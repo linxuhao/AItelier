@@ -58,21 +58,26 @@ asserts both halves — that the retained fragment contains no record, and that
 the run was still read as `unmeasured`.
 
 ## What happens to a declared absence
+It is NOT re-acquired inside the step. `REPO_GATE_UNMEASURED_ATTEMPTS` is 1:
+one step invocation makes ONE gate call, and its worst-case hold is the gate's
+own timeout (`REPO_GATE_TIMEOUT`, 5400 s) rather than the 3 x 5400 + 2 x 60 s
+an in-step re-acquisition cost (round 5, measured). Waiting for the gate is the
+SCHEDULER's job (`core/gate_deferral.py`): while the absence is live the run is
+not advanced and spends no implement cycle, and the poller keeps serving every
+other project. `repo_gate.attempts` still records how many runs the reading
+cost. A gate that stayed silent ends the story honestly:
+`repo_gate_unmeasured: true`, `passed: false`, no case list (so nothing of that
+gate's known-red is pruned) and no failure invented out of it.
 
-It is **re-acquired**, not spent. `run_tests` runs the gate again — up to
-`REPO_GATE_UNMEASURED_ATTEMPTS` runs, `REPO_GATE_RETRY_DELAY_SECONDS` apart —
-and folds in only the verdict it finally gets. `repo_gate.attempts` records
-how many runs the reading cost. A gate that stayed silent through every
-attempt ends the story honestly: `repo_gate_unmeasured: true`, `passed:
-false`, no case list (so nothing of that gate's known-red is pruned) and no
-failure invented out of it.
+Why the absence is routed out of the loop: `configs/coding_impl.yaml` keeps
+`max_loop: 3` on `test_outcome -> implement`, but its `test` step matches the
+`repo_gate_absent` FLAG and routes to the loop-external `test_gate_absent`
+gate. Left to the `all_passed: false` edge, a declared absence would spend one
+of the three implement laps on a gate that never spoke, and the run would die
+on `Cycle limit exceeded`. The flag travels on the tool's own RETURN, so the
+edge needs no file reader at all.contention costs no implement cycle and does not end the run.
 
-Why it has to happen inside the step: `configs/coding_impl.yaml` is frozen
-(`max_loop: 3` included), and its `test` step routes a report with no usable
-evidence to `test_evidence_missing` — a loop-external **terminal** gate. Left
-to the graph, a declared absence would either end the run or spend an
-implement cycle. Re-acquiring inside the tool buys neither: the first
-contention costs no implement cycle and does not end the run.
+The first contention costs no implement cycle and does not end the run.
 
 ## The four witnesses
 
@@ -182,10 +187,12 @@ How the two execution points read it:
   what routes the absence back into the implement loop.
 * `core/scheduler.py:31` `_MAX_CLAIMS_PER_INSTANCE` — its own comment states
   the premise: one instance is re-claimed only when something reset a
-  completed row back to `pending`, which a deferral does ON PURPOSE. Left
-  unguarded, that valve kills the run with a message blaming the step, so the
-  valve is bypassed while an episode is live and the EPISODE's ceiling is the
-  bound that applies instead.
+  completed row back to `pending`. A deferral does NOT do that: it releases
+  no claim, it does not move the row, and the tick returns at
+  `state == "silent"` BEFORE the valve check, so each instance during a live
+  episode is claimed exactly ONCE (measured). The valve is therefore not
+  bypassed — it is never reached on the deferral path, and it stays the
+  ordinary bound for a non-deferral runaway.  bound that applies instead.
 
 Both knobs are bounded: `GATE_DEFERRAL_WAIT_SECONDS` and
 `GATE_DEFERRAL_EPISODE_MAX_SECONDS` may be tuned through the environment and

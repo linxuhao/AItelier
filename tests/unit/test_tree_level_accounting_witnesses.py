@@ -19,10 +19,10 @@
 #         green means the text had no reader.
 #   S1    delete the deferral skip in `core/scheduler.py`'s tick.
 #   H2    delete the hold check in `AItelierSkillFlow.advance_run`.
-#   EDGE  move the `repo_gate_absent` edge off the `test` step (where
-#         `from_file` resolves against the step that owns the file) back onto
-#         `test_evidence`, where it raises FileNotFoundError on every
-#         evaluation and can never match.
+#   EDGE  move the `repo_gate_absent` edge off the `test` step's FLAG match
+#         back onto a `from_file` read on `test_evidence`, which writes no file:
+#         the reader raises FileNotFoundError on every evaluation and the edge
+#         can never match.
 #   ABS   let a declared absence seed the baseline / pass relatively: the ONE
 #         field a run must never reach from an absence. Killed end-to-end by
 #         `test_run_tests_unmeasured_declaration.py::
@@ -30,10 +30,11 @@
 #         relative`, which drives the REAL tool four times and reads the
 #         baseline file back off disk.
 #
-# These are SOURCE pins on purpose. A behavioural test cannot distinguish
-# `startswith` from `in` at the noise length review used; the tree, read as
-# text, can — see the exactly-prefix-length witnesses that already live in
-# `test_run_tests_unmeasured_declaration.py`.
+# These read the FILE, not a copy of the expectation, and the file-level pins
+# are the ones a tree mutation actually trips. A behavioural test CAN see this
+# mutation too — `test_run_tests_unmeasured_declaration.py` measures it by
+# re-applying both halves to the REAL reader and asserting the reading flips —
+# so nothing here rests on the claim that a behavioural witness is impossible.
 from pathlib import Path
 
 import pytest

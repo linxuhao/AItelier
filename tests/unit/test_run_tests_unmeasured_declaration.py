@@ -234,7 +234,6 @@ def _apply_m21(func):
     Together they turn a mid-line echo into a declaration.
     """
     import ast
-    import ast
     import inspect
     import textwrap
 

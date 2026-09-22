@@ -54,11 +54,14 @@ description: >
   `repo_gate_unmeasured: true` and `repo_gate_absent: true` (plus
   `repo_gate.measured: "unmeasured"` and `repo_gate.attempts`, the number of
   runs the reading cost), and `configs/coding_impl.yaml` routes
-  `repo_gate_absent` to the loop-external `test_gate_absent` gate — from the
-  `test` step, which OWNS `test_report.json`: a `from_file` match is resolved
-  against the evaluating step's own output dir, so on the `test_evidence`
-  validator (which writes nothing) the reader raises `FileNotFoundError` and
-  the edge can never match. Waiting for the gate and bounding how long a run
+  `repo_gate_absent` to the loop-external `test_gate_absent` gate. The edge is
+  a FLAG match on this tool's own RETURN (`repo_gate_absent` is in the result
+  dict, which the engine merges into the step's flags), NOT a `from_file`
+  read: `from_file` resolves against the evaluating step's own output dir, so
+  on the `test_evidence` validator (which writes nothing) the reader raised
+  `FileNotFoundError` and the edge could never match, and moving it onto
+  `test` still crashes the resolver on a report that parses to a list.
+  Waiting for the gate and bounding how long a run
   may spend absent is the SCHEDULER's job (`core/gate_deferral.py`), not this
   step's: while an absence is live the run is not advanced and spends no
   implement cycle, and past the episode's wall-clock ceiling the run ends with

@@ -178,7 +178,13 @@ def tick_sf(monkeypatch):
 
 def _trace(total: int, worst: tuple[str, int, int] | None):
     def query(run_id, sql, params=()):
-        return [list(worst)] if "GROUP BY" in sql else [[total]]
+        if "GROUP BY" not in sql:
+            return [[total]]
+        # None means "no per-instance row", which is what a run with one claim
+        # per instance looks like. Returning `[list(None)]` instead would raise
+        # inside the tick's guarded valve block, be swallowed by its
+        # `except Exception: pass`, and make every pole that uses it vacuous.
+        return [] if worst is None else [list(worst)]
     return query
 
 
@@ -199,6 +205,59 @@ async def test_a_normal_task_loop_does_not_trip_the_guard(tick_sf):
     """A 40-task run claims t_impl 40 times — across 40 INSTANCES, one claim each."""
     from core import scheduler
     tick_sf.trace_query.side_effect = _trace(200, ("t_impl", 512, 1))
+
+    await scheduler._run_skillflow_tick("p1", None)
+
+    tick_sf.fail_run.assert_not_called()
+
+
+# ── the WHOLE-RUN valve, and the constant it reads ───────────────────────────
+
+def test_the_whole_run_valve_reads_a_name_that_is_actually_bound():
+    """The name the tick's whole-run valve reads must EXIST in the module.
+
+    The valve lives inside a `try` whose `except Exception: pass` exists so a
+    broken guard cannot take a tick down. That same clause swallows the
+    NameError a MISSING constant raises, so an unbound `_MAX_STEPS_PER_RUN`
+    turned the whole block — whole-run AND per-instance — into dead code with
+    every other test green. This asserts the name is bound and positive, which
+    is the half `ruff` F821 also checks and `except Exception: pass` hides.
+    """
+    from core import scheduler
+    bound = getattr(scheduler, "_MAX_STEPS_PER_RUN", None)
+    assert isinstance(bound, int), (
+        "the tick's whole-run valve reads an unbound name — the enclosing "
+        "`except Exception: pass` turns that into a silently disabled guard")
+    assert bound > 0, bound
+
+
+async def test_the_whole_run_valve_fires_on_claims_above_its_bound(tick_sf,
+                                                                  monkeypatch):
+    """Pole A of the whole-run valve: one claim past the bound fails the run.
+
+    The per-instance query returns an empty GROUP BY result so the whole-run
+    branch is the only thing that can fire, and the message has to name the
+    bound it exceeded — a valve that fires on some other number is not this
+    valve.
+    """
+    from core import scheduler
+    monkeypatch.setattr(scheduler, "_MAX_STEPS_PER_RUN", 10)
+    tick_sf.trace_query.side_effect = _trace(11, None)
+
+    await scheduler._run_skillflow_tick("p1", None)
+
+    tick_sf.fail_run.assert_called_once()
+    _run_id, reason = tick_sf.fail_run.call_args[0]
+    assert "exceeded 10 step" in reason and "11" in reason, reason
+
+
+async def test_the_whole_run_valve_does_not_fire_at_its_bound(tick_sf,
+                                                              monkeypatch):
+    """Pole B: at the bound, nothing fires. A valve that fires one early is a
+    different bug, and only a two-pole test can tell them apart."""
+    from core import scheduler
+    monkeypatch.setattr(scheduler, "_MAX_STEPS_PER_RUN", 10)
+    tick_sf.trace_query.side_effect = _trace(10, None)
 
     await scheduler._run_skillflow_tick("p1", None)
 

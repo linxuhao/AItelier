@@ -24,7 +24,15 @@ from core import gate_deferral
 
 # NB-1 runaway-loop guard: max total step executions before a run is force-failed.
 # A normal DPE run is well under this; this only trips on a non-converging loop.
+#
+# The constant is defined here, not merely mentioned: the tick's whole-run valve
+# reads it inside a `try` whose `except Exception: pass` swallows a NameError, so
+# a MISSING name made the whole valve block — whole-run AND per-instance —
+# silently dead code. That is why
+# `test_one_instance_re_executed_forever_fails_the_run` was red: 227 claims on
+# one instance could never fail the run, because the guard never evaluated.
 import os as _os
+_MAX_STEPS_PER_RUN = int(_os.getenv("AITELIER_MAX_STEPS_PER_RUN", "300"))
 # Per-instance companion: how often ONE step instance may be re-claimed before
 # the run is killed with a message blaming the step.
 #

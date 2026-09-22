@@ -1299,7 +1299,6 @@ class PipelineEngine:
         `classify_json_failure`).
         """
         return classify_json_failure(text) == JSON_FAILURE_TRUNCATED
-        return repaired
 
     def _make_feedback_example(self) -> str:
         """Build a step-aware JSON example for feedback messages.
@@ -1839,19 +1838,15 @@ class PipelineEngine:
                 "Available tools: " + (", ".join(sorted(schemas)) or "(none)")
             )}
         if tool_name == "focused_check":
-            # Its result is evidence about THIS implement attempt. SkillFlow
-            # injects these identities after this boundary; an agent-provided
-            # value must not win through the framework's setdefault behavior.
             for identity in ("run_id", "step_id", "project_id", "operation_id"):
                 params.pop(identity, None)
+        elif tool_name == "apply_patch":
             if (getattr(self, "_output_target", "artifact") != "code"
-                    or getattr(self, "_output_fixed", {}) or "apply_patch" not in schemas):
+                    or getattr(self, "_output_fixed", {})):
                 return {"error": "apply_patch requires a granted generic code-output step"}
             if not set(params) <= {"patch", "references"} or not params:
                 return {"error": ("apply_patch accepts only patch and/or "
                                   "references")}
-            # The size ceiling comes BEFORE the scope check and before SkillFlow
-            # sees the call. This is the host's own answer to the accident's
             # upstream cause: SkillFlow's preflight text — "hunks overlap or are
             # out of order; combine them" (trace seq 88) — is read as "send the
             # whole file at once", and the next turn's 20,061-character payload
@@ -1866,6 +1861,10 @@ class PipelineEngine:
                 return oversized
         elif "apply_patch" in schemas and tool_name in ("create", "edit", "write", "repo_remove_file"):
             return {"error": "Use the granted apply_patch tool for code Add/Update/Delete operations"}
+        # Write-scope refusal is checked for EVERY mutator here, before
+        # SkillFlow sees the call, so an unauthorized path is refused with its
+        # own message instead of surfacing as a generic tool failure.
+        refusal = self._write_scope_refusal(tool_name, params)
         if refusal is not None:
             return refusal
         return sf.execute_tool(

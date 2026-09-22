@@ -67,7 +67,6 @@ description: >
   = 1`): the re-acquisition that used to happen in-step held the scheduler for
   3 x 5400 s + 2 x 60 s, so the waiting is the poller's instead. Only a
   `measured_pass` licenses pruning that gate's known-red cases.
-nses pruning that gate's known-red cases.
 parameters:
   project_root:
     type: string
@@ -92,7 +91,6 @@ parameters:
     type: string
     description: "Durable per-pipeline state dir, INJECTED by the `stateful`
       capability — holds the known-red baseline. Never pass a path by hand."
-    required: false
     required: false
 
 # Its result carries passed/error, so a graph step running it MUST route the

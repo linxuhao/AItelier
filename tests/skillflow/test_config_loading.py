@@ -106,8 +106,13 @@ class TestV2ConfigLoading:
             # win first and hand the absence to `test_evidence`.
             # tests/skillflow/test_coding_impl_gate_absence.py drives the real
             # tick order and fails if either the step or the order moves.
+            #
+            # The `_error` edge is FIRST, and this list had lost it: a failed
+            # tool invocation must not be able to consume a prior attempt's
+            # report. tests/unit/test_tree_level_accounting_witnesses.py asserts
+            # that same position against the config, so the two agree.
+            ("test_evidence_missing", {"_error": True}),
             ("test_gate_absent", {"field": "repo_gate_absent", "value": True}),
-
             ("test_evidence", {"written": "test_report.json"}),
             ("test_evidence_missing", None),
         ]

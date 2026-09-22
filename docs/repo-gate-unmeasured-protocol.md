@@ -195,10 +195,27 @@ its own ceiling, so "raise the number" is not a way to delete the bound.
 Routing: an honest absence report still writes `test_report.json` and still
 passes the schema, so the graph had to be told about it. The `test` step now
 carries an edge keyed on `repo_gate_absent` — a flag the tool sets on the
-report itself, read with `from_file` so it survives any validator — leading to
-`test_gate_absent`, a loop-EXTERNAL gate that is deliberately absent from
-`end_conditions`. Reaching it parks a still-running run instead of completing
-or failing it, so the absence costs neither an implement lap nor the run.
+report and ALSO returns in the step's own flags, so the edge matches it as a
+`{field: repo_gate_absent, value: true}` FLAG with no file reader at all —
+leading to `test_gate_absent`, a loop-EXTERNAL gate that is deliberately absent
+from `end_conditions`. Reaching it parks a still-running run instead of
+completing or failing it, so the absence costs neither an implement lap nor
+the run.
+
+The edge is a FLAG and not a `from_file` read, and that is a measurement, not
+a preference. `from_file` is resolved against the EVALUATING step's own output
+dir: on `test_evidence` — a json_schema validator that writes no file — every
+evaluation raised `FileNotFoundError: Output file not found:
+test_report.json`, the engine recorded `transition file_reader failed`, and
+the edge counted as UNMATCHED. That one placement is the root cause of three
+round-5 verdicts: the absence fell through to `all_passed: false`, spent all
+three implement laps, and the run died on `Cycle limit exceeded` for a gate
+that never spoke. Moving the same `from_file` match onto `test` does not fix
+it either: the engine's `_flags_match` calls `data.get(field)` on whatever the
+file parses to, so a report parsing to a LIST raises
+`AttributeError: 'list' object has no attribute 'get'` and takes the resolver
+down instead of routing. The flag therefore travels on the tool's RETURN,
+which the engine merges into the step's flags.
 
 ## The tests that hold this down
 
@@ -216,6 +233,27 @@ The `run_tests` protocol (round 4, carried as a regression guard):
 | M18 measured-pass branch: `set()` → `None` | `test_run_tests_unmeasured_declaration.py::test_a_repo_gate_that_measured_green_may_prune_its_known_red` |
 | M19 invert the truncation branch | `test_run_tests_unmeasured_declaration.py::test_a_truncated_gate_with_no_record_at_all_is_a_red` |
 | M17 add `"failed"`/`"red"` to the state set | `test_run_tests_unmeasured_declaration.py::test_a_declaration_that_says_failed_is_not_an_absence[failed]`; `::test_the_unmeasured_state_set_holds_no_red_word` |
+| ABS let a declared absence seed a baseline or pass relatively | `test_run_tests_unmeasured_declaration.py::test_a_declared_absence_never_seeds_a_baseline_and_never_passes_relative`; `test_tree_level_accounting_witnesses.py::test_ABS_the_absence_branch_is_ahead_of_the_seed_in_the_real_source`; `::test_ABS_the_unmeasured_state_is_not_a_measurement` |
+
+## A declared absence is not a baseline, in either direction (round 6)
+
+`_apply_baseline` is where an absence could be laundered into a measurement,
+because it is the one place that reads `failures[]` and writes a durable
+record. Two rules, both measured end to end through the REAL tool:
+
+* an absence may not **SEED** a baseline. The seed is `known = set(keys)`
+  taken from this run's `failures[]`, and an absence's only entry says
+  `repo_gate:run_tests.sh was NOT measured`. Writing that in records a gate
+  that never spoke as the repo's standing known-red — and the NEXT real red
+  from that gate is then forgiven by it;
+* an absence may not report `passed_relative: true`, even when a baseline
+  already exists. That field is the claim "this red was already here"; with no
+  verdict there is no such claim to make.
+
+So an absence that finds no baseline is given its own fourth state,
+`unmeasured`, which is in neither `BASELINE_MEASURED` nor the write path.
+Absence is declared at most once per report and is read from the report's own
+`repo_gate_absent` / `repo_gate_unmeasured` flags.
 
 The absence accounting (round 5), in
 `tests/unit/test_gate_deferral_is_accounted.py`:

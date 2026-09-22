@@ -21,6 +21,11 @@ _KNOWN_FAILURE_STATES = {"failed", "known_failure"}
 # actually taken or read — see `run_tests.impl.BASELINE_MEASURED`. Any other
 # value, and the absence of the field, mean nothing was compared.
 _BASELINE_MEASURED = {"seeded", "compared"}
+# `unmeasured` is the fourth value `run_tests._apply_baseline` can write: an
+# absence whose run found no baseline to compare against. It is NOT a
+# measurement in either direction — it may not seed a baseline and it may not
+# report `passed_relative: true` — so it is absent from `_BASELINE_MEASURED`
+# above on purpose, and a reader that sees it must not read the red as old.
 
 
 def _read_json(path: Path) -> dict:

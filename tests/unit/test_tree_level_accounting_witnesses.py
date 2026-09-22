@@ -23,6 +23,12 @@
 #         `from_file` resolves against the step that owns the file) back onto
 #         `test_evidence`, where it raises FileNotFoundError on every
 #         evaluation and can never match.
+#   ABS   let a declared absence seed the baseline / pass relatively: the ONE
+#         field a run must never reach from an absence. Killed end-to-end by
+#         `test_run_tests_unmeasured_declaration.py::
+#         test_a_declared_absence_never_seeds_a_baseline_and_never_passes_\
+#         relative`, which drives the REAL tool four times and reads the
+#         baseline file back off disk.
 #
 # These are SOURCE pins on purpose. A behavioural test cannot distinguish
 # `startswith` from `in` at the noise length review used; the tree, read as
@@ -42,6 +48,47 @@ _PROTOCOL = _ROOT / "docs" / "repo-gate-unmeasured-protocol.md"
 
 _DECL_PREFIX = "_REPO_GATE_UNMEASURED_PREFIX"
 _CASE_PREFIX = "_REPO_GATE_CASE_PREFIX"
+
+
+def test_ABS_the_absence_branch_is_ahead_of_the_seed_in_the_real_source():
+    """ABS: the absence must be decided BEFORE the seed, in the tree.
+
+    Asserted against the REAL `_apply_baseline` text rather than a restatement:
+    the seed takes `known = set(keys)` from this run's `failures[]`, and an
+    absence's only failure entry says the gate produced NO VERDICT — seeding
+    off that records a gate that never spoke as this repo's standing
+    known-red. `absent` must be defined before the seed and must gate both the
+    seed and `passed_relative`.
+    """
+    source = _source(_IMPL)
+    assert "absent = bool(report.get(\"repo_gate_absent\")" in source, (
+        "ABS: the absence is no longer read in `_apply_baseline`")
+    seed = source.index("known = set(keys)")
+    absent = source.index("absent = bool(report.get(\"repo_gate_absent\")")
+    assert absent < seed, (
+        "ABS: the seed now runs before the absence is read, so an absence can "
+        "seed the baseline off its own 'was NOT measured' entry")
+    # The relative-pass assignment must consult `absent` too: an absence that
+    # HAS a baseline behind it still may not claim the red was already there.
+    window = source[source.index("report[\"passed_relative\"] = (state in"
+                                 " BASELINE_MEASURED"):][:200]
+    assert "absent" in window, (
+        "ABS: `passed_relative` no longer consults the absence — an absence "
+        "with a baseline behind it would report a relative pass")
+
+
+def test_ABS_the_unmeasured_state_is_not_a_measurement():
+    """ABS, second half: `unmeasured` must be in neither set of things a
+    reader treats as a measurement, or the absence is back to being a pass --
+    the exact failure the criterion names."""
+    from aitelier.tools.run_tests import impl as rt
+
+    assert "unmeasured" not in rt.BASELINE_MEASURED, (
+        "ABS: `unmeasured` joined BASELINE_MEASURED — an absence is now a "
+        "relative pass")
+    from aitelier.gate_evidence import _BASELINE_MEASURED as readers
+    assert "unmeasured" not in readers, (
+        "ABS: the release-state reader treats an absence as measured")
 
 
 

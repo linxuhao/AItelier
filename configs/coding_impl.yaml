@@ -175,9 +175,6 @@ steps:
         match: { written: "test_report.json" }
       - to: "test_evidence_missing"
 
-        match: { written: "test_report.json" }
-      - to: "test_evidence_missing"
-
 
   - id: "test_evidence"
     step_type: "tool"

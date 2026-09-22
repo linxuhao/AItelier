@@ -32,6 +32,14 @@ import signal
 import subprocess
 
 from core import env_scrub
+# Module-level, NOT function-local. This name is used on EVERY path out of
+# `run_tests` (the return dict's `release_evidence`), so an import that lives
+# inside the `fail_fast_gates` branch made it a LOCAL of the whole function:
+# every ordinary invocation died with `UnboundLocalError: cannot access local
+# variable 'release_disposition'` before writing a report at all. That is a
+# step that never produced a verdict for a reason that has nothing to do with
+# the code under test — the exact shape this card exists to remove.
+from aitelier.gate_evidence import release_disposition
 import sys
 import tempfile
 import time
@@ -680,7 +688,7 @@ BASELINE_FILE = "run_tests_baseline.json"
 # unset deployment-wide (no config declared `capability: stateful` until
 # 2026-09-20) produced reports that read like a clean baseline for months.
 BASELINE_MEASURED = ("seeded", "compared")
-BASELINE_UNMEASURED = ("unavailable", "unreadable")
+BASELINE_UNMEASURED = ("unavailable", "unreadable", "unmeasured")
 
 _FAILED_RE = re.compile(r"^(?:.*\s)?FAILED\s+(\S+)")
 _ERROR_RE = re.compile(r"^ERROR\s+(\S+)")
@@ -1051,7 +1059,28 @@ def _apply_baseline(report: dict, state_dir: str,
         return
 
     known = set(baseline)
-    if path is not None and not path.is_file() and state == "compared":
+    # A declared ABSENCE is not a baseline, in either direction:
+    #
+    #   * it may not SEED one. The seed is taken from this run's `failures[]`,
+    #     and an absence's `failures[]` entry is "repo_gate:run_tests.sh was NOT
+    #     measured" — writing that into the baseline would record a gate that
+    #     never spoke as this repo's standing known-red, and a later real red
+    #     from that same gate would then be forgiven by it.
+    #   * it may not report a relative pass. `passed_relative: true` is the
+    #     claim "this red was already there"; with no verdict there is no such
+    #     claim to make, and this is the ONE field a run must never reach from
+    #     an absence. Measured on the r5 candidate: `passed_relative: true` +
+    #     `baseline_state: seeded` and a baseline file written on every pole.
+    #
+    # So an absence with no baseline behind it gets its own state, `unmeasured`,
+    # which is in neither BASELINE_MEASURED nor the write path below. An absence
+    # that HAS a baseline still runs the diff, because that is what keeps a
+    # known-red case from being pruned by a gate that said it did not run — the
+    # `Executed` guard below — but it can no more pass relatively than seed.
+    absent = bool(report.get("repo_gate_absent")
+                  or report.get("repo_gate_unmeasured"))
+    if (path is not None and not path.is_file() and state == "compared"
+            and not absent):
         # Seed: this repo's current red IS the known red. Nothing is new
         # relative to a baseline that was just taken from it.
         known = set(keys)
@@ -1061,8 +1090,11 @@ def _apply_baseline(report: dict, state_dir: str,
     else:
         report["new_failures"] = [f for f, k in zip(failures, keys)
                                   if k not in known]
+        if absent and (path is None or not path.is_file()):
+            state = "unmeasured"
     report["baseline_state"] = state
     report["passed_relative"] = (state in BASELINE_MEASURED
+                                 and not absent
                                  and not report["new_failures"])
     # Only a measured baseline may report a known-red SET. `[]` beside
     # `unavailable` means nobody looked, and saying so in one field that a
@@ -1070,8 +1102,11 @@ def _apply_baseline(report: dict, state_dir: str,
     report["baseline_failures"] = (sorted(known) if state in BASELINE_MEASURED
                                    else [])
 
-    if path is None or state == "unreadable":
+    # No baseline file is written for an absence that found none: there was
+    # nothing to compare against and nothing measured to record.
+    if path is None or state in ("unreadable", "unmeasured"):
         return
+
     # Persist: the seed, or the pruned set. A key is dropped only when this run
     # can prove the thing it names RAN and did not fail — see `Executed`.
     if report.get("baseline_seeded"):
@@ -1147,7 +1182,6 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
                               "out_dir=$STEP_DIR")}
         from aitelier.gate_evidence import (
             first_upstream_blocker,
-            release_disposition,
             stamp_report,
             upstream_failed_report,
         )

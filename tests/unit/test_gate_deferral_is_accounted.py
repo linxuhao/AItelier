@@ -232,4 +232,3 @@ def test_the_absent_terminal_checker_refuses_a_sentence_that_blames_the_code():
     # sentence it exists to accept.
     assert "measured" in good.lower()
     assert gd.absent_terminal_names_no_failure(good) is True
-.0

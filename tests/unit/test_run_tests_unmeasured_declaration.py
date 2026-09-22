@@ -439,3 +439,77 @@ def test_a_repo_gate_that_measured_green_may_prune_its_known_red(tmp_path):
     assert report["repo_gate"]["measured"] == rt.REPO_GATE_MEASURED_PASS
     assert json.loads(baseline.read_text())["failures"] == []
     assert report.get("baseline_kept_unproven") is None
+
+
+# ── a declared absence may NEVER become a relative pass ───────────────────
+
+def test_a_declared_absence_never_seeds_a_baseline_and_never_passes_relative(
+        tmp_path):
+    """The card's first criterion, end to end through the REAL tool.
+
+    Four CONSECUTIVE declarations of absence, on a repo that has never had a
+    baseline taken. Every pass must report `passed_relative: false`, and the
+    baseline file must never be written: the seed is taken from this run's
+    `failures[]`, whose only entry here says the gate produced NO VERDICT, so
+    writing it would record a gate that never spoke as this repo's standing
+    known-red — and the NEXT real red from that gate would be forgiven by it.
+
+    The r5 candidate did the opposite on this exact shape: review measured
+    `passed_relative: true`, `baseline_state: seeded`, and
+    `run_tests_baseline.json` written, on every pole.
+    """
+    repo = _repo_with_gate(tmp_path, DECLARED, exit_code=3)
+    state = tmp_path / "state"
+    baseline = _baseline_file(state, repo)
+
+    for attempt in range(1, 5):
+        out = tmp_path / f"out-{attempt}"
+        result = rt.run_tests(project_root=str(repo), out_dir=str(out),
+                              state_dir=str(state))
+        report = _report(out)
+        where = f"pass {attempt}"
+        assert report["repo_gate"]["measured"] == rt.REPO_GATE_UNMEASURED, where
+        assert result["repo_gate_absent"] is True, where
+        assert report["passed_relative"] is False, where
+        assert result["passed_relative"] is False, where
+        assert report["baseline_state"] == "unmeasured", (
+            f"{where}: an absence with no baseline behind it is not a "
+            f"measurement — got {report['baseline_state']!r}")
+        assert not baseline.is_file(), (
+            f"{where}: an absence seeded a baseline from its own absence")
+
+
+def test_a_real_red_still_enters_the_baseline_and_the_absence_after_it_does_not_pass(
+        tmp_path):
+    """The other pole of the same property, and the reason it is not a
+    blanket: a gate that MEASURED red must still seed the baseline.
+
+    Without this pole the rule above could be satisfied by never seeding at
+    all, which would make every pre-existing red look like this round's.
+    """
+    repo = _repo_with_gate(tmp_path, _case("A", "broken"), exit_code=1)
+    state = tmp_path / "state"
+    out = tmp_path / "out-red"
+    rt.run_tests(project_root=str(repo), out_dir=str(out), state_dir=str(state))
+    report = _report(out)
+    baseline = _baseline_file(state, repo)
+
+    assert report["repo_gate"]["measured"] == rt.REPO_GATE_MEASURED_FAIL
+    assert report["baseline_state"] == "seeded"
+    assert report["passed_relative"] is True
+    assert json.loads(baseline.read_text())["failures"] == [
+        "repo_gate:run_tests.sh#A"]
+    before = baseline.read_bytes()
+
+    # ...and now the SAME gate declares an absence. The known red it seeded has
+    # not been measured away, so it must survive, and this pass may not pass
+    # relatively off it.
+    _write_gate(repo, DECLARED, exit_code=3)
+    out = tmp_path / "out-absent"
+    rt.run_tests(project_root=str(repo), out_dir=str(out), state_dir=str(state))
+    report = _report(out)
+    assert report["repo_gate"]["measured"] == rt.REPO_GATE_UNMEASURED
+    assert report["passed_relative"] is False
+    assert baseline.read_bytes() == before, (
+        "an absence changed a baseline it did not measure")
+    assert "repo_gate:run_tests.sh#A" in report["baseline_kept_unproven"]

@@ -19,15 +19,22 @@
 # that shape.
 #
 # What it does NOT catch, and why: a statement duplicated verbatim
-# (`return x` written twice, a duplicated block of prose). Measured against
-# this repo, "one statement repeated verbatim" fires on 15 legitimate sites
-# (two identical assertions in a row, a parametrized setup run twice), so it
-# is not a defect signal at all — it is what ordinary code looks like. Nothing
-# cheap in text can separate the two, so the guarantee here is stated rather
-# than overclaimed: this file catches the self-call collapse, and the OTHER
-# half of the delivery card's rule is honored by reading each written file
-# back, which is the only thing that sees damage introduced during a write.
+# (`return x` written twice, a duplicated block of prose). "One statement
+# repeated verbatim" is not a defect signal — it is what ordinary code looks
+# like — and no cheap text rule separates the two. The exemption used to carry
+# a HAND-COUNTED number ("fires on 15 legitimate sites"); a round-6 review
+# counted 24 with the same rule and found that one of them was the candidate's
+# OWN defect, which is exactly what a hand-counted allowance buys. So the
+# number is not restated here: `_verbatim_repeat_sites` DERIVES it from the
+# tree with the rule written down, and
+# `test_the_verbatim_repeat_exemption_is_derived_not_asserted` only asserts
+# that the rule is broad (it fires on ordinary code), never a particular
+# count. The guarantee is then stated rather than overclaimed: this file
+# catches the self-call collapse, and the OTHER half of the delivery card's
+# rule is honored by reading each written file back, which is the only thing
+# that sees damage introduced during a write.
 import ast
+import collections
 from pathlib import Path
 
 import pytest
@@ -56,6 +63,29 @@ def _mangled_shapes(tree: ast.AST):
                 and isinstance(body[0].value.func, ast.Name) \
                 and body[0].value.func.id == node.name:
             yield node.lineno, f"body is only `{node.name}()`"
+            yield node.lineno, f"body is only `{node.name}()`"
+
+
+def _verbatim_repeat_sites(source: str) -> int:
+    """How many statements this source repeats verbatim inside one block.
+
+    This is the exemption's rule, DERIVED from the tree instead of a number
+    typed into a comment: it is deliberately broad, and what it measures is
+    how often ordinary code repeats a statement — which is why the shape
+    cannot be a defect signal and is not checked as one.
+    """
+    tree = ast.parse(source)
+    repeats = 0
+    for node in ast.walk(tree):
+        for block in ("body", "orelse", "finalbody"):
+            body = getattr(node, block, None)
+            if not isinstance(body, list):
+                continue
+            texts = [ast.dump(stmt) for stmt in body
+                     if isinstance(stmt, ast.stmt)]
+            repeats += sum(count - 1 for count in
+                           collections.Counter(texts).values() if count > 1)
+    return repeats
 
 
 def test_no_python_source_is_a_self_call_and_nothing_else():
@@ -87,4 +117,34 @@ def test_the_check_catches_the_shape_it_claims(source, catches):
     that must NOT be flagged — including the one that merely MENTIONS itself,
     which is what a text-based check would wrongly fire on."""
     hits = list(_mangled_shapes(ast.parse(source)))
+    hits = list(_mangled_shapes(ast.parse(source)))
     assert bool(hits) is catches, hits
+
+
+def test_the_verbatim_repeat_exemption_is_derived_not_asserted():
+    """The exemption, made real instead of hand-counted.
+
+    The rule that grants it is `_verbatim_repeat_sites` above — written down
+    and RUN, not a number someone counted by hand. This asserts the rule is
+    BROAD (it fires on ordinary, legitimate code) and that the checker
+    nonetheless does NOT flag that code. It deliberately asserts no particular
+    COUNT: the count is what the previous revision got wrong (hand-counted 15
+    where the same rule yields 24 across the tree, and one of the 24 was the
+    candidate's OWN defect).
+    """
+    ordinary = "def f(x):\n    assert x\n    assert x\n"
+    assert _verbatim_repeat_sites(ordinary) == 1, (
+        "the exemption's rule must fire on ordinary repeated code")
+    assert list(_mangled_shapes(ast.parse(ordinary))) == [], (
+        "the checker must NOT flag ordinary repeated code")
+
+    # ...and the rule really is what ordinary code looks like, measured over
+    # this tree rather than asserted about it.
+    sites = 0
+    for path in _python_sources():
+        try:
+            sites += _verbatim_repeat_sites(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, SyntaxError):
+            continue
+    assert sites > 0, "the rule found no repeat anywhere — it is not the rule"
+

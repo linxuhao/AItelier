@@ -267,11 +267,12 @@ async def test_the_sweep_runs_while_other_projects_are_busy(live, monkeypatch):
     async def _fake_tick(pid, loop=None):
         ticked.append(pid)
 
-    monkeypatch.setattr(sc, "_execute_skillflow_tick", _fake_tick)
+    monkeypatch.setattr(sc, "_run_skillflow_tick", _fake_tick)
     monkeypatch.setattr(sc.db, "get_active_projects",
                         lambda **kw: [{"project_id": "busy"}])
 
-    await sc.poll_and_execute()
+    # The poller returns once it has STARTED the ticks; wait for them.
+    await asyncio.gather(*await sc.poll_and_execute())
 
     assert ticked == ["busy"], f"the busy project stopped being advanced: {ticked}"
     assert ri.lease_holder(live["db"], canonical) is None, (

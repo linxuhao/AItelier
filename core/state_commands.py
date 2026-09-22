@@ -640,12 +640,13 @@ _CATALOG_READS = frozenset({"list_projects", "project_catalog"})
 
 
 def _anonymous(service) -> bool:
-    """True only for a caller the transport has explicitly tagged as unable to
-    read private records (an unauthenticated HTTP visitor). Every other caller —
-    the internal driver, MCP, a writer, and any embedder that did not opt in —
-    defaults to trusted, so this can only ever NARROW an existing read, never
-    widen the public surface."""
-    return getattr(service, "project_read_trusted", True) is False
+    """True unless the caller EXPLICITLY declared itself trusted to read private
+    records. An unauthenticated HTTP visitor is anonymous, and so is any object
+    that never declared a level at all: silence must not be trusted, or a leaf
+    rebuilt from an untrusted store would become readable by staying silent.
+    Trust only comes from an explicit ``project_read_trusted=True`` at a real
+    construction point (the internal driver, MCP, a test fixture)."""
+    return getattr(service, "project_read_trusted", False) is not True
 
 
 def _refuse_if_project_not_public(service, action, args) -> None:

@@ -16,7 +16,7 @@ def node(k, deps=None, priority=0):
 
 @pytest.fixture
 def store(tmp_path):
-    result = StateGraphStore(DBManager(str(tmp_path / "state.sqlite")))
+    result = StateGraphStore(DBManager(str(tmp_path / "state.sqlite")), project_read_trusted=True)
     result.create_project("shrimp", "Shrimp game")
     return result
 
@@ -177,7 +177,7 @@ def test_stale_split_rolls_back_new_children(store):
 
 def test_history_and_current_survive_reopening(store):
     store.add_nodes("shrimp", [node("a")])
-    fresh = StateGraphStore(DBManager(store.db.db_path))
+    fresh = StateGraphStore(DBManager(store.db.db_path), project_read_trusted=True)
     assert fresh.get_graph("shrimp") == store.get_graph("shrimp")
     assert fresh.events("shrimp") == store.events("shrimp")
     assert fresh.events("shrimp", after=fresh.events("shrimp")[0]["seq"])[0]["event_type"] == "node_created"

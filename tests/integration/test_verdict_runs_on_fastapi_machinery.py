@@ -173,8 +173,7 @@ class TestTheGuardMatchesPlainDepends:
         """Regression guard, not a fix: on the deployed FastAPI the guard and a
         plain `Depends(D)` route close a `yield` dependency's teardown at the
         same point, so this is green on the base tree as well. It pins that
-        equivalence - setup -> handler -> teardown on both - so a later change
-        that closed the verdict stack early would show up here."""
+        equivalence - setup -> handler -> teardown on both."""
         monkeypatch.setattr(authz, "gate_enabled", lambda: True)
         events: list = []
 

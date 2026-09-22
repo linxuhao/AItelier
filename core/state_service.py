@@ -69,8 +69,7 @@ class StateService:
                 "a service that never declared its trust level must not come into existence")
         self.project_read_trusted = project_read_trusted
         self.db, self.ws, self.sf, self.registry = db, ws, sf, registry
-        self.store = StateGraphStore(db)
-        self.store.project_read_trusted = project_read_trusted
+        self.store = StateGraphStore(db, project_read_trusted=project_read_trusted)
         from core.state_driver_notes import StateDriverNotes
         self.driver_notes = StateDriverNotes(self.store, actor,
                                               project_read_trusted=project_read_trusted)

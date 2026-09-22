@@ -96,7 +96,7 @@ def _wait_for(path: Path, timeout: float = 15) -> None:
 
 
 def _state_fixture(tmp_path: Path):
-    store = StateGraphStore(DBManager(str(tmp_path / "state.db")))
+    store = StateGraphStore(DBManager(str(tmp_path / "state.db")), project_read_trusted=True)
     store.create_project("fixture", "fixture")
     store.add_nodes("fixture", [{
         "key": "operation",

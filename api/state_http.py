@@ -207,8 +207,7 @@ def create_state_router(service_dependency, access_dependency, read_dependency=N
         teardown of a plain `Depends(D)` route, so the verdict stack opened here
         closes at the same point a real route's would - a verdict dependency
         with a post-`yield` half observes setup -> handler -> teardown, the same
-        order `Depends(D)` gives it. Closing the stack inside the guard (the
-        earlier shape) ran teardown BEFORE the handler, order-reversed.
+        order `Depends(D)` gives it.
         """
         route = request.scope.get("route")
         path = getattr(route, "path", None)

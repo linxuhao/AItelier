@@ -126,13 +126,14 @@ def _matches(value: str, query: str) -> bool:
 class StateDriverNotes:
     """One CAS-protected notebook per State project; State remains authoritative."""
 
-    def __init__(self, store, actor: str, project_read_trusted: bool = True):
+    def __init__(self, store, actor: str, project_read_trusted: bool = False):
         self.store = store
         # The trust level of whoever built THIS notebook. `StateService` passes
-        # its own, derived once per request from the raw credential; any other
-        # constructor that never declared one is trusted, exactly as
-        # `core.state_commands._anonymous` defaults. Every writer-only read
-        # below is refused from this value, at the moment the read runs.
+        # its own, derived once per request from the raw credential. Any other
+        # constructor that never declared one is UNTRUSTED, so a notebook rebuilt
+        # from an anonymous service's store cannot read private notes by staying
+        # silent. Every writer-only read below is refused from this value, at the
+        # moment the read runs.
         self.project_read_trusted = bool(project_read_trusted)
         self.actor = text(actor, "authenticated actor", 320)
         with store.db.get_connection() as conn:

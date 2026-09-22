@@ -1,14 +1,11 @@
 """Enumerate the author-controllable surface of a ``/api/state`` route.
 
-This is the OBSERVATION POINT the guard has always lacked. Each prior round
-removed one exemption carrier - an endpoint attribute, a dependency attribute,
-an object-identity check, then a parameter-name-plus-path-template branch - and
-each round a new carrier appeared, because nothing in the repository ever READ
-the shape "did a route author write a datum that decided whether to judge?" This
-module reads it. It generates, from the dimensions a route author actually
-controls, every route shape they can express, so the invariant "the prefix
-verdict is applied to any author-writable route" is checked against the whole
-surface rather than a hand-written list of cases.
+This module OBSERVES the author-controllable surface of the route-layer guard:
+it generates, from the dimensions a route author actually controls, route
+shapes and records whether the guard applied a judgment to each. It measures
+the guard's REACH, not confidentiality - an approval here is not a grant, since
+what a caller may read is decided where the private read EXECUTES
+(`core.state_privacy.refuse_private_read`).
 
 This is TEST SCAFFOLDING and lives under ``tests/`` on purpose: the running
 application imports nothing here, and it must never grow into an API-package
@@ -209,10 +206,9 @@ def _is_public(action: str) -> bool:
 def carrier_shapes() -> dict:
     """The four named carriers, one generated instance each.
 
-    These are the exact shapes a route author used, in four successive rounds,
-    to move the exemption rather than remove it. The generator must catch every
-    one; if the binding ever re-opens for one of them, the invariant breaks here
-    first.
+    Each is a shape a route author used, in an earlier round, to try to move an
+    exemption rather than remove it. The generator records the guard's judgment
+    of each; a shape the guard stops judging shows up here first.
     """
     index = {s.name: s for s in shapes()}
     return {

@@ -13,14 +13,41 @@ refusal and applies it from every place a private read can be performed:
 
 The trust level comes from the object that owns the data. ``StateService``
 derives it once per request from the raw credential (``api.authz.may_read_private``)
-and hands it to the objects it builds. An owner that never declared a level is
-treated as trusted, which only ever NARROWS a read when a transport explicitly
-opted in - the same default ``core.state_commands._anonymous`` uses.
+and hands it to every object that can reach a private table. An owner that never
+declared a level is UNTRUSTED, exactly like an anonymous transport: trust only
+comes from an explicit declaration at a real construction point.
 """
 from __future__ import annotations
 
 import functools
 import inspect
+
+# THE one classification of State tables. Every ``state_*`` table in the schema
+# must appear in exactly one of these sets: a table added to the schema and left
+# unclassified fails `tests/unit/test_undeclared_reader_is_untrusted.py`, so
+# ``nobody decided`` can never silently mean ``public``. The private set is the
+# data whose reads must pass the execution-point verdict.
+PRIVATE_STATE_TABLES = frozenset({
+    "state_driver_notes", "state_driver_note_revisions", "state_driver_note_entries",
+    "state_events", "state_project_access",
+    "state_director_messages", "state_director_deliveries",
+    "state_director_inbox_sequences", "state_director_idempotency",
+})
+
+PUBLIC_STATE_TABLES = frozenset({
+    "state_projects", "state_nodes", "state_dependencies", "state_node_revisions",
+    "state_attempts", "state_evidence", "state_acceptances",
+    "state_external_observations", "state_external_report_blobs", "state_external_owners",
+    "state_design_revisions", "state_design_baselines", "state_design_heads",
+    "state_design_bindings", "state_issues", "state_issue_nodes",
+    "state_project_policy", "state_node_holds", "state_source_bindings",
+    "state_history_links",
+})
+
+
+def is_private_table(name: str) -> bool:
+    """True only for a table the one classification calls private."""
+    return name in PRIVATE_STATE_TABLES
 
 
 def _read_visibility(action: str) -> str:
@@ -43,7 +70,13 @@ def refuse_private_read(trusted, action: str) -> None:
 
 
 def trust_of(owner) -> bool:
-    """The declared trust level of the object that owns a read."""
+    """The declared trust level of the object that owns a read.
+
+    Only an explicit ``True`` is trusted. An object that never declared a level
+    is UNTRUSTED, so a leaf reconstructed from an untrusted store or db cannot
+    become trusted by staying silent - the same rule ``StateService`` applies to
+    its own construction.
+    """
     trust = getattr(owner, "project_read_trusted", None)
     if isinstance(trust, bool):
         return trust
@@ -51,7 +84,7 @@ def trust_of(owner) -> bool:
     trust = getattr(service, "project_read_trusted", None)
     if isinstance(trust, bool):
         return trust
-    return True
+    return False
 
 
 def writer_only_read(action: str):
@@ -74,5 +107,16 @@ def writer_only_read(action: str):
                 refuse_private_read(trust_of(self), action)
                 return function(self, *args, **kwargs)
         wrapper.__state_read_action__ = action
+        # `functools.wraps` copies `__wrapped__`, which would expose the
+        # undecorated body - a bypass around the verdict. Drop it and preserve the
+        # signature explicitly so introspection still reports the real parameters.
+        try:
+            del wrapper.__wrapped__
+        except AttributeError:  # pragma: no cover - wraps always sets it
+            pass
+        try:
+            wrapper.__signature__ = inspect.signature(function)
+        except (TypeError, ValueError):  # pragma: no cover - builtins only
+            pass
         return wrapper
     return decorate

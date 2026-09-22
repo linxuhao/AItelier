@@ -25,7 +25,7 @@ def spec(k, deps=None):
 
 @pytest.fixture
 def system(tmp_path):
-    store = StateGraphStore(DBManager(str(tmp_path / "state.db")))
+    store = StateGraphStore(DBManager(str(tmp_path / "state.db")), project_read_trusted=True)
     store.create_project("game", "Long-running game")
     store.add_nodes("game", [spec("a"), spec("b", ["a"]), spec("c", ["b"])])
     attempts = StateAttempts(store)
@@ -277,7 +277,7 @@ def test_old_candidate_cannot_be_accepted_after_new_attempt_reserved(system):
 def test_disconnected_driver_can_reopen_and_continue_same_attempt(system):
     store, attempts, sf = system
     a = finish(system, reserve(system))
-    fresh_store = StateGraphStore(DBManager(store.db.db_path))
+    fresh_store = StateGraphStore(DBManager(store.db.db_path), project_read_trusted=True)
     fresh = StateAttempts(fresh_store)
     assert fresh.get(a["attempt_id"])["run_id"] == a["run_id"]
     attest((fresh_store, fresh, sf), a, "behaviour")

@@ -9,10 +9,10 @@ closes the second one:
 
 The declaration is read off the endpoint object, and so is the answer: the
 handler's own source, parsed, reduced to the actions a reachable `return` can
-hand to a caller. A declaration is honoured only when every action the handler
-delivers is public. Anything this module cannot resolve — unreadable source, a
-delivered action that is not a literal, a delivery through a value it cannot
-bind — is REFUSED. An unread declaration is not an approval.
+hand to a caller. The binding is a ROUTE-SHAPE review, not a grant of
+confidentiality: whatever it approves, confidentiality is decided where the
+private read EXECUTES (`core.state_privacy`), so this layer cannot widen what a
+caller may read. An unread declaration is not an approval.
 
 The rules, in full, because a rule nobody writes down is a rule that drifts:
 

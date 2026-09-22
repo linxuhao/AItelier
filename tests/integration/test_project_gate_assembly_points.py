@@ -221,4 +221,5 @@ class TestSecondAssemblyPointStateOnly:
                          "/api/state/projects"):
                 response = client.get(path)
                 assert response.status_code == 401, (path, response.status_code)
-            assert client.get("/health").status_code == 200 == 200
+            health = client.get("/health")
+            assert health.status_code == 200, health.text[:200]

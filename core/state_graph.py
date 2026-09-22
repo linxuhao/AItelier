@@ -291,11 +291,17 @@ CREATE TABLE IF NOT EXISTS state_project_access (
 
 
 class StateGraphStore:
-    # The trust level of the caller that built this store. `StateService` sets
-    # the instance value to the level it derived per request; a store built
-    # directly is trusted, which only NARROWS a read when a transport opted in.
-    project_read_trusted = True
-    def __init__(self, db):
+    """One database handle over the State DAG tables.
+
+    The trust level of the caller that built this store decides every read of a
+    private table (``state_events``, ``state_project_access``). It must be
+    declared: a store that never declared one is UNTRUSTED, and a store rebuilt
+    from an untrusted service's db cannot become trusted by staying silent.
+    """
+    def __init__(self, db, project_read_trusted: bool = False):
+        """Use an explicitly supplied DBManager; never resolve a production path."""
+        self.db = db
+        self.project_read_trusted = bool(project_read_trusted)
         """Use an explicitly supplied DBManager; never resolve a production path."""
         self.db = db
         with db.get_connection() as conn:
@@ -391,6 +397,7 @@ class StateGraphStore:
         with self.transaction() as conn:
             return self._project(conn, project_id)
 
+    @writer_only_read("project_visibility")
     def get_project_access(self, project_id: str) -> dict:
         """Current visibility and the record of who changed it and when.
 

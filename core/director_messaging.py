@@ -108,11 +108,13 @@ class SQLiteDirectorMessaging:
     """Actor-bound provider sharing State's SQLite transaction/event boundary."""
 
     def __init__(self, store, actor: str, *, clock=None, id_factory=None, redactor=_redact,
-                 project_read_trusted: bool = True):
+                 project_read_trusted: bool = False):
         if not isinstance(actor, str) or not actor:
             raise ValueError("actor must be authenticated nonempty text")
         self.store = store
         self.actor = actor
+        # Undeclared is UNTRUSTED: a provider rebuilt from an anonymous service's
+        # store must not read the director inbox by staying silent.
         self.project_read_trusted = bool(project_read_trusted)
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._id_factory = id_factory or (lambda: str(uuid4()))

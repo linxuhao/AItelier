@@ -22,7 +22,7 @@ def node(k, deps=(), facet=None):
 
 @pytest.fixture
 def store(tmp_path):
-    result = StateGraphStore(DBManager(str(tmp_path / "state.sqlite")))
+    result = StateGraphStore(DBManager(str(tmp_path / "state.sqlite")), project_read_trusted=True)
     result.create_project("game", "Game")
     return result
 

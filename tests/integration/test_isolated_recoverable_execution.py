@@ -168,7 +168,7 @@ async def test_bounded_failure_timeout_disconnect_and_unknown_retain_distinct_st
     # models a disconnected controller.  Neither writes a terminal observation.
     from core.state_service import StateService
 
-    service = StateService(store.db, actor="fixture-controller")
+    service = StateService(store.db, actor="fixture-controller", project_read_trusted=True)
     timeout = await service.wait_for_state_change(
         "fixture", after=store.events("fixture")[-1]["seq"],
         attempt_ids=[active["attempt_id"]], timeout_seconds=0)

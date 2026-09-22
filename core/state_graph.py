@@ -371,9 +371,16 @@ class StateGraphStore:
             self._event(conn, project_id, None, "project_created", {"title": title, "source_project_id": source_project_id})
             return self._project(conn, project_id)
 
-    def list_projects(self) -> list[dict]:
+    def list_projects(self, public_only: bool = False) -> list[dict]:
+        """With `public_only`, visibility is part of the SQL itself: the rows an
+        anonymous caller must not know about are excluded BEFORE any caller pages
+        or counts, so a page's size, cursor and emptiness are byte-identical
+        whether or not private projects exist in this database."""
+        where = ("WHERE EXISTS(SELECT 1 FROM state_project_access a "
+                 "WHERE a.project_id=p.project_id AND a.visibility='public')") if public_only else ""
         with self.transaction() as conn:
-            return [dict(r) for r in conn.execute("SELECT * FROM state_projects ORDER BY project_id")]
+            return [dict(r) for r in conn.execute(
+                f"SELECT * FROM state_projects p {where} ORDER BY p.project_id")]
 
     def get_project(self, project_id: str) -> dict:
         with self.transaction() as conn:

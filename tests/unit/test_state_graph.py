@@ -263,7 +263,8 @@ def test_search_nodes_finds_key_goal_acceptance_and_evidence(store):
 def test_search_nodes_reaches_recorded_evidence(tmp_path):
     from core.state_database import StateDatabase
     from core.state_service import StateService
-    service = StateService(StateDatabase(str(tmp_path / "svc.sqlite")), actor="authorized-author")
+    service = StateService(StateDatabase(str(tmp_path / "svc.sqlite")), actor="authorized-author",
+                           project_read_trusted=True)
     service.create_project(project_id="shrimp", title="Shrimp game")
     service.store.add_nodes("shrimp", [node("art.audio")])
     a = service.start_external_attempt("shrimp", "art.audio", 1, "harness", "job", "request")

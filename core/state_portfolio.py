@@ -19,8 +19,11 @@ ATTEMPT_COLUMNS = ("seq", "attempt_id", "project_id", "node_key", "node_revision
 
 
 class StatePortfolio:
-    def __init__(self, store, actor="authorized-state-operator"):
-        self.store, self.actor = store, actor
+    def __init__(self, store, actor="authorized-state-operator", service=None):
+        # The owning StateService, so the catalog can consult the caller's
+        # DECLARED trust level. Fail closed: with no service attached the caller
+        # is treated as anonymous.
+        self.store, self.actor, self.service = store, actor, service
 
     def source_binding(self, project_id):
         with self.store.transaction() as conn:
@@ -149,10 +152,19 @@ class StatePortfolio:
         if repo_path is not None:
             repo_path = str(Path(text(repo_path, "repo_path", 4000)).expanduser().resolve())
         with self.store.transaction() as conn:
+            # Visibility is pushed INTO the SQL, BEFORE the page is cut. Filtering
+            # after pagination leaked the SHAPE of the page: an unopened project
+            # turned a whole page empty and shifted every later cursor, which let
+            # a reviewer reconstruct an unopened id character by character. Fail
+            # closed: with no owning service the caller is treated as anonymous.
+            where, params = "p.project_id>?", [after]
+            if not getattr(self.service, "project_read_trusted", False):
+                where += (" AND EXISTS(SELECT 1 FROM state_project_access a "
+                          "WHERE a.project_id=p.project_id AND a.visibility='public')")
             rows = conn.execute("SELECT p.*,COUNT(n.node_key) AS node_count,"
                                 "COALESCE(SUM(n.status='VERIFIED'),0) AS verified_count "
                                 "FROM state_projects p LEFT JOIN state_nodes n ON n.project_id=p.project_id "
-                                "WHERE p.project_id>? GROUP BY p.project_id ORDER BY p.project_id", (after,)).fetchall()
+                                f"WHERE {where} GROUP BY p.project_id ORDER BY p.project_id", tuple(params)).fetchall()
             result = []
             for row in rows:
                 p = dict(row)

@@ -35,7 +35,8 @@ def fixture(root):
     registry = ConfigRegistry()
     sf.register_graph(PipelineGraph(name='browser_feature', begin='historical_impl', steps=[StepNode(id='historical_impl')]))
     registry.register_one(sf, 'browser_feature', hint_overrides={'repo_mode':'none','seed_file':'plan.md','output_step':'historical_impl'})
-    service = StateService(db, ws, sf, registry, actor='browser-fixture-verifier')
+    service = StateService(db, ws, sf, registry, actor='browser-fixture-verifier',
+                           project_read_trusted=True)
     service.create_project('shrimp-preview', '武虾传奇 · Migration preview')
     seeds = [
         ('design.phases','两阶段规则与成长契约',[]),
@@ -257,7 +258,8 @@ def main():
                 import subprocess, hashlib
                 from core.state_database import StateDatabase
                 from core.state_service import StateService
-                own=StateService(StateDatabase(str(root/'external-only.sqlite')),actor='browser-external-verifier')
+                own=StateService(StateDatabase(str(root/'external-only.sqlite')),actor='browser-external-verifier',
+                                 project_read_trusted=True)
                 own.create_project('external-only','External harness project')
                 own.store.add_nodes('external-only',[{'key':'external.goal','goal':'外部 harness 验证目标',
                     'acceptance':[{'id':'actual-test','kind':'test','description':'Actual Python assertion passes'}]}])

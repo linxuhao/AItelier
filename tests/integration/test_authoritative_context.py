@@ -28,7 +28,8 @@ def _node(key: str = "rule") -> dict:
 
 
 def test_ruling_version_propagates_while_old_attempt_stays_frozen(tmp_path):
-    service = StateService(StateDatabase(str(tmp_path / "state.sqlite")), actor="fixture-reviewer")
+    service = StateService(StateDatabase(str(tmp_path / "state.sqlite")), actor="fixture-reviewer",
+                           project_read_trusted=True)
     service.create_project("fixture", "Authoritative context fixture")
     service.store.add_nodes("fixture", [_node()])
     first = service.design.create_revision("fixture", "rule", 0, "Rule", "Use the old rule.",

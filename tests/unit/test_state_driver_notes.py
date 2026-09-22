@@ -13,10 +13,10 @@ from core.state_service import StateService
 @pytest.fixture
 def services(tmp_path):
     db_path = str(tmp_path / "state.sqlite")
-    first = StateService(StateDatabase(db_path), actor="alice@example.test")
+    first = StateService(StateDatabase(db_path), actor="alice@example.test", project_read_trusted=True)
     first.create_project("aitelier", "AItelier")
     first.create_project("wuxia-myth", "Wuxia")
-    return first, StateService(StateDatabase(db_path), actor="bob@example.test")
+    return first, StateService(StateDatabase(db_path), actor="bob@example.test", project_read_trusted=True)
 
 
 def test_project_scoped_sections_history_and_provenance(services):
@@ -42,7 +42,8 @@ def test_project_scoped_sections_history_and_provenance(services):
     assert [entry["revision"] for entry in history["entries"]] == [1, 2, 3]
     assert history["entries"][-1]["actor"] == "bob@example.test"
     assert alice.driver_notes.history("wuxia-myth")["entries"][0]["temporary"] == "combat batch"
-    reopened = StateService(StateDatabase(alice.db.db_path), actor="handoff@example.test")
+    reopened = StateService(StateDatabase(alice.db.db_path), actor="handoff@example.test",
+                            project_read_trusted=True)
     assert reopened.driver_notes.get("aitelier")["temporary"] == "one + two"
 
 
@@ -117,7 +118,8 @@ def test_search_compares_time_instants_and_unicode_casefold(services, monkeypatc
 def test_search_redacts_slack_tokens_and_identity_metadata(services):
     service, _ = services
     secret_actor = "sk_abcdefghijklmnop1234"
-    writer = StateService(StateDatabase(service.db.db_path), actor=secret_actor)
+    writer = StateService(StateDatabase(service.db.db_path), actor=secret_actor,
+                          project_read_trusted=True)
     slack_token = "".join(("xo", "xb-1234567890-abcdefghijklmnop"))
     writer.driver_notes.update(
         "aitelier", "temporary",

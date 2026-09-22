@@ -88,7 +88,7 @@ class TestClassification:
 def gated(tmp_path, monkeypatch):
     """Anonymous visitor: the gate is armed and nothing verifies."""
     service = StateService(StateDatabase(str(tmp_path / "state.sqlite")),
-                           actor="visibility-test")
+                           actor="visibility-test", project_read_trusted=True)
     service.create_project("p", "P")
     service.store.add_nodes("p", [{"key": "a", "goal": "A", "acceptance": [
         {"id": "c", "kind": "test", "description": "Check"}]}])
@@ -236,7 +236,8 @@ class TestEmbedderDefaults:
         verdict. It can never open a private read by omission — the fallback is
         the writer verdict, and the read table is the only thing that decides
         which reads are public."""
-        service = StateService(StateDatabase(str(tmp_path / "s.sqlite")), actor="e")
+        service = StateService(StateDatabase(str(tmp_path / "s.sqlite")), actor="e",
+                               project_read_trusted=True)
         service.create_project("p", "P")
         app = FastAPI()
         app.include_router(create_state_router(lambda: service, authz.require_writer))

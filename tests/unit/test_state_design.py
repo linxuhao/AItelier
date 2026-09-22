@@ -18,7 +18,8 @@ SCOPE = {'mode': 'all'}
 
 @pytest.fixture
 def service(tmp_path):
-    s = StateService(StateDatabase(str(tmp_path / 'state.sqlite')), actor='authorized-author')
+    s = StateService(StateDatabase(str(tmp_path / 'state.sqlite')), actor='authorized-author',
+                     project_read_trusted=True)
     s.create_project('game', 'Game')
     s.store.add_nodes('game', [{'key': 'work', 'goal': 'Deliver behavior', 'acceptance': [
         {'id': 'behavior', 'kind': 'test', 'description': 'Actual behavior passes'}]},

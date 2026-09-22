@@ -71,7 +71,8 @@ def live(tmp_path, monkeypatch):
         attached.append((run_id, kwargs))
         return True
     monkeypatch.setattr(mcp_router, "_start_driver", attach)
-    service = StateService(db, ws, sf, registry, attach, actor="test-reviewer")
+    service = StateService(db, ws, sf, registry, attach, actor="test-reviewer",
+                           project_read_trusted=True)
     service.create_project("game", "Long-running game")
     service.store.add_nodes("game", [spec("a"), spec("b", ["a"])])
     yield SimpleNamespace(db=db, ws=ws, sf=sf, registry=registry, service=service,
@@ -1057,7 +1058,7 @@ def test_state_inspection_does_not_require_a_working_executor(live):
     def unavailable():
         calls.append(1)
         raise RuntimeError("executor unavailable")
-    service = StateService(live.db, live.ws, runtime_factory=unavailable)
+    service = StateService(live.db, live.ws, runtime_factory=unavailable, project_read_trusted=True)
     assert execute(service, "frontier", {"project_id": "game"})["total"] == 1
     execute(service, "add_nodes", {"project_id": "game", "nodes": [spec("offline-plan")]}, allow_write=True)
     assert calls == []
@@ -1283,7 +1284,7 @@ def test_successor_restores_owner_cursor_and_pending_checkpoint_without_duplicat
     }]
 
     successor = StateService(live.db, live.ws, live.sf, live.registry, live.service.attach_driver,
-                             actor="successor")
+                             actor="successor", project_read_trusted=True)
     recovered = successor.recover_attempt(checkpoint["attempt_id"])
     assert recovered["attempt_id"] == checkpoint["attempt_id"]
     assert recovered["run_id"] == checkpoint["run_id"]

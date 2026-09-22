@@ -41,7 +41,7 @@ def test_rehearsal_uses_temporary_db_zero_attempts_zero_acceptance(bundle):
 
 
 def test_repeat_manifest_is_idempotent_but_edits_or_releasing_hold_refuse(bundle,tmp_path):
-    svc=StateService(DBManager(str(tmp_path/'shadow.db')))
+    svc=StateService(DBManager(str(tmp_path/'shadow.db')), project_read_trusted=True)
     stage_shadow(svc,bundle)
     before=svc.store.events('preview');assert stage_shadow(svc,bundle)['idempotent'] is True
     assert svc.store.events('preview')==before
@@ -52,7 +52,7 @@ def test_repeat_manifest_is_idempotent_but_edits_or_releasing_hold_refuse(bundle
 
 
 def test_existing_project_is_not_implicitly_overwritten(bundle,tmp_path):
-    svc=StateService(DBManager(str(tmp_path/'shadow.db')));svc.create_project('preview','An existing project')
+    svc=StateService(DBManager(str(tmp_path/'shadow.db')),project_read_trusted=True);svc.create_project('preview','An existing project')
     with pytest.raises(StateConflict,match='without a complete'):stage_shadow(svc,bundle)
     assert svc.store.get_project('preview')['title']=='An existing project'
 
@@ -91,7 +91,7 @@ def test_changed_evidence_or_source_head_refuses(bundle):
 
 
 def test_reference_is_only_history_and_protection_survives_global_release(bundle,tmp_path):
-    svc=StateService(DBManager(str(tmp_path/'shadow.db')))
+    svc=StateService(DBManager(str(tmp_path/'shadow.db')), project_read_trusted=True)
     stage_shadow(svc,bundle)
     assert svc.portfolio.run_owners('external-run')['links'][0]['relation']=='reference'
     svc.portfolio.set_dispatch('preview','active',1,'Review complete in fixture')

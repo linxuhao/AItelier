@@ -52,7 +52,7 @@ def world(tmp_path, monkeypatch):
     src = tmp_path / "src"
     head = _init_repo(src)
     yield {"db": db, "store": store, "attempts": attempts, "sf": sf, "ws": ws, "src": src, "head": head,
-           "service": StateService(db, ws, sf, {})}
+           "service": StateService(db, ws, sf, {}, project_read_trusted=True)}
     sf._conn.close()
 
 

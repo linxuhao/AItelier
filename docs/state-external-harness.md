@@ -244,6 +244,7 @@ from core.state_service import StateService
 service = StateService(
     StateDatabase('/absolute/private/project-state.sqlite'),
     actor='my-authenticated-integration',
+    project_read_trusted=True,  # required: an undeclared trust level refuses to construct
 )
 ```
 

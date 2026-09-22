@@ -207,7 +207,8 @@ def dry_run(value: dict, *, check_files=True) -> dict:
     from core.db_manager import DBManager
     from core.state_service import StateService
     with tempfile.TemporaryDirectory(prefix="state-migration-preview-") as tmp:
-        service=StateService(DBManager(str(Path(tmp)/"shadow.sqlite")),actor="migration-preview")
+        service=StateService(DBManager(str(Path(tmp)/"shadow.sqlite")),actor="migration-preview",
+                             project_read_trusted=True)
         first=stage_shadow(service,bundle)
         second=stage_shadow(service,bundle)
         assert second["idempotent"] is True

@@ -38,7 +38,8 @@ def _arm(monkeypatch):
 
 
 def _build(tmp_path, actor="anon-test"):
-    service = StateService(StateDatabase(str(tmp_path / "s.sqlite")), actor=actor)
+    service = StateService(StateDatabase(str(tmp_path / "s.sqlite")), actor=actor,
+                           project_read_trusted=True)
 
     def dep(request: Request):
         service.project_read_trusted = authz.may_read_private(request)
@@ -84,13 +85,15 @@ def _public_project_doors(router, pid):
 
 class TestPrivacyIsAMechanismNotAList:
     def test_a_project_created_now_is_private_the_instant_it_exists(self, tmp_path):
-        service = StateService(StateDatabase(str(tmp_path / "s.sqlite")), actor="a")
+        service = StateService(StateDatabase(str(tmp_path / "s.sqlite")), actor="a",
+                               project_read_trusted=True)
         service.create_project("brand-new", "Fresh")
         assert service.store.is_project_public("brand-new") is False
         assert service.store.get_project_access("brand-new")["visibility"] == "private"
 
     def test_opening_happens_only_via_the_recorded_write(self, tmp_path):
-        service = StateService(StateDatabase(str(tmp_path / "s.sqlite")), actor="a")
+        service = StateService(StateDatabase(str(tmp_path / "s.sqlite")), actor="a",
+                               project_read_trusted=True)
         _seed(service, "p", "P", "G", "SECRET")
         assert service.store.is_project_public("p") is False
         assert service.open_project("p")["visibility"] == "public"
@@ -115,7 +118,8 @@ class TestPrivacyIsAMechanismNotAList:
 
 class TestOpeningIsRecorded:
     def test_open_records_who_and_when_and_reads_back(self, tmp_path):
-        service = StateService(StateDatabase(str(tmp_path / "s.sqlite")), actor="boss@x")
+        service = StateService(StateDatabase(str(tmp_path / "s.sqlite")), actor="boss@x",
+                               project_read_trusted=True)
         _seed(service, "p", "P", "G", "SECRET")
         rec = service.open_project("p")
         assert rec["opened_by"] == "boss@x" and rec["opened_at"]
@@ -124,7 +128,8 @@ class TestOpeningIsRecorded:
         assert back["opened_by"] == "boss@x" and back["changed_by"] == "boss@x"
 
     def test_closing_is_a_recorded_write_and_keeps_the_open_history(self, tmp_path):
-        service = StateService(StateDatabase(str(tmp_path / "s.sqlite")), actor="boss@x")
+        service = StateService(StateDatabase(str(tmp_path / "s.sqlite")), actor="boss@x",
+                               project_read_trusted=True)
         _seed(service, "p", "P", "G", "SECRET")
         service.open_project("p")
         rec = service.close_project("p")
@@ -142,7 +147,8 @@ class TestOpeningIsRecorded:
 
 class TestNoExistingWriteOpensAProject:
     def test_representative_writes_all_leave_the_project_private(self, tmp_path):
-        service = StateService(StateDatabase(str(tmp_path / "s.sqlite")), actor="op")
+        service = StateService(StateDatabase(str(tmp_path / "s.sqlite")), actor="op",
+                               project_read_trusted=True)
         service.create_project("p", "P")
         assert not service.store.is_project_public("p")
         service.store.add_nodes("p", [{"key": "a", "goal": "A", "acceptance": [
@@ -328,7 +334,8 @@ class TestGateHoldsAgainstRouteAuthor:
         assert "PRIVATE-BODY-XYZZY" not in r.text
 
     def test_second_assembly_point_state_only(self, monkeypatch, tmp_path):
-        service = StateService(StateDatabase(str(tmp_path / "only.sqlite")), actor="state-token")
+        service = StateService(StateDatabase(str(tmp_path / "only.sqlite")), actor="state-token",
+                               project_read_trusted=True)
         _seed(service, "priv", "PRIVATE-TITLE", "PRIVATE-GOAL-XYZZY", "PRIVATE-BODY-XYZZY")
 
         def dep(request: Request):
@@ -357,13 +364,14 @@ class TestGateHoldsAgainstRouteAuthor:
     def test_decision_lives_at_execute_which_stand_down_cannot_reach(self):
         src = (REPO / "core" / "state_commands.py").read_text(encoding="utf-8")
         body = src[src.index("def execute("):]
-        assert "_refuse_if_project_not_public" in body[:body.index("handlers = {")]
+        assert "_refuse_if_project_not_public" in body[:body.index("handlers = _handlers(service)")]
         http_src = (REPO / "api" / "state_http.py").read_text(encoding="utf-8")
         assert "ProjectPrivate" in http_src
 
 
 def test_execute_refuses_anonymous_read_of_unopened_project_directly(tmp_path):
-    service = StateService(StateDatabase(str(tmp_path / "s.sqlite")), actor="a")
+    service = StateService(StateDatabase(str(tmp_path / "s.sqlite")), actor="a",
+                           project_read_trusted=True)
     _seed(service, "p", "P", "G", "SECRET")
     service.project_read_trusted = False
     with pytest.raises(state_commands.ProjectPrivate):

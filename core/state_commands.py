@@ -684,49 +684,21 @@ def _filter_catalog(service, action, result):
     return result
 
 
-def execute(service, action: str, arguments: dict, *, allow_write: bool = False):
-    if not isinstance(action, str) or action not in REQUESTS:
-        raise StateGraphError("unknown state graph action; use state_graph_help")
-    if action in WRITE_REQUESTS and not allow_write:
-        raise StateGraphError("mutating action is not available on the read surface")
-    director_action = action in {
-        "send_director_message", "list_director_messages",
-        "acknowledge_director_message", "resolve_director_message"}
-    if not isinstance(arguments, dict):
-        if director_action:
-            from core.director_messaging_protocol import DirectorMessageError
-            return DirectorMessageError("invalid_request").as_dict()
-        raise StateGraphError("arguments must be an object")
-    # Project privacy is decided HERE, the single chokepoint every transport
-    # shares, and not in the route guard: a route author who forges a declaration
-    # to make the guard stand down still has to call `execute` to obtain any
-    # project body, and that call is refused for an anonymous principal on a
-    # project nobody opened. This does not depend on the action classification
-    # table or on `prefix_verdict_stands_down_for` — those answer "is this ACTION
-    # public", which is ANDed with "is this PROJECT opened" only in this function.
-    # It runs BEFORE argument validation so an anonymous probe of an unopened
-    # project is refused as private, never bounced with a structural error that
-    # itself leaks the project's request shape.
-    anonymous = _anonymous(service)
-    if anonymous and action in READ_REQUESTS:
-        _refuse_if_project_not_public(service, action, arguments)
-    try:
-        args = REQUESTS[action].model_validate(arguments).model_dump()
-    except ValidationError as exc:
-        if director_action:
-            from core.director_messaging_protocol import DirectorMessageError
-            return DirectorMessageError("invalid_request").as_dict()
-        # Bounded validation errors without echoing whole inputs into logs.
-        details = [{"field": ".".join(map(str, e["loc"])), "error": e["msg"]} for e in exc.errors(include_input=False)[:10]]
-        raise StateGraphError(str(details)) from exc
-    handlers = {
+def _handlers(service) -> dict:
+    """The ONE authoritative action -> implementation table. `execute` uses it
+    to dispatch; the write-opening mutation gate (tests/unit/
+    test_write_opening_coverage.py) uses it to DERIVE, for every write action in
+    WRITE_REQUESTS, the exact callable a "this action opens the project"
+    mutation must infect. A new action lands in WRITE_REQUESTS and its handler
+    here, and the gate covers it automatically — no second handwritten list."""
+    return {
         "design_catalog": service.design.catalog, "get_design_revision": service.design.get_revision,
         "search_design_items": service.design.search, "design_impact": service.design.impact,
         "get_design_baseline": service.design.get_baseline, "get_design_bindings": service.design.node_bindings,
         "export_design_markdown": service.design.export_markdown, "check_design_markdown": service.design.check_markdown,
         "create_design_revision": service.design.create_revision, "create_design_baseline": service.design.create_baseline,
         "bind_node_design": service.design.bind_node,
-        "list_projects": service.store.list_projects, "get_graph": service.store.get_graph,
+        "list_projects": service.list_projects, "get_graph": service.store.get_graph,
         "get_node": service.node_context, "search_nodes": service.store.search_nodes, "frontier": service.store.frontier, "facet_lint": service.store.facet_lint,
         "wait_for_state_change": service.wait_for_state_change, "events": service.store.events,
         "get_driver_note": service.driver_notes.get, "driver_note_history": service.driver_notes.history,
@@ -769,6 +741,44 @@ def execute(service, action: str, arguments: dict, *, allow_write: bool = False)
         "get_issue": service.issues.get, "link_issue": service.issues.link,
         "resolve_issue": service.issues.resolve,
     }
+
+
+def execute(service, action: str, arguments: dict, *, allow_write: bool = False):
+    if not isinstance(action, str) or action not in REQUESTS:
+        raise StateGraphError("unknown state graph action; use state_graph_help")
+    if action in WRITE_REQUESTS and not allow_write:
+        raise StateGraphError("mutating action is not available on the read surface")
+    director_action = action in {
+        "send_director_message", "list_director_messages",
+        "acknowledge_director_message", "resolve_director_message"}
+    if not isinstance(arguments, dict):
+        if director_action:
+            from core.director_messaging_protocol import DirectorMessageError
+            return DirectorMessageError("invalid_request").as_dict()
+        raise StateGraphError("arguments must be an object")
+    # Project privacy is decided HERE, the single chokepoint every transport
+    # shares, and not in the route guard: a route author who forges a declaration
+    # to make the guard stand down still has to call `execute` to obtain any
+    # project body, and that call is refused for an anonymous principal on a
+    # project nobody opened. This does not depend on the action classification
+    # table or on `prefix_verdict_stands_down_for` — those answer "is this ACTION
+    # public", which is ANDed with "is this PROJECT opened" only in this function.
+    # It runs BEFORE argument validation so an anonymous probe of an unopened
+    # project is refused as private, never bounced with a structural error that
+    # itself leaks the project's request shape.
+    anonymous = _anonymous(service)
+    if anonymous and action in READ_REQUESTS:
+        _refuse_if_project_not_public(service, action, arguments)
+    try:
+        args = REQUESTS[action].model_validate(arguments).model_dump()
+    except ValidationError as exc:
+        if director_action:
+            from core.director_messaging_protocol import DirectorMessageError
+            return DirectorMessageError("invalid_request").as_dict()
+        # Bounded validation errors without echoing whole inputs into logs.
+        details = [{"field": ".".join(map(str, e["loc"])), "error": e["msg"]} for e in exc.errors(include_input=False)[:10]]
+        raise StateGraphError(str(details)) from exc
+    handlers = _handlers(service)
     try:
         result = handlers[action](**args)
     except Exception as exc:

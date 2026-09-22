@@ -26,7 +26,8 @@ class Host:
         from api.dependencies import get_db_manager, get_skillflow
         from core.state_service import StateService
         self.sf = get_skillflow()
-        self.state = StateService(get_db_manager(), actor="writing-bench-run")
+        self.state = StateService(get_db_manager(), actor="writing-bench-run",
+                                  project_read_trusted=True)
 
     def review_contracts(self, policy_document: dict) -> dict:
         files = contracts(policy_document)

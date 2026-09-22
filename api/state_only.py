@@ -47,7 +47,8 @@ class _BearerAuth:
 def create_app(db_path: str, token: str, *, with_mcp: bool = True) -> FastAPI:
     if not isinstance(token,str) or len(token.encode('utf-8'))<32 or '\n' in token or '\r' in token:
         raise ValueError('Set a dedicated State-only bearer token of at least 32 bytes')
-    service = StateService(StateDatabase(db_path), actor='authenticated-state-token')
+    service = StateService(StateDatabase(db_path), actor='authenticated-state-token',
+                           project_read_trusted=True)
     mcp = None
     if with_mcp:
         from mcp.server.fastmcp import FastMCP

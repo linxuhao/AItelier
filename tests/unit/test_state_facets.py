@@ -152,7 +152,7 @@ def test_a_faceted_node_cannot_be_added_on_top_of_a_legacy_node(store):
 # ── the command surface and the projection ──────────────────────────────────
 
 def test_commands_expose_set_node_facet_and_facet_lint(tmp_path):
-    service = StateService(DBManager(str(tmp_path / "host.sqlite")))
+    service = StateService(DBManager(str(tmp_path / "host.sqlite")), project_read_trusted=True)
     service.create_project("game", "Game")
     service.store.add_nodes("game", [node("d")])
     with pytest.raises(StateGraphError):

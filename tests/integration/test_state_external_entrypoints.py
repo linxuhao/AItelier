@@ -326,7 +326,8 @@ def test_real_state_only_mcp_can_certify_external_attempt_and_returns_errors(app
 def test_external_lifecycle_never_calls_unavailable_runtime_factory(tmp_path):
     calls=[]
     def runtime():calls.append(1);raise AssertionError('Workflow engine must not be touched')
-    service=StateService(StateDatabase(str(tmp_path/'bare.sqlite')),runtime_factory=runtime,actor='director')
+    service=StateService(StateDatabase(str(tmp_path/'bare.sqlite')),runtime_factory=runtime,actor='director',
+                         project_read_trusted=True)
     service.create_project('game','Game');service.store.add_nodes('game',[spec('a')])
     a=service.start_external_attempt('game','a',1,'subagents','worker-1','request')
     report_path=tmp_path/'report.txt'
@@ -407,7 +408,8 @@ def test_state_only_does_not_boot_unprotected(tmp_path,token):
 
 
 def test_same_http_factory_in_embedded_mode_shares_commands_and_actor(tmp_path):
-    service=StateService(StateDatabase(str(tmp_path/'db.sqlite')),actor='director@local')
+    service=StateService(StateDatabase(str(tmp_path/'db.sqlite')),actor='director@local',
+                         project_read_trusted=True)
     app=FastAPI();app.state.state_service=service;app.include_router(create_state_router(lambda:service,lambda:None))
     with TestClient(app) as client:
         project(client);a=register(client)

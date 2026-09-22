@@ -11,7 +11,8 @@ from core.state_service import StateService
 
 
 def _service(tmp_path, actor="transport@example.test"):
-    service = StateService(StateDatabase(str(tmp_path / "state.sqlite")), actor=actor)
+    service = StateService(StateDatabase(str(tmp_path / "state.sqlite")), actor=actor,
+                           project_read_trusted=True)
     service.create_project("alpha", "alpha")
     service.create_project("beta", "beta")
     return service
@@ -143,7 +144,7 @@ def test_rest_direct_actions_return_closed_success_and_invalid_request(client):
 def test_mcp_wire_exposes_direct_action_with_closed_envelope(client, tmp_path, monkeypatch):
     from api import dependencies
     db = StateDatabase(str(tmp_path / "wire.sqlite"))
-    service = StateService(db)
+    service = StateService(db, project_read_trusted=True)
     service.create_project("alpha", "alpha")
     service.create_project("beta", "beta")
     monkeypatch.setattr(dependencies, "get_db_manager", lambda: db)

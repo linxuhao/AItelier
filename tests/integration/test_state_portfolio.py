@@ -34,7 +34,7 @@ def live(tmp_path, monkeypatch):
     sf.register_graph(PipelineGraph(name="fixture", begin="work", steps=[StepNode(id="work")]))
     registry = ConfigRegistry()
     registry.register_one(sf, "fixture", hint_overrides={"repo_mode": "none", "seed_file": "plan.md", "output_step": "work", "scheduler_owned": True})
-    service = StateService(db, ws, sf, registry, actor="test-verifier")
+    service = StateService(db, ws, sf, registry, actor="test-verifier", project_read_trusted=True)
     service.create_project("game", "武虾传奇")
     service.store.add_nodes("game", [node("growth.proficiency"), node("month.actions", ["growth.proficiency"])])
     yield SimpleNamespace(service=service, db=db, ws=ws, sf=sf, tmp=tmp_path)
@@ -81,7 +81,7 @@ def test_held_project_refuses_before_executor_composition(live):
     def broken():
         calls.append(1)
         raise RuntimeError("should not be touched")
-    offline = StateService(live.db, runtime_factory=broken)
+    offline = StateService(live.db, runtime_factory=broken, project_read_trusted=True)
     with pytest.raises(StateConflict, match="held"):
         offline.start_attempt("game", "growth.proficiency", 1, "fixture", "r")
     assert calls == []

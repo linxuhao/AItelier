@@ -220,8 +220,8 @@ def test_project_scoped_note_cas_race_reloads_before_submit_and_redacts_identity
     from core.state_graph import StateConflict
 
     db = StateDatabase(str(tmp_path / "handoff.sqlite"))
-    first = StateService(db, actor="Authorization: Bearer synthetic-first")
-    second = StateService(db, actor="Authorization: Bearer synthetic-second")
+    first = StateService(db, actor="Authorization: Bearer synthetic-first", project_read_trusted=True)
+    second = StateService(db, actor="Authorization: Bearer synthetic-second", project_read_trusted=True)
     first.create_project("project-a", "Project A")
     first.create_project("project-b", "Project B")
     for service in (first, second):

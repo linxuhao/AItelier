@@ -10,8 +10,16 @@ before publication, with unchanged files preserved when carry_forward is enabled
 Validation failure retains the candidate for repair and blocks delivery. Code
 review determines acceptance. See `docs/output-target-migration.md` for deployment.
 
-# Director handoff — 2026-09-05
-For 武虾传奇 game tasks, read AGENTS.md here and the game repository AGENTS.md. Codex directs; Claude may implement assigned gameplay in an isolated worktree. The old pipeline-only workflow and old R6 queue are superseded. Do not start AItelier or publish without director assignment.
+# Director assignment — where it lives
+
+Who directs 武虾传奇, which agent implements what, and what may be started or
+published is NOT recorded here. It lives in the State DAG: the `wuxia-myth`
+driver note (`get_driver_note`) for what is in flight, and the node acceptance
+criteria for what counts as done. Read those, not this file.
+
+A previous edition of this section named the director by hand and went stale
+without anyone noticing, because a fact copied into a file has no way to hear
+that it changed. This paragraph names a location instead.
 
 # CLAUDE.md
 

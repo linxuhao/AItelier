@@ -34,5 +34,5 @@ def get_service(request: Request, db=Depends(get_db_manager), ws=Depends(get_wor
 # about reading. Which reads are public is NOT decided per route here — the route
 # declares the action it serves and one router-wide guard asks
 # `core.state_commands.read_visibility`, which fails CLOSED, so a read added later
-# is private until someone opens it.# fails CLOSED, so a read added later is private until someone opens it.
+# is private until someone opens it.
 router = create_state_router(get_service, require_writer, require_reader)

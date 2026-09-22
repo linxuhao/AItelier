@@ -8,6 +8,13 @@ criterion 2 demands ("this write action opens the project as a side effect").
 
 It records how many times the mutation actually FIRED (a green run with
 `fired == 0` proves nothing), and writes that count to STATE_MUTATION_FIRE.
+
+WHY THIS FILE SITS AT THE REPOSITORY ROOT: it is neither application code nor a
+test — it is a pytest PLUGIN, loaded by NAME (`-p mutation_gate`) by the
+mutation subprocesses that `tests/unit/test_write_opening_coverage.py` spawns
+with `cwd=<repository root>`. `python -m pytest` puts the current directory on
+`sys.path`, so the repository root is the one place from which that name
+resolves without the test editing `sys.path` or installing a package.
 """
 import json
 import os

@@ -106,7 +106,7 @@ def _mutation_run(action, files):
                # file per action would multiply the suite's runtime for no
                # extra verdict. THAT the exercising files exist (organic
                # coverage) is asserted statically and named in the report.
-               ]ctions() else []),
+
                *[str(f) for f in files]]
         try:
             proc = subprocess.run(cmd, cwd=REPO, env=env, capture_output=True,

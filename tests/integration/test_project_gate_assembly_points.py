@@ -1,0 +1,192 @@
+"""Criterion 4: the project gate holds where the product is ACTUALLY assembled.
+
+The criterion names two assembly points, and an assertion on an app the test
+itself builds does not answer it:
+
+* ``api.main.app``             — the whole product: the real state router, every
+                                 middleware, the real dependency graph;
+* ``api.state_only.create_app`` — the bearer-protected second assembly point.
+
+Each is attacked with the SAME forged route the criterion describes (reuse the
+product's own router-wide guard, declare a PUBLIC action, then execute a
+PRIVATE read), and each is measured on TWO poles. A run whose every response is
+a refusal cannot tell "the gate held" from "the attack never landed":
+
+  UNOPENED project -> refused, and the notebook text absent from the response;
+  OPENED   project -> 200 with the full text  (the liveness control).
+
+``api/state_only`` refuses at the TRANSPORT — its ASGI bearer middleware
+answers 401 before any router runs — so the identical route is exercised
+without the deployment token (refused) and with it (200 + full text). The
+refusal is a property of that assembly point, not of a route declaration.
+"""
+from __future__ import annotations
+
+import pytest
+from fastapi import Depends, Request
+from fastapi.testclient import TestClient
+
+import api.state_graph_routers as state_graph_routers
+from api import authz
+from api.dependencies import get_db_manager, get_workspace_manager
+from api.state_graph_routers import get_service
+from core.db_manager import DBManager
+from core.state_commands import execute
+from core.state_database import StateDatabase
+from core.state_service import StateService
+from core.workspace_manager import WorkspaceManager
+
+PRIVATE_PID = "assembly-private"
+OPEN_PID = "assembly-open"
+PRIVATE_SECRET = "PRODUCT-APP-PRIVATE-BODY-Q7"
+OPEN_SECRET = "PRODUCT-APP-OPEN-BODY-Q7"
+FORGED_PATH = "/api/state/forged-assembly"
+ADMIN = {"X-AItelier-Admin-Token": "assembly-point-admin"}
+STATE_ONLY_TOKEN = "s" * 40
+
+
+def _arm(monkeypatch):
+    """Arm the identity gate with nobody allowlisted: every request that does
+    not carry the admin token is an anonymous visitor."""
+    monkeypatch.setattr(authz, "gate_enabled", lambda: True)
+    monkeypatch.setattr(authz, "WRITERS", set())
+    monkeypatch.setattr(authz, "ADMIN_TOKEN", "assembly-point-admin")
+    monkeypatch.setattr(authz.cf_access, "email_from_request_headers", lambda *a, **k: None)
+
+
+def _seed(service):
+    for pid, secret in ((PRIVATE_PID, PRIVATE_SECRET), (OPEN_PID, OPEN_SECRET)):
+        service.create_project(pid, pid)
+        service.driver_notes.update(pid, "permanent", secret, 0, "director")
+    service.open_project(OPEN_PID)
+
+
+def _forge_on_product_app(app):
+    """Mount the forged route on the product app object itself.
+
+    It reuses the product's OWN router-wide guard and declares a public action,
+    so the guard stands down; then it executes a private read. The decision must
+    come from the chokepoint, not from the declaration.
+
+    The route goes in FRONT of the SPA catch-all mount (`app.mount("/", ...)`),
+    which is registered last and matches every path: a route appended after it
+    is never reached and answers 404, which would look like a refusal.
+    """
+    guard = state_graph_routers.router.dependencies[0].dependency
+
+    def forged(request: Request, pid: str, svc=Depends(get_service)):
+        execute(svc, "list_projects", {})
+        return execute(svc, "get_driver_note", {"project_id": pid})
+
+    setattr(forged, "_state_route", ("read", "list_projects"))
+    app.router.add_api_route(FORGED_PATH, forged, methods=["GET"],
+                             dependencies=[Depends(guard)])
+    app.router.routes.insert(0, app.router.routes.pop())
+
+def _drop_forged_route(app):
+    app.router.routes = [r for r in app.router.routes
+                         if getattr(r, "path", None) != FORGED_PATH]
+
+
+class TestProductAppObject:
+    def test_forged_route_on_the_real_app_refuses_private_and_serves_open(
+            self, monkeypatch, tmp_path):
+        _arm(monkeypatch)
+        from api import main as main_module
+
+        app = main_module.app
+        db = DBManager(str(tmp_path / "assembly.sqlite"))
+        ws = WorkspaceManager(str(tmp_path / "ws"))
+        _seed(StateService(db, ws, actor="assembly-seeder", project_read_trusted=True))
+        app.dependency_overrides[get_db_manager] = lambda: db
+        app.dependency_overrides[get_workspace_manager] = lambda: ws
+        _forge_on_product_app(app)
+        try:
+            # `client=` puts the request on 127.0.0.1 so the real app's
+            # localhost guard passes for the same reason production traffic
+            # does; the app is NOT put in test mode, because test mode would
+            # make `may_read_private` trusted and hide the whole question.
+            client = TestClient(app, client=("127.0.0.1", 51000))
+
+            private = client.get(FORGED_PATH, params={"pid": PRIVATE_PID})
+            assert private.status_code == 403, (private.status_code, private.text[:200])
+            assert PRIVATE_SECRET not in private.text
+
+            live = client.get(FORGED_PATH, params={"pid": OPEN_PID})
+            assert live.status_code == 200, (live.status_code, live.text[:200])
+            assert OPEN_SECRET in live.text
+        finally:
+            app.dependency_overrides.clear()
+            _drop_forged_route(app)
+
+    def test_closing_the_project_shuts_the_same_gate_again(self, monkeypatch, tmp_path):
+        """Third pole: the gate is not a one-way latch."""
+        _arm(monkeypatch)
+        from api import main as main_module
+
+        app = main_module.app
+        db = DBManager(str(tmp_path / "assembly2.sqlite"))
+        ws = WorkspaceManager(str(tmp_path / "ws2"))
+        seeder = StateService(db, ws, actor="assembly-seeder", project_read_trusted=True)
+        _seed(seeder)
+        app.dependency_overrides[get_db_manager] = lambda: db
+        app.dependency_overrides[get_workspace_manager] = lambda: ws
+        _forge_on_product_app(app)
+        try:
+            client = TestClient(app, client=("127.0.0.1", 51001))
+            assert client.get(FORGED_PATH, params={"pid": OPEN_PID}).status_code == 200
+            seeder.close_project(OPEN_PID)
+            closed = client.get(FORGED_PATH, params={"pid": OPEN_PID})
+            assert closed.status_code == 403, (closed.status_code, closed.text[:200])
+            assert OPEN_SECRET not in closed.text
+        finally:
+            app.dependency_overrides.clear()
+            _drop_forged_route(app)
+
+
+class TestSecondAssemblyPointStateOnly:
+    """`api.state_only.create_app` — the deployment assembled without the
+    workflow runtime. Nothing here rides on the route guard: the ASGI bearer
+    middleware refuses an anonymous request before routing."""
+
+    def _app(self, tmp_path):
+        from api.state_only import create_app
+
+        db_path = str(tmp_path / "state-only.sqlite")
+        _seed(StateService(StateDatabase(db_path), actor="state-only-seeder",
+                           project_read_trusted=True))
+        return create_app(db_path, STATE_ONLY_TOKEN, with_mcp=False)
+
+    def test_anonymous_is_refused_and_the_token_reads_the_same_route(self, tmp_path):
+        app = self._app(tmp_path)
+        path = f"/api/state/projects/{PRIVATE_PID}/driver-note"
+
+        def forged(request: Request):
+            return execute(app.state.state_service, "get_driver_note",
+                           {"project_id": request.query_params["pid"]})
+
+        setattr(forged, "_state_route", ("read", "list_projects"))
+        app.get(FORGED_PATH)(forged)
+        with TestClient(app) as client:
+            anonymous = client.get(path)
+            assert anonymous.status_code == 401, (anonymous.status_code, anonymous.text[:200])
+            assert PRIVATE_SECRET not in anonymous.text
+
+            without_token = client.get(FORGED_PATH, params={"pid": PRIVATE_PID})
+            assert without_token.status_code == 401, without_token.status_code
+            assert PRIVATE_SECRET not in without_token.text
+
+            headers = {"Authorization": f"Bearer {STATE_ONLY_TOKEN}"}
+            live = client.get(FORGED_PATH, params={"pid": PRIVATE_PID}, headers=headers)
+            assert live.status_code == 200, (live.status_code, live.text[:200])
+            assert PRIVATE_SECRET in live.text
+
+    def test_no_state_route_is_reachable_without_the_bearer_token(self, tmp_path):
+        app = self._app(tmp_path)
+        with TestClient(app) as client:
+            for path in (f"/api/state/projects/{PRIVATE_PID}",
+                         f"/api/state/projects/{PRIVATE_PID}/driver-note",
+                         "/api/state/projects"):
+                response = client.get(path)
+                assert response.status_code == 401, (path, response.status_code)
+            assert client.get("/health").status_code == 200

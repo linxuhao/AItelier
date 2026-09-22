@@ -317,7 +317,7 @@ stable, so the log greps cleanly:
 | `idle` | no active project (coalesced to one heartbeat/min) |
 | `locked` | a tick for this project is already in flight |
 | `run_start_failed` | `_get_or_create_skillflow_run` raised |
-| `active_claim` | a step is still executing |
+| `active_claim` | a step is still executing, OR the run is wedged on a stranded admission. `_has_active_claim` queries `skillflow_active_ops` BEFORE it looks at any claimed step, so one orphaned admission row holds the run forever while every tick prints this same word — health and a permanent stall are spelled identically here. A container restart strands the admissions its old process owned: the engine notices (`owner_lost_at` is set) and deliberately does NOT clear them, because it cannot see a child it never spawned and will not infer "effects ended" from "pid died". Before believing this outcome, dump `skillflow_active_ops` and check `owner_lost_at`. Settle a stranded row with the evidence-bearing `SkillFlow.release_operation(op_id, evidence=...)` (the reference goes FIRST — only 2000 chars are kept) after proving the effects are quiescent, never by deleting the row. Measured 2026-09-22: 39 min, 470 ticks, `iss-40dc57963a8245fc` |
 | `terminal` | run paused/completed/failed |
 | `claim_failed` | `claim_next_step` raised — carries the reason |
 | `no_claim` | nothing claimable at `node` |

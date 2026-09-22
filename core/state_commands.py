@@ -758,14 +758,17 @@ def execute(service, action: str, arguments: dict, *, allow_write: bool = False)
         raise StateGraphError("arguments must be an object")
     # Project privacy is decided HERE, the single chokepoint every transport
     # shares, and not in the route guard: a route author who forges a declaration
-    # to make the guard stand down still has to call `execute` to obtain any
-    # project body, and that call is refused for an anonymous principal on a
-    # project nobody opened. This does not depend on the action classification
-    # table or on `prefix_verdict_stands_down_for` — those answer "is this ACTION
+    # still has to call `execute` to obtain any project body, and that call is
+    # refused for an anonymous principal on a project nobody opened. This does NOT
+    # depend on the action classification table - that answers "is this ACTION
     # public", which is ANDed with "is this PROJECT opened" only in this function.
+    # The other half lives in the route guard: a declaration is honoured only when
+    # the handler's own source delivers nothing but public actions
+    # (api/state_verdict), so a forged declaration cannot open the door either.
     # It runs BEFORE argument validation so an anonymous probe of an unopened
     # project is refused as private, never bounced with a structural error that
     # itself leaks the project's request shape.
+
     anonymous = _anonymous(service)
     if anonymous and action in READ_REQUESTS:
         _refuse_if_project_not_public(service, action, arguments)

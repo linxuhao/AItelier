@@ -8,6 +8,7 @@ from core.state_commands import (READ_REQUESTS, WRITE_REQUESTS, describe, execut
                                                                   is_public_read, ProjectPrivate)
 from starlette.responses import JSONResponse
 from core.state_graph import StateConflict, StateGraphError, StateNotFound
+from api.state_verdict import DECLARATION_ATTR, binding_for, record_judged
 
 
 # Each route declares WHAT it serves, on its own endpoint object: a tuple
@@ -15,7 +16,7 @@ from core.state_graph import StateConflict, StateGraphError, StateNotFound
 # the read action (or None for the action-dispatch families, whose action lives
 # in the URL). This is the enumerable declaration the router guard reads, and
 # the thing the invariant tests walk instead of a hardcoded door list.
-_DECLARATION = "_state_route"
+_DECLARATION = DECLARATION_ATTR
 
 # The `/schema` REST route publishes the shape of every operation, closed
 # families included. The owner has not ruled on opening it, so it stays shut -
@@ -103,21 +104,36 @@ def create_state_router(service_dependency, access_dependency, read_dependency=N
         except StateGraphError as exc:
             raise HTTPException(422, str(exc)) from exc
 
-    def _guard_read_action(action, request: Request) -> None:
-        """Refuse a NON-public read before the request body is parsed.
+    def _guard_read_action(action, route, request: Request) -> None:
+        """Refuse a NON-public read before the request body is parsed, and refuse -
+        unconditionally - a PUBLIC declaration its own handler source contradicts.
 
         `None` (the action could not be resolved) and every name the table does
-        not list - including one added later - are private reads.
+        not list - including one added later - are private reads. A declaration
+        that IS public is then checked against the handler's source: a route that
+        declares a public read and DELIVERS a private one is refused here.
+
+        The mismatch refusal does NOT route through `read_verdict`. An embedder may
+        pass a no-op verdict (api/state_only does, because its bearer middleware
+        already authenticated every request), and routing the mismatch through that
+        no-op would let a forged declaration answer 200 there. A declaration that
+        contradicts its handler is not a visibility question, so it is answered by
+        the guard itself, on every app that builds this router.
         """
         if action is None or not is_public_read(action):
             _verdict(read_verdict, request)
+            return
+        binding = binding_for(route.endpoint, action, route.path)
+        if not binding.ok:
+            raise HTTPException(403, "state route declaration does not match its handler")
 
-    def _guard_director_action(request: Request) -> None:
+
+    def _guard_director_action(route, request: Request) -> None:
         """This path carries both classes. `send_director_message` and the two
         transitions CHANGE state, so they take the WRITE verdict and its wording;
         only `list_director_messages` is a read, and it is private."""
         if request.path_params.get("action") == "list_director_messages":
-            _guard_read_action("list_director_messages", request)
+            _guard_read_action("list_director_messages", route, request)
         else:
             _verdict(access_dependency, request)
 
@@ -129,9 +145,18 @@ def create_state_router(service_dependency, access_dependency, read_dependency=N
         frozen at build time except the declaration of which action a route
         serves. An endpoint that declares nothing is refused - the default here
         is DENY, exactly as it is in the read table.
+
+        THERE IS NO STAND-DOWN. An earlier revision let a route decline this
+        judgment by carrying the guard object itself; measuring the second
+        judgment settles it, because applying the verdict is IDEMPOTENT - it is a
+        pure function of the request's credential, so judging a request N times
+        yields exactly the status and the body of judging it once. The exemption
+        protected nothing, and its only effect was to hand a route author
+        something to reach for. Every `/api/state` route is judged, once, here.
         """
         route = request.scope.get("route")
-        declaration = getattr(getattr(route, "endpoint", None), _DECLARATION, None)
+        record_judged(request.app, getattr(route, "path", None))
+        declaration = getattr(getattr(route, "endpoint", None), DECLARATION_ATTR, None)
         if declaration is None:
             _verdict(read_verdict, request)
             return
@@ -139,13 +164,15 @@ def create_state_router(service_dependency, access_dependency, read_dependency=N
         if kind == "write":
             _verdict(access_dependency, request)
         elif kind == "director":
-            _guard_director_action(request)
+            _guard_director_action(route, request)
         elif action is None:
-            # Action-dispatch family: the action is in the URL, and a request
-            # that names none is refused like any other unclassified read.
-            _guard_read_action(request.path_params.get("action"), request)
+            # Action-dispatch family: the action is in the URL, judged HERE, and
+            # the declaration is BOUND because the handler hands `execute` the
+            # very path parameter this guard judged - the same string, not a
+            # name the handler merely mentioned.
+            _guard_read_action(request.path_params.get("action"), route, request)
         else:
-            _guard_read_action(action, request)
+            _guard_read_action(action, route, request)
 
     def _declare(endpoint, kind: str, action: str | None = None):
         """Record on the endpoint function WHAT it serves.
@@ -187,7 +214,12 @@ def create_state_router(service_dependency, access_dependency, read_dependency=N
     def projects(repo_path: str | None = None, after: str = "", limit: int = 100, service=Depends(service_dependency)):
         return _call(service, "project_catalog", {"repo_path": repo_path, "after": after, "limit": limit})
 
-    _declare(router.get("/projects")(projects), "read", "list_projects")
+    # The declaration names the action this handler SERVES (`project_catalog`, the
+    # paged catalog), not a sibling public read it resembles: `list_projects` is a
+    # different action with different arguments, and a declaration that named it
+    # would not bind the action this route delivers.
+    _declare(router.get("/projects")(projects), "read", "project_catalog")
+
 
     def graph(project_id: str, service=Depends(service_dependency)):
         return _call(service, "get_graph", {"project_id": project_id})

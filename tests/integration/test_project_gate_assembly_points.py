@@ -1,28 +1,32 @@
-"""Criterion 4: the project gate holds where the product is ACTUALLY assembled.
+"""The project gate holds where the product is ACTUALLY assembled.
 
-The criterion names two assembly points, and an assertion on an app the test
-itself builds does not answer it:
+Two assembly points, and an assertion on an app the test itself builds answers
+for neither:
 
 * ``api.main.app``             — the whole product: the real state router, every
                                  middleware, the real dependency graph;
 * ``api.state_only.create_app`` — the bearer-protected second assembly point.
 
-Each is attacked with the SAME forged route the criterion describes (reuse the
-product's own router-wide guard, declare a PUBLIC action, then execute a
-PRIVATE read), and each is measured on TWO poles. A run whose every response is
-a refusal cannot tell "the gate held" from "the attack never landed":
+Both are measured, and each is attacked with the SAME forged route: reuse the
+product's own router-wide guard, declare a PUBLIC action its handler does not
+deliver, then execute and return a PRIVATE read. On the product app the refusal
+comes from the guard's own declaration check, so it holds whether the project is
+unopened or opened — what is wrong there is the declaration, not the read.
 
-  UNOPENED project -> refused, and the notebook text absent from the response;
-  OPENED   project -> 200 with the full text  (the liveness control).
+Because a run whose every response is a refusal cannot tell "the gate held" from
+"the attack never landed", each class carries a LIVENESS CONTROL: an honest
+route on the same app that performs a genuinely project-gated public read, is
+refused while the project is unopened, and answers 200 once it is opened. The
+control is honest by construction — its declaration names the action its handler
+delivers, so it is judged by that action rather than stood down.
 
 ``api/state_only`` refuses at the TRANSPORT — its ASGI bearer middleware
-answers 401 before any router runs — so the identical route is exercised
+answers 401 before any router runs — so the identical forged route is exercised
 without the deployment token (refused) and with it (200 + full text). The
 refusal is a property of that assembly point, not of a route declaration.
 """
 from __future__ import annotations
 
-import pytest
 from fastapi import Depends, Request
 from fastapi.testclient import TestClient
 
@@ -41,6 +45,7 @@ OPEN_PID = "assembly-open"
 PRIVATE_SECRET = "PRODUCT-APP-PRIVATE-BODY-Q7"
 OPEN_SECRET = "PRODUCT-APP-OPEN-BODY-Q7"
 FORGED_PATH = "/api/state/forged-assembly"
+HONEST_PATH = "/api/state/honest-assembly"
 ADMIN = {"X-AItelier-Admin-Token": "assembly-point-admin"}
 STATE_ONLY_TOKEN = "s" * 40
 
@@ -62,13 +67,19 @@ def _seed(service):
 
 
 def _forge_on_product_app(app):
-    """Mount the forged route on the product app object itself.
+    """Mount the forged route and its liveness control on the product app.
 
-    It reuses the product's OWN router-wide guard and declares a public action,
-    so the guard stands down; then it executes a private read. The decision must
-    come from the chokepoint, not from the declaration.
+    The forged route reuses the product's OWN router-wide guard and declares a
+    public action its handler does not deliver: the declaration names
+    `list_projects` (the discarded call) while the handler returns
+    `get_driver_note`. It is refused by the guard's own declaration check.
 
-    The route goes in FRONT of the SPA catch-all mount (`app.mount("/", ...)`),
+    The honest route is the control: it performs a genuinely project-gated
+    PUBLIC read (`get_graph`) with a declaration that names the action its
+    handler serves, so it is judged by that action — refused while the project
+    is unopened, answered 200 once it is opened.
+
+    Each route goes in FRONT of the SPA catch-all mount (`app.mount("/", ...)`),
     which is registered last and matches every path: a route appended after it
     is never reached and answers 404, which would look like a refusal.
     """
@@ -78,14 +89,21 @@ def _forge_on_product_app(app):
         execute(svc, "list_projects", {})
         return execute(svc, "get_driver_note", {"project_id": pid})
 
-    setattr(forged, "_state_route", ("read", "list_projects"))
-    app.router.add_api_route(FORGED_PATH, forged, methods=["GET"],
-                             dependencies=[Depends(guard)])
-    app.router.routes.insert(0, app.router.routes.pop())
+    def honest(request: Request, pid: str, svc=Depends(get_service)):
+        return execute(svc, "get_graph", {"project_id": pid})
+
+    for path, handler, declaration in (
+            (FORGED_PATH, forged, ("read", "list_projects")),
+            (HONEST_PATH, honest, ("read", "get_graph"))):
+        setattr(handler, "_state_route", declaration)
+        app.router.add_api_route(path, handler, methods=["GET"],
+                                 dependencies=[Depends(guard)])
+        app.router.routes.insert(0, app.router.routes.pop())
+
 
 def _drop_forged_route(app):
     app.router.routes = [r for r in app.router.routes
-                         if getattr(r, "path", None) != FORGED_PATH]
+                         if getattr(r, "path", None) not in (FORGED_PATH, HONEST_PATH)]
 
 
 class TestProductAppObject:
@@ -112,9 +130,23 @@ class TestProductAppObject:
             assert private.status_code == 403, (private.status_code, private.text[:200])
             assert PRIVATE_SECRET not in private.text
 
-            live = client.get(FORGED_PATH, params={"pid": OPEN_PID})
-            assert live.status_code == 200, (live.status_code, live.text[:200])
-            assert OPEN_SECRET in live.text
+            # The lying declaration is refused on the OPENED project too: the
+            # refusal is the declaration mismatch, not only the private read.
+            lying = client.get(FORGED_PATH, params={"pid": OPEN_PID})
+            assert lying.status_code == 403, (lying.status_code, lying.text[:200])
+            assert OPEN_SECRET not in lying.text
+
+            # Liveness control: an HONEST, genuinely project-gated public read
+            # on the same app is refused while the project is unopened and
+            # answers 200 once it is opened — so the refusals above are refusals
+            # and not a route that never landed.
+            honest_private = client.get(HONEST_PATH, params={"pid": PRIVATE_PID})
+            assert honest_private.status_code == 403, honest_private.status_code
+            assert PRIVATE_PID not in honest_private.text
+            honest_live = client.get(HONEST_PATH, params={"pid": OPEN_PID})
+            assert honest_live.status_code == 200, (honest_live.status_code,
+                                                    honest_live.text[:200])
+            assert OPEN_PID in honest_live.text
         finally:
             app.dependency_overrides.clear()
             _drop_forged_route(app)
@@ -134,9 +166,9 @@ class TestProductAppObject:
         _forge_on_product_app(app)
         try:
             client = TestClient(app, client=("127.0.0.1", 51001))
-            assert client.get(FORGED_PATH, params={"pid": OPEN_PID}).status_code == 200
+            assert client.get(HONEST_PATH, params={"pid": OPEN_PID}).status_code == 200
             seeder.close_project(OPEN_PID)
-            closed = client.get(FORGED_PATH, params={"pid": OPEN_PID})
+            closed = client.get(HONEST_PATH, params={"pid": OPEN_PID})
             assert closed.status_code == 403, (closed.status_code, closed.text[:200])
             assert OPEN_SECRET not in closed.text
         finally:
@@ -189,4 +221,5 @@ class TestSecondAssemblyPointStateOnly:
                          "/api/state/projects"):
                 response = client.get(path)
                 assert response.status_code == 401, (path, response.status_code)
+            assert client.get("/health").status_code == 200
             assert client.get("/health").status_code == 200

@@ -145,6 +145,22 @@ class TestTheTwoCausesAreToldApart:
         assert classify_json_failure('{"thoughts": "ok", "actions": []}') == \
             JSON_FAILURE_NO_JSON
 
+    def test_a_bracket_inside_a_string_value_is_not_a_truncation(self):
+        """The m4 blind spot: an unpaired bracket inside a JSON string.
+
+        A string VALUE may carry '(' or an unterminated '['; the depth
+        counter reads structure, so a complete reply that merely quotes a
+        bracket must still classify as no-JSON, never truncated.
+        """
+        for text in ('{"a": "("}', '{"a": "see (below", "b": [1, 2]}'):
+            assert json.loads(text)
+            assert classify_json_failure(text) == JSON_FAILURE_NO_JSON, text
+            assert PipelineEngine._detect_truncated_json(text) is False, text
+        # The mirror pole: a string left open AFTER the braces balance is a
+        # truncation that only the in_string half of the verdict can see.
+        cut = '{"a": "x"} trailing "'
+        assert classify_json_failure(cut) == JSON_FAILURE_TRUNCATED, cut
+
     def test_braces_inside_strings_do_not_fake_a_truncation(self):
         """The old counter ran over the whole text, strings included."""
         complete = json.dumps({"actions": [
@@ -415,38 +431,80 @@ def test_paren_prose_behaviour_is_unchanged_end_to_end(tmp_path):
 
 
 # ── The prose sent to the agent is a deliverable ──────────────────────────
-# The corpus below is every surface that carries agent-facing prose in a code
-# step. The checker is not asserted to cover "this class"; it is measured
-# against the five corruptions already in git, one at a time. Each listed rule
-# has been observed to fire on those exact bytes and to name its own file:
+# The corpus is DERIVED, not declared: every templates/*.md file on disk
+# (glob, not a list) plus the code modules that inject prose into agent
+# prompts. The checker is measured against the six corruptions already in
+# git (or mechanically derivable from them), one at a time. Each listed rule
+# fires on those exact bytes and names its own file:
 #
-#   fixture (git bytes)                        rule that fires
-#   duplicate banner, core/dpe_pipeline.py     adjacent_duplicate_line
-#   r2 EN duplicated two-line run, 3b3d6560    repeated_run (GUIDANCE_EN)
-#   r2 ZH corruption, 3b3d6560                 repeated_run (GUIDANCE_ZH)
-#   r3 ZH trailing backtick, fad833b0          odd_backtick_count
-#   fix_tests.md clipped block, 3b3d6560       severed_clause
+#   fixture (git bytes)                          rule that fires
+#   duplicate banner, core/dpe_pipeline.py       adjacent_duplicate_line
+#   r2 EN duplicated two-line run, 3b3d6560      repeated_run (GUIDANCE_EN)
+#   r2 ZH corruption, 3b3d6560                   repeated_run (GUIDANCE_ZH)
+#   r3 ZH trailing backtick, fad833b0            odd_backtick_count
+#   fix_tests.md clipped block, 3b3d6560         severed_clause
+#   fix_tests.md sha advice replaced (derived)   missing_sha_advice
 #
-# test below is what keeps it honest.
+# The corruptions below are only samples. Because the corpus is derived from
+# the filesystem, planting a defect in ANY file under templates/ — a new
+# zz_probe.md, task_implementer.md, game_designer.md, any of them — turns
+# test_the_agent_facing_prose_is_intact red naming that file, and
+# test_a_duplicate_line_planted_in_any_surface_fires_by_name proves the
+# per-surface attribution mechanically.
 REPO_ROOT = Path(__file__).resolve().parents[2]
 _LONG_LINE = 25
 STRICT_GUIDANCE_BLOCKS = ("GUIDANCE_EN", "GUIDANCE_ZH",
                           "templates/fix_tests.md")
 
+# Modules whose prose reaches agent prompts wholesale. Every multi-line
+# string constant in these files is inside the corpus without enumeration,
+# because the whole file text is the corpus entry.
+PROSE_CODE_FILES = ("core/dpe_pipeline.py", "core/prompt_assembler.py",
+                    "core/output_migration.py")
+
+# The single exemption declaration: a multi-line prose constant in core/
+# that is NOT covered by PROSE_CODE_FILES must be named here with the reason
+# it never reaches an agent prompt. A new constant in neither place turns
+# test_every_prose_constant_in_core_is_accounted_for red.
+PROSE_CONSTANT_EXEMPTIONS = {
+    # JSON schemas / DDL / SQL: machine-readable contracts, not prose.
+    "SCHEMA": "SQL DDL schema for state tables, executed not shown to agents",
+    "ATTEMPT_TABLE": "SQL DDL for the attempts table",
+    "EXTRA_SCHEMA": "JSON schema for structured state output validation",
+    "ENTRY_SCHEMA": "JSON schema for state driver index entries",
+    "META_JSON_SCHEMA": "JSON schema for meta-conversation structured output",
+    "_INTENT_SCHEMA": "JSON schema for intent classification output",
+    "USAGE_SQL": "SQL query for token usage accounting",
+    # Prompts and guides served outside code steps (meta conversation, MCP
+    # onboarding): agent-facing, but not apply_patch patch-guidance surfaces.
+    "SYSTEM_PROMPT": "meta agent system prompt, injected outside code steps",
+    "REVISION_SYSTEM_PROMPT": "meta revision prompt, outside code steps",
+    "_INTENT_SYSTEM_PROMPT": "meta intent classifier prompt, outside code steps",
+    "_SPEC_HEADER": "meta conversation spec header, outside code steps",
+    "STATE_DRIVER_GUIDE": "MCP guide:// onboarding text, served via tool not "
+                          "injected into code-step prompts",
+    # Executable plumbing, never rendered into a prompt.
+    "probe": "function-local out-of-process importability probe script",
+}
 
 def _read(rel):
     return (REPO_ROOT / rel).read_text(encoding="utf-8")
 
 
 def _prose_corpus():
-    """Every agent-facing prose surface, keyed by the path that carries it."""
+    """Every agent-facing prose surface, derived from the filesystem.
+
+    Nothing here is a hand-written list of surfaces: templates/*.md is a
+    glob, so a file created after this test was written is IN the corpus
+    on the next run without touching this file.
+    """
     corpus = {
         "GUIDANCE_EN": STRICT_PATCH_GUIDANCE_EN,
         "GUIDANCE_ZH": STRICT_PATCH_GUIDANCE_ZH,
     }
-    for rel in ("templates/fix_tests.md", "templates/coding_impl.md",
-                "core/dpe_pipeline.py", "core/prompt_assembler.py",
-                "core/output_migration.py"):
+    for md in sorted((REPO_ROOT / "templates").glob("*.md")):
+        corpus[f"templates/{md.name}"] = md.read_text(encoding="utf-8")
+    for rel in PROSE_CODE_FILES:
         corpus[rel] = _read(rel)
     return corpus
 
@@ -481,6 +539,11 @@ def _prose_violations(name, text):
     if "stale or file." in " ".join(text.split()):
         violations.append(
             f"severed_clause: {name}: 'stale or file.' is a deleted clause")
+
+    if name in STRICT_GUIDANCE_BLOCKS and "sha" not in text:
+        violations.append(
+            f"missing_sha_advice: {name}: teaches apply_patch or reference "
+            f"mode without the sha-citation advice")
     return violations
 
 
@@ -492,25 +555,67 @@ def test_the_agent_facing_prose_is_intact():
     assert not {k: v for k, v in survivors.items() if v}, survivors
 
 
-def test_the_checker_reads_every_file_that_carries_agent_prose():
-    """A scope narrower than the prose is a checker that cannot see a defect."""
+def test_the_corpus_is_derived_from_the_filesystem_not_a_list():
+    """Coverage is glob-shaped: a new template is in the corpus unseen.
+
+    A checker whose scope is an author's list cannot see a defect outside
+    that list. This test asserts the derivation, not a list: the corpus
+    carries every *.md under templates/ and the prompt-injecting modules.
+    """
     corpus = _prose_corpus()
-    assert "core/dpe_pipeline.py" in corpus, \
-        "the truncation classifier's own prose lives in dpe_pipeline.py"
-    assert "core/prompt_assembler.py" in corpus
-    assert "core/output_migration.py" in corpus
-    assert "templates/fix_tests.md" in corpus
-    assert set(STRICT_GUIDANCE_BLOCKS) <= set(corpus)
-    for name in corpus:
-        assert name == "GUIDANCE_EN" or name == "GUIDANCE_ZH" \
-            or (REPO_ROOT / name).is_file(), name
+    templates = sorted(p.name for p in (REPO_ROOT / "templates").glob("*.md"))
+    assert len(templates) >= 40, templates
+    for name in templates:
+        assert f"templates/{name}" in corpus, name
+    for rel in PROSE_CODE_FILES:
+        assert rel in corpus, rel
+    assert "GUIDANCE_EN" in corpus and "GUIDANCE_ZH" in corpus
     assert "STRICT_PATCH_GUIDANCE_ZH" not in corpus
+
+
+def test_every_prose_constant_in_core_is_accounted_for():
+    """Code prose constants are covered, or named in ONE exemption table.
+
+    The corpus covers whole modules (PROSE_CODE_FILES), so every multi-line
+    string constant there is checked. Any multi-line constant elsewhere in
+    core/ must be in PROSE_CONSTANT_EXEMPTIONS with a reason; a new one in
+    neither place goes red here.
+    """
+    import ast
+
+    corpus = _prose_corpus()
+    missing = []
+    for py in sorted((REPO_ROOT / "core").glob("*.py")):
+        rel = f"core/{py.name}"
+        tree = ast.parse(py.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+                continue
+            targets = (node.targets if isinstance(node, ast.Assign)
+                       else [node.target])
+            names = [t.id for t in targets if isinstance(t, ast.Name)]
+            value = node.value
+            if (not names or not isinstance(value, ast.Constant)
+                    or not isinstance(value.value, str)):
+                continue
+            if "\n" not in value.value or len(value.value) < 120:
+                continue
+            for const_name in names:
+                if rel in corpus:
+                    continue
+                if const_name not in PROSE_CONSTANT_EXEMPTIONS:
+                    missing.append(f"{rel}:{const_name}")
+                else:
+                    assert PROSE_CONSTANT_EXEMPTIONS[const_name].strip(), \
+                        const_name
+    assert not missing, (
+        "multi-line prose constants in core/ that are neither in the corpus "
+        f"nor exempted with a reason: {', '.join(missing)}")
 
 
 def _git_file(rev, rel):
     import subprocess
-    out = subprocess.run(["git", "show", f"{rev}:{rel}"],
-                         cwd=REPO_ROOT, capture_output=True, text=True)
+    out = subprocess.run(["git", "show", f"{rev}:{rel}"],                         cwd=REPO_ROOT, capture_output=True, text=True)
     assert out.returncode == 0, out.stderr
     return out.stdout
 
@@ -526,6 +631,29 @@ def _git_guidance(rev, block):
 R2 = "3b3d6560"          # r2 candidate: EN pair-repeat, ZH corruption, banner
 R3 = "fad833b016a5c54d1a5f6253f4fcdfc0fbeb9722"   # r3 candidate: ZH backtick
 
+LEGACY_EDIT_ADVICE = (
+    "Use `create` / `edit` for code changes: supply old_str and new_str,\n"
+    "reading the affected region with raw=true before retrying.\n")
+
+
+def _sha_advice_replaced():
+    """Derived fixture for the rule r4 dropped: fix_tests.md's advice to
+
+    prefer `references` and quote the `sha` from its `citation` swapped back
+    for the legacy create/edit advice. The base checker fired on this exact
+    replacement (ignition 1); r4 lost the rule and the fixture went dark
+    (ignition 0), so the caught set shrank. This restores the rule and the
+    fixture, so the matrix cell is 1 again.
+    """
+    text = _git_file(R2, "templates/fix_tests.md")
+    replaced = re.sub(
+        r"(?s)Use `apply_patch` for code changes.*?rather than replaying\.\n",
+        LEGACY_EDIT_ADVICE, text)
+    assert replaced != text, "the sha-advice block was not found in the fixture"
+    assert "sha" not in replaced, "the replacement kept the sha advice"
+    return replaced
+
+
 GIT_CORRUPTIONS = {
     "r2 EN duplicated two-line run": (
         "GUIDANCE_EN", lambda: _git_guidance(R2, "EN")),
@@ -539,7 +667,11 @@ GIT_CORRUPTIONS = {
     "fix_tests.md clipped block": (
         "templates/fix_tests.md",
         lambda: _git_file(R2, "templates/fix_tests.md")),
+    "fix_tests.md sha advice replaced": (
+        "templates/fix_tests.md", _sha_advice_replaced),
 }
+
+
 @pytest.mark.parametrize("label", sorted(GIT_CORRUPTIONS))
 def test_each_known_corruption_is_caught_by_name(label):
     name, load = GIT_CORRUPTIONS[label]
@@ -552,8 +684,51 @@ def test_each_known_corruption_is_caught_by_name(label):
     assert not _prose_violations(name, clean), (name, "clean copy is red")
 
 
-# ── The apply_patch grant boundary ───────────────────────────────────────
-# `_exec_tool` refuses apply_patch unless the step's OWN schema carries it.
+# ── Both languages tell the agent to split, not to reformat ──────────────
+
+
+@pytest.mark.parametrize("label,guidance", [
+    ("EN", STRICT_PATCH_GUIDANCE_EN), ("ZH", STRICT_PATCH_GUIDANCE_ZH)])
+def test_both_guidances_carry_the_split_advice(label, guidance):
+    """EN and ZH both carry the split-don't-reformat advice.
+
+    The word-for-word restoration the previous round attempted silently
+    deleted the base ZH split paragraph, leaving EN telling the agent to
+    split and ZH silent. Deleting either paragraph goes red here, by name.
+    """
+    marker = ("split a large change" if label == "EN"
+              else "拆成多次 apply_patch")
+    assert marker in guidance, (
+        f"{label} lost the split advice: {marker!r} not present")
+    if label == "ZH":
+        assert "发小一点" in guidance, "ZH lost the resend-smaller advice"
+
+
+def test_a_duplicate_line_planted_in_any_surface_fires_by_name():
+    """Self-proof fixture: plant one line in EVERY surface; each fires.
+
+    A coverage claim without a self-proof fixture is prose. This plants one
+    adjacent duplicate line into every corpus surface and demands the
+    violation name that surface — so the checker's attribution is proven
+    per surface, not asserted.
+    """
+    corpus = _prose_corpus()
+    planted = 0
+    for name, text in corpus.items():
+        lines = text.splitlines()
+        idx = next((i for i, l in enumerate(lines)
+                    if len(l.strip()) >= _LONG_LINE), None)
+        if idx is None:
+            continue
+        bad = "\n".join(lines[:idx + 1] + [lines[idx]] + lines[idx + 1:])
+        violations = _prose_violations(name, bad)
+        assert violations, f"{name}: the planted duplicate went undetected"
+        assert any(name in v for v in violations), (name, violations)
+        planted += 1
+    assert planted >= 40, planted
+
+
+# ── The apply_patch grant boundary# `_exec_tool` refuses apply_patch unless the step's OWN schema carries it.
 # Without a reader, deleting that clause changes no test result, so a step
 # whose schema never granted apply_patch would reach the globally registered
 # tool. The two tests below are that reader.
@@ -603,7 +778,6 @@ def test_apply_patch_needs_a_schema_boundary_that_carries_it(monkeypatch):
     })
     assert "apply_patch requires a granted generic code-output step" in \
         result["error"], result
-    assert seen == {}, "the un-granted call reached SkillFlow"
     assert seen == {}, "the un-granted call reached SkillFlow"
 
 

@@ -103,6 +103,12 @@ class TestV2ConfigLoading:
         assert evidence.tool_params["files"] == ["test_report.json"]
         assert [(t.to, t.match) for t in evidence.transitions] == [
             ("test_evidence_missing", {"_error": True}),
+            # The absence edge lives on the EVIDENCE step, not on `test`:
+            # it must sit AFTER the shape check, so a report that is not a
+            # report at all still goes to `test_evidence_missing` rather than
+            # being read for a flag it could not carry.
+            ("test_gate_absent", {"from_file": "test_report.json",
+                                  "field": "repo_gate_absent", "value": True}),
             ("test_outcome", {"all_passed": True}),
             ("test_evidence_missing", None),
         ]

@@ -20,14 +20,31 @@ from core.dpe_pipeline import PipelineEngine, MaxRetriesExceeded
 from core.workspace_manager import DPE_GRAPH_NAME
 from aitelier.step_labels import COARSE_MAP
 from core.orphan_dbg import odbg as _odbg
+from core import gate_deferral
 
 # NB-1 runaway-loop guard: max total step executions before a run is force-failed.
 # A normal DPE run is well under this; this only trips on a non-converging loop.
 import os as _os
 _MAX_STEPS_PER_RUN = int(_os.getenv("AITELIER_MAX_STEPS_PER_RUN", "300"))
 # Per-instance companion: how often ONE step instance may be re-claimed before the
-# run is force-failed. In-framework re-claims of a single instance are bounded by
-# max_retries (3); anything far above that is a resumed terminal state.
+# KNOWN COUPLING, guarded rather than commented away: the premise above is
+# "only something that resets a completed row back to pending re-claims one
+# instance", and `core/gate_deferral.py` does EXACTLY that on purpose — a
+# deferral parks the run while its repository gate produces no verdict and
+# re-opens the step. Measured on the r4 candidate: 38 claims of one instance
+# in a single episode. Left unguarded, this valve fires and kills the run with
+# a message that BLAMES THE STEP ("a terminal state is being resumed instead
+# of ending") — a false attribution, and the defect this card exists to
+# remove. So the valve is bypassed while an episode is live and the episode's
+# own wall-clock ceiling is the bound that applies then (see
+# `guard_per_instance_valve`, and the test that proves the valve still fires
+# for a genuine runaway: tests/unit/test_gate_deferral_is_accounted.py).
+# Under the production constants the valve is not even reachable during one
+# episode (300 s poll x 20 = 6000 s < 10800 s ceiling), so the safe direction
+# is the one that holds; setting the poll interval below ~540 s is what brings
+# the valve back into range before the ceiling ends the run, which is why both
+# knobs in gate_deferral are clamped rather than free.
+_MAX_CLAIMS_PER_INSTANCE = int(_os.getenv("AITELIER_MAX_CLAIMS_PER_INSTANCE", "20"))
 _MAX_CLAIMS_PER_INSTANCE = int(_os.getenv("AITELIER_MAX_CLAIMS_PER_INSTANCE", "20"))
 
 # Claim-time failures happen before an executor exists.  In particular, a code
@@ -1195,6 +1212,27 @@ async def _run_skillflow_tick(project_id: str, loop):
         tick_log(project_id, "active_claim", run=run_id[:8])
         return
 
+    # An absence must never be charged to the implementer. `observe_run` reads
+    # the gate's own recorded verdict for this run: while that verdict is
+    # "no verdict at all" the tick spends nothing and ends nothing; once the
+    # absence has outlived the wall-clock ceiling for one episode the run ends
+    # NAMING THE ABSENCE (`gate did not run: no verdict was measured`) and
+    # never as a code failure. See core/gate_deferral.py for why the wall clock
+    # bound and the accounting rule are not in conflict.
+    deferral = gate_deferral.observe_run(sf, run_id)
+    if deferral["state"] == "silent":
+        tick_log(project_id, "gate_deferral_hold", run=run_id[:8],
+                 gate=deferral.get("gate") or "",
+                 remaining=f"{deferral['remaining']:.0f}s")
+        return
+    if deferral["state"] == "expired":
+        sf.fail_run(run_id, deferral["reason"])
+        gate_deferral.LEDGER.clear(run_id)
+        _sync_project_status_to_db(project_id)
+        tick_log(project_id, "gate_absence_terminal", run=run_id[:8],
+                 reason=deferral["reason"])
+        return
+
     # NB-1 safety valve: bound any runaway loop regardless of root cause. If a run
     # has executed an unreasonable number of steps (e.g. a chronically-failing
     # verify gate cycling t_plan -> t_impl forever), fail the run cleanly instead
@@ -1237,7 +1275,8 @@ async def _run_skillflow_tick(project_id: str, loop):
             "AND step_instance_id IS NOT NULL "
             "GROUP BY step_instance_id ORDER BY 3 DESC LIMIT 1",
             (run_id,))
-        if inst and inst[0][2] > _MAX_CLAIMS_PER_INSTANCE:
+        if inst and gate_deferral.guard_per_instance_valve(
+                inst[0][2], run_id, max_claims=_MAX_CLAIMS_PER_INSTANCE):
             sf.fail_run(run_id,
                         f"Aborted: step '{inst[0][0]}' (instance {inst[0][1]}) was "
                         f"re-executed {inst[0][2]} times without the run advancing "

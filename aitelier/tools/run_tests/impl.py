@@ -813,7 +813,6 @@ def _acquire_repo_gate(repo: Path, run_gate=None, sleep=None) -> dict | None:
     if gate is not None:
         gate["attempts"] = attempts
     return gate
-    return gate
 
 def _repo_gate_failure_cases(gate: dict) -> tuple[list[dict], str | None]:
     """Read trustworthy per-case identities from one failed repository gate.
@@ -1405,6 +1404,14 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
                 executed.repo_gate_cases = None
                 report["passed"] = False
                 report["repo_gate_unmeasured"] = True
+                # The scheduler reads THIS flag to tell an absence from a
+                # red: a gate that produced no verdict decided nothing, so
+                # the run may not be sent back to the implementer for it
+                # (see core/gate_deferral.py). It is a separate key from
+                # `repo_gate_unmeasured` because that one is also set for a
+                # gate that never existed, and only a gate that RAN and
+                # stayed silent is an absence to wait on.
+                report["repo_gate_absent"] = True
                 report["failures"].append(
                     f"repo_gate:{gate['script']} was NOT measured "
                     f"({gate.get('attempts', 1)} attempt(s)): "

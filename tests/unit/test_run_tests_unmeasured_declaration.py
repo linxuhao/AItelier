@@ -184,6 +184,110 @@ def test_a_log_echo_of_the_case_prefix_mid_line_is_not_a_case_record():
     assert identity_error
 
 
+# The two witnesses BELOW are the ones the mutation actually has to fail. A
+# mid-line echo only kills `PREFIX in line` when the slice the mutated reader
+# takes lands ON the JSON — i.e. when the noise header is EXACTLY as long as
+# the prefix. With a short header ("the gate reported: ", 19 characters) the
+# mutated slice cuts into the prefix itself, `json.loads` fails, and the test
+# stays green under the mutation while reading as if it had caught it. The
+# length is asserted here so a future edit to the protocol line cannot
+# silently re-disarm these witnesses.
+
+_MIDLINE_NOISE = "x" * len(rt._REPO_GATE_UNMEASURED_PREFIX)
+_CASE_MIDLINE_NOISE = "x" * len(rt._REPO_GATE_CASE_PREFIX)
+
+
+def test_a_mid_line_echo_kills_the_in_operator_on_the_declaration_channel():
+    """Kills M21 (`startswith` -> `in`) at the ONE noise length where it is
+    observable. This is the witness the previous revision claimed and did not
+    have: measured, the mutation turns this test red."""
+    assert len(_MIDLINE_NOISE) == len(rt._REPO_GATE_UNMEASURED_PREFIX) > 19
+    body = json.dumps({"state": "blocked", "reason": "an echo, not a record"})
+    line = _MIDLINE_NOISE + rt._REPO_GATE_UNMEASURED_PREFIX + body
+    gate = {"returncode": 1, "output": line, "output_truncated": False}
+    assert rt._unmeasured_declaration(line) is None
+    assert rt._repo_gate_outcome(gate) == rt.REPO_GATE_MEASURED_FAIL
+
+
+def test_a_mid_line_echo_kills_the_in_operator_on_the_case_channel():
+    """Kills M21b (the same `in` on `_REPO_GATE_CASE_PREFIX`): a single log
+    line that echoes the case prefix must not fabricate a prunable red
+    identity."""
+    assert len(_CASE_MIDLINE_NOISE) == len(rt._REPO_GATE_CASE_PREFIX) > 0
+    gate = {"returncode": 1, "output_truncated": False,
+            "output": _CASE_MIDLINE_NOISE + _case("A", "quoted")}
+    cases, identity_error = rt._repo_gate_failure_cases(gate)
+    assert cases == []
+    assert identity_error
+
+
+def _apply_m21(func):
+    """Apply the mutation ITSELF, in-process, and return the mutant callable.
+
+    The card's claim is "M21 is killed". An assertion about the candidate
+    cannot show that — it only shows the candidate behaves one way. So each
+    witness below re-runs the REAL reader mutated and asserts the reading
+    FLIPS. The mutation is reproduced by the suite, not asserted about.
+
+    MEASURED, and the reason the previous revision's table row was false:
+    `startswith(PREFIX)` -> `PREFIX in line` ALONE is not observable at all.
+    The slice stays `line[len(PREFIX):]`, so on an echoed line the mutant
+    starts its JSON at index 30 — inside the echo — and `json.loads` fails just
+    as it does for the candidate. The one-token mutation is unfalsifiable, so
+    a table row claiming a test kills it could never have been reproduced.
+    What IS observable is the careless REFACTOR that goes with it: keep the
+    substring test AND seek the prefix where it was found. That pair is what
+    these witnesses kill, and `_apply_m21` applies both halves.
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    source = textwrap.dedent(inspect.getsource(func))
+    mutated = source.replace(
+        "line.startswith(_REPO_GATE_UNMEASURED_PREFIX)",
+        "_REPO_GATE_UNMEASURED_PREFIX in line").replace(
+        "raw = line[len(_REPO_GATE_UNMEASURED_PREFIX):]",
+        "raw = line[line.index(_REPO_GATE_UNMEASURED_PREFIX) + "
+        "len(_REPO_GATE_UNMEASURED_PREFIX):]").replace(
+        "line.startswith(_REPO_GATE_CASE_PREFIX)",
+        "_REPO_GATE_CASE_PREFIX in line").replace(
+        "raw = line[len(_REPO_GATE_CASE_PREFIX):]",
+        "raw = line[line.index(_REPO_GATE_CASE_PREFIX) + "
+        "len(_REPO_GATE_CASE_PREFIX):]")
+    assert mutated != source, "the mutation did not apply — the reader changed"
+    namespace = dict(vars(rt))
+    exec(compile(ast.parse(mutated), "<m21>", "exec"), namespace)
+    return namespace[func.__name__]
+
+
+def test_m21_is_reproduced_and_this_file_is_what_flips():
+    """M21: `line.startswith(PREFIX)` -> `PREFIX in line` on the declaration
+    channel. Under it a mid-line echo fires `unmeasured`, so a real red is
+    rewritten into an absence. Both halves are measured: the candidate reads
+    None, the mutant reads `blocked`."""
+    mutant = _apply_m21(rt._unmeasured_declaration)
+    body = json.dumps({"state": "blocked", "reason": "an echo, not a record"})
+    line = _MIDLINE_NOISE + rt._REPO_GATE_UNMEASURED_PREFIX + body
+    assert rt._unmeasured_declaration(line) is None
+    assert mutant(line) is not None and mutant(line)["state"] == "blocked"
+
+
+def test_m21b_is_reproduced_and_this_file_is_what_flips():
+    """M21b: the same `in` on `_REPO_GATE_CASE_PREFIX`. Under it one echoed
+    log line fabricates a prunable known-red identity — how a red gets
+    forgiven by a gate that never ran."""
+    mutant = _apply_m21(rt._repo_gate_failure_cases)
+    gate = {"returncode": 1, "output_truncated": False,
+            "output": _CASE_MIDLINE_NOISE + _case("A", "quoted")}
+    cases, identity_error = rt._repo_gate_failure_cases(gate)
+    assert cases == [] and identity_error
+    m_cases, _ = mutant(gate)
+    assert [c["case_id"] for c in m_cases] == ["A"]
+
+# ── a timeout is the framework's own observation ───────────────────────────
+
+
 # ── a timeout is the framework's own observation ───────────────────────────
 
 def test_a_declared_absence_is_unmeasured_whatever_the_exit_code_was():

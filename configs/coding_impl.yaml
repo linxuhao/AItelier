@@ -151,6 +151,25 @@ steps:
     transitions:
       - to: "test_evidence_missing"
         match: { _error: true }
+      # A gate that produced NO VERDICT is not a red the implementer can fix.
+      # Routing it down the `all_passed: false` edge spends one of the three
+      # implement laps on a gate that never spoke, and once the lap budget runs
+      # out the run dies on `Cycle limit exceeded` — which reads as "your code
+      # failed". The absence instead parks the run at a loop-EXTERNAL gate
+      # (`test_gate_absent`), so the run stays non-terminal and no implement
+      # cycle is charged for it.
+      #
+      # `from_file` reads the REPORT rather than the validator's return shape:
+      # the flag has to survive any validator that can reject the report, and
+      # `all_passed` is the validator's own word for a different question.
+      #
+      # The wall-clock bound lives in the scheduler, not here: ONE absence may
+      # not hold the scheduler forever, so past the episode's ceiling the run is
+      # ended with a reason that NAMES the absence (core/gate_deferral.py).
+      # Routing and the ceiling therefore never disagree — neither of them ever
+      # calls this a test failure.
+      - to: "test_gate_absent"
+        match: { from_file: "test_report.json", field: "repo_gate_absent", value: true }
       - to: "test_outcome"
         match: { all_passed: true }
       - to: "test_evidence_missing"
@@ -177,6 +196,15 @@ steps:
         max_loop: 3
 
   - id: "test_evidence_missing"
+    step_type: "gate"
+    transitions:
+      - to: null
+
+  # Loop-EXTERNAL terminal-by-silence gate. Reached only by a `test` report
+  # that says the repository gate produced no verdict; it is deliberately NOT
+  # in `end_conditions`, so reaching it does not complete or fail the run — it
+  # parks a still-running run while the scheduler accounts for the absence.
+  - id: "test_gate_absent"
     step_type: "gate"
     transitions:
       - to: null

@@ -147,21 +147,114 @@ does not touch it:
 This card only makes the protocol fixed, documented (here and in
 `aitelier/tools/run_tests/tool.yaml`) and usable by that card.
 
+## The absence that outlives the wall clock (round 5)
+
+The first four rounds stopped at "a gate that never ran is not a failing
+gate". That was half the property. The other half is the ACCOUNT: an absence
+that lasts long enough to outlive the run's wall-clock bound may not be
+recorded as a failure of the code under test — which is what `Cycle limit
+exceeded` does, and what round 4's candidate shipped.
+
+The two rules are not in conflict, because they protect different resources:
+
+* the wall-clock bound protects a SHARED resource — the scheduler and its
+  poller may never be held by one step forever;
+* the accounting rule protects the LEDGER — one gate that produced no verdict
+  may never be charged to the implementer, however long it stays silent.
+
+`core/gate_deferral.py` holds both. While an absence is live and inside its
+ceiling the run is left alone: no advance, no claim, no implement cycle.
+Past the ceiling the run may END, and the sentence it ends with is
+
+    gate did not run: no verdict was measured
+
+It names the absence and carries no word that could be read as a code
+failure. There is no third option in which the run ends saying the tests
+failed, because nothing measured a test.
+
+How the two execution points read it:
+
+* `core/scheduler.py` — the tick consults `observe_run` before the NB-1
+  runaway valves and returns without spending anything while the episode is
+  live; an expired episode calls `fail_run` with the absence sentence.
+* `AItelierSkillFlow.advance_run` — the tick is not the only driver. The
+  host refuses to advance a run whose gate is silent, because advancing is
+  what routes the absence back into the implement loop.
+* `core/scheduler.py:31` `_MAX_CLAIMS_PER_INSTANCE` — its own comment states
+  the premise: one instance is re-claimed only when something reset a
+  completed row back to `pending`, which a deferral does ON PURPOSE. Left
+  unguarded, that valve kills the run with a message blaming the step, so the
+  valve is bypassed while an episode is live and the EPISODE's ceiling is the
+  bound that applies instead.
+
+Both knobs are bounded: `GATE_DEFERRAL_WAIT_SECONDS` and
+`GATE_DEFERRAL_EPISODE_MAX_SECONDS` may be tuned through the environment and
+may not be removed — a non-positive value falls back, and each is clamped to
+its own ceiling, so "raise the number" is not a way to delete the bound.
+
+Routing: an honest absence report still writes `test_report.json` and still
+passes the schema, so the graph had to be told about it. The `test` step now
+carries an edge keyed on `repo_gate_absent` — a flag the tool sets on the
+report itself, read with `from_file` so it survives any validator — leading to
+`test_gate_absent`, a loop-EXTERNAL gate that is deliberately absent from
+`end_conditions`. Reaching it parks a still-running run instead of completing
+or failing it, so the absence costs neither an implement lap nor the run.
+
 ## The tests that hold this down
 
-Each row is a mutation of this candidate, and the test that turns red when it
-is applied. The mutations are the seven that survived the previous attempt's
-19 new tests.
+Every mutation claim below is backed by a test that fails when the mutation
+is applied; the kill count is per-test, from the suite, and a mutation whose
+test does not fail is not listed here.
+
+The `run_tests` protocol (round 4, carried as a regression guard):
 
 | mutation | killed by |
 |---|---|
 | M2 delete the `output_truncated` branch | `test_run_tests_unmeasured_declaration.py::test_a_bounded_fragment_is_not_a_record_on_its_own`; `test_run_tests_known_red_baseline.py::test_unreliable_repo_gate_identity_never_seeds_or_changes_baseline` |
-| M19 invert it (`return False` on truncation) | `test_run_tests_unmeasured_declaration.py::test_a_truncated_gate_with_no_record_at_all_is_a_red` |
-| M4 delete `result["measured"]` | `test_run_tests_unmeasured_declaration.py::test_every_repo_gate_run_carries_its_measurement` (the fold reads the field; without the writer the fold raises) |
+| M4 delete `result["measured"]` | `test_run_tests_unmeasured_declaration.py::test_every_repo_gate_run_carries_its_measurement` |
 | M8 unmeasured branch: `repo_gate_cases=None` → `set()` | `test_run_tests_unmeasured_declaration.py::test_an_unmeasured_repo_gate_may_not_prune_its_known_red` |
-| M18 computed-pass branch: `set()` → `None` | `test_run_tests_unmeasured_declaration.py::test_a_repo_gate_that_measured_green_may_prune_its_known_red` |
-| M17 add `"failed"`/`"red"` to the unmeasured state set | `test_run_tests_unmeasured_declaration.py::test_a_declaration_that_says_failed_is_not_an_absence[failed]`; `::test_the_unmeasured_state_set_holds_no_red_word` |
-| M21 `line.startswith(PREFIX)` → `PREFIX in line` | `test_run_tests_unmeasured_declaration.py::test_a_log_echo_of_the_prefix_mid_line_is_not_a_declaration`; `::test_a_log_echo_of_the_case_prefix_mid_line_is_not_a_case_record` |
+| M18 measured-pass branch: `set()` → `None` | `test_run_tests_unmeasured_declaration.py::test_a_repo_gate_that_measured_green_may_prune_its_known_red` |
+| M19 invert the truncation branch | `test_run_tests_unmeasured_declaration.py::test_a_truncated_gate_with_no_record_at_all_is_a_red` |
+| M17 add `"failed"`/`"red"` to the state set | `test_run_tests_unmeasured_declaration.py::test_a_declaration_that_says_failed_is_not_an_absence[failed]`; `::test_the_unmeasured_state_set_holds_no_red_word` |
+
+The absence accounting (round 5), in
+`tests/unit/test_gate_deferral_is_accounted.py`:
+
+| mutation | killed by |
+|---|---|
+| treat any red report as an absence | `test_a_report_that_graded_the_code_states_no_absence` |
+| expire the absence on the first tick | `test_a_declared_absence_is_silent_inside_its_wait`; `test_a_zero_ceiling_cannot_expire_a_run_instantly` |
+| restart the episode from the last tick | `test_the_episode_does_not_restart_on_every_tick` |
+| end with `Cycle limit exceeded` (or any red word) | `test_an_expired_absence_names_the_absence_and_never_the_code` |
+| widen the wait to 24h / 1e9 | `test_the_wait_cannot_be_widened_until_the_ceiling_disappears` |
+| remove the episode ceiling | `test_the_episode_ceiling_cannot_be_removed` |
+| force `hold_remaining` to 0 | `test_hold_remaining_is_not_constant_zero` |
+| delete the per-instance valve guard | `test_the_per_instance_valve_does_not_fire_while_an_episode_is_live`; `test_the_episode_ceiling_replaces_the_valve_that_it_disarmed` |
+| delete the host `advance_run` hold | `test_the_host_refuses_to_advance_a_run_whose_gate_is_silent` |
+
+A previous revision of this file carried a row claiming M21
+named in it. That row has been **removed**, not reworded. Round 5 MEASURED whymoved**,
+not reworded. Round 5 MEASURED why it could never reproduce, which is more than
+the previous revision did:
+
+`startswith(PREFIX)` → `PREFIX in line` **alone is not observable at all**.
+The slice is still `line[len(PREFIX):]`, so on an echoed line the reader starts
+at index 30 — inside the echo — and `json.loads` fails exactly as it does for
+the candidate. No test can kill a mutation with no observable effect, and a
+table row claiming one does is a false claim by construction, not a
+fixture-length problem.
+
+The observable mutation is the careless REFACTOR that travels with it: keep the
+substring test AND seek the prefix where it was found
+(`line.index(PREFIX) + len(PREFIX)`). That pair turns one echoed log line into a
+declaration — and, on the case channel, into a prunable known-red identity.
+`tests/unit/test_run_tests_unmeasured_declaration.py` now applies that mutation
+IN-SUITE (`_apply_m21`) and asserts both halves: the candidate reads `None`,
+the mutant reads `blocked` / fabricates case `A`. The two witnesses the removed
+row named are kept and now carry the exactly-prefix-length noise header their
+comment documents. A row returns to this table only with that measurement
+behind it.
+
 
 `measured` is not a dead key: the fold in `run_tests` and `_acquire_repo_gate`
 both read it, and it is what decides whether a gate's cases may be pruned or
@@ -169,7 +262,12 @@ its red forgiven.
 
 ## What this card did not touch
 
-* `configs/` — no diff. `max_loop: 3` on the `test_outcome → implement` edge is
-  the loop bound the four witnesses exhausted, and it stays.
 * `evidence/gate-cycle-accounting-20260921/` — not one byte.
 * The game repository's `tools/godot_gate.py` — another card.
+* `max_loop: 3` on `test_outcome → implement` — unchanged in value. Round 5
+  routes the ABSENCE to a loop-external gate instead of reclassifying it, so
+  the bound the four witnesses exhausted still governs every real red. The
+  `test`/`test_evidence` edges did gain one transition each; that is the
+  minimum the honest report shape needs, it touches nothing the four witnesses
+  read, and it is stated at the edge itself.
+

@@ -90,8 +90,10 @@ config graph because it is a config view, not a historical run view.
 
 ## Private project projection APIs
 
-Writes and the driver notebooks retain writer authorization; the graph reads
-are public (see `docs/state-graph.md` for the classification). These extra
+Writes stay writer-only; since the owner's ruling of 2026-09-22 the driver's
+working notes are public for a project that has been opened, while the director
+mailbox and the driver guide stay writer-only. The graph reads
+are public (see `docs/state-graph.md` for the classification). These extraassification). These extra
 queries are available through the same typed `state_graph_help/read/write`
 contracts used by MCP and the internal Driver:
 

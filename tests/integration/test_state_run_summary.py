@@ -255,12 +255,13 @@ def test_invalid_json_trace_does_not_remove_valid_usage(system):
     assert result['total_tokens']==37 and result['token_reported_turns']==1
     assert result['usage_turns']==2 and result['partial'] is True
 
-
-def test_full_host_summary_is_a_public_read_while_notes_and_writes_stay_closed(system,monkeypatch):
+def test_full_host_summary_is_a_public_read_while_the_mailbox_and_writes_stay_closed(system,monkeypatch):
     """The run summary is project progress, so an anonymous reader may see it.
 
-    It used to be writer-only because the whole router carried `require_writer`.
-    What must NOT move: the notebook reads and every write.
+    It used to be writer-only because the whole router carried `require_writer`,
+    and since the owner's ruling of 2026-09-22 the driver's working notes are
+    public for an opened project too. What must NOT move: the director mailbox
+    and every write.
     """
     from api import authz
     from api.state_graph_routers import router,get_service
@@ -270,6 +271,7 @@ def test_full_host_summary_is_a_public_read_while_notes_and_writes_stay_closed(s
     with TestClient(app) as c:
         assert c.get('/api/state/projects/game/run-summary').status_code==200
         assert c.post('/api/state/query/project_run_summary',json={'project_id':'game'}).status_code==200
-        assert c.get('/api/state/projects/game/driver-note').status_code==403
-        assert c.post('/api/state/query/driver_note_index',json={'project_id':'game'}).status_code==403
+        assert c.get('/api/state/projects/game/driver-note').status_code==200
+        assert c.post('/api/state/query/driver_note_index',json={'project_id':'game'}).status_code==200
+        assert c.post('/api/state/query/list_director_messages',json={'project_id':'game'}).status_code==403
         assert c.post('/api/state/commands/refresh_project',json={'project_id':'game'}).status_code==403

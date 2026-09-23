@@ -241,18 +241,18 @@ def main():
                 checks.append('server failure displayed as failure, not an empty successful graph')
                 page.unroute('**/api/state/projects/shrimp-preview/overview')
                 anonymous=browser.new_context(viewport={'width':900,'height':700});anon=anonymous.new_page()
-                # A visitor with NO credential reads the graph — the whole point
-                # of building in public — while the driver notes stay private and
-                # are refused by the API, not hidden by the page.
+                # A visitor with NO credential reads the graph AND (since the
+                # owner's ruling of 2026-09-22) the working notes of this OPENED
+                # project — the whole point of building in public. The mailbox
+                # stays writer-only and is refused by the API, not hidden.
                 anon.goto(base+'/#/state-projects/shrimp-preview');expect(anon.locator('g.goal')).to_have_count(8)
-                expect(anon.get_by_text('Working notes (writers only)')).to_be_visible()
-                expect(anon.get_by_text('The driver notes are private; sign in with writer access to read them.')).to_be_visible()
+                expect(anon.get_by_text('Working notes')).to_be_visible()
                 assert anon.get_by_text('Project state is private.',exact=False).count()==0
                 assert anonymous.request.get(base+'/api/state/projects/shrimp-preview/overview').status==200
-                assert anonymous.request.get(base+'/api/state/projects/shrimp-preview/driver-note').status==403
+                assert anonymous.request.get(base+'/api/state/projects/shrimp-preview/driver-note').status==200
                 assert anonymous.request.post(base+'/api/state/query/get_driver_note',
-                    data={'project_id':'shrimp-preview'}).status==403
-                checks.append('anonymous reader sees the public graph; the writer-only notes are refused by the API')
+                    data={'project_id':'shrimp-preview'}).status==200
+                checks.append('anonymous reader sees the public graph and the opened project working notes') by the API')
                 # A real external attempt in the isolated API has no workflow.
                 # The test harness, not AItelier, runs and waits for its checker.
                 import subprocess, hashlib

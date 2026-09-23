@@ -699,9 +699,9 @@ export function stateIssue(projectId: string, issueId: string): Promise<import('
 export function stateAttempts(projectId: string, after = 0): Promise<{attempts: import('./stateGraph').StateAttempt[]; next_after: number | null}> {
   return _get('/api/state/projects/' + encodeURIComponent(projectId) + '/attempts?after=' + after + '&limit=30');
 }
-/** The driver's working notes. NOT public: the server refuses this to a reader
- *  (`core.state_commands.WRITER_ONLY_READS`), so it is requested only for a
- *  writer. There is no client-side read of it to hide. */
+/** The driver's working notes. Public for a project that has been opened (owner's
+ *  and that refusal is the server's, not this client's. */ling of 2026-09-22): the server answers 403 only for a project nobody opened,
+ *  and that refusal is the server's, not this client's. */ */
 export function stateDriverNote(projectId: string): Promise<{ project_id: string; revision: number; updated_at: string; permanent: string; temporary: string }> {
   return _get('/api/state/projects/' + encodeURIComponent(projectId) + '/driver-note');
 }

@@ -67,14 +67,15 @@ def test_real_mcp_review_flow_explicit_relations_and_immutable_old_baseline(tmp_
         assert c.execute('SELECT COUNT(*) FROM state_dependencies').fetchone()[0]==0
 
 
-def test_shared_app_reads_the_design_and_keeps_the_notebook_writer_only(tmp_path,monkeypatch):
-    """Design reads are part of the published project state; the notebook is not.
+def test_shared_app_reads_the_design_and_keeps_the_mailbox_writer_only(tmp_path,monkeypatch):
+    """Design reads are part of the published project state; the mailbox is not.
 
     This router is built with ONE verdict (`authz.require_writer`), which is how
     an embedder that omits the read verdict falls back. The design queries are
     classified public in `core.state_commands`, so they serve an anonymous
-    reader; the driver note is classified private, so the same router still
-    refuses it, and a write action is never served by the read surface.
+    reader; `list_director_messages` is classified private (the owner's ruling
+    of 2026-09-22 opened the working note, not the mailbox), so the same router
+    still refuses it, and a write action is never served by the read surface.
     """
     standalone=create_app(str(tmp_path/'state.sqlite'),TOKEN,with_mcp=False)
     service=standalone.state.state_service;service.create_project('p','Private')
@@ -82,6 +83,7 @@ def test_shared_app_reads_the_design_and_keeps_the_notebook_writer_only(tmp_path
     service.design.create_baseline('p','b1',[{'design_id':'private','revision':1}])
     service.driver_notes.update('p','permanent','NOTEBOOK BODY MUST NOT LEAK',0,'director')
     app=FastAPI();app.include_router(create_state_router(lambda:service,authz.require_writer))
+
     monkeypatch.setattr(authz,'gate_enabled',lambda:True)
     monkeypatch.setattr(authz,'request_can_write',lambda request:False)
     cases=[('search_design_items',{'project_id':'p','query':'Ready'}),
@@ -94,10 +96,11 @@ def test_shared_app_reads_the_design_and_keeps_the_notebook_writer_only(tmp_path
             # A write action is never served by the read surface, and the
             # commands surface still demands the writer verdict.
             assert client.post('/api/state/commands/'+name,json=args).status_code==403
-        refused=client.post('/api/state/query/get_driver_note',json={'project_id':'p'})
+        refused=client.post('/api/state/query/list_director_messages',json={'project_id':'p'})
         assert refused.status_code==403,refused.text
         assert 'NOTEBOOK BODY MUST NOT LEAK' not in refused.text
-        assert client.get('/api/state/projects/p/driver-note').status_code==403
+        assert client.post('/api/state/director-messages/list_director_messages',
+                           json={'project_id':'p'}).status_code==403
         app.dependency_overrides[authz.require_writer]=lambda:None
         for name,args in cases:
             assert client.post('/api/state/query/'+name,json=args).status_code==200

@@ -61,21 +61,20 @@ describe('State graph component', () => {
 });
 
 describe('Long-lived project pages', () => {
-  it('a reader sees the graph while the working notes stay private', async () => {
-    // Reads of the graph are public; the notes are not. "May I write?" used to
-    // decide "may I read?", which is why a reader saw nothing but the notice.
+  it('a reader sees the graph and may ask for the working notes', async () => {
+    // Reads of the graph are public, and since the owner's ruling of 2026-09-22
+    // the working notes of an OPENED project are public too. "May I write?"
+    // used to decide "may I read?", which is why a reader saw only the notice.
     authStore.set({canWrite:false, permissionResolved:true, email:null});
     const view=render(StateProject,{params:{id:'game'}});
     await view.findByRole('heading',{name:'武虾传奇'});
     expect(view.container.querySelectorAll('g.goal')).toHaveLength(2);
     expect(view.container.textContent).not.toContain('Project state is private');
-    expect(view.getByText(/driver notes are private/)).toBeTruthy();
     await new Promise(r=>setTimeout(r,0));
     expect(api.stateOverview).toHaveBeenCalled();
-    // The notes are not requested and then hidden — a server refusal is the
-    // only refusal, so the request is never made.
-    expect(api.stateDriverNote).not.toHaveBeenCalled();
-  });
+    // The reader asks for the notes; the SERVER decides (403 for an unopened
+    // project) — nothing is fetched and then hidden.
+    expect(api.stateDriverNote).toHaveBeenCalled();  });
   it('shows the notice only when the read itself is refused', async () => {
     const forbidden=Object.assign(new Error('gateway refused'),{status:403});
     api.stateOverview.mockRejectedValueOnce(forbidden);

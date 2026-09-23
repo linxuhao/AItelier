@@ -244,14 +244,15 @@ def test_all_new_state_reads_remain_private_and_commands_strict(live, monkeypatc
     app.dependency_overrides[routes.get_service] = lambda: live.service
     monkeypatch.setattr(authz, "gate_enabled", lambda: True)
     monkeypatch.setattr(authz.cf_access, "email_from_request_headers", lambda *_: None)
-    # The split this pins: the graph and the progress reads are PUBLIC to a
-    # caller with no credential, the two notebooks and the mailbox are not.
-    # Publishing is irreversible, so what an ANONYMOUS caller gets is the
-    # contract, and an unclassified read action must be refused by default.
+    # The split this pins: the graph, the progress reads and (since the owner's
+    # ruling of 2026-09-22) the driver's working notes are PUBLIC to a caller
+    # with no credential; the director mailbox is not. Publishing is
+    # irreversible, so what an ANONYMOUS caller gets is the contract, and an
+    # unclassified read action must be refused by default.
     public = ["/projects", "/projects/game/overview", "/projects/game/nodes/growth.proficiency",
-              "/projects/game/attempts", "/projects/game/references"]
-    private = ["/projects/game/driver-note", "/projects/game/driver-note/history",
-               "/projects/game/driver-note/history/search"]
+              "/projects/game/attempts", "/projects/game/references",
+              "/projects/game/driver-note", "/projects/game/driver-note/history",
+              "/projects/game/driver-note/history/search"]
     with TestClient(app) as client:
         for url in public:
             response = client.get("/api/state" + url)
@@ -259,15 +260,21 @@ def test_all_new_state_reads_remain_private_and_commands_strict(live, monkeypatc
         # An unknown run reaches the handler: the door let it through, and the
         # only reason it is not 200 is that no such run exists.
         assert client.get("/api/state/runs/unknown/owners").status_code in (200, 404)
-        for url in private:
-            response = client.get("/api/state" + url)
-            assert response.status_code == 403, (url, response.text)
-            assert "Full private requirement" not in response.text
-            assert "to make changes" not in response.text
-            assert response.headers["X-AItelier-Denial"] == authz.READ_DENIED_NOT_AUTHENTICATED
-        for action in ("get_driver_note", "driver_note_index", "list_director_messages"):
+        # The director mailbox is a READ the 2026-09-22 ruling did not name, so
+        # its refusal is measured through the SAME read-wording contract as
+        # before: a 403, never "to make changes".
+        response = client.post("/api/state/director-messages/list_director_messages",
+                               json={"project_id": "game"})
+        assert response.status_code == 403, response.text
+        assert "Full private requirement" not in response.text
+        assert "to make changes" not in response.text
+        assert response.headers["X-AItelier-Denial"] == authz.READ_DENIED_NOT_AUTHENTICATED
+        for action in ("list_director_messages", "get_driver_guide_section"):
             response = client.post("/api/state/query/" + action, json={"project_id": "game"})
             assert response.status_code == 403, (action, response.text)
+        for action in ("get_driver_note", "driver_note_index"):
+            response = client.post("/api/state/query/" + action, json={"project_id": "game"})
+            assert response.status_code != 403, (action, response.text)
         # Default DENY: a read action nobody classified, including one added
         # later, is refused to an anonymous caller.
         assert client.post("/api/state/query/a_read_added_later",

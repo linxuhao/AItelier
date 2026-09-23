@@ -196,9 +196,17 @@ authorization even though other legacy metadata reads may be public.
 
 Read actions include `get_driver_note`, `driver_note_index`,
 `get_driver_note_entry`, `check_driver_note_index`, `get_driver_guide_section`,
-`driver_note_history`, `list_projects`,
+`driver_note_history`, `search_driver_note_history`, `list_director_messages`,
+`list_projects`,
 `get_graph`, `get_node`, `frontier`, `events`, `wait_for_state_change`,
 `get_attempt`, `list_attempts`, and `evidence`.
+
+Over MCP the whole `state_graph_read` tool demands the writer verdict, so an
+anonymous MCP caller gets none of these; the REST table
+(`core.state_commands.PUBLIC_READS`, below) is what decides which of them an
+anonymous REST visitor may read.
+(`core.state_commands.PUBLIC_READS`, below) is what decides which of them an
+anonymous REST visitor may read.
 
 Write actions: `create_project`, `add_nodes`, `revise_node`, `split_node`,
 `supersede_node`, `start_attempt`, `start_external_attempt`, `report_external_attempt`,
@@ -400,12 +408,18 @@ incremental audit view, not a full transcript dump.
 ## REST and SDK
 
 Reads of the State DAG are PUBLIC: an anonymous visitor may read the graph, the
-nodes, the acceptance criteria, attempts, evidence, issues, design records and
-the frontier. Two read families stay writer-only — the driver notebooks
+nodes, the acceptance criteria, attempts, evidence, issues, design records, the
+frontier, and — since the owner's ruling of 2026-09-22 ("let's open up the
+working note for public projects too") — the driver's working notes
 (`get_driver_note`, `driver_note_history`, `search_driver_note_history`,
-`get_driver_note_entry`, `check_driver_note_index`, `driver_note_index`) and the
-director mailbox (`list_director_messages`) — plus the driver guide and the
-event/long-poll plumbing.
+`get_driver_note_entry`, `check_driver_note_index`, `driver_note_index`). The
+director mailbox (`list_director_messages`), the driver guide and the
+event/long-poll plumbing stay writer-only.
+
+Public is ANDed with project privacy: every note read names a `project_id`, and
+`core.state_commands.execute` refuses an anonymous read of a project nobody
+opened — with a refusal byte-identical to a project that does not exist, so a
+refusal is never an existence oracle.
 
 The classification is ONE table, `core.state_commands.PUBLIC_READS`, and the
 default is DENY: a read action that is not listed is private, INCLUDING one added
@@ -432,9 +446,9 @@ GET  /api/state/projects/{project_id}/issues/{issue_id}                 public
 GET  /api/state/attempts/{attempt_id}                                  public
 GET  /api/state/attempts/{attempt_id}/detail                           public
 GET  /api/state/runs/{run_id}/owners                                   public
-GET  /api/state/projects/{project_id}/driver-note                      writer-only
-GET  /api/state/projects/{project_id}/driver-note/history              writer-only
-GET  /api/state/projects/{project_id}/driver-note/history/search       writer-only
+GET  /api/state/projects/{project_id}/driver-note                      public
+GET  /api/state/projects/{project_id}/driver-note/history              public
+GET  /api/state/projects/{project_id}/driver-note/history/search       publicistory/search       writer-only
 POST /api/state/query/{read_action}       JSON body = arguments only
 POST /api/state/commands/{write_action}   JSON body = arguments only
 ```

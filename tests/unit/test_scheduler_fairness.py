@@ -6,8 +6,9 @@ could not advance. Measured on this host: a `dpe_game` step ran 400s and produce
 an unbroken run of `outcome=locked` lines while a freshly generated pipeline sat
 at its begin node with zero trace rows for over an hour.
 
-The rule now: the SAME project is still strictly serial (the per-project lock is
-untouched); DIFFERENT projects proceed together, bounded.
+The rule now: the SAME project is still strictly serial (its per-project lock is
+taken at dispatch in `poll_and_execute` and released when its tick's task is
+done); DIFFERENT projects proceed together, bounded.
 """
 
 import asyncio

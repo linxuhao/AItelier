@@ -11,6 +11,7 @@ import asyncio
 import json
 import threading
 import time as _time
+import weakref
 from datetime import datetime
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from skillflow.exceptions import RequiredContextMissing, TerminalRunFenced
@@ -135,8 +136,8 @@ def _quota_hold_remaining() -> float:
     return max(0.0, _QUOTA_HOLD_UNTIL - _time.time())
 
 # Hung-step detection: warn when a claimed step has run longer than
-# timeout_seconds * this multiplier.  Detection runs on a separate periodic
-# job so it fires even when the main scheduler tick is blocked by a hung call.
+# timeout_seconds * this multiplier.  Detection runs as its own periodic job
+# (`_check_hung_claims`), so a tick waiting on a hung call does not delay it.
 _HUNG_WARN_MULTIPLIER = 3
 _HUNG_WARNING_COOLDOWN = 120  # seconds between repeated warnings for same step
 
@@ -846,8 +847,10 @@ def _has_active_claim(sf, run_id: str) -> bool:
 async def _check_hung_claims():
     """Periodic supervisor: RECLAIM dead claims, warn about merely tardy ones.
 
-    Runs independently from the main scheduler tick so it fires even when
-    poll_and_execute is blocked awaiting a hung LLM call. That independence was
+    Runs as its own 30 s interval job, not from inside a poll or a tick. A tick
+    waiting on a hung LLM call waits in its own task (`_detached_ticks`), and
+    `poll_and_execute` returns once it has dispatched, so neither holds this
+    job's slot or delays its next run. That independence was
     the right instinct and, until now, entirely wasted: skillflow's reaper
     (recover_stale_claims) was called from exactly ONE place — the top of
     advance_run — and _run_skillflow_tick returns before reaching it on five
@@ -1579,9 +1582,12 @@ async def _advance_off_the_loop(sf, run_id: str, project_id: str = ""):
     Nothing about the tick needed to be ON the loop; it blocked there only
     because a tick that blocks is a tick that cannot be re-entered, and that
     accident was carrying the mutual exclusion. It no longer has to: the
-    per-project lock in `_execute_skillflow_tick` is a threading.Lock held
-    across every await of the tick, so a second tick for the same project still
-    fails its non-blocking acquire and logs `locked` — and a claim now names its
+    per-project lock is a threading.Lock that `poll_and_execute` takes at
+    dispatch and `_on_detached_tick_done` releases once the tick's task is done
+    (the demo and per-owner pollers take the same lock in
+    `_execute_skillflow_tick`, around the whole tick), so it is held across
+    every await of the tick and a second tick for the same project fails its
+    non-blocking acquire and logs `locked` — and a claim now names its
     owner, so nothing has to infer "still working" from "still blocked". Two
     concurrent `godot_compile` runs writing one $STEP_DIR is exactly what this
     ordering exists to prevent.
@@ -2739,7 +2745,8 @@ def start_scheduler(demo: bool = False, owner_email: str = None):
         logging.getLogger("aitelier.scheduler").warning(
             "Another worker already holds the scheduler lock; not starting a "
             "second scheduler in this process. Run the API with --workers 1 to "
-            "avoid this — the in-process scheduler is single-instance by design."
+            "avoid this — only the process holding the scheduler's advisory "
+            "file lock runs a scheduler; this one gets a no-op handle."
         )
         return _NoopScheduler()
     settings = _get_default_settings()
@@ -2800,6 +2807,13 @@ def reschedule_scheduler(scheduler: AsyncIOScheduler, settings: dict = None,
         _add_scheduler_job(scheduler, settings, owner_email=owner_email, demo=demo)
 
 
+# Schedulers that already carry the `_cancel_detached_ticks` shutdown listener.
+# `reschedule_scheduler` runs `_add_scheduler_job` again on the SAME scheduler
+# at every settings change, and apscheduler keeps every listener it is given, so
+# without this each change attached one more.
+_shutdown_listener_on: "weakref.WeakSet[AsyncIOScheduler]" = weakref.WeakSet()
+
+
 def _add_scheduler_job(scheduler: AsyncIOScheduler, settings: dict,
                        owner_email: str = None, demo: bool = False):
     """Add a poll_and_execute job based on settings dict."""
@@ -2832,9 +2846,9 @@ def _add_scheduler_job(scheduler: AsyncIOScheduler, settings: dict,
                               # conflicts) is the per-project lock's job
         )
 
-    # Hung-step detection: runs on a separate periodic job so it fires even
-    # when the main tick is blocked awaiting a hung LLM call.  Lightweight
-    # (only SQL queries), so a 30 s interval is safe.
+    # Hung-step detection: its own periodic job, so neither the poll nor a tick
+    # waiting on a hung LLM call delays it.  Lightweight (only SQL queries), so
+    # a 30 s interval is safe.
     scheduler.add_job(
         _check_hung_claims, 'interval', seconds=30,
         max_instances=1,
@@ -2850,11 +2864,12 @@ def _add_scheduler_job(scheduler: AsyncIOScheduler, settings: dict,
         )
     except Exception:
         pass
-    if job_func is poll_and_execute:
+    if job_func is poll_and_execute and scheduler not in _shutdown_listener_on:
         # Its ticks outlive the job, so the shutdown that used to cancel them by
         # cancelling the job no longer does. See `poll_and_execute`.
         from apscheduler.events import EVENT_SCHEDULER_SHUTDOWN
         scheduler.add_listener(_cancel_detached_ticks, EVENT_SCHEDULER_SHUTDOWN)
+        _shutdown_listener_on.add(scheduler)
 
 
 # ── Wake-on-confirm hook ──────────────────────────────────────────

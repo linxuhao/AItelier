@@ -16,6 +16,7 @@ these fail on the behaviour they pin, not on an AttributeError.
 """
 
 import asyncio
+import gc
 import logging
 import threading
 import time
@@ -436,3 +437,101 @@ async def test_shutdown_cancels_every_in_flight_tick_and_releases_its_claim(
         if sched.running:
             sched.shutdown(wait=False)
         await _settle()
+
+
+# ── a raising detached tick: logged with its project, exception retrieved ───
+
+async def test_a_raising_tick_is_logged_with_its_project_and_its_exception_retrieved(
+        env, monkeypatch):
+    """A detached tick has no apscheduler job to raise into, so
+    `_on_detached_tick_done` is the only place its exception is read. Without
+    that read the tick_error line and the ERROR record are gone, and asyncio
+    reports "Task exception was never retrieved" when the task is collected."""
+    pid, boom = f"e-{uuid.uuid4().hex[:6]}", f"boom-{uuid.uuid4().hex[:6]}"
+
+    async def tick(p, loop):
+        await asyncio.sleep(0)
+        raise RuntimeError(boom)
+    monkeypatch.setattr(sc, "_run_skillflow_tick", tick)
+    env.active.append(pid)
+
+    loop = asyncio.get_running_loop()
+    loop_reported: list[str] = []
+    old_handler = loop.get_exception_handler()
+    loop.set_exception_handler(
+        lambda _loop, ctx: loop_reported.append(str(ctx.get("message"))))
+    records: list[logging.LogRecord] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+    capture = _Capture(level=logging.ERROR)
+    sched_logger = logging.getLogger("aitelier.scheduler")
+    sched_logger.addHandler(capture)
+    try:
+        started = await sc.poll_and_execute()
+        assert len(started) == 1, started
+        await asyncio.wait(started, timeout=5)    # waits; does not read the result
+        await asyncio.sleep(0)                    # done callbacks run via call_soon
+        del started                               # drop the last test reference
+        for _ in range(3):
+            gc.collect()
+            await asyncio.sleep(0)
+    finally:
+        sched_logger.removeHandler(capture)
+        loop.set_exception_handler(old_handler)
+
+    tick_error = [ln for ln in env.lines_for(pid) if "outcome=tick_error" in ln]
+    raised = [r for r in records if pid in r.getMessage() and r.exc_info
+              and isinstance(r.exc_info[1], RuntimeError)
+              and str(r.exc_info[1]) == boom]
+    print(f"\ntick_error lines={tick_error} error records={len(raised)} "
+          f"loop reported={loop_reported}")
+    assert tick_error and boom in tick_error[0] and raised and not loop_reported, (
+        f"_on_detached_tick_done did not retrieve the exception of {pid}'s "
+        f"detached tick: tick_error lines={tick_error}, ERROR records with the "
+        f"exception={len(raised)}, asyncio loop reported={loop_reported}")
+    assert not sc._detached_ticks, "the raising tick still holds a cap slot"
+    assert not sc._tick_locks[pid].locked(), "the raising tick still holds its lock"
+
+
+# ── a settings change does not stack shutdown listeners ─────────────────────
+
+async def test_rescheduling_keeps_exactly_one_shutdown_listener(env, monkeypatch):
+    """`reschedule_scheduler` re-runs `_add_scheduler_job` on the same
+    scheduler at every settings change (api/settings_routers.py)."""
+    calls = []
+    real = sc._cancel_detached_ticks
+
+    def counting(event=None):
+        calls.append(event)
+        return real(event)
+    monkeypatch.setattr(sc, "_cancel_detached_ticks", counting)
+
+    settings = {"scheduler_type": "interval", "scheduler_interval": INTERVAL_S}
+    reschedules = 4
+    sched = AsyncIOScheduler()
+    sc._add_scheduler_job(sched, settings)          # what start_scheduler does
+    sched.start()
+    try:
+        for _ in range(reschedules):
+            sc.reschedule_scheduler(sched, settings)
+        polls = [j for j in sched.get_jobs() if j.func is sc.poll_and_execute]
+        assert len(polls) == 1, polls
+        # apscheduler 3.x keeps listeners as (callback, mask) in `_listeners`.
+        attached = [cb for cb, _mask in sched._listeners if cb is counting]
+    finally:
+        # AsyncIOScheduler runs its shutdown (and so dispatches the event) on
+        # the loop, via call_soon_threadsafe: yield until it has.
+        sched.shutdown(wait=False)
+        deadline = time.monotonic() + 5
+        while sched.running and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
+        await _settle()
+    assert not sched.running, "the scheduler never finished shutting down"
+    print(f"\nshutdown listeners after 1 start + {reschedules} reschedules: "
+          f"{len(attached)}; listener runs on one shutdown: {len(calls)}")
+    assert len(attached) == 1, (
+        f"after 1 start + {reschedules} reschedules the scheduler carries "
+        f"{len(attached)} _cancel_detached_ticks shutdown listeners, not 1")
+    assert len(calls) == 1, f"one shutdown ran the listener {len(calls)} times"

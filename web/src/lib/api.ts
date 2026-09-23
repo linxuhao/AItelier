@@ -699,9 +699,10 @@ export function stateIssue(projectId: string, issueId: string): Promise<import('
 export function stateAttempts(projectId: string, after = 0): Promise<{attempts: import('./stateGraph').StateAttempt[]; next_after: number | null}> {
   return _get('/api/state/projects/' + encodeURIComponent(projectId) + '/attempts?after=' + after + '&limit=30');
 }
-/** The driver's working notes. Public for a project that has been opened (owner's
- *  and that refusal is the server's, not this client's. */ling of 2026-09-22): the server answers 403 only for a project nobody opened,
- *  and that refusal is the server's, not this client's. */ */
+/** The driver's working notes. Public for a project that has been opened
+ *  (owner's ruling of 2026-09-22: let's open up the working note for public
+ *  projects too). For a project nobody opened the server answers 403, and that
+ *  refusal is the server's, not this client's. */
 export function stateDriverNote(projectId: string): Promise<{ project_id: string; revision: number; updated_at: string; permanent: string; temporary: string }> {
   return _get('/api/state/projects/' + encodeURIComponent(projectId) + '/driver-note');
 }

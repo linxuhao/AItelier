@@ -220,3 +220,8 @@ def test_concurrent_replacement_cannot_be_overwritten_by_late_certificate(tmp_pa
     pointer=json.loads((tmp_path/'literary-session.json').read_text())
     assert pointer['session']==new[0].session and pointer['certificate'] is None
     assert old.guard('write_verdict',report())['error']=='review executor was superseded'
+
+
+def test_empty_review_material_is_rejected_before_observer_installation():
+    with pytest.raises(BenchError,match='nonempty'):
+        Material('empty.md','step:prepare','')

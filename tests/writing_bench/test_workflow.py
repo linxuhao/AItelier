@@ -80,7 +80,23 @@ class Session:
                                 {"run_id": run, "step_id": claim.step_id,
                                  "step_instance_id": claim.token.step_instance_id,
                                  "claim_epoch": claim.token.claim_epoch})
-        session.observe([{"role": "user", "content": m.text} for m in materials])
+        if getattr(self, "use_bounded_attestation", False):
+            for material in materials:
+                start = 0
+                while start < len(material.text):
+                    page = self.sf.execute_tool("novel_bench_read", {"path": "review/" + material.path,
+                               "start": start, "length": 8000}, run_id=run, step_id=claim.step_id,
+                               step_instance_id=claim.token.step_instance_id, claim_epoch=claim.token.claim_epoch)
+                    assert "error" not in page, page
+                    # A tool result is credited only when the next model input
+                    # actually contains it, not when execute_tool returned it.
+                    call_id = material.path + str(start)
+                    session.observe([{"role": "assistant", "tool_calls": [{"id": call_id,
+                        "function": {"name": "novel_bench_read", "arguments": "{}"}}]},
+                        {"role": "tool", "tool_call_id": call_id, "content": encode(page).decode()}])
+                    start = page["end"]
+        else:
+            session.observe([{"role": "user", "content": m.text} for m in materials])
         assert session.guard("write_verdict", value) is None
 
     def drive(self, run, *, reject_literary=False, read=True):

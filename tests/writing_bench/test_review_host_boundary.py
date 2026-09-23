@@ -127,3 +127,39 @@ def test_host_rejects_prior_claim_epoch_even_with_same_step_instance(tmp_path,mo
     session.sf.confirm_step(claim.token,StepResult(outputs={'written':saved}))
     with pytest.raises(BenchError,match='another reviewer attempt'):
         adapter.Host().observed_review(bench,run,'literary',value)
+
+
+def test_graph_resolver_and_prompt_assembler_present_current_prose_verbatim(tmp_path,monkeypatch,bench):
+    from core.prompt_assembler import PromptAssembler
+    from core.ai_router import AIGateway
+    from core.dpe_pipeline import _project_native_messages
+    session=Session(tmp_path,monkeypatch,bench);run=session.start(request(bench))
+    session.sf.advance_run(run);claim=session.sf.claim_next_step(run)
+    identity,materials=bench.review_materials(run,'literary')
+    c=Coverage('literary',identity['review_key'],identity['targets'],materials)
+    workspace=session.sf._workspace.get_project_path('execution')
+    rendered=PromptAssembler().assemble(claim.step_id,workspace,native=True,
+        resolved_context=claim.inputs['_resolved_context'],tool_schemas=claim.inputs['_tool_schemas'])
+    prose=next(x for x in materials if x.path=='current_prose.md')
+    context=next(x for x in materials if x.path=='review_context.md')
+    assert prose.text in rendered and context.text not in rendered
+    class CaptureGateway(AIGateway):
+        def __init__(self):self.on_messages_presented=c.observe;self.last_outbound=None
+        @property
+        def active_model(self):return 'fixture/model'
+        def _build_kwargs(self,messages,**kwargs):return {'messages':self._sanitize_messages(messages)}
+        def _complete_prebuilt(self,kwargs):
+            self.presented=copy.deepcopy(kwargs['messages'])
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content='read',tool_calls=[]),finish_reason='stop')])
+    g=CaptureGateway();visible,_=_project_native_messages([{'role':'user','content':rendered}]);g.generate_native(visible)
+    assert c.ranges[prose.path]==[[0,len(prose.text)]] and c.ranges[context.path]==[]
+    assert any(prose.text in m['content'] for m in g.presented)
+
+
+def test_real_graph_bounded_material_reads_build_both_independent_proofs(tmp_path,monkeypatch,bench):
+    session=Session(tmp_path,monkeypatch,bench);session.use_bounded_attestation=True
+    run=session.start(request(bench));assert session.drive(run)=='paused'
+    stage=bench._json(bench.work(run),'stage.json')
+    assert stage['observed_reading']['literary']['complete'] and stage['observed_reading']['ledger']['complete']
+    assert not session.backup_calls
+    assert git(bench.policy.repo,'rev-parse','HEAD')==bench.policy.genesis

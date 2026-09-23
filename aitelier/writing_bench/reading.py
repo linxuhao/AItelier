@@ -25,6 +25,9 @@ class Material:
     source: str
     text: str
 
+    def __post_init__(self) -> None:
+        require(isinstance(self.text, str) and bool(self.text), "nonempty frozen review material required")
+
     @property
     def digest(self) -> str:
         return sha(self.text.encode())

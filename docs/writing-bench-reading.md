@@ -104,3 +104,23 @@ modify the accepted chapter or run its promotion/backup to test the reader.
 Deploy only the reviewed code commit and coordinate process restart with directors
 whose work may be in flight. Code test success, actual live reviewer success and
 production activation are separate facts.
+
+### Native-reader compatibility and size ceiling
+
+The optional generic-read observation parser targets the deployed SkillFlow read
+shape: `source`, `path`, zero-based `start_line`, actual `returned_lines`,
+`total_lines`, and `content`. Content must equal the frozen raw slice or the
+one-based, tab-numbered lines that the native reader returns. An unknown shape,
+outline-only result, changed newline convention or missing metadata grants no
+coverage; the phase-bound `novel_bench_read` remains the supported recovery path.
+This compatibility parser never interprets a request's `end_line` as a returned
+range. Empty required materials are rejected before installing an observer.
+
+The operator's existing `max_context_bytes` is a ceiling on the **complete review
+material set and display packet**, not just one model request. Pagination does not
+remove that ceiling. Multi-chapter revisions must fit the same configured total
+budget; a large revision must be split into explicit coherent submissions or be
+handled under a separately reviewed operator policy. This fix does not silently
+raise the production budget. Review-session replacement and certificate
+publication share a host lock, and final admission also matches the completed
+reviewer's claim epoch, not only its step instance id.

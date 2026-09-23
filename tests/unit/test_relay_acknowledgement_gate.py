@@ -142,6 +142,50 @@ def test_cjk_remaining_work_is_counted_not_ignored():
     assert denied["status"] == "denied"
 
 
+CJK_TASKS = [
+    "重跑新增的渲染队列测试并确认数字",
+    "跑全套测试并把裸退出码写进日志",
+    "补全交付说明第三节的最后两条判据",
+    "调用 finish_step 收尾",
+]
+
+
+def _cjk_instruction(total_chars: int) -> str:
+    header = "\n".join(f"{i}. {task}" for i, task in enumerate(CJK_TASKS, 1))
+    body = ("原始简报正文延续，承载已批准的计划。" * ((total_chars // 18) + 1))
+    return header + "\n\n" + body
+
+
+def test_chinese_work_faithfully_restated_passes_once_at_every_length():
+    for total in (1024, 10240, 51200):
+        relay = relay_for(_cjk_instruction(total))
+        assert relay["incomplete_items"] == CJK_TASKS
+        paraphrase = [
+            "重跑新增渲染队列测试，确认数字",
+            "跑完整套测试，把裸退出码记录进日志",
+            "补全交付说明第三节末尾两条判据",
+            "调用 finish_step 完成收尾",
+        ]
+        ok, result = _relay_acknowledgement(
+            relay, {"retained_bytes": RETAINED, "incomplete_items": paraphrase}
+        )
+        assert ok, result
+
+        ok, denied = _relay_acknowledgement(
+            relay,
+            {"retained_bytes": RETAINED,
+             "incomplete_items": ["随便说一点无关的中文内容"]},
+        )
+        assert not ok, denied
+        assert denied["status"] == "denied"
+
+        ok, denied = _relay_acknowledgement(
+            relay,
+            {"retained_bytes": RETAINED, "incomplete_items": CJK_TASKS[:2]},
+        )
+        assert not ok, denied
+
+
 def test_short_unstructured_instruction_keeps_whole_instruction_fallback():
     instruction = "Finish dpe_pipeline wiring and add targeted tests."
     relay = relay_for(instruction)

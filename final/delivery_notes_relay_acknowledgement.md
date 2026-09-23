@@ -24,7 +24,7 @@ Log files live in `logs/`, all `.txt`.
 | --- | --- | --- |
 | gate file, 9 tests | `logs/relay_gate_tests.txt` | 0 |
 | relay family, 40 tests | `logs/relay_gate_tests.txt` | 0 |
-| full suite, 4779 passed / 1 failed | `logs/full_suite.txt` | 1 |
+| full suite, 4780 passed / 1 failed | `logs/full_suite.txt` | 1 |
 | the one failing node alone, 1 passed | `logs/full_suite.txt` | 0 |
 | mutant A (coverage removed), 1 failed | `logs/relay_gate_mutants.txt` | 1 |
 | mutant B (whole instruction as the item), 1 failed | `logs/relay_gate_mutants.txt` | 1 |
@@ -50,7 +50,7 @@ Log files live in `logs/`, all `.txt`.
   refused: 3 x 2 = 6 checks, matching the expected polarity
   (`logs/relay_gate_tests.txt`, bare RC 0).
 - `the-suite-stays-green-and-the-note-carries-every-number` - **met**. Full
-  suite bare RC 1 with 4779 passed / 10 skipped / 11 deselected; the sole red is
+  suite bare RC 1 with 4780 passed / 10 skipped / 11 deselected; the sole red is
   `test_an_engine_without_the_counter_costs_a_key_not_a_step`, which is
   `iss-ab57b4061b314de3`'s order dependency and exits bare RC 0 when run alone
   (`logs/full_suite.txt`). The web node's install, build and test each exit

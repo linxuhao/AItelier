@@ -256,6 +256,11 @@ _ACK_STOPWORDS = frozenset({
 
 
 def _ack_tokens(value: str) -> set[str]:
+    """ASCII identifier-ish units: >=3-char tokens minus the stopwords.
+
+    Paired with `_ack_cjk_chars` through `_ack_units`, so an acknowledgement
+    written in Chinese is not read as an empty entry.
+    """
     tokens = {
         token.lower()
         for token in re.findall(r"[A-Za-z0-9_]+", value)

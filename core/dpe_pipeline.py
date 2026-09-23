@@ -119,9 +119,10 @@ def _relay_progress_context(value: Any) -> dict | None:
                 "first_failure_run_id": first_failure_run_id,
                 "retained_files": retained,
                 "retained_bytes": sum(retained.values()),
-                "incomplete_items": [instruction] if instruction else [
+                "incomplete_items": _relay_work_items(instruction)
+                or ([instruction] if instruction else [
                     "finish the approved plan portions not proven by the retained change set"
-                ],
+                ]),
                 "prior_budget_failure": (
                     "turn budget exhausted" in str(relay.get("error", "")).lower()
                 ),
@@ -219,6 +220,35 @@ def _should_intervene_early(*, turn: int, max_turns: int, writable: bool,
     )
 
 
+_NUMBERED_ITEM = re.compile(r"^\s*(?:\d{1,2}[.、)]|[-*•])\s+(.+)$")
+
+
+def _relay_work_items(instruction: str) -> list[str]:
+    """Split a relay instruction into the remaining-work items it names.
+
+    A director's relay header enumerates the closing tasks as a numbered list
+    before the retained brief follows; those items ARE the remaining work. The
+    brief body is background, not a work item, so it is never included: the
+    acknowledgement pass line must not grow with the brief it rides on.
+    """
+    items: list[str] = []
+    for line in str(instruction or "").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        match = _NUMBERED_ITEM.match(stripped)
+        if match:
+            item = match.group(1).strip()
+            if item:
+                items.append(item)
+            continue
+        if items:
+            break  # the header's task list has ended
+        if len(stripped) > 200:
+            break  # the brief body began before any header list
+    return items
+
+
 _ACK_STOPWORDS = frozenset({
     "a", "an", "and", "the", "to", "of", "from", "this", "that", "then",
     "do", "not", "before", "after", "with", "into", "for", "existing",
@@ -226,11 +256,30 @@ _ACK_STOPWORDS = frozenset({
 
 
 def _ack_tokens(value: str) -> set[str]:
-    return {
+    tokens = {
         token.lower()
         for token in re.findall(r"[A-Za-z0-9_]+", value)
         if len(token) >= 3 and token.lower() not in _ACK_STOPWORDS
     }
+    for token in list(tokens):
+        if "_" in token:
+            tokens |= {
+                part for part in token.split("_")
+                if len(part) >= 3 and part not in _ACK_STOPWORDS
+            }
+    return tokens
+
+
+_CJK_CHAR = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
+
+
+def _ack_cjk_chars(value: str) -> set[str]:
+    """CJK characters carry the meaning ASCII tokens never see; count them."""
+    return set(_CJK_CHAR.findall(value))
+
+
+def _ack_units(value: str) -> set[str]:
+    return _ack_tokens(value) | _ack_cjk_chars(value)
 
 
 def _acknowledges_incomplete(expected: list[str], supplied: Any) -> bool:
@@ -240,23 +289,24 @@ def _acknowledges_incomplete(expected: list[str], supplied: Any) -> bool:
     supplied_text = [str(item).strip() for item in supplied]
     if any(not item for item in supplied_text):
         return False
-    supplied_tokens = [_ack_tokens(item) for item in supplied_text]
-    if any(not tokens for tokens in supplied_tokens):
+    supplied_units = [_ack_units(item) for item in supplied_text]
+    if any(not units for units in supplied_units):
         return False
-    expected_tokens = [_ack_tokens(str(item)) for item in expected if str(item).strip()]
-    if not expected_tokens:
+    expected_units = [_ack_units(str(item)) for item in expected if str(item).strip()]
+    if not expected_units:
         return False
     # Each claimed item must be grounded in the retained instruction, and each
-    # retained instruction must have meaningful coverage. This accepts a useful
-    # split such as "finish wiring" + "add targeted tests", while rejecting an
-    # arbitrary acknowledgement such as "banana".
-    all_expected = set().union(*expected_tokens)
-    if any(not (tokens & all_expected) for tokens in supplied_tokens):
+    # retained work item must have meaningful coverage. This accepts a useful
+    # split such as "finish wiring" + "add targeted tests" (and a Chinese
+    # paraphrase, via the character units), while rejecting an arbitrary
+    # acknowledgement such as "banana".
+    all_expected = set().union(*expected_units)
+    if any(not (units & all_expected) for units in supplied_units):
         return False
-    supplied_union = set().union(*supplied_tokens)
+    supplied_union = set().union(*supplied_units)
     return all(
-        len(tokens & supplied_union) >= max(1, (len(tokens) + 1) // 2)
-        for tokens in expected_tokens
+        len(units & supplied_union) >= max(1, (len(units) + 1) // 2)
+        for units in expected_units
     )
 
 

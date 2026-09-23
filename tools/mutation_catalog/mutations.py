@@ -66,10 +66,9 @@ MUTATIONS = {
     },
     "M21PAIR": {
         "file_note": "The OBSERVABLE half of the M21 family: `in` AND the "
-                     "`line.index(prefix)` slice together. Literal M21 is "
-                     "behaviourally inert (see the inertness witness); this "
-                     "pair is what a test can turn red on the declaration "
-                     "channel.",
+                     "`line.index(prefix)` slice together. The pair is what "
+                     "turns a declaration-channel test red; literal M21 "
+                     "alone is inert against THIS shape.",
         "edits": [
             {
                 "file": "aitelier/tools/run_tests/impl.py",
@@ -381,36 +380,8 @@ MUTATIONS = {
             "tests/unit/test_gate_deferral_execution_points.py",
         ],
     },
-    "G1b": {
-        "edits": [{
-            "file": "core/gate_deferral.py",
-            "anchor": "GATE_DEFERRAL_WAIT_MAX = float(\n    os.getenv(\"AITELIER_GATE_DEFERRAL_WAIT_MAX\", \"900\"))\n",
-            "replacement": "GATE_DEFERRAL_WAIT_MAX = 1e9\n",
-        }],
-        "targeted": [
-            "tests/unit/test_gate_deferral_execution_points.py",
-        ],
-    },
-    "G3": {
-        "edits": [{
-            "file": "core/gate_deferral.py",
-            "anchor": "    return min(_positive_seconds(GATE_DEFERRAL_EPISODE_MAX_SECONDS, 10800.0),\n               ceiling)\n",
-            "replacement": "    return _positive_seconds(GATE_DEFERRAL_EPISODE_MAX_SECONDS, 10800.0)\n",
-        }],
-        "targeted": [
-            "tests/unit/test_gate_deferral_execution_points.py",
-        ],
-    },
-    "G4": {
-        "edits": [{
-            "file": "core/gate_deferral.py",
-            "anchor": "    return min(_positive_seconds(GATE_DEFERRAL_WAIT_SECONDS, 300.0),\n               max(1.0, _positive_seconds(GATE_DEFERRAL_WAIT_MAX, 900.0)))\n",
-            "replacement": "    return _positive_seconds(GATE_DEFERRAL_WAIT_SECONDS, 300.0)\n",
-        }],
-        "targeted": [
-            "tests/unit/test_gate_deferral_execution_points.py",
-        ],
-    },
+    # G1b, G3, G4 removed: G3=GILCLAMP, G4=WAITCLAMP byte-identical;
+    # G1b duplicates WAIT_MAX coverage already in WAITCLAMP.
     "S1": {
         "edits": [{
             "file": "aitelier/tools/run_tests/impl.py",
@@ -464,11 +435,39 @@ MUTATIONS = {
     "DUPHITS": {
         "edits": [{
             "file": "tests/unit/test_no_verbatim_previous_line_dup.py",
-            "anchor": "    assert non_test == []\n",
-            "replacement": "    assert non_test == []\n    assert non_test == []\n",
+            "anchor": "    assert non_test == []\\n",
+            "replacement": "    assert non_test == []\\n    assert non_test == []\\n",
         }],
         "targeted": [
             "tests/unit/test_no_verbatim_previous_line_dup.py::test_the_checker_file_is_clean_under_its_own_rule",
+        ],
+    },
+    # ── new round-9: hold-breaking mutations for the deferral readers ──
+    "HOST_HOLD_INERT": {
+        "file_note": "AItelierSkillFlow.advance_run no longer checks "
+                     "hold_blocks_advance — the host-level hold is inert; "
+                     "any caller of advance_run (run_driver, API, tests) "
+                     "can advance a deferred run.",
+        "edits": [{
+            "file": "core/skillflow_host.py",
+            "anchor": "        from core import gate_deferral\n        if gate_deferral.hold_blocks_advance(run_id):\n            return None\n",
+            "replacement": "        pass\n",
+        }],
+        "targeted": [
+            "tests/skillflow/test_coding_impl_gate_absence.py",
+        ],
+    },
+    "TICK_HOLD_INERT": {
+        "file_note": "The scheduler tick's deferral check is bypassed — "
+                     "observe_run returns state=none so the tick never "
+                     "returns early for a silent gate.",
+        "edits": [{
+            "file": "core/gate_deferral.py",
+            "anchor": "    book = LEDGER if ledger is None else ledger\n    absence = last_gate_absence(sf, run_id, report_path=report_path)\n    if absence is None:\n        book.clear(run_id)\n        return {\"state\": \"none\", \"remaining\": 0.0, \"gate\": \"\", \"reason\": \"\"}\n",
+            "replacement": "    book = LEDGER if ledger is None else ledger\n    absence = last_gate_absence(sf, run_id, report_path=report_path)\n    if True:\n        book.clear(run_id)\n        return {\"state\": \"none\", \"remaining\": 0.0, \"gate\": \"\", \"reason\": \"\"}\n",
+        }],
+        "targeted": [
+            "tests/skillflow/test_coding_impl_gate_absence.py",
         ],
     },
 }

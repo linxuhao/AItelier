@@ -198,9 +198,8 @@ _CASE_MIDLINE_NOISE = "x" * len(rt._REPO_GATE_CASE_PREFIX)
 
 
 def test_a_mid_line_echo_kills_the_in_operator_on_the_declaration_channel():
-    """Kills M21 (`startswith` -> `in`) at the ONE noise length where it is
-    observable. This is the witness the previous revision claimed and did not
-    have: measured, the mutation turns this test red."""
+    """A log echo whose length equals the prefix must not be mistaken for a
+    declaration. Kills M21PAIR (the `in` + `line.index` pair mutation)."""
     assert len(_MIDLINE_NOISE) == len(rt._REPO_GATE_UNMEASURED_PREFIX) > 19
     body = json.dumps({"state": "blocked", "reason": "an echo, not a record"})
     line = _MIDLINE_NOISE + rt._REPO_GATE_UNMEASURED_PREFIX + body
@@ -616,10 +615,7 @@ def test_a_mid_line_prefix_with_valid_json_after_it_is_still_not_a_record():
     fixed slice cuts into the prefix itself. It is NOT inert against every
     shape: with a header exactly `len(prefix)` long and the prefix quoted
     inside the JSON the fixed slice lands on the JSON and the reading flips —
-    `test_the_r4_shaped_witness_flips_under_the_literal_m21` measures that.
     The pair is the other, blunter half: it also moves the slice.
-
-    The pair is the other, blunter half.
     """
     prefix = rt._REPO_GATE_UNMEASURED_PREFIX
     echo = "10:00:00 " + prefix + '{"state":"blocked"}'

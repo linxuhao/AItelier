@@ -274,7 +274,6 @@ The absence accounting (round 5), in
 | widen the wait to 24h / 1e9 | `test_the_wait_cannot_be_widened_until_the_ceiling_disappears` |
 | remove the episode ceiling | `test_the_episode_ceiling_cannot_be_removed` |
 | force `hold_remaining` to 0 | `test_hold_remaining_is_not_constant_zero` |
-| delete the per-instance valve guard | `test_the_per_instance_valve_does_not_fire_while_an_episode_is_live`; `test_the_episode_ceiling_replaces_the_valve_that_it_disarmed` |
 
 ## The M21 family, stated honestly (round 8)
 
@@ -294,7 +293,6 @@ The mutation catalog (`tools/mutation_catalog/mutations.py`) carries `M21` and
 of the tree. The `in` + `line.index(...)` PAIR is a SECOND, blunter mutation
 (`M21PAIR` / `M21BPAIR`, applied in-process as `_apply_m21_pair`), not the
 card's M21 — the name says which one it is.
-noise.
 
 
 

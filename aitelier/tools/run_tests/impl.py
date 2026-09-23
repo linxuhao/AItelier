@@ -744,8 +744,8 @@ def _unmeasured_declaration(text: str) -> dict | None:
     A declaration is a whole line that STARTS with the prefix — a log echo of
     the prefix in the middle of a line is not a record — carrying a JSON
     object whose `state` is one of `_REPO_GATE_UNMEASURED_STATES`.
-    `state: "failed"` is not one of them: a gate that failed measured
-    absence.
+        `state: "failed"` is not one of them: a gate that failed measured its
+    subject, and a measured failure is not an absence.
     """
     for line in str(text).splitlines():
         if not line.startswith(_REPO_GATE_UNMEASURED_PREFIX):

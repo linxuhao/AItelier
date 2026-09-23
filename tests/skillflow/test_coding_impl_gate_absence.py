@@ -113,13 +113,16 @@ _SILENT_TAIL = (
     "exit 3\n")
 
 
-def _drive(sf, run_id, *, tick_ledger, ticks, clock_step):
+def _drive(sf, run_id, *, ticks, clock_step):
     """The scheduler's own order, INCLUDING the inline-tool drain.
 
-    Returns `(implement_runs, statuses, tick_outcomes, nodes)`. Nothing here
-    re-implements the tick: it calls the two `gate_deferral` readers the tick
-    calls, in the order the tick calls them, refuses to advance when they say
-    to hold, and drains inline tool steps the way the tick does.
+    Returns `(implement_runs, statuses, tick_outcomes, nodes)`. Both production
+    hold mechanisms are exercised on the global LEDGER:
+    1. `observe_run` (the scheduler's tick hold) — if silent, the tick returns
+       early without advancing; we still attempt `advance_run` to verify the
+       host-level hold fires.
+    2. `hold_blocks_advance` inside `advance_run` (the host's hold) — must
+       refuse to advance during a live episode.
 
     `clock_step` is how far the WALL CLOCK moves between ticks. The scheduler
     never waits out a real hold in a test, so the clock is fast-forwarded
@@ -140,10 +143,14 @@ def _drive(sf, run_id, *, tick_ledger, ticks, clock_step):
         if run["status"] != "running":
             break
         clock += clock_step
-        decision = gate_deferral.observe_run(sf, run_id, now=clock,
-                                             ledger=tick_ledger)
+        decision = gate_deferral.observe_run(sf, run_id, now=clock)
         outcomes.append(decision["state"])
         if decision["state"] == "silent":
+            # Exercise the host-level hold: advance_run must return None
+            # because hold_blocks_advance uses the same global LEDGER.
+            assert sf.advance_run(run_id) is None, (
+                "host hold failed: advance_run should return None while "
+                "the episode is silent")
             continue
         if decision["state"] == "expired":
             sf.fail_run(run_id, decision["reason"])
@@ -179,11 +186,10 @@ def _assert_never_cycles(statuses, outcomes, reason_source):
     assert "Cycle limit exceeded" not in text
 
 
-def _tick_ledger_for(sf, run_id):
-    """The tick's ledger, primed from the run exactly as the tick seeds it."""
-    ledger = gate_deferral.DeferralLedger()
-    first = gate_deferral.observe_run(sf, run_id, ledger=ledger)
-    return ledger, first
+def _prime_ledger(sf, run_id):
+    """Prime the global LEDGER by calling observe_run once, exactly as the
+    production scheduler does on the first tick. Returns the first observation."""
+    return gate_deferral.observe_run(sf, run_id)
 
 
 def test_pole_a_a_ceiling_far_past_the_window_spends_one_implement_cycle(
@@ -201,11 +207,11 @@ def test_pole_a_a_ceiling_far_past_the_window_spends_one_implement_cycle(
     counter = tmp_path / "calls.txt"
     sf, run_id = _wire(tmp_path, monkeypatch, episode_max=100000,
                        wait=1, counter=counter, tail=_SILENT_TAIL)
-    ledger, first = _tick_ledger_for(sf, run_id)
+    first = _prime_ledger(sf, run_id)
     assert first["state"] == "none"          # no report yet: nothing to account
 
     implement_runs, statuses, outcomes, nodes = _drive(
-        sf, run_id, tick_ledger=ledger, ticks=40,
+        sf, run_id, ticks=40,
         clock_step=gate_deferral.wait_seconds())
 
     assert implement_runs == 1, implement_runs
@@ -216,6 +222,7 @@ def test_pole_a_a_ceiling_far_past_the_window_spends_one_implement_cycle(
     assert sf.get_run(run_id)["current_node"] == "test_gate_absent"
     _assert_never_cycles(statuses, outcomes,
                          sf.get_run(run_id).get("error_reason"))
+    _assert_test_row_untouched(sf, run_id)
 
 
 def test_pole_b_a_zero_ceiling_is_clamped_and_cannot_charge_the_absence(
@@ -232,10 +239,10 @@ def test_pole_b_a_zero_ceiling_is_clamped_and_cannot_charge_the_absence(
     sf, run_id = _wire(tmp_path, monkeypatch, episode_max=0, wait=1,
                        counter=counter, tail=_SILENT_TAIL)
     assert gate_deferral.episode_max_seconds() > 0
-    ledger, _ = _tick_ledger_for(sf, run_id)
+    _prime_ledger(sf, run_id)
 
     implement_runs, statuses, outcomes, nodes = _drive(
-        sf, run_id, tick_ledger=ledger, ticks=15, clock_step=1)
+        sf, run_id, ticks=15, clock_step=1)
 
     assert implement_runs == 1, implement_runs
     assert statuses[-1] == "running", statuses
@@ -243,6 +250,7 @@ def test_pole_b_a_zero_ceiling_is_clamped_and_cannot_charge_the_absence(
     assert nodes[-1] == "test_gate_absent", nodes
     _assert_never_cycles(statuses, outcomes,
                          sf.get_run(run_id).get("error_reason"))
+    _assert_test_row_untouched(sf, run_id)
 
 
 def test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence(
@@ -258,10 +266,10 @@ def test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence(
     sf, run_id = _wire(tmp_path, monkeypatch, episode_max=3, wait=1,
                        counter=counter, tail=_SILENT_TAIL)
     assert gate_deferral.episode_max_seconds() == 3
-    ledger, _ = _tick_ledger_for(sf, run_id)
+    _prime_ledger(sf, run_id)
 
     implement_runs, statuses, outcomes, nodes = _drive(
-        sf, run_id, tick_ledger=ledger, ticks=20, clock_step=3)
+        sf, run_id, ticks=20, clock_step=3)
 
     assert implement_runs == 1, implement_runs
     assert nodes[-1] == "test_gate_absent", nodes
@@ -272,6 +280,7 @@ def test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence(
     reason = sf.get_run(run_id).get("error_reason") or ""
     assert gate_deferral.ABSENCE_TERMINAL in reason
     _assert_never_cycles(statuses, outcomes, reason)
+    _assert_test_row_untouched(sf, run_id)
 
 
 def test_a_gate_that_finally_answers_clears_the_deferral(tmp_path, monkeypatch):
@@ -281,9 +290,10 @@ def test_a_gate_that_finally_answers_clears_the_deferral(tmp_path, monkeypatch):
     counter = tmp_path / "calls.txt"
     sf, run_id = _wire(tmp_path, monkeypatch, episode_max=100000, wait=1,
                        counter=counter, tail=_SILENT_TAIL)
-    ledger, _ = _tick_ledger_for(sf, run_id)
-    _drive(sf, run_id, tick_ledger=ledger, ticks=8, clock_step=1)
-    assert gate_deferral.hold_blocks_advance(run_id, ledger=ledger)
+    _prime_ledger(sf, run_id)
+    _drive(sf, run_id, ticks=8, clock_step=1)
+    assert gate_deferral.hold_blocks_advance(run_id)
+    _assert_test_row_untouched(sf, run_id)
 
     # The gate's answer arrives: the report now says the code was graded.
     report_path = gate_deferral.find_test_report(sf, run_id)
@@ -296,9 +306,9 @@ def test_a_gate_that_finally_answers_clears_the_deferral(tmp_path, monkeypatch):
     data["summary"] = "the gate ran, nothing failed"
     report_path.write_text(json.dumps(data), encoding="utf-8")
 
-    cleared = gate_deferral.observe_run(sf, run_id, ledger=ledger)
+    cleared = gate_deferral.observe_run(sf, run_id)
     assert cleared["state"] == "none"
-    assert not gate_deferral.hold_blocks_advance(run_id, ledger=ledger)
+    assert not gate_deferral.hold_blocks_advance(run_id)
 
 
 def _step_rows(sf, run_id):
@@ -311,6 +321,20 @@ def _step_rows(sf, run_id):
 
 def _rows_by_step(sf, run_id):
     return {r["step_id"]: r for r in _step_rows(sf, run_id)[1]}
+
+
+def _assert_test_row_untouched(sf, run_id):
+    """Assert the four step-row invariants while the gate is silent.
+    Called from every pole so no hold-breaking mutation passes unnoticed."""
+    test_row = _rows_by_step(sf, run_id)["test"]
+    assert test_row["status"] == "completed", (
+        f"test row status drifted: {test_row['status']}")
+    assert test_row["retry_count"] == 0, (
+        f"deferral charged a retry: {test_row['retry_count']}")
+    assert test_row["release_count"] == 0, (
+        f"deferral released the claim: {test_row['release_count']}")
+    assert test_row["claim_epoch"] == 1, (
+        f"step re-claimed during deferral: {test_row['claim_epoch']}")
 
 
 def test_the_deferral_hold_leaves_real_step_rows_untouched(tmp_path, monkeypatch):
@@ -334,8 +358,8 @@ def test_the_deferral_hold_leaves_real_step_rows_untouched(tmp_path, monkeypatch
     counter = tmp_path / "calls.txt"
     sf, run_id = _wire(tmp_path, monkeypatch, episode_max=100000, wait=1,
                        counter=counter, tail=_SILENT_TAIL)
-    ledger, _ = _tick_ledger_for(sf, run_id)
-    _drive(sf, run_id, tick_ledger=ledger, ticks=40,
+    _prime_ledger(sf, run_id)
+    _drive(sf, run_id, ticks=40,
            clock_step=gate_deferral.wait_seconds())
     test_row = _rows_by_step(sf, run_id)["test"]
     assert test_row["status"] == "completed", test_row

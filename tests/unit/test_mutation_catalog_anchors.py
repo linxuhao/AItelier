@@ -1,42 +1,28 @@
-"""Every catalogued mutation is a concrete edit against a real file, and the
-card forbids counting an anchor that matches zero times as a kill. This test
-is the cheap half of that guarantee: it loads the catalog and checks that each
-edit's anchor matches EXACTLY once in the delivered tree, applying a file's
-edits in order (so a second edit sees the first's result)."""
+"""The mutation catalog's structural integrity. Anchor validation against
+product source lives in run_mutations.py (the runner), not here — that way a
+mutation that changes its own anchor text cannot produce a false 'kill' via
+this test going red. What remains: the catalog file must parse and the goal
+table entries must be present."""
 import sys
 from pathlib import Path
-
-import pytest
 
 _ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(_ROOT / "tools" / "mutation_catalog"))
 from mutations import MUTATIONS  # noqa: E402
 
 
-def _validate(name):
-    work = {}
-    for edit in MUTATIONS[name]["edits"]:
-        rel = edit["file"]
-        path = _ROOT / rel
-        text = work.get(rel)
-        if text is None:
-            text = path.read_text(encoding="utf-8")
-        hits = text.count(edit["anchor"])
-        assert hits == 1, (
-            f"{name}: anchor hit {hits} (need 1) in {rel}: "
-            f"{edit['anchor'][:70]!r}")
-        work[rel] = text.replace(edit["anchor"], edit["replacement"], 1)
-    return work
-
-
-def test_each_mutation_anchor_hits_exactly_once():
-    problems = []
-    for name in sorted(MUTATIONS):
-        try:
-            _validate(name)
-        except AssertionError as exc:
-            problems.append(str(exc))
-    assert not problems, "anchor problems:\n" + "\n".join(problems)
+def test_the_catalog_parses_and_each_entry_has_required_keys():
+    """The catalog must load, every entry must have 'edits' and 'targeted',
+    and every edit must have 'file', 'anchor', 'replacement'.  This checks
+    file-level syntax, NOT product-source anchor hits (the runner does that)."""
+    assert isinstance(MUTATIONS, dict)
+    for name, spec in sorted(MUTATIONS.items()):
+        assert "edits" in spec, f"{name}: missing 'edits'"
+        assert "targeted" in spec, f"{name}: missing 'targeted'"
+        assert isinstance(spec["edits"], list) and len(spec["edits"]) > 0
+        for edit in spec["edits"]:
+            for key in ("file", "anchor", "replacement"):
+                assert key in edit, f"{name}: edit missing '{key}'"
 
 
 def test_the_goal_table_mutations_are_all_present():

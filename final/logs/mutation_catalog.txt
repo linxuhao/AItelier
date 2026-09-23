@@ -1,0 +1,13 @@
+=== r8 tree: the catalog's anchors, on the delivered tree ===
+date: 2026-09-23
+cwd: <worktree root>
+command: python3.12 -m pytest -q -s -p no:cacheprovider \
+  tests/unit/test_mutation_catalog_anchors.py
+bare exit code: 0
+result line: 3 passed
+
+What it asserts: every edit in tools/mutation_catalog/mutations.py — including
+the 7 goal-table mutations N9, M21, M21b, G2, G2b, DUPIMPL, RESTART — is a
+concrete anchor that matches EXACTLY ONCE in the delivered tree, and that all
+seven goal-table names are present. An anchor that hit zero times would be an
+ERROR, never a kill.

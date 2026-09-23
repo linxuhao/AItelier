@@ -8,7 +8,9 @@ Run from the repository root:
 
 Exit status of THIS script is 0 only if every mutation it ran produced a
 non-zero full-suite exit code (a kill).  It writes one log per mutation under
-logs/mutations/ and a machine-readable table to logs/mutations/summary.json.
+logs/mutations/ as a `.txt` file (never `.log`, which the repo gitignores and
+the delivery hook then refuses) and a machine-readable table to
+logs/mutations/summary.json.
 
 Nothing here weakens a gate to make a mutation look killed: an anchor that does
 not match exactly once is reported as ANCHOR-ERROR (and is NOT a kill), the
@@ -93,7 +95,7 @@ def run_one(name: str, mutation: dict) -> dict:
     tcode, tout = _run(tree, mutation.get("targeted", []))
     fcode, fout = _run(tree, FULL_SCOPE)
     (LOG_DIR).mkdir(parents=True, exist_ok=True)
-    (LOG_DIR / f"{name}.log").write_text(
+    (LOG_DIR / f"{name}.txt").write_text(
         "# targeted (bare rc=%d)\n%s\n\n# full (bare rc=%d)\n%s\n"
         % (tcode, tout, fcode, fout), encoding="utf-8")
     # Verify the tree copy is a git repo copy and status is clean after we

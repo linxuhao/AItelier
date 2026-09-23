@@ -275,18 +275,25 @@ The absence accounting (round 5), in
 | remove the episode ceiling | `test_the_episode_ceiling_cannot_be_removed` |
 | force `hold_remaining` to 0 | `test_hold_remaining_is_not_constant_zero` |
 | delete the per-instance valve guard | `test_the_per_instance_valve_does_not_fire_while_an_episode_is_live`; `test_the_episode_ceiling_replaces_the_valve_that_it_disarmed` |
-| delete the host `advance_run` hold | `test_the_host_refuses_to_advance_a_run_whose_gate_is_silent` |
-The M21 family is stated honestly. The card's literal M21 (`startswith` ->
-`in`, the `line[len(prefix):]` slice UNCHANGED) is applied in the mutation
-catalog (`tools/mutation_catalog/mutations.py`) and is behaviourally INERT: a
-fixed 30-character slice can only land on the JSON when the prefix is already
-at column 0, which is the `startswith` case, so no input flips the reading.
-`test_M21_in_without_the_offset_is_invisible` records that fact rather than
-hiding it. What IS observable — and what `tests/unit/test_run_tests_unmeasured_declaration.py`
-reproduces in-process via `_apply_m21_pair` (the `in` + `line.index` PAIR, the
-two halves together) — is that a mid-line echo becomes a declaration on both the
-unmeasured and the case channel, and the named witness tests go red. The flip
-depends on the shape of the reading, not on the length of the surrounding
+
+## The M21 family, stated honestly (round 8)
+
+The card's literal M21 (`startswith` -> `in`, the `line[len(prefix):]` slice
+UNCHANGED) IS observable, and the r7 claim that it was inert was wrong. It is
+inert only for the echo shape used in r7 (`noise + PREFIX + body`), where the
+fixed slice cuts into the prefix itself. With a header exactly `len(prefix)`
+long and the prefix quoted INSIDE the JSON, `line[len(prefix):]` lands on the
+JSON and a real red is rewritten into an absence.
+`test_the_r4_shaped_witness_flips_under_the_literal_m21` asserts both readings
+of that shape; `test_the_r4_shaped_witness_flips_under_the_literal_m21b` does
+the same on the case channel. Both re-run the REAL reader with the card's
+literal single-line edit applied.
+
+The mutation catalog (`tools/mutation_catalog/mutations.py`) carries `M21` and
+`M21b` verbatim, and `run_mutations.py` applies exactly those edits to a copy
+of the tree. The `in` + `line.index(...)` PAIR is a SECOND, blunter mutation
+(`M21PAIR` / `M21BPAIR`, applied in-process as `_apply_m21_pair`), not the
+card's M21 — the name says which one it is.
 noise.
 
 

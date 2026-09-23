@@ -231,9 +231,11 @@ def _apply_m21_pair(func):
 
     `_apply_m21_pair` applies both halves — `startswith` → `in` AND the
     slice seeking the prefix where it was found (`line.index(PREFIX) +
-    len(PREFIX)`). It is NOT the card's literal M21 (`in`, slice UNCHANGED),
-    which is behaviourally inert against every input — see
-    `test_M21_in_without_the_offset_is_invisible`. The name says what it is.
+    len(PREFIX)`). It is NOT the card's literal M21 (`in`, slice UNCHANGED);
+    that half is measurable too, but only against a witness whose noise header
+    is EXACTLY `len(prefix)` long with the prefix quoted inside the JSON — see
+    `test_the_r4_shaped_witness_flips_under_the_literal_m21`. The name says
+    what this helper is.
     """
     import ast
     import inspect
@@ -257,6 +259,24 @@ def _apply_m21_pair(func):
     return namespace[func.__name__]
 
 
+def _apply_m21_literal(func):
+    """Apply the card's LITERAL M21 to the real reader: `in`, slice UNCHANGED."""
+    import ast
+    import inspect
+    import textwrap
+
+    source = textwrap.dedent(inspect.getsource(func))
+    mutated = source.replace(
+        "line.startswith(_REPO_GATE_UNMEASURED_PREFIX)",
+        "_REPO_GATE_UNMEASURED_PREFIX in line").replace(
+        "line.startswith(_REPO_GATE_CASE_PREFIX)",
+        "_REPO_GATE_CASE_PREFIX in line")
+    assert mutated != source, "the mutation did not apply — the reader changed"
+    namespace = dict(vars(rt))
+    exec(compile(ast.parse(mutated), "<m21-literal>", "exec"), namespace)
+    return namespace[func.__name__]
+
+
 def test_m21_is_reproduced_and_this_file_is_what_flips():
     """M21: `line.startswith(PREFIX)` -> `PREFIX in line` on the declaration
     channel. Under it a mid-line echo fires `unmeasured`, so a real red is
@@ -267,6 +287,49 @@ def test_m21_is_reproduced_and_this_file_is_what_flips():
     line = _MIDLINE_NOISE + rt._REPO_GATE_UNMEASURED_PREFIX + body
     assert rt._unmeasured_declaration(line) is None
     assert mutant(line) is not None and mutant(line)["state"] == "blocked"
+def test_the_r4_shaped_witness_flips_under_the_literal_m21():
+    """The card's literal M21 (`in`, the slice UNCHANGED) IS observable.
+
+    This is the witness shape the r7 review found and no test asserted: the
+    header is EXACTLY as long as the prefix and the prefix is quoted inside
+    the JSON, so `line[len(prefix):]` lands on the JSON. The candidate reads
+    NO declaration, so an rc=3 gate stays `measured_fail`; under the literal
+    M21 the quoted prefix matches, the fixed slice lands on the JSON, and a
+    real red is rewritten into an absence. Both readings are measured here —
+    the mutant is the card's literal single-line edit, not a pair.
+    """
+    prefix = rt._REPO_GATE_UNMEASURED_PREFIX
+    header = "2026-09-21 12:00:00 gate says:"
+    header = (header + "x" * len(prefix))[:len(prefix)]
+    assert len(header) == len(prefix)
+    body = json.dumps({"state": "blocked", "note": prefix})
+    line = header + body
+    gate = {"returncode": 3, "output": line, "output_truncated": False}
+    assert rt._unmeasured_declaration(line) is None
+    assert rt._repo_gate_outcome(gate) == rt.REPO_GATE_MEASURED_FAIL
+    mutant = _apply_m21_literal(rt._unmeasured_declaration)
+    assert mutant is not rt._unmeasured_declaration
+    assert mutant(line) is not None and mutant(line)["state"] == "blocked"
+
+
+def test_the_r4_shaped_witness_flips_under_the_literal_m21b():
+    """The same shape on the case channel for M21b's literal half: one echoed
+    log line fabricates a prunable known-red identity."""
+    prefix = rt._REPO_GATE_CASE_PREFIX
+    header = "2026-09-21 12:00:00 gate says:"
+    header = (header + "x" * len(prefix))[:len(prefix)]
+    assert len(header) == len(prefix)
+    body = json.dumps({"case_id": "A", "status": "failed", "detail": prefix})
+    gate = {"returncode": 1, "output_truncated": False,
+            "output": header + body}
+    cases, identity_error = rt._repo_gate_failure_cases(gate)
+    assert cases == [] and identity_error
+    mutant = _apply_m21_literal(rt._repo_gate_failure_cases)
+    assert mutant is not rt._repo_gate_failure_cases
+    m_cases, _ = mutant(gate)
+    assert [c["case_id"] for c in m_cases] == ["A"]
+
+
 
 
 def test_m21b_is_reproduced_and_this_file_is_what_flips():
@@ -548,11 +611,15 @@ def test_a_mid_line_prefix_with_valid_json_after_it_is_still_not_a_record():
     `_apply_m21_pair`) breaks — with the pair the line's JSON is sliced out at
     the prefix's real position and read as an absence, flipping the verdict.
 
-    Literal M21 (`in`, the 30-char slice UNCHANGED) is behaviourally inert
-    against this shape and every other: the fixed slice can only land on the
-    JSON when the prefix is already at column 0, which is the `startswith`
-    case. That is why the pair, not the lone `in`, is the observable mutation;
-    `test_M21_in_without_the_offset_is_invisible` records the inertness.
+    Literal M21 (`in`, the 30-char slice UNCHANGED) is inert against THIS
+    shape, because the echo here carries its JSON AFTER the prefix, so the
+    fixed slice cuts into the prefix itself. It is NOT inert against every
+    shape: with a header exactly `len(prefix)` long and the prefix quoted
+    inside the JSON the fixed slice lands on the JSON and the reading flips —
+    `test_the_r4_shaped_witness_flips_under_the_literal_m21` measures that.
+    The pair is the other, blunter half: it also moves the slice.
+
+    The pair is the other, blunter half.
     """
     prefix = rt._REPO_GATE_UNMEASURED_PREFIX
     echo = "10:00:00 " + prefix + '{"state":"blocked"}'

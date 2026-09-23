@@ -58,6 +58,7 @@ GATE_DEFERRAL_WAIT_MAX = float(
     os.getenv("AITELIER_GATE_DEFERRAL_WAIT_MAX", "900"))
 GATE_DEFERRAL_EPISODE_MAX_CEILING = float(
     os.getenv("AITELIER_GATE_DEFERRAL_EPISODE_MAX_CEILING", str(6 * 3600)))
+
 #: Hard-coded absolute ceiling on episode_max_seconds. No env var may lift
 #: the returned value past this. Guards against G2: setting the ceiling env
 #: to 1e9 would silently disable the wall-clock bound without this.

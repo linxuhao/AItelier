@@ -691,6 +691,7 @@ BASELINE_MEASURED = ("seeded", "compared")
 
 _FAILED_RE = re.compile(r"^(?:.*\s)?FAILED\s+(\S+)")
 _ERROR_RE = re.compile(r"^ERROR\s+(\S+)")
+
 _GATE_RE = re.compile(r"^((?:node|repo_gate):\S+)")
 _REPO_GATE_CASE_PREFIX = "AITELIER_REPO_GATE_CASE="
 _REPO_GATE_CASE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$")
@@ -744,7 +745,6 @@ def _unmeasured_declaration(text: str) -> dict | None:
     the prefix in the middle of a line is not a record — carrying a JSON
     object whose `state` is one of `_REPO_GATE_UNMEASURED_STATES`.
     `state: "failed"` is not one of them: a gate that failed measured
-    something, and one line must never be able to turn that red into an
     absence.
     """
     for line in str(text).splitlines():

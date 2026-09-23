@@ -6,8 +6,9 @@ could not advance. Measured on this host: a `dpe_game` step ran 400s and produce
 an unbroken run of `outcome=locked` lines while a freshly generated pipeline sat
 at its begin node with zero trace rows for over an hour.
 
-The rule now: the SAME project is still strictly serial (the per-project lock is
-untouched); DIFFERENT projects proceed together, bounded.
+The rule now: the SAME project is still strictly serial (its per-project lock is
+taken at dispatch in `poll_and_execute` and released when its tick's task is
+done); DIFFERENT projects proceed together, bounded.
 """
 
 import asyncio
@@ -21,9 +22,18 @@ from core import scheduler as sc
 @pytest.fixture
 def clean_locks():
     sc._tick_locks.clear() if hasattr(sc, "_tick_locks") else None
+    sc._detached_ticks.clear()
     yield
     if hasattr(sc, "_tick_locks"):
         sc._tick_locks.clear()
+    sc._detached_ticks.clear()
+
+
+async def _poll_and_wait(*polls):
+    """Run the polls, then wait for the ticks they dispatched: the poller
+    returns once it has STARTED them, not once they finish."""
+    started = await asyncio.gather(*polls)
+    await asyncio.gather(*(t for batch in started for t in batch))
 
 
 def _projects(*ids):
@@ -42,9 +52,9 @@ async def test_a_busy_project_no_longer_consumes_the_tick(clean_locks):
         ticked = []
         with patch.object(sc.db, "get_active_projects",
                           return_value=_projects("busy", "idle")), \
-             patch.object(sc, "_execute_skillflow_tick",
+             patch.object(sc, "_run_skillflow_tick",
                           side_effect=_recorder(ticked)):
-            await sc.poll_and_execute()
+            await _poll_and_wait(sc.poll_and_execute())
         assert ticked == ["idle"], f"expected only the free project to run: {ticked}"
     finally:
         sc._get_tick_lock("busy").release()
@@ -55,9 +65,9 @@ async def test_different_projects_advance_in_the_same_tick(clean_locks):
     ticked = []
     with patch.object(sc.db, "get_active_projects",
                       return_value=_projects("a", "b", "c")), \
-         patch.object(sc, "_execute_skillflow_tick",
+         patch.object(sc, "_run_skillflow_tick",
                       side_effect=_recorder(ticked)):
-        await sc.poll_and_execute()
+        await _poll_and_wait(sc.poll_and_execute())
     assert sorted(ticked) == ["a", "b", "c"]
 
 
@@ -68,8 +78,8 @@ async def test_the_same_project_is_never_advanced_twice_at_once(clean_locks):
     conflicts, which is why the lock exists."""
     entered, peak = [], []
 
-    # Mock the INNER tick, not `_execute_skillflow_tick` — the lock lives in the
-    # outer one, and mocking that away would test the mock instead of the lock.
+    # Mock the INNER tick — the lock is taken outside it, at dispatch, and
+    # mocking that away would test the mock instead of the lock.
     async def _slow_tick(pid, loop):
         entered.append(pid)
         peak.append(len(entered))
@@ -78,7 +88,7 @@ async def test_the_same_project_is_never_advanced_twice_at_once(clean_locks):
 
     with patch.object(sc.db, "get_active_projects", return_value=_projects("solo")), \
          patch.object(sc, "_run_skillflow_tick", side_effect=_slow_tick):
-        await asyncio.gather(sc.poll_and_execute(), sc.poll_and_execute())
+        await _poll_and_wait(sc.poll_and_execute(), sc.poll_and_execute())
     assert peak and max(peak) == 1, f"one project was advanced concurrently: {peak}"
 
 

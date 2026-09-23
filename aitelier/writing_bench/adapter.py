@@ -275,7 +275,9 @@ def novel_bench(*, operation: str, workspace_root: str = "", run_id: str = "",
         for file in ("literary.json", "audit.json", "audit_reading.json", "ledgers.json"):
             immutable(out / file, read_file(bench.work(run_id), file, TREE_LIMIT))
         manual = {"status": "awaiting_manual_approval", "commit": result["commit"], "stage_sha256": sha(raw),
-                  "normal_wait": True, "effects_on_approval": "exact acceptance then private backup",
+                  "normal_wait": True, "review_targets": result["review_targets"],
+                  "observed_reading": result["observed_reading"],
+                  "effects_on_approval": "exact acceptance then private backup",
                   "no_decision": "No acceptance, no timeout escalation, no automatic approval."}
         immutable(out / "approval_manifest.json", encode(manual))
         immutable(out / "review_bundle.md", ("# 导演终审\n\n请阅读完整本章、独立编辑意见、分录及 semantic_changes.json；"

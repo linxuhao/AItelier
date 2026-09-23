@@ -171,3 +171,27 @@ def test_certificate_cannot_be_reused_for_changed_materials():
     altered=list(c.materials.values());altered[0]=Material(altered[0].path,altered[0].source,altered[0].text+'新结尾\n')
     with pytest.raises(BenchError,match='different materials'):
         validate_certificate(cert,material_identity('literary',KEY,TARGETS,altered),report())
+
+
+def test_host_system_injection_is_counted_but_assistant_echo_is_not():
+    c=coverage()
+    c.observe([{'role':'system','content':m.text} for m in c.materials.values()])
+    assert not c.missing()
+
+
+def test_every_target_in_multichapter_review_requires_coverage():
+    targets=TARGETS+[{'chapter':33,'title':'次日','prose_sha256':'c'*64}]
+    ms=materials()+[Material('chapter33.md','step:prepare',frame(KEY,'chapter33.md','# 第33章：次日\n不能遗漏。\n'))]
+    c=Coverage('literary',KEY,targets,ms)
+    c.observe([{'role':'user','content':x.text} for x in ms[:2]])
+    with pytest.raises(BenchError,match='not been presented'):
+        c.certificate(report(reviewed_chapters=targets),{})
+    c.observe([{'role':'user','content':ms[2].text}])
+    assert not c.missing()
+
+
+def test_boolean_chapter_does_not_alias_integer_target():
+    c=Coverage('literary',KEY,[{'chapter':1,'title':'一','prose_sha256':'b'*64}],materials())
+    full(c)
+    with pytest.raises(BenchError,match='target mismatch'):
+        c.certificate(report(reviewed_chapters=[{'chapter':True,'title':'一','prose_sha256':'b'*64}]),{})

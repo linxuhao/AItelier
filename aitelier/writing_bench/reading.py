@@ -165,7 +165,7 @@ class Coverage:
                 content = "\n".join(x.get("text", "") for x in content if isinstance(x, dict) and x.get("type") == "text")
             if not isinstance(content, str):
                 continue
-            if message.get("role") == "user":
+            if message.get("role") in ("user", "system"):
                 self._inline(content)
                 continue
             tool = self.calls.get(message.get("tool_call_id"))

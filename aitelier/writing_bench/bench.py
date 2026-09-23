@@ -29,8 +29,10 @@ LISTS = ("events", "appearances", "locations", "thread_updates", "arc_updates")
 
 
 def engine_identity() -> str:
-    files = sorted(Path(__file__).parent.glob("*.py")) + [Path(ns.__file__)]
-    return sha(encode({p.name: sha(p.read_bytes()) for p in files}))
+    root = Path(__file__).resolve().parents[2]
+    files = sorted(Path(__file__).parent.glob("*.py")) + [Path(ns.__file__),
+            root / "core/dpe_pipeline.py", root / "core/ai_router.py"]
+    return sha(encode({str(p.relative_to(root)): sha(p.read_bytes()) for p in files}))
 
 
 def validate_ledger(value: dict, chapter: int, title: str) -> None:
@@ -448,6 +450,12 @@ class Bench:
                       "commit": commit, "tree": tree, "retained_ref": ref, "genesis": self.policy.genesis,
                       "policy": m["policy"], "engine": m["engine"],
                       "input_manifest_sha256": self._json(self.work(run_id), "input.json")["manifest_sha256"],
+                      "review_protocol": PROTOCOL,
+                      "review_targets": self.review_materials(run_id, "literary")[0]["targets"],
+                      "observed_reading": {phase: {"source_run_id": cert["claim"].get("run_id"),
+                             "step_instance_id": cert["claim"].get("step_instance_id"),
+                             "materials": cert["identity"]["materials"], "complete": cert["complete"]}
+                             for phase, cert in (("literary", literary["reading"]), ("ledger", proof))},
                       "literary_sha256": sha(read_file(self.work(run_id), "literary.json")),
                       "ledger_sha256": sha(read_file(self.work(run_id), "ledgers.json")),
                       "audit_sha256": sha(read_file(self.work(run_id), "audit.json")),

@@ -241,3 +241,23 @@ silently waived. A failed process can leave an unreferenced `.freeze-*` temporar
 directory in the project's artifact root. Recovery does not use it as a valid
 submission; operator cleanup must wait until no freeze operation owns the lock,
 and must preserve published submissions, retained refs and run evidence.
+
+## Host-observed review reading
+
+The reviewer entry point is `review_request.json`, followed by the independent
+`current_prose.md`; baseline context is not the current chapter. Literary review
+requires that prose and `review_context.md`; the ledger auditor also requires
+`proposed_ledgers.md`. Reports explicitly bind every chapter number, title and
+prose hash in `reviewed_chapters`.
+
+A host-only session accounts for exact material actually present in successful
+model requests after context projection. Self-reported `read_complete`, requested
+read ranges and raw hidden tool results are insufficient. Missing windows cause
+a refusal with precise bounded-read instructions; material already fully injected
+does not require a redundant read. Certificates bind report bytes and the real
+reviewer instance. Stage creation requires both content judgment and this
+independent presentation evidence; the single manual approval remains mandatory.
+
+See [Writing Bench review evidence](writing-bench-reading.md) for the material,
+coverage, recovery and rollout contracts, including the limits of what mechanical
+coverage can establish about literary understanding.

@@ -17,6 +17,6 @@ parameters:
   length:
     type: integer
     required: false
-    description: "Characters to read, default 12000, maximum 20000."
+    description: "Character budget; baseline maximum 20000. Review pages are bounded below native projection size; follow next_start."
 output:
   target: artifact

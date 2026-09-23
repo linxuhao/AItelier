@@ -75,7 +75,7 @@ Why the absence is routed out of the loop: `configs/coding_impl.yaml` keeps
 gate. Left to the `all_passed: false` edge, a declared absence would spend one
 of the three implement laps on a gate that never spoke, and the run would die
 on `Cycle limit exceeded`. The flag travels on the tool's own RETURN, so the
-edge needs no file reader at all.contention costs no implement cycle and does not end the run.
+edge needs no file reader at all.
 
 The first contention costs no implement cycle and does not end the run.
 
@@ -192,7 +192,7 @@ How the two execution points read it:
   `state == "silent"` BEFORE the valve check, so each instance during a live
   episode is claimed exactly ONCE (measured). The valve is therefore not
   bypassed — it is never reached on the deferral path, and it stays the
-  ordinary bound for a non-deferral runaway.  bound that applies instead.
+  ordinary bound for a non-deferral runaway.
 
 Both knobs are bounded: `GATE_DEFERRAL_WAIT_SECONDS` and
 `GATE_DEFERRAL_EPISODE_MAX_SECONDS` may be tuned through the environment and
@@ -276,12 +276,18 @@ The absence accounting (round 5), in
 | force `hold_remaining` to 0 | `test_hold_remaining_is_not_constant_zero` |
 | delete the per-instance valve guard | `test_the_per_instance_valve_does_not_fire_while_an_episode_is_live`; `test_the_episode_ceiling_replaces_the_valve_that_it_disarmed` |
 | delete the host `advance_run` hold | `test_the_host_refuses_to_advance_a_run_whose_gate_is_silent` |
-M21 and M21b are killed in-suite: `tests/unit/test_run_tests_unmeasured_declaration.py`
-applies both halves of the mutation via `_apply_m21` and asserts the reading
-flips (candidate reads `None`, mutant reads `blocked` on the declaration
-channel; candidate finds no case, mutant fabricates one on the case channel).
-The tree-level witnesses in `tests/unit/test_tree_level_accounting_witnesses.py`
-also pin the source text to reject a future reintroduction.
+The M21 family is stated honestly. The card's literal M21 (`startswith` ->
+`in`, the `line[len(prefix):]` slice UNCHANGED) is applied in the mutation
+catalog (`tools/mutation_catalog/mutations.py`) and is behaviourally INERT: a
+fixed 30-character slice can only land on the JSON when the prefix is already
+at column 0, which is the `startswith` case, so no input flips the reading.
+`test_M21_in_without_the_offset_is_invisible` records that fact rather than
+hiding it. What IS observable — and what `tests/unit/test_run_tests_unmeasured_declaration.py`
+reproduces in-process via `_apply_m21_pair` (the `in` + `line.index` PAIR, the
+two halves together) — is that a mid-line echo becomes a declaration on both the
+unmeasured and the case channel, and the named witness tests go red. The flip
+depends on the shape of the reading, not on the length of the surrounding
+noise.
 
 
 

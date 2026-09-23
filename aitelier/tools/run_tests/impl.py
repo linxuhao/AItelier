@@ -690,8 +690,6 @@ BASELINE_FILE = "run_tests_baseline.json"
 BASELINE_MEASURED = ("seeded", "compared")
 
 _FAILED_RE = re.compile(r"^(?:.*\s)?FAILED\s+(\S+)")
-
-_FAILED_RE = re.compile(r"^(?:.*\s)?FAILED\s+(\S+)")
 _ERROR_RE = re.compile(r"^ERROR\s+(\S+)")
 _GATE_RE = re.compile(r"^((?:node|repo_gate):\S+)")
 _REPO_GATE_CASE_PREFIX = "AITELIER_REPO_GATE_CASE="

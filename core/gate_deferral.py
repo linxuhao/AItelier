@@ -12,7 +12,10 @@ Both can hold at once: the episode below lets the run STOP, and when it stops
 it names the absence.  It never says ``Cycle limit exceeded`` and it never
 says the tests failed, because neither of those is what happened.
 
-One execution point reads this module (``core/scheduler.py``):
+Two execution points read this module:
+
+* ``core/scheduler.py``'s tick, and
+* ``core/skillflow_host.py``'s ``AItelierSkillFlow.advance_run``.
 
 * the tick skips a run whose deferral is still inside its wait, so no
   implement cycle is spent while the gate is silent.  Because the tick

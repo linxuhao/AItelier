@@ -4,10 +4,8 @@
 # that talks to the GitHub REST API and needs the GITHUB_TOKEN secret.
 
 import os
-import os
 import re
 import subprocess
-import os
 from pathlib import Path
 
 import httpx

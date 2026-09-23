@@ -219,12 +219,13 @@ def test_the_tick_refuses_to_claim_while_the_gate_is_silent(monkeypatch,
 
 def test_during_a_deferral_hold_the_step_claim_is_held_not_released(monkeypatch,
                                                                      tmp_path):
-    """The deferral does NOT reset the step to pending, does NOT increment
-    retry_count, and does NOT release the claim. Measured: each instance gets
-    exactly 1 claim and stays completed; the tick returns before reaching any
-    step-state mutation. This replaces the prior assertion (which tested the
-    valve bypass during a hypothetical re-claim — premise shown false by
-    these measurements: 1 claim, no re-claim, no retry_count change).
+    """While an absence is live the tick neither claims the step nor advances
+    it. This stub measures exactly two things: `claims == 0` across three
+    silent ticks, and the ledger holding the episode (3 absences, remaining
+    hold > 0). The step-STATE claims this file used to make in prose —
+    retry_count / release_count staying put — are measured on REAL step rows
+    in `test_coding_impl_gate_absence.py`, not here: a stub with no step row
+    cannot see a counter it does not model.
     """
     out_dir = tmp_path / "out"
     out_dir.mkdir()
@@ -295,12 +296,42 @@ def test_the_deferral_ledger_is_not_persisted_so_a_restart_re_measures():
 
     restarted = gd.DeferralLedger()
     assert restarted.episode_count("run-1") == 0
+    # A fresh process holds no remembered instant: the episode clock starts
+    # from the re-derived absence, not from the previous process's start.
+    assert restarted.episode_seconds("run-1", now=1e9) == 0.0
     assert restarted.expired("run-1", now=1e9) is False
     assert restarted.deferring("run-1", now=1e9) is False
     # Re-derived from the run, not remembered: a fresh ledger seeds the
     # episode from `observe_run`'s own reading at the moment it is asked.
     restarted.note_absence("run-1", now=1e9)
     assert restarted.episode_count("run-1") == 1
+
+
+def test_the_effective_episode_ceiling_is_ten_thousand_eight_hundred_as_loaded():
+    """G2 / G2b reader that does NOT touch the constants it guards.
+
+    The r7 reader monkeypatched `GATE_DEFERRAL_EPISODE_MAX_SECONDS` to 10800
+    and then asserted 10800 — it overwrote the very value it claimed to check,
+    so a module that loaded `1e9` stayed green while the effective episode
+    ceiling silently doubled. This reads the module exactly as it is loaded:
+
+    * G2 (the seconds constant becomes 1e9) is caught by the effective
+      `episode_max_seconds()` and by the constant itself, and BOTH name 10800;
+    * G2b (the ceiling constant becomes 1e9) is caught by the ceiling constant
+      itself — the hardcoded absolute clip still holds the runtime value, so
+      this is the one reader that sees it.
+    """
+    import importlib
+    loaded = importlib.reload(gd)
+    assert loaded.episode_max_seconds() == 10800.0, (
+        f"as-loaded effective episode ceiling is "
+        f"{loaded.episode_max_seconds()}, not 10800 s (G2 widened the bound)")
+    assert loaded.GATE_DEFERRAL_EPISODE_MAX_SECONDS == 10800.0, (
+        f"GATE_DEFERRAL_EPISODE_MAX_SECONDS={loaded.GATE_DEFERRAL_EPISODE_MAX_SECONDS}"
+        ", expected 10800")
+    assert loaded.GATE_DEFERRAL_EPISODE_MAX_CEILING == 6 * 3600, (
+        f"GATE_DEFERRAL_EPISODE_MAX_CEILING={loaded.GATE_DEFERRAL_EPISODE_MAX_CEILING}"
+        ", expected 21600 (6 * 3600) — G2b widened the ceiling constant")
 
 
 def test_G2_episode_max_seconds_is_hard_capped_against_1e9(monkeypatch):

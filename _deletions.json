@@ -1,4 +1,5 @@
 [
   "test_create.txt",
-  "web/src/views/UnifiedDashboard.svelte"
+  "web/src/views/UnifiedDashboard.svelte",
+  "tests/unit/test_source_lines_are_not_mangled.py"
 ]

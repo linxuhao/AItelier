@@ -221,7 +221,7 @@ def test_a_mid_line_echo_kills_the_in_operator_on_the_case_channel():
     assert identity_error
 
 
-def _apply_m21(func):
+def _apply_m21_pair(func):
     """Apply the mutation ITSELF, in-process, and return the mutant callable.
 
     The card's claim is "M21 is killed". An assertion about the candidate
@@ -229,9 +229,11 @@ def _apply_m21(func):
     witness below re-runs the REAL reader mutated and asserts the reading
     FLIPS. The mutation is reproduced by the suite, not asserted about.
 
-    `_apply_m21` applies both halves: `startswith` → `in` AND the slice
-    seeking the prefix where it was found (`line.index(PREFIX) + len(PREFIX)`).
-    Together they turn a mid-line echo into a declaration.
+    `_apply_m21_pair` applies both halves — `startswith` → `in` AND the
+    slice seeking the prefix where it was found (`line.index(PREFIX) +
+    len(PREFIX)`). It is NOT the card's literal M21 (`in`, slice UNCHANGED),
+    which is behaviourally inert against every input — see
+    `test_M21_in_without_the_offset_is_invisible`. The name says what it is.
     """
     import ast
     import inspect
@@ -260,7 +262,7 @@ def test_m21_is_reproduced_and_this_file_is_what_flips():
     channel. Under it a mid-line echo fires `unmeasured`, so a real red is
     rewritten into an absence. Both halves are measured: the candidate reads
     None, the mutant reads `blocked`."""
-    mutant = _apply_m21(rt._unmeasured_declaration)
+    mutant = _apply_m21_pair(rt._unmeasured_declaration)
     body = json.dumps({"state": "blocked", "reason": "an echo, not a record"})
     line = _MIDLINE_NOISE + rt._REPO_GATE_UNMEASURED_PREFIX + body
     assert rt._unmeasured_declaration(line) is None
@@ -271,7 +273,7 @@ def test_m21b_is_reproduced_and_this_file_is_what_flips():
     """M21b: the same `in` on `_REPO_GATE_CASE_PREFIX`. Under it one echoed
     log line fabricates a prunable known-red identity — how a red gets
     forgiven by a gate that never ran."""
-    mutant = _apply_m21(rt._repo_gate_failure_cases)
+    mutant = _apply_m21_pair(rt._repo_gate_failure_cases)
     gate = {"returncode": 1, "output_truncated": False,
             "output": _CASE_MIDLINE_NOISE + _case("A", "quoted")}
     cases, identity_error = rt._repo_gate_failure_cases(gate)
@@ -507,3 +509,55 @@ def test_a_real_red_still_enters_the_baseline_and_the_absence_after_it_does_not_
     assert baseline.read_bytes() == before, (
         "an absence changed a baseline it did not measure")
     assert "repo_gate:run_tests.sh#A" in report["baseline_kept_unproven"]
+
+
+# ── N9: the tool's OWN contract text is a witness, on the deleted segment ───
+
+_N9_SEGMENT = (
+    "  A gate that produced NO VERDICT does not loop back to `implement`: its\n"
+    "  absence is stated on the report, with\n"
+    "  `repo_gate_unmeasured: true` and `repo_gate_absent: true` (plus\n"
+    "  `repo_gate.measured: \"unmeasured\"` and `repo_gate.attempts`, the number of\n"
+    "  runs the reading cost), and `configs/coding_impl.yaml` routes\n")
+
+
+def test_the_tool_doc_names_the_no_verdict_gate_as_absent_not_a_loop():
+    """The `tool.yaml` :52-56 segment is the human-visible contract that a
+    gate with NO verdict does not spend an implement cycle: it states
+    `repo_gate.attempts` and that `configs/coding_impl.yaml` routes the
+    absence. N9 deletes exactly this segment. The witness asserts the segment
+    itself — not the neighbouring UNMEASURED-declaration prose at :42-45 that
+    r7 pinned instead."""
+    tool_yaml = (Path(rt.__file__).parent / "tool.yaml").read_text(
+        encoding="utf-8")
+    assert _N9_SEGMENT in tool_yaml, (
+        "the no-verdict-does-not-loop-back segment is gone — the absence "
+        "contract that stops an unmeasured gate reaching `implement` is no "
+        "longer stated on the tool's own contract")
+
+
+# ── M21 family: the observable half is the pair, stated honestly ────────────
+
+def test_a_mid_line_prefix_with_valid_json_after_it_is_still_not_a_record():
+    """A behavioral witness, not a text pin.
+
+    `noise AITELIER_REPO_GATE_UNMEASURED={"state":"blocked"}` is a log echo
+    whose JSON is complete but which does NOT start with the prefix. The
+    candidate reads it as NO declaration, so a gate that rc=3 stays
+    `measured_fail`. This is the behaviour the `in`+`line.index` PAIR (see
+    `_apply_m21_pair`) breaks — with the pair the line's JSON is sliced out at
+    the prefix's real position and read as an absence, flipping the verdict.
+
+    Literal M21 (`in`, the 30-char slice UNCHANGED) is behaviourally inert
+    against this shape and every other: the fixed slice can only land on the
+    JSON when the prefix is already at column 0, which is the `startswith`
+    case. That is why the pair, not the lone `in`, is the observable mutation;
+    `test_M21_in_without_the_offset_is_invisible` records the inertness.
+    """
+    prefix = rt._REPO_GATE_UNMEASURED_PREFIX
+    echo = "10:00:00 " + prefix + '{"state":"blocked"}'
+    assert rt._unmeasured_declaration(echo) is None
+    measured_fail = {"returncode": 3, "output": echo, "output_truncated": False}
+    assert rt._repo_gate_outcome(measured_fail) == rt.REPO_GATE_MEASURED_FAIL
+    assert rt._repo_gate_outcome(measured_fail) != rt.REPO_GATE_UNMEASURED
+

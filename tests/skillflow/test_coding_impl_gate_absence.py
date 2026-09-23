@@ -299,3 +299,48 @@ def test_a_gate_that_finally_answers_clears_the_deferral(tmp_path, monkeypatch):
     cleared = gate_deferral.observe_run(sf, run_id, ledger=ledger)
     assert cleared["state"] == "none"
     assert not gate_deferral.hold_blocks_advance(run_id, ledger=ledger)
+
+
+def _step_rows(sf, run_id):
+    cols = [d[0] for d in sf._conn.execute(
+        "SELECT * FROM skillflow_steps WHERE run_id=?", (run_id,)).description]
+    rows = sf._conn.execute(
+        "SELECT * FROM skillflow_steps WHERE run_id=?", (run_id,)).fetchall()
+    return cols, [dict(zip(cols, tuple(r))) for r in rows]
+
+
+def _rows_by_step(sf, run_id):
+    return {r["step_id"]: r for r in _step_rows(sf, run_id)[1]}
+
+
+def test_the_deferral_hold_leaves_real_step_rows_untouched(tmp_path, monkeypatch):
+    """Criterion 2, measured on the REAL graph's step rows — not a stub.
+
+    While the never-answering gate is silent, the `test` step has already run
+    and completed, and the hold parks the run at `test_gate_absent`. What must
+    be TRUE of the rows the hold does NOT touch:
+
+    * the `test` row is `completed`;
+    * its `retry_count` is 0 — the deferral never charges a retry;
+    * its `release_count` is 0 — the deferral never releases the claim;
+    * its `claim_epoch` is 1 — the step instance was claimed exactly once.
+
+    Each is a separate assertion so the mutation that breaks it names itself.
+    The `H2` mutation (host `advance_run` no longer refuses during a hold)
+    lets the run advance past the silent gate and re-drive the loop, which
+    moves `release_count` / `retry_count` off 0 and re-claims; `D1` (absence
+    never expires) and the release/retry charge paths are the other readers.
+    """
+    counter = tmp_path / "calls.txt"
+    sf, run_id = _wire(tmp_path, monkeypatch, episode_max=100000, wait=1,
+                       counter=counter, tail=_SILENT_TAIL)
+    ledger, _ = _tick_ledger_for(sf, run_id)
+    _drive(sf, run_id, tick_ledger=ledger, ticks=40,
+           clock_step=gate_deferral.wait_seconds())
+    test_row = _rows_by_step(sf, run_id)["test"]
+    assert test_row["status"] == "completed", test_row
+    assert test_row["retry_count"] == 0, test_row
+    assert test_row["release_count"] == 0, test_row
+    assert test_row["claim_epoch"] == 1, test_row
+
+

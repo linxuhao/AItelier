@@ -10,17 +10,33 @@ This rev touches **no code behaviour**. It closes only the red criterion
 `the-ruling-is-written-where-the-table-is` (its five fix-items below) and re-runs the four
 already-green criteria on this tree.
 
+## Criteria, one by one (this rev, this tree)
+
+- `an-opened-projects-notes-are-readable-anonymously` — **pass**. `tests/unit/test_state_project_privacy.py::TestTheWorkingNoteReadsAcrossThreeProjectStates::test_the_six_note_reads_over_the_three_project_states` is the cross product **6 note reads × 3 project states = 18 cells** (opened → 200 carrying the body; unopened → 403; absent → 403; the two refusals byte-identical). Re-run on this tree: `logs/criteria_named_nodes_13.txt`, bare exit code 0; the same file whole, again, in `logs/criteria_rerun_5files.txt`, bare exit code 0.
+- `everything-else-private-stays-private` — **pass**. In the same log: `TestClassification::test_everything_the_ruling_did_not_name_stays_private` (the director mailbox, the events/long-poll plumbing, `project_visibility`) and `TestClassification::test_an_unclassified_read_is_private_by_default`, which judges a made-up action name private. The four note writes stay refused in `TestAnonymousHttp::test_writes_stay_refused_anonymously`, inside `logs/criteria_rerun_5files.txt`. Bare exit code 0 for both logs.
+- `no-note-read-leaks-an-unopened-project` — **pass**. `TestListingDoesNotNameRefused::test_no_private_body_surfaces_and_scanner_has_a_positive_control` (the scanner's positive control sits in the same assertion, so a scanner that scans nothing cannot pass it), `test_public_gate_table_unopened_opened_closed` over the whole public-gate set, and `TestExhaustiveDoors::test_every_read_action_is_refused_iff_it_is_private` over every action and every GET route read from the mounted app's own OpenAPI document. Same log, bare exit code 0.
+- `the-ruling-is-written-where-the-table-is` — **pass after the fixes below**; its five fix-items are each shown before → after further down.
+- `the-whole-suite-stays-green-in-the-container` — **not re-measured by this step; reported, not claimed.** One `pytest tests` run and one `pytest tests/unit` run were both killed at the host probe's 300-second wall with recorded exit status -9 (`logs/full_suite_attempt.txt`), so this step holds no bare whole-suite RC for this tree. The container-wide number for this behaviour is r2's 4773 passed / bare RC 0 on base `c037a54fc9281f1ab66f26f3e87f6684ea3914d0`, and this rev's diff moves no behaviour (markdown, comments, two test docstrings, one unused i18n key). What this tree does measure is the whole State surface: 20 `test_state*.py` files, 447 passed in three chunks, bare exit code 0 in every chunk (`logs/state_surface_chunks.txt`). The authoritative whole-suite run is this pipeline's own `run_tests` gate, which the step's test phase executes uncapped.
+
+The mutation poles for the first three criteria — dropping the project-privacy half, moving one still-private read into the public table, dropping the cross-project filter — were planted and read in r2 and named by the r2 review. This rev changes no code, so it re-runs the named nodes on this tree instead of re-planting them.
+
 ## Every number with the log that produced it
+
+Every delivery log in `logs/` ends in `.txt`: the repository's `.gitignore` line 67 is `*.log`, so a `.log` output file is git-ignored and the implement lifecycle hook refuses the whole step.
 
 | number | meaning | log file | bare exit code |
 | --- | --- | --- | --- |
-| 143 passed | five criteria/gate test files re-run post-edit | `logs/criteria_rerun_5files.log` | 0 |
-| 173 passed | eight reagent-swapped guard + leak tests re-run post-edit | `logs/criteria_rerun_8files.log` | 0 |
-| timeout (-9) | full `tests/` single run vs 300s host probe wall | `logs/full_suite_attempt.log` | n/a (killed) |
+| 150 passed in 32.13 s | five criteria/gate files re-run post-edit on this tree | `logs/criteria_rerun_5files.txt` | 0 |
+| 188 passed in 34.33 s | eight files carrying the private-read reagents and the leak checks | `logs/criteria_rerun_8files.txt` | 0 |
+| 8 passed in 1.40 s | the eight reagent-swapped guard/leak nodes, alone | `logs/criteria_rerun_8files.txt` | 0 |
+| 13 passed in 2.43 s | criteria 1/2/3 named nodes: the 6 × 3 = 18-cell cross product, the unknown action, the leak scanner | `logs/criteria_named_nodes_13.txt` | 0 |
+| 447 passed (196 + 161 + 90) | every `test_state*.py` file: 20 files in 3 chunks | `logs/state_surface_chunks.txt` | 0 in each chunk |
+| exit status -9 at 300 s | `pytest tests`, and `pytest tests/unit`, each past the probe wall | `logs/full_suite_attempt.txt` | none taken (killed) |
 
-The full-suite-in-container bare RC (4773 passed, RC 0) belongs to r2 and is unchanged
-because this diff is comment/docstring/i18n/markdown only; the authoritative run is the
-step's `run_tests` gate, not a probe (see `logs/full_suite_attempt.log`).
+Each exit code above is the focused probe's own recorded `exit_status`; no exit code in this
+delivery was taken through a pipe. The container command form the r2 review used
+(`-w <tree> -e PYTHONPATH=<tree>`) belongs to the `run_tests` gate and is recorded in that
+gate's own log, not here.
 
 ## Item 1 — broken/duplicated doc sentences (before → after)
 
@@ -65,7 +81,8 @@ half passes only because the service is read-trusted here:
 
 i18n key `noteUnavailable` (`web/src/lib/stateI18n.svelte.ts`) was **unused** and carried a
 now-false claim ("Sign in with writer access to read this project") that contradicts the
-ruling — deleted (no reference existed; `grep noteUnavailable` → only its definition).
+ruling — deleted. No view asked for it; `noteUnavailable` now appears in this file only, and
+the notice the view really renders is the `private` key at `web/src/views/StateProject.svelte:109`.
 
 ## Reagent-swapped tests (private-guard reagents now a still-private action)
 

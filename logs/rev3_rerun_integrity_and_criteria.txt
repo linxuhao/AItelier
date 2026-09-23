@@ -1,0 +1,46 @@
+# notes-public rev 3 - re-run evidence (documentation / test-script round)
+#
+# Captured with the implement step's focused_check probe (pytest runner). Each
+# [exit] line below is the recorded `exit_status` field of that probe, taken with
+# NO pipe (no `| tail`, no `| tee`) between the run and the recorded value.
+#
+# Environment: /usr/local/bin/python3.12 -m pytest -q -s -p no:cacheprovider
+# cwd: /home/linxuhao/.AItelier/worktrees/cf0507b9-4746-4eb2-b2d9-7e794294bbfd
+# run_id: cf0507b9-4746-4eb2-b2d9-7e794294bbfd  step_id: implement
+#
+# The whole-suite `pytest tests/ -q -p no:cacheprovider` (criterion 5) is NOT in
+# this file: this step's probe surface caps at 300s and a whole-suite attempt was
+# killed at that wall (see logs/full_suite_attempt.txt, exit status -9). The
+# authoritative whole-suite run is this pipeline's own run_tests gate.
+
+## Run 1 - integrity scan, on this rev's tree AFTER the fixes
+
+[command] python -m pytest -q -s -p no:cacheprovider \
+            tests/unit/test_source_files_are_intact.py
+[state]   StateProject.test.ts line 78 collapsed `  });});` -> `  });`;
+          GRAFTED_CLOSER relaxed from `;[ \t]+\}` to `;[ \t]*\}` so it sees a
+          closer grafted onto a closer; positive control for `  });});` added.
+[exit]    0
+[output]  4 passed, 2 warnings in 1.95s
+
+## Run 2 - criteria 1/2/3 behavioral + reagent entrypoints, on this rev's tree
+
+[command] python -m pytest -q -s -p no:cacheprovider \
+            tests/unit/test_state_project_privacy.py \
+            tests/unit/test_state_read_visibility.py \
+            tests/integration/test_state_graph_entrypoints.py \
+            tests/integration/test_state_run_summary.py
+[covers]  the 6 note reads x 3 project states cross-product (18 cells), the
+          private-classification (mailbox / events / wait / visibility / unknown
+          action private by default), the four refused note writes, the no-leak
+          listing scans, and the still-private reagent entrypoints.
+[exit]    0
+[output]  139 passed, 2 warnings in 27.44s
+[note]    the `[master (root-commit) ...]` lines interleaved in the output are a
+          fixture creating throwaway git repos under state_code_fixture; they are
+          stdout from the fixtures, not failures.
+
+## Bare exit codes, restated
+
+  integrity scan (run 1):            exit 0   (4 passed)
+  behavioral criteria (run 2):       exit 0   (139 passed)

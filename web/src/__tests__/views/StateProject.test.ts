@@ -75,7 +75,7 @@ describe('Long-lived project pages', () => {
     // The reader asks for the notes; the SERVER decides (403 for an unopened
     // project) — nothing is fetched and then hidden.
     expect(api.stateDriverNote).toHaveBeenCalled();
-  });});
+  });
   it('shows the notice only when the read itself is refused', async () => {
     const forbidden=Object.assign(new Error('gateway refused'),{status:403});
     api.stateOverview.mockRejectedValueOnce(forbidden);

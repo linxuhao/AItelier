@@ -11,8 +11,9 @@ not already named, so this module watches all of them instead of a list:
 * no ``.md`` / ``.txt`` line may contain a fragment of at least 24 characters
   that immediately repeats itself while carrying two or more words
   (``These extra**assification). These extra**`` is that shape);
-* no ``.ts`` / ``.svelte`` line may graft a group closer onto a statement
-  (``expect(x).toHaveBeenCalled();  });`` is that shape).
+* no ``.ts`` / ``.svelte`` line may graft a group closer onto a statement or
+  onto another closer (``expect(x).toHaveBeenCalled();  });`` and ``});});``
+  are those shapes).
 
 ``test_the_detectors_see_the_known_corruption_shapes`` feeds each detector the
 exact corruption shape of the base revision *and* a clean sample, so a detector
@@ -52,7 +53,7 @@ SKIP_TOP_LEVEL = {"final", "logs"}
 MIN_FRAGMENT = 24
 _WORD = re.compile(r"[A-Za-z]{3,}")
 ADJACENT_REPEAT = re.compile(r"(.{%d,}?)\1" % MIN_FRAGMENT)
-GRAFTED_CLOSER = re.compile(r";[ \t]+\}\)")
+GRAFTED_CLOSER = re.compile(r";[ \t]*\}\)")
 
 
 def _walk(suffixes):
@@ -142,11 +143,14 @@ def test_the_detectors_see_the_known_corruption_shapes():
     assert repeated_fragment(
         "...classification). These extra**assification). These extra** ..."
     )
-    # web/src/__tests__/views/StateProject.test.ts:77 before this rev: a closer
-    # grafted onto the end of the statement.
+    # web/src/__tests__/views/StateProject.test.ts before this rev. Two shapes of
+    # one defect: a closer grafted onto the end of a statement, and - the one that
+    # actually shipped in r3, which the old rule missed because its space was
+    # mandatory - a closer grafted onto another closer with no space between.
     assert GRAFTED_CLOSER.search(
         "    expect(api.stateDriverNote).toHaveBeenCalled();  });"
     )
+    assert GRAFTED_CLOSER.search("  });});")
     # Clean samples are not flagged.
     assert repeated_fragment("State project data is private to authorized writers.") is None
     assert repeated_fragment("-" * 40) is None

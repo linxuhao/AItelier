@@ -3243,12 +3243,6 @@ class PipelineEngine:
         until the model signals completion (no more tool_calls).
         """
         agent = self.factory.get_native_agent(agent_config_name)
-        # Coverage is owned by the host and observed only after projection and a
-        # successful provider call. Ordinary pipelines have no review session.
-        from aitelier.writing_bench.adapter import begin_observed_review
-        self._writing_review_session = begin_observed_review(self)
-        if self._writing_review_session is not None:
-            agent.gateway.on_messages_presented = self._writing_review_session.observe
         role = self._agent_role(step_id)
         role_label = "Red Agent" if role == "red" else "Green Agent"
         project_path = self._get_project_path(workspace, project_id)
@@ -3338,6 +3332,20 @@ class PipelineEngine:
         context_budget_unknown_reported = False
         last_reasoning = ""  # cached for deepseek: replay on tool-only turns
         self._current_step = step_id
+        # Coverage is owned by the host and observed only after projection and a
+        # successful provider call. Ordinary pipelines have no review session.
+        #
+        # Installed HERE, AFTER `_current_step` is assigned on the line above.
+        # `begin_observed_review` reads the live step id off this engine
+        # (`aitelier/writing_bench/adapter.py`), so the block used to sit at the
+        # top of this method saw `_current_step is None` — for every native step,
+        # including the two Writing Bench reviewers, it returned no session, the
+        # gateway was left unobserved, and the downstream `literary_check` had no
+        # host certificate to accept. Do not hoist this above the assignment.
+        from aitelier.writing_bench.adapter import begin_observed_review
+        self._writing_review_session = begin_observed_review(self)
+        if self._writing_review_session is not None:
+            agent.gateway.on_messages_presented = self._writing_review_session.observe
         self._step_start = time.time()
         # A State relay carries exact recovered bytes and the director's
         # remaining-work instruction. Require proof that the continuation has

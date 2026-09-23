@@ -1,0 +1,72 @@
+# Two-pole mutation runs, Writing Bench v2, 2026-09-23
+#
+# Environment: this run's isolated worktree, python3.12, repo-rootdir.
+# Command for every run below (no pipe, bare exit code):
+#
+#   python3.12 -m pytest -q -s --maxfail=1 -p no:cacheprovider \
+#       --rootdir <worktree> tests/writing_bench
+#
+# ---------------------------------------------------------------- baseline
+# clean candidate after the assembly-order fix
+exit code: 0
+result: 99 passed in 15.7s
+
+# ---------------------------------------------------------------- M3
+# mutation: in aitelier/writing_bench/reading.py:validate_certificate, the
+#   coverage-gap guard
+#     require(not holes(m["characters"], spans), "incomplete observed material: " + ...)
+#   was deleted. (The full mutation text and the diff to it are in this round's
+#   change receipt / git history of the isolated worktree; the line was
+#   restored immediately after this run.)
+exit code: 1
+result: 1 failed, 30 passed in 5.39s
+red test (named on stdout):
+  FAILED tests/writing_bench/test_named_mutation_survivors_killed.py::
+    test_m3_coverage_gap_must_be_refused_by_certificate_and_by_the_domain_gate
+  E  Failed: DID NOT RAISE BenchError
+
+# restore -> green
+exit code: 0
+result: 99 passed
+
+# ---------------------------------------------------------------- M9
+# mutation: in aitelier/writing_bench/bench.py:Bench._review_evidence, the
+#   unconditional
+#     validate_certificate(certificate, identity, report)
+#   was replaced by
+#     if certificate is not None:
+#         validate_certificate(certificate, identity, report)
+#   i.e. a MISSING certificate skips validation.
+exit code: 1
+result: 1 failed, 33 passed
+red test (named on stdout):
+  FAILED tests/writing_bench/test_named_mutation_survivors_killed.py::
+    test_m9_missing_certificate_is_refused_at_the_real_tool_entry
+
+# restore -> green
+exit code: 0
+result: 99 passed in 15.7s (observed together with baseline)
+
+# ---------------------------------------------------------------- M11
+# mutation: in aitelier/writing_bench/bench.py:Bench.literary, the
+#   unconditional
+#     self._review_evidence(run_id, "literary", report, proof)
+#   was made conditional on a fresh review:
+#     if reused is None:
+#         self._review_evidence(...)
+#   i.e. the literary-reuse path skips the evidence checks.
+exit code: 1
+result: 1 failed, 33 passed in 5.24s
+red test (named on stdout):
+  FAILED tests/writing_bench/test_named_mutation_survivors_killed.py::
+    test_m11_reuse_never_accepts_a_legacy_self_reported_receipt
+
+# restore -> green
+exit code: 0
+result: 99 passed in 15.73s
+
+# ---------------------------------------------------------------- real path
+# The `review-session-installed-on-the-real-step-path` criterion:
+exit code: 0
+result: 1 passed in 3.78s
+  tests/writing_bench/test_observed_session_real_path.py

@@ -334,22 +334,30 @@ def publish_review_materials(bench: Bench, run_id: str, phase: str, out: Path) -
         immutable(out / material.path, material.text.encode())
 
 
-def begin_observed_review(engine) -> ReviewSession | None:
-    """Only the registered Writing Bench reviewers acquire the host-only proof owner."""
-    if getattr(engine, "_config_name", None) != CONFIG or getattr(engine, "_current_step", None) not in PHASES:
+def begin_observed_review(engine, step_id: str | None = None) -> ReviewSession | None:
+    """Only the registered Writing Bench reviewers acquire the host-only proof owner.
+
+    The step id is an ARGUMENT, not a field read off a live engine. The caller
+    knows which step it is running, so session installation does not depend on
+    the order in which `run_step` assigns its own bookkeeping fields — the
+    failure that made this session inert on the real runner path.
+    """
+    step = step_id if step_id is not None else getattr(engine, "_current_step", None)
+    if getattr(engine, "_config_name", None) != CONFIG or step not in PHASES:
         return None
     host = Host()
-    run_id, step_id = engine._run_id, engine._current_step
+    run_id = engine._run_id
     run = host.sf.get_run(run_id)
     require(run is not None, "review run missing")
     workspace = checked_root(Path(host.sf._workspace.get_project_path(run["project_id"])))
-    host.ensure_run(run_id, step_id, workspace)
+    host.ensure_run(run_id, step, workspace)
     request = _request(workspace / CONFIG)
     policy, _ = load_policy(request["project_id"])
     bench = Bench(policy)
-    identity, materials = bench.review_materials(run_id, PHASES[step_id])
-    return ReviewSession(Coverage(PHASES[step_id], identity["review_key"], identity["targets"], materials),
+    identity, materials = bench.review_materials(run_id, PHASES[step])
+    return ReviewSession(Coverage(PHASES[step], identity["review_key"], identity["targets"], materials),
                          bench.work(run_id) / "reading",
-                         {"run_id": run_id, "step_id": step_id,
+                         {"run_id": run_id, "step_id": step,
                           "step_instance_id": engine._step_instance_id,
                           "claim_epoch": getattr(engine, "_claim_epoch", 0)})
+

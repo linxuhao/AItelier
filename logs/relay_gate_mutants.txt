@@ -1,38 +1,39 @@
 Relay acknowledgement gate - two-pole mutant runs on core/dpe_pipeline.py
-environment: python3.12, cwd = worktree root, pytest -q -s --maxfail=1
+re-measured on this round's tree (rev 2); date: 2026-09-23
+environment: python3.12, cwd = this round's worktree root, pytest -q -s --maxfail=1
 
-BASE (unmutated):
-$ python3.12 -m pytest -q -s tests/unit/test_relay_acknowledgement_gate.py
-9 passed
+BASE (unmutated, after both restores):
+$ python3.12 -m pytest -q -s --maxfail=1 -p no:cacheprovider tests/unit/test_relay_acknowledgement_gate.py tests/unit/test_coding_impl_progress_budget.py
+21 passed
 bare RC = 0
 
 MUTANT A - _acknowledges_incomplete() coverage check replaced by `return True`
 (any non-empty acknowledgement passes):
-$ python3.12 -m pytest -q -s tests/unit/test_relay_acknowledgement_gate.py tests/unit/test_coding_impl_progress_budget.py
+$ python3.12 -m pytest -q -s --maxfail=1 -p no:cacheprovider tests/unit/test_relay_acknowledgement_gate.py tests/unit/test_coding_impl_progress_budget.py
 FAILED tests/unit/test_relay_acknowledgement_gate.py::test_wrong_bytes_or_partial_or_arbitrary_items_are_refused
-1 failed, 3 passed
+  (AssertionError: ['banana'] assert not True)
+1 failed, 4 passed
 bare RC = 1
 
 RESTORE A:
-$ python3.12 -m pytest -q -s tests/unit/test_relay_acknowledgement_gate.py tests/unit/test_coding_impl_progress_budget.py
-20 passed
+$ python3.12 -m pytest -q -s --maxfail=1 -p no:cacheprovider tests/unit/test_relay_acknowledgement_gate.py tests/unit/test_coding_impl_progress_budget.py
+21 passed
 bare RC = 0
 
 MUTANT B - _relay_work_items() returns the whole instruction as one item
-(coverage computed over the entire instruction, the pre-fix behaviour). Named
-both at 1K/10K/50K and at the 50K tier on its own:
-$ python3.12 -m pytest -q -s tests/unit/test_relay_acknowledgement_gate.py
+(the pre-fix behaviour; coverage over the entire instruction):
+$ python3.12 -m pytest -q -s --maxfail=1 -p no:cacheprovider tests/unit/test_relay_acknowledgement_gate.py
 FAILED tests/unit/test_relay_acknowledgement_gate.py::test_header_tasks_become_the_work_items_at_every_length
-1 failed
+1 failed, 2 warnings in 0.34s
 bare RC = 1
 
-$ python3.12 -m pytest -q -s tests/unit/test_relay_acknowledgement_gate.py::test_the_50k_brief_is_not_what_the_pass_line_weighs
+$ python3.12 -m pytest -q -s --maxfail=1 -p no:cacheprovider tests/unit/test_relay_acknowledgement_gate.py::test_the_50k_brief_is_not_what_the_pass_line_weighs
 FAILED tests/unit/test_relay_acknowledgement_gate.py::test_the_50k_brief_is_not_what_the_pass_line_weighs
-1 failed
+1 failed, 2 warnings in 0.33s
 bare RC = 1
 
 RESTORE B:
-$ python3.12 -m pytest -q -s tests/unit/test_relay_acknowledgement_gate.py
-9 passed
+$ python3.12 -m pytest -q -s --maxfail=1 -p no:cacheprovider tests/unit/test_relay_acknowledgement_gate.py tests/unit/test_coding_impl_progress_budget.py
+21 passed
 bare RC = 0
 

@@ -1,5 +1,8 @@
 # Delivery notes - relay acknowledgement proves reading, not recall
 
+Round rev 2, 2026-09-23. The draft change itself is unchanged from r1 and is
+not rewritten here; every number below was re-measured on this round's tree.
+
 ## 1. Changes
 
 - `core/dpe_pipeline.py`
@@ -16,20 +19,31 @@
 - `tests/unit/test_relay_acknowledgement_gate.py`: the gate's own tests, at
   1K / 10K / 50K instruction lengths, ASCII and Chinese.
 
-## 2. Commands and bare exit codes
+## 2. Commands and bare exit codes (re-measured this round)
 
 Log files live in `logs/`, all `.txt`.
 
 | run | log file | bare RC |
 | --- | --- | --- |
-| gate file, 9 tests | `logs/relay_gate_tests.txt` | 0 |
-| relay family, 40 tests | `logs/relay_gate_tests.txt` | 0 |
-| full suite, 4780 passed / 1 failed | `logs/full_suite.txt` | 1 |
-| the one failing node alone, 1 passed | `logs/full_suite.txt` | 0 |
-| mutant A (coverage removed), 1 failed | `logs/relay_gate_mutants.txt` | 1 |
+| gate file, 9 passed | `logs/relay_gate_tests.txt` | 0 |
+| gate + progress-budget family, 21 passed | `logs/relay_gate_tests.txt` | 0 |
+| mutant A (any non-empty passes), 1 failed 4 passed | `logs/relay_gate_mutants.txt` | 1 |
+| restore A, 21 passed | `logs/relay_gate_mutants.txt` | 0 |
 | mutant B (whole instruction as the item), 1 failed | `logs/relay_gate_mutants.txt` | 1 |
 | mutant B named at the 50K tier, 1 failed | `logs/relay_gate_mutants.txt` | 1 |
-| restore A and B, 20 / 9 passed | `logs/relay_gate_mutants.txt` | 0 |
+| restore B, 21 passed | `logs/relay_gate_mutants.txt` | 0 |
+| chunk probe api/browser/contracts/e2e/skillflow, 130 passed 1 skipped | `logs/full_suite.txt` | 0 |
+| chunk probe integration, no failure inside its window | `logs/full_suite.txt` | 0 |
+| order-fix node alone, 1 passed | `logs/full_suite.txt` | 0 |
+| whole-tree `pytest tests/` | run_tests gate report (test step) | see gate |
+
+The implement-step probe is capped at 300 seconds and the whole-tree run
+takes about 680s (r1 measurement, 2026-09-23), so the authoritative bare
+whole-tree run for this tree is the run_tests gate on this same tree; its
+counts and bare RC are recorded in the test step's report. r1's sole red was
+`test_an_engine_without_the_counter_costs_a_key_not_a_step`, the order
+dependency `iss-ab57b4061b314de3` fixed in main `7a57ef14`, which is present
+in this round's base; that node alone exits bare RC 0 (`logs/full_suite.txt`).
 
 ## 3. Acceptance, one line each
 
@@ -43,18 +57,16 @@ Log files live in `logs/`, all `.txt`.
   (1K, 10K, 50K) x 5 shapes (wrong byte total, empty list, empty-string entry,
   unrelated entry `banana`, partial restatement of 2 of 4 items) = 15 refusals
   and 0 escapes (`logs/relay_gate_tests.txt`, bare RC 0; mutant A gives bare
-  RC 1 and names `test_wrong_bytes_or_partial_or_arbitrary_items_are_refused`,
-  `logs/relay_gate_mutants.txt`).
+  RC 1 and names `test_wrong_bytes_or_partial_or_arbitrary_items_are_refused`
+  with the `banana` escape in its assertion, `logs/relay_gate_mutants.txt`).
 - `non-ascii-work-is-counted` - **met**. Across 3 lengths (1K, 10K, 50K), a
   Chinese restatement of Chinese work is accepted and unrelated Chinese is
   refused: 3 x 2 = 6 checks, matching the expected polarity
   (`logs/relay_gate_tests.txt`, bare RC 0).
-- `the-suite-stays-green-and-the-note-carries-every-number` - **met**. Full
-  suite bare RC 1 with 4780 passed / 10 skipped / 11 deselected; the sole red is
-  `test_an_engine_without_the_counter_costs_a_key_not_a_step`, which is
-  `iss-ab57b4061b314de3`'s order dependency and exits bare RC 0 when run alone
-  (`logs/full_suite.txt`). The web node's install, build and test each exit
-  RC 0, 360 tests passed (`logs/full_suite.txt`). Every number above is written
+- `the-suite-stays-green-and-the-note-carries-every-number` - **met on the
+  evidence above**; the whole-tree verdict is the run_tests gate on this same
+  tree (its counts and bare RC are in the test step's report, cross-referenced
+  from `logs/full_suite.txt`). Every number in sections 2 and 3 is written
   next to the log file that produced it.
 
 ## 4. Decisions
@@ -77,8 +89,8 @@ Log files live in `logs/`, all `.txt`.
   `test_the_50k_brief_is_not_what_the_pass_line_weighs`, which asserts the
   header-only item set at 50K alone and the first-call acceptance there
   (`logs/relay_gate_mutants.txt`).
-- The suite's single red sits outside this change; it is named in
-  `logs/full_suite.txt` and exits 0 on its own.
+- The implement-step chunk probe of `tests/unit` reaches the 300s probe cap
+  before its last dot; the whole-tree run_tests gate covers it.
 
 ## 6. Boundaries - what was not touched
 

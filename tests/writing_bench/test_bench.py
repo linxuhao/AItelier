@@ -70,13 +70,26 @@ def verdict(key, **kwargs):
             "feedback": "读过冻结全文，当前检查通过。", "findings": [], **kwargs}
 
 
+def observed_verdict(bench, run, phase="literary", **kwargs):
+    # Synthetic model text, but the real coverage implementation observes the
+    # exact material delivered in this synthetic model's input.
+    from aitelier.writing_bench.reading import Coverage
+    identity, material = bench.review_materials(run, phase)
+    value = verdict(identity["review_key"], reviewed_chapters=identity["targets"], **kwargs)
+    coverage = Coverage(phase, identity["review_key"], identity["targets"], material)
+    coverage.observe([{"role": "user", "content": m.text} for m in material])
+    return value, coverage.certificate(value, {"run_id": run, "step_id": phase, "step_instance_id": 1})
+
+
 def staged(bench, req=None, run="run1", extracted=None):
     req = req or request(bench)
     bench.freeze(req, run, RULES, CONTRACTS)
     _, manifest = bench.input(run)
-    bench.literary(run, verdict(manifest["literary_key"]))
+    value, proof = observed_verdict(bench, run)
+    bench.literary(run, value, proof=proof)
     ledgers = bench.ledgers(run, extracted)
-    return bench.stage(run, verdict(ledgers["review_key"]))
+    value, proof = observed_verdict(bench, run, "ledger")
+    return bench.stage(run, value, proof=proof)
 
 
 def accept(bench, stage, run="run1"):
@@ -213,7 +226,8 @@ def test_review_reuse_only_identical_literary_dependencies(bench):
     req = request(bench)
     bench.freeze(req, "run1", RULES, CONTRACTS)
     _, m = bench.input("run1")
-    bench.literary("run1", verdict(m["literary_key"]))
+    value, proof = observed_verdict(bench, "run1")
+    bench.literary("run1", value, proof=proof)
     revised = ledger(location="院门")
     req2 = request(bench, sid="ledgerfix", value=revised)
     req2["reuse_literary_from"] = "run1"

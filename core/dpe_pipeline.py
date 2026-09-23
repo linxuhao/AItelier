@@ -1771,6 +1771,11 @@ class PipelineEngine:
                                   "references")}
         elif "apply_patch" in schemas and tool_name in ("create", "edit", "write", "repo_remove_file"):
             return {"error": "Use the granted apply_patch tool for code Add/Update/Delete operations"}
+        review_session = getattr(self, "_writing_review_session", None)
+        if review_session is not None:
+            blocked = review_session.guard(tool_name, params)
+            if blocked is not None:
+                return blocked
         refusal = self._write_scope_refusal(tool_name, params)
         if refusal is not None:
             return refusal
@@ -3237,6 +3242,12 @@ class PipelineEngine:
         until the model signals completion (no more tool_calls).
         """
         agent = self.factory.get_native_agent(agent_config_name)
+        # Coverage is owned by the host and observed only after projection and a
+        # successful provider call. Ordinary pipelines have no review session.
+        from aitelier.writing_bench.adapter import begin_observed_review
+        self._writing_review_session = begin_observed_review(self)
+        if self._writing_review_session is not None:
+            agent.gateway.on_messages_presented = self._writing_review_session.observe
         role = self._agent_role(step_id)
         role_label = "Red Agent" if role == "red" else "Green Agent"
         project_path = self._get_project_path(workspace, project_id)

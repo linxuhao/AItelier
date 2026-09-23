@@ -70,6 +70,19 @@ class Session:
         self.sf.start_run(run)
         return run
 
+    def attest(self, run, claim, value):
+        from aitelier.writing_bench.reading import Coverage, ReviewSession
+        phase = "literary" if claim.step_id == "literary_review" else "ledger"
+        identity, materials = self.bench.review_materials(run, phase)
+        value["reviewed_chapters"] = identity["targets"]
+        session = ReviewSession(Coverage(phase, identity["review_key"], identity["targets"], materials),
+                                self.bench.work(run) / "reading",
+                                {"run_id": run, "step_id": claim.step_id,
+                                 "step_instance_id": claim.token.step_instance_id,
+                                 "claim_epoch": claim.token.claim_epoch})
+        session.observe([{"role": "user", "content": m.text} for m in materials])
+        assert session.guard("write_verdict", value) is None
+
     def drive(self, run, *, reject_literary=False, read=True):
         for _ in range(70):
             result = self.sf.advance_run(run)
@@ -90,7 +103,7 @@ class Session:
                 assert "error" not in fetched, fetched
                 assert "旅人" in fetched["text"] and fetched["complete"]
             resolved = str(claim.inputs.get("_resolved_context", {}))
-            assert "待接受" in resolved or "分录" in resolved, resolved
+            assert "current_prose" in resolved or "分录" in resolved or "待接受" in resolved, resolved
             if claim.step_id == "literary_review":
                 _, m = self.bench.input(run)
                 obj = verdict(m["literary_key"], passed=not reject_literary)
@@ -104,6 +117,8 @@ class Session:
                 obj, writer = verdict(bundle["review_key"]), "write_verdict"
             else:
                 raise AssertionError("unexpected model step: " + claim.step_id)
+            if writer == "write_verdict":
+                self.attest(run, claim, obj)
             saved = self.sf.execute_tool(writer, {"content": encode(obj).decode()}, **common)
             assert "error" not in saved, saved
             self.sf.confirm_step(token, StepResult(outputs={"written": saved}))

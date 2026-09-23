@@ -1,6 +1,7 @@
 name: novel_bench_read
 description: >-
-  Read an exact frozen baseline novel/ file for the current writing-bench run.
+  Read required review materials via review/current_prose.md, review/review_context.md,
+  or review/proposed_ledgers.md (bounded pages, follow next_start), or an exact frozen baseline novel/ file for the current writing-bench run.
   Does not read live source, author drafts, secrets, or another project. Returns
   source hash, explicit range and completeness; use next_start for the rest.
   Index summaries are previews; summary.md contains the complete recap.

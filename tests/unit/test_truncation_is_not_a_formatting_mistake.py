@@ -20,6 +20,7 @@ mistake and keeps the old instruction.
 """
 
 
+import ast
 import json
 import re
 from pathlib import Path
@@ -429,26 +430,32 @@ def test_paren_prose_behaviour_is_unchanged_end_to_end(tmp_path):
     assert not any(k == "truncation_detected" for k, _ in e.events)
     assert not [p for p in e.prompts[1:] if "TRUNCATED" in p.upper()]
 
-
 # ── The prose sent to the agent is a deliverable ──────────────────────────
 # The corpus is DERIVED, not declared: every templates/*.md file on disk
-# (glob, not a list) plus the code modules that inject prose into agent
-# prompts. The checker is measured against the six corruptions already in
-# git (or mechanically derivable from them), one at a time. Each listed rule
-# fires on those exact bytes and names its own file:
+# (glob, not a list), the agent_configs system prompts, and the code modules
+# and constants that inject prose into agent prompts. The corruption bytes
+# that measure the checker are supplied by the director and live in ONE place,
+# tools/prose_corruptions/catalog.py, one byte string per corruption; that
+# catalog is the fixture source for the checks below, so the bytes that measure
+# the checker and the bytes the runner applies to a clean worktree are the same
+# bytes. Adding an entry there adds it to the parametrized checks below.
 #
-#   fixture (git bytes)                          rule that fires
-#   duplicate banner, core/dpe_pipeline.py       adjacent_duplicate_line
-#   r2 EN duplicated two-line run, 3b3d6560      repeated_run (GUIDANCE_EN)
-#   r2 ZH corruption, 3b3d6560                   repeated_run (GUIDANCE_ZH)
-#   r3 ZH trailing backtick, fad833b0            odd_backtick_count
-#   fix_tests.md clipped block, 3b3d6560         severed_clause
-#   fix_tests.md sha advice replaced (derived)   missing_sha_advice
+# The rule each corruption must fire (id -> rule, named in the catalog):
 #
-# The corruptions below are only samples. Because the corpus is derived from
-# the filesystem, planting a defect in ANY file under templates/ — a new
-# zz_probe.md, task_implementer.md, game_designer.md, any of them — turns
-# test_the_agent_facing_prose_is_intact red naming that file, and
+#   K1/K2 fix_tests.md sha advice replaced    stale_hunk_remedy,
+#                                             reference_advice_missing
+#   K3   ZH reference example unannounced     unannounced_reference_example
+#   K4/K5 new module prompt constant          unaccounted_prose_constant
+#   K6a  r2 EN duplicated two-line run        repeated_run
+#   K6b  r2 ZH corruption                     repeated_run
+#   K6c  duplicate banner core/dpe_pipeline   adjacent_duplicate_line
+#   K6d  r3 ZH trailing backtick              odd_backtick_count
+#   K6e  fix_tests.md clipped block           severed_clause
+#
+# Because the corpus is derived from the filesystem, planting a defect in ANY
+# file under templates/ — a new zz_probe.md, task_implementer.md,
+# game_designer.md, any of them — turns test_the_agent_facing_prose_is_intact
+# red naming that file, and
 # test_a_duplicate_line_planted_in_any_surface_fires_by_name proves the
 # per-surface attribution mechanically.
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -462,30 +469,63 @@ STRICT_GUIDANCE_BLOCKS = ("GUIDANCE_EN", "GUIDANCE_ZH",
 PROSE_CODE_FILES = ("core/dpe_pipeline.py", "core/prompt_assembler.py",
                     "core/output_migration.py")
 
-# The single exemption declaration: a multi-line prose constant in core/
-# that is NOT covered by PROSE_CODE_FILES must be named here with the reason
-# it never reaches an agent prompt. A new constant in neither place turns
-# test_every_prose_constant_in_core_is_accounted_for red.
-PROSE_CONSTANT_EXEMPTIONS = {
-    # JSON schemas / DDL / SQL: machine-readable contracts, not prose.
-    "SCHEMA": "SQL DDL schema for state tables, executed not shown to agents",
-    "ATTEMPT_TABLE": "SQL DDL for the attempts table",
-    "EXTRA_SCHEMA": "JSON schema for structured state output validation",
-    "ENTRY_SCHEMA": "JSON schema for state driver index entries",
-    "META_JSON_SCHEMA": "JSON schema for meta-conversation structured output",
-    "_INTENT_SCHEMA": "JSON schema for intent classification output",
-    "USAGE_SQL": "SQL query for token usage accounting",
-    # Prompts and guides served outside code steps (meta conversation, MCP
-    # onboarding): agent-facing, but not apply_patch patch-guidance surfaces.
-    "SYSTEM_PROMPT": "meta agent system prompt, injected outside code steps",
-    "REVISION_SYSTEM_PROMPT": "meta revision prompt, outside code steps",
-    "_INTENT_SYSTEM_PROMPT": "meta intent classifier prompt, outside code steps",
-    "_SPEC_HEADER": "meta conversation spec header, outside code steps",
-    "STATE_DRIVER_GUIDE": "MCP guide:// onboarding text, served via tool not "
-                          "injected into code-step prompts",
-    # Executable plumbing, never rendered into a prompt.
-    "probe": "function-local out-of-process importability probe script",
+# Multi-line constants elsewhere in core/ that ARE agent-facing prose: the
+# meta agent and meta-conversation prompts and the MCP onboarding guide are
+# read by an agent, so they are corpus surfaces even though they are not the
+# apply_patch guidance blocks. Keyed by the surface name the corpus uses.
+PROSE_PROMPT_CONSTANTS = {
+    "core/meta_agent.py:SYSTEM_PROMPT":
+        ("core/meta_agent.py", "SYSTEM_PROMPT"),
+    "core/meta_conversation.py:REVISION_SYSTEM_PROMPT":
+        ("core/meta_conversation.py", "REVISION_SYSTEM_PROMPT"),
+    "core/meta_conversation.py:_INTENT_SYSTEM_PROMPT":
+        ("core/meta_conversation.py", "_INTENT_SYSTEM_PROMPT"),
+    "core/meta_conversation.py:_SPEC_HEADER":
+        ("core/meta_conversation.py", "_SPEC_HEADER"),
+    "core/state_driver_guide.py:STATE_DRIVER_GUIDE":
+        ("core/state_driver_guide.py", "STATE_DRIVER_GUIDE"),
 }
+
+# The exemption declaration: a multi-line prose constant in core/ that is
+# neither in a corpus module nor in PROSE_PROMPT_CONSTANTS must be named here
+# as (module path, constant name) with the reason it never reaches an agent
+# prompt. The MODULE is part of the key on purpose: a new module that declares
+# its own constant called `SYSTEM_PROMPT` is a new agent-facing prompt, not the
+# exempted constant of a different file, and a bare name let it through.
+PROSE_CONSTANT_EXEMPTIONS = {
+    # JSON schemas / DDL / SQL: machine-readable contracts, parsed or executed
+    # rather than folded into a prompt as prose.
+    ("core/director_messaging.py", "SCHEMA"):
+        "SQL DDL for the director notes table",
+    ("core/state_attempts.py", "SCHEMA"):
+        "SQL DDL schema for the attempt tables",
+    ("core/state_attempt_schema.py", "ATTEMPT_TABLE"):
+        "SQL DDL for the attempts table",
+    ("core/state_attempt_schema.py", "EXTRA_SCHEMA"):
+        "JSON schema for structured state output validation",
+    ("core/state_design.py", "SCHEMA"):
+        "SQL DDL schema for the design tables",
+    ("core/state_driver_index.py", "ENTRY_SCHEMA"):
+        "JSON schema for state driver index entries",
+    ("core/state_driver_notes.py", "SCHEMA"):
+        "SQL DDL for the driver notes table",
+    ("core/state_graph.py", "SCHEMA"):
+        "SQL DDL schema for the state graph tables",
+    ("core/state_issues.py", "SCHEMA"):
+        "SQL DDL schema for the issue tables",
+    ("core/state_metadata.py", "SCHEMA"):
+        "SQL DDL schema for the state metadata table",
+    ("core/state_run_summary.py", "USAGE_SQL"):
+        "SQL query for token usage accounting",
+    ("core/meta_conversation.py", "META_JSON_SCHEMA"):
+        "JSON schema for meta-conversation structured output",
+    ("core/meta_conversation.py", "_INTENT_SCHEMA"):
+        "JSON schema for intent classification output",
+    # Executable plumbing, never rendered into a prompt.
+    ("core/tool_guards.py", "probe"):
+        "function-local out-of-process importability probe script",
+}
+
 
 def _read(rel):
     return (REPO_ROOT / rel).read_text(encoding="utf-8")
@@ -495,9 +535,13 @@ def _prose_corpus():
     """Every agent-facing prose surface, derived from the filesystem.
 
     Nothing here is a hand-written list of surfaces: templates/*.md is a
-    glob, so a file created after this test was written is IN the corpus
-    on the next run without touching this file.
+    glob, agent_configs/*.yaml is a glob, and the prompt constants are read
+    out of the modules that declare them, so a surface created after this
+    test was written is IN the corpus on the next run without touching this
+    file.
     """
+    import yaml
+
     corpus = {
         "GUIDANCE_EN": STRICT_PATCH_GUIDANCE_EN,
         "GUIDANCE_ZH": STRICT_PATCH_GUIDANCE_ZH,
@@ -506,11 +550,53 @@ def _prose_corpus():
         corpus[f"templates/{md.name}"] = md.read_text(encoding="utf-8")
     for rel in PROSE_CODE_FILES:
         corpus[rel] = _read(rel)
+    for name, (rel, const_name) in sorted(PROSE_PROMPT_CONSTANTS.items()):
+        corpus[name] = _constant_text(rel, const_name)
+    for cfg in sorted((REPO_ROOT / "agent_configs").glob("*.yaml")):
+        doc = yaml.safe_load(cfg.read_text(encoding="utf-8"))
+        for role, prompt in _system_prompts(doc):
+            corpus[f"agent_configs/{cfg.name}:{role}"] = prompt
     return corpus
 
 
+def _system_prompts(node, trail=""):
+    """Every (role, text) pair for a `system_prompt:` key in a config tree."""
+    found = []
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key == "system_prompt" and isinstance(value, str):
+                found.append((trail.lstrip("/"), value))
+            found += _system_prompts(value, f"{trail}/{key}")
+    elif isinstance(node, list):
+        for i, value in enumerate(node):
+            found += _system_prompts(value, f"{trail}[{i}]")
+    return found
+
+
+def _constant_text(rel, const_name):
+    """The literal text of one module-level string constant in `rel`."""
+    for node in ast.walk(ast.parse(_read(rel))):
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        names = [t.id for t in targets if isinstance(t, ast.Name)]
+        if const_name not in names:
+            continue
+        text = _string_constant_text(node.value)
+        assert text is not None, f"{rel}:{const_name} is not a string constant"
+        return text
+    raise AssertionError(f"{rel} declares no constant {const_name}")
+
 def _prose_violations(name, text):
-    """Rule violations in one prose surface; empty means intact."""
+    """Rule violations in one prose surface; empty means intact.
+
+    Every rule below is a claim about what the surface must TEACH and where,
+    not a word that happens to occur somewhere in the file: a stale-hunk
+    remedy only counts in the sentence that names the stale hunk, a reference
+    example only counts when the sentence introducing it announces it, and a
+    surface that names `references` must also say what to cite and where the
+    citation comes from.
+    """
     violations = []
     lines = [line.strip() for line in text.splitlines()]
     long_at = {i for i, line in enumerate(lines) if len(line) >= _LONG_LINE}
@@ -540,12 +626,102 @@ def _prose_violations(name, text):
         violations.append(
             f"severed_clause: {name}: 'stale or file.' is a deleted clause")
 
-    if name in STRICT_GUIDANCE_BLOCKS and "sha" not in text:
-        violations.append(
-            f"missing_sha_advice: {name}: teaches apply_patch or reference "
-            f"mode without the sha-citation advice")
+    violations += _stale_hunk_remedy_violations(name, text)
+    violations += _reference_example_violations(name, text)
+    violations += _reference_advice_violations(name, text)
     return violations
 
+
+_REREAD_WORDS = ("reread", "re-read", "重读", "重新读")
+_REFERENCE_REMEDY = ("to a reference", "改用引用模式", "引用模式")
+_TARGET_WORDS = ("sha", "citation", "range", "window", "那一段", "窗口",
+                 "范围")
+_ANNOUNCE_ENDINGS = (":", "：", "—", "–")
+
+
+def _stale_hunk_remedy_violations(name, text):
+    """A stale or ambiguous hunk must carry its remedy in the same sentence.
+
+    The remedy is either a re-read of the cited range (naming where the range
+    is) or a switch to the reference addressing mode. A sentence that only
+    tells the agent to send something smaller leaves it with no way to locate
+    the stale spot, which is what the corrupted bytes say.
+    """
+    out = []
+    flat = " ".join(text.split())
+    for unit in re.split(r"(?<=[.!?。])\s*", flat):
+        hay = unit.lower()
+        if "hunk" not in hay:
+            continue
+        if "stale" not in hay and "ambiguous" not in hay:
+            continue
+        reread = any(word in hay for word in _REREAD_WORDS)
+        target = any(word in hay for word in _TARGET_WORDS)
+        switched = any(word in hay for word in _REFERENCE_REMEDY)
+        if not (switched or (reread and target)):
+            out.append(
+                f"stale_hunk_remedy: {name}: a stale or ambiguous hunk with "
+                f"no local remedy: {unit[:80]!r}")
+    return out
+
+
+def _reference_example_violations(name, text):
+    """A reference example must be announced by the sentence before it."""
+    out = []
+    for match in re.finditer(r'\{"file"', text):
+        span = text[match.start():text.find("`", match.start())]
+        if match.start() == 0 or text[match.start() - 1] != "`":
+            continue
+        if '"sha"' not in span or '"new_text"' not in span:
+            continue
+        before = text[:match.start()].rstrip().rstrip("`").rstrip()
+        announce = next((line.strip() for line in reversed(before.split("\n"))
+                         if line.strip()), "")
+        if not announce.endswith(_ANNOUNCE_ENDINGS):
+            out.append(
+                f"unannounced_reference_example: {name}: the reference "
+                f"example is introduced by {announce[-40:]!r}")
+    return out
+
+
+def _reference_advice_violations(name, text):
+    """Naming `references` obliges the SAME sentence to say what to cite.
+
+    The advice is a local conjunction, not a word that occurs somewhere in the
+    file: the sentence that names the reference addressing mode must also name
+    the thing to quote (`sha`) and where that thing comes from (`citation`).
+    An occurrence elsewhere in the surface cannot stand in for it, which is
+    the shape that let an unrelated token satisfy the old advice check.
+    """
+    out = []
+    for sentence in _sentences(text):
+        if "`references`" not in sentence:
+            continue
+        absent = [word for word in ("citation", "sha")
+                  if not _has_word(sentence, word)]
+        if absent:
+            out.append(
+                f"reference_advice_missing: {name}: the sentence naming "
+                f"`references` never states {absent}: {sentence[:70]!r}")
+    return out
+
+
+def _sentences(text):
+    """The surface's teaching units: one contiguous paragraph or bullet each.
+
+    A unit ends at a blank line, not at every newline: these surfaces wrap at
+    ~78 columns, so a rule that split on newlines would call a wrapped
+    sentence two utterances and read the advice as absent.
+    """
+    for block in re.split(r"\n\s*\n", text):
+        flat = re.sub(r"\s+", " ", block).strip()
+        if flat:
+            yield flat
+
+
+def _has_word(text, word):
+    return re.search(rf"(?<![a-z0-9]){re.escape(word)}(?![a-z0-9])",
+                     text.lower()) is not None
 
 def test_the_agent_facing_prose_is_intact():
     corpus = _prose_corpus()
@@ -573,19 +749,30 @@ def test_the_corpus_is_derived_from_the_filesystem_not_a_list():
     assert "STRICT_PATCH_GUIDANCE_ZH" not in corpus
 
 
-def test_every_prose_constant_in_core_is_accounted_for():
-    """Code prose constants are covered, or named in ONE exemption table.
+def _string_constant_text(value):
+    """The literal text of a string constant, plain or f-string alike.
 
-    The corpus covers whole modules (PROSE_CODE_FILES), so every multi-line
-    string constant there is checked. Any multi-line constant elsewhere in
-    core/ must be in PROSE_CONSTANT_EXEMPTIONS with a reason; a new one in
-    neither place goes red here.
+    `ast.JoinedStr` is an f-string; reading its literal chunks the same way
+    as an `ast.Constant`'s value keeps f-string prose inside the corpus
+    instead of letting it slip past as "not a constant".
     """
-    import ast
+    if isinstance(value, ast.Constant) and isinstance(value.value, str):
+        return value.value
+    if isinstance(value, ast.JoinedStr):
+        chunks = []
+        for part in value.values:
+            if isinstance(part, ast.Constant) and isinstance(part.value, str):
+                chunks.append(part.value)
+            else:
+                chunks.append("{}")
+        return "".join(chunks)
+    return None
 
-    corpus = _prose_corpus()
-    missing = []
-    for py in sorted((REPO_ROOT / "core").glob("*.py")):
+
+def _prose_constants(root=REPO_ROOT):
+    """{(module path, constant name): text} for every prose-sized constant."""
+    found = {}
+    for py in sorted((root / "core").glob("*.py")):
         rel = f"core/{py.name}"
         tree = ast.parse(py.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
@@ -594,28 +781,61 @@ def test_every_prose_constant_in_core_is_accounted_for():
             targets = (node.targets if isinstance(node, ast.Assign)
                        else [node.target])
             names = [t.id for t in targets if isinstance(t, ast.Name)]
-            value = node.value
-            if (not names or not isinstance(value, ast.Constant)
-                    or not isinstance(value.value, str)):
+            text = _string_constant_text(node.value)
+            if not names or text is None:
                 continue
-            if "\n" not in value.value or len(value.value) < 120:
+            if "\n" not in text or len(text) < 120:
                 continue
             for const_name in names:
-                if rel in corpus:
-                    continue
-                if const_name not in PROSE_CONSTANT_EXEMPTIONS:
-                    missing.append(f"{rel}:{const_name}")
-                else:
-                    assert PROSE_CONSTANT_EXEMPTIONS[const_name].strip(), \
-                        const_name
+                found[(rel, const_name)] = text
+    return found
+
+
+def _covered_constant_keys():
+    """The (module, constant) pairs the corpus already carries by name."""
+    return {tuple(key.split(":", 1)) for key in PROSE_PROMPT_CONSTANTS}
+
+
+def _unaccounted_prose_constants(root=REPO_ROOT):
+    """(module, constant) pairs neither in the corpus nor exempt with a reason.
+
+    Exemptions are keyed by (module path, name). A bare name let a NEW module
+    declare its own `SYSTEM_PROMPT` and go unseen — the escape a new prompt
+    constant needs only to be in a file the table had never heard of.
+    """
+    missing = []
+    for (rel, const_name) in sorted(_prose_constants(root)):
+        if rel in PROSE_CODE_FILES:
+            continue
+        if (rel, const_name) in _covered_constant_keys():
+            continue
+        reason = PROSE_CONSTANT_EXEMPTIONS.get((rel, const_name))
+        if reason is None:
+            missing.append(f"{rel}:{const_name}")
+        else:
+            assert reason.strip(), (rel, const_name)
+    return missing
+
+
+def test_every_prose_constant_in_core_is_accounted_for():
+    """Code prose constants are covered, or named in ONE exemption table.
+
+    The corpus covers whole modules (PROSE_CODE_FILES) and the agent-facing
+    prompt constants (PROSE_PROMPT_CONSTANTS) wherever they are declared. Any
+    other multi-line constant in core/ must appear in PROSE_CONSTANT_EXEMPTIONS
+    as (module path, name) with a reason it never reaches an agent prompt. A
+    constant in a module the table has never heard of — including one written
+    as an f-string — goes red here and names its module.
+    """
+    missing = _unaccounted_prose_constants()
     assert not missing, (
         "multi-line prose constants in core/ that are neither in the corpus "
         f"nor exempted with a reason: {', '.join(missing)}")
 
-
 def _git_file(rev, rel):
     import subprocess
-    out = subprocess.run(["git", "show", f"{rev}:{rel}"],                         cwd=REPO_ROOT, capture_output=True, text=True)
+    out = subprocess.run(["git", "show", f"{rev}:{rel}"], cwd=REPO_ROOT,
+                         capture_output=True, text=True)
     assert out.returncode == 0, out.stderr
     return out.stdout
 
@@ -628,49 +848,44 @@ def _git_guidance(rev, block):
     return match.group(1)
 
 
-R2 = "3b3d6560"          # r2 candidate: EN pair-repeat, ZH corruption, banner
-R3 = "fad833b016a5c54d1a5f6253f4fcdfc0fbeb9722"   # r3 candidate: ZH backtick
-
-LEGACY_EDIT_ADVICE = (
-    "Use `create` / `edit` for code changes: supply old_str and new_str,\n"
-    "reading the affected region with raw=true before retrying.\n")
-
-
-def _sha_advice_replaced():
-    """Derived fixture for the rule r4 dropped: fix_tests.md's advice to
-
-    prefer `references` and quote the `sha` from its `citation` swapped back
-    for the legacy create/edit advice. The base checker fired on this exact
-    replacement (ignition 1); r4 lost the rule and the fixture went dark
-    (ignition 0), so the caught set shrank. This restores the rule and the
-    fixture, so the matrix cell is 1 again.
-    """
-    text = _git_file(R2, "templates/fix_tests.md")
-    replaced = re.sub(
-        r"(?s)Use `apply_patch` for code changes.*?rather than replaying\.\n",
-        LEGACY_EDIT_ADVICE, text)
-    assert replaced != text, "the sha-advice block was not found in the fixture"
-    assert "sha" not in replaced, "the replacement kept the sha advice"
-    return replaced
+def _load_corruption_catalog():
+    """The corruption bytes and their ids, from the one catalog module."""
+    import importlib.util
+    path = REPO_ROOT / "tools" / "prose_corruptions" / "catalog.py"
+    spec = importlib.util.spec_from_file_location(
+        "prose_corruption_catalog", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
+_CATALOG = _load_corruption_catalog()
+
+
+def _corruption_loader(entry):
+    """The corrupted SURFACE text: git bytes, or the file on disk plus edits."""
+
+    def load():
+        if entry.get("rev"):
+            if entry.get("block"):
+                return _git_guidance(entry["rev"], entry["block"])
+            return _git_file(entry["rev"], entry["path"])
+        return _CATALOG.apply_edits(_read(entry["path"]), entry)
+        return _CATALOG.apply_edits(_read(entry["path"]), entry)
+
+    return load
+
+
+# tools/prose_corruptions/catalog.py is the only place the corruption bytes
+# live: every entry that replaces an existing surface is measured below, by the
+# rule that must fire and the surface name it must carry. The entries that
+# CREATE a new prompt module have no surface in the corpus;
+# tests/unit/test_prose_corruption_catalog.py measures those through the
+# accounting check.
 GIT_CORRUPTIONS = {
-    "r2 EN duplicated two-line run": (
-        "GUIDANCE_EN", lambda: _git_guidance(R2, "EN")),
-    "r2 ZH corruption": (
-        "GUIDANCE_ZH", lambda: _git_guidance(R2, "ZH")),
-    "duplicate banner in core/dpe_pipeline.py": (
-        "core/dpe_pipeline.py",
-        lambda: _git_file(R2, "core/dpe_pipeline.py")),
-    "r3 ZH trailing backtick": (
-        "GUIDANCE_ZH", lambda: _git_guidance(R3, "ZH")),
-    "fix_tests.md clipped block": (
-        "templates/fix_tests.md",
-        lambda: _git_file(R2, "templates/fix_tests.md")),
-    "fix_tests.md sha advice replaced": (
-        "templates/fix_tests.md", _sha_advice_replaced),
+    entry["id"]: (_CATALOG.surface_name(entry), _corruption_loader(entry))
+    for entry in _CATALOG.existing_surface_entries()
 }
-
 
 @pytest.mark.parametrize("label", sorted(GIT_CORRUPTIONS))
 def test_each_known_corruption_is_caught_by_name(label):
@@ -728,7 +943,8 @@ def test_a_duplicate_line_planted_in_any_surface_fires_by_name():
     assert planted >= 40, planted
 
 
-# ── The apply_patch grant boundary# `_exec_tool` refuses apply_patch unless the step's OWN schema carries it.
+# ── The apply_patch grant boundary ────────────────────────────────────────
+# `_exec_tool` refuses apply_patch unless the step's OWN schema carries it.
 # Without a reader, deleting that clause changes no test result, so a step
 # whose schema never granted apply_patch would reach the globally registered
 # tool. The two tests below are that reader.

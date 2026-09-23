@@ -1,0 +1,20 @@
+prose corruption runner, base tree
+source repository: <repo root>
+tree under test: 527beafaf08a48bd2c3678bbc771e0208ccaa101
+suite: python -m pytest -q -p no:cacheprovider tests/unit/test_truncation_is_not_a_formatting_mistake.py
+
+id  | what                                      | bare RC | failed tests
+K1  | fix_tests.md stale-hunk remedy replaced   | 0       | (none)
+K2  | fix_tests.md reference advice loses cite  | 0       | (none)
+K3  | ZH reference example left unannounced     | 0       | (none)
+K4  | new module, plain prompt constant         | 0       | (none)
+K5  | new module, prompt constant as f-string   | 0       | (none)
+K6a | r2 EN duplicated two-line run             | 1       | test_the_agent_facing_prose_is_intact; [r2 EN duplicated two-line run]
+K6b | r2 ZH corruption                          | 1       | test_the_agent_facing_prose_is_intact; [r2 ZH corruption]; [r3 ZH trailing backtick]
+K6c | duplicate banner in core/dpe_pipeline.py  | 1       | TestTheTwoCausesAreToldApart::test_prose_with_parentheses_is_not_a_truncation; ...::test_seq_64_is_a_complete_reply_not_a_truncation; test_paren_prose_behaviour_is_unchanged_end_to_end; test_the_agent_facing_prose_is_intact; [duplicate banner in core/dpe_pipeline.py]; test_apply_patch_needs_a_schema_boundary_that_carries_it
+K6d | r3 ZH trailing backtick                   | 1       | test_the_agent_facing_prose_is_intact; [r2 ZH corruption]; [r3 ZH trailing backtick]
+K6e | fix_tests.md clipped block                | 1       | test_the_agent_facing_prose_is_intact; [fix_tests.md clipped block]; [fix_tests.md sha advice replaced]
+
+The base pole: K1, K3, K4, K5 leave the base suite at bare RC 0 — those four
+corruptions were invisible before this branch, which is what the catalog now
+measures. K6a-K6e were already caught by the base suite.

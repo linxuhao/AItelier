@@ -1,0 +1,22 @@
+command: python tools/prose_corruptions/scan_joined_lines.py 527beafaf08a48bd2c3678bbc771e0208ccaa101
+  (that is: git diff --unified=0 <base>, added lines scanned)
+tracked file with added lines: 1 (tests/unit/test_truncation_is_not_a_formatting_mistake.py)
+added lines: 320
+hits: 0
+
+Scope note, recorded so the number is not read as broader than it is: `git
+diff <base>` covers TRACKED changes only, so the three NEW files this branch
+adds (tools/prose_corruptions/catalog.py, run_corruptions.py,
+scan_joined_lines.py) and the new test file
+tests/unit/test_prose_corruption_catalog.py are not in that diff. They are
+scanned by the same scanner through
+tests/unit/test_prose_corruption_catalog.py, whose own added lines are
+covered by the same three self-proof checks below; the 320 lines are the
+edited-and-tracked surface the earlier rounds' splices lived in.
+
+The three shapes scanned (two_statements_one_line, banner_glued, sentence_split)
+are exercised by tests/unit/test_prose_corruption_catalog.py
+::test_the_spliced_line_scanner_fires_on_the_splice_shapes, which plants one
+sample of each and requires the scanner to name it, and by
+::test_the_spliced_line_scanner_is_silent_on_clean_lines, which requires
+silence on intact equivalents.

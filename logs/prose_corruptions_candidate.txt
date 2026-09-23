@@ -1,0 +1,97 @@
+prose corruption runner, candidate worktree (live, this branch)
+source repository: <repo root>
+tree under test: the live worktree, copied together with the catalog, the runner and this branch's tests
+suite: python -m pytest -q -p no:cacheprovider
+       tests/unit/test_prose_corruption_catalog.py
+       tests/unit/test_truncation_is_not_a_formatting_mistake.py
+
+Every entry dirtied only its own path in the throwaway copy, and the source
+worktree is byte-identical before and after the whole run.
+
+=== K1 fix_tests.md stale-hunk remedy replaced ===
+corruption rule: stale_hunk_remedy
+changed paths: M templates/fix_tests.md
+bare exit code: 1
+failed tests: tests/unit/test_prose_corruption_catalog.py::test_each_edit_entry_applies_to_its_own_surface;
+  tests/unit/test_prose_corruption_catalog.py::test_the_runner_copies_the_tree_and_does_not_mutate_the_source;
+  tests/unit/test_truncation_is_not_a_formatting_mistake.py::test_the_agent_facing_prose_is_intact;
+  tests/unit/test_truncation_is_not_a_formatting_mistake.py::test_each_known_corruption_is_caught_by_name[K1];
+  tests/unit/test_truncation_is_not_a_formatting_mistake.py::test_each_known_corruption_is_caught_by_name[K2];
+  tests/unit/test_truncation_is_not_a_formatting_mistake.py::test_each_known_corruption_is_caught_by_name[K6e]
+
+=== K2 fix_tests.md reference advice loses cite/where ===
+corruption rule: reference_advice_missing
+changed paths: M templates/fix_tests.md
+bare exit code: 1
+failed tests: the same six nodes as K1 — the fix_tests.md surfaces [K1], [K2] and [K6e] are the triple K1/K2/K6e share
+
+=== K3 ZH reference example left unannounced ===
+corruption rule: unannounced_reference_example
+changed paths: M core/output_migration.py
+bare exit code: 1
+failed tests: tests/unit/test_prose_corruption_catalog.py::test_each_edit_entry_applies_to_its_own_surface;
+  tests/unit/test_truncation_is_not_a_formatting_mistake.py::test_the_agent_facing_prose_is_intact;
+  tests/unit/test_truncation_is_not_a_formatting_mistake.py::test_each_known_corruption_is_caught_by_name[K3];
+  tests/unit/test_truncation_is_not_a_formatting_mistake.py::test_each_known_corruption_is_caught_by_name[K6b];
+  tests/unit/test_truncation_is_not_a_formatting_mistake.py::test_each_known_corruption_is_caught_by_name[K6d]
+
+=== K4 new module, plain prompt constant ===
+corruption rule: unaccounted_prose_constant
+changed paths: ?? core/zz_new_prompt.py
+bare exit code: 1
+failed tests: tests/unit/test_truncation_is_not_a_formatting_mistake.py::test_every_prose_constant_in_core_is_accounted_for
+
+=== K5 new module, prompt constant as an f-string ===
+corruption rule: unaccounted_prose_constant
+changed paths: ?? core/zz_new_prompt.py
+bare exit code: 1
+failed tests: tests/unit/test_truncation_is_not_a_formatting_mistake.py::test_every_prose_constant_in_core_is_accounted_for
+
+=== K6a r2 EN duplicated two-line run ===
+corruption rule: repeated_run
+changed paths: M core/output_migration.py
+bare exit code: 1
+failed tests: tests/unit/test_truncation_is_not_a_formatting_mistake.py::test_the_agent_facing_prose_is_intact;
+  tests/unit/test_truncation_is_not_a_formatting_mistake.py::test_each_known_corruption_is_caught_by_name[K6a]
+
+=== K6b r2 ZH corruption ===
+corruption rule: repeated_run
+changed paths: M core/output_migration.py
+bare exit code: 1
+failed tests: test_the_agent_facing_prose_is_intact; [K3]; [K6b]; [K6d]
+
+=== K6c duplicate banner in core/dpe_pipeline.py ===
+corruption rule: adjacent_duplicate_line
+changed paths: M core/dpe_pipeline.py
+bare exit code: 1
+failed tests: TestTheTwoCausesAreToldApart::test_prose_with_parentheses_is_not_a_truncation;
+  TestTheTwoCausesAreToldApart::test_seq_64_is_a_complete_reply_not_a_truncation;
+  test_paren_prose_behaviour_is_unchanged_end_to_end;
+  test_the_agent_facing_prose_is_intact;
+  test_each_known_corruption_is_caught_by_name[K6c];
+  test_apply_patch_needs_a_schema_boundary_that_carries_it
+
+=== K6d r3 ZH trailing backtick ===
+corruption rule: odd_backtick_count
+changed paths: M core/output_migration.py
+bare exit code: 1
+failed tests: test_the_agent_facing_prose_is_intact; [K3]; [K6b]; [K6d]
+
+=== K6e fix_tests.md clipped block ===
+corruption rule: severed_clause
+changed paths: M templates/fix_tests.md
+bare exit code: 1
+failed tests: test_the_agent_facing_prose_is_intact; [K1]; [K2]; [K6e]
+
+table
+id  | rule                          | bare RC | a failing test that is this card's own
+K1  | stale_hunk_remedy             | 1       | test_each_known_corruption_is_caught_by_name[K1]
+K2  | reference_advice_missing      | 1       | test_each_known_corruption_is_caught_by_name[K2]
+K3  | unannounced_reference_example | 1       | test_each_known_corruption_is_caught_by_name[K3]
+K4  | unaccounted_prose_constant    | 1       | test_every_prose_constant_in_core_is_accounted_for
+K5  | unaccounted_prose_constant    | 1       | test_every_prose_constant_in_core_is_accounted_for
+K6a | repeated_run                  | 1       | test_each_known_corruption_is_caught_by_name[K6a]
+K6b | repeated_run                  | 1       | test_each_known_corruption_is_caught_by_name[K6b]
+K6c | adjacent_duplicate_line       | 1       | test_each_known_corruption_is_caught_by_name[K6c]
+K6d | odd_backtick_count            | 1       | test_each_known_corruption_is_caught_by_name[K6d]
+K6e | severed_clause                | 1       | test_each_known_corruption_is_caught_by_name[K6e]

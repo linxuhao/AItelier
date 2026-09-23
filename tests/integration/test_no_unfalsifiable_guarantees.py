@@ -6,9 +6,10 @@ the "keep a lie alive" phrases across the EXACT set of files this round touched,
 so a future edit that tries to soften a refusal with one of them fails here
 rather than passing on a green suite.
 
-The scan set is DERIVED from git - the round's diff against the base it was
-built from - not typed here: a file the round adds is in scope automatically,
-and the ban cannot be narrowed by editing a list in this file. The phrases are
+The scan set is DERIVED from git - the diff against this CARD's first-round
+base, not the previous round's candidate - not typed here: a file any of the
+card's rounds adds or edits is in scope automatically, and the ban cannot be
+narrowed by editing a list in this file. The phrases are
 assembled from fragments so this file holds no banned literal, which removes
 the earlier hole where a phrase written on the declaration line slipped a
 line-prefix exclusion. There is no exclusion now: any occurrence fails.
@@ -23,9 +24,10 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[2]
 
-# The base this round was built from. It anchors the diff; the FILE LIST still
-# comes from git below.
-BASE_SHA = "98bffeac252fc611cec435698070d877d661434d"
+# The base this card was opened against - its FIRST round, not the previous
+# round's candidate. Anchoring on the card base keeps every file any of the
+# card's rounds touched in scope; the FILE LIST still comes from git below.
+BASE_SHA = "9c79f11f"
 
 # Assembled from fragments so this module contains no banned literal.
 BANNED = [
@@ -77,6 +79,27 @@ ROUND_FILES = _changed_files()
 
 def test_the_scan_scope_is_derived_from_git_and_not_empty():
     assert ROUND_FILES, "git reported no changed files for this round"
+
+
+def test_the_scan_is_anchored_on_the_cards_first_round_base():
+    """Guarantee: the scan cannot be narrowed by moving its base forward.
+
+    Anchoring on the previous round's candidate drops the files earlier rounds
+    of this card already changed, and a phrase planted into one of them slips
+    the ban. Falsified by moving BASE_SHA forward: this fails, and a phrase in
+    an earlier-round file stops being scanned (measured: a "by desi"+"gn"
+    phrase planted into `api/state_only.py` is caught under this base).
+    """
+    assert BASE_SHA == "9c79f11f", (
+        "the scan base must stay the card's first-round base; moving it forward "
+        "narrows the scope below files the card already changed")
+    # Resolvable in git, so the scope is a re-runnable derivation rather than a
+    # typed list: this fails if the base commits forward or stops existing.
+    import subprocess
+    resolved = subprocess.run(["git", "cat-file", "-e", BASE_SHA], cwd=REPO,
+                              capture_output=True)
+    assert resolved.returncode == 0, f"base {BASE_SHA} does not resolve in git"
+    assert "api/state_only.py" in ROUND_FILES
 
 
 @pytest.mark.parametrize("rel", ROUND_FILES)

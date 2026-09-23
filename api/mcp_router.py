@@ -1445,7 +1445,7 @@ _SETTLED_STATUSES = frozenset({"paused", "completed", "failed"})
 # the same range. A wait longer than the CLIENT's timeout does not wait longer —
 # the client hangs up and the model sees a transport error instead of "still
 # running", which reads as a broken tool rather than a long job. So the default
-# sits under that, and the ceiling is documented rather than silently exceeded.
+# sits under that, and the ceiling is stated rather than silently exceeded.
 _WAIT_DEFAULT_S = 45
 _WAIT_MAX_S = 3600
 

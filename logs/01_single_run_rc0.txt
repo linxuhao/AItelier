@@ -1,0 +1,15 @@
+Command (focused_check, kind=pytest):
+  python3.12 -m pytest -q -s --maxfail=1 -p no:cacheprovider --rootdir <worktree> \
+    tests/unit/test_a_round_reports_what_it_paid_twice_for.py::test_an_engine_without_the_counter_costs_a_key_not_a_step
+
+Result on the FIXED tree:
+  1 passed, 2 warnings in 0.17s
+  bare exit code = 0   (returncode 0, passed=True, timed_out=False)
+
+This is acceptance-ordering (1) "single run": green.
+
+---
+For reference, the SAME single test on the UNMODIFIED base also passed in
+isolation (the bug only shows when the permanent package attribute already
+exists, which a single-run interpreter does not have at this test's turn).
+The fix's job is to make the result hold regardless of who ran before it.

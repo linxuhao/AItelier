@@ -123,7 +123,19 @@ def test_a_step_that_read_nothing_traces_nothing(engine_with_counter):
 def test_an_engine_without_the_counter_costs_a_key_not_a_step(monkeypatch):
     """This is the path the DEPLOYED container takes today: its wheel has no
     read_accounting at all. Reporting must degrade to silence, never to a
-    raise inside a finally, which would replace the step\'s real outcome."""
+    raise inside a finally, which would replace the step's real outcome.
+
+    "No counter on the engine" is exactly what the code detects by the absence
+    of the ``read_accounting`` attribute on the ``skillflow`` package (and, on
+    the import fallback, the absence of the module in ``sys.modules``). Nulling
+    only the sys.modules entry does not stand in for that once an earlier test
+    has already imported the submodule: the import system resolves
+    ``from skillflow import read_accounting`` from the package attribute first,
+    so the attribute has to go too. Both are monkeypatch-restored, so the
+    result no longer depends on what ran before this test in the suite.
+    """
+    import skillflow
+    monkeypatch.delattr(skillflow, "read_accounting", raising=False)
     monkeypatch.setitem(sys.modules, "skillflow.read_accounting", None)
     pipeline = _Pipeline()
     assert pipeline._read_accounting() == {}

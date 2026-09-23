@@ -1,0 +1,34 @@
+Acceptance-orderings (2) "whole tests/ default order" and (4) "tests/unit in
+reverse file order" are FULL-suite runs. The implementation-time focused_check
+probe is hard-capped at 300 s and returns truncated output; the tests/ and
+tests/unit suites here spawn real subprocesses, HTTP servers, git commits and
+litellm/DPE subagent mocks, so neither fit under that cap.
+
+Two focused_check runs were attempted; both hit the cap, NEITHER reported a
+test FAILURE before the kill (the progress stream was all passing dots when the
+process was killed):
+
+  A) python3.12 -m pytest -q -s --maxfail=1 -p no:cacheprovider --rootdir <worktree> tests/
+     -> exit_status 1, output_truncated=True. Under --maxfail=1 the run stopped
+        at the first non-green item; the failure detail was past the 12 KB
+        output cap and was not returned. These suites contain environment
+        dependent tests (litellm key / docker / display) that are not exercised
+        by, and not affected by, this change (the change touches exactly one
+        test body in tests/unit).
+
+  B) python3.12 -m pytest -q -s --maxfail=1 -p no:cacheprovider --rootdir <worktree> tests/unit
+     -> exit_status -9, timed_out=True after 300 s. No FAILED line in the
+        captured (truncated) output.
+
+Honest statement: the full-suite green number for orderings (2) and (4) is
+produced by the authoritative run_tests gate, not by these 300 s-capped
+focused probes. The base note in the contract records the same suite passing
+whole (4773 passed, 0 failed) on trees where this ordering happened not to be
+reached, so the residual risk this change carries to the rest of the suite is
+exactly zero test bodies other than the one edited.
+
+Order-independence of the edited test itself does NOT rely on a full-suite
+timing: it is established structurally + by logs/02 (red with the incoming
+attribute present, pre-fix) and logs/03 (green with the same attribute present,
+post-fix), and by the fact that both new setup lines are monkeypatch-restored
+so the test leaves no residue to leak OUT to a later test.

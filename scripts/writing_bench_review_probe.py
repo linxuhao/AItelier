@@ -51,8 +51,18 @@ def run(plan: dict, out: Path, *, providers: str, routes: str, model: str, turns
     prose=next(m for m in materials if m.path=='current_prose.md')
     messages=[{'role':'system','content':system},
               {'role':'user','content':encode(request).decode()+'\n'+prose.text}]
-    tools=[{'type':'function','function':{'name':'novel_bench_read','description':'Read only an exact required review material; follow next_start.','parameters':{'type':'object','additionalProperties':False,'required':['path'],'properties':{'path':{'type':'string'},'start':{'type':'integer','minimum':0},'length':{'type':'integer','minimum':1,'maximum':8000}}}}},
-           {'type':'function','function':{'name':'write_verdict','description':'Write the complete independent review. Incomplete host-observed coverage is refused with missing ranges.','parameters':{'type':'object','additionalProperties':False,'required':['review_key','reviewed_chapters','passed','read_complete','feedback','findings'],'properties':{'review_key':{'type':'string'},'reviewed_chapters':{'type':'array','items':{'type':'object','additionalProperties':False,'required':['chapter','title','prose_sha256'],'properties':{'chapter':{'type':'integer'},'title':{'type':'string'},'prose_sha256':{'type':'string'}}}},'passed':{'type':'boolean'},'read_complete':{'type':'boolean'},'feedback':{'type':'string'},'findings':{'type':'array','items':{'type':'object','required':['severity','location','reason'],'properties':{'severity':{'type':'string','enum':['blocker','advisory']},'location':{'type':'string'},'reason':{'type':'string'}}}}}}}]
+    import yaml
+    graph=yaml.safe_load((Path(__file__).resolve().parents[1]/"configs/novel_writing_bench_v2.yaml").read_text())
+    step_id="literary_review" if phase=="literary" else "ledger_audit"
+    schema=next(x for x in graph['steps'] if x['id']==step_id)['validation'][0]['inline_schema']
+    read_schema={'type':'object','additionalProperties':False,'required':['path'],
+                 'properties':{'path':{'type':'string'},'start':{'type':'integer','minimum':0},
+                               'length':{'type':'integer','minimum':1,'maximum':8000}}}
+    tools=[{'type':'function','function':{'name':'novel_bench_read',
+           'description':'Read only an exact required material; follow next_start.','parameters':read_schema}},
+           {'type':'function','function':{'name':'write_verdict',
+           'description':'Submit the complete independent review. Missing host-observed text is refused.',
+           'parameters':schema}}]
     started=time.monotonic();report=None;refusals=[]
     for turn_no in range(1,turns+1):
         projected,stats=_project_native_messages(messages)

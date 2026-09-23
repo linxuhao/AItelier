@@ -97,3 +97,13 @@ def test_already_accepted_backup_survives_code_upgrade_not_new_approval(bench,mo
     proof={'verified':True,'repository_private_after':True,'remote_master_after':stage['commit'],
            'remote_tag_after':bench.policy.genesis,'force':False,'mirror':False}
     assert bench.record_backup('run1',stage['commit'],proof)['status']=='backed_up'
+
+
+def test_read_only_real_model_probe_has_valid_source_and_no_delivery_calls():
+    import ast
+    from pathlib import Path
+    p=Path(__file__).resolve().parents[2]/'scripts/writing_bench_review_probe.py'
+    tree=ast.parse(p.read_text())
+    called={node.func.attr for node in ast.walk(tree) if isinstance(node,ast.Call) and isinstance(node.func,ast.Attribute)}
+    assert not {'promote','record_backup','approve_checkpoint'} & called
+    assert {'generate_native','observe','guard'} <= called

@@ -61,6 +61,43 @@ the existing, deliberate guard; it was not weakened this round.
 - `tests/writing_bench/test_named_mutation_survivors_killed.py` — one test (or
   one positive-pole pair of tests) per survivor M3, M9, M11.
 
+## Suite-order repairs (this round, second pass)
+
+The full suite surfaced two order-dependent failures that neither the
+narrow `tests/writing_bench` run nor either test alone showed. Both were
+tests measuring the wrong thing once the suite ran in one process, and both
+are now fixed in the shipped candidate:
+
+1. `tests/unit/test_a_round_reports_what_it_paid_twice_for.py::
+   test_an_engine_without_the_counter_costs_a_key_not_a_step` — the test
+   simulated a wheel without `skillflow.read_accounting` by putting `None`
+   into `sys.modules`. But `from skillflow import read_accounting` resolves
+   through the PACKAGE attribute first, and an earlier test in the suite
+   leaves that attribute bound to the real counter, so the test silently
+   exercised the real engine and saw its `{reads: 0, ...}` summary instead of
+   `{}`. The test now also removes the package attribute. Alone it passed;
+   after `tests/unit/test_coding_impl_self_verification.py` it failed.
+2. `tests/writing_bench/test_observed_session_real_path.py` — it stubbed the
+   code-path lookup with a CLASS-level `monkeypatch.setattr` on
+   `core.workspace_manager.WorkspaceManager`. `tests/unit/
+   test_public_read_hardening.py` calls
+   `importlib.reload(core.workspace_manager)`, which rebinds the class object;
+   the workspace the test built keeps the ORIGINAL class, so the class-level
+   stub missed and the real `run_isolation` resolver raised
+   `IsolationUnavailable`, failing the test before any review step ran. The
+   stub is now installed on the workspace INSTANCE, which no reload can
+   stale. Alone it passed; after `tests/unit/test_public_read_hardening.py`
+   it failed.
+
+Both repairs are in test files only. No production module changed in this
+pass; `core/dpe_pipeline.py` and `aitelier/writing_bench/adapter.py` carry the
+assembly-order fix described above and nothing else.
+
+Log: `logs/writing-bench-suite-order-2026-09-23.txt` records the red pairs
+(each failing test with its polluter, bare exit code) and the green runs
+(`tests/writing_bench` plus both repaired tests, 209 passed, bare exit code 0).
+
+## Known limits
 ## Known limits
 
 - The certificate proves the material was PRESENTED, not that the model

@@ -149,15 +149,18 @@ def _drive(session, run, monkeypatch, engines):
     import api.dependencies as deps
     import core.agents as agents
     import core.dpe_pipeline as dpe
-    import core.workspace_manager as wsm
 
     monkeypatch.setattr(deps, "get_skillflow", lambda: session.sf)
     monkeypatch.setattr(deps, "get_db_manager", lambda: session.db)
     # This graph owns no repository (`repo_mode: none`); the code-path lookup is
     # a host stub, not part of what this test proves.
-    monkeypatch.setattr(wsm.WorkspaceManager, "get_code_path",
-                        lambda _self, _pid, run_id=None: None)
-
+    # Patch the INSTANCE, not the class. Another test in the suite
+    # (`tests/unit/test_public_read_hardening.py`) calls
+    # `importlib.reload(core.workspace_manager)`, which rebinds the CLASS object
+    # while this workspace keeps the one it was built from; a class-level
+    # monkeypatch then silently misses and the real resolver runs.
+    monkeypatch.setattr(session.ws, "get_code_path",
+                        lambda _pid, run_id=None, *_a, **_k: None)
     recorded = {}
     real_init = dpe.PipelineEngine.__init__
 

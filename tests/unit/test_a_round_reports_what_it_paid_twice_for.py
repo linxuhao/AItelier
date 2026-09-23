@@ -124,6 +124,14 @@ def test_an_engine_without_the_counter_costs_a_key_not_a_step(monkeypatch):
     """This is the path the DEPLOYED container takes today: its wheel has no
     read_accounting at all. Reporting must degrade to silence, never to a
     raise inside a finally, which would replace the step\'s real outcome."""
+    # `from skillflow import read_accounting` resolves through the PACKAGE
+    # attribute first, and an earlier test that exercised `_read_accounting`
+    # against the real wheel leaves that attribute bound. Removing the module
+    # from `sys.modules` alone is therefore not enough to simulate a wheel that
+    # never shipped the counter; the bound attribute has to go too, or this
+    # test silently measures the real engine once the suite runs in one order.
+    import skillflow
+    monkeypatch.delattr(skillflow, "read_accounting", raising=False)
     monkeypatch.setitem(sys.modules, "skillflow.read_accounting", None)
     pipeline = _Pipeline()
     assert pipeline._read_accounting() == {}

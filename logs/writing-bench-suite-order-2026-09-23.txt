@@ -1,0 +1,59 @@
+# Suite-order red/green runs, Writing Bench v2, 2026-09-23
+#
+# Environment: this run's isolated worktree, python3.12, repo-rootdir.
+# Every command below was run with a BARE exit code (no pipe, no tee):
+#
+#   python3.12 -m pytest -q -s --maxfail=1 -p no:cacheprovider \
+#       --rootdir <worktree> <targets>
+#
+# ------------------------------------------------------------------ red pair 1
+# target: tests/unit/test_coding_impl_self_verification.py
+#         tests/unit/test_a_round_reports_what_it_paid_twice_for.py
+exit code: 1
+result: 1 failed, 20 passed
+red test named on stdout:
+  FAILED tests/unit/test_a_round_reports_what_it_paid_twice_for.py::
+    test_an_engine_without_the_counter_costs_a_key_not_a_step
+  E  AssertionError: assert {'reads': 0, ...} == {}
+# Cause: the test put None into sys.modules["skillflow.read_accounting"], but
+# `from skillflow import read_accounting` resolves through the PACKAGE
+# attribute first, which an earlier test left bound to the real counter.
+# ...while the same test alone is green:
+# target: tests/unit/test_a_round_reports_what_it_paid_twice_for.py::
+#         test_an_engine_without_the_counter_costs_a_key_not_a_step
+exit code: 0
+result: 1 passed
+
+# ------------------------------------------------------------------ red pair 2
+# target: tests/unit/test_public_read_hardening.py
+#         tests/writing_bench/test_observed_session_real_path.py
+exit code: 1
+result: 1 failed, 102 passed
+red test named on stdout:
+  FAILED tests/writing_bench/test_observed_session_real_path.py::
+    test_real_runner_installs_the_observed_session_for_both_review_steps
+  E  skillflow.exceptions.IsolationUnavailable: run <id> was created at
+     ..., at or after this deployment began recording isolation (...), and
+     has no isolation record.
+# Cause: test_public_read_hardening.py reloads core.workspace_manager, which
+# rebinds the CLASS; a class-level monkeypatch on WorkspaceManager.get_code_path
+# then misses the class the workspace instance was built from.
+
+# ------------------------------------------------------------------ green run
+# target: tests/writing_bench
+#         tests/unit/test_a_round_reports_what_it_paid_twice_for.py
+#         tests/unit/test_public_read_hardening.py
+exit code: 0
+result: 209 passed in 15.39s
+
+# ------------------------------------------------------------------ green run
+# target: tests/unit/test_public_read_hardening.py
+#         tests/writing_bench/test_observed_session_real_path.py
+exit code: 0
+result: 103 passed in 2.27s
+
+# ------------------------------------------------------------------ green run
+# target: tests/unit/test_coding_impl_self_verification.py
+#         tests/unit/test_a_round_reports_what_it_paid_twice_for.py
+exit code: 0
+result: 23 passed in 5.81s

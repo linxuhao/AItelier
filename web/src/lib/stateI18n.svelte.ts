@@ -40,7 +40,6 @@ const en: Record<string, string> = {
   intro: 'Long-lived goals, independent of workflow runs.',
   private: 'Project state is private. Sign in with writer access to view it.',
   workingNotes: 'Working notes',
-  noteUnavailable: 'The working notes are not available. Sign in with writer access to read this project.',
   loading: 'Loading…', retry: 'Retry', reload: 'Reload view', sync: 'Sync run results', syncMore: 'Sync next batch',
   syncNote: 'Updates observations only. Does not launch, approve or verify.', syncDone: 'Run observations updated',
   failures: 'Observation errors', staleView: 'View refresh failed; the displayed snapshot may be out of date.',

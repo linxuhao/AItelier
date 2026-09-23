@@ -553,8 +553,13 @@ READ_REQUESTS = {
 # (it gets cached and indexed), so the default is DENY: an action missing from
 # `PUBLIC_READS` is private, and that includes a read action added LATER, which
 # nobody will remember to classify. The owner's ruling of 2026-09-22 opens the
-# graph AND the driver's working notes for a project that has been opened:
-# "let's open up the working note for public projects too". It REPLACES the
+# graph AND the driver's working notes for a project that has been opened.
+# The ruling is recorded at note://aitelier/546f3b521eca. The owner's words,
+# verbatim and translated: "public的 project的working note也可以public，
+# private project的working note继续private" — the working note of a public
+# project may be public too, the working note of a private project stays
+# private — also stated in English as "let's open up the working note for
+# public projects too". It REPLACES the
 # half-sentence in the 2026-09-21 ruling that "keeps the working notes shut";
 # that claim is no longer true of this table. The ruling named the WORKING NOTE
 # only: the director mailbox, the driver guide and the event/long-poll plumbing

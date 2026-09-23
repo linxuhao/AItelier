@@ -259,8 +259,10 @@ def test_full_host_summary_is_a_public_read_while_the_mailbox_and_writes_stay_cl
     """The run summary is project progress, so an anonymous reader may see it.
 
     It used to be writer-only because the whole router carried `require_writer`,
-    and since the owner's ruling of 2026-09-22 the driver's working notes are
-    public for an opened project too. What must NOT move: the director mailbox
+    and since the owner's ruling of 2026-09-22 the note reads are public ACTIONS.
+    This fixture's service is read-trusted, so the project half passes even
+    though `game` is never opened here; `test_state_project_privacy.py` covers
+    the project half. What must NOT move: the director mailbox
     and every write.
     """
     from api import authz

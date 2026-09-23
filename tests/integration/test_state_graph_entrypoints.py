@@ -675,8 +675,9 @@ def test_anonymous_reader_sees_the_graph_and_the_notebook_but_not_the_mailbox(li
     """The split this replaces the blanket writer gate with.
 
     Anonymous reads of the graph/attempts/issues are open — that is the point of
-    building in public — and since the owner's ruling of 2026-09-22 the driver's
-    working notes are open for a project that has been opened too. The director
+    building in public — and since the owner's ruling of 2026-09-22 the note reads
+    are public actions; this fixture's service is read-trusted so the project
+    half passes even though `game` is never opened here. The director
     mailbox stays writer-only, and every write stays refused. Its pole is proved
     with the refusal's own words: a READ request must not be answered "to make
     changes".

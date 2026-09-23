@@ -205,8 +205,6 @@ Over MCP the whole `state_graph_read` tool demands the writer verdict, so an
 anonymous MCP caller gets none of these; the REST table
 (`core.state_commands.PUBLIC_READS`, below) is what decides which of them an
 anonymous REST visitor may read.
-(`core.state_commands.PUBLIC_READS`, below) is what decides which of them an
-anonymous REST visitor may read.
 
 Write actions: `create_project`, `add_nodes`, `revise_node`, `split_node`,
 `supersede_node`, `start_attempt`, `start_external_attempt`, `report_external_attempt`,
@@ -429,7 +427,7 @@ action is refused with a read-worded 403 before its body is parsed). There is no
 per-route dependency to attach and none to forget: a route that declares nothing
 — including one added later — is REFUSED. Writes still require the writer verdict
 on `/commands/{action}`. MCP's external token is not automatically a REST admin
-token; use the host's supported authenticated channel for each transport.token; use the host's supported authenticated channel for each transport.
+token; use the host's supported authenticated channel for each transport.
 
 ```text
 GET  /api/state/schema                                                 writer-only
@@ -448,7 +446,7 @@ GET  /api/state/attempts/{attempt_id}/detail                           public
 GET  /api/state/runs/{run_id}/owners                                   public
 GET  /api/state/projects/{project_id}/driver-note                      public
 GET  /api/state/projects/{project_id}/driver-note/history              public
-GET  /api/state/projects/{project_id}/driver-note/history/search       publicistory/search       writer-only
+GET  /api/state/projects/{project_id}/driver-note/history/search       public
 POST /api/state/query/{read_action}       JSON body = arguments only
 POST /api/state/commands/{write_action}   JSON body = arguments only
 ```

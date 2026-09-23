@@ -22,8 +22,9 @@
   // line used to be `permissionResolved && canWrite`, so "may I write?" decided
   // "may I read?". State DAG reads are public now (api/state_http classifies
   // every one of them), so a resolved session is enough to ask for the graph;
-  // `canWrite` still decides write affordances and whether the working notes may
-  // be requested at all. The SERVER is the judge either way — a 403 below still
+  // `canWrite` decides the write affordances, while `canRead` is what decides
+  // whether the working notes may be requested at all (see the `mayReadNotes`
+  // effect below). The SERVER is the judge either way — a 403 below still
   // clears the view and shows the notice.
   const canRead = $derived($authStore.permissionResolved);
   const canWrite = $derived($authStore.canWrite);

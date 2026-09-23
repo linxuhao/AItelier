@@ -125,6 +125,8 @@ def test_an_engine_without_the_counter_costs_a_key_not_a_step(monkeypatch):
     read_accounting at all. Reporting must degrade to silence, never to a
     raise inside a finally, which would replace the step\'s real outcome."""
     monkeypatch.setitem(sys.modules, "skillflow.read_accounting", None)
+    import skillflow
+    monkeypatch.delattr(skillflow, "read_accounting", raising=False)
     pipeline = _Pipeline()
     assert pipeline._read_accounting() == {}
     pipeline._report_read_accounting("t_impl")

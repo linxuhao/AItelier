@@ -187,7 +187,7 @@ class Bench:
                 # Whether the author supplied a ledger is not a literary-review input.
                 dependency["chapters"] = [{k: c[k] for k in ("chapter", "title")} for c in chapter_meta]
                 literary_key = sha(encode(dependency))
-                manifest = {"version": 2, "project_id": self.policy.project_id, "submission_id": sid,
+                manifest = {"version": 2, "review_protocol": PROTOCOL, "project_id": self.policy.project_id, "submission_id": sid,
                             "base": base, "mode": mode, "chapters": chapter_meta, "contracts": contracts,
                             "engine": engine_identity(), "policy": self.policy.identity(), "literary_key": literary_key,
                             "baseline_files": {k: sha(v) for k, v in files.items()},
@@ -247,7 +247,7 @@ class Bench:
         materials = [Material(name, source, frame(key, name, body)) for name, body in bodies.items()]
         identity = material_identity(phase, key, targets, materials)
         require(sum(len(x.text.encode()) for x in materials) + len(encode(identity)) <= self.policy.max_context_bytes,
-                "review materials exceed budget; not truncated")
+                "review context exceeds budget; not truncated")
         return identity, materials
 
     def review_request(self, run_id: str, phase: str) -> bytes:
@@ -262,7 +262,9 @@ class Bench:
         # Compatibility/display artifact. Agents use the small request and
         # independent current-prose entry, not a candidate hidden behind history.
         _, materials = self.review_materials(run_id, "literary")
-        return self.review_request(run_id, "literary").decode() + "\n\n" + "\n\n".join(x.text for x in materials)
+        text = self.review_request(run_id, "literary").decode() + "\n\n" + "\n\n".join(x.text for x in materials)
+        require(len(text.encode()) <= self.policy.max_context_bytes, "editor packet exceeds budget; not truncated")
+        return text
 
     def _review_evidence(self, run_id: str, phase: str, report: dict, certificate: dict | None) -> dict:
         identity, _ = self.review_materials(run_id, phase)
@@ -324,7 +326,9 @@ class Bench:
 
     def audit_packet(self, run_id: str) -> str:
         _, materials = self.review_materials(run_id, "ledger")
-        return self.review_request(run_id, "ledger").decode() + "\n\n" + "\n\n".join(x.text for x in materials)
+        text = self.review_request(run_id, "ledger").decode() + "\n\n" + "\n\n".join(x.text for x in materials)
+        require(len(text.encode()) <= self.policy.max_context_bytes, "audit packet exceeds budget; not truncated")
+        return text
 
     def read(self, run_id: str, path: str, start: int = 0, length: int = 12000) -> dict:
         frozen, _ = self.input(run_id)
@@ -462,9 +466,18 @@ class Bench:
                 and stage["policy"] == self.policy.identity() and stage["base"] == m["base"], "stage binding changed")
         require(stage["input_manifest_sha256"] == self._json(self.work(run_id), "input.json")["manifest_sha256"],
                 "stage input changed")
-        for key, file in (("literary_sha256", "literary.json"), ("ledger_sha256", "ledgers.json"),
-                          ("audit_sha256", "audit.json"), ("reading_sha256", "audit_reading.json"), ("semantic_sha256", "semantic_changes.json"),
-                          ("patch_sha256", "candidate.patch")):
+        self._verify_stage_bytes(run_id, stage, m)
+
+    def _verify_stage_bytes(self, run_id: str, stage: dict, m: dict) -> None:
+        pairs = [("literary_sha256", "literary.json"), ("ledger_sha256", "ledgers.json"),
+                 ("audit_sha256", "audit.json"), ("semantic_sha256", "semantic_changes.json"),
+                 ("patch_sha256", "candidate.patch")]
+        if m.get("review_protocol") == PROTOCOL:
+            require("reading_sha256" in stage, "reading evidence missing from stage")
+            pairs.append(("reading_sha256", "audit_reading.json"))
+        elif "reading_sha256" in stage:
+            pairs.append(("reading_sha256", "audit_reading.json"))
+        for key, file in pairs:
             require(sha(read_file(self.work(run_id), file, TREE_LIMIT)) == stage[key], "stage evidence changed")
         require(git(self.policy.repo, "rev-parse", stage["commit"] + "^") == m["base"], "candidate parent mismatch")
         require(git(self.policy.repo, "rev-parse", stage["commit"] + "^{tree}") == stage["tree"], "candidate tree mismatch")
@@ -501,7 +514,22 @@ class Bench:
         require(receipt["accepted_commit"] == commit_id(expected_commit), "wrong backup recovery commit")
         stage_raw = read_file(self.work(run_id), "stage.json", TREE_LIMIT)
         require(sha(stage_raw) == receipt["stage_sha256"], "accepted receipt/stage mismatch")
-        self._verify_stage(run_id, decode(stage_raw))
+        # Already accepted history is immutable evidence, not a request to run
+        # today's review protocol. Backup recovery verifies its original chain
+        # without relabelling a legacy read_complete claim as observed coverage.
+        stage = decode(stage_raw)
+        pointer = self._json(self.work(run_id), "input.json")
+        frozen = self.root / "submissions" / identifier(pointer["submission_id"])
+        manifest_raw = read_file(frozen, "manifest.json", TREE_LIMIT)
+        require(sha(manifest_raw) == pointer["manifest_sha256"] == stage["input_manifest_sha256"],
+                "accepted input manifest changed")
+        m = decode(manifest_raw)
+        require(receipt["run_id"] == stage["run_id"] == run_id and receipt["project_id"] == self.policy.project_id
+                and stage["engine"] == m["engine"] and stage["base"] == m["base"]
+                and stage["policy"] == m["policy"] == self.policy.identity(), "accepted artifact chain mismatch")
+        for name, digest in m["files"].items():
+            require(sha(read_file(frozen, name, TREE_LIMIT)) == digest, "accepted frozen input changed")
+        self._verify_stage_bytes(run_id, stage, m)
         clean_head(self.policy.repo, self.policy.branch, expected_commit)
         require(git(self.policy.repo, "rev-parse", "novel-genesis") == self.policy.genesis, "genesis drift")
         return receipt

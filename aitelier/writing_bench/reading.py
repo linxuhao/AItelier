@@ -71,7 +71,7 @@ def material_identity(phase: str, key: str, targets: list[dict], materials: list
 def validate_targets(report: dict, key: str, targets: list[dict]) -> None:
     require(isinstance(report, dict) and report.get("review_key") == key,
             "review input fingerprint mismatch")
-    require(report.get("reviewed_chapters") == targets,
+    require(encode(report.get("reviewed_chapters")) == encode(targets),
             "review target mismatch: reviewed_chapters must exactly match the current chapter/title/prose_sha256 list")
 
 

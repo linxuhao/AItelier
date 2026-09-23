@@ -99,6 +99,33 @@ def test_goal_verbatim_acknowledgement_is_accepted():
     assert ok, result
 
 
+def test_the_50k_brief_is_not_what_the_pass_line_weighs():
+    """The 50K tier alone: the item set is the header, not the brief.
+
+    Named so that restoring the old whole-instruction coverage goes red HERE,
+    at the length where the old pass line actually became unreachable.
+    """
+    instruction = relay_instruction(51200)
+    relay = relay_for(instruction)
+    assert relay["incomplete_items"] == TASKS
+    joined = "".join(relay["incomplete_items"])
+    assert len(joined) < len(instruction) // 10
+    ok, result = _relay_acknowledgement(relay, {
+        "retained_bytes": RETAINED,
+        "incomplete_items": [
+            "Rerun the render-queue tests and the harness test family, "
+            "confirming the numbers",
+            "Run pytest tests/ and record the bare RC in a .txt log under logs/",
+            "Finish section 3 of the delivery notes, log file name next to "
+            "every number",
+            "Call finish_step; the four mutant kills each bare RC stay "
+            "established, so no established part is rewritten",
+        ],
+
+    })
+    assert ok, result
+
+
 def test_wrong_bytes_or_partial_or_arbitrary_items_are_refused():
     for total in (1024, 10240, 51200):
         relay = relay_for(relay_instruction(total))

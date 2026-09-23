@@ -9,7 +9,8 @@ for current routes, visible fact/attempt badges and the white-label fix.
 The catalog and all project/goal/run permalinks below remain supported.
 This is the long-lived product project, not the old execution-project row.
 
-- `#/state-projects`: private project catalog with goal counts and dispatch policy.
+- `#/state-projects`: project catalog with goal counts and dispatch policy; an opened
+  project's graph and working notes read publicly, everything else stays writer-only. policy.
 - `#/state-projects/:id`: State DAG, project attempts, evidence/history.
 - `#/state-projects/:id/nodes/:nodeKey`: link to a specific goal.
 - `#/state-projects/for-repo/:encodedPath`: related projects for a source checkout.
@@ -120,8 +121,10 @@ POST /api/state/commands/refresh_project
 ```
 
 No private goal fields were added to anonymous repository/config projections.
-State data remains administrative-writer scoped; this does not introduce a
-separate per-project ACL or cryptographic verifier role.
+An opened state project's graph and working notes are anonymous-readable (the
+owner's ruling of 2026-09-22); every other state project and every other state
+read remains administrative-writer scoped. This does not introduce a separate
+per-project ACL or cryptographic verifier role.
 
 ## Stable source binding and migration holds
 

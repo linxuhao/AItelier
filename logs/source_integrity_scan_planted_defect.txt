@@ -1,0 +1,34 @@
+notes-public rev 3 - planted-defect pole for the integrity scan (criterion 4, item 1)
+date: 2026-09-23 (UTC)
+worktree: /home/linxuhao/.AItelier/worktrees/cf0507b9-4746-4eb2-b2d9-7e794294bbfd
+environment: python3.12 in the aitelier container
+
+planted mutation: tests/browser/state_project_smoke.py line 255 was really edited back to
+the base-revision text (the new string with the old tail ` by the API')` glued to it):
+
+  -                checks.append('anonymous reader sees the public graph and the opened project working notes')
+  +                checks.append('anonymous reader sees the public graph and the opened project working notes') by the API')
+
+command (focused_check kind=pytest, step implement, run_id cf0507b9-4746-4eb2-b2d9-7e794294bbfd):
+
+  /usr/local/bin/python3.12 -m pytest -q -s --maxfail=1 -p no:cacheprovider \
+    --rootdir <tree> tests/unit/test_source_files_are_intact.py
+
+bare exit status: 1  (red, and it names the file)
+output, verbatim excerpt:
+
+  F
+  _______________________ test_every_python_file_compiles ________________________
+  E       AssertionError: uncompilable python files:
+  E         tests/browser/state_project_smoke.py:255: unterminated string literal (detected at line 255)
+  FAILED tests/unit/test_source_files_are_intact.py::test_every_python_file_compiles
+  1 failed, 2 warnings in 1.28s
+
+recovery: the mutation was reverted with the same edit tool; the scan was then re-run and is
+green with bare exit status 0 in logs/source_integrity_scan.txt.
+
+note on the requested base-tree control: this step's tool surface offers no shell, so the
+base revision 79d6f5eb could not be checked out and scanned here.  The planted-defect pole
+above is the same file at the same line, produced by really editing the file rather than by
+quoting a sample; the base-revision shape is also asserted inside the module's positive
+control.

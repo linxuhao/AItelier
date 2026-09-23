@@ -176,8 +176,11 @@ authorized writer is outside this trust boundary. Do not treat an agent's
 The offline demo below really runs its tests, including an intentional failure.
 
 The transport derives reviewer identity from the authenticated request or the
-internal driver's owner. A body cannot override `reviewer`. State project data
-is private to authorized writers; there is not yet a separate per-state-project
+internal driver's owner. A body cannot override `reviewer`. A state project's
+graph and its working notes become readable by anyone once the project is opened
+(the owner's ruling of 2026-09-22, `note://aitelier/546f3b521eca`); every other
+state project stays private to authorized writers, and an unopened project is
+refused exactly like an absent one. There is not yet a separate per-state-project
 ACL or a distinct cryptographic verifier role. Normal host writer authority is
 therefore administrative authority over this state graph.
 

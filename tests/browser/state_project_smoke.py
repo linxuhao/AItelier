@@ -252,7 +252,7 @@ def main():
                 assert anonymous.request.get(base+'/api/state/projects/shrimp-preview/driver-note').status==200
                 assert anonymous.request.post(base+'/api/state/query/get_driver_note',
                     data={'project_id':'shrimp-preview'}).status==200
-                checks.append('anonymous reader sees the public graph and the opened project working notes') by the API')
+                checks.append('anonymous reader sees the public graph and the opened project working notes')
                 # A real external attempt in the isolated API has no workflow.
                 # The test harness, not AItelier, runs and waits for its checker.
                 import subprocess, hashlib

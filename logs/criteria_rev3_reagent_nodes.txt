@@ -1,0 +1,21 @@
+notes-public rev 3 - the reagent-swapped guard nodes, alone, this tree
+date: 2026-09-23 (UTC)
+worktree: /home/linxuhao/.AItelier/worktrees/cf0507b9-4746-4eb2-b2d9-7e794294bbfd
+environment: python3.12 in the aitelier container
+
+command (focused_check kind=pytest, step implement, run_id cf0507b9-4746-4eb2-b2d9-7e794294bbfd):
+
+  /usr/local/bin/python3.12 -m pytest -q -s --maxfail=1 -p no:cacheprovider \
+    --rootdir <tree> \
+    tests/unit/test_state_read_visibility.py::TestAnonymousHttp::test_the_visitor_reads_the_notebook_but_not_the_mailbox \
+    tests/unit/test_state_read_visibility.py::TestRefusalWording \
+    tests/unit/test_state_read_visibility.py::TestNoLeak::test_the_refusal_bodies_carry_no_still_private_text \
+    tests/unit/test_state_read_visibility.py::TestEmbedderDefaults \
+    tests/unit/test_state_project_privacy.py::TestGateHoldsAgainstRouteAuthor \
+    tests/integration/test_state_graph_entrypoints.py::test_anonymous_reader_sees_the_graph_and_the_notebook_but_not_the_mailbox
+
+bare exit status: 0
+output: 13 passed, 2 warnings in 2.12s
+
+This run also settles that every node named in the reagent table below still exists in this
+tree (pytest errors on a node id that is not collected).

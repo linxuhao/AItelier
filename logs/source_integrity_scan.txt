@@ -1,0 +1,36 @@
+notes-public rev 3 - full integrity scan of every source file (criterion 4, items 1 and 6)
+date: 2026-09-23 (UTC)
+worktree: /home/linxuhao/.AItelier/worktrees/cf0507b9-4746-4eb2-b2d9-7e794294bbfd
+environment: python3.12 in the aitelier container, no network, PYTHONPATH inherited from the
+  focused_check probe (the probe injects the worktree root and strips secret-looking env vars)
+
+command (focused_check kind=pytest, step implement, run_id cf0507b9-4746-4eb2-b2d9-7e794294bbfd):
+
+  /usr/local/bin/python3.12 -m pytest -q -s --maxfail=1 -p no:cacheprovider \
+    --rootdir <tree> tests/unit/test_source_files_are_intact.py
+
+bare exit status: 0
+output: 4 passed, 2 warnings in 1.78s
+
+what the scan covers (it walks the repository, not the round-2 reviewer's list):
+
+  * every .py file under the repository root -> must compile.  Recursive walk from the
+    repository root, skipping only .git, dotted directories, node_modules, __pycache__,
+    .venv/venv, build, dist, site-packages, and the top-level final/ and logs/ folders
+    (see tests/unit/test_source_files_are_intact.py); the count is asserted > 100 so a walk
+    that finds nothing fails instead of passing.
+  * every .md and .txt file -> no line may carry a fragment of >= 24 characters that
+    immediately repeats itself while containing two or more >= 3-letter words.  Count
+    asserted > 20.
+  * every .ts and .svelte file -> no line may graft a group closer onto a statement
+    (a statement terminator followed by whitespace and `})`, on a line with no `=>`, which
+    is how an arrow-function one-liner legitimately ends).  Count asserted > 20.
+
+hits: 0 in each of the three scans (the run above is green; the module lists every hit it
+would have found in its assertion message).
+
+positive control: the module's own test_the_detectors_see_the_known_corruption_shapes feeds
+each detector the base-revision shape and a clean sample, so a detector that flags nothing,
+or everything, fails.  The planted-defect pole on the real file is
+logs/source_integrity_scan_planted_defect.txt.
+scan script: tests/unit/test_source_files_are_intact.py

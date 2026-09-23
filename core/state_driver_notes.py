@@ -136,7 +136,10 @@ class StateDriverNotes:
         # moment the read runs.
         self.project_read_trusted = bool(project_read_trusted)
         self.actor = text(actor, "authenticated actor", 320)
-        with store.db.get_connection() as conn:
+        # Schema setup is not a read of a private record: it must run for every
+        # caller, including the anonymous one whose reads the connection will
+        # then judge.
+        with store.db.decision_connection() as conn:
             conn.executescript(SCHEMA + ENTRY_SCHEMA)
             conn.commit()
 
@@ -258,6 +261,7 @@ class StateDriverNotes:
                 "truncated": len(selected) > limit,
                 "next_after_revision": entries[-1]["revision"] if entries else after_revision}
 
+    @writer_only_read("get_driver_note")
     def update(self, project_id: str, section: str, content: str, expected_revision: int,
                director_identity: str, operation: str = "replace") -> dict:
         project_id = key(project_id, "project_id")
@@ -391,6 +395,7 @@ class StateDriverNotes:
              director_identity, timestamp, timestamp))
         return entry_id
 
+    @writer_only_read("get_driver_note_entry")
     def write_entry(self, project_id: str, assertion: str, body: str, director_identity: str,
                     force: str = "in_force", landed: str = "") -> dict:
         """Write one assertion plus its body and return the address of both."""
@@ -413,6 +418,7 @@ class StateDriverNotes:
                 "director_identity": director_identity})
             return {**entry_detail(row), **projection}
 
+    @writer_only_read("get_driver_note_entry")
     def supersede_entry(self, project_id: str, entry_id: str, assertion: str, body: str,
                         reason: str, director_identity: str, force: str = "in_force",
                         landed: str = "") -> dict:
@@ -450,6 +456,7 @@ class StateDriverNotes:
             return {"superseded": entry_detail(retired), "successor": entry_detail(successor),
                     **projection}
 
+    @writer_only_read("get_driver_note_entry")
     def delist_entry(self, project_id: str, entry_id: str, reason: str,
                      director_identity: str) -> dict:
         """Evict a line from the index without deleting its body.

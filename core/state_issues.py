@@ -64,7 +64,8 @@ class StateIssues:
     def __init__(self, store, actor: str):
         self.store = store
         self.actor = text(actor, "authenticated actor", 320)
-        with store.db.get_connection() as conn:
+        # Schema setup is not a read of a private record.
+        with store.db.decision_connection() as conn:
             conn.executescript(SCHEMA)
             conn.commit()
 

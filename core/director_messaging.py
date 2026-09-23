@@ -119,7 +119,8 @@ class SQLiteDirectorMessaging:
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._id_factory = id_factory or (lambda: str(uuid4()))
         self._redactor = redactor
-        with self.store.db.get_connection() as conn:
+        # Schema setup is not a read of a private record.
+        with self.store.db.decision_connection() as conn:
             conn.execute("PRAGMA foreign_keys=ON")
             conn.executescript(SCHEMA)
             columns = {row["name"] for row in conn.execute(

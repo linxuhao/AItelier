@@ -10,6 +10,19 @@ from core.state_graph import StateGraphError
 from core.state_service import StateService
 
 
+def mcp_read_trust(request) -> bool:
+    """Whether the MCP caller behind ``request`` may read private State.
+
+    The credential is the request itself: ``api.authz.may_read_private`` derives
+    the verdict from the raw request. NO request object is NO credential, so this
+    returns False - a `_request_from` failure (an exception swallowed into None)
+    must never be a way into private reads.
+    """
+    if request is None:
+        return False
+    return may_read_private(request)
+
+
 def register_state_tools(tool, mcp, service_factory=None):
     def service():
         if service_factory is not None:
@@ -17,18 +30,19 @@ def register_state_tools(tool, mcp, service_factory=None):
         from api.dependencies import get_db_manager, get_workspace_manager, get_skillflow, get_config_registry
         from api.mcp_router import _request_from, _start_driver
         from api.state_graph_routers import authenticated_actor
+        request = None
         try:
             request = _request_from(mcp.get_context())
         except Exception:
             request = None
-        # The MCP service declares its trust from the SAME raw credential the HTTP
-        # transport uses — never from a default. No request object (stdio/CLI) is a
-        # local operator; an HTTP request inherits the anonymous/reader verdict.
+        # Trust comes from a REAL credential, never from a default and never from
+        # "there was no request object". An HTTP request inherits its anonymous /
+        # reader verdict; a transport that produced no request object carries no
+        # credential at all and is UNTRUSTED, exactly like an anonymous visitor.
         return StateService(get_db_manager(), get_workspace_manager(), attach_driver=_start_driver,
                             actor=authenticated_actor(request),
                             runtime_factory=lambda: (get_skillflow(), get_config_registry()),
-                            project_read_trusted=may_read_private(request) if request is not None else True)
-
+                            project_read_trusted=mcp_read_trust(request))
     def invoke(action, arguments, write):
         from mcp.server.fastmcp.exceptions import ToolError as MCPToolError
         try:

@@ -46,7 +46,6 @@ _ARGS = {
     "check_driver_note_index": {"project_id": PROJECT},
     "driver_note_index": {"project_id": PROJECT},
     "list_director_messages": {"project_id": PROJECT},
-    "get_driver_guide_section": {"address": "guide://driver-loop"},
     "events": {"project_id": PROJECT},
     "wait_for_state_change": {"project_id": PROJECT},
     "project_visibility": {"project_id": PROJECT},
@@ -144,16 +143,12 @@ class TestEveryPathIsJudgedAtExecution:
                 _drive_bypass(target, action)
             except ProjectPrivate:
                 refused.append(action)
-        # The driver-guide section takes no service object, so it has no direct
-        # call to guard; it is reachable only through `execute`, which refuses
-        # it (proved by the `execute` test above).
-        by_execute_only = {"get_driver_guide_section"}
-        assert set(refused) == set(WRITER_ONLY_READS) - by_execute_only, (
+        assert set(refused) == set(WRITER_ONLY_READS), (
             "these writer-only reads were NOT refused when called directly: "
-            f"{sorted((set(WRITER_ONLY_READS) - by_execute_only) - set(refused))}")
-        assert set(derived) == set(WRITER_ONLY_READS) - by_execute_only, (
+            f"{sorted(set(WRITER_ONLY_READS) - set(refused))}")
+        assert set(derived) == set(WRITER_ONLY_READS), (
             "these writer-only reads carry no execution-point verdict: "
-            f"{sorted((set(WRITER_ONLY_READS) - by_execute_only) - set(derived))}")
+            f"{sorted(set(WRITER_ONLY_READS) - set(derived))}")
 
     def test_a_public_read_and_a_trusted_read_are_unaffected(self, tmp_path):
         anonymous = _anonymous(_trusted(tmp_path))

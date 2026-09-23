@@ -568,6 +568,10 @@ PUBLIC_READS = frozenset({
     "design_catalog", "get_design_revision", "search_design_items",
     "design_impact", "get_design_baseline", "get_design_bindings",
     "export_design_markdown", "check_design_markdown",
+    # The driver guide. Its text is `core/state_driver_guide.py` in a PUBLIC
+    # repository, and the MCP prompt and resource already serve it publicly; a
+    # read the transport already publishes is not a private record.
+    "get_driver_guide_section",
 })
 WRITER_ONLY_READS = frozenset({
     # The two working notebooks and their full revision history. In-flight run
@@ -576,9 +580,9 @@ WRITER_ONLY_READS = frozenset({
     "get_driver_note_entry", "check_driver_note_index", "driver_note_index",
     # The director mailbox.
     "list_director_messages",
-    # The driver guide and the event/long-poll plumbing are NOT on the opened
-    # list, so they stay shut rather than be assumed harmless.
-    "get_driver_guide_section", "events", "wait_for_state_change",
+    # The event/long-poll plumbing is NOT on the opened list, so it stays shut
+    # rather than being assumed harmless.
+    "events", "wait_for_state_change",
     # The privacy record itself: who opened a project and when. Private by
     # default like every unclassified read; the writer verdict reads it back.
     "project_visibility",
@@ -769,7 +773,15 @@ def execute(service, action: str, arguments: dict, *, allow_write: bool = False)
     #   is refused by the very same function.
     # * the PROJECT's privacy (opened or not) is judged HERE from
     #   `service.project_read_trusted`, which `api.authz.may_read_private`
+    # * the PROJECT's privacy (opened or not) is judged HERE from
+    #   `service.project_read_trusted`, which `api.authz.may_read_private`
     #   derives from the raw credential once per request; a forged route
+    #   declaration cannot change it.
+    #
+    # Beneath both, the connection itself carries the table verdict: a reader
+    # that reaches a private table without going through `execute` and without
+    # any decoration is refused by the trust-bound handle's authorizer, so no
+    # list of readers - hand-written or derived - has to be complete.
     #   declaration cannot change it.
     #
     # Both run BEFORE argument validation so an anonymous probe is refused as

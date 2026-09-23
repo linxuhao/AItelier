@@ -59,15 +59,18 @@ K5_CONTENT = (
     "report every defect you find, citing file and line for each one of them.\n"
     '"""\n')
 
+# K6c is the r5 m12 shape: duplicate the single `Step dispatch` banner line,
+# so the git diff after applying it is exactly one added line, not a whole-file
+# overwrite of core/dpe_pipeline.py. The locator is that line's unique text;
+# `duplicate_line` refuses a locator that does not select exactly one line.
+K6C_LOCATE = "Step dispatch"
+
 # K6: the bytes that were already corrupt in r2/r3, kept as they were.
 K6_ENTRIES = (
     {"id": "K6a", "what": "r2 EN duplicated two-line run",
      "rev": R2, "block": "EN", "surface": "GUIDANCE_EN", "rule": "repeated_run"},
     {"id": "K6b", "what": "r2 ZH corruption",
      "rev": R2, "block": "ZH", "surface": "GUIDANCE_ZH", "rule": "repeated_run"},
-    {"id": "K6c", "what": "duplicate banner in core/dpe_pipeline.py",
-     "rev": R2, "path": "core/dpe_pipeline.py",
-     "surface": "core/dpe_pipeline.py", "rule": "adjacent_duplicate_line"},
     {"id": "K6d", "what": "r3 ZH trailing backtick",
      "rev": R3, "block": "ZH", "surface": "GUIDANCE_ZH",
      "rule": "odd_backtick_count"},
@@ -96,6 +99,10 @@ CORRUPTIONS = (
     {"id": "K5", "what": "new module, prompt constant as an f-string",
      "kind": "add", "path": "core/zz_new_prompt.py", "content": K5_CONTENT,
      "surface": None, "rule": "unaccounted_prose_constant"},
+    {"id": "K6c", "what": "duplicate the Step dispatch banner line",
+     "kind": "dupline", "path": "core/dpe_pipeline.py",
+     "locate": K6C_LOCATE, "surface": "core/dpe_pipeline.py",
+     "rule": "adjacent_duplicate_line"},
 ) + tuple(dict(entry, kind="git") for entry in K6_ENTRIES)
 
 
@@ -110,6 +117,34 @@ def apply_edits(text, entry):
                 f"found {found}: {old[:60]!r}")
         text = text.replace(old, new)
     return text
+
+
+def duplicate_line(text, locate):
+    """Insert a copy of the single line containing `locate`, exactly once.
+
+    The corruption is one repeated banner line, so applying it changes the
+    file by a single added line. A locator that is absent or that matches more
+    than one line raises, so the entry can never damage a different line or
+    overwrite a whole file.
+    """
+    matched = [ln for ln in text.splitlines(keepends=True) if locate in ln]
+    if len(matched) != 1:
+        raise AssertionError(
+            f"the locator must select exactly one line, found "
+            f"{len(matched)}: {locate!r}")
+    line = matched[0] if matched[0].endswith("\n") else matched[0] + "\n"
+    return text.replace(matched[0], matched[0] + line, 1)
+
+
+def apply_to_text(text, entry):
+    """The corrupted text of an on-disk surface, built from a clean copy.
+
+    A `dupline` entry repeats one line; every other on-disk entry replaces
+    bytes through `apply_edits`.
+    """
+    if entry["kind"] == "dupline":
+        return duplicate_line(text, entry["locate"])
+    return apply_edits(text, entry)
 
 
 def surface_name(entry):
@@ -135,7 +170,7 @@ def surface_text(entry, read, show):
             return _guidance(show(entry["rev"], "core/output_migration.py"),
                              entry["block"])
         return show(entry["rev"], entry["path"])
-    text = apply_edits(read(entry["path"]), entry)
+    text = apply_to_text(read(entry["path"]), entry)
     if entry.get("block"):
         return _guidance(text, entry["block"])
     return text
@@ -149,3 +184,21 @@ def existing_surface_entries():
 def new_module_entries():
     """Entries that create a module under core/ instead of editing one."""
     return [entry for entry in CORRUPTIONS if entry["kind"] == "add"]
+
+# The rule a corruption must fire is DATA, held here and looked up by the
+# checker (tests/.../test_truncation_is_not_a_formatting_mistake.py
+# set_active_corruption reads this table); it is never a substring of the
+# damaged prose, the shape the director forbade ("sha" in text). Slots name the
+# violation-emitting rule (adjacent / repeated_run / odd_backtick / severed /
+# unannounced_example / reference_advice / stale_hunk); each value is the rule
+# name the checker emits for that corruption, equal to the entry's `rule`.
+PROSE_RULES = {
+    "K1": {"stale_hunk": "stale_hunk_remedy"},
+    "K2": {"reference_advice": "reference_advice_missing"},
+    "K3": {"unannounced_example": "unannounced_reference_example"},
+    "K6a": {"repeated_run": "repeated_run"},
+    "K6b": {"repeated_run": "repeated_run"},
+    "K6c": {"adjacent": "adjacent_duplicate_line"},
+    "K6d": {"odd_backtick": "odd_backtick_count"},
+    "K6e": {"severed": "severed_clause"},
+}

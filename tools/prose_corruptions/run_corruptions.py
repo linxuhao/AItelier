@@ -19,7 +19,14 @@ Run it from the repository root:
 measures a corruption against a different tree (the base commit, for instance).
 `--targets` narrows the pytest invocation (the default is the whole suite).
 The per-corruption results are written as a table; the bare exit code is what
-decides whether the corruption was caught.
+decides whether the corruption was caught. Each run also records the suite
+command, the source-tree sha and the corrupted worktree's HEAD sha, the UTC
+start time, the selection scope actually run (`tests/` when no `--targets` is
+given), and the named rule; with `--raw-dir` it writes one file of the raw
+pytest output per corruption. `--targets` is the knob that lets the same
+runner measure a corruption against a narrower selection (this card's own test
+files, say) than the default whole suite; the recorded selection is the truth
+of what ran, and the table header repeats it.
 """
 
 import argparse
@@ -150,6 +157,12 @@ def _apply(entry, worktree, catalog):
         target = worktree / entry["path"]
         target.write_text(entry["content"], encoding="utf-8")
         return
+    if entry["kind"] == "dupline":
+        target = worktree / entry["path"]
+        text = target.read_text(encoding="utf-8")
+        target.write_text(catalog.duplicate_line(text, entry["locate"]),
+                          encoding="utf-8")
+        return
     if entry["kind"] == "git":
         if entry.get("block"):
             target = worktree / "core/output_migration.py"
@@ -168,7 +181,7 @@ def _apply(entry, worktree, catalog):
         return
     target = worktree / entry["path"]
     text = target.read_text(encoding="utf-8")
-    target.write_text(catalog.apply_edits(text, entry), encoding="utf-8")
+    target.write_text(catalog.apply_to_text(text, entry), encoding="utf-8")
 
 
 def _failed_tests(output):
@@ -178,9 +191,48 @@ def _failed_tests(output):
     return names
 
 
-def run_all(rev=None, log=None, targets=()):
+def _log_block(entry, row, command, rev, raw_dir):
+    """The combined-log record for one corruption run."""
+    lines = [f"=== {row['id']} {row['what']} ===",
+             f"corruption rule: {row['rule']}",
+             f"selection scope: {row['selection']}",
+             f"source tree sha: {row['source_sha']}",
+             f"corrupted worktree HEAD sha: {row['tree_sha']}",
+             f"tree under test: {rev or 'HEAD'}",
+             f"started (UTC): {row['utc']}",
+             "suite command: " + " ".join(command),
+             f"changed paths: {row['changed']}",
+             f"bare exit code: {row['rc']}",
+             "named (failed) tests: "
+             + (", ".join(row["failed"]) or "(none)")]
+    if raw_dir:
+        lines.append(f"raw output: {raw_dir / (row['id'] + '.txt')}")
+    lines.append("")
+    return lines
+
+
+def _write_raw(raw_dir, entry, row, command, rev, output):
+    """One raw-output file per corruption run, with its provenance header."""
+    header = [f"corruption: {row['id']} {row['what']}",
+              f"rule: {row['rule']}",
+              f"selection scope: {row['selection']}",
+              f"source tree sha: {row['source_sha']}",
+              f"corrupted worktree HEAD sha: {row['tree_sha']}",
+              f"tree under test: {rev or 'HEAD'}",
+              f"started (UTC): {row['utc']}",
+              f"suite command: {' '.join(command)}",
+              f"changed paths: {row['changed']}",
+              f"bare exit code: {row['rc']}",
+              "named (failed) tests: "
+              + (", ".join(row["failed"]) or "(none)"),
+              "---- raw pytest output ----"]
+    (raw_dir / f"{row['id']}.txt").write_text(
+        "\n".join(header + [output]) + "\n", encoding="utf-8")
+def run_all(rev=None, log=None, targets=(), raw_dir=None):
     catalog = _load_catalog()
     rows = []
+    selection = " ".join(targets) if targets else "tests/ (whole suite)"
+    source_sha = _git(["rev-parse", "HEAD"], REPO_ROOT).stdout.strip()
     source_before = _git(["status", "--porcelain"], REPO_ROOT).stdout
     for entry in catalog.CORRUPTIONS:
         with tempfile.TemporaryDirectory(prefix="prose-corruption-") as tmp:
@@ -188,26 +240,23 @@ def run_all(rev=None, log=None, targets=()):
             _copy_tree(worktree, rev)
             _apply(entry, worktree, catalog)
             changed = _git(["status", "--porcelain"], worktree)
+            run_targets = list(targets) if targets else ["tests/"]
             command = [sys.executable, "-m", "pytest", "-q",
-                       "-p", "no:cacheprovider", *targets]
-            code, output = _bare_run(
-                command,
-                worktree)
+                       "-p", "no:cacheprovider", *run_targets]
+            started = datetime.now(timezone.utc).isoformat()
+            code, output = _bare_run(command, worktree)
+            tree_sha = _git(["rev-parse", "HEAD"], worktree).stdout.strip()
             row = {"id": entry["id"], "what": entry["what"],
-                   "rule": entry["rule"], "changed": changed.stdout.strip()
-                   .replace("\n", " | "), "rc": code,
-                   "failed": _failed_tests(output)}
+                   "rule": entry["rule"], "selection": selection,
+                   "source_sha": source_sha, "tree_sha": tree_sha,
+                   "utc": started,
+                   "changed": changed.stdout.strip().replace("\n", " | "),
+                   "rc": code, "failed": _failed_tests(output)}
+            if raw_dir:
+                _write_raw(raw_dir, entry, row, command, rev, output)
             rows.append(row)
             if log:
-                log.append(f"=== {entry['id']} {entry['what']} "
-                           f"(rev={rev or 'HEAD'}) ===")
-                log.append(f"corruption rule: {entry['rule']}")
-                log.append(f"changed paths: {row['changed']}")
-                log.append("suite command: " + " ".join(command))
-                log.append(f"bare exit code: {code}")
-                log.append("failed tests: "
-                           + (", ".join(row["failed"]) or "(none)"))
-                log.append("")
+                log.extend(_log_block(entry, row, command, rev, raw_dir))
     after = _git(["status", "--porcelain"], REPO_ROOT).stdout
     assert after == source_before, (
         "a corruption run must leave the source worktree exactly as it found "
@@ -219,23 +268,43 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--rev", default=None)
     parser.add_argument("--out", default="logs/prose_corruptions.txt")
-    parser.add_argument("--targets", nargs="*", default=[])
+    parser.add_argument("--targets", nargs="*", default=[],
+                        help="pytest selection; empty means the whole "
+                             "suite under tests/")
+    parser.add_argument("--raw-dir", default=None,
+                        help="directory for one raw-output file per "
+                             "corruption (default: alongside --out)")
     args = parser.parse_args()
-
-    header = [f"prose corruption runner, {datetime.now(timezone.utc).isoformat()}",
-              f"source repository: {REPO_ROOT}",
-              f"tree under test: {args.rev or 'HEAD'}"]
-    log = list(header)
-    rows = run_all(rev=args.rev, log=log, targets=tuple(args.targets))
-
-    table = ["id | rule | bare RC | failed tests"]
-    for row in rows:
-        table.append(f"{row['id']} | {row['rule']} | {row['rc']} | "
-                     + ("; ".join(row["failed"]) or "-"))
-    log.extend(table)
 
     out = REPO_ROOT / args.out
     out.parent.mkdir(parents=True, exist_ok=True)
+    raw_dir = Path(args.raw_dir) if args.raw_dir else out.parent / (
+        out.stem + "_raw")
+    if not raw_dir.is_absolute():
+        raw_dir = REPO_ROOT / raw_dir
+    raw_dir.mkdir(parents=True, exist_ok=True)
+
+    selection = " ".join(args.targets) if args.targets \
+        else "tests/ (whole suite)"
+    source_sha = _git(["rev-parse", "HEAD"], REPO_ROOT).stdout.strip()
+    header = [f"prose corruption runner, "
+              f"{datetime.now(timezone.utc).isoformat()}",
+              f"source repository: {REPO_ROOT}",
+              f"source tree sha: {source_sha}",
+              f"tree under test: {args.rev or 'HEAD'}",
+              f"selection scope: {selection}",
+              f"raw per-run logs: {raw_dir}"]
+    log = list(header)
+    rows = run_all(rev=args.rev, log=log, targets=tuple(args.targets),
+                   raw_dir=raw_dir)
+
+    table = [f"id | rule | selection | bare RC | named tests  "
+             f"(scope: {selection})"]
+    for row in rows:
+        table.append(f"{row['id']} | {row['rule']} | {row['selection']} | "
+                     f"{row['rc']} | " + ("; ".join(row["failed"]) or "-"))
+    log.append("")
+    log.extend(table)
     out.write_text("\n".join(log) + "\n", encoding="utf-8")
     print("\n".join(table))
 

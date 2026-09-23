@@ -102,6 +102,48 @@ def test_an_exempt_name_in_another_module_is_still_red(tmp_path):
         encoding="utf-8")
     missing = MOD._unaccounted_prose_constants(tmp_path)
     assert "core/zz_borrowed_schema.py:SCHEMA" in missing, missing
+def test_a_rule_name_is_catalog_data_not_a_substring_of_the_prose():
+    """The checker emits the catalog's name, never a word it found in prose.
+
+    A substring rule (`"sha" in text`) is forbidden. This sets a canary name
+    for the duplicate-line slot, corrupts core/dpe_pipeline.py in memory (one
+    repeated banner line, which carries no rule-name text), and demands the
+    CANARY name fire. It then points the slot at the real name and proves a
+    surface that only *mentions* the canary word is not named by it: the rule
+    name is read from data, never matched against the prose.
+    """
+    surface = "core/dpe_pipeline.py"
+    entry = next(e for e in CATALOG.CORRUPTIONS if e["id"] == "K6c")
+    clean = MOD._prose_corpus()[surface]
+    corrupted = CATALOG.apply_to_text(clean, entry)
+    MOD.PROSE_RULES.clear()
+    try:
+        MOD.PROSE_RULES["adjacent"] = "m12_duplicate_banner"
+        violations = MOD._prose_violations(surface, corrupted)
+        assert any("m12_duplicate_banner" in v and surface in v
+                   for v in violations), violations
+        assert not any("adjacent_duplicate_line" in v for v in violations)
+        MOD.PROSE_RULES.clear()
+        MOD.PROSE_RULES["adjacent"] = "adjacent_duplicate_line"
+        mentions = (corrupted
+                    + "\n# m12_duplicate_banner is only a word here\n")
+        assert not any("m12_duplicate_banner" in v for v in
+                       MOD._prose_violations("templates/x.md", mentions))
+    finally:
+        MOD.PROSE_RULES.clear()
+
+
+def test_the_card_leaves_no_stray_prompt_module_or_probe():
+    """The clean worktree carries none of the scratch files earlier rounds left.
+
+    K4/K5 create `core/zz_new_prompt.py` and r5 left a `tests/unit/_tmp_git_probe.py`;
+    neither may be committed. If one were on disk, the accounting check would
+    read it as a real surface and the whole corruption study would measure a
+    committed defect, not the catalog's planted one.
+    """
+    assert not (REPO_ROOT / "core" / "zz_new_prompt.py").exists()
+    assert not (REPO_ROOT / "tests" / "unit" / "_tmp_git_probe.py").exists()
+
 
 
 def test_the_agent_facing_prompt_constants_are_corpus_surfaces():
@@ -109,10 +151,12 @@ def test_the_agent_facing_prompt_constants_are_corpus_surfaces():
     corpus = MOD._prose_corpus()
     for name in MOD.PROSE_PROMPT_CONSTANTS:
         assert name in corpus, name
-    exempted = {":".join(key) for key in MOD.PROSE_CONSTANT_EXEMPTIONS}
+        exempted = {":".join(key) for key in MOD.PROSE_CONSTANT_EXEMPTIONS}
     for name in ("core/meta_agent.py:SYSTEM_PROMPT",
-                 "core/state_driver_guide.py:STATE_DRIVER_GUIDE"):
-        assert name not in exempted, name
+                 "core/state_driver_guide.py:STATE_DRIVER_GUIDE",
+                 "core/meta_conversation.py:META_JSON_SCHEMA",
+                 "core/meta_conversation.py:_INTENT_SCHEMA"):
+        assert name not in exempted, namee
 
 
 def test_every_exemption_is_keyed_by_module_and_name_with_a_reason():
@@ -190,3 +234,50 @@ def test_the_catalog_names_revisions_the_runner_can_reach():
     for entry in CATALOG.CORRUPTIONS:
         if entry.get("rev"):
             assert entry["rev"][:8] in reachable, entry["id"]
+
+# ── The corruptions are reproduced in isolation and fire their rule ──────
+#
+# Earlier rounds measured each corruption by running the suite in a worktree
+# the runner had ALREADY corrupted, so the test's "clean" copy was the damaged
+# file: most rows went red on a missing-bytes precondition, not on detection.
+# These checks apply each catalog entry to a clean in-memory copy, never touch
+# disk, and demand the named RULE fire — so every row is a detection result and
+# the empty-mutation control (the same surfaces intact) is green by the assert
+# that the clean copy carries no violation.
+@pytest.mark.parametrize("entry", CATALOG.existing_surface_entries(),
+                         ids=lambda e: e["id"])
+def test_each_existing_surface_corruption_fires_its_named_rule(entry):
+    surface = CATALOG.surface_name(entry)
+    corpus = MOD._prose_corpus()
+    clean = corpus[surface]
+    corrupted = CATALOG.surface_text(entry, MOD._read, MOD._git_file)
+    assert corrupted != clean, f"{entry['id']}: the fixture is not corrupt"
+    violations = MOD._prose_violations(surface, corrupted)
+    assert violations, f"{entry['id']}: no violation on the corrupted {surface}"
+    assert any(entry["rule"] in v for v in violations), \
+        (entry["id"], entry["rule"], violations)
+    assert any(surface in v for v in violations), violations
+    assert not MOD._prose_violations(surface, clean), (surface, "clean is red")
+
+
+def test_k6c_duplicates_exactly_one_line_and_overwrites_nothing():
+    """K6c is the m12 shape: one repeated banner line, not a whole-file swap."""
+    import difflib
+    entry = next(e for e in CATALOG.CORRUPTIONS if e["id"] == "K6c")
+    text = (REPO_ROOT / "core" / "dpe_pipeline.py").read_text(encoding="utf-8")
+    corrupted = CATALOG.apply_to_text(text, entry)
+    assert len(corrupted.splitlines()) == len(text.splitlines()) + 1
+    added = [ln for ln in difflib.unified_diff(
+        text.splitlines(), corrupted.splitlines(), lineterm="")
+        if ln.startswith("+") and not ln.startswith("+++")]
+    assert len(added) == 1, added
+    assert entry["locate"] in added[0], added
+
+
+def test_the_empty_mutation_leaves_every_surface_clean():
+    """No corruption applied: every corpus surface carries no violation."""
+    corpus = MOD._prose_corpus()
+    survivors = {name: MOD._prose_violations(name, text)
+                 for name, text in corpus.items()
+                 if MOD._prose_violations(name, text)}
+    assert not survivors, survivors

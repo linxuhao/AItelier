@@ -1,0 +1,17 @@
+Empty-mutation control, this card's own test files.
+
+Selection scope: tests/unit/test_prose_corruption_catalog.py and
+tests/unit/test_truncation_is_not_a_formatting_mistake.py (this card's test
+files). NOT the whole suite; the whole-suite run is issued by the reviewer with
+tools/prose_corruptions/run_corruptions.py (see final/prose_corruption_matrix.md).
+
+Command:
+    python -m pytest -q -s --maxfail=1 -p no:cacheprovider \
+        tests/unit/test_prose_corruption_catalog.py \
+        tests/unit/test_truncation_is_not_a_formatting_mistake.py
+
+Cwd: the isolated run worktree, base sha 7c43f6a5def2ce8620936f037afe550d36109bc6.
+Environment: python 3.12, no network, no injected secrets.
+
+No corruption applied (empty mutation). Bare exit code: 0.
+Result: 68 passed, 2 warnings in 7.07s.

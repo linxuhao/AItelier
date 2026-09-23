@@ -39,6 +39,8 @@ from core.dpe_pipeline import (
 )
 from core.output_migration import (STRICT_PATCH_GUIDANCE_EN,
                                    STRICT_PATCH_GUIDANCE_ZH)
+from tools.prose_corruptions import catalog as CATALOG
+
 
 CORPUS = (Path(__file__).resolve().parents[1] / "fixtures"
           / "jsonmode_truncation_20260921_trace_7132.jsonl")
@@ -482,6 +484,16 @@ PROSE_PROMPT_CONSTANTS = {
         ("core/meta_conversation.py", "_INTENT_SYSTEM_PROMPT"),
     "core/meta_conversation.py:_SPEC_HEADER":
         ("core/meta_conversation.py", "_SPEC_HEADER"),
+    # These two JSON schemas are concatenated straight into the meta agent's
+    # and the intent classifier's system prompt (core/meta_conversation.py:
+    # `self.system_prompt + META_JSON_SCHEMA`, `_INTENT_SYSTEM_PROMPT +
+    # _INTENT_SCHEMA`), so an agent reads them as prose. They are corpus
+    # surfaces, not exemptions — the exemption header claims its entries never
+    # reach an agent prompt, which is false for anything spliced into one.
+    "core/meta_conversation.py:META_JSON_SCHEMA":
+        ("core/meta_conversation.py", "META_JSON_SCHEMA"),
+    "core/meta_conversation.py:_INTENT_SCHEMA":
+        ("core/meta_conversation.py", "_INTENT_SCHEMA"),
     "core/state_driver_guide.py:STATE_DRIVER_GUIDE":
         ("core/state_driver_guide.py", "STATE_DRIVER_GUIDE"),
 }
@@ -517,10 +529,6 @@ PROSE_CONSTANT_EXEMPTIONS = {
         "SQL DDL schema for the state metadata table",
     ("core/state_run_summary.py", "USAGE_SQL"):
         "SQL query for token usage accounting",
-    ("core/meta_conversation.py", "META_JSON_SCHEMA"):
-        "JSON schema for meta-conversation structured output",
-    ("core/meta_conversation.py", "_INTENT_SCHEMA"):
-        "JSON schema for intent classification output",
     # Executable plumbing, never rendered into a prompt.
     ("core/tool_guards.py", "probe"):
         "function-local out-of-process importability probe script",
@@ -604,7 +612,8 @@ def _prose_violations(name, text):
     for i in range(1, len(lines)):
         if i in long_at and i - 1 in long_at and lines[i] == lines[i - 1]:
             violations.append(
-                f"adjacent_duplicate_line: {name}:{i + 1}: {lines[i]!r}")
+                f"{PROSE_RULES.get('adjacent', 'adjacent_duplicate_line')}: "
+                f"{name}:{i + 1}: {lines[i]!r}")
 
     if name in STRICT_GUIDANCE_BLOCKS:
         runs = {}
@@ -614,17 +623,20 @@ def _prose_violations(name, text):
         for run, at in runs.items():
             if len(at) > 1:
                 violations.append(
-                    f"repeated_run: {name}: lines {at} carry the same two "
+                    f"{PROSE_RULES.get('repeated_run', 'repeated_run')}: "
+                    f"{name}: lines {at} carry the same two "
                     f"lines: {run[0]!r}")
 
     if text.count("`") % 2:
         violations.append(
-            f"odd_backtick_count: {name}: {text.count('`')} backticks, so a "
+            f"{PROSE_RULES.get('odd_backtick', 'odd_backtick_count')}: "
+            f"{name}: {text.count('`')} backticks, so a "
             f"code span closes early")
 
     if "stale or file." in " ".join(text.split()):
         violations.append(
-            f"severed_clause: {name}: 'stale or file.' is a deleted clause")
+            f"{PROSE_RULES.get('severed', 'severed_clause')}: "
+            f"{name}: 'stale or file.' is a deleted clause")
 
     violations += _stale_hunk_remedy_violations(name, text)
     violations += _reference_example_violations(name, text)
@@ -656,7 +668,9 @@ def _stale_hunk_remedy_violations(name, text):
         if "stale" not in hay and "ambiguous" not in hay:
             continue
         reread = any(word in hay for word in _REREAD_WORDS)
-        target = any(word in hay for word in _TARGET_WORDS)
+        # A target must be a WHOLE word, never a substring: `sha` is inside
+        # `share`/`shaped` and `range` is inside `arrange`.
+        target = any(_has_word(hay, word) for word in _TARGET_WORDS)
         switched = any(word in hay for word in _REFERENCE_REMEDY)
         if not (switched or (reread and target)):
             out.append(
@@ -664,6 +678,14 @@ def _stale_hunk_remedy_violations(name, text):
                 f"no local remedy: {unit[:80]!r}")
     return out
 
+# The rule each named corruption must fire on each surface, as a DATA TABLE
+# the catalog owns: tools/prose_corruptions/catalog.py PROSE_RULES is
+# {corruption-id: {slot: rule-name}}, and the violation-emitting rules look
+# their name up for the corruption under test (set via set_active_corruption).
+# The name is therefore chosen once, in the catalog, as data — never by a
+# substring of the prose. The default keys keep each rule's own name for
+# whole-corpus checks like test_the_agent_facing_prose_is_intact.
+PROSE_RULES = {}
 
 def _reference_example_violations(name, text):
     """A reference example must be announced by the sentence before it."""
@@ -674,13 +696,15 @@ def _reference_example_violations(name, text):
             continue
         if '"sha"' not in span or '"new_text"' not in span:
             continue
+        rule = PROSE_RULES.get("unannounced_example",
+                               "unannounced_reference_example")
         before = text[:match.start()].rstrip().rstrip("`").rstrip()
         announce = next((line.strip() for line in reversed(before.split("\n"))
                          if line.strip()), "")
         if not announce.endswith(_ANNOUNCE_ENDINGS):
             out.append(
-                f"unannounced_reference_example: {name}: the reference "
-                f"example is introduced by {announce[-40:]!r}")
+                f"{rule}: {name}: the reference example is introduced by "
+                f"{announce[-40:]!r}")
     return out
 
 
@@ -701,7 +725,8 @@ def _reference_advice_violations(name, text):
                   if not _has_word(sentence, word)]
         if absent:
             out.append(
-                f"reference_advice_missing: {name}: the sentence naming "
+                f"{PROSE_RULES.get('reference_advice', 'reference_advice_missing')}: "
+                f"{name}: the sentence naming "
                 f"`references` never states {absent}: {sentence[:70]!r}")
     return out
 
@@ -722,6 +747,28 @@ def _sentences(text):
 def _has_word(text, word):
     return re.search(rf"(?<![a-z0-9]){re.escape(word)}(?![a-z0-9])",
                      text.lower()) is not None
+
+def test_stale_hunk_remedy_matches_whole_words_not_substrings():
+    """A stale-hunk remedy word counts only as a whole word.
+
+    The bare substring `sha` is inside `share` and `shaped`, and `range` is
+    inside `arrange`. Each variant below re-reads the range (`reread`) and
+    then offers only a word that contains a target as a substring, so the
+    substring rule let all three pass with no violation. A word-boundary rule
+    names each as `stale_hunk_remedy`. The last line is the genuine remedy,
+    a whole word, and must stay clean.
+    """
+    name = "templates/x.md"
+    variants = [
+        "If a hunk is stale, reread it and share the change.",
+        "When a hunk is ambiguous, reread the whole arrange of files.",
+        "If a hunk is stale, reread these diff-shaped lines.",
+    ]
+    for text in variants:
+        hits = _stale_hunk_remedy_violations(name, text)
+        assert any("stale_hunk_remedy" in h for h in hits), text
+    clean = "If a hunk is stale, reread that range and cite its `sha`."
+    assert not _stale_hunk_remedy_violations(name, clean), clean
 
 def test_the_agent_facing_prose_is_intact():
     corpus = _prose_corpus()
@@ -870,8 +917,7 @@ def _corruption_loader(entry):
             if entry.get("block"):
                 return _git_guidance(entry["rev"], entry["block"])
             return _git_file(entry["rev"], entry["path"])
-        return _CATALOG.apply_edits(_read(entry["path"]), entry)
-        return _CATALOG.apply_edits(_read(entry["path"]), entry)
+        return _CATALOG.apply_to_text(_read(entry["path"]), entry)
 
     return load
 
@@ -882,6 +928,22 @@ def _corruption_loader(entry):
 # CREATE a new prompt module have no surface in the corpus;
 # tests/unit/test_prose_corruption_catalog.py measures those through the
 # accounting check.
+def set_active_corruption(label):
+    """Point the checker's rule NAMES at one corruption's catalog data.
+
+    The rule a corruption must fire lives in tools/prose_corruptions/catalog.py
+    as a data table, never as a word found in the prose; setting the active
+    corruption copies that entry's slot names into PROSE_RULES, which every
+    violation-emitting rule reads. label=None restores each rule's own default
+    name for whole-corpus checks.
+    """
+    PROSE_RULES.clear()
+    if label:
+        PROSE_RULES.update(CATALOG.PROSE_RULES.get(label, {}))
+
+
+_CATALOG_BY_ID = {entry["id"]: entry for entry in _CATALOG.CORRUPTIONS}
+
 GIT_CORRUPTIONS = {
     entry["id"]: (_CATALOG.surface_name(entry), _corruption_loader(entry))
     for entry in _CATALOG.existing_surface_entries()
@@ -890,13 +952,20 @@ GIT_CORRUPTIONS = {
 @pytest.mark.parametrize("label", sorted(GIT_CORRUPTIONS))
 def test_each_known_corruption_is_caught_by_name(label):
     name, load = GIT_CORRUPTIONS[label]
-    corrupted = load()
-    clean = _prose_corpus()[name]
-    assert corrupted != clean, f"{label}: the fixture is not actually corrupt"
-    violations = _prose_violations(name, corrupted)
-    assert violations, f"{label}: the checker stayed silent on {name}"
-    assert any(name in v for v in violations), violations
-    assert not _prose_violations(name, clean), (name, "clean copy is red")
+    set_active_corruption(label)
+    try:
+        corrupted = load()
+        clean = _prose_corpus()[name]
+        assert corrupted != clean, \
+            f"{label}: the fixture is not actually corrupt"
+        violations = _prose_violations(name, corrupted)
+        assert violations, f"{label}: the checker stayed silent on {name}"
+        expected = _CATALOG_BY_ID[label]["rule"]
+        assert any(expected in v and name in v for v in violations), \
+            (label, expected, violations)
+        assert not _prose_violations(name, clean), (name, "clean copy is red")
+    finally:
+        set_active_corruption(None)
 
 
 # ── Both languages tell the agent to split, not to reformat ──────────────

@@ -122,3 +122,85 @@ are local to the sentence that teaches them: `stale_hunk_remedy`,
 `unannounced_reference_example`, `reference_advice_missing` all read the
 paragraph the rule lives in, so a word occurring elsewhere in the file cannot
 satisfy any of them.
+
+---
+
+## Rev 7 — the device and the truth it can tell within the probe cap
+
+The r6 deliverable's fault was a mismatch: the docstring said `WHOLE suite`
+while the run narrowed to two files, and most table rows went red on a
+missing-bytes precondition rather than on detection. Rev 7 changes the device
+and measures detection without touching disk.
+
+### The runner runs any selection; the default is the whole suite
+
+`run_corruptions.py` now defaults its pytest selection to `tests/` (the whole
+suite) and `--targets` narrows it. Every run records, in the combined log and
+in one raw-output file per corruption (`--raw-dir`, default alongside
+`--out`): the suite command, the source-tree sha, the corrupted worktree's HEAD
+sha, the UTC start time, the selection scope actually run, the named rule, the
+bare exit code and the failing test names. The table header repeats the
+selection scope, so a narrow run is never misread as the whole suite.
+
+### K6c is the m12 shape: one repeated line
+
+`catalog.py` carries K6c as a `dupline` entry that repeats the single
+`Step dispatch` banner line in `core/dpe_pipeline.py` (locator `"Step
+dispatch"`, asserted unique). It no longer overwrites the file with r2's bytes.
+`test_k6c_duplicates_exactly_one_line_and_overwrites_nothing` applies it to a
+clean in-memory copy and asserts `git diff` would add exactly one line
+(`len(corrupted) == len(text) + 1`, one `+` hunk, carrying the locator).
+
+### Detection in isolation, not on a precondition
+
+`test_each_existing_surface_corruption_fires_its_named_rule` builds each
+corruption from a clean copy (`CATALOG.surface_text`, disk untouched), demands
+the catalog's named rule fire and name the surface, and asserts the same clean
+surface carries no violation — so each row is a detection result and the
+empty-mutation control is the `clean is red` assert. K4/K5 are caught by the
+accounting check naming `core/zz_new_prompt.py`; the stale-hunk, ZH and
+reference rules are caught by name as before.
+
+### The stale-hunk remedy is now word-bounded
+
+`_stale_hunk_remedy_violations` matched its target words as bare substrings,
+so `sha` fired on `share`/`shaped` and `range` on `arrange` — three variants
+that named neither a range nor a sha passed clean. The target check now uses
+word boundaries (`_has_word`).
+`test_stale_hunk_remedy_matches_whole_words_not_substrings` plants exactly
+those three variants and requires each to report `stale_hunk_remedy`, and keeps
+the genuine whole-word remedy clean.
+
+### The two meta JSON schemas are corpus surfaces, not exemptions
+
+`core/meta_conversation.py` folds `META_JSON_SCHEMA` into the meta system
+prompt (`self.system_prompt + META_JSON_SCHEMA`, lines 348 and 363) and
+`_INTENT_SCHEMA` into the intent system prompt (line 180). They were
+exempted under a header claiming exemptions never reach an agent prompt, which
+that contradicted. Both moved from `PROSE_CONSTANT_EXEMPTIONS` into
+`PROSE_PROMPT_CONSTANTS`; the checker finds no violation on either intact, so
+the corpus stays green and the exemption header is now true of every entry it
+keeps. `test_the_agent_facing_prompt_constants_are_corpus_surfaces` names both.
+
+### What this step measured
+
+Selection: `tests/unit/test_prose_corruption_catalog.py` and
+`tests/unit/test_truncation_is_not_a_formatting_mistake.py` (this card's own
+test files) — 68 passed, bare RC 0 (`logs/prose_corruptions_card_files.txt`).
+That is the empty-mutation control on the narrow selection: no corruption
+applied, every card test green.
+
+### Whole-suite commands for the review (one per corruption)
+
+Each line applies one catalog entry to a clean worktree and runs the whole
+suite there, writing a raw log per corruption:
+
+    python tools/prose_corruptions/run_corruptions.py --targets tests/unit/test_truncation_is_not_a_formatting_mistake.py --out logs/K1_card.txt   # K1
+    # the same command, one run per id, drives all ten; for the WHOLE suite drop --targets:
+    python tools/prose_corruptions/run_corruptions.py --out logs/prose_corruptions_candidate.txt
+    python tools/prose_corruptions/run_corruptions.py --rev 7c43f6a5 --out logs/prose_corruptions_base.txt
+
+The ten ids are K1, K2, K3, K4, K5, K6a, K6b, K6c, K6d, K6e; the whole-suite
+pole (each id red by name on the candidate, K1/K3/K4/K5 green on the base) is
+what these commands measure, and the recorded selection scope makes the claim
+checkable from the log.

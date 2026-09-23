@@ -73,7 +73,9 @@ class Host:
                  if x["step_id"] == step_id and x["status"] == "completed"]
         require(len(steps) == 1, "completed independent reviewer instance required")
         require(cert["claim"].get("run_id") == run_id and cert["claim"].get("step_id") == step_id
-                and str(cert["claim"].get("step_instance_id")) == str(steps[0]["id"]),
+                and str(cert["claim"].get("step_instance_id")) == str(steps[0]["id"])
+                and type(cert["claim"].get("claim_epoch")) is int
+                and cert["claim"]["claim_epoch"] == steps[0].get("claim_epoch"),
                 "reading certificate is from another reviewer attempt")
         return cert
 

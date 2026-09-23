@@ -107,3 +107,23 @@ def test_read_only_real_model_probe_has_valid_source_and_no_delivery_calls():
     called={node.func.attr for node in ast.walk(tree) if isinstance(node,ast.Call) and isinstance(node.func,ast.Attribute)}
     assert not {'promote','record_backup','approve_checkpoint'} & called
     assert {'generate_native','observe','guard'} <= called
+
+
+def test_host_rejects_prior_claim_epoch_even_with_same_step_instance(tmp_path,monkeypatch,bench):
+    from skillflow import StepResult
+    from aitelier.writing_bench.reading import ReviewSession,Coverage
+    session=Session(tmp_path,monkeypatch,bench);run=session.start(request(bench))
+    session.sf.advance_run(run);claim=session.sf.claim_next_step(run)
+    identity,materials=bench.review_materials(run,'literary')
+    observed=ReviewSession(Coverage('literary',identity['review_key'],identity['targets'],materials),
+             bench.work(run)/'reading',{'run_id':run,'step_id':claim.step_id,
+             'step_instance_id':claim.token.step_instance_id,'claim_epoch':claim.token.claim_epoch-1})
+    observed.observe([{'role':'user','content':m.text} for m in materials])
+    value={'review_key':identity['review_key'],'reviewed_chapters':identity['targets'],
+           'passed':True,'read_complete':True,'feedback':'模拟上一claim留下的同字节报告','findings':[]}
+    assert observed.guard('write_verdict',value) is None
+    saved=session.sf.execute_tool('write_verdict',value,run_id=run,step_id=claim.step_id,
+          step_instance_id=claim.token.step_instance_id,claim_epoch=claim.token.claim_epoch)
+    session.sf.confirm_step(claim.token,StepResult(outputs={'written':saved}))
+    with pytest.raises(BenchError,match='another reviewer attempt'):
+        adapter.Host().observed_review(bench,run,'literary',value)

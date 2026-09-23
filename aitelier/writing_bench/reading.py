@@ -13,7 +13,7 @@ import os
 import tempfile
 import uuid
 
-from .storage import BenchError, decode, encode, identifier, immutable, read_file, require, sha
+from .storage import BenchError, decode, encode, identifier, immutable, lock, read_file, require, sha
 
 PROTOCOL = 1
 PHASES = {"literary_review": "literary", "ledger_audit": "ledger"}
@@ -237,7 +237,8 @@ class ReviewSession:
         self.coverage, self.directory, self.claim = coverage, directory, claim
         self.session = uuid.uuid4().hex
         self.pointer = directory / (coverage.identity["phase"] + "-session.json")
-        replace_owned(self.pointer, {"session": self.session, "claim": claim, "certificate": None})
+        with lock(self.directory / ".reading.lock"):
+            replace_owned(self.pointer, {"session": self.session, "claim": claim, "certificate": None})
 
     def observe(self, messages: list[dict]) -> None:
         self.coverage.observe(messages)
@@ -255,12 +256,16 @@ class ReviewSession:
             if report.get("passed") is False and report.get("read_complete") is False:
                 return None
             cert = self.coverage.certificate(report, self.claim)
-            current = decode(read_file(self.directory, self.pointer.name))
-            require(current["session"] == self.session, "review executor was superseded")
-            filename = sha(encode({"session": self.session, "report": report})) + ".json"
-            immutable(self.directory / filename, encode(cert))
-            replace_owned(self.pointer, {"session": self.session, "claim": self.claim,
-                                        "certificate": filename, "sha256": sha(encode(cert))})
+            # Session replacement and certificate publication share one lock.
+            # Atomic rename alone does not prevent an old executor winning a
+            # read-pointer/write-pointer race against a new claim.
+            with lock(self.directory / ".reading.lock"):
+                current = decode(read_file(self.directory, self.pointer.name))
+                require(current["session"] == self.session, "review executor was superseded")
+                filename = sha(encode({"session": self.session, "report": report})) + ".json"
+                immutable(self.directory / filename, encode(cert))
+                replace_owned(self.pointer, {"session": self.session, "claim": self.claim,
+                                            "certificate": filename, "sha256": sha(encode(cert))})
             return None
         except (ValueError, OSError, TypeError) as exc:
             return {"error": str(exc), "missing_review_material": self.coverage.missing()}

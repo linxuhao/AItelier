@@ -195,3 +195,28 @@ def test_boolean_chapter_does_not_alias_integer_target():
     full(c)
     with pytest.raises(BenchError,match='target mismatch'):
         c.certificate(report(reviewed_chapters=[{'chapter':True,'title':'一','prose_sha256':'b'*64}]),{})
+
+
+def test_concurrent_replacement_cannot_be_overwritten_by_late_certificate(tmp_path,monkeypatch):
+    import threading
+    from aitelier.writing_bench import reading
+    old=ReviewSession(full(coverage()),tmp_path,{'run_id':'r','claim_epoch':1})
+    started=threading.Event();replaced=threading.Event();new=[]
+    def replace():
+        started.set()
+        new.append(ReviewSession(coverage(),tmp_path,{'run_id':'r','claim_epoch':2}))
+        replaced.set()
+    thread=threading.Thread(target=replace)
+    original=reading.immutable
+    def at_publication(path,raw):
+        thread.start();assert started.wait(2)
+        # Without the shared lock the new owner installs its pointer here,
+        # then the old executor overwrites it. With the lock it must wait.
+        replaced.wait(0.15)
+        return original(path,raw)
+    monkeypatch.setattr(reading,'immutable',at_publication)
+    assert old.guard('write_verdict',report()) is None
+    thread.join(3);assert replaced.is_set() and not thread.is_alive()
+    pointer=json.loads((tmp_path/'literary-session.json').read_text())
+    assert pointer['session']==new[0].session and pointer['certificate'] is None
+    assert old.guard('write_verdict',report())['error']=='review executor was superseded'

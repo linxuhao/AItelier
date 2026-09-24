@@ -82,8 +82,12 @@ def godot_playtest_scenario(*, scenario: str = "", inline_scenario: str = "",
             doc = load_yaml_strict(inline_scenario, source="inline_scenario")
         except Exception as exc:
             return {"error": f"inline_scenario is not valid YAML: {exc}"}
+        inline_header: dict = {}
         if isinstance(doc, dict) and isinstance(doc.get("scenarios"), list):
             inline_doc = doc["scenarios"]
+            # The wrapper's other keys (`scene:`, or a misspelt one) go to the
+            # harness with the scenarios, which applies or refuses each one.
+            inline_header = {k: v for k, v in doc.items() if k != "scenarios"}
         elif isinstance(doc, dict) and doc.get("timeline") is not None:
             inline_doc = [doc]
         else:
@@ -131,6 +135,7 @@ def godot_playtest_scenario(*, scenario: str = "", inline_scenario: str = "",
         # scenario files — so a forgotten probe reddens the WHOLE gate, not
         # just itself.
         picked = dict(spec)
+        picked.update(inline_header)
         picked["scenarios"] = inline_doc
     else:
         available = sorted(str(s.get("name")) for s in spec["scenarios"])
@@ -169,6 +174,7 @@ def godot_playtest_scenario(*, scenario: str = "", inline_scenario: str = "",
         "scenarios": results,
         "all_passed": bool(results) and all(r["passed"] for r in results),
         "hard_passed": bool(report.get("passed")),
+        "spec_errors": list(report.get("spec_errors") or []),
         "timed_out": bool(report.get("gate_timeout")),
         "code_root": str(target),
         "report": "\n".join(header + _render(scen)),

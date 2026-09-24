@@ -42,12 +42,21 @@ def test_read_spec_valid(tmp_path):
     assert info["source"] == "playtest_spec.yaml"
 
 
-def test_read_spec_no_scenarios_is_none(tmp_path):
-    # A spec with no scenarios can't drive anything → treat as absent (legacy path).
+def test_read_spec_keys_without_scenarios_is_an_error(tmp_path):
+    # A file with keys is a contract: without a scenario list it is named as an
+    # error, never read as "no contract" (which runs the canned smoke test).
     (tmp_path / "playtest_spec.yaml").write_text("scene: res://main.tscn\n")
     spec, info = read_spec(tmp_path)
     assert spec is None
+    assert info["errors"] == ["playtest_spec.yaml has no non-empty `scenarios` list "
+                              "(`scenarios` is absent; top-level keys: scene)"]
+
+
+def test_read_spec_empty_file_is_none(tmp_path):
     # EMPTY is not MALFORMED: no contract to run is the legacy path, not an error.
+    (tmp_path / "playtest_spec.yaml").write_text("")
+    spec, info = read_spec(tmp_path)
+    assert spec is None
     assert info["errors"] == []
 
 

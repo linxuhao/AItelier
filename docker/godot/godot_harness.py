@@ -890,7 +890,7 @@ func _point_of(node_name: String, offset: Vector2, spec: String) -> Vector2:
     var nan_pt := Vector2(NAN, NAN)
     var n := _resolve(node_name)
     if n == null:
-        if _is_scene_path(node_name):
+        if _is_path(node_name):
             _refuse_path("aim", node_name, spec)
             return nan_pt
         push_error("aim: node not found: " + node_name + " (spec: " + spec + ")")
@@ -1029,7 +1029,7 @@ func _eval_assert(a: Dictionary) -> void:
     var target := _resolve(node_name)
     if target == null:
         res["error"] = "node not found: " + node_name
-        if _is_scene_path(node_name):
+        if _is_path(node_name):
             res["error"] = "path does not resolve: " + node_name
             _refuse_path("assert", node_name, str(a.get("name", expr_str)))
         _results.append(res)
@@ -1099,20 +1099,21 @@ func _resolve(name: String) -> Node:
     # it resolves relative to the current scene or not at all. It used to fall
     # back to find_child(leaf) anywhere in the tree, so `X/PlanEditKind1`
     # clicked a node the written path never named. The caller reports a path
-    # that does not resolve as a spec error (_is_scene_path / _refuse_path).
+    # that does not resolve as a spec error (_is_path / _refuse_path).
     if "/" in name:
         if scene == null:
             return null
         return scene.get_node_or_null(NodePath(name))
     return get_tree().get_root().find_child(name, true, false)
-## A scene-relative PATH target, as opposed to a bare node name (searched by
-## name) or an absolute /root or res: path.
-func _is_scene_path(name: String) -> bool:
-    return "/" in name and not name.begins_with("/") and not name.begins_with("res:")
+## A PATH target -- scene-relative (`HUD/Label`) or absolute (`/root/...`) --
+## as opposed to a bare node name, which is searched by name. A node name
+## cannot contain "/", so the slash alone decides it.
+func _is_path(name: String) -> bool:
+    return "/" in name
 ## The spec named a path that is not in the tree. That is the author's error,
 ## so it goes to the spec_errors the python side reports, not to push_error.
 func _refuse_path(kind: String, name: String, spec: String) -> void:
-    _spec_errors.append("frame %d: %s target %s is a path and does not resolve under the current scene (spec: %s)" % [_frame, kind, name, spec])
+    _spec_errors.append("frame %d: %s target %s is a path and does not resolve in the scene tree (spec: %s)" % [_frame, kind, name, spec])
 func _jsonable(v):
     match typeof(v):
         TYPE_VECTOR2:
@@ -1464,8 +1465,87 @@ _TIMELINE_KEYS = {"at", "press", "release", "actions", "assert", "click", "click
 #   repeatability -- the game repo's gate launcher replays the scenario;
 #   description -- read by the type check in _playtest_spec: a plain string
 #     only, because a mapping or a list under it could carry assert blocks.
-_SPEC_KEYS = {"scene", "frames", "scenarios", "actions", "surface"}
-_SCENARIO_KEYS = {"name", "timeline", "scene", "repeatability", "description"}
+# Each key also has ONE type. A value of another type is a spec error: a
+# mapping parked under `repeatability:` or `name:` carries assert blocks no
+# reader evaluates, and the launcher reads `repeatability: 'yes'` as off.
+# The shapes are the ones the readers above consume (wuxia _common.yaml:
+# actions is a list of action names, surface maps a node to attribute names).
+def _is_str_list(v) -> bool:
+    return isinstance(v, list) and all(isinstance(x, str) for x in v)
+
+
+_SPEC_KEY_TYPES = {
+    "scene": (lambda v: isinstance(v, str), "a string"),
+    "frames": (lambda v: isinstance(v, int) and not isinstance(v, bool), "an integer"),
+    "scenarios": (lambda v: isinstance(v, list) and len(v) > 0, "a non-empty list"),
+    "actions": (_is_str_list, "a list of strings"),
+    "surface": (lambda v: isinstance(v, dict) and all(
+        isinstance(k, str) and _is_str_list(x) for k, x in v.items()),
+        "a mapping of node name to a list of strings"),
+}
+_SCENARIO_KEY_TYPES = {
+    "name": (lambda v: isinstance(v, str), "a string"),
+    "timeline": (lambda v: isinstance(v, list), "a list"),
+    "scene": (lambda v: isinstance(v, str), "a string"),
+    "repeatability": (lambda v: isinstance(v, bool), "true or false"),
+    "description": (lambda v: isinstance(v, str), "a plain string"),
+}
+_SPEC_KEYS = set(_SPEC_KEY_TYPES)
+_SCENARIO_KEYS = set(_SCENARIO_KEY_TYPES)
+
+
+def _key_type_errors(where: str, mapping: dict, types: dict) -> list:
+    return ["%s has key %s of type %s - it must be %s."
+            % (where, k, type(mapping[k]).__name__, what)
+            for k, (ok, what) in types.items() if k in mapping and not ok(mapping[k])]
+
+
+# A list-form assert item is read by the probe's _eval_assert: node, expr and
+# name, or node, attr and mode for a delta assert, which never reads expr.
+_ASSERT_ITEM_KEYS = {"name", "node", "expr", "mode", "attr"}
+
+
+def _assert_errors(raw) -> list:
+    if isinstance(raw, dict):
+        return []
+    if not isinstance(raw, list):
+        return ["`assert` is a %s - it must be a mapping or a list" % type(raw).__name__]
+    errors = []
+    for j, a in enumerate(raw):
+        if not isinstance(a, dict):
+            errors.append("assert item %d is a %s - it must be a mapping"
+                          % (j, type(a).__name__))
+            continue
+        unknown = sorted(str(k) for k in a if k not in _ASSERT_ITEM_KEYS)
+        if unknown:
+            errors.append("assert item %d has unknown key(s) %s - allowed: %s"
+                          % (j, ", ".join(unknown), ", ".join(sorted(_ASSERT_ITEM_KEYS))))
+        if "mode" in a and "expr" in a:
+            errors.append("assert item %d has both `mode` and `expr`; a `mode` "
+                          "assert compares `attr` with frame 0 and never reads "
+                          "`expr`. Write two items." % j)
+    return errors
+
+
+_AIM_BUTTONS = ("left", "right", "middle")
+
+
+def _aim_errors(key: str, aim) -> list:
+    """The probe parses an aim token by token and a later offset or button
+    overwrites an earlier one, so `X +0,500 +0,0` clicks at +0,0."""
+    toks = str(aim).split(" ")[1:]
+    offsets = [t for t in toks if t.startswith(("+", "-")) or "," in t]
+    buttons = [t for t in toks if t in _AIM_BUTTONS]
+    errors = []
+    if len(offsets) > 1:
+        errors.append("%s %r has %d offsets (%s); an aim takes one offset"
+                      % (key, aim, len(offsets), ", ".join(offsets)))
+    if len(buttons) > 1:
+        errors.append("%s %r has %d buttons (%s); a click takes one button"
+                      % (key, aim, len(buttons), ", ".join(buttons)))
+    return errors
+
+
 _MAX_SPEC_FRAMES = 3000   # safety cap on how long one scenario may run
 
 
@@ -1504,7 +1584,16 @@ def _normalize_timeline(timeline: list) -> tuple[list, list]:
         # broken prologue) read as "the builder service is down", so the probe
         # was recorded as BLOCKED and the defect it existed to measure went
         # unmeasured. A malformed scenario must say it is malformed.
-        at_raw = e.get("at", 0)
+        # An entry with no `at` had two readings: rebuilt `actions:`/`clicks:`/
+        # `hovers:` entries ran at frame 0, while `press:`/`click:`/`assert:`
+        # kept no `at` and the probe never ran them -- an assert that is never
+        # evaluated, in a scenario that stays green.
+        if "at" not in e:
+            errors.append("timeline entry %d has no `at`. Every entry runs on the "
+                          "frame its `at` names; write it (`at: 0` is the first "
+                          "frame)." % i)
+            continue
+        at_raw = e["at"]
         if isinstance(at_raw, bool) or not isinstance(at_raw, (int, float)):
             errors.append(
                 "timeline entry %d has a non-numeric `at`: %r. Frames are single "
@@ -1535,6 +1624,15 @@ def _normalize_timeline(timeline: list) -> tuple[list, list]:
                 % (i, at, latest[0], latest[1], i, latest[0]))
         elif latest is None or at > latest[1]:
             latest = (i, at)
+        shape_errors = _assert_errors(e["assert"]) if "assert" in e else []
+        for key in ("click", "hover", "clicks", "hovers"):
+            aims = e.get(key) or []
+            for aim in ([aims] if isinstance(aims, str) else aims):
+                shape_errors.extend(_aim_errors(key, aim))
+        if shape_errors:
+            errors.extend("timeline entry %d (at: %d): %s" % (i, at, m)
+                          for m in shape_errors)
+            continue
         acts = e.get("actions") or []
         if isinstance(acts, str):
             acts = [acts]
@@ -1715,13 +1813,25 @@ def _playtest_spec(dst: Path, spec: dict, frames: int, timeout: int,
     malformed timeline, and input that never reached the game. Per-scenario
     assertion outcomes stay ADVISORY (``behavior``) so a wrong or flaky assertion
     can never stall a build that otherwise runs clean."""
+    # A spec with keys is read as a spec or refused; the canned smoke test is
+    # only for a request that carries no spec (see playtest_project).
+    spec_errors = []
+    if not isinstance(spec, dict):
+        spec_errors.append("spec is a %s - it must be a mapping with a `scenarios` "
+                           "list. No scenario was run." % type(spec).__name__)
+        spec = {}
+    elif "scenarios" not in spec:
+        spec_errors.append("spec has no `scenarios` key (top-level keys: %s). No "
+                           "scenario was run." % ", ".join(sorted(str(k) for k in spec)))
+    header_errors = _key_type_errors("spec", spec, _SPEC_KEY_TYPES)
+    spec_errors.extend(m + " No scenario was run." for m in header_errors)
     scene = str(spec.get("scene", "") or "")
-    default_frames = int(spec.get("frames", frames) or frames)
-    scenarios = spec.get("scenarios") or []
+    default_frames = int(spec.get("frames") or frames) if not header_errors else frames
+    scenarios = spec.get("scenarios") if isinstance(spec.get("scenarios"), list) else []
     state_path = dst.parent / "probe_state.json"
     spec_path = dst.parent / "scenario_spec.json"
 
-    scen_results, all_errors, captures, spec_errors = [], [], [], []
+    scen_results, all_errors, captures = [], [], []
     scen_timing: list[dict] = []
     ctrl_timing: list[dict] = []
     all_debt: list[dict] = []
@@ -1736,22 +1846,25 @@ def _playtest_spec(dst: Path, spec: dict, frames: int, timeout: int,
         spec_errors.append(
             "spec has unknown top-level key(s) %s - allowed: %s. No scenario was run."
             % (", ".join(unknown_spec), ", ".join(sorted(_SPEC_KEYS))))
+    header_bad = bool(spec_errors)
     for i, sc in enumerate(scenarios):
+        refused = header_bad
+        if not isinstance(sc, dict):
+            spec_errors.append("scenario %d is a %s - it must be a mapping. The "
+                               "scenario was not run." % (i, type(sc).__name__))
+            sc, refused = {}, True
         name = str(sc.get("name", "scenario"))
-        timeline, terrs = _normalize_timeline(sc.get("timeline") or [])
+        tl_raw = sc.get("timeline")
+        timeline, terrs = _normalize_timeline(tl_raw if isinstance(tl_raw, list) else [])
         spec_errors.extend("scenario %r: %s" % (name, m) for m in terrs)
         unknown = sorted(str(k) for k in sc if k not in _SCENARIO_KEYS)
         if unknown:
             spec_errors.append(
                 "scenario %r has unknown key(s) %s - allowed: %s. The scenario was not run."
                 % (name, ", ".join(unknown), ", ".join(sorted(_SCENARIO_KEYS))))
-        bad_desc = "description" in sc and not isinstance(sc["description"], str)
-        if bad_desc:
-            spec_errors.append(
-                "scenario %r has key description of type %s - it must be a plain "
-                "string. The scenario was not run."
-                % (name, type(sc["description"]).__name__))
-        if unknown or unknown_spec or bad_desc:
+        bad_types = _key_type_errors("scenario %r" % name, sc, _SCENARIO_KEY_TYPES)
+        spec_errors.extend(m + " The scenario was not run." for m in bad_types)
+        if refused or unknown or bad_types:
             scen_results.append({"name": name, "ran": False, "errors": [],
                                  "native_debt": [], "asserts": [], "passed": False,
                                  "pressed": False, "input_dead": False})
@@ -1770,14 +1883,15 @@ def _playtest_spec(dst: Path, spec: dict, frames: int, timeout: int,
             # to: an assertion scheduled past it simply never fires, vanishes
             # from asserts[], and `all(a.passed)` then holds over whatever did
             # run. A scenario losing its terminal assertion must not read as a
-            # scenario that passed it.
+            # scenario that passed it. An input past the cap never fires either,
+            # so it is refused the same way.
             dropped = sorted({int(e.get("at", 0)) for e in timeline
-                              if e.get("assert") and int(e.get("at", 0)) >= _MAX_SPEC_FRAMES})
+                              if int(e.get("at", 0)) >= _MAX_SPEC_FRAMES})
             if dropped:
                 spec_errors.append(
-                    "scenario %r: assertion(s) scheduled at frame(s) %s, past the "
-                    "%d-frame cap - they would never be evaluated. Reach the same "
-                    "state sooner, or assert earlier."
+                    "scenario %r: timeline entry(ies) scheduled at frame(s) %s, past "
+                    "the %d-frame cap - they would never run. Reach the same "
+                    "state sooner, or act and assert earlier."
                     % (name, ", ".join(str(d) for d in dropped), _MAX_SPEC_FRAMES))
         spec_path.write_text(json.dumps({"frames": sframes, "timeline": timeline}))
         # Per-scenario scene override. `run_godot` has always been able to boot
@@ -2031,7 +2145,9 @@ def playtest_project(project_dir: str, frames: int = DEFAULT_PLAYTEST_FRAMES,
         t_import = time.monotonic()
         _import_resources(dst, timeout)
         import_sec = time.monotonic() - t_import
-        if spec and isinstance(spec.get("scenarios"), list) and spec["scenarios"]:
+        # Any spec with keys is read as a spec (and refused there if it has
+        # no scenario list); only a request with no spec runs the smoke test.
+        if spec:
             result = _playtest_spec(dst, spec, frames, timeout, ledger=ledger,
                                     cap_limit=captures)
         else:

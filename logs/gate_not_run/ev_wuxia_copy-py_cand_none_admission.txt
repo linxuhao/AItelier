@@ -1,0 +1,32 @@
+{
+  "requests": [
+    {
+      "route": "/compile",
+      "method": "POST",
+      "seq": 0,
+      "status": 200,
+      "outcome": "answered",
+      "elapsed_sec": 0.001,
+      "delivered": true
+    },
+    {
+      "route": "/playtest",
+      "method": "POST",
+      "seq": 1,
+      "render_wait_injected": true,
+      "render_wait_timeout_sec": 1500.0,
+      "status": 200,
+      "outcome": "answered",
+      "render_owner_wait_sec": 0.0069,
+      "render_owner_waited_for_owner_ids": [],
+      "elapsed_sec": 0.046,
+      "delivered": true
+    }
+  ],
+  "queued_behind": [],
+  "render_owner_wait_sec": 0.007,
+  "state": "answered",
+  "last_route": "/playtest",
+  "ticket": "rt-20260924T225253Z-78bd6abf",
+  "upstream": "http://127.0.0.1:37719"
+}

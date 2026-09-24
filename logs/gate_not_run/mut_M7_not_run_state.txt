@@ -1,0 +1,107 @@
+MUTATION M7_not_run_state: applied to aitelier/tools/run_tests/impl.py
+ignition: 87 (bytes appended by the probe on the mutated line)
+tree: rsync copy of /home/linxuhao/.AItelier/worktrees-scratch/gatenotrun2 at 59f3252e0f1b4c5839958e849c9f54f1c5f26eee
+----- pytest -----
+throwaway aitelier containers running: 3
+fatal: not a git repository (or any parent up to mount point /home/linxuhao)
+Stopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).
+gitrc=0
+..FF.................................................................... [ 35%]
+........................................................................ [ 70%]
+............................................................             [100%]
+=================================== FAILURES ===================================
+_____ test_pole_1_a_gate_the_engine_did_not_admit_is_not_run[live_render] ______
+
+rig = <tests.gate_fixture.HarnessRig object at 0x73b660825b50>
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_pole_1_a_gate_the_engine_0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x73b660825520>
+holder = 'live_render'
+
+    @pytest.mark.parametrize("holder", ["live_render", "owner_lost"])
+    def test_pole_1_a_gate_the_engine_did_not_admit_is_not_run(
+            rig, tmp_path, monkeypatch, holder):
+        """Another owner holds the render lock. `live_render`: a render is in
+        flight and the request's queue window runs out; `owner_lost`: the holder
+        died and needs reconciliation, so the harness refuses at once. Either way
+        the harness answers 409 with its structured payload, the gate exits 2, and
+        the report says NOT RUN in structured fields — never a code red."""
+        monkeypatch.setenv("AITELIER_REPO_GATE_RENDER_WAIT_SECONDS", "0.5")
+        if holder == "live_render":
+            rig.hold()
+        else:
+            rig.mark_owner_lost()
+        repo = _repo(tmp_path)
+        out = tmp_path / "out"
+        result = rt.run_tests(project_root=str(repo), out_dir=str(out))
+        report = _report(out)
+        gate = report["repo_gate"]
+    
+        assert gate["returncode"] == 2
+        assert gate["measured"] == rt.REPO_GATE_UNMEASURED
+        assert report["repo_gate_admission"] == gate_admission.NOT_ADMITTED
+        (request,) = gate["admission"]["requests"]
+        assert request["status"] == 409 and request["outcome"] == "not_admitted"
+        assert request["owner_kind"] == ("active" if holder == "live_render"
+                                         else "owner_lost")
+        assert request["needs_reconciliation"] is (holder == "owner_lost")
+        # Not run, and non-passing: never a pass, never a code red.
+        assert report["passed"] is False and result["passed"] is False
+        assert report["repo_gate_absent"] is True and result["repo_gate_absent"] is True
+>       assert report["evidence_state"] == "not_run"
+               ^^^^^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'evidence_state'
+
+tests/unit/test_repo_gate_admission.py:150: KeyError
+______ test_pole_1_a_gate_the_engine_did_not_admit_is_not_run[owner_lost] ______
+
+rig = <tests.gate_fixture.HarnessRig object at 0x73b660af89b0>
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_pole_1_a_gate_the_engine_1')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x73b660af9ee0>
+holder = 'owner_lost'
+
+    @pytest.mark.parametrize("holder", ["live_render", "owner_lost"])
+    def test_pole_1_a_gate_the_engine_did_not_admit_is_not_run(
+            rig, tmp_path, monkeypatch, holder):
+        """Another owner holds the render lock. `live_render`: a render is in
+        flight and the request's queue window runs out; `owner_lost`: the holder
+        died and needs reconciliation, so the harness refuses at once. Either way
+        the harness answers 409 with its structured payload, the gate exits 2, and
+        the report says NOT RUN in structured fields — never a code red."""
+        monkeypatch.setenv("AITELIER_REPO_GATE_RENDER_WAIT_SECONDS", "0.5")
+        if holder == "live_render":
+            rig.hold()
+        else:
+            rig.mark_owner_lost()
+        repo = _repo(tmp_path)
+        out = tmp_path / "out"
+        result = rt.run_tests(project_root=str(repo), out_dir=str(out))
+        report = _report(out)
+        gate = report["repo_gate"]
+    
+        assert gate["returncode"] == 2
+        assert gate["measured"] == rt.REPO_GATE_UNMEASURED
+        assert report["repo_gate_admission"] == gate_admission.NOT_ADMITTED
+        (request,) = gate["admission"]["requests"]
+        assert request["status"] == 409 and request["outcome"] == "not_admitted"
+        assert request["owner_kind"] == ("active" if holder == "live_render"
+                                         else "owner_lost")
+        assert request["needs_reconciliation"] is (holder == "owner_lost")
+        # Not run, and non-passing: never a pass, never a code red.
+        assert report["passed"] is False and result["passed"] is False
+        assert report["repo_gate_absent"] is True and result["repo_gate_absent"] is True
+>       assert report["evidence_state"] == "not_run"
+               ^^^^^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'evidence_state'
+
+tests/unit/test_repo_gate_admission.py:150: KeyError
+=============================== warnings summary ===============================
+../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_repo_gate_admission.py::test_pole_1_a_gate_the_engine_did_not_admit_is_not_run[live_render]
+FAILED tests/unit/test_repo_gate_admission.py::test_pole_1_a_gate_the_engine_did_not_admit_is_not_run[owner_lost]
+2 failed, 202 passed, 1 warning in 167.27s (0:02:47)
+BARE_RC=1

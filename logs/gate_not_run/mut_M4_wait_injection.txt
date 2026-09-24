@@ -1,0 +1,131 @@
+MUTATION M4_wait_injection: applied to aitelier/gate_admission.py
+ignition: 17 (bytes appended by the probe on the mutated line)
+tree: rsync copy of /home/linxuhao/.AItelier/worktrees-scratch/gatenotrun2 at 59f3252e0f1b4c5839958e849c9f54f1c5f26eee
+----- pytest -----
+throwaway aitelier containers running: 3
+fatal: not a git repository (or any parent up to mount point /home/linxuhao)
+Stopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).
+gitrc=0
+FFF..................................................................... [ 35%]
+........................................................................ [ 70%]
+............................................................             [100%]
+=================================== FAILURES ===================================
+________ test_two_concurrent_repo_gates_are_each_admitted_by_the_queue _________
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_two_concurrent_repo_gates0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7083c49fe720>
+
+    def test_two_concurrent_repo_gates_are_each_admitted_by_the_queue(
+            tmp_path, monkeypatch):
+        """Gate A holds the render lock while gate B arrives. B queues behind A's
+        owner and is admitted when A releases: both get an admission answer, both
+        gates measure, and no request of either is answered 409."""
+        rig = HarnessRig(tmp_path / "harness", monkeypatch, render_seconds=1.0)
+        monkeypatch.setenv("GODOT_BUILDER_URL", rig.base)
+        try:
+            repo_a, repo_b = _repo(tmp_path, "gate-a"), _repo(tmp_path, "gate-b")
+            results: dict = {}
+    
+            def run(name, repo):
+                results[name] = rt._run_repo_gate(repo)
+    
+            a = threading.Thread(target=run, args=("a", repo_a))
+            a.start()
+            assert rig.entered_event("gate-a").wait(30), "gate A never rendered"
+            b = threading.Thread(target=run, args=("b", repo_b))
+            b.start()
+            a.join(60)
+            b.join(60)
+            owners = {r["operation_id"]: r["owner_id"] for r in rig.owners()}
+        finally:
+            rig.close()
+    
+        for name in ("a", "b"):
+            gate = results[name]
+            assert gate["returncode"] == 0, gate["output"]
+            assert gate["measured"] == rt.REPO_GATE_MEASURED_PASS
+            assert gate["admission"]["state"] == gate_admission.ANSWERED
+            (request,) = gate["admission"]["requests"]
+            assert request["status"] == 200 and request["outcome"] == "answered"
+>           assert request["render_wait_injected"] is True
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           KeyError: 'render_wait_injected'
+
+tests/unit/test_repo_gate_admission.py:84: KeyError
+_________________ test_a_gate_that_sends_its_own_wait_keeps_it _________________
+
+rig = <tests.gate_fixture.HarnessRig object at 0x7083c4bdec90>
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_a_gate_that_sends_its_own0')
+
+    def test_a_gate_that_sends_its_own_wait_keeps_it(rig, tmp_path):
+        """The relay fills `render_wait_timeout_sec` only when the gate sent none."""
+        relay = gate_admission.AdmissionRelay(rig.base, render_wait_sec=7,
+                                              upstream_timeout=30)
+        url = relay.start()
+        try:
+            import urllib.request
+            for body in ({"project_dir": str(tmp_path), "operation_id": "own",
+                          "render_wait_timeout_sec": 3},
+                         {"project_dir": str(tmp_path), "operation_id": "none"}):
+                req = urllib.request.Request(url + "/script", data=json.dumps(body).encode(),
+                                             headers={"Content-Type": "application/json"},
+                                             method="POST")
+                with urllib.request.urlopen(req, timeout=30) as r:
+                    assert r.status == 200
+        finally:
+            relay.stop()
+        own, injected = relay.snapshot()
+        assert own["render_wait_timeout_sec"] == 3 and "render_wait_injected" not in own
+>       assert injected["render_wait_timeout_sec"] == 7 and injected["render_wait_injected"]
+E       assert (None == 7)
+
+tests/unit/test_repo_gate_admission.py:115: AssertionError
+_____ test_pole_1_a_gate_the_engine_did_not_admit_is_not_run[live_render] ______
+
+rig = <tests.gate_fixture.HarnessRig object at 0x7083c4bd47d0>
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_pole_1_a_gate_the_engine_0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7083c4bd5c40>
+holder = 'live_render'
+
+    @pytest.mark.parametrize("holder", ["live_render", "owner_lost"])
+    def test_pole_1_a_gate_the_engine_did_not_admit_is_not_run(
+            rig, tmp_path, monkeypatch, holder):
+        """Another owner holds the render lock. `live_render`: a render is in
+        flight and the request's queue window runs out; `owner_lost`: the holder
+        died and needs reconciliation, so the harness refuses at once. Either way
+        the harness answers 409 with its structured payload, the gate exits 2, and
+        the report says NOT RUN in structured fields — never a code red."""
+        monkeypatch.setenv("AITELIER_REPO_GATE_RENDER_WAIT_SECONDS", "0.5")
+        if holder == "live_render":
+            rig.hold()
+        else:
+            rig.mark_owner_lost()
+        repo = _repo(tmp_path)
+        out = tmp_path / "out"
+        result = rt.run_tests(project_root=str(repo), out_dir=str(out))
+        report = _report(out)
+        gate = report["repo_gate"]
+    
+        assert gate["returncode"] == 2
+        assert gate["measured"] == rt.REPO_GATE_UNMEASURED
+>       assert report["repo_gate_admission"] == gate_admission.NOT_ADMITTED
+E       AssertionError: assert 'abandoned' == 'not_admitted'
+E         
+E         - not_admitted
+E         + abandoned
+
+tests/unit/test_repo_gate_admission.py:141: AssertionError
+--------------------------- Captured stdout teardown ---------------------------
+[harness] /script repo: caller disconnected after 60.57s queued behind render owner(s) ['ea8f982501ca40a3ae9132a90278a7a7']
+=============================== warnings summary ===============================
+../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_repo_gate_admission.py::test_two_concurrent_repo_gates_are_each_admitted_by_the_queue
+FAILED tests/unit/test_repo_gate_admission.py::test_a_gate_that_sends_its_own_wait_keeps_it
+FAILED tests/unit/test_repo_gate_admission.py::test_pole_1_a_gate_the_engine_did_not_admit_is_not_run[live_render]
+3 failed, 201 passed, 1 warning in 246.03s (0:04:06)
+BARE_RC=1

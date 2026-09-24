@@ -1,0 +1,294 @@
+$ git diff --word-diff 658ee8df35e45f4e42bc2f9a006225490f377e96 HEAD -- aitelier/tools/run_tests/impl.py   # HEAD d41c0a4b439816799596046f6aba3541b8af82bf
+diff --git a/aitelier/tools/run_tests/impl.py b/aitelier/tools/run_tests/impl.py
+index c5be1684..8464dc30 100644
+--- a/aitelier/tools/run_tests/impl.py
++++ b/aitelier/tools/run_tests/impl.py
+@@ -31,7 +31,8 @@ import shutil
+import signal
+import subprocess
+
+from core import {+datadir,+} env_scrub
+{+from aitelier import gate_admission+}
+# Module-level, NOT function-local. This name is used on EVERY path out of
+# `run_tests` (the return dict's `release_evidence`), so an import that lives
+# inside the `fail_fast_gates` branch made it a LOCAL of the whole function:
+@@ -549,7 +550,15 @@ def _find_node_project(repo: Path) -> Path | None:
+    return candidates[0] if candidates else None
+
+
+{+# How much of a command's output `_run_node_cmd` retains. Nothing that+}
+{+# identifies a failure is read from this tail: a repository gate's failure+}
+{+# identities come from the structured report directory it retains+}
+{+# (`_report_dir_failure_cases`), so this bound may be any size.+}
+{+OUTPUT_TAIL_CHARS = 2000+}
+
+
+def _run_node_cmd(pkg_dir: Path, args: list[str], timeout: [-int)-]{+int,+}
+{+                  env_overrides: dict | None = None)+} -> dict:
+    """Run one npm command in its own process group; kill the tree on timeout.
+
+    `output` is a bounded TAIL, and `output_truncated` says so. The one thing
+@@ -561,19 +570,23 @@ def _run_node_cmd(pkg_dir: Path, args: list[str], timeout: int) -> dict:
+    that nothing was measured — never inferred from `returncode`.
+    """
+    proc = None
+    {+# `npm ci` runs whatever `postinstall` the generated package.json names.+}
+{+    # With no env= it inherited everything this process holds. The overrides+}
+{+    # are the caller's own values (the repository gate's relay URL and report+}
+{+    # directory), applied after the scrub.+}
+{+    env = env_scrub.scrubbed_env()+}
+{+    env.update(env_overrides or {})+}
+    try:
+        proc = subprocess.Popen(
+            args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            cwd=str(pkg_dir), start_new_session=True, [-# `npm ci` runs whatever `postinstall` the generated package.json-]
+[-            # names. With no env= it inherited everything this process holds.-]
+[-            env=env_scrub.scrubbed_env(),-]{+env=env,+}
+        )
+        stdout, stderr = proc.communicate(timeout=timeout)
+        out = ((stdout or "") + "\n" + (stderr or "")).strip()
+        return {"passed": proc.returncode == 0,
+                "returncode": proc.returncode,
+                "output": [-out[-2000:],-]{+out[-OUTPUT_TAIL_CHARS:],+}
+                "output_truncated": len(out) > [-2000,-]{+OUTPUT_TAIL_CHARS,+}
+                "unmeasured_declaration": _unmeasured_declaration(out)}
+    except subprocess.TimeoutExpired:
+        _kill_group(proc)
+@@ -666,8 +679,48 @@ def _run_repo_gate(repo: Path) -> dict | None:
+    script = repo / REPO_GATE_SCRIPT
+    if not script.is_file() or not os.access(script, os.X_OK):
+        return None
+    {+# Every run of the gate gets a TICKET: a directory of its own under+}
+{+    # gate-reports/, handed to the gate as GATE_REPORT_DIR. A gate that retains+}
+{+    # structured reports writes them there, and failure identities are read+}
+{+    # from them (`_report_dir_failure_cases`), never from the bounded tail.+}
+{+    ticket = "rt-%s-%s" % (time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()),+}
+{+                           os.urandom(4).hex())+}
+{+    report_dir = datadir.aitelier_home() / "gate-reports" / ticket+}
+{+    # Every engine request the gate makes goes through the admission relay,+}
+{+    # which queues render requests in the harness's render queue and records+}
+{+    # the engine's own answer to each (aitelier/gate_admission.py).+}
+{+    upstream = os.environ.get("GODOT_BUILDER_URL") or gate_admission.DEFAULT_BUILDER_URL+}
+{+    try:+}
+{+        report_dir.mkdir(parents=True, exist_ok=True)+}
+{+        relay = gate_admission.AdmissionRelay(+}
+{+            upstream, render_wait_sec=gate_admission.render_wait_seconds(),+}
+{+            upstream_timeout=REPO_GATE_TIMEOUT)+}
+{+        relay_url = relay.start()+}
+{+    except (OSError, ValueError) as e:+}
+{+        return {"passed": False, "returncode": -1, "runner_error": True,+}
+{+                "script": REPO_GATE_SCRIPT, "ticket": ticket,+}
+{+                "output": f"repository gate not started: admission relay "+}
+{+                          f"unavailable ({type(e).__name__}: {e})",+}
+{+                "measured": REPO_GATE_UNMEASURED}+}
+{+    try:+}
+        result = [-_run_node_cmd(repo,-]{+_run_node_cmd(+}
+{+            repo,+} ["bash", str(script)], [-REPO_GATE_TIMEOUT)-]{+REPO_GATE_TIMEOUT,+}
+{+            env_overrides={"GODOT_BUILDER_URL": relay_url,+}
+{+                           "GATE_REPORT_DIR": str(report_dir)})+}
+{+    finally:+}
+{+        relay.stop()+}
+{+    admission = gate_admission.admission_summary(relay.snapshot())+}
+{+    admission.update(ticket=ticket, upstream=upstream)+}
+{+    try:+}
+{+        (report_dir / "admission.json").write_text(+}
+{+            json.dumps(admission, indent=2), encoding="utf-8")+}
+{+    except OSError:+}
+{+        pass+}
+    result["script"] = REPO_GATE_SCRIPT
+    {+result["ticket"] = ticket+}
+{+    result["report_dir"] = str(report_dir)+}
+{+    result["repo"] = str(repo)+}
+{+    result["admission"] = admission+}
+    # ONE word for what this run of the gate is WORTH: `measured_pass`,
+    # `measured_fail` or `unmeasured`. It is read by the fold in `run_tests`,
+    # re-read by `_acquire_repo_gate`, and lands in every report a reviewer
+@@ -780,19 +833,29 @@ def _repo_gate_declares_unmeasured(gate: dict) -> bool:
+def _repo_gate_outcome(gate: dict) -> str:
+    """`measured_pass`, `measured_fail` or `unmeasured`, for ONE gate run.
+
+    UNMEASURED has [-exactly two-]{+three+} sources and [-both-]{+all+} are the framework OBSERVING the
+    absence itself: the gate's own declaration,[-and-] a run this harness killed or
+    could not start (`timed_out` / [-`runner_error`).-]{+`runner_error`), and a gate that exited+}
+{+    neither 0 nor 1 after the engine did not answer its last request — the+}
+{+    admission relay's record of the engine's own reply (`admission.state` in+}
+{+    `gate_admission.NOT_RUN_STATES`: refused admission, unreachable, or cut off+}
+{+    before its answer was delivered).+} `returncode` {+alone+} is never [-one of them — it only ever splits-]{+a source:+} 0
+    [-(`measured_pass`) from-]
+[-    everything else, including -1, 2, 124, 137-]{+is `measured_pass`, 1 is `measured_fail` whatever the relay saw,+} and [-255 (`measured_fail`).-]{+any+}
+{+    other code with no engine refusal behind it (a contract error, a crash)+}
+{+    stays `measured_fail`.+} A timeout is the framework's own observation,
+    exactly like the pytest wall whose `skipped_because="pytest_timeout"` this
+    aligns with.
+    """
+    if _repo_gate_declares_unmeasured(gate):
+        return REPO_GATE_UNMEASURED
+    if gate.get("timed_out") is True or gate.get("runner_error") is True:
+        return REPO_GATE_UNMEASURED
+    {+returncode = gate.get("returncode")+}
+{+    admission = gate.get("admission") or {}+}
+{+    if (returncode not in (0, 1)+}
+{+            and admission.get("state") in gate_admission.NOT_RUN_STATES):+}
+{+        return REPO_GATE_UNMEASURED+}
+    return (REPO_GATE_MEASURED_PASS if [-gate.get("returncode")-]{+returncode+} == 0
+            else REPO_GATE_MEASURED_FAIL)
+
+
+@@ -835,6 +898,108 @@ def _acquire_repo_gate(repo: Path, run_gate=None, sleep=None) -> dict | None:
+        gate["attempts"] = attempts
+    return gate
+
+{+def _finding_text(item) -> str:+}
+{+    """One finding as text: a string as it is, a located error as file:line."""+}
+{+    if isinstance(item, str):+}
+{+        return item+}
+{+    if isinstance(item, dict) and item.get("file"):+}
+{+        return f"{item.get('file')}:{item.get('line')}: {item.get('msg', '')}"+}
+{+    return json.dumps(item, ensure_ascii=False, sort_keys=True)+}
+
+
+{+def _report_dir_failure_cases(ticket_dir: Path, repo: Path+}
+{+                              ) -> tuple[list[dict], str | None] | None:+}
+{+    """Failure identities from the structured report a gate retained, or None.+}
+
+{+    The gate writes its report under the ticket directory it was handed as+}
+{+    GATE_REPORT_DIR: one `manifest.json` whose `stages` name every stage it+}
+{+    ran, a `<stage>.json` per stage, and a `<stage>-findings.json` list for the+}
+{+    stages it judges itself (tools/godot_gate.py in the game repository). Each+}
+{+    finding is one failure. A stage with no findings file contributes the+}
+{+    `errors[]` of a stage report that says `passed: false`.+}
+
+{+    The gate's python stage runs the repository's own tests, and the tests of+}
+{+    the gate itself inherit GATE_REPORT_DIR: the reports their fixture+}
+{+    repositories retain land under the same ticket. The gate's own report is+}
+{+    the one whose manifest names `repo`, the repository this gate ran for;+}
+{+    every other report under the ticket is not read.+}
+
+{+    A finding's identity is `<stage>/<first 12 hex of its sha256>`, so the+}
+{+    same finding keeps the same key on the next run. None means the gate+}
+{+    retained no report for `repo` here and the caller falls back to the+}
+{+    output records.+}
+{+    """+}
+{+    if not ticket_dir.is_dir():+}
+{+        return None+}
+
+{+    def load(path: Path):+}
+{+        try:+}
+{+            return json.loads(path.read_text(encoding="utf-8")), None+}
+{+        except (OSError, ValueError) as e:+}
+{+            return None, f"repository gate report {path.name} is unreadable: {e}"+}
+
+{+    def names_repo(manifest) -> bool:+}
+{+        claimed = manifest.get("repo") if isinstance(manifest, dict) else None+}
+{+        if not isinstance(claimed, str) or not claimed:+}
+{+            return False+}
+{+        try:+}
+{+            return Path(claimed).resolve() == Path(repo).resolve()+}
+{+        except (OSError, RuntimeError):+}
+{+            return False+}
+
+{+    paths = [p for p in [ticket_dir / "manifest.json",+}
+{+                         *sorted(ticket_dir.glob("*/manifest.json"))]+}
+{+             if p.is_file()]+}
+{+    owned = []+}
+{+    for path in paths:+}
+{+        manifest, error = load(path)+}
+{+        if error:+}
+{+            return [], error+}
+{+        if names_repo(manifest):+}
+{+            owned.append((path, manifest))+}
+{+    if not owned:+}
+{+        return None+}
+{+    if len(owned) > 1:+}
+{+        return [], (f"repository gate retained {len(owned)} reports for "+}
+{+                    f"{repo} under one ticket ({ticket_dir.name})")+}
+{+    manifest_path, manifest = owned[0]+}
+{+    report_dir = manifest_path.parent+}
+{+    stages = (manifest or {}).get("stages") if isinstance(manifest, dict) else None+}
+{+    if not isinstance(stages, dict):+}
+{+        return [], "repository gate manifest names no stages"+}
+{+    records: list[dict] = []+}
+{+    seen: set[str] = set()+}
+{+    for stage, state in stages.items():+}
+{+        findings_path = report_dir / f"{stage}-findings.json"+}
+{+        if findings_path.is_file():+}
+{+            items, error = load(findings_path)+}
+{+            if error:+}
+{+                return [], error+}
+{+            if not isinstance(items, list):+}
+{+                return [], f"repository gate {findings_path.name} is not a list"+}
+{+        else:+}
+{+            name = (state or {}).get("report") if isinstance(state, dict) else None+}
+{+            stage_report, error = load(report_dir / name) if name else (None, None)+}
+{+            if error:+}
+{+                return [], error+}
+{+            if not isinstance(stage_report, dict) or stage_report.get("passed") is not False:+}
+{+                continue+}
+{+            items = stage_report.get("errors") or [+}
+{+                stage_report.get("summary") or f"{stage} reported passed=false"]+}
+{+        for item in items:+}
+{+            text = _finding_text(item)+}
+{+            case_id = f"{stage}/{hashlib.sha256(text.encode('utf-8')).hexdigest()[:12]}"+}
+{+            if case_id in seen:+}
+{+                continue+}
+{+            seen.add(case_id)+}
+{+            records.append({"case_id": case_id, "status": "failed",+}
+{+                            "detail": text[:1000]})+}
+{+    if not records:+}
+{+        return [], (f"repository gate report {report_dir.name} names no "+}
+{+                    f"failure")+}
+{+    return records, None+}
+
+
+def _repo_gate_failure_cases(gate: dict) -> tuple[list[dict], str | None]:
+    """Read trustworthy per-case identities from one failed repository gate.
+
+@@ -843,10 +1008,21 @@ def _repo_gate_failure_cases(gate: dict) -> tuple[list[dict], str | None]:
+
+        AITELIER_REPO_GATE_CASE={"case_id":"compile/autoload","status":"failed","detail":"..."}
+
+    [-The-]{+A gate that retains a structured report for its repository under its+}
+{+    ticket (`gate["report_dir"]`, `gate["repo"]`, see+}
+{+    `_report_dir_failure_cases`) is read from that report and nothing else,+}
+{+    whatever the length of its output.+}
+
+{+    Otherwise the+} retained command output is bounded, so any truncation makes
+    the set incomplete and unusable.  One malformed or duplicate record
+    likewise invalidates the whole set instead of mixing reliable and
+    script-wide keys.
+    """
+    {+if gate.get("report_dir") and gate.get("repo"):+}
+{+        from_report = _report_dir_failure_cases(Path(gate["report_dir"]),+}
+{+                                                Path(gate["repo"]))+}
+{+        if from_report is not None:+}
+{+            return from_report+}
+    if gate.get("output_truncated"):
+        return [], "repository gate output was truncated"
+    records: list[dict] = []
+@@ -1442,7 +1618,16 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
+        if gate is not None:
+            report["repo_gate"] = gate
+            outcome = gate["measured"]
+            {+# The engine's reply to the gate's last request, as the admission+}
+{+            # relay recorded it (`answered`, `not_admitted`, `unreachable`, ...).+}
+{+            report["repo_gate_admission"] = (gate.get("admission") or {}).get("state")+}
+            if outcome == REPO_GATE_UNMEASURED:
+                {+# Not run is not a product failure, so release routing may not+}
+{+                # read it as one (`gate_evidence.report_state` maps `not_run`+}
+{+                # to `skipped`, never `failed`). Only when nothing else in this+}
+{+                # report is red: a measured red elsewhere stays a measured red.+}
+{+                if not report["failures"]:+}
+{+                    report["evidence_state"] = "not_run"+}
+                # The gate said it did not run and re-acquiring the verdict
+                # did not get one either. Nothing was measured: there is no
+                # case list to prune from and no failure of the implementer's
+@@ -1461,7 +1646,8 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
+                report["repo_gate_absent"] = True
+                report["failures"].append(
+                    f"repo_gate:{gate['script']} was NOT measured "
+                    [-f"({gate.get('attempts',-]{+f"(engine admission: {report['repo_gate_admission']}; "+}
+{+                    f"{gate.get('attempts',+} 1)} attempt(s)): "
+                    f"{gate['output'][-1500:]}")
+            elif outcome == REPO_GATE_MEASURED_PASS:
+                # The gate ran and reported nothing failed: every case it
+BARE_RC=0

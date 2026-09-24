@@ -1,0 +1,47 @@
+throwaway aitelier containers running: 2
+tree: /home/linxuhao/.AItelier/worktrees-scratch/gatenotrun2 head: 59f3252e0f1b4c5839958e849c9f54f1c5f26eee dirty: 0
+command: python final/scripts/gate_not_run_evidence.py pole2
+EVIDENCE {
+ "tree": "/home/linxuhao/.AItelier/worktrees-scratch/gatenotrun2",
+ "has_admission_relay": true,
+ "repo_gate.returncode": 1,
+ "repo_gate.measured": "measured_fail",
+ "repo_gate.output_truncated": false,
+ "repo_gate.output_len": 17,
+ "repo_gate.ticket": "rt-20260924T231151Z-24a8a08b",
+ "repo_gate.admission.state": "answered",
+ "last_request": {
+  "route": "/script",
+  "status": 200,
+  "outcome": "answered",
+  "owner_kind": null,
+  "needs_reconciliation": null,
+  "render_wait_timeout_sec": 0.5,
+  "render_wait_injected": true
+ },
+ "repo_gate_admission": "answered",
+ "repo_gate_absent(report)": null,
+ "repo_gate_absent(return)": false,
+ "repo_gate_unmeasured": null,
+ "evidence_state": null,
+ "passed": false,
+ "release_evidence": "known_failure",
+ "failure_identity_error": null,
+ "baseline_state": "compared",
+ "new_failures_count": 3,
+ "new_failure_identities": [
+  "repo_gate:run_tests.sh#script/a6414c8a715c",
+  "repo_gate:run_tests.sh#script/bef7e278faf2",
+  "repo_gate:run_tests.sh#script/012be646d084"
+ ],
+ "new_failures": [
+  "repo_gate:run_tests.sh#script/a6414c8a715c failed: script res://tests/a.gd FAILED",
+  "repo_gate:run_tests.sh#script/bef7e278faf2 failed: script res://tests/b.gd FAILED",
+  "repo_gate:run_tests.sh#script/012be646d084 failed: script gate failed: 0 passed, 2 failed"
+ ],
+ "harness_rendered_for": [
+  "repo"
+ ],
+ "scenario": "pole2"
+}
+BARE_RC=0

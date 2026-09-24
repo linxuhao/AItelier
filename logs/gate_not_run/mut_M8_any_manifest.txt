@@ -1,0 +1,45 @@
+MUTATION M8_any_manifest: applied to aitelier/tools/run_tests/impl.py
+ignition: 11 (bytes appended by the probe on the mutated line)
+tree: rsync copy of /home/linxuhao/.AItelier/worktrees-scratch/gatenotrun2 at 59f3252e0f1b4c5839958e849c9f54f1c5f26eee
+----- pytest -----
+throwaway aitelier containers running: 3
+fatal: not a git repository (or any parent up to mount point /home/linxuhao)
+Stopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).
+gitrc=0
+...............F........................................................ [ 35%]
+........................................................................ [ 70%]
+............................................................             [100%]
+=================================== FAILURES ===================================
+______ test_reports_the_repositorys_own_tests_retained_are_not_the_gates _______
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_reports_the_repositorys_o0')
+
+    def test_reports_the_repositorys_own_tests_retained_are_not_the_gates(tmp_path):
+        """The real game gate's python stage runs the gate's own tests, which
+        retain reports for their fixture repository (`/repo`) under the same
+        ticket: 3 manifests in the ticket of a real wuxia run. Only the report
+        for the repository the gate ran for is read."""
+        ticket = _ticket(tmp_path, {"stages": {"python": {"report": "python.json"}}},
+                         {"python.json": {"returncode": 1},
+                          "python-findings.json": ["the python suite exited 1"]})
+        for name in ("wuxia-godot-gate-fixture-a", "wuxia-godot-gate-fixture-b"):
+            foreign = ticket / name
+            foreign.mkdir()
+            (foreign / "manifest.json").write_text(json.dumps(
+                {"repo": "/repo", "stages": {"script": {"report": "script.json"}}}))
+            (foreign / "script-findings.json").write_text(json.dumps(["foreign red"]))
+        cases, error = rt._report_dir_failure_cases(ticket, REPO)
+>       assert error is None
+E       AssertionError: assert 'repository gate retained 3 reports for /work/repo under one ticket (ticket)' is None
+
+tests/unit/test_repo_gate_identity_from_report_dir.py:134: AssertionError
+=============================== warnings summary ===============================
+../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_repo_gate_identity_from_report_dir.py::test_reports_the_repositorys_own_tests_retained_are_not_the_gates
+1 failed, 203 passed, 1 warning in 166.59s (0:02:46)
+BARE_RC=1

@@ -1,0 +1,215 @@
+MUTATION M6_hold_forever: applied to core/gate_deferral.py
+ignition: 182 (bytes appended by the probe on the mutated line)
+tree: rsync copy of /home/linxuhao/.AItelier/worktrees-scratch/gatenotrun2 at 59f3252e0f1b4c5839958e849c9f54f1c5f26eee
+----- pytest -----
+throwaway aitelier containers running: 3
+fatal: not a git repository (or any parent up to mount point /home/linxuhao)
+Stopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).
+gitrc=0
+..................F.......F............................................. [ 35%]
+........................................................................ [ 70%]
+...........................................................----------------------------------------
+Exception occurred during processing of request from ('127.0.0.1', 53168)
+.             [100%]
+=================================== FAILURES ===================================
+____________ test_a_busy_gate_never_sends_the_run_back_to_implement ____________
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_a_busy_gate_never_sends_t0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7544fc163980>
+
+    def test_a_busy_gate_never_sends_the_run_back_to_implement(tmp_path, monkeypatch):
+        rig = HarnessRig(tmp_path / "harness", monkeypatch)
+        monkeypatch.setenv("GODOT_BUILDER_URL", rig.base)
+        monkeypatch.setenv("FIXTURE_GATE_CLIENT_TIMEOUT", "3")
+        monkeypatch.setenv("FIXTURE_GATE_OP", "coding-impl-gate")
+        monkeypatch.setenv("AITELIER_REPO_GATE_RENDER_WAIT_SECONDS", "0.3")
+        counter = tmp_path / "calls.txt"
+        try:
+            sf, run_id = _wire(tmp_path, monkeypatch, episode_max=100000, wait=1,
+                               counter=counter, tail=_GATE_TAIL)
+            rig.hold()
+            busy_runs, busy_statuses, busy_outcomes, busy_nodes = _drive(
+                sf, run_id, monkeypatch, ticks=12, clock_step=1)
+            busy = _inventory(sf, run_id)
+            gate_calls_while_busy = int(counter.read_text()) if counter.exists() else 0
+            rig.let_go()
+            free_runs, free_statuses, free_outcomes, free_nodes = _drive(
+                sf, run_id, monkeypatch, ticks=12, clock_step=1)
+            final = _inventory(sf, run_id)
+            last_report = json.loads(
+                gate_deferral.find_test_report(sf, run_id).read_text())
+        finally:
+            rig.close()
+        print("GATE_EVIDENCE " + json.dumps({
+            "implement_runs_while_busy": busy_runs,
+            "implement_runs_after_release": free_runs,
+            "gate_calls_while_busy": gate_calls_while_busy,
+            "gate_calls_total": int(counter.read_text()) if counter.exists() else 0,
+            "busy_outcomes": busy_outcomes, "busy_nodes": busy_nodes,
+            "free_outcomes": free_outcomes, "free_nodes": free_nodes,
+            "rendered_for": rig.rendered,
+            "last_repo_gate": {k: last_report.get("repo_gate", {}).get(k)
+                               for k in ("returncode", "measured", "ticket")},
+            "inventory_while_busy": busy, "inventory_final": final}, indent=1))
+    
+        # While the gate is busy: one implement (the round's own), then only the
+        # gate step, re-run once per wait, and never the implement loop.
+        assert busy_runs == 1, busy_runs
+        assert len(busy["commits"]) == 1, busy
+        assert busy["status"] == "running", busy
+        assert busy["current_node"] == "test_gate_absent", busy
+>       assert gate_calls_while_busy >= 3, gate_calls_while_busy
+E       AssertionError: 1
+E       assert 1 >= 3
+
+tests/skillflow/test_coding_impl_busy_gate.py:82: AssertionError
+----------------------------- Captured stdout call -----------------------------
+GATE_EVIDENCE {
+ "implement_runs_while_busy": 1,
+ "implement_runs_after_release": 0,
+ "gate_calls_while_busy": 1,
+ "gate_calls_total": 1,
+ "busy_outcomes": [
+  "none",
+  "none",
+  "none",
+  "silent",
+  "reacquire",
+  "reacquire",
+  "reacquire",
+  "reacquire",
+  "reacquire",
+  "reacquire",
+  "reacquire",
+  "reacquire"
+ ],
+ "busy_nodes": [
+  null,
+  "test",
+  "test_gate_absent",
+  "test_gate_absent",
+  "test_gate_absent",
+  "test_gate_absent",
+  "test_gate_absent",
+  "test_gate_absent",
+  "test_gate_absent",
+  "test_gate_absent",
+  "test_gate_absent",
+  "test_gate_absent"
+ ],
+ "free_outcomes": [
+  "silent",
+  "silent",
+  "silent",
+  "silent",
+  "reacquire",
+  "reacquire",
+  "reacquire",
+  "reacquire",
+  "reacquire",
+  "reacquire",
+  "reacquire",
+  "reacquire"
+ ],
+ "free_nodes": [
+  "test_gate_absent",
+  "test_gate_absent",
+  "test_gate_absent",
+  "test_gate_absent",
+  "test_gate_absent",
+  "test_gate_absent",
+  "test_gate_absent",
+  "test_gate_absent",
+  "test_gate_absent",
+  "test_gate_absent",
+  "test_gate_absent",
+  "test_gate_absent"
+ ],
+ "rendered_for": [
+  "op-holder"
+ ],
+ "last_repo_gate": {
+  "returncode": 2,
+  "measured": "unmeasured",
+  "ticket": "rt-20260924T232010Z-76b2c798"
+ },
+ "inventory_while_busy": {
+  "run_id": "2f09395d-7388-4120-b959-05289fc885b5",
+  "status": "running",
+  "current_node": "test_gate_absent",
+  "error": null,
+  "commits": [
+   {
+    "sha": "ee1f5036bd0a6b6414df2cbcabc8d4a914aca4b8",
+    "subject": "step: implement [p]"
+   }
+  ]
+ },
+ "inventory_final": {
+  "run_id": "2f09395d-7388-4120-b959-05289fc885b5",
+  "status": "running",
+  "current_node": "test_gate_absent",
+  "error": null,
+  "commits": [
+   {
+    "sha": "ee1f5036bd0a6b6414df2cbcabc8d4a914aca4b8",
+    "subject": "step: implement [p]"
+   }
+  ]
+ }
+}
+------------------------------ Captured log call -------------------------------
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+_____ test_the_host_hold_alone_keeps_the_rows_where_the_absence_left_them ______
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_the_host_hold_alone_keeps0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7544fbd94c50>
+
+    def test_the_host_hold_alone_keeps_the_rows_where_the_absence_left_them(
+            tmp_path, monkeypatch):
+        """The HOST hold (`AItelierSkillFlow.advance_run`) measured on its own.
+        The tick is handed a `none` answer, so its early return is out, while the
+        REAL `observe_run` still records the episode in the ledger the host reads.
+        Every tick then walks on into `advance_run`, and the host's refusal alone
+        must keep the run parked at `test_gate_absent` with the rows untouched
+        while the wait runs, and let it through only to re-run the gate step once
+        per wait that ran out (`due`).
+        """
+        counter = tmp_path / "calls.txt"
+        sf, run_id = _wire(tmp_path, monkeypatch, episode_max=100000, wait=1,
+                           counter=counter, tail=_SILENT_TAIL)
+        real_observe = gate_deferral.observe_run
+        seen = []
+    
+        def _observe_but_answer_none(sf_, run_id_, **kw):
+            seen.append(real_observe(sf_, run_id_, **kw)["state"])
+            return {"state": "none", "remaining": 0.0, "gate": "", "reason": ""}
+    
+        monkeypatch.setattr(gate_deferral, "observe_run", _observe_but_answer_none)
+        implement_runs, statuses, outcomes, nodes = _drive(
+            sf, run_id, monkeypatch, ticks=20, clock_step=1, second_driver=False)
+        _assert_test_row_untouched(sf, run_id)
+        assert implement_runs == 1, implement_runs
+        assert statuses[-1] == "running", statuses
+        first = seen.index("silent")
+        assert set(seen[first:]) == {"silent", "due"}, seen
+>       assert seen.count("silent") >= 8, seen
+E       AssertionError: ['none', 'none', 'none', 'silent', 'due', 'due', ...]
+E       assert 1 >= 8
+E        +  where 1 = <built-in method count of list object at 0x7544fc279200>('silent')
+E        +    where <built-in method count of list object at 0x7544fc279200> = ['none', 'none', 'none', 'silent', 'due', 'due', ...].count
+
+tests/skillflow/test_coding_impl_gate_absence.py:536: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+=============================== warnings summary ===============================
+../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/skillflow/test_coding_impl_busy_gate.py::test_a_busy_gate_never_sends_the_run_back_to_implement
+FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_the_host_hold_alone_keeps_the_rows_where_the_absence_left_them
+2 failed, 202 passed, 1 warning in 118.21s (0:01:58)
+BARE_RC=1

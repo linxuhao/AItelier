@@ -1,0 +1,43 @@
+throwaway aitelier containers running: 3
+tree: /home/linxuhao/.AItelier/worktrees-scratch/gatenotrun2-base head: 658ee8df35e45f4e42bc2f9a006225490f377e96 dirty: 5
+command: python final/scripts/gate_not_run_evidence.py long-fixture
+EVIDENCE {
+ "tree": "/home/linxuhao/.AItelier/worktrees-scratch/gatenotrun2-base",
+ "has_admission_relay": false,
+ "repo_gate.returncode": 1,
+ "repo_gate.measured": "measured_fail",
+ "repo_gate.output_truncated": true,
+ "repo_gate.output_len": 2000,
+ "repo_gate.ticket": null,
+ "repo_gate.admission.state": null,
+ "last_request": {
+  "route": null,
+  "status": null,
+  "outcome": null,
+  "owner_kind": null,
+  "needs_reconciliation": null,
+  "render_wait_timeout_sec": null,
+  "render_wait_injected": null
+ },
+ "repo_gate_admission": null,
+ "repo_gate_absent(report)": null,
+ "repo_gate_absent(return)": false,
+ "repo_gate_unmeasured": null,
+ "evidence_state": null,
+ "passed": false,
+ "release_evidence": "known_failure",
+ "failure_identity_error": "repository gate output was truncated",
+ "baseline_state": "unreadable",
+ "new_failures_count": 1,
+ "new_failure_identities": [
+  "repo_gate:run_tests.sh"
+ ],
+ "new_failures": [
+  "repo_gate:run_tests.sh failed (rc=1): .................................................................................................................................................................."
+ ],
+ "harness_rendered_for": [
+  "repo"
+ ],
+ "scenario": "long-fixture"
+}
+BARE_RC=0

@@ -1,0 +1,184 @@
+$ git diff --word-diff 658ee8df35e45f4e42bc2f9a006225490f377e96 HEAD -- final/scripts/gate_not_run_evidence.py   # HEAD d41c0a4b439816799596046f6aba3541b8af82bf
+diff --git a/final/scripts/gate_not_run_evidence.py b/final/scripts/gate_not_run_evidence.py
+new file mode 100644
+index 00000000..63fe8475
+--- /dev/null
++++ b/final/scripts/gate_not_run_evidence.py
+@@ -0,0 +1,176 @@
+{+"""Evidence driver for `harness.a-gate-that-could-not-run-is-not-a-failing-test` r2.+}
+
+{+Runs unchanged on the candidate tree and on the base tree (with+}
+{+tests/gate_fixture.py copied in), so each scenario is measured on both. It+}
+{+serves the REAL harness admission code in-process (tests/gate_fixture.py) and+}
+{+runs the REAL `run_tests` over a repository whose gate talks to it. Prints one+}
+{+`EVIDENCE <json>` line per run.+}
+
+{+usage:+}
+{+  python final/scripts/gate_not_run_evidence.py pole1-live+}
+{+  python final/scripts/gate_not_run_evidence.py pole1-lost+}
+{+  python final/scripts/gate_not_run_evidence.py pole2+}
+{+  python final/scripts/gate_not_run_evidence.py long-fixture+}
+{+  python final/scripts/gate_not_run_evidence.py wuxia <game copy> <real report dir> [tail]+}
+
+{+`wuxia` runs the game repository's OWN run_tests.sh / tools/godot_gate.py (a+}
+{+git-initialised copy of an archive of it) against the harness admission code;+}
+{+the engine's replies are the real compile.json / playtest.json / script.json a+}
+{+passing gate retained for that same tree, with two authored assertions turned+}
+{+red. `tail` (candidate only) overrides the retained output tail.+}
+{+"""+}
+{+from __future__ import annotations+}
+
+{+import json+}
+{+import sys+}
+{+import tempfile+}
+{+from pathlib import Path+}
+
+{+import pytest+}
+
+{+ROOT = Path(__file__).resolve().parents[2]+}
+{+sys.path.insert(0, str(ROOT))+}
+
+{+from aitelier.tools.run_tests import impl as rt  # noqa: E402+}
+{+from tests.gate_fixture import HarnessRig, red_report, write_gate  # noqa: E402+}
+
+
+{+def _fields(result: dict, report: dict) -> dict:+}
+{+    gate = report.get("repo_gate") or {}+}
+{+    admission = gate.get("admission") or {}+}
+{+    last = (admission.get("requests") or [{}])[-1]+}
+{+    return {+}
+{+        "tree": str(ROOT),+}
+{+        "has_admission_relay": hasattr(rt, "gate_admission"),+}
+{+        "repo_gate.returncode": gate.get("returncode"),+}
+{+        "repo_gate.measured": gate.get("measured"),+}
+{+        "repo_gate.output_truncated": gate.get("output_truncated"),+}
+{+        "repo_gate.output_len": len(gate.get("output") or ""),+}
+{+        "repo_gate.ticket": gate.get("ticket"),+}
+{+        "repo_gate.admission.state": admission.get("state"),+}
+{+        "last_request": {k: last.get(k) for k in (+}
+{+            "route", "status", "outcome", "owner_kind", "needs_reconciliation",+}
+{+            "render_wait_timeout_sec", "render_wait_injected")},+}
+{+        "repo_gate_admission": report.get("repo_gate_admission"),+}
+{+        "repo_gate_absent(report)": report.get("repo_gate_absent"),+}
+{+        "repo_gate_absent(return)": result.get("repo_gate_absent"),+}
+{+        "repo_gate_unmeasured": report.get("repo_gate_unmeasured"),+}
+{+        "evidence_state": report.get("evidence_state"),+}
+{+        "passed": report.get("passed"),+}
+{+        "release_evidence": result.get("release_evidence"),+}
+{+        "failure_identity_error": report.get("failure_identity_error"),+}
+{+        "baseline_state": report.get("baseline_state"),+}
+{+        "new_failures_count": len(report.get("new_failures") or []),+}
+{+        "new_failure_identities": [rt._failure_key(f)+}
+{+                                   for f in report.get("new_failures") or []],+}
+{+        "new_failures": [f[:200] for f in report.get("new_failures") or []],+}
+{+    }+}
+
+
+{+def _run(repo: Path, work: Path) -> dict:+}
+{+    state = work / "state"+}
+{+    baseline_dir = Path(rt._baseline_dir(str(state), repo.resolve()))+}
+{+    baseline_dir.mkdir(parents=True, exist_ok=True)+}
+{+    # A taken baseline with no known red: every red of the run is new.+}
+{+    (baseline_dir / rt.BASELINE_FILE).write_text(json.dumps({"failures": []}))+}
+{+    out = work / "out"+}
+{+    result = rt.run_tests(project_root=str(repo), out_dir=str(out),+}
+{+                          state_dir=str(state))+}
+{+    report = json.loads((out / "test_report.json").read_text())+}
+{+    return _fields(result, report)+}
+
+
+{+def _fixture_repo(work: Path) -> Path:+}
+{+    repo = work / "repo"+}
+{+    (repo / "tests").mkdir(parents=True)+}
+{+    (repo / "tests" / "test_ok.py").write_text("def test_ok():\n    assert True\n")+}
+{+    write_gate(repo)+}
+{+    return repo+}
+
+
+{+def fixture_scenario(name: str) -> dict:+}
+{+    with pytest.MonkeyPatch.context() as mp, tempfile.TemporaryDirectory() as tmp:+}
+{+        work = Path(tmp)+}
+{+        rig = HarnessRig(work / "harness", mp)+}
+{+        mp.setenv("GODOT_BUILDER_URL", rig.base)+}
+{+        # The gate's own client timeout, as the game gate has one (3600 s on+}
+{+        # /playtest there): on a tree with no admission window the gate gives+}
+{+        # up waiting in the queue and exits 2.+}
+{+        mp.setenv("FIXTURE_GATE_CLIENT_TIMEOUT", "3")+}
+{+        mp.setenv("AITELIER_REPO_GATE_RENDER_WAIT_SECONDS", "0.5")+}
+{+        try:+}
+{+            if name == "pole1-live":+}
+{+                rig.hold()+}
+{+            elif name == "pole1-lost":+}
+{+                rig.mark_owner_lost()+}
+{+            elif name == "pole2":+}
+{+                rig.script_report = red_report()+}
+{+            elif name == "long-fixture":+}
+{+                rig.script_report = red_report()+}
+{+                mp.setenv("FIXTURE_GATE_NOISE", "6000")+}
+{+            fields = _run(_fixture_repo(work), work)+}
+{+            fields["harness_rendered_for"] = list(rig.rendered)+}
+{+            return fields+}
+{+        finally:+}
+{+            rig.close()+}
+
+
+{+def _red_playtest(real: dict) -> tuple[dict, list[str]]:+}
+{+    """The real passing play-test reply with two authored assertions red."""+}
+{+    report = json.loads(json.dumps(real))+}
+{+    behavior = report["behavior"]+}
+{+    names = {s.get("name") for s in behavior["scenarios"]}+}
+{+    flipped = []+}
+{+    for scenario in behavior["scenarios"]:+}
+{+        name = str(scenario.get("name"))+}
+{+        if (name == "rendered_health_suites" or name.endswith("__repeatability")+}
+{+                or name + "__repeatability" in names or not scenario.get("asserts")):+}
+{+            continue+}
+{+        row = scenario["asserts"][0]+}
+{+        row["passed"] = False+}
+{+        row["actual"] = "evidence: turned red"+}
+{+        scenario["passed"] = False+}
+{+        flipped.append(f"{name} / {row.get('name')}")+}
+{+        if len(flipped) == 2:+}
+{+            break+}
+{+    behavior["all_passed"] = False+}
+{+    return report, flipped+}
+
+
+{+def wuxia(copy_dir: str, real_dir: str, tail: str | None) -> dict:+}
+{+    real = Path(real_dir)+}
+{+    compile_reply = json.loads((real / "compile.json").read_text())+}
+{+    playtest_reply, flipped = _red_playtest(json.loads((real / "playtest.json").read_text()))+}
+{+    script_reply = json.loads((real / "script.json").read_text())+}
+{+    if tail and hasattr(rt, "OUTPUT_TAIL_CHARS"):+}
+{+        rt.OUTPUT_TAIL_CHARS = int(tail)+}
+{+    with pytest.MonkeyPatch.context() as mp, tempfile.TemporaryDirectory() as tmp:+}
+{+        work = Path(tmp)+}
+{+        rig = HarnessRig(work / "harness", mp)+}
+{+        rig.script_report = script_reply+}
+{+        mp.setattr(rig.gh, "compile_project", lambda _proj: compile_reply)+}
+{+        mp.setattr(rig.gh, "playtest_project",+}
+{+                   lambda _proj, **_kw: json.loads(json.dumps(playtest_reply)))+}
+{+        mp.setenv("GODOT_BUILDER_URL", rig.base)+}
+{+        try:+}
+{+            fields = _run(Path(copy_dir), work)+}
+{+        finally:+}
+{+            rig.close()+}
+{+    fields["tail_override"] = tail+}
+{+    fields["flipped_assertions"] = flipped+}
+{+    return fields+}
+
+
+{+def main(argv: list[str]) -> int:+}
+{+    name = argv[0]+}
+{+    if name == "wuxia":+}
+{+        fields = wuxia(argv[1], argv[2], argv[3] if len(argv) > 3 else None)+}
+{+    else:+}
+{+        fields = fixture_scenario(name)+}
+{+    fields["scenario"] = name+}
+{+    print("EVIDENCE " + json.dumps(fields, ensure_ascii=False, indent=1))+}
+{+    return 0+}
+
+
+{+if __name__ == "__main__":+}
+{+    raise SystemExit(main(sys.argv[1:]))+}
+BARE_RC=0

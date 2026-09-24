@@ -1,0 +1,152 @@
+$ git diff --word-diff 658ee8df35e45f4e42bc2f9a006225490f377e96 HEAD -- core/gate_deferral.py   # HEAD d41c0a4b439816799596046f6aba3541b8af82bf
+diff --git a/core/gate_deferral.py b/core/gate_deferral.py
+index 79f097d8..cb65bcd1 100644
+--- a/core/gate_deferral.py
++++ b/core/gate_deferral.py
+@@ -106,6 +106,7 @@ class _Episode:
+    last_absence_at: float
+    absences: int = 1
+    gate: str = ""
+    {+report_key: tuple | None = None+}
+
+
+@dataclass
+@@ -121,20 +122,28 @@ class DeferralLedger:
+    episodes: dict[str, _Episode] = field(default_factory=dict)
+
+    def note_absence(self, run_id: str, *, now: float | None = None,
+                     gate: str = [-"")-]{+"", report_key: tuple | None = None)+} -> _Episode:
+        """Record that `run_id`'s gate produced no verdict this pass.
+
+        The episode START is kept across calls: the ceiling measures how long
+        the absence has lasted, not how long ago the last tick was.
+
+        {+`report_key` names the report the absence was read from. The wait is+}
+{+        measured from the first sight of a report, so looking at the SAME+}
+{+        report again on a later tick does not restart it; once it runs out+}
+{+        the run is due to re-acquire the verdict (`observe_run` -> `due`). A+}
+{+        caller that passes no key restarts the wait on every call.+}
+        """
+        moment = time.time() if now is None else now
+        episode = self.episodes.get(run_id)
+        if episode is None:
+            episode = _Episode(started_at=moment, last_absence_at=moment,
+                               [-gate=gate)-]{+gate=gate, report_key=report_key)+}
+            self.episodes[run_id] = episode
+        else:
+            {+if report_key is None or report_key != episode.report_key:+}
+                episode.last_absence_at = moment
+                {+episode.report_key = report_key+}
+            episode.absences += 1
+            if gate:
+                episode.gate = gate
+@@ -162,8 +171,15 @@ class DeferralLedger:
+        return self.episode_seconds(run_id, now=now) > episode_max_seconds()
+
+    def deferring(self, run_id: str, *, now: float | None = None) -> bool:
+        """Should this run be left alone entirely on this [-tick?"""-]{+tick?+}
+
+{+        Only while the wait for the report it last saw is running. Past the+}
+{+        wait the run is due: it may advance, and the only place it can advance+}
+{+        to from the absence gate is the gate step itself+}
+{+        (`configs/coding_impl.yaml`: `test_gate_absent -> test`).+}
+{+        """+}
+        return [-run_id-]{+(run_id+} in self.episodes and not self.expired(run_id, now=now)
+                {+and self.hold_remaining(run_id, now=now) > 0)+}
+
+    def terminal_reason(self, run_id: str) -> str:
+        """The sentence an expired absence ends with.
+@@ -230,15 +246,28 @@ def absent_terminal_names_no_failure(reason: str) -> bool:
+
+
+def hold_blocks_advance(run_id: str, *, now: float | None = None,
+                        ledger: DeferralLedger | None = [-None)-]{+None,+}
+{+                        sf=None)+} -> bool:
+    """May the host refuse to advance this run at all right now?
+
+    Read by ``AItelierSkillFlow.advance_run``.  A live episode of absence means
+    advancing the run would route the absence back into the implement loop,
+    which is the charge this card removes; the run is left exactly where it is
+    until {+its wait runs out,+} the gate [-speaks-]{+speaks,+} or the ceiling ends it.
+
+    {+With `sf`, a run that already has an episode first has its LATEST report+}
+{+    noted, so a re-acquisition that came back silent again starts a new wait+}
+{+    here, before a second driver (or the tick's own drain) could advance the+}
+{+    run straight back into the gate. A report that cannot be read changes+}
+{+    nothing: the ledger answers as it stands.+}
+    """
+    book = LEDGER if ledger is None else ledger
+    {+if sf is not None and run_id in book.episodes:+}
+{+        path = find_test_report(sf, run_id)+}
+{+        absence = read_absence(path)+}
+{+        if absence is not None:+}
+{+            book.note_absence(run_id, now=now, gate=absence["gate"],+}
+{+                              report_key=_report_key(path))+}
+    return book.deferring(run_id, now=now)
+
+
+@@ -289,6 +318,19 @@ def find_test_report(sf, run_id: str):
+    return None
+
+
+{+def _report_key(report_path) -> tuple | None:+}
+{+    """Which report this is: its path and its modification time.+}
+
+{+    A re-acquisition rewrites `test_report.json`, so the same path with a new+}
+{+    mtime is a new report, and a new report is a new absence to wait on.+}
+{+    """+}
+{+    from pathlib import Path+}
+{+    try:+}
+{+        return (str(report_path), Path(report_path).stat().st_mtime_ns)+}
+{+    except (OSError, TypeError):+}
+{+        return None+}
+
+
+def read_absence(report_path) -> dict | None:
+    """The absence a `test_report.json` states, or None if it states none.
+
+@@ -310,35 +352,37 @@ def read_absence(report_path) -> dict | None:
+    return {"gate": str(gate.get("script") or "the repository gate")}
+
+
+[-def last_gate_absence(sf, run_id: str, report_path=None) -> dict | None:-]
+[-    """The absence this run's repository gate left behind, or None."""-]
+[-    path = report_path if report_path is not None else find_test_report(sf, run_id)-]
+[-    return read_absence(path)-]
+
+
+def observe_run(sf, run_id: str, *, now: float | None = None,
+                ledger: DeferralLedger | None = None,
+                report_path=None) -> dict:
+    """What this tick owes a run whose repository gate produced no verdict.
+
+    Returns one of [-three-]{+four+} states:
+
+    * ``none``     — there is no absence to account for; the tick proceeds.
+    * ``silent``   — an absence is in [-progress-]{+progress, inside the wait for the report+}
+{+                     it was read from+} and inside its wall-clock ceiling: do
+                     nothing, spend nothing, end nothing.
+    {+* ``due``      — the wait for that report has run out and the ceiling has+}
+{+                     not: the tick advances the run, which re-runs the gate+}
+{+                     step ALONE to re-acquire the verdict (the absence gate's+}
+{+                     only way forward). No implement cycle is spent on it.+}
+    * ``expired``  — the absence outlived the ceiling: the run may end, and it
+                     ends with ``reason`` NAMING the absence.
+    """
+    book = LEDGER if ledger is None else ledger
+    {+if report_path is None:+}
+{+        report_path = find_test_report(sf, run_id)+}
+    absence = [-last_gate_absence(sf, run_id, report_path=report_path)-]{+read_absence(report_path)+}
+    if absence is None:
+        book.clear(run_id)
+        return {"state": "none", "remaining": 0.0, "gate": "", "reason": ""}
+    moment = time.time() if now is None else now
+    episode = book.note_absence(run_id, now=moment, [-gate=absence["gate"])-]{+gate=absence["gate"],+}
+{+                                report_key=_report_key(report_path))+}
+    if book.expired(run_id, now=moment):
+        return {"state": "expired", "remaining": 0.0, "gate": episode.gate,
+                "reason": book.terminal_reason(run_id)}
+    {+remaining = book.hold_remaining(run_id, now=moment)+}
+    return {"state": [-"silent",-]{+"silent" if remaining > 0 else "due",+}
+            "remaining": [-book.hold_remaining(run_id, now=moment),-]{+remaining,+} "gate": episode.gate, "reason": ""}
+BARE_RC=0

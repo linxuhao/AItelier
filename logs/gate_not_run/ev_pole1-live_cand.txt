@@ -1,0 +1,43 @@
+throwaway aitelier containers running: 2
+tree: /home/linxuhao/.AItelier/worktrees-scratch/gatenotrun2 head: 59f3252e0f1b4c5839958e849c9f54f1c5f26eee dirty: 0
+command: python final/scripts/gate_not_run_evidence.py pole1-live
+EVIDENCE {
+ "tree": "/home/linxuhao/.AItelier/worktrees-scratch/gatenotrun2",
+ "has_admission_relay": true,
+ "repo_gate.returncode": 2,
+ "repo_gate.measured": "unmeasured",
+ "repo_gate.output_truncated": false,
+ "repo_gate.output_len": 94,
+ "repo_gate.ticket": "rt-20260924T231148Z-035535f4",
+ "repo_gate.admission.state": "not_admitted",
+ "last_request": {
+  "route": "/script",
+  "status": 409,
+  "outcome": "not_admitted",
+  "owner_kind": "active",
+  "needs_reconciliation": false,
+  "render_wait_timeout_sec": 0.5,
+  "render_wait_injected": true
+ },
+ "repo_gate_admission": "not_admitted",
+ "repo_gate_absent(report)": true,
+ "repo_gate_absent(return)": true,
+ "repo_gate_unmeasured": true,
+ "evidence_state": "not_run",
+ "passed": false,
+ "release_evidence": "unresolved",
+ "failure_identity_error": null,
+ "baseline_state": "compared",
+ "new_failures_count": 1,
+ "new_failure_identities": [
+  "repo_gate:run_tests.sh"
+ ],
+ "new_failures": [
+  "repo_gate:run_tests.sh was NOT measured (engine admission: not_admitted; 1 attempt(s)): godot-builder unreachable at http://127.0.0.1:35091: HTTP Error 409: Conflict -- gate NOT run."
+ ],
+ "harness_rendered_for": [
+  "op-holder"
+ ],
+ "scenario": "pole1-live"
+}
+BARE_RC=0

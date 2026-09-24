@@ -1,0 +1,65 @@
+$ grep -n "gate_queue\|ticket\|/queue" aitelier/tools/run_tests/impl.py   # candidate d41c0a4b439816799596046f6aba3541b8af82bf
+686:    ticket = "rt-%s-%s" % (time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()),
+688:    report_dir = datadir.aitelier_home() / "gate-reports" / ticket
+701:                "script": REPO_GATE_SCRIPT, "ticket": ticket,
+713:    admission.update(ticket=ticket, upstream=upstream)
+720:    result["ticket"] = ticket
+910:def _report_dir_failure_cases(ticket_dir: Path, repo: Path
+914:    The gate writes its report under the ticket directory it was handed as
+923:    repositories retain land under the same ticket. The gate's own report is
+925:    every other report under the ticket is not read.
+932:    if not ticket_dir.is_dir():
+950:    paths = [p for p in [ticket_dir / "manifest.json",
+951:                         *sorted(ticket_dir.glob("*/manifest.json"))]
+964:                    f"{repo} under one ticket ({ticket_dir.name})")
+1012:    ticket (`gate["report_dir"]`, `gate["repo"]`, see
+BARE_RC=0
+hits: 14
+
+$ same grep, base 658ee8df35e45f4e42bc2f9a006225490f377e96
+BARE_RC=1
+hits: 0
+
+$ grep -n "gate_admission\|relay" aitelier/tools/run_tests/impl.py  # candidate: where the gate is routed through the relay
+35:from aitelier import gate_admission
+575:    # are the caller's own values (the repository gate's relay URL and report
+689:    # Every engine request the gate makes goes through the admission relay,
+691:    # the engine's own answer to each (aitelier/gate_admission.py).
+692:    upstream = os.environ.get("GODOT_BUILDER_URL") or gate_admission.DEFAULT_BUILDER_URL
+695:        relay = gate_admission.AdmissionRelay(
+696:            upstream, render_wait_sec=gate_admission.render_wait_seconds(),
+698:        relay_url = relay.start()
+702:                "output": f"repository gate not started: admission relay "
+708:            env_overrides={"GODOT_BUILDER_URL": relay_url,
+711:        relay.stop()
+712:    admission = gate_admission.admission_summary(relay.snapshot())
+840:    admission relay's record of the engine's own reply (`admission.state` in
+841:    `gate_admission.NOT_RUN_STATES`: refused admission, unreachable, or cut off
+843:    is `measured_pass`, 1 is `measured_fail` whatever the relay saw, and any
+856:            and admission.get("state") in gate_admission.NOT_RUN_STATES):
+1622:            # relay recorded it (`answered`, `not_admitted`, `unreachable`, ...).
+1623:            report["repo_gate_admission"] = (gate.get("admission") or {}).get("state")
+1649:                    f"(engine admission: {report['repo_gate_admission']}; "
+BARE_RC=0
+
+$ grep -n "render_wait_timeout_sec\|RENDER_ROUTES\|def render_wait_seconds\|NOT_RUN_STATES =" aitelier/gate_admission.py  # candidate
+15:gives each render request a bounded `render_wait_timeout_sec` when the gate
+37:# (docker/godot/godot_harness.py:_Handler._RENDER_ROUTES).
+38:RENDER_ROUTES = ("/playtest", "/script", "/x11_input_smoke")
+67:NOT_RUN_STATES = frozenset({NOT_ADMITTED, UNREACHABLE, ABANDONED, "undelivered"})
+74:def render_wait_seconds() -> float:
+172:        if method == "POST" and route in RENDER_ROUTES:
+178:                if "render_wait_timeout_sec" not in payload:
+179:                    payload["render_wait_timeout_sec"] = self._render_wait
+181:                record["render_wait_timeout_sec"] = payload["render_wait_timeout_sec"]
+BARE_RC=0
+
+$ grep -n "def acquire_render_owner_waiting\|render_wait_timeout_sec" docker/godot/godot_harness.py  # candidate, unchanged from base
+258:def acquire_render_owner_waiting(project_id: str, run_id: str, operation_id: str, *,
+310:    """The refusal for a request whose own render_wait_timeout_sec ran out."""
+326:                       f"render_wait_timeout_sec ({wait_timeout}) ran out: {tail}")}
+2895:        # timeout) or when the request's own {"render_wait_timeout_sec": N} runs
+2919:            wait_timeout = req.get("render_wait_timeout_sec")
+2923:                return self._send(400, {"error": "render_wait_timeout_sec must be a number"})
+2972:                    release_reason = ("not rendered: render_wait_timeout_sec ran "
+BARE_RC=0

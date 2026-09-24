@@ -1,0 +1,172 @@
+throwaway aitelier containers running: 3
+gitrc=0
+...s.................................................................... [  1%]
+........................................................................ [  2%]
+........................................................................ [  3%]
+........................................................................ [  5%]
+........................................................................ [  6%]
+........................................................................ [  7%]
+........................................................................ [  9%]
+........................................................................ [ 10%]
+........................................................................ [ 11%]
+........................................................................ [ 13%]
+........................................................................ [ 14%]
+........................................................................ [ 15%]
+........................................................................ [ 17%]
+........................................................................ [ 18%]
+........................................................................ [ 19%]
+........................................................................ [ 21%]
+........................................................................ [ 22%]
+........................................................................ [ 23%]
+........................................................................ [ 24%]
+........................................................................ [ 26%]
+........................................................................ [ 27%]
+........................................................................ [ 28%]
+........................................................................ [ 30%]
+........................................................................ [ 31%]
+........................................................................ [ 32%]
+........................................................................ [ 34%]
+........................................................................ [ 35%]
+........................................................................ [ 36%]
+........................................................................ [ 38%]
+........................................................................ [ 39%]
+........................................................................ [ 40%]
+........................................................................ [ 42%]
+........................................................................ [ 43%]
+.........................ssssssss....................................... [ 44%]
+........................................................................ [ 46%]
+........................................................................ [ 47%]
+........................................................................ [ 48%]
+........................................................................ [ 49%]
+........................................................................ [ 51%]
+........................................................................ [ 52%]
+........................................................................ [ 53%]
+........................................................................ [ 55%]
+........................................................................ [ 56%]
+...............................................................s........ [ 57%]
+........................................................................ [ 59%]
+........................................................................ [ 60%]
+........................................................................ [ 61%]
+........................................................................ [ 63%]
+........................................................................ [ 64%]
+........................................................................ [ 65%]
+........................................................................ [ 67%]
+........................................................................ [ 68%]
+................................................F....................... [ 69%]
+........................................................................ [ 71%]
+........................................................................ [ 72%]
+........................................................................ [ 73%]
+........................................................................ [ 74%]
+........................................................................ [ 76%]
+........................................................................ [ 77%]
+........................................................................ [ 78%]
+........................................................................ [ 80%]
+........................................................................ [ 81%]
+........................................................................ [ 82%]
+........................................................................ [ 84%]
+........................................................................ [ 85%]
+........................................................................ [ 86%]
+........................................................................ [ 88%]
+........................................................................ [ 89%]
+........................................................................ [ 90%]
+........................................................................ [ 92%]
+F....................................................................... [ 93%]
+........................................................................ [ 94%]
+........................................................................ [ 96%]
+........................................................................ [ 97%]
+........................................................................ [ 98%]
+........................................................................ [ 99%]
+...                                                                      [100%]
+=================================== FAILURES ===================================
+__________ test_every_subprocess_in_run_tests_scrubs_the_environment ___________
+
+    def test_every_subprocess_in_run_tests_scrubs_the_environment():
+        """Third pass over the same module. `bash` was hardened first, `npm ci` and
+        pytest in the second round, and `pip install -e` — which EXECUTES the
+        target's build backend, i.e. LLM-authored setup.py — was still inheriting
+        everything. Counting the spawns is the only way this stops being a
+        one-at-a-time discovery."""
+        import aitelier.tools.run_tests.impl as impl
+        src = inspect.getsource(impl)
+        spawns = src.count("subprocess.run(") + src.count("subprocess.Popen(")
+        scrubbed = src.count("env_scrub.scrubbed_env()") + src.count(
+            "env_scrub.scrubbed_env(PYTHONPATH=")
+>       assert scrubbed >= 4, f"{spawns} spawn sites, only {scrubbed} scrubbed"
+E       AssertionError: 10 spawn sites, only 3 scrubbed
+E       assert 3 >= 4
+
+tests/unit/test_public_read_hardening.py:756: AssertionError
+____________________ test_N9_the_protocol_text_has_a_reader ____________________
+
+    def test_N9_the_protocol_text_has_a_reader():
+        """N9 deleted five lines of contract text from tool.yaml and the whole
+        suite stayed green, which means nothing read them. This is the reader for
+        the two things the text has to keep saying: an absence is DECLARED and
+        never inferred, and a gate that produced no verdict may not be charged to
+        the implementer.
+    
+        The witness reads the file N9 ACTUALLY deletes: tool.yaml, not docs/.
+        """
+        text = _source(_TOOL_YAML)
+        assert "AITELIER_REPO_GATE_UNMEASURED=" in text, (
+            "N9: the declaration line the protocol is built on is gone from tool.yaml")
+        assert "no exit code" in text.lower(), (
+            "N9: tool.yaml no longer says UNMEASURED is never an exit code")
+>       assert "DECLARED and never" in text, (
+            "N9: tool.yaml no longer declares unmeasured is never inferred")
+E       AssertionError: N9: tool.yaml no longer declares unmeasured is never inferred
+E       assert 'DECLARED and never' in "name: run_tests\ndescription: >\n  Run the project's unit tests (pytest) over the current run worktree and write\n  t...: true\n\n# Reports/metadata are artifacts even when invoked by a code-producing agent.\noutput:\n  target: artifact\n"
+
+tests/unit/test_tree_level_accounting_witnesses.py:185: AssertionError
+=============================== warnings summary ===============================
+../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+tests/integration/test_composed_product_delivery_cycle.py::test_real_product_delivery_cycle
+  /usr/local/lib/python3.12/site-packages/pydantic/_internal/_generate_schema.py:1480: UserWarning: Item 'summary' on TypedDict class 'ChatCompletionReasoningItem' is using the `ReadOnly` qualifier. Pydantic will not protect items from any mutation on dictionary instances.
+    warnings.warn(
+
+tests/integration/test_me_signin.py::TestWhoAmISignin::test_a_refused_credential_is_reported_as_one
+tests/integration/test_me_signin.py::TestWhoAmISignin::test_a_refused_credential_leaks_no_detail
+  /usr/local/lib/python3.12/site-packages/starlette/testclient.py:463: DeprecationWarning: Setting per-request cookies=<...> is being deprecated, because the expected behaviour on cookie persistence is ambiguous. Set cookies directly on the client instance instead.
+    return super().request(
+
+tests/unit/test_bash_admission_lifetime.py::test_a_second_cancellation_during_cleanup_still_ends_the_writer
+  /usr/local/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <function BaseSubprocessTransport.__del__ at 0x7af0c676e700>
+  
+  Traceback (most recent call last):
+    File "/usr/local/lib/python3.12/asyncio/base_subprocess.py", line 126, in __del__
+      self.close()
+    File "/usr/local/lib/python3.12/asyncio/base_subprocess.py", line 104, in close
+      proto.pipe.close()
+    File "/usr/local/lib/python3.12/asyncio/unix_events.py", line 568, in close
+      self._close(None)
+    File "/usr/local/lib/python3.12/asyncio/unix_events.py", line 592, in _close
+      self._loop.call_soon(self._call_connection_lost, exc)
+    File "/usr/local/lib/python3.12/asyncio/base_events.py", line 799, in call_soon
+      self._check_closed()
+    File "/usr/local/lib/python3.12/asyncio/base_events.py", line 545, in _check_closed
+      raise RuntimeError('Event loop is closed')
+  RuntimeError: Event loop is closed
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/unit/test_coding_impl_self_verification.py::test_game_probe_uses_the_same_bounds_and_trace_identity
+tests/unit/test_coding_impl_self_verification.py::test_representative_native_implement_traces_repo_and_game_checks_before_finish
+  /usr/local/lib/python3.12/multiprocessing/popen_fork.py:66: DeprecationWarning: This process (pid=7) is multi-threaded, use of fork() may lead to deadlocks in the child.
+    self.pid = os.fork()
+
+tests/unit/test_public_read_hardening.py::TestAnUnknownJwtKidCostsNoNetworkCall::test_a_rejected_kid_is_remembered
+tests/unit/test_public_read_hardening.py::TestAnUnknownJwtKidCostsNoNetworkCall::test_the_bad_kid_table_is_bounded
+  /usr/local/lib/python3.12/site-packages/jwt/api_jwt.py:149: InsecureKeyLengthWarning: The HMAC key is 1 bytes long, which is below the minimum recommended length of 32 bytes for SHA256. See RFC 7518 Section 3.2.
+    return self._jws.encode(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_public_read_hardening.py::test_every_subprocess_in_run_tests_scrubs_the_environment
+FAILED tests/unit/test_tree_level_accounting_witnesses.py::test_N9_the_protocol_text_has_a_reader
+2 failed, 5463 passed, 10 skipped, 11 deselected, 9 warnings in 842.33s (0:14:02)
+BARE_RC=1

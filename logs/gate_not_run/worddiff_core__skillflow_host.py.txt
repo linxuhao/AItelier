@@ -1,0 +1,14 @@
+$ git diff --word-diff 658ee8df35e45f4e42bc2f9a006225490f377e96 HEAD -- core/skillflow_host.py   # HEAD d41c0a4b439816799596046f6aba3541b8af82bf
+diff --git a/core/skillflow_host.py b/core/skillflow_host.py
+index b0113dca..aa115e3a 100644
+--- a/core/skillflow_host.py
++++ b/core/skillflow_host.py
+@@ -502,7 +502,7 @@ class AItelierSkillFlow(SkillFlow):
+        # routes the absence back into the implement loop. Deleting this check
+        # reintroduces exactly that, so it is guarded by its own test.
+        from core import gate_deferral
+        if [-gate_deferral.hold_blocks_advance(run_id):-]{+gate_deferral.hold_blocks_advance(run_id, sf=self):+}
+            return None
+        return super().advance_run(run_id)
+
+BARE_RC=0

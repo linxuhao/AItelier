@@ -1,0 +1,100 @@
+throwaway aitelier containers running: 2
+gitrc=0
+GATE_EVIDENCE {
+ "implement_runs_while_busy": 1,
+ "implement_runs_after_release": 0,
+ "gate_calls_while_busy": 5,
+ "gate_calls_total": 6,
+ "busy_outcomes": [
+  "none",
+  "none",
+  "none",
+  "silent",
+  "reacquire",
+  "silent",
+  "reacquire",
+  "silent",
+  "reacquire",
+  "silent",
+  "reacquire",
+  "silent"
+ ],
+ "busy_nodes": [
+  null,
+  "test",
+  "test_gate_absent",
+  "test_gate_absent",
+  "test_gate_absent",
+  "test_gate_absent",
+  "test_gate_absent",
+  "test_gate_absent",
+  "test_gate_absent",
+  "test_gate_absent",
+  "test_gate_absent",
+  "test_gate_absent"
+ ],
+ "free_outcomes": [
+  "silent",
+  "silent",
+  "silent",
+  "silent",
+  "silent",
+  "silent",
+  "silent",
+  "silent",
+  "reacquire"
+ ],
+ "free_nodes": [
+  "test_gate_absent",
+  "test_gate_absent",
+  "test_gate_absent",
+  "test_gate_absent",
+  "test_gate_absent",
+  "test_gate_absent",
+  "test_gate_absent",
+  "test_gate_absent",
+  "test_outcome"
+ ],
+ "rendered_for": [
+  "op-holder",
+  "coding-impl-gate"
+ ],
+ "last_repo_gate": {
+  "returncode": 0,
+  "measured": "measured_pass",
+  "ticket": "rt-20260924T231203Z-e108b6cd"
+ },
+ "inventory_while_busy": {
+  "run_id": "e66dda51-89c7-4a46-a38c-020656e5fd11",
+  "status": "running",
+  "current_node": "test_gate_absent",
+  "error": null,
+  "commits": [
+   {
+    "sha": "491c6fbe27af2e0e7eb052042fea2cce2b966d2e",
+    "subject": "step: implement [p]"
+   }
+  ]
+ },
+ "inventory_final": {
+  "run_id": "e66dda51-89c7-4a46-a38c-020656e5fd11",
+  "status": "completed",
+  "current_node": "test_outcome",
+  "error": null,
+  "commits": [
+   {
+    "sha": "491c6fbe27af2e0e7eb052042fea2cce2b966d2e",
+    "subject": "step: implement [p]"
+   }
+  ]
+ }
+}
+.
+=============================== warnings summary ===============================
+../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1 passed, 1 warning in 6.02s
+BARE_RC=0

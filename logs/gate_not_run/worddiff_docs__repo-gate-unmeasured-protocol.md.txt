@@ -1,0 +1,126 @@
+$ git diff --word-diff 658ee8df35e45f4e42bc2f9a006225490f377e96 HEAD -- docs/repo-gate-unmeasured-protocol.md   # HEAD d41c0a4b439816799596046f6aba3541b8af82bf
+diff --git a/docs/repo-gate-unmeasured-protocol.md b/docs/repo-gate-unmeasured-protocol.md
+index a25b65d7..f535d0d8 100644
+--- a/docs/repo-gate-unmeasured-protocol.md
++++ b/docs/repo-gate-unmeasured-protocol.md
+@@ -9,8 +9,9 @@ is **another card** (see "The other card" below).
+
+> `unmeasured` is **declared**, never inferred.
+
+The only things that produce `unmeasured` are the [-two-]{+three+} the framework can see
+for [-itself:-]{+itself (the third since r2, 2026-09-24 — see "A gate the engine did not+}
+{+admit" below):+}
+
+1. **The gate's own declaration.** Exactly one whole line, emitted by the gate:
+
+@@ -26,10 +27,18 @@ itself:
+   it (`timed_out` / `runner_error`). This is the same shape `run_tests`
+   already used for pytest — `skipped_because="pytest_timeout"`, "a timeout is
+   ABSENT evidence, not a red suite". The repo gate now aligns with it.
+{+3. **The admission relay's record of the engine's own answer.** The gate+}
+{+   reaches the engine only through `aitelier/gate_admission.py`, which records+}
+{+   what the engine answered to every request. A gate that exits neither `0`+}
+{+   nor `1` while its LAST engine request was refused admission (409),+}
+{+   unreachable, abandoned or undelivered did not run. `1` is a red whatever+}
+{+   the relay saw, and any other exit after an answered request stays+}
+{+   `measured_fail`.+}
+
+Everything else is measured. `rc=0` is `measured_pass`; **every other exit
+code is `measured_fail`**, including `1`, `2`, `124`, `137`, `255`, `-1` and
+[-`-9`.-]{+`-9`, unless source 3 applies.+} No exit code {+on its own+} is ever read as an
+absence, and that is the whole point:
+the game repo's `tools/godot_gate.py` reserves `2` for `incomplete`, which
+includes contract files **the implementer wrote wrong** — its own text says
+"no authored scenarios found under ... — an empty one is not a pass". Reading
+@@ -64,7 +73,9 @@ own timeout (`REPO_GATE_TIMEOUT`, 5400 s) rather than the 3 x 5400 + 2 x 60 s
+an in-step re-acquisition cost (round 5, measured). Waiting for the gate is the
+SCHEDULER's job (`core/gate_deferral.py`): while the absence is live the run is
+not advanced and spends no implement cycle, and the poller keeps serving every
+other project. {+Since r2 the hold lasts one wait per silent report; then the run+}
+{+advances along the absence gate's only edge, back to `test`, which re-runs the+}
+{+gate alone.+} `repo_gate.attempts` still records how many runs the reading
+cost. A gate that stayed silent ends the story honestly:
+`repo_gate_unmeasured: true`, `passed: false`, no case list (so nothing of that
+gate's known-red is pruned) and no failure invented out of it.
+@@ -144,8 +155,8 @@ does not touch it:
+* on its genuinely unmeasured paths (the builder unreachable, the render lock
+  held) it must emit the declaration line above, with `state: "blocked"`;
+* it must **stop** using exit `2` for contract files the author wrote wrong.
+  Until it does, a broken authored contract is a `measured_fail` [-here — by-]
+[-  design,-]{+here,+}
+  because "an empty one is not a pass" is a defect the round is
+  supposed to fix. The `manifest` line (`{0: passed, 1: failed}.get(code,
+  "incomplete")`) is where that split has to become visible.
+
+@@ -207,7 +218,8 @@ report and ALSO returns in the step's own flags, so the edge matches it as a
+leading to `test_gate_absent`, a loop-EXTERNAL gate that is deliberately absent
+from `end_conditions`. Reaching it parks a still-running run instead of
+completing or failing it, so the absence costs neither an implement lap nor
+the run. {+Its one transition (r2) is `test_gate_absent -> test`: when the wait+}
+{+runs out, the verdict is re-acquired and `implement` stays unreachable.+}
+
+The edge is a FLAG and not a `from_file` read, and that is a measurement, not
+a preference. `from_file` is resolved against the EVALUATING step's own output
+@@ -312,3 +324,61 @@ its red forgiven.
+  minimum the honest report shape needs, it touches nothing the four witnesses
+  read, and it is stated at the edge itself.
+
+{+## A gate the engine did not admit (r2, 2026-09-24)+}
+
+{+Node `harness.a-gate-that-could-not-run-is-not-a-failing-test`. Three runs+}
+{+(`751e9e26`, `attempt-d3d14632`, `f6e21064`) died of `Cycle limit exceeded`+}
+{+because a render lock held by someone else made the game gate exit `2`+}
+{+(`godot-builder unreachable ... HTTP Error 409: Conflict -- gate NOT run`), and+}
+{+`2` was a red. The game gate does not declare, so sources 1 and 2 above never+}
+{+fired for it.+}
+
+{+**The relay.** `_run_repo_gate` starts an `AdmissionRelay`+}
+{+(`aitelier/gate_admission.py`) for each gate run and hands the gate the+}
+{+relay's URL as `GODOT_BUILDER_URL`. The relay forwards every request to the+}
+{+real builder. On the render routes (`/playtest`, `/script`,+}
+{+`/x11_input_smoke`) it adds `render_wait_timeout_sec`+}
+{+(`AITELIER_REPO_GATE_RENDER_WAIT_SECONDS`, default 1500) when the gate sent+}
+{+none, so the request waits in the harness render queue behind a live owner+}
+{+instead of getting a 409. For each request it records the route, the status+}
+{+and the owner fields of a 409 payload, as `answered`, `not_admitted`,+}
+{+`engine_error`, `unreachable` or `abandoned`. The summary (from the LAST+}
+{+request) is written to `<ticket>/admission.json` and to+}
+{+`repo_gate.admission`.+}
+
+{+**Three outcomes, three sets of fields** (`test_report.json`):+}
+
+{+| outcome | fields |+}
+{+|---|---|+}
+{+| passed | `passed: true`, `repo_gate.measured: measured_pass` |+}
+{+| ran and red | `passed: false`, `repo_gate.measured: measured_fail`, `release_evidence: known_failure`, per-case `new_failures` |+}
+{+| not run | `passed: false`, `repo_gate.measured: unmeasured`, `repo_gate_absent: true`, `repo_gate_unmeasured: true`, `repo_gate_admission` / `repo_gate.admission.state` (`not_admitted`, `unreachable`, `abandoned`, `undelivered`), `evidence_state: not_run` when nothing else failed, `release_evidence: unresolved` |+}
+
+{+**Identities.** Each gate run has a ticket (`rt-<UTC>-<8 hex>`) and its own+}
+{+`GATE_REPORT_DIR` (`$AITELIER_HOME/gate-reports/<ticket>`). A red gate's+}
+{+identities are read from the findings it retained there+}
+{+(`_report_dir_failure_cases`), one per finding, keyed+}
+{+`<stage>/<sha256[:12]>`, never from the bounded tail. Only the report whose+}
+{+manifest names the repository the gate ran for is read: the real gate's+}
+{+python stage runs the gate's own tests, and they retain reports for their+}
+{+fixture repository `/repo` under the same ticket.+}
+
+{+**The loop.** `test_gate_absent -> test` (`max_loop: 100`). The deferral+}
+{+ledger holds the run for one wait per silent report (keyed by report path and+}
+{+mtime), then the tick logs `gate_deferral_reacquire` and advances, which+}
+{+re-runs the `test` step alone. The wall-clock ceiling still ends an absence+}
+{+that never clears, with the absence sentence.+}
+
+{+The tests that hold this down (candidate mutations, one throwaway copy each,+}
+{+run against the 12 files of the gate and deferral suites):+}
+
+{+| mutation | killed by |+}
+{+|---|---|+}
+{+| delete the admission clause in `_repo_gate_outcome` | `test_repo_gate_admission.py::test_pole_1_a_gate_the_engine_did_not_admit_is_not_run[live_render]`, `[owner_lost]`, `::test_an_unreachable_engine_is_not_run`, `::test_an_answered_gate_that_exits_nonzero_stays_a_measured_failure[2]`, `[3]`, `[124]`; `test_coding_impl_busy_gate.py::test_a_busy_gate_never_sends_the_run_back_to_implement` |+}
+{+| let an exit 1 become not-run (`not in (0,)`) | `test_repo_gate_admission.py::test_exit_1_is_a_red_whatever_the_relay_saw` |+}
+{+| skip the report directory (`if False:`) | `test_repo_gate_admission.py::test_pole_2_a_gate_that_ran_and_went_red_is_a_code_red`; `test_repo_gate_identity_from_report_dir.py::test_a_long_red_output_still_names_every_failure` |+}
+{+| stop adding `render_wait_timeout_sec` | `test_repo_gate_admission.py::test_two_concurrent_repo_gates_are_each_admitted_by_the_queue`, `::test_a_gate_that_sends_its_own_wait_keeps_it`, `::test_pole_1_a_gate_the_engine_did_not_admit_is_not_run[live_render]` |+}
+{+| `test_gate_absent` back to `to: null` | `test_coding_impl_busy_gate.py::test_a_busy_gate_never_sends_the_run_back_to_implement`; 8 tests in `test_coding_impl_gate_absence.py` |+}
+{+| hold for the whole episode (drop `hold_remaining > 0`) | `test_coding_impl_busy_gate.py::test_a_busy_gate_never_sends_the_run_back_to_implement`; `test_coding_impl_gate_absence.py::test_the_host_hold_alone_keeps_the_rows_where_the_absence_left_them` |+}
+{+| drop `evidence_state = "not_run"` | `test_repo_gate_admission.py::test_pole_1_a_gate_the_engine_did_not_admit_is_not_run[live_render]`, `[owner_lost]` |+}
+{+| read every manifest under the ticket | `test_repo_gate_identity_from_report_dir.py::test_reports_the_repositorys_own_tests_retained_are_not_the_gates` |+}
+BARE_RC=0

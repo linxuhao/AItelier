@@ -1,0 +1,159 @@
+throwaway aitelier containers running: 0
+?? tests/gate_fixture.py
+?? tests/skillflow/test_coding_impl_busy_gate.py
+?? tests/unit/test_repo_gate_admission.py
+gitrc=0
+[harness] /script coding-impl-gate: caller disconnected after 3.01s queued behind render owner(s) ['07642eb2d9dc4c5b86a6232cd57918e0']
+[harness] /script coding-impl-gate: caller disconnected after 3.01s queued behind render owner(s) ['07642eb2d9dc4c5b86a6232cd57918e0']
+[harness] /script coding-impl-gate: caller disconnected after 3.02s queued behind render owner(s) ['07642eb2d9dc4c5b86a6232cd57918e0']
+[harness] /script coding-impl-gate: caller disconnected after 3.02s queued behind render owner(s) ['07642eb2d9dc4c5b86a6232cd57918e0']
+GATE_EVIDENCE {
+ "implement_runs_while_busy": 4,
+ "implement_runs_after_release": 0,
+ "gate_calls_while_busy": 4,
+ "gate_calls_total": 4,
+ "busy_outcomes": [
+  "none",
+  "none",
+  "none",
+  "none",
+  "none",
+  "none",
+  "none",
+  "none",
+  "none"
+ ],
+ "busy_nodes": [
+  null,
+  "test",
+  null,
+  "test",
+  null,
+  "test",
+  null,
+  "test",
+  "test_outcome"
+ ],
+ "free_outcomes": [],
+ "free_nodes": [],
+ "rendered_for": [
+  "op-holder"
+ ],
+ "last_repo_gate": {
+  "returncode": 2,
+  "measured": "measured_fail",
+  "ticket": null
+ },
+ "inventory_while_busy": {
+  "run_id": "c9e4b6bf-0ffc-468d-b854-30d4a298fb29",
+  "status": "failed",
+  "current_node": "test_outcome",
+  "error": "Cycle limit exceeded",
+  "commits": [
+   {
+    "sha": "1aca05d392e0b4c0851830a761f5c272651b0b90",
+    "subject": "step: implement [p]"
+   },
+   {
+    "sha": "464e5e2cb855e79604472928d3bb08e97c71e457",
+    "subject": "step: implement [p]"
+   },
+   {
+    "sha": "06763d1c8826bb9a55676f4bca94783ce8461418",
+    "subject": "step: implement [p]"
+   },
+   {
+    "sha": "d42b5112840ce14cbb42341e96f97d098be1c442",
+    "subject": "step: implement [p]"
+   }
+  ]
+ },
+ "inventory_final": {
+  "run_id": "c9e4b6bf-0ffc-468d-b854-30d4a298fb29",
+  "status": "failed",
+  "current_node": "test_outcome",
+  "error": "Cycle limit exceeded",
+  "commits": [
+   {
+    "sha": "1aca05d392e0b4c0851830a761f5c272651b0b90",
+    "subject": "step: implement [p]"
+   },
+   {
+    "sha": "464e5e2cb855e79604472928d3bb08e97c71e457",
+    "subject": "step: implement [p]"
+   },
+   {
+    "sha": "06763d1c8826bb9a55676f4bca94783ce8461418",
+    "subject": "step: implement [p]"
+   },
+   {
+    "sha": "d42b5112840ce14cbb42341e96f97d098be1c442",
+    "subject": "step: implement [p]"
+   }
+  ]
+ }
+}
+F
+=================================== FAILURES ===================================
+____________ test_a_busy_gate_never_sends_the_run_back_to_implement ____________
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_a_busy_gate_never_sends_t0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7891cacf6a80>
+
+    def test_a_busy_gate_never_sends_the_run_back_to_implement(tmp_path, monkeypatch):
+        rig = HarnessRig(tmp_path / "harness", monkeypatch)
+        monkeypatch.setenv("GODOT_BUILDER_URL", rig.base)
+        monkeypatch.setenv("FIXTURE_GATE_CLIENT_TIMEOUT", "3")
+        monkeypatch.setenv("FIXTURE_GATE_OP", "coding-impl-gate")
+        monkeypatch.setenv("AITELIER_REPO_GATE_RENDER_WAIT_SECONDS", "0.3")
+        counter = tmp_path / "calls.txt"
+        try:
+            sf, run_id = _wire(tmp_path, monkeypatch, episode_max=100000, wait=1,
+                               counter=counter, tail=_GATE_TAIL)
+            rig.hold()
+            busy_runs, busy_statuses, busy_outcomes, busy_nodes = _drive(
+                sf, run_id, monkeypatch, ticks=12, clock_step=1)
+            busy = _inventory(sf, run_id)
+            gate_calls_while_busy = int(counter.read_text()) if counter.exists() else 0
+            rig.let_go()
+            free_runs, free_statuses, free_outcomes, free_nodes = _drive(
+                sf, run_id, monkeypatch, ticks=12, clock_step=1)
+            final = _inventory(sf, run_id)
+            last_report = json.loads(
+                gate_deferral.find_test_report(sf, run_id).read_text())
+        finally:
+            rig.close()
+        print("GATE_EVIDENCE " + json.dumps({
+            "implement_runs_while_busy": busy_runs,
+            "implement_runs_after_release": free_runs,
+            "gate_calls_while_busy": gate_calls_while_busy,
+            "gate_calls_total": int(counter.read_text()) if counter.exists() else 0,
+            "busy_outcomes": busy_outcomes, "busy_nodes": busy_nodes,
+            "free_outcomes": free_outcomes, "free_nodes": free_nodes,
+            "rendered_for": rig.rendered,
+            "last_repo_gate": {k: last_report.get("repo_gate", {}).get(k)
+                               for k in ("returncode", "measured", "ticket")},
+            "inventory_while_busy": busy, "inventory_final": final}, indent=1))
+    
+        # While the gate is busy: one implement (the round's own), then only the
+        # gate step, re-run once per wait, and never the implement loop.
+>       assert busy_runs == 1, busy_runs
+E       AssertionError: 4
+E       assert 4 == 1
+
+tests/skillflow/test_coding_impl_busy_gate.py:78: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+=============================== warnings summary ===============================
+../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/skillflow/test_coding_impl_busy_gate.py::test_a_busy_gate_never_sends_the_run_back_to_implement
+1 failed, 1 warning in 14.64s
+BARE_RC=1

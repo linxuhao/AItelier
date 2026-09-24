@@ -1,0 +1,821 @@
+# CMD: python -m pytest -p no:cacheprovider -q -rf --tb=line tests/integration/test_author_surface_generator.py tests/integration/test_coverage_measures_judged_not_reached.py tests/integration/test_no_unfalsifiable_guarantees.py tests/integration/test_private_delivery_before_early_ok.py tests/integration/test_verdict_runs_on_fastapi_machinery.py tests/integration/test_unreadable_delivery_is_refused.py tests/integration/test_state_verdict_is_effective.py tests/integration/test_owner_ruled_notes.py tests/unit/test_state_declaration_binding.py tests/unit/test_private_read_verdict_at_execution.py tests/unit/test_project_privacy_rev3.py tests/unit/test_state_project_privacy.py tests/unit/test_state_read_visibility.py tests/unit/test_undeclared_reader_is_untrusted.py tests/unit/test_every_private_table_reader_is_judged_at_the_read.py tests/unit/test_mcp_router.py tests/unit/test_mcp_transport_security.py tests/integration/test_state_graph_entrypoints.py tests/contracts/director_messaging
+# CWD: /home/linxuhao/.AItelier/worktrees-scratch/gs10-mut
+# TREE_HEAD: 6346a95d86ac8e67b76d6a10687c06f3a90b4823
+# TREE_DIRTY:  M core/state_privacy.py;
+# CONTAINER: docker run --rm --init -m 3g --name gs10-mut_notes_allow-3857800 (+ .git mounted read-only at its host path) aitelier:latest
+# START_UTC: 2026-09-24T07:05:32Z
+........................................................................ [ 14%]
+........................................................................ [ 28%]
+.........................FFF............................................ [ 42%]
+........................................................................ [ 57%]
+...............F.......FF............................................... [ 71%]
+........................................................................ [ 85%]
+........................................................................ [100%]
+=================================== FAILURES ===================================
+E   AssertionError: in-process: unopened-project notebook canaries delivered by: ['S01/state_driver_note_entries', 'S01/state_driver_note_revisions', 'S01/state_driver_notes', 'S02/state_driver_note_entries', 'S02/state_driver_note_revisions', 'S02/state_driver_notes', 'S13/state_driver_note_entries', 'S13/state_driver_note_revisions', 'S13/state_driver_notes', 'X01/state_driver_note_entries', 'X01/state_driver_note_revisions', 'X01/state_driver_notes', 'X03/state_driver_note_entries', 'X03/state_driver_note_revisions', 'X03/state_driver_notes', 'X06/state_driver_note_entries', 'X06/state_driver_note_revisions', 'X06/state_driver_notes', 'X07/state_driver_note_entries', 'X07/state_driver_note_revisions', 'X07/state_driver_notes']
+    assert not ['S01/state_driver_note_entries', 'S01/state_driver_note_revisions', 'S01/state_driver_notes', 'S02/state_driver_note_entries', 'S02/state_driver_note_revisions', 'S02/state_driver_notes', ...]
+----------------------------- Captured stdout call -----------------------------
+ITEM3 in-process shape=S01 table=state_driver_note_entries outcome=LEAKED
+ITEM3 in-process shape=S01 table=state_driver_note_revisions outcome=LEAKED
+ITEM3 in-process shape=S01 table=state_driver_notes outcome=LEAKED
+ITEM3 in-process shape=S02 table=state_driver_note_entries outcome=LEAKED
+ITEM3 in-process shape=S02 table=state_driver_note_revisions outcome=LEAKED
+ITEM3 in-process shape=S02 table=state_driver_notes outcome=LEAKED
+ITEM3 in-process shape=S03 table=state_driver_note_entries outcome=ABSENT UntrustedDatabase.decision_connection does not exist
+ITEM3 in-process shape=S03 table=state_driver_note_revisions outcome=ABSENT UntrustedDatabase.decision_connection does not exist
+ITEM3 in-process shape=S03 table=state_driver_notes outcome=ABSENT UntrustedDatabase.decision_connection does not exist
+ITEM3 in-process shape=S04 table=state_driver_note_entries outcome=ABSENT UntrustedDatabase.unrestricted does not exist
+ITEM3 in-process shape=S04 table=state_driver_note_revisions outcome=ABSENT UntrustedDatabase.unrestricted does not exist
+ITEM3 in-process shape=S04 table=state_driver_notes outcome=ABSENT UntrustedDatabase.unrestricted does not exist
+ITEM3 in-process shape=S05 table=state_driver_note_entries outcome=REFUSED
+ITEM3 in-process shape=S05 table=state_driver_note_revisions outcome=REFUSED
+ITEM3 in-process shape=S05 table=state_driver_notes outcome=REFUSED
+ITEM3 in-process shape=S06 table=state_driver_note_entries outcome=ABSENT StateGraphStore._decision does not exist
+ITEM3 in-process shape=S06 table=state_driver_note_revisions outcome=ABSENT StateGraphStore._decision does not exist
+ITEM3 in-process shape=S06 table=state_driver_notes outcome=ABSENT StateGraphStore._decision does not exist
+ITEM3 in-process shape=S11 table=state_driver_note_entries outcome=REFUSED
+ITEM3 in-process shape=S11 table=state_driver_note_revisions outcome=REFUSED
+ITEM3 in-process shape=S11 table=state_driver_notes outcome=REFUSED
+ITEM3 in-process shape=S12 table=state_driver_note_entries outcome=ABSENT UntrustedDatabase.unrestricted does not exist
+ITEM3 in-process shape=S12 table=state_driver_note_revisions outcome=ABSENT UntrustedDatabase.unrestricted does not exist
+ITEM3 in-process shape=S12 table=state_driver_notes outcome=ABSENT UntrustedDatabase.unrestricted does not exist
+ITEM3 in-process shape=S13 table=state_driver_note_entries outcome=LEAKED
+ITEM3 in-process shape=S13 table=state_driver_note_revisions outcome=LEAKED
+ITEM3 in-process shape=S13 table=state_driver_notes outcome=LEAKED
+ITEM3 in-process shape=S14 table=state_driver_note_entries outcome=REFUSED
+ITEM3 in-process shape=S14 table=state_driver_note_revisions outcome=REFUSED
+ITEM3 in-process shape=S14 table=state_driver_notes outcome=REFUSED
+ITEM3 in-process shape=S16 table=state_driver_note_entries outcome=REFUSED
+ITEM3 in-process shape=S16 table=state_driver_note_revisions outcome=REFUSED
+ITEM3 in-process shape=S16 table=state_driver_notes outcome=REFUSED
+ITEM3 in-process shape=S17 table=state_driver_note_entries outcome=REFUSED
+ITEM3 in-process shape=S17 table=state_driver_note_revisions outcome=REFUSED
+ITEM3 in-process shape=S17 table=state_driver_notes outcome=REFUSED
+ITEM3 in-process shape=S18 table=state_driver_note_entries outcome=REFUSED
+ITEM3 in-process shape=S18 table=state_driver_note_revisions outcome=REFUSED
+ITEM3 in-process shape=S18 table=state_driver_notes outcome=REFUSED
+ITEM3 in-process shape=S19 table=state_driver_note_entries outcome=REFUSED
+ITEM3 in-process shape=S19 table=state_driver_note_revisions outcome=REFUSED
+ITEM3 in-process shape=S19 table=state_driver_notes outcome=REFUSED
+ITEM3 in-process shape=X01 table=state_driver_note_entries outcome=LEAKED
+ITEM3 in-process shape=X01 table=state_driver_note_revisions outcome=LEAKED
+ITEM3 in-process shape=X01 table=state_driver_notes outcome=LEAKED
+ITEM3 in-process shape=X02 table=state_driver_note_entries outcome=CLEAN
+ITEM3 in-process shape=X02 table=state_driver_note_revisions outcome=CLEAN
+ITEM3 in-process shape=X02 table=state_driver_notes outcome=CLEAN
+ITEM3 in-process shape=X03 table=state_driver_note_entries outcome=LEAKED
+ITEM3 in-process shape=X03 table=state_driver_note_revisions outcome=LEAKED
+ITEM3 in-process shape=X03 table=state_driver_notes outcome=LEAKED
+ITEM3 in-process shape=X04 table=state_driver_note_entries outcome=CLEAN
+ITEM3 in-process shape=X04 table=state_driver_note_revisions outcome=CLEAN
+ITEM3 in-process shape=X04 table=state_driver_notes outcome=CLEAN
+ITEM3 in-process shape=X05 table=state_driver_note_entries outcome=ABSENT the armed connection has no temp copy of state_driver_note_entries: no such table: temp.state_driver_note_entries
+ITEM3 in-process shape=X05 table=state_driver_note_revisions outcome=ABSENT the armed connection has no temp copy of state_driver_note_revisions: no such table: temp.state_driver_note_revisions
+ITEM3 in-process shape=X05 table=state_driver_notes outcome=ABSENT the armed connection has no temp copy of state_driver_notes: no such table: temp.state_driver_notes
+ITEM3 in-process shape=X06 table=state_driver_note_entries outcome=LEAKED
+ITEM3 in-process shape=X06 table=state_driver_note_revisions outcome=LEAKED
+ITEM3 in-process shape=X06 table=state_driver_notes outcome=LEAKED
+ITEM3 in-process shape=X07 table=state_driver_note_entries outcome=LEAKED
+ITEM3 in-process shape=X07 table=state_driver_note_revisions outcome=LEAKED
+ITEM3 in-process shape=X07 table=state_driver_notes outcome=LEAKED
+ITEM3 TALLY in-process: 21 in-scope shapes x 3 notebook tables x 1 anonymous identity = 63 cells; [('ABSENT', 15), ('CLEAN', 6), ('LEAKED', 21), ('REFUSED', 21)]
+/home/linxuhao/.AItelier/worktrees-scratch/gs10-mut/tests/integration/test_owner_ruled_notes.py:145: AssertionError: in-process: unopened-project notebook canaries delivered by: ['S01/state_driver_note_entries', 'S01/state_driver_note_revisions', 'S01/state_driver_notes', 'S02/state_driver_note_entries', 'S02/state_driver_note_revisions', 'S02/state_driver_notes', 'S13/state_driver_note_entries', 'S13/state_driver_note_revisions', 'S13/state_driver_notes', 'X01/state_driver_note_entries', 'X01/state_driver_note_revisions', 'X01/state_driver_notes', 'X03/state_driver_note_entries', 'X03/state_driver_note_revisions', 'X03/state_driver_notes', 'X06/state_driver_note_entries', 'X06/state_driver_note_revisions', 'X06/state_driver_notes', 'X07/state_driver_note_entries', 'X07/state_driver_note_revisions', 'X07/state_driver_notes']
+E   AssertionError: http-fresh: unopened-project notebook canaries delivered by: ['S01/state_driver_note_entries', 'S01/state_driver_note_revisions', 'S01/state_driver_notes', 'S02/state_driver_note_entries', 'S02/state_driver_note_revisions', 'S02/state_driver_notes', 'S13/state_driver_note_entries', 'S13/state_driver_note_revisions', 'S13/state_driver_notes', 'X01/state_driver_note_entries', 'X01/state_driver_note_revisions', 'X01/state_driver_notes', 'X03/state_driver_note_entries', 'X03/state_driver_note_revisions', 'X03/state_driver_notes', 'X06/state_driver_note_entries', 'X06/state_driver_note_revisions', 'X06/state_driver_notes', 'X07/state_driver_note_entries', 'X07/state_driver_note_revisions', 'X07/state_driver_notes']
+    assert not ['S01/state_driver_note_entries', 'S01/state_driver_note_revisions', 'S01/state_driver_notes', 'S02/state_driver_note_entries', 'S02/state_driver_note_revisions', 'S02/state_driver_notes', ...]
+----------------------------- Captured stdout call -----------------------------
+ITEM3 http-fresh shape=S01 table=state_driver_note_entries outcome=LEAKED
+ITEM3 http-fresh shape=S01 table=state_driver_note_revisions outcome=LEAKED
+ITEM3 http-fresh shape=S01 table=state_driver_notes outcome=LEAKED
+ITEM3 http-fresh shape=S02 table=state_driver_note_entries outcome=LEAKED
+ITEM3 http-fresh shape=S02 table=state_driver_note_revisions outcome=LEAKED
+ITEM3 http-fresh shape=S02 table=state_driver_notes outcome=LEAKED
+ITEM3 http-fresh shape=S03 table=state_driver_note_entries outcome=ABSENT {"absent":"UntrustedDatabase.decision_connection does not exist"}
+ITEM3 http-fresh shape=S03 table=state_driver_note_revisions outcome=ABSENT {"absent":"UntrustedDatabase.decision_connection does not exist"}
+ITEM3 http-fresh shape=S03 table=state_driver_notes outcome=ABSENT {"absent":"UntrustedDatabase.decision_connection does not exist"}
+ITEM3 http-fresh shape=S04 table=state_driver_note_entries outcome=ABSENT {"absent":"UntrustedDatabase.unrestricted does not exist"}
+ITEM3 http-fresh shape=S04 table=state_driver_note_revisions outcome=ABSENT {"absent":"UntrustedDatabase.unrestricted does not exist"}
+ITEM3 http-fresh shape=S04 table=state_driver_notes outcome=ABSENT {"absent":"UntrustedDatabase.unrestricted does not exist"}
+ITEM3 http-fresh shape=S05 table=state_driver_note_entries outcome=REFUSED
+ITEM3 http-fresh shape=S05 table=state_driver_note_revisions outcome=REFUSED
+ITEM3 http-fresh shape=S05 table=state_driver_notes outcome=REFUSED
+ITEM3 http-fresh shape=S06 table=state_driver_note_entries outcome=ABSENT {"absent":"StateGraphStore._decision does not exist"}
+ITEM3 http-fresh shape=S06 table=state_driver_note_revisions outcome=ABSENT {"absent":"StateGraphStore._decision does not exist"}
+ITEM3 http-fresh shape=S06 table=state_driver_notes outcome=ABSENT {"absent":"StateGraphStore._decision does not exist"}
+ITEM3 http-fresh shape=S11 table=state_driver_note_entries outcome=REFUSED
+ITEM3 http-fresh shape=S11 table=state_driver_note_revisions outcome=REFUSED
+ITEM3 http-fresh shape=S11 table=state_driver_notes outcome=REFUSED
+ITEM3 http-fresh shape=S12 table=state_driver_note_entries outcome=ABSENT {"absent":"UntrustedDatabase.unrestricted does not exist"}
+ITEM3 http-fresh shape=S12 table=state_driver_note_revisions outcome=ABSENT {"absent":"UntrustedDatabase.unrestricted does not exist"}
+ITEM3 http-fresh shape=S12 table=state_driver_notes outcome=ABSENT {"absent":"UntrustedDatabase.unrestricted does not exist"}
+ITEM3 http-fresh shape=S13 table=state_driver_note_entries outcome=LEAKED
+ITEM3 http-fresh shape=S13 table=state_driver_note_revisions outcome=LEAKED
+ITEM3 http-fresh shape=S13 table=state_driver_notes outcome=LEAKED
+ITEM3 http-fresh shape=S14 table=state_driver_note_entries outcome=REFUSED
+ITEM3 http-fresh shape=S14 table=state_driver_note_revisions outcome=REFUSED
+ITEM3 http-fresh shape=S14 table=state_driver_notes outcome=REFUSED
+ITEM3 http-fresh shape=S16 table=state_driver_note_entries outcome=REFUSED
+ITEM3 http-fresh shape=S16 table=state_driver_note_revisions outcome=REFUSED
+ITEM3 http-fresh shape=S16 table=state_driver_notes outcome=REFUSED
+ITEM3 http-fresh shape=S17 table=state_driver_note_entries outcome=REFUSED
+ITEM3 http-fresh shape=S17 table=state_driver_note_revisions outcome=REFUSED
+ITEM3 http-fresh shape=S17 table=state_driver_notes outcome=REFUSED
+ITEM3 http-fresh shape=S18 table=state_driver_note_entries outcome=REFUSED
+ITEM3 http-fresh shape=S18 table=state_driver_note_revisions outcome=REFUSED
+ITEM3 http-fresh shape=S18 table=state_driver_notes outcome=REFUSED
+ITEM3 http-fresh shape=S19 table=state_driver_note_entries outcome=REFUSED
+ITEM3 http-fresh shape=S19 table=state_driver_note_revisions outcome=REFUSED
+ITEM3 http-fresh shape=S19 table=state_driver_notes outcome=REFUSED
+ITEM3 http-fresh shape=X01 table=state_driver_note_entries outcome=LEAKED
+ITEM3 http-fresh shape=X01 table=state_driver_note_revisions outcome=LEAKED
+ITEM3 http-fresh shape=X01 table=state_driver_notes outcome=LEAKED
+ITEM3 http-fresh shape=X02 table=state_driver_note_entries outcome=CLEAN
+ITEM3 http-fresh shape=X02 table=state_driver_note_revisions outcome=CLEAN
+ITEM3 http-fresh shape=X02 table=state_driver_notes outcome=CLEAN
+ITEM3 http-fresh shape=X03 table=state_driver_note_entries outcome=LEAKED
+ITEM3 http-fresh shape=X03 table=state_driver_note_revisions outcome=LEAKED
+ITEM3 http-fresh shape=X03 table=state_driver_notes outcome=LEAKED
+ITEM3 http-fresh shape=X04 table=state_driver_note_entries outcome=CLEAN
+ITEM3 http-fresh shape=X04 table=state_driver_note_revisions outcome=CLEAN
+ITEM3 http-fresh shape=X04 table=state_driver_notes outcome=CLEAN
+ITEM3 http-fresh shape=X05 table=state_driver_note_entries outcome=ABSENT {"absent":"the armed connection has no temp copy of state_driver_note_entries: no such table: temp.s
+ITEM3 http-fresh shape=X05 table=state_driver_note_revisions outcome=ABSENT {"absent":"the armed connection has no temp copy of state_driver_note_revisions: no such table: temp
+ITEM3 http-fresh shape=X05 table=state_driver_notes outcome=ABSENT {"absent":"the armed connection has no temp copy of state_driver_notes: no such table: temp.state_dr
+ITEM3 http-fresh shape=X06 table=state_driver_note_entries outcome=LEAKED
+ITEM3 http-fresh shape=X06 table=state_driver_note_revisions outcome=LEAKED
+ITEM3 http-fresh shape=X06 table=state_driver_notes outcome=LEAKED
+ITEM3 http-fresh shape=X07 table=state_driver_note_entries outcome=LEAKED
+ITEM3 http-fresh shape=X07 table=state_driver_note_revisions outcome=LEAKED
+ITEM3 http-fresh shape=X07 table=state_driver_notes outcome=LEAKED
+ITEM3 TALLY http-fresh: 21 in-scope shapes x 3 notebook tables x 1 anonymous identity = 63 cells; [('ABSENT', 15), ('CLEAN', 6), ('LEAKED', 21), ('REFUSED', 21)]
+/home/linxuhao/.AItelier/worktrees-scratch/gs10-mut/tests/integration/test_owner_ruled_notes.py:145: AssertionError: http-fresh: unopened-project notebook canaries delivered by: ['S01/state_driver_note_entries', 'S01/state_driver_note_revisions', 'S01/state_driver_notes', 'S02/state_driver_note_entries', 'S02/state_driver_note_revisions', 'S02/state_driver_notes', 'S13/state_driver_note_entries', 'S13/state_driver_note_revisions', 'S13/state_driver_notes', 'X01/state_driver_note_entries', 'X01/state_driver_note_revisions', 'X01/state_driver_notes', 'X03/state_driver_note_entries', 'X03/state_driver_note_revisions', 'X03/state_driver_notes', 'X06/state_driver_note_entries', 'X06/state_driver_note_revisions', 'X06/state_driver_notes', 'X07/state_driver_note_entries', 'X07/state_driver_note_revisions', 'X07/state_driver_notes']
+E   AssertionError: http-main: unopened-project notebook canaries delivered by: ['S01/state_driver_note_entries', 'S01/state_driver_note_revisions', 'S01/state_driver_notes', 'S02/state_driver_note_entries', 'S02/state_driver_note_revisions', 'S02/state_driver_notes', 'S13/state_driver_note_entries', 'S13/state_driver_note_revisions', 'S13/state_driver_notes', 'X01/state_driver_note_entries', 'X01/state_driver_note_revisions', 'X01/state_driver_notes', 'X03/state_driver_note_entries', 'X03/state_driver_note_revisions', 'X03/state_driver_notes', 'X06/state_driver_note_entries', 'X06/state_driver_note_revisions', 'X06/state_driver_notes', 'X07/state_driver_note_entries', 'X07/state_driver_note_revisions', 'X07/state_driver_notes']
+    assert not ['S01/state_driver_note_entries', 'S01/state_driver_note_revisions', 'S01/state_driver_notes', 'S02/state_driver_note_entries', 'S02/state_driver_note_revisions', 'S02/state_driver_notes', ...]
+----------------------------- Captured stdout call -----------------------------
+ITEM3 http-main shape=S01 table=state_driver_note_entries outcome=LEAKED
+ITEM3 http-main shape=S01 table=state_driver_note_revisions outcome=LEAKED
+ITEM3 http-main shape=S01 table=state_driver_notes outcome=LEAKED
+ITEM3 http-main shape=S02 table=state_driver_note_entries outcome=LEAKED
+ITEM3 http-main shape=S02 table=state_driver_note_revisions outcome=LEAKED
+ITEM3 http-main shape=S02 table=state_driver_notes outcome=LEAKED
+ITEM3 http-main shape=S03 table=state_driver_note_entries outcome=ABSENT {"absent":"UntrustedDatabase.decision_connection does not exist"}
+ITEM3 http-main shape=S03 table=state_driver_note_revisions outcome=ABSENT {"absent":"UntrustedDatabase.decision_connection does not exist"}
+ITEM3 http-main shape=S03 table=state_driver_notes outcome=ABSENT {"absent":"UntrustedDatabase.decision_connection does not exist"}
+ITEM3 http-main shape=S04 table=state_driver_note_entries outcome=ABSENT {"absent":"UntrustedDatabase.unrestricted does not exist"}
+ITEM3 http-main shape=S04 table=state_driver_note_revisions outcome=ABSENT {"absent":"UntrustedDatabase.unrestricted does not exist"}
+ITEM3 http-main shape=S04 table=state_driver_notes outcome=ABSENT {"absent":"UntrustedDatabase.unrestricted does not exist"}
+ITEM3 http-main shape=S05 table=state_driver_note_entries outcome=REFUSED
+ITEM3 http-main shape=S05 table=state_driver_note_revisions outcome=REFUSED
+ITEM3 http-main shape=S05 table=state_driver_notes outcome=REFUSED
+ITEM3 http-main shape=S06 table=state_driver_note_entries outcome=ABSENT {"absent":"StateGraphStore._decision does not exist"}
+ITEM3 http-main shape=S06 table=state_driver_note_revisions outcome=ABSENT {"absent":"StateGraphStore._decision does not exist"}
+ITEM3 http-main shape=S06 table=state_driver_notes outcome=ABSENT {"absent":"StateGraphStore._decision does not exist"}
+ITEM3 http-main shape=S11 table=state_driver_note_entries outcome=REFUSED
+ITEM3 http-main shape=S11 table=state_driver_note_revisions outcome=REFUSED
+ITEM3 http-main shape=S11 table=state_driver_notes outcome=REFUSED
+ITEM3 http-main shape=S12 table=state_driver_note_entries outcome=ABSENT {"absent":"UntrustedDatabase.unrestricted does not exist"}
+ITEM3 http-main shape=S12 table=state_driver_note_revisions outcome=ABSENT {"absent":"UntrustedDatabase.unrestricted does not exist"}
+ITEM3 http-main shape=S12 table=state_driver_notes outcome=ABSENT {"absent":"UntrustedDatabase.unrestricted does not exist"}
+ITEM3 http-main shape=S13 table=state_driver_note_entries outcome=LEAKED
+ITEM3 http-main shape=S13 table=state_driver_note_revisions outcome=LEAKED
+ITEM3 http-main shape=S13 table=state_driver_notes outcome=LEAKED
+ITEM3 http-main shape=S14 table=state_driver_note_entries outcome=REFUSED
+ITEM3 http-main shape=S14 table=state_driver_note_revisions outcome=REFUSED
+ITEM3 http-main shape=S14 table=state_driver_notes outcome=REFUSED
+ITEM3 http-main shape=S16 table=state_driver_note_entries outcome=REFUSED
+ITEM3 http-main shape=S16 table=state_driver_note_revisions outcome=REFUSED
+ITEM3 http-main shape=S16 table=state_driver_notes outcome=REFUSED
+ITEM3 http-main shape=S17 table=state_driver_note_entries outcome=REFUSED
+ITEM3 http-main shape=S17 table=state_driver_note_revisions outcome=REFUSED
+ITEM3 http-main shape=S17 table=state_driver_notes outcome=REFUSED
+ITEM3 http-main shape=S18 table=state_driver_note_entries outcome=REFUSED
+ITEM3 http-main shape=S18 table=state_driver_note_revisions outcome=REFUSED
+ITEM3 http-main shape=S18 table=state_driver_notes outcome=REFUSED
+ITEM3 http-main shape=S19 table=state_driver_note_entries outcome=REFUSED
+ITEM3 http-main shape=S19 table=state_driver_note_revisions outcome=REFUSED
+ITEM3 http-main shape=S19 table=state_driver_notes outcome=REFUSED
+ITEM3 http-main shape=X01 table=state_driver_note_entries outcome=LEAKED
+ITEM3 http-main shape=X01 table=state_driver_note_revisions outcome=LEAKED
+ITEM3 http-main shape=X01 table=state_driver_notes outcome=LEAKED
+ITEM3 http-main shape=X02 table=state_driver_note_entries outcome=CLEAN
+ITEM3 http-main shape=X02 table=state_driver_note_revisions outcome=CLEAN
+ITEM3 http-main shape=X02 table=state_driver_notes outcome=CLEAN
+ITEM3 http-main shape=X03 table=state_driver_note_entries outcome=LEAKED
+ITEM3 http-main shape=X03 table=state_driver_note_revisions outcome=LEAKED
+ITEM3 http-main shape=X03 table=state_driver_notes outcome=LEAKED
+ITEM3 http-main shape=X04 table=state_driver_note_entries outcome=CLEAN
+ITEM3 http-main shape=X04 table=state_driver_note_revisions outcome=CLEAN
+ITEM3 http-main shape=X04 table=state_driver_notes outcome=CLEAN
+ITEM3 http-main shape=X05 table=state_driver_note_entries outcome=ABSENT {"absent":"the armed connection has no temp copy of state_driver_note_entries: no such table: temp.s
+ITEM3 http-main shape=X05 table=state_driver_note_revisions outcome=ABSENT {"absent":"the armed connection has no temp copy of state_driver_note_revisions: no such table: temp
+ITEM3 http-main shape=X05 table=state_driver_notes outcome=ABSENT {"absent":"the armed connection has no temp copy of state_driver_notes: no such table: temp.state_dr
+ITEM3 http-main shape=X06 table=state_driver_note_entries outcome=LEAKED
+ITEM3 http-main shape=X06 table=state_driver_note_revisions outcome=LEAKED
+ITEM3 http-main shape=X06 table=state_driver_notes outcome=LEAKED
+ITEM3 http-main shape=X07 table=state_driver_note_entries outcome=LEAKED
+ITEM3 http-main shape=X07 table=state_driver_note_revisions outcome=LEAKED
+ITEM3 http-main shape=X07 table=state_driver_notes outcome=LEAKED
+ITEM3 TALLY http-main: 21 in-scope shapes x 3 notebook tables x 1 anonymous identity = 63 cells; [('ABSENT', 15), ('CLEAN', 6), ('LEAKED', 21), ('REFUSED', 21)]
+/home/linxuhao/.AItelier/worktrees-scratch/gs10-mut/tests/integration/test_owner_ruled_notes.py:145: AssertionError: http-main: unopened-project notebook canaries delivered by: ['S01/state_driver_note_entries', 'S01/state_driver_note_revisions', 'S01/state_driver_notes', 'S02/state_driver_note_entries', 'S02/state_driver_note_revisions', 'S02/state_driver_notes', 'S13/state_driver_note_entries', 'S13/state_driver_note_revisions', 'S13/state_driver_notes', 'X01/state_driver_note_entries', 'X01/state_driver_note_revisions', 'X01/state_driver_notes', 'X03/state_driver_note_entries', 'X03/state_driver_note_revisions', 'X03/state_driver_notes', 'X06/state_driver_note_entries', 'X06/state_driver_note_revisions', 'X06/state_driver_notes', 'X07/state_driver_note_entries', 'X07/state_driver_note_revisions', 'X07/state_driver_notes']
+E   AssertionError: in-scope readers delivered private rows: S01/state_driver_note_entries, S01/state_driver_note_revisions, S01/state_driver_notes, S02/state_driver_note_entries, S02/state_driver_note_revisions, S02/state_driver_notes, S13/state_driver_note_entries, S13/state_driver_note_revisions, S13/state_driver_notes, X01/state_driver_note_entries, X01/state_driver_note_revisions, X01/state_driver_notes, X03/state_driver_note_entries, X03/state_driver_note_revisions, X03/state_driver_notes, X06/state_driver_note_entries, X06/state_driver_note_revisions, X06/state_driver_notes, X07/state_driver_note_entries, X07/state_driver_note_revisions, X07/state_driver_notes
+    assert not [('S01', 'state_driver_note_entries'), ('S01', 'state_driver_note_revisions'), ('S01', 'state_driver_notes'), ('S02', 'state_driver_note_entries'), ('S02', 'state_driver_note_revisions'), ('S02', 'state_driver_notes'), ...]
+---------------------------- Captured stdout setup -----------------------------
+CANARY_PRESENT = {'state_director_deliveries': True, 'state_director_idempotency': True, 'state_director_inbox_sequences': True, 'state_director_messages': True, 'state_driver_note_entries': True, 'state_driver_note_revisions': True, 'state_driver_notes': True, 'state_events': True, 'state_project_access': True}
+----------------------------- Captured stdout call -----------------------------
+CELL in shape=S01 table=state_director_deliveries outcome=REFUSED
+CELL in shape=S01 table=state_director_idempotency outcome=REFUSED
+CELL in shape=S01 table=state_director_inbox_sequences outcome=REFUSED
+CELL in shape=S01 table=state_director_messages outcome=REFUSED
+CELL in shape=S01 table=state_driver_note_entries outcome=LEAKED
+CELL in shape=S01 table=state_driver_note_revisions outcome=LEAKED
+CELL in shape=S01 table=state_driver_notes outcome=LEAKED
+CELL in shape=S01 table=state_events outcome=REFUSED
+CELL in shape=S01 table=state_project_access outcome=REFUSED
+CELL in shape=S02 table=state_director_deliveries outcome=REFUSED
+CELL in shape=S02 table=state_director_idempotency outcome=REFUSED
+CELL in shape=S02 table=state_director_inbox_sequences outcome=REFUSED
+CELL in shape=S02 table=state_director_messages outcome=REFUSED
+CELL in shape=S02 table=state_driver_note_entries outcome=LEAKED
+CELL in shape=S02 table=state_driver_note_revisions outcome=LEAKED
+CELL in shape=S02 table=state_driver_notes outcome=LEAKED
+CELL in shape=S02 table=state_events outcome=REFUSED
+CELL in shape=S02 table=state_project_access outcome=REFUSED
+CELL in shape=S03 table=state_director_deliveries outcome=ABSENT UntrustedDatabase.decision_connection does not exist
+CELL in shape=S03 table=state_director_idempotency outcome=ABSENT UntrustedDatabase.decision_connection does not exist
+CELL in shape=S03 table=state_director_inbox_sequences outcome=ABSENT UntrustedDatabase.decision_connection does not exist
+CELL in shape=S03 table=state_director_messages outcome=ABSENT UntrustedDatabase.decision_connection does not exist
+CELL in shape=S03 table=state_driver_note_entries outcome=ABSENT UntrustedDatabase.decision_connection does not exist
+CELL in shape=S03 table=state_driver_note_revisions outcome=ABSENT UntrustedDatabase.decision_connection does not exist
+CELL in shape=S03 table=state_driver_notes outcome=ABSENT UntrustedDatabase.decision_connection does not exist
+CELL in shape=S03 table=state_events outcome=ABSENT UntrustedDatabase.decision_connection does not exist
+CELL in shape=S03 table=state_project_access outcome=ABSENT UntrustedDatabase.decision_connection does not exist
+CELL in shape=S04 table=state_director_deliveries outcome=ABSENT UntrustedDatabase.unrestricted does not exist
+CELL in shape=S04 table=state_director_idempotency outcome=ABSENT UntrustedDatabase.unrestricted does not exist
+CELL in shape=S04 table=state_director_inbox_sequences outcome=ABSENT UntrustedDatabase.unrestricted does not exist
+CELL in shape=S04 table=state_director_messages outcome=ABSENT UntrustedDatabase.unrestricted does not exist
+CELL in shape=S04 table=state_driver_note_entries outcome=ABSENT UntrustedDatabase.unrestricted does not exist
+CELL in shape=S04 table=state_driver_note_revisions outcome=ABSENT UntrustedDatabase.unrestricted does not exist
+CELL in shape=S04 table=state_driver_notes outcome=ABSENT UntrustedDatabase.unrestricted does not exist
+CELL in shape=S04 table=state_events outcome=ABSENT UntrustedDatabase.unrestricted does not exist
+CELL in shape=S04 table=state_project_access outcome=ABSENT UntrustedDatabase.unrestricted does not exist
+CELL in shape=S05 table=state_director_deliveries outcome=REFUSED
+CELL in shape=S05 table=state_director_idempotency outcome=REFUSED
+CELL in shape=S05 table=state_director_inbox_sequences outcome=REFUSED
+CELL in shape=S05 table=state_director_messages outcome=REFUSED
+CELL in shape=S05 table=state_driver_note_entries outcome=REFUSED
+CELL in shape=S05 table=state_driver_note_revisions outcome=REFUSED
+CELL in shape=S05 table=state_driver_notes outcome=REFUSED
+CELL in shape=S05 table=state_events outcome=REFUSED
+CELL in shape=S05 table=state_project_access outcome=REFUSED
+CELL in shape=S06 table=state_director_deliveries outcome=ABSENT StateGraphStore._decision does not exist
+CELL in shape=S06 table=state_director_idempotency outcome=ABSENT StateGraphStore._decision does not exist
+CELL in shape=S06 table=state_director_inbox_sequences outcome=ABSENT StateGraphStore._decision does not exist
+CELL in shape=S06 table=state_director_messages outcome=ABSENT StateGraphStore._decision does not exist
+CELL in shape=S06 table=state_driver_note_entries outcome=ABSENT StateGraphStore._decision does not exist
+CELL in shape=S06 table=state_driver_note_revisions outcome=ABSENT StateGraphStore._decision does not exist
+CELL in shape=S06 table=state_driver_notes outcome=ABSENT StateGraphStore._decision does not exist
+CELL in shape=S06 table=state_events outcome=ABSENT StateGraphStore._decision does not exist
+CELL in shape=S06 table=state_project_access outcome=ABSENT StateGraphStore._decision does not exist
+CELL in shape=S11 table=state_director_deliveries outcome=REFUSED
+CELL in shape=S11 table=state_director_idempotency outcome=REFUSED
+CELL in shape=S11 table=state_director_inbox_sequences outcome=REFUSED
+CELL in shape=S11 table=state_director_messages outcome=REFUSED
+CELL in shape=S11 table=state_driver_note_entries outcome=REFUSED
+CELL in shape=S11 table=state_driver_note_revisions outcome=REFUSED
+CELL in shape=S11 table=state_driver_notes outcome=REFUSED
+CELL in shape=S11 table=state_events outcome=REFUSED
+CELL in shape=S11 table=state_project_access outcome=REFUSED
+CELL in shape=S12 table=state_director_deliveries outcome=ABSENT UntrustedDatabase.unrestricted does not exist
+CELL in shape=S12 table=state_director_idempotency outcome=ABSENT UntrustedDatabase.unrestricted does not exist
+CELL in shape=S12 table=state_director_inbox_sequences outcome=ABSENT UntrustedDatabase.unrestricted does not exist
+CELL in shape=S12 table=state_director_messages outcome=ABSENT UntrustedDatabase.unrestricted does not exist
+CELL in shape=S12 table=state_driver_note_entries outcome=ABSENT UntrustedDatabase.unrestricted does not exist
+CELL in shape=S12 table=state_driver_note_revisions outcome=ABSENT UntrustedDatabase.unrestricted does not exist
+CELL in shape=S12 table=state_driver_notes outcome=ABSENT UntrustedDatabase.unrestricted does not exist
+CELL in shape=S12 table=state_events outcome=ABSENT UntrustedDatabase.unrestricted does not exist
+CELL in shape=S12 table=state_project_access outcome=ABSENT UntrustedDatabase.unrestricted does not exist
+CELL in shape=S13 table=state_director_deliveries outcome=REFUSED
+CELL in shape=S13 table=state_director_idempotency outcome=REFUSED
+CELL in shape=S13 table=state_director_inbox_sequences outcome=REFUSED
+CELL in shape=S13 table=state_director_messages outcome=REFUSED
+CELL in shape=S13 table=state_driver_note_entries outcome=LEAKED
+CELL in shape=S13 table=state_driver_note_revisions outcome=LEAKED
+CELL in shape=S13 table=state_driver_notes outcome=LEAKED
+CELL in shape=S13 table=state_events outcome=REFUSED
+CELL in shape=S13 table=state_project_access outcome=REFUSED
+CELL in shape=S14 table=state_director_deliveries outcome=REFUSED
+CELL in shape=S14 table=state_director_idempotency outcome=REFUSED
+CELL in shape=S14 table=state_director_inbox_sequences outcome=REFUSED
+CELL in shape=S14 table=state_director_messages outcome=REFUSED
+CELL in shape=S14 table=state_driver_note_entries outcome=REFUSED
+CELL in shape=S14 table=state_driver_note_revisions outcome=REFUSED
+CELL in shape=S14 table=state_driver_notes outcome=REFUSED
+CELL in shape=S14 table=state_events outcome=REFUSED
+CELL in shape=S14 table=state_project_access outcome=REFUSED
+CELL in shape=S16 table=state_director_deliveries outcome=REFUSED
+CELL in shape=S16 table=state_director_idempotency outcome=REFUSED
+CELL in shape=S16 table=state_director_inbox_sequences outcome=REFUSED
+CELL in shape=S16 table=state_director_messages outcome=REFUSED
+CELL in shape=S16 table=state_driver_note_entries outcome=REFUSED
+CELL in shape=S16 table=state_driver_note_revisions outcome=REFUSED
+CELL in shape=S16 table=state_driver_notes outcome=REFUSED
+CELL in shape=S16 table=state_events outcome=REFUSED
+CELL in shape=S16 table=state_project_access outcome=REFUSED
+CELL in shape=S17 table=state_director_deliveries outcome=REFUSED
+CELL in shape=S17 table=state_director_idempotency outcome=REFUSED
+CELL in shape=S17 table=state_director_inbox_sequences outcome=REFUSED
+CELL in shape=S17 table=state_director_messages outcome=REFUSED
+CELL in shape=S17 table=state_driver_note_entries outcome=REFUSED
+CELL in shape=S17 table=state_driver_note_revisions outcome=REFUSED
+CELL in shape=S17 table=state_driver_notes outcome=REFUSED
+CELL in shape=S17 table=state_events outcome=REFUSED
+CELL in shape=S17 table=state_project_access outcome=REFUSED
+CELL in shape=S18 table=state_director_deliveries outcome=REFUSED
+CELL in shape=S18 table=state_director_idempotency outcome=REFUSED
+CELL in shape=S18 table=state_director_inbox_sequences outcome=REFUSED
+CELL in shape=S18 table=state_director_messages outcome=REFUSED
+CELL in shape=S18 table=state_driver_note_entries outcome=REFUSED
+CELL in shape=S18 table=state_driver_note_revisions outcome=REFUSED
+CELL in shape=S18 table=state_driver_notes outcome=REFUSED
+CELL in shape=S18 table=state_events outcome=REFUSED
+CELL in shape=S18 table=state_project_access outcome=REFUSED
+CELL in shape=S19 table=state_director_deliveries outcome=REFUSED
+CELL in shape=S19 table=state_director_idempotency outcome=REFUSED
+CELL in shape=S19 table=state_director_inbox_sequences outcome=REFUSED
+CELL in shape=S19 table=state_director_messages outcome=REFUSED
+CELL in shape=S19 table=state_driver_note_entries outcome=REFUSED
+CELL in shape=S19 table=state_driver_note_revisions outcome=REFUSED
+CELL in shape=S19 table=state_driver_notes outcome=REFUSED
+CELL in shape=S19 table=state_events outcome=REFUSED
+CELL in shape=S19 table=state_project_access outcome=REFUSED
+CELL in shape=X01 table=state_director_deliveries outcome=REFUSED
+CELL in shape=X01 table=state_director_idempotency outcome=REFUSED
+CELL in shape=X01 table=state_director_inbox_sequences outcome=REFUSED
+CELL in shape=X01 table=state_director_messages outcome=REFUSED
+CELL in shape=X01 table=state_driver_note_entries outcome=LEAKED
+CELL in shape=X01 table=state_driver_note_revisions outcome=LEAKED
+CELL in shape=X01 table=state_driver_notes outcome=LEAKED
+CELL in shape=X01 table=state_events outcome=REFUSED
+CELL in shape=X01 table=state_project_access outcome=REFUSED
+CELL in shape=X02 table=state_director_deliveries outcome=REFUSED
+CELL in shape=X02 table=state_director_idempotency outcome=REFUSED
+CELL in shape=X02 table=state_director_inbox_sequences outcome=REFUSED
+CELL in shape=X02 table=state_director_messages outcome=REFUSED
+CELL in shape=X02 table=state_driver_note_entries outcome=CLEAN
+CELL in shape=X02 table=state_driver_note_revisions outcome=CLEAN
+CELL in shape=X02 table=state_driver_notes outcome=CLEAN
+CELL in shape=X02 table=state_events outcome=REFUSED
+CELL in shape=X02 table=state_project_access outcome=REFUSED
+CELL in shape=X03 table=state_director_deliveries outcome=REFUSED
+CELL in shape=X03 table=state_director_idempotency outcome=REFUSED
+CELL in shape=X03 table=state_director_inbox_sequences outcome=REFUSED
+CELL in shape=X03 table=state_director_messages outcome=REFUSED
+CELL in shape=X03 table=state_driver_note_entries outcome=LEAKED
+CELL in shape=X03 table=state_driver_note_revisions outcome=LEAKED
+CELL in shape=X03 table=state_driver_notes outcome=LEAKED
+CELL in shape=X03 table=state_events outcome=REFUSED
+CELL in shape=X03 table=state_project_access outcome=REFUSED
+CELL in shape=X04 table=state_director_deliveries outcome=REFUSED
+CELL in shape=X04 table=state_director_idempotency outcome=REFUSED
+CELL in shape=X04 table=state_director_inbox_sequences outcome=REFUSED
+CELL in shape=X04 table=state_director_messages outcome=REFUSED
+CELL in shape=X04 table=state_driver_note_entries outcome=CLEAN
+CELL in shape=X04 table=state_driver_note_revisions outcome=CLEAN
+CELL in shape=X04 table=state_driver_notes outcome=CLEAN
+CELL in shape=X04 table=state_events outcome=REFUSED
+CELL in shape=X04 table=state_project_access outcome=REFUSED
+CELL in shape=X05 table=state_director_deliveries outcome=ABSENT the armed connection has no temp copy of state_director_deliveries: no such table: temp.state_director_deliveries
+CELL in shape=X05 table=state_director_idempotency outcome=ABSENT the armed connection has no temp copy of state_director_idempotency: no such table: temp.state_director_idempotency
+CELL in shape=X05 table=state_director_inbox_sequences outcome=ABSENT the armed connection has no temp copy of state_director_inbox_sequences: no such table: temp.state_director_inbox_sequences
+CELL in shape=X05 table=state_director_messages outcome=ABSENT the armed connection has no temp copy of state_director_messages: no such table: temp.state_director_messages
+CELL in shape=X05 table=state_driver_note_entries outcome=ABSENT the armed connection has no temp copy of state_driver_note_entries: no such table: temp.state_driver_note_entries
+CELL in shape=X05 table=state_driver_note_revisions outcome=ABSENT the armed connection has no temp copy of state_driver_note_revisions: no such table: temp.state_driver_note_revisions
+CELL in shape=X05 table=state_driver_notes outcome=ABSENT the armed connection has no temp copy of state_driver_notes: no such table: temp.state_driver_notes
+CELL in shape=X05 table=state_events outcome=REFUSED
+CELL in shape=X05 table=state_project_access outcome=REFUSED
+CELL in shape=X06 table=state_director_deliveries outcome=REFUSED
+CELL in shape=X06 table=state_director_idempotency outcome=REFUSED
+CELL in shape=X06 table=state_director_inbox_sequences outcome=REFUSED
+CELL in shape=X06 table=state_director_messages outcome=REFUSED
+CELL in shape=X06 table=state_driver_note_entries outcome=LEAKED
+CELL in shape=X06 table=state_driver_note_revisions outcome=LEAKED
+CELL in shape=X06 table=state_driver_notes outcome=LEAKED
+CELL in shape=X06 table=state_events outcome=REFUSED
+CELL in shape=X06 table=state_project_access outcome=REFUSED
+CELL in shape=X07 table=state_director_deliveries outcome=REFUSED
+CELL in shape=X07 table=state_director_idempotency outcome=REFUSED
+CELL in shape=X07 table=state_director_inbox_sequences outcome=REFUSED
+CELL in shape=X07 table=state_director_messages outcome=REFUSED
+CELL in shape=X07 table=state_driver_note_entries outcome=LEAKED
+CELL in shape=X07 table=state_driver_note_revisions outcome=LEAKED
+CELL in shape=X07 table=state_driver_notes outcome=LEAKED
+CELL in shape=X07 table=state_events outcome=REFUSED
+CELL in shape=X07 table=state_project_access outcome=REFUSED
+TALLY in: 21 shapes x 9 private tables x 1 anonymous identity x 1 opened project = 189 cells; [('ABSENT', 43), ('CLEAN', 6), ('LEAKED', 21), ('REFUSED', 119)]
+/home/linxuhao/.AItelier/worktrees-scratch/gs10-mut/tests/unit/test_every_private_table_reader_is_judged_at_the_read.py:349: AssertionError: in-scope readers delivered private rows: S01/state_driver_note_entries, S01/state_driver_note_revisions, S01/state_driver_notes, S02/state_driver_note_entries, S02/state_driver_note_revisions, S02/state_driver_notes, S13/state_driver_note_entries, S13/state_driver_note_revisions, S13/state_driver_notes, X01/state_driver_note_entries, X01/state_driver_note_revisions, X01/state_driver_notes, X03/state_driver_note_entries, X03/state_driver_note_revisions, X03/state_driver_notes, X06/state_driver_note_entries, X06/state_driver_note_revisions, X06/state_driver_notes, X07/state_driver_note_entries, X07/state_driver_note_revisions, X07/state_driver_notes
+E   AssertionError: fresh: in-scope readers delivered private rows: [('S01', 'state_driver_note_entries'), ('S01', 'state_driver_note_revisions'), ('S01', 'state_driver_notes'), ('S02', 'state_driver_note_entries'), ('S02', 'state_driver_note_revisions'), ('S02', 'state_driver_notes'), ('S13', 'state_driver_note_entries'), ('S13', 'state_driver_note_revisions'), ('S13', 'state_driver_notes'), ('X01', 'state_driver_note_entries'), ('X01', 'state_driver_note_revisions'), ('X01', 'state_driver_notes'), ('X03', 'state_driver_note_entries'), ('X03', 'state_driver_note_revisions'), ('X03', 'state_driver_notes'), ('X06', 'state_driver_note_entries'), ('X06', 'state_driver_note_revisions'), ('X06', 'state_driver_notes'), ('X07', 'state_driver_note_entries'), ('X07', 'state_driver_note_revisions'), ('X07', 'state_driver_notes')]
+    assert not [('S01', 'state_driver_note_entries'), ('S01', 'state_driver_note_revisions'), ('S01', 'state_driver_notes'), ('S02', 'state_driver_note_entries'), ('S02', 'state_driver_note_revisions'), ('S02', 'state_driver_notes'), ...]
+----------------------------- Captured stdout call -----------------------------
+CELL http-fresh shape=S01 table=state_director_deliveries outcome=REFUSED
+CELL http-fresh shape=S01 table=state_director_idempotency outcome=REFUSED
+CELL http-fresh shape=S01 table=state_director_inbox_sequences outcome=REFUSED
+CELL http-fresh shape=S01 table=state_director_messages outcome=REFUSED
+CELL http-fresh shape=S01 table=state_driver_note_entries outcome=LEAKED
+CELL http-fresh shape=S01 table=state_driver_note_revisions outcome=LEAKED
+CELL http-fresh shape=S01 table=state_driver_notes outcome=LEAKED
+CELL http-fresh shape=S01 table=state_events outcome=REFUSED
+CELL http-fresh shape=S01 table=state_project_access outcome=REFUSED
+CELL http-fresh shape=S02 table=state_director_deliveries outcome=REFUSED
+CELL http-fresh shape=S02 table=state_director_idempotency outcome=REFUSED
+CELL http-fresh shape=S02 table=state_director_inbox_sequences outcome=REFUSED
+CELL http-fresh shape=S02 table=state_director_messages outcome=REFUSED
+CELL http-fresh shape=S02 table=state_driver_note_entries outcome=LEAKED
+CELL http-fresh shape=S02 table=state_driver_note_revisions outcome=LEAKED
+CELL http-fresh shape=S02 table=state_driver_notes outcome=LEAKED
+CELL http-fresh shape=S02 table=state_events outcome=REFUSED
+CELL http-fresh shape=S02 table=state_project_access outcome=REFUSED
+CELL http-fresh shape=S03 table=state_director_deliveries outcome=ABSENT
+CELL http-fresh shape=S03 table=state_director_idempotency outcome=ABSENT
+CELL http-fresh shape=S03 table=state_director_inbox_sequences outcome=ABSENT
+CELL http-fresh shape=S03 table=state_director_messages outcome=ABSENT
+CELL http-fresh shape=S03 table=state_driver_note_entries outcome=ABSENT
+CELL http-fresh shape=S03 table=state_driver_note_revisions outcome=ABSENT
+CELL http-fresh shape=S03 table=state_driver_notes outcome=ABSENT
+CELL http-fresh shape=S03 table=state_events outcome=ABSENT
+CELL http-fresh shape=S03 table=state_project_access outcome=ABSENT
+CELL http-fresh shape=S04 table=state_director_deliveries outcome=ABSENT
+CELL http-fresh shape=S04 table=state_director_idempotency outcome=ABSENT
+CELL http-fresh shape=S04 table=state_director_inbox_sequences outcome=ABSENT
+CELL http-fresh shape=S04 table=state_director_messages outcome=ABSENT
+CELL http-fresh shape=S04 table=state_driver_note_entries outcome=ABSENT
+CELL http-fresh shape=S04 table=state_driver_note_revisions outcome=ABSENT
+CELL http-fresh shape=S04 table=state_driver_notes outcome=ABSENT
+CELL http-fresh shape=S04 table=state_events outcome=ABSENT
+CELL http-fresh shape=S04 table=state_project_access outcome=ABSENT
+CELL http-fresh shape=S05 table=state_director_deliveries outcome=REFUSED
+CELL http-fresh shape=S05 table=state_director_idempotency outcome=REFUSED
+CELL http-fresh shape=S05 table=state_director_inbox_sequences outcome=REFUSED
+CELL http-fresh shape=S05 table=state_director_messages outcome=REFUSED
+CELL http-fresh shape=S05 table=state_driver_note_entries outcome=REFUSED
+CELL http-fresh shape=S05 table=state_driver_note_revisions outcome=REFUSED
+CELL http-fresh shape=S05 table=state_driver_notes outcome=REFUSED
+CELL http-fresh shape=S05 table=state_events outcome=REFUSED
+CELL http-fresh shape=S05 table=state_project_access outcome=REFUSED
+CELL http-fresh shape=S06 table=state_director_deliveries outcome=ABSENT
+CELL http-fresh shape=S06 table=state_director_idempotency outcome=ABSENT
+CELL http-fresh shape=S06 table=state_director_inbox_sequences outcome=ABSENT
+CELL http-fresh shape=S06 table=state_director_messages outcome=ABSENT
+CELL http-fresh shape=S06 table=state_driver_note_entries outcome=ABSENT
+CELL http-fresh shape=S06 table=state_driver_note_revisions outcome=ABSENT
+CELL http-fresh shape=S06 table=state_driver_notes outcome=ABSENT
+CELL http-fresh shape=S06 table=state_events outcome=ABSENT
+CELL http-fresh shape=S06 table=state_project_access outcome=ABSENT
+CELL http-fresh shape=S11 table=state_director_deliveries outcome=REFUSED
+CELL http-fresh shape=S11 table=state_director_idempotency outcome=REFUSED
+CELL http-fresh shape=S11 table=state_director_inbox_sequences outcome=REFUSED
+CELL http-fresh shape=S11 table=state_director_messages outcome=REFUSED
+CELL http-fresh shape=S11 table=state_driver_note_entries outcome=REFUSED
+CELL http-fresh shape=S11 table=state_driver_note_revisions outcome=REFUSED
+CELL http-fresh shape=S11 table=state_driver_notes outcome=REFUSED
+CELL http-fresh shape=S11 table=state_events outcome=REFUSED
+CELL http-fresh shape=S11 table=state_project_access outcome=REFUSED
+CELL http-fresh shape=S12 table=state_director_deliveries outcome=ABSENT
+CELL http-fresh shape=S12 table=state_director_idempotency outcome=ABSENT
+CELL http-fresh shape=S12 table=state_director_inbox_sequences outcome=ABSENT
+CELL http-fresh shape=S12 table=state_director_messages outcome=ABSENT
+CELL http-fresh shape=S12 table=state_driver_note_entries outcome=ABSENT
+CELL http-fresh shape=S12 table=state_driver_note_revisions outcome=ABSENT
+CELL http-fresh shape=S12 table=state_driver_notes outcome=ABSENT
+CELL http-fresh shape=S12 table=state_events outcome=ABSENT
+CELL http-fresh shape=S12 table=state_project_access outcome=ABSENT
+CELL http-fresh shape=S13 table=state_director_deliveries outcome=REFUSED
+CELL http-fresh shape=S13 table=state_director_idempotency outcome=REFUSED
+CELL http-fresh shape=S13 table=state_director_inbox_sequences outcome=REFUSED
+CELL http-fresh shape=S13 table=state_director_messages outcome=REFUSED
+CELL http-fresh shape=S13 table=state_driver_note_entries outcome=LEAKED
+CELL http-fresh shape=S13 table=state_driver_note_revisions outcome=LEAKED
+CELL http-fresh shape=S13 table=state_driver_notes outcome=LEAKED
+CELL http-fresh shape=S13 table=state_events outcome=REFUSED
+CELL http-fresh shape=S13 table=state_project_access outcome=REFUSED
+CELL http-fresh shape=S14 table=state_director_deliveries outcome=REFUSED
+CELL http-fresh shape=S14 table=state_director_idempotency outcome=REFUSED
+CELL http-fresh shape=S14 table=state_director_inbox_sequences outcome=REFUSED
+CELL http-fresh shape=S14 table=state_director_messages outcome=REFUSED
+CELL http-fresh shape=S14 table=state_driver_note_entries outcome=REFUSED
+CELL http-fresh shape=S14 table=state_driver_note_revisions outcome=REFUSED
+CELL http-fresh shape=S14 table=state_driver_notes outcome=REFUSED
+CELL http-fresh shape=S14 table=state_events outcome=REFUSED
+CELL http-fresh shape=S14 table=state_project_access outcome=REFUSED
+CELL http-fresh shape=S16 table=state_director_deliveries outcome=REFUSED
+CELL http-fresh shape=S16 table=state_director_idempotency outcome=REFUSED
+CELL http-fresh shape=S16 table=state_director_inbox_sequences outcome=REFUSED
+CELL http-fresh shape=S16 table=state_director_messages outcome=REFUSED
+CELL http-fresh shape=S16 table=state_driver_note_entries outcome=REFUSED
+CELL http-fresh shape=S16 table=state_driver_note_revisions outcome=REFUSED
+CELL http-fresh shape=S16 table=state_driver_notes outcome=REFUSED
+CELL http-fresh shape=S16 table=state_events outcome=REFUSED
+CELL http-fresh shape=S16 table=state_project_access outcome=REFUSED
+CELL http-fresh shape=S17 table=state_director_deliveries outcome=REFUSED
+CELL http-fresh shape=S17 table=state_director_idempotency outcome=REFUSED
+CELL http-fresh shape=S17 table=state_director_inbox_sequences outcome=REFUSED
+CELL http-fresh shape=S17 table=state_director_messages outcome=REFUSED
+CELL http-fresh shape=S17 table=state_driver_note_entries outcome=REFUSED
+CELL http-fresh shape=S17 table=state_driver_note_revisions outcome=REFUSED
+CELL http-fresh shape=S17 table=state_driver_notes outcome=REFUSED
+CELL http-fresh shape=S17 table=state_events outcome=REFUSED
+CELL http-fresh shape=S17 table=state_project_access outcome=REFUSED
+CELL http-fresh shape=S18 table=state_director_deliveries outcome=REFUSED
+CELL http-fresh shape=S18 table=state_director_idempotency outcome=REFUSED
+CELL http-fresh shape=S18 table=state_director_inbox_sequences outcome=REFUSED
+CELL http-fresh shape=S18 table=state_director_messages outcome=REFUSED
+CELL http-fresh shape=S18 table=state_driver_note_entries outcome=REFUSED
+CELL http-fresh shape=S18 table=state_driver_note_revisions outcome=REFUSED
+CELL http-fresh shape=S18 table=state_driver_notes outcome=REFUSED
+CELL http-fresh shape=S18 table=state_events outcome=REFUSED
+CELL http-fresh shape=S18 table=state_project_access outcome=REFUSED
+CELL http-fresh shape=S19 table=state_director_deliveries outcome=REFUSED
+CELL http-fresh shape=S19 table=state_director_idempotency outcome=REFUSED
+CELL http-fresh shape=S19 table=state_director_inbox_sequences outcome=REFUSED
+CELL http-fresh shape=S19 table=state_director_messages outcome=REFUSED
+CELL http-fresh shape=S19 table=state_driver_note_entries outcome=REFUSED
+CELL http-fresh shape=S19 table=state_driver_note_revisions outcome=REFUSED
+CELL http-fresh shape=S19 table=state_driver_notes outcome=REFUSED
+CELL http-fresh shape=S19 table=state_events outcome=REFUSED
+CELL http-fresh shape=S19 table=state_project_access outcome=REFUSED
+CELL http-fresh shape=X01 table=state_director_deliveries outcome=REFUSED
+CELL http-fresh shape=X01 table=state_director_idempotency outcome=REFUSED
+CELL http-fresh shape=X01 table=state_director_inbox_sequences outcome=REFUSED
+CELL http-fresh shape=X01 table=state_director_messages outcome=REFUSED
+CELL http-fresh shape=X01 table=state_driver_note_entries outcome=LEAKED
+CELL http-fresh shape=X01 table=state_driver_note_revisions outcome=LEAKED
+CELL http-fresh shape=X01 table=state_driver_notes outcome=LEAKED
+CELL http-fresh shape=X01 table=state_events outcome=REFUSED
+CELL http-fresh shape=X01 table=state_project_access outcome=REFUSED
+CELL http-fresh shape=X02 table=state_director_deliveries outcome=REFUSED
+CELL http-fresh shape=X02 table=state_director_idempotency outcome=REFUSED
+CELL http-fresh shape=X02 table=state_director_inbox_sequences outcome=REFUSED
+CELL http-fresh shape=X02 table=state_director_messages outcome=REFUSED
+CELL http-fresh shape=X02 table=state_driver_note_entries outcome=CLEAN
+CELL http-fresh shape=X02 table=state_driver_note_revisions outcome=CLEAN
+CELL http-fresh shape=X02 table=state_driver_notes outcome=CLEAN
+CELL http-fresh shape=X02 table=state_events outcome=REFUSED
+CELL http-fresh shape=X02 table=state_project_access outcome=REFUSED
+CELL http-fresh shape=X03 table=state_director_deliveries outcome=REFUSED
+CELL http-fresh shape=X03 table=state_director_idempotency outcome=REFUSED
+CELL http-fresh shape=X03 table=state_director_inbox_sequences outcome=REFUSED
+CELL http-fresh shape=X03 table=state_director_messages outcome=REFUSED
+CELL http-fresh shape=X03 table=state_driver_note_entries outcome=LEAKED
+CELL http-fresh shape=X03 table=state_driver_note_revisions outcome=LEAKED
+CELL http-fresh shape=X03 table=state_driver_notes outcome=LEAKED
+CELL http-fresh shape=X03 table=state_events outcome=REFUSED
+CELL http-fresh shape=X03 table=state_project_access outcome=REFUSED
+CELL http-fresh shape=X04 table=state_director_deliveries outcome=REFUSED
+CELL http-fresh shape=X04 table=state_director_idempotency outcome=REFUSED
+CELL http-fresh shape=X04 table=state_director_inbox_sequences outcome=REFUSED
+CELL http-fresh shape=X04 table=state_director_messages outcome=REFUSED
+CELL http-fresh shape=X04 table=state_driver_note_entries outcome=CLEAN
+CELL http-fresh shape=X04 table=state_driver_note_revisions outcome=CLEAN
+CELL http-fresh shape=X04 table=state_driver_notes outcome=CLEAN
+CELL http-fresh shape=X04 table=state_events outcome=REFUSED
+CELL http-fresh shape=X04 table=state_project_access outcome=REFUSED
+CELL http-fresh shape=X05 table=state_director_deliveries outcome=ABSENT
+CELL http-fresh shape=X05 table=state_director_idempotency outcome=ABSENT
+CELL http-fresh shape=X05 table=state_director_inbox_sequences outcome=ABSENT
+CELL http-fresh shape=X05 table=state_director_messages outcome=ABSENT
+CELL http-fresh shape=X05 table=state_driver_note_entries outcome=ABSENT
+CELL http-fresh shape=X05 table=state_driver_note_revisions outcome=ABSENT
+CELL http-fresh shape=X05 table=state_driver_notes outcome=ABSENT
+CELL http-fresh shape=X05 table=state_events outcome=REFUSED
+CELL http-fresh shape=X05 table=state_project_access outcome=REFUSED
+CELL http-fresh shape=X06 table=state_director_deliveries outcome=REFUSED
+CELL http-fresh shape=X06 table=state_director_idempotency outcome=REFUSED
+CELL http-fresh shape=X06 table=state_director_inbox_sequences outcome=REFUSED
+CELL http-fresh shape=X06 table=state_director_messages outcome=REFUSED
+CELL http-fresh shape=X06 table=state_driver_note_entries outcome=LEAKED
+CELL http-fresh shape=X06 table=state_driver_note_revisions outcome=LEAKED
+CELL http-fresh shape=X06 table=state_driver_notes outcome=LEAKED
+CELL http-fresh shape=X06 table=state_events outcome=REFUSED
+CELL http-fresh shape=X06 table=state_project_access outcome=REFUSED
+CELL http-fresh shape=X07 table=state_director_deliveries outcome=REFUSED
+CELL http-fresh shape=X07 table=state_director_idempotency outcome=REFUSED
+CELL http-fresh shape=X07 table=state_director_inbox_sequences outcome=REFUSED
+CELL http-fresh shape=X07 table=state_director_messages outcome=REFUSED
+CELL http-fresh shape=X07 table=state_driver_note_entries outcome=LEAKED
+CELL http-fresh shape=X07 table=state_driver_note_revisions outcome=LEAKED
+CELL http-fresh shape=X07 table=state_driver_notes outcome=LEAKED
+CELL http-fresh shape=X07 table=state_events outcome=REFUSED
+CELL http-fresh shape=X07 table=state_project_access outcome=REFUSED
+TALLY http-fresh: 21 shapes x 9 private tables x 1 anonymous identity x 1 opened project = 189 cells; [('ABSENT', 43), ('CLEAN', 6), ('LEAKED', 21), ('REFUSED', 119)]
+/home/linxuhao/.AItelier/worktrees-scratch/gs10-mut/tests/unit/test_every_private_table_reader_is_judged_at_the_read.py:602: AssertionError: fresh: in-scope readers delivered private rows: [('S01', 'state_driver_note_entries'), ('S01', 'state_driver_note_revisions'), ('S01', 'state_driver_notes'), ('S02', 'state_driver_note_entries'), ('S02', 'state_driver_note_revisions'), ('S02', 'state_driver_notes'), ('S13', 'state_driver_note_entries'), ('S13', 'state_driver_note_revisions'), ('S13', 'state_driver_notes'), ('X01', 'state_driver_note_entries'), ('X01', 'state_driver_note_revisions'), ('X01', 'state_driver_notes'), ('X03', 'state_driver_note_entries'), ('X03', 'state_driver_note_revisions'), ('X03', 'state_driver_notes'), ('X06', 'state_driver_note_entries'), ('X06', 'state_driver_note_revisions'), ('X06', 'state_driver_notes'), ('X07', 'state_driver_note_entries'), ('X07', 'state_driver_note_revisions'), ('X07', 'state_driver_notes')]
+E   AssertionError: main: in-scope readers delivered private rows: [('S01', 'state_driver_note_entries'), ('S01', 'state_driver_note_revisions'), ('S01', 'state_driver_notes'), ('S02', 'state_driver_note_entries'), ('S02', 'state_driver_note_revisions'), ('S02', 'state_driver_notes'), ('S13', 'state_driver_note_entries'), ('S13', 'state_driver_note_revisions'), ('S13', 'state_driver_notes'), ('X01', 'state_driver_note_entries'), ('X01', 'state_driver_note_revisions'), ('X01', 'state_driver_notes'), ('X03', 'state_driver_note_entries'), ('X03', 'state_driver_note_revisions'), ('X03', 'state_driver_notes'), ('X06', 'state_driver_note_entries'), ('X06', 'state_driver_note_revisions'), ('X06', 'state_driver_notes'), ('X07', 'state_driver_note_entries'), ('X07', 'state_driver_note_revisions'), ('X07', 'state_driver_notes')]
+    assert not [('S01', 'state_driver_note_entries'), ('S01', 'state_driver_note_revisions'), ('S01', 'state_driver_notes'), ('S02', 'state_driver_note_entries'), ('S02', 'state_driver_note_revisions'), ('S02', 'state_driver_notes'), ...]
+----------------------------- Captured stdout call -----------------------------
+CELL http-main shape=S01 table=state_director_deliveries outcome=REFUSED
+CELL http-main shape=S01 table=state_director_idempotency outcome=REFUSED
+CELL http-main shape=S01 table=state_director_inbox_sequences outcome=REFUSED
+CELL http-main shape=S01 table=state_director_messages outcome=REFUSED
+CELL http-main shape=S01 table=state_driver_note_entries outcome=LEAKED
+CELL http-main shape=S01 table=state_driver_note_revisions outcome=LEAKED
+CELL http-main shape=S01 table=state_driver_notes outcome=LEAKED
+CELL http-main shape=S01 table=state_events outcome=REFUSED
+CELL http-main shape=S01 table=state_project_access outcome=REFUSED
+CELL http-main shape=S02 table=state_director_deliveries outcome=REFUSED
+CELL http-main shape=S02 table=state_director_idempotency outcome=REFUSED
+CELL http-main shape=S02 table=state_director_inbox_sequences outcome=REFUSED
+CELL http-main shape=S02 table=state_director_messages outcome=REFUSED
+CELL http-main shape=S02 table=state_driver_note_entries outcome=LEAKED
+CELL http-main shape=S02 table=state_driver_note_revisions outcome=LEAKED
+CELL http-main shape=S02 table=state_driver_notes outcome=LEAKED
+CELL http-main shape=S02 table=state_events outcome=REFUSED
+CELL http-main shape=S02 table=state_project_access outcome=REFUSED
+CELL http-main shape=S03 table=state_director_deliveries outcome=ABSENT
+CELL http-main shape=S03 table=state_director_idempotency outcome=ABSENT
+CELL http-main shape=S03 table=state_director_inbox_sequences outcome=ABSENT
+CELL http-main shape=S03 table=state_director_messages outcome=ABSENT
+CELL http-main shape=S03 table=state_driver_note_entries outcome=ABSENT
+CELL http-main shape=S03 table=state_driver_note_revisions outcome=ABSENT
+CELL http-main shape=S03 table=state_driver_notes outcome=ABSENT
+CELL http-main shape=S03 table=state_events outcome=ABSENT
+CELL http-main shape=S03 table=state_project_access outcome=ABSENT
+CELL http-main shape=S04 table=state_director_deliveries outcome=ABSENT
+CELL http-main shape=S04 table=state_director_idempotency outcome=ABSENT
+CELL http-main shape=S04 table=state_director_inbox_sequences outcome=ABSENT
+CELL http-main shape=S04 table=state_director_messages outcome=ABSENT
+CELL http-main shape=S04 table=state_driver_note_entries outcome=ABSENT
+CELL http-main shape=S04 table=state_driver_note_revisions outcome=ABSENT
+CELL http-main shape=S04 table=state_driver_notes outcome=ABSENT
+CELL http-main shape=S04 table=state_events outcome=ABSENT
+CELL http-main shape=S04 table=state_project_access outcome=ABSENT
+CELL http-main shape=S05 table=state_director_deliveries outcome=REFUSED
+CELL http-main shape=S05 table=state_director_idempotency outcome=REFUSED
+CELL http-main shape=S05 table=state_director_inbox_sequences outcome=REFUSED
+CELL http-main shape=S05 table=state_director_messages outcome=REFUSED
+CELL http-main shape=S05 table=state_driver_note_entries outcome=REFUSED
+CELL http-main shape=S05 table=state_driver_note_revisions outcome=REFUSED
+CELL http-main shape=S05 table=state_driver_notes outcome=REFUSED
+CELL http-main shape=S05 table=state_events outcome=REFUSED
+CELL http-main shape=S05 table=state_project_access outcome=REFUSED
+CELL http-main shape=S06 table=state_director_deliveries outcome=ABSENT
+CELL http-main shape=S06 table=state_director_idempotency outcome=ABSENT
+CELL http-main shape=S06 table=state_director_inbox_sequences outcome=ABSENT
+CELL http-main shape=S06 table=state_director_messages outcome=ABSENT
+CELL http-main shape=S06 table=state_driver_note_entries outcome=ABSENT
+CELL http-main shape=S06 table=state_driver_note_revisions outcome=ABSENT
+CELL http-main shape=S06 table=state_driver_notes outcome=ABSENT
+CELL http-main shape=S06 table=state_events outcome=ABSENT
+CELL http-main shape=S06 table=state_project_access outcome=ABSENT
+CELL http-main shape=S11 table=state_director_deliveries outcome=REFUSED
+CELL http-main shape=S11 table=state_director_idempotency outcome=REFUSED
+CELL http-main shape=S11 table=state_director_inbox_sequences outcome=REFUSED
+CELL http-main shape=S11 table=state_director_messages outcome=REFUSED
+CELL http-main shape=S11 table=state_driver_note_entries outcome=REFUSED
+CELL http-main shape=S11 table=state_driver_note_revisions outcome=REFUSED
+CELL http-main shape=S11 table=state_driver_notes outcome=REFUSED
+CELL http-main shape=S11 table=state_events outcome=REFUSED
+CELL http-main shape=S11 table=state_project_access outcome=REFUSED
+CELL http-main shape=S12 table=state_director_deliveries outcome=ABSENT
+CELL http-main shape=S12 table=state_director_idempotency outcome=ABSENT
+CELL http-main shape=S12 table=state_director_inbox_sequences outcome=ABSENT
+CELL http-main shape=S12 table=state_director_messages outcome=ABSENT
+CELL http-main shape=S12 table=state_driver_note_entries outcome=ABSENT
+CELL http-main shape=S12 table=state_driver_note_revisions outcome=ABSENT
+CELL http-main shape=S12 table=state_driver_notes outcome=ABSENT
+CELL http-main shape=S12 table=state_events outcome=ABSENT
+CELL http-main shape=S12 table=state_project_access outcome=ABSENT
+CELL http-main shape=S13 table=state_director_deliveries outcome=REFUSED
+CELL http-main shape=S13 table=state_director_idempotency outcome=REFUSED
+CELL http-main shape=S13 table=state_director_inbox_sequences outcome=REFUSED
+CELL http-main shape=S13 table=state_director_messages outcome=REFUSED
+CELL http-main shape=S13 table=state_driver_note_entries outcome=LEAKED
+CELL http-main shape=S13 table=state_driver_note_revisions outcome=LEAKED
+CELL http-main shape=S13 table=state_driver_notes outcome=LEAKED
+CELL http-main shape=S13 table=state_events outcome=REFUSED
+CELL http-main shape=S13 table=state_project_access outcome=REFUSED
+CELL http-main shape=S14 table=state_director_deliveries outcome=REFUSED
+CELL http-main shape=S14 table=state_director_idempotency outcome=REFUSED
+CELL http-main shape=S14 table=state_director_inbox_sequences outcome=REFUSED
+CELL http-main shape=S14 table=state_director_messages outcome=REFUSED
+CELL http-main shape=S14 table=state_driver_note_entries outcome=REFUSED
+CELL http-main shape=S14 table=state_driver_note_revisions outcome=REFUSED
+CELL http-main shape=S14 table=state_driver_notes outcome=REFUSED
+CELL http-main shape=S14 table=state_events outcome=REFUSED
+CELL http-main shape=S14 table=state_project_access outcome=REFUSED
+CELL http-main shape=S16 table=state_director_deliveries outcome=REFUSED
+CELL http-main shape=S16 table=state_director_idempotency outcome=REFUSED
+CELL http-main shape=S16 table=state_director_inbox_sequences outcome=REFUSED
+CELL http-main shape=S16 table=state_director_messages outcome=REFUSED
+CELL http-main shape=S16 table=state_driver_note_entries outcome=REFUSED
+CELL http-main shape=S16 table=state_driver_note_revisions outcome=REFUSED
+CELL http-main shape=S16 table=state_driver_notes outcome=REFUSED
+CELL http-main shape=S16 table=state_events outcome=REFUSED
+CELL http-main shape=S16 table=state_project_access outcome=REFUSED
+CELL http-main shape=S17 table=state_director_deliveries outcome=REFUSED
+CELL http-main shape=S17 table=state_director_idempotency outcome=REFUSED
+CELL http-main shape=S17 table=state_director_inbox_sequences outcome=REFUSED
+CELL http-main shape=S17 table=state_director_messages outcome=REFUSED
+CELL http-main shape=S17 table=state_driver_note_entries outcome=REFUSED
+CELL http-main shape=S17 table=state_driver_note_revisions outcome=REFUSED
+CELL http-main shape=S17 table=state_driver_notes outcome=REFUSED
+CELL http-main shape=S17 table=state_events outcome=REFUSED
+CELL http-main shape=S17 table=state_project_access outcome=REFUSED
+CELL http-main shape=S18 table=state_director_deliveries outcome=REFUSED
+CELL http-main shape=S18 table=state_director_idempotency outcome=REFUSED
+CELL http-main shape=S18 table=state_director_inbox_sequences outcome=REFUSED
+CELL http-main shape=S18 table=state_director_messages outcome=REFUSED
+CELL http-main shape=S18 table=state_driver_note_entries outcome=REFUSED
+CELL http-main shape=S18 table=state_driver_note_revisions outcome=REFUSED
+CELL http-main shape=S18 table=state_driver_notes outcome=REFUSED
+CELL http-main shape=S18 table=state_events outcome=REFUSED
+CELL http-main shape=S18 table=state_project_access outcome=REFUSED
+CELL http-main shape=S19 table=state_director_deliveries outcome=REFUSED
+CELL http-main shape=S19 table=state_director_idempotency outcome=REFUSED
+CELL http-main shape=S19 table=state_director_inbox_sequences outcome=REFUSED
+CELL http-main shape=S19 table=state_director_messages outcome=REFUSED
+CELL http-main shape=S19 table=state_driver_note_entries outcome=REFUSED
+CELL http-main shape=S19 table=state_driver_note_revisions outcome=REFUSED
+CELL http-main shape=S19 table=state_driver_notes outcome=REFUSED
+CELL http-main shape=S19 table=state_events outcome=REFUSED
+CELL http-main shape=S19 table=state_project_access outcome=REFUSED
+CELL http-main shape=X01 table=state_director_deliveries outcome=REFUSED
+CELL http-main shape=X01 table=state_director_idempotency outcome=REFUSED
+CELL http-main shape=X01 table=state_director_inbox_sequences outcome=REFUSED
+CELL http-main shape=X01 table=state_director_messages outcome=REFUSED
+CELL http-main shape=X01 table=state_driver_note_entries outcome=LEAKED
+CELL http-main shape=X01 table=state_driver_note_revisions outcome=LEAKED
+CELL http-main shape=X01 table=state_driver_notes outcome=LEAKED
+CELL http-main shape=X01 table=state_events outcome=REFUSED
+CELL http-main shape=X01 table=state_project_access outcome=REFUSED
+CELL http-main shape=X02 table=state_director_deliveries outcome=REFUSED
+CELL http-main shape=X02 table=state_director_idempotency outcome=REFUSED
+CELL http-main shape=X02 table=state_director_inbox_sequences outcome=REFUSED
+CELL http-main shape=X02 table=state_director_messages outcome=REFUSED
+CELL http-main shape=X02 table=state_driver_note_entries outcome=CLEAN
+CELL http-main shape=X02 table=state_driver_note_revisions outcome=CLEAN
+CELL http-main shape=X02 table=state_driver_notes outcome=CLEAN
+CELL http-main shape=X02 table=state_events outcome=REFUSED
+CELL http-main shape=X02 table=state_project_access outcome=REFUSED
+CELL http-main shape=X03 table=state_director_deliveries outcome=REFUSED
+CELL http-main shape=X03 table=state_director_idempotency outcome=REFUSED
+CELL http-main shape=X03 table=state_director_inbox_sequences outcome=REFUSED
+CELL http-main shape=X03 table=state_director_messages outcome=REFUSED
+CELL http-main shape=X03 table=state_driver_note_entries outcome=LEAKED
+CELL http-main shape=X03 table=state_driver_note_revisions outcome=LEAKED
+CELL http-main shape=X03 table=state_driver_notes outcome=LEAKED
+CELL http-main shape=X03 table=state_events outcome=REFUSED
+CELL http-main shape=X03 table=state_project_access outcome=REFUSED
+CELL http-main shape=X04 table=state_director_deliveries outcome=REFUSED
+CELL http-main shape=X04 table=state_director_idempotency outcome=REFUSED
+CELL http-main shape=X04 table=state_director_inbox_sequences outcome=REFUSED
+CELL http-main shape=X04 table=state_director_messages outcome=REFUSED
+CELL http-main shape=X04 table=state_driver_note_entries outcome=CLEAN
+CELL http-main shape=X04 table=state_driver_note_revisions outcome=CLEAN
+CELL http-main shape=X04 table=state_driver_notes outcome=CLEAN
+CELL http-main shape=X04 table=state_events outcome=REFUSED
+CELL http-main shape=X04 table=state_project_access outcome=REFUSED
+CELL http-main shape=X05 table=state_director_deliveries outcome=ABSENT
+CELL http-main shape=X05 table=state_director_idempotency outcome=ABSENT
+CELL http-main shape=X05 table=state_director_inbox_sequences outcome=ABSENT
+CELL http-main shape=X05 table=state_director_messages outcome=ABSENT
+CELL http-main shape=X05 table=state_driver_note_entries outcome=ABSENT
+CELL http-main shape=X05 table=state_driver_note_revisions outcome=ABSENT
+CELL http-main shape=X05 table=state_driver_notes outcome=ABSENT
+CELL http-main shape=X05 table=state_events outcome=REFUSED
+CELL http-main shape=X05 table=state_project_access outcome=REFUSED
+CELL http-main shape=X06 table=state_director_deliveries outcome=REFUSED
+CELL http-main shape=X06 table=state_director_idempotency outcome=REFUSED
+CELL http-main shape=X06 table=state_director_inbox_sequences outcome=REFUSED
+CELL http-main shape=X06 table=state_director_messages outcome=REFUSED
+CELL http-main shape=X06 table=state_driver_note_entries outcome=LEAKED
+CELL http-main shape=X06 table=state_driver_note_revisions outcome=LEAKED
+CELL http-main shape=X06 table=state_driver_notes outcome=LEAKED
+CELL http-main shape=X06 table=state_events outcome=REFUSED
+CELL http-main shape=X06 table=state_project_access outcome=REFUSED
+CELL http-main shape=X07 table=state_director_deliveries outcome=REFUSED
+CELL http-main shape=X07 table=state_director_idempotency outcome=REFUSED
+CELL http-main shape=X07 table=state_director_inbox_sequences outcome=REFUSED
+CELL http-main shape=X07 table=state_director_messages outcome=REFUSED
+CELL http-main shape=X07 table=state_driver_note_entries outcome=LEAKED
+CELL http-main shape=X07 table=state_driver_note_revisions outcome=LEAKED
+CELL http-main shape=X07 table=state_driver_notes outcome=LEAKED
+CELL http-main shape=X07 table=state_events outcome=REFUSED
+CELL http-main shape=X07 table=state_project_access outcome=REFUSED
+TALLY http-main: 21 shapes x 9 private tables x 1 anonymous identity x 1 opened project = 189 cells; [('ABSENT', 43), ('CLEAN', 6), ('LEAKED', 21), ('REFUSED', 119)]
+/home/linxuhao/.AItelier/worktrees-scratch/gs10-mut/tests/unit/test_every_private_table_reader_is_judged_at_the_read.py:602: AssertionError: main: in-scope readers delivered private rows: [('S01', 'state_driver_note_entries'), ('S01', 'state_driver_note_revisions'), ('S01', 'state_driver_notes'), ('S02', 'state_driver_note_entries'), ('S02', 'state_driver_note_revisions'), ('S02', 'state_driver_notes'), ('S13', 'state_driver_note_entries'), ('S13', 'state_driver_note_revisions'), ('S13', 'state_driver_notes'), ('X01', 'state_driver_note_entries'), ('X01', 'state_driver_note_revisions'), ('X01', 'state_driver_notes'), ('X03', 'state_driver_note_entries'), ('X03', 'state_driver_note_revisions'), ('X03', 'state_driver_notes'), ('X06', 'state_driver_note_entries'), ('X06', 'state_driver_note_revisions'), ('X06', 'state_driver_notes'), ('X07', 'state_driver_note_entries'), ('X07', 'state_driver_note_revisions'), ('X07', 'state_driver_notes')]
+=============================== warnings summary ===============================
+../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/integration/test_owner_ruled_notes.py::test_item3_no_in_scope_reader_gets_an_unopened_note_in_process
+FAILED tests/integration/test_owner_ruled_notes.py::test_item3_no_in_scope_reader_gets_an_unopened_note_over_http[fresh]
+FAILED tests/integration/test_owner_ruled_notes.py::test_item3_no_in_scope_reader_gets_an_unopened_note_over_http[main]
+FAILED tests/unit/test_every_private_table_reader_is_judged_at_the_read.py::TestAnAfterTheFactReaderIsJudged::test_no_in_scope_reader_delivers_a_canary
+FAILED tests/unit/test_every_private_table_reader_is_judged_at_the_read.py::test_the_in_scope_matrix_over_http[fresh]
+FAILED tests/unit/test_every_private_table_reader_is_judged_at_the_read.py::test_the_in_scope_matrix_over_http[main]
+6 failed, 498 passed, 1 warning in 83.49s (0:01:23)
+# END_UTC: 2026-09-24T07:07:00Z
+BARE_RC=1
+# MUTATION: notes_allow (diff in mut_notes_allow.diff, per-process ignition lines in mut_notes_allow.ignition)
+IGNITION_TOTAL=2037
+RESTORED porcelain_lines=0

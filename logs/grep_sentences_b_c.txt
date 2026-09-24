@@ -1,0 +1,8 @@
+# CMD: grep -rnE stricter action wins|decline this judgment|no stand-down: api core docs tests
+# CWD: /home/linxuhao/.AItelier/worktrees-scratch/gs10-cand
+# TREE_HEAD: 6346a95d86ac8e67b76d6a10687c06f3a90b4823
+# TREE_DIRTY: 
+# CONTAINER: docker run --rm --init -m 3g --name gs10-grep_sentences_b_c-3948432 (+ .git mounted read-only at its host path) aitelier:latest
+# START_UTC: 2026-09-24T07:13:46Z
+# END_UTC: 2026-09-24T07:13:47Z
+BARE_RC=1

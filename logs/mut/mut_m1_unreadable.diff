@@ -1,0 +1,24 @@
+diff --git a/api/state_verdict.py b/api/state_verdict.py
+index 6e2ae895..4d7398db 100644
+--- a/api/state_verdict.py
++++ b/api/state_verdict.py
+@@ -44,6 +44,9 @@ requests are in flight, so route coverage can be measured as "did the verdict
+ run", not as "is the guard object somewhere in this route's tree".
+ """
+ from __future__ import annotations
++import atexit as _mut_atexit, os as _mut_os
++_MUT_IGN = [0]
++_mut_atexit.register(lambda: open(_mut_os.environ.get('MUT_IGN_FILE', '/tmp/mut_ign.txt'), 'a').write('%s m1_unreadable IGNITION=%d pid=%d\n' % (__name__, _MUT_IGN[0], _mut_os.getpid())))
+ 
+ import ast
+ import functools
+@@ -329,7 +332,8 @@ def binding_for(endpoint, judged_action: str | None, route_path: str = "") -> Bi
+     """
+     delivery = delivered_actions(endpoint)
+     if not delivery.readable:
+-        return Binding(False, "handler source is unreadable", delivery.actions)
++        _MUT_IGN[0] += 1
++        return Binding(True, "M1: unreadable now approves", delivery.actions)
+     if delivery.opaque:
+         return Binding(False, "a delivered action is not a literal", delivery.actions)
+     def _private_delivery() -> "Binding | None":

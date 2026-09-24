@@ -1,0 +1,26 @@
+#!/bin/bash
+# usage: run.sh <tree-abs-path> <log-abs-path> <command...>
+# Runs <command...> inside a throwaway container with cwd=<tree>.
+# The log gets a header (command, tree sha, dirty files, UTC start) and a footer
+# (UTC end, bare exit code). The exit code is captured directly from docker run.
+TREE="$1"; LOG="$2"; shift 2
+NAME="gs10-$(basename "$LOG" .txt)-$$"
+{
+  echo "# CMD: $*"
+  echo "# CWD: $TREE"
+  echo "# TREE_HEAD: $(git -C "$TREE" rev-parse HEAD)"
+  echo "# TREE_DIRTY: $(git -C "$TREE" status --porcelain | tr '\n' ';')"
+  echo "# CONTAINER: docker run --rm --init -m 3g --name $NAME (+ .git mounted read-only at its host path) aitelier:latest"
+  echo "# START_UTC: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+} > "$LOG"
+docker run --rm --init -m 3g --name "$NAME" --network aitelier_default -u 1000:1000 \
+  -e HOME=/home/linxuhao -e PYTHONPATH="$TREE" -e PYTHONDONTWRITEBYTECODE=1 \
+  -e SEARXNG_URL=http://linxuhaserver:8888 ${EXTRA_ENV} \
+  -v /home/linxuhao/AItelier:/app -v /home/linxuhao/.AItelier:/home/linxuhao/.AItelier -v /home/linxuhao/AItelier/.git:/home/linxuhao/AItelier/.git:ro \
+  -w "$TREE" aitelier:latest "$@" >> "$LOG" 2>&1
+RC=$?
+{
+  echo "# END_UTC: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  echo "BARE_RC=$RC"
+} >> "$LOG"
+exit $RC

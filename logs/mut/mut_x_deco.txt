@@ -1,0 +1,52 @@
+# CMD: python -m pytest -p no:cacheprovider -q -rf --tb=line tests/integration/test_author_surface_generator.py tests/integration/test_coverage_measures_judged_not_reached.py tests/integration/test_no_unfalsifiable_guarantees.py tests/integration/test_private_delivery_before_early_ok.py tests/integration/test_verdict_runs_on_fastapi_machinery.py tests/integration/test_unreadable_delivery_is_refused.py tests/integration/test_state_verdict_is_effective.py tests/integration/test_owner_ruled_notes.py tests/unit/test_state_declaration_binding.py tests/unit/test_private_read_verdict_at_execution.py tests/unit/test_project_privacy_rev3.py tests/unit/test_state_project_privacy.py tests/unit/test_state_read_visibility.py tests/unit/test_undeclared_reader_is_untrusted.py tests/unit/test_every_private_table_reader_is_judged_at_the_read.py tests/unit/test_mcp_router.py tests/unit/test_mcp_transport_security.py tests/integration/test_state_graph_entrypoints.py tests/contracts/director_messaging
+# CWD: /home/linxuhao/.AItelier/worktrees-scratch/gs10-mut
+# TREE_HEAD: 6346a95d86ac8e67b76d6a10687c06f3a90b4823
+# TREE_DIRTY:  M core/state_privacy.py;
+# CONTAINER: docker run --rm --init -m 3g --name gs10-mut_x_deco-4027498 (+ .git mounted read-only at its host path) aitelier:latest
+# START_UTC: 2026-09-24T07:23:00Z
+........................................................................ [ 14%]
+........................................................................ [ 28%]
+........................................................................ [ 42%]
+........................................................................ [ 57%]
+.F...................FF................................................. [ 71%]
+........................................................................ [ 85%]
+........................................................................ [100%]
+=================================== FAILURES ===================================
+E   Failed: DID NOT RAISE ProjectPrivate
+/home/linxuhao/.AItelier/worktrees-scratch/gs10-mut/tests/unit/test_undeclared_reader_is_untrusted.py:143: Failed: DID NOT RAISE ProjectPrivate
+E   AssertionError: {'g_closure_events': ('EXC', [], 'IndexError: tuple index out of range'), 'g_closure_get_project_access': ('EXC', [], ...Error: tuple index out of range'), 'g_closure_project_visibility': ('EXC', [], 'IndexError: tuple index out of range')}
+    assert not {'g_closure_events': ('EXC', [], 'IndexError: tuple index out of range'), 'g_closure_get_project_access': ('EXC', [], ...Error: tuple index out of range'), 'g_closure_project_visibility': ('EXC', [], 'IndexError: tuple index out of range')}
+----------------------------- Captured stdout call -----------------------------
+REVIEWED http app=fresh path=g_closure_events guarded=True status=EXC leaked=[] body='IndexError: tuple index out of range'
+REVIEWED http app=fresh path=g_closure_get_project_access guarded=True status=EXC leaked=[] body='IndexError: tuple index out of range'
+REVIEWED http app=fresh path=g_closure_list_director_messages guarded=True status=EXC leaked=[] body='IndexError: tuple index out of range'
+REVIEWED http app=fresh path=g_closure_project_visibility guarded=True status=EXC leaked=[] body='IndexError: tuple index out of range'
+REVIEWED http app=fresh path=g_control guarded=True status=200 leaked=[] body='{"ok":true}'
+CROSS_PRODUCT http-guarded app=fresh: 5 inline handlers x 1 product-guarded dispatch route x GET x 1 anonymous identity x 1 opened project = 5 requests
+/home/linxuhao/.AItelier/worktrees-scratch/gs10-mut/tests/unit/test_every_private_table_reader_is_judged_at_the_read.py:521: AssertionError: {'g_closure_events': ('EXC', [], 'IndexError: tuple index out of range'), 'g_closure_get_project_access': ('EXC', [], ...Error: tuple index out of range'), 'g_closure_project_visibility': ('EXC', [], 'IndexError: tuple index out of range')}
+E   AssertionError: {'g_closure_events': ('EXC', [], 'IndexError: tuple index out of range'), 'g_closure_get_project_access': ('EXC', [], ...Error: tuple index out of range'), 'g_closure_project_visibility': ('EXC', [], 'IndexError: tuple index out of range')}
+    assert not {'g_closure_events': ('EXC', [], 'IndexError: tuple index out of range'), 'g_closure_get_project_access': ('EXC', [], ...Error: tuple index out of range'), 'g_closure_project_visibility': ('EXC', [], 'IndexError: tuple index out of range')}
+----------------------------- Captured stdout call -----------------------------
+REVIEWED http app=main path=g_closure_events guarded=True status=EXC leaked=[] body='IndexError: tuple index out of range'
+REVIEWED http app=main path=g_closure_get_project_access guarded=True status=EXC leaked=[] body='IndexError: tuple index out of range'
+REVIEWED http app=main path=g_closure_list_director_messages guarded=True status=EXC leaked=[] body='IndexError: tuple index out of range'
+REVIEWED http app=main path=g_closure_project_visibility guarded=True status=EXC leaked=[] body='IndexError: tuple index out of range'
+REVIEWED http app=main path=g_control guarded=True status=200 leaked=[] body='{"ok":true}'
+CROSS_PRODUCT http-guarded app=main: 5 inline handlers x 1 product-guarded dispatch route x GET x 1 anonymous identity x 1 opened project = 5 requests
+/home/linxuhao/.AItelier/worktrees-scratch/gs10-mut/tests/unit/test_every_private_table_reader_is_judged_at_the_read.py:521: AssertionError: {'g_closure_events': ('EXC', [], 'IndexError: tuple index out of range'), 'g_closure_get_project_access': ('EXC', [], ...Error: tuple index out of range'), 'g_closure_project_visibility': ('EXC', [], 'IndexError: tuple index out of range')}
+=============================== warnings summary ===============================
+../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_undeclared_reader_is_untrusted.py::test_a_messaging_provider_rebuilt_without_a_declaration_refuses
+FAILED tests/unit/test_every_private_table_reader_is_judged_at_the_read.py::TestTheReviewedPathsAreRefused::test_behind_the_product_guard[fresh]
+FAILED tests/unit/test_every_private_table_reader_is_judged_at_the_read.py::TestTheReviewedPathsAreRefused::test_behind_the_product_guard[main]
+3 failed, 501 passed, 1 warning in 70.66s (0:01:10)
+# END_UTC: 2026-09-24T07:24:16Z
+BARE_RC=1
+# MUTATION: x_deco (diff in mut_x_deco.diff, per-process ignition lines in mut_x_deco.ignition)
+IGNITION_TOTAL=359
+RESTORED porcelain_lines=0

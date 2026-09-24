@@ -1,0 +1,24 @@
+diff --git a/core/state_privacy.py b/core/state_privacy.py
+index 9f1765b3..f8967b86 100644
+--- a/core/state_privacy.py
++++ b/core/state_privacy.py
+@@ -48,6 +48,9 @@ UNTRUSTED, and a store built on an ``UntrustedDatabase`` is untrusted whatever
+ it declares, because the handle - not the flag - decides which rows exist.
+ """
+ from __future__ import annotations
++import atexit as _mut_atexit, os as _mut_os
++_MUT_IGN = [0]
++_mut_atexit.register(lambda: open(_mut_os.environ.get('MUT_IGN_FILE', '/tmp/mut_ign.txt'), 'a').write('%s notes_allow IGNITION=%d pid=%d\n' % (__name__, _MUT_IGN[0], _mut_os.getpid())))
+ 
+ from contextlib import contextmanager
+ import functools
+@@ -285,6 +288,9 @@ class ReadVerdict:
+     def __call__(self, action, arg1, arg2, db_name, _source):
+         if action == sqlite3.SQLITE_READ:
+             table, column = arg1, arg2
++            if table in NOTEBOOK_TABLES:
++                _MUT_IGN[0] += 1  # MUTATION notes_allow
++                return sqlite3.SQLITE_OK
+             if table in self.readable:
+                 # An unqualified name (db_name None) resolves to the temp copy,
+                 # which shadows the database's table; "main" is the table itself.

@@ -1,0 +1,156 @@
+# CMD: python -m pytest -p no:cacheprovider -q -rf tests
+# CWD: /home/linxuhao/.AItelier/worktrees-scratch/gs10-main
+# TREE_HEAD: b72339cc887f5efbc80c4ca375d558740a54d96c
+# TREE_DIRTY: 
+# CONTAINER: docker run --rm --init -m 3g --name gs10-suite_main_b72339cc_r2-3800432 (+ .git mounted read-only at its host path) aitelier:latest
+# START_UTC: 2026-09-24T07:00:45Z
+...s.................................................................... [  1%]
+........................................................................ [  2%]
+........................................................................ [  4%]
+........................................................................ [  5%]
+........................................................................ [  7%]
+........................................................................ [  8%]
+........................................................................ [ 10%]
+........................................................................ [ 11%]
+........................................................................ [ 13%]
+........................................................................ [ 14%]
+........................................................................ [ 16%]
+........................................................F............... [ 17%]
+........................................................................ [ 19%]
+........................................................................ [ 20%]
+........................................................................ [ 22%]
+........................................................................ [ 23%]
+........................................................................ [ 25%]
+........................................................................ [ 26%]
+........................................................................ [ 28%]
+........................................................................ [ 29%]
+........................................................................ [ 31%]
+........................................................................ [ 32%]
+........................................................................ [ 34%]
+........................................................................ [ 35%]
+........................................................................ [ 37%]
+........................................................................ [ 38%]
+........................................................................ [ 40%]
+........................................................................ [ 41%]
+........................................................................ [ 43%]
+..........................................ssssssss...................... [ 44%]
+........................................................................ [ 45%]
+........................................................................ [ 47%]
+........................................................................ [ 48%]
+........................................................................ [ 50%]
+........................................................................ [ 51%]
+........................................................................ [ 53%]
+........................................................................ [ 54%]
+........................................................................ [ 56%]
+........................................................................ [ 57%]
+.........................................s.............................. [ 59%]
+........................................................................ [ 60%]
+........................................................................ [ 62%]
+........................................................................ [ 63%]
+........................................................................ [ 65%]
+........................................................................ [ 66%]
+........................................................................ [ 68%]
+........................................................................ [ 69%]
+........................................................................ [ 71%]
+........................................................................ [ 72%]
+........................................................................ [ 74%]
+........................................................................ [ 75%]
+........................................................................ [ 77%]
+........................................................................ [ 78%]
+........................................................................ [ 80%]
+........................................................................ [ 81%]
+........................................................................ [ 83%]
+........................................................................ [ 84%]
+........................................................................ [ 86%]
+........................................................................ [ 87%]
+........................................................................ [ 88%]
+........................................................................ [ 90%]
+........................................................................ [ 91%]
+........................................................................ [ 93%]
+........................................................................ [ 94%]
+........................................................................ [ 96%]
+........................................................................ [ 97%]
+........................................................................ [ 99%]
+..............................                                           [100%]
+=================================== FAILURES ===================================
+______________ test_a_timed_out_command_keeps_the_loop_responsive ______________
+
+live = {'db': <core.db_manager.DBManager object at 0x734730bea750>, 'checkout': PosixPath('/tmp/pytest-of-unknown/pytest-0/test_a_timed_out_command_keeps0/checkout'), 'agent': <core.meta_agent.MetaAgent object at 0x734730be87a0>}
+
+    def test_a_timed_out_command_keeps_the_loop_responsive(live):
+        """The other path that reaches cleanup on every call."""
+        agent, checkout = live["agent"], live["checkout"]
+        marker = checkout / "timeout_wrote.txt"
+        cmd = f"{_stubborn(30, marker)} & sleep 30"
+    
+        async def drive():
+            hb = _Heartbeat().start()
+            res = await agent._tool_bash(
+                {"project_id": "p", "command": cmd, "timeout": 1})
+            await hb.stop()
+            return hb.worst, res
+    
+        worst, res = asyncio.run(drive())
+        print(f"\ntimeout: worst loop gap {worst:.2f}s")
+        assert "error" in res and "timed out" in res["error"], res
+>       assert worst < _MAX_LOOP_GAP_S, (
+            f"the event loop was frozen for {worst:.2f}s on the timeout path")
+E       AssertionError: the event loop was frozen for 1.08s on the timeout path
+E       assert 1.0828202889533713 < 0.5
+
+tests/unit/test_bash_cleanup_is_async.py:204: AssertionError
+----------------------------- Captured stdout call -----------------------------
+
+timeout: worst loop gap 1.08s
+=============================== warnings summary ===============================
+../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+tests/integration/test_composed_product_delivery_cycle.py::test_real_product_delivery_cycle
+  /usr/local/lib/python3.12/site-packages/pydantic/_internal/_generate_schema.py:1480: UserWarning: Item 'summary' on TypedDict class 'ChatCompletionReasoningItem' is using the `ReadOnly` qualifier. Pydantic will not protect items from any mutation on dictionary instances.
+    warnings.warn(
+
+tests/integration/test_me_signin.py::TestWhoAmISignin::test_a_refused_credential_is_reported_as_one
+tests/integration/test_me_signin.py::TestWhoAmISignin::test_a_refused_credential_leaks_no_detail
+  /usr/local/lib/python3.12/site-packages/starlette/testclient.py:463: DeprecationWarning: Setting per-request cookies=<...> is being deprecated, because the expected behaviour on cookie persistence is ambiguous. Set cookies directly on the client instance instead.
+    return super().request(
+
+tests/unit/test_bash_admission_lifetime.py::test_a_second_cancellation_during_cleanup_still_ends_the_writer
+  /usr/local/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <function BaseSubprocessTransport.__del__ at 0x734746052700>
+  
+  Traceback (most recent call last):
+    File "/usr/local/lib/python3.12/asyncio/base_subprocess.py", line 126, in __del__
+      self.close()
+    File "/usr/local/lib/python3.12/asyncio/base_subprocess.py", line 104, in close
+      proto.pipe.close()
+    File "/usr/local/lib/python3.12/asyncio/unix_events.py", line 568, in close
+      self._close(None)
+    File "/usr/local/lib/python3.12/asyncio/unix_events.py", line 592, in _close
+      self._loop.call_soon(self._call_connection_lost, exc)
+    File "/usr/local/lib/python3.12/asyncio/base_events.py", line 799, in call_soon
+      self._check_closed()
+    File "/usr/local/lib/python3.12/asyncio/base_events.py", line 545, in _check_closed
+      raise RuntimeError('Event loop is closed')
+  RuntimeError: Event loop is closed
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/unit/test_coding_impl_self_verification.py::test_game_probe_uses_the_same_bounds_and_trace_identity
+tests/unit/test_coding_impl_self_verification.py::test_representative_native_implement_traces_repo_and_game_checks_before_finish
+  /usr/local/lib/python3.12/multiprocessing/popen_fork.py:66: DeprecationWarning: This process (pid=7) is multi-threaded, use of fork() may lead to deadlocks in the child.
+    self.pid = os.fork()
+
+tests/unit/test_public_read_hardening.py::TestAnUnknownJwtKidCostsNoNetworkCall::test_a_rejected_kid_is_remembered
+tests/unit/test_public_read_hardening.py::TestAnUnknownJwtKidCostsNoNetworkCall::test_the_bad_kid_table_is_bounded
+  /usr/local/lib/python3.12/site-packages/jwt/api_jwt.py:149: InsecureKeyLengthWarning: The HMAC key is 1 bytes long, which is below the minimum recommended length of 32 bytes for SHA256. See RFC 7518 Section 3.2.
+    return self._jws.encode(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_bash_cleanup_is_async.py::test_a_timed_out_command_keeps_the_loop_responsive
+1 failed, 4843 passed, 10 skipped, 11 deselected, 9 warnings in 644.45s (0:10:44)
+# END_UTC: 2026-09-24T07:11:39Z
+BARE_RC=1

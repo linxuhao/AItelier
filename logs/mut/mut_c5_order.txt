@@ -1,0 +1,60 @@
+# CMD: python -m pytest -p no:cacheprovider -q -rf --tb=line tests/integration/test_author_surface_generator.py tests/integration/test_coverage_measures_judged_not_reached.py tests/integration/test_no_unfalsifiable_guarantees.py tests/integration/test_private_delivery_before_early_ok.py tests/integration/test_verdict_runs_on_fastapi_machinery.py tests/integration/test_unreadable_delivery_is_refused.py tests/integration/test_state_verdict_is_effective.py tests/integration/test_owner_ruled_notes.py tests/unit/test_state_declaration_binding.py tests/unit/test_private_read_verdict_at_execution.py tests/unit/test_project_privacy_rev3.py tests/unit/test_state_project_privacy.py tests/unit/test_state_read_visibility.py tests/unit/test_undeclared_reader_is_untrusted.py tests/unit/test_every_private_table_reader_is_judged_at_the_read.py tests/unit/test_mcp_router.py tests/unit/test_mcp_transport_security.py tests/integration/test_state_graph_entrypoints.py tests/contracts/director_messaging
+# CWD: /home/linxuhao/.AItelier/worktrees-scratch/gs10-mut
+# TREE_HEAD: 6346a95d86ac8e67b76d6a10687c06f3a90b4823
+# TREE_DIRTY:  M api/state_verdict.py;
+# CONTAINER: docker run --rm --init -m 3g --name gs10-mut_c5_order-3974737 (+ .git mounted read-only at its host path) aitelier:latest
+# START_UTC: 2026-09-24T07:16:51Z
+..F....FF..F............................................................ [ 14%]
+.........................................................FF............. [ 28%]
+........................................................................ [ 42%]
+........................................................................ [ 57%]
+........................................................................ [ 71%]
+........................................................................ [ 85%]
+........................................................................ [100%]
+=================================== FAILURES ===================================
+E   AssertionError: ('dispatch_and_private/{p:action} GET sd=False', 200, '{"schema":"aitelier.director-messaging.v2","result":{"project_i...pen","items":[{"message":{"message_id":"698de5ff-3558-475f-a77d-fd7d4e656f9d","thread_id":"698de5ff-3558-475f-a77d-fd')
+    assert 'AUTHOR-SURFACE-LEAK-9b1c' not in '{"schema":"...t_after":1}}'
+      
+      'AUTHOR-SURFACE-LEAK-9b1c' is contained here:
+      ?        ----------
+        subject":"AUTHOR-SURFACE-LEAK-9b1c","body":"AUTHOR-SURFACE-LEAK-9b1c","created_at":"2026-09-24T07:16:55.128167Z","reply_to_delivery_id":null,"delivery_mode":"transient"},"delivery":{"delivery_id":"3ff526f5-f0e0-42fc-a796-0f8e5b182c9f","message_id":"698de5ff-3558-475f-a77d-fd7d4e656f9d","target_project_id":"author-surface-open","delivery_seq":1,"status":"unread","version":1}}],"matched_total":1,"has_more":false,"next_after":1}}
+      ?                                      ++++++++++++++++++++++++++++++++++
+/home/linxuhao/.AItelier/worktrees-scratch/gs10-mut/tests/integration/test_author_surface_generator.py:131: AssertionError: ('dispatch_and_private/{p:action} GET sd=False', 200, '{"schema":"aitelier.director-messaging.v2","result":{"project_i...pen","items":[{"message":{"message_id":"698de5ff-3558-475f-a77d-fd7d4e656f9d","thread_id":"698de5ff-3558-475f-a77d-fd')
+E   AssertionError: ('dispatch_and_private/{p:action} GET sd=False', 200, '{"schema":"aitelier.director-messaging.v2","result":{"project_i...pen","items":[{"message":{"message_id":"ac265c99-0a76-43d5-86d0-e04bf353ec7f","thread_id":"ac265c99-0a76-43d5-86d0-e0')
+    assert 200 == 403
+     +  where 200 = <Response [200 OK]>.status_code
+/home/linxuhao/.AItelier/worktrees-scratch/gs10-mut/tests/integration/test_author_surface_generator.py:184: AssertionError: ('dispatch_and_private/{p:action} GET sd=False', 200, '{"schema":"aitelier.director-messaging.v2","result":{"project_i...pen","items":[{"message":{"message_id":"ac265c99-0a76-43d5-86d0-e04bf353ec7f","thread_id":"ac265c99-0a76-43d5-86d0-e0')
+E   AssertionError: Binding(ok=True, reason='', delivered=frozenset({'list_director_messages'}))
+    assert True is False
+     +  where True = Binding(ok=True, reason='', delivered=frozenset({'list_director_messages'})).ok
+/home/linxuhao/.AItelier/worktrees-scratch/gs10-mut/tests/integration/test_author_surface_generator.py:235: AssertionError: Binding(ok=True, reason='', delivered=frozenset({'list_director_messages'}))
+E   AssertionError: (200, '{"schema":"aitelier.director-messaging.v2","result":{"project_id":"author-surface-open","items":[{"message":{"message_id":"c13216ce-e151-496a-a3e7-f2f687cb3f01","thread_id":"c13216ce-e151-496a-a3e7-f2')
+    assert 200 == 403
+     +  where 200 = <Response [200 OK]>.status_code
+/home/linxuhao/.AItelier/worktrees-scratch/gs10-mut/tests/integration/test_coverage_measures_judged_not_reached.py:80: AssertionError: (200, '{"schema":"aitelier.director-messaging.v2","result":{"project_id":"author-surface-open","items":[{"message":{"message_id":"c13216ce-e151-496a-a3e7-f2f687cb3f01","thread_id":"c13216ce-e151-496a-a3e7-f2')
+E   AssertionError: assert True is False
+     +  where True = Binding(ok=True, reason='', delivered=frozenset({'list_director_messages'})).ok
+/home/linxuhao/.AItelier/worktrees-scratch/gs10-mut/tests/integration/test_no_unfalsifiable_guarantees.py:166: AssertionError: assert True is False
+E   AssertionError: Binding(ok=True, reason='', delivered=frozenset({'list_director_messages'}))
+    assert True is False
+     +  where True = Binding(ok=True, reason='', delivered=frozenset({'list_director_messages'})).ok
+/home/linxuhao/.AItelier/worktrees-scratch/gs10-mut/tests/integration/test_private_delivery_before_early_ok.py:55: AssertionError: Binding(ok=True, reason='', delivered=frozenset({'list_director_messages'}))
+=============================== warnings summary ===============================
+../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/integration/test_author_surface_generator.py::TestEveryGeneratedRouteIsJudged::test_no_generated_shape_leaks_and_only_agreeing_shapes_serve
+FAILED tests/integration/test_author_surface_generator.py::TestTheFourCarriersAreCaught::test_carrier4_param_name_and_template_is_refused
+FAILED tests/integration/test_author_surface_generator.py::TestTheFourCarriersAreCaught::test_the_binder_directly_refuses_the_carrier4_shape
+FAILED tests/integration/test_coverage_measures_judged_not_reached.py::TestTheLeakHandlerIsNamedUncovered::test_the_same_route_through_the_guard_is_judged_and_not_uncovered
+FAILED tests/integration/test_no_unfalsifiable_guarantees.py::test_binding_for_orders_the_private_check_before_the_dispatch_approval
+FAILED tests/integration/test_private_delivery_before_early_ok.py::TestBothPolesOfTheBinder::test_dispatch_that_also_delivers_private_is_refused
+6 failed, 498 passed, 1 warning in 69.60s (0:01:09)
+# END_UTC: 2026-09-24T07:18:05Z
+BARE_RC=1
+# MUTATION: c5_order (diff in mut_c5_order.diff, per-process ignition lines in mut_c5_order.ignition)
+IGNITION_TOTAL=332
+RESTORED porcelain_lines=0

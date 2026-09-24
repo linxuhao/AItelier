@@ -1,0 +1,38 @@
+# CMD: python -m pytest -p no:cacheprovider -q --tb=line -rf tests/integration/test_state_verdict_is_effective.py tests/integration/test_verdict_runs_on_fastapi_machinery.py tests/unit/test_state_declaration_binding.py tests/integration/test_no_unfalsifiable_guarantees.py
+# CWD: /home/linxuhao/.AItelier/worktrees-scratch/gs10-base
+# TREE_HEAD: 3173d9c2373cc44461fb332315673f8449d7b483
+# TREE_DIRTY: 
+# CONTAINER: docker run --rm --init -m 3g --name gs10-base_verdict_files-3490834 (+ .git mounted read-only at its host path) aitelier:latest
+# START_UTC: 2026-09-24T06:36:30Z
+......FFF..F............................................................ [ 65%]
+......................................                                   [100%]
+=================================== FAILURES ===================================
+E   AssertionError: (200, '{"detail":"no verdict asked for this action"}')
+    assert 200 == 403
+     +  where 200 = <Response [200 OK]>.status_code
+/home/linxuhao/.AItelier/worktrees-scratch/gs10-base/tests/integration/test_state_verdict_is_effective.py:384: AssertionError: (200, '{"detail":"no verdict asked for this action"}')
+E   AssertionError: (200, '{"notebook":"VERDICT-PRIVATE-BODY-5521"}')
+    assert 200 == 403
+     +  where 200 = <Response [200 OK]>.status_code
+/home/linxuhao/.AItelier/worktrees-scratch/gs10-base/tests/integration/test_state_verdict_is_effective.py:402: AssertionError: (200, '{"notebook":"VERDICT-PRIVATE-BODY-5521"}')
+E   AssertionError: (200, '{"project_id":"verdict-private","revision":1,"permanent":"VERDICT-PRIVATE-BODY-5521","temporary":"","updated_at...tor":"verdict-seeder","director_identity":"director"},"index":[],"entry_count":0,"listed_count":0,"delisted_count":0}')
+    assert 200 != 200
+     +  where 200 = <Response [200 OK]>.status_code
+/home/linxuhao/.AItelier/worktrees-scratch/gs10-base/tests/integration/test_state_verdict_is_effective.py:412: AssertionError: (200, '{"project_id":"verdict-private","revision":1,"permanent":"VERDICT-PRIVATE-BODY-5521","temporary":"","updated_at...tor":"verdict-seeder","director_identity":"director"},"index":[],"entry_count":0,"listed_count":0,"delisted_count":0}')
+E   assert 200 == 403
+     +  where 200 = <Response [200 OK]>.status_code
+/home/linxuhao/.AItelier/worktrees-scratch/gs10-base/tests/integration/test_state_verdict_is_effective.py:459: assert 200 == 403
+=============================== warnings summary ===============================
+../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/integration/test_state_verdict_is_effective.py::TestTheRegressionsTheEarlierRoundsBought::test_a_declaration_for_an_action_added_later_is_refused
+FAILED tests/integration/test_state_verdict_is_effective.py::TestTheRegressionsTheEarlierRoundsBought::test_a_route_that_declares_nothing_is_refused_not_opened
+FAILED tests/integration/test_state_verdict_is_effective.py::TestTheRegressionsTheEarlierRoundsBought::test_head_and_a_trailing_slash_do_not_leak_a_private_body
+FAILED tests/integration/test_state_verdict_is_effective.py::TestTheRegressionsTheEarlierRoundsBought::test_the_verdict_is_idempotent_for_the_same_request
+4 failed, 106 passed, 1 warning in 6.09s
+# END_UTC: 2026-09-24T06:36:42Z
+BARE_RC=1

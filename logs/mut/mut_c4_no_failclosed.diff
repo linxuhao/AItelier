@@ -1,0 +1,25 @@
+diff --git a/api/state_verdict.py b/api/state_verdict.py
+index 6e2ae895..7d59d553 100644
+--- a/api/state_verdict.py
++++ b/api/state_verdict.py
+@@ -44,6 +44,9 @@ requests are in flight, so route coverage can be measured as "did the verdict
+ run", not as "is the guard object somewhere in this route's tree".
+ """
+ from __future__ import annotations
++import atexit as _mut_atexit, os as _mut_os
++_MUT_IGN = [0]
++_mut_atexit.register(lambda: open(_mut_os.environ.get('MUT_IGN_FILE', '/tmp/mut_ign.txt'), 'a').write('%s c4_no_failclosed IGNITION=%d pid=%d\n' % (__name__, _MUT_IGN[0], _mut_os.getpid())))
+ 
+ import ast
+ import functools
+@@ -262,9 +265,7 @@ class _Analysis:
+             # see. It may hand `execute` a private action this source never
+             # spells out — the four hiding shapes (module-level helper, renamed
+             # import, async inner, keyword action) each hid exactly here. An
+-            # unresolvable delivery is a refusal, not an approval; `opaque` is
+-            # the observable, mutable state that records the derivation failure.
+-            self.opaque = True
++            _MUT_IGN[0] += 1  # MUTATION c4_no_failclosed
+ 
+     def _follow_helper(self, name: str) -> bool:
+         """Follow a module-level helper the handler delivers through.

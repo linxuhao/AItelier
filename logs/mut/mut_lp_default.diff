@@ -1,0 +1,26 @@
+diff --git a/core/state_graph.py b/core/state_graph.py
+index 4da46f80..79436c84 100644
+--- a/core/state_graph.py
++++ b/core/state_graph.py
+@@ -6,6 +6,9 @@ transactions. Revisions and events are append-only, including after supersession
+ No default database, agent calls, Git mutations or production imports live here.
+ """
+ from __future__ import annotations
++import atexit as _mut_atexit, os as _mut_os
++_MUT_IGN = [0]
++_mut_atexit.register(lambda: open(_mut_os.environ.get('MUT_IGN_FILE', '/tmp/mut_ign.txt'), 'a').write('%s lp_default IGNITION=%d pid=%d\n' % (__name__, _MUT_IGN[0], _mut_os.getpid())))
+ 
+ import hashlib
+ import json
+@@ -446,8 +449,9 @@ class StateGraphStore:
+         not know about are excluded BEFORE any caller pages or counts, so a
+         page's size, cursor and emptiness are byte-identical whether or not
+         private projects exist in this database."""
+-        if not self.project_read_trusted:
+-            public_only = True
++        if public_only is None:
++            _MUT_IGN[0] += 1  # MUTATION lp_default
++            public_only = False
+         elif public_only is None:
+             public_only = False
+         where = ("WHERE EXISTS(SELECT 1 FROM state_project_access a "

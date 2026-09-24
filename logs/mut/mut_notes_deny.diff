@@ -1,0 +1,23 @@
+diff --git a/core/state_privacy.py b/core/state_privacy.py
+index 9f1765b3..b3edd381 100644
+--- a/core/state_privacy.py
++++ b/core/state_privacy.py
+@@ -48,6 +48,9 @@ UNTRUSTED, and a store built on an ``UntrustedDatabase`` is untrusted whatever
+ it declares, because the handle - not the flag - decides which rows exist.
+ """
+ from __future__ import annotations
++import atexit as _mut_atexit, os as _mut_os
++_MUT_IGN = [0]
++_mut_atexit.register(lambda: open(_mut_os.environ.get('MUT_IGN_FILE', '/tmp/mut_ign.txt'), 'a').write('%s notes_deny IGNITION=%d pid=%d\n' % (__name__, _MUT_IGN[0], _mut_os.getpid())))
+ 
+ from contextlib import contextmanager
+ import functools
+@@ -249,6 +252,8 @@ def _arm(connection, notebook):
+             connection.execute(f"CREATE TEMP TABLE {table} AS {select}")
+             readable[table] = columns
+     if notebook is not None:
++        _MUT_IGN[0] += 1  # MUTATION notes_deny
++    if False:
+         opened = connection.execute(
+             "SELECT 1 FROM main.state_project_access WHERE project_id=? "
+             "AND visibility='public'", (notebook,)).fetchone() is not None

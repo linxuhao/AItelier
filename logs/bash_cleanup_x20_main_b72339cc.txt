@@ -1,0 +1,9 @@
+# CMD: sh -c f=0; for i in $(seq 1 20); do python -m pytest -q -p no:cacheprovider tests/unit/test_bash_cleanup_is_async.py::test_a_timed_out_command_keeps_the_loop_responsive > /tmp/o.txt 2>&1 || { f=$((f+1)); tail -3 /tmp/o.txt; }; done; echo RUNS=20 FAILS=$f; exit $f
+# CWD: /home/linxuhao/.AItelier/worktrees-scratch/gs10-main
+# TREE_HEAD: b72339cc887f5efbc80c4ca375d558740a54d96c
+# TREE_DIRTY: 
+# CONTAINER: docker run --rm --init -m 3g --name gs10-bash_cleanup_x20_gs10-main-4059196 (+ .git mounted read-only at its host path) aitelier:latest
+# START_UTC: 2026-09-24T07:25:38Z
+RUNS=20 FAILS=0
+# END_UTC: 2026-09-24T07:31:04Z
+BARE_RC=0

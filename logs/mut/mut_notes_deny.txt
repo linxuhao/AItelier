@@ -1,0 +1,54 @@
+# CMD: python -m pytest -p no:cacheprovider -q -rf --tb=line tests/integration/test_author_surface_generator.py tests/integration/test_coverage_measures_judged_not_reached.py tests/integration/test_no_unfalsifiable_guarantees.py tests/integration/test_private_delivery_before_early_ok.py tests/integration/test_verdict_runs_on_fastapi_machinery.py tests/integration/test_unreadable_delivery_is_refused.py tests/integration/test_state_verdict_is_effective.py tests/integration/test_owner_ruled_notes.py tests/unit/test_state_declaration_binding.py tests/unit/test_private_read_verdict_at_execution.py tests/unit/test_project_privacy_rev3.py tests/unit/test_state_project_privacy.py tests/unit/test_state_read_visibility.py tests/unit/test_undeclared_reader_is_untrusted.py tests/unit/test_every_private_table_reader_is_judged_at_the_read.py tests/unit/test_mcp_router.py tests/unit/test_mcp_transport_security.py tests/integration/test_state_graph_entrypoints.py tests/contracts/director_messaging
+# CWD: /home/linxuhao/.AItelier/worktrees-scratch/gs10-mut
+# TREE_HEAD: 6346a95d86ac8e67b76d6a10687c06f3a90b4823
+# TREE_DIRTY:  M core/state_privacy.py;
+# CONTAINER: docker run --rm --init -m 3g --name gs10-mut_notes_deny-3880344 (+ .git mounted read-only at its host path) aitelier:latest
+# START_UTC: 2026-09-24T07:07:00Z
+........................................................................ [ 14%]
+........................................................................ [ 28%]
+.....................FF................................................. [ 42%]
+........................................................................ [ 57%]
+F....................................................................... [ 71%]
+........................................................................ [ 85%]
+........................................................................ [100%]
+=================================== FAILURES ===================================
+E   AssertionError: fresh: note reads that did not answer with the opened note: ['get_driver_note', 'driver_note_history', 'search_driver_note_history', 'get_driver_note_entry', 'check_driver_note_index', 'driver_note_index']
+    assert not ['get_driver_note', 'driver_note_history', 'search_driver_note_history', 'get_driver_note_entry', 'check_driver_note_index', 'driver_note_index']
+----------------------------- Captured stdout call -----------------------------
+ITEM1 app=fresh action=get_driver_note project=opened status=403 carries_note_text=False body='{"detail":"This State DAG record is not available."}'
+ITEM1 app=fresh action=driver_note_history project=opened status=403 carries_note_text=False body='{"detail":"This State DAG record is not available."}'
+ITEM1 app=fresh action=search_driver_note_history project=opened status=403 carries_note_text=False body='{"detail":"This State DAG record is not available."}'
+ITEM1 app=fresh action=get_driver_note_entry project=opened status=403 carries_note_text=False body='{"detail":"This State DAG record is not available."}'
+ITEM1 app=fresh action=check_driver_note_index project=opened status=403 carries_note_text=False body='{"detail":"This State DAG record is not available."}'
+ITEM1 app=fresh action=driver_note_index project=opened status=403 carries_note_text=False body='{"detail":"This State DAG record is not available."}'
+ITEM1 app=fresh: 6 note reads x 1 opened project x 1 app; failed=['get_driver_note', 'driver_note_history', 'search_driver_note_history', 'get_driver_note_entry', 'check_driver_note_index', 'driver_note_index']
+/home/linxuhao/.AItelier/worktrees-scratch/gs10-mut/tests/integration/test_owner_ruled_notes.py:101: AssertionError: fresh: note reads that did not answer with the opened note: ['get_driver_note', 'driver_note_history', 'search_driver_note_history', 'get_driver_note_entry', 'check_driver_note_index', 'driver_note_index']
+E   AssertionError: main: note reads that did not answer with the opened note: ['get_driver_note', 'driver_note_history', 'search_driver_note_history', 'get_driver_note_entry', 'check_driver_note_index', 'driver_note_index']
+    assert not ['get_driver_note', 'driver_note_history', 'search_driver_note_history', 'get_driver_note_entry', 'check_driver_note_index', 'driver_note_index']
+----------------------------- Captured stdout call -----------------------------
+ITEM1 app=main action=get_driver_note project=opened status=403 carries_note_text=False body='{"detail":"This State DAG record is not available."}'
+ITEM1 app=main action=driver_note_history project=opened status=403 carries_note_text=False body='{"detail":"This State DAG record is not available."}'
+ITEM1 app=main action=search_driver_note_history project=opened status=403 carries_note_text=False body='{"detail":"This State DAG record is not available."}'
+ITEM1 app=main action=get_driver_note_entry project=opened status=403 carries_note_text=False body='{"detail":"This State DAG record is not available."}'
+ITEM1 app=main action=check_driver_note_index project=opened status=403 carries_note_text=False body='{"detail":"This State DAG record is not available."}'
+ITEM1 app=main action=driver_note_index project=opened status=403 carries_note_text=False body='{"detail":"This State DAG record is not available."}'
+ITEM1 app=main: 6 note reads x 1 opened project x 1 app; failed=['get_driver_note', 'driver_note_history', 'search_driver_note_history', 'get_driver_note_entry', 'check_driver_note_index', 'driver_note_index']
+/home/linxuhao/.AItelier/worktrees-scratch/gs10-mut/tests/integration/test_owner_ruled_notes.py:101: AssertionError: main: note reads that did not answer with the opened note: ['get_driver_note', 'driver_note_history', 'search_driver_note_history', 'get_driver_note_entry', 'check_driver_note_index', 'driver_note_index']
+E   core.state_commands.ProjectPrivate: This State DAG record is not available.
+/home/linxuhao/.AItelier/worktrees-scratch/gs10-mut/core/state_privacy.py:197: core.state_commands.ProjectPrivate: This State DAG record is not available.
+=============================== warnings summary ===============================
+../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/integration/test_owner_ruled_notes.py::test_item1_an_opened_projects_notes_are_public[fresh]
+FAILED tests/integration/test_owner_ruled_notes.py::test_item1_an_opened_projects_notes_are_public[main]
+FAILED tests/unit/test_undeclared_reader_is_untrusted.py::test_a_notebook_rebuilt_without_a_declaration_delivers_no_unopened_note
+3 failed, 501 passed, 1 warning in 85.98s (0:01:25)
+# END_UTC: 2026-09-24T07:08:32Z
+BARE_RC=1
+# MUTATION: notes_deny (diff in mut_notes_deny.diff, per-process ignition lines in mut_notes_deny.ignition)
+IGNITION_TOTAL=124
+RESTORED porcelain_lines=0

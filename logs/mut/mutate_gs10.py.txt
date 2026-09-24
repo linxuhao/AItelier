@@ -1,0 +1,146 @@
+"""Source mutations for the gs10 candidate, WITH ignition counters.
+
+usage: python3 mutate_gs10.py <name> <tree-root>
+
+Adapted from the r11 reviewer's mutate11.py. Each mutation replaces exactly one
+anchor (asserted count == 1) and inserts, into the mutated module, an atexit
+hook that appends "<module> <name> IGNITION=<n> pid=<pid>" to $MUT_IGN_FILE.
+The mutated line increments the counter every time it EXECUTES, so
+IGNITION > 0 proves the mutated code ran during the session.
+"""
+import re
+import sys
+
+name, root = sys.argv[1], sys.argv[2]
+PRIV = root + "/core/state_privacy.py"
+CMD = root + "/core/state_commands.py"
+GRAPH = root + "/core/state_graph.py"
+VERD = root + "/api/state_verdict.py"
+HTTP = root + "/api/state_http.py"
+TOOLS = root + "/api/state_graph_tools.py"
+MCPR = root + "/api/mcp_router.py"
+
+HEADER = (
+    "import atexit as _mut_atexit, os as _mut_os\n"
+    "_MUT_IGN = [0]\n"
+    "_mut_atexit.register(lambda: open(_mut_os.environ.get('MUT_IGN_FILE', '/tmp/mut_ign.txt'), 'a').write("
+    "'%s " + name + " IGNITION=%d pid=%d\\n' % (__name__, _MUT_IGN[0], _mut_os.getpid())))\n"
+)
+
+
+def header(path):
+    s = open(path).read()
+    if "_MUT_IGN = [0]" in s:
+        return
+    m = re.search(r"^from __future__ import [^\n]+\n", s, re.M)
+    if m:
+        s = s[:m.end()] + HEADER + s[m.end():]
+    else:
+        m = re.match(r'\s*("""[\s\S]*?"""|\'\'\'[\s\S]*?\'\'\')\n', s)
+        at = m.end() if m else 0
+        s = s[:at] + HEADER + s[at:]
+    open(path, "w").write(s)
+
+
+def sub(path, old, new):
+    s = open(path).read()
+    assert s.count(old) == 1, (name, "anchor count", s.count(old), old[:90])
+    open(path, "w").write(s.replace(old, new))
+    header(path)
+
+
+I = "_MUT_IGN[0] += 1"
+
+if name == "empty":            # CONTROL: no edit at all
+    pass
+elif name == "row_off":        # the row verdict removed: connections are never armed
+    sub(PRIV, "            verdict = _arm(connection, notebook)\n",
+        "            " + I + "  # MUTATION row_off\n"
+        "            import types as _t\n"
+        "            verdict = _t.SimpleNamespace(denied=False)\n")
+elif name in ("x_deco", "x_deco_row_off"):  # the method decoration refuses nothing
+    sub(PRIV, "            def wrapper(self, *args, **kwargs):\n                refuse_private_read(trust_of(self), action)\n                return function(self, *args, **kwargs)\n",
+        "            def wrapper(self, *args, **kwargs):\n                " + I + "  # MUTATION x_deco\n                return function(self, *args, **kwargs)\n")
+    s = open(PRIV).read()
+    old = "            async def wrapper(self, *args, **kwargs):\n                refuse_private_read(trust_of(self), action)\n"
+    assert s.count(old) == 1
+    open(PRIV, "w").write(s.replace(old, "            async def wrapper(self, *args, **kwargs):\n                " + I + "  # MUTATION x_deco\n"))
+    if name == "x_deco_row_off":  # and the row verdict removed as well
+        sub(PRIV, "            verdict = _arm(connection, notebook)\n",
+            "            " + I + "  # MUTATION row_off\n"
+            "            import types as _t\n"
+            "            verdict = _t.SimpleNamespace(denied=False)\n")
+elif name == "notes_allow":    # notebook tables allowed table-wide (no project row filter)
+    sub(PRIV, "        if action == sqlite3.SQLITE_READ:\n            table, column = arg1, arg2\n",
+        "        if action == sqlite3.SQLITE_READ:\n            table, column = arg1, arg2\n"
+        "            if table in NOTEBOOK_TABLES:\n"
+        "                " + I + "  # MUTATION notes_allow\n"
+        "                return sqlite3.SQLITE_OK\n")
+elif name == "notes_deny":     # notebook tables denied outright, opened or not
+    sub(PRIV, "    if notebook is not None:\n        opened = connection.execute(\n",
+        "    if notebook is not None:\n        " + I + "  # MUTATION notes_deny\n"
+        "    if False:\n        opened = connection.execute(\n")
+elif name == "mcp_else_true":  # no request object => trusted
+    sub(TOOLS, "    if request is None:\n        return False\n    from api.mcp_router import _mcp_may_read_private\n",
+        "    if request is None:\n        " + I + "  # MUTATION mcp_else_true\n        return True\n"
+        "    from api.mcp_router import _mcp_may_read_private\n")
+elif name == "mcp_reqfrom_trusted":  # _request_from's exception path hands back a trusted request
+    sub(MCPR, "    except Exception:\n        # No request object is NO CREDENTIAL.",
+        "    except Exception:\n        " + I + "  # MUTATION mcp_reqfrom_trusted\n"
+        "        import types as _t\n"
+        "        return _t.SimpleNamespace(app=_t.SimpleNamespace(state=_t.SimpleNamespace(_test_mode=True)),\n"
+        "                                  headers={}, cookies={}, client=None, url=None)\n"
+        "        # No request object is NO CREDENTIAL.")
+elif name == "lp_default":     # an untrusted store lists every project by default
+    sub(GRAPH, "        if not self.project_read_trusted:\n            public_only = True\n        elif public_only is None:\n",
+        "        if public_only is None:\n            " + I + "  # MUTATION lp_default\n"
+        "            public_only = False\n        elif public_only is None:\n")
+elif name == "x_exec":         # the execute() action verdict removed
+    sub(CMD, "        state_privacy.refuse_private_read(not anonymous, action)\n",
+        "        " + I + "  # MUTATION x_exec\n")
+elif name == "m1_unreadable":
+    sub(VERD, '        return Binding(False, "handler source is unreadable", delivery.actions)\n',
+        '        ' + I + '\n        return Binding(True, "M1: unreadable now approves", delivery.actions)\n')
+elif name == "c5_order":
+    sub(VERD, "        private = _private_delivery()\n        if private is not None:\n"
+              "            return private\n        return Binding(True, \"\", delivery.actions)\n",
+        "        " + I + "\n        return Binding(True, \"\", delivery.actions)  # MUTATION c5_order\n")
+elif name == "c2_arrival":
+    sub(HTTP, "        ran: list = []\n", "        ran: list = [True]  # MUTATION c2_arrival\n        " + I + "\n")
+elif name == "c6_handcall":
+    s = open(HTTP).read()
+    a = s.index('        overrides = getattr(getattr(request, "app", None), "dependency_overrides", None) or {}')
+    b = s.index('    def _call(service, action, arguments, *, write=False):')
+    hand = ('        overrides = getattr(getattr(request, "app", None), "dependency_overrides", None) or {}\n'
+            '        dependency = overrides.get(dependency, dependency)\n'
+            '        ran.append(True)\n'
+            '        ' + I + '\n'
+            '        import inspect as _i\n'
+            '        try:\n'
+            '            accepts = bool(_i.signature(dependency).parameters)\n'
+            '        except (TypeError, ValueError):\n'
+            '            accepts = True\n'
+            '        dependency(request) if accepts else dependency()  # MUTATION c6_handcall\n'
+            '        return AsyncExitStack()\n\n')
+    open(HTTP, "w").write(s[:a] + hand + s[b:])
+    header(HTTP)
+elif name == "c4_no_failclosed":
+    sub(VERD, "            # unresolvable delivery is a refusal, not an approval; `opaque` is\n"
+              "            # the observable, mutable state that records the derivation failure.\n"
+              "            self.opaque = True\n",
+        "            " + I + "  # MUTATION c4_no_failclosed\n")
+elif name == "c4_both":
+    sub(VERD, "        if delivery.followed:\n", "        " + I + "\n        if False and delivery.followed:  # MUTATION\n")
+    s = open(VERD).read()
+    old = ("            # unresolvable delivery is a refusal, not an approval; `opaque` is\n"
+           "            # the observable, mutable state that records the derivation failure.\n"
+           "            self.opaque = True\n")
+    assert s.count(old) == 1
+    open(VERD, "w").write(s.replace(old, "            " + I + "  # MUTATION c4_both\n"))
+elif name == "ban_17":         # a banned phrase in a file the card changed, outside a narrow base
+    p = root + "/api/state_graph_routers.py"
+    s = open(p).read()
+    open(p, "w").write(s + "\n# MUTATION ban_17: this gap is by " + "design\n")
+else:
+    raise SystemExit("unknown mutation " + name)
+print("MUTATION_APPLIED", name, root)

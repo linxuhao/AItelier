@@ -1,0 +1,23 @@
+diff --git a/core/state_commands.py b/core/state_commands.py
+index b8bca08e..f50251b7 100644
+--- a/core/state_commands.py
++++ b/core/state_commands.py
+@@ -4,6 +4,9 @@ This is not reflection RPC: only the handlers enumerated below can be called.
+ Extra fields (including status=VERIFIED and spoofed reviewer identity) fail.
+ """
+ from __future__ import annotations
++import atexit as _mut_atexit, os as _mut_os
++_MUT_IGN = [0]
++_mut_atexit.register(lambda: open(_mut_os.environ.get('MUT_IGN_FILE', '/tmp/mut_ign.txt'), 'a').write('%s x_exec IGNITION=%d pid=%d\n' % (__name__, _MUT_IGN[0], _mut_os.getpid())))
+ 
+ from typing import Any, Literal
+ 
+@@ -806,7 +809,7 @@ def execute(service, action: str, arguments: dict, *, allow_write: bool = False)
+     anonymous = _anonymous(service)
+     if anonymous and action in READ_REQUESTS:
+         from core import state_privacy
+-        state_privacy.refuse_private_read(not anonymous, action)
++        _MUT_IGN[0] += 1  # MUTATION x_exec
+         _refuse_if_project_not_public(service, action, arguments)
+ 
+     try:

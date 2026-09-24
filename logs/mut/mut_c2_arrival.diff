@@ -1,0 +1,22 @@
+diff --git a/api/state_http.py b/api/state_http.py
+index 71c242ca..b7324022 100644
+--- a/api/state_http.py
++++ b/api/state_http.py
+@@ -1,4 +1,7 @@
+ """State-only HTTP routes reusable without importing the workflow host."""
++import atexit as _mut_atexit, os as _mut_os
++_MUT_IGN = [0]
++_mut_atexit.register(lambda: open(_mut_os.environ.get('MUT_IGN_FILE', '/tmp/mut_ign.txt'), 'a').write('%s c2_arrival IGNITION=%d pid=%d\n' % (__name__, _MUT_IGN[0], _mut_os.getpid())))
+ import inspect
+ from functools import partial
+ from typing import Annotated, Literal
+@@ -217,7 +220,8 @@ def create_state_router(service_dependency, access_dependency, read_dependency=N
+         # authorization dependency executed (append to `ran`), or the reader
+         # approved a public declaration (public-clearance). Arriving here records
+         # nothing - the arrival-count was the metric that hid the leak.
+-        ran: list = []
++        ran: list = [True]  # MUTATION c2_arrival
++        _MUT_IGN[0] += 1
+         stacks: list = []
+         decision = None
+         try:

@@ -1,0 +1,64 @@
+diff --git a/api/state_http.py b/api/state_http.py
+index 71c242ca..421ec507 100644
+--- a/api/state_http.py
++++ b/api/state_http.py
+@@ -1,4 +1,7 @@
+ """State-only HTTP routes reusable without importing the workflow host."""
++import atexit as _mut_atexit, os as _mut_os
++_MUT_IGN = [0]
++_mut_atexit.register(lambda: open(_mut_os.environ.get('MUT_IGN_FILE', '/tmp/mut_ign.txt'), 'a').write('%s c6_handcall IGNITION=%d pid=%d\n' % (__name__, _MUT_IGN[0], _mut_os.getpid())))
+ import inspect
+ from functools import partial
+ from typing import Annotated, Literal
+@@ -94,43 +97,15 @@ def create_state_router(service_dependency, access_dependency, read_dependency=N
+         """
+         overrides = getattr(getattr(request, "app", None), "dependency_overrides", None) or {}
+         dependency = overrides.get(dependency, dependency)
+-
+-        def _parent(v=Depends(dependency)):
+-            return v
+-
+-        # D becomes a real SUB-dependency of a trivial parent: that is the only
+-        # way FastAPI executes it (solve_dependencies runs a dependant's
+-        # sub-dependencies, not its own `call`).
+-        dependant = get_dependant(path=request.url.path, call=_parent, scope="function")
+         ran.append(True)
+-        # The stack is created here and returned OPEN: the guard is a yield
+-        # dependency, so it closes this AFTER the handler has run — the same
+-        # order in which a plain `Depends(D)` route closes D's teardown.
+-        stack = AsyncExitStack()
+-        solved = await solve_dependencies(
+-                request=request, dependant=dependant, body=None,
+-                background_tasks=None, response=None,
+-                dependency_overrides_provider=request.app,
+-                dependency_cache={}, async_exit_stack=stack,
+-                embed_body_fields=False)
+-        # A released verdict leaves no refusal. A refused one either propagated as
+-        # an exception above (handled exactly like a route dependency) or is
+-        # recorded on the solved result; reproduce it so the guard denies exactly
+-        # as a real `Depends(D)` route would.
+-        errors = getattr(solved, "errors", None)
+-        if errors:
+-            raise errors[0] if isinstance(errors, (list, tuple)) else errors
+-        response = getattr(solved, "response", None)
+-        status = getattr(solved, "status_code", None)
+-        if status is None and response is not None:
+-            status = getattr(response, "status_code", None)
+-        if status is not None and 400 <= int(status) < 600:
+-            headers = getattr(solved, "headers", None)
+-            if headers is None and response is not None:
+-                headers = getattr(response, "headers", None)
+-            raise HTTPException(status_code=int(status),
+-                                headers=dict(headers) if headers else None)
+-        return stack
++        _MUT_IGN[0] += 1
++        import inspect as _i
++        try:
++            accepts = bool(_i.signature(dependency).parameters)
++        except (TypeError, ValueError):
++            accepts = True
++        dependency(request) if accepts else dependency()  # MUTATION c6_handcall
++        return AsyncExitStack()
+ 
+     def _call(service, action, arguments, *, write=False):
+         try:

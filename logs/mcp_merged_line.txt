@@ -1,0 +1,13 @@
+# CMD: git grep -n -B2 -A2 project_read_trusted=mcp_read_trust(request) -- api/state_graph_tools.py
+# CWD: /home/linxuhao/.AItelier/worktrees-scratch/gs10-cand
+# TREE_HEAD: 6346a95d86ac8e67b76d6a10687c06f3a90b4823
+# TREE_DIRTY: 
+# CONTAINER: docker run --rm --init -m 3g --name gs10-mcp_merged_line-3949678 (+ .git mounted read-only at its host path) aitelier:latest
+# START_UTC: 2026-09-24T07:13:48Z
+api/state_graph_tools.py-45-                            actor=authenticated_actor(request),
+api/state_graph_tools.py-46-                            runtime_factory=lambda: (get_skillflow(), get_config_registry()),
+api/state_graph_tools.py:47:                            project_read_trusted=mcp_read_trust(request))
+api/state_graph_tools.py-48-
+api/state_graph_tools.py-49-    def invoke(action, arguments, write):
+# END_UTC: 2026-09-24T07:13:49Z
+BARE_RC=0

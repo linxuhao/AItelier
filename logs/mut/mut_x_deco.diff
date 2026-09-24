@@ -1,0 +1,29 @@
+diff --git a/core/state_privacy.py b/core/state_privacy.py
+index 9f1765b3..7e523c5e 100644
+--- a/core/state_privacy.py
++++ b/core/state_privacy.py
+@@ -48,6 +48,9 @@ UNTRUSTED, and a store built on an ``UntrustedDatabase`` is untrusted whatever
+ it declares, because the handle - not the flag - decides which rows exist.
+ """
+ from __future__ import annotations
++import atexit as _mut_atexit, os as _mut_os
++_MUT_IGN = [0]
++_mut_atexit.register(lambda: open(_mut_os.environ.get('MUT_IGN_FILE', '/tmp/mut_ign.txt'), 'a').write('%s x_deco IGNITION=%d pid=%d\n' % (__name__, _MUT_IGN[0], _mut_os.getpid())))
+ 
+ from contextlib import contextmanager
+ import functools
+@@ -132,12 +135,12 @@ def writer_only_read(action: str):
+         if inspect.iscoroutinefunction(function):
+             @functools.wraps(function)
+             async def wrapper(self, *args, **kwargs):
+-                refuse_private_read(trust_of(self), action)
++                _MUT_IGN[0] += 1  # MUTATION x_deco
+                 return await function(self, *args, **kwargs)
+         else:
+             @functools.wraps(function)
+             def wrapper(self, *args, **kwargs):
+-                refuse_private_read(trust_of(self), action)
++                _MUT_IGN[0] += 1  # MUTATION x_deco
+                 return function(self, *args, **kwargs)
+         wrapper.__state_read_action__ = action
+         # `functools.wraps` copies `__wrapped__`, which would expose the

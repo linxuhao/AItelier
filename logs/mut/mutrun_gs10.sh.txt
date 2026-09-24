@@ -1,0 +1,29 @@
+#!/bin/bash
+# usage: mutrun_gs10.sh <mutation> <logname>
+# Applies ONE mutation to the mutation worktree gs10-mut, records the diff, runs
+# the fixed file set in a throwaway container with a bare exit code, records the
+# ignition, then restores the tree with `git checkout -- .` and proves it clean.
+T=/home/linxuhao/.AItelier/worktrees-scratch/gs10-mut
+TOOLS=/home/linxuhao/.AItelier/worktrees-scratch/gs10-tools
+L=/home/linxuhao/.AItelier/worktrees-scratch/gs10-logs/mut
+mkdir -p $L
+M=$1; N=$2
+IGN=$L/$N.ignition
+rm -f $IGN
+git -C $T checkout -q -- .
+PRE=$(git -C $T status --porcelain | wc -l)
+if [ "$PRE" != "0" ]; then echo "tree not clean before $M"; exit 99; fi
+python3 $TOOLS/mutate_gs10.py $M $T > $L/$N.apply 2>&1 || { echo "apply failed $M"; cat $L/$N.apply; exit 98; }
+git -C $T diff > $L/$N.diff
+FILES="tests/integration/test_author_surface_generator.py tests/integration/test_coverage_measures_judged_not_reached.py tests/integration/test_no_unfalsifiable_guarantees.py tests/integration/test_private_delivery_before_early_ok.py tests/integration/test_verdict_runs_on_fastapi_machinery.py tests/integration/test_unreadable_delivery_is_refused.py tests/integration/test_state_verdict_is_effective.py tests/integration/test_owner_ruled_notes.py tests/unit/test_state_declaration_binding.py tests/unit/test_private_read_verdict_at_execution.py tests/unit/test_project_privacy_rev3.py tests/unit/test_state_project_privacy.py tests/unit/test_state_read_visibility.py tests/unit/test_undeclared_reader_is_untrusted.py tests/unit/test_every_private_table_reader_is_judged_at_the_read.py tests/unit/test_mcp_router.py tests/unit/test_mcp_transport_security.py tests/integration/test_state_graph_entrypoints.py tests/contracts/director_messaging"
+EXTRA_ENV="-e MUT_IGN_FILE=$IGN" $TOOLS/run.sh $T $L/$N.txt python -m pytest -p no:cacheprovider -q -rf --tb=line $FILES
+RC=$?
+if [ -f $IGN ]; then TOTAL=$(awk '{split($3,a,"="); s+=a[2]} END {print s+0}' $IGN); else TOTAL=0; fi
+{
+  echo "# MUTATION: $M (diff in $N.diff, per-process ignition lines in $N.ignition)"
+  echo "IGNITION_TOTAL=$TOTAL"
+} >> $L/$N.txt
+git -C $T checkout -q -- .
+POST=$(git -C $T status --porcelain | wc -l)
+echo "RESTORED porcelain_lines=$POST" >> $L/$N.txt
+echo "$N mutation=$M BARE_RC=$RC IGNITION=$TOTAL restored_porcelain=$POST FAILED=$(grep -c '^FAILED' $L/$N.txt)"

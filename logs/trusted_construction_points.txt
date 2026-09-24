@@ -1,0 +1,28 @@
+# CMD: git grep -n project_read_trusted= -- core api aitelier scripts examples cli mutation_gate.py
+# CWD: /home/linxuhao/.AItelier/worktrees-scratch/gs10-cand
+# TREE_HEAD: 6346a95d86ac8e67b76d6a10687c06f3a90b4823
+# TREE_DIRTY: 
+# CONTAINER: docker run --rm --init -m 3g --name gs10-trusted_construction_points-3949350 (+ .git mounted read-only at its host path) aitelier:latest
+# START_UTC: 2026-09-24T07:13:48Z
+aitelier/writing_bench/adapter.py:31:                                  project_read_trusted=True)
+api/state_graph_routers.py:29:                        project_read_trusted=may_read_private(request))
+api/state_graph_tools.py:47:                            project_read_trusted=mcp_read_trust(request))
+api/state_only.py:51:                           project_read_trusted=True)
+core/director_messaging.py:144:                          project_read_trusted=self.project_read_trusted)
+core/state_changes.py:227:    service = StateService(db, ws, sf, registry={}, project_read_trusted=True)
+core/state_commands.py:667:    Trust only comes from an explicit ``project_read_trusted=True`` at a real
+core/state_graph.py:333:    declared ``project_read_trusted=True`` on a real handle keeps that handle.
+core/state_meta.py:27:                               project_read_trusted=True)
+core/state_migration.py:211:                             project_read_trusted=True)
+core/state_service.py:57:                 runtime_factory=None, project_read_trusted=_UNDECLARED_TRUST):
+core/state_service.py:68:                "StateService requires an explicit project_read_trusted=True|False: "
+core/state_service.py:70:        self.store = StateGraphStore(db, project_read_trusted=project_read_trusted)
+core/state_service.py:81:                                              project_read_trusted=project_read_trusted)
+core/state_service.py:96:                                                          project_read_trusted=project_read_trusted)
+examples/state_graph_demo.py:59:        graph = StateGraphStore(db, project_read_trusted=True)
+examples/state_graph_demo.py:128:        graph = StateGraphStore(DBManager(db.db_path), project_read_trusted=True)
+mutation_gate.py:40:                             project_read_trusted=True)
+scripts/check_driver_note_index.py:32:        store = StateGraphStore(StateDatabase(database), project_read_trusted=True)
+scripts/check_driver_note_index.py:34:                                 project_read_trusted=True)
+# END_UTC: 2026-09-24T07:13:48Z
+BARE_RC=0

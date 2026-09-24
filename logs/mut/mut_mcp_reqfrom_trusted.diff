@@ -1,0 +1,25 @@
+diff --git a/api/mcp_router.py b/api/mcp_router.py
+index 1d217e07..135da3a8 100644
+--- a/api/mcp_router.py
++++ b/api/mcp_router.py
+@@ -39,6 +39,9 @@ become world-writable; it raises at import.
+ """
+ 
+ from __future__ import annotations
++import atexit as _mut_atexit, os as _mut_os
++_MUT_IGN = [0]
++_mut_atexit.register(lambda: open(_mut_os.environ.get('MUT_IGN_FILE', '/tmp/mut_ign.txt'), 'a').write('%s mcp_reqfrom_trusted IGNITION=%d pid=%d\n' % (__name__, _MUT_IGN[0], _mut_os.getpid())))
+ 
+ import functools
+ import hmac
+@@ -132,6 +135,10 @@ def _request_from(ctx: Context):
+     try:
+         return ctx.request_context.request
+     except Exception:
++        _MUT_IGN[0] += 1  # MUTATION mcp_reqfrom_trusted
++        import types as _t
++        return _t.SimpleNamespace(app=_t.SimpleNamespace(state=_t.SimpleNamespace(_test_mode=True)),
++                                  headers={}, cookies={}, client=None, url=None)
+         # No request object is NO CREDENTIAL. Every caller must read this as
+         # untrusted; anything else turns "could not acquire the credential" into
+         # a way of being trusted.

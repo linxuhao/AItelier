@@ -1,0 +1,22 @@
+diff --git a/api/state_graph_tools.py b/api/state_graph_tools.py
+index 94e43372..0d79cdd2 100644
+--- a/api/state_graph_tools.py
++++ b/api/state_graph_tools.py
+@@ -1,4 +1,7 @@
+ """MCP adapters for the same typed State DAG commands used by REST/driver."""
++import atexit as _mut_atexit, os as _mut_os
++_MUT_IGN = [0]
++_mut_atexit.register(lambda: open(_mut_os.environ.get('MUT_IGN_FILE', '/tmp/mut_ign.txt'), 'a').write('%s mcp_else_true IGNITION=%d pid=%d\n' % (__name__, _MUT_IGN[0], _mut_os.getpid())))
+ import inspect
+ import anyio
+ 
+@@ -19,7 +22,8 @@ def mcp_read_trust(request) -> bool:
+     (an exception swallowed into None) must never be a way into private reads.
+     """
+     if request is None:
+-        return False
++        _MUT_IGN[0] += 1  # MUTATION mcp_else_true
++        return True
+     from api.mcp_router import _mcp_may_read_private
+     return _mcp_may_read_private(request)
+ 

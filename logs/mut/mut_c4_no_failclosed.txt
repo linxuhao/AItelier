@@ -1,0 +1,37 @@
+# CMD: python -m pytest -p no:cacheprovider -q -rf --tb=line tests/integration/test_author_surface_generator.py tests/integration/test_coverage_measures_judged_not_reached.py tests/integration/test_no_unfalsifiable_guarantees.py tests/integration/test_private_delivery_before_early_ok.py tests/integration/test_verdict_runs_on_fastapi_machinery.py tests/integration/test_unreadable_delivery_is_refused.py tests/integration/test_state_verdict_is_effective.py tests/integration/test_owner_ruled_notes.py tests/unit/test_state_declaration_binding.py tests/unit/test_private_read_verdict_at_execution.py tests/unit/test_project_privacy_rev3.py tests/unit/test_state_project_privacy.py tests/unit/test_state_read_visibility.py tests/unit/test_undeclared_reader_is_untrusted.py tests/unit/test_every_private_table_reader_is_judged_at_the_read.py tests/unit/test_mcp_router.py tests/unit/test_mcp_transport_security.py tests/integration/test_state_graph_entrypoints.py tests/contracts/director_messaging
+# CWD: /home/linxuhao/.AItelier/worktrees-scratch/gs10-mut
+# TREE_HEAD: 6346a95d86ac8e67b76d6a10687c06f3a90b4823
+# TREE_DIRTY:  M api/state_verdict.py;
+# CONTAINER: docker run --rm --init -m 3g --name gs10-mut_c4_no_failclosed-4000586 (+ .git mounted read-only at its host path) aitelier:latest
+# START_UTC: 2026-09-24T07:19:20Z
+........................................................................ [ 14%]
+........................................................................ [ 28%]
+.F....F................................................................. [ 42%]
+........................................................................ [ 57%]
+........................................................................ [ 71%]
+........................................................................ [ 85%]
+........................................................................ [100%]
+=================================== FAILURES ===================================
+E   AssertionError: ('public_beside_unresolvable', Binding(ok=True, reason='', delivered=frozenset({'get_graph'})))
+    assert True is False
+     +  where True = Binding(ok=True, reason='', delivered=frozenset({'get_graph'})).ok
+/home/linxuhao/.AItelier/worktrees-scratch/gs10-mut/tests/integration/test_unreadable_delivery_is_refused.py:65: AssertionError: ('public_beside_unresolvable', Binding(ok=True, reason='', delivered=frozenset({'get_graph'})))
+E   AssertionError: ('public_beside_unresolvable', 200, '{"graph":{"project":{"project_id":"author-surface-open","title":"author-surface-open","source_project_id":null,"created_at":"2026-09-24T07:19:26.919714+00:00"},"nodes":[]},"mail":{"schema":"aitelier.d')
+    assert 200 == 403
+     +  where 200 = <Response [200 OK]>.status_code
+/home/linxuhao/.AItelier/worktrees-scratch/gs10-mut/tests/integration/test_unreadable_delivery_is_refused.py:83: AssertionError: ('public_beside_unresolvable', 200, '{"graph":{"project":{"project_id":"author-surface-open","title":"author-surface-open","source_project_id":null,"created_at":"2026-09-24T07:19:26.919714+00:00"},"nodes":[]},"mail":{"schema":"aitelier.d')
+=============================== warnings summary ===============================
+../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/integration/test_unreadable_delivery_is_refused.py::TestTheBinderRefusesEveryHidingShape::test_the_binding_refuses[public_beside_unresolvable]
+FAILED tests/integration/test_unreadable_delivery_is_refused.py::TestTheGuardRefusesEveryHidingShape::test_anonymous_request_gets_403_not_the_private_body[public_beside_unresolvable]
+2 failed, 502 passed, 1 warning in 68.86s (0:01:08)
+# END_UTC: 2026-09-24T07:20:33Z
+BARE_RC=1
+# MUTATION: c4_no_failclosed (diff in mut_c4_no_failclosed.diff, per-process ignition lines in mut_c4_no_failclosed.ignition)
+IGNITION_TOTAL=11
+RESTORED porcelain_lines=0

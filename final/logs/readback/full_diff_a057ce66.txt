@@ -1,0 +1,2586 @@
+# CMD: git diff a057ce66 96721904a7d9b6b461109cfcded6d0abd03f469c
+# CWD: /home/linxuhao/.AItelier/worktrees-scratch/ga10
+# HEAD: 96721904a7d9b6b461109cfcded6d0abd03f469c porcelain_lines=4
+# RUNNER: host
+# ENV: (none)
+# STARTED: 2026-09-24T06:50:07Z
+diff --git a/aitelier/tools/run_tests/impl.py b/aitelier/tools/run_tests/impl.py
+index 56922fba..766b7f33 100644
+--- a/aitelier/tools/run_tests/impl.py
++++ b/aitelier/tools/run_tests/impl.py
+@@ -744,8 +744,8 @@ def _unmeasured_declaration(text: str) -> dict | None:
+     A declaration is a whole line that STARTS with the prefix — a log echo of
+     the prefix in the middle of a line is not a record — carrying a JSON
+     object whose `state` is one of `_REPO_GATE_UNMEASURED_STATES`.
+-    `state: "failed"` is not one of them: a gate that failed measured
+-    absence.
++    `state: "failed"` is not one of them: a gate that failed measured its
++    subject, and a measured failure is not an absence.
+     """
+     for line in str(text).splitlines():
+         if not line.startswith(_REPO_GATE_UNMEASURED_PREFIX):
+diff --git a/core/scheduler.py b/core/scheduler.py
+index 0f2f57ff..a9d28fc4 100644
+--- a/core/scheduler.py
++++ b/core/scheduler.py
+@@ -24,26 +24,25 @@ from core import gate_deferral
+ 
+ # NB-1 runaway-loop guard: max total step executions before a run is force-failed.
+ # A normal DPE run is well under this; this only trips on a non-converging loop.
+-#
+-# The constant is defined here, not merely mentioned: the tick's whole-run valve
+-# reads it inside a `try` whose `except Exception: pass` swallows a NameError, so
+-# a MISSING name made the whole valve block — whole-run AND per-instance —
+-# silently dead code. That is why
+-# `test_one_instance_re_executed_forever_fails_the_run` was red: 227 claims on
+-# one instance could never fail the run, because the guard never evaluated.
++# The constant is defined here so the tick's whole-run valve block evaluates:
++# a NameError inside `try { except Exception: pass }` would silently make the
++# entire guard dead. The per-instance guard test that would catch this is
++# `test_one_instance_re_executed_forever_fails_the_run`.
+ import os as _os
+ _MAX_STEPS_PER_RUN = int(_os.getenv("AITELIER_MAX_STEPS_PER_RUN", "300"))
+ # Per-instance companion: how often ONE step instance may be re-claimed before
+ # the run is killed with a message blaming the step.
+ #
+ # The deferral mechanism parks the run via the tick's early return at
+-# state == "silent" (line ~1228). Because the tick returns BEFORE the valve
+-# check (~1283), a step instance is never re-claimed during a live episode
+-# (measured: 1 claim per instance). The valve therefore has nothing to
+-# suppress on the deferral path — the prior bypass in guard_per_instance_valve
+-# was unreachable code and has been removed.
++# `deferral["state"] == "silent"` in `_run_skillflow_tick`. Because the tick
++# returns BEFORE the valve check (`guard_per_instance_valve`), a step instance
++# is never re-claimed during a live episode (measured: 1 claim per instance).
++# The valve therefore has nothing to suppress on the deferral path — the prior
++# bypass in guard_per_instance_valve was unreachable code and has been removed.
+ # Proved by: tests/unit/test_gate_deferral_execution_points.py (claims == 0
+-# while deferring) and tests/unit/test_gate_deferral_is_accounted.py.
++# while deferring), tests/unit/test_gate_deferral_is_accounted.py, and
++# tests/skillflow/test_coding_impl_gate_absence.py (this tick, driven on real
++# step rows: one `claimed` event per instance).
+ 
+ 
+ _MAX_CLAIMS_PER_INSTANCE = int(_os.getenv("AITELIER_MAX_CLAIMS_PER_INSTANCE", "20"))
+diff --git a/docs/repo-gate-unmeasured-protocol.md b/docs/repo-gate-unmeasured-protocol.md
+index 846a038c..681653e9 100644
+--- a/docs/repo-gate-unmeasured-protocol.md
++++ b/docs/repo-gate-unmeasured-protocol.md
+@@ -185,7 +185,7 @@ How the two execution points read it:
+ * `AItelierSkillFlow.advance_run` — the tick is not the only driver. The
+   host refuses to advance a run whose gate is silent, because advancing is
+   what routes the absence back into the implement loop.
+-* `core/scheduler.py:31` `_MAX_CLAIMS_PER_INSTANCE` — its own comment states
++* `core/scheduler.py` `_MAX_CLAIMS_PER_INSTANCE` — its own comment states
+   the premise: one instance is re-claimed only when something reset a
+   completed row back to `pending`. A deferral does NOT do that: it releases
+   no claim, it does not move the row, and the tick returns at
+@@ -274,9 +274,8 @@ The absence accounting (round 5), in
+ | widen the wait to 24h / 1e9 | `test_the_wait_cannot_be_widened_until_the_ceiling_disappears` |
+ | remove the episode ceiling | `test_the_episode_ceiling_cannot_be_removed` |
+ | force `hold_remaining` to 0 | `test_hold_remaining_is_not_constant_zero` |
+-| delete the per-instance valve guard | `test_the_per_instance_valve_does_not_fire_while_an_episode_is_live`; `test_the_episode_ceiling_replaces_the_valve_that_it_disarmed` |
+ 
+-## The M21 family, stated honestly (round 8)
++## The M21 family (rounds 8-10)
+ 
+ The card's literal M21 (`startswith` -> `in`, the `line[len(prefix):]` slice
+ UNCHANGED) IS observable, and the r7 claim that it was inert was wrong. It is
+@@ -290,11 +289,11 @@ the same on the case channel. Both re-run the REAL reader with the card's
+ literal single-line edit applied.
+ 
+ The mutation catalog (`tools/mutation_catalog/mutations.py`) carries `M21` and
+-`M21b` verbatim, and `run_mutations.py` applies exactly those edits to a copy
+-of the tree. The `in` + `line.index(...)` PAIR is a SECOND, blunter mutation
+-(`M21PAIR` / `M21BPAIR`, applied in-process as `_apply_m21_pair`), not the
+-card's M21 — the name says which one it is.
+-noise.
++`M21b` verbatim, and `run_mutations.py` applies exactly those edits to a
++detached `git worktree` of the committed tree, one worktree per mutation. The
++`in` + `line.index(...)` PAIR is a SECOND, blunter mutation (`M21PAIR` /
++`M21BPAIR`, applied in-process as `_apply_m21_pair`), not the card's M21 — the
++name says which one it is.
+ 
+ 
+ 
+diff --git a/final/capture.py b/final/capture.py
+new file mode 100644
+index 00000000..4a679a7f
+--- /dev/null
++++ b/final/capture.py
+@@ -0,0 +1,111 @@
++"""Run ONE command and write its log file; this is how every log under
++`final/logs/` except `final/logs/mutations/` was produced (the mutation
++runner writes its own).
++
++    python3 final/capture.py <log> [--container NAME] [--cwd DIR] \
++        [ENV=VAL ...] -- <cmd ...>
++
++The log holds: the command, the real cwd, the tree's HEAD and porcelain line
++count, the runner (the full `docker run` argv, or `host`), the environment
++overrides, the sha256 of every argument that is an existing file (probe
++scripts), start and end time, the command's combined output, and
++`BARE_RC=<exit code>`, the exit code of the command itself. capture.py exits
++with that code.
++
++With `--container NAME` the command runs in a throwaway container
++(`docker run --rm --init -m 3g`, never the production `aitelier`
++container), with the repository and `~/.AItelier` mounted at their host
++paths so a git worktree's gitdir resolves. Without it, the command runs on
++the host.
++"""
++from __future__ import annotations
++
++import datetime
++import hashlib
++import os
++import subprocess
++import sys
++from pathlib import Path
++
++HOME = "/home/linxuhao"
++IMAGE = "aitelier:latest"
++
++
++def _now() -> str:
++    return datetime.datetime.now(datetime.timezone.utc).strftime(
++        "%Y-%m-%dT%H:%M:%SZ")
++
++
++def _git(cwd: str, *args: str) -> str:
++    proc = subprocess.run(["git", "-C", cwd, *args], capture_output=True,
++                          text=True)
++    return proc.stdout.strip() if proc.returncode == 0 else f"(git rc={proc.returncode})"
++
++
++def main(argv: list[str]) -> int:
++    log = Path(argv[0]).resolve()
++    argv = argv[1:]
++    container = None
++    cwd = os.getcwd()
++    env: dict[str, str] = {}
++    while argv and argv[0] != "--":
++        head = argv.pop(0)
++        if head == "--container":
++            container = argv.pop(0)
++        elif head == "--cwd":
++            cwd = str(Path(argv.pop(0)).resolve())
++        else:
++            key, _, value = head.partition("=")
++            env[key] = value
++    cmd = argv[1:]
++    if container:
++        base_env = {"HOME": HOME, "PYTHONPATH": cwd,
++                    "PYTHONDONTWRITEBYTECODE": "1",
++                    "SEARXNG_URL": "http://linxuhaserver:8888"}
++        base_env.update(env)
++        run = ["docker", "run", "--rm", "--init", "-m", "3g",
++               "--name", container, "--network", "aitelier_default",
++               "-u", "1000:1000"]
++        for key, value in base_env.items():
++            run += ["-e", f"{key}={value}"]
++        run += ["-v", f"{HOME}/AItelier:/app",
++                "-v", f"{HOME}/AItelier:{HOME}/AItelier",
++                "-v", f"{HOME}/.AItelier:{HOME}/.AItelier",
++                "-w", cwd, IMAGE, *cmd]
++        runner = " ".join(run)
++        child_env = None
++    else:
++        run = cmd
++        runner = "host"
++        child_env = {**os.environ, **env}
++    hashes = []
++    for arg in cmd:
++        path = Path(cwd, arg) if not os.path.isabs(arg) else Path(arg)
++        if path.is_file():
++            digest = hashlib.sha256(path.read_bytes()).hexdigest()
++            hashes.append(f"{arg} sha256={digest}")
++    started = _now()
++    proc = subprocess.run(run, cwd=cwd, env=child_env, capture_output=True,
++                          text=True)
++    ended = _now()
++    porcelain = _git(cwd, "status", "--porcelain")
++    header = [
++        f"# CMD: {' '.join(cmd)}",
++        f"# CWD: {cwd}",
++        f"# HEAD: {_git(cwd, 'rev-parse', 'HEAD')} "
++        f"porcelain_lines={len(porcelain.splitlines()) if porcelain else 0}",
++        f"# RUNNER: {runner}",
++        f"# ENV: {' '.join(f'{k}={v}' for k, v in env.items()) or '(none)'}",
++        *(f"# FILE: {h}" for h in hashes),
++        f"# STARTED: {started}",
++    ]
++    log.parent.mkdir(parents=True, exist_ok=True)
++    log.write_text("\n".join(header) + "\n" + proc.stdout + proc.stderr
++                   + f"# ENDED: {ended}\nBARE_RC={proc.returncode}\n",
++                   encoding="utf-8")
++    print(f"{log.name} BARE_RC={proc.returncode}")
++    return proc.returncode
++
++
++if __name__ == "__main__":
++    raise SystemExit(main(sys.argv[1:]))
+diff --git a/final/probes/p_rows.py b/final/probes/p_rows.py
+new file mode 100644
+index 00000000..b4faaf97
+--- /dev/null
++++ b/final/probes/p_rows.py
+@@ -0,0 +1,18 @@
++"""Probe: step rows + run state after driving the real tick, with a mutation
++optionally applied to the tree beforehand. usage: python p_rows.py"""
++import sys, tempfile, json
++from pathlib import Path
++import pytest
++sys.path.insert(0, ".")
++import tests.skillflow.test_coding_impl_gate_absence as t
++from core import gate_deferral
++with pytest.MonkeyPatch.context() as mp:
++    tmp = Path(tempfile.mkdtemp())
++    sf, run_id = t._wire(tmp, mp, episode_max=100000, wait=1,
++                         counter=tmp / "c.txt", tail=t._SILENT_TAIL)
++    res = t._drive(sf, run_id, mp, ticks=12, clock_step=1)
++    print("DRIVE", res)
++    print("RUN", {k: v for k, v in sf.get_run(run_id).items() if k in ("status", "current_node", "error_reason")})
++    for r in t._step_rows(sf, run_id)[1]:
++        print("ROW", {k: r[k] for k in ("id", "step_id", "status", "retry_count", "release_count", "claim_epoch")})
++    print("CLAIMS", t._claims_per_instance(sf, run_id))
+diff --git a/tests/skillflow/test_coding_impl_gate_absence.py b/tests/skillflow/test_coding_impl_gate_absence.py
+index 55946e0c..ff1ed0ae 100644
+--- a/tests/skillflow/test_coding_impl_gate_absence.py
++++ b/tests/skillflow/test_coding_impl_gate_absence.py
+@@ -1,31 +1,40 @@
+ # tests/skillflow/test_coding_impl_gate_absence.py
+ #
+ # The absence accounting, measured on the REAL `configs/coding_impl.yaml`, the
+-# REAL `AItelierSkillFlow` and the REAL `run_tests` tool, driven in the order
+-# `core/scheduler.py:_run_skillflow_tick` uses — INCLUDING its inline-tool
+-# drain (drain loop at lines 1299-1306).
++# REAL `AItelierSkillFlow` and the REAL `run_tests` tool, driven by the REAL
++# `core/scheduler.py:_run_skillflow_tick` — one call per tick. The tick's own
++# deferral hold (`observe_run` → `silent` → return), its inline-tool drain, its
++# claim phase and its expiry branch are the production code; so is the host's
++# hold inside `AItelierSkillFlow.advance_run`, which the tick reaches through
++# `_advance_off_the_loop`. The only stand-in is the LLM agent that would run a
++# claimed `implement` step (`aitelier.runner.AgentStepRunner`): it writes one
++# code change through the real tool path and returns.
+ #
+ # The subject is a gate that NEVER produces a verdict — NOT a fixture that lets
+-# go on the Nth call (the forbidden technique: `if [ "$n" -lt 2 ]`). The three
+-# poles below are the SAME never-answering gate; only the episode's wall-clock
+-# ceiling differs, because that is the only knob that is supposed to matter.
++# go on the Nth call (the forbidden technique: `if [ "$n" -lt 2 ]`). The poles
++# below are the SAME never-answering gate; only the episode's wall-clock
++# ceiling and the observation window differ, because those are the only knobs
++# that are supposed to matter.
+ #
+ # What must hold at every pole, including the one where the absence outlives
+ # the ceiling:
+ #
+ #   * `implement_runs == 1` — the absence spends no implement cycle, ever;
+ #   * the run NEVER ends on `Cycle limit exceeded`;
+-#   * when it does end, it ends NAMING THE ABSENCE.
++#   * when it does end, it ends NAMING THE ABSENCE;
++#   * the rows the hold parks — the step rows and the run row — are left as
++#     the absence found them (`_assert_test_row_untouched`).
+ #
+-# ROUND 6's correction, and the whole reason the drain is here: round 5's
+-# driver called `advance_run` once per tick and did not drain, while the real
+-# tick drains consecutive inline tool steps IN ONE TICK — it carries the run
+-# from `test` through `test_evidence`/`test_outcome` and on to `implement`.
+-# A driver that does not drain reports implement_runs=2 for a run that spends
+-# 1: it proves a world that does not exist. That one tick is the entire gap
+-# between 1 and 2, and it is why the round-5 `_drive` could not see the dead
+-# `from_file` edge on `test_evidence`.
++# ROUND 6's correction, and the reason the drain matters: round 5's driver
++# called `advance_run` once per tick and did not drain, while the real tick
++# drains consecutive inline tool steps IN ONE TICK — it carries the run from
++# `test` through `test_evidence`/`test_outcome` and on to `implement`. A driver
++# that does not drain reports implement_runs=2 for a run that spends 1. Round
++# 10 stops re-stating the tick at all: the driver below calls it.
++import asyncio
+ import json
++import time
++import types
+ from pathlib import Path
+ 
+ import yaml
+@@ -113,65 +122,112 @@ _SILENT_TAIL = (
+     "exit 3\n")
+ 
+ 
+-def _drive(sf, run_id, *, tick_ledger, ticks, clock_step):
+-    """The scheduler's own order, INCLUDING the inline-tool drain.
++def _drive(sf, run_id, monkeypatch, *, ticks, clock_step, second_driver=True):
++    """Call the REAL `core/scheduler._run_skillflow_tick` once per tick.
++
++    Two production holds stand between a silent gate and the implement loop,
++    and this driver walks both:
++
++    * the TICK hold — `_run_skillflow_tick` reads `gate_deferral.observe_run`
++      and returns early on `silent` (it never reaches `advance_run`);
++    * the HOST hold — `AItelierSkillFlow.advance_run` refuses while
++      `gate_deferral.hold_blocks_advance` says the episode is live. The tick
++      never reaches it while its own hold is working, so a second production
++      driver does: after every tick whose own log line says it held the run,
++      `core/run_driver._step` (the driver butler-driven runs use) steps the
++      same run once, exactly as a second caller arriving during the hold
++      would. `second_driver=False` leaves the tick as the only driver.
++
++    Returns `(implement_runs, statuses, outcomes, nodes)`:
++
++    * `implement_runs` — how many times a claimed `implement` step was
++      executed, by either driver;
++    * `statuses` — the run's status before each tick, then its final status;
++    * `outcomes` — what each tick decided, read off the tick's OWN `tick_log`
++      line: `silent` for `gate_deferral_hold`, `expired` followed by
++      `terminal:<reason>` for `gate_absence_terminal`, `none` otherwise;
++    * `nodes` — the run's `current_node` after each tick.
++
++    What is replaced, and why each is not the hold:
++
++    * `get_skillflow` / `_get_or_create_skillflow_run` point the tick at this
++      test's host and run instead of the server's;
++    * `_sync_project_status_to_db` / `_reconcile_lease` / `_odbg` write the
++      server's project table, lease and debug log, none of which exist here;
++    * `tick_log` is recorded instead of written to the operator's log file;
++    * `aitelier.runner.AgentStepRunner` is the LLM agent: it writes one code
++      change for a claimed step and returns an empty result;
++    * `gate_deferral.time` is a clock the test moves by `clock_step` per tick.
++      The ceiling is measured from the episode's start, so moving the clock is
++      the only way to observe an expiry without sleeping for hours. Every
++      reader in `gate_deferral` (the tick's `observe_run` and the host's
++      `hold_blocks_advance`) reads the same clock.
++    """
++    from core import run_driver, scheduler
++    import aitelier.runner as agent_runner
++    from tests.code_output_fixture import write_claim_code
++
++    clock = [time.time()]
++    monkeypatch.setattr(gate_deferral, "time",
++                        types.SimpleNamespace(time=lambda: clock[0]))
++    logged = []
++    monkeypatch.setattr(scheduler, "tick_log",
++                        lambda project_id, outcome, **detail:
++                        logged.append((outcome, detail)))
++    monkeypatch.setattr(scheduler, "_odbg", lambda *a, **k: None)
++    monkeypatch.setattr(scheduler, "get_skillflow", lambda: sf)
++    monkeypatch.setattr(scheduler, "_get_or_create_skillflow_run",
++                        lambda project_id: run_id)
++    monkeypatch.setattr(scheduler, "_sync_project_status_to_db",
++                        lambda project_id: None)
++    monkeypatch.setattr(scheduler, "_reconcile_lease", lambda *a: None)
++    monkeypatch.setattr(scheduler, "_claim_retry_after", {})
++
++    executed = []
++    agent_errors = []
++
++    class _Implementer:
++        def __init__(self, **_ignored):
++            pass
+ 
+-    Returns `(implement_runs, statuses, tick_outcomes, nodes)`. Nothing here
+-    re-implements the tick: it calls the two `gate_deferral` readers the tick
+-    calls, in the order the tick calls them, refuses to advance when they say
+-    to hold, and drains inline tool steps the way the tick does.
++        async def execute(self, claimed):
++            executed.append(claimed.step_id)
++            try:
++                write_claim_code(sf, run_id, claimed)
++            except Exception as exc:
++                agent_errors.append(repr(exc))
++                raise
++            return StepResult(flags={})
+ 
+-    `clock_step` is how far the WALL CLOCK moves between ticks. The scheduler
+-    never waits out a real hold in a test, so the clock is fast-forwarded
+-    instead; the episode ceiling is measured from the episode's start, so
+-    fast-forwarding is the only way to observe an expiry without sleeping for
+-    hours. It is passed per pole because the observation window is the thing
+-    the poles differ in.
+-    """
+-    import time
+-    clock = time.time()
+-    implement_runs = 0
+-    statuses = []
+-    outcomes = []
+-    nodes = []
++    monkeypatch.setattr(agent_runner, "AgentStepRunner", _Implementer)
++
++    statuses, outcomes, nodes = [], [], []
+     for _ in range(ticks):
+         run = sf.get_run(run_id)
+         statuses.append(run["status"])
+         if run["status"] != "running":
+             break
+-        clock += clock_step
+-        decision = gate_deferral.observe_run(sf, run_id, now=clock,
+-                                             ledger=tick_ledger)
+-        outcomes.append(decision["state"])
+-        if decision["state"] == "silent":
+-            continue
+-        if decision["state"] == "expired":
+-            sf.fail_run(run_id, decision["reason"])
+-            statuses.append(sf.get_run(run_id)["status"])
+-            outcomes.append("terminal:" + decision["reason"])
+-            break
+-        node = sf.advance_run(run_id)
+-        drain = 0
+-        while node is not None and drain < 20 \
+-                and sf._get_resolver_for_run(run_id).is_tool(node):
+-            node = sf.advance_run(run_id)
+-            drain += 1
+-        nodes.append(node)
+-        run = sf.get_run(run_id)
+-        if node is None:
+-            if run["status"] == "running":
+-                continue
+-            statuses.append(run["status"])
+-            break
+-        claimed = sf.claim_next_step(run_id)
+-        if claimed is None:
+-            continue
+-        assert claimed.step_id == "implement", claimed.step_id
+-        implement_runs += 1
+-        from tests.code_output_fixture import write_claim_code
+-        write_claim_code(sf, run_id, claimed)
+-        sf.confirm_step(claimed.token, StepResult(flags={}))
+-    return implement_runs, statuses, outcomes, nodes
++        clock[0] += clock_step
++        before = len(logged)
++        asyncio.run(scheduler._run_skillflow_tick("p", None))
++        said = [outcome for outcome, _detail in logged[before:]]
++        if "gate_deferral_hold" in said:
++            outcomes.append("silent")
++            if second_driver:
++                asyncio.run(run_driver._step(sf, None, None, run_id,
++                                             False, 1))
++        elif "gate_absence_terminal" in said:
++            detail = dict(logged[before:])["gate_absence_terminal"]
++            outcomes.append("expired")
++            outcomes.append("terminal:" + str(detail.get("reason") or ""))
++        else:
++            outcomes.append("none")
++        nodes.append(sf.get_run(run_id).get("current_node"))
++    else:
++        statuses.append(sf.get_run(run_id)["status"])
++    assert agent_errors == [], agent_errors
++    assert set(executed) <= {"implement"}, executed
++    return executed.count("implement"), statuses, outcomes, nodes
+ 
+ 
+ def _assert_never_cycles(statuses, outcomes, reason_source):
+@@ -179,11 +235,10 @@ def _assert_never_cycles(statuses, outcomes, reason_source):
+     assert "Cycle limit exceeded" not in text
+ 
+ 
+-def _tick_ledger_for(sf, run_id):
+-    """The tick's ledger, primed from the run exactly as the tick seeds it."""
+-    ledger = gate_deferral.DeferralLedger()
+-    first = gate_deferral.observe_run(sf, run_id, ledger=ledger)
+-    return ledger, first
++def _prime_ledger(sf, run_id):
++    """Prime the global LEDGER by calling observe_run once, exactly as the
++    production scheduler does on the first tick. Returns the first observation."""
++    return gate_deferral.observe_run(sf, run_id)
+ 
+ 
+ def test_pole_a_a_ceiling_far_past_the_window_spends_one_implement_cycle(
+@@ -201,12 +256,13 @@ def test_pole_a_a_ceiling_far_past_the_window_spends_one_implement_cycle(
+     counter = tmp_path / "calls.txt"
+     sf, run_id = _wire(tmp_path, monkeypatch, episode_max=100000,
+                        wait=1, counter=counter, tail=_SILENT_TAIL)
+-    ledger, first = _tick_ledger_for(sf, run_id)
++    first = _prime_ledger(sf, run_id)
+     assert first["state"] == "none"          # no report yet: nothing to account
+ 
+     implement_runs, statuses, outcomes, nodes = _drive(
+-        sf, run_id, tick_ledger=ledger, ticks=40,
++        sf, run_id, monkeypatch, ticks=40,
+         clock_step=gate_deferral.wait_seconds())
++    _assert_test_row_untouched(sf, run_id)
+ 
+     assert implement_runs == 1, implement_runs
+     assert statuses[-1] == "running", statuses
+@@ -232,14 +288,43 @@ def test_pole_b_a_zero_ceiling_is_clamped_and_cannot_charge_the_absence(
+     sf, run_id = _wire(tmp_path, monkeypatch, episode_max=0, wait=1,
+                        counter=counter, tail=_SILENT_TAIL)
+     assert gate_deferral.episode_max_seconds() > 0
+-    ledger, _ = _tick_ledger_for(sf, run_id)
++    _prime_ledger(sf, run_id)
++
++    implement_runs, statuses, outcomes, nodes = _drive(
++        sf, run_id, monkeypatch, ticks=15, clock_step=1)
++    _assert_test_row_untouched(sf, run_id)
++
++    assert implement_runs == 1, implement_runs
++    assert statuses[-1] == "running", statuses
++    assert "expired" not in outcomes, outcomes
++    assert nodes[-1] == "test_gate_absent", nodes
++    _assert_never_cycles(statuses, outcomes,
++                         sf.get_run(run_id).get("error_reason"))
++
++
++def test_pole_c_a_tiny_ceiling_inside_the_window_is_honoured_and_uncharged(
++        tmp_path, monkeypatch):
++    """(c) ceiling tiny (3 s) and HONOURED, observed for a window shorter than
++    the ceiling (20 ticks x 0.1 s = 2 s): the absence never expires, so the run
++    stays silent and non-terminal, `implement_runs == 1`, and the rows the hold
++    parks are untouched. This is the non-expiring small-ceiling pole of
++    `an-expired-absence-is-never-charged-to-the-implementer`; the expiring one
++    is `test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence` (C′).
++    """
++    counter = tmp_path / "calls.txt"
++    sf, run_id = _wire(tmp_path, monkeypatch, episode_max=3, wait=1,
++                       counter=counter, tail=_SILENT_TAIL)
++    assert gate_deferral.episode_max_seconds() == 3
++    _prime_ledger(sf, run_id)
+ 
+     implement_runs, statuses, outcomes, nodes = _drive(
+-        sf, run_id, tick_ledger=ledger, ticks=15, clock_step=1)
++        sf, run_id, monkeypatch, ticks=20, clock_step=0.1)
++    _assert_test_row_untouched(sf, run_id)
+ 
+     assert implement_runs == 1, implement_runs
+     assert statuses[-1] == "running", statuses
+     assert "expired" not in outcomes, outcomes
++    assert "silent" in outcomes, outcomes
+     assert nodes[-1] == "test_gate_absent", nodes
+     _assert_never_cycles(statuses, outcomes,
+                          sf.get_run(run_id).get("error_reason"))
+@@ -247,9 +332,9 @@ def test_pole_b_a_zero_ceiling_is_clamped_and_cannot_charge_the_absence(
+ 
+ def test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence(
+         tmp_path, monkeypatch):
+-    """(c) ceiling tiny, and small enough to be HONORED (unlike 0, which is a
+-    mis-set knob). Review measured this pole on the r4 candidate as
+-    `implement_runs=4` + `Cycle limit exceeded`.
++    """(C′) ceiling tiny, and small enough to be HONORED (unlike 0, which is a
++    mis-set knob), observed past the ceiling. Review measured this pole on the
++    r4 candidate as `implement_runs=4` + `Cycle limit exceeded`.
+ 
+     It must now be `implement_runs == 1` and a terminal status whose reason
+     names the absence.
+@@ -258,10 +343,11 @@ def test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence(
+     sf, run_id = _wire(tmp_path, monkeypatch, episode_max=3, wait=1,
+                        counter=counter, tail=_SILENT_TAIL)
+     assert gate_deferral.episode_max_seconds() == 3
+-    ledger, _ = _tick_ledger_for(sf, run_id)
++    _prime_ledger(sf, run_id)
+ 
+     implement_runs, statuses, outcomes, nodes = _drive(
+-        sf, run_id, tick_ledger=ledger, ticks=20, clock_step=3)
++        sf, run_id, monkeypatch, ticks=20, clock_step=3)
++    _assert_test_row_untouched(sf, run_id, run_status="failed")
+ 
+     assert implement_runs == 1, implement_runs
+     assert nodes[-1] == "test_gate_absent", nodes
+@@ -281,9 +367,10 @@ def test_a_gate_that_finally_answers_clears_the_deferral(tmp_path, monkeypatch):
+     counter = tmp_path / "calls.txt"
+     sf, run_id = _wire(tmp_path, monkeypatch, episode_max=100000, wait=1,
+                        counter=counter, tail=_SILENT_TAIL)
+-    ledger, _ = _tick_ledger_for(sf, run_id)
+-    _drive(sf, run_id, tick_ledger=ledger, ticks=8, clock_step=1)
+-    assert gate_deferral.hold_blocks_advance(run_id, ledger=ledger)
++    _prime_ledger(sf, run_id)
++    _drive(sf, run_id, monkeypatch, ticks=8, clock_step=1)
++    assert gate_deferral.hold_blocks_advance(run_id)
++    _assert_test_row_untouched(sf, run_id)
+ 
+     # The gate's answer arrives: the report now says the code was graded.
+     report_path = gate_deferral.find_test_report(sf, run_id)
+@@ -296,9 +383,9 @@ def test_a_gate_that_finally_answers_clears_the_deferral(tmp_path, monkeypatch):
+     data["summary"] = "the gate ran, nothing failed"
+     report_path.write_text(json.dumps(data), encoding="utf-8")
+ 
+-    cleared = gate_deferral.observe_run(sf, run_id, ledger=ledger)
++    cleared = gate_deferral.observe_run(sf, run_id)
+     assert cleared["state"] == "none"
+-    assert not gate_deferral.hold_blocks_advance(run_id, ledger=ledger)
++    assert not gate_deferral.hold_blocks_advance(run_id)
+ 
+ 
+ def _step_rows(sf, run_id):
+@@ -313,6 +400,53 @@ def _rows_by_step(sf, run_id):
+     return {r["step_id"]: r for r in _step_rows(sf, run_id)[1]}
+ 
+ 
++def _claims_per_instance(sf, run_id):
++    rows = sf.trace_query(
++        run_id,
++        "SELECT step_id, step_instance_id, COUNT(*) FROM skillflow_trace "
++        "WHERE run_id = ? AND event = 'claimed' "
++        "AND step_instance_id IS NOT NULL GROUP BY step_instance_id",
++        (run_id,))
++    return {(r[0], r[1]): r[2] for r in rows or []}
++
++
++def _assert_test_row_untouched(sf, run_id, *, run_status="running"):
++    """Assert the row invariants while the gate is silent.
++    Called from every pole so no hold-breaking mutation passes unnoticed.
++
++    The four step-row assertions the criterion names: the `test` row is
++    `completed`, its `retry_count` is 0, its `release_count` is 0, and every
++    step instance was claimed exactly once (`claim_epoch == 1` on the `test`
++    row, and one `claimed` trace event per instance).
++
++    Then the RUN row. Measured in round 10: a hold that lets the run advance
++    ends the run through the absence gate's only transition and writes no step
++    row at all — every step row is identical to the held run's, and the
++    `test_gate_absent` row stays `pending` — so no step-row assertion can see
++    that break. The run row can: while the gate is silent it is `running` and
++    parked at `test_gate_absent`; at the expiring pole it is `failed` there.
++    """
++    rows = _rows_by_step(sf, run_id)
++    test_row = rows["test"]
++    assert test_row["status"] == "completed", (
++        f"test row status drifted: {test_row['status']}")
++    assert test_row["retry_count"] == 0, (
++        f"deferral charged a retry: {test_row['retry_count']}")
++    assert test_row["release_count"] == 0, (
++        f"deferral released the claim: {test_row['release_count']}")
++    assert test_row["claim_epoch"] == 1, (
++        f"step re-claimed during deferral: {test_row['claim_epoch']}")
++    claims = _claims_per_instance(sf, run_id)
++    reclaimed = {key: n for key, n in claims.items() if n != 1}
++    assert claims and reclaimed == {}, (
++        f"an instance was claimed more than once: {reclaimed}")
++    run = sf.get_run(run_id)
++    assert (run["status"], run["current_node"]) == (
++        run_status, "test_gate_absent"), (
++        f"the run row moved while the gate was silent: "
++        f"status={run['status']} node={run['current_node']}")
++
++
+ def test_the_deferral_hold_leaves_real_step_rows_untouched(tmp_path, monkeypatch):
+     """Criterion 2, measured on the REAL graph's step rows — not a stub.
+ 
+@@ -326,21 +460,64 @@ def test_the_deferral_hold_leaves_real_step_rows_untouched(tmp_path, monkeypatch
+     * its `claim_epoch` is 1 — the step instance was claimed exactly once.
+ 
+     Each is a separate assertion so the mutation that breaks it names itself.
+-    The `H2` mutation (host `advance_run` no longer refuses during a hold)
+-    lets the run advance past the silent gate and re-drive the loop, which
+-    moves `release_count` / `retry_count` off 0 and re-claims; `D1` (absence
+-    never expires) and the release/retry charge paths are the other readers.
+     """
+     counter = tmp_path / "calls.txt"
+     sf, run_id = _wire(tmp_path, monkeypatch, episode_max=100000, wait=1,
+                        counter=counter, tail=_SILENT_TAIL)
+-    ledger, _ = _tick_ledger_for(sf, run_id)
+-    _drive(sf, run_id, tick_ledger=ledger, ticks=40,
++    _prime_ledger(sf, run_id)
++    _drive(sf, run_id, monkeypatch, ticks=40,
+            clock_step=gate_deferral.wait_seconds())
+     test_row = _rows_by_step(sf, run_id)["test"]
+     assert test_row["status"] == "completed", test_row
+     assert test_row["retry_count"] == 0, test_row
+     assert test_row["release_count"] == 0, test_row
+     assert test_row["claim_epoch"] == 1, test_row
++    _assert_test_row_untouched(sf, run_id)
++
++
++def test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them(
++        tmp_path, monkeypatch):
++    """The TICK hold (`core/scheduler.py:_run_skillflow_tick`) measured on its
++    own. With both holds in series, a break in one is covered by the other; so
++    here the host's `hold_blocks_advance` answers False (the host hold is out)
++    and the tick is the only driver. The tick's own `silent` return must then
++    keep the run parked at `test_gate_absent` with the rows untouched.
++    """
++    counter = tmp_path / "calls.txt"
++    sf, run_id = _wire(tmp_path, monkeypatch, episode_max=100000, wait=1,
++                       counter=counter, tail=_SILENT_TAIL)
++    monkeypatch.setattr(gate_deferral, "hold_blocks_advance",
++                        lambda run_id, **_kw: False)
++    implement_runs, statuses, outcomes, nodes = _drive(
++        sf, run_id, monkeypatch, ticks=20, clock_step=1, second_driver=False)
++    _assert_test_row_untouched(sf, run_id)
++    assert implement_runs == 1, implement_runs
++    assert statuses[-1] == "running", statuses
++    assert outcomes.count("silent") >= 10, outcomes
+ 
+ 
++def test_the_host_hold_alone_keeps_the_rows_where_the_absence_left_them(
++        tmp_path, monkeypatch):
++    """The HOST hold (`AItelierSkillFlow.advance_run`) measured on its own.
++    The tick is handed a `none` answer, so its early return is out, while the
++    REAL `observe_run` still records the episode in the ledger the host reads.
++    Every tick then walks on into `advance_run`, and the host's refusal alone
++    must keep the run parked at `test_gate_absent` with the rows untouched.
++    """
++    counter = tmp_path / "calls.txt"
++    sf, run_id = _wire(tmp_path, monkeypatch, episode_max=100000, wait=1,
++                       counter=counter, tail=_SILENT_TAIL)
++    real_observe = gate_deferral.observe_run
++    seen = []
++
++    def _observe_but_answer_none(sf_, run_id_, **kw):
++        seen.append(real_observe(sf_, run_id_, **kw)["state"])
++        return {"state": "none", "remaining": 0.0, "gate": "", "reason": ""}
++
++    monkeypatch.setattr(gate_deferral, "observe_run", _observe_but_answer_none)
++    implement_runs, statuses, outcomes, nodes = _drive(
++        sf, run_id, monkeypatch, ticks=20, clock_step=1, second_driver=False)
++    _assert_test_row_untouched(sf, run_id)
++    assert implement_runs == 1, implement_runs
++    assert statuses[-1] == "running", statuses
++    assert seen.count("silent") >= 10, seen
+diff --git a/tests/unit/test_gate_deferral_execution_points.py b/tests/unit/test_gate_deferral_execution_points.py
+index 49372003..e3435cac 100644
+--- a/tests/unit/test_gate_deferral_execution_points.py
++++ b/tests/unit/test_gate_deferral_execution_points.py
+@@ -353,3 +353,16 @@ def test_G2_episode_max_seconds_is_hard_capped_against_1e9(monkeypatch):
+     monkeypatch.setattr(gd, "GATE_DEFERRAL_EPISODE_MAX_SECONDS", 10800)
+     assert gd.episode_max_seconds() == 10800.0, (
+         "the default episode is not 10800s")
++
++
++def test_no_environment_can_raise_the_episode_ceiling_past_six_hours(
++        monkeypatch):
++    """Kills ABSCEIL (`_ABSOLUTE_EPISODE_CEILING = 1e9`). The test above
++    compares against the module's own constant, so it moves with it; this one
++    names the number: with both settings at 1e9 the effective ceiling is
++    21600 s."""
++    monkeypatch.setattr(gd, "GATE_DEFERRAL_EPISODE_MAX_CEILING", 1e9)
++    monkeypatch.setattr(gd, "GATE_DEFERRAL_EPISODE_MAX_SECONDS", 1e9)
++    assert gd.episode_max_seconds() == 21600.0, (
++        f"episode_max_seconds()={gd.episode_max_seconds()}, not 21600.0 s: "
++        "the absolute six-hour ceiling no longer bounds the episode")
+diff --git a/tests/unit/test_gate_deferral_is_accounted.py b/tests/unit/test_gate_deferral_is_accounted.py
+index 327a5578..507468bb 100644
+--- a/tests/unit/test_gate_deferral_is_accounted.py
++++ b/tests/unit/test_gate_deferral_is_accounted.py
+@@ -47,6 +47,18 @@ def test_a_report_that_graded_the_code_states_no_absence(tmp_path):
+     assert gd.observe_run(None, "r", report_path=path)["state"] == "none"
+ 
+ 
++@pytest.mark.parametrize("payload", [[], ["repo_gate_absent"], "absent", 3])
++def test_a_report_that_is_not_an_object_states_no_absence(tmp_path, ledger,
++                                                          payload):
++    """Kills READNONDICT: a `test_report.json` that parses but is not a JSON
++    object carries no flag of its own, so it states no absence, and the tick
++    that reads it must get `none`, not an exception."""
++    path = tmp_path / "test_report.json"
++    path.write_text(json.dumps(payload), encoding="utf-8")
++    assert gd.read_absence(path) is None
++    assert gd.observe_run(None, "r", report_path=path)["state"] == "none"
++
++
+ def test_no_report_at_all_is_not_an_absence(tmp_path, ledger):
+     """A run before its gate step has no report; that is not silence."""
+     assert gd.observe_run(None, "r", report_path=tmp_path / "missing.json"
+diff --git a/tests/unit/test_mutation_catalog_anchors.py b/tests/unit/test_mutation_catalog_anchors.py
+index 56c225be..a227f415 100644
+--- a/tests/unit/test_mutation_catalog_anchors.py
++++ b/tests/unit/test_mutation_catalog_anchors.py
+@@ -1,42 +1,28 @@
+-"""Every catalogued mutation is a concrete edit against a real file, and the
+-card forbids counting an anchor that matches zero times as a kill. This test
+-is the cheap half of that guarantee: it loads the catalog and checks that each
+-edit's anchor matches EXACTLY once in the delivered tree, applying a file's
+-edits in order (so a second edit sees the first's result)."""
++"""The mutation catalog's structural integrity. Anchor validation against
++product source lives in run_mutations.py (the runner), not here — that way a
++mutation that changes its own anchor text cannot produce a false 'kill' via
++this test going red. What remains: the catalog file must parse and the goal
++table entries must be present."""
+ import sys
+ from pathlib import Path
+ 
+-import pytest
+-
+ _ROOT = Path(__file__).resolve().parent.parent.parent
+ sys.path.insert(0, str(_ROOT / "tools" / "mutation_catalog"))
+ from mutations import MUTATIONS  # noqa: E402
+ 
+ 
+-def _validate(name):
+-    work = {}
+-    for edit in MUTATIONS[name]["edits"]:
+-        rel = edit["file"]
+-        path = _ROOT / rel
+-        text = work.get(rel)
+-        if text is None:
+-            text = path.read_text(encoding="utf-8")
+-        hits = text.count(edit["anchor"])
+-        assert hits == 1, (
+-            f"{name}: anchor hit {hits} (need 1) in {rel}: "
+-            f"{edit['anchor'][:70]!r}")
+-        work[rel] = text.replace(edit["anchor"], edit["replacement"], 1)
+-    return work
+-
+-
+-def test_each_mutation_anchor_hits_exactly_once():
+-    problems = []
+-    for name in sorted(MUTATIONS):
+-        try:
+-            _validate(name)
+-        except AssertionError as exc:
+-            problems.append(str(exc))
+-    assert not problems, "anchor problems:\n" + "\n".join(problems)
++def test_the_catalog_parses_and_each_entry_has_required_keys():
++    """The catalog must load, every entry must have 'edits' and 'targeted',
++    and every edit must have 'file', 'anchor', 'replacement'.  This checks
++    file-level syntax, NOT product-source anchor hits (the runner does that)."""
++    assert isinstance(MUTATIONS, dict)
++    for name, spec in sorted(MUTATIONS.items()):
++        assert "edits" in spec, f"{name}: missing 'edits'"
++        assert "targeted" in spec, f"{name}: missing 'targeted'"
++        assert isinstance(spec["edits"], list) and len(spec["edits"]) > 0
++        for edit in spec["edits"]:
++            for key in ("file", "anchor", "replacement"):
++                assert key in edit, f"{name}: edit missing '{key}'"
+ 
+ 
+ def test_the_goal_table_mutations_are_all_present():
+diff --git a/tests/unit/test_no_verbatim_previous_line_dup.py b/tests/unit/test_no_verbatim_previous_line_dup.py
+index 52ad02f4..a4f18836 100644
+--- a/tests/unit/test_no_verbatim_previous_line_dup.py
++++ b/tests/unit/test_no_verbatim_previous_line_dup.py
+@@ -1,10 +1,8 @@
+-import re
+ from pathlib import Path
+ 
+ import pytest
+ 
+ _ROOT = Path(__file__).resolve().parent.parent.parent
+-_COMMENT = re.compile(r"^\s*#")
+ 
+ 
+ def _python_sources():
+@@ -15,11 +13,15 @@ def _python_sources():
+ 
+ 
+ def _verbatim_previous_line_sites(source):
++    """Every non-blank line identical to the previous non-blank line.
++
++    Comment lines count: round 9's splice wrote one comment line twice in THIS
++    file, and a reader that skipped comments stayed green over it."""
+     sites = []
+     previous = None
+     for number, raw in enumerate(source.splitlines(), start=1):
+         text = raw.rstrip("\n")
+-        if text.strip() == "" or _COMMENT.match(text):
++        if text.strip() == "":
+             continue
+         if previous is not None and text == previous:
+             sites.append((number, text.strip()))
+@@ -29,22 +31,24 @@ def _verbatim_previous_line_sites(source):
+ 
+ # Deliberate, named repeats in the test tree: two calls or two asserts in a
+ # row that MEAN two invocations (a re-poll, a re-read, a two-item rotate).
+-# Each entry is (file, statement) — the statement text, not a line number. The
+-# count is pinned: a NEW repeat anywhere, or a change to this list, is red.
++# Each entry is (file, statement, consecutive_count): the statement text and
++# how many times it appears as a consecutive duplicate in that file. A
++# THIRD occurrence at a listed site changes the count and must be written
++# down here before the suite goes green.
+ TEST_INTENTIONAL_REPEATS = [
+-    ("tests/integration/test_state_graph_entrypoints.py", 'assert module._start_driver("run1", scheduler_owned=True, auto_approve=False)'),
+-    ("tests/integration/test_tool_operation_owner_recovery.py", 'sf.reconcile_active_operations(run_id, trigger="retryable_trace")'),
+-    ("tests/unit/test_ai_router.py", 'litellm.exceptions.RateLimitError("Limit reached", model="zai", llm_provider="zai"),'),
+-    ("tests/unit/test_claim_precondition_bounded.py", 'await scheduler._run_skillflow_tick("p1", None)'),
+-    ("tests/unit/test_godot_harness.py", 'gh._playtest_spec(tmp_path / "proj", _spec(["a"]), 60, 120)'),
+-    ("tests/unit/test_godot_harness.py", "gh.run_script(str(tmp_path), [], timeout=30)"),
+-    ("tests/unit/test_knowledge_sync.py", '_call(repo, ws, "proj1")'),
+-    ("tests/unit/test_postcompact_driver_hook.py", '"state_graph_read", "state_graph_read", "state_graph_help", "state_graph_read",'),
+-    ("tests/unit/test_public_read_hardening.py", '_read_cache.cached(("k2",), lambda: calls.append(1) or "v", ttl=-1)'),
+-    ("tests/unit/test_quota_hold.py", 'sched.tick_log("p", outcome)'),
+-    ("tests/unit/test_route_rotation.py", 'assert table.resolve("plain", rotate=True) == ["a/m1", "payg/m9"]'),
+-    ("tests/unit/test_route_rotation.py", 'assert table.resolve("solo", rotate=True) == ["a/m1", "payg/m9"]'),
+-    ("tests/unit/test_run_isolation_lifecycle.py", "await sc.poll_and_execute()"),
++    ("tests/integration/test_state_graph_entrypoints.py", 'assert module._start_driver("run1", scheduler_owned=True, auto_approve=False)', 1),
++    ("tests/integration/test_tool_operation_owner_recovery.py", 'sf.reconcile_active_operations(run_id, trigger="retryable_trace")', 1),
++    ("tests/unit/test_ai_router.py", 'litellm.exceptions.RateLimitError("Limit reached", model="zai", llm_provider="zai"),', 1),
++    ("tests/unit/test_claim_precondition_bounded.py", 'await scheduler._run_skillflow_tick("p1", None)', 1),
++    ("tests/unit/test_godot_harness.py", 'gh._playtest_spec(tmp_path / "proj", _spec(["a"]), 60, 120)', 1),
++    ("tests/unit/test_godot_harness.py", "gh.run_script(str(tmp_path), [], timeout=30)", 1),
++    ("tests/unit/test_knowledge_sync.py", '_call(repo, ws, "proj1")', 1),
++    ("tests/unit/test_postcompact_driver_hook.py", '"state_graph_read", "state_graph_read", "state_graph_help", "state_graph_read",', 1),
++    ("tests/unit/test_public_read_hardening.py", '_read_cache.cached(("k2",), lambda: calls.append(1) or "v", ttl=-1)', 1),
++    ("tests/unit/test_quota_hold.py", 'sched.tick_log("p", outcome)', 1),
++    ("tests/unit/test_route_rotation.py", 'assert table.resolve("plain", rotate=True) == ["a/m1", "payg/m9"]', 1),
++    ("tests/unit/test_route_rotation.py", 'assert table.resolve("solo", rotate=True) == ["a/m1", "payg/m9"]', 1),
++    ("tests/unit/test_run_isolation_lifecycle.py", "await sc.poll_and_execute()", 2),
+ ]
+ 
+ 
+@@ -55,7 +59,7 @@ def _is_test(path):
+ def _derived_sites():
+     import collections
+     non_test = []
+-    test = []
++    test = collections.Counter()
+     for path in _python_sources():
+         try:
+             source = path.read_text(encoding="utf-8")
+@@ -63,7 +67,10 @@ def _derived_sites():
+             continue
+         rel = str(path.relative_to(_ROOT))
+         for _lineno, text in _verbatim_previous_line_sites(source):
+-            (test if _is_test(path) else non_test).append((rel, text))
++            if _is_test(path):
++                test[(rel, text)] += 1
++            else:
++                non_test.append((rel, text))
+     return non_test, test
+ 
+ 
+@@ -75,14 +82,16 @@ def test_no_verbatim_previous_line_dup_in_non_test_code():
+ def test_named_test_repeats_are_pinned_and_current():
+     """The tests/ repeats are a named LIST, not a hand-counted number: every
+     listed entry must still be a real repeat, and there must be no unlisted
+-    repeat. The list length is pinned too — a new intentional repeat has to be
+-    written down here before the suite goes green."""
++    repeat. The consecutive-count is pinned too — adding a THIRD duplicate at
++    a listed site changes the count and must be written down here."""
+     _non_test, test = _derived_sites()
+-    derived = set(test)
+-    listed = set(TEST_INTENTIONAL_REPEATS)
++    derived = dict(test)
++    listed = {(f, s): c for f, s, c in TEST_INTENTIONAL_REPEATS}
+     assert derived == listed, (
+-        f"tests/ repeats drifted; only-in-tree={sorted(derived - listed)} "
+-        f"only-in-list={sorted(listed - derived)}")
++        f"tests/ repeats drifted; "
++        f"only-in-tree={sorted(set(derived) - set(listed))} "
++        f"only-in-list={sorted(set(listed) - set(derived))} "
++        f"count-mismatch={[(k, derived[k], listed.get(k)) for k in derived if k in listed and derived[k] != listed[k]]}")
+     assert len(TEST_INTENTIONAL_REPEATS) == 13
+ 
+ 
+@@ -96,6 +105,12 @@ def test_the_checker_file_is_clean_under_its_own_rule():
+     assert _verbatim_previous_line_sites(src) == []
+ 
+ 
++def test_a_duplicated_comment_line_is_red():
++    src = "# one sentence of a comment\n# one sentence of a comment\nx = 1\n"
++    assert _verbatim_previous_line_sites(src) == [
++        (2, "# one sentence of a comment")]
++
++
+ def test_the_duplicated_statement_pole_is_red():
+     src = 'import re\n_X = re.compile("x")\n\n_X = re.compile("x")\n'
+     assert _verbatim_previous_line_sites(src)
+diff --git a/tests/unit/test_run_tests_unmeasured_declaration.py b/tests/unit/test_run_tests_unmeasured_declaration.py
+index f02656ad..f1dd3976 100644
+--- a/tests/unit/test_run_tests_unmeasured_declaration.py
++++ b/tests/unit/test_run_tests_unmeasured_declaration.py
+@@ -166,8 +166,10 @@ def test_the_unmeasured_state_set_holds_no_red_word():
+ 
+ 
+ def test_a_log_echo_of_the_prefix_mid_line_is_not_a_declaration():
+-    """Kills M21 (`startswith` -> `in`): a gate whose log merely QUOTES the
+-    protocol line is not declaring anything."""
++    """Kills M21PAIR (`in` + the `line.index` slice): a gate whose log merely
++    QUOTES the protocol line is not declaring anything. Under the literal M21
++    this stays green (the fixed slice cuts into the prefix); its witness is
++    `test_the_r4_shaped_witness_flips_under_the_literal_m21`."""
+     line = ("the gate reported: " + rt._REPO_GATE_UNMEASURED_PREFIX
+             + json.dumps({"state": "blocked"}))
+     gate = {"returncode": 1, "output": line, "output_truncated": False}
+@@ -184,23 +186,21 @@ def test_a_log_echo_of_the_case_prefix_mid_line_is_not_a_case_record():
+     assert identity_error
+ 
+ 
+-# The two witnesses BELOW are the ones the mutation actually has to fail. A
+-# mid-line echo only kills `PREFIX in line` when the slice the mutated reader
+-# takes lands ON the JSON — i.e. when the noise header is EXACTLY as long as
+-# the prefix. With a short header ("the gate reported: ", 19 characters) the
+-# mutated slice cuts into the prefix itself, `json.loads` fails, and the test
+-# stays green under the mutation while reading as if it had caught it. The
+-# length is asserted here so a future edit to the protocol line cannot
+-# silently re-disarm these witnesses.
++# The two witnesses BELOW use a noise header EXACTLY as long as the prefix.
++# They kill the PAIR (M21PAIR / M21BPAIR). Under the literal M21 / M21b the
++# fixed slice `line[len(prefix):]` lands on the prefix itself, `json.loads`
++# fails and they stay green; the literal edits are killed by
++# `test_the_r4_shaped_witness_flips_under_the_literal_m21{,b}`, whose prefix
++# sits INSIDE the JSON. The length is asserted here so a future edit to the
++# protocol line cannot silently change which mutation these read.
+ 
+ _MIDLINE_NOISE = "x" * len(rt._REPO_GATE_UNMEASURED_PREFIX)
+ _CASE_MIDLINE_NOISE = "x" * len(rt._REPO_GATE_CASE_PREFIX)
+ 
+ 
+ def test_a_mid_line_echo_kills_the_in_operator_on_the_declaration_channel():
+-    """Kills M21 (`startswith` -> `in`) at the ONE noise length where it is
+-    observable. This is the witness the previous revision claimed and did not
+-    have: measured, the mutation turns this test red."""
++    """A log echo whose length equals the prefix must not be mistaken for a
++    declaration. Kills M21PAIR (the `in` + `line.index` pair mutation)."""
+     assert len(_MIDLINE_NOISE) == len(rt._REPO_GATE_UNMEASURED_PREFIX) > 19
+     body = json.dumps({"state": "blocked", "reason": "an echo, not a record"})
+     line = _MIDLINE_NOISE + rt._REPO_GATE_UNMEASURED_PREFIX + body
+@@ -210,9 +210,9 @@ def test_a_mid_line_echo_kills_the_in_operator_on_the_declaration_channel():
+ 
+ 
+ def test_a_mid_line_echo_kills_the_in_operator_on_the_case_channel():
+-    """Kills M21b (the same `in` on `_REPO_GATE_CASE_PREFIX`): a single log
+-    line that echoes the case prefix must not fabricate a prunable red
+-    identity."""
++    """Kills M21BPAIR (the `in` + `line.index` pair on
++    `_REPO_GATE_CASE_PREFIX`): a single log line that echoes the case prefix
++    must not fabricate a prunable red identity."""
+     assert len(_CASE_MIDLINE_NOISE) == len(rt._REPO_GATE_CASE_PREFIX) > 0
+     gate = {"returncode": 1, "output_truncated": False,
+             "output": _CASE_MIDLINE_NOISE + _case("A", "quoted")}
+@@ -278,15 +278,18 @@ def _apply_m21_literal(func):
+ 
+ 
+ def test_m21_is_reproduced_and_this_file_is_what_flips():
+-    """M21: `line.startswith(PREFIX)` -> `PREFIX in line` on the declaration
+-    channel. Under it a mid-line echo fires `unmeasured`, so a real red is
+-    rewritten into an absence. Both halves are measured: the candidate reads
+-    None, the mutant reads `blocked`."""
++    """The PAIR (M21PAIR: `startswith` -> `in` AND the `line.index` slice) on
++    the declaration channel, applied in-process by `_apply_m21_pair`. Under it
++    a mid-line echo fires `unmeasured`, so a real red is rewritten into an
++    absence. Both halves are measured: the candidate reads None, the mutant
++    reads `blocked`."""
+     mutant = _apply_m21_pair(rt._unmeasured_declaration)
+     body = json.dumps({"state": "blocked", "reason": "an echo, not a record"})
+     line = _MIDLINE_NOISE + rt._REPO_GATE_UNMEASURED_PREFIX + body
+     assert rt._unmeasured_declaration(line) is None
+     assert mutant(line) is not None and mutant(line)["state"] == "blocked"
++
++
+ def test_the_r4_shaped_witness_flips_under_the_literal_m21():
+     """The card's literal M21 (`in`, the slice UNCHANGED) IS observable.
+ 
+@@ -330,11 +333,9 @@ def test_the_r4_shaped_witness_flips_under_the_literal_m21b():
+     assert [c["case_id"] for c in m_cases] == ["A"]
+ 
+ 
+-
+-
+ def test_m21b_is_reproduced_and_this_file_is_what_flips():
+-    """M21b: the same `in` on `_REPO_GATE_CASE_PREFIX`. Under it one echoed
+-    log line fabricates a prunable known-red identity — how a red gets
++    """The same PAIR on `_REPO_GATE_CASE_PREFIX` (M21BPAIR). Under it one
++    echoed log line fabricates a prunable known-red identity — how a red gets
+     forgiven by a gate that never ran."""
+     mutant = _apply_m21_pair(rt._repo_gate_failure_cases)
+     gate = {"returncode": 1, "output_truncated": False,
+@@ -574,6 +575,35 @@ def test_a_real_red_still_enters_the_baseline_and_the_absence_after_it_does_not_
+     assert "repo_gate:run_tests.sh#A" in report["baseline_kept_unproven"]
+ 
+ 
++def test_an_absence_whose_failures_are_all_known_red_still_does_not_pass(
++        tmp_path):
++    """Kills ABSREL (`and not absent` removed from `passed_relative`).
++
++    The absence's own `failures[]` entry keys to the gate's name,
++    `repo_gate:run_tests.sh`. A baseline that already holds that key leaves
++    the absence with NO new failure, so `new_failures` alone would call it a
++    relative pass. Only the absence clause keeps it false.
++    """
++    repo = _repo_with_gate(tmp_path, DECLARED, exit_code=3)
++    state = tmp_path / "state"
++    baseline = _baseline_file(state, repo)
++    baseline.parent.mkdir(parents=True, exist_ok=True)
++    baseline.write_text(json.dumps({"failures": ["repo_gate:run_tests.sh"]}))
++
++    out = tmp_path / "out"
++    result = rt.run_tests(project_root=str(repo), out_dir=str(out),
++                          state_dir=str(state))
++    report = _report(out)
++
++    assert report["repo_gate"]["measured"] == rt.REPO_GATE_UNMEASURED
++    assert report["baseline_state"] == "compared"
++    assert report["new_failures"] == []
++    assert report["passed_relative"] is False, (
++        "an absence over a baseline that already names its gate reported a "
++        "relative pass")
++    assert result["passed_relative"] is False
++
++
+ # ── N9: the tool's OWN contract text is a witness, on the deleted segment ───
+ 
+ _N9_SEGMENT = (
+@@ -599,7 +629,7 @@ def test_the_tool_doc_names_the_no_verdict_gate_as_absent_not_a_loop():
+         "longer stated on the tool's own contract")
+ 
+ 
+-# ── M21 family: the observable half is the pair, stated honestly ────────────
++# ── M21 family: this shape is killed by the pair; literal M21 by the r4 shape ─
+ 
+ def test_a_mid_line_prefix_with_valid_json_after_it_is_still_not_a_record():
+     """A behavioral witness, not a text pin.
+@@ -618,8 +648,6 @@ def test_a_mid_line_prefix_with_valid_json_after_it_is_still_not_a_record():
+     inside the JSON the fixed slice lands on the JSON and the reading flips —
+     `test_the_r4_shaped_witness_flips_under_the_literal_m21` measures that.
+     The pair is the other, blunter half: it also moves the slice.
+-
+-    The pair is the other, blunter half.
+     """
+     prefix = rt._REPO_GATE_UNMEASURED_PREFIX
+     echo = "10:00:00 " + prefix + '{"state":"blocked"}'
+diff --git a/tools/mutation_catalog/ignition_plugin.py b/tools/mutation_catalog/ignition_plugin.py
+new file mode 100644
+index 00000000..c5d60d7c
+--- /dev/null
++++ b/tools/mutation_catalog/ignition_plugin.py
+@@ -0,0 +1,134 @@
++"""pytest plugin loaded by `run_mutations.py` as ``-p ignition_plugin``.
++
++It measures two things about ONE applied mutation, inside the pytest process:
++
++* ``line_hits`` — how many times the mutated lines executed (Python's
++  ``sys.monitoring`` LINE events, restricted to the replacement's lines; every
++  other code location is disabled after its first event, so the cost is one
++  callback per location), and ``igniting_tests``, the tests during whose
++  call phase a mutated line executed;
++* ``source_readers`` — which tests read a mutated file's TEXT while they ran
++  (``open`` / ``io.open`` / ``tokenize.open`` / ``linecache.getlines`` during
++  the test's call phase). A test that went red after reading the mutated
++  source is a source-text witness, not a behavioural one; ``file_reads``
++  counts those reads. A test in both lists executed the mutated code, so it
++  is not a source-text witness.
++
++Input: ``MUTATION_IGNITION_SPEC`` = JSON ``{"lines": {path: [line, ...]},
++"files": [path, ...]}``. Output: ``MUTATION_IGNITION_OUT`` = JSON, written at
++session end. Code run in a child process is not counted.
++"""
++from __future__ import annotations
++
++import builtins
++import io
++import json
++import linecache
++import os
++import sys
++import tokenize
++
++import pytest
++
++_SPEC = json.loads(os.environ.get("MUTATION_IGNITION_SPEC") or "{}")
++_OUT = os.environ.get("MUTATION_IGNITION_OUT") or ""
++_LINES = {os.path.realpath(p): frozenset(v)
++          for p, v in (_SPEC.get("lines") or {}).items()}
++_FILES = frozenset(os.path.realpath(p) for p in (_SPEC.get("files") or []))
++
++_hits = {path: 0 for path in _LINES}
++_reads = {path: 0 for path in _FILES}
++_readers: set[str] = set()
++_igniters: set[str] = set()
++_current: list[str] = []
++_resolved: dict[str, str | None] = {}
++
++
++def _target_of(filename) -> str | None:
++    key = str(filename)
++    if key not in _resolved:
++        try:
++            real = os.path.realpath(os.fspath(filename))
++        except (TypeError, ValueError):
++            real = None
++        _resolved[key] = real
++    return _resolved[key]
++
++
++_mon = sys.monitoring
++_TOOL = next((t for t in (4, 3) if _mon.get_tool(t) is None), None)
++
++
++def _on_line(code, line):
++    path = _target_of(code.co_filename)
++    lines = _LINES.get(path)
++    if lines is None or line not in lines:
++        return _mon.DISABLE
++    _hits[path] += 1
++    if _current:
++        _igniters.add(_current[-1])
++    return None
++
++
++if _TOOL is not None and _LINES:
++    _mon.use_tool_id(_TOOL, "mutation-ignition")
++    _mon.register_callback(_TOOL, _mon.events.LINE, _on_line)
++    _mon.set_events(_TOOL, _mon.events.LINE)
++
++
++def _note_read(filename) -> None:
++    if not _current:
++        return
++    path = _target_of(filename)
++    if path in _reads:
++        _reads[path] += 1
++        _readers.add(_current[-1])
++
++
++def _wrap_open(real):
++    def opener(file, *args, **kwargs):
++        if isinstance(file, (str, bytes, os.PathLike)):
++            _note_read(file)
++        return real(file, *args, **kwargs)
++    return opener
++
++
++def _wrap_getlines(real):
++    def getlines(filename, module_globals=None):
++        _note_read(filename)
++        return real(filename, module_globals)
++    return getlines
++
++
++@pytest.hookimpl(hookwrapper=True)
++def pytest_runtest_call(item):
++    saved = (builtins.open, io.open, tokenize.open, linecache.getlines)
++    builtins.open = io.open = _wrap_open(saved[0])
++    tokenize.open = _wrap_open(saved[2])
++    linecache.getlines = _wrap_getlines(saved[3])
++    _current.append(item.nodeid)
++    try:
++        yield
++    finally:
++        _current.pop()
++        builtins.open, io.open, tokenize.open, linecache.getlines = saved
++
++
++def pytest_sessionfinish(session, exitstatus):
++    if not _OUT:
++        return
++    imported = sorted(
++        path for path in _LINES
++        if any(_target_of(getattr(m, "__file__", None) or "") == path
++               for m in list(sys.modules.values())))
++    with open(_OUT, "w", encoding="utf-8") as fh:
++        json.dump({
++            "monitoring_tool_id": _TOOL,
++            "line_hits": sum(_hits.values()),
++            "line_hits_by_file": _hits,
++            "file_reads": sum(_reads.values()),
++            "file_reads_by_file": _reads,
++            "source_readers": sorted(_readers),
++            "igniting_tests": sorted(_igniters),
++            "mutated_modules_imported": imported,
++        }, fh, indent=2, sort_keys=True)
+diff --git a/tools/mutation_catalog/mutations.py b/tools/mutation_catalog/mutations.py
+index 90501963..e05e9dd8 100644
+--- a/tools/mutation_catalog/mutations.py
++++ b/tools/mutation_catalog/mutations.py
+@@ -1,23 +1,70 @@
+ """Named-mutation catalog for the "a gate that never ran is not a failing
+-gate" card (rev 8).  Every entry is ONE concrete edit against a REAL file:
+-an anchor that must match exactly once, and the replacement.  The 7 goal-table
+-mutations (N9, M21, M21b, G2, G2b, DUPIMPL, RESTART) are written VERBATIM per
+-the card's table — no self-authored "equivalent" stands in for them.
++gate" card. Every entry is ONE concrete edit (one or more hunks) against a REAL
++file: an anchor that must match exactly once, and its replacement.
+ 
+-`run_mutations.py` applies each to a copy of the tree, checks the anchor hit
+-exactly once, runs the targeted tests and the full ``tests/unit tests/skillflow``
+-suite, reads the BARE exit code, records the tests that went red, and restores
+-the tree.  A mutation whose anchor does not hit exactly once is an ERROR, not a
+-kill (the card forbids counting a zero-hit anchor as killed).
++What is in here, and where each name comes from:
+ 
+-Each edit is a list of ``{anchor, replacement}`` hunk(s) so a mutation can be
+-more than a one-line change (RESTART persists the ledger, which needs a global
+-plus the field)."""
++* the goal table, VERBATIM (`GOAL_TABLE`: N9, M21, M21b, G2, G2b, DUPIMPL,
++  RESTART). Only their `targeted` selections are this catalog's choice;
++* the nine names round 8 re-used for other edits (S1, VALVEREACH, ABSTERM,
++  ABSTERM2, D1, D4, M2, M19, TAILONLY2), restored to the edits an independent
++  review defined them with, minus the review's ignition counter call (the
++  runner counts ignition itself); SCHEDROWRETRY and SCHEDROWSTATUS are that
++  review's edits too;
++* every other name, with the edit it was entered in this catalog with. A
++  different edit gets a different name: round 8's edits for the nine names
++  now carry new names (TIMEOUT60, ABSTERMTEXT, TERMREASONCYCLE, VALVEOFF,
++  NEVEREXPIRE, READNONDICT, DECLNONE), except where one is the same edit as a
++  restored name (round 8's "M2" is TAILONLY2's edit, round 8's "TAILONLY2" is
++  M2's). TICK_HOLD_INERT edits `core/scheduler.py`, as the round-10 brief
++  requires; its round-9 edit, in `gate_deferral.observe_run`, is OBSERVENONE.
+ 
+-#: name -> { "edits": [{file, anchor, replacement}], "targeted": [test ids] }
++`run_mutations.py` applies each entry to its own detached `git worktree` of
++the committed tree, checks every anchor hits exactly once BEFORE editing (a
++miss is an anchor error, never a kill), runs the `targeted` selection and
++`FULL_SCOPE`, and records bare exit codes, ignition and red tests.
++
++`kind` is "behaviour" unless stated: a red test that read the mutated file's
++source text and executed none of the mutated lines is then a source-text
++witness, not a killer. "text" marks an edit whose guarded property IS the
++text (a duplicated line, a deleted contract sentence), where the reader of
++the text is the witness.
++"""
++
++IMPL = "aitelier/tools/run_tests/impl.py"
++SCHED = "core/scheduler.py"
++HOST = "core/skillflow_host.py"
++GD = "core/gate_deferral.py"
++CHK = "tests/unit/test_no_verbatim_previous_line_dup.py"
++
++DECL = "tests/unit/test_run_tests_unmeasured_declaration.py"
++ABSENCE = "tests/skillflow/test_coding_impl_gate_absence.py"
++EXEC_POINTS = "tests/unit/test_gate_deferral_execution_points.py"
++ACCOUNTED = "tests/unit/test_gate_deferral_is_accounted.py"
++
++GOAL_TABLE = ("N9", "M21", "M21b", "G2", "G2b", "DUPIMPL", "RESTART")
++
++_TICK_SILENT = "    if deferral[\"state\"] == \"silent\":\n"
++
++
++def _sched_row_charge(column_sql):
++    """The review's SCHEDROW* shape: the tick's silent branch charges the
++    parked `test` row while it holds the run."""
++    return [{
++        "file": SCHED,
++        "anchor": _TICK_SILENT,
++        "replacement": _TICK_SILENT +
++        "        sf._conn.execute(\"UPDATE skillflow_steps SET " + column_sql +
++        " WHERE run_id=? AND step_id='test'\", (run_id,))\n",
++    }]
++
++
++#: name -> {"edits": [{file, anchor, replacement}], "targeted": [test ids],
++#:          optional "kind", optional "file_note"}
+ MUTATIONS = {
+     # ── goal table, verbatim ──────────────────────────────────────────────
+     "N9": {
++        "kind": "text",
+         "file_note": "tool.yaml:52-56 — delete the sentence that states a "
+                      "no-verdict gate does not loop back to implement.",
+         "edits": [{
+@@ -35,110 +82,69 @@ MUTATIONS = {
+             "replacement": "",
+         }],
+         "targeted": [
+-            "tests/unit/test_run_tests_unmeasured_declaration.py::test_the_tool_doc_names_the_no_verdict_gate_as_absent_not_a_loop",
++            DECL + "::test_the_tool_doc_names_the_no_verdict_gate_as_absent_not_a_loop",
+         ],
+     },
+     "M21": {
+         "file_note": "_unmeasured_declaration: startswith -> `in`; the "
+                      "line[len(prefix):] slice is LEFT UNCHANGED (verbatim).",
+         "edits": [{
+-            "file": "aitelier/tools/run_tests/impl.py",
++            "file": IMPL,
+             "anchor": "        if not line.startswith(_REPO_GATE_UNMEASURED_PREFIX):\n",
+             "replacement": "        if not (_REPO_GATE_UNMEASURED_PREFIX in line):\n",
+         }],
+         "targeted": [
+-            "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_mid_line_echo_kills_the_in_operator_on_the_declaration_channel",
+-            "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_log_echo_of_the_prefix_mid_line_is_not_a_declaration",
++            DECL + "::test_the_r4_shaped_witness_flips_under_the_literal_m21",
+         ],
+     },
+     "M21b": {
+         "file_note": "_repo_gate_failure_cases: startswith -> `in`; slice "
+                      "unchanged (verbatim).",
+         "edits": [{
+-            "file": "aitelier/tools/run_tests/impl.py",
++            "file": IMPL,
+             "anchor": "        if not line.startswith(_REPO_GATE_CASE_PREFIX):\n",
+             "replacement": "        if not (_REPO_GATE_CASE_PREFIX in line):\n",
+         }],
+         "targeted": [
+-            "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_mid_line_echo_kills_the_in_operator_on_the_case_channel",
+-            "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_log_echo_of_the_case_prefix_mid_line_is_not_a_case_record",
+-        ],
+-    },
+-    "M21PAIR": {
+-        "file_note": "The OBSERVABLE half of the M21 family: `in` AND the "
+-                     "`line.index(prefix)` slice together. Literal M21 is "
+-                     "behaviourally inert (see the inertness witness); this "
+-                     "pair is what a test can turn red on the declaration "
+-                     "channel.",
+-        "edits": [
+-            {
+-                "file": "aitelier/tools/run_tests/impl.py",
+-                "anchor": "        if not line.startswith(_REPO_GATE_UNMEASURED_PREFIX):\n",
+-                "replacement": "        if not (_REPO_GATE_UNMEASURED_PREFIX in line):\n",
+-            },
+-            {
+-                "file": "aitelier/tools/run_tests/impl.py",
+-                "anchor": "        raw = line[len(_REPO_GATE_UNMEASURED_PREFIX):]\n",
+-                "replacement": "        raw = line[line.index(_REPO_GATE_UNMEASURED_PREFIX) + len(_REPO_GATE_UNMEASURED_PREFIX):]\n",
+-            },
+-        ],
+-        "targeted": [
+-            "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_mid_line_echo_kills_the_in_operator_on_the_declaration_channel",
+-        ],
+-    },
+-    "M21BPAIR": {
+-        "file_note": "The observable pair on the case channel (M21b + its slice).",
+-        "edits": [
+-            {
+-                "file": "aitelier/tools/run_tests/impl.py",
+-                "anchor": "        if not line.startswith(_REPO_GATE_CASE_PREFIX):\n",
+-                "replacement": "        if not (_REPO_GATE_CASE_PREFIX in line):\n",
+-            },
+-            {
+-                "file": "aitelier/tools/run_tests/impl.py",
+-                "anchor": "        raw = line[len(_REPO_GATE_CASE_PREFIX):]\n",
+-                "replacement": "        raw = line[line.index(_REPO_GATE_CASE_PREFIX) + len(_REPO_GATE_CASE_PREFIX):]\n",
+-            },
+-        ],
+-        "targeted": [
+-            "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_mid_line_echo_kills_the_in_operator_on_the_case_channel",
++            DECL + "::test_the_r4_shaped_witness_flips_under_the_literal_m21b",
+         ],
+     },
+     "G2": {
+         "file_note": "gate_deferral module constant GATE_DEFERRAL_EPISODE_MAX_SECONDS = 1e9.",
+         "edits": [{
+-            "file": "core/gate_deferral.py",
++            "file": GD,
+             "anchor": "GATE_DEFERRAL_EPISODE_MAX_SECONDS = float(\n"
+                       "    os.getenv(\"AITELIER_GATE_DEFERRAL_EPISODE_MAX_SECONDS\", \"10800\"))\n",
+             "replacement": "GATE_DEFERRAL_EPISODE_MAX_SECONDS = 1e9\n",
+         }],
+         "targeted": [
+-            "tests/unit/test_gate_deferral_execution_points.py::test_the_effective_episode_ceiling_is_ten_thousand_eight_hundred_as_loaded",
++            EXEC_POINTS + "::test_the_effective_episode_ceiling_is_ten_thousand_eight_hundred_as_loaded",
+         ],
+     },
+     "G2b": {
+         "file_note": "gate_deferral module constant GATE_DEFERRAL_EPISODE_MAX_CEILING = 1e9.",
+         "edits": [{
+-            "file": "core/gate_deferral.py",
++            "file": GD,
+             "anchor": "GATE_DEFERRAL_EPISODE_MAX_CEILING = float(\n"
+                       "    os.getenv(\"AITELIER_GATE_DEFERRAL_EPISODE_MAX_CEILING\", str(6 * 3600)))\n",
+             "replacement": "GATE_DEFERRAL_EPISODE_MAX_CEILING = 1e9\n",
+         }],
+         "targeted": [
+-            "tests/unit/test_gate_deferral_execution_points.py::test_the_effective_episode_ceiling_is_ten_thousand_eight_hundred_as_loaded",
++            EXEC_POINTS + "::test_the_effective_episode_ceiling_is_ten_thousand_eight_hundred_as_loaded",
+         ],
+     },
+     "DUPIMPL": {
++        "kind": "text",
+         "file_note": "write the `_ERROR_RE = ...` line a second time, "
+                      "immediately after itself.",
+         "edits": [{
+-            "file": "aitelier/tools/run_tests/impl.py",
++            "file": IMPL,
+             "anchor": "_ERROR_RE = re.compile(r\"^ERROR\\s+(\\S+)\")\n",
+             "replacement": "_ERROR_RE = re.compile(r\"^ERROR\\s+(\\S+)\")\n"
+                            "_ERROR_RE = re.compile(r\"^ERROR\\s+(\\S+)\")\n",
+         }],
+         "targeted": [
+-            "tests/unit/test_no_verbatim_previous_line_dup.py::test_no_verbatim_previous_line_dup_in_non_test_code",
++            CHK + "::test_no_verbatim_previous_line_dup_in_non_test_code",
+         ],
+     },
+     "RESTART": {
+@@ -147,7 +153,7 @@ MUTATIONS = {
+                      "`episode_seconds(...) == 0.0` assert guarded.",
+         "edits": [
+             {
+-                "file": "core/gate_deferral.py",
++                "file": GD,
+                 "anchor": "@dataclass\nclass DeferralLedger:",
+                 "replacement": "# RESTART mutation: a process-wide store every fresh\n"
+                                "# ledger reads back, i.e. the ledger IS persisted.\n"
+@@ -155,321 +161,439 @@ MUTATIONS = {
+                                "class DeferralLedger:",
+             },
+             {
+-                "file": "core/gate_deferral.py",
++                "file": GD,
+                 "anchor": "    episodes: dict[str, _Episode] = field(default_factory=dict)\n",
+                 "replacement": "    episodes: dict[str, _Episode] = field("
+                                "default_factory=lambda: _PERSISTED_EPISODES)\n",
+             },
+         ],
+         "targeted": [
+-            "tests/unit/test_gate_deferral_execution_points.py::test_the_deferral_ledger_is_not_persisted_so_a_restart_re_measures",
++            EXEC_POINTS + "::test_the_deferral_ledger_is_not_persisted_so_a_restart_re_measures",
++        ],
++    },
++    # ── the M21 pair (round 8/9 names) ────────────────────────────────────
++    "M21PAIR": {
++        "file_note": "`in` AND the `line.index(prefix)` slice together on the "
++                     "declaration channel: a second, blunter mutation than "
++                     "the goal table's M21.",
++        "edits": [
++            {
++                "file": IMPL,
++                "anchor": "        if not line.startswith(_REPO_GATE_UNMEASURED_PREFIX):\n",
++                "replacement": "        if not (_REPO_GATE_UNMEASURED_PREFIX in line):\n",
++            },
++            {
++                "file": IMPL,
++                "anchor": "        raw = line[len(_REPO_GATE_UNMEASURED_PREFIX):]\n",
++                "replacement": "        raw = line[line.index(_REPO_GATE_UNMEASURED_PREFIX) + len(_REPO_GATE_UNMEASURED_PREFIX):]\n",
++            },
++        ],
++        "targeted": [
++            DECL + "::test_a_mid_line_echo_kills_the_in_operator_on_the_declaration_channel",
+         ],
+     },
+-    # ── previously-killed named mutations, anchored to real source ─────────
++    "M21BPAIR": {
++        "file_note": "The same pair on the case channel (M21b + its slice).",
++        "edits": [
++            {
++                "file": IMPL,
++                "anchor": "        if not line.startswith(_REPO_GATE_CASE_PREFIX):\n",
++                "replacement": "        if not (_REPO_GATE_CASE_PREFIX in line):\n",
++            },
++            {
++                "file": IMPL,
++                "anchor": "        raw = line[len(_REPO_GATE_CASE_PREFIX):]\n",
++                "replacement": "        raw = line[line.index(_REPO_GATE_CASE_PREFIX) + len(_REPO_GATE_CASE_PREFIX):]\n",
++            },
++        ],
++        "targeted": [
++            DECL + "::test_a_mid_line_echo_kills_the_in_operator_on_the_case_channel",
++        ],
++    },
++    # ── review-defined names, the review's edits ──────────────────────────
+     "M2": {
++        "file_note": "a truncated gate's retained fragment alone decides the "
++                     "declaration again (the truncation branch is skipped).",
+         "edits": [{
+-            "file": "aitelier/tools/run_tests/impl.py",
+-            "anchor": "                \"unmeasured_declaration\": _unmeasured_declaration(out)}\n",
+-            "replacement": "                \"unmeasured_declaration\": _unmeasured_declaration(out[-2000:])}\n",
++            "file": IMPL,
++            "anchor": "        return True\n    if gate.get(\"output_truncated\"):",
++            "replacement": "        return True\n    if False and gate.get(\"output_truncated\"):",
+         }],
+         "targeted": [
+-            "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_declaration_survives_output_far_past_the_retention_bound",
++            DECL + "::test_a_bounded_fragment_is_not_a_record_on_its_own",
+         ],
+     },
+     "M19": {
++        "file_note": "the truncation branch answers True instead of False.",
+         "edits": [{
+-            "file": "aitelier/tools/run_tests/impl.py",
+-            "anchor": "                \"unmeasured_declaration\": _unmeasured_declaration(out)}\n",
+-            "replacement": "                \"unmeasured_declaration\": None}\n",
++            "file": IMPL,
++            "anchor": "        return False\n    return _unmeasured_declaration(str(gate.get(\"output\", \"\"))) is not None",
++            "replacement": "        return True\n    return _unmeasured_declaration(str(gate.get(\"output\", \"\"))) is not None",
+         }],
+         "targeted": [
+-            "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_declared_absence_is_unmeasured_whatever_the_exit_code_was",
++            DECL + "::test_a_bounded_fragment_is_not_a_record_on_its_own",
+         ],
+     },
+     "TAILONLY2": {
++        "file_note": "`_run_node_cmd` scans only the retained tail out[-2000:] "
++                     "for the declaration.",
+         "edits": [{
+-            "file": "aitelier/tools/run_tests/impl.py",
+-            "anchor": "    if gate.get(\"output_truncated\"):\n        # Only a fragment was retained",
+-            "replacement": "    if False:\n        # Only a fragment was retained",
++            "file": IMPL,
++            "anchor": "\"unmeasured_declaration\": _unmeasured_declaration(out)}",
++            "replacement": "\"unmeasured_declaration\": _unmeasured_declaration(out[-2000:])}",
+         }],
+         "targeted": [
+-            "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_truncated_gate_with_no_record_at_all_is_a_red",
++            DECL + "::test_a_declaration_survives_output_far_past_the_retention_bound",
+         ],
+     },
+-    "RC2": {
++    "D1": {
++        "file_note": "a declared absence no longer sets repo_gate_unmeasured.",
+         "edits": [{
+-            "file": "aitelier/tools/run_tests/impl.py",
+-            "anchor": "    return (REPO_GATE_MEASURED_PASS if gate.get(\"returncode\") == 0\n            else REPO_GATE_MEASURED_FAIL)\n",
+-            "replacement": "    return (REPO_GATE_MEASURED_PASS if gate.get(\"returncode\") == 0\n            else REPO_GATE_UNMEASURED)\n",
++            "file": IMPL,
++            "anchor": "                report[\"repo_gate_unmeasured\"] = True",
++            "replacement": "                report[\"repo_gate_unmeasured\"] = False",
+         }],
+-        "targeted": [
+-            "tests/unit/test_run_tests_unmeasured_declaration.py::test_no_exit_code_alone_is_ever_unmeasured",
+-        ],
++        "targeted": [DECL, ABSENCE],
+     },
+-    "TIMEOUT_NOT_UNMEASURED": {
++    "D4": {
++        "file_note": "a declared absence no longer sets repo_gate_absent.",
+         "edits": [{
+-            "file": "aitelier/tools/run_tests/impl.py",
+-            "anchor": "    if gate.get(\"timed_out\") is True or gate.get(\"runner_error\") is True:\n",
+-            "replacement": "    if False:\n",
++            "file": IMPL,
++            "anchor": "                report[\"repo_gate_absent\"] = True",
++            "replacement": "                report[\"repo_gate_absent\"] = False",
+         }],
+-        "targeted": [
+-            "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_killed_gate_is_unmeasured_and_its_returncode_is_not_why",
+-        ],
++        "targeted": [DECL, ABSENCE],
+     },
+-    "VALVEBYPASS": {
++    "ABSTERM": {
++        "file_note": "the terminal-wording checker answers True for any "
++                     "sentence.",
+         "edits": [{
+-            "file": "core/gate_deferral.py",
+-            "anchor": "    return claims > max_claims\n",
+-            "replacement": "    if ledger is not None and ledger.deferring(run_id, now=now):\n        return False\n    return claims > max_claims\n",
++            "file": GD,
++            "anchor": "    lowered = str(reason).lower()\n"
++                      "    if ABSENCE_TERMINAL.lower() not in lowered:\n"
++                      "        return False",
++            "replacement": "    lowered = str(reason).lower()\n"
++                           "    if True:\n"
++                           "        return True\n"
++                           "    if ABSENCE_TERMINAL.lower() not in lowered:\n"
++                           "        return False",
+         }],
+-        "targeted": [
+-            "tests/unit/test_gate_deferral_execution_points.py",
+-            "tests/unit/test_gate_deferral_is_accounted.py",
+-        ],
++        "targeted": [ACCOUNTED],
+     },
+-    "VALVEREACH": {
++    "ABSTERM2": {
++        "file_note": "drop the plural-stem widening of the forbidden words.",
+         "edits": [{
+-            "file": "core/gate_deferral.py",
+-            "anchor": "    return claims > max_claims\n",
+-            "replacement": "    return False\n",
++            "file": GD,
++            "anchor": "    words |= {w[:-1] for w in words if w.endswith(\"s\")}",
++            "replacement": "    words |= set()",
+         }],
+-        "targeted": [
+-            "tests/unit/test_gate_deferral_execution_points.py",
+-            "tests/unit/test_gate_deferral_is_accounted.py",
+-        ],
++        "targeted": [ACCOUNTED],
+     },
+-    "ABSCEIL": {
++    "S1": {
++        "file_note": "the tick's observe_run result is replaced by `none`: "
++                     "the scheduler tick hold never sees the absence.",
+         "edits": [{
+-            "file": "core/gate_deferral.py",
+-            "anchor": "_ABSOLUTE_EPISODE_CEILING = 6 * 3600.0\n",
+-            "replacement": "_ABSOLUTE_EPISODE_CEILING = 1e9\n",
++            "file": SCHED,
++            "anchor": "    deferral = gate_deferral.observe_run(sf, run_id)\n" + _TICK_SILENT,
++            "replacement": "    deferral = {\"state\": \"none\", \"remaining\": 0.0, "
++                           "\"gate\": \"\", \"reason\": \"\"}\n" + _TICK_SILENT,
+         }],
+-        "targeted": [
+-            "tests/unit/test_gate_deferral_execution_points.py",
+-        ],
++        "targeted": [ABSENCE, EXEC_POINTS],
++    },
++    "VALVEREACH": {
++        "file_note": "the tick's silent branch logs and falls through instead "
++                     "of returning.",
++        "edits": [{
++            "file": SCHED,
++            "anchor": "                 remaining=f\"{deferral['remaining']:.0f}s\")\n"
++                      "        return\n"
++                      "    if deferral[\"state\"] == \"expired\":",
++            "replacement": "                 remaining=f\"{deferral['remaining']:.0f}s\")\n"
++                           "        pass\n"
++                           "    if deferral[\"state\"] == \"expired\":",
++        }],
++        "targeted": [ABSENCE, EXEC_POINTS],
++    },
++    "SCHEDROWRETRY": {
++        "file_note": "the tick's silent branch charges the parked `test` "
++                     "row's retry_count.",
++        "edits": _sched_row_charge("retry_count=retry_count+1"),
++        "targeted": [ABSENCE],
++    },
++    "SCHEDROWSTATUS": {
++        "file_note": "the tick's silent branch sets the parked `test` row "
++                     "back to pending.",
++        "edits": _sched_row_charge("status='pending'"),
++        "targeted": [ABSENCE],
+     },
+     "H2": {
++        "file_note": "hold_blocks_advance always answers False.",
+         "edits": [{
+-            "file": "core/gate_deferral.py",
++            "file": GD,
+             "anchor": "    book = LEDGER if ledger is None else ledger\n    return book.deferring(run_id, now=now)\n",
+             "replacement": "    book = LEDGER if ledger is None else ledger\n    return False\n",
+         }],
+         "targeted": [
+-            "tests/skillflow/test_coding_impl_gate_absence.py",
+-            "tests/skillflow/test_coding_impl_gate_absence.py::test_the_deferral_hold_leaves_real_step_rows_untouched",
+-            "tests/unit/test_gate_deferral_execution_points.py",
++            ABSENCE,
++            EXEC_POINTS,
+         ],
+     },
+-    "ABSTERM": {
++    "RC2": {
+         "edits": [{
+-            "file": "core/gate_deferral.py",
+-            "anchor": "ABSENCE_TERMINAL = \"gate did not run: no verdict was measured\"\n",
+-            "replacement": "ABSENCE_TERMINAL = \"gate failed: the code did not pass\"\n",
++            "file": IMPL,
++            "anchor": "    return (REPO_GATE_MEASURED_PASS if gate.get(\"returncode\") == 0\n            else REPO_GATE_MEASURED_FAIL)\n",
++            "replacement": "    return (REPO_GATE_MEASURED_PASS if gate.get(\"returncode\") == 0\n            else REPO_GATE_UNMEASURED)\n",
+         }],
+         "targeted": [
+-            "tests/unit/test_gate_deferral_execution_points.py",
++            DECL + "::test_no_exit_code_alone_is_ever_unmeasured",
+         ],
+     },
+-    "ABSTERM2": {
++    "TIMEOUT_NOT_UNMEASURED": {
+         "edits": [{
+-            "file": "core/gate_deferral.py",
+-            "anchor": "        return f\"{ABSENCE_TERMINAL} ({gate}, {self.episode_count(run_id)} attempt(s))\"\n",
+-            "replacement": "        return (\"Cycle limit exceeded: the code \"\n                \"regressed and gate did not run: no verdict was measured\")\n",
++            "file": IMPL,
++            "anchor": "    if gate.get(\"timed_out\") is True or gate.get(\"runner_error\") is True:\n",
++            "replacement": "    if False:\n",
+         }],
+         "targeted": [
+-            "tests/unit/test_gate_deferral_execution_points.py",
++            DECL + "::test_a_killed_gate_is_unmeasured_and_its_returncode_is_not_why",
+         ],
+     },
++    "VALVEBYPASS": {
++        "edits": [{
++            "file": GD,
++            "anchor": "    return claims > max_claims\n",
++            "replacement": "    if ledger is not None and ledger.deferring(run_id, now=now):\n        return False\n    return claims > max_claims\n",
++        }],
++        "targeted": [EXEC_POINTS, ACCOUNTED],
++    },
++    "ABSCEIL": {
++        "edits": [{
++            "file": GD,
++            "anchor": "_ABSOLUTE_EPISODE_CEILING = 6 * 3600.0\n",
++            "replacement": "_ABSOLUTE_EPISODE_CEILING = 1e9\n",
++        }],
++        "targeted": [EXEC_POINTS],
++    },
+     "ABSENCEWORD": {
+         "edits": [{
+-            "file": "core/gate_deferral.py",
++            "file": GD,
+             "anchor": "_FORBIDDEN_WORDS = (\"failed\", \"failure\", \"fail\", \"regression\", \"red\", \"error\")\n",
+             "replacement": "_FORBIDDEN_WORDS = ()\n",
+         }],
+-        "targeted": [
+-            "tests/unit/test_gate_deferral_execution_points.py",
+-        ],
++        "targeted": [ACCOUNTED],
+     },
+     "READABSENCE": {
+         "edits": [{
+-            "file": "core/gate_deferral.py",
++            "file": GD,
+             "anchor": "    if not (data.get(\"repo_gate_absent\") or data.get(\"repo_gate_unmeasured\")):\n        return None\n",
+             "replacement": "    if False:\n        return None\n",
+         }],
+-        "targeted": [
+-            "tests/unit/test_gate_deferral_is_accounted.py",
+-        ],
++        "targeted": [ACCOUNTED],
+     },
+     "ABSREL": {
+         "edits": [{
+-            "file": "aitelier/tools/run_tests/impl.py",
++            "file": IMPL,
+             "anchor": "    report[\"passed_relative\"] = (state in BASELINE_MEASURED\n                                 and not absent\n                                 and not report[\"new_failures\"])\n",
+             "replacement": "    report[\"passed_relative\"] = (state in BASELINE_MEASURED\n                                 and not report[\"new_failures\"])\n",
+         }],
+-        "targeted": [
+-            "tests/unit/test_run_tests_unmeasured_declaration.py",
+-        ],
++        "targeted": [DECL],
+     },
+     "ABSSTATE": {
+         "edits": [{
+-            "file": "aitelier/tools/run_tests/impl.py",
++            "file": IMPL,
+             "anchor": "        if absent and (path is None or not path.is_file()):\n            state = \"unmeasured\"\n",
+             "replacement": "        pass\n",
+         }],
+-        "targeted": [
+-            "tests/unit/test_run_tests_unmeasured_declaration.py",
+-        ],
++        "targeted": [DECL],
+     },
+     "ABSWRITE": {
+         "edits": [{
+-            "file": "aitelier/tools/run_tests/impl.py",
++            "file": IMPL,
+             "anchor": "    if path is None or state in (\"unreadable\", \"unmeasured\"):\n        return\n",
+             "replacement": "    if path is None or state == \"unreadable\":\n        return\n",
+         }],
+-        "targeted": [
+-            "tests/unit/test_run_tests_unmeasured_declaration.py",
+-        ],
++        "targeted": [DECL],
++    },
++    "ABSSEED": {
++        "edits": [{
++            "file": IMPL,
++            "anchor": "    if (path is not None and not path.is_file() and state == \"compared\"\n            and not absent):\n",
++            "replacement": "    if (path is not None and not path.is_file() and state == \"compared\"):\n",
++        }],
++        "targeted": [DECL],
+     },
+     "RETFLAG": {
+         "edits": [{
+-            "file": "aitelier/tools/run_tests/impl.py",
++            "file": IMPL,
+             "anchor": "            \"repo_gate_absent\": bool(report.get(\"repo_gate_absent\")),\n",
+             "replacement": "            \"repo_gate_absent\": False,\n",
+         }],
+         "targeted": [
+             "tests/skillflow/test_config_loading.py",
+-            "tests/skillflow/test_coding_impl_gate_absence.py",
++            ABSENCE,
+         ],
+     },
+     "ATTEMPTS3": {
+         "edits": [{
+-            "file": "aitelier/tools/run_tests/impl.py",
++            "file": IMPL,
+             "anchor": "REPO_GATE_UNMEASURED_ATTEMPTS = 1\n",
+             "replacement": "REPO_GATE_UNMEASURED_ATTEMPTS = 3\n",
+         }],
+-        "targeted": [
+-            "tests/unit/test_gate_deferral_execution_points.py",
+-        ],
++        "targeted": [EXEC_POINTS],
+     },
+     "TIMEOUTBIG": {
+         "edits": [{
+-            "file": "aitelier/tools/run_tests/impl.py",
++            "file": IMPL,
+             "anchor": "REPO_GATE_TIMEOUT = 5400\n",
+             "replacement": "REPO_GATE_TIMEOUT = 1e9\n",
+         }],
+-        "targeted": [
+-            "tests/unit/test_gate_deferral_execution_points.py",
+-        ],
++        "targeted": [EXEC_POINTS],
+     },
+     "WAITCLAMP": {
+         "edits": [{
+-            "file": "core/gate_deferral.py",
++            "file": GD,
+             "anchor": "    return min(_positive_seconds(GATE_DEFERRAL_WAIT_SECONDS, 300.0),\n               max(1.0, _positive_seconds(GATE_DEFERRAL_WAIT_MAX, 900.0)))\n",
+             "replacement": "    return _positive_seconds(GATE_DEFERRAL_WAIT_SECONDS, 300.0)\n",
+         }],
+         "targeted": [
+-            "tests/unit/test_gate_deferral_execution_points.py",
++            ACCOUNTED + "::test_the_wait_cannot_be_widened_until_the_ceiling_disappears",
+         ],
+     },
+     "CEILCLAMP": {
+         "edits": [{
+-            "file": "core/gate_deferral.py",
++            "file": GD,
+             "anchor": "    return min(_positive_seconds(GATE_DEFERRAL_EPISODE_MAX_SECONDS, 10800.0),\n               ceiling)\n",
+             "replacement": "    return _positive_seconds(GATE_DEFERRAL_EPISODE_MAX_SECONDS, 10800.0)\n",
+         }],
+-        "targeted": [
+-            "tests/unit/test_gate_deferral_execution_points.py",
+-        ],
++        "targeted": [EXEC_POINTS],
+     },
+-    "G1b": {
++    "DUPYIELD": {
++        "kind": "text",
+         "edits": [{
+-            "file": "core/gate_deferral.py",
+-            "anchor": "GATE_DEFERRAL_WAIT_MAX = float(\n    os.getenv(\"AITELIER_GATE_DEFERRAL_WAIT_MAX\", \"900\"))\n",
+-            "replacement": "GATE_DEFERRAL_WAIT_MAX = 1e9\n",
++            "file": CHK,
++            "anchor": "    return non_test, test\n",
++            "replacement": "    return non_test, test\n    return non_test, test\n",
+         }],
+         "targeted": [
+-            "tests/unit/test_gate_deferral_execution_points.py",
++            CHK + "::test_the_checker_file_is_clean_under_its_own_rule",
+         ],
+     },
+-    "G3": {
++    "DUPHITS": {
++        "kind": "text",
+         "edits": [{
+-            "file": "core/gate_deferral.py",
+-            "anchor": "    return min(_positive_seconds(GATE_DEFERRAL_EPISODE_MAX_SECONDS, 10800.0),\n               ceiling)\n",
+-            "replacement": "    return _positive_seconds(GATE_DEFERRAL_EPISODE_MAX_SECONDS, 10800.0)\n",
++            "file": CHK,
++            "anchor": "    assert non_test == []\n",
++            "replacement": "    assert non_test == []\n    assert non_test == []\n",
+         }],
+         "targeted": [
+-            "tests/unit/test_gate_deferral_execution_points.py",
++            CHK + "::test_the_checker_file_is_clean_under_its_own_rule",
+         ],
+     },
+-    "G4": {
++    # ── round 8's own edits under their own names ─────────────────────────
++    "TIMEOUT60": {
++        "file_note": "round 8's `S1` edit: REPO_GATE_TIMEOUT = 60.",
+         "edits": [{
+-            "file": "core/gate_deferral.py",
+-            "anchor": "    return min(_positive_seconds(GATE_DEFERRAL_WAIT_SECONDS, 300.0),\n               max(1.0, _positive_seconds(GATE_DEFERRAL_WAIT_MAX, 900.0)))\n",
+-            "replacement": "    return _positive_seconds(GATE_DEFERRAL_WAIT_SECONDS, 300.0)\n",
++            "file": IMPL,
++            "anchor": "REPO_GATE_TIMEOUT = 5400\n",
++            "replacement": "REPO_GATE_TIMEOUT = 60\n",
+         }],
+-        "targeted": [
+-            "tests/unit/test_gate_deferral_execution_points.py",
+-        ],
++        "targeted": [EXEC_POINTS],
+     },
+-    "S1": {
++    "ABSTERMTEXT": {
++        "file_note": "round 8's `ABSTERM` edit: the absence sentence names a "
++                     "code failure.",
+         "edits": [{
+-            "file": "aitelier/tools/run_tests/impl.py",
+-            "anchor": "REPO_GATE_TIMEOUT = 5400\n",
+-            "replacement": "REPO_GATE_TIMEOUT = 60\n",
++            "file": GD,
++            "anchor": "ABSENCE_TERMINAL = \"gate did not run: no verdict was measured\"\n",
++            "replacement": "ABSENCE_TERMINAL = \"gate failed: the code did not pass\"\n",
+         }],
+-        "targeted": [
+-            "tests/unit/test_gate_deferral_execution_points.py",
+-        ],
++        "targeted": [EXEC_POINTS, ACCOUNTED],
+     },
+-    "ABSSEED": {
++    "TERMREASONCYCLE": {
++        "file_note": "round 8's `ABSTERM2` edit: terminal_reason says "
++                     "`Cycle limit exceeded`.",
+         "edits": [{
+-            "file": "aitelier/tools/run_tests/impl.py",
+-            "anchor": "    if (path is not None and not path.is_file() and state == \"compared\"\n            and not absent):\n",
+-            "replacement": "    if (path is not None and not path.is_file() and state == \"compared\"):\n",
++            "file": GD,
++            "anchor": "        return f\"{ABSENCE_TERMINAL} ({gate}, {self.episode_count(run_id)} attempt(s))\"\n",
++            "replacement": "        return (\"Cycle limit exceeded: the code \"\n                \"regressed and gate did not run: no verdict was measured\")\n",
+         }],
+-        "targeted": [
+-            "tests/unit/test_run_tests_unmeasured_declaration.py",
+-        ],
++        "targeted": [EXEC_POINTS, ACCOUNTED],
+     },
+-    "D1": {
++    "VALVEOFF": {
++        "file_note": "round 8's `VALVEREACH` edit: the per-instance valve "
++                     "never fires.",
++        "edits": [{
++            "file": GD,
++            "anchor": "    return claims > max_claims\n",
++            "replacement": "    return False\n",
++        }],
++        "targeted": [EXEC_POINTS, ACCOUNTED],
++    },
++    "NEVEREXPIRE": {
++        "file_note": "round 8's `D1` edit: observe_run never reports expired.",
+         "edits": [{
+-            "file": "core/gate_deferral.py",
++            "file": GD,
+             "anchor": "    if book.expired(run_id, now=moment):\n",
+             "replacement": "    if False:\n",
+         }],
+-        "targeted": [
+-            "tests/unit/test_gate_deferral_execution_points.py",
+-        ],
++        "targeted": [EXEC_POINTS, ABSENCE],
+     },
+-    "D4": {
++    "READNONDICT": {
++        "file_note": "round 8's `D4` edit: read_absence drops its non-dict "
++                     "guard.",
+         "edits": [{
+-            "file": "core/gate_deferral.py",
++            "file": GD,
+             "anchor": "    if not isinstance(data, dict):\n        return None\n",
+             "replacement": "    pass\n",
+         }],
+-        "targeted": [
+-            "tests/unit/test_gate_deferral_is_accounted.py",
+-        ],
++        "targeted": [ACCOUNTED],
+     },
+-    "DUPYIELD": {
++    "DECLNONE": {
++        "file_note": "round 8's `M19` edit: `_run_node_cmd` never carries a "
++                     "declaration.",
+         "edits": [{
+-            "file": "tests/unit/test_no_verbatim_previous_line_dup.py",
+-            "anchor": "    return non_test, test\n",
+-            "replacement": "    return non_test, test\n    return non_test, test\n",
++            "file": IMPL,
++            "anchor": "                \"unmeasured_declaration\": _unmeasured_declaration(out)}\n",
++            "replacement": "                \"unmeasured_declaration\": None}\n",
+         }],
+         "targeted": [
+-            "tests/unit/test_no_verbatim_previous_line_dup.py::test_the_checker_file_is_clean_under_its_own_rule",
++            DECL + "::test_a_declaration_survives_output_far_past_the_retention_bound",
+         ],
+     },
+-    "DUPHITS": {
++    # ── the two production holds, one hold-breaking edit each ─────────────
++    "HOST_HOLD_INERT": {
++        "file_note": "AItelierSkillFlow.advance_run no longer checks "
++                     "hold_blocks_advance — the host-level hold is inert; "
++                     "any caller of advance_run (run_driver, API, tests) "
++                     "can advance a deferred run.",
+         "edits": [{
+-            "file": "tests/unit/test_no_verbatim_previous_line_dup.py",
+-            "anchor": "    assert non_test == []\n",
+-            "replacement": "    assert non_test == []\n    assert non_test == []\n",
++            "file": HOST,
++            "anchor": "        from core import gate_deferral\n        if gate_deferral.hold_blocks_advance(run_id):\n            return None\n",
++            "replacement": "        pass\n",
+         }],
+-        "targeted": [
+-            "tests/unit/test_no_verbatim_previous_line_dup.py::test_the_checker_file_is_clean_under_its_own_rule",
+-        ],
++        "targeted": [ABSENCE],
++    },
++    "TICK_HOLD_INERT": {
++        "file_note": "The scheduler tick's deferral check is bypassed: the "
++                     "tick never returns early for a silent gate "
++                     "(core/scheduler.py, the `silent` branch never taken).",
++        "edits": [{
++            "file": SCHED,
++            "anchor": _TICK_SILENT,
++            "replacement": "    if False:\n",
++        }],
++        "targeted": [ABSENCE],
++    },
++    "OBSERVENONE": {
++        "file_note": "round 9's `TICK_HOLD_INERT` edit, which is in "
++                     "gate_deferral.observe_run, not in the tick: observe_run "
++                     "never reports an absence.",
++        "edits": [{
++            "file": GD,
++            "anchor": "    book = LEDGER if ledger is None else ledger\n    absence = last_gate_absence(sf, run_id, report_path=report_path)\n    if absence is None:\n        book.clear(run_id)\n        return {\"state\": \"none\", \"remaining\": 0.0, \"gate\": \"\", \"reason\": \"\"}\n",
++            "replacement": "    book = LEDGER if ledger is None else ledger\n    absence = last_gate_absence(sf, run_id, report_path=report_path)\n    if True:\n        book.clear(run_id)\n        return {\"state\": \"none\", \"remaining\": 0.0, \"gate\": \"\", \"reason\": \"\"}\n",
++        }],
++        "targeted": [ABSENCE],
+     },
+ }
+ 
+diff --git a/tools/mutation_catalog/run_mutations.py b/tools/mutation_catalog/run_mutations.py
+index 15c94adb..9caeb04a 100644
+--- a/tools/mutation_catalog/run_mutations.py
++++ b/tools/mutation_catalog/run_mutations.py
+@@ -1,26 +1,56 @@
+-"""Apply every named mutation to a copy of the real tree, run it at two
+-scopes, read the BARE exit code, record which tests went red, and restore.
++"""Apply named mutations to detached git worktrees, run each at two scopes,
++count how often the mutated lines ran, and record which tests went red.
+ 
+-Run from the repository root:
++Run from the root of a COMMITTED tree. The runner never edits the checkout it
++is started from: every run (the control and each mutation) happens in its own
++`git worktree add --detach` of HEAD.
+ 
+-    python tools/mutation_catalog/run_mutations.py            # all mutations
+-    python tools/mutation_catalog/run_mutations.py M21 DUPIMPL # a subset
++    python tools/mutation_catalog/run_mutations.py                # every name
++    python tools/mutation_catalog/run_mutations.py M21 DUPIMPL    # a subset
++    python tools/mutation_catalog/run_mutations.py --shard 2/4    # names[1::4]
++    python tools/mutation_catalog/run_mutations.py --report       # merge
+ 
+-Exit status of THIS script is 0 only if every mutation it ran produced a
+-non-zero full-suite exit code (a kill).  It writes one log per mutation under
+-logs/mutations/ as a `.txt` file (never `.log`, which the repo gitignores and
+-the delivery hook then refuses) and a machine-readable table to
+-logs/mutations/summary.json.
++Protocol of one invocation (a shard is one invocation):
+ 
+-Nothing here weakens a gate to make a mutation look killed: an anchor that does
+-not match exactly once is reported as ANCHOR-ERROR (and is NOT a kill), the
+-worktree is copied so the tree under test is otherwise the delivered one, and
+-the bare returncode is read from the subprocess directly — never through a
+-pipe, so `| tail` cannot mask a non-zero exit.
++1. CLEAN: `git status --porcelain` of the root, the output directory
++   excepted, must be empty. Otherwise exit 3 before anything runs.
++2. EMPTY CONTROL: a worktree of HEAD with no edit, run at the TARGETED scope
++   (the union of the selected mutations' `targeted` lists) and at the FULL
++   scope (`FULL_SCOPE`). If either bare exit code is not 0, no kill is
++   reported and the runner exits 2.
++3. Each mutation, in a fresh worktree: every anchor is checked BEFORE any edit
++   (applied in order, each must hit exactly once; otherwise the mutation is
++   `anchor-error`, never a kill); the edits are applied and the diff is
++   recorded; the targeted and the full scope run, each with
++   `ignition_plugin` loaded; the worktree is restored with `git checkout --
++   .`, its `git status --porcelain` must then be empty (otherwise exit 3),
++   and it is removed.
++4. Killers, per scope: the red tests minus that scope's control reds. For a
++   `behaviour` mutation (the default), a red test that read a mutated file's
++   text while it ran and executed none of the mutated lines is a source-text
++   witness and is removed from the killers. For a `text` mutation (the
++   guarded property IS the text: a duplicated line, a deleted contract
++   sentence) a reader of the text is the behavioural witness and stays.
++   `killed` = some scope has a killer.
++5. CLEAN again, as in 1 (otherwise exit 3).
++
++Ignition is `line_hits` (executions of the replacement's lines inside the
++pytest process) for a `behaviour` mutation and `file_reads` (reads of the
++mutated file's text during a test) for a `text` mutation; both are logged.
++
++Exit status: 0 every selected mutation killed; 1 some survived, hit an anchor
++error or could not run; 2 control not green; 3 a tree was not clean.
++
++Output (`OUT_DIR`, `.txt` and `.json` only): `CONTROL<tag>.txt`,
++`<NAME>.txt`, `summary<tag>.json`; `--report` merges every `summary*.json`
++there into `summary.txt`, control rows first.
+ """
+ from __future__ import annotations
+ 
++import datetime
++import difflib
+ import json
++import os
+ import shutil
+ import subprocess
+ import sys
+@@ -28,107 +58,359 @@ import tempfile
+ from pathlib import Path
+ 
+ sys.path.insert(0, str(Path(__file__).resolve().parent))
+-from mutations import MUTATIONS, FULL_SCOPE  # noqa: E402
++from mutations import FULL_SCOPE, GOAL_TABLE, MUTATIONS  # noqa: E402
+ 
+ ROOT = Path(__file__).resolve().parent.parent.parent
+-LOG_DIR = ROOT / "logs" / "mutations"
++OUT_REL = "final/logs/mutations"
++OUT_DIR = ROOT / OUT_REL
++PLUGIN_DIR_REL = "tools/mutation_catalog"
++
++
++class AnchorError(Exception):
++    pass
++
++
++def _now() -> str:
++    return datetime.datetime.now(datetime.timezone.utc).strftime(
++        "%Y-%m-%d %H:%M:%S UTC")
++
++
++def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess:
++    return subprocess.run(["git", *args], cwd=str(cwd),
++                          capture_output=True, text=True)
+ 
+ 
+-def _apply_copy(dst: Path) -> Path:
+-    tmp = Path(tempfile.mkdtemp(prefix="mut-")) / "tree"
+-    shutil.copytree(dst, tmp, ignore=shutil.ignore_patterns(
+-        ".git", "__pycache__", "*.pyc", ".pytest_cache", "logs"))
+-    return tmp
++def _root_porcelain() -> str:
++    return _git(ROOT, "status", "--porcelain", "--", ".",
++                f":(exclude){OUT_REL}").stdout.strip()
+ 
+ 
+-def _snapshot(tree: Path, edits) -> dict:
+-    """Return original texts keyed by touched file after validating anchors."""
+-    originals: dict[str, str] = {}
++def _make_worktree() -> Path:
++    base = os.environ.get("MUTATION_WORKTREE_DIR") or None
++    if base:
++        Path(base).mkdir(parents=True, exist_ok=True)
++    wt = Path(tempfile.mkdtemp(prefix="mut-wt-", dir=base)) / "tree"
++    proc = _git(ROOT, "worktree", "add", "--detach", str(wt), "HEAD")
++    if proc.returncode != 0:
++        raise RuntimeError(f"git worktree add failed: {proc.stderr}")
++    return wt
++
++
++def _remove_worktree(wt: Path) -> None:
++    _git(ROOT, "worktree", "remove", "--force", str(wt))
++    shutil.rmtree(wt.parent, ignore_errors=True)
++
++
++def _changed_offsets(anchor: str, replacement: str) -> list[int]:
++    """Line indices, within `replacement`, that the edit wrote (lines of the
++    replacement that are not carried over unchanged from the anchor).
++
++    A deletion writes no line, so its site is the line just before the gap
++    (index `j1 - 1`), or, when nothing precedes it, the line that now follows
++    it (index `j1`, which may lie past the end of the replacement)."""
++    old = anchor.splitlines(keepends=True)
++    new = replacement.splitlines(keepends=True)
++    changed: list[int] = []
++    for tag, _i1, _i2, j1, j2 in difflib.SequenceMatcher(
++            a=old, b=new, autojunk=False).get_opcodes():
++        if tag in ("replace", "insert"):
++            changed.extend(range(j1, j2))
++        elif tag == "delete":
++            changed.append(j1 - 1 if j1 > 0 else j1)
++    return changed
++
++
++def _plan_edits(tree: Path, edits):
++    """Apply the edits in memory, in order. Returns ({file: new_text},
++    {file: [numbers of the lines the edits wrote]}); raises AnchorError when
++    an anchor does not hit exactly once."""
++    texts: dict[str, str] = {}
++    marks: dict[str, list[list[int]]] = {}
+     for edit in edits:
+-        path = tree / edit["file"]
+-        text = path.read_text(encoding="utf-8") if originals.get(edit["file"]) is None \
+-            else originals[edit["file"]]
++        rel = edit["file"]
++        if rel not in texts:
++            texts[rel] = (tree / rel).read_text(encoding="utf-8")
++            marks[rel] = []
++        text = texts[rel]
+         hits = text.count(edit["anchor"])
+         if hits != 1:
+             raise AnchorError(f"anchor hit {hits} times (need exactly 1): "
+-                              f"{edit['file']}: {edit['anchor'][:60]!r}")
+-        originals[edit["file"]] = text.replace(
+-            edit["anchor"], edit["replacement"], 1)
+-    return originals
+-
+-
+-class AnchorError(Exception):
+-    pass
++                              f"{rel}: {edit['anchor'][:70]!r}")
++        start = text.index(edit["anchor"])
++        delta = len(edit["replacement"]) - len(edit["anchor"])
++        for mark in marks[rel]:
++            if mark[0] > start:
++                mark[0] += delta
++        offsets = _changed_offsets(edit["anchor"], edit["replacement"])
++        marks[rel].append([start, offsets])
++        texts[rel] = (text[:start] + edit["replacement"]
++                      + text[start + len(edit["anchor"]):])
++    lines: dict[str, list[int]] = {}
++    for rel, file_marks in marks.items():
++        numbers: set[int] = set()
++        for start, offsets in file_marks:
++            first = texts[rel].count("\n", 0, start) + 1
++            numbers.update(first + offset for offset in offsets)
++        lines[rel] = sorted(numbers)
++    return texts, lines
+ 
+ 
+-def _run(tree: Path, targets) -> tuple[int, str]:
+-    proc = subprocess.run(
+-        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+-         *targets],
+-        cwd=str(tree), capture_output=True, text=True)
+-    out = proc.stdout + proc.stderr
+-    code = proc.returncode  # BARE exit code: not piped, not tee'd
+-    (LOG_DIR).mkdir(parents=True, exist_ok=True)
+-    return code, out
++def _run_pytest(tree: Path, targets, spec: dict | None, tag: str):
++    """Run pytest in `tree`. Returns (bare_rc, output, ignition, argv)."""
++    argv = [sys.executable, "-m", "pytest", "-q", "-rfE",
++            "-p", "no:cacheprovider", "-p", "ignition_plugin", *targets]
++    out_json = Path(tempfile.mkstemp(prefix=f"ign-{tag}-",
++                                     suffix=".json")[1])
++    env = {**os.environ,
++           "PYTHONPATH": f"{tree}{os.pathsep}{tree / PLUGIN_DIR_REL}",
++           "PYTHONDONTWRITEBYTECODE": "1",
++           "MUTATION_IGNITION_SPEC": json.dumps(spec or {}),
++           "MUTATION_IGNITION_OUT": str(out_json)}
++    proc = subprocess.run(argv, cwd=str(tree), capture_output=True,
++                          text=True, env=env)
++    try:
++        ignition = json.loads(out_json.read_text(encoding="utf-8"))
++    except (OSError, ValueError):
++        ignition = None
++    out_json.unlink(missing_ok=True)
++    return proc.returncode, proc.stdout + proc.stderr, ignition, argv
+ 
+ 
+-def _red_tests(output: str) -> list[str]:
+-    ids = []
++def _red_test_ids(output: str) -> list[str]:
++    ids = set()
+     for line in output.splitlines():
+         if line.startswith("FAILED ") or line.startswith("ERROR "):
+-            ids.append(line.split(" ")[1])
+-    return sorted(set(ids))
++            ids.add(line.split(" ")[1])
++    return sorted(ids)
++
+ 
++def _tail_counts(output: str) -> str:
++    found = [line for line in output.splitlines() if " in " in line and (
++        "passed" in line or "failed" in line or "error" in line)]
++    return found[-1].strip("= ") if found else "(no pytest summary line)"
++
++
++def _targeted_union(names) -> list[str]:
++    seen: list[str] = []
++    for name in names:
++        for target in MUTATIONS[name].get("targeted", []):
++            if target not in seen:
++                seen.append(target)
++    return seen
+ 
+-def run_one(name: str, mutation: dict) -> dict:
+-    tree = _apply_copy(ROOT)
+-    record = {"name": name, "edits": [e["file"] for e in mutation["edits"]]}
++
++def run_control(names, tag: str) -> dict:
++    wt = _make_worktree()
++    head = _git(wt, "rev-parse", "HEAD").stdout.strip()
++    targeted = _targeted_union(names)
++    started = _now()
++    trc, tout, _, targv = _run_pytest(wt, targeted, None, "control-t")
++    frc, fout, _, fargv = _run_pytest(wt, FULL_SCOPE, None, "control-f")
++    _remove_worktree(wt)
++    result = {
++        "name": "CONTROL" + tag, "status": "control", "head": head,
++        "targeted_rc": trc, "full_rc": frc,
++        "targeted_counts": _tail_counts(tout), "full_counts": _tail_counts(fout),
++        "targeted_reds": _red_test_ids(tout), "full_reds": _red_test_ids(fout),
++        "names": list(names), "started": started, "ended": _now()}
++    (OUT_DIR / f"CONTROL{tag}.txt").write_text(
++        f"# EMPTY CONTROL{tag}: no edit applied\n"
++        f"# head={head}\n# worktree={wt} (removed)\n"
++        f"# names covered={' '.join(names)}\n"
++        f"# started={started} ended={result['ended']}\n\n"
++        f"## targeted scope: {' '.join(targv)}\n# cwd={wt}\n{tout}\n"
++        f"BARE_RC_TARGETED={trc}\n\n"
++        f"## full scope: {' '.join(fargv)}\n# cwd={wt}\n{fout}\n"
++        f"BARE_RC_FULL={frc}\n\n"
++        f"# targeted reds={result['targeted_reds']}\n"
++        f"# full reds={result['full_reds']}\n", encoding="utf-8")
++    return result
++
++
++def run_one(name: str, mutation: dict, control: dict) -> dict:
++    kind = mutation.get("kind", "behaviour")
++    wt = _make_worktree()
++    head = _git(wt, "rev-parse", "HEAD").stdout.strip()
++    started = _now()
+     try:
+-        originals = _snapshot(tree, mutation["edits"])
++        texts, lines = _plan_edits(wt, mutation["edits"])
+     except AnchorError as exc:
+-        record["status"] = "anchor-error"
+-        record["detail"] = str(exc)
+-        shutil.rmtree(tree.parent, ignore_errors=True)
+-        return record
+-    for rel, text in originals.items():
+-        (tree / rel).write_text(text, encoding="utf-8")
+-    tcode, tout = _run(tree, mutation.get("targeted", []))
+-    fcode, fout = _run(tree, FULL_SCOPE)
+-    (LOG_DIR).mkdir(parents=True, exist_ok=True)
+-    (LOG_DIR / f"{name}.txt").write_text(
+-        "# targeted (bare rc=%d)\n%s\n\n# full (bare rc=%d)\n%s\n"
+-        % (tcode, tout, fcode, fout), encoding="utf-8")
+-    # Verify the tree copy is a git repo copy and status is clean after we
+-    # simply discard it (we never touch the original tree, so porcelain of the
+-    # REAL worktree is what matters; assert it stays empty here).
+-    status = subprocess.run(["git", "status", "--porcelain"],
+-                            cwd=str(ROOT), capture_output=True, text=True).stdout.strip()
+-    record.update(
+-        targeted_rc=tcode, full_rc=fcode,
+-        red_tests=_red_tests(fout) or _red_tests(tout),
+-        killed=bool(fcode != 0),
+-        worktree_dirty=bool(status))
+-    shutil.rmtree(tree.parent, ignore_errors=True)
+-    return record
++        _remove_worktree(wt)
++        (OUT_DIR / f"{name}.txt").write_text(
++            f"# {name}: anchor-error\n# head={head}\n# {exc}\n",
++            encoding="utf-8")
++        return {"name": name, "kind": kind, "status": "anchor-error",
++                "detail": str(exc), "head": head}
++    for rel, text in texts.items():
++        (wt / rel).write_text(text, encoding="utf-8")
++    diff = _git(wt, "diff").stdout
++    spec = {"lines": {str(wt / rel): nums for rel, nums in lines.items()
++                      if rel.endswith(".py")},
++            "files": [str(wt / rel) for rel in texts]}
++    trc, tout, tign, targv = _run_pytest(wt, mutation.get("targeted", []),
++                                         spec, f"{name}-t")
++    frc, fout, fign, fargv = _run_pytest(wt, FULL_SCOPE, spec, f"{name}-f")
++    _git(wt, "checkout", "--", ".")
++    porcelain = _git(wt, "status", "--porcelain").stdout.strip()
++    _remove_worktree(wt)
+ 
++    def _killers(output, ign, control_reds):
++        reds = set(_red_test_ids(output)) - set(control_reds)
++        readers = (set((ign or {}).get("source_readers") or [])
++                   - set((ign or {}).get("igniting_tests") or []))
++        witnesses = reds & readers if kind == "behaviour" else set()
++        return sorted(reds - witnesses), sorted(witnesses)
+ 
+-def main(argv) -> int:
+-    LOG_DIR.mkdir(parents=True, exist_ok=True)
+-    names = argv or sorted(MUTATIONS)
++    t_kill, t_text = _killers(tout, tign, control["targeted_reds"])
++    f_kill, f_text = _killers(fout, fign, control["full_reds"])
++    field = "line_hits" if kind == "behaviour" else "file_reads"
++    t_ign = (tign or {}).get(field)
++    f_ign = (fign or {}).get(field)
++    if porcelain:
++        status = "not-restored"
++    elif trc not in (0, 1) or frc not in (0, 1):
++        status = "run-error"
++    elif t_kill or f_kill:
++        status = "killed"
++    else:
++        status = "SURVIVED"
++    result = {
++        "name": name, "kind": kind, "status": status, "head": head,
++        "ignition_field": field,
++        "targeted_ignition": t_ign, "full_ignition": f_ign,
++        "targeted_rc": trc, "full_rc": frc,
++        "targeted_counts": _tail_counts(tout), "full_counts": _tail_counts(fout),
++        "targeted_killers": t_kill, "full_killers": f_kill,
++        "targeted_text_witnesses": t_text, "full_text_witnesses": f_text,
++        "porcelain_after_restore": porcelain,
++        "started": started, "ended": _now()}
++    (OUT_DIR / f"{name}.txt").write_text(
++        f"# {name} ({kind}): {mutation.get('file_note', '')}\n"
++        f"# head={head}\n# worktree={wt} (removed)\n"
++        f"# started={started} ended={result['ended']}\n"
++        f"# replacement lines={json.dumps(lines)}\n\n"
++        f"## diff applied\n{diff}\n"
++        f"## targeted scope: {' '.join(targv)}\n# cwd={wt}\n{tout}\n"
++        f"BARE_RC_TARGETED={trc}\n"
++        f"IGNITION_TARGETED={json.dumps(tign, sort_keys=True)}\n\n"
++        f"## full scope: {' '.join(fargv)}\n# cwd={wt}\n{fout}\n"
++        f"BARE_RC_FULL={frc}\n"
++        f"IGNITION_FULL={json.dumps(fign, sort_keys=True)}\n\n"
++        f"# control targeted reds={control['targeted_reds']}\n"
++        f"# control full reds={control['full_reds']}\n"
++        f"# targeted killers={t_kill}\n# targeted source-text witnesses={t_text}\n"
++        f"# full killers={f_kill}\n# full source-text witnesses={f_text}\n"
++        f"# porcelain after restore={porcelain!r}\n"
++        f"# status={status}\n", encoding="utf-8")
++    return result
++
++
++def _row(r: dict) -> str:
++    def cell(v):
++        return "–" if v is None else str(v)
++    if r["status"] == "control":
++        return (f"| {r['name']} | control | – | {r['targeted_rc']} | "
++                f"{r['full_rc']} | {r['targeted_counts']} / {r['full_counts']}"
++                f" | reds: {len(r['targeted_reds'])} / {len(r['full_reds'])} "
++                f"| `{r['name']}.txt` |")
++    if r["status"] == "anchor-error":
++        return (f"| {r['name']} | anchor-error | – | – | – | {r['detail']} "
++                f"| – | `{r['name']}.txt` |")
++    killers = sorted(set(r["targeted_killers"]) | set(r["full_killers"]))
++    shown = "; ".join(k.split("::")[-1] for k in killers[:4])
++    more = f" (+{len(killers) - 4})" if len(killers) > 4 else ""
++    return (f"| {r['name']} | {r['status']} | {r['ignition_field']} "
++            f"{cell(r['targeted_ignition'])} / {cell(r['full_ignition'])} | "
++            f"{r['targeted_rc']} | {r['full_rc']} | "
++            f"{len(r['targeted_killers'])} / {len(r['full_killers'])} | "
++            f"{shown}{more} | `{r['name']}.txt` |")
++
++
++def report() -> int:
+     results = []
++    for path in sorted(OUT_DIR.glob("summary*.json")):
++        results.extend(json.loads(path.read_text(encoding="utf-8")))
++    controls = [r for r in results if r["status"] == "control"]
++    rest = [r for r in results if r["status"] != "control"]
++    order = {n: i for i, n in enumerate(GOAL_TABLE)}
++    rest.sort(key=lambda r: (order.get(r["name"], len(order)), r["name"]))
++    heads = sorted({r.get("head") for r in results})
++    lines = [
++        f"# Mutation runner report, merged from {len(controls)} control(s) "
++        f"and {len(rest)} mutation(s); generated {_now()} by "
++        f"`python {PLUGIN_DIR_REL}/run_mutations.py --report`",
++        f"# head(s) measured: {', '.join(h or '?' for h in heads)}",
++        "",
++        "| name | status | ignition (targeted / full) | targeted bare RC "
++        "| full bare RC | killers (targeted / full) | killer tests | log |",
++        "|---|---|---|---|---|---|---|---|",
++    ]
++    lines += [_row(r) for r in controls + rest]
++    survived = [r["name"] for r in rest if r["status"] != "killed"]
++    lines += ["", f"# killed: {len(rest) - len(survived)} of {len(rest)}",
++              f"# not killed: {', '.join(survived) if survived else 'none'}"]
++    (OUT_DIR / "summary.txt").write_text("\n".join(lines) + "\n",
++                                         encoding="utf-8")
++    print("\n".join(lines))
++    return 0 if not survived and all(
++        c["targeted_rc"] == 0 and c["full_rc"] == 0 for c in controls) else 1
++
++
++def main(argv) -> int:
++    OUT_DIR.mkdir(parents=True, exist_ok=True)
++    if argv[:1] == ["--report"]:
++        return report()
++    tag = ""
++    if argv[:1] == ["--shard"]:
++        index, total = (int(x) for x in argv[1].split("/"))
++        names = sorted(MUTATIONS)[index - 1::total]
++        tag = f"_shard{index}of{total}"
++        argv = argv[2:]
++    else:
++        names = argv or sorted(MUTATIONS)
++    unknown = [n for n in names if n not in MUTATIONS]
++    if unknown:
++        print(f"unknown mutation name(s): {unknown}")
++        return 1
++
++    dirty = _root_porcelain()
++    if dirty:
++        print(f"ROOT NOT CLEAN before the run:\n{dirty}")
++        return 3
++    print(f"[{_now()}] root={ROOT} head={_git(ROOT, 'rev-parse', 'HEAD').stdout.strip()}")
++    print(f"[{_now()}] empty control{tag} over {len(names)} name(s)...", flush=True)
++    control = run_control(names, tag)
++    results = [control]
++    if control["targeted_rc"] != 0 or control["full_rc"] != 0:
++        print(f"CONTROL NOT GREEN (targeted rc={control['targeted_rc']}, "
++              f"full rc={control['full_rc']}). Refusing to report kills. "
++              f"Reds: {control['targeted_reds']} {control['full_reds']}")
++        (OUT_DIR / f"summary{tag}.json").write_text(
++            json.dumps(results, indent=2), encoding="utf-8")
++        return 2
++    print(f"[{_now()}] control green (targeted rc=0, full rc=0).", flush=True)
++
+     for name in names:
+-        results.append(run_one(name, MUTATIONS[name]))
+-    (LOG_DIR / "summary.json").write_text(
+-        json.dumps(results, indent=2), encoding="utf-8")
++        print(f"[{_now()}]   {name}...", end=" ", flush=True)
++        result = run_one(name, MUTATIONS[name], control)
++        results.append(result)
++        print(result["status"], flush=True)
++        (OUT_DIR / f"summary{tag}.json").write_text(
++            json.dumps(results, indent=2), encoding="utf-8")
++        if result["status"] == "not-restored":
++            print(f"WORKTREE NOT RESTORED after {name}: "
++                  f"{result['porcelain_after_restore']}")
++            return 3
++
++    dirty = _root_porcelain()
++    if dirty:
++        print(f"ROOT NOT CLEAN after the run:\n{dirty}")
++        return 3
+     for r in results:
+-        line = (f"{r['name']:22s} {r.get('status', 'killed' if r.get('killed') else 'SURVIVED'):9s}"
+-                f" targeted_rc={r.get('targeted_rc')} full_rc={r.get('full_rc')}"
+-                f" red={len(r.get('red_tests', []))}")
+-        print(line)
+-    failed = [r["name"] for r in results
+-              if r.get("status") == "anchor-error" or not r.get("killed")]
++        print(_row(r))
++    failed = [r["name"] for r in results[1:] if r["status"] != "killed"]
+     if failed:
+-        print("NOT KILLED / ANCHOR-ERROR: " + ", ".join(failed))
++        print("NOT KILLED: " + ", ".join(failed))
+         return 1
+     return 0
+ 
+# ENDED: 2026-09-24T06:50:07Z
+BARE_RC=0

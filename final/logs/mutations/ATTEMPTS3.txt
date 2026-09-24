@@ -1,0 +1,181 @@
+# ATTEMPTS3 (behaviour): 
+# head=b104f18c2e7e1d0f0c59e99cb32a077e7896dd28
+# worktree=/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-uucnnnkd/tree (removed)
+# started=2026-09-24 05:33:43 UTC ended=2026-09-24 05:53:43 UTC
+# replacement lines={"aitelier/tools/run_tests/impl.py": [733]}
+
+## diff applied
+diff --git a/aitelier/tools/run_tests/impl.py b/aitelier/tools/run_tests/impl.py
+index 766b7f33..4845b1b4 100644
+--- a/aitelier/tools/run_tests/impl.py
++++ b/aitelier/tools/run_tests/impl.py
+@@ -730,7 +730,7 @@ REPO_GATE_UNMEASURED = "unmeasured"
+ # Both numbers are asserted in
+ # tests/unit/test_gate_deferral_execution_points.py::test_one_step_holds_the_\
+ # scheduler_for_at_most_one_gate_run.
+-REPO_GATE_UNMEASURED_ATTEMPTS = 1
++REPO_GATE_UNMEASURED_ATTEMPTS = 3
+ # Kept for the re-acquisition path that remains reachable (`attempts` still
+ # reports how many runs the reading cost, and the loop honors this constant
+ # when a deployment raises it deliberately). Not read on the default path.
+
+## targeted scope: /usr/local/bin/python -m pytest -q -rfE -p no:cacheprovider -p ignition_plugin tests/unit/test_gate_deferral_execution_points.py
+# cwd=/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-uucnnnkd/tree
+F..........                                                              [100%]
+=================================== FAILURES ===================================
+__________ test_one_step_holds_the_scheduler_for_at_most_one_gate_run __________
+
+    def test_one_step_holds_the_scheduler_for_at_most_one_gate_run():
+        """The budget itself, read off the REAL constants rather than restated."""
+        from aitelier.tools.run_tests import impl as rt
+    
+>       assert rt.REPO_GATE_UNMEASURED_ATTEMPTS == 1, (
+            "gate runs per step moved: "
+            f"{rt.REPO_GATE_UNMEASURED_ATTEMPTS} (the scheduler parks the absence "
+            "now, so a step does not pay for the wait)")
+E       AssertionError: gate runs per step moved: 3 (the scheduler parks the absence now, so a step does not pay for the wait)
+E       assert 3 == 1
+E        +  where 3 = <module 'aitelier.tools.run_tests.impl' from '/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-uucnnnkd/tree/aitelier/tools/run_tests/impl.py'>.REPO_GATE_UNMEASURED_ATTEMPTS
+
+tests/unit/test_gate_deferral_execution_points.py:52: AssertionError
+=============================== warnings summary ===============================
+../../../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_gate_deferral_execution_points.py::test_one_step_holds_the_scheduler_for_at_most_one_gate_run
+1 failed, 10 passed, 1 warning in 2.64s
+Exception ignored in: <function _removeHandlerRef at 0x754816e58cc0>
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/logging/__init__.py", line 882, in _removeHandlerRef
+  File "/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-uucnnnkd/tree/tools/mutation_catalog/ignition_plugin.py", line 63, in _on_line
+TypeError: 'NoneType' object is not callable
+
+BARE_RC_TARGETED=1
+IGNITION_TARGETED={"file_reads": 0, "file_reads_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-uucnnnkd/tree/aitelier/tools/run_tests/impl.py": 0}, "igniting_tests": ["tests/unit/test_gate_deferral_execution_points.py::test_one_step_holds_the_scheduler_for_at_most_one_gate_run"], "line_hits": 1, "line_hits_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-uucnnnkd/tree/aitelier/tools/run_tests/impl.py": 1}, "monitoring_tool_id": 4, "mutated_modules_imported": ["/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-uucnnnkd/tree/aitelier/tools/run_tests/impl.py"], "source_readers": []}
+
+## full scope: /usr/local/bin/python -m pytest -q -rfE -p no:cacheprovider -p ignition_plugin tests/unit tests/skillflow
+# cwd=/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-uucnnnkd/tree
+........................................................................ [  1%]
+........................................................................ [  3%]
+........................................................................ [  5%]
+........................................................................ [  7%]
+........................................................................ [  8%]
+........................................................................ [ 10%]
+........................................................................ [ 12%]
+........................................................................ [ 14%]
+........................................................................ [ 15%]
+........................................................................ [ 17%]
+........................................................................ [ 19%]
+........................................................................ [ 21%]
+........................................................................ [ 22%]
+........................................................................ [ 24%]
+........................................................................ [ 26%]
+........................................................................ [ 28%]
+........................................................................ [ 29%]
+........................................................................ [ 31%]
+......................................................F................. [ 33%]
+........................................................................ [ 35%]
+.......................................................................s [ 37%]
+sssssss................................................................. [ 38%]
+........................................................................ [ 40%]
+........................................................................ [ 42%]
+........................................................................ [ 44%]
+........................................................................ [ 45%]
+........................................................................ [ 47%]
+........................................................................ [ 49%]
+........................................................................ [ 51%]
+........................................................................ [ 52%]
+........................................................................ [ 54%]
+.............s.......................................................... [ 56%]
+........................................................................ [ 58%]
+........................................................................ [ 59%]
+........................................................................ [ 61%]
+........................................................................ [ 63%]
+........................................................................ [ 65%]
+........................................................................ [ 67%]
+........................................................................ [ 68%]
+........................................................................ [ 70%]
+........................................................................ [ 72%]
+........................................................................ [ 74%]
+........................................................................ [ 75%]
+........................................................................ [ 77%]
+........................................................................ [ 79%]
+........................................................................ [ 81%]
+........................................................................ [ 82%]
+........................................................................ [ 84%]
+........................................................................ [ 86%]
+........................................................................ [ 88%]
+........................................................................ [ 89%]
+........................................................................ [ 91%]
+........................................................................ [ 93%]
+........................................................................ [ 95%]
+........................................................................ [ 97%]
+........................................................................ [ 98%]
+.................................................                        [100%]
+=================================== FAILURES ===================================
+__________ test_one_step_holds_the_scheduler_for_at_most_one_gate_run __________
+
+    def test_one_step_holds_the_scheduler_for_at_most_one_gate_run():
+        """The budget itself, read off the REAL constants rather than restated."""
+        from aitelier.tools.run_tests import impl as rt
+    
+>       assert rt.REPO_GATE_UNMEASURED_ATTEMPTS == 1, (
+            "gate runs per step moved: "
+            f"{rt.REPO_GATE_UNMEASURED_ATTEMPTS} (the scheduler parks the absence "
+            "now, so a step does not pay for the wait)")
+E       AssertionError: gate runs per step moved: 3 (the scheduler parks the absence now, so a step does not pay for the wait)
+E       assert 3 == 1
+E        +  where 3 = <module 'aitelier.tools.run_tests.impl' from '/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-uucnnnkd/tree/aitelier/tools/run_tests/impl.py'>.REPO_GATE_UNMEASURED_ATTEMPTS
+
+tests/unit/test_gate_deferral_execution_points.py:52: AssertionError
+=============================== warnings summary ===============================
+../../../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+tests/unit/test_bash_admission_lifetime.py::test_a_second_cancellation_during_cleanup_still_ends_the_writer
+  /usr/local/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <function BaseSubprocessTransport.__del__ at 0x7ca343810040>
+  
+  Traceback (most recent call last):
+    File "/usr/local/lib/python3.12/asyncio/base_subprocess.py", line 126, in __del__
+      self.close()
+    File "/usr/local/lib/python3.12/asyncio/base_subprocess.py", line 104, in close
+      proto.pipe.close()
+    File "/usr/local/lib/python3.12/asyncio/unix_events.py", line 568, in close
+      self._close(None)
+    File "/usr/local/lib/python3.12/asyncio/unix_events.py", line 592, in _close
+      self._loop.call_soon(self._call_connection_lost, exc)
+    File "/usr/local/lib/python3.12/asyncio/base_events.py", line 799, in call_soon
+      self._check_closed()
+    File "/usr/local/lib/python3.12/asyncio/base_events.py", line 545, in _check_closed
+      raise RuntimeError('Event loop is closed')
+  RuntimeError: Event loop is closed
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/unit/test_public_read_hardening.py::TestAnUnknownJwtKidCostsNoNetworkCall::test_a_rejected_kid_is_remembered
+tests/unit/test_public_read_hardening.py::TestAnUnknownJwtKidCostsNoNetworkCall::test_the_bad_kid_table_is_bounded
+  /usr/local/lib/python3.12/site-packages/jwt/api_jwt.py:149: InsecureKeyLengthWarning: The HMAC key is 1 bytes long, which is below the minimum recommended length of 32 bytes for SHA256. See RFC 7518 Section 3.2.
+    return self._jws.encode(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_gate_deferral_execution_points.py::test_one_step_holds_the_scheduler_for_at_most_one_gate_run
+1 failed, 4071 passed, 9 skipped, 4 warnings in 1185.89s (0:19:45)
+
+BARE_RC_FULL=1
+IGNITION_FULL={"file_reads": 22, "file_reads_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-uucnnnkd/tree/aitelier/tools/run_tests/impl.py": 22}, "igniting_tests": ["tests/skillflow/test_coding_impl_gate.py::test_four_real_reds_still_exhaust_the_cycle_limit", "tests/skillflow/test_coding_impl_gate_absence.py::test_a_gate_that_finally_answers_clears_the_deferral", "tests/skillflow/test_coding_impl_gate_absence.py::test_pole_a_a_ceiling_far_past_the_window_spends_one_implement_cycle", "tests/skillflow/test_coding_impl_gate_absence.py::test_pole_b_a_zero_ceiling_is_clamped_and_cannot_charge_the_absence", "tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence", "tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_inside_the_window_is_honoured_and_uncharged", "tests/skillflow/test_coding_impl_gate_absence.py::test_the_deferral_hold_leaves_real_step_rows_untouched", "tests/skillflow/test_coding_impl_gate_absence.py::test_the_host_hold_alone_keeps_the_rows_where_the_absence_left_them", "tests/skillflow/test_coding_impl_gate_absence.py::test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them", "tests/unit/test_diagnostic_output_targets.py::test_run_tests_report_is_an_artifact_not_a_code_change", "tests/unit/test_host_injected_kwargs_are_declared.py::test_the_guard_never_contradicts_the_signature_it_reads", "tests/unit/test_tool_root_guard_inventory.py::test_run_tests_refuses_a_relative_out_dir"], "line_hits": 13, "line_hits_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-uucnnnkd/tree/aitelier/tools/run_tests/impl.py": 13}, "monitoring_tool_id": 4, "mutated_modules_imported": ["/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-uucnnnkd/tree/aitelier/tools/run_tests/impl.py"], "source_readers": ["tests/unit/test_datadir_guardrail.py::test_no_home_paths_outside_datadir", "tests/unit/test_every_step_driver_handles_cancellation.py::test_every_claim_holding_loop_handles_cancellation", "tests/unit/test_no_by_name_graph_lookup_during_a_run.py::test_no_run_scoped_lookup_resolves_a_graph_by_name", "tests/unit/test_no_self_call_collapse.py::test_no_python_source_is_a_self_call_and_nothing_else", "tests/unit/test_no_verbatim_previous_line_dup.py::test_named_test_repeats_are_pinned_and_current", "tests/unit/test_no_verbatim_previous_line_dup.py::test_no_verbatim_previous_line_dup_in_non_test_code", "tests/unit/test_public_read_hardening.py::TestTheEnvScrubCoversTheUnattendedPath::test_both_subprocess_paths_in_run_tests_use_it", "tests/unit/test_public_read_hardening.py::test_every_subprocess_in_run_tests_scrubs_the_environment", "tests/unit/test_run_tests_pytest_wall.py::test_the_budget_is_one_constant_and_not_a_repeated_literal", "tests/unit/test_run_tests_unmeasured_declaration.py::test_m21_is_reproduced_and_this_file_is_what_flips", "tests/unit/test_run_tests_unmeasured_declaration.py::test_m21b_is_reproduced_and_this_file_is_what_flips", "tests/unit/test_run_tests_unmeasured_declaration.py::test_the_r4_shaped_witness_flips_under_the_literal_m21", "tests/unit/test_run_tests_unmeasured_declaration.py::test_the_r4_shaped_witness_flips_under_the_literal_m21b", "tests/unit/test_tool_root_guard_inventory.py::test_every_tool_that_takes_a_root_is_classified", "tests/unit/test_tree_level_accounting_witnesses.py::test_ABS_the_absence_branch_is_ahead_of_the_seed_in_the_real_source", "tests/unit/test_tree_level_accounting_witnesses.py::test_M21_the_tree_still_tests_the_line_start_not_a_substring", "tests/unit/test_tree_level_accounting_witnesses.py::test_M21_the_tree_witnesses_go_red_on_the_actual_mutation[line.startswith(_REPO_GATE_UNMEASURED_PREFIX)-_REPO_GATE_UNMEASURED_PREFIX in line]", "tests/unit/test_tree_level_accounting_witnesses.py::test_M21_the_tree_witnesses_go_red_on_the_actual_mutation[raw = line[len(_REPO_GATE_UNMEASURED_PREFIX):]-raw = line[line.index(_REPO_GATE_UNMEASURED_PREFIX) + len(_REPO_GATE_UNMEASURED_PREFIX):]]", "tests/unit/test_tree_level_accounting_witnesses.py::test_M21b_the_tree_still_tests_the_case_prefix_at_the_line_start", "tests/unit/test_tree_level_accounting_witnesses.py::test_M21b_the_tree_witness_goes_red_on_the_actual_mutation"]}
+
+# control targeted reds=[]
+# control full reds=[]
+# targeted killers=['tests/unit/test_gate_deferral_execution_points.py::test_one_step_holds_the_scheduler_for_at_most_one_gate_run']
+# targeted source-text witnesses=[]
+# full killers=['tests/unit/test_gate_deferral_execution_points.py::test_one_step_holds_the_scheduler_for_at_most_one_gate_run']
+# full source-text witnesses=[]
+# porcelain after restore=''
+# status=killed

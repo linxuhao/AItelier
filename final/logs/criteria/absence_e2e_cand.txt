@@ -1,0 +1,33 @@
+# CMD: python -m pytest -v -p no:cacheprovider tests/skillflow/test_coding_impl_gate_absence.py
+# CWD: /home/linxuhao/.AItelier/worktrees-scratch/ga10
+# HEAD: 96721904a7d9b6b461109cfcded6d0abd03f469c porcelain_lines=3
+# RUNNER: docker run --rm --init -m 3g --name ga10-e2e --network aitelier_default -u 1000:1000 -e HOME=/home/linxuhao -e PYTHONPATH=/home/linxuhao/.AItelier/worktrees-scratch/ga10 -e PYTHONDONTWRITEBYTECODE=1 -e SEARXNG_URL=http://linxuhaserver:8888 -v /home/linxuhao/AItelier:/app -v /home/linxuhao/AItelier:/home/linxuhao/AItelier -v /home/linxuhao/.AItelier:/home/linxuhao/.AItelier -w /home/linxuhao/.AItelier/worktrees-scratch/ga10 aitelier:latest python -m pytest -v -p no:cacheprovider tests/skillflow/test_coding_impl_gate_absence.py
+# ENV: (none)
+# FILE: tests/skillflow/test_coding_impl_gate_absence.py sha256=62f30df561fe31763dcfe2b6fd87ec8201e9f56e4a155f6313c8059b8c286aaf
+# STARTED: 2026-09-24T06:49:52Z
+============================= test session starts ==============================
+platform linux -- Python 3.12.14, pytest-9.1.1, pluggy-1.6.0 -- /usr/local/bin/python
+rootdir: /home/linxuhao/.AItelier/worktrees-scratch/ga10
+configfile: pytest.ini
+plugins: anyio-4.15.1, asyncio-1.4.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 8 items
+
+tests/skillflow/test_coding_impl_gate_absence.py::test_pole_a_a_ceiling_far_past_the_window_spends_one_implement_cycle PASSED [ 12%]
+tests/skillflow/test_coding_impl_gate_absence.py::test_pole_b_a_zero_ceiling_is_clamped_and_cannot_charge_the_absence PASSED [ 25%]
+tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_inside_the_window_is_honoured_and_uncharged PASSED [ 37%]
+tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence PASSED [ 50%]
+tests/skillflow/test_coding_impl_gate_absence.py::test_a_gate_that_finally_answers_clears_the_deferral PASSED [ 62%]
+tests/skillflow/test_coding_impl_gate_absence.py::test_the_deferral_hold_leaves_real_step_rows_untouched PASSED [ 75%]
+tests/skillflow/test_coding_impl_gate_absence.py::test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them PASSED [ 87%]
+tests/skillflow/test_coding_impl_gate_absence.py::test_the_host_hold_alone_keeps_the_rows_where_the_absence_left_them PASSED [100%]
+
+=============================== warnings summary ===============================
+../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+========================= 8 passed, 1 warning in 4.11s =========================
+# ENDED: 2026-09-24T06:50:01Z
+BARE_RC=0

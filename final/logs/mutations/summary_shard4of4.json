@@ -1,0 +1,368 @@
+[
+  {
+    "name": "CONTROL_shard4of4",
+    "status": "control",
+    "head": "b104f18c2e7e1d0f0c59e99cb32a077e7896dd28",
+    "targeted_rc": 0,
+    "full_rc": 0,
+    "targeted_counts": "78 passed, 1 warning in 11.42s",
+    "full_counts": "4072 passed, 9 skipped, 4 warnings in 330.21s (0:05:30)",
+    "targeted_reds": [],
+    "full_reds": [],
+    "names": [
+      "ABSSEED",
+      "ABSTERMTEXT",
+      "D1",
+      "DUPIMPL",
+      "H2",
+      "M21",
+      "N9",
+      "READABSENCE",
+      "S1",
+      "TERMREASONCYCLE",
+      "TIMEOUT_NOT_UNMEASURED",
+      "WAITCLAMP"
+    ],
+    "started": "2026-09-24 05:16:34 UTC",
+    "ended": "2026-09-24 05:22:25 UTC"
+  },
+  {
+    "name": "ABSSEED",
+    "kind": "behaviour",
+    "status": "killed",
+    "head": "b104f18c2e7e1d0f0c59e99cb32a077e7896dd28",
+    "ignition_field": "line_hits",
+    "targeted_ignition": 11,
+    "full_ignition": 80,
+    "targeted_rc": 1,
+    "full_rc": 1,
+    "targeted_counts": "1 failed, 38 passed, 1 warning in 7.89s",
+    "full_counts": "1 failed, 4071 passed, 9 skipped, 4 warnings in 326.66s (0:05:26)",
+    "targeted_killers": [
+      "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_declared_absence_never_seeds_a_baseline_and_never_passes_relative"
+    ],
+    "full_killers": [
+      "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_declared_absence_never_seeds_a_baseline_and_never_passes_relative"
+    ],
+    "targeted_text_witnesses": [],
+    "full_text_witnesses": [],
+    "porcelain_after_restore": "",
+    "started": "2026-09-24 05:22:25 UTC",
+    "ended": "2026-09-24 05:28:12 UTC"
+  },
+  {
+    "name": "ABSTERMTEXT",
+    "kind": "behaviour",
+    "status": "killed",
+    "head": "b104f18c2e7e1d0f0c59e99cb32a077e7896dd28",
+    "ignition_field": "line_hits",
+    "targeted_ignition": 2,
+    "full_ignition": 2,
+    "targeted_rc": 1,
+    "full_rc": 1,
+    "targeted_counts": "2 failed, 28 passed, 1 warning in 2.35s",
+    "full_counts": "3 failed, 4069 passed, 9 skipped, 4 warnings in 334.05s (0:05:34)",
+    "targeted_killers": [
+      "tests/unit/test_gate_deferral_is_accounted.py::test_an_expired_absence_names_the_absence_and_never_the_code",
+      "tests/unit/test_gate_deferral_is_accounted.py::test_the_absent_terminal_checker_refuses_a_sentence_that_blames_the_code"
+    ],
+    "full_killers": [
+      "tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence",
+      "tests/unit/test_gate_deferral_is_accounted.py::test_an_expired_absence_names_the_absence_and_never_the_code",
+      "tests/unit/test_gate_deferral_is_accounted.py::test_the_absent_terminal_checker_refuses_a_sentence_that_blames_the_code"
+    ],
+    "targeted_text_witnesses": [],
+    "full_text_witnesses": [],
+    "porcelain_after_restore": "",
+    "started": "2026-09-24 05:28:13 UTC",
+    "ended": "2026-09-24 05:34:00 UTC"
+  },
+  {
+    "name": "D1",
+    "kind": "behaviour",
+    "status": "killed",
+    "head": "b104f18c2e7e1d0f0c59e99cb32a077e7896dd28",
+    "ignition_field": "line_hits",
+    "targeted_ignition": 17,
+    "full_ignition": 17,
+    "targeted_rc": 1,
+    "full_rc": 1,
+    "targeted_counts": "2 failed, 45 passed, 1 warning in 12.80s",
+    "full_counts": "2 failed, 4070 passed, 9 skipped, 4 warnings in 351.05s (0:05:51)",
+    "targeted_killers": [
+      "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_declaration_survives_output_far_past_the_retention_bound",
+      "tests/unit/test_run_tests_unmeasured_declaration.py::test_re_acquisition_is_bounded_and_the_last_verdict_is_the_reported_one"
+    ],
+    "full_killers": [
+      "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_declaration_survives_output_far_past_the_retention_bound",
+      "tests/unit/test_run_tests_unmeasured_declaration.py::test_re_acquisition_is_bounded_and_the_last_verdict_is_the_reported_one"
+    ],
+    "targeted_text_witnesses": [],
+    "full_text_witnesses": [],
+    "porcelain_after_restore": "",
+    "started": "2026-09-24 05:34:01 UTC",
+    "ended": "2026-09-24 05:40:16 UTC"
+  },
+  {
+    "name": "DUPIMPL",
+    "kind": "text",
+    "status": "killed",
+    "head": "b104f18c2e7e1d0f0c59e99cb32a077e7896dd28",
+    "ignition_field": "file_reads",
+    "targeted_ignition": 1,
+    "full_ignition": 22,
+    "targeted_rc": 1,
+    "full_rc": 1,
+    "targeted_counts": "1 failed, 1 warning in 0.40s",
+    "full_counts": "3 failed, 4069 passed, 9 skipped, 4 warnings in 381.06s (0:06:21)",
+    "targeted_killers": [
+      "tests/unit/test_no_verbatim_previous_line_dup.py::test_no_verbatim_previous_line_dup_in_non_test_code"
+    ],
+    "full_killers": [
+      "tests/unit/test_bash_cleanup_is_async.py::test_a_timed_out_command_keeps_the_loop_responsive",
+      "tests/unit/test_bash_cleanup_is_async.py::test_cancelling_an_ordinary_command_keeps_the_loop_responsive",
+      "tests/unit/test_no_verbatim_previous_line_dup.py::test_no_verbatim_previous_line_dup_in_non_test_code"
+    ],
+    "targeted_text_witnesses": [],
+    "full_text_witnesses": [],
+    "porcelain_after_restore": "",
+    "started": "2026-09-24 05:40:16 UTC",
+    "ended": "2026-09-24 05:46:49 UTC"
+  },
+  {
+    "name": "H2",
+    "kind": "behaviour",
+    "status": "killed",
+    "head": "b104f18c2e7e1d0f0c59e99cb32a077e7896dd28",
+    "ignition_field": "line_hits",
+    "targeted_ignition": 30,
+    "full_ignition": 32,
+    "targeted_rc": 1,
+    "full_rc": 1,
+    "targeted_counts": "8 failed, 11 passed, 1 warning in 6.64s",
+    "full_counts": "11 failed, 4061 passed, 9 skipped, 4 warnings in 348.25s (0:05:48)",
+    "targeted_killers": [
+      "tests/skillflow/test_coding_impl_gate_absence.py::test_a_gate_that_finally_answers_clears_the_deferral",
+      "tests/skillflow/test_coding_impl_gate_absence.py::test_pole_a_a_ceiling_far_past_the_window_spends_one_implement_cycle",
+      "tests/skillflow/test_coding_impl_gate_absence.py::test_pole_b_a_zero_ceiling_is_clamped_and_cannot_charge_the_absence",
+      "tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence",
+      "tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_inside_the_window_is_honoured_and_uncharged",
+      "tests/skillflow/test_coding_impl_gate_absence.py::test_the_deferral_hold_leaves_real_step_rows_untouched",
+      "tests/skillflow/test_coding_impl_gate_absence.py::test_the_host_hold_alone_keeps_the_rows_where_the_absence_left_them",
+      "tests/unit/test_gate_deferral_execution_points.py::test_the_host_refuses_to_advance_before_reaching_the_framework"
+    ],
+    "full_killers": [
+      "tests/skillflow/test_coding_impl_gate_absence.py::test_a_gate_that_finally_answers_clears_the_deferral",
+      "tests/skillflow/test_coding_impl_gate_absence.py::test_pole_a_a_ceiling_far_past_the_window_spends_one_implement_cycle",
+      "tests/skillflow/test_coding_impl_gate_absence.py::test_pole_b_a_zero_ceiling_is_clamped_and_cannot_charge_the_absence",
+      "tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence",
+      "tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_inside_the_window_is_honoured_and_uncharged",
+      "tests/skillflow/test_coding_impl_gate_absence.py::test_the_deferral_hold_leaves_real_step_rows_untouched",
+      "tests/skillflow/test_coding_impl_gate_absence.py::test_the_host_hold_alone_keeps_the_rows_where_the_absence_left_them",
+      "tests/unit/test_bash_cleanup_is_async.py::test_a_timed_out_command_keeps_the_loop_responsive",
+      "tests/unit/test_bash_cleanup_is_async.py::test_escalating_to_sigkill_keeps_the_loop_responsive",
+      "tests/unit/test_gate_deferral_execution_points.py::test_the_host_refuses_to_advance_before_reaching_the_framework",
+      "tests/unit/test_gate_deferral_is_accounted.py::test_the_host_refuses_to_advance_a_run_whose_gate_is_silent"
+    ],
+    "targeted_text_witnesses": [],
+    "full_text_witnesses": [],
+    "porcelain_after_restore": "",
+    "started": "2026-09-24 05:46:49 UTC",
+    "ended": "2026-09-24 05:52:57 UTC"
+  },
+  {
+    "name": "M21",
+    "kind": "behaviour",
+    "status": "killed",
+    "head": "b104f18c2e7e1d0f0c59e99cb32a077e7896dd28",
+    "ignition_field": "line_hits",
+    "targeted_ignition": 1,
+    "full_ignition": 101,
+    "targeted_rc": 1,
+    "full_rc": 1,
+    "targeted_counts": "1 failed, 1 warning in 0.38s",
+    "full_counts": "3 failed, 4069 passed, 9 skipped, 4 warnings in 352.42s (0:05:52)",
+    "targeted_killers": [
+      "tests/unit/test_run_tests_unmeasured_declaration.py::test_the_r4_shaped_witness_flips_under_the_literal_m21"
+    ],
+    "full_killers": [
+      "tests/unit/test_run_tests_unmeasured_declaration.py::test_the_r4_shaped_witness_flips_under_the_literal_m21",
+      "tests/unit/test_tree_level_accounting_witnesses.py::test_M21_the_tree_witnesses_go_red_on_the_actual_mutation[line.startswith(_REPO_GATE_UNMEASURED_PREFIX)-_REPO_GATE_UNMEASURED_PREFIX"
+    ],
+    "targeted_text_witnesses": [],
+    "full_text_witnesses": [
+      "tests/unit/test_tree_level_accounting_witnesses.py::test_M21_the_tree_still_tests_the_line_start_not_a_substring"
+    ],
+    "porcelain_after_restore": "",
+    "started": "2026-09-24 05:52:57 UTC",
+    "ended": "2026-09-24 05:59:02 UTC"
+  },
+  {
+    "name": "N9",
+    "kind": "text",
+    "status": "killed",
+    "head": "b104f18c2e7e1d0f0c59e99cb32a077e7896dd28",
+    "ignition_field": "file_reads",
+    "targeted_ignition": 1,
+    "full_ignition": 24,
+    "targeted_rc": 1,
+    "full_rc": 1,
+    "targeted_counts": "1 failed, 1 warning in 0.36s",
+    "full_counts": "1 failed, 4071 passed, 9 skipped, 4 warnings in 341.33s (0:05:41)",
+    "targeted_killers": [
+      "tests/unit/test_run_tests_unmeasured_declaration.py::test_the_tool_doc_names_the_no_verdict_gate_as_absent_not_a_loop"
+    ],
+    "full_killers": [
+      "tests/unit/test_run_tests_unmeasured_declaration.py::test_the_tool_doc_names_the_no_verdict_gate_as_absent_not_a_loop"
+    ],
+    "targeted_text_witnesses": [],
+    "full_text_witnesses": [],
+    "porcelain_after_restore": "",
+    "started": "2026-09-24 05:59:02 UTC",
+    "ended": "2026-09-24 06:04:54 UTC"
+  },
+  {
+    "name": "READABSENCE",
+    "kind": "behaviour",
+    "status": "killed",
+    "head": "b104f18c2e7e1d0f0c59e99cb32a077e7896dd28",
+    "ignition_field": "line_hits",
+    "targeted_ignition": 27,
+    "full_ignition": 178,
+    "targeted_rc": 1,
+    "full_rc": 1,
+    "targeted_counts": "1 failed, 18 passed, 1 warning in 3.70s",
+    "full_counts": "3 failed, 4069 passed, 9 skipped, 4 warnings in 347.08s (0:05:47)",
+    "targeted_killers": [
+      "tests/unit/test_gate_deferral_is_accounted.py::test_a_report_that_graded_the_code_states_no_absence"
+    ],
+    "full_killers": [
+      "tests/skillflow/test_coding_impl_gate_absence.py::test_a_gate_that_finally_answers_clears_the_deferral",
+      "tests/unit/test_gate_deferral_execution_points.py::test_the_tick_refuses_to_claim_while_the_gate_is_silent",
+      "tests/unit/test_gate_deferral_is_accounted.py::test_a_report_that_graded_the_code_states_no_absence"
+    ],
+    "targeted_text_witnesses": [],
+    "full_text_witnesses": [],
+    "porcelain_after_restore": "",
+    "started": "2026-09-24 06:04:54 UTC",
+    "ended": "2026-09-24 06:10:57 UTC"
+  },
+  {
+    "name": "S1",
+    "kind": "behaviour",
+    "status": "killed",
+    "head": "b104f18c2e7e1d0f0c59e99cb32a077e7896dd28",
+    "ignition_field": "line_hits",
+    "targeted_ignition": 36,
+    "full_ignition": 71,
+    "targeted_rc": 1,
+    "full_rc": 1,
+    "targeted_counts": "10 failed, 9 passed, 1 warning in 15.43s",
+    "full_counts": "11 failed, 4061 passed, 9 skipped, 4 warnings in 326.74s (0:05:26)",
+    "targeted_killers": [
+      "tests/skillflow/test_coding_impl_gate_absence.py::test_a_gate_that_finally_answers_clears_the_deferral",
+      "tests/skillflow/test_coding_impl_gate_absence.py::test_pole_a_a_ceiling_far_past_the_window_spends_one_implement_cycle",
+      "tests/skillflow/test_coding_impl_gate_absence.py::test_pole_b_a_zero_ceiling_is_clamped_and_cannot_charge_the_absence",
+      "tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence",
+      "tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_inside_the_window_is_honoured_and_uncharged",
+      "tests/skillflow/test_coding_impl_gate_absence.py::test_the_deferral_hold_leaves_real_step_rows_untouched",
+      "tests/skillflow/test_coding_impl_gate_absence.py::test_the_host_hold_alone_keeps_the_rows_where_the_absence_left_them",
+      "tests/skillflow/test_coding_impl_gate_absence.py::test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them",
+      "tests/unit/test_gate_deferral_execution_points.py::test_during_a_deferral_hold_the_step_claim_is_held_not_released",
+      "tests/unit/test_gate_deferral_execution_points.py::test_the_tick_refuses_to_claim_while_the_gate_is_silent"
+    ],
+    "full_killers": [
+      "tests/skillflow/test_coding_impl_gate_absence.py::test_a_gate_that_finally_answers_clears_the_deferral",
+      "tests/skillflow/test_coding_impl_gate_absence.py::test_pole_a_a_ceiling_far_past_the_window_spends_one_implement_cycle",
+      "tests/skillflow/test_coding_impl_gate_absence.py::test_pole_b_a_zero_ceiling_is_clamped_and_cannot_charge_the_absence",
+      "tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence",
+      "tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_inside_the_window_is_honoured_and_uncharged",
+      "tests/skillflow/test_coding_impl_gate_absence.py::test_the_deferral_hold_leaves_real_step_rows_untouched",
+      "tests/skillflow/test_coding_impl_gate_absence.py::test_the_host_hold_alone_keeps_the_rows_where_the_absence_left_them",
+      "tests/skillflow/test_coding_impl_gate_absence.py::test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them",
+      "tests/unit/test_gate_deferral_execution_points.py::test_during_a_deferral_hold_the_step_claim_is_held_not_released",
+      "tests/unit/test_gate_deferral_execution_points.py::test_the_tick_refuses_to_claim_while_the_gate_is_silent"
+    ],
+    "targeted_text_witnesses": [],
+    "full_text_witnesses": [
+      "tests/unit/test_tree_level_accounting_witnesses.py::test_S1_the_tick_call_site_is_present_in_the_tree"
+    ],
+    "porcelain_after_restore": "",
+    "started": "2026-09-24 06:10:57 UTC",
+    "ended": "2026-09-24 06:16:51 UTC"
+  },
+  {
+    "name": "TERMREASONCYCLE",
+    "kind": "behaviour",
+    "status": "killed",
+    "head": "b104f18c2e7e1d0f0c59e99cb32a077e7896dd28",
+    "ignition_field": "line_hits",
+    "targeted_ignition": 2,
+    "full_ignition": 3,
+    "targeted_rc": 1,
+    "full_rc": 1,
+    "targeted_counts": "1 failed, 29 passed, 1 warning in 2.29s",
+    "full_counts": "2 failed, 4070 passed, 9 skipped, 4 warnings in 327.45s (0:05:27)",
+    "targeted_killers": [
+      "tests/unit/test_gate_deferral_is_accounted.py::test_an_expired_absence_names_the_absence_and_never_the_code"
+    ],
+    "full_killers": [
+      "tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence",
+      "tests/unit/test_gate_deferral_is_accounted.py::test_an_expired_absence_names_the_absence_and_never_the_code"
+    ],
+    "targeted_text_witnesses": [],
+    "full_text_witnesses": [],
+    "porcelain_after_restore": "",
+    "started": "2026-09-24 06:16:51 UTC",
+    "ended": "2026-09-24 06:22:32 UTC"
+  },
+  {
+    "name": "TIMEOUT_NOT_UNMEASURED",
+    "kind": "behaviour",
+    "status": "killed",
+    "head": "b104f18c2e7e1d0f0c59e99cb32a077e7896dd28",
+    "ignition_field": "line_hits",
+    "targeted_ignition": 1,
+    "full_ignition": 43,
+    "targeted_rc": 1,
+    "full_rc": 1,
+    "targeted_counts": "1 failed, 1 warning in 3.04s",
+    "full_counts": "2 failed, 4070 passed, 9 skipped, 4 warnings in 371.56s (0:06:11)",
+    "targeted_killers": [
+      "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_killed_gate_is_unmeasured_and_its_returncode_is_not_why"
+    ],
+    "full_killers": [
+      "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_killed_gate_is_unmeasured_and_its_returncode_is_not_why",
+      "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_runner_that_cannot_start_is_unmeasured"
+    ],
+    "targeted_text_witnesses": [],
+    "full_text_witnesses": [],
+    "porcelain_after_restore": "",
+    "started": "2026-09-24 06:22:32 UTC",
+    "ended": "2026-09-24 06:28:59 UTC"
+  },
+  {
+    "name": "WAITCLAMP",
+    "kind": "behaviour",
+    "status": "killed",
+    "head": "b104f18c2e7e1d0f0c59e99cb32a077e7896dd28",
+    "ignition_field": "line_hits",
+    "targeted_ignition": 1,
+    "full_ignition": 181,
+    "targeted_rc": 1,
+    "full_rc": 1,
+    "targeted_counts": "1 failed, 1 warning in 0.34s",
+    "full_counts": "1 failed, 4071 passed, 9 skipped, 4 warnings in 390.11s (0:06:30)",
+    "targeted_killers": [
+      "tests/unit/test_gate_deferral_is_accounted.py::test_the_wait_cannot_be_widened_until_the_ceiling_disappears"
+    ],
+    "full_killers": [
+      "tests/unit/test_gate_deferral_is_accounted.py::test_the_wait_cannot_be_widened_until_the_ceiling_disappears"
+    ],
+    "targeted_text_witnesses": [],
+    "full_text_witnesses": [],
+    "porcelain_after_restore": "",
+    "started": "2026-09-24 06:28:59 UTC",
+    "ended": "2026-09-24 06:35:41 UTC"
+  }
+]

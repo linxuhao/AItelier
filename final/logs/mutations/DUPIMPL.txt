@@ -1,0 +1,239 @@
+# DUPIMPL (text): write the `_ERROR_RE = ...` line a second time, immediately after itself.
+# head=b104f18c2e7e1d0f0c59e99cb32a077e7896dd28
+# worktree=/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-4jhcwrki/tree (removed)
+# started=2026-09-24 05:40:16 UTC ended=2026-09-24 05:46:49 UTC
+# replacement lines={"aitelier/tools/run_tests/impl.py": [694]}
+
+## diff applied
+diff --git a/aitelier/tools/run_tests/impl.py b/aitelier/tools/run_tests/impl.py
+index 766b7f33..eb754993 100644
+--- a/aitelier/tools/run_tests/impl.py
++++ b/aitelier/tools/run_tests/impl.py
+@@ -691,6 +691,7 @@ BASELINE_MEASURED = ("seeded", "compared")
+ 
+ _FAILED_RE = re.compile(r"^(?:.*\s)?FAILED\s+(\S+)")
+ _ERROR_RE = re.compile(r"^ERROR\s+(\S+)")
++_ERROR_RE = re.compile(r"^ERROR\s+(\S+)")
+ 
+ _GATE_RE = re.compile(r"^((?:node|repo_gate):\S+)")
+ _REPO_GATE_CASE_PREFIX = "AITELIER_REPO_GATE_CASE="
+
+## targeted scope: /usr/local/bin/python -m pytest -q -rfE -p no:cacheprovider -p ignition_plugin tests/unit/test_no_verbatim_previous_line_dup.py::test_no_verbatim_previous_line_dup_in_non_test_code
+# cwd=/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-4jhcwrki/tree
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_____________ test_no_verbatim_previous_line_dup_in_non_test_code ______________
+
+    def test_no_verbatim_previous_line_dup_in_non_test_code():
+        non_test, _test = _derived_sites()
+>       assert non_test == []
+E       assert [('aitelier/t...\s+(\\S+)")')] == []
+E         
+E         Left contains one more item: ('aitelier/tools/run_tests/impl.py', '_ERROR_RE = re.compile(r"^ERROR\\s+(\\S+)")')
+E         Use -v to get more diff
+
+tests/unit/test_no_verbatim_previous_line_dup.py:79: AssertionError
+=============================== warnings summary ===============================
+../../../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_no_verbatim_previous_line_dup.py::test_no_verbatim_previous_line_dup_in_non_test_code
+1 failed, 1 warning in 0.40s
+Exception ignored in: <function _removeHandlerRef at 0x78225a6bccc0>
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/logging/__init__.py", line 882, in _removeHandlerRef
+  File "/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-4jhcwrki/tree/tools/mutation_catalog/ignition_plugin.py", line 63, in _on_line
+TypeError: 'NoneType' object is not callable
+
+BARE_RC_TARGETED=1
+IGNITION_TARGETED={"file_reads": 1, "file_reads_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-4jhcwrki/tree/aitelier/tools/run_tests/impl.py": 1}, "igniting_tests": [], "line_hits": 0, "line_hits_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-4jhcwrki/tree/aitelier/tools/run_tests/impl.py": 0}, "monitoring_tool_id": 4, "mutated_modules_imported": [], "source_readers": ["tests/unit/test_no_verbatim_previous_line_dup.py::test_no_verbatim_previous_line_dup_in_non_test_code"]}
+
+## full scope: /usr/local/bin/python -m pytest -q -rfE -p no:cacheprovider -p ignition_plugin tests/unit tests/skillflow
+# cwd=/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-4jhcwrki/tree
+........................................................................ [  1%]
+........................................................................ [  3%]
+..................................................F.F................... [  5%]
+........................................................................ [  7%]
+........................................................................ [  8%]
+........................................................................ [ 10%]
+........................................................................ [ 12%]
+........................................................................ [ 14%]
+........................................................................ [ 15%]
+........................................................................ [ 17%]
+........................................................................ [ 19%]
+........................................................................ [ 21%]
+........................................................................ [ 22%]
+........................................................................ [ 24%]
+........................................................................ [ 26%]
+........................................................................ [ 28%]
+........................................................................ [ 29%]
+........................................................................ [ 31%]
+........................................................................ [ 33%]
+........................................................................ [ 35%]
+.......................................................................s [ 37%]
+sssssss................................................................. [ 38%]
+........................................................................ [ 40%]
+........................................................................ [ 42%]
+........................................................................ [ 44%]
+........................................................................ [ 45%]
+........................................................................ [ 47%]
+........................................................................ [ 49%]
+........................................................................ [ 51%]
+......F................................................................. [ 52%]
+........................................................................ [ 54%]
+.............s.......................................................... [ 56%]
+........................................................................ [ 58%]
+........................................................................ [ 59%]
+........................................................................ [ 61%]
+........................................................................ [ 63%]
+........................................................................ [ 65%]
+........................................................................ [ 67%]
+........................................................................ [ 68%]
+........................................................................ [ 70%]
+........................................................................ [ 72%]
+........................................................................ [ 74%]
+........................................................................ [ 75%]
+........................................................................ [ 77%]
+........................................................................ [ 79%]
+........................................................................ [ 81%]
+........................................................................ [ 82%]
+........................................................................ [ 84%]
+........................................................................ [ 86%]
+........................................................................ [ 88%]
+........................................................................ [ 89%]
+........................................................................ [ 91%]
+........................................................................ [ 93%]
+........................................................................ [ 95%]
+........................................................................ [ 97%]
+........................................................................ [ 98%]
+.................................................                        [100%]
+=================================== FAILURES ===================================
+________ test_cancelling_an_ordinary_command_keeps_the_loop_responsive _________
+
+live = {'db': <core.db_manager.DBManager object at 0x7a2a637ea840>, 'checkout': PosixPath('/tmp/pytest-of-unknown/pytest-8/test_cancelling_an_ordinary_co0/checkout'), 'agent': <core.meta_agent.MetaAgent object at 0x7a2a637ebad0>}
+
+    def test_cancelling_an_ordinary_command_keeps_the_loop_responsive(live):
+        """A plain `sleep`, cancelled. It dies on the first SIGTERM, and the review
+        measured a 5.04 s loop freeze anyway — the tool's own child stays a zombie
+        that answers `killpg` until it is reaped, and the reap came last."""
+        agent = live["agent"]
+    
+        async def drive():
+            hb = _Heartbeat().start()
+            task = asyncio.ensure_future(agent._tool_bash(
+                {"project_id": "p", "command": "sleep 30", "timeout": 60}))
+            await asyncio.sleep(0.6)
+            t0 = time.monotonic()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            cost = time.monotonic() - t0
+            await hb.stop()
+            return hb.worst, cost
+    
+        worst, cost = asyncio.run(drive())
+        print(f"\nordinary cancel: worst loop gap {worst:.2f}s, unwind {cost:.2f}s")
+>       assert worst < _MAX_LOOP_GAP_S, (
+            f"the event loop was frozen for {worst:.2f}s cancelling an ordinary "
+            f"command: every other task on it — SSE heartbeats, the scheduler tick, "
+            f"every request — stopped for that long")
+E       AssertionError: the event loop was frozen for 1.06s cancelling an ordinary command: every other task on it — SSE heartbeats, the scheduler tick, every request — stopped for that long
+E       assert 1.0600069479551166 < 0.5
+
+tests/unit/test_bash_cleanup_is_async.py:154: AssertionError
+----------------------------- Captured stdout call -----------------------------
+
+ordinary cancel: worst loop gap 1.06s, unwind 1.04s
+______________ test_a_timed_out_command_keeps_the_loop_responsive ______________
+
+live = {'db': <core.db_manager.DBManager object at 0x7a2a63a89040>, 'checkout': PosixPath('/tmp/pytest-of-unknown/pytest-8/test_a_timed_out_command_keeps0/checkout'), 'agent': <core.meta_agent.MetaAgent object at 0x7a2a63a8b380>}
+
+    def test_a_timed_out_command_keeps_the_loop_responsive(live):
+        """The other path that reaches cleanup on every call."""
+        agent, checkout = live["agent"], live["checkout"]
+        marker = checkout / "timeout_wrote.txt"
+        cmd = f"{_stubborn(30, marker)} & sleep 30"
+    
+        async def drive():
+            hb = _Heartbeat().start()
+            res = await agent._tool_bash(
+                {"project_id": "p", "command": cmd, "timeout": 1})
+            await hb.stop()
+            return hb.worst, res
+    
+        worst, res = asyncio.run(drive())
+        print(f"\ntimeout: worst loop gap {worst:.2f}s")
+        assert "error" in res and "timed out" in res["error"], res
+>       assert worst < _MAX_LOOP_GAP_S, (
+            f"the event loop was frozen for {worst:.2f}s on the timeout path")
+E       AssertionError: the event loop was frozen for 0.59s on the timeout path
+E       assert 0.5906890360638499 < 0.5
+
+tests/unit/test_bash_cleanup_is_async.py:204: AssertionError
+----------------------------- Captured stdout call -----------------------------
+
+timeout: worst loop gap 0.59s
+_____________ test_no_verbatim_previous_line_dup_in_non_test_code ______________
+
+    def test_no_verbatim_previous_line_dup_in_non_test_code():
+        non_test, _test = _derived_sites()
+>       assert non_test == []
+E       assert [('aitelier/t...\s+(\\S+)")')] == []
+E         
+E         Left contains one more item: ('aitelier/tools/run_tests/impl.py', '_ERROR_RE = re.compile(r"^ERROR\\s+(\\S+)")')
+E         Use -v to get more diff
+
+tests/unit/test_no_verbatim_previous_line_dup.py:79: AssertionError
+=============================== warnings summary ===============================
+../../../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+tests/unit/test_bash_admission_lifetime.py::test_a_second_cancellation_during_cleanup_still_ends_the_writer
+  /usr/local/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <function BaseSubprocessTransport.__del__ at 0x7a2a7067c040>
+  
+  Traceback (most recent call last):
+    File "/usr/local/lib/python3.12/asyncio/base_subprocess.py", line 126, in __del__
+      self.close()
+    File "/usr/local/lib/python3.12/asyncio/base_subprocess.py", line 104, in close
+      proto.pipe.close()
+    File "/usr/local/lib/python3.12/asyncio/unix_events.py", line 568, in close
+      self._close(None)
+    File "/usr/local/lib/python3.12/asyncio/unix_events.py", line 592, in _close
+      self._loop.call_soon(self._call_connection_lost, exc)
+    File "/usr/local/lib/python3.12/asyncio/base_events.py", line 799, in call_soon
+      self._check_closed()
+    File "/usr/local/lib/python3.12/asyncio/base_events.py", line 545, in _check_closed
+      raise RuntimeError('Event loop is closed')
+  RuntimeError: Event loop is closed
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/unit/test_public_read_hardening.py::TestAnUnknownJwtKidCostsNoNetworkCall::test_a_rejected_kid_is_remembered
+tests/unit/test_public_read_hardening.py::TestAnUnknownJwtKidCostsNoNetworkCall::test_the_bad_kid_table_is_bounded
+  /usr/local/lib/python3.12/site-packages/jwt/api_jwt.py:149: InsecureKeyLengthWarning: The HMAC key is 1 bytes long, which is below the minimum recommended length of 32 bytes for SHA256. See RFC 7518 Section 3.2.
+    return self._jws.encode(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_bash_cleanup_is_async.py::test_cancelling_an_ordinary_command_keeps_the_loop_responsive
+FAILED tests/unit/test_bash_cleanup_is_async.py::test_a_timed_out_command_keeps_the_loop_responsive
+FAILED tests/unit/test_no_verbatim_previous_line_dup.py::test_no_verbatim_previous_line_dup_in_non_test_code
+3 failed, 4069 passed, 9 skipped, 4 warnings in 381.06s (0:06:21)
+
+BARE_RC_FULL=1
+IGNITION_FULL={"file_reads": 22, "file_reads_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-4jhcwrki/tree/aitelier/tools/run_tests/impl.py": 22}, "igniting_tests": ["tests/skillflow/test_coding_impl_gate.py::test_four_real_reds_still_exhaust_the_cycle_limit", "tests/skillflow/test_coding_impl_gate_absence.py::test_a_gate_that_finally_answers_clears_the_deferral", "tests/skillflow/test_coding_impl_gate_absence.py::test_pole_a_a_ceiling_far_past_the_window_spends_one_implement_cycle", "tests/skillflow/test_coding_impl_gate_absence.py::test_pole_b_a_zero_ceiling_is_clamped_and_cannot_charge_the_absence", "tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence", "tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_inside_the_window_is_honoured_and_uncharged", "tests/skillflow/test_coding_impl_gate_absence.py::test_the_deferral_hold_leaves_real_step_rows_untouched", "tests/skillflow/test_coding_impl_gate_absence.py::test_the_host_hold_alone_keeps_the_rows_where_the_absence_left_them", "tests/skillflow/test_coding_impl_gate_absence.py::test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them", "tests/unit/test_diagnostic_output_targets.py::test_run_tests_report_is_an_artifact_not_a_code_change", "tests/unit/test_host_injected_kwargs_are_declared.py::test_the_guard_never_contradicts_the_signature_it_reads", "tests/unit/test_tool_root_guard_inventory.py::test_run_tests_refuses_a_relative_out_dir"], "line_hits": 13, "line_hits_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-4jhcwrki/tree/aitelier/tools/run_tests/impl.py": 13}, "monitoring_tool_id": 4, "mutated_modules_imported": ["/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-4jhcwrki/tree/aitelier/tools/run_tests/impl.py"], "source_readers": ["tests/unit/test_datadir_guardrail.py::test_no_home_paths_outside_datadir", "tests/unit/test_every_step_driver_handles_cancellation.py::test_every_claim_holding_loop_handles_cancellation", "tests/unit/test_no_by_name_graph_lookup_during_a_run.py::test_no_run_scoped_lookup_resolves_a_graph_by_name", "tests/unit/test_no_self_call_collapse.py::test_no_python_source_is_a_self_call_and_nothing_else", "tests/unit/test_no_verbatim_previous_line_dup.py::test_named_test_repeats_are_pinned_and_current", "tests/unit/test_no_verbatim_previous_line_dup.py::test_no_verbatim_previous_line_dup_in_non_test_code", "tests/unit/test_public_read_hardening.py::TestTheEnvScrubCoversTheUnattendedPath::test_both_subprocess_paths_in_run_tests_use_it", "tests/unit/test_public_read_hardening.py::test_every_subprocess_in_run_tests_scrubs_the_environment", "tests/unit/test_run_tests_pytest_wall.py::test_the_budget_is_one_constant_and_not_a_repeated_literal", "tests/unit/test_run_tests_unmeasured_declaration.py::test_m21_is_reproduced_and_this_file_is_what_flips", "tests/unit/test_run_tests_unmeasured_declaration.py::test_m21b_is_reproduced_and_this_file_is_what_flips", "tests/unit/test_run_tests_unmeasured_declaration.py::test_the_r4_shaped_witness_flips_under_the_literal_m21", "tests/unit/test_run_tests_unmeasured_declaration.py::test_the_r4_shaped_witness_flips_under_the_literal_m21b", "tests/unit/test_tool_root_guard_inventory.py::test_every_tool_that_takes_a_root_is_classified", "tests/unit/test_tree_level_accounting_witnesses.py::test_ABS_the_absence_branch_is_ahead_of_the_seed_in_the_real_source", "tests/unit/test_tree_level_accounting_witnesses.py::test_M21_the_tree_still_tests_the_line_start_not_a_substring", "tests/unit/test_tree_level_accounting_witnesses.py::test_M21_the_tree_witnesses_go_red_on_the_actual_mutation[line.startswith(_REPO_GATE_UNMEASURED_PREFIX)-_REPO_GATE_UNMEASURED_PREFIX in line]", "tests/unit/test_tree_level_accounting_witnesses.py::test_M21_the_tree_witnesses_go_red_on_the_actual_mutation[raw = line[len(_REPO_GATE_UNMEASURED_PREFIX):]-raw = line[line.index(_REPO_GATE_UNMEASURED_PREFIX) + len(_REPO_GATE_UNMEASURED_PREFIX):]]", "tests/unit/test_tree_level_accounting_witnesses.py::test_M21b_the_tree_still_tests_the_case_prefix_at_the_line_start", "tests/unit/test_tree_level_accounting_witnesses.py::test_M21b_the_tree_witness_goes_red_on_the_actual_mutation"]}
+
+# control targeted reds=[]
+# control full reds=[]
+# targeted killers=['tests/unit/test_no_verbatim_previous_line_dup.py::test_no_verbatim_previous_line_dup_in_non_test_code']
+# targeted source-text witnesses=[]
+# full killers=['tests/unit/test_bash_cleanup_is_async.py::test_a_timed_out_command_keeps_the_loop_responsive', 'tests/unit/test_bash_cleanup_is_async.py::test_cancelling_an_ordinary_command_keeps_the_loop_responsive', 'tests/unit/test_no_verbatim_previous_line_dup.py::test_no_verbatim_previous_line_dup_in_non_test_code']
+# full source-text witnesses=[]
+# porcelain after restore=''
+# status=killed

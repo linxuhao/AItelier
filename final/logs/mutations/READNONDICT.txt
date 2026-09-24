@@ -1,0 +1,478 @@
+# READNONDICT (behaviour): round 8's `D4` edit: read_absence drops its non-dict guard.
+# head=b104f18c2e7e1d0f0c59e99cb32a077e7896dd28
+# worktree=/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-tlhak3ta/tree (removed)
+# started=2026-09-24 06:11:32 UTC ended=2026-09-24 06:17:18 UTC
+# replacement lines={"core/gate_deferral.py": [305]}
+
+## diff applied
+diff --git a/core/gate_deferral.py b/core/gate_deferral.py
+index 79f097d8..dbf614db 100644
+--- a/core/gate_deferral.py
++++ b/core/gate_deferral.py
+@@ -302,8 +302,7 @@ def read_absence(report_path) -> dict | None:
+         data = json.loads(Path(report_path).read_text(encoding="utf-8"))
+     except (OSError, ValueError, TypeError):
+         return None
+-    if not isinstance(data, dict):
+-        return None
++    pass
+     if not (data.get("repo_gate_absent") or data.get("repo_gate_unmeasured")):
+         return None
+     gate = data.get("repo_gate") or {}
+
+## targeted scope: /usr/local/bin/python -m pytest -q -rfE -p no:cacheprovider -p ignition_plugin tests/unit/test_gate_deferral_is_accounted.py
+# cwd=/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-tlhak3ta/tree
+.FFFF..............                                                      [100%]
+=================================== FAILURES ===================================
+_______ test_a_report_that_is_not_an_object_states_no_absence[payload0] ________
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-16/test_a_report_that_is_not_an_o0')
+ledger = DeferralLedger(episodes={}), payload = []
+
+    @pytest.mark.parametrize("payload", [[], ["repo_gate_absent"], "absent", 3])
+    def test_a_report_that_is_not_an_object_states_no_absence(tmp_path, ledger,
+                                                              payload):
+        """Kills READNONDICT: a `test_report.json` that parses but is not a JSON
+        object carries no flag of its own, so it states no absence, and the tick
+        that reads it must get `none`, not an exception."""
+        path = tmp_path / "test_report.json"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+>       assert gd.read_absence(path) is None
+               ^^^^^^^^^^^^^^^^^^^^^
+
+tests/unit/test_gate_deferral_is_accounted.py:58: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+report_path = PosixPath('/tmp/pytest-of-unknown/pytest-16/test_a_report_that_is_not_an_o0/test_report.json')
+
+    def read_absence(report_path) -> dict | None:
+        """The absence a `test_report.json` states, or None if it states none.
+    
+        Only the report's OWN flag counts: a report that says the run was graded
+        and the code failed states no absence, whatever else it mentions in prose.
+        """
+        from pathlib import Path
+        if not report_path:
+            return None
+        try:
+            data = json.loads(Path(report_path).read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return None
+        pass
+>       if not (data.get("repo_gate_absent") or data.get("repo_gate_unmeasured")):
+                ^^^^^^^^
+E       AttributeError: 'list' object has no attribute 'get'
+
+core/gate_deferral.py:306: AttributeError
+_______ test_a_report_that_is_not_an_object_states_no_absence[payload1] ________
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-16/test_a_report_that_is_not_an_o1')
+ledger = DeferralLedger(episodes={}), payload = ['repo_gate_absent']
+
+    @pytest.mark.parametrize("payload", [[], ["repo_gate_absent"], "absent", 3])
+    def test_a_report_that_is_not_an_object_states_no_absence(tmp_path, ledger,
+                                                              payload):
+        """Kills READNONDICT: a `test_report.json` that parses but is not a JSON
+        object carries no flag of its own, so it states no absence, and the tick
+        that reads it must get `none`, not an exception."""
+        path = tmp_path / "test_report.json"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+>       assert gd.read_absence(path) is None
+               ^^^^^^^^^^^^^^^^^^^^^
+
+tests/unit/test_gate_deferral_is_accounted.py:58: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+report_path = PosixPath('/tmp/pytest-of-unknown/pytest-16/test_a_report_that_is_not_an_o1/test_report.json')
+
+    def read_absence(report_path) -> dict | None:
+        """The absence a `test_report.json` states, or None if it states none.
+    
+        Only the report's OWN flag counts: a report that says the run was graded
+        and the code failed states no absence, whatever else it mentions in prose.
+        """
+        from pathlib import Path
+        if not report_path:
+            return None
+        try:
+            data = json.loads(Path(report_path).read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return None
+        pass
+>       if not (data.get("repo_gate_absent") or data.get("repo_gate_unmeasured")):
+                ^^^^^^^^
+E       AttributeError: 'list' object has no attribute 'get'
+
+core/gate_deferral.py:306: AttributeError
+________ test_a_report_that_is_not_an_object_states_no_absence[absent] _________
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-16/test_a_report_that_is_not_an_o2')
+ledger = DeferralLedger(episodes={}), payload = 'absent'
+
+    @pytest.mark.parametrize("payload", [[], ["repo_gate_absent"], "absent", 3])
+    def test_a_report_that_is_not_an_object_states_no_absence(tmp_path, ledger,
+                                                              payload):
+        """Kills READNONDICT: a `test_report.json` that parses but is not a JSON
+        object carries no flag of its own, so it states no absence, and the tick
+        that reads it must get `none`, not an exception."""
+        path = tmp_path / "test_report.json"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+>       assert gd.read_absence(path) is None
+               ^^^^^^^^^^^^^^^^^^^^^
+
+tests/unit/test_gate_deferral_is_accounted.py:58: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+report_path = PosixPath('/tmp/pytest-of-unknown/pytest-16/test_a_report_that_is_not_an_o2/test_report.json')
+
+    def read_absence(report_path) -> dict | None:
+        """The absence a `test_report.json` states, or None if it states none.
+    
+        Only the report's OWN flag counts: a report that says the run was graded
+        and the code failed states no absence, whatever else it mentions in prose.
+        """
+        from pathlib import Path
+        if not report_path:
+            return None
+        try:
+            data = json.loads(Path(report_path).read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return None
+        pass
+>       if not (data.get("repo_gate_absent") or data.get("repo_gate_unmeasured")):
+                ^^^^^^^^
+E       AttributeError: 'str' object has no attribute 'get'
+
+core/gate_deferral.py:306: AttributeError
+___________ test_a_report_that_is_not_an_object_states_no_absence[3] ___________
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-16/test_a_report_that_is_not_an_o3')
+ledger = DeferralLedger(episodes={}), payload = 3
+
+    @pytest.mark.parametrize("payload", [[], ["repo_gate_absent"], "absent", 3])
+    def test_a_report_that_is_not_an_object_states_no_absence(tmp_path, ledger,
+                                                              payload):
+        """Kills READNONDICT: a `test_report.json` that parses but is not a JSON
+        object carries no flag of its own, so it states no absence, and the tick
+        that reads it must get `none`, not an exception."""
+        path = tmp_path / "test_report.json"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+>       assert gd.read_absence(path) is None
+               ^^^^^^^^^^^^^^^^^^^^^
+
+tests/unit/test_gate_deferral_is_accounted.py:58: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+report_path = PosixPath('/tmp/pytest-of-unknown/pytest-16/test_a_report_that_is_not_an_o3/test_report.json')
+
+    def read_absence(report_path) -> dict | None:
+        """The absence a `test_report.json` states, or None if it states none.
+    
+        Only the report's OWN flag counts: a report that says the run was graded
+        and the code failed states no absence, whatever else it mentions in prose.
+        """
+        from pathlib import Path
+        if not report_path:
+            return None
+        try:
+            data = json.loads(Path(report_path).read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return None
+        pass
+>       if not (data.get("repo_gate_absent") or data.get("repo_gate_unmeasured")):
+                ^^^^^^^^
+E       AttributeError: 'int' object has no attribute 'get'
+
+core/gate_deferral.py:306: AttributeError
+=============================== warnings summary ===============================
+../../../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_gate_deferral_is_accounted.py::test_a_report_that_is_not_an_object_states_no_absence[payload0]
+FAILED tests/unit/test_gate_deferral_is_accounted.py::test_a_report_that_is_not_an_object_states_no_absence[payload1]
+FAILED tests/unit/test_gate_deferral_is_accounted.py::test_a_report_that_is_not_an_object_states_no_absence[absent]
+FAILED tests/unit/test_gate_deferral_is_accounted.py::test_a_report_that_is_not_an_object_states_no_absence[3]
+4 failed, 15 passed, 1 warning in 5.89s
+Exception ignored in: <function _removeHandlerRef at 0x71e9c0abccc0>
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/logging/__init__.py", line 882, in _removeHandlerRef
+  File "/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-tlhak3ta/tree/tools/mutation_catalog/ignition_plugin.py", line 63, in _on_line
+TypeError: 'NoneType' object is not callable
+
+BARE_RC_TARGETED=1
+IGNITION_TARGETED={"file_reads": 0, "file_reads_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-tlhak3ta/tree/core/gate_deferral.py": 0}, "igniting_tests": ["tests/unit/test_gate_deferral_is_accounted.py::test_a_declared_absence_is_silent_inside_its_wait", "tests/unit/test_gate_deferral_is_accounted.py::test_a_report_that_graded_the_code_states_no_absence", "tests/unit/test_gate_deferral_is_accounted.py::test_a_report_that_is_not_an_object_states_no_absence[3]", "tests/unit/test_gate_deferral_is_accounted.py::test_a_report_that_is_not_an_object_states_no_absence[absent]", "tests/unit/test_gate_deferral_is_accounted.py::test_a_report_that_is_not_an_object_states_no_absence[payload0]", "tests/unit/test_gate_deferral_is_accounted.py::test_a_report_that_is_not_an_object_states_no_absence[payload1]", "tests/unit/test_gate_deferral_is_accounted.py::test_a_zero_ceiling_cannot_expire_a_run_instantly", "tests/unit/test_gate_deferral_is_accounted.py::test_an_expired_absence_names_the_absence_and_never_the_code", "tests/unit/test_gate_deferral_is_accounted.py::test_the_episode_does_not_restart_on_every_tick"], "line_hits": 32, "line_hits_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-tlhak3ta/tree/core/gate_deferral.py": 32}, "monitoring_tool_id": 4, "mutated_modules_imported": ["/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-tlhak3ta/tree/core/gate_deferral.py"], "source_readers": []}
+
+## full scope: /usr/local/bin/python -m pytest -q -rfE -p no:cacheprovider -p ignition_plugin tests/unit tests/skillflow
+# cwd=/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-tlhak3ta/tree
+........................................................................ [  1%]
+........................................................................ [  3%]
+........................................................................ [  5%]
+........................................................................ [  7%]
+........................................................................ [  8%]
+........................................................................ [ 10%]
+........................................................................ [ 12%]
+........................................................................ [ 14%]
+........................................................................ [ 15%]
+........................................................................ [ 17%]
+........................................................................ [ 19%]
+........................................................................ [ 21%]
+........................................................................ [ 22%]
+........................................................................ [ 24%]
+........................................................................ [ 26%]
+........................................................................ [ 28%]
+........................................................................ [ 29%]
+........................................................................ [ 31%]
+..................................................................FFFF.. [ 33%]
+........................................................................ [ 35%]
+.......................................................................s [ 37%]
+sssssss................................................................. [ 38%]
+........................................................................ [ 40%]
+........................................................................ [ 42%]
+........................................................................ [ 44%]
+........................................................................ [ 45%]
+........................................................................ [ 47%]
+........................................................................ [ 49%]
+........................................................................ [ 51%]
+........................................................................ [ 52%]
+........................................................................ [ 54%]
+.............s.......................................................... [ 56%]
+........................................................................ [ 58%]
+........................................................................ [ 59%]
+........................................................................ [ 61%]
+........................................................................ [ 63%]
+........................................................................ [ 65%]
+........................................................................ [ 67%]
+........................................................................ [ 68%]
+........................................................................ [ 70%]
+........................................................................ [ 72%]
+........................................................................ [ 74%]
+........................................................................ [ 75%]
+........................................................................ [ 77%]
+........................................................................ [ 79%]
+........................................................................ [ 81%]
+........................................................................ [ 82%]
+........................................................................ [ 84%]
+........................................................................ [ 86%]
+........................................................................ [ 88%]
+........................................................................ [ 89%]
+........................................................................ [ 91%]
+........................................................................ [ 93%]
+........................................................................ [ 95%]
+........................................................................ [ 97%]
+........................................................................ [ 98%]
+.................................................                        [100%]
+=================================== FAILURES ===================================
+_______ test_a_report_that_is_not_an_object_states_no_absence[payload0] ________
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-17/test_a_report_that_is_not_an_o0')
+ledger = DeferralLedger(episodes={}), payload = []
+
+    @pytest.mark.parametrize("payload", [[], ["repo_gate_absent"], "absent", 3])
+    def test_a_report_that_is_not_an_object_states_no_absence(tmp_path, ledger,
+                                                              payload):
+        """Kills READNONDICT: a `test_report.json` that parses but is not a JSON
+        object carries no flag of its own, so it states no absence, and the tick
+        that reads it must get `none`, not an exception."""
+        path = tmp_path / "test_report.json"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+>       assert gd.read_absence(path) is None
+               ^^^^^^^^^^^^^^^^^^^^^
+
+tests/unit/test_gate_deferral_is_accounted.py:58: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+report_path = PosixPath('/tmp/pytest-of-unknown/pytest-17/test_a_report_that_is_not_an_o0/test_report.json')
+
+    def read_absence(report_path) -> dict | None:
+        """The absence a `test_report.json` states, or None if it states none.
+    
+        Only the report's OWN flag counts: a report that says the run was graded
+        and the code failed states no absence, whatever else it mentions in prose.
+        """
+        from pathlib import Path
+        if not report_path:
+            return None
+        try:
+            data = json.loads(Path(report_path).read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return None
+        pass
+>       if not (data.get("repo_gate_absent") or data.get("repo_gate_unmeasured")):
+                ^^^^^^^^
+E       AttributeError: 'list' object has no attribute 'get'
+
+core/gate_deferral.py:306: AttributeError
+_______ test_a_report_that_is_not_an_object_states_no_absence[payload1] ________
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-17/test_a_report_that_is_not_an_o1')
+ledger = DeferralLedger(episodes={}), payload = ['repo_gate_absent']
+
+    @pytest.mark.parametrize("payload", [[], ["repo_gate_absent"], "absent", 3])
+    def test_a_report_that_is_not_an_object_states_no_absence(tmp_path, ledger,
+                                                              payload):
+        """Kills READNONDICT: a `test_report.json` that parses but is not a JSON
+        object carries no flag of its own, so it states no absence, and the tick
+        that reads it must get `none`, not an exception."""
+        path = tmp_path / "test_report.json"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+>       assert gd.read_absence(path) is None
+               ^^^^^^^^^^^^^^^^^^^^^
+
+tests/unit/test_gate_deferral_is_accounted.py:58: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+report_path = PosixPath('/tmp/pytest-of-unknown/pytest-17/test_a_report_that_is_not_an_o1/test_report.json')
+
+    def read_absence(report_path) -> dict | None:
+        """The absence a `test_report.json` states, or None if it states none.
+    
+        Only the report's OWN flag counts: a report that says the run was graded
+        and the code failed states no absence, whatever else it mentions in prose.
+        """
+        from pathlib import Path
+        if not report_path:
+            return None
+        try:
+            data = json.loads(Path(report_path).read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return None
+        pass
+>       if not (data.get("repo_gate_absent") or data.get("repo_gate_unmeasured")):
+                ^^^^^^^^
+E       AttributeError: 'list' object has no attribute 'get'
+
+core/gate_deferral.py:306: AttributeError
+________ test_a_report_that_is_not_an_object_states_no_absence[absent] _________
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-17/test_a_report_that_is_not_an_o2')
+ledger = DeferralLedger(episodes={}), payload = 'absent'
+
+    @pytest.mark.parametrize("payload", [[], ["repo_gate_absent"], "absent", 3])
+    def test_a_report_that_is_not_an_object_states_no_absence(tmp_path, ledger,
+                                                              payload):
+        """Kills READNONDICT: a `test_report.json` that parses but is not a JSON
+        object carries no flag of its own, so it states no absence, and the tick
+        that reads it must get `none`, not an exception."""
+        path = tmp_path / "test_report.json"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+>       assert gd.read_absence(path) is None
+               ^^^^^^^^^^^^^^^^^^^^^
+
+tests/unit/test_gate_deferral_is_accounted.py:58: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+report_path = PosixPath('/tmp/pytest-of-unknown/pytest-17/test_a_report_that_is_not_an_o2/test_report.json')
+
+    def read_absence(report_path) -> dict | None:
+        """The absence a `test_report.json` states, or None if it states none.
+    
+        Only the report's OWN flag counts: a report that says the run was graded
+        and the code failed states no absence, whatever else it mentions in prose.
+        """
+        from pathlib import Path
+        if not report_path:
+            return None
+        try:
+            data = json.loads(Path(report_path).read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return None
+        pass
+>       if not (data.get("repo_gate_absent") or data.get("repo_gate_unmeasured")):
+                ^^^^^^^^
+E       AttributeError: 'str' object has no attribute 'get'
+
+core/gate_deferral.py:306: AttributeError
+___________ test_a_report_that_is_not_an_object_states_no_absence[3] ___________
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-17/test_a_report_that_is_not_an_o3')
+ledger = DeferralLedger(episodes={}), payload = 3
+
+    @pytest.mark.parametrize("payload", [[], ["repo_gate_absent"], "absent", 3])
+    def test_a_report_that_is_not_an_object_states_no_absence(tmp_path, ledger,
+                                                              payload):
+        """Kills READNONDICT: a `test_report.json` that parses but is not a JSON
+        object carries no flag of its own, so it states no absence, and the tick
+        that reads it must get `none`, not an exception."""
+        path = tmp_path / "test_report.json"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+>       assert gd.read_absence(path) is None
+               ^^^^^^^^^^^^^^^^^^^^^
+
+tests/unit/test_gate_deferral_is_accounted.py:58: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+report_path = PosixPath('/tmp/pytest-of-unknown/pytest-17/test_a_report_that_is_not_an_o3/test_report.json')
+
+    def read_absence(report_path) -> dict | None:
+        """The absence a `test_report.json` states, or None if it states none.
+    
+        Only the report's OWN flag counts: a report that says the run was graded
+        and the code failed states no absence, whatever else it mentions in prose.
+        """
+        from pathlib import Path
+        if not report_path:
+            return None
+        try:
+            data = json.loads(Path(report_path).read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return None
+        pass
+>       if not (data.get("repo_gate_absent") or data.get("repo_gate_unmeasured")):
+                ^^^^^^^^
+E       AttributeError: 'int' object has no attribute 'get'
+
+core/gate_deferral.py:306: AttributeError
+=============================== warnings summary ===============================
+../../../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+tests/unit/test_bash_admission_lifetime.py::test_a_second_cancellation_during_cleanup_still_ends_the_writer
+  /usr/local/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <function BaseSubprocessTransport.__del__ at 0x77687002bd80>
+  
+  Traceback (most recent call last):
+    File "/usr/local/lib/python3.12/asyncio/base_subprocess.py", line 126, in __del__
+      self.close()
+    File "/usr/local/lib/python3.12/asyncio/base_subprocess.py", line 104, in close
+      proto.pipe.close()
+    File "/usr/local/lib/python3.12/asyncio/unix_events.py", line 568, in close
+      self._close(None)
+    File "/usr/local/lib/python3.12/asyncio/unix_events.py", line 592, in _close
+      self._loop.call_soon(self._call_connection_lost, exc)
+    File "/usr/local/lib/python3.12/asyncio/base_events.py", line 799, in call_soon
+      self._check_closed()
+    File "/usr/local/lib/python3.12/asyncio/base_events.py", line 545, in _check_closed
+      raise RuntimeError('Event loop is closed')
+  RuntimeError: Event loop is closed
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/unit/test_public_read_hardening.py::TestAnUnknownJwtKidCostsNoNetworkCall::test_a_rejected_kid_is_remembered
+tests/unit/test_public_read_hardening.py::TestAnUnknownJwtKidCostsNoNetworkCall::test_the_bad_kid_table_is_bounded
+  /usr/local/lib/python3.12/site-packages/jwt/api_jwt.py:149: InsecureKeyLengthWarning: The HMAC key is 1 bytes long, which is below the minimum recommended length of 32 bytes for SHA256. See RFC 7518 Section 3.2.
+    return self._jws.encode(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_gate_deferral_is_accounted.py::test_a_report_that_is_not_an_object_states_no_absence[payload0]
+FAILED tests/unit/test_gate_deferral_is_accounted.py::test_a_report_that_is_not_an_object_states_no_absence[payload1]
+FAILED tests/unit/test_gate_deferral_is_accounted.py::test_a_report_that_is_not_an_object_states_no_absence[absent]
+FAILED tests/unit/test_gate_deferral_is_accounted.py::test_a_report_that_is_not_an_object_states_no_absence[3]
+4 failed, 4068 passed, 9 skipped, 4 warnings in 328.57s (0:05:28)
+
+BARE_RC_FULL=1
+IGNITION_FULL={"file_reads": 8, "file_reads_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-tlhak3ta/tree/core/gate_deferral.py": 8}, "igniting_tests": ["tests/skillflow/test_coding_impl_gate_absence.py::test_a_gate_that_finally_answers_clears_the_deferral", "tests/skillflow/test_coding_impl_gate_absence.py::test_pole_a_a_ceiling_far_past_the_window_spends_one_implement_cycle", "tests/skillflow/test_coding_impl_gate_absence.py::test_pole_b_a_zero_ceiling_is_clamped_and_cannot_charge_the_absence", "tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence", "tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_inside_the_window_is_honoured_and_uncharged", "tests/skillflow/test_coding_impl_gate_absence.py::test_the_deferral_hold_leaves_real_step_rows_untouched", "tests/skillflow/test_coding_impl_gate_absence.py::test_the_host_hold_alone_keeps_the_rows_where_the_absence_left_them", "tests/skillflow/test_coding_impl_gate_absence.py::test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them", "tests/unit/test_gate_deferral_execution_points.py::test_during_a_deferral_hold_the_step_claim_is_held_not_released", "tests/unit/test_gate_deferral_execution_points.py::test_the_tick_refuses_to_claim_while_the_gate_is_silent", "tests/unit/test_gate_deferral_is_accounted.py::test_a_declared_absence_is_silent_inside_its_wait", "tests/unit/test_gate_deferral_is_accounted.py::test_a_report_that_graded_the_code_states_no_absence", "tests/unit/test_gate_deferral_is_accounted.py::test_a_report_that_is_not_an_object_states_no_absence[3]", "tests/unit/test_gate_deferral_is_accounted.py::test_a_report_that_is_not_an_object_states_no_absence[absent]", "tests/unit/test_gate_deferral_is_accounted.py::test_a_report_that_is_not_an_object_states_no_absence[payload0]", "tests/unit/test_gate_deferral_is_accounted.py::test_a_report_that_is_not_an_object_states_no_absence[payload1]", "tests/unit/test_gate_deferral_is_accounted.py::test_a_zero_ceiling_cannot_expire_a_run_instantly", "tests/unit/test_gate_deferral_is_accounted.py::test_an_expired_absence_names_the_absence_and_never_the_code", "tests/unit/test_gate_deferral_is_accounted.py::test_the_episode_does_not_restart_on_every_tick"], "line_hits": 183, "line_hits_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-tlhak3ta/tree/core/gate_deferral.py": 183}, "monitoring_tool_id": 4, "mutated_modules_imported": ["/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-tlhak3ta/tree/core/gate_deferral.py"], "source_readers": ["tests/unit/test_checkpoint_reject_target.py::test_every_reject_checkpoint_caller_passes_redirect_to[core]", "tests/unit/test_datadir_guardrail.py::test_no_home_paths_outside_datadir", "tests/unit/test_every_step_driver_handles_cancellation.py::test_every_claim_holding_loop_handles_cancellation", "tests/unit/test_logs_are_bounded.py::test_no_durable_log_is_opened_for_append_without_rotation", "tests/unit/test_no_by_name_graph_lookup_during_a_run.py::test_no_run_scoped_lookup_resolves_a_graph_by_name", "tests/unit/test_no_self_call_collapse.py::test_no_python_source_is_a_self_call_and_nothing_else", "tests/unit/test_no_verbatim_previous_line_dup.py::test_named_test_repeats_are_pinned_and_current", "tests/unit/test_no_verbatim_previous_line_dup.py::test_no_verbatim_previous_line_dup_in_non_test_code"]}
+
+# control targeted reds=[]
+# control full reds=[]
+# targeted killers=['tests/unit/test_gate_deferral_is_accounted.py::test_a_report_that_is_not_an_object_states_no_absence[3]', 'tests/unit/test_gate_deferral_is_accounted.py::test_a_report_that_is_not_an_object_states_no_absence[absent]', 'tests/unit/test_gate_deferral_is_accounted.py::test_a_report_that_is_not_an_object_states_no_absence[payload0]', 'tests/unit/test_gate_deferral_is_accounted.py::test_a_report_that_is_not_an_object_states_no_absence[payload1]']
+# targeted source-text witnesses=[]
+# full killers=['tests/unit/test_gate_deferral_is_accounted.py::test_a_report_that_is_not_an_object_states_no_absence[3]', 'tests/unit/test_gate_deferral_is_accounted.py::test_a_report_that_is_not_an_object_states_no_absence[absent]', 'tests/unit/test_gate_deferral_is_accounted.py::test_a_report_that_is_not_an_object_states_no_absence[payload0]', 'tests/unit/test_gate_deferral_is_accounted.py::test_a_report_that_is_not_an_object_states_no_absence[payload1]']
+# full source-text witnesses=[]
+# porcelain after restore=''
+# status=killed

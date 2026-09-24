@@ -1,0 +1,72 @@
+# CMD: python3 final/probes/p_hold_ign.py S1 VALVEREACH SCHEDROWRETRY SCHEDROWSTATUS HOST_HOLD_INERT TICK_HOLD_INERT H2 OBSERVENONE
+# CWD: /home/linxuhao/.AItelier/worktrees-scratch/ga10
+# HEAD: 96721904a7d9b6b461109cfcded6d0abd03f469c porcelain_lines=9
+# RUNNER: host
+# ENV: (none)
+# FILE: final/probes/p_hold_ign.py sha256=17286ff602b72eb96196c310113c3cf8ffd365440005eeab67f6a6b2f9e1b9b8
+# STARTED: 2026-09-24T07:02:31Z
+S1 targeted_line_hits=36 igniting_tests_in_absence_file=8 red_in_absence_file=8
+  S1 row_or_run_assert_messages[the run row moved while the gate was silent: status=\w+ node=\w+]=7
+  S1 RED tests/skillflow/test_coding_impl_gate_absence.py::test_a_gate_that_finally_answers_clears_the_deferral
+  S1 RED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_a_a_ceiling_far_past_the_window_spends_one_implement_cycle
+  S1 RED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_b_a_zero_ceiling_is_clamped_and_cannot_charge_the_absence
+  S1 RED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence
+  S1 RED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_inside_the_window_is_honoured_and_uncharged
+  S1 RED tests/skillflow/test_coding_impl_gate_absence.py::test_the_deferral_hold_leaves_real_step_rows_untouched
+  S1 RED tests/skillflow/test_coding_impl_gate_absence.py::test_the_host_hold_alone_keeps_the_rows_where_the_absence_left_them
+  S1 RED tests/skillflow/test_coding_impl_gate_absence.py::test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them
+VALVEREACH targeted_line_hits=115 igniting_tests_in_absence_file=7 red_in_absence_file=1
+  VALVEREACH row_or_run_assert_messages[the run row moved while the gate was silent: status=\w+ node=\w+]=1
+  VALVEREACH RED tests/skillflow/test_coding_impl_gate_absence.py::test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them
+SCHEDROWRETRY targeted_line_hits=127 igniting_tests_in_absence_file=7 red_in_absence_file=7
+  SCHEDROWRETRY row_or_run_assert_messages[deferral charged a retry: \d+]=5
+  SCHEDROWRETRY RED tests/skillflow/test_coding_impl_gate_absence.py::test_a_gate_that_finally_answers_clears_the_deferral
+  SCHEDROWRETRY RED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_a_a_ceiling_far_past_the_window_spends_one_implement_cycle
+  SCHEDROWRETRY RED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_b_a_zero_ceiling_is_clamped_and_cannot_charge_the_absence
+  SCHEDROWRETRY RED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence
+  SCHEDROWRETRY RED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_inside_the_window_is_honoured_and_uncharged
+  SCHEDROWRETRY RED tests/skillflow/test_coding_impl_gate_absence.py::test_the_deferral_hold_leaves_real_step_rows_untouched
+  SCHEDROWRETRY RED tests/skillflow/test_coding_impl_gate_absence.py::test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them
+SCHEDROWSTATUS targeted_line_hits=127 igniting_tests_in_absence_file=7 red_in_absence_file=7
+  SCHEDROWSTATUS row_or_run_assert_messages[test row status drifted: \w+]=5
+  SCHEDROWSTATUS RED tests/skillflow/test_coding_impl_gate_absence.py::test_a_gate_that_finally_answers_clears_the_deferral
+  SCHEDROWSTATUS RED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_a_a_ceiling_far_past_the_window_spends_one_implement_cycle
+  SCHEDROWSTATUS RED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_b_a_zero_ceiling_is_clamped_and_cannot_charge_the_absence
+  SCHEDROWSTATUS RED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence
+  SCHEDROWSTATUS RED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_inside_the_window_is_honoured_and_uncharged
+  SCHEDROWSTATUS RED tests/skillflow/test_coding_impl_gate_absence.py::test_the_deferral_hold_leaves_real_step_rows_untouched
+  SCHEDROWSTATUS RED tests/skillflow/test_coding_impl_gate_absence.py::test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them
+HOST_HOLD_INERT targeted_line_hits=31 igniting_tests_in_absence_file=8 red_in_absence_file=7
+  HOST_HOLD_INERT row_or_run_assert_messages[the run row moved while the gate was silent: status=\w+ node=\w+]=7
+  HOST_HOLD_INERT RED tests/skillflow/test_coding_impl_gate_absence.py::test_a_gate_that_finally_answers_clears_the_deferral
+  HOST_HOLD_INERT RED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_a_a_ceiling_far_past_the_window_spends_one_implement_cycle
+  HOST_HOLD_INERT RED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_b_a_zero_ceiling_is_clamped_and_cannot_charge_the_absence
+  HOST_HOLD_INERT RED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence
+  HOST_HOLD_INERT RED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_inside_the_window_is_honoured_and_uncharged
+  HOST_HOLD_INERT RED tests/skillflow/test_coding_impl_gate_absence.py::test_the_deferral_hold_leaves_real_step_rows_untouched
+  HOST_HOLD_INERT RED tests/skillflow/test_coding_impl_gate_absence.py::test_the_host_hold_alone_keeps_the_rows_where_the_absence_left_them
+TICK_HOLD_INERT targeted_line_hits=153 igniting_tests_in_absence_file=8 red_in_absence_file=2
+  TICK_HOLD_INERT row_or_run_assert_messages[the run row moved while the gate was silent: status=\w+ node=\w+]=1
+  TICK_HOLD_INERT RED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_inside_the_window_is_honoured_and_uncharged
+  TICK_HOLD_INERT RED tests/skillflow/test_coding_impl_gate_absence.py::test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them
+H2 targeted_line_hits=30 igniting_tests_in_absence_file=7 red_in_absence_file=7
+  H2 row_or_run_assert_messages[the run row moved while the gate was silent: status=\w+ node=\w+]=6
+  H2 RED tests/skillflow/test_coding_impl_gate_absence.py::test_a_gate_that_finally_answers_clears_the_deferral
+  H2 RED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_a_a_ceiling_far_past_the_window_spends_one_implement_cycle
+  H2 RED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_b_a_zero_ceiling_is_clamped_and_cannot_charge_the_absence
+  H2 RED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence
+  H2 RED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_inside_the_window_is_honoured_and_uncharged
+  H2 RED tests/skillflow/test_coding_impl_gate_absence.py::test_the_deferral_hold_leaves_real_step_rows_untouched
+  H2 RED tests/skillflow/test_coding_impl_gate_absence.py::test_the_host_hold_alone_keeps_the_rows_where_the_absence_left_them
+OBSERVENONE targeted_line_hits=38 igniting_tests_in_absence_file=8 red_in_absence_file=8
+  OBSERVENONE row_or_run_assert_messages[the run row moved while the gate was silent: status=\w+ node=\w+]=7
+  OBSERVENONE RED tests/skillflow/test_coding_impl_gate_absence.py::test_a_gate_that_finally_answers_clears_the_deferral
+  OBSERVENONE RED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_a_a_ceiling_far_past_the_window_spends_one_implement_cycle
+  OBSERVENONE RED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_b_a_zero_ceiling_is_clamped_and_cannot_charge_the_absence
+  OBSERVENONE RED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence
+  OBSERVENONE RED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_inside_the_window_is_honoured_and_uncharged
+  OBSERVENONE RED tests/skillflow/test_coding_impl_gate_absence.py::test_the_deferral_hold_leaves_real_step_rows_untouched
+  OBSERVENONE RED tests/skillflow/test_coding_impl_gate_absence.py::test_the_host_hold_alone_keeps_the_rows_where_the_absence_left_them
+  OBSERVENONE RED tests/skillflow/test_coding_impl_gate_absence.py::test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them
+# ENDED: 2026-09-24T07:02:31Z
+BARE_RC=0

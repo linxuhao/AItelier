@@ -1,0 +1,197 @@
+# DUPYIELD (text): 
+# head=b104f18c2e7e1d0f0c59e99cb32a077e7896dd28
+# worktree=/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-q22wldm2/tree (removed)
+# started=2026-09-24 05:46:42 UTC ended=2026-09-24 05:52:56 UTC
+# replacement lines={"tests/unit/test_no_verbatim_previous_line_dup.py": [75]}
+
+## diff applied
+diff --git a/tests/unit/test_no_verbatim_previous_line_dup.py b/tests/unit/test_no_verbatim_previous_line_dup.py
+index a4f18836..ab037b5a 100644
+--- a/tests/unit/test_no_verbatim_previous_line_dup.py
++++ b/tests/unit/test_no_verbatim_previous_line_dup.py
+@@ -72,6 +72,7 @@ def _derived_sites():
+             else:
+                 non_test.append((rel, text))
+     return non_test, test
++    return non_test, test
+ 
+ 
+ def test_no_verbatim_previous_line_dup_in_non_test_code():
+
+## targeted scope: /usr/local/bin/python -m pytest -q -rfE -p no:cacheprovider -p ignition_plugin tests/unit/test_no_verbatim_previous_line_dup.py::test_the_checker_file_is_clean_under_its_own_rule
+# cwd=/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-q22wldm2/tree
+F                                                                        [100%]
+=================================== FAILURES ===================================
+______________ test_the_checker_file_is_clean_under_its_own_rule _______________
+
+    def test_the_checker_file_is_clean_under_its_own_rule():
+        src = (_ROOT / _SELF).read_text(encoding="utf-8")
+>       assert _verbatim_previous_line_sites(src) == []
+E       AssertionError: assert [(75, 'return..._test, test')] == []
+E         
+E         Left contains one more item: (75, 'return non_test, test')
+E         Use -v to get more diff
+
+tests/unit/test_no_verbatim_previous_line_dup.py:106: AssertionError
+=============================== warnings summary ===============================
+../../../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_no_verbatim_previous_line_dup.py::test_the_checker_file_is_clean_under_its_own_rule
+1 failed, 1 warning in 0.37s
+Exception ignored in: <function _removeHandlerRef at 0x77e0b46c8cc0>
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/logging/__init__.py", line 882, in _removeHandlerRef
+  File "/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-q22wldm2/tree/tools/mutation_catalog/ignition_plugin.py", line 63, in _on_line
+TypeError: 'NoneType' object is not callable
+
+BARE_RC_TARGETED=1
+IGNITION_TARGETED={"file_reads": 1, "file_reads_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-q22wldm2/tree/tests/unit/test_no_verbatim_previous_line_dup.py": 1}, "igniting_tests": [], "line_hits": 0, "line_hits_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-q22wldm2/tree/tests/unit/test_no_verbatim_previous_line_dup.py": 0}, "monitoring_tool_id": 4, "mutated_modules_imported": ["/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-q22wldm2/tree/tests/unit/test_no_verbatim_previous_line_dup.py"], "source_readers": ["tests/unit/test_no_verbatim_previous_line_dup.py::test_the_checker_file_is_clean_under_its_own_rule"]}
+
+## full scope: /usr/local/bin/python -m pytest -q -rfE -p no:cacheprovider -p ignition_plugin tests/unit tests/skillflow
+# cwd=/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-q22wldm2/tree
+........................................................................ [  1%]
+........................................................................ [  3%]
+........................................................................ [  5%]
+........................................................................ [  7%]
+........................................................................ [  8%]
+........................................................................ [ 10%]
+........................................................................ [ 12%]
+........................................................................ [ 14%]
+........................................................................ [ 15%]
+........................................................................ [ 17%]
+........................................................................ [ 19%]
+........................................................................ [ 21%]
+........................................................................ [ 22%]
+........................................................................ [ 24%]
+........................................................................ [ 26%]
+........................................................................ [ 28%]
+........................................................................ [ 29%]
+........................................................................ [ 31%]
+........................................................................ [ 33%]
+........................................................................ [ 35%]
+.......................................................................s [ 37%]
+sssssss................................................................. [ 38%]
+........................................................................ [ 40%]
+........................................................................ [ 42%]
+........................................................................ [ 44%]
+........................................................................ [ 45%]
+........................................................................ [ 47%]
+........................................................................ [ 49%]
+........................................................................ [ 51%]
+.......FF............................................................... [ 52%]
+........................................................................ [ 54%]
+.............s.......................................................... [ 56%]
+........................................................................ [ 58%]
+........................................................................ [ 59%]
+........................................................................ [ 61%]
+........................................................................ [ 63%]
+........................................................................ [ 65%]
+........................................................................ [ 67%]
+........................................................................ [ 68%]
+........................................................................ [ 70%]
+........................................................................ [ 72%]
+........................................................................ [ 74%]
+........................................................................ [ 75%]
+........................................................................ [ 77%]
+........................................................................ [ 79%]
+........................................................................ [ 81%]
+........................................................................ [ 82%]
+........................................................................ [ 84%]
+........................................................................ [ 86%]
+........................................................................ [ 88%]
+........................................................................ [ 89%]
+........................................................................ [ 91%]
+........................................................................ [ 93%]
+........................................................................ [ 95%]
+........................................................................ [ 97%]
+........................................................................ [ 98%]
+.................................................                        [100%]
+=================================== FAILURES ===================================
+________________ test_named_test_repeats_are_pinned_and_current ________________
+
+    def test_named_test_repeats_are_pinned_and_current():
+        """The tests/ repeats are a named LIST, not a hand-counted number: every
+        listed entry must still be a real repeat, and there must be no unlisted
+        repeat. The consecutive-count is pinned too — adding a THIRD duplicate at
+        a listed site changes the count and must be written down here."""
+        _non_test, test = _derived_sites()
+        derived = dict(test)
+        listed = {(f, s): c for f, s, c in TEST_INTENTIONAL_REPEATS}
+>       assert derived == listed, (
+            f"tests/ repeats drifted; "
+            f"only-in-tree={sorted(set(derived) - set(listed))} "
+            f"only-in-list={sorted(set(listed) - set(derived))} "
+            f"count-mismatch={[(k, derived[k], listed.get(k)) for k in derived if k in listed and derived[k] != listed[k]]}")
+E       AssertionError: tests/ repeats drifted; only-in-tree=[('tests/unit/test_no_verbatim_previous_line_dup.py', 'return non_test, test')] only-in-list=[] count-mismatch=[]
+E       assert {('tests/inte...ne)'): 1, ...} == {('tests/inte...ne)'): 1, ...}
+E         
+E         Omitting 13 identical items, use -vv to show
+E         Left contains 1 more item:
+E         {('tests/unit/test_no_verbatim_previous_line_dup.py', 'return non_test, test'): 1}
+E         Use -v to get more diff
+
+tests/unit/test_no_verbatim_previous_line_dup.py:91: AssertionError
+______________ test_the_checker_file_is_clean_under_its_own_rule _______________
+
+    def test_the_checker_file_is_clean_under_its_own_rule():
+        src = (_ROOT / _SELF).read_text(encoding="utf-8")
+>       assert _verbatim_previous_line_sites(src) == []
+E       AssertionError: assert [(75, 'return..._test, test')] == []
+E         
+E         Left contains one more item: (75, 'return non_test, test')
+E         Use -v to get more diff
+
+tests/unit/test_no_verbatim_previous_line_dup.py:106: AssertionError
+=============================== warnings summary ===============================
+../../../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+tests/unit/test_bash_admission_lifetime.py::test_a_second_cancellation_during_cleanup_still_ends_the_writer
+  /usr/local/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <function BaseSubprocessTransport.__del__ at 0x79d352d27d80>
+  
+  Traceback (most recent call last):
+    File "/usr/local/lib/python3.12/asyncio/base_subprocess.py", line 126, in __del__
+      self.close()
+    File "/usr/local/lib/python3.12/asyncio/base_subprocess.py", line 104, in close
+      proto.pipe.close()
+    File "/usr/local/lib/python3.12/asyncio/unix_events.py", line 568, in close
+      self._close(None)
+    File "/usr/local/lib/python3.12/asyncio/unix_events.py", line 592, in _close
+      self._loop.call_soon(self._call_connection_lost, exc)
+    File "/usr/local/lib/python3.12/asyncio/base_events.py", line 799, in call_soon
+      self._check_closed()
+    File "/usr/local/lib/python3.12/asyncio/base_events.py", line 545, in _check_closed
+      raise RuntimeError('Event loop is closed')
+  RuntimeError: Event loop is closed
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/unit/test_public_read_hardening.py::TestAnUnknownJwtKidCostsNoNetworkCall::test_a_rejected_kid_is_remembered
+tests/unit/test_public_read_hardening.py::TestAnUnknownJwtKidCostsNoNetworkCall::test_the_bad_kid_table_is_bounded
+  /usr/local/lib/python3.12/site-packages/jwt/api_jwt.py:149: InsecureKeyLengthWarning: The HMAC key is 1 bytes long, which is below the minimum recommended length of 32 bytes for SHA256. See RFC 7518 Section 3.2.
+    return self._jws.encode(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_no_verbatim_previous_line_dup.py::test_named_test_repeats_are_pinned_and_current
+FAILED tests/unit/test_no_verbatim_previous_line_dup.py::test_the_checker_file_is_clean_under_its_own_rule
+2 failed, 4070 passed, 9 skipped, 4 warnings in 360.55s (0:06:00)
+
+BARE_RC_FULL=1
+IGNITION_FULL={"file_reads": 4, "file_reads_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-q22wldm2/tree/tests/unit/test_no_verbatim_previous_line_dup.py": 4}, "igniting_tests": [], "line_hits": 0, "line_hits_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-q22wldm2/tree/tests/unit/test_no_verbatim_previous_line_dup.py": 0}, "monitoring_tool_id": 4, "mutated_modules_imported": ["/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-q22wldm2/tree/tests/unit/test_no_verbatim_previous_line_dup.py"], "source_readers": ["tests/unit/test_no_self_call_collapse.py::test_no_python_source_is_a_self_call_and_nothing_else", "tests/unit/test_no_verbatim_previous_line_dup.py::test_named_test_repeats_are_pinned_and_current", "tests/unit/test_no_verbatim_previous_line_dup.py::test_no_verbatim_previous_line_dup_in_non_test_code", "tests/unit/test_no_verbatim_previous_line_dup.py::test_the_checker_file_is_clean_under_its_own_rule"]}
+
+# control targeted reds=[]
+# control full reds=[]
+# targeted killers=['tests/unit/test_no_verbatim_previous_line_dup.py::test_the_checker_file_is_clean_under_its_own_rule']
+# targeted source-text witnesses=[]
+# full killers=['tests/unit/test_no_verbatim_previous_line_dup.py::test_named_test_repeats_are_pinned_and_current', 'tests/unit/test_no_verbatim_previous_line_dup.py::test_the_checker_file_is_clean_under_its_own_rule']
+# full source-text witnesses=[]
+# porcelain after restore=''
+# status=killed

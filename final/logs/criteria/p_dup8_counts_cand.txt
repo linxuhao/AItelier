@@ -1,0 +1,26 @@
+# CMD: python3 final/probes/p_repeats.py
+# CWD: /home/linxuhao/.AItelier/worktrees-scratch/ga10
+# HEAD: 96721904a7d9b6b461109cfcded6d0abd03f469c porcelain_lines=9
+# RUNNER: docker run --rm --init -m 3g --name ga10-cnt --network aitelier_default -u 1000:1000 -e HOME=/home/linxuhao -e PYTHONPATH=/home/linxuhao/.AItelier/worktrees-scratch/ga10 -e PYTHONDONTWRITEBYTECODE=1 -e SEARXNG_URL=http://linxuhaserver:8888 -v /home/linxuhao/AItelier:/app -v /home/linxuhao/AItelier:/home/linxuhao/AItelier -v /home/linxuhao/.AItelier:/home/linxuhao/.AItelier -w /home/linxuhao/.AItelier/worktrees-scratch/ga10 aitelier:latest python3 final/probes/p_repeats.py
+# ENV: (none)
+# FILE: final/probes/p_repeats.py sha256=f5c4ab7fffb2a964f71aef5136a9b5eef328a81c7965874f2bf20a41b7ac3883
+# STARTED: 2026-09-24T07:02:31Z
+derived_non_test_sites 0
+derived_test_pairs 13 derived_test_sites_sum 14
+listed_entries 13 listed_count_sum 14
+derived_equals_listed_with_counts True
+LISTED 1 tests/integration/test_state_graph_entrypoints.py assert module._start_driver("run1", scheduler_owned=True, auto_approve=False)
+LISTED 1 tests/integration/test_tool_operation_owner_recovery.py sf.reconcile_active_operations(run_id, trigger="retryable_trace")
+LISTED 1 tests/unit/test_ai_router.py litellm.exceptions.RateLimitError("Limit reached", model="zai", llm_provider="zai"),
+LISTED 1 tests/unit/test_claim_precondition_bounded.py await scheduler._run_skillflow_tick("p1", None)
+LISTED 1 tests/unit/test_godot_harness.py gh._playtest_spec(tmp_path / "proj", _spec(["a"]), 60, 120)
+LISTED 1 tests/unit/test_godot_harness.py gh.run_script(str(tmp_path), [], timeout=30)
+LISTED 1 tests/unit/test_knowledge_sync.py _call(repo, ws, "proj1")
+LISTED 1 tests/unit/test_postcompact_driver_hook.py "state_graph_read", "state_graph_read", "state_graph_help", "state_graph_read",
+LISTED 1 tests/unit/test_public_read_hardening.py _read_cache.cached(("k2",), lambda: calls.append(1) or "v", ttl=-1)
+LISTED 1 tests/unit/test_quota_hold.py sched.tick_log("p", outcome)
+LISTED 1 tests/unit/test_route_rotation.py assert table.resolve("plain", rotate=True) == ["a/m1", "payg/m9"]
+LISTED 1 tests/unit/test_route_rotation.py assert table.resolve("solo", rotate=True) == ["a/m1", "payg/m9"]
+LISTED 2 tests/unit/test_run_isolation_lifecycle.py await sc.poll_and_execute()
+# ENDED: 2026-09-24T07:02:32Z
+BARE_RC=0

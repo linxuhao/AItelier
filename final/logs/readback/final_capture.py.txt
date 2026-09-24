@@ -1,0 +1,126 @@
+# CMD: git diff --word-diff dcfa78729628f0cbbbc703a44d0e97098a3b9c8f 96721904a7d9b6b461109cfcded6d0abd03f469c -- final/capture.py
+# CWD: /home/linxuhao/.AItelier/worktrees-scratch/ga10
+# HEAD: 96721904a7d9b6b461109cfcded6d0abd03f469c porcelain_lines=4
+# RUNNER: host
+# ENV: (none)
+# FILE: final/capture.py sha256=bc2625cc878d1d781b3b89c23f34de2042a571b7e0bc2f08bf25c56ea4093f88
+# STARTED: 2026-09-24T06:50:07Z
+diff --git a/final/capture.py b/final/capture.py
+new file mode 100644
+index 00000000..4a679a7f
+--- /dev/null
++++ b/final/capture.py
+@@ -0,0 +1,111 @@
+{+"""Run ONE command and write its log file; this is how every log under+}
+{+`final/logs/` except `final/logs/mutations/` was produced (the mutation+}
+{+runner writes its own).+}
+
+{+    python3 final/capture.py <log> [--container NAME] [--cwd DIR] \+}
+{+        [ENV=VAL ...] -- <cmd ...>+}
+
+{+The log holds: the command, the real cwd, the tree's HEAD and porcelain line+}
+{+count, the runner (the full `docker run` argv, or `host`), the environment+}
+{+overrides, the sha256 of every argument that is an existing file (probe+}
+{+scripts), start and end time, the command's combined output, and+}
+{+`BARE_RC=<exit code>`, the exit code of the command itself. capture.py exits+}
+{+with that code.+}
+
+{+With `--container NAME` the command runs in a throwaway container+}
+{+(`docker run --rm --init -m 3g`, never the production `aitelier`+}
+{+container), with the repository and `~/.AItelier` mounted at their host+}
+{+paths so a git worktree's gitdir resolves. Without it, the command runs on+}
+{+the host.+}
+{+"""+}
+{+from __future__ import annotations+}
+
+{+import datetime+}
+{+import hashlib+}
+{+import os+}
+{+import subprocess+}
+{+import sys+}
+{+from pathlib import Path+}
+
+{+HOME = "/home/linxuhao"+}
+{+IMAGE = "aitelier:latest"+}
+
+
+{+def _now() -> str:+}
+{+    return datetime.datetime.now(datetime.timezone.utc).strftime(+}
+{+        "%Y-%m-%dT%H:%M:%SZ")+}
+
+
+{+def _git(cwd: str, *args: str) -> str:+}
+{+    proc = subprocess.run(["git", "-C", cwd, *args], capture_output=True,+}
+{+                          text=True)+}
+{+    return proc.stdout.strip() if proc.returncode == 0 else f"(git rc={proc.returncode})"+}
+
+
+{+def main(argv: list[str]) -> int:+}
+{+    log = Path(argv[0]).resolve()+}
+{+    argv = argv[1:]+}
+{+    container = None+}
+{+    cwd = os.getcwd()+}
+{+    env: dict[str, str] = {}+}
+{+    while argv and argv[0] != "--":+}
+{+        head = argv.pop(0)+}
+{+        if head == "--container":+}
+{+            container = argv.pop(0)+}
+{+        elif head == "--cwd":+}
+{+            cwd = str(Path(argv.pop(0)).resolve())+}
+{+        else:+}
+{+            key, _, value = head.partition("=")+}
+{+            env[key] = value+}
+{+    cmd = argv[1:]+}
+{+    if container:+}
+{+        base_env = {"HOME": HOME, "PYTHONPATH": cwd,+}
+{+                    "PYTHONDONTWRITEBYTECODE": "1",+}
+{+                    "SEARXNG_URL": "http://linxuhaserver:8888"}+}
+{+        base_env.update(env)+}
+{+        run = ["docker", "run", "--rm", "--init", "-m", "3g",+}
+{+               "--name", container, "--network", "aitelier_default",+}
+{+               "-u", "1000:1000"]+}
+{+        for key, value in base_env.items():+}
+{+            run += ["-e", f"{key}={value}"]+}
+{+        run += ["-v", f"{HOME}/AItelier:/app",+}
+{+                "-v", f"{HOME}/AItelier:{HOME}/AItelier",+}
+{+                "-v", f"{HOME}/.AItelier:{HOME}/.AItelier",+}
+{+                "-w", cwd, IMAGE, *cmd]+}
+{+        runner = " ".join(run)+}
+{+        child_env = None+}
+{+    else:+}
+{+        run = cmd+}
+{+        runner = "host"+}
+{+        child_env = {**os.environ, **env}+}
+{+    hashes = []+}
+{+    for arg in cmd:+}
+{+        path = Path(cwd, arg) if not os.path.isabs(arg) else Path(arg)+}
+{+        if path.is_file():+}
+{+            digest = hashlib.sha256(path.read_bytes()).hexdigest()+}
+{+            hashes.append(f"{arg} sha256={digest}")+}
+{+    started = _now()+}
+{+    proc = subprocess.run(run, cwd=cwd, env=child_env, capture_output=True,+}
+{+                          text=True)+}
+{+    ended = _now()+}
+{+    porcelain = _git(cwd, "status", "--porcelain")+}
+{+    header = [+}
+{+        f"# CMD: {' '.join(cmd)}",+}
+{+        f"# CWD: {cwd}",+}
+{+        f"# HEAD: {_git(cwd, 'rev-parse', 'HEAD')} "+}
+{+        f"porcelain_lines={len(porcelain.splitlines()) if porcelain else 0}",+}
+{+        f"# RUNNER: {runner}",+}
+{+        f"# ENV: {' '.join(f'{k}={v}' for k, v in env.items()) or '(none)'}",+}
+{+        *(f"# FILE: {h}" for h in hashes),+}
+{+        f"# STARTED: {started}",+}
+{+    ]+}
+{+    log.parent.mkdir(parents=True, exist_ok=True)+}
+{+    log.write_text("\n".join(header) + "\n" + proc.stdout + proc.stderr+}
+{+                   + f"# ENDED: {ended}\nBARE_RC={proc.returncode}\n",+}
+{+                   encoding="utf-8")+}
+{+    print(f"{log.name} BARE_RC={proc.returncode}")+}
+{+    return proc.returncode+}
+
+
+{+if __name__ == "__main__":+}
+{+    raise SystemExit(main(sys.argv[1:]))+}
+# ENDED: 2026-09-24T06:50:07Z
+BARE_RC=0

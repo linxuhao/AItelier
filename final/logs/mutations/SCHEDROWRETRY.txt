@@ -1,0 +1,1145 @@
+# SCHEDROWRETRY (behaviour): the tick's silent branch charges the parked `test` row's retry_count.
+# head=b104f18c2e7e1d0f0c59e99cb32a077e7896dd28
+# worktree=/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-9f745iax/tree (removed)
+# started=2026-09-24 06:17:18 UTC ended=2026-09-24 06:23:11 UTC
+# replacement lines={"core/scheduler.py": [1225]}
+
+## diff applied
+diff --git a/core/scheduler.py b/core/scheduler.py
+index a9d28fc4..f581add9 100644
+--- a/core/scheduler.py
++++ b/core/scheduler.py
+@@ -1222,6 +1222,7 @@ async def _run_skillflow_tick(project_id: str, loop):
+     # bound and the accounting rule are not in conflict.
+     deferral = gate_deferral.observe_run(sf, run_id)
+     if deferral["state"] == "silent":
++        sf._conn.execute("UPDATE skillflow_steps SET retry_count=retry_count+1 WHERE run_id=? AND step_id='test'", (run_id,))
+         tick_log(project_id, "gate_deferral_hold", run=run_id[:8],
+                  gate=deferral.get("gate") or "",
+                  remaining=f"{deferral['remaining']:.0f}s")
+
+## targeted scope: /usr/local/bin/python -m pytest -q -rfE -p no:cacheprovider -p ignition_plugin tests/skillflow/test_coding_impl_gate_absence.py
+# cwd=/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-9f745iax/tree
+FFFFFFF.                                                                 [100%]
+=================================== FAILURES ===================================
+_____ test_pole_a_a_ceiling_far_past_the_window_spends_one_implement_cycle _____
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-18/test_pole_a_a_ceiling_far_past0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7d1f3c255a60>
+
+    def test_pole_a_a_ceiling_far_past_the_window_spends_one_implement_cycle(
+            tmp_path, monkeypatch):
+        """(a) Ceiling >> observation window: the absence is silent throughout.
+    
+        `implement_runs` must be 1 and the run must NOT be terminal — the run's gate
+        has not answered, so there is nothing to end. The run must also be parked at
+        the loop-external gate, which is only reachable if the absence edge actually
+        fired: on the r5 candidate the same two lines sat on `test_evidence`, where
+        `from_file` resolves against a step that writes nothing, so the edge could
+        never match and this pole spent 4 implement cycles on `Cycle limit
+        exceeded` instead.
+        """
+        counter = tmp_path / "calls.txt"
+        sf, run_id = _wire(tmp_path, monkeypatch, episode_max=100000,
+                           wait=1, counter=counter, tail=_SILENT_TAIL)
+        first = _prime_ledger(sf, run_id)
+        assert first["state"] == "none"          # no report yet: nothing to account
+    
+        implement_runs, statuses, outcomes, nodes = _drive(
+            sf, run_id, monkeypatch, ticks=40,
+            clock_step=gate_deferral.wait_seconds())
+>       _assert_test_row_untouched(sf, run_id)
+
+tests/skillflow/test_coding_impl_gate_absence.py:265: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+sf = <core.skillflow_host.AItelierSkillFlow object at 0x7d1f3c167050>
+run_id = 'da83481b-737b-4ec3-8579-a501711dd6d6', run_status = 'running'
+
+    def _assert_test_row_untouched(sf, run_id, *, run_status="running"):
+        """Assert the row invariants while the gate is silent.
+        Called from every pole so no hold-breaking mutation passes unnoticed.
+    
+        The four step-row assertions the criterion names: the `test` row is
+        `completed`, its `retry_count` is 0, its `release_count` is 0, and every
+        step instance was claimed exactly once (`claim_epoch == 1` on the `test`
+        row, and one `claimed` trace event per instance).
+    
+        Then the RUN row. Measured in round 10: a hold that lets the run advance
+        ends the run through the absence gate's only transition and writes no step
+        row at all — every step row is identical to the held run's, and the
+        `test_gate_absent` row stays `pending` — so no step-row assertion can see
+        that break. The run row can: while the gate is silent it is `running` and
+        parked at `test_gate_absent`; at the expiring pole it is `failed` there.
+        """
+        rows = _rows_by_step(sf, run_id)
+        test_row = rows["test"]
+        assert test_row["status"] == "completed", (
+            f"test row status drifted: {test_row['status']}")
+>       assert test_row["retry_count"] == 0, (
+            f"deferral charged a retry: {test_row['retry_count']}")
+E       AssertionError: deferral charged a retry: 37
+E       assert 37 == 0
+
+tests/skillflow/test_coding_impl_gate_absence.py:433: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+_____ test_pole_b_a_zero_ceiling_is_clamped_and_cannot_charge_the_absence ______
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-18/test_pole_b_a_zero_ceiling_is_0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7d1f3c1819d0>
+
+    def test_pole_b_a_zero_ceiling_is_clamped_and_cannot_charge_the_absence(
+            tmp_path, monkeypatch):
+        """(b) ceiling 0. Review measured this pole on the r4 candidate as
+        `implement_runs=4` + `Cycle limit exceeded`.
+    
+        Here the pole is a MIS-SET KNOB, and the reading is that a mis-set knob may
+        not be what charges an absence to the implementer: `episode_max_seconds()`
+        refuses the zero and falls back, so the run stays silent and non-terminal
+        with `implement_runs == 1` instead of being declared a test failure.
+        """
+        counter = tmp_path / "calls.txt"
+        sf, run_id = _wire(tmp_path, monkeypatch, episode_max=0, wait=1,
+                           counter=counter, tail=_SILENT_TAIL)
+        assert gate_deferral.episode_max_seconds() > 0
+        _prime_ledger(sf, run_id)
+    
+        implement_runs, statuses, outcomes, nodes = _drive(
+            sf, run_id, monkeypatch, ticks=15, clock_step=1)
+>       _assert_test_row_untouched(sf, run_id)
+
+tests/skillflow/test_coding_impl_gate_absence.py:295: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+sf = <core.skillflow_host.AItelierSkillFlow object at 0x7d1f3c1826f0>
+run_id = '43afc246-b352-4105-9848-d31cfdb567ff', run_status = 'running'
+
+    def _assert_test_row_untouched(sf, run_id, *, run_status="running"):
+        """Assert the row invariants while the gate is silent.
+        Called from every pole so no hold-breaking mutation passes unnoticed.
+    
+        The four step-row assertions the criterion names: the `test` row is
+        `completed`, its `retry_count` is 0, its `release_count` is 0, and every
+        step instance was claimed exactly once (`claim_epoch == 1` on the `test`
+        row, and one `claimed` trace event per instance).
+    
+        Then the RUN row. Measured in round 10: a hold that lets the run advance
+        ends the run through the absence gate's only transition and writes no step
+        row at all — every step row is identical to the held run's, and the
+        `test_gate_absent` row stays `pending` — so no step-row assertion can see
+        that break. The run row can: while the gate is silent it is `running` and
+        parked at `test_gate_absent`; at the expiring pole it is `failed` there.
+        """
+        rows = _rows_by_step(sf, run_id)
+        test_row = rows["test"]
+        assert test_row["status"] == "completed", (
+            f"test row status drifted: {test_row['status']}")
+>       assert test_row["retry_count"] == 0, (
+            f"deferral charged a retry: {test_row['retry_count']}")
+E       AssertionError: deferral charged a retry: 12
+E       assert 12 == 0
+
+tests/skillflow/test_coding_impl_gate_absence.py:433: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+____ test_pole_c_a_tiny_ceiling_inside_the_window_is_honoured_and_uncharged ____
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-18/test_pole_c_a_tiny_ceiling_ins0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7d1f3c188b30>
+
+    def test_pole_c_a_tiny_ceiling_inside_the_window_is_honoured_and_uncharged(
+            tmp_path, monkeypatch):
+        """(c) ceiling tiny (3 s) and HONOURED, observed for a window shorter than
+        the ceiling (20 ticks x 0.1 s = 2 s): the absence never expires, so the run
+        stays silent and non-terminal, `implement_runs == 1`, and the rows the hold
+        parks are untouched. This is the non-expiring small-ceiling pole of
+        `an-expired-absence-is-never-charged-to-the-implementer`; the expiring one
+        is `test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence` (C′).
+        """
+        counter = tmp_path / "calls.txt"
+        sf, run_id = _wire(tmp_path, monkeypatch, episode_max=3, wait=1,
+                           counter=counter, tail=_SILENT_TAIL)
+        assert gate_deferral.episode_max_seconds() == 3
+        _prime_ledger(sf, run_id)
+    
+        implement_runs, statuses, outcomes, nodes = _drive(
+            sf, run_id, monkeypatch, ticks=20, clock_step=0.1)
+>       _assert_test_row_untouched(sf, run_id)
+
+tests/skillflow/test_coding_impl_gate_absence.py:322: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+sf = <core.skillflow_host.AItelierSkillFlow object at 0x7d1f3c18bb00>
+run_id = '34bd8ee0-9f10-4ffe-8717-1cbc174b09d4', run_status = 'running'
+
+    def _assert_test_row_untouched(sf, run_id, *, run_status="running"):
+        """Assert the row invariants while the gate is silent.
+        Called from every pole so no hold-breaking mutation passes unnoticed.
+    
+        The four step-row assertions the criterion names: the `test` row is
+        `completed`, its `retry_count` is 0, its `release_count` is 0, and every
+        step instance was claimed exactly once (`claim_epoch == 1` on the `test`
+        row, and one `claimed` trace event per instance).
+    
+        Then the RUN row. Measured in round 10: a hold that lets the run advance
+        ends the run through the absence gate's only transition and writes no step
+        row at all — every step row is identical to the held run's, and the
+        `test_gate_absent` row stays `pending` — so no step-row assertion can see
+        that break. The run row can: while the gate is silent it is `running` and
+        parked at `test_gate_absent`; at the expiring pole it is `failed` there.
+        """
+        rows = _rows_by_step(sf, run_id)
+        test_row = rows["test"]
+        assert test_row["status"] == "completed", (
+            f"test row status drifted: {test_row['status']}")
+>       assert test_row["retry_count"] == 0, (
+            f"deferral charged a retry: {test_row['retry_count']}")
+E       AssertionError: deferral charged a retry: 17
+E       assert 17 == 0
+
+tests/skillflow/test_coding_impl_gate_absence.py:433: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+__________ test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence __________
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-18/test_pole_c_a_tiny_ceiling_end0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7d1f3c188590>
+
+    def test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence(
+            tmp_path, monkeypatch):
+        """(C′) ceiling tiny, and small enough to be HONORED (unlike 0, which is a
+        mis-set knob), observed past the ceiling. Review measured this pole on the
+        r4 candidate as `implement_runs=4` + `Cycle limit exceeded`.
+    
+        It must now be `implement_runs == 1` and a terminal status whose reason
+        names the absence.
+        """
+        counter = tmp_path / "calls.txt"
+        sf, run_id = _wire(tmp_path, monkeypatch, episode_max=3, wait=1,
+                           counter=counter, tail=_SILENT_TAIL)
+        assert gate_deferral.episode_max_seconds() == 3
+        _prime_ledger(sf, run_id)
+    
+>       implement_runs, statuses, outcomes, nodes = _drive(
+            sf, run_id, monkeypatch, ticks=20, clock_step=3)
+
+tests/skillflow/test_coding_impl_gate_absence.py:348: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/skillflow/test_coding_impl_gate_absence.py:212: in _drive
+    asyncio.run(scheduler._run_skillflow_tick("p", None))
+/usr/local/lib/python3.12/asyncio/runners.py:195: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.12/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.12/asyncio/base_events.py:691: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+core/scheduler.py:1231: in _run_skillflow_tick
+    sf.fail_run(run_id, deferral["reason"])
+/usr/local/lib/python3.12/site-packages/skillflow/core.py:1678: in fail_run
+    return self.stop_run(run_id, reason)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.12/site-packages/skillflow/core.py:1612: in stop_run
+    with self._tx() as conn:
+         ^^^^^^^^^^
+/usr/local/lib/python3.12/contextlib.py:137: in __enter__
+    return next(self.gen)
+           ^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <core.skillflow_host.AItelierSkillFlow object at 0x7d1f3c18aea0>
+
+    @contextmanager
+    def _tx(self):
+        """Serialised transaction context.
+    
+        Yields the persistent connection with BEGIN IMMEDIATE already
+        started.  Commits on clean exit, rolls back on any exception
+        (including _TxRollback, which is used for intentional abort).
+        """
+        with self._lock:
+>           self._conn.execute("BEGIN IMMEDIATE;")
+E           sqlite3.OperationalError: cannot start a transaction within a transaction
+
+/usr/local/lib/python3.12/site-packages/skillflow/core.py:594: OperationalError
+------------------------------ Captured log call -------------------------------
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+_____________ test_a_gate_that_finally_answers_clears_the_deferral _____________
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-18/test_a_gate_that_finally_answe0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7d1f3c17dc70>
+
+    def test_a_gate_that_finally_answers_clears_the_deferral(tmp_path, monkeypatch):
+        """The other pole: the deferral is not a one-way door. Once a report that
+        GRADED the code exists, the run advances again and the absence is cleared.
+        """
+        counter = tmp_path / "calls.txt"
+        sf, run_id = _wire(tmp_path, monkeypatch, episode_max=100000, wait=1,
+                           counter=counter, tail=_SILENT_TAIL)
+        _prime_ledger(sf, run_id)
+        _drive(sf, run_id, monkeypatch, ticks=8, clock_step=1)
+        assert gate_deferral.hold_blocks_advance(run_id)
+>       _assert_test_row_untouched(sf, run_id)
+
+tests/skillflow/test_coding_impl_gate_absence.py:373: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+sf = <core.skillflow_host.AItelierSkillFlow object at 0x7d1f3c17e6c0>
+run_id = '2013a2f1-5497-46f3-adfa-137b5cc62dfe', run_status = 'running'
+
+    def _assert_test_row_untouched(sf, run_id, *, run_status="running"):
+        """Assert the row invariants while the gate is silent.
+        Called from every pole so no hold-breaking mutation passes unnoticed.
+    
+        The four step-row assertions the criterion names: the `test` row is
+        `completed`, its `retry_count` is 0, its `release_count` is 0, and every
+        step instance was claimed exactly once (`claim_epoch == 1` on the `test`
+        row, and one `claimed` trace event per instance).
+    
+        Then the RUN row. Measured in round 10: a hold that lets the run advance
+        ends the run through the absence gate's only transition and writes no step
+        row at all — every step row is identical to the held run's, and the
+        `test_gate_absent` row stays `pending` — so no step-row assertion can see
+        that break. The run row can: while the gate is silent it is `running` and
+        parked at `test_gate_absent`; at the expiring pole it is `failed` there.
+        """
+        rows = _rows_by_step(sf, run_id)
+        test_row = rows["test"]
+        assert test_row["status"] == "completed", (
+            f"test row status drifted: {test_row['status']}")
+>       assert test_row["retry_count"] == 0, (
+            f"deferral charged a retry: {test_row['retry_count']}")
+E       AssertionError: deferral charged a retry: 5
+E       assert 5 == 0
+
+tests/skillflow/test_coding_impl_gate_absence.py:433: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+____________ test_the_deferral_hold_leaves_real_step_rows_untouched ____________
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-18/test_the_deferral_hold_leaves_0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7d1f3c18c830>
+
+    def test_the_deferral_hold_leaves_real_step_rows_untouched(tmp_path, monkeypatch):
+        """Criterion 2, measured on the REAL graph's step rows — not a stub.
+    
+        While the never-answering gate is silent, the `test` step has already run
+        and completed, and the hold parks the run at `test_gate_absent`. What must
+        be TRUE of the rows the hold does NOT touch:
+    
+        * the `test` row is `completed`;
+        * its `retry_count` is 0 — the deferral never charges a retry;
+        * its `release_count` is 0 — the deferral never releases the claim;
+        * its `claim_epoch` is 1 — the step instance was claimed exactly once.
+    
+        Each is a separate assertion so the mutation that breaks it names itself.
+        """
+        counter = tmp_path / "calls.txt"
+        sf, run_id = _wire(tmp_path, monkeypatch, episode_max=100000, wait=1,
+                           counter=counter, tail=_SILENT_TAIL)
+        _prime_ledger(sf, run_id)
+        _drive(sf, run_id, monkeypatch, ticks=40,
+               clock_step=gate_deferral.wait_seconds())
+        test_row = _rows_by_step(sf, run_id)["test"]
+        assert test_row["status"] == "completed", test_row
+>       assert test_row["retry_count"] == 0, test_row
+E       AssertionError: {'id': 2, 'run_id': '5f319896-ac78-4786-a737-31fcc13a1ddf', 'step_id': 'test', 'step_config_json': '{}', ...}
+E       assert 37 == 0
+
+tests/skillflow/test_coding_impl_gate_absence.py:472: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+_____ test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them ______
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-18/test_the_tick_hold_alone_keeps0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7d1f3c18b200>
+
+    def test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them(
+            tmp_path, monkeypatch):
+        """The TICK hold (`core/scheduler.py:_run_skillflow_tick`) measured on its
+        own. With both holds in series, a break in one is covered by the other; so
+        here the host's `hold_blocks_advance` answers False (the host hold is out)
+        and the tick is the only driver. The tick's own `silent` return must then
+        keep the run parked at `test_gate_absent` with the rows untouched.
+        """
+        counter = tmp_path / "calls.txt"
+        sf, run_id = _wire(tmp_path, monkeypatch, episode_max=100000, wait=1,
+                           counter=counter, tail=_SILENT_TAIL)
+        monkeypatch.setattr(gate_deferral, "hold_blocks_advance",
+                            lambda run_id, **_kw: False)
+        implement_runs, statuses, outcomes, nodes = _drive(
+            sf, run_id, monkeypatch, ticks=20, clock_step=1, second_driver=False)
+>       _assert_test_row_untouched(sf, run_id)
+
+tests/skillflow/test_coding_impl_gate_absence.py:493: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+sf = <core.skillflow_host.AItelierSkillFlow object at 0x7d1f3c18b350>
+run_id = '836148b1-39fe-40cd-8b81-b9630a4b8930', run_status = 'running'
+
+    def _assert_test_row_untouched(sf, run_id, *, run_status="running"):
+        """Assert the row invariants while the gate is silent.
+        Called from every pole so no hold-breaking mutation passes unnoticed.
+    
+        The four step-row assertions the criterion names: the `test` row is
+        `completed`, its `retry_count` is 0, its `release_count` is 0, and every
+        step instance was claimed exactly once (`claim_epoch == 1` on the `test`
+        row, and one `claimed` trace event per instance).
+    
+        Then the RUN row. Measured in round 10: a hold that lets the run advance
+        ends the run through the absence gate's only transition and writes no step
+        row at all — every step row is identical to the held run's, and the
+        `test_gate_absent` row stays `pending` — so no step-row assertion can see
+        that break. The run row can: while the gate is silent it is `running` and
+        parked at `test_gate_absent`; at the expiring pole it is `failed` there.
+        """
+        rows = _rows_by_step(sf, run_id)
+        test_row = rows["test"]
+        assert test_row["status"] == "completed", (
+            f"test row status drifted: {test_row['status']}")
+>       assert test_row["retry_count"] == 0, (
+            f"deferral charged a retry: {test_row['retry_count']}")
+E       AssertionError: deferral charged a retry: 17
+E       assert 17 == 0
+
+tests/skillflow/test_coding_impl_gate_absence.py:433: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+=============================== warnings summary ===============================
+../../../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_a_a_ceiling_far_past_the_window_spends_one_implement_cycle
+FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_b_a_zero_ceiling_is_clamped_and_cannot_charge_the_absence
+FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_inside_the_window_is_honoured_and_uncharged
+FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence
+FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_a_gate_that_finally_answers_clears_the_deferral
+FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_the_deferral_hold_leaves_real_step_rows_untouched
+FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them
+7 failed, 1 passed, 1 warning in 5.53s
+Exception ignored in: <function _removeHandlerRef at 0x7d1f46ae0cc0>
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/logging/__init__.py", line 882, in _removeHandlerRef
+  File "/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-9f745iax/tree/tools/mutation_catalog/ignition_plugin.py", line 63, in _on_line
+TypeError: 'NoneType' object is not callable
+
+BARE_RC_TARGETED=1
+IGNITION_TARGETED={"file_reads": 0, "file_reads_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-9f745iax/tree/core/scheduler.py": 0}, "igniting_tests": ["tests/skillflow/test_coding_impl_gate_absence.py::test_a_gate_that_finally_answers_clears_the_deferral", "tests/skillflow/test_coding_impl_gate_absence.py::test_pole_a_a_ceiling_far_past_the_window_spends_one_implement_cycle", "tests/skillflow/test_coding_impl_gate_absence.py::test_pole_b_a_zero_ceiling_is_clamped_and_cannot_charge_the_absence", "tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence", "tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_inside_the_window_is_honoured_and_uncharged", "tests/skillflow/test_coding_impl_gate_absence.py::test_the_deferral_hold_leaves_real_step_rows_untouched", "tests/skillflow/test_coding_impl_gate_absence.py::test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them"], "line_hits": 127, "line_hits_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-9f745iax/tree/core/scheduler.py": 127}, "monitoring_tool_id": 4, "mutated_modules_imported": ["/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-9f745iax/tree/core/scheduler.py"], "source_readers": []}
+
+## full scope: /usr/local/bin/python -m pytest -q -rfE -p no:cacheprovider -p ignition_plugin tests/unit tests/skillflow
+# cwd=/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-9f745iax/tree
+........................................................................ [  1%]
+........................................................................ [  3%]
+........................................................................ [  5%]
+........................................................................ [  7%]
+........................................................................ [  8%]
+........................................................................ [ 10%]
+........................................................................ [ 12%]
+........................................................................ [ 14%]
+........................................................................ [ 15%]
+........................................................................ [ 17%]
+........................................................................ [ 19%]
+........................................................................ [ 21%]
+........................................................................ [ 22%]
+........................................................................ [ 24%]
+........................................................................ [ 26%]
+........................................................................ [ 28%]
+........................................................................ [ 29%]
+........................................................................ [ 31%]
+..........................................................FF............ [ 33%]
+........................................................................ [ 35%]
+.......................................................................s [ 37%]
+sssssss................................................................. [ 38%]
+........................................................................ [ 40%]
+........................................................................ [ 42%]
+........................................................................ [ 44%]
+........................................................................ [ 45%]
+........................................................................ [ 47%]
+........................................................................ [ 49%]
+........................................................................ [ 51%]
+........................................................................ [ 52%]
+........................................................................ [ 54%]
+.............s.......................................................... [ 56%]
+........................................................................ [ 58%]
+........................................................................ [ 59%]
+........................................................................ [ 61%]
+........................................................................ [ 63%]
+........................................................................ [ 65%]
+........................................................................ [ 67%]
+........................................................................ [ 68%]
+........................................................................ [ 70%]
+........................................................................ [ 72%]
+........................................................................ [ 74%]
+........................................................................ [ 75%]
+........................................................................ [ 77%]
+........................................................................ [ 79%]
+........................................................................ [ 81%]
+........................................................................ [ 82%]
+........................................................................ [ 84%]
+........................................................................ [ 86%]
+........................................................................ [ 88%]
+........................................................................ [ 89%]
+........................................................................ [ 91%]
+........................................................................ [ 93%]
+........................................................................ [ 95%]
+........................................................................ [ 97%]
+........................................................................ [ 98%]
+.........FFFFFFF.................................                        [100%]
+=================================== FAILURES ===================================
+___________ test_the_tick_refuses_to_claim_while_the_gate_is_silent ____________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x70bbd05f40e0>
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-19/test_the_tick_refuses_to_claim0')
+
+    def test_the_tick_refuses_to_claim_while_the_gate_is_silent(monkeypatch,
+                                                                tmp_path):
+        """Kills S1 (delete the deferral skip inside the tick; 0/33 in review).
+    
+        Driven at the CALL SITE — `core/scheduler._run_skillflow_tick` — with the
+        REAL `observe_run` reading a REAL report off disk. Both poles are measured:
+        with the absence the tick must not claim; with a GRADED report the tick
+        must. One pole alone would pass for a tick that never claims anything.
+        """
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+        _silent_report(out_dir)
+    
+        sf = _TickStub()
+        scheduler = _wire_tick(monkeypatch, sf, out_dir)
+    
+>       asyncio.run(scheduler._run_skillflow_tick("p", None))
+
+tests/unit/test_gate_deferral_execution_points.py:207: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/usr/local/lib/python3.12/asyncio/runners.py:195: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.12/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.12/asyncio/base_events.py:691: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+project_id = 'p', loop = None
+
+    async def _run_skillflow_tick(project_id: str, loop):
+        """Advance the skillflow pipeline for one project by one step."""
+        held = _quota_hold_remaining()
+        if held > 0:
+            # Before the run is even resolved: claiming a step we cannot execute is
+            # what spends the retry budget, so the cheapest correct move is not to
+            # claim. The project stays active and is re-picked normally afterwards.
+            tick_log(project_id, "quota_hold", remaining=f"{held:.0f}s",
+                     reason=_QUOTA_HOLD_REASON[:120])
+            return
+        sf = get_skillflow()
+        try:
+            run_id = _get_or_create_skillflow_run(project_id)
+        except Exception as e:
+            # A run that dies inside create_run has no run row, so no trace and no
+            # failed status to enrich — the project just sits at 'planning' forever
+            # while every tick re-raises into APScheduler, and the only record is a
+            # container log line. (A config with two max_loop edges on one (from, to)
+            # pair does exactly this: UNIQUE constraint on skillflow_edge_counts.)
+            # Write a terminal status so the user sees the reason and the project
+            # stops being re-picked by get_next_active_project's planning guard.
+            import logging
+            logging.getLogger("aitelier.scheduler").error(
+                f"could not start a skillflow run for {project_id}: {e}", exc_info=True)
+            try:
+                db.update_project(project_id,
+                                  status=f"failed:could not start run — {e}"[:160])
+            except Exception:
+                pass    # a DB write failure here must not mask the original error
+            tick_log(project_id, "run_start_failed", error=str(e)[:160])
+            return
+        if not run_id:
+            # Self-heal stuck task states when the DPE run is terminal.
+            # _sync_project_status_to_db marks running tasks as completed/failed
+            # and bumps updated_at so the project no longer starves active
+            # projects in get_next_active_project's ORDER BY updated_at ASC.
+            _sync_project_status_to_db(project_id)
+            # Was the one tick outcome with no log line. A project that
+            # get_next_active_project keeps handing us while this returns None reads
+            # exactly like an idle scheduler — which is how a stalled run hid behind
+            # "nothing to do" for 20 minutes.
+            tick_log(project_id, "no_run")
+            return
+    
+        # Don't re-enter a run that's actively executing (in-flight guard).
+        # With max_instances=1 (SF-5 fix), concurrent ticks are prevented at the
+        # APScheduler level. This is a safety net for edge cases.
+        if _has_active_claim(sf, run_id):
+            tick_log(project_id, "active_claim", run=run_id[:8])
+            return
+    
+        # An absence must never be charged to the implementer. `observe_run` reads
+        # the gate's own recorded verdict for this run: while that verdict is
+        # "no verdict at all" the tick spends nothing and ends nothing; once the
+        # absence has outlived the wall-clock ceiling for one episode the run ends
+        # NAMING THE ABSENCE (`gate did not run: no verdict was measured`) and
+        # never as a code failure. See core/gate_deferral.py for why the wall clock
+        # bound and the accounting rule are not in conflict.
+        deferral = gate_deferral.observe_run(sf, run_id)
+        if deferral["state"] == "silent":
+>           sf._conn.execute("UPDATE skillflow_steps SET retry_count=retry_count+1 WHERE run_id=? AND step_id='test'", (run_id,))
+            ^^^^^^^^
+E           AttributeError: '_TickStub' object has no attribute '_conn'
+
+core/scheduler.py:1225: AttributeError
+_______ test_during_a_deferral_hold_the_step_claim_is_held_not_released ________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x70bbd05f75f0>
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-19/test_during_a_deferral_hold_th0')
+
+    def test_during_a_deferral_hold_the_step_claim_is_held_not_released(monkeypatch,
+                                                                         tmp_path):
+        """While an absence is live the tick neither claims the step nor advances
+        it. This stub measures exactly two things: `claims == 0` across three
+        silent ticks, and the ledger holding the episode (3 absences, remaining
+        hold > 0). The step-STATE claims this file used to make in prose —
+        retry_count / release_count staying put — are measured on REAL step rows
+        in `test_coding_impl_gate_absence.py`, not here: a stub with no step row
+        cannot see a counter it does not model.
+        """
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+        _silent_report(out_dir)
+    
+        sf = _TickStub()
+        scheduler = _wire_tick(monkeypatch, sf, out_dir)
+    
+        # Drive multiple ticks: each returns without claiming.
+        for _ in range(3):
+>           asyncio.run(scheduler._run_skillflow_tick("p", None))
+
+tests/unit/test_gate_deferral_execution_points.py:239: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/usr/local/lib/python3.12/asyncio/runners.py:195: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.12/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.12/asyncio/base_events.py:691: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+project_id = 'p', loop = None
+
+    async def _run_skillflow_tick(project_id: str, loop):
+        """Advance the skillflow pipeline for one project by one step."""
+        held = _quota_hold_remaining()
+        if held > 0:
+            # Before the run is even resolved: claiming a step we cannot execute is
+            # what spends the retry budget, so the cheapest correct move is not to
+            # claim. The project stays active and is re-picked normally afterwards.
+            tick_log(project_id, "quota_hold", remaining=f"{held:.0f}s",
+                     reason=_QUOTA_HOLD_REASON[:120])
+            return
+        sf = get_skillflow()
+        try:
+            run_id = _get_or_create_skillflow_run(project_id)
+        except Exception as e:
+            # A run that dies inside create_run has no run row, so no trace and no
+            # failed status to enrich — the project just sits at 'planning' forever
+            # while every tick re-raises into APScheduler, and the only record is a
+            # container log line. (A config with two max_loop edges on one (from, to)
+            # pair does exactly this: UNIQUE constraint on skillflow_edge_counts.)
+            # Write a terminal status so the user sees the reason and the project
+            # stops being re-picked by get_next_active_project's planning guard.
+            import logging
+            logging.getLogger("aitelier.scheduler").error(
+                f"could not start a skillflow run for {project_id}: {e}", exc_info=True)
+            try:
+                db.update_project(project_id,
+                                  status=f"failed:could not start run — {e}"[:160])
+            except Exception:
+                pass    # a DB write failure here must not mask the original error
+            tick_log(project_id, "run_start_failed", error=str(e)[:160])
+            return
+        if not run_id:
+            # Self-heal stuck task states when the DPE run is terminal.
+            # _sync_project_status_to_db marks running tasks as completed/failed
+            # and bumps updated_at so the project no longer starves active
+            # projects in get_next_active_project's ORDER BY updated_at ASC.
+            _sync_project_status_to_db(project_id)
+            # Was the one tick outcome with no log line. A project that
+            # get_next_active_project keeps handing us while this returns None reads
+            # exactly like an idle scheduler — which is how a stalled run hid behind
+            # "nothing to do" for 20 minutes.
+            tick_log(project_id, "no_run")
+            return
+    
+        # Don't re-enter a run that's actively executing (in-flight guard).
+        # With max_instances=1 (SF-5 fix), concurrent ticks are prevented at the
+        # APScheduler level. This is a safety net for edge cases.
+        if _has_active_claim(sf, run_id):
+            tick_log(project_id, "active_claim", run=run_id[:8])
+            return
+    
+        # An absence must never be charged to the implementer. `observe_run` reads
+        # the gate's own recorded verdict for this run: while that verdict is
+        # "no verdict at all" the tick spends nothing and ends nothing; once the
+        # absence has outlived the wall-clock ceiling for one episode the run ends
+        # NAMING THE ABSENCE (`gate did not run: no verdict was measured`) and
+        # never as a code failure. See core/gate_deferral.py for why the wall clock
+        # bound and the accounting rule are not in conflict.
+        deferral = gate_deferral.observe_run(sf, run_id)
+        if deferral["state"] == "silent":
+>           sf._conn.execute("UPDATE skillflow_steps SET retry_count=retry_count+1 WHERE run_id=? AND step_id='test'", (run_id,))
+            ^^^^^^^^
+E           AttributeError: '_TickStub' object has no attribute '_conn'
+
+core/scheduler.py:1225: AttributeError
+_____ test_pole_a_a_ceiling_far_past_the_window_spends_one_implement_cycle _____
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-19/test_pole_a_a_ceiling_far_past0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x70bbc8c5ddf0>
+
+    def test_pole_a_a_ceiling_far_past_the_window_spends_one_implement_cycle(
+            tmp_path, monkeypatch):
+        """(a) Ceiling >> observation window: the absence is silent throughout.
+    
+        `implement_runs` must be 1 and the run must NOT be terminal — the run's gate
+        has not answered, so there is nothing to end. The run must also be parked at
+        the loop-external gate, which is only reachable if the absence edge actually
+        fired: on the r5 candidate the same two lines sat on `test_evidence`, where
+        `from_file` resolves against a step that writes nothing, so the edge could
+        never match and this pole spent 4 implement cycles on `Cycle limit
+        exceeded` instead.
+        """
+        counter = tmp_path / "calls.txt"
+        sf, run_id = _wire(tmp_path, monkeypatch, episode_max=100000,
+                           wait=1, counter=counter, tail=_SILENT_TAIL)
+        first = _prime_ledger(sf, run_id)
+        assert first["state"] == "none"          # no report yet: nothing to account
+    
+        implement_runs, statuses, outcomes, nodes = _drive(
+            sf, run_id, monkeypatch, ticks=40,
+            clock_step=gate_deferral.wait_seconds())
+>       _assert_test_row_untouched(sf, run_id)
+
+tests/skillflow/test_coding_impl_gate_absence.py:265: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+sf = <core.skillflow_host.AItelierSkillFlow object at 0x70bbc9496f60>
+run_id = '16a2aa97-565f-4195-a7d6-2ea9c413a9db', run_status = 'running'
+
+    def _assert_test_row_untouched(sf, run_id, *, run_status="running"):
+        """Assert the row invariants while the gate is silent.
+        Called from every pole so no hold-breaking mutation passes unnoticed.
+    
+        The four step-row assertions the criterion names: the `test` row is
+        `completed`, its `retry_count` is 0, its `release_count` is 0, and every
+        step instance was claimed exactly once (`claim_epoch == 1` on the `test`
+        row, and one `claimed` trace event per instance).
+    
+        Then the RUN row. Measured in round 10: a hold that lets the run advance
+        ends the run through the absence gate's only transition and writes no step
+        row at all — every step row is identical to the held run's, and the
+        `test_gate_absent` row stays `pending` — so no step-row assertion can see
+        that break. The run row can: while the gate is silent it is `running` and
+        parked at `test_gate_absent`; at the expiring pole it is `failed` there.
+        """
+        rows = _rows_by_step(sf, run_id)
+        test_row = rows["test"]
+        assert test_row["status"] == "completed", (
+            f"test row status drifted: {test_row['status']}")
+>       assert test_row["retry_count"] == 0, (
+            f"deferral charged a retry: {test_row['retry_count']}")
+E       AssertionError: deferral charged a retry: 37
+E       assert 37 == 0
+
+tests/skillflow/test_coding_impl_gate_absence.py:433: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+_____ test_pole_b_a_zero_ceiling_is_clamped_and_cannot_charge_the_absence ______
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-19/test_pole_b_a_zero_ceiling_is_0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x70bbc8ed6570>
+
+    def test_pole_b_a_zero_ceiling_is_clamped_and_cannot_charge_the_absence(
+            tmp_path, monkeypatch):
+        """(b) ceiling 0. Review measured this pole on the r4 candidate as
+        `implement_runs=4` + `Cycle limit exceeded`.
+    
+        Here the pole is a MIS-SET KNOB, and the reading is that a mis-set knob may
+        not be what charges an absence to the implementer: `episode_max_seconds()`
+        refuses the zero and falls back, so the run stays silent and non-terminal
+        with `implement_runs == 1` instead of being declared a test failure.
+        """
+        counter = tmp_path / "calls.txt"
+        sf, run_id = _wire(tmp_path, monkeypatch, episode_max=0, wait=1,
+                           counter=counter, tail=_SILENT_TAIL)
+        assert gate_deferral.episode_max_seconds() > 0
+        _prime_ledger(sf, run_id)
+    
+        implement_runs, statuses, outcomes, nodes = _drive(
+            sf, run_id, monkeypatch, ticks=15, clock_step=1)
+>       _assert_test_row_untouched(sf, run_id)
+
+tests/skillflow/test_coding_impl_gate_absence.py:295: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+sf = <core.skillflow_host.AItelierSkillFlow object at 0x70bbc8ed7050>
+run_id = '8fdb521b-2d13-496f-bf44-b099b0a5b79a', run_status = 'running'
+
+    def _assert_test_row_untouched(sf, run_id, *, run_status="running"):
+        """Assert the row invariants while the gate is silent.
+        Called from every pole so no hold-breaking mutation passes unnoticed.
+    
+        The four step-row assertions the criterion names: the `test` row is
+        `completed`, its `retry_count` is 0, its `release_count` is 0, and every
+        step instance was claimed exactly once (`claim_epoch == 1` on the `test`
+        row, and one `claimed` trace event per instance).
+    
+        Then the RUN row. Measured in round 10: a hold that lets the run advance
+        ends the run through the absence gate's only transition and writes no step
+        row at all — every step row is identical to the held run's, and the
+        `test_gate_absent` row stays `pending` — so no step-row assertion can see
+        that break. The run row can: while the gate is silent it is `running` and
+        parked at `test_gate_absent`; at the expiring pole it is `failed` there.
+        """
+        rows = _rows_by_step(sf, run_id)
+        test_row = rows["test"]
+        assert test_row["status"] == "completed", (
+            f"test row status drifted: {test_row['status']}")
+>       assert test_row["retry_count"] == 0, (
+            f"deferral charged a retry: {test_row['retry_count']}")
+E       AssertionError: deferral charged a retry: 12
+E       assert 12 == 0
+
+tests/skillflow/test_coding_impl_gate_absence.py:433: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+____ test_pole_c_a_tiny_ceiling_inside_the_window_is_honoured_and_uncharged ____
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-19/test_pole_c_a_tiny_ceiling_ins0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x70bbc8d54410>
+
+    def test_pole_c_a_tiny_ceiling_inside_the_window_is_honoured_and_uncharged(
+            tmp_path, monkeypatch):
+        """(c) ceiling tiny (3 s) and HONOURED, observed for a window shorter than
+        the ceiling (20 ticks x 0.1 s = 2 s): the absence never expires, so the run
+        stays silent and non-terminal, `implement_runs == 1`, and the rows the hold
+        parks are untouched. This is the non-expiring small-ceiling pole of
+        `an-expired-absence-is-never-charged-to-the-implementer`; the expiring one
+        is `test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence` (C′).
+        """
+        counter = tmp_path / "calls.txt"
+        sf, run_id = _wire(tmp_path, monkeypatch, episode_max=3, wait=1,
+                           counter=counter, tail=_SILENT_TAIL)
+        assert gate_deferral.episode_max_seconds() == 3
+        _prime_ledger(sf, run_id)
+    
+        implement_runs, statuses, outcomes, nodes = _drive(
+            sf, run_id, monkeypatch, ticks=20, clock_step=0.1)
+>       _assert_test_row_untouched(sf, run_id)
+
+tests/skillflow/test_coding_impl_gate_absence.py:322: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+sf = <core.skillflow_host.AItelierSkillFlow object at 0x70bbc8d55790>
+run_id = 'b6a5718c-4603-436b-9af9-b83815417ff6', run_status = 'running'
+
+    def _assert_test_row_untouched(sf, run_id, *, run_status="running"):
+        """Assert the row invariants while the gate is silent.
+        Called from every pole so no hold-breaking mutation passes unnoticed.
+    
+        The four step-row assertions the criterion names: the `test` row is
+        `completed`, its `retry_count` is 0, its `release_count` is 0, and every
+        step instance was claimed exactly once (`claim_epoch == 1` on the `test`
+        row, and one `claimed` trace event per instance).
+    
+        Then the RUN row. Measured in round 10: a hold that lets the run advance
+        ends the run through the absence gate's only transition and writes no step
+        row at all — every step row is identical to the held run's, and the
+        `test_gate_absent` row stays `pending` — so no step-row assertion can see
+        that break. The run row can: while the gate is silent it is `running` and
+        parked at `test_gate_absent`; at the expiring pole it is `failed` there.
+        """
+        rows = _rows_by_step(sf, run_id)
+        test_row = rows["test"]
+        assert test_row["status"] == "completed", (
+            f"test row status drifted: {test_row['status']}")
+>       assert test_row["retry_count"] == 0, (
+            f"deferral charged a retry: {test_row['retry_count']}")
+E       AssertionError: deferral charged a retry: 17
+E       assert 17 == 0
+
+tests/skillflow/test_coding_impl_gate_absence.py:433: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+__________ test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence __________
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-19/test_pole_c_a_tiny_ceiling_end0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x70bbc8c5c2f0>
+
+    def test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence(
+            tmp_path, monkeypatch):
+        """(C′) ceiling tiny, and small enough to be HONORED (unlike 0, which is a
+        mis-set knob), observed past the ceiling. Review measured this pole on the
+        r4 candidate as `implement_runs=4` + `Cycle limit exceeded`.
+    
+        It must now be `implement_runs == 1` and a terminal status whose reason
+        names the absence.
+        """
+        counter = tmp_path / "calls.txt"
+        sf, run_id = _wire(tmp_path, monkeypatch, episode_max=3, wait=1,
+                           counter=counter, tail=_SILENT_TAIL)
+        assert gate_deferral.episode_max_seconds() == 3
+        _prime_ledger(sf, run_id)
+    
+>       implement_runs, statuses, outcomes, nodes = _drive(
+            sf, run_id, monkeypatch, ticks=20, clock_step=3)
+
+tests/skillflow/test_coding_impl_gate_absence.py:348: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/skillflow/test_coding_impl_gate_absence.py:212: in _drive
+    asyncio.run(scheduler._run_skillflow_tick("p", None))
+/usr/local/lib/python3.12/asyncio/runners.py:195: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.12/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.12/asyncio/base_events.py:691: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+core/scheduler.py:1231: in _run_skillflow_tick
+    sf.fail_run(run_id, deferral["reason"])
+/usr/local/lib/python3.12/site-packages/skillflow/core.py:1678: in fail_run
+    return self.stop_run(run_id, reason)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.12/site-packages/skillflow/core.py:1612: in stop_run
+    with self._tx() as conn:
+         ^^^^^^^^^^
+/usr/local/lib/python3.12/contextlib.py:137: in __enter__
+    return next(self.gen)
+           ^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <core.skillflow_host.AItelierSkillFlow object at 0x70bbc8c5f7a0>
+
+    @contextmanager
+    def _tx(self):
+        """Serialised transaction context.
+    
+        Yields the persistent connection with BEGIN IMMEDIATE already
+        started.  Commits on clean exit, rolls back on any exception
+        (including _TxRollback, which is used for intentional abort).
+        """
+        with self._lock:
+>           self._conn.execute("BEGIN IMMEDIATE;")
+E           sqlite3.OperationalError: cannot start a transaction within a transaction
+
+/usr/local/lib/python3.12/site-packages/skillflow/core.py:594: OperationalError
+------------------------------ Captured log call -------------------------------
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+_____________ test_a_gate_that_finally_answers_clears_the_deferral _____________
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-19/test_a_gate_that_finally_answe0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x70bbc94f9a00>
+
+    def test_a_gate_that_finally_answers_clears_the_deferral(tmp_path, monkeypatch):
+        """The other pole: the deferral is not a one-way door. Once a report that
+        GRADED the code exists, the run advances again and the absence is cleared.
+        """
+        counter = tmp_path / "calls.txt"
+        sf, run_id = _wire(tmp_path, monkeypatch, episode_max=100000, wait=1,
+                           counter=counter, tail=_SILENT_TAIL)
+        _prime_ledger(sf, run_id)
+        _drive(sf, run_id, monkeypatch, ticks=8, clock_step=1)
+        assert gate_deferral.hold_blocks_advance(run_id)
+>       _assert_test_row_untouched(sf, run_id)
+
+tests/skillflow/test_coding_impl_gate_absence.py:373: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+sf = <core.skillflow_host.AItelierSkillFlow object at 0x70bbc94fb5f0>
+run_id = 'd4b8c696-d03e-4e76-8c5f-bad76914b9d5', run_status = 'running'
+
+    def _assert_test_row_untouched(sf, run_id, *, run_status="running"):
+        """Assert the row invariants while the gate is silent.
+        Called from every pole so no hold-breaking mutation passes unnoticed.
+    
+        The four step-row assertions the criterion names: the `test` row is
+        `completed`, its `retry_count` is 0, its `release_count` is 0, and every
+        step instance was claimed exactly once (`claim_epoch == 1` on the `test`
+        row, and one `claimed` trace event per instance).
+    
+        Then the RUN row. Measured in round 10: a hold that lets the run advance
+        ends the run through the absence gate's only transition and writes no step
+        row at all — every step row is identical to the held run's, and the
+        `test_gate_absent` row stays `pending` — so no step-row assertion can see
+        that break. The run row can: while the gate is silent it is `running` and
+        parked at `test_gate_absent`; at the expiring pole it is `failed` there.
+        """
+        rows = _rows_by_step(sf, run_id)
+        test_row = rows["test"]
+        assert test_row["status"] == "completed", (
+            f"test row status drifted: {test_row['status']}")
+>       assert test_row["retry_count"] == 0, (
+            f"deferral charged a retry: {test_row['retry_count']}")
+E       AssertionError: deferral charged a retry: 5
+E       assert 5 == 0
+
+tests/skillflow/test_coding_impl_gate_absence.py:433: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+____________ test_the_deferral_hold_leaves_real_step_rows_untouched ____________
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-19/test_the_deferral_hold_leaves_0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x70bbc8eb2720>
+
+    def test_the_deferral_hold_leaves_real_step_rows_untouched(tmp_path, monkeypatch):
+        """Criterion 2, measured on the REAL graph's step rows — not a stub.
+    
+        While the never-answering gate is silent, the `test` step has already run
+        and completed, and the hold parks the run at `test_gate_absent`. What must
+        be TRUE of the rows the hold does NOT touch:
+    
+        * the `test` row is `completed`;
+        * its `retry_count` is 0 — the deferral never charges a retry;
+        * its `release_count` is 0 — the deferral never releases the claim;
+        * its `claim_epoch` is 1 — the step instance was claimed exactly once.
+    
+        Each is a separate assertion so the mutation that breaks it names itself.
+        """
+        counter = tmp_path / "calls.txt"
+        sf, run_id = _wire(tmp_path, monkeypatch, episode_max=100000, wait=1,
+                           counter=counter, tail=_SILENT_TAIL)
+        _prime_ledger(sf, run_id)
+        _drive(sf, run_id, monkeypatch, ticks=40,
+               clock_step=gate_deferral.wait_seconds())
+        test_row = _rows_by_step(sf, run_id)["test"]
+        assert test_row["status"] == "completed", test_row
+>       assert test_row["retry_count"] == 0, test_row
+E       AssertionError: {'id': 2, 'run_id': '9fca3c21-e7bf-45b1-9cb8-747e8b6d5355', 'step_id': 'test', 'step_config_json': '{}', ...}
+E       assert 37 == 0
+
+tests/skillflow/test_coding_impl_gate_absence.py:472: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+_____ test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them ______
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-19/test_the_tick_hold_alone_keeps0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x70bbc8ed6780>
+
+    def test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them(
+            tmp_path, monkeypatch):
+        """The TICK hold (`core/scheduler.py:_run_skillflow_tick`) measured on its
+        own. With both holds in series, a break in one is covered by the other; so
+        here the host's `hold_blocks_advance` answers False (the host hold is out)
+        and the tick is the only driver. The tick's own `silent` return must then
+        keep the run parked at `test_gate_absent` with the rows untouched.
+        """
+        counter = tmp_path / "calls.txt"
+        sf, run_id = _wire(tmp_path, monkeypatch, episode_max=100000, wait=1,
+                           counter=counter, tail=_SILENT_TAIL)
+        monkeypatch.setattr(gate_deferral, "hold_blocks_advance",
+                            lambda run_id, **_kw: False)
+        implement_runs, statuses, outcomes, nodes = _drive(
+            sf, run_id, monkeypatch, ticks=20, clock_step=1, second_driver=False)
+>       _assert_test_row_untouched(sf, run_id)
+
+tests/skillflow/test_coding_impl_gate_absence.py:493: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+sf = <core.skillflow_host.AItelierSkillFlow object at 0x70bbc8ed7980>
+run_id = '35e85862-a44e-4a1a-b24a-d3cf8a345c35', run_status = 'running'
+
+    def _assert_test_row_untouched(sf, run_id, *, run_status="running"):
+        """Assert the row invariants while the gate is silent.
+        Called from every pole so no hold-breaking mutation passes unnoticed.
+    
+        The four step-row assertions the criterion names: the `test` row is
+        `completed`, its `retry_count` is 0, its `release_count` is 0, and every
+        step instance was claimed exactly once (`claim_epoch == 1` on the `test`
+        row, and one `claimed` trace event per instance).
+    
+        Then the RUN row. Measured in round 10: a hold that lets the run advance
+        ends the run through the absence gate's only transition and writes no step
+        row at all — every step row is identical to the held run's, and the
+        `test_gate_absent` row stays `pending` — so no step-row assertion can see
+        that break. The run row can: while the gate is silent it is `running` and
+        parked at `test_gate_absent`; at the expiring pole it is `failed` there.
+        """
+        rows = _rows_by_step(sf, run_id)
+        test_row = rows["test"]
+        assert test_row["status"] == "completed", (
+            f"test row status drifted: {test_row['status']}")
+>       assert test_row["retry_count"] == 0, (
+            f"deferral charged a retry: {test_row['retry_count']}")
+E       AssertionError: deferral charged a retry: 17
+E       assert 17 == 0
+
+tests/skillflow/test_coding_impl_gate_absence.py:433: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+=============================== warnings summary ===============================
+../../../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+tests/unit/test_bash_admission_lifetime.py::test_a_second_cancellation_during_cleanup_still_ends_the_writer
+  /usr/local/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <function BaseSubprocessTransport.__del__ at 0x70bbdf41bd80>
+  
+  Traceback (most recent call last):
+    File "/usr/local/lib/python3.12/asyncio/base_subprocess.py", line 126, in __del__
+      self.close()
+    File "/usr/local/lib/python3.12/asyncio/base_subprocess.py", line 104, in close
+      proto.pipe.close()
+    File "/usr/local/lib/python3.12/asyncio/unix_events.py", line 568, in close
+      self._close(None)
+    File "/usr/local/lib/python3.12/asyncio/unix_events.py", line 592, in _close
+      self._loop.call_soon(self._call_connection_lost, exc)
+    File "/usr/local/lib/python3.12/asyncio/base_events.py", line 799, in call_soon
+      self._check_closed()
+    File "/usr/local/lib/python3.12/asyncio/base_events.py", line 545, in _check_closed
+      raise RuntimeError('Event loop is closed')
+  RuntimeError: Event loop is closed
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/unit/test_public_read_hardening.py::TestAnUnknownJwtKidCostsNoNetworkCall::test_a_rejected_kid_is_remembered
+tests/unit/test_public_read_hardening.py::TestAnUnknownJwtKidCostsNoNetworkCall::test_the_bad_kid_table_is_bounded
+  /usr/local/lib/python3.12/site-packages/jwt/api_jwt.py:149: InsecureKeyLengthWarning: The HMAC key is 1 bytes long, which is below the minimum recommended length of 32 bytes for SHA256. See RFC 7518 Section 3.2.
+    return self._jws.encode(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_gate_deferral_execution_points.py::test_the_tick_refuses_to_claim_while_the_gate_is_silent
+FAILED tests/unit/test_gate_deferral_execution_points.py::test_during_a_deferral_hold_the_step_claim_is_held_not_released
+FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_a_a_ceiling_far_past_the_window_spends_one_implement_cycle
+FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_b_a_zero_ceiling_is_clamped_and_cannot_charge_the_absence
+FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_inside_the_window_is_honoured_and_uncharged
+FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence
+FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_a_gate_that_finally_answers_clears_the_deferral
+FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_the_deferral_hold_leaves_real_step_rows_untouched
+FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them
+9 failed, 4063 passed, 9 skipped, 4 warnings in 336.99s (0:05:36)
+
+BARE_RC_FULL=1
+IGNITION_FULL={"file_reads": 26, "file_reads_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-9f745iax/tree/core/scheduler.py": 26}, "igniting_tests": ["tests/skillflow/test_coding_impl_gate_absence.py::test_a_gate_that_finally_answers_clears_the_deferral", "tests/skillflow/test_coding_impl_gate_absence.py::test_pole_a_a_ceiling_far_past_the_window_spends_one_implement_cycle", "tests/skillflow/test_coding_impl_gate_absence.py::test_pole_b_a_zero_ceiling_is_clamped_and_cannot_charge_the_absence", "tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence", "tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_inside_the_window_is_honoured_and_uncharged", "tests/skillflow/test_coding_impl_gate_absence.py::test_the_deferral_hold_leaves_real_step_rows_untouched", "tests/skillflow/test_coding_impl_gate_absence.py::test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them", "tests/unit/test_gate_deferral_execution_points.py::test_during_a_deferral_hold_the_step_claim_is_held_not_released", "tests/unit/test_gate_deferral_execution_points.py::test_the_tick_refuses_to_claim_while_the_gate_is_silent"], "line_hits": 129, "line_hits_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-9f745iax/tree/core/scheduler.py": 129}, "monitoring_tool_id": 4, "mutated_modules_imported": ["/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-9f745iax/tree/core/scheduler.py"], "source_readers": ["tests/unit/test_checkpoint_reject_target.py::test_every_reject_checkpoint_caller_passes_redirect_to[core]", "tests/unit/test_datadir_guardrail.py::test_no_home_paths_outside_datadir", "tests/unit/test_db_manager.py::test_card_files_without_id_key_are_keyed_by_filename", "tests/unit/test_every_step_driver_handles_cancellation.py::test_every_claim_holding_loop_handles_cancellation", "tests/unit/test_logs_are_bounded.py::test_no_durable_log_is_opened_for_append_without_rotation", "tests/unit/test_no_by_name_graph_lookup_during_a_run.py::test_no_run_scoped_lookup_resolves_a_graph_by_name", "tests/unit/test_no_self_call_collapse.py::test_no_python_source_is_a_self_call_and_nothing_else", "tests/unit/test_no_verbatim_previous_line_dup.py::test_named_test_repeats_are_pinned_and_current", "tests/unit/test_no_verbatim_previous_line_dup.py::test_no_verbatim_previous_line_dup_in_non_test_code", "tests/unit/test_run_isolation_lifecycle.py::test_a_lease_survives_the_drain_and_is_released_by_a_later_tick", "tests/unit/test_scheduler_failure_reason.py::test_a_db_write_failure_does_not_mask_the_original_error", "tests/unit/test_scheduler_failure_reason.py::test_create_run_failure_becomes_a_visible_terminal_status", "tests/unit/test_startup_recovery.py::test_startup_recovery_fails_closed_when_operation_audit_fails", "tests/unit/test_stop_is_truthful.py::test_a_draining_stop_is_not_reported_as_complete", "tests/unit/test_stop_is_truthful.py::test_a_stop_between_steps_claims_nothing_more_and_nothing_less", "tests/unit/test_stop_is_truthful.py::test_a_stop_that_cannot_complete_on_its_own_says_so_and_forwards_the_state", "tests/unit/test_stop_is_truthful.py::test_a_terminal_stop_promises_that_nothing_new_starts", "tests/unit/test_stop_is_truthful.py::test_an_already_ended_run_says_so", "tests/unit/test_stop_is_truthful.py::test_an_older_skillflow_returning_none_does_not_break_the_butler", "tests/unit/test_stop_is_truthful.py::test_an_unobservable_owner_is_forwarded_too", "tests/unit/test_stop_is_truthful.py::test_the_status_field_agrees_with_the_outcome", "tests/unit/test_tree_level_accounting_witnesses.py::test_S1_the_tick_call_site_is_present_in_the_tree"]}
+
+# control targeted reds=[]
+# control full reds=[]
+# targeted killers=['tests/skillflow/test_coding_impl_gate_absence.py::test_a_gate_that_finally_answers_clears_the_deferral', 'tests/skillflow/test_coding_impl_gate_absence.py::test_pole_a_a_ceiling_far_past_the_window_spends_one_implement_cycle', 'tests/skillflow/test_coding_impl_gate_absence.py::test_pole_b_a_zero_ceiling_is_clamped_and_cannot_charge_the_absence', 'tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence', 'tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_inside_the_window_is_honoured_and_uncharged', 'tests/skillflow/test_coding_impl_gate_absence.py::test_the_deferral_hold_leaves_real_step_rows_untouched', 'tests/skillflow/test_coding_impl_gate_absence.py::test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them']
+# targeted source-text witnesses=[]
+# full killers=['tests/skillflow/test_coding_impl_gate_absence.py::test_a_gate_that_finally_answers_clears_the_deferral', 'tests/skillflow/test_coding_impl_gate_absence.py::test_pole_a_a_ceiling_far_past_the_window_spends_one_implement_cycle', 'tests/skillflow/test_coding_impl_gate_absence.py::test_pole_b_a_zero_ceiling_is_clamped_and_cannot_charge_the_absence', 'tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence', 'tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_inside_the_window_is_honoured_and_uncharged', 'tests/skillflow/test_coding_impl_gate_absence.py::test_the_deferral_hold_leaves_real_step_rows_untouched', 'tests/skillflow/test_coding_impl_gate_absence.py::test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them', 'tests/unit/test_gate_deferral_execution_points.py::test_during_a_deferral_hold_the_step_claim_is_held_not_released', 'tests/unit/test_gate_deferral_execution_points.py::test_the_tick_refuses_to_claim_while_the_gate_is_silent']
+# full source-text witnesses=[]
+# porcelain after restore=''
+# status=killed

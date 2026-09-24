@@ -1,0 +1,187 @@
+# N9 (text): tool.yaml:52-56 — delete the sentence that states a no-verdict gate does not loop back to implement.
+# head=b104f18c2e7e1d0f0c59e99cb32a077e7896dd28
+# worktree=/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-66k5zl90/tree (removed)
+# started=2026-09-24 05:59:02 UTC ended=2026-09-24 06:04:54 UTC
+# replacement lines={"aitelier/tools/run_tests/tool.yaml": [52]}
+
+## diff applied
+diff --git a/aitelier/tools/run_tests/tool.yaml b/aitelier/tools/run_tests/tool.yaml
+index 38336d26..763fcfd2 100644
+--- a/aitelier/tools/run_tests/tool.yaml
++++ b/aitelier/tools/run_tests/tool.yaml
+@@ -49,11 +49,6 @@ description: >
+   harness's own observation of the absence. The declaration is read from the
+   gate's WHOLE output BEFORE the 2000-byte tail is retained, so it survives a
+   real gate's log.
+-  A gate that produced NO VERDICT does not loop back to `implement`: its
+-  absence is stated on the report, with
+-  `repo_gate_unmeasured: true` and `repo_gate_absent: true` (plus
+-  `repo_gate.measured: "unmeasured"` and `repo_gate.attempts`, the number of
+-  runs the reading cost), and `configs/coding_impl.yaml` routes
+   `repo_gate_absent` to the loop-external `test_gate_absent` gate. The edge is
+   a FLAG match on this tool's own RETURN (`repo_gate_absent` is in the result
+   dict, which the engine merges into the step's flags), NOT a `from_file`
+
+## targeted scope: /usr/local/bin/python -m pytest -q -rfE -p no:cacheprovider -p ignition_plugin tests/unit/test_run_tests_unmeasured_declaration.py::test_the_tool_doc_names_the_no_verdict_gate_as_absent_not_a_loop
+# cwd=/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-66k5zl90/tree
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_______ test_the_tool_doc_names_the_no_verdict_gate_as_absent_not_a_loop _______
+
+    def test_the_tool_doc_names_the_no_verdict_gate_as_absent_not_a_loop():
+        """The `tool.yaml` :52-56 segment is the human-visible contract that a
+        gate with NO verdict does not spend an implement cycle: it states
+        `repo_gate.attempts` and that `configs/coding_impl.yaml` routes the
+        absence. N9 deletes exactly this segment. The witness asserts the segment
+        itself — not the neighbouring UNMEASURED-declaration prose at :42-45 that
+        r7 pinned instead."""
+        tool_yaml = (Path(rt.__file__).parent / "tool.yaml").read_text(
+            encoding="utf-8")
+>       assert _N9_SEGMENT in tool_yaml, (
+            "the no-verdict-does-not-loop-back segment is gone — the absence "
+            "contract that stops an unmeasured gate reaching `implement` is no "
+            "longer stated on the tool's own contract")
+E       AssertionError: the no-verdict-does-not-loop-back segment is gone — the absence contract that stops an unmeasured gate reaching `implement` is no longer stated on the tool's own contract
+E       assert '  A gate that produced NO VERDICT does not loop back to `implement`: its\n  absence is stated on the report, with\n  ...nmeasured"` and `repo_gate.attempts`, the number of\n  runs the reading cost), and `configs/coding_impl.yaml` routes\n' in "name: run_tests\ndescription: >\n  Run the project's unit tests (pytest) over the current run worktree and write\n  t...: true\n\n# Reports/metadata are artifacts even when invoked by a code-producing agent.\noutput:\n  target: artifact\n"
+
+tests/unit/test_run_tests_unmeasured_declaration.py:626: AssertionError
+=============================== warnings summary ===============================
+../../../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_run_tests_unmeasured_declaration.py::test_the_tool_doc_names_the_no_verdict_gate_as_absent_not_a_loop
+1 failed, 1 warning in 0.36s
+
+BARE_RC_TARGETED=1
+IGNITION_TARGETED={"file_reads": 1, "file_reads_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-66k5zl90/tree/aitelier/tools/run_tests/tool.yaml": 1}, "igniting_tests": [], "line_hits": 0, "line_hits_by_file": {}, "monitoring_tool_id": 4, "mutated_modules_imported": [], "source_readers": ["tests/unit/test_run_tests_unmeasured_declaration.py::test_the_tool_doc_names_the_no_verdict_gate_as_absent_not_a_loop"]}
+
+## full scope: /usr/local/bin/python -m pytest -q -rfE -p no:cacheprovider -p ignition_plugin tests/unit tests/skillflow
+# cwd=/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-66k5zl90/tree
+........................................................................ [  1%]
+........................................................................ [  3%]
+........................................................................ [  5%]
+........................................................................ [  7%]
+........................................................................ [  8%]
+........................................................................ [ 10%]
+........................................................................ [ 12%]
+........................................................................ [ 14%]
+........................................................................ [ 15%]
+........................................................................ [ 17%]
+........................................................................ [ 19%]
+........................................................................ [ 21%]
+........................................................................ [ 22%]
+........................................................................ [ 24%]
+........................................................................ [ 26%]
+........................................................................ [ 28%]
+........................................................................ [ 29%]
+........................................................................ [ 31%]
+........................................................................ [ 33%]
+........................................................................ [ 35%]
+.......................................................................s [ 37%]
+sssssss................................................................. [ 38%]
+........................................................................ [ 40%]
+........................................................................ [ 42%]
+........................................................................ [ 44%]
+........................................................................ [ 45%]
+........................................................................ [ 47%]
+........................................................................ [ 49%]
+........................................................................ [ 51%]
+........................................................................ [ 52%]
+........................................................................ [ 54%]
+.............s.......................................................... [ 56%]
+........................................................................ [ 58%]
+........................................................................ [ 59%]
+........................................................................ [ 61%]
+........................................................................ [ 63%]
+........................................................................ [ 65%]
+........................................................................ [ 67%]
+........................................................................ [ 68%]
+........................................................................ [ 70%]
+........................................................................ [ 72%]
+........................................................................ [ 74%]
+........................................................................ [ 75%]
+........................................................................ [ 77%]
+..................................................................F..... [ 79%]
+........................................................................ [ 81%]
+........................................................................ [ 82%]
+........................................................................ [ 84%]
+........................................................................ [ 86%]
+........................................................................ [ 88%]
+........................................................................ [ 89%]
+........................................................................ [ 91%]
+........................................................................ [ 93%]
+........................................................................ [ 95%]
+........................................................................ [ 97%]
+........................................................................ [ 98%]
+.................................................                        [100%]
+=================================== FAILURES ===================================
+_______ test_the_tool_doc_names_the_no_verdict_gate_as_absent_not_a_loop _______
+
+    def test_the_tool_doc_names_the_no_verdict_gate_as_absent_not_a_loop():
+        """The `tool.yaml` :52-56 segment is the human-visible contract that a
+        gate with NO verdict does not spend an implement cycle: it states
+        `repo_gate.attempts` and that `configs/coding_impl.yaml` routes the
+        absence. N9 deletes exactly this segment. The witness asserts the segment
+        itself — not the neighbouring UNMEASURED-declaration prose at :42-45 that
+        r7 pinned instead."""
+        tool_yaml = (Path(rt.__file__).parent / "tool.yaml").read_text(
+            encoding="utf-8")
+>       assert _N9_SEGMENT in tool_yaml, (
+            "the no-verdict-does-not-loop-back segment is gone — the absence "
+            "contract that stops an unmeasured gate reaching `implement` is no "
+            "longer stated on the tool's own contract")
+E       AssertionError: the no-verdict-does-not-loop-back segment is gone — the absence contract that stops an unmeasured gate reaching `implement` is no longer stated on the tool's own contract
+E       assert '  A gate that produced NO VERDICT does not loop back to `implement`: its\n  absence is stated on the report, with\n  ...nmeasured"` and `repo_gate.attempts`, the number of\n  runs the reading cost), and `configs/coding_impl.yaml` routes\n' in "name: run_tests\ndescription: >\n  Run the project's unit tests (pytest) over the current run worktree and write\n  t...: true\n\n# Reports/metadata are artifacts even when invoked by a code-producing agent.\noutput:\n  target: artifact\n"
+
+tests/unit/test_run_tests_unmeasured_declaration.py:626: AssertionError
+=============================== warnings summary ===============================
+../../../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+tests/unit/test_bash_admission_lifetime.py::test_a_second_cancellation_during_cleanup_still_ends_the_writer
+  /usr/local/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <function BaseSubprocessTransport.__del__ at 0x7b81422e7100>
+  
+  Traceback (most recent call last):
+    File "/usr/local/lib/python3.12/asyncio/base_subprocess.py", line 126, in __del__
+      self.close()
+    File "/usr/local/lib/python3.12/asyncio/base_subprocess.py", line 104, in close
+      proto.pipe.close()
+    File "/usr/local/lib/python3.12/asyncio/unix_events.py", line 568, in close
+      self._close(None)
+    File "/usr/local/lib/python3.12/asyncio/unix_events.py", line 592, in _close
+      self._loop.call_soon(self._call_connection_lost, exc)
+    File "/usr/local/lib/python3.12/asyncio/base_events.py", line 799, in call_soon
+      self._check_closed()
+    File "/usr/local/lib/python3.12/asyncio/base_events.py", line 545, in _check_closed
+      raise RuntimeError('Event loop is closed')
+  RuntimeError: Event loop is closed
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/unit/test_public_read_hardening.py::TestAnUnknownJwtKidCostsNoNetworkCall::test_a_rejected_kid_is_remembered
+tests/unit/test_public_read_hardening.py::TestAnUnknownJwtKidCostsNoNetworkCall::test_the_bad_kid_table_is_bounded
+  /usr/local/lib/python3.12/site-packages/jwt/api_jwt.py:149: InsecureKeyLengthWarning: The HMAC key is 1 bytes long, which is below the minimum recommended length of 32 bytes for SHA256. See RFC 7518 Section 3.2.
+    return self._jws.encode(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_run_tests_unmeasured_declaration.py::test_the_tool_doc_names_the_no_verdict_gate_as_absent_not_a_loop
+1 failed, 4071 passed, 9 skipped, 4 warnings in 341.33s (0:05:41)
+
+BARE_RC_FULL=1
+IGNITION_FULL={"file_reads": 24, "file_reads_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-66k5zl90/tree/aitelier/tools/run_tests/tool.yaml": 24}, "igniting_tests": [], "line_hits": 0, "line_hits_by_file": {}, "monitoring_tool_id": 4, "mutated_modules_imported": [], "source_readers": ["tests/unit/test_capability_registry.py::test_capability_edit_revalidates_live_release_graph", "tests/unit/test_capability_registry.py::test_capability_edit_revalidates_persisted_release_graph", "tests/unit/test_diagnostic_output_targets.py::test_report_tools_declare_their_output_destination", "tests/unit/test_diagnostic_output_targets.py::test_run_tests_report_is_an_artifact_not_a_code_change", "tests/unit/test_fallible_is_declared_not_listed.py::TestTheGateAsksTheTool::test_a_stamped_builtin_is_recognised", "tests/unit/test_fallible_is_declared_not_listed.py::TestTheGateAsksTheTool::test_the_shipped_fail_open_is_now_caught", "tests/unit/test_pipeline_registry.py::test_boot_skips_migration_for_omitted_polluted_live_role[grants0]", "tests/unit/test_pipeline_registry.py::test_boot_skips_migration_for_omitted_polluted_live_role[grants1]", "tests/unit/test_pipeline_registry.py::test_forge_update_rejects_omitted_polluted_role_before_publication[grants0]", "tests/unit/test_pipeline_registry.py::test_forge_update_rejects_omitted_polluted_role_before_publication[grants1]", "tests/unit/test_pipeline_registry.py::test_register_text_rejects_omitted_polluted_live_role[grants0]", "tests/unit/test_pipeline_registry.py::test_register_text_rejects_omitted_polluted_live_role[grants1]", "tests/unit/test_pipeline_registry.py::test_register_text_rejects_reused_live_gate_schema", "tests/unit/test_pipeline_registry.py::test_reload_rejects_omitted_polluted_role_and_preserves_live_state_and_file[grants0]", "tests/unit/test_pipeline_registry.py::test_reload_rejects_omitted_polluted_role_and_preserves_live_state_and_file[grants1]", "tests/unit/test_registration_transaction.py::test_direct_registration_commits_the_roles_it_preflighted", "tests/unit/test_release_fail_fast.py::test_skillflow_executes_every_effective_tool_grant_shape[capability-list]", "tests/unit/test_release_fail_fast.py::test_skillflow_executes_every_effective_tool_grant_shape[capability-mapping-keys]", "tests/unit/test_release_fail_fast.py::test_skillflow_executes_every_effective_tool_grant_shape[config-mapping-keys]", "tests/unit/test_release_fail_fast.py::test_skillflow_executes_every_effective_tool_grant_shape[config-yaml-list]", "tests/unit/test_release_fail_fast.py::test_skillflow_executes_every_effective_tool_grant_shape[paired-role-json-array]", "tests/unit/test_release_fail_fast.py::test_skillflow_executes_every_effective_tool_grant_shape[paired-role-mapping-keys]", "tests/unit/test_run_tests_unmeasured_declaration.py::test_the_tool_doc_names_the_no_verdict_gate_as_absent_not_a_loop", "tests/unit/test_tree_level_accounting_witnesses.py::test_N9_the_protocol_text_has_a_reader"]}
+
+# control targeted reds=[]
+# control full reds=[]
+# targeted killers=['tests/unit/test_run_tests_unmeasured_declaration.py::test_the_tool_doc_names_the_no_verdict_gate_as_absent_not_a_loop']
+# targeted source-text witnesses=[]
+# full killers=['tests/unit/test_run_tests_unmeasured_declaration.py::test_the_tool_doc_names_the_no_verdict_gate_as_absent_not_a_loop']
+# full source-text witnesses=[]
+# porcelain after restore=''
+# status=killed

@@ -1,0 +1,20 @@
+# CMD: python /home/linxuhao/.AItelier/worktrees-scratch/ga10/final/probes/p_rows.py
+# CWD: /home/linxuhao/.AItelier/worktrees-scratch/ga10
+# HEAD: 96721904a7d9b6b461109cfcded6d0abd03f469c porcelain_lines=3
+# RUNNER: docker run --rm --init -m 3g --name ga10-rows --network aitelier_default -u 1000:1000 -e HOME=/home/linxuhao -e PYTHONPATH=/home/linxuhao/.AItelier/worktrees-scratch/ga10 -e PYTHONDONTWRITEBYTECODE=1 -e SEARXNG_URL=http://linxuhaserver:8888 -v /home/linxuhao/AItelier:/app -v /home/linxuhao/AItelier:/home/linxuhao/AItelier -v /home/linxuhao/.AItelier:/home/linxuhao/.AItelier -w /home/linxuhao/.AItelier/worktrees-scratch/ga10 aitelier:latest python /home/linxuhao/.AItelier/worktrees-scratch/ga10/final/probes/p_rows.py
+# ENV: (none)
+# FILE: /home/linxuhao/.AItelier/worktrees-scratch/ga10/final/probes/p_rows.py sha256=2da105c61f86aa0f9c0c85208f4999cd8fa8cc80359742df30dfcd17a4449396
+# STARTED: 2026-09-24T06:50:01Z
+DRIVE (1, ['running', 'running', 'running', 'running', 'running', 'running', 'running', 'running', 'running', 'running', 'running', 'running', 'running'], ['none', 'none', 'none', 'silent', 'silent', 'silent', 'silent', 'silent', 'silent', 'silent', 'silent', 'silent'], [None, 'test', 'test_gate_absent', 'test_gate_absent', 'test_gate_absent', 'test_gate_absent', 'test_gate_absent', 'test_gate_absent', 'test_gate_absent', 'test_gate_absent', 'test_gate_absent', 'test_gate_absent'])
+RUN {'status': 'running', 'current_node': 'test_gate_absent', 'error_reason': None}
+ROW {'id': 1, 'step_id': 'implement', 'status': 'completed', 'retry_count': 0, 'release_count': 0, 'claim_epoch': 1}
+ROW {'id': 2, 'step_id': 'test', 'status': 'completed', 'retry_count': 0, 'release_count': 0, 'claim_epoch': 1}
+ROW {'id': 3, 'step_id': 'test_evidence', 'status': 'pending', 'retry_count': 0, 'release_count': 0, 'claim_epoch': 0}
+ROW {'id': 4, 'step_id': 'test_outcome', 'status': 'pending', 'retry_count': 0, 'release_count': 0, 'claim_epoch': 0}
+ROW {'id': 5, 'step_id': 'test_evidence_missing', 'status': 'pending', 'retry_count': 0, 'release_count': 0, 'claim_epoch': 0}
+ROW {'id': 6, 'step_id': 'test_gate_absent', 'status': 'pending', 'retry_count': 0, 'release_count': 0, 'claim_epoch': 0}
+ROW {'id': 7, 'step_id': 'done', 'status': 'pending', 'retry_count': 0, 'release_count': 0, 'claim_epoch': 0}
+CLAIMS {('implement', 1): 1, ('test', 2): 1}
+step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+# ENDED: 2026-09-24T06:50:05Z
+BARE_RC=0

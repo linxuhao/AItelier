@@ -1,0 +1,12 @@
+# CMD: python tools/mutation_catalog/run_mutations.py G2
+# CWD: /home/linxuhao/.AItelier/worktrees-scratch/ga10-pol
+# HEAD: 96721904a7d9b6b461109cfcded6d0abd03f469c porcelain_lines=1
+# RUNNER: docker run --rm --init -m 3g --name ga10-redctl --network aitelier_default -u 1000:1000 -e HOME=/home/linxuhao -e PYTHONPATH=/home/linxuhao/.AItelier/worktrees-scratch/ga10-pol -e PYTHONDONTWRITEBYTECODE=1 -e SEARXNG_URL=http://linxuhaserver:8888 -e AITELIER_GATE_DEFERRAL_EPISODE_MAX_SECONDS=5 -e MUTATION_WORKTREE_DIR=/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut -v /home/linxuhao/AItelier:/app -v /home/linxuhao/AItelier:/home/linxuhao/AItelier -v /home/linxuhao/.AItelier:/home/linxuhao/.AItelier -w /home/linxuhao/.AItelier/worktrees-scratch/ga10-pol aitelier:latest python tools/mutation_catalog/run_mutations.py G2
+# ENV: AITELIER_GATE_DEFERRAL_EPISODE_MAX_SECONDS=5 MUTATION_WORKTREE_DIR=/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut
+# FILE: tools/mutation_catalog/run_mutations.py sha256=ae4112383816b8b0a92472047a4aed48d79b55108211535c28be84bd9b561cfc
+# STARTED: 2026-09-24T07:13:50Z
+[2026-09-24 07:13:51 UTC] root=/home/linxuhao/.AItelier/worktrees-scratch/ga10-pol head=96721904a7d9b6b461109cfcded6d0abd03f469c
+[2026-09-24 07:13:51 UTC] empty control over 1 name(s)...
+CONTROL NOT GREEN (targeted rc=1, full rc=1). Refusing to report kills. Reds: ['tests/unit/test_gate_deferral_execution_points.py::test_the_effective_episode_ceiling_is_ten_thousand_eight_hundred_as_loaded'] ['tests/unit/test_gate_deferral_execution_points.py::test_the_effective_episode_ceiling_is_ten_thousand_eight_hundred_as_loaded', 'tests/unit/test_gate_deferral_execution_points.py::test_the_valve_is_a_simple_bound_and_the_deferral_path_cannot_reach_it', 'tests/unit/test_gate_deferral_is_accounted.py::test_a_declared_absence_is_silent_inside_its_wait']
+# ENDED: 2026-09-24T07:19:23Z
+BARE_RC=2

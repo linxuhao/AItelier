@@ -1,0 +1,211 @@
+# ABSTERM2 (behaviour): drop the plural-stem widening of the forbidden words.
+# head=b104f18c2e7e1d0f0c59e99cb32a077e7896dd28
+# worktree=/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-p41yn4xf/tree (removed)
+# started=2026-09-24 05:28:14 UTC ended=2026-09-24 05:34:01 UTC
+# replacement lines={"core/gate_deferral.py": [228]}
+
+## diff applied
+diff --git a/core/gate_deferral.py b/core/gate_deferral.py
+index 79f097d8..989880cc 100644
+--- a/core/gate_deferral.py
++++ b/core/gate_deferral.py
+@@ -225,7 +225,7 @@ def absent_terminal_names_no_failure(reason: str) -> bool:
+     # Plurals of the same stem are the same accusation: `failures`, `errors`,
+     # `regressions`. Only a trailing `s` is stripped, so the check stays on
+     # whole words and never fires inside `measu(red)`.
+-    words |= {w[:-1] for w in words if w.endswith("s")}
++    words |= set()
+     return not (words & set(_FORBIDDEN_WORDS))
+ 
+ 
+
+## targeted scope: /usr/local/bin/python -m pytest -q -rfE -p no:cacheprovider -p ignition_plugin tests/unit/test_gate_deferral_is_accounted.py
+# cwd=/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-p41yn4xf/tree
+..................F                                                      [100%]
+=================================== FAILURES ===================================
+___ test_the_absent_terminal_checker_refuses_a_sentence_that_blames_the_code ___
+
+    def test_the_absent_terminal_checker_refuses_a_sentence_that_blames_the_code():
+        """Round 5 left this checker with a SINGLE pole: pinning it to
+        unconditional `True` kept the whole suite green, because every test only
+        ever handed it a good sentence and asked for True. A checker with one pole
+        is not a checker. So both directions are measured here, with the forbidden
+        vocabulary the implementation actually names.
+        """
+        good = gd.ABSENCE_TERMINAL + " (run_tests.sh, 3 attempt(s))"
+        assert gd.absent_terminal_names_no_failure(good) is True
+    
+        for bad in (
+            good + " — Cycle limit exceeded",
+            good + " — the suite failed",
+            good + " — 3 failures",
+            good + " — a regression in test_ops",
+            good + " — the gate reported red",
+            good + " — error: builder unreachable",
+            "Cycle limit exceeded (test, 4 attempt(s))",
+            "the tests failed",
+            "",
+        ):
+>           assert gd.absent_terminal_names_no_failure(bad) is False, bad
+E           AssertionError: gate did not run: no verdict was measured (run_tests.sh, 3 attempt(s)) — 3 failures
+E           assert True is False
+E            +  where True = <function absent_terminal_names_no_failure at 0x733012fb8e00>('gate did not run: no verdict was measured (run_tests.sh, 3 attempt(s)) — 3 failures')
+E            +    where <function absent_terminal_names_no_failure at 0x733012fb8e00> = gd.absent_terminal_names_no_failure
+
+tests/unit/test_gate_deferral_is_accounted.py:246: AssertionError
+=============================== warnings summary ===============================
+../../../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_gate_deferral_is_accounted.py::test_the_absent_terminal_checker_refuses_a_sentence_that_blames_the_code
+1 failed, 18 passed, 1 warning in 2.16s
+Exception ignored in: <function _removeHandlerRef at 0x73301d58ccc0>
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/logging/__init__.py", line 882, in _removeHandlerRef
+  File "/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-p41yn4xf/tree/tools/mutation_catalog/ignition_plugin.py", line 63, in _on_line
+TypeError: 'NoneType' object is not callable
+
+BARE_RC_TARGETED=1
+IGNITION_TARGETED={"file_reads": 0, "file_reads_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-p41yn4xf/tree/core/gate_deferral.py": 0}, "igniting_tests": ["tests/unit/test_gate_deferral_is_accounted.py::test_an_expired_absence_names_the_absence_and_never_the_code", "tests/unit/test_gate_deferral_is_accounted.py::test_the_absent_terminal_checker_refuses_a_sentence_that_blames_the_code"], "line_hits": 4, "line_hits_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-p41yn4xf/tree/core/gate_deferral.py": 4}, "monitoring_tool_id": 4, "mutated_modules_imported": ["/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-p41yn4xf/tree/core/gate_deferral.py"], "source_readers": []}
+
+## full scope: /usr/local/bin/python -m pytest -q -rfE -p no:cacheprovider -p ignition_plugin tests/unit tests/skillflow
+# cwd=/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-p41yn4xf/tree
+........................................................................ [  1%]
+........................................................................ [  3%]
+........................................................................ [  5%]
+........................................................................ [  7%]
+........................................................................ [  8%]
+........................................................................ [ 10%]
+........................................................................ [ 12%]
+........................................................................ [ 14%]
+........................................................................ [ 15%]
+........................................................................ [ 17%]
+........................................................................ [ 19%]
+........................................................................ [ 21%]
+........................................................................ [ 22%]
+........................................................................ [ 24%]
+........................................................................ [ 26%]
+........................................................................ [ 28%]
+........................................................................ [ 29%]
+........................................................................ [ 31%]
+........................................................................ [ 33%]
+...........F............................................................ [ 35%]
+.......................................................................s [ 37%]
+sssssss................................................................. [ 38%]
+........................................................................ [ 40%]
+........................................................................ [ 42%]
+........................................................................ [ 44%]
+........................................................................ [ 45%]
+........................................................................ [ 47%]
+........................................................................ [ 49%]
+........................................................................ [ 51%]
+........................................................................ [ 52%]
+........................................................................ [ 54%]
+.............s.......................................................... [ 56%]
+........................................................................ [ 58%]
+........................................................................ [ 59%]
+........................................................................ [ 61%]
+........................................................................ [ 63%]
+........................................................................ [ 65%]
+........................................................................ [ 67%]
+........................................................................ [ 68%]
+........................................................................ [ 70%]
+........................................................................ [ 72%]
+........................................................................ [ 74%]
+........................................................................ [ 75%]
+........................................................................ [ 77%]
+........................................................................ [ 79%]
+........................................................................ [ 81%]
+........................................................................ [ 82%]
+........................................................................ [ 84%]
+........................................................................ [ 86%]
+........................................................................ [ 88%]
+........................................................................ [ 89%]
+........................................................................ [ 91%]
+........................................................................ [ 93%]
+........................................................................ [ 95%]
+........................................................................ [ 97%]
+........................................................................ [ 98%]
+.................................................                        [100%]
+=================================== FAILURES ===================================
+___ test_the_absent_terminal_checker_refuses_a_sentence_that_blames_the_code ___
+
+    def test_the_absent_terminal_checker_refuses_a_sentence_that_blames_the_code():
+        """Round 5 left this checker with a SINGLE pole: pinning it to
+        unconditional `True` kept the whole suite green, because every test only
+        ever handed it a good sentence and asked for True. A checker with one pole
+        is not a checker. So both directions are measured here, with the forbidden
+        vocabulary the implementation actually names.
+        """
+        good = gd.ABSENCE_TERMINAL + " (run_tests.sh, 3 attempt(s))"
+        assert gd.absent_terminal_names_no_failure(good) is True
+    
+        for bad in (
+            good + " — Cycle limit exceeded",
+            good + " — the suite failed",
+            good + " — 3 failures",
+            good + " — a regression in test_ops",
+            good + " — the gate reported red",
+            good + " — error: builder unreachable",
+            "Cycle limit exceeded (test, 4 attempt(s))",
+            "the tests failed",
+            "",
+        ):
+>           assert gd.absent_terminal_names_no_failure(bad) is False, bad
+E           AssertionError: gate did not run: no verdict was measured (run_tests.sh, 3 attempt(s)) — 3 failures
+E           assert True is False
+E            +  where True = <function absent_terminal_names_no_failure at 0x795b829a0220>('gate did not run: no verdict was measured (run_tests.sh, 3 attempt(s)) — 3 failures')
+E            +    where <function absent_terminal_names_no_failure at 0x795b829a0220> = gd.absent_terminal_names_no_failure
+
+tests/unit/test_gate_deferral_is_accounted.py:246: AssertionError
+=============================== warnings summary ===============================
+../../../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+tests/unit/test_bash_admission_lifetime.py::test_a_second_cancellation_during_cleanup_still_ends_the_writer
+  /usr/local/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <function BaseSubprocessTransport.__del__ at 0x795b8c9d7d80>
+  
+  Traceback (most recent call last):
+    File "/usr/local/lib/python3.12/asyncio/base_subprocess.py", line 126, in __del__
+      self.close()
+    File "/usr/local/lib/python3.12/asyncio/base_subprocess.py", line 104, in close
+      proto.pipe.close()
+    File "/usr/local/lib/python3.12/asyncio/unix_events.py", line 568, in close
+      self._close(None)
+    File "/usr/local/lib/python3.12/asyncio/unix_events.py", line 592, in _close
+      self._loop.call_soon(self._call_connection_lost, exc)
+    File "/usr/local/lib/python3.12/asyncio/base_events.py", line 799, in call_soon
+      self._check_closed()
+    File "/usr/local/lib/python3.12/asyncio/base_events.py", line 545, in _check_closed
+      raise RuntimeError('Event loop is closed')
+  RuntimeError: Event loop is closed
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/unit/test_public_read_hardening.py::TestAnUnknownJwtKidCostsNoNetworkCall::test_a_rejected_kid_is_remembered
+tests/unit/test_public_read_hardening.py::TestAnUnknownJwtKidCostsNoNetworkCall::test_the_bad_kid_table_is_bounded
+  /usr/local/lib/python3.12/site-packages/jwt/api_jwt.py:149: InsecureKeyLengthWarning: The HMAC key is 1 bytes long, which is below the minimum recommended length of 32 bytes for SHA256. See RFC 7518 Section 3.2.
+    return self._jws.encode(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_gate_deferral_is_accounted.py::test_the_absent_terminal_checker_refuses_a_sentence_that_blames_the_code
+1 failed, 4071 passed, 9 skipped, 4 warnings in 332.95s (0:05:32)
+
+BARE_RC_FULL=1
+IGNITION_FULL={"file_reads": 8, "file_reads_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-p41yn4xf/tree/core/gate_deferral.py": 8}, "igniting_tests": ["tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence", "tests/unit/test_gate_deferral_is_accounted.py::test_an_expired_absence_names_the_absence_and_never_the_code", "tests/unit/test_gate_deferral_is_accounted.py::test_the_absent_terminal_checker_refuses_a_sentence_that_blames_the_code"], "line_hits": 5, "line_hits_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-p41yn4xf/tree/core/gate_deferral.py": 5}, "monitoring_tool_id": 4, "mutated_modules_imported": ["/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-p41yn4xf/tree/core/gate_deferral.py"], "source_readers": ["tests/unit/test_checkpoint_reject_target.py::test_every_reject_checkpoint_caller_passes_redirect_to[core]", "tests/unit/test_datadir_guardrail.py::test_no_home_paths_outside_datadir", "tests/unit/test_every_step_driver_handles_cancellation.py::test_every_claim_holding_loop_handles_cancellation", "tests/unit/test_logs_are_bounded.py::test_no_durable_log_is_opened_for_append_without_rotation", "tests/unit/test_no_by_name_graph_lookup_during_a_run.py::test_no_run_scoped_lookup_resolves_a_graph_by_name", "tests/unit/test_no_self_call_collapse.py::test_no_python_source_is_a_self_call_and_nothing_else", "tests/unit/test_no_verbatim_previous_line_dup.py::test_named_test_repeats_are_pinned_and_current", "tests/unit/test_no_verbatim_previous_line_dup.py::test_no_verbatim_previous_line_dup_in_non_test_code"]}
+
+# control targeted reds=[]
+# control full reds=[]
+# targeted killers=['tests/unit/test_gate_deferral_is_accounted.py::test_the_absent_terminal_checker_refuses_a_sentence_that_blames_the_code']
+# targeted source-text witnesses=[]
+# full killers=['tests/unit/test_gate_deferral_is_accounted.py::test_the_absent_terminal_checker_refuses_a_sentence_that_blames_the_code']
+# full source-text witnesses=[]
+# porcelain after restore=''
+# status=killed

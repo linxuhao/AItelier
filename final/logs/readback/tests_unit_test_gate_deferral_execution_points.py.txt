@@ -1,0 +1,30 @@
+# CMD: git diff --word-diff dcfa78729628f0cbbbc703a44d0e97098a3b9c8f 96721904a7d9b6b461109cfcded6d0abd03f469c -- tests/unit/test_gate_deferral_execution_points.py
+# CWD: /home/linxuhao/.AItelier/worktrees-scratch/ga10
+# HEAD: 96721904a7d9b6b461109cfcded6d0abd03f469c porcelain_lines=4
+# RUNNER: host
+# ENV: (none)
+# FILE: tests/unit/test_gate_deferral_execution_points.py sha256=b691546e17ae3cf9bd58a0502019422f7ff23ab277ec119ac7e110075cdc2cda
+# STARTED: 2026-09-24T06:50:07Z
+diff --git a/tests/unit/test_gate_deferral_execution_points.py b/tests/unit/test_gate_deferral_execution_points.py
+index 49372003..e3435cac 100644
+--- a/tests/unit/test_gate_deferral_execution_points.py
++++ b/tests/unit/test_gate_deferral_execution_points.py
+@@ -353,3 +353,16 @@ def test_G2_episode_max_seconds_is_hard_capped_against_1e9(monkeypatch):
+    monkeypatch.setattr(gd, "GATE_DEFERRAL_EPISODE_MAX_SECONDS", 10800)
+    assert gd.episode_max_seconds() == 10800.0, (
+        "the default episode is not 10800s")
+
+
+{+def test_no_environment_can_raise_the_episode_ceiling_past_six_hours(+}
+{+        monkeypatch):+}
+{+    """Kills ABSCEIL (`_ABSOLUTE_EPISODE_CEILING = 1e9`). The test above+}
+{+    compares against the module's own constant, so it moves with it; this one+}
+{+    names the number: with both settings at 1e9 the effective ceiling is+}
+{+    21600 s."""+}
+{+    monkeypatch.setattr(gd, "GATE_DEFERRAL_EPISODE_MAX_CEILING", 1e9)+}
+{+    monkeypatch.setattr(gd, "GATE_DEFERRAL_EPISODE_MAX_SECONDS", 1e9)+}
+{+    assert gd.episode_max_seconds() == 21600.0, (+}
+{+        f"episode_max_seconds()={gd.episode_max_seconds()}, not 21600.0 s: "+}
+{+        "the absolute six-hour ceiling no longer bounds the episode")+}
+# ENDED: 2026-09-24T06:50:07Z
+BARE_RC=0

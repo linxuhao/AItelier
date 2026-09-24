@@ -1,0 +1,69 @@
+# CMD: python3 tools/mutation_catalog/run_mutations.py --report
+# CWD: /home/linxuhao/.AItelier/worktrees-scratch/ga10
+# HEAD: 96721904a7d9b6b461109cfcded6d0abd03f469c porcelain_lines=2
+# RUNNER: host
+# ENV: (none)
+# FILE: tools/mutation_catalog/run_mutations.py sha256=ae4112383816b8b0a92472047a4aed48d79b55108211535c28be84bd9b561cfc
+# STARTED: 2026-09-24T06:49:38Z
+# Mutation runner report, merged from 4 control(s) and 48 mutation(s); generated 2026-09-24 06:49:38 UTC by `python tools/mutation_catalog/run_mutations.py --report`
+# head(s) measured: b104f18c2e7e1d0f0c59e99cb32a077e7896dd28
+
+| name | status | ignition (targeted / full) | targeted bare RC | full bare RC | killers (targeted / full) | killer tests | log |
+|---|---|---|---|---|---|---|---|
+| CONTROL_shard1of4 | control | – | 0 | 0 | 78 passed, 1 warning in 11.40s / 4072 passed, 9 skipped, 4 warnings in 330.77s (0:05:30) | reds: 0 / 0 | `CONTROL_shard1of4.txt` |
+| CONTROL_shard2of4 | control | – | 0 | 0 | 41 passed, 1 warning in 4.67s / 4072 passed, 9 skipped, 4 warnings in 318.74s (0:05:18) | reds: 0 / 0 | `CONTROL_shard2of4.txt` |
+| CONTROL_shard3of4 | control | – | 0 | 0 | 93 passed, 1 warning in 11.87s / 4072 passed, 9 skipped, 4 warnings in 329.73s (0:05:29) | reds: 0 / 0 | `CONTROL_shard3of4.txt` |
+| CONTROL_shard4of4 | control | – | 0 | 0 | 78 passed, 1 warning in 11.42s / 4072 passed, 9 skipped, 4 warnings in 330.21s (0:05:30) | reds: 0 / 0 | `CONTROL_shard4of4.txt` |
+| N9 | killed | file_reads 1 / 24 | 1 | 1 | 1 / 1 | test_the_tool_doc_names_the_no_verdict_gate_as_absent_not_a_loop | `N9.txt` |
+| M21 | killed | line_hits 1 / 101 | 1 | 1 | 1 / 2 | test_the_r4_shaped_witness_flips_under_the_literal_m21; test_M21_the_tree_witnesses_go_red_on_the_actual_mutation[line.startswith(_REPO_GATE_UNMEASURED_PREFIX)-_REPO_GATE_UNMEASURED_PREFIX | `M21.txt` |
+| M21b | killed | line_hits 1 / 28 | 1 | 1 | 1 / 1 | test_the_r4_shaped_witness_flips_under_the_literal_m21b | `M21b.txt` |
+| G2 | killed | line_hits 2 / 2 | 1 | 1 | 1 / 1 | test_the_effective_episode_ceiling_is_ten_thousand_eight_hundred_as_loaded | `G2.txt` |
+| G2b | killed | line_hits 2 / 2 | 1 | 1 | 1 / 3 | test_a_timed_out_command_keeps_the_loop_responsive; test_escalating_to_sigkill_keeps_the_loop_responsive; test_the_effective_episode_ceiling_is_ten_thousand_eight_hundred_as_loaded | `G2b.txt` |
+| DUPIMPL | killed | file_reads 1 / 22 | 1 | 1 | 1 / 3 | test_a_timed_out_command_keeps_the_loop_responsive; test_cancelling_an_ordinary_command_keeps_the_loop_responsive; test_no_verbatim_previous_line_dup_in_non_test_code | `DUPIMPL.txt` |
+| RESTART | killed | line_hits 5 / 33 | 1 | 1 | 1 / 7 | test_a_timed_out_command_keeps_the_loop_responsive; test_cancelling_an_ordinary_command_keeps_the_loop_responsive; test_during_a_deferral_hold_the_step_claim_is_held_not_released; test_the_deferral_ledger_is_not_persisted_so_a_restart_re_measures (+3) | `RESTART.txt` |
+| ABSCEIL | killed | line_hits 2 / 2 | 1 | 1 | 1 / 1 | test_no_environment_can_raise_the_episode_ceiling_past_six_hours | `ABSCEIL.txt` |
+| ABSENCEWORD | killed | line_hits 1 / 2 | 1 | 1 | 1 / 1 | test_the_absent_terminal_checker_refuses_a_sentence_that_blames_the_code | `ABSENCEWORD.txt` |
+| ABSREL | killed | line_hits 21 / 118 | 1 | 1 | 1 / 1 | test_an_absence_whose_failures_are_all_known_red_still_does_not_pass | `ABSREL.txt` |
+| ABSSEED | killed | line_hits 11 / 80 | 1 | 1 | 1 / 1 | test_a_declared_absence_never_seeds_a_baseline_and_never_passes_relative | `ABSSEED.txt` |
+| ABSSTATE | killed | line_hits 8 / 63 | 1 | 1 | 1 / 1 | test_a_declared_absence_never_seeds_a_baseline_and_never_passes_relative | `ABSSTATE.txt` |
+| ABSTERM | killed | line_hits 6 / 8 | 1 | 1 | 1 / 1 | test_the_absent_terminal_checker_refuses_a_sentence_that_blames_the_code | `ABSTERM.txt` |
+| ABSTERM2 | killed | line_hits 4 / 5 | 1 | 1 | 1 / 1 | test_the_absent_terminal_checker_refuses_a_sentence_that_blames_the_code | `ABSTERM2.txt` |
+| ABSTERMTEXT | killed | line_hits 2 / 2 | 1 | 1 | 2 / 3 | test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence; test_an_expired_absence_names_the_absence_and_never_the_code; test_the_absent_terminal_checker_refuses_a_sentence_that_blames_the_code | `ABSTERMTEXT.txt` |
+| ABSWRITE | killed | line_hits 11 / 80 | 1 | 1 | 1 / 1 | test_a_declared_absence_never_seeds_a_baseline_and_never_passes_relative | `ABSWRITE.txt` |
+| ATTEMPTS3 | killed | line_hits 1 / 13 | 1 | 1 | 1 / 1 | test_one_step_holds_the_scheduler_for_at_most_one_gate_run | `ATTEMPTS3.txt` |
+| CEILCLAMP | killed | line_hits 12 / 323 | 1 | 1 | 2 / 3 | test_G2_episode_max_seconds_is_hard_capped_against_1e9; test_no_environment_can_raise_the_episode_ceiling_past_six_hours; test_the_episode_ceiling_cannot_be_removed | `CEILCLAMP.txt` |
+| D1 | killed | line_hits 17 / 17 | 1 | 1 | 2 / 2 | test_a_declaration_survives_output_far_past_the_retention_bound; test_re_acquisition_is_bounded_and_the_last_verdict_is_the_reported_one | `D1.txt` |
+| D4 | killed | line_hits 14 / 14 | 1 | 1 | 9 / 11 | test_a_gate_that_finally_answers_clears_the_deferral; test_pole_a_a_ceiling_far_past_the_window_spends_one_implement_cycle; test_pole_b_a_zero_ceiling_is_clamped_and_cannot_charge_the_absence; test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence (+7) | `D4.txt` |
+| DECLNONE | killed | line_hits 1 / 45 | 1 | 1 | 1 / 1 | test_a_declaration_survives_output_far_past_the_retention_bound | `DECLNONE.txt` |
+| DUPHITS | killed | file_reads 1 / 4 | 1 | 1 | 1 / 2 | test_named_test_repeats_are_pinned_and_current; test_the_checker_file_is_clean_under_its_own_rule | `DUPHITS.txt` |
+| DUPYIELD | killed | file_reads 1 / 4 | 1 | 1 | 1 / 2 | test_named_test_repeats_are_pinned_and_current; test_the_checker_file_is_clean_under_its_own_rule | `DUPYIELD.txt` |
+| H2 | killed | line_hits 30 / 32 | 1 | 1 | 8 / 11 | test_a_gate_that_finally_answers_clears_the_deferral; test_pole_a_a_ceiling_far_past_the_window_spends_one_implement_cycle; test_pole_b_a_zero_ceiling_is_clamped_and_cannot_charge_the_absence; test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence (+7) | `H2.txt` |
+| HOST_HOLD_INERT | killed | line_hits 31 / 32 | 1 | 1 | 7 / 8 | test_a_gate_that_finally_answers_clears_the_deferral; test_pole_a_a_ceiling_far_past_the_window_spends_one_implement_cycle; test_pole_b_a_zero_ceiling_is_clamped_and_cannot_charge_the_absence; test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence (+4) | `HOST_HOLD_INERT.txt` |
+| M19 | killed | line_hits 1 / 3 | 1 | 1 | 1 / 3 | test_unreliable_repo_gate_identity_never_seeds_or_changes_baseline; test_a_bounded_fragment_is_not_a_record_on_its_own; test_a_truncated_gate_with_no_record_at_all_is_a_red | `M19.txt` |
+| M2 | killed | line_hits 1 / 45 | 1 | 1 | 1 / 2 | test_escalating_to_sigkill_keeps_the_loop_responsive; test_a_bounded_fragment_is_not_a_record_on_its_own | `M2.txt` |
+| M21BPAIR | killed | line_hits 2 / 51 | 1 | 1 | 1 / 3 | test_a_log_echo_of_the_case_prefix_mid_line_is_not_a_case_record; test_a_mid_line_echo_kills_the_in_operator_on_the_case_channel; test_the_r4_shaped_witness_flips_under_the_literal_m21b | `M21BPAIR.txt` |
+| M21PAIR | killed | line_hits 2 / 123 | 1 | 1 | 1 / 6 | test_a_log_echo_of_the_prefix_mid_line_is_not_a_declaration; test_a_mid_line_echo_kills_the_in_operator_on_the_declaration_channel; test_a_mid_line_prefix_with_valid_json_after_it_is_still_not_a_record; test_the_r4_shaped_witness_flips_under_the_literal_m21 (+2) | `M21PAIR.txt` |
+| NEVEREXPIRE | killed | line_hits 149 / 175 | 1 | 1 | 1 / 3 | test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence; test_an_expired_absence_names_the_absence_and_never_the_code; test_the_episode_does_not_restart_on_every_tick | `NEVEREXPIRE.txt` |
+| OBSERVENONE | killed | line_hits 38 / 107 | 1 | 1 | 8 / 14 | test_a_gate_that_finally_answers_clears_the_deferral; test_pole_a_a_ceiling_far_past_the_window_spends_one_implement_cycle; test_pole_b_a_zero_ceiling_is_clamped_and_cannot_charge_the_absence; test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence (+10) | `OBSERVENONE.txt` |
+| RC2 | killed | line_hits 8 / 28 | 1 | 1 | 8 / 27 | test_four_real_reds_still_exhaust_the_cycle_limit; test_real_repo_gate_a_then_a_plus_b_exposes_b_and_keeps_detail_stable; test_real_repo_gate_fixed_then_rebroken_case_becomes_new; test_repo_gate_without_state_dir_stays_strict (+23) | `RC2.txt` |
+| READABSENCE | killed | line_hits 27 / 178 | 1 | 1 | 1 / 3 | test_a_gate_that_finally_answers_clears_the_deferral; test_the_tick_refuses_to_claim_while_the_gate_is_silent; test_a_report_that_graded_the_code_states_no_absence | `READABSENCE.txt` |
+| READNONDICT | killed | line_hits 32 / 183 | 1 | 1 | 4 / 4 | test_a_report_that_is_not_an_object_states_no_absence[3]; test_a_report_that_is_not_an_object_states_no_absence[absent]; test_a_report_that_is_not_an_object_states_no_absence[payload0]; test_a_report_that_is_not_an_object_states_no_absence[payload1] | `READNONDICT.txt` |
+| RETFLAG | killed | line_hits 8 / 59 | 1 | 1 | 8 / 9 | test_a_gate_that_finally_answers_clears_the_deferral; test_pole_a_a_ceiling_far_past_the_window_spends_one_implement_cycle; test_pole_b_a_zero_ceiling_is_clamped_and_cannot_charge_the_absence; test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence (+5) | `RETFLAG.txt` |
+| S1 | killed | line_hits 36 / 71 | 1 | 1 | 10 / 10 | test_a_gate_that_finally_answers_clears_the_deferral; test_pole_a_a_ceiling_far_past_the_window_spends_one_implement_cycle; test_pole_b_a_zero_ceiling_is_clamped_and_cannot_charge_the_absence; test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence (+6) | `S1.txt` |
+| SCHEDROWRETRY | killed | line_hits 127 / 129 | 1 | 1 | 7 / 9 | test_a_gate_that_finally_answers_clears_the_deferral; test_pole_a_a_ceiling_far_past_the_window_spends_one_implement_cycle; test_pole_b_a_zero_ceiling_is_clamped_and_cannot_charge_the_absence; test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence (+5) | `SCHEDROWRETRY.txt` |
+| SCHEDROWSTATUS | killed | line_hits 127 / 129 | 1 | 1 | 7 / 9 | test_a_gate_that_finally_answers_clears_the_deferral; test_pole_a_a_ceiling_far_past_the_window_spends_one_implement_cycle; test_pole_b_a_zero_ceiling_is_clamped_and_cannot_charge_the_absence; test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence (+5) | `SCHEDROWSTATUS.txt` |
+| TAILONLY2 | killed | line_hits 1 / 45 | 1 | 1 | 1 / 1 | test_a_declaration_survives_output_far_past_the_retention_bound | `TAILONLY2.txt` |
+| TERMREASONCYCLE | killed | line_hits 2 / 3 | 1 | 1 | 1 / 2 | test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence; test_an_expired_absence_names_the_absence_and_never_the_code | `TERMREASONCYCLE.txt` |
+| TICK_HOLD_INERT | killed | line_hits 153 / 192 | 1 | 1 | 2 / 5 | test_pole_c_a_tiny_ceiling_inside_the_window_is_honoured_and_uncharged; test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them; test_a_timed_out_command_keeps_the_loop_responsive; test_during_a_deferral_hold_the_step_claim_is_held_not_released (+1) | `TICK_HOLD_INERT.txt` |
+| TIMEOUT60 | killed | line_hits 1 / 13 | 1 | 1 | 2 / 2 | test_the_budget_goes_red_and_names_the_number_that_moved[3-gate; test_the_budget_goes_red_and_names_the_number_that_moved[4-gate | `TIMEOUT60.txt` |
+| TIMEOUTBIG | killed | line_hits 1 / 13 | 1 | 1 | 1 / 13 | test_four_real_reds_still_exhaust_the_cycle_limit; test_pole_a_a_ceiling_far_past_the_window_spends_one_implement_cycle; test_one_step_holds_the_scheduler_for_at_most_one_gate_run; test_real_repo_gate_a_then_a_plus_b_exposes_b_and_keeps_detail_stable (+9) | `TIMEOUTBIG.txt` |
+| TIMEOUT_NOT_UNMEASURED | killed | line_hits 1 / 43 | 1 | 1 | 1 / 2 | test_a_killed_gate_is_unmeasured_and_its_returncode_is_not_why; test_a_runner_that_cannot_start_is_unmeasured | `TIMEOUT_NOT_UNMEASURED.txt` |
+| VALVEBYPASS | killed | line_hits 10 / 45 | 1 | 1 | 2 / 2 | test_the_valve_is_a_simple_bound_and_the_deferral_path_cannot_reach_it; test_the_valve_fires_on_excess_claims_regardless_of_episode | `VALVEBYPASS.txt` |
+| VALVEOFF | killed | line_hits 5 / 40 | 1 | 1 | 4 / 5 | test_the_valve_is_a_simple_bound_and_the_deferral_path_cannot_reach_it; test_the_episode_ceiling_ends_the_run_before_the_valve_is_needed; test_the_valve_fires_on_excess_claims_regardless_of_episode; test_the_valve_is_narrow_not_blanket (+1) | `VALVEOFF.txt` |
+| VALVEREACH | killed | line_hits 115 / 115 | 1 | 1 | 3 / 3 | test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them; test_during_a_deferral_hold_the_step_claim_is_held_not_released; test_the_tick_refuses_to_claim_while_the_gate_is_silent | `VALVEREACH.txt` |
+| WAITCLAMP | killed | line_hits 1 / 181 | 1 | 1 | 1 / 1 | test_the_wait_cannot_be_widened_until_the_ceiling_disappears | `WAITCLAMP.txt` |
+
+# killed: 48 of 48
+# not killed: none
+# ENDED: 2026-09-24T06:49:38Z
+BARE_RC=0

@@ -1,0 +1,108 @@
+# CMD: python3 /home/linxuhao/.AItelier/director/reports/gateacct-r9-review-20260923/probes/p_crit.py /home/linxuhao/.AItelier/worktrees-scratch/ga10-base
+# CWD: /home/linxuhao/.AItelier/worktrees-scratch/ga10-base
+# HEAD: dcfa78729628f0cbbbc703a44d0e97098a3b9c8f porcelain_lines=0
+# RUNNER: docker run --rm --init -m 3g --name ga10-crit-b --network aitelier_default -u 1000:1000 -e HOME=/home/linxuhao -e PYTHONPATH=/home/linxuhao/.AItelier/worktrees-scratch/ga10-base -e PYTHONDONTWRITEBYTECODE=1 -e SEARXNG_URL=http://linxuhaserver:8888 -v /home/linxuhao/AItelier:/app -v /home/linxuhao/AItelier:/home/linxuhao/AItelier -v /home/linxuhao/.AItelier:/home/linxuhao/.AItelier -w /home/linxuhao/.AItelier/worktrees-scratch/ga10-base aitelier:latest python3 /home/linxuhao/.AItelier/director/reports/gateacct-r9-review-20260923/probes/p_crit.py /home/linxuhao/.AItelier/worktrees-scratch/ga10-base
+# ENV: (none)
+# FILE: /home/linxuhao/.AItelier/director/reports/gateacct-r9-review-20260923/probes/p_crit.py sha256=9168048d62211a9482d1998bbc079242543ce88bb8ee2aa3fac4e7c5cb73bb98
+# STARTED: 2026-09-24T06:49:37Z
+{
+ "c7_exit_code_sweep": {
+  "0": "measured_pass",
+  "1": "measured_fail",
+  "2": "measured_fail",
+  "3": "measured_fail",
+  "124": "measured_fail",
+  "137": "measured_fail",
+  "255": "measured_fail",
+  "-1": "measured_fail",
+  "-9": "measured_fail"
+ },
+ "c7_any_unmeasured": [],
+ "c7_has_legacy_constant": false,
+ "c7_contract_error_rc2": "measured_fail",
+ "m21_witness_header_len": 30,
+ "m21_prefix_len": 30,
+ "m21_witness_declaration": null,
+ "m21_witness_outcome": "measured_fail",
+ "c5_output_truncated": true,
+ "c5_declaration_read": {
+  "state": "blocked",
+  "reason": "godot builder 409"
+ },
+ "c5_measured": "unmeasured",
+ "c5_retained_output_chars": 2000,
+ "c5_declaration_in_retained_tail": false,
+ "c1_absence_runs": [
+  {
+   "run": 0,
+   "passed": false,
+   "passed_relative": false,
+   "new_failures": [
+    "repo_gate:run_tests.sh was NOT measured (1 attempt(s)): AITELIER_REPO_GATE_UNMEASURED={\"state\":\"blocked\",\"reason\":\"godot builder 409\"}"
+   ],
+   "baseline_state": "unmeasured",
+   "failures": [
+    "repo_gate:run_tests.sh was NOT measured (1 attempt(s)): AITELIER_REPO_GATE_UNMEASURED={\"state\":\"blocked\",\"reason\":\"godot builder 409\"}"
+   ],
+   "repo_gate_unmeasured": true,
+   "deferred": null
+  },
+  {
+   "run": 1,
+   "passed": false,
+   "passed_relative": false,
+   "new_failures": [
+    "repo_gate:run_tests.sh was NOT measured (1 attempt(s)): AITELIER_REPO_GATE_UNMEASURED={\"state\":\"blocked\",\"reason\":\"godot builder 409\"}"
+   ],
+   "baseline_state": "unmeasured",
+   "failures": [
+    "repo_gate:run_tests.sh was NOT measured (1 attempt(s)): AITELIER_REPO_GATE_UNMEASURED={\"state\":\"blocked\",\"reason\":\"godot builder 409\"}"
+   ],
+   "repo_gate_unmeasured": true,
+   "deferred": null
+  },
+  {
+   "run": 2,
+   "passed": false,
+   "passed_relative": false,
+   "new_failures": [
+    "repo_gate:run_tests.sh was NOT measured (1 attempt(s)): AITELIER_REPO_GATE_UNMEASURED={\"state\":\"blocked\",\"reason\":\"godot builder 409\"}"
+   ],
+   "baseline_state": "unmeasured",
+   "failures": [
+    "repo_gate:run_tests.sh was NOT measured (1 attempt(s)): AITELIER_REPO_GATE_UNMEASURED={\"state\":\"blocked\",\"reason\":\"godot builder 409\"}"
+   ],
+   "repo_gate_unmeasured": true,
+   "deferred": null
+  },
+  {
+   "run": 3,
+   "passed": false,
+   "passed_relative": false,
+   "new_failures": [
+    "repo_gate:run_tests.sh was NOT measured (1 attempt(s)): AITELIER_REPO_GATE_UNMEASURED={\"state\":\"blocked\",\"reason\":\"godot builder 409\"}"
+   ],
+   "baseline_state": "unmeasured",
+   "failures": [
+    "repo_gate:run_tests.sh was NOT measured (1 attempt(s)): AITELIER_REPO_GATE_UNMEASURED={\"state\":\"blocked\",\"reason\":\"godot builder 409\"}"
+   ],
+   "repo_gate_unmeasured": true,
+   "deferred": null
+  }
+ ],
+ "c1_baseline_files": [],
+ "c1_measured_red_baseline": [
+  {
+   "failures": [
+    "repo_gate:run_tests.sh#compile/A"
+   ],
+   "updated_at": 1790232579.5106652
+  }
+ ],
+ "held_keys": "AttributeError(\"module 'core.gate_deferral' has no attribute 'reset'\")",
+ "hold_gate_invocations_per_step": 1,
+ "hold_step_seconds_with_instant_gate": 0.33,
+ "REPO_GATE_TIMEOUT": 5400
+}
+# ENDED: 2026-09-24T06:49:40Z
+BARE_RC=0

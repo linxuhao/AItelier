@@ -1,0 +1,235 @@
+# TERMREASONCYCLE (behaviour): round 8's `ABSTERM2` edit: terminal_reason says `Cycle limit exceeded`.
+# head=b104f18c2e7e1d0f0c59e99cb32a077e7896dd28
+# worktree=/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-pkuhubic/tree (removed)
+# started=2026-09-24 06:16:51 UTC ended=2026-09-24 06:22:32 UTC
+# replacement lines={"core/gate_deferral.py": [176, 177]}
+
+## diff applied
+diff --git a/core/gate_deferral.py b/core/gate_deferral.py
+index 79f097d8..ec178676 100644
+--- a/core/gate_deferral.py
++++ b/core/gate_deferral.py
+@@ -173,7 +173,8 @@ class DeferralLedger:
+         """
+         episode = self.episodes.get(run_id)
+         gate = (episode.gate if episode else "") or "the repository gate"
+-        return f"{ABSENCE_TERMINAL} ({gate}, {self.episode_count(run_id)} attempt(s))"
++        return ("Cycle limit exceeded: the code "
++                "regressed and gate did not run: no verdict was measured")
+ 
+     def episode_count(self, run_id: str) -> int:
+         episode = self.episodes.get(run_id)
+
+## targeted scope: /usr/local/bin/python -m pytest -q -rfE -p no:cacheprovider -p ignition_plugin tests/unit/test_gate_deferral_execution_points.py tests/unit/test_gate_deferral_is_accounted.py
+# cwd=/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-pkuhubic/tree
+...................F..........                                           [100%]
+=================================== FAILURES ===================================
+_________ test_an_expired_absence_names_the_absence_and_never_the_code _________
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-17/test_an_expired_absence_names_0')
+ledger = DeferralLedger(episodes={'r': _Episode(started_at=1000.0, last_absence_at=11801.0, absences=2, gate='run_tests.sh')})
+
+    def test_an_expired_absence_names_the_absence_and_never_the_code(tmp_path,
+                                                                     ledger):
+        """Kills "fail with `Cycle limit exceeded`". The run may end past the
+        ceiling; the sentence it ends with must name the gate that never spoke."""
+        path = _absence_report(tmp_path)
+        gd.observe_run(None, "r", now=1000.0, report_path=path)
+        out = gd.observe_run(
+            None, "r", now=1000.0 + gd.episode_max_seconds() + 1,
+            report_path=path)
+    
+        assert out["state"] == "expired"
+        assert gd.ABSENCE_TERMINAL in out["reason"]
+>       assert gd.absent_terminal_names_no_failure(out["reason"])
+E       AssertionError: assert False
+E        +  where False = <function absent_terminal_names_no_failure at 0x71b76c630180>('Cycle limit exceeded: the code regressed and gate did not run: no verdict was measured')
+E        +    where <function absent_terminal_names_no_failure at 0x71b76c630180> = gd.absent_terminal_names_no_failure
+
+tests/unit/test_gate_deferral_is_accounted.py:109: AssertionError
+=============================== warnings summary ===============================
+../../../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_gate_deferral_is_accounted.py::test_an_expired_absence_names_the_absence_and_never_the_code
+1 failed, 29 passed, 1 warning in 2.29s
+Exception ignored in: <function _removeHandlerRef at 0x71b776a7ccc0>
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/logging/__init__.py", line 882, in _removeHandlerRef
+  File "/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-pkuhubic/tree/tools/mutation_catalog/ignition_plugin.py", line 63, in _on_line
+TypeError: 'NoneType' object is not callable
+
+BARE_RC_TARGETED=1
+IGNITION_TARGETED={"file_reads": 0, "file_reads_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-pkuhubic/tree/core/gate_deferral.py": 0}, "igniting_tests": ["tests/unit/test_gate_deferral_is_accounted.py::test_an_expired_absence_names_the_absence_and_never_the_code", "tests/unit/test_gate_deferral_is_accounted.py::test_the_episode_does_not_restart_on_every_tick"], "line_hits": 2, "line_hits_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-pkuhubic/tree/core/gate_deferral.py": 2}, "monitoring_tool_id": 4, "mutated_modules_imported": ["/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-pkuhubic/tree/core/gate_deferral.py"], "source_readers": []}
+
+## full scope: /usr/local/bin/python -m pytest -q -rfE -p no:cacheprovider -p ignition_plugin tests/unit tests/skillflow
+# cwd=/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-pkuhubic/tree
+........................................................................ [  1%]
+........................................................................ [  3%]
+........................................................................ [  5%]
+........................................................................ [  7%]
+........................................................................ [  8%]
+........................................................................ [ 10%]
+........................................................................ [ 12%]
+........................................................................ [ 14%]
+........................................................................ [ 15%]
+........................................................................ [ 17%]
+........................................................................ [ 19%]
+........................................................................ [ 21%]
+........................................................................ [ 22%]
+........................................................................ [ 24%]
+........................................................................ [ 26%]
+........................................................................ [ 28%]
+........................................................................ [ 29%]
+........................................................................ [ 31%]
+........................................................................ [ 33%]
+.F...................................................................... [ 35%]
+.......................................................................s [ 37%]
+sssssss................................................................. [ 38%]
+........................................................................ [ 40%]
+........................................................................ [ 42%]
+........................................................................ [ 44%]
+........................................................................ [ 45%]
+........................................................................ [ 47%]
+........................................................................ [ 49%]
+........................................................................ [ 51%]
+........................................................................ [ 52%]
+........................................................................ [ 54%]
+.............s.......................................................... [ 56%]
+........................................................................ [ 58%]
+........................................................................ [ 59%]
+........................................................................ [ 61%]
+........................................................................ [ 63%]
+........................................................................ [ 65%]
+........................................................................ [ 67%]
+........................................................................ [ 68%]
+........................................................................ [ 70%]
+........................................................................ [ 72%]
+........................................................................ [ 74%]
+........................................................................ [ 75%]
+........................................................................ [ 77%]
+........................................................................ [ 79%]
+........................................................................ [ 81%]
+........................................................................ [ 82%]
+........................................................................ [ 84%]
+........................................................................ [ 86%]
+........................................................................ [ 88%]
+........................................................................ [ 89%]
+........................................................................ [ 91%]
+........................................................................ [ 93%]
+........................................................................ [ 95%]
+........................................................................ [ 97%]
+........................................................................ [ 98%]
+............F....................................                        [100%]
+=================================== FAILURES ===================================
+_________ test_an_expired_absence_names_the_absence_and_never_the_code _________
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-18/test_an_expired_absence_names_0')
+ledger = DeferralLedger(episodes={'r': _Episode(started_at=1000.0, last_absence_at=11801.0, absences=2, gate='run_tests.sh')})
+
+    def test_an_expired_absence_names_the_absence_and_never_the_code(tmp_path,
+                                                                     ledger):
+        """Kills "fail with `Cycle limit exceeded`". The run may end past the
+        ceiling; the sentence it ends with must name the gate that never spoke."""
+        path = _absence_report(tmp_path)
+        gd.observe_run(None, "r", now=1000.0, report_path=path)
+        out = gd.observe_run(
+            None, "r", now=1000.0 + gd.episode_max_seconds() + 1,
+            report_path=path)
+    
+        assert out["state"] == "expired"
+        assert gd.ABSENCE_TERMINAL in out["reason"]
+>       assert gd.absent_terminal_names_no_failure(out["reason"])
+E       AssertionError: assert False
+E        +  where False = <function absent_terminal_names_no_failure at 0x78e5e92f8180>('Cycle limit exceeded: the code regressed and gate did not run: no verdict was measured')
+E        +    where <function absent_terminal_names_no_failure at 0x78e5e92f8180> = gd.absent_terminal_names_no_failure
+
+tests/unit/test_gate_deferral_is_accounted.py:109: AssertionError
+__________ test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence __________
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-18/test_pole_c_a_tiny_ceiling_end0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x78e5dcbd2810>
+
+    def test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence(
+            tmp_path, monkeypatch):
+        """(C′) ceiling tiny, and small enough to be HONORED (unlike 0, which is a
+        mis-set knob), observed past the ceiling. Review measured this pole on the
+        r4 candidate as `implement_runs=4` + `Cycle limit exceeded`.
+    
+        It must now be `implement_runs == 1` and a terminal status whose reason
+        names the absence.
+        """
+        counter = tmp_path / "calls.txt"
+        sf, run_id = _wire(tmp_path, monkeypatch, episode_max=3, wait=1,
+                           counter=counter, tail=_SILENT_TAIL)
+        assert gate_deferral.episode_max_seconds() == 3
+        _prime_ledger(sf, run_id)
+    
+        implement_runs, statuses, outcomes, nodes = _drive(
+            sf, run_id, monkeypatch, ticks=20, clock_step=3)
+        _assert_test_row_untouched(sf, run_id, run_status="failed")
+    
+        assert implement_runs == 1, implement_runs
+        assert nodes[-1] == "test_gate_absent", nodes
+        endings = [o for o in outcomes if str(o).startswith("terminal:")]
+        assert endings, outcomes
+>       assert gate_deferral.absent_terminal_names_no_failure(endings[0])
+E       AssertionError: assert False
+E        +  where False = <function absent_terminal_names_no_failure at 0x78e5e92f8180>('terminal:Cycle limit exceeded: the code regressed and gate did not run: no verdict was measured')
+E        +    where <function absent_terminal_names_no_failure at 0x78e5e92f8180> = gate_deferral.absent_terminal_names_no_failure
+
+tests/skillflow/test_coding_impl_gate_absence.py:356: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+=============================== warnings summary ===============================
+../../../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+tests/unit/test_bash_admission_lifetime.py::test_a_second_cancellation_during_cleanup_still_ends_the_writer
+  /usr/local/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <function BaseSubprocessTransport.__del__ at 0x78e5f336bd80>
+  
+  Traceback (most recent call last):
+    File "/usr/local/lib/python3.12/asyncio/base_subprocess.py", line 126, in __del__
+      self.close()
+    File "/usr/local/lib/python3.12/asyncio/base_subprocess.py", line 104, in close
+      proto.pipe.close()
+    File "/usr/local/lib/python3.12/asyncio/unix_events.py", line 568, in close
+      self._close(None)
+    File "/usr/local/lib/python3.12/asyncio/unix_events.py", line 592, in _close
+      self._loop.call_soon(self._call_connection_lost, exc)
+    File "/usr/local/lib/python3.12/asyncio/base_events.py", line 799, in call_soon
+      self._check_closed()
+    File "/usr/local/lib/python3.12/asyncio/base_events.py", line 545, in _check_closed
+      raise RuntimeError('Event loop is closed')
+  RuntimeError: Event loop is closed
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/unit/test_public_read_hardening.py::TestAnUnknownJwtKidCostsNoNetworkCall::test_a_rejected_kid_is_remembered
+tests/unit/test_public_read_hardening.py::TestAnUnknownJwtKidCostsNoNetworkCall::test_the_bad_kid_table_is_bounded
+  /usr/local/lib/python3.12/site-packages/jwt/api_jwt.py:149: InsecureKeyLengthWarning: The HMAC key is 1 bytes long, which is below the minimum recommended length of 32 bytes for SHA256. See RFC 7518 Section 3.2.
+    return self._jws.encode(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_gate_deferral_is_accounted.py::test_an_expired_absence_names_the_absence_and_never_the_code
+FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence
+2 failed, 4070 passed, 9 skipped, 4 warnings in 327.45s (0:05:27)
+
+BARE_RC_FULL=1
+IGNITION_FULL={"file_reads": 8, "file_reads_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-pkuhubic/tree/core/gate_deferral.py": 8}, "igniting_tests": ["tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence", "tests/unit/test_gate_deferral_is_accounted.py::test_an_expired_absence_names_the_absence_and_never_the_code", "tests/unit/test_gate_deferral_is_accounted.py::test_the_episode_does_not_restart_on_every_tick"], "line_hits": 3, "line_hits_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-pkuhubic/tree/core/gate_deferral.py": 3}, "monitoring_tool_id": 4, "mutated_modules_imported": ["/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-pkuhubic/tree/core/gate_deferral.py"], "source_readers": ["tests/unit/test_checkpoint_reject_target.py::test_every_reject_checkpoint_caller_passes_redirect_to[core]", "tests/unit/test_datadir_guardrail.py::test_no_home_paths_outside_datadir", "tests/unit/test_every_step_driver_handles_cancellation.py::test_every_claim_holding_loop_handles_cancellation", "tests/unit/test_logs_are_bounded.py::test_no_durable_log_is_opened_for_append_without_rotation", "tests/unit/test_no_by_name_graph_lookup_during_a_run.py::test_no_run_scoped_lookup_resolves_a_graph_by_name", "tests/unit/test_no_self_call_collapse.py::test_no_python_source_is_a_self_call_and_nothing_else", "tests/unit/test_no_verbatim_previous_line_dup.py::test_named_test_repeats_are_pinned_and_current", "tests/unit/test_no_verbatim_previous_line_dup.py::test_no_verbatim_previous_line_dup_in_non_test_code"]}
+
+# control targeted reds=[]
+# control full reds=[]
+# targeted killers=['tests/unit/test_gate_deferral_is_accounted.py::test_an_expired_absence_names_the_absence_and_never_the_code']
+# targeted source-text witnesses=[]
+# full killers=['tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence', 'tests/unit/test_gate_deferral_is_accounted.py::test_an_expired_absence_names_the_absence_and_never_the_code']
+# full source-text witnesses=[]
+# porcelain after restore=''
+# status=killed

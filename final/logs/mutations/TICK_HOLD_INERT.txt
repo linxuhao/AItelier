@@ -1,0 +1,568 @@
+# TICK_HOLD_INERT (behaviour): The scheduler tick's deferral check is bypassed: the tick never returns early for a silent gate (core/scheduler.py, the `silent` branch never taken).
+# head=b104f18c2e7e1d0f0c59e99cb32a077e7896dd28
+# worktree=/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-__ho2cgz/tree (removed)
+# started=2026-09-24 06:23:11 UTC ended=2026-09-24 06:29:36 UTC
+# replacement lines={"core/scheduler.py": [1224]}
+
+## diff applied
+diff --git a/core/scheduler.py b/core/scheduler.py
+index a9d28fc4..f2ff454f 100644
+--- a/core/scheduler.py
++++ b/core/scheduler.py
+@@ -1221,7 +1221,7 @@ async def _run_skillflow_tick(project_id: str, loop):
+     # never as a code failure. See core/gate_deferral.py for why the wall clock
+     # bound and the accounting rule are not in conflict.
+     deferral = gate_deferral.observe_run(sf, run_id)
+-    if deferral["state"] == "silent":
++    if False:
+         tick_log(project_id, "gate_deferral_hold", run=run_id[:8],
+                  gate=deferral.get("gate") or "",
+                  remaining=f"{deferral['remaining']:.0f}s")
+
+## targeted scope: /usr/local/bin/python -m pytest -q -rfE -p no:cacheprovider -p ignition_plugin tests/skillflow/test_coding_impl_gate_absence.py
+# cwd=/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-__ho2cgz/tree
+..F...F.                                                                 [100%]
+=================================== FAILURES ===================================
+____ test_pole_c_a_tiny_ceiling_inside_the_window_is_honoured_and_uncharged ____
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-20/test_pole_c_a_tiny_ceiling_ins0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x719aa65cf830>
+
+    def test_pole_c_a_tiny_ceiling_inside_the_window_is_honoured_and_uncharged(
+            tmp_path, monkeypatch):
+        """(c) ceiling tiny (3 s) and HONOURED, observed for a window shorter than
+        the ceiling (20 ticks x 0.1 s = 2 s): the absence never expires, so the run
+        stays silent and non-terminal, `implement_runs == 1`, and the rows the hold
+        parks are untouched. This is the non-expiring small-ceiling pole of
+        `an-expired-absence-is-never-charged-to-the-implementer`; the expiring one
+        is `test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence` (C′).
+        """
+        counter = tmp_path / "calls.txt"
+        sf, run_id = _wire(tmp_path, monkeypatch, episode_max=3, wait=1,
+                           counter=counter, tail=_SILENT_TAIL)
+        assert gate_deferral.episode_max_seconds() == 3
+        _prime_ledger(sf, run_id)
+    
+        implement_runs, statuses, outcomes, nodes = _drive(
+            sf, run_id, monkeypatch, ticks=20, clock_step=0.1)
+        _assert_test_row_untouched(sf, run_id)
+    
+        assert implement_runs == 1, implement_runs
+        assert statuses[-1] == "running", statuses
+        assert "expired" not in outcomes, outcomes
+>       assert "silent" in outcomes, outcomes
+E       AssertionError: ['none', 'none', 'none', 'none', 'none', 'none', ...]
+E       assert 'silent' in ['none', 'none', 'none', 'none', 'none', 'none', ...]
+
+tests/skillflow/test_coding_impl_gate_absence.py:327: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+_____ test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them ______
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-20/test_the_tick_hold_alone_keeps0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x719aa65d9d00>
+
+    def test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them(
+            tmp_path, monkeypatch):
+        """The TICK hold (`core/scheduler.py:_run_skillflow_tick`) measured on its
+        own. With both holds in series, a break in one is covered by the other; so
+        here the host's `hold_blocks_advance` answers False (the host hold is out)
+        and the tick is the only driver. The tick's own `silent` return must then
+        keep the run parked at `test_gate_absent` with the rows untouched.
+        """
+        counter = tmp_path / "calls.txt"
+        sf, run_id = _wire(tmp_path, monkeypatch, episode_max=100000, wait=1,
+                           counter=counter, tail=_SILENT_TAIL)
+        monkeypatch.setattr(gate_deferral, "hold_blocks_advance",
+                            lambda run_id, **_kw: False)
+        implement_runs, statuses, outcomes, nodes = _drive(
+            sf, run_id, monkeypatch, ticks=20, clock_step=1, second_driver=False)
+>       _assert_test_row_untouched(sf, run_id)
+
+tests/skillflow/test_coding_impl_gate_absence.py:493: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+sf = <core.skillflow_host.AItelierSkillFlow object at 0x719aa65d8620>
+run_id = '7c319138-904a-4a52-8e6c-bc8c2b644e66', run_status = 'running'
+
+    def _assert_test_row_untouched(sf, run_id, *, run_status="running"):
+        """Assert the row invariants while the gate is silent.
+        Called from every pole so no hold-breaking mutation passes unnoticed.
+    
+        The four step-row assertions the criterion names: the `test` row is
+        `completed`, its `retry_count` is 0, its `release_count` is 0, and every
+        step instance was claimed exactly once (`claim_epoch == 1` on the `test`
+        row, and one `claimed` trace event per instance).
+    
+        Then the RUN row. Measured in round 10: a hold that lets the run advance
+        ends the run through the absence gate's only transition and writes no step
+        row at all — every step row is identical to the held run's, and the
+        `test_gate_absent` row stays `pending` — so no step-row assertion can see
+        that break. The run row can: while the gate is silent it is `running` and
+        parked at `test_gate_absent`; at the expiring pole it is `failed` there.
+        """
+        rows = _rows_by_step(sf, run_id)
+        test_row = rows["test"]
+        assert test_row["status"] == "completed", (
+            f"test row status drifted: {test_row['status']}")
+        assert test_row["retry_count"] == 0, (
+            f"deferral charged a retry: {test_row['retry_count']}")
+        assert test_row["release_count"] == 0, (
+            f"deferral released the claim: {test_row['release_count']}")
+        assert test_row["claim_epoch"] == 1, (
+            f"step re-claimed during deferral: {test_row['claim_epoch']}")
+        claims = _claims_per_instance(sf, run_id)
+        reclaimed = {key: n for key, n in claims.items() if n != 1}
+        assert claims and reclaimed == {}, (
+            f"an instance was claimed more than once: {reclaimed}")
+        run = sf.get_run(run_id)
+>       assert (run["status"], run["current_node"]) == (
+            run_status, "test_gate_absent"), (
+            f"the run row moved while the gate was silent: "
+            f"status={run['status']} node={run['current_node']}")
+E       AssertionError: the run row moved while the gate was silent: status=completed node=test_gate_absent
+E       assert ('completed',..._gate_absent') == ('running', '..._gate_absent')
+E         
+E         At index 0 diff: 'completed' != 'running'
+E         Use -v to get more diff
+
+tests/skillflow/test_coding_impl_gate_absence.py:444: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+=============================== warnings summary ===============================
+../../../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_inside_the_window_is_honoured_and_uncharged
+FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them
+2 failed, 6 passed, 1 warning in 8.56s
+Exception ignored in: <function _removeHandlerRef at 0x719ab10b0cc0>
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/logging/__init__.py", line 882, in _removeHandlerRef
+  File "/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-__ho2cgz/tree/tools/mutation_catalog/ignition_plugin.py", line 63, in _on_line
+TypeError: 'NoneType' object is not callable
+
+BARE_RC_TARGETED=1
+IGNITION_TARGETED={"file_reads": 0, "file_reads_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-__ho2cgz/tree/core/scheduler.py": 0}, "igniting_tests": ["tests/skillflow/test_coding_impl_gate_absence.py::test_a_gate_that_finally_answers_clears_the_deferral", "tests/skillflow/test_coding_impl_gate_absence.py::test_pole_a_a_ceiling_far_past_the_window_spends_one_implement_cycle", "tests/skillflow/test_coding_impl_gate_absence.py::test_pole_b_a_zero_ceiling_is_clamped_and_cannot_charge_the_absence", "tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence", "tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_inside_the_window_is_honoured_and_uncharged", "tests/skillflow/test_coding_impl_gate_absence.py::test_the_deferral_hold_leaves_real_step_rows_untouched", "tests/skillflow/test_coding_impl_gate_absence.py::test_the_host_hold_alone_keeps_the_rows_where_the_absence_left_them", "tests/skillflow/test_coding_impl_gate_absence.py::test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them"], "line_hits": 153, "line_hits_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-__ho2cgz/tree/core/scheduler.py": 153}, "monitoring_tool_id": 4, "mutated_modules_imported": ["/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-__ho2cgz/tree/core/scheduler.py"], "source_readers": []}
+
+## full scope: /usr/local/bin/python -m pytest -q -rfE -p no:cacheprovider -p ignition_plugin tests/unit tests/skillflow
+# cwd=/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-__ho2cgz/tree
+........................................................................ [  1%]
+........................................................................ [  3%]
+....................................................F................... [  5%]
+........................................................................ [  7%]
+........................................................................ [  8%]
+........................................................................ [ 10%]
+........................................................................ [ 12%]
+........................................................................ [ 14%]
+........................................................................ [ 15%]
+........................................................................ [ 17%]
+........................................................................ [ 19%]
+........................................................................ [ 21%]
+........................................................................ [ 22%]
+........................................................................ [ 24%]
+........................................................................ [ 26%]
+........................................................................ [ 28%]
+........................................................................ [ 29%]
+........................................................................ [ 31%]
+..........................................................FF............ [ 33%]
+........................................................................ [ 35%]
+.......................................................................s [ 37%]
+sssssss................................................................. [ 38%]
+........................................................................ [ 40%]
+........................................................................ [ 42%]
+........................................................................ [ 44%]
+........................................................................ [ 45%]
+........................................................................ [ 47%]
+........................................................................ [ 49%]
+........................................................................ [ 51%]
+........................................................................ [ 52%]
+........................................................................ [ 54%]
+.............s.......................................................... [ 56%]
+........................................................................ [ 58%]
+........................................................................ [ 59%]
+........................................................................ [ 61%]
+........................................................................ [ 63%]
+........................................................................ [ 65%]
+........................................................................ [ 67%]
+........................................................................ [ 68%]
+........................................................................ [ 70%]
+........................................................................ [ 72%]
+........................................................................ [ 74%]
+........................................................................ [ 75%]
+........................................................................ [ 77%]
+........................................................................ [ 79%]
+........................................................................ [ 81%]
+........................................................................ [ 82%]
+........................................................................ [ 84%]
+........................................................................ [ 86%]
+........................................................................ [ 88%]
+........................................................................ [ 89%]
+........................................................................ [ 91%]
+........................................................................ [ 93%]
+............................F........................................... [ 95%]
+........................................................................ [ 97%]
+........................................................................ [ 98%]
+...........F...F.................................                        [100%]
+=================================== FAILURES ===================================
+______________ test_a_timed_out_command_keeps_the_loop_responsive ______________
+
+live = {'db': <core.db_manager.DBManager object at 0x741eb9c19cd0>, 'checkout': PosixPath('/tmp/pytest-of-unknown/pytest-21/test_a_timed_out_command_keeps0/checkout'), 'agent': <core.meta_agent.MetaAgent object at 0x741eb9c1a720>}
+
+    def test_a_timed_out_command_keeps_the_loop_responsive(live):
+        """The other path that reaches cleanup on every call."""
+        agent, checkout = live["agent"], live["checkout"]
+        marker = checkout / "timeout_wrote.txt"
+        cmd = f"{_stubborn(30, marker)} & sleep 30"
+    
+        async def drive():
+            hb = _Heartbeat().start()
+            res = await agent._tool_bash(
+                {"project_id": "p", "command": cmd, "timeout": 1})
+            await hb.stop()
+            return hb.worst, res
+    
+        worst, res = asyncio.run(drive())
+        print(f"\ntimeout: worst loop gap {worst:.2f}s")
+        assert "error" in res and "timed out" in res["error"], res
+>       assert worst < _MAX_LOOP_GAP_S, (
+            f"the event loop was frozen for {worst:.2f}s on the timeout path")
+E       AssertionError: the event loop was frozen for 0.78s on the timeout path
+E       assert 0.7771826280513778 < 0.5
+
+tests/unit/test_bash_cleanup_is_async.py:204: AssertionError
+----------------------------- Captured stdout call -----------------------------
+
+timeout: worst loop gap 0.78s
+___________ test_the_tick_refuses_to_claim_while_the_gate_is_silent ____________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x741eb3d3fda0>
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-21/test_the_tick_refuses_to_claim0')
+
+    def test_the_tick_refuses_to_claim_while_the_gate_is_silent(monkeypatch,
+                                                                tmp_path):
+        """Kills S1 (delete the deferral skip inside the tick; 0/33 in review).
+    
+        Driven at the CALL SITE — `core/scheduler._run_skillflow_tick` — with the
+        REAL `observe_run` reading a REAL report off disk. Both poles are measured:
+        with the absence the tick must not claim; with a GRADED report the tick
+        must. One pole alone would pass for a tick that never claims anything.
+        """
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+        _silent_report(out_dir)
+    
+        sf = _TickStub()
+        scheduler = _wire_tick(monkeypatch, sf, out_dir)
+    
+        asyncio.run(scheduler._run_skillflow_tick("p", None))
+>       assert sf.claims == 0, "the tick claimed a step for a gate that never spoke"
+E       AssertionError: the tick claimed a step for a gate that never spoke
+E       assert 1 == 0
+E        +  where 1 = <tests.unit.test_gate_deferral_execution_points._TickStub object at 0x741eb3d3e210>.claims
+
+tests/unit/test_gate_deferral_execution_points.py:208: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  aitelier.scheduler:scheduler.py:2075 successor claim recovery inspection failed
+Traceback (most recent call last):
+  File "/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-__ho2cgz/tree/core/scheduler.py", line 2006, in _record_unclaimable_successor
+    resolver = sf._get_resolver_for_run(run_id)
+               ^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: '_TickStub' object has no attribute '_get_resolver_for_run'
+WARNING  aitelier.scheduler:scheduler.py:2084 could not fail run after successor recovery inspection error
+Traceback (most recent call last):
+  File "/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-__ho2cgz/tree/core/scheduler.py", line 2006, in _record_unclaimable_successor
+    resolver = sf._get_resolver_for_run(run_id)
+               ^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: '_TickStub' object has no attribute '_get_resolver_for_run'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-__ho2cgz/tree/core/scheduler.py", line 2082, in _record_unclaimable_successor
+    sf.fail_run(run_id, reason)
+  File "/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-__ho2cgz/tree/tests/unit/test_gate_deferral_execution_points.py", line 167, in fail_run
+    raise AssertionError(f"the tick ended the run: {reason}")
+AssertionError: the tick ended the run: Successor claim recovery inspection failed for run 'run-1': AttributeError: '_TickStub' object has no attribute '_get_resolver_for_run'
+INFO     aitelier.scheduler.tick:scheduler.py:1838 project=p outcome=successor_claim_terminal run=run-1 node=unknown predecessor=unknown reason=Successor claim recovery inspection failed for run 'run-1': AttributeError: '_TickStub' object has no attribute '_get_resolver_for_run'
+_______ test_during_a_deferral_hold_the_step_claim_is_held_not_released ________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x741eb3d3c380>
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-21/test_during_a_deferral_hold_th0')
+
+    def test_during_a_deferral_hold_the_step_claim_is_held_not_released(monkeypatch,
+                                                                         tmp_path):
+        """While an absence is live the tick neither claims the step nor advances
+        it. This stub measures exactly two things: `claims == 0` across three
+        silent ticks, and the ledger holding the episode (3 absences, remaining
+        hold > 0). The step-STATE claims this file used to make in prose —
+        retry_count / release_count staying put — are measured on REAL step rows
+        in `test_coding_impl_gate_absence.py`, not here: a stub with no step row
+        cannot see a counter it does not model.
+        """
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+        _silent_report(out_dir)
+    
+        sf = _TickStub()
+        scheduler = _wire_tick(monkeypatch, sf, out_dir)
+    
+        # Drive multiple ticks: each returns without claiming.
+        for _ in range(3):
+            asyncio.run(scheduler._run_skillflow_tick("p", None))
+    
+>       assert sf.claims == 0, (
+            "the deferral tick claimed a step — retry_count or release would move")
+E       AssertionError: the deferral tick claimed a step — retry_count or release would move
+E       assert 3 == 0
+E        +  where 3 = <tests.unit.test_gate_deferral_execution_points._TickStub object at 0x741eb3d3ee40>.claims
+
+tests/unit/test_gate_deferral_execution_points.py:241: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  aitelier.scheduler:scheduler.py:2075 successor claim recovery inspection failed
+Traceback (most recent call last):
+  File "/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-__ho2cgz/tree/core/scheduler.py", line 2006, in _record_unclaimable_successor
+    resolver = sf._get_resolver_for_run(run_id)
+               ^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: '_TickStub' object has no attribute '_get_resolver_for_run'
+WARNING  aitelier.scheduler:scheduler.py:2084 could not fail run after successor recovery inspection error
+Traceback (most recent call last):
+  File "/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-__ho2cgz/tree/core/scheduler.py", line 2006, in _record_unclaimable_successor
+    resolver = sf._get_resolver_for_run(run_id)
+               ^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: '_TickStub' object has no attribute '_get_resolver_for_run'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-__ho2cgz/tree/core/scheduler.py", line 2082, in _record_unclaimable_successor
+    sf.fail_run(run_id, reason)
+  File "/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-__ho2cgz/tree/tests/unit/test_gate_deferral_execution_points.py", line 167, in fail_run
+    raise AssertionError(f"the tick ended the run: {reason}")
+AssertionError: the tick ended the run: Successor claim recovery inspection failed for run 'run-1': AttributeError: '_TickStub' object has no attribute '_get_resolver_for_run'
+INFO     aitelier.scheduler.tick:scheduler.py:1838 project=p outcome=successor_claim_terminal run=run-1 node=unknown predecessor=unknown reason=Successor claim recovery inspection failed for run 'run-1': AttributeError: '_TickStub' object has no attribute '_get_resolver_for_run'
+WARNING  aitelier.scheduler:scheduler.py:2075 successor claim recovery inspection failed
+Traceback (most recent call last):
+  File "/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-__ho2cgz/tree/core/scheduler.py", line 2006, in _record_unclaimable_successor
+    resolver = sf._get_resolver_for_run(run_id)
+               ^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: '_TickStub' object has no attribute '_get_resolver_for_run'
+WARNING  aitelier.scheduler:scheduler.py:2084 could not fail run after successor recovery inspection error
+Traceback (most recent call last):
+  File "/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-__ho2cgz/tree/core/scheduler.py", line 2006, in _record_unclaimable_successor
+    resolver = sf._get_resolver_for_run(run_id)
+               ^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: '_TickStub' object has no attribute '_get_resolver_for_run'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-__ho2cgz/tree/core/scheduler.py", line 2082, in _record_unclaimable_successor
+    sf.fail_run(run_id, reason)
+  File "/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-__ho2cgz/tree/tests/unit/test_gate_deferral_execution_points.py", line 167, in fail_run
+    raise AssertionError(f"the tick ended the run: {reason}")
+AssertionError: the tick ended the run: Successor claim recovery inspection failed for run 'run-1': AttributeError: '_TickStub' object has no attribute '_get_resolver_for_run'
+INFO     aitelier.scheduler.tick:scheduler.py:1838 project=p outcome=successor_claim_terminal run=run-1 node=unknown predecessor=unknown reason=Successor claim recovery inspection failed for run 'run-1': AttributeError: '_TickStub' object has no attribute '_get_resolver_for_run'
+WARNING  aitelier.scheduler:scheduler.py:2075 successor claim recovery inspection failed
+Traceback (most recent call last):
+  File "/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-__ho2cgz/tree/core/scheduler.py", line 2006, in _record_unclaimable_successor
+    resolver = sf._get_resolver_for_run(run_id)
+               ^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: '_TickStub' object has no attribute '_get_resolver_for_run'
+WARNING  aitelier.scheduler:scheduler.py:2084 could not fail run after successor recovery inspection error
+Traceback (most recent call last):
+  File "/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-__ho2cgz/tree/core/scheduler.py", line 2006, in _record_unclaimable_successor
+    resolver = sf._get_resolver_for_run(run_id)
+               ^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: '_TickStub' object has no attribute '_get_resolver_for_run'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-__ho2cgz/tree/core/scheduler.py", line 2082, in _record_unclaimable_successor
+    sf.fail_run(run_id, reason)
+  File "/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-__ho2cgz/tree/tests/unit/test_gate_deferral_execution_points.py", line 167, in fail_run
+    raise AssertionError(f"the tick ended the run: {reason}")
+AssertionError: the tick ended the run: Successor claim recovery inspection failed for run 'run-1': AttributeError: '_TickStub' object has no attribute '_get_resolver_for_run'
+INFO     aitelier.scheduler.tick:scheduler.py:1838 project=p outcome=successor_claim_terminal run=run-1 node=unknown predecessor=unknown reason=Successor claim recovery inspection failed for run 'run-1': AttributeError: '_TickStub' object has no attribute '_get_resolver_for_run'
+______________ test_S1_the_tick_call_site_is_present_in_the_tree _______________
+
+    def test_S1_the_tick_call_site_is_present_in_the_tree():
+        """Kills S1 (delete the deferral skip in the tick; 0/33 in review)."""
+        text = _source(_SCHEDULER)
+        missing = [name for name in (
+            'gate_deferral.observe_run(sf, run_id)',
+            'if deferral["state"] == "silent":',
+            'if deferral["state"] == "expired":',
+            "gate_absence_terminal",
+        ) if name not in text]
+>       assert missing == [], f"S1: the tick no longer reads the deferral: {missing}"
+E       AssertionError: S1: the tick no longer reads the deferral: ['if deferral["state"] == "silent":']
+E       assert ['if deferral...== "silent":'] == []
+E         
+E         Left contains one more item: 'if deferral["state"] == "silent":'
+E         Use -v to get more diff
+
+tests/unit/test_tree_level_accounting_witnesses.py:231: AssertionError
+____ test_pole_c_a_tiny_ceiling_inside_the_window_is_honoured_and_uncharged ____
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-21/test_pole_c_a_tiny_ceiling_ins0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x741eb0b615b0>
+
+    def test_pole_c_a_tiny_ceiling_inside_the_window_is_honoured_and_uncharged(
+            tmp_path, monkeypatch):
+        """(c) ceiling tiny (3 s) and HONOURED, observed for a window shorter than
+        the ceiling (20 ticks x 0.1 s = 2 s): the absence never expires, so the run
+        stays silent and non-terminal, `implement_runs == 1`, and the rows the hold
+        parks are untouched. This is the non-expiring small-ceiling pole of
+        `an-expired-absence-is-never-charged-to-the-implementer`; the expiring one
+        is `test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence` (C′).
+        """
+        counter = tmp_path / "calls.txt"
+        sf, run_id = _wire(tmp_path, monkeypatch, episode_max=3, wait=1,
+                           counter=counter, tail=_SILENT_TAIL)
+        assert gate_deferral.episode_max_seconds() == 3
+        _prime_ledger(sf, run_id)
+    
+        implement_runs, statuses, outcomes, nodes = _drive(
+            sf, run_id, monkeypatch, ticks=20, clock_step=0.1)
+        _assert_test_row_untouched(sf, run_id)
+    
+        assert implement_runs == 1, implement_runs
+        assert statuses[-1] == "running", statuses
+        assert "expired" not in outcomes, outcomes
+>       assert "silent" in outcomes, outcomes
+E       AssertionError: ['none', 'none', 'none', 'none', 'none', 'none', ...]
+E       assert 'silent' in ['none', 'none', 'none', 'none', 'none', 'none', ...]
+
+tests/skillflow/test_coding_impl_gate_absence.py:327: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+_____ test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them ______
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-21/test_the_tick_hold_alone_keeps0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x741eb0983800>
+
+    def test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them(
+            tmp_path, monkeypatch):
+        """The TICK hold (`core/scheduler.py:_run_skillflow_tick`) measured on its
+        own. With both holds in series, a break in one is covered by the other; so
+        here the host's `hold_blocks_advance` answers False (the host hold is out)
+        and the tick is the only driver. The tick's own `silent` return must then
+        keep the run parked at `test_gate_absent` with the rows untouched.
+        """
+        counter = tmp_path / "calls.txt"
+        sf, run_id = _wire(tmp_path, monkeypatch, episode_max=100000, wait=1,
+                           counter=counter, tail=_SILENT_TAIL)
+        monkeypatch.setattr(gate_deferral, "hold_blocks_advance",
+                            lambda run_id, **_kw: False)
+        implement_runs, statuses, outcomes, nodes = _drive(
+            sf, run_id, monkeypatch, ticks=20, clock_step=1, second_driver=False)
+>       _assert_test_row_untouched(sf, run_id)
+
+tests/skillflow/test_coding_impl_gate_absence.py:493: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+sf = <core.skillflow_host.AItelierSkillFlow object at 0x741eb0980050>
+run_id = 'a327328e-7e8e-45c9-8db1-a96ff5deaf1b', run_status = 'running'
+
+    def _assert_test_row_untouched(sf, run_id, *, run_status="running"):
+        """Assert the row invariants while the gate is silent.
+        Called from every pole so no hold-breaking mutation passes unnoticed.
+    
+        The four step-row assertions the criterion names: the `test` row is
+        `completed`, its `retry_count` is 0, its `release_count` is 0, and every
+        step instance was claimed exactly once (`claim_epoch == 1` on the `test`
+        row, and one `claimed` trace event per instance).
+    
+        Then the RUN row. Measured in round 10: a hold that lets the run advance
+        ends the run through the absence gate's only transition and writes no step
+        row at all — every step row is identical to the held run's, and the
+        `test_gate_absent` row stays `pending` — so no step-row assertion can see
+        that break. The run row can: while the gate is silent it is `running` and
+        parked at `test_gate_absent`; at the expiring pole it is `failed` there.
+        """
+        rows = _rows_by_step(sf, run_id)
+        test_row = rows["test"]
+        assert test_row["status"] == "completed", (
+            f"test row status drifted: {test_row['status']}")
+        assert test_row["retry_count"] == 0, (
+            f"deferral charged a retry: {test_row['retry_count']}")
+        assert test_row["release_count"] == 0, (
+            f"deferral released the claim: {test_row['release_count']}")
+        assert test_row["claim_epoch"] == 1, (
+            f"step re-claimed during deferral: {test_row['claim_epoch']}")
+        claims = _claims_per_instance(sf, run_id)
+        reclaimed = {key: n for key, n in claims.items() if n != 1}
+        assert claims and reclaimed == {}, (
+            f"an instance was claimed more than once: {reclaimed}")
+        run = sf.get_run(run_id)
+>       assert (run["status"], run["current_node"]) == (
+            run_status, "test_gate_absent"), (
+            f"the run row moved while the gate was silent: "
+            f"status={run['status']} node={run['current_node']}")
+E       AssertionError: the run row moved while the gate was silent: status=completed node=test_gate_absent
+E       assert ('completed',..._gate_absent') == ('running', '..._gate_absent')
+E         
+E         At index 0 diff: 'completed' != 'running'
+E         Use -v to get more diff
+
+tests/skillflow/test_coding_impl_gate_absence.py:444: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+=============================== warnings summary ===============================
+../../../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+tests/unit/test_bash_admission_lifetime.py::test_a_second_cancellation_during_cleanup_still_ends_the_writer
+  /usr/local/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <function BaseSubprocessTransport.__del__ at 0x741ec7263d80>
+  
+  Traceback (most recent call last):
+    File "/usr/local/lib/python3.12/asyncio/base_subprocess.py", line 126, in __del__
+      self.close()
+    File "/usr/local/lib/python3.12/asyncio/base_subprocess.py", line 104, in close
+      proto.pipe.close()
+    File "/usr/local/lib/python3.12/asyncio/unix_events.py", line 568, in close
+      self._close(None)
+    File "/usr/local/lib/python3.12/asyncio/unix_events.py", line 592, in _close
+      self._loop.call_soon(self._call_connection_lost, exc)
+    File "/usr/local/lib/python3.12/asyncio/base_events.py", line 799, in call_soon
+      self._check_closed()
+    File "/usr/local/lib/python3.12/asyncio/base_events.py", line 545, in _check_closed
+      raise RuntimeError('Event loop is closed')
+  RuntimeError: Event loop is closed
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/unit/test_public_read_hardening.py::TestAnUnknownJwtKidCostsNoNetworkCall::test_a_rejected_kid_is_remembered
+tests/unit/test_public_read_hardening.py::TestAnUnknownJwtKidCostsNoNetworkCall::test_the_bad_kid_table_is_bounded
+  /usr/local/lib/python3.12/site-packages/jwt/api_jwt.py:149: InsecureKeyLengthWarning: The HMAC key is 1 bytes long, which is below the minimum recommended length of 32 bytes for SHA256. See RFC 7518 Section 3.2.
+    return self._jws.encode(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_bash_cleanup_is_async.py::test_a_timed_out_command_keeps_the_loop_responsive
+FAILED tests/unit/test_gate_deferral_execution_points.py::test_the_tick_refuses_to_claim_while_the_gate_is_silent
+FAILED tests/unit/test_gate_deferral_execution_points.py::test_during_a_deferral_hold_the_step_claim_is_held_not_released
+FAILED tests/unit/test_tree_level_accounting_witnesses.py::test_S1_the_tick_call_site_is_present_in_the_tree
+FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_inside_the_window_is_honoured_and_uncharged
+FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them
+6 failed, 4066 passed, 9 skipped, 4 warnings in 365.94s (0:06:05)
+
+BARE_RC_FULL=1
+IGNITION_FULL={"file_reads": 39, "file_reads_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-__ho2cgz/tree/core/scheduler.py": 39}, "igniting_tests": ["tests/skillflow/test_coding_impl_gate_absence.py::test_a_gate_that_finally_answers_clears_the_deferral", "tests/skillflow/test_coding_impl_gate_absence.py::test_pole_a_a_ceiling_far_past_the_window_spends_one_implement_cycle", "tests/skillflow/test_coding_impl_gate_absence.py::test_pole_b_a_zero_ceiling_is_clamped_and_cannot_charge_the_absence", "tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence", "tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_inside_the_window_is_honoured_and_uncharged", "tests/skillflow/test_coding_impl_gate_absence.py::test_the_deferral_hold_leaves_real_step_rows_untouched", "tests/skillflow/test_coding_impl_gate_absence.py::test_the_host_hold_alone_keeps_the_rows_where_the_absence_left_them", "tests/skillflow/test_coding_impl_gate_absence.py::test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them", "tests/unit/test_claim_precondition_bounded.py::test_dirty_claim_failure_is_bounded_actionable_and_lossless", "tests/unit/test_claim_precondition_bounded.py::test_identical_count_survives_process_memory_reset", "tests/unit/test_claim_precondition_bounded.py::test_terminal_settlement_releases_single_project_scheduler_slot", "tests/unit/test_claim_precondition_bounded.py::test_transient_claim_contention_backs_off_without_consuming_terminal_budget", "tests/unit/test_confirmed_successor_claim.py::test_scheduler_uses_recovery_result_instead_of_no_claim", "tests/unit/test_gate_deferral_execution_points.py::test_during_a_deferral_hold_the_step_claim_is_held_not_released", "tests/unit/test_gate_deferral_execution_points.py::test_the_tick_refuses_to_claim_while_the_gate_is_silent", "tests/unit/test_goal_loop_dead_end.py::test_a_normal_task_loop_does_not_trip_the_guard", "tests/unit/test_goal_loop_dead_end.py::test_one_instance_re_executed_forever_fails_the_run", "tests/unit/test_goal_loop_dead_end.py::test_the_whole_run_valve_does_not_fire_at_its_bound", "tests/unit/test_goal_loop_dead_end.py::test_the_whole_run_valve_fires_on_claims_above_its_bound", "tests/unit/test_pm_failure_boundary.py::test_scheduler_exhaustion_fails_closed[NativeOutputCapExhausted-base]", "tests/unit/test_pm_failure_boundary.py::test_scheduler_exhaustion_fails_closed[NativeOutputCapExhausted-game]", "tests/unit/test_pm_failure_boundary.py::test_scheduler_exhaustion_fails_closed[NativeTurnBudgetExhausted-base]", "tests/unit/test_pm_failure_boundary.py::test_scheduler_exhaustion_fails_closed[NativeTurnBudgetExhausted-game]", "tests/unit/test_scheduler_terminal_claim.py::test_missing_required_context_fails_the_run", "tests/unit/test_scheduler_terminal_claim.py::test_other_claim_errors_still_retry", "tests/unit/test_scheduler_wedge.py::test_a_genuinely_terminal_run_still_returns_without_claiming[completed]", "tests/unit/test_scheduler_wedge.py::test_a_genuinely_terminal_run_still_returns_without_claiming[failed]", "tests/unit/test_scheduler_wedge.py::test_a_genuinely_terminal_run_still_returns_without_claiming[paused]", "tests/unit/test_scheduler_wedge.py::test_a_running_run_that_cannot_advance_is_not_reported_terminal", "tests/unit/test_scheduler_wedge.py::test_the_wedge_asks_whether_the_step_is_claimable", "tests/unit/test_stop_is_truthful.py::test_a_fenced_confirm_is_not_recorded_as_a_step_failure", "tests/unit/test_tick_confirmed_is_truthful.py::test_a_fenced_tick_reports_only_the_cancellation", "tests/unit/test_tick_confirmed_is_truthful.py::test_a_normal_confirm_return_is_not_acceptance", "tests/unit/test_tick_confirmed_is_truthful.py::test_a_normal_tick_reports_that_the_confirm_returned", "tests/unit/test_tick_confirmed_is_truthful.py::test_confirm_returned_is_false_when_the_confirm_raised", "tests/unit/test_tick_confirmed_is_truthful.py::test_output_ceiling_tick_never_confirms_or_retries", "tests/unit/test_tick_log.py::TestATerminalTickSaysWhy::test_a_completed_run_carries_no_reason", "tests/unit/test_tick_log.py::TestATerminalTickSaysWhy::test_a_failed_run_logs_its_error_reason"], "line_hits": 192, "line_hits_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-__ho2cgz/tree/core/scheduler.py": 192}, "monitoring_tool_id": 4, "mutated_modules_imported": ["/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-__ho2cgz/tree/core/scheduler.py"], "source_readers": ["tests/unit/test_checkpoint_reject_target.py::test_every_reject_checkpoint_caller_passes_redirect_to[core]", "tests/unit/test_datadir_guardrail.py::test_no_home_paths_outside_datadir", "tests/unit/test_db_manager.py::test_card_files_without_id_key_are_keyed_by_filename", "tests/unit/test_every_step_driver_handles_cancellation.py::test_every_claim_holding_loop_handles_cancellation", "tests/unit/test_gate_deferral_execution_points.py::test_during_a_deferral_hold_the_step_claim_is_held_not_released", "tests/unit/test_gate_deferral_execution_points.py::test_the_tick_refuses_to_claim_while_the_gate_is_silent", "tests/unit/test_logs_are_bounded.py::test_no_durable_log_is_opened_for_append_without_rotation", "tests/unit/test_no_by_name_graph_lookup_during_a_run.py::test_no_run_scoped_lookup_resolves_a_graph_by_name", "tests/unit/test_no_self_call_collapse.py::test_no_python_source_is_a_self_call_and_nothing_else", "tests/unit/test_no_verbatim_previous_line_dup.py::test_named_test_repeats_are_pinned_and_current", "tests/unit/test_no_verbatim_previous_line_dup.py::test_no_verbatim_previous_line_dup_in_non_test_code", "tests/unit/test_run_isolation_lifecycle.py::test_a_lease_survives_the_drain_and_is_released_by_a_later_tick", "tests/unit/test_scheduler_failure_reason.py::test_a_db_write_failure_does_not_mask_the_original_error", "tests/unit/test_scheduler_failure_reason.py::test_create_run_failure_becomes_a_visible_terminal_status", "tests/unit/test_startup_recovery.py::test_startup_recovery_fails_closed_when_operation_audit_fails", "tests/unit/test_stop_is_truthful.py::test_a_draining_stop_is_not_reported_as_complete", "tests/unit/test_stop_is_truthful.py::test_a_stop_between_steps_claims_nothing_more_and_nothing_less", "tests/unit/test_stop_is_truthful.py::test_a_stop_that_cannot_complete_on_its_own_says_so_and_forwards_the_state", "tests/unit/test_stop_is_truthful.py::test_a_terminal_stop_promises_that_nothing_new_starts", "tests/unit/test_stop_is_truthful.py::test_an_already_ended_run_says_so", "tests/unit/test_stop_is_truthful.py::test_an_older_skillflow_returning_none_does_not_break_the_butler", "tests/unit/test_stop_is_truthful.py::test_an_unobservable_owner_is_forwarded_too", "tests/unit/test_stop_is_truthful.py::test_the_status_field_agrees_with_the_outcome", "tests/unit/test_tree_level_accounting_witnesses.py::test_S1_the_tick_call_site_is_present_in_the_tree"]}
+
+# control targeted reds=[]
+# control full reds=[]
+# targeted killers=['tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_inside_the_window_is_honoured_and_uncharged', 'tests/skillflow/test_coding_impl_gate_absence.py::test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them']
+# targeted source-text witnesses=[]
+# full killers=['tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_inside_the_window_is_honoured_and_uncharged', 'tests/skillflow/test_coding_impl_gate_absence.py::test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them', 'tests/unit/test_bash_cleanup_is_async.py::test_a_timed_out_command_keeps_the_loop_responsive', 'tests/unit/test_gate_deferral_execution_points.py::test_during_a_deferral_hold_the_step_claim_is_held_not_released', 'tests/unit/test_gate_deferral_execution_points.py::test_the_tick_refuses_to_claim_while_the_gate_is_silent']
+# full source-text witnesses=['tests/unit/test_tree_level_accounting_witnesses.py::test_S1_the_tick_call_site_is_present_in_the_tree']
+# porcelain after restore=''
+# status=killed

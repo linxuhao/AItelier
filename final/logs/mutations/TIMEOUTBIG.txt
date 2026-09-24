@@ -1,0 +1,550 @@
+# TIMEOUTBIG (behaviour): 
+# head=b104f18c2e7e1d0f0c59e99cb32a077e7896dd28
+# worktree=/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-4muyoxer/tree (removed)
+# started=2026-09-24 06:22:18 UTC ended=2026-09-24 06:28:49 UTC
+# replacement lines={"aitelier/tools/run_tests/impl.py": [643]}
+
+## diff applied
+diff --git a/aitelier/tools/run_tests/impl.py b/aitelier/tools/run_tests/impl.py
+index 766b7f33..c043022f 100644
+--- a/aitelier/tools/run_tests/impl.py
++++ b/aitelier/tools/run_tests/impl.py
+@@ -640,7 +640,7 @@ REPO_GATE_SCRIPT = "run_tests.sh"
+ # therefore a FLOOR for a clean tree, not the figure. 900 was a
+ # placeholder and would have failed every gate as a timeout, which is the
+ # worst kind of red: one that has nothing to do with the code.
+-REPO_GATE_TIMEOUT = 5400
++REPO_GATE_TIMEOUT = 1e9
+ 
+ 
+ def _run_repo_gate(repo: Path) -> dict | None:
+
+## targeted scope: /usr/local/bin/python -m pytest -q -rfE -p no:cacheprovider -p ignition_plugin tests/unit/test_gate_deferral_execution_points.py
+# cwd=/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-4muyoxer/tree
+F..........                                                              [100%]
+=================================== FAILURES ===================================
+__________ test_one_step_holds_the_scheduler_for_at_most_one_gate_run __________
+
+    def test_one_step_holds_the_scheduler_for_at_most_one_gate_run():
+        """The budget itself, read off the REAL constants rather than restated."""
+        from aitelier.tools.run_tests import impl as rt
+    
+        assert rt.REPO_GATE_UNMEASURED_ATTEMPTS == 1, (
+            "gate runs per step moved: "
+            f"{rt.REPO_GATE_UNMEASURED_ATTEMPTS} (the scheduler parks the absence "
+            "now, so a step does not pay for the wait)")
+>       assert _step_budget_violations(
+            gate_timeout=rt.REPO_GATE_TIMEOUT,
+            attempts=rt.REPO_GATE_UNMEASURED_ATTEMPTS,
+            retry_delay=rt.REPO_GATE_RETRY_DELAY_SECONDS) == []
+E       AssertionError: assert ['worst-case ...0s > 5400.0s'] == []
+E         
+E         Left contains one more item: 'worst-case hold=1000000000.0s > 5400.0s'
+E         Use -v to get more diff
+
+tests/unit/test_gate_deferral_execution_points.py:56: AssertionError
+=============================== warnings summary ===============================
+../../../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_gate_deferral_execution_points.py::test_one_step_holds_the_scheduler_for_at_most_one_gate_run
+1 failed, 10 passed, 1 warning in 2.22s
+Exception ignored in: <function _removeHandlerRef at 0x7b39afa50cc0>
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/logging/__init__.py", line 882, in _removeHandlerRef
+  File "/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-4muyoxer/tree/tools/mutation_catalog/ignition_plugin.py", line 63, in _on_line
+TypeError: 'NoneType' object is not callable
+
+BARE_RC_TARGETED=1
+IGNITION_TARGETED={"file_reads": 0, "file_reads_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-4muyoxer/tree/aitelier/tools/run_tests/impl.py": 0}, "igniting_tests": ["tests/unit/test_gate_deferral_execution_points.py::test_one_step_holds_the_scheduler_for_at_most_one_gate_run"], "line_hits": 1, "line_hits_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-4muyoxer/tree/aitelier/tools/run_tests/impl.py": 1}, "monitoring_tool_id": 4, "mutated_modules_imported": ["/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-4muyoxer/tree/aitelier/tools/run_tests/impl.py"], "source_readers": []}
+
+## full scope: /usr/local/bin/python -m pytest -q -rfE -p no:cacheprovider -p ignition_plugin tests/unit tests/skillflow
+# cwd=/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-4muyoxer/tree
+........................................................................ [  1%]
+........................................................................ [  3%]
+........................................................................ [  5%]
+........................................................................ [  7%]
+........................................................................ [  8%]
+........................................................................ [ 10%]
+........................................................................ [ 12%]
+........................................................................ [ 14%]
+........................................................................ [ 15%]
+........................................................................ [ 17%]
+........................................................................ [ 19%]
+........................................................................ [ 21%]
+........................................................................ [ 22%]
+........................................................................ [ 24%]
+........................................................................ [ 26%]
+........................................................................ [ 28%]
+........................................................................ [ 29%]
+........................................................................ [ 31%]
+......................................................F................. [ 33%]
+........................................................................ [ 35%]
+.......................................................................s [ 37%]
+sssssss................................................................. [ 38%]
+........................................................................ [ 40%]
+........................................................................ [ 42%]
+........................................................................ [ 44%]
+........................................................................ [ 45%]
+........................................................................ [ 47%]
+........................................................................ [ 49%]
+........................................................................ [ 51%]
+........................................................................ [ 52%]
+........................................................................ [ 54%]
+.............s.......................................................... [ 56%]
+........................................................................ [ 58%]
+........................................................................ [ 59%]
+........................................................................ [ 61%]
+........................................................................ [ 63%]
+........................................................................ [ 65%]
+........................................................................ [ 67%]
+........................................................................ [ 68%]
+........................................................................ [ 70%]
+........................................................................ [ 72%]
+........................................................................ [ 74%]
+........................................................................ [ 75%]
+...............................................FFFF..................... [ 77%]
+.......................................FF.................F..FF.F....... [ 79%]
+........................................................................ [ 81%]
+........................................................................ [ 82%]
+........................................................................ [ 84%]
+........................................................................ [ 86%]
+........................................................................ [ 88%]
+........................................................................ [ 89%]
+........................................................................ [ 91%]
+........................................................................ [ 93%]
+........................................................................ [ 95%]
+........................................................................ [ 97%]
+........................................................................ [ 98%]
+........FF.......................................                        [100%]
+=================================== FAILURES ===================================
+__________ test_one_step_holds_the_scheduler_for_at_most_one_gate_run __________
+
+    def test_one_step_holds_the_scheduler_for_at_most_one_gate_run():
+        """The budget itself, read off the REAL constants rather than restated."""
+        from aitelier.tools.run_tests import impl as rt
+    
+        assert rt.REPO_GATE_UNMEASURED_ATTEMPTS == 1, (
+            "gate runs per step moved: "
+            f"{rt.REPO_GATE_UNMEASURED_ATTEMPTS} (the scheduler parks the absence "
+            "now, so a step does not pay for the wait)")
+>       assert _step_budget_violations(
+            gate_timeout=rt.REPO_GATE_TIMEOUT,
+            attempts=rt.REPO_GATE_UNMEASURED_ATTEMPTS,
+            retry_delay=rt.REPO_GATE_RETRY_DELAY_SECONDS) == []
+E       AssertionError: assert ['worst-case ...0s > 5400.0s'] == []
+E         
+E         Left contains one more item: 'worst-case hold=1000000000.0s > 5400.0s'
+E         Use -v to get more diff
+
+tests/unit/test_gate_deferral_execution_points.py:56: AssertionError
+____ test_real_repo_gate_a_then_a_plus_b_exposes_b_and_keeps_detail_stable _____
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-18/test_real_repo_gate_a_then_a_p0')
+
+    def test_real_repo_gate_a_then_a_plus_b_exposes_b_and_keeps_detail_stable(tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        state = tmp_path / "state"
+        _write_repo_gate(repo, _gate_record("A", "first detail"))
+        first = _run_repo(repo, tmp_path / "out-a", state)
+>       assert first["baseline_seeded"] is True
+               ^^^^^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'baseline_seeded'
+
+tests/unit/test_run_tests_known_red_baseline.py:169: KeyError
+___________ test_real_repo_gate_fixed_then_rebroken_case_becomes_new ___________
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-18/test_real_repo_gate_fixed_then0')
+
+    def test_real_repo_gate_fixed_then_rebroken_case_becomes_new(tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        state = tmp_path / "state"
+        _write_repo_gate(repo, _gate_record("A", "a"), _gate_record("B", "b"))
+        _run_repo(repo, tmp_path / "out-seed", state)
+        _write_repo_gate(repo, _gate_record("A", "a remains"))
+        _run_repo(repo, tmp_path / "out-fixed", state)
+>       assert json.loads(_baseline_path(state, repo).read_text())["failures"] == [
+                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+            "repo_gate:run_tests.sh#A"]
+
+tests/unit/test_run_tests_known_red_baseline.py:189: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/usr/local/lib/python3.12/pathlib.py:1027: in read_text
+    with self.open(mode='r', encoding=encoding, errors=errors) as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.12/pathlib.py:1013: in open
+    return io.open(self, mode, buffering, encoding, errors, newline)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+file = PosixPath('/tmp/pytest-of-unknown/pytest-18/test_real_repo_gate_fixed_then0/state/repos/repo-c8ebb10a7c414e3a/run_tests_baseline.json')
+args = ('r', -1, 'locale', None, None), kwargs = {}
+
+    def opener(file, *args, **kwargs):
+        if isinstance(file, (str, bytes, os.PathLike)):
+            _note_read(file)
+>       return real(file, *args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       FileNotFoundError: [Errno 2] No such file or directory: '/tmp/pytest-of-unknown/pytest-18/test_real_repo_gate_fixed_then0/state/repos/repo-c8ebb10a7c414e3a/run_tests_baseline.json'
+
+tools/mutation_catalog/ignition_plugin.py:92: FileNotFoundError
+________________ test_repo_gate_without_state_dir_stays_strict _________________
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-18/test_repo_gate_without_state_d0')
+
+    def test_repo_gate_without_state_dir_stays_strict(tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _write_repo_gate(repo, _gate_record("A", "a"))
+        from aitelier.tools.run_tests.impl import run_tests
+        out = tmp_path / "out"
+        result = run_tests(project_root=str(repo), out_dir=str(out), state_dir="")
+        report = json.loads((out / "test_report.json").read_text())
+        assert result["passed_relative"] is False
+>       assert report["new_failures"] == [
+            "repo_gate:run_tests.sh#A failed: a"]
+E       AssertionError: assert ['repo_gate:r...is too large'] == ['repo_gate:r...#A failed: a']
+E         
+E         At index 0 diff: 'repo_gate:run_tests.sh was NOT measured (1 attempt(s)): OverflowError: timeout is too large' != 'repo_gate:run_tests.sh#A failed: a'
+E         Use -v to get more diff
+
+tests/unit/test_run_tests_known_red_baseline.py:206: AssertionError
+______ test_unreliable_repo_gate_identity_never_seeds_or_changes_baseline ______
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-18/test_unreliable_repo_gate_iden0')
+
+    def test_unreliable_repo_gate_identity_never_seeds_or_changes_baseline(tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        state = tmp_path / "state"
+        _write_repo_gate(repo, _gate_record("A", "known"))
+        _run_repo(repo, tmp_path / "out-seed", state)
+>       before = _baseline_path(state, repo).read_bytes()
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/unit/test_run_tests_known_red_baseline.py:216: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/usr/local/lib/python3.12/pathlib.py:1019: in read_bytes
+    with self.open(mode='rb') as f:
+         ^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.12/pathlib.py:1013: in open
+    return io.open(self, mode, buffering, encoding, errors, newline)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+file = PosixPath('/tmp/pytest-of-unknown/pytest-18/test_unreliable_repo_gate_iden0/state/repos/repo-a790055eab704667/run_tests_baseline.json')
+args = ('rb', -1, None, None, None), kwargs = {}
+
+    def opener(file, *args, **kwargs):
+        if isinstance(file, (str, bytes, os.PathLike)):
+            _note_read(file)
+>       return real(file, *args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       FileNotFoundError: [Errno 2] No such file or directory: '/tmp/pytest-of-unknown/pytest-18/test_unreliable_repo_gate_iden0/state/repos/repo-a790055eab704667/run_tests_baseline.json'
+
+tools/mutation_catalog/ignition_plugin.py:92: FileNotFoundError
+_______ test_a_contract_error_exit_2_is_a_measured_failure_with_failures _______
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-18/test_a_contract_error_exit_2_i0')
+
+    def test_a_contract_error_exit_2_is_a_measured_failure_with_failures(tmp_path):
+        """The author's own broken contract file, at exit 2, is a RED — the text
+        the game gate prints says so itself ("an empty one is not a pass"). It may
+        not become an absence with `failures: []` (the forbidden technique: a
+        legitimate red leaking past as "nothing was measured")."""
+        repo = _repo_with_gate(
+            tmp_path,
+            "CONTRACT ERROR: no authored scenarios found under tests/play, "
+            "an empty one is not a pass.",
+            exit_code=2)
+        out = tmp_path / "out"
+        result = rt.run_tests(project_root=str(repo), out_dir=str(out))
+        report = _report(out)
+    
+>       assert report["repo_gate"]["measured"] == rt.REPO_GATE_MEASURED_FAIL
+E       AssertionError: assert 'unmeasured' == 'measured_fail'
+E         
+E         - measured_fail
+E         + unmeasured
+
+tests/unit/test_run_tests_unmeasured_declaration.py:93: AssertionError
+_______ test_a_declaration_survives_output_far_past_the_retention_bound ________
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-18/test_a_declaration_survives_ou0')
+
+    def test_a_declaration_survives_output_far_past_the_retention_bound(tmp_path):
+        """The channel the whole protocol rests on, on a gate whose output is far
+        larger than the 2000 characters `output` retains.
+    
+        The record is FIRST and the log continues long past the bound, so the
+        retained fragment provably does not contain it: only scanning the whole
+        text before truncating can read it. This is the run that used to be
+        impossible — before, the declaration was only readable while the gate's
+        log was SHORT, and no real gate's log is.
+        """
+        noise = "=" * 3000
+        repo = _repo_with_gate(tmp_path, DECLARED, noise, exit_code=3)
+        out = tmp_path / "out"
+        rt.run_tests(project_root=str(repo), out_dir=str(out))
+        report = _report(out)
+        gate = report["repo_gate"]
+    
+>       assert gate["output_truncated"] is True
+               ^^^^^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'output_truncated'
+
+tests/unit/test_run_tests_unmeasured_declaration.py:120: KeyError
+_______________ test_every_repo_gate_run_carries_its_measurement _______________
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-18/test_every_repo_gate_run_carri0')
+
+    def test_every_repo_gate_run_carries_its_measurement(tmp_path):
+        """Kills M4 (deleting `result["measured"]`): the fold below reads it, so
+        the field is not a dead key — it is the only thing that decides whether a
+        gate's cases may be pruned or its red forgiven."""
+        repo = _repo_with_gate(tmp_path, "plain red prose", exit_code=1)
+        out = tmp_path / "out"
+        rt.run_tests(project_root=str(repo), out_dir=str(out))
+        gate = _report(out)["repo_gate"]
+        assert "measured" in gate
+>       assert gate["measured"] == rt.REPO_GATE_MEASURED_FAIL
+E       AssertionError: assert 'unmeasured' == 'measured_fail'
+E         
+E         - measured_fail
+E         + unmeasured
+
+tests/unit/test_run_tests_unmeasured_declaration.py:384: AssertionError
+___________ test_an_unmeasured_repo_gate_may_not_prune_its_known_red ___________
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-18/test_an_unmeasured_repo_gate_m0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x790622ce0e60>
+
+    def test_an_unmeasured_repo_gate_may_not_prune_its_known_red(tmp_path,
+                                                                 monkeypatch):
+        """Kills M8 (`repo_gate_cases: None` -> `set()` on the unmeasured branch).
+        `Executed.ran("repo_gate:...")` reads that field, so `set()` claims the
+        gate RAN — and a known-red case is dropped by a gate that said, in its own
+        words, that it never ran."""
+        monkeypatch.setattr(rt, "REPO_GATE_UNMEASURED_ATTEMPTS", 1)
+        repo = _repo_with_gate(tmp_path, _case("A", "broken"), exit_code=1)
+        state = tmp_path / "state"
+        rt.run_tests(project_root=str(repo), out_dir=str(tmp_path / "out-1"),
+                     state_dir=str(state))
+        baseline = _baseline_file(state, repo)
+>       assert json.loads(baseline.read_text())["failures"] == [
+                          ^^^^^^^^^^^^^^^^^^^^
+            "repo_gate:run_tests.sh#A"]
+
+tests/unit/test_run_tests_unmeasured_declaration.py:466: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/usr/local/lib/python3.12/pathlib.py:1027: in read_text
+    with self.open(mode='r', encoding=encoding, errors=errors) as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.12/pathlib.py:1013: in open
+    return io.open(self, mode, buffering, encoding, errors, newline)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+file = PosixPath('/tmp/pytest-of-unknown/pytest-18/test_an_unmeasured_repo_gate_m0/state/repos/repo-d0274070401f56b0/run_tests_baseline.json')
+args = ('r', -1, 'locale', None, None), kwargs = {}
+
+    def opener(file, *args, **kwargs):
+        if isinstance(file, (str, bytes, os.PathLike)):
+            _note_read(file)
+>       return real(file, *args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       FileNotFoundError: [Errno 2] No such file or directory: '/tmp/pytest-of-unknown/pytest-18/test_an_unmeasured_repo_gate_m0/state/repos/repo-d0274070401f56b0/run_tests_baseline.json'
+
+tools/mutation_catalog/ignition_plugin.py:92: FileNotFoundError
+_________ test_a_repo_gate_that_measured_green_may_prune_its_known_red _________
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-18/test_a_repo_gate_that_measured0')
+
+    def test_a_repo_gate_that_measured_green_may_prune_its_known_red(tmp_path):
+        """Kills M18 (the mirror: `set()` -> `None` on the measured_pass branch).
+        The gate DID run and reported nothing failed, so its known-red case is
+        measured green and has to leave the baseline."""
+        repo = _repo_with_gate(tmp_path, _case("A", "broken"), exit_code=1)
+        state = tmp_path / "state"
+        rt.run_tests(project_root=str(repo), out_dir=str(tmp_path / "out-1"),
+                     state_dir=str(state))
+        baseline = _baseline_file(state, repo)
+>       assert json.loads(baseline.read_text())["failures"] == [
+                          ^^^^^^^^^^^^^^^^^^^^
+            "repo_gate:run_tests.sh#A"]
+
+tests/unit/test_run_tests_unmeasured_declaration.py:490: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/usr/local/lib/python3.12/pathlib.py:1027: in read_text
+    with self.open(mode='r', encoding=encoding, errors=errors) as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.12/pathlib.py:1013: in open
+    return io.open(self, mode, buffering, encoding, errors, newline)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+file = PosixPath('/tmp/pytest-of-unknown/pytest-18/test_a_repo_gate_that_measured0/state/repos/repo-68560a89027b2bff/run_tests_baseline.json')
+args = ('r', -1, 'locale', None, None), kwargs = {}
+
+    def opener(file, *args, **kwargs):
+        if isinstance(file, (str, bytes, os.PathLike)):
+            _note_read(file)
+>       return real(file, *args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       FileNotFoundError: [Errno 2] No such file or directory: '/tmp/pytest-of-unknown/pytest-18/test_a_repo_gate_that_measured0/state/repos/repo-68560a89027b2bff/run_tests_baseline.json'
+
+tools/mutation_catalog/ignition_plugin.py:92: FileNotFoundError
+_ test_a_real_red_still_enters_the_baseline_and_the_absence_after_it_does_not_pass _
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-18/test_a_real_red_still_enters_t0')
+
+    def test_a_real_red_still_enters_the_baseline_and_the_absence_after_it_does_not_pass(
+            tmp_path):
+        """The other pole of the same property, and the reason it is not a
+        blanket: a gate that MEASURED red must still seed the baseline.
+    
+        Without this pole the rule above could be satisfied by never seeding at
+        all, which would make every pre-existing red look like this round's.
+        """
+        repo = _repo_with_gate(tmp_path, _case("A", "broken"), exit_code=1)
+        state = tmp_path / "state"
+        out = tmp_path / "out-red"
+        rt.run_tests(project_root=str(repo), out_dir=str(out), state_dir=str(state))
+        report = _report(out)
+        baseline = _baseline_file(state, repo)
+    
+>       assert report["repo_gate"]["measured"] == rt.REPO_GATE_MEASURED_FAIL
+E       AssertionError: assert 'unmeasured' == 'measured_fail'
+E         
+E         - measured_fail
+E         + unmeasured
+
+tests/unit/test_run_tests_unmeasured_declaration.py:557: AssertionError
+______________ test_four_real_reds_still_exhaust_the_cycle_limit _______________
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-18/test_four_real_reds_still_exha0')
+
+    def test_four_real_reds_still_exhaust_the_cycle_limit(tmp_path):
+        """(3) The re-acquisition must not make the loop unbounded: four real reds
+        still run the edge out and the run dies on `Cycle limit exceeded`."""
+        counter = tmp_path / "gate_calls.txt"
+        tail = ("printf '%s\\n' '" + _case_record() + "'\n"
+                "exit 1\n")
+        sf, run_id, calls = _wire(
+            tmp_path, [True], real_run_tests=True,
+            repo_prepare=lambda project: _prepare_project_gate(project, counter,
+                                                               tail))
+        status, implement_runs = _drive(sf, run_id)
+    
+>       assert status == "failed"
+E       AssertionError: assert 'completed' == 'failed'
+E         
+E         - failed
+E         + completed
+
+tests/skillflow/test_coding_impl_gate.py:367: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+_____ test_pole_a_a_ceiling_far_past_the_window_spends_one_implement_cycle _____
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-18/test_pole_a_a_ceiling_far_past0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7906215f4f20>
+
+    def test_pole_a_a_ceiling_far_past_the_window_spends_one_implement_cycle(
+            tmp_path, monkeypatch):
+        """(a) Ceiling >> observation window: the absence is silent throughout.
+    
+        `implement_runs` must be 1 and the run must NOT be terminal — the run's gate
+        has not answered, so there is nothing to end. The run must also be parked at
+        the loop-external gate, which is only reachable if the absence edge actually
+        fired: on the r5 candidate the same two lines sat on `test_evidence`, where
+        `from_file` resolves against a step that writes nothing, so the edge could
+        never match and this pole spent 4 implement cycles on `Cycle limit
+        exceeded` instead.
+        """
+        counter = tmp_path / "calls.txt"
+        sf, run_id = _wire(tmp_path, monkeypatch, episode_max=100000,
+                           wait=1, counter=counter, tail=_SILENT_TAIL)
+        first = _prime_ledger(sf, run_id)
+        assert first["state"] == "none"          # no report yet: nothing to account
+    
+        implement_runs, statuses, outcomes, nodes = _drive(
+            sf, run_id, monkeypatch, ticks=40,
+            clock_step=gate_deferral.wait_seconds())
+        _assert_test_row_untouched(sf, run_id)
+    
+        assert implement_runs == 1, implement_runs
+        assert statuses[-1] == "running", statuses
+        assert "expired" not in outcomes, outcomes
+>       assert _gate_calls(counter) >= 1
+E       AssertionError: assert 0 >= 1
+E        +  where 0 = _gate_calls(PosixPath('/tmp/pytest-of-unknown/pytest-18/test_pole_a_a_ceiling_far_past0/calls.txt'))
+
+tests/skillflow/test_coding_impl_gate_absence.py:270: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+=============================== warnings summary ===============================
+../../../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+tests/unit/test_bash_admission_lifetime.py::test_a_second_cancellation_during_cleanup_still_ends_the_writer
+  /usr/local/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <function BaseSubprocessTransport.__del__ at 0x790637ba0040>
+  
+  Traceback (most recent call last):
+    File "/usr/local/lib/python3.12/asyncio/base_subprocess.py", line 126, in __del__
+      self.close()
+    File "/usr/local/lib/python3.12/asyncio/base_subprocess.py", line 104, in close
+      proto.pipe.close()
+    File "/usr/local/lib/python3.12/asyncio/unix_events.py", line 568, in close
+      self._close(None)
+    File "/usr/local/lib/python3.12/asyncio/unix_events.py", line 592, in _close
+      self._loop.call_soon(self._call_connection_lost, exc)
+    File "/usr/local/lib/python3.12/asyncio/base_events.py", line 799, in call_soon
+      self._check_closed()
+    File "/usr/local/lib/python3.12/asyncio/base_events.py", line 545, in _check_closed
+      raise RuntimeError('Event loop is closed')
+  RuntimeError: Event loop is closed
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/unit/test_public_read_hardening.py::TestAnUnknownJwtKidCostsNoNetworkCall::test_a_rejected_kid_is_remembered
+tests/unit/test_public_read_hardening.py::TestAnUnknownJwtKidCostsNoNetworkCall::test_the_bad_kid_table_is_bounded
+  /usr/local/lib/python3.12/site-packages/jwt/api_jwt.py:149: InsecureKeyLengthWarning: The HMAC key is 1 bytes long, which is below the minimum recommended length of 32 bytes for SHA256. See RFC 7518 Section 3.2.
+    return self._jws.encode(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_gate_deferral_execution_points.py::test_one_step_holds_the_scheduler_for_at_most_one_gate_run
+FAILED tests/unit/test_run_tests_known_red_baseline.py::test_real_repo_gate_a_then_a_plus_b_exposes_b_and_keeps_detail_stable
+FAILED tests/unit/test_run_tests_known_red_baseline.py::test_real_repo_gate_fixed_then_rebroken_case_becomes_new
+FAILED tests/unit/test_run_tests_known_red_baseline.py::test_repo_gate_without_state_dir_stays_strict
+FAILED tests/unit/test_run_tests_known_red_baseline.py::test_unreliable_repo_gate_identity_never_seeds_or_changes_baseline
+FAILED tests/unit/test_run_tests_unmeasured_declaration.py::test_a_contract_error_exit_2_is_a_measured_failure_with_failures
+FAILED tests/unit/test_run_tests_unmeasured_declaration.py::test_a_declaration_survives_output_far_past_the_retention_bound
+FAILED tests/unit/test_run_tests_unmeasured_declaration.py::test_every_repo_gate_run_carries_its_measurement
+FAILED tests/unit/test_run_tests_unmeasured_declaration.py::test_an_unmeasured_repo_gate_may_not_prune_its_known_red
+FAILED tests/unit/test_run_tests_unmeasured_declaration.py::test_a_repo_gate_that_measured_green_may_prune_its_known_red
+FAILED tests/unit/test_run_tests_unmeasured_declaration.py::test_a_real_red_still_enters_the_baseline_and_the_absence_after_it_does_not_pass
+FAILED tests/skillflow/test_coding_impl_gate.py::test_four_real_reds_still_exhaust_the_cycle_limit
+FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_a_a_ceiling_far_past_the_window_spends_one_implement_cycle
+13 failed, 4059 passed, 9 skipped, 4 warnings in 376.17s (0:06:16)
+
+BARE_RC_FULL=1
+IGNITION_FULL={"file_reads": 22, "file_reads_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-4muyoxer/tree/aitelier/tools/run_tests/impl.py": 22}, "igniting_tests": ["tests/skillflow/test_coding_impl_gate.py::test_four_real_reds_still_exhaust_the_cycle_limit", "tests/skillflow/test_coding_impl_gate_absence.py::test_a_gate_that_finally_answers_clears_the_deferral", "tests/skillflow/test_coding_impl_gate_absence.py::test_pole_a_a_ceiling_far_past_the_window_spends_one_implement_cycle", "tests/skillflow/test_coding_impl_gate_absence.py::test_pole_b_a_zero_ceiling_is_clamped_and_cannot_charge_the_absence", "tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence", "tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_inside_the_window_is_honoured_and_uncharged", "tests/skillflow/test_coding_impl_gate_absence.py::test_the_deferral_hold_leaves_real_step_rows_untouched", "tests/skillflow/test_coding_impl_gate_absence.py::test_the_host_hold_alone_keeps_the_rows_where_the_absence_left_them", "tests/skillflow/test_coding_impl_gate_absence.py::test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them", "tests/unit/test_diagnostic_output_targets.py::test_run_tests_report_is_an_artifact_not_a_code_change", "tests/unit/test_host_injected_kwargs_are_declared.py::test_the_guard_never_contradicts_the_signature_it_reads", "tests/unit/test_tool_root_guard_inventory.py::test_run_tests_refuses_a_relative_out_dir"], "line_hits": 13, "line_hits_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-4muyoxer/tree/aitelier/tools/run_tests/impl.py": 13}, "monitoring_tool_id": 4, "mutated_modules_imported": ["/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-4muyoxer/tree/aitelier/tools/run_tests/impl.py"], "source_readers": ["tests/unit/test_datadir_guardrail.py::test_no_home_paths_outside_datadir", "tests/unit/test_every_step_driver_handles_cancellation.py::test_every_claim_holding_loop_handles_cancellation", "tests/unit/test_no_by_name_graph_lookup_during_a_run.py::test_no_run_scoped_lookup_resolves_a_graph_by_name", "tests/unit/test_no_self_call_collapse.py::test_no_python_source_is_a_self_call_and_nothing_else", "tests/unit/test_no_verbatim_previous_line_dup.py::test_named_test_repeats_are_pinned_and_current", "tests/unit/test_no_verbatim_previous_line_dup.py::test_no_verbatim_previous_line_dup_in_non_test_code", "tests/unit/test_public_read_hardening.py::TestTheEnvScrubCoversTheUnattendedPath::test_both_subprocess_paths_in_run_tests_use_it", "tests/unit/test_public_read_hardening.py::test_every_subprocess_in_run_tests_scrubs_the_environment", "tests/unit/test_run_tests_pytest_wall.py::test_the_budget_is_one_constant_and_not_a_repeated_literal", "tests/unit/test_run_tests_unmeasured_declaration.py::test_m21_is_reproduced_and_this_file_is_what_flips", "tests/unit/test_run_tests_unmeasured_declaration.py::test_m21b_is_reproduced_and_this_file_is_what_flips", "tests/unit/test_run_tests_unmeasured_declaration.py::test_the_r4_shaped_witness_flips_under_the_literal_m21", "tests/unit/test_run_tests_unmeasured_declaration.py::test_the_r4_shaped_witness_flips_under_the_literal_m21b", "tests/unit/test_tool_root_guard_inventory.py::test_every_tool_that_takes_a_root_is_classified", "tests/unit/test_tree_level_accounting_witnesses.py::test_ABS_the_absence_branch_is_ahead_of_the_seed_in_the_real_source", "tests/unit/test_tree_level_accounting_witnesses.py::test_M21_the_tree_still_tests_the_line_start_not_a_substring", "tests/unit/test_tree_level_accounting_witnesses.py::test_M21_the_tree_witnesses_go_red_on_the_actual_mutation[line.startswith(_REPO_GATE_UNMEASURED_PREFIX)-_REPO_GATE_UNMEASURED_PREFIX in line]", "tests/unit/test_tree_level_accounting_witnesses.py::test_M21_the_tree_witnesses_go_red_on_the_actual_mutation[raw = line[len(_REPO_GATE_UNMEASURED_PREFIX):]-raw = line[line.index(_REPO_GATE_UNMEASURED_PREFIX) + len(_REPO_GATE_UNMEASURED_PREFIX):]]", "tests/unit/test_tree_level_accounting_witnesses.py::test_M21b_the_tree_still_tests_the_case_prefix_at_the_line_start", "tests/unit/test_tree_level_accounting_witnesses.py::test_M21b_the_tree_witness_goes_red_on_the_actual_mutation"]}
+
+# control targeted reds=[]
+# control full reds=[]
+# targeted killers=['tests/unit/test_gate_deferral_execution_points.py::test_one_step_holds_the_scheduler_for_at_most_one_gate_run']
+# targeted source-text witnesses=[]
+# full killers=['tests/skillflow/test_coding_impl_gate.py::test_four_real_reds_still_exhaust_the_cycle_limit', 'tests/skillflow/test_coding_impl_gate_absence.py::test_pole_a_a_ceiling_far_past_the_window_spends_one_implement_cycle', 'tests/unit/test_gate_deferral_execution_points.py::test_one_step_holds_the_scheduler_for_at_most_one_gate_run', 'tests/unit/test_run_tests_known_red_baseline.py::test_real_repo_gate_a_then_a_plus_b_exposes_b_and_keeps_detail_stable', 'tests/unit/test_run_tests_known_red_baseline.py::test_real_repo_gate_fixed_then_rebroken_case_becomes_new', 'tests/unit/test_run_tests_known_red_baseline.py::test_repo_gate_without_state_dir_stays_strict', 'tests/unit/test_run_tests_known_red_baseline.py::test_unreliable_repo_gate_identity_never_seeds_or_changes_baseline', 'tests/unit/test_run_tests_unmeasured_declaration.py::test_a_contract_error_exit_2_is_a_measured_failure_with_failures', 'tests/unit/test_run_tests_unmeasured_declaration.py::test_a_declaration_survives_output_far_past_the_retention_bound', 'tests/unit/test_run_tests_unmeasured_declaration.py::test_a_real_red_still_enters_the_baseline_and_the_absence_after_it_does_not_pass', 'tests/unit/test_run_tests_unmeasured_declaration.py::test_a_repo_gate_that_measured_green_may_prune_its_known_red', 'tests/unit/test_run_tests_unmeasured_declaration.py::test_an_unmeasured_repo_gate_may_not_prune_its_known_red', 'tests/unit/test_run_tests_unmeasured_declaration.py::test_every_repo_gate_run_carries_its_measurement']
+# full source-text witnesses=[]
+# porcelain after restore=''
+# status=killed

@@ -1,0 +1,323 @@
+# M21BPAIR (behaviour): The same pair on the case channel (M21b + its slice).
+# head=b104f18c2e7e1d0f0c59e99cb32a077e7896dd28
+# worktree=/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-zelhciay/tree (removed)
+# started=2026-09-24 05:59:10 UTC ended=2026-09-24 06:05:15 UTC
+# replacement lines={"aitelier/tools/run_tests/impl.py": [855, 857]}
+
+## diff applied
+diff --git a/aitelier/tools/run_tests/impl.py b/aitelier/tools/run_tests/impl.py
+index 766b7f33..15b9e9d4 100644
+--- a/aitelier/tools/run_tests/impl.py
++++ b/aitelier/tools/run_tests/impl.py
+@@ -852,9 +852,9 @@ def _repo_gate_failure_cases(gate: dict) -> tuple[list[dict], str | None]:
+     records: list[dict] = []
+     seen: set[str] = set()
+     for line in str(gate.get("output", "")).splitlines():
+-        if not line.startswith(_REPO_GATE_CASE_PREFIX):
++        if not (_REPO_GATE_CASE_PREFIX in line):
+             continue
+-        raw = line[len(_REPO_GATE_CASE_PREFIX):]
++        raw = line[line.index(_REPO_GATE_CASE_PREFIX) + len(_REPO_GATE_CASE_PREFIX):]
+         try:
+             value = json.loads(raw)
+         except (TypeError, ValueError):
+
+## targeted scope: /usr/local/bin/python -m pytest -q -rfE -p no:cacheprovider -p ignition_plugin tests/unit/test_run_tests_unmeasured_declaration.py::test_a_mid_line_echo_kills_the_in_operator_on_the_case_channel
+# cwd=/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-zelhciay/tree
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________ test_a_mid_line_echo_kills_the_in_operator_on_the_case_channel ________
+
+    def test_a_mid_line_echo_kills_the_in_operator_on_the_case_channel():
+        """Kills M21BPAIR (the `in` + `line.index` pair on
+        `_REPO_GATE_CASE_PREFIX`): a single log line that echoes the case prefix
+        must not fabricate a prunable red identity."""
+        assert len(_CASE_MIDLINE_NOISE) == len(rt._REPO_GATE_CASE_PREFIX) > 0
+        gate = {"returncode": 1, "output_truncated": False,
+                "output": _CASE_MIDLINE_NOISE + _case("A", "quoted")}
+        cases, identity_error = rt._repo_gate_failure_cases(gate)
+>       assert cases == []
+E       AssertionError: assert [{'case_id': ...l': 'quoted'}] == []
+E         
+E         Left contains one more item: {'case_id': 'A', 'status': 'failed', 'detail': 'quoted'}
+E         Use -v to get more diff
+
+tests/unit/test_run_tests_unmeasured_declaration.py:220: AssertionError
+=============================== warnings summary ===============================
+../../../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_run_tests_unmeasured_declaration.py::test_a_mid_line_echo_kills_the_in_operator_on_the_case_channel
+1 failed, 1 warning in 0.38s
+Exception ignored in: <function _removeHandlerRef at 0x7286e2c08e00>
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/logging/__init__.py", line 882, in _removeHandlerRef
+  File "/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-zelhciay/tree/tools/mutation_catalog/ignition_plugin.py", line 63, in _on_line
+TypeError: 'NoneType' object is not callable
+
+BARE_RC_TARGETED=1
+IGNITION_TARGETED={"file_reads": 0, "file_reads_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-zelhciay/tree/aitelier/tools/run_tests/impl.py": 0}, "igniting_tests": ["tests/unit/test_run_tests_unmeasured_declaration.py::test_a_mid_line_echo_kills_the_in_operator_on_the_case_channel"], "line_hits": 2, "line_hits_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-zelhciay/tree/aitelier/tools/run_tests/impl.py": 2}, "monitoring_tool_id": 4, "mutated_modules_imported": ["/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-zelhciay/tree/aitelier/tools/run_tests/impl.py"], "source_readers": []}
+
+## full scope: /usr/local/bin/python -m pytest -q -rfE -p no:cacheprovider -p ignition_plugin tests/unit tests/skillflow
+# cwd=/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-zelhciay/tree
+........................................................................ [  1%]
+........................................................................ [  3%]
+........................................................................ [  5%]
+........................................................................ [  7%]
+........................................................................ [  8%]
+........................................................................ [ 10%]
+........................................................................ [ 12%]
+........................................................................ [ 14%]
+........................................................................ [ 15%]
+........................................................................ [ 17%]
+........................................................................ [ 19%]
+........................................................................ [ 21%]
+........................................................................ [ 22%]
+........................................................................ [ 24%]
+........................................................................ [ 26%]
+........................................................................ [ 28%]
+........................................................................ [ 29%]
+........................................................................ [ 31%]
+........................................................................ [ 33%]
+........................................................................ [ 35%]
+.......................................................................s [ 37%]
+sssssss................................................................. [ 38%]
+........................................................................ [ 40%]
+........................................................................ [ 42%]
+........................................................................ [ 44%]
+........................................................................ [ 45%]
+........................................................................ [ 47%]
+........................................................................ [ 49%]
+........................................................................ [ 51%]
+........................................................................ [ 52%]
+........................................................................ [ 54%]
+.............s.......................................................... [ 56%]
+........................................................................ [ 58%]
+........................................................................ [ 59%]
+........................................................................ [ 61%]
+........................................................................ [ 63%]
+........................................................................ [ 65%]
+........................................................................ [ 67%]
+........................................................................ [ 68%]
+........................................................................ [ 70%]
+........................................................................ [ 72%]
+........................................................................ [ 74%]
+........................................................................ [ 75%]
+........................................................................ [ 77%]
+................................................F.F..FF................. [ 79%]
+........................................................................ [ 81%]
+........................................................................ [ 82%]
+........................................................................ [ 84%]
+........................................................................ [ 86%]
+........................................................................ [ 88%]
+........................................................................ [ 89%]
+........................................................................ [ 91%]
+........................................................................ [ 93%]
+.....................F..F............................................... [ 95%]
+........................................................................ [ 97%]
+........................................................................ [ 98%]
+.................................................                        [100%]
+=================================== FAILURES ===================================
+_______ test_a_log_echo_of_the_case_prefix_mid_line_is_not_a_case_record _______
+
+    def test_a_log_echo_of_the_case_prefix_mid_line_is_not_a_case_record():
+        """The same mutation on the per-case channel, which is what turns an
+        echoed log line into a prunable known-red identity."""
+        gate = {"returncode": 1, "output_truncated": False,
+                "output": "note: " + _case("A", "quoted")}
+        cases, identity_error = rt._repo_gate_failure_cases(gate)
+>       assert cases == []
+E       AssertionError: assert [{'case_id': ...l': 'quoted'}] == []
+E         
+E         Left contains one more item: {'case_id': 'A', 'status': 'failed', 'detail': 'quoted'}
+E         Use -v to get more diff
+
+tests/unit/test_run_tests_unmeasured_declaration.py:185: AssertionError
+________ test_a_mid_line_echo_kills_the_in_operator_on_the_case_channel ________
+
+    def test_a_mid_line_echo_kills_the_in_operator_on_the_case_channel():
+        """Kills M21BPAIR (the `in` + `line.index` pair on
+        `_REPO_GATE_CASE_PREFIX`): a single log line that echoes the case prefix
+        must not fabricate a prunable red identity."""
+        assert len(_CASE_MIDLINE_NOISE) == len(rt._REPO_GATE_CASE_PREFIX) > 0
+        gate = {"returncode": 1, "output_truncated": False,
+                "output": _CASE_MIDLINE_NOISE + _case("A", "quoted")}
+        cases, identity_error = rt._repo_gate_failure_cases(gate)
+>       assert cases == []
+E       AssertionError: assert [{'case_id': ...l': 'quoted'}] == []
+E         
+E         Left contains one more item: {'case_id': 'A', 'status': 'failed', 'detail': 'quoted'}
+E         Use -v to get more diff
+
+tests/unit/test_run_tests_unmeasured_declaration.py:220: AssertionError
+___________ test_the_r4_shaped_witness_flips_under_the_literal_m21b ____________
+
+    def test_the_r4_shaped_witness_flips_under_the_literal_m21b():
+        """The same shape on the case channel for M21b's literal half: one echoed
+        log line fabricates a prunable known-red identity."""
+        prefix = rt._REPO_GATE_CASE_PREFIX
+        header = "2026-09-21 12:00:00 gate says:"
+        header = (header + "x" * len(prefix))[:len(prefix)]
+        assert len(header) == len(prefix)
+        body = json.dumps({"case_id": "A", "status": "failed", "detail": prefix})
+        gate = {"returncode": 1, "output_truncated": False,
+                "output": header + body}
+        cases, identity_error = rt._repo_gate_failure_cases(gate)
+        assert cases == [] and identity_error
+>       mutant = _apply_m21_literal(rt._repo_gate_failure_cases)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/unit/test_run_tests_unmeasured_declaration.py:330: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+func = <function _repo_gate_failure_cases at 0x7b798f482ca0>
+
+    def _apply_m21_literal(func):
+        """Apply the card's LITERAL M21 to the real reader: `in`, slice UNCHANGED."""
+        import ast
+        import inspect
+        import textwrap
+    
+        source = textwrap.dedent(inspect.getsource(func))
+        mutated = source.replace(
+            "line.startswith(_REPO_GATE_UNMEASURED_PREFIX)",
+            "_REPO_GATE_UNMEASURED_PREFIX in line").replace(
+            "line.startswith(_REPO_GATE_CASE_PREFIX)",
+            "_REPO_GATE_CASE_PREFIX in line")
+>       assert mutated != source, "the mutation did not apply — the reader changed"
+E       AssertionError: the mutation did not apply — the reader changed
+E       assert 'def _repo_gate_failure_cases(gate: dict) -> tuple[list[dict], str | None]:\n    """Read trustworthy per-case identiti...    if not records:\n        return [], "repository gate did not emit per-case identities"\n    return records, None\n' != 'def _repo_gate_failure_cases(gate: dict) -> tuple[list[dict], str | None]:\n    """Read trustworthy per-case identiti...    if not records:\n        return [], "repository gate did not emit per-case identities"\n    return records, None\n'
+
+tests/unit/test_run_tests_unmeasured_declaration.py:274: AssertionError
+_____________ test_m21b_is_reproduced_and_this_file_is_what_flips ______________
+
+    def test_m21b_is_reproduced_and_this_file_is_what_flips():
+        """The same PAIR on `_REPO_GATE_CASE_PREFIX` (M21BPAIR). Under it one
+        echoed log line fabricates a prunable known-red identity — how a red gets
+        forgiven by a gate that never ran."""
+>       mutant = _apply_m21_pair(rt._repo_gate_failure_cases)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/unit/test_run_tests_unmeasured_declaration.py:340: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+func = <function _repo_gate_failure_cases at 0x7b798f482ca0>
+
+    def _apply_m21_pair(func):
+        """Apply the mutation ITSELF, in-process, and return the mutant callable.
+    
+        The card's claim is "M21 is killed". An assertion about the candidate
+        cannot show that — it only shows the candidate behaves one way. So each
+        witness below re-runs the REAL reader mutated and asserts the reading
+        FLIPS. The mutation is reproduced by the suite, not asserted about.
+    
+        `_apply_m21_pair` applies both halves — `startswith` → `in` AND the
+        slice seeking the prefix where it was found (`line.index(PREFIX) +
+        len(PREFIX)`). It is NOT the card's literal M21 (`in`, slice UNCHANGED);
+        that half is measurable too, but only against a witness whose noise header
+        is EXACTLY `len(prefix)` long with the prefix quoted inside the JSON — see
+        `test_the_r4_shaped_witness_flips_under_the_literal_m21`. The name says
+        what this helper is.
+        """
+        import ast
+        import inspect
+        import textwrap
+    
+        source = textwrap.dedent(inspect.getsource(func))
+        mutated = source.replace(
+            "line.startswith(_REPO_GATE_UNMEASURED_PREFIX)",
+            "_REPO_GATE_UNMEASURED_PREFIX in line").replace(
+            "raw = line[len(_REPO_GATE_UNMEASURED_PREFIX):]",
+            "raw = line[line.index(_REPO_GATE_UNMEASURED_PREFIX) + "
+            "len(_REPO_GATE_UNMEASURED_PREFIX):]").replace(
+            "line.startswith(_REPO_GATE_CASE_PREFIX)",
+            "_REPO_GATE_CASE_PREFIX in line").replace(
+            "raw = line[len(_REPO_GATE_CASE_PREFIX):]",
+            "raw = line[line.index(_REPO_GATE_CASE_PREFIX) + "
+            "len(_REPO_GATE_CASE_PREFIX):]")
+>       assert mutated != source, "the mutation did not apply — the reader changed"
+E       AssertionError: the mutation did not apply — the reader changed
+E       assert 'def _repo_gate_failure_cases(gate: dict) -> tuple[list[dict], str | None]:\n    """Read trustworthy per-case identiti...    if not records:\n        return [], "repository gate did not emit per-case identities"\n    return records, None\n' != 'def _repo_gate_failure_cases(gate: dict) -> tuple[list[dict], str | None]:\n    """Read trustworthy per-case identiti...    if not records:\n        return [], "repository gate did not emit per-case identities"\n    return records, None\n'
+
+tests/unit/test_run_tests_unmeasured_declaration.py:256: AssertionError
+_______ test_M21b_the_tree_still_tests_the_case_prefix_at_the_line_start _______
+
+    def test_M21b_the_tree_still_tests_the_case_prefix_at_the_line_start():
+        offenders = _case_witnesses(_source(_IMPL))
+>       assert offenders == [], "\n".join(offenders)
+E       AssertionError: M21b: the line start is no longer tested with startswith(_REPO_GATE_CASE_PREFIX)
+E         M21b: `_REPO_GATE_CASE_PREFIX in line` is present — one echoed log line fabricates a prunable known-red identity
+E         M21b: the slice is not `line[len(_REPO_GATE_CASE_PREFIX):]`
+E       assert ['M21b: the l...E_PREFIX):]`'] == []
+E         
+E         Left contains 3 more items, first extra item: 'M21b: the line start is no longer tested with startswith(_REPO_GATE_CASE_PREFIX)'
+E         Use -v to get more diff
+
+tests/unit/test_tree_level_accounting_witnesses.py:143: AssertionError
+__________ test_M21b_the_tree_witness_goes_red_on_the_actual_mutation __________
+
+    def test_M21b_the_tree_witness_goes_red_on_the_actual_mutation():
+        source = _source(_IMPL)
+        mutated = source.replace(f"line.startswith({_CASE_PREFIX})",
+                                 f"{_CASE_PREFIX} in line")
+>       assert mutated != source, "the mutation did not apply"
+E       AssertionError: the mutation did not apply
+E       assert '"""run_tests — execute the project\'s unit tests and write a test report.\n\nUsed as a tool STEP after the final veri...ures"]),\n            "failure_count": len(report["failures"]),\n            "new_failures": report["new_failures"]}\n' != '"""run_tests — execute the project\'s unit tests and write a test report.\n\nUsed as a tool STEP after the final veri...ures"]),\n            "failure_count": len(report["failures"]),\n            "new_failures": report["new_failures"]}\n'
+
+tests/unit/test_tree_level_accounting_witnesses.py:166: AssertionError
+=============================== warnings summary ===============================
+../../../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+tests/unit/test_bash_admission_lifetime.py::test_a_second_cancellation_during_cleanup_still_ends_the_writer
+  /usr/local/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <function BaseSubprocessTransport.__del__ at 0x7b799b2fc040>
+  
+  Traceback (most recent call last):
+    File "/usr/local/lib/python3.12/asyncio/base_subprocess.py", line 126, in __del__
+      self.close()
+    File "/usr/local/lib/python3.12/asyncio/base_subprocess.py", line 104, in close
+      proto.pipe.close()
+    File "/usr/local/lib/python3.12/asyncio/unix_events.py", line 568, in close
+      self._close(None)
+    File "/usr/local/lib/python3.12/asyncio/unix_events.py", line 592, in _close
+      self._loop.call_soon(self._call_connection_lost, exc)
+    File "/usr/local/lib/python3.12/asyncio/base_events.py", line 799, in call_soon
+      self._check_closed()
+    File "/usr/local/lib/python3.12/asyncio/base_events.py", line 545, in _check_closed
+      raise RuntimeError('Event loop is closed')
+  RuntimeError: Event loop is closed
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/unit/test_public_read_hardening.py::TestAnUnknownJwtKidCostsNoNetworkCall::test_a_rejected_kid_is_remembered
+tests/unit/test_public_read_hardening.py::TestAnUnknownJwtKidCostsNoNetworkCall::test_the_bad_kid_table_is_bounded
+  /usr/local/lib/python3.12/site-packages/jwt/api_jwt.py:149: InsecureKeyLengthWarning: The HMAC key is 1 bytes long, which is below the minimum recommended length of 32 bytes for SHA256. See RFC 7518 Section 3.2.
+    return self._jws.encode(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_run_tests_unmeasured_declaration.py::test_a_log_echo_of_the_case_prefix_mid_line_is_not_a_case_record
+FAILED tests/unit/test_run_tests_unmeasured_declaration.py::test_a_mid_line_echo_kills_the_in_operator_on_the_case_channel
+FAILED tests/unit/test_run_tests_unmeasured_declaration.py::test_the_r4_shaped_witness_flips_under_the_literal_m21b
+FAILED tests/unit/test_run_tests_unmeasured_declaration.py::test_m21b_is_reproduced_and_this_file_is_what_flips
+FAILED tests/unit/test_tree_level_accounting_witnesses.py::test_M21b_the_tree_still_tests_the_case_prefix_at_the_line_start
+FAILED tests/unit/test_tree_level_accounting_witnesses.py::test_M21b_the_tree_witness_goes_red_on_the_actual_mutation
+6 failed, 4066 passed, 9 skipped, 4 warnings in 352.19s (0:05:52)
+
+BARE_RC_FULL=1
+IGNITION_FULL={"file_reads": 22, "file_reads_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-zelhciay/tree/aitelier/tools/run_tests/impl.py": 22}, "igniting_tests": ["tests/skillflow/test_coding_impl_gate.py::test_four_real_reds_still_exhaust_the_cycle_limit", "tests/unit/test_run_tests_known_red_baseline.py::test_real_repo_gate_a_then_a_plus_b_exposes_b_and_keeps_detail_stable", "tests/unit/test_run_tests_known_red_baseline.py::test_real_repo_gate_fixed_then_rebroken_case_becomes_new", "tests/unit/test_run_tests_known_red_baseline.py::test_repo_gate_without_state_dir_stays_strict", "tests/unit/test_run_tests_known_red_baseline.py::test_unreliable_repo_gate_identity_never_seeds_or_changes_baseline", "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_contract_error_exit_2_is_a_measured_failure_with_failures", "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_log_echo_of_the_case_prefix_mid_line_is_not_a_case_record", "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_mid_line_echo_kills_the_in_operator_on_the_case_channel", "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_real_red_still_enters_the_baseline_and_the_absence_after_it_does_not_pass", "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_repo_gate_that_measured_green_may_prune_its_known_red", "tests/unit/test_run_tests_unmeasured_declaration.py::test_an_unmeasured_repo_gate_may_not_prune_its_known_red", "tests/unit/test_run_tests_unmeasured_declaration.py::test_every_repo_gate_run_carries_its_measurement", "tests/unit/test_run_tests_unmeasured_declaration.py::test_the_r4_shaped_witness_flips_under_the_literal_m21b"], "line_hits": 51, "line_hits_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-zelhciay/tree/aitelier/tools/run_tests/impl.py": 51}, "monitoring_tool_id": 4, "mutated_modules_imported": ["/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-zelhciay/tree/aitelier/tools/run_tests/impl.py"], "source_readers": ["tests/unit/test_datadir_guardrail.py::test_no_home_paths_outside_datadir", "tests/unit/test_every_step_driver_handles_cancellation.py::test_every_claim_holding_loop_handles_cancellation", "tests/unit/test_no_by_name_graph_lookup_during_a_run.py::test_no_run_scoped_lookup_resolves_a_graph_by_name", "tests/unit/test_no_self_call_collapse.py::test_no_python_source_is_a_self_call_and_nothing_else", "tests/unit/test_no_verbatim_previous_line_dup.py::test_named_test_repeats_are_pinned_and_current", "tests/unit/test_no_verbatim_previous_line_dup.py::test_no_verbatim_previous_line_dup_in_non_test_code", "tests/unit/test_public_read_hardening.py::TestTheEnvScrubCoversTheUnattendedPath::test_both_subprocess_paths_in_run_tests_use_it", "tests/unit/test_public_read_hardening.py::test_every_subprocess_in_run_tests_scrubs_the_environment", "tests/unit/test_run_tests_pytest_wall.py::test_the_budget_is_one_constant_and_not_a_repeated_literal", "tests/unit/test_run_tests_unmeasured_declaration.py::test_m21_is_reproduced_and_this_file_is_what_flips", "tests/unit/test_run_tests_unmeasured_declaration.py::test_m21b_is_reproduced_and_this_file_is_what_flips", "tests/unit/test_run_tests_unmeasured_declaration.py::test_the_r4_shaped_witness_flips_under_the_literal_m21", "tests/unit/test_run_tests_unmeasured_declaration.py::test_the_r4_shaped_witness_flips_under_the_literal_m21b", "tests/unit/test_tool_root_guard_inventory.py::test_every_tool_that_takes_a_root_is_classified", "tests/unit/test_tree_level_accounting_witnesses.py::test_ABS_the_absence_branch_is_ahead_of_the_seed_in_the_real_source", "tests/unit/test_tree_level_accounting_witnesses.py::test_M21_the_tree_still_tests_the_line_start_not_a_substring", "tests/unit/test_tree_level_accounting_witnesses.py::test_M21_the_tree_witnesses_go_red_on_the_actual_mutation[line.startswith(_REPO_GATE_UNMEASURED_PREFIX)-_REPO_GATE_UNMEASURED_PREFIX in line]", "tests/unit/test_tree_level_accounting_witnesses.py::test_M21_the_tree_witnesses_go_red_on_the_actual_mutation[raw = line[len(_REPO_GATE_UNMEASURED_PREFIX):]-raw = line[line.index(_REPO_GATE_UNMEASURED_PREFIX) + len(_REPO_GATE_UNMEASURED_PREFIX):]]", "tests/unit/test_tree_level_accounting_witnesses.py::test_M21b_the_tree_still_tests_the_case_prefix_at_the_line_start", "tests/unit/test_tree_level_accounting_witnesses.py::test_M21b_the_tree_witness_goes_red_on_the_actual_mutation"]}
+
+# control targeted reds=[]
+# control full reds=[]
+# targeted killers=['tests/unit/test_run_tests_unmeasured_declaration.py::test_a_mid_line_echo_kills_the_in_operator_on_the_case_channel']
+# targeted source-text witnesses=[]
+# full killers=['tests/unit/test_run_tests_unmeasured_declaration.py::test_a_log_echo_of_the_case_prefix_mid_line_is_not_a_case_record', 'tests/unit/test_run_tests_unmeasured_declaration.py::test_a_mid_line_echo_kills_the_in_operator_on_the_case_channel', 'tests/unit/test_run_tests_unmeasured_declaration.py::test_the_r4_shaped_witness_flips_under_the_literal_m21b']
+# full source-text witnesses=['tests/unit/test_run_tests_unmeasured_declaration.py::test_m21b_is_reproduced_and_this_file_is_what_flips', 'tests/unit/test_tree_level_accounting_witnesses.py::test_M21b_the_tree_still_tests_the_case_prefix_at_the_line_start', 'tests/unit/test_tree_level_accounting_witnesses.py::test_M21b_the_tree_witness_goes_red_on_the_actual_mutation']
+# porcelain after restore=''
+# status=killed

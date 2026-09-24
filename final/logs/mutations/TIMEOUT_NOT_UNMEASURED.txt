@@ -1,0 +1,201 @@
+# TIMEOUT_NOT_UNMEASURED (behaviour): 
+# head=b104f18c2e7e1d0f0c59e99cb32a077e7896dd28
+# worktree=/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-tmysf5sx/tree (removed)
+# started=2026-09-24 06:22:32 UTC ended=2026-09-24 06:28:59 UTC
+# replacement lines={"aitelier/tools/run_tests/impl.py": [793]}
+
+## diff applied
+diff --git a/aitelier/tools/run_tests/impl.py b/aitelier/tools/run_tests/impl.py
+index 766b7f33..d1f6c859 100644
+--- a/aitelier/tools/run_tests/impl.py
++++ b/aitelier/tools/run_tests/impl.py
+@@ -790,7 +790,7 @@ def _repo_gate_outcome(gate: dict) -> str:
+     """
+     if _repo_gate_declares_unmeasured(gate):
+         return REPO_GATE_UNMEASURED
+-    if gate.get("timed_out") is True or gate.get("runner_error") is True:
++    if False:
+         return REPO_GATE_UNMEASURED
+     return (REPO_GATE_MEASURED_PASS if gate.get("returncode") == 0
+             else REPO_GATE_MEASURED_FAIL)
+
+## targeted scope: /usr/local/bin/python -m pytest -q -rfE -p no:cacheprovider -p ignition_plugin tests/unit/test_run_tests_unmeasured_declaration.py::test_a_killed_gate_is_unmeasured_and_its_returncode_is_not_why
+# cwd=/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-tmysf5sx/tree
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________ test_a_killed_gate_is_unmeasured_and_its_returncode_is_not_why ________
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-19/test_a_killed_gate_is_unmeasur0')
+
+    def test_a_killed_gate_is_unmeasured_and_its_returncode_is_not_why(tmp_path):
+        gate = rt._run_node_cmd(Path(str(tmp_path)), ["bash", "-c", "sleep 3"],
+                                timeout=1)
+        assert gate["returncode"] == -1
+        assert gate["timed_out"] is True
+        # Same value the bare exit-code scan above reads as a MEASURED failure —
+        # the marker, not the number, is what makes this an absence.
+>       assert rt._repo_gate_outcome(gate) == rt.REPO_GATE_UNMEASURED
+E       AssertionError: assert 'measured_fail' == 'unmeasured'
+E         
+E         - unmeasured
+E         + measured_fail
+
+tests/unit/test_run_tests_unmeasured_declaration.py:363: AssertionError
+=============================== warnings summary ===============================
+../../../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_run_tests_unmeasured_declaration.py::test_a_killed_gate_is_unmeasured_and_its_returncode_is_not_why
+1 failed, 1 warning in 3.04s
+Exception ignored in: <function _removeHandlerRef at 0x7f182d7e4e00>
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/logging/__init__.py", line 882, in _removeHandlerRef
+  File "/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-tmysf5sx/tree/tools/mutation_catalog/ignition_plugin.py", line 63, in _on_line
+TypeError: 'NoneType' object is not callable
+
+BARE_RC_TARGETED=1
+IGNITION_TARGETED={"file_reads": 0, "file_reads_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-tmysf5sx/tree/aitelier/tools/run_tests/impl.py": 0}, "igniting_tests": ["tests/unit/test_run_tests_unmeasured_declaration.py::test_a_killed_gate_is_unmeasured_and_its_returncode_is_not_why"], "line_hits": 1, "line_hits_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-tmysf5sx/tree/aitelier/tools/run_tests/impl.py": 1}, "monitoring_tool_id": 4, "mutated_modules_imported": ["/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-tmysf5sx/tree/aitelier/tools/run_tests/impl.py"], "source_readers": []}
+
+## full scope: /usr/local/bin/python -m pytest -q -rfE -p no:cacheprovider -p ignition_plugin tests/unit tests/skillflow
+# cwd=/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-tmysf5sx/tree
+........................................................................ [  1%]
+........................................................................ [  3%]
+........................................................................ [  5%]
+........................................................................ [  7%]
+........................................................................ [  8%]
+........................................................................ [ 10%]
+........................................................................ [ 12%]
+........................................................................ [ 14%]
+........................................................................ [ 15%]
+........................................................................ [ 17%]
+........................................................................ [ 19%]
+........................................................................ [ 21%]
+........................................................................ [ 22%]
+........................................................................ [ 24%]
+........................................................................ [ 26%]
+........................................................................ [ 28%]
+........................................................................ [ 29%]
+........................................................................ [ 31%]
+........................................................................ [ 33%]
+........................................................................ [ 35%]
+.......................................................................s [ 37%]
+sssssss................................................................. [ 38%]
+........................................................................ [ 40%]
+........................................................................ [ 42%]
+........................................................................ [ 44%]
+........................................................................ [ 45%]
+........................................................................ [ 47%]
+........................................................................ [ 49%]
+........................................................................ [ 51%]
+........................................................................ [ 52%]
+........................................................................ [ 54%]
+.............s.......................................................... [ 56%]
+........................................................................ [ 58%]
+........................................................................ [ 59%]
+........................................................................ [ 61%]
+........................................................................ [ 63%]
+........................................................................ [ 65%]
+........................................................................ [ 67%]
+........................................................................ [ 68%]
+........................................................................ [ 70%]
+........................................................................ [ 72%]
+........................................................................ [ 74%]
+........................................................................ [ 75%]
+........................................................................ [ 77%]
+........................................................FF.............. [ 79%]
+........................................................................ [ 81%]
+........................................................................ [ 82%]
+........................................................................ [ 84%]
+........................................................................ [ 86%]
+........................................................................ [ 88%]
+........................................................................ [ 89%]
+........................................................................ [ 91%]
+........................................................................ [ 93%]
+........................................................................ [ 95%]
+........................................................................ [ 97%]
+........................................................................ [ 98%]
+.................................................                        [100%]
+=================================== FAILURES ===================================
+________ test_a_killed_gate_is_unmeasured_and_its_returncode_is_not_why ________
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-20/test_a_killed_gate_is_unmeasur0')
+
+    def test_a_killed_gate_is_unmeasured_and_its_returncode_is_not_why(tmp_path):
+        gate = rt._run_node_cmd(Path(str(tmp_path)), ["bash", "-c", "sleep 3"],
+                                timeout=1)
+        assert gate["returncode"] == -1
+        assert gate["timed_out"] is True
+        # Same value the bare exit-code scan above reads as a MEASURED failure —
+        # the marker, not the number, is what makes this an absence.
+>       assert rt._repo_gate_outcome(gate) == rt.REPO_GATE_UNMEASURED
+E       AssertionError: assert 'measured_fail' == 'unmeasured'
+E         
+E         - unmeasured
+E         + measured_fail
+
+tests/unit/test_run_tests_unmeasured_declaration.py:363: AssertionError
+________________ test_a_runner_that_cannot_start_is_unmeasured _________________
+
+    def test_a_runner_that_cannot_start_is_unmeasured():
+        gate = rt._run_node_cmd(Path("/nonexistent-dir-aitelier"),
+                                ["bash", "-c", "true"], timeout=5)
+        assert gate["runner_error"] is True
+>       assert rt._repo_gate_outcome(gate) == rt.REPO_GATE_UNMEASURED
+E       AssertionError: assert 'measured_fail' == 'unmeasured'
+E         
+E         - unmeasured
+E         + measured_fail
+
+tests/unit/test_run_tests_unmeasured_declaration.py:370: AssertionError
+=============================== warnings summary ===============================
+../../../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+tests/unit/test_bash_admission_lifetime.py::test_a_second_cancellation_during_cleanup_still_ends_the_writer
+  /usr/local/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <function BaseSubprocessTransport.__del__ at 0x7badb9a60040>
+  
+  Traceback (most recent call last):
+    File "/usr/local/lib/python3.12/asyncio/base_subprocess.py", line 126, in __del__
+      self.close()
+    File "/usr/local/lib/python3.12/asyncio/base_subprocess.py", line 104, in close
+      proto.pipe.close()
+    File "/usr/local/lib/python3.12/asyncio/unix_events.py", line 568, in close
+      self._close(None)
+    File "/usr/local/lib/python3.12/asyncio/unix_events.py", line 592, in _close
+      self._loop.call_soon(self._call_connection_lost, exc)
+    File "/usr/local/lib/python3.12/asyncio/base_events.py", line 799, in call_soon
+      self._check_closed()
+    File "/usr/local/lib/python3.12/asyncio/base_events.py", line 545, in _check_closed
+      raise RuntimeError('Event loop is closed')
+  RuntimeError: Event loop is closed
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/unit/test_public_read_hardening.py::TestAnUnknownJwtKidCostsNoNetworkCall::test_a_rejected_kid_is_remembered
+tests/unit/test_public_read_hardening.py::TestAnUnknownJwtKidCostsNoNetworkCall::test_the_bad_kid_table_is_bounded
+  /usr/local/lib/python3.12/site-packages/jwt/api_jwt.py:149: InsecureKeyLengthWarning: The HMAC key is 1 bytes long, which is below the minimum recommended length of 32 bytes for SHA256. See RFC 7518 Section 3.2.
+    return self._jws.encode(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_run_tests_unmeasured_declaration.py::test_a_killed_gate_is_unmeasured_and_its_returncode_is_not_why
+FAILED tests/unit/test_run_tests_unmeasured_declaration.py::test_a_runner_that_cannot_start_is_unmeasured
+2 failed, 4070 passed, 9 skipped, 4 warnings in 371.56s (0:06:11)
+
+BARE_RC_FULL=1
+IGNITION_FULL={"file_reads": 22, "file_reads_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-tmysf5sx/tree/aitelier/tools/run_tests/impl.py": 22}, "igniting_tests": ["tests/skillflow/test_coding_impl_gate.py::test_four_real_reds_still_exhaust_the_cycle_limit", "tests/unit/test_run_tests_known_red_baseline.py::test_real_repo_gate_a_then_a_plus_b_exposes_b_and_keeps_detail_stable", "tests/unit/test_run_tests_known_red_baseline.py::test_real_repo_gate_fixed_then_rebroken_case_becomes_new", "tests/unit/test_run_tests_known_red_baseline.py::test_repo_gate_without_state_dir_stays_strict", "tests/unit/test_run_tests_known_red_baseline.py::test_unreliable_repo_gate_identity_never_seeds_or_changes_baseline", "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_bounded_fragment_is_not_a_record_on_its_own", "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_contract_error_exit_2_is_a_measured_failure_with_failures", "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_declaration_that_says_failed_is_not_an_absence[error]", "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_declaration_that_says_failed_is_not_an_absence[failed]", "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_declaration_that_says_failed_is_not_an_absence[red]", "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_killed_gate_is_unmeasured_and_its_returncode_is_not_why", "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_log_echo_of_the_prefix_mid_line_is_not_a_declaration", "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_mid_line_echo_kills_the_in_operator_on_the_declaration_channel", "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_mid_line_prefix_with_valid_json_after_it_is_still_not_a_record", "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_real_red_still_enters_the_baseline_and_the_absence_after_it_does_not_pass", "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_repo_gate_that_measured_green_may_prune_its_known_red", "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_runner_that_cannot_start_is_unmeasured", "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_truncated_gate_with_no_record_at_all_is_a_red", "tests/unit/test_run_tests_unmeasured_declaration.py::test_an_unmeasured_repo_gate_may_not_prune_its_known_red", "tests/unit/test_run_tests_unmeasured_declaration.py::test_every_repo_gate_run_carries_its_measurement", "tests/unit/test_run_tests_unmeasured_declaration.py::test_no_exit_code_alone_is_ever_unmeasured[-1]", "tests/unit/test_run_tests_unmeasured_declaration.py::test_no_exit_code_alone_is_ever_unmeasured[-9]", "tests/unit/test_run_tests_unmeasured_declaration.py::test_no_exit_code_alone_is_ever_unmeasured[0]", "tests/unit/test_run_tests_unmeasured_declaration.py::test_no_exit_code_alone_is_ever_unmeasured[124]", "tests/unit/test_run_tests_unmeasured_declaration.py::test_no_exit_code_alone_is_ever_unmeasured[137]", "tests/unit/test_run_tests_unmeasured_declaration.py::test_no_exit_code_alone_is_ever_unmeasured[1]", "tests/unit/test_run_tests_unmeasured_declaration.py::test_no_exit_code_alone_is_ever_unmeasured[255]", "tests/unit/test_run_tests_unmeasured_declaration.py::test_no_exit_code_alone_is_ever_unmeasured[2]", "tests/unit/test_run_tests_unmeasured_declaration.py::test_no_exit_code_alone_is_ever_unmeasured[3]", "tests/unit/test_run_tests_unmeasured_declaration.py::test_the_r4_shaped_witness_flips_under_the_literal_m21"], "line_hits": 43, "line_hits_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-tmysf5sx/tree/aitelier/tools/run_tests/impl.py": 43}, "monitoring_tool_id": 4, "mutated_modules_imported": ["/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-tmysf5sx/tree/aitelier/tools/run_tests/impl.py"], "source_readers": ["tests/unit/test_datadir_guardrail.py::test_no_home_paths_outside_datadir", "tests/unit/test_every_step_driver_handles_cancellation.py::test_every_claim_holding_loop_handles_cancellation", "tests/unit/test_no_by_name_graph_lookup_during_a_run.py::test_no_run_scoped_lookup_resolves_a_graph_by_name", "tests/unit/test_no_self_call_collapse.py::test_no_python_source_is_a_self_call_and_nothing_else", "tests/unit/test_no_verbatim_previous_line_dup.py::test_named_test_repeats_are_pinned_and_current", "tests/unit/test_no_verbatim_previous_line_dup.py::test_no_verbatim_previous_line_dup_in_non_test_code", "tests/unit/test_public_read_hardening.py::TestTheEnvScrubCoversTheUnattendedPath::test_both_subprocess_paths_in_run_tests_use_it", "tests/unit/test_public_read_hardening.py::test_every_subprocess_in_run_tests_scrubs_the_environment", "tests/unit/test_run_tests_pytest_wall.py::test_the_budget_is_one_constant_and_not_a_repeated_literal", "tests/unit/test_run_tests_unmeasured_declaration.py::test_m21_is_reproduced_and_this_file_is_what_flips", "tests/unit/test_run_tests_unmeasured_declaration.py::test_m21b_is_reproduced_and_this_file_is_what_flips", "tests/unit/test_run_tests_unmeasured_declaration.py::test_the_r4_shaped_witness_flips_under_the_literal_m21", "tests/unit/test_run_tests_unmeasured_declaration.py::test_the_r4_shaped_witness_flips_under_the_literal_m21b", "tests/unit/test_tool_root_guard_inventory.py::test_every_tool_that_takes_a_root_is_classified", "tests/unit/test_tree_level_accounting_witnesses.py::test_ABS_the_absence_branch_is_ahead_of_the_seed_in_the_real_source", "tests/unit/test_tree_level_accounting_witnesses.py::test_M21_the_tree_still_tests_the_line_start_not_a_substring", "tests/unit/test_tree_level_accounting_witnesses.py::test_M21_the_tree_witnesses_go_red_on_the_actual_mutation[line.startswith(_REPO_GATE_UNMEASURED_PREFIX)-_REPO_GATE_UNMEASURED_PREFIX in line]", "tests/unit/test_tree_level_accounting_witnesses.py::test_M21_the_tree_witnesses_go_red_on_the_actual_mutation[raw = line[len(_REPO_GATE_UNMEASURED_PREFIX):]-raw = line[line.index(_REPO_GATE_UNMEASURED_PREFIX) + len(_REPO_GATE_UNMEASURED_PREFIX):]]", "tests/unit/test_tree_level_accounting_witnesses.py::test_M21b_the_tree_still_tests_the_case_prefix_at_the_line_start", "tests/unit/test_tree_level_accounting_witnesses.py::test_M21b_the_tree_witness_goes_red_on_the_actual_mutation"]}
+
+# control targeted reds=[]
+# control full reds=[]
+# targeted killers=['tests/unit/test_run_tests_unmeasured_declaration.py::test_a_killed_gate_is_unmeasured_and_its_returncode_is_not_why']
+# targeted source-text witnesses=[]
+# full killers=['tests/unit/test_run_tests_unmeasured_declaration.py::test_a_killed_gate_is_unmeasured_and_its_returncode_is_not_why', 'tests/unit/test_run_tests_unmeasured_declaration.py::test_a_runner_that_cannot_start_is_unmeasured']
+# full source-text witnesses=[]
+# porcelain after restore=''
+# status=killed

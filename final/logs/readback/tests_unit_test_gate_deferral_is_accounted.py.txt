@@ -1,0 +1,32 @@
+# CMD: git diff --word-diff dcfa78729628f0cbbbc703a44d0e97098a3b9c8f 96721904a7d9b6b461109cfcded6d0abd03f469c -- tests/unit/test_gate_deferral_is_accounted.py
+# CWD: /home/linxuhao/.AItelier/worktrees-scratch/ga10
+# HEAD: 96721904a7d9b6b461109cfcded6d0abd03f469c porcelain_lines=4
+# RUNNER: host
+# ENV: (none)
+# FILE: tests/unit/test_gate_deferral_is_accounted.py sha256=3311cfee64014929444b3ae26006b97ed59df504e66faae1e9fd33988f2f3382
+# STARTED: 2026-09-24T06:50:07Z
+diff --git a/tests/unit/test_gate_deferral_is_accounted.py b/tests/unit/test_gate_deferral_is_accounted.py
+index 327a5578..507468bb 100644
+--- a/tests/unit/test_gate_deferral_is_accounted.py
++++ b/tests/unit/test_gate_deferral_is_accounted.py
+@@ -47,6 +47,18 @@ def test_a_report_that_graded_the_code_states_no_absence(tmp_path):
+    assert gd.observe_run(None, "r", report_path=path)["state"] == "none"
+
+
+{+@pytest.mark.parametrize("payload", [[], ["repo_gate_absent"], "absent", 3])+}
+{+def test_a_report_that_is_not_an_object_states_no_absence(tmp_path, ledger,+}
+{+                                                          payload):+}
+{+    """Kills READNONDICT: a `test_report.json` that parses but is not a JSON+}
+{+    object carries no flag of its own, so it states no absence, and the tick+}
+{+    that reads it must get `none`, not an exception."""+}
+{+    path = tmp_path / "test_report.json"+}
+{+    path.write_text(json.dumps(payload), encoding="utf-8")+}
+{+    assert gd.read_absence(path) is None+}
+{+    assert gd.observe_run(None, "r", report_path=path)["state"] == "none"+}
+
+
+def test_no_report_at_all_is_not_an_absence(tmp_path, ledger):
+    """A run before its gate step has no report; that is not silence."""
+    assert gd.observe_run(None, "r", report_path=tmp_path / "missing.json"
+# ENDED: 2026-09-24T06:50:07Z
+BARE_RC=0

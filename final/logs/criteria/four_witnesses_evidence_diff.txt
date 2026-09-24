@@ -1,0 +1,8 @@
+# CMD: git diff --exit-code 7bcbe667 96721904a7d9b6b461109cfcded6d0abd03f469c -- evidence/
+# CWD: /home/linxuhao/.AItelier/worktrees-scratch/ga10
+# HEAD: 96721904a7d9b6b461109cfcded6d0abd03f469c porcelain_lines=3
+# RUNNER: host
+# ENV: (none)
+# STARTED: 2026-09-24T06:50:06Z
+# ENDED: 2026-09-24T06:50:06Z
+BARE_RC=0

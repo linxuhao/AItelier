@@ -1,0 +1,206 @@
+# G2 (behaviour): gate_deferral module constant GATE_DEFERRAL_EPISODE_MAX_SECONDS = 1e9.
+# head=b104f18c2e7e1d0f0c59e99cb32a077e7896dd28
+# worktree=/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-jdqlbkev/tree (removed)
+# started=2026-09-24 05:59:59 UTC ended=2026-09-24 06:05:55 UTC
+# replacement lines={"core/gate_deferral.py": [49]}
+
+## diff applied
+diff --git a/core/gate_deferral.py b/core/gate_deferral.py
+index 79f097d8..f83ebee9 100644
+--- a/core/gate_deferral.py
++++ b/core/gate_deferral.py
+@@ -46,8 +46,7 @@ GATE_DEFERRAL_WAIT_SECONDS = float(
+ # `_positive_seconds` refuses a non-positive value (a zero ceiling would end
+ # every absence instantly) and the ceiling is enforced by `expired`, so a
+ # caller cannot get an unbounded episode by raising the number alone.
+-GATE_DEFERRAL_EPISODE_MAX_SECONDS = float(
+-    os.getenv("AITELIER_GATE_DEFERRAL_EPISODE_MAX_SECONDS", "10800"))
++GATE_DEFERRAL_EPISODE_MAX_SECONDS = 1e9
+ 
+ # Absolute ceilings on the two knobs above. Both are read from the
+ # environment, and both are things a caller could "fix" a stuck run by
+
+## targeted scope: /usr/local/bin/python -m pytest -q -rfE -p no:cacheprovider -p ignition_plugin tests/unit/test_gate_deferral_execution_points.py::test_the_effective_episode_ceiling_is_ten_thousand_eight_hundred_as_loaded
+# cwd=/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-jdqlbkev/tree
+F                                                                        [100%]
+=================================== FAILURES ===================================
+__ test_the_effective_episode_ceiling_is_ten_thousand_eight_hundred_as_loaded __
+
+    def test_the_effective_episode_ceiling_is_ten_thousand_eight_hundred_as_loaded():
+        """G2 / G2b reader that does NOT touch the constants it guards.
+    
+        The r7 reader monkeypatched `GATE_DEFERRAL_EPISODE_MAX_SECONDS` to 10800
+        and then asserted 10800 — it overwrote the very value it claimed to check,
+        so a module that loaded `1e9` stayed green while the effective episode
+        ceiling silently doubled. This reads the module exactly as it is loaded:
+    
+        * G2 (the seconds constant becomes 1e9) is caught by the effective
+          `episode_max_seconds()` and by the constant itself, and BOTH name 10800;
+        * G2b (the ceiling constant becomes 1e9) is caught by the ceiling constant
+          itself — the hardcoded absolute clip still holds the runtime value, so
+          this is the one reader that sees it.
+        """
+        import importlib
+        loaded = importlib.reload(gd)
+>       assert loaded.episode_max_seconds() == 10800.0, (
+            f"as-loaded effective episode ceiling is "
+            f"{loaded.episode_max_seconds()}, not 10800 s (G2 widened the bound)")
+E       AssertionError: as-loaded effective episode ceiling is 21600.0, not 10800 s (G2 widened the bound)
+E       assert 21600.0 == 10800.0
+E        +  where 21600.0 = <function episode_max_seconds at 0x7159aefdfec0>()
+E        +    where <function episode_max_seconds at 0x7159aefdfec0> = <module 'core.gate_deferral' from '/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-jdqlbkev/tree/core/gate_deferral.py'>.episode_max_seconds
+
+tests/unit/test_gate_deferral_execution_points.py:326: AssertionError
+=============================== warnings summary ===============================
+../../../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_gate_deferral_execution_points.py::test_the_effective_episode_ceiling_is_ten_thousand_eight_hundred_as_loaded
+1 failed, 1 warning in 0.35s
+Exception ignored in: <function _removeHandlerRef at 0x7159b9824cc0>
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/logging/__init__.py", line 882, in _removeHandlerRef
+  File "/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-jdqlbkev/tree/tools/mutation_catalog/ignition_plugin.py", line 63, in _on_line
+TypeError: 'NoneType' object is not callable
+
+BARE_RC_TARGETED=1
+IGNITION_TARGETED={"file_reads": 0, "file_reads_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-jdqlbkev/tree/core/gate_deferral.py": 0}, "igniting_tests": ["tests/unit/test_gate_deferral_execution_points.py::test_the_effective_episode_ceiling_is_ten_thousand_eight_hundred_as_loaded"], "line_hits": 2, "line_hits_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-jdqlbkev/tree/core/gate_deferral.py": 2}, "monitoring_tool_id": 4, "mutated_modules_imported": ["/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-jdqlbkev/tree/core/gate_deferral.py"], "source_readers": []}
+
+## full scope: /usr/local/bin/python -m pytest -q -rfE -p no:cacheprovider -p ignition_plugin tests/unit tests/skillflow
+# cwd=/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-jdqlbkev/tree
+........................................................................ [  1%]
+........................................................................ [  3%]
+........................................................................ [  5%]
+........................................................................ [  7%]
+........................................................................ [  8%]
+........................................................................ [ 10%]
+........................................................................ [ 12%]
+........................................................................ [ 14%]
+........................................................................ [ 15%]
+........................................................................ [ 17%]
+........................................................................ [ 19%]
+........................................................................ [ 21%]
+........................................................................ [ 22%]
+........................................................................ [ 24%]
+........................................................................ [ 26%]
+........................................................................ [ 28%]
+........................................................................ [ 29%]
+........................................................................ [ 31%]
+..............................................................F......... [ 33%]
+........................................................................ [ 35%]
+.......................................................................s [ 37%]
+sssssss................................................................. [ 38%]
+........................................................................ [ 40%]
+........................................................................ [ 42%]
+........................................................................ [ 44%]
+........................................................................ [ 45%]
+........................................................................ [ 47%]
+........................................................................ [ 49%]
+........................................................................ [ 51%]
+........................................................................ [ 52%]
+........................................................................ [ 54%]
+.............s.......................................................... [ 56%]
+........................................................................ [ 58%]
+........................................................................ [ 59%]
+........................................................................ [ 61%]
+........................................................................ [ 63%]
+........................................................................ [ 65%]
+........................................................................ [ 67%]
+........................................................................ [ 68%]
+........................................................................ [ 70%]
+........................................................................ [ 72%]
+........................................................................ [ 74%]
+........................................................................ [ 75%]
+........................................................................ [ 77%]
+........................................................................ [ 79%]
+........................................................................ [ 81%]
+........................................................................ [ 82%]
+........................................................................ [ 84%]
+........................................................................ [ 86%]
+........................................................................ [ 88%]
+........................................................................ [ 89%]
+........................................................................ [ 91%]
+........................................................................ [ 93%]
+........................................................................ [ 95%]
+........................................................................ [ 97%]
+........................................................................ [ 98%]
+.................................................                        [100%]
+=================================== FAILURES ===================================
+__ test_the_effective_episode_ceiling_is_ten_thousand_eight_hundred_as_loaded __
+
+    def test_the_effective_episode_ceiling_is_ten_thousand_eight_hundred_as_loaded():
+        """G2 / G2b reader that does NOT touch the constants it guards.
+    
+        The r7 reader monkeypatched `GATE_DEFERRAL_EPISODE_MAX_SECONDS` to 10800
+        and then asserted 10800 — it overwrote the very value it claimed to check,
+        so a module that loaded `1e9` stayed green while the effective episode
+        ceiling silently doubled. This reads the module exactly as it is loaded:
+    
+        * G2 (the seconds constant becomes 1e9) is caught by the effective
+          `episode_max_seconds()` and by the constant itself, and BOTH name 10800;
+        * G2b (the ceiling constant becomes 1e9) is caught by the ceiling constant
+          itself — the hardcoded absolute clip still holds the runtime value, so
+          this is the one reader that sees it.
+        """
+        import importlib
+        loaded = importlib.reload(gd)
+>       assert loaded.episode_max_seconds() == 10800.0, (
+            f"as-loaded effective episode ceiling is "
+            f"{loaded.episode_max_seconds()}, not 10800 s (G2 widened the bound)")
+E       AssertionError: as-loaded effective episode ceiling is 21600.0, not 10800 s (G2 widened the bound)
+E       assert 21600.0 == 10800.0
+E        +  where 21600.0 = <function episode_max_seconds at 0x7f40e3af0040>()
+E        +    where <function episode_max_seconds at 0x7f40e3af0040> = <module 'core.gate_deferral' from '/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-jdqlbkev/tree/core/gate_deferral.py'>.episode_max_seconds
+
+tests/unit/test_gate_deferral_execution_points.py:326: AssertionError
+=============================== warnings summary ===============================
+../../../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+tests/unit/test_bash_admission_lifetime.py::test_a_second_cancellation_during_cleanup_still_ends_the_writer
+  /usr/local/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <function BaseSubprocessTransport.__del__ at 0x7f40ed883d80>
+  
+  Traceback (most recent call last):
+    File "/usr/local/lib/python3.12/asyncio/base_subprocess.py", line 126, in __del__
+      self.close()
+    File "/usr/local/lib/python3.12/asyncio/base_subprocess.py", line 104, in close
+      proto.pipe.close()
+    File "/usr/local/lib/python3.12/asyncio/unix_events.py", line 568, in close
+      self._close(None)
+    File "/usr/local/lib/python3.12/asyncio/unix_events.py", line 592, in _close
+      self._loop.call_soon(self._call_connection_lost, exc)
+    File "/usr/local/lib/python3.12/asyncio/base_events.py", line 799, in call_soon
+      self._check_closed()
+    File "/usr/local/lib/python3.12/asyncio/base_events.py", line 545, in _check_closed
+      raise RuntimeError('Event loop is closed')
+  RuntimeError: Event loop is closed
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/unit/test_public_read_hardening.py::TestAnUnknownJwtKidCostsNoNetworkCall::test_a_rejected_kid_is_remembered
+tests/unit/test_public_read_hardening.py::TestAnUnknownJwtKidCostsNoNetworkCall::test_the_bad_kid_table_is_bounded
+  /usr/local/lib/python3.12/site-packages/jwt/api_jwt.py:149: InsecureKeyLengthWarning: The HMAC key is 1 bytes long, which is below the minimum recommended length of 32 bytes for SHA256. See RFC 7518 Section 3.2.
+    return self._jws.encode(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_gate_deferral_execution_points.py::test_the_effective_episode_ceiling_is_ten_thousand_eight_hundred_as_loaded
+1 failed, 4071 passed, 9 skipped, 4 warnings in 345.09s (0:05:45)
+
+BARE_RC_FULL=1
+IGNITION_FULL={"file_reads": 8, "file_reads_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-jdqlbkev/tree/core/gate_deferral.py": 8}, "igniting_tests": ["tests/unit/test_gate_deferral_execution_points.py::test_the_effective_episode_ceiling_is_ten_thousand_eight_hundred_as_loaded"], "line_hits": 2, "line_hits_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-jdqlbkev/tree/core/gate_deferral.py": 2}, "monitoring_tool_id": 4, "mutated_modules_imported": ["/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-jdqlbkev/tree/core/gate_deferral.py"], "source_readers": ["tests/unit/test_checkpoint_reject_target.py::test_every_reject_checkpoint_caller_passes_redirect_to[core]", "tests/unit/test_datadir_guardrail.py::test_no_home_paths_outside_datadir", "tests/unit/test_every_step_driver_handles_cancellation.py::test_every_claim_holding_loop_handles_cancellation", "tests/unit/test_logs_are_bounded.py::test_no_durable_log_is_opened_for_append_without_rotation", "tests/unit/test_no_by_name_graph_lookup_during_a_run.py::test_no_run_scoped_lookup_resolves_a_graph_by_name", "tests/unit/test_no_self_call_collapse.py::test_no_python_source_is_a_self_call_and_nothing_else", "tests/unit/test_no_verbatim_previous_line_dup.py::test_named_test_repeats_are_pinned_and_current", "tests/unit/test_no_verbatim_previous_line_dup.py::test_no_verbatim_previous_line_dup_in_non_test_code"]}
+
+# control targeted reds=[]
+# control full reds=[]
+# targeted killers=['tests/unit/test_gate_deferral_execution_points.py::test_the_effective_episode_ceiling_is_ten_thousand_eight_hundred_as_loaded']
+# targeted source-text witnesses=[]
+# full killers=['tests/unit/test_gate_deferral_execution_points.py::test_the_effective_episode_ceiling_is_ten_thousand_eight_hundred_as_loaded']
+# full source-text witnesses=[]
+# porcelain after restore=''
+# status=killed

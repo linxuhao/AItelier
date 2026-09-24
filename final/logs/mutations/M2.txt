@@ -1,0 +1,214 @@
+# M2 (behaviour): a truncated gate's retained fragment alone decides the declaration again (the truncation branch is skipped).
+# head=b104f18c2e7e1d0f0c59e99cb32a077e7896dd28
+# worktree=/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-m4kynsrm/tree (removed)
+# started=2026-09-24 05:52:44 UTC ended=2026-09-24 05:58:46 UTC
+# replacement lines={"aitelier/tools/run_tests/impl.py": [772]}
+
+## diff applied
+diff --git a/aitelier/tools/run_tests/impl.py b/aitelier/tools/run_tests/impl.py
+index 766b7f33..3c60ae2b 100644
+--- a/aitelier/tools/run_tests/impl.py
++++ b/aitelier/tools/run_tests/impl.py
+@@ -769,7 +769,7 @@ def _repo_gate_declares_unmeasured(gate: dict) -> bool:
+     """Did this run of the repo gate declare that it did not measure?"""
+     if gate.get("unmeasured_declaration") is not None:
+         return True
+-    if gate.get("output_truncated"):
++    if False and gate.get("output_truncated"):
+         # Only a fragment was retained and it was not scanned whole, so
+         # nothing in it is a record: the declaration could have been cut out of
+         # the middle, and half a line still looks like a line.
+
+## targeted scope: /usr/local/bin/python -m pytest -q -rfE -p no:cacheprovider -p ignition_plugin tests/unit/test_run_tests_unmeasured_declaration.py::test_a_bounded_fragment_is_not_a_record_on_its_own
+# cwd=/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-m4kynsrm/tree
+F                                                                        [100%]
+=================================== FAILURES ===================================
+______________ test_a_bounded_fragment_is_not_a_record_on_its_own ______________
+
+    def test_a_bounded_fragment_is_not_a_record_on_its_own():
+        """A gate handed to this reader as a FRAGMENT (a report read back off disk,
+        a replayed gate) proves nothing about a line that may have been cut in
+        half. Kills M2 (deleting the `output_truncated` branch): the fragment
+        below reads as a declaration the moment the branch is gone."""
+        gate = {"returncode": 3, "output_truncated": True,
+                "output": DECLARED + "\n" + "=" * 2000}
+>       assert rt._repo_gate_declares_unmeasured(gate) is False
+E       assert True is False
+E        +  where True = <function _repo_gate_declares_unmeasured at 0x7e3d28da8ae0>({'returncode': 3, 'output_truncated': True, 'output': 'AITELIER_REPO_GATE_UNMEASURED={"state":"blocked","reason":"godo...====================================================================================================================='})
+E        +    where <function _repo_gate_declares_unmeasured at 0x7e3d28da8ae0> = rt._repo_gate_declares_unmeasured
+
+tests/unit/test_run_tests_unmeasured_declaration.py:138: AssertionError
+=============================== warnings summary ===============================
+../../../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_run_tests_unmeasured_declaration.py::test_a_bounded_fragment_is_not_a_record_on_its_own
+1 failed, 1 warning in 0.39s
+Exception ignored in: <function _removeHandlerRef at 0x7e3d3399ccc0>
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/logging/__init__.py", line 882, in _removeHandlerRef
+  File "/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-m4kynsrm/tree/tools/mutation_catalog/ignition_plugin.py", line 63, in _on_line
+TypeError: 'NoneType' object is not callable
+
+BARE_RC_TARGETED=1
+IGNITION_TARGETED={"file_reads": 0, "file_reads_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-m4kynsrm/tree/aitelier/tools/run_tests/impl.py": 0}, "igniting_tests": ["tests/unit/test_run_tests_unmeasured_declaration.py::test_a_bounded_fragment_is_not_a_record_on_its_own"], "line_hits": 1, "line_hits_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-m4kynsrm/tree/aitelier/tools/run_tests/impl.py": 1}, "monitoring_tool_id": 4, "mutated_modules_imported": ["/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-m4kynsrm/tree/aitelier/tools/run_tests/impl.py"], "source_readers": []}
+
+## full scope: /usr/local/bin/python -m pytest -q -rfE -p no:cacheprovider -p ignition_plugin tests/unit tests/skillflow
+# cwd=/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-m4kynsrm/tree
+........................................................................ [  1%]
+........................................................................ [  3%]
+...................................................F.................... [  5%]
+........................................................................ [  7%]
+........................................................................ [  8%]
+........................................................................ [ 10%]
+........................................................................ [ 12%]
+........................................................................ [ 14%]
+........................................................................ [ 15%]
+........................................................................ [ 17%]
+........................................................................ [ 19%]
+........................................................................ [ 21%]
+........................................................................ [ 22%]
+........................................................................ [ 24%]
+........................................................................ [ 26%]
+........................................................................ [ 28%]
+........................................................................ [ 29%]
+........................................................................ [ 31%]
+........................................................................ [ 33%]
+........................................................................ [ 35%]
+.......................................................................s [ 37%]
+sssssss................................................................. [ 38%]
+........................................................................ [ 40%]
+........................................................................ [ 42%]
+........................................................................ [ 44%]
+........................................................................ [ 45%]
+........................................................................ [ 47%]
+........................................................................ [ 49%]
+........................................................................ [ 51%]
+........................................................................ [ 52%]
+........................................................................ [ 54%]
+.............s.......................................................... [ 56%]
+........................................................................ [ 58%]
+........................................................................ [ 59%]
+........................................................................ [ 61%]
+........................................................................ [ 63%]
+........................................................................ [ 65%]
+........................................................................ [ 67%]
+........................................................................ [ 68%]
+........................................................................ [ 70%]
+........................................................................ [ 72%]
+........................................................................ [ 74%]
+........................................................................ [ 75%]
+........................................................................ [ 77%]
+.........................................F.............................. [ 79%]
+........................................................................ [ 81%]
+........................................................................ [ 82%]
+........................................................................ [ 84%]
+........................................................................ [ 86%]
+........................................................................ [ 88%]
+........................................................................ [ 89%]
+........................................................................ [ 91%]
+........................................................................ [ 93%]
+........................................................................ [ 95%]
+........................................................................ [ 97%]
+........................................................................ [ 98%]
+.................................................                        [100%]
+=================================== FAILURES ===================================
+_____________ test_escalating_to_sigkill_keeps_the_loop_responsive _____________
+
+live = {'db': <core.db_manager.DBManager object at 0x7ae81a516ae0>, 'checkout': PosixPath('/tmp/pytest-of-unknown/pytest-10/test_escalating_to_sigkill_kee0/checkout'), 'agent': <core.meta_agent.MetaAgent object at 0x7ae81a515b50>}
+
+    def test_escalating_to_sigkill_keeps_the_loop_responsive(live):
+        """The case that legitimately takes seconds: a SIGTERM-ignoring child has
+        to be escalated. The cleanup may take that long; the LOOP may not stop."""
+        agent, checkout = live["agent"], live["checkout"]
+        marker = checkout / "stubborn_wrote.txt"
+    
+        async def drive():
+            hb = _Heartbeat().start()
+            task = asyncio.ensure_future(agent._tool_bash(
+                {"project_id": "p", "command": _stubborn(30, marker), "timeout": 60}))
+            await asyncio.sleep(1.0)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            await hb.stop()
+            return hb.worst
+    
+        worst = asyncio.run(drive())
+        print(f"\nSIGKILL escalation: worst loop gap {worst:.2f}s")
+>       assert worst < _MAX_LOOP_GAP_S, (
+            f"the event loop was frozen for {worst:.2f}s while escalating")
+E       AssertionError: the event loop was frozen for 0.79s while escalating
+E       assert 0.7883748229360208 < 0.5
+
+tests/unit/test_bash_cleanup_is_async.py:179: AssertionError
+----------------------------- Captured stdout call -----------------------------
+
+SIGKILL escalation: worst loop gap 0.79s
+______________ test_a_bounded_fragment_is_not_a_record_on_its_own ______________
+
+    def test_a_bounded_fragment_is_not_a_record_on_its_own():
+        """A gate handed to this reader as a FRAGMENT (a report read back off disk,
+        a replayed gate) proves nothing about a line that may have been cut in
+        half. Kills M2 (deleting the `output_truncated` branch): the fragment
+        below reads as a declaration the moment the branch is gone."""
+        gate = {"returncode": 3, "output_truncated": True,
+                "output": DECLARED + "\n" + "=" * 2000}
+>       assert rt._repo_gate_declares_unmeasured(gate) is False
+E       assert True is False
+E        +  where True = <function _repo_gate_declares_unmeasured at 0x7ae81b422a20>({'returncode': 3, 'output_truncated': True, 'output': 'AITELIER_REPO_GATE_UNMEASURED={"state":"blocked","reason":"godo...====================================================================================================================='})
+E        +    where <function _repo_gate_declares_unmeasured at 0x7ae81b422a20> = rt._repo_gate_declares_unmeasured
+
+tests/unit/test_run_tests_unmeasured_declaration.py:138: AssertionError
+=============================== warnings summary ===============================
+../../../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+tests/unit/test_bash_admission_lifetime.py::test_a_second_cancellation_during_cleanup_still_ends_the_writer
+  /usr/local/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <function BaseSubprocessTransport.__del__ at 0x7ae8279c0040>
+  
+  Traceback (most recent call last):
+    File "/usr/local/lib/python3.12/asyncio/base_subprocess.py", line 126, in __del__
+      self.close()
+    File "/usr/local/lib/python3.12/asyncio/base_subprocess.py", line 104, in close
+      proto.pipe.close()
+    File "/usr/local/lib/python3.12/asyncio/unix_events.py", line 568, in close
+      self._close(None)
+    File "/usr/local/lib/python3.12/asyncio/unix_events.py", line 592, in _close
+      self._loop.call_soon(self._call_connection_lost, exc)
+    File "/usr/local/lib/python3.12/asyncio/base_events.py", line 799, in call_soon
+      self._check_closed()
+    File "/usr/local/lib/python3.12/asyncio/base_events.py", line 545, in _check_closed
+      raise RuntimeError('Event loop is closed')
+  RuntimeError: Event loop is closed
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/unit/test_public_read_hardening.py::TestAnUnknownJwtKidCostsNoNetworkCall::test_a_rejected_kid_is_remembered
+tests/unit/test_public_read_hardening.py::TestAnUnknownJwtKidCostsNoNetworkCall::test_the_bad_kid_table_is_bounded
+  /usr/local/lib/python3.12/site-packages/jwt/api_jwt.py:149: InsecureKeyLengthWarning: The HMAC key is 1 bytes long, which is below the minimum recommended length of 32 bytes for SHA256. See RFC 7518 Section 3.2.
+    return self._jws.encode(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_bash_cleanup_is_async.py::test_escalating_to_sigkill_keeps_the_loop_responsive
+FAILED tests/unit/test_run_tests_unmeasured_declaration.py::test_a_bounded_fragment_is_not_a_record_on_its_own
+2 failed, 4070 passed, 9 skipped, 4 warnings in 350.27s (0:05:50)
+
+BARE_RC_FULL=1
+IGNITION_FULL={"file_reads": 22, "file_reads_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-m4kynsrm/tree/aitelier/tools/run_tests/impl.py": 22}, "igniting_tests": ["tests/skillflow/test_coding_impl_gate.py::test_four_real_reds_still_exhaust_the_cycle_limit", "tests/unit/test_run_tests_known_red_baseline.py::test_real_repo_gate_a_then_a_plus_b_exposes_b_and_keeps_detail_stable", "tests/unit/test_run_tests_known_red_baseline.py::test_real_repo_gate_fixed_then_rebroken_case_becomes_new", "tests/unit/test_run_tests_known_red_baseline.py::test_repo_gate_without_state_dir_stays_strict", "tests/unit/test_run_tests_known_red_baseline.py::test_unreliable_repo_gate_identity_never_seeds_or_changes_baseline", "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_bounded_fragment_is_not_a_record_on_its_own", "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_contract_error_exit_2_is_a_measured_failure_with_failures", "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_declaration_that_says_failed_is_not_an_absence[error]", "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_declaration_that_says_failed_is_not_an_absence[failed]", "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_declaration_that_says_failed_is_not_an_absence[red]", "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_declared_absence_is_unmeasured_whatever_the_exit_code_was", "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_killed_gate_is_unmeasured_and_its_returncode_is_not_why", "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_log_echo_of_the_prefix_mid_line_is_not_a_declaration", "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_mid_line_echo_kills_the_in_operator_on_the_declaration_channel", "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_mid_line_prefix_with_valid_json_after_it_is_still_not_a_record", "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_real_red_still_enters_the_baseline_and_the_absence_after_it_does_not_pass", "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_repo_gate_that_measured_green_may_prune_its_known_red", "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_runner_that_cannot_start_is_unmeasured", "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_truncated_gate_with_no_record_at_all_is_a_red", "tests/unit/test_run_tests_unmeasured_declaration.py::test_an_unmeasured_repo_gate_may_not_prune_its_known_red", "tests/unit/test_run_tests_unmeasured_declaration.py::test_every_repo_gate_run_carries_its_measurement", "tests/unit/test_run_tests_unmeasured_declaration.py::test_no_exit_code_alone_is_ever_unmeasured[-1]", "tests/unit/test_run_tests_unmeasured_declaration.py::test_no_exit_code_alone_is_ever_unmeasured[-9]", "tests/unit/test_run_tests_unmeasured_declaration.py::test_no_exit_code_alone_is_ever_unmeasured[0]", "tests/unit/test_run_tests_unmeasured_declaration.py::test_no_exit_code_alone_is_ever_unmeasured[124]", "tests/unit/test_run_tests_unmeasured_declaration.py::test_no_exit_code_alone_is_ever_unmeasured[137]", "tests/unit/test_run_tests_unmeasured_declaration.py::test_no_exit_code_alone_is_ever_unmeasured[1]", "tests/unit/test_run_tests_unmeasured_declaration.py::test_no_exit_code_alone_is_ever_unmeasured[255]", "tests/unit/test_run_tests_unmeasured_declaration.py::test_no_exit_code_alone_is_ever_unmeasured[2]", "tests/unit/test_run_tests_unmeasured_declaration.py::test_no_exit_code_alone_is_ever_unmeasured[3]", "tests/unit/test_run_tests_unmeasured_declaration.py::test_the_r4_shaped_witness_flips_under_the_literal_m21"], "line_hits": 45, "line_hits_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-m4kynsrm/tree/aitelier/tools/run_tests/impl.py": 45}, "monitoring_tool_id": 4, "mutated_modules_imported": ["/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-m4kynsrm/tree/aitelier/tools/run_tests/impl.py"], "source_readers": ["tests/unit/test_datadir_guardrail.py::test_no_home_paths_outside_datadir", "tests/unit/test_every_step_driver_handles_cancellation.py::test_every_claim_holding_loop_handles_cancellation", "tests/unit/test_no_by_name_graph_lookup_during_a_run.py::test_no_run_scoped_lookup_resolves_a_graph_by_name", "tests/unit/test_no_self_call_collapse.py::test_no_python_source_is_a_self_call_and_nothing_else", "tests/unit/test_no_verbatim_previous_line_dup.py::test_named_test_repeats_are_pinned_and_current", "tests/unit/test_no_verbatim_previous_line_dup.py::test_no_verbatim_previous_line_dup_in_non_test_code", "tests/unit/test_public_read_hardening.py::TestTheEnvScrubCoversTheUnattendedPath::test_both_subprocess_paths_in_run_tests_use_it", "tests/unit/test_public_read_hardening.py::test_every_subprocess_in_run_tests_scrubs_the_environment", "tests/unit/test_run_tests_pytest_wall.py::test_the_budget_is_one_constant_and_not_a_repeated_literal", "tests/unit/test_run_tests_unmeasured_declaration.py::test_m21_is_reproduced_and_this_file_is_what_flips", "tests/unit/test_run_tests_unmeasured_declaration.py::test_m21b_is_reproduced_and_this_file_is_what_flips", "tests/unit/test_run_tests_unmeasured_declaration.py::test_the_r4_shaped_witness_flips_under_the_literal_m21", "tests/unit/test_run_tests_unmeasured_declaration.py::test_the_r4_shaped_witness_flips_under_the_literal_m21b", "tests/unit/test_tool_root_guard_inventory.py::test_every_tool_that_takes_a_root_is_classified", "tests/unit/test_tree_level_accounting_witnesses.py::test_ABS_the_absence_branch_is_ahead_of_the_seed_in_the_real_source", "tests/unit/test_tree_level_accounting_witnesses.py::test_M21_the_tree_still_tests_the_line_start_not_a_substring", "tests/unit/test_tree_level_accounting_witnesses.py::test_M21_the_tree_witnesses_go_red_on_the_actual_mutation[line.startswith(_REPO_GATE_UNMEASURED_PREFIX)-_REPO_GATE_UNMEASURED_PREFIX in line]", "tests/unit/test_tree_level_accounting_witnesses.py::test_M21_the_tree_witnesses_go_red_on_the_actual_mutation[raw = line[len(_REPO_GATE_UNMEASURED_PREFIX):]-raw = line[line.index(_REPO_GATE_UNMEASURED_PREFIX) + len(_REPO_GATE_UNMEASURED_PREFIX):]]", "tests/unit/test_tree_level_accounting_witnesses.py::test_M21b_the_tree_still_tests_the_case_prefix_at_the_line_start", "tests/unit/test_tree_level_accounting_witnesses.py::test_M21b_the_tree_witness_goes_red_on_the_actual_mutation"]}
+
+# control targeted reds=[]
+# control full reds=[]
+# targeted killers=['tests/unit/test_run_tests_unmeasured_declaration.py::test_a_bounded_fragment_is_not_a_record_on_its_own']
+# targeted source-text witnesses=[]
+# full killers=['tests/unit/test_bash_cleanup_is_async.py::test_escalating_to_sigkill_keeps_the_loop_responsive', 'tests/unit/test_run_tests_unmeasured_declaration.py::test_a_bounded_fragment_is_not_a_record_on_its_own']
+# full source-text witnesses=[]
+# porcelain after restore=''
+# status=killed

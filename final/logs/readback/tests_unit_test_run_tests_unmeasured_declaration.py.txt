@@ -1,0 +1,133 @@
+# CMD: git diff --word-diff dcfa78729628f0cbbbc703a44d0e97098a3b9c8f 96721904a7d9b6b461109cfcded6d0abd03f469c -- tests/unit/test_run_tests_unmeasured_declaration.py
+# CWD: /home/linxuhao/.AItelier/worktrees-scratch/ga10
+# HEAD: 96721904a7d9b6b461109cfcded6d0abd03f469c porcelain_lines=4
+# RUNNER: host
+# ENV: (none)
+# FILE: tests/unit/test_run_tests_unmeasured_declaration.py sha256=d0aed2d0cabf5830aa92e00b34ac29a458a500411253dc736d8b5587b9996135
+# STARTED: 2026-09-24T06:50:07Z
+diff --git a/tests/unit/test_run_tests_unmeasured_declaration.py b/tests/unit/test_run_tests_unmeasured_declaration.py
+index a459c063..f1dd3976 100644
+--- a/tests/unit/test_run_tests_unmeasured_declaration.py
++++ b/tests/unit/test_run_tests_unmeasured_declaration.py
+@@ -166,8 +166,10 @@ def test_the_unmeasured_state_set_holds_no_red_word():
+
+
+def test_a_log_echo_of_the_prefix_mid_line_is_not_a_declaration():
+    """Kills [-M21 (`startswith` -> `in`):-]{+M21PAIR (`in` + the `line.index` slice):+} a gate whose log merely
+    QUOTES the protocol line is not declaring [-anything."""-]{+anything. Under the literal M21+}
+{+    this stays green (the fixed slice cuts into the prefix); its witness is+}
+{+    `test_the_r4_shaped_witness_flips_under_the_literal_m21`."""+}
+    line = ("the gate reported: " + rt._REPO_GATE_UNMEASURED_PREFIX
+            + json.dumps({"state": "blocked"}))
+    gate = {"returncode": 1, "output": line, "output_truncated": False}
+@@ -184,14 +186,13 @@ def test_a_log_echo_of_the_case_prefix_mid_line_is_not_a_case_record():
+    assert identity_error
+
+
+# The two witnesses BELOW [-are the ones the mutation actually has to fail. A-]
+[-# mid-line echo only kills `PREFIX in line` when the slice the mutated reader-]
+[-# takes lands ON the JSON — i.e. when the-]{+use a+} noise header[-is-] EXACTLY as long as[-#-] the prefix.
+[-With a short header ("the gate reported: ", 19 characters)-]{+# They kill the PAIR (M21PAIR / M21BPAIR). Under the literal M21 / M21b+} the
+# [-mutated-]{+fixed+} slice [-cuts into-]{+`line[len(prefix):]` lands on+} the prefix itself, `json.loads`
+[-fails,-]{+# fails+} and {+they stay green;+} the [-test-]{+literal edits are killed by+}
+# [-stays green under-]{+`test_the_r4_shaped_witness_flips_under_the_literal_m21{,b}`, whose prefix+}
+{+# sits INSIDE+} the [-mutation while reading as if it had caught it.-]{+JSON.+} The[-#-] length is asserted here so a future edit to the
+{+#+} protocol line cannot[-#-] silently [-re-disarm-]{+change which mutation+} these [-witnesses.-]{+read.+}
+
+_MIDLINE_NOISE = "x" * len(rt._REPO_GATE_UNMEASURED_PREFIX)
+_CASE_MIDLINE_NOISE = "x" * len(rt._REPO_GATE_CASE_PREFIX)
+@@ -209,9 +210,9 @@ def test_a_mid_line_echo_kills_the_in_operator_on_the_declaration_channel():
+
+
+def test_a_mid_line_echo_kills_the_in_operator_on_the_case_channel():
+    """Kills [-M21b-]{+M21BPAIR+} (the[-same-] `in` {++ `line.index` pair+} on
+    `_REPO_GATE_CASE_PREFIX`): a single log line that echoes the case prefix
+    must not fabricate a prunable red identity."""
+    assert len(_CASE_MIDLINE_NOISE) == len(rt._REPO_GATE_CASE_PREFIX) > 0
+    gate = {"returncode": 1, "output_truncated": False,
+            "output": _CASE_MIDLINE_NOISE + _case("A", "quoted")}
+@@ -277,15 +278,18 @@ def _apply_m21_literal(func):
+
+
+def test_m21_is_reproduced_and_this_file_is_what_flips():
+    [-"""M21: `line.startswith(PREFIX)`-]{+"""The PAIR (M21PAIR: `startswith`+} -> [-`PREFIX in line`-]{+`in` AND the `line.index` slice)+} on
+    the declaration [-channel.-]{+channel, applied in-process by `_apply_m21_pair`.+} Under it
+    a mid-line echo fires `unmeasured`, so a real red is rewritten into an
+    absence. Both halves are measured: the candidate reads None, the mutant
+    reads `blocked`."""
+    mutant = _apply_m21_pair(rt._unmeasured_declaration)
+    body = json.dumps({"state": "blocked", "reason": "an echo, not a record"})
+    line = _MIDLINE_NOISE + rt._REPO_GATE_UNMEASURED_PREFIX + body
+    assert rt._unmeasured_declaration(line) is None
+    assert mutant(line) is not None and mutant(line)["state"] == "blocked"
+
+
+def test_the_r4_shaped_witness_flips_under_the_literal_m21():
+    """The card's literal M21 (`in`, the slice UNCHANGED) IS observable.
+
+@@ -329,11 +333,9 @@ def test_the_r4_shaped_witness_flips_under_the_literal_m21b():
+    assert [c["case_id"] for c in m_cases] == ["A"]
+
+
+
+
+def test_m21b_is_reproduced_and_this_file_is_what_flips():
+    [-"""M21b: the-]{+"""The+} same [-`in`-]{+PAIR+} on [-`_REPO_GATE_CASE_PREFIX`.-]{+`_REPO_GATE_CASE_PREFIX` (M21BPAIR).+} Under it one
+    echoed log line fabricates a prunable known-red identity — how a red gets
+    forgiven by a gate that never ran."""
+    mutant = _apply_m21_pair(rt._repo_gate_failure_cases)
+    gate = {"returncode": 1, "output_truncated": False,
+@@ -573,6 +575,35 @@ def test_a_real_red_still_enters_the_baseline_and_the_absence_after_it_does_not_
+    assert "repo_gate:run_tests.sh#A" in report["baseline_kept_unproven"]
+
+
+{+def test_an_absence_whose_failures_are_all_known_red_still_does_not_pass(+}
+{+        tmp_path):+}
+{+    """Kills ABSREL (`and not absent` removed from `passed_relative`).+}
+
+{+    The absence's own `failures[]` entry keys to the gate's name,+}
+{+    `repo_gate:run_tests.sh`. A baseline that already holds that key leaves+}
+{+    the absence with NO new failure, so `new_failures` alone would call it a+}
+{+    relative pass. Only the absence clause keeps it false.+}
+{+    """+}
+{+    repo = _repo_with_gate(tmp_path, DECLARED, exit_code=3)+}
+{+    state = tmp_path / "state"+}
+{+    baseline = _baseline_file(state, repo)+}
+{+    baseline.parent.mkdir(parents=True, exist_ok=True)+}
+{+    baseline.write_text(json.dumps({"failures": ["repo_gate:run_tests.sh"]}))+}
+
+{+    out = tmp_path / "out"+}
+{+    result = rt.run_tests(project_root=str(repo), out_dir=str(out),+}
+{+                          state_dir=str(state))+}
+{+    report = _report(out)+}
+
+{+    assert report["repo_gate"]["measured"] == rt.REPO_GATE_UNMEASURED+}
+{+    assert report["baseline_state"] == "compared"+}
+{+    assert report["new_failures"] == []+}
+{+    assert report["passed_relative"] is False, (+}
+{+        "an absence over a baseline that already names its gate reported a "+}
+{+        "relative pass")+}
+{+    assert result["passed_relative"] is False+}
+
+
+# ── N9: the tool's OWN contract text is a witness, on the deleted segment ───
+
+_N9_SEGMENT = (
+@@ -598,7 +629,7 @@ def test_the_tool_doc_names_the_no_verdict_gate_as_absent_not_a_loop():
+        "longer stated on the tool's own contract")
+
+
+# ── M21 family: [-the observable half-]{+this shape+} is {+killed by the pair; literal M21 by+} the [-pair, stated honestly ────────────-]{+r4 shape ─+}
+
+def test_a_mid_line_prefix_with_valid_json_after_it_is_still_not_a_record():
+    """A behavioral witness, not a text pin.
+@@ -615,6 +646,7 @@ def test_a_mid_line_prefix_with_valid_json_after_it_is_still_not_a_record():
+    fixed slice cuts into the prefix itself. It is NOT inert against every
+    shape: with a header exactly `len(prefix)` long and the prefix quoted
+    inside the JSON the fixed slice lands on the JSON and the reading flips —
+    {+`test_the_r4_shaped_witness_flips_under_the_literal_m21` measures that.+}
+    The pair is the other, blunter half: it also moves the slice.
+    """
+    prefix = rt._REPO_GATE_UNMEASURED_PREFIX
+# ENDED: 2026-09-24T06:50:07Z
+BARE_RC=0

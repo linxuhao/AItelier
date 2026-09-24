@@ -1,0 +1,184 @@
+# WAITCLAMP (behaviour): 
+# head=b104f18c2e7e1d0f0c59e99cb32a077e7896dd28
+# worktree=/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-vuzrkr_d/tree (removed)
+# started=2026-09-24 06:28:59 UTC ended=2026-09-24 06:35:41 UTC
+# replacement lines={"core/gate_deferral.py": [91]}
+
+## diff applied
+diff --git a/core/gate_deferral.py b/core/gate_deferral.py
+index 79f097d8..cb93ad9f 100644
+--- a/core/gate_deferral.py
++++ b/core/gate_deferral.py
+@@ -88,8 +88,7 @@ def _positive_seconds(value: float, fallback: float) -> float:
+ 
+ 
+ def wait_seconds() -> float:
+-    return min(_positive_seconds(GATE_DEFERRAL_WAIT_SECONDS, 300.0),
+-               max(1.0, _positive_seconds(GATE_DEFERRAL_WAIT_MAX, 900.0)))
++    return _positive_seconds(GATE_DEFERRAL_WAIT_SECONDS, 300.0)
+ 
+ 
+ def episode_max_seconds() -> float:
+
+## targeted scope: /usr/local/bin/python -m pytest -q -rfE -p no:cacheprovider -p ignition_plugin tests/unit/test_gate_deferral_is_accounted.py::test_the_wait_cannot_be_widened_until_the_ceiling_disappears
+# cwd=/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-vuzrkr_d/tree
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_________ test_the_wait_cannot_be_widened_until_the_ceiling_disappears _________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x71b32cfe0830>
+
+    def test_the_wait_cannot_be_widened_until_the_ceiling_disappears(monkeypatch):
+        """Kills "wait = 24h / 1e9" — the fifth round of buying the same ticket.
+        Widening the poll interval is not a repair; it is the wall-clock bound
+        being spent instead of resolved."""
+        monkeypatch.setattr(gd, "GATE_DEFERRAL_WAIT_SECONDS", 24 * 3600)
+>       assert gd.wait_seconds() <= gd.GATE_DEFERRAL_WAIT_MAX
+E       assert 86400.0 <= 900.0
+E        +  where 86400.0 = <function wait_seconds at 0x71b32d0e4180>()
+E        +    where <function wait_seconds at 0x71b32d0e4180> = gd.wait_seconds
+E        +  and   900.0 = gd.GATE_DEFERRAL_WAIT_MAX
+
+tests/unit/test_gate_deferral_is_accounted.py:132: AssertionError
+=============================== warnings summary ===============================
+../../../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_gate_deferral_is_accounted.py::test_the_wait_cannot_be_widened_until_the_ceiling_disappears
+1 failed, 1 warning in 0.34s
+Exception ignored in: <function _removeHandlerRef at 0x71b33795ce00>
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/logging/__init__.py", line 882, in _removeHandlerRef
+  File "/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-vuzrkr_d/tree/tools/mutation_catalog/ignition_plugin.py", line 63, in _on_line
+TypeError: 'NoneType' object is not callable
+
+BARE_RC_TARGETED=1
+IGNITION_TARGETED={"file_reads": 0, "file_reads_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-vuzrkr_d/tree/core/gate_deferral.py": 0}, "igniting_tests": ["tests/unit/test_gate_deferral_is_accounted.py::test_the_wait_cannot_be_widened_until_the_ceiling_disappears"], "line_hits": 1, "line_hits_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-vuzrkr_d/tree/core/gate_deferral.py": 1}, "monitoring_tool_id": 4, "mutated_modules_imported": ["/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-vuzrkr_d/tree/core/gate_deferral.py"], "source_readers": []}
+
+## full scope: /usr/local/bin/python -m pytest -q -rfE -p no:cacheprovider -p ignition_plugin tests/unit tests/skillflow
+# cwd=/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-vuzrkr_d/tree
+........................................................................ [  1%]
+........................................................................ [  3%]
+........................................................................ [  5%]
+........................................................................ [  7%]
+........................................................................ [  8%]
+........................................................................ [ 10%]
+........................................................................ [ 12%]
+........................................................................ [ 14%]
+........................................................................ [ 15%]
+........................................................................ [ 17%]
+........................................................................ [ 19%]
+........................................................................ [ 21%]
+........................................................................ [ 22%]
+........................................................................ [ 24%]
+........................................................................ [ 26%]
+........................................................................ [ 28%]
+........................................................................ [ 29%]
+........................................................................ [ 31%]
+........................................................................ [ 33%]
+...F.................................................................... [ 35%]
+.......................................................................s [ 37%]
+sssssss................................................................. [ 38%]
+........................................................................ [ 40%]
+........................................................................ [ 42%]
+........................................................................ [ 44%]
+........................................................................ [ 45%]
+........................................................................ [ 47%]
+........................................................................ [ 49%]
+........................................................................ [ 51%]
+........................................................................ [ 52%]
+........................................................................ [ 54%]
+.............s.......................................................... [ 56%]
+........................................................................ [ 58%]
+........................................................................ [ 59%]
+........................................................................ [ 61%]
+........................................................................ [ 63%]
+........................................................................ [ 65%]
+........................................................................ [ 67%]
+........................................................................ [ 68%]
+........................................................................ [ 70%]
+........................................................................ [ 72%]
+........................................................................ [ 74%]
+........................................................................ [ 75%]
+........................................................................ [ 77%]
+........................................................................ [ 79%]
+........................................................................ [ 81%]
+........................................................................ [ 82%]
+........................................................................ [ 84%]
+........................................................................ [ 86%]
+........................................................................ [ 88%]
+........................................................................ [ 89%]
+........................................................................ [ 91%]
+........................................................................ [ 93%]
+........................................................................ [ 95%]
+........................................................................ [ 97%]
+........................................................................ [ 98%]
+.................................................                        [100%]
+=================================== FAILURES ===================================
+_________ test_the_wait_cannot_be_widened_until_the_ceiling_disappears _________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7bbc241bd370>
+
+    def test_the_wait_cannot_be_widened_until_the_ceiling_disappears(monkeypatch):
+        """Kills "wait = 24h / 1e9" — the fifth round of buying the same ticket.
+        Widening the poll interval is not a repair; it is the wall-clock bound
+        being spent instead of resolved."""
+        monkeypatch.setattr(gd, "GATE_DEFERRAL_WAIT_SECONDS", 24 * 3600)
+>       assert gd.wait_seconds() <= gd.GATE_DEFERRAL_WAIT_MAX
+E       assert 86400.0 <= 900.0
+E        +  where 86400.0 = <function wait_seconds at 0x7bbc2771bf60>()
+E        +    where <function wait_seconds at 0x7bbc2771bf60> = gd.wait_seconds
+E        +  and   900.0 = gd.GATE_DEFERRAL_WAIT_MAX
+
+tests/unit/test_gate_deferral_is_accounted.py:132: AssertionError
+=============================== warnings summary ===============================
+../../../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+tests/unit/test_bash_admission_lifetime.py::test_a_second_cancellation_during_cleanup_still_ends_the_writer
+  /usr/local/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <function BaseSubprocessTransport.__del__ at 0x7bbc3133bd80>
+  
+  Traceback (most recent call last):
+    File "/usr/local/lib/python3.12/asyncio/base_subprocess.py", line 126, in __del__
+      self.close()
+    File "/usr/local/lib/python3.12/asyncio/base_subprocess.py", line 104, in close
+      proto.pipe.close()
+    File "/usr/local/lib/python3.12/asyncio/unix_events.py", line 568, in close
+      self._close(None)
+    File "/usr/local/lib/python3.12/asyncio/unix_events.py", line 592, in _close
+      self._loop.call_soon(self._call_connection_lost, exc)
+    File "/usr/local/lib/python3.12/asyncio/base_events.py", line 799, in call_soon
+      self._check_closed()
+    File "/usr/local/lib/python3.12/asyncio/base_events.py", line 545, in _check_closed
+      raise RuntimeError('Event loop is closed')
+  RuntimeError: Event loop is closed
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/unit/test_public_read_hardening.py::TestAnUnknownJwtKidCostsNoNetworkCall::test_a_rejected_kid_is_remembered
+tests/unit/test_public_read_hardening.py::TestAnUnknownJwtKidCostsNoNetworkCall::test_the_bad_kid_table_is_bounded
+  /usr/local/lib/python3.12/site-packages/jwt/api_jwt.py:149: InsecureKeyLengthWarning: The HMAC key is 1 bytes long, which is below the minimum recommended length of 32 bytes for SHA256. See RFC 7518 Section 3.2.
+    return self._jws.encode(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_gate_deferral_is_accounted.py::test_the_wait_cannot_be_widened_until_the_ceiling_disappears
+1 failed, 4071 passed, 9 skipped, 4 warnings in 390.11s (0:06:30)
+
+BARE_RC_FULL=1
+IGNITION_FULL={"file_reads": 8, "file_reads_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-vuzrkr_d/tree/core/gate_deferral.py": 8}, "igniting_tests": ["tests/skillflow/test_coding_impl_gate_absence.py::test_a_gate_that_finally_answers_clears_the_deferral", "tests/skillflow/test_coding_impl_gate_absence.py::test_pole_a_a_ceiling_far_past_the_window_spends_one_implement_cycle", "tests/skillflow/test_coding_impl_gate_absence.py::test_pole_b_a_zero_ceiling_is_clamped_and_cannot_charge_the_absence", "tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence", "tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_inside_the_window_is_honoured_and_uncharged", "tests/skillflow/test_coding_impl_gate_absence.py::test_the_deferral_hold_leaves_real_step_rows_untouched", "tests/skillflow/test_coding_impl_gate_absence.py::test_the_host_hold_alone_keeps_the_rows_where_the_absence_left_them", "tests/skillflow/test_coding_impl_gate_absence.py::test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them", "tests/unit/test_gate_deferral_execution_points.py::test_during_a_deferral_hold_the_step_claim_is_held_not_released", "tests/unit/test_gate_deferral_execution_points.py::test_the_tick_refuses_to_claim_while_the_gate_is_silent", "tests/unit/test_gate_deferral_execution_points.py::test_the_valve_is_a_simple_bound_and_the_deferral_path_cannot_reach_it", "tests/unit/test_gate_deferral_is_accounted.py::test_a_declared_absence_is_silent_inside_its_wait", "tests/unit/test_gate_deferral_is_accounted.py::test_a_zero_ceiling_cannot_expire_a_run_instantly", "tests/unit/test_gate_deferral_is_accounted.py::test_an_expired_absence_names_the_absence_and_never_the_code", "tests/unit/test_gate_deferral_is_accounted.py::test_hold_remaining_is_not_constant_zero", "tests/unit/test_gate_deferral_is_accounted.py::test_the_episode_does_not_restart_on_every_tick", "tests/unit/test_gate_deferral_is_accounted.py::test_the_wait_cannot_be_widened_until_the_ceiling_disappears"], "line_hits": 181, "line_hits_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-vuzrkr_d/tree/core/gate_deferral.py": 181}, "monitoring_tool_id": 4, "mutated_modules_imported": ["/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-vuzrkr_d/tree/core/gate_deferral.py"], "source_readers": ["tests/unit/test_checkpoint_reject_target.py::test_every_reject_checkpoint_caller_passes_redirect_to[core]", "tests/unit/test_datadir_guardrail.py::test_no_home_paths_outside_datadir", "tests/unit/test_every_step_driver_handles_cancellation.py::test_every_claim_holding_loop_handles_cancellation", "tests/unit/test_logs_are_bounded.py::test_no_durable_log_is_opened_for_append_without_rotation", "tests/unit/test_no_by_name_graph_lookup_during_a_run.py::test_no_run_scoped_lookup_resolves_a_graph_by_name", "tests/unit/test_no_self_call_collapse.py::test_no_python_source_is_a_self_call_and_nothing_else", "tests/unit/test_no_verbatim_previous_line_dup.py::test_named_test_repeats_are_pinned_and_current", "tests/unit/test_no_verbatim_previous_line_dup.py::test_no_verbatim_previous_line_dup_in_non_test_code"]}
+
+# control targeted reds=[]
+# control full reds=[]
+# targeted killers=['tests/unit/test_gate_deferral_is_accounted.py::test_the_wait_cannot_be_widened_until_the_ceiling_disappears']
+# targeted source-text witnesses=[]
+# full killers=['tests/unit/test_gate_deferral_is_accounted.py::test_the_wait_cannot_be_widened_until_the_ceiling_disappears']
+# full source-text witnesses=[]
+# porcelain after restore=''
+# status=killed

@@ -1,0 +1,41 @@
+# CMD: git diff --word-diff dcfa78729628f0cbbbc703a44d0e97098a3b9c8f 96721904a7d9b6b461109cfcded6d0abd03f469c -- docs/repo-gate-unmeasured-protocol.md
+# CWD: /home/linxuhao/.AItelier/worktrees-scratch/ga10
+# HEAD: 96721904a7d9b6b461109cfcded6d0abd03f469c porcelain_lines=4
+# RUNNER: host
+# ENV: (none)
+# FILE: docs/repo-gate-unmeasured-protocol.md sha256=bd9cf9ab1d40ff574b296f993f257ce93c94f4041440e93cc2609bddbe6c2842
+# STARTED: 2026-09-24T06:50:07Z
+diff --git a/docs/repo-gate-unmeasured-protocol.md b/docs/repo-gate-unmeasured-protocol.md
+index a86cda5c..681653e9 100644
+--- a/docs/repo-gate-unmeasured-protocol.md
++++ b/docs/repo-gate-unmeasured-protocol.md
+@@ -185,7 +185,7 @@ How the two execution points read it:
+* `AItelierSkillFlow.advance_run` — the tick is not the only driver. The
+  host refuses to advance a run whose gate is silent, because advancing is
+  what routes the absence back into the implement loop.
+* [-`core/scheduler.py:31`-]{+`core/scheduler.py`+} `_MAX_CLAIMS_PER_INSTANCE` — its own comment states
+  the premise: one instance is re-claimed only when something reset a
+  completed row back to `pending`. A deferral does NOT do that: it releases
+  no claim, it does not move the row, and the tick returns at
+@@ -275,7 +275,7 @@ The absence accounting (round 5), in
+| remove the episode ceiling | `test_the_episode_ceiling_cannot_be_removed` |
+| force `hold_remaining` to 0 | `test_hold_remaining_is_not_constant_zero` |
+
+## The M21 [-family, stated honestly (round 8)-]{+family (rounds 8-10)+}
+
+The card's literal M21 (`startswith` -> `in`, the `line[len(prefix):]` slice
+UNCHANGED) IS observable, and the r7 claim that it was inert was wrong. It is
+@@ -289,10 +289,11 @@ the same on the case channel. Both re-run the REAL reader with the card's
+literal single-line edit applied.
+
+The mutation catalog (`tools/mutation_catalog/mutations.py`) carries `M21` and
+`M21b` verbatim, and `run_mutations.py` applies exactly those edits to a
+[-copy-]{+detached `git worktree`+} of the [-tree.-]{+committed tree, one worktree per mutation.+} The
+`in` + `line.index(...)` PAIR is a SECOND, blunter mutation (`M21PAIR` /
+`M21BPAIR`, applied in-process as `_apply_m21_pair`), not the card's M21 — the
+name says which one it is.
+
+
+
+# ENDED: 2026-09-24T06:50:07Z
+BARE_RC=0

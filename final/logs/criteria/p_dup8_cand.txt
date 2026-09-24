@@ -1,0 +1,36 @@
+# CMD: python3 /home/linxuhao/.AItelier/director/reports/gateacct-r9-review-20260923/probes/p_dup8.py /home/linxuhao/.AItelier/worktrees-scratch/ga10
+# CWD: /home/linxuhao/.AItelier/worktrees-scratch/ga10
+# HEAD: 96721904a7d9b6b461109cfcded6d0abd03f469c porcelain_lines=3
+# RUNNER: docker run --rm --init -m 3g --name ga10-dup-c --network aitelier_default -u 1000:1000 -e HOME=/home/linxuhao -e PYTHONPATH=/home/linxuhao/.AItelier/worktrees-scratch/ga10 -e PYTHONDONTWRITEBYTECODE=1 -e SEARXNG_URL=http://linxuhaserver:8888 -v /home/linxuhao/AItelier:/app -v /home/linxuhao/AItelier:/home/linxuhao/AItelier -v /home/linxuhao/.AItelier:/home/linxuhao/.AItelier -w /home/linxuhao/.AItelier/worktrees-scratch/ga10 aitelier:latest python3 /home/linxuhao/.AItelier/director/reports/gateacct-r9-review-20260923/probes/p_dup8.py /home/linxuhao/.AItelier/worktrees-scratch/ga10
+# ENV: (none)
+# FILE: /home/linxuhao/.AItelier/director/reports/gateacct-r9-review-20260923/probes/p_dup8.py sha256=0f3bc39ae76b2cdc31c722533b34bfa84c0d52f1a021ce7623f18b7f3da3ccef
+# STARTED: 2026-09-24T06:50:05Z
+tracked_py_files 543
+A_sites_total 14 files 11
+A_non_test_sites 0
+A_test_sites 14 files 11
+  TEST tests/integration/test_state_graph_entrypoints.py:846  assert module._start_driver("run1", scheduler_owned=True, auto_approve=False)
+  TEST tests/integration/test_tool_operation_owner_recovery.py:268  sf.reconcile_active_operations(run_id, trigger="retryable_trace")
+  TEST tests/unit/test_ai_router.py:40  litellm.exceptions.RateLimitError("Limit reached", model="zai", llm_provider="zai"),
+  TEST tests/unit/test_claim_precondition_bounded.py:121  await scheduler._run_skillflow_tick("p1", None)
+  TEST tests/unit/test_godot_harness.py:732  gh.run_script(str(tmp_path), [], timeout=30)
+  TEST tests/unit/test_godot_harness.py:852  gh._playtest_spec(tmp_path / "proj", _spec(["a"]), 60, 120)
+  TEST tests/unit/test_knowledge_sync.py:91  _call(repo, ws, "proj1")
+  TEST tests/unit/test_postcompact_driver_hook.py:703  "state_graph_read", "state_graph_read", "state_graph_help", "state_graph_read",
+  TEST tests/unit/test_public_read_hardening.py:402  _read_cache.cached(("k2",), lambda: calls.append(1) or "v", ttl=-1)
+  TEST tests/unit/test_quota_hold.py:194  sched.tick_log("p", outcome)
+  TEST tests/unit/test_route_rotation.py:48  assert table.resolve("solo", rotate=True) == ["a/m1", "payg/m9"]
+  TEST tests/unit/test_route_rotation.py:53  assert table.resolve("plain", rotate=True) == ["a/m1", "payg/m9"]
+  TEST tests/unit/test_run_isolation_lifecycle.py:295  await sc.poll_and_execute()
+  TEST tests/unit/test_run_isolation_lifecycle.py:296  await sc.poll_and_execute()
+A_test_distinct_(file,statement)_pairs 13
+  PAIR_WITH_MULTIPLE_SITES ('tests/unit/test_run_isolation_lifecycle.py', 'await sc.poll_and_execute()') 2
+B_candidate_reader_non_test 0 []
+B_candidate_reader_test_sites(list) 13 distinct 13
+B_listed_entries 13
+B_set_equal False
+DEFECT_CHECK aitelier/tools/run_tests/impl.py lines [692]
+DEFECT_CHECK core/git_ops.py lines [6]
+DEFECT_CHECK core/workspace_manager.py lines [10]
+# ENDED: 2026-09-24T06:50:06Z
+BARE_RC=0

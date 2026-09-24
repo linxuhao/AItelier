@@ -1,0 +1,268 @@
+# READABSENCE (behaviour): 
+# head=b104f18c2e7e1d0f0c59e99cb32a077e7896dd28
+# worktree=/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-ipbnfojb/tree (removed)
+# started=2026-09-24 06:04:54 UTC ended=2026-09-24 06:10:57 UTC
+# replacement lines={"core/gate_deferral.py": [307]}
+
+## diff applied
+diff --git a/core/gate_deferral.py b/core/gate_deferral.py
+index 79f097d8..295392e4 100644
+--- a/core/gate_deferral.py
++++ b/core/gate_deferral.py
+@@ -304,7 +304,7 @@ def read_absence(report_path) -> dict | None:
+         return None
+     if not isinstance(data, dict):
+         return None
+-    if not (data.get("repo_gate_absent") or data.get("repo_gate_unmeasured")):
++    if False:
+         return None
+     gate = data.get("repo_gate") or {}
+     return {"gate": str(gate.get("script") or "the repository gate")}
+
+## targeted scope: /usr/local/bin/python -m pytest -q -rfE -p no:cacheprovider -p ignition_plugin tests/unit/test_gate_deferral_is_accounted.py
+# cwd=/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-ipbnfojb/tree
+F..................                                                      [100%]
+=================================== FAILURES ===================================
+_____________ test_a_report_that_graded_the_code_states_no_absence _____________
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-13/test_a_report_that_graded_the_0')
+
+    def test_a_report_that_graded_the_code_states_no_absence(tmp_path):
+        """Kills "any red is treated as an absence": a report that says the code
+        failed is a MEASUREMENT, and the implementer does own that one."""
+        path = tmp_path / "test_report.json"
+        path.write_text(json.dumps({
+            "passed": False, "summary": "FAILED tests/test_ops.py::test_sub",
+            "failures": ["FAILED tests/test_ops.py::test_sub"], "repo_gate": {
+                "script": "run_tests.sh", "measured": "measured_fail"}}),
+            encoding="utf-8")
+>       assert gd.read_absence(path) is None
+E       AssertionError: assert {'gate': 'run_tests.sh'} is None
+E        +  where {'gate': 'run_tests.sh'} = <function read_absence at 0x7e06de090f40>(PosixPath('/tmp/pytest-of-unknown/pytest-13/test_a_report_that_graded_the_0/test_report.json'))
+E        +    where <function read_absence at 0x7e06de090f40> = gd.read_absence
+
+tests/unit/test_gate_deferral_is_accounted.py:46: AssertionError
+=============================== warnings summary ===============================
+../../../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_gate_deferral_is_accounted.py::test_a_report_that_graded_the_code_states_no_absence
+1 failed, 18 passed, 1 warning in 3.70s
+Exception ignored in: <function _removeHandlerRef at 0x7e06e851ccc0>
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/logging/__init__.py", line 882, in _removeHandlerRef
+  File "/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-ipbnfojb/tree/tools/mutation_catalog/ignition_plugin.py", line 63, in _on_line
+TypeError: 'NoneType' object is not callable
+
+BARE_RC_TARGETED=1
+IGNITION_TARGETED={"file_reads": 0, "file_reads_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-ipbnfojb/tree/core/gate_deferral.py": 0}, "igniting_tests": ["tests/unit/test_gate_deferral_is_accounted.py::test_a_declared_absence_is_silent_inside_its_wait", "tests/unit/test_gate_deferral_is_accounted.py::test_a_report_that_graded_the_code_states_no_absence", "tests/unit/test_gate_deferral_is_accounted.py::test_a_zero_ceiling_cannot_expire_a_run_instantly", "tests/unit/test_gate_deferral_is_accounted.py::test_an_expired_absence_names_the_absence_and_never_the_code", "tests/unit/test_gate_deferral_is_accounted.py::test_the_episode_does_not_restart_on_every_tick"], "line_hits": 27, "line_hits_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-ipbnfojb/tree/core/gate_deferral.py": 27}, "monitoring_tool_id": 4, "mutated_modules_imported": ["/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-ipbnfojb/tree/core/gate_deferral.py"], "source_readers": []}
+
+## full scope: /usr/local/bin/python -m pytest -q -rfE -p no:cacheprovider -p ignition_plugin tests/unit tests/skillflow
+# cwd=/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-ipbnfojb/tree
+........................................................................ [  1%]
+........................................................................ [  3%]
+........................................................................ [  5%]
+........................................................................ [  7%]
+........................................................................ [  8%]
+........................................................................ [ 10%]
+........................................................................ [ 12%]
+........................................................................ [ 14%]
+........................................................................ [ 15%]
+........................................................................ [ 17%]
+........................................................................ [ 19%]
+........................................................................ [ 21%]
+........................................................................ [ 22%]
+........................................................................ [ 24%]
+........................................................................ [ 26%]
+........................................................................ [ 28%]
+........................................................................ [ 29%]
+........................................................................ [ 31%]
+..........................................................F......F...... [ 33%]
+........................................................................ [ 35%]
+.......................................................................s [ 37%]
+sssssss................................................................. [ 38%]
+........................................................................ [ 40%]
+........................................................................ [ 42%]
+........................................................................ [ 44%]
+........................................................................ [ 45%]
+........................................................................ [ 47%]
+........................................................................ [ 49%]
+........................................................................ [ 51%]
+........................................................................ [ 52%]
+........................................................................ [ 54%]
+.............s.......................................................... [ 56%]
+........................................................................ [ 58%]
+........................................................................ [ 59%]
+........................................................................ [ 61%]
+........................................................................ [ 63%]
+........................................................................ [ 65%]
+........................................................................ [ 67%]
+........................................................................ [ 68%]
+........................................................................ [ 70%]
+........................................................................ [ 72%]
+........................................................................ [ 74%]
+........................................................................ [ 75%]
+........................................................................ [ 77%]
+........................................................................ [ 79%]
+........................................................................ [ 81%]
+........................................................................ [ 82%]
+........................................................................ [ 84%]
+........................................................................ [ 86%]
+........................................................................ [ 88%]
+........................................................................ [ 89%]
+........................................................................ [ 91%]
+........................................................................ [ 93%]
+........................................................................ [ 95%]
+........................................................................ [ 97%]
+........................................................................ [ 98%]
+.............F...................................                        [100%]
+=================================== FAILURES ===================================
+___________ test_the_tick_refuses_to_claim_while_the_gate_is_silent ____________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x79c37dc7b050>
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-14/test_the_tick_refuses_to_claim0')
+
+    def test_the_tick_refuses_to_claim_while_the_gate_is_silent(monkeypatch,
+                                                                tmp_path):
+        """Kills S1 (delete the deferral skip inside the tick; 0/33 in review).
+    
+        Driven at the CALL SITE — `core/scheduler._run_skillflow_tick` — with the
+        REAL `observe_run` reading a REAL report off disk. Both poles are measured:
+        with the absence the tick must not claim; with a GRADED report the tick
+        must. One pole alone would pass for a tick that never claims anything.
+        """
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+        _silent_report(out_dir)
+    
+        sf = _TickStub()
+        scheduler = _wire_tick(monkeypatch, sf, out_dir)
+    
+        asyncio.run(scheduler._run_skillflow_tick("p", None))
+        assert sf.claims == 0, "the tick claimed a step for a gate that never spoke"
+        assert gd.LEDGER.deferring("run-1") is True
+    
+        _graded_report(out_dir)
+        sf.claims = 0
+        asyncio.run(scheduler._run_skillflow_tick("p", None))
+>       assert sf.claims == 1, (
+            "the tick skipped a claim with no absence to account for — the skip "
+            "is not conditional on the deferral")
+E       AssertionError: the tick skipped a claim with no absence to account for — the skip is not conditional on the deferral
+E       assert 0 == 1
+E        +  where 0 = <tests.unit.test_gate_deferral_execution_points._TickStub object at 0x79c37dc78860>.claims
+
+tests/unit/test_gate_deferral_execution_points.py:214: AssertionError
+------------------------------ Captured log call -------------------------------
+INFO     aitelier.scheduler.tick:scheduler.py:1838 project=p outcome=gate_deferral_hold run=run-1 gate=run_tests.sh remaining=300s
+INFO     aitelier.scheduler.tick:scheduler.py:1838 project=p outcome=gate_deferral_hold run=run-1 gate=run_tests.sh remaining=300s
+_____________ test_a_report_that_graded_the_code_states_no_absence _____________
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-14/test_a_report_that_graded_the_0')
+
+    def test_a_report_that_graded_the_code_states_no_absence(tmp_path):
+        """Kills "any red is treated as an absence": a report that says the code
+        failed is a MEASUREMENT, and the implementer does own that one."""
+        path = tmp_path / "test_report.json"
+        path.write_text(json.dumps({
+            "passed": False, "summary": "FAILED tests/test_ops.py::test_sub",
+            "failures": ["FAILED tests/test_ops.py::test_sub"], "repo_gate": {
+                "script": "run_tests.sh", "measured": "measured_fail"}}),
+            encoding="utf-8")
+>       assert gd.read_absence(path) is None
+E       AssertionError: assert {'gate': 'run_tests.sh'} is None
+E        +  where {'gate': 'run_tests.sh'} = <function read_absence at 0x79c382918ea0>(PosixPath('/tmp/pytest-of-unknown/pytest-14/test_a_report_that_graded_the_0/test_report.json'))
+E        +    where <function read_absence at 0x79c382918ea0> = gd.read_absence
+
+tests/unit/test_gate_deferral_is_accounted.py:46: AssertionError
+_____________ test_a_gate_that_finally_answers_clears_the_deferral _____________
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-14/test_a_gate_that_finally_answe0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x79c37667f8f0>
+
+    def test_a_gate_that_finally_answers_clears_the_deferral(tmp_path, monkeypatch):
+        """The other pole: the deferral is not a one-way door. Once a report that
+        GRADED the code exists, the run advances again and the absence is cleared.
+        """
+        counter = tmp_path / "calls.txt"
+        sf, run_id = _wire(tmp_path, monkeypatch, episode_max=100000, wait=1,
+                           counter=counter, tail=_SILENT_TAIL)
+        _prime_ledger(sf, run_id)
+        _drive(sf, run_id, monkeypatch, ticks=8, clock_step=1)
+        assert gate_deferral.hold_blocks_advance(run_id)
+        _assert_test_row_untouched(sf, run_id)
+    
+        # The gate's answer arrives: the report now says the code was graded.
+        report_path = gate_deferral.find_test_report(sf, run_id)
+        assert report_path is not None, "the run must have recorded its out_dir"
+        data = json.loads(Path(report_path).read_text(encoding="utf-8"))
+        data.pop("repo_gate_absent", None)
+        data.pop("repo_gate_unmeasured", None)
+        data["passed"] = True
+        data["failures"] = []
+        data["summary"] = "the gate ran, nothing failed"
+        report_path.write_text(json.dumps(data), encoding="utf-8")
+    
+        cleared = gate_deferral.observe_run(sf, run_id)
+>       assert cleared["state"] == "none"
+E       AssertionError: assert 'silent' == 'none'
+E         
+E         - none
+E         + silent
+
+tests/skillflow/test_coding_impl_gate_absence.py:387: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+=============================== warnings summary ===============================
+../../../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+tests/unit/test_bash_admission_lifetime.py::test_a_second_cancellation_during_cleanup_still_ends_the_writer
+  /usr/local/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <function BaseSubprocessTransport.__del__ at 0x79c38cadbd80>
+  
+  Traceback (most recent call last):
+    File "/usr/local/lib/python3.12/asyncio/base_subprocess.py", line 126, in __del__
+      self.close()
+    File "/usr/local/lib/python3.12/asyncio/base_subprocess.py", line 104, in close
+      proto.pipe.close()
+    File "/usr/local/lib/python3.12/asyncio/unix_events.py", line 568, in close
+      self._close(None)
+    File "/usr/local/lib/python3.12/asyncio/unix_events.py", line 592, in _close
+      self._loop.call_soon(self._call_connection_lost, exc)
+    File "/usr/local/lib/python3.12/asyncio/base_events.py", line 799, in call_soon
+      self._check_closed()
+    File "/usr/local/lib/python3.12/asyncio/base_events.py", line 545, in _check_closed
+      raise RuntimeError('Event loop is closed')
+  RuntimeError: Event loop is closed
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/unit/test_public_read_hardening.py::TestAnUnknownJwtKidCostsNoNetworkCall::test_a_rejected_kid_is_remembered
+tests/unit/test_public_read_hardening.py::TestAnUnknownJwtKidCostsNoNetworkCall::test_the_bad_kid_table_is_bounded
+  /usr/local/lib/python3.12/site-packages/jwt/api_jwt.py:149: InsecureKeyLengthWarning: The HMAC key is 1 bytes long, which is below the minimum recommended length of 32 bytes for SHA256. See RFC 7518 Section 3.2.
+    return self._jws.encode(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_gate_deferral_execution_points.py::test_the_tick_refuses_to_claim_while_the_gate_is_silent
+FAILED tests/unit/test_gate_deferral_is_accounted.py::test_a_report_that_graded_the_code_states_no_absence
+FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_a_gate_that_finally_answers_clears_the_deferral
+3 failed, 4069 passed, 9 skipped, 4 warnings in 347.08s (0:05:47)
+
+BARE_RC_FULL=1
+IGNITION_FULL={"file_reads": 8, "file_reads_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-ipbnfojb/tree/core/gate_deferral.py": 8}, "igniting_tests": ["tests/skillflow/test_coding_impl_gate_absence.py::test_a_gate_that_finally_answers_clears_the_deferral", "tests/skillflow/test_coding_impl_gate_absence.py::test_pole_a_a_ceiling_far_past_the_window_spends_one_implement_cycle", "tests/skillflow/test_coding_impl_gate_absence.py::test_pole_b_a_zero_ceiling_is_clamped_and_cannot_charge_the_absence", "tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence", "tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_inside_the_window_is_honoured_and_uncharged", "tests/skillflow/test_coding_impl_gate_absence.py::test_the_deferral_hold_leaves_real_step_rows_untouched", "tests/skillflow/test_coding_impl_gate_absence.py::test_the_host_hold_alone_keeps_the_rows_where_the_absence_left_them", "tests/skillflow/test_coding_impl_gate_absence.py::test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them", "tests/unit/test_gate_deferral_execution_points.py::test_during_a_deferral_hold_the_step_claim_is_held_not_released", "tests/unit/test_gate_deferral_execution_points.py::test_the_tick_refuses_to_claim_while_the_gate_is_silent", "tests/unit/test_gate_deferral_is_accounted.py::test_a_declared_absence_is_silent_inside_its_wait", "tests/unit/test_gate_deferral_is_accounted.py::test_a_report_that_graded_the_code_states_no_absence", "tests/unit/test_gate_deferral_is_accounted.py::test_a_zero_ceiling_cannot_expire_a_run_instantly", "tests/unit/test_gate_deferral_is_accounted.py::test_an_expired_absence_names_the_absence_and_never_the_code", "tests/unit/test_gate_deferral_is_accounted.py::test_the_episode_does_not_restart_on_every_tick"], "line_hits": 178, "line_hits_by_file": {"/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-ipbnfojb/tree/core/gate_deferral.py": 178}, "monitoring_tool_id": 4, "mutated_modules_imported": ["/home/linxuhao/.AItelier/worktrees-scratch/ga10-mut/mut-wt-ipbnfojb/tree/core/gate_deferral.py"], "source_readers": ["tests/unit/test_checkpoint_reject_target.py::test_every_reject_checkpoint_caller_passes_redirect_to[core]", "tests/unit/test_datadir_guardrail.py::test_no_home_paths_outside_datadir", "tests/unit/test_every_step_driver_handles_cancellation.py::test_every_claim_holding_loop_handles_cancellation", "tests/unit/test_logs_are_bounded.py::test_no_durable_log_is_opened_for_append_without_rotation", "tests/unit/test_no_by_name_graph_lookup_during_a_run.py::test_no_run_scoped_lookup_resolves_a_graph_by_name", "tests/unit/test_no_self_call_collapse.py::test_no_python_source_is_a_self_call_and_nothing_else", "tests/unit/test_no_verbatim_previous_line_dup.py::test_named_test_repeats_are_pinned_and_current", "tests/unit/test_no_verbatim_previous_line_dup.py::test_no_verbatim_previous_line_dup_in_non_test_code"]}
+
+# control targeted reds=[]
+# control full reds=[]
+# targeted killers=['tests/unit/test_gate_deferral_is_accounted.py::test_a_report_that_graded_the_code_states_no_absence']
+# targeted source-text witnesses=[]
+# full killers=['tests/skillflow/test_coding_impl_gate_absence.py::test_a_gate_that_finally_answers_clears_the_deferral', 'tests/unit/test_gate_deferral_execution_points.py::test_the_tick_refuses_to_claim_while_the_gate_is_silent', 'tests/unit/test_gate_deferral_is_accounted.py::test_a_report_that_graded_the_code_states_no_absence']
+# full source-text witnesses=[]
+# porcelain after restore=''
+# status=killed

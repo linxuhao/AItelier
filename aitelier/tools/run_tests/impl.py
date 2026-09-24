@@ -716,6 +716,7 @@ def _run_repo_gate(repo: Path) -> dict | None:
     result["script"] = REPO_GATE_SCRIPT
     result["ticket"] = ticket
     result["report_dir"] = str(report_dir)
+    result["repo"] = str(repo)
     result["admission"] = admission
     # ONE word for what this run of the gate is WORTH: `measured_pass`,
     # `measured_fail` or `unmeasured`. It is read by the fold in `run_tests`,
@@ -903,7 +904,8 @@ def _finding_text(item) -> str:
     return json.dumps(item, ensure_ascii=False, sort_keys=True)
 
 
-def _report_dir_failure_cases(ticket_dir: Path) -> tuple[list[dict], str | None] | None:
+def _report_dir_failure_cases(ticket_dir: Path, repo: Path
+                              ) -> tuple[list[dict], str | None] | None:
     """Failure identities from the structured report a gate retained, or None.
 
     The gate writes its report under the ticket directory it was handed as
@@ -913,21 +915,19 @@ def _report_dir_failure_cases(ticket_dir: Path) -> tuple[list[dict], str | None]
     finding is one failure. A stage with no findings file contributes the
     `errors[]` of a stage report that says `passed: false`.
 
+    The gate's python stage runs the repository's own tests, and the tests of
+    the gate itself inherit GATE_REPORT_DIR: the reports their fixture
+    repositories retain land under the same ticket. The gate's own report is
+    the one whose manifest names `repo`, the repository this gate ran for;
+    every other report under the ticket is not read.
+
     A finding's identity is `<stage>/<first 12 hex of its sha256>`, so the
     same finding keeps the same key on the next run. None means the gate
-    retained no report here and the caller falls back to the output records.
+    retained no report for `repo` here and the caller falls back to the
+    output records.
     """
     if not ticket_dir.is_dir():
         return None
-    manifests = [p for p in [ticket_dir / "manifest.json",
-                             *sorted(ticket_dir.glob("*/manifest.json"))]
-                 if p.is_file()]
-    if not manifests:
-        return None
-    if len(manifests) > 1:
-        return [], (f"repository gate retained {len(manifests)} reports under "
-                    f"one ticket ({ticket_dir.name})")
-    report_dir = manifests[0].parent
 
     def load(path: Path):
         try:
@@ -935,9 +935,32 @@ def _report_dir_failure_cases(ticket_dir: Path) -> tuple[list[dict], str | None]
         except (OSError, ValueError) as e:
             return None, f"repository gate report {path.name} is unreadable: {e}"
 
-    manifest, error = load(manifests[0])
-    if error:
-        return [], error
+    def names_repo(manifest) -> bool:
+        claimed = manifest.get("repo") if isinstance(manifest, dict) else None
+        if not isinstance(claimed, str) or not claimed:
+            return False
+        try:
+            return Path(claimed).resolve() == Path(repo).resolve()
+        except (OSError, RuntimeError):
+            return False
+
+    paths = [p for p in [ticket_dir / "manifest.json",
+                         *sorted(ticket_dir.glob("*/manifest.json"))]
+             if p.is_file()]
+    owned = []
+    for path in paths:
+        manifest, error = load(path)
+        if error:
+            return [], error
+        if names_repo(manifest):
+            owned.append((path, manifest))
+    if not owned:
+        return None
+    if len(owned) > 1:
+        return [], (f"repository gate retained {len(owned)} reports for "
+                    f"{repo} under one ticket ({ticket_dir.name})")
+    manifest_path, manifest = owned[0]
+    report_dir = manifest_path.parent
     stages = (manifest or {}).get("stages") if isinstance(manifest, dict) else None
     if not isinstance(stages, dict):
         return [], "repository gate manifest names no stages"
@@ -982,17 +1005,19 @@ def _repo_gate_failure_cases(gate: dict) -> tuple[list[dict], str | None]:
 
         AITELIER_REPO_GATE_CASE={"case_id":"compile/autoload","status":"failed","detail":"..."}
 
-    A gate that retains a structured report under its ticket
-    (`gate["report_dir"]`, see `_report_dir_failure_cases`) is read from that
-    report and nothing else, whatever the length of its output.
+    A gate that retains a structured report for its repository under its
+    ticket (`gate["report_dir"]`, `gate["repo"]`, see
+    `_report_dir_failure_cases`) is read from that report and nothing else,
+    whatever the length of its output.
 
     Otherwise the retained command output is bounded, so any truncation makes
     the set incomplete and unusable.  One malformed or duplicate record
     likewise invalidates the whole set instead of mixing reliable and
     script-wide keys.
     """
-    if gate.get("report_dir"):
-        from_report = _report_dir_failure_cases(Path(gate["report_dir"]))
+    if gate.get("report_dir") and gate.get("repo"):
+        from_report = _report_dir_failure_cases(Path(gate["report_dir"]),
+                                                Path(gate["repo"]))
         if from_report is not None:
             return from_report
     if gate.get("output_truncated"):

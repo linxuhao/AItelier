@@ -37,7 +37,7 @@ op = os.environ.get("FIXTURE_GATE_OP") or os.path.basename(os.getcwd())
 parent = os.environ.get("GATE_REPORT_DIR") or tempfile.gettempdir()
 os.makedirs(parent, exist_ok=True)
 directory = tempfile.mkdtemp(prefix="fixture-gate-", dir=parent)
-manifest = {"status": "incomplete", "stages": {}}
+manifest = {"repo": os.getcwd(), "status": "incomplete", "stages": {}}
 
 def write(name, value):
     with open(os.path.join(directory, name), "w", encoding="utf-8") as fh:

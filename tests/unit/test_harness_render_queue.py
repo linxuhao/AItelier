@@ -706,6 +706,10 @@ def test_a_queue_wait_that_outlasts_the_callers_timeout_is_not_a_product_failure
         rep_a = json.loads((tmp_path / "a" / "playtest_report.json").read_text())
         # Reader C: godot_compile as game_harness wires it, and its route.
         graph, ret_c, rep_c = _run_compile_step(compile_impl, tmp_path, proj)
+        # Reader C2: godot_compile without an evidence cycle.
+        ret_c2 = compile_impl.godot_compile(project_root=str(proj),
+                                            out_dir=str(tmp_path / "c2"))
+        rep_c2 = json.loads((tmp_path / "c2" / "playtest_report.json").read_text())
         # Reader D: the release audit.
         gates = [["5_test", "test_report.json"], ["5_compile", "playtest_report.json"]]
         aud = audit_evidence(graph, "run-q", gates)
@@ -731,7 +735,8 @@ def test_a_queue_wait_that_outlasts_the_callers_timeout_is_not_a_product_failure
 
     assert not [op for _, op in rig.rendered if op != "op-holder"], (
         "a queued request rendered", rig.rendered)
-    for name, rep in (("godot_playtest", rep_a), ("godot_compile", rep_c)):
+    for name, rep in (("godot_playtest", rep_a), ("godot_compile", rep_c),
+                      ("godot_compile without an evidence cycle", rep_c2)):
         assert not rep.get("gate_timeout"), (
             f"{name}: a queue wait was reported as a timed-out play-test", rep)
         assert rep.get("skipped_because") == "render_owner_wait_timed_out", (name, rep)
@@ -739,6 +744,7 @@ def test_a_queue_wait_that_outlasts_the_callers_timeout_is_not_a_product_failure
         assert (report_state(dict(rep)), release_disposition(dict(rep))) == (
             "skipped", "unresolved"), (name, rep)
     assert ret_a["passed"] is True, ret_a
+    assert ret_c2["passed"] is True, ret_c2
     assert ret_c.get("release_evidence") == "unresolved", ret_c
     assert _compile_step_route(ret_c) == "5_release_wait", ret_c
     assert (aud["state"], aud["passed"]) == ("skipped", False), aud

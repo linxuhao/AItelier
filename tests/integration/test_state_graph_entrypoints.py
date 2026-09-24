@@ -671,13 +671,15 @@ def test_missing_or_unseeded_workflow_is_refused_before_attempt_creation(live):
     assert live.sf.list_runs() == []
 
 
-def test_anonymous_reader_sees_the_graph_and_not_the_notebook(live, monkeypatch):
+def test_anonymous_reader_sees_the_graph_and_the_notebook_but_not_the_mailbox(live, monkeypatch):
     """The split this replaces the blanket writer gate with.
 
     Anonymous reads of the graph/attempts/issues are open — that is the point of
-    building in public — while the driver notebook and the director mailbox stay
-    writer-only, and every write stays refused. The notebook pole is proved with
-    the refusal's own words: a READ request must not be answered "to make
+    building in public — and since the owner's ruling of 2026-09-22 the note reads
+    are public actions; this fixture's service is read-trusted so the project
+    half passes even though `game` is never opened here. The director
+    mailbox stays writer-only, and every write stays refused. Its pole is proved
+    with the refusal's own words: a READ request must not be answered "to make
     changes".
     """
     from api import authz, state_graph_routers as routes
@@ -692,12 +694,14 @@ def test_anonymous_reader_sees_the_graph_and_not_the_notebook(live, monkeypatch)
         assert client.get("/api/state/projects/game/overview").status_code == 200
         assert client.post("/api/state/query/frontier",
                            json={"project_id": "game"}).status_code == 200
-        refused = client.get("/api/state/projects/game/driver-note")
+        assert client.get("/api/state/projects/game/driver-note").status_code == 200
+        assert client.post("/api/state/query/driver_note_index",
+                           json={"project_id": "game"}).status_code == 200
+        refused = client.post("/api/state/query/list_director_messages",
+                              json={"project_id": "game"})
         assert refused.status_code == 403
         assert "to make changes" not in refused.text
         assert refused.headers["X-AItelier-Denial"] == authz.READ_DENIED_NOT_AUTHENTICATED
-        assert client.post("/api/state/query/driver_note_index",
-                           json={"project_id": "game"}).status_code == 403
         assert client.post("/api/state/commands/add_nodes", json={"project_id": "game", "nodes": [spec("secret")]}).status_code == 403
     assert len(live.service.store.get_graph("game")["nodes"]) == 2
 

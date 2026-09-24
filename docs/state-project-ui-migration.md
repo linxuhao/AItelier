@@ -9,7 +9,8 @@ for current routes, visible fact/attempt badges and the white-label fix.
 The catalog and all project/goal/run permalinks below remain supported.
 This is the long-lived product project, not the old execution-project row.
 
-- `#/state-projects`: private project catalog with goal counts and dispatch policy.
+- `#/state-projects`: project catalog with goal counts and dispatch policy; an opened
+  project's graph and working notes read publicly, everything else stays writer-only.
 - `#/state-projects/:id`: State DAG, project attempts, evidence/history.
 - `#/state-projects/:id/nodes/:nodeKey`: link to a specific goal.
 - `#/state-projects/for-repo/:encodedPath`: related projects for a source checkout.
@@ -17,7 +18,7 @@ This is the long-lived product project, not the old execution-project row.
 
 Existing `#/projects/:executionId` and trace links remain valid. Expanded old
 execution details show related State Project links. Expanded repository cards
-query the private State API for their associated projects; they do not create a
+query the State API for their associated projects; they do not create a
 second graph or place private goals inside the public repository response.
 
 One State Project has many nodes; each node can have many attempts. Each attempt
@@ -88,9 +89,11 @@ attribution are deliberately not applied to a historical run; unknown labels
 fall back to stable node IDs. The config catalog still displays the current
 config graph because it is a config view, not a historical run view.
 
-## Private project projection APIs
+## Project projection APIs
 
-Writes and the driver notebooks retain writer authorization; the graph reads
+Writes stay writer-only; since the owner's ruling of 2026-09-22 the driver's
+working notes are public for a project that has been opened, while the director
+mailbox and the driver guide stay writer-only. The graph reads
 are public (see `docs/state-graph.md` for the classification). These extra
 queries are available through the same typed `state_graph_help/read/write`
 contracts used by MCP and the internal Driver:
@@ -118,8 +121,10 @@ POST /api/state/commands/refresh_project
 ```
 
 No private goal fields were added to anonymous repository/config projections.
-State data remains administrative-writer scoped; this does not introduce a
-separate per-project ACL or cryptographic verifier role.
+An opened state project's graph and working notes are anonymous-readable (the
+owner's ruling of 2026-09-22); every other state project and every other state
+read remains administrative-writer scoped. This does not introduce a separate
+per-project ACL or cryptographic verifier role.
 
 ## Stable source binding and migration holds
 

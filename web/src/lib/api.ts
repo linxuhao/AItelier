@@ -672,8 +672,11 @@ export function getRepo(repoPath: string): Promise<RepoDetail> {
 }
 
 
-// State project data is private; unlike workflow metadata these GETs require
-// writer authorization on the backend. Do not merge it into public repo payloads.
+// Since the owner's ruling of 2026-09-22 an OPENED project's graph and working
+// notes read publicly ("public的 project的working note也可以public，private
+// project的working note继续private"), replacing the old claim here that "State
+// project data is private ... require writer authorization". Everything else stays
+// writer-only, so do not merge a private project's data into public repo payloads.
 export function runWorkflowGraph(runId: string): Promise<Record<string, any>> {
   return _get('/api/runs/' + encodeURIComponent(runId) + '/graph');
 }
@@ -699,9 +702,10 @@ export function stateIssue(projectId: string, issueId: string): Promise<import('
 export function stateAttempts(projectId: string, after = 0): Promise<{attempts: import('./stateGraph').StateAttempt[]; next_after: number | null}> {
   return _get('/api/state/projects/' + encodeURIComponent(projectId) + '/attempts?after=' + after + '&limit=30');
 }
-/** The driver's working notes. NOT public: the server refuses this to a reader
- *  (`core.state_commands.WRITER_ONLY_READS`), so it is requested only for a
- *  writer. There is no client-side read of it to hide. */
+/** The driver's working notes. Public for a project that has been opened
+ *  (owner's ruling of 2026-09-22: let's open up the working note for public
+ *  projects too). For a project nobody opened the server answers 403, and that
+ *  refusal is the server's, not this client's. */
 export function stateDriverNote(projectId: string): Promise<{ project_id: string; revision: number; updated_at: string; permanent: string; temporary: string }> {
   return _get('/api/state/projects/' + encodeURIComponent(projectId) + '/driver-note');
 }

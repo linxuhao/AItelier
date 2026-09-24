@@ -329,7 +329,11 @@ class TestGateHoldsAgainstRouteAuthor:
         assert "PRIVATE-BODY-XYZZY" not in r.text
 
     def test_HONEST_declares_the_private_read_it_serves(self, monkeypatch, tmp_path):
-        r = self._run(monkeypatch, tmp_path, True, "get_driver_note")
+        # 2026-09-22 opened the working notes, so the still-private read named
+        # here is the director mailbox; the guard must refuse on the DECLARATION
+        # before the forged handler runs. The project half is unchanged: the
+        # inner note read is refused for an unopened project whatever its class.
+        r = self._run(monkeypatch, tmp_path, True, "list_director_messages")
         assert r.status_code == 403, (r.status_code, r.text[:120])
         assert "PRIVATE-BODY-XYZZY" not in r.text
 
@@ -490,9 +494,81 @@ def test_public_gate_table_unopened_opened_closed(monkeypatch, tmp_path):
     assert all(code == 403 for (gate, action, code) in rows_closed
                if scoped(gate, action)), \
         "CLOSED BACK:\n" + table(rows_unopened, rows_opened, rows_closed)
-    # Recovery: no project-scoped gate keeps refusing once opened, and the core
-    # corpus doors answer 200 with the project's real content.
     assert all(code != 403 for (gate, action, code) in rows_opened
                if scoped(gate, action)), \
         "OPENED:\n" + table(rows_unopened, rows_opened, rows_closed)
 
+
+class TestTheWorkingNoteReadsAcrossThreeProjectStates:
+    """Criterion 1's cross product: 6 note reads x 3 project states.
+
+    OPENED   -> 200 WITH the note body, for every one of the six;
+    UNOPENED -> refused (403);
+    ABSENT   -> refused (403), byte-identical to UNOPENED.
+
+    The action half opened on 2026-09-22; the project half is unchanged, and
+    this is the test that fails if the project half is loosened for the notes.
+    """
+
+    NOTE_READS = ("get_driver_note", "driver_note_history",
+                  "search_driver_note_history", "get_driver_note_entry",
+                  "check_driver_note_index", "driver_note_index")
+    OPENED_SECRET = "OPENED-NOTE-BODY-4711"
+    PRIVATE_SECRET = "UNOPENED-NOTE-BODY-9999"
+
+    def _entry_id(self, service, pid, secret):
+        service.driver_notes.write_entry(pid, secret + " ASSERTION",
+                                         secret + " ENTRY BODY", "director")
+        return service.driver_notes.entry_index(pid)["entries"][0]["entry_id"]
+
+    def test_the_six_note_reads_over_the_three_project_states(self, monkeypatch, tmp_path):
+        import core.state_commands as state_commands
+        app, router, service = _build(tmp_path)
+        _seed(service, "opened-pid", "Opened", "G", self.OPENED_SECRET)
+        _seed(service, "unopened-pid", "Unopened", "G", self.PRIVATE_SECRET)
+        opened_entry = self._entry_id(service, "opened-pid", self.OPENED_SECRET)
+        unopened_entry = self._entry_id(service, "unopened-pid", self.PRIVATE_SECRET)
+        service.open_project("opened-pid")
+        _arm(monkeypatch)
+
+        def args(action, pid, secret):
+            body = {"project_id": pid}
+            if action == "get_driver_note_entry":
+                body["entry_id"] = (opened_entry if pid == "opened-pid"
+                                    else unopened_entry)
+            if action == "driver_note_index":
+                body["include_delisted"] = True
+            return body
+
+        table = []
+        with TestClient(app) as client:
+            for action in self.NOTE_READS:
+                opened = client.post("/api/state/query/" + action,
+                                     json=args(action, "opened-pid", self.OPENED_SECRET))
+                unopened = client.post("/api/state/query/" + action,
+                                       json=args(action, "unopened-pid", self.PRIVATE_SECRET))
+                absent = client.post("/api/state/query/" + action,
+                                     json=args(action, "no-such-project", self.PRIVATE_SECRET))
+                table.append((action, opened.status_code, unopened.status_code,
+                              absent.status_code))
+                # The action is public, so the opened project's note comes back.
+                assert is_public_read(action) is True, action
+                assert opened.status_code == 200, (action, opened.text[:200])
+                # The project half is untouched: refused, and refused the SAME
+                # way whether the project is unopened or does not exist.
+                assert unopened.status_code == 403, (action, unopened.text[:200])
+                assert absent.status_code == 403, (action, absent.text[:200])
+                assert unopened.text == absent.text, (action, unopened.text, absent.text)
+                assert self.OPENED_SECRET in opened.text or action in (
+                    "driver_note_index", "check_driver_note_index"), action
+                assert self.PRIVATE_SECRET not in unopened.text, action
+                assert self.PRIVATE_SECRET not in absent.text, action
+        assert set(a for a, _, _, _ in table) == set(self.NOTE_READS)
+        # The whole cross product, in one sentence: 6 reads x 3 project states,
+        # and both refusal columns are 403 for every read.
+        assert all(o == 200 and u == 403 and x == 403 for _, o, u, x in table), table
+
+    def test_the_classification_is_unknown_action_private_by_default(self, gated=None):
+        import core.state_commands as state_commands
+        assert state_commands.read_visibility("a_note_read_invented_later") == "private"
+        assert state_commands.is_public_read("a_note_read_invented_later") is False

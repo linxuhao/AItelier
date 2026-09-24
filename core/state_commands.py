@@ -552,9 +552,20 @@ READ_REQUESTS = {
 # answers "may an UNSIGNED internet visitor run it?". Publishing is irreversible
 # (it gets cached and indexed), so the default is DENY: an action missing from
 # `PUBLIC_READS` is private, and that includes a read action added LATER, which
-# nobody will remember to classify. The owner's ruling of 2026-09-21 opens the
-# graph — goals, acceptance criteria, nodes, attempts, evidence, issues, design,
-# frontier — and keeps the working notes shut.
+# nobody will remember to classify. The owner's ruling of 2026-09-22 opens the
+# graph AND the driver's working notes for a project that has been opened.
+# The ruling is recorded at note://aitelier/546f3b521eca. The owner's words,
+# verbatim and translated: "public的 project的working note也可以public，
+# private project的working note继续private" — the working note of a public
+# project may be public too, the working note of a private project stays
+# private — also stated in English as "let's open up the working note for
+# public projects too". It REPLACES the
+# half-sentence in the 2026-09-21 ruling that "keeps the working notes shut";
+# that claim is no longer true of this table. The ruling named the WORKING NOTE
+# only: the director mailbox, the driver guide and the event/long-poll plumbing
+# stay writer-only (below). A note read is still ANDed with project privacy —
+# the note of a project nobody opened is refused exactly like a project that
+# does not exist, because `_refuse_if_project_not_public` runs at `execute`.
 PUBLIC_READS = frozenset({
     # Projects, graph, node context, frontier.
     "list_projects", "get_graph", "get_node", "search_nodes", "facet_lint",
@@ -568,13 +579,17 @@ PUBLIC_READS = frozenset({
     "design_catalog", "get_design_revision", "search_design_items",
     "design_impact", "get_design_baseline", "get_design_bindings",
     "export_design_markdown", "check_design_markdown",
-})
-WRITER_ONLY_READS = frozenset({
-    # The two working notebooks and their full revision history. In-flight run
-    # ids, withheld reasons, owner rulings and the director's own error log.
+    # The driver's working notebook and its revision/entry history, for a project
+    # that has been opened (2026-09-22 ruling). Every one of these takes a
+    # `project_id`, so the project half of the verdict decides them here exactly
+    # as it does for the graph: an unopened project's notes are refused, and the
+    # refusal is byte-identical to a project that does not exist.
     "get_driver_note", "driver_note_history", "search_driver_note_history",
     "get_driver_note_entry", "check_driver_note_index", "driver_note_index",
-    # The director mailbox.
+})
+WRITER_ONLY_READS = frozenset({
+    # The director mailbox. The 2026-09-22 ruling named the working notes, not
+    # the mailbox, so this stays writer-only.
     "list_director_messages",
     # The driver guide and the event/long-poll plumbing are NOT on the opened
     # list, so they stay shut rather than be assumed harmless.

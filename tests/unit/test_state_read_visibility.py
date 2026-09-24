@@ -14,8 +14,15 @@ refused for an anonymous caller.
 
 `TestClassification` is the table. `TestAnonymousHttp` is the verdict, taken
 through the real router with the gate armed. `TestRefusalWording` is the copy a
-reader gets. `TestNoLeak` checks the refusal carries no note body.
-"""
+reader gets. `TestNoLeak` checks a refusal carries no body of the reads that are
+still writer-only.
+
+The table moved on 2026-09-22: the owner opened the working notes for an OPENED
+project ("let's open up the working note for public projects too"), so the six
+note reads are public while the mailbox, the guide and the event plumbing stay
+writer-only. Project privacy is NOT tested here — this fixture's service is
+trusted, so these tests isolate the ACTION half.
+`tests/unit/test_state_project_privacy.py` is the project half."""
 from __future__ import annotations
 
 import json
@@ -32,13 +39,18 @@ import core.state_commands as state_commands
 from core.state_database import StateDatabase
 from core.state_service import StateService
 
-# The owner's ruling of 2026-09-21 named these as staying private, by name.
-NOTEBOOK_AND_MAILBOX = {
+# The owner's ruling of 2026-09-22 opened the working notes for an OPENED
+# project, by name. These six note reads are public now.
+OPENED_NOTE_READS = {
     "get_driver_note", "driver_note_history", "search_driver_note_history",
     "get_driver_note_entry", "check_driver_note_index", "driver_note_index",
-    "list_director_messages",
 }
-
+# What the ruling did NOT name, so it stays only-for-a-writer. The director
+# mailbox is here because the ruling named the note, not the mailbox.
+STILL_PRIVATE_READS = {
+    "list_director_messages", "get_driver_guide_section", "events",
+    "wait_for_state_change", "project_visibility",
+}
 
 class TestClassification:
     def test_every_read_action_is_classified_exactly_once(self):
@@ -52,12 +64,17 @@ class TestClassification:
         assert WRITER_ONLY_READS <= set(READ_REQUESTS)
         assert PUBLIC_READS <= set(READ_REQUESTS)
 
-    def test_the_notebook_and_the_mailbox_are_private(self):
-        for action in NOTEBOOK_AND_MAILBOX:
+    def test_everything_the_ruling_did_not_name_stays_private(self):
+        for action in STILL_PRIVATE_READS:
             assert action in READ_REQUESTS, action
             assert read_visibility(action) == "private", action
             assert is_public_read(action) is False, action
 
+    @pytest.mark.parametrize("action", sorted(OPENED_NOTE_READS))
+    def test_the_working_notes_are_public(self, action):
+        assert action in READ_REQUESTS, action
+        assert read_visibility(action) == "public", action
+        assert is_public_read(action) is True, action
     @pytest.mark.parametrize("action", [
         "list_projects", "get_graph", "get_node", "project_overview",
         "project_catalog", "get_attempt", "list_attempts", "evidence",
@@ -108,8 +125,7 @@ def gated(tmp_path, monkeypatch):
 
 
 class TestAnonymousHttp:
-    """Two poles: the reading visitor gets in, the notebook does not."""
-
+    """Two poles: the reading visitor gets in; a still-private read does not."""
     def test_the_visitor_reads_the_graph(self, gated):
         client, _ = gated
         assert client.get("/api/state/projects").status_code == 200
@@ -124,16 +140,26 @@ class TestAnonymousHttp:
         assert client.post("/api/state/query/frontier",
                            json={"project_id": "p"}).status_code == 200
 
-    def test_the_visitor_is_refused_the_notebook_and_the_mailbox(self, gated):
+    def test_the_visitor_reads_the_notebook_but_not_the_mailbox(self, gated):
         client, _ = gated
-        assert client.get("/api/state/projects/p/driver-note").status_code == 403
-        assert client.get("/api/state/projects/p/driver-note/history").status_code == 403
+        # 2026-09-22: the working notes are public, so every note door hands an
+        # anonymous visitor the body instead of a refusal.
+        note = client.get("/api/state/projects/p/driver-note")
+        assert note.status_code == 200, note.text
+        assert "IN-FLIGHT RUN ID 4711 SECRET" in note.text
+        assert client.get("/api/state/projects/p/driver-note/history").status_code == 200
         assert client.get(
-            "/api/state/projects/p/driver-note/history/search").status_code == 403
-        for action in NOTEBOOK_AND_MAILBOX:
+            "/api/state/projects/p/driver-note/history/search").status_code == 200
+        for action in OPENED_NOTE_READS:
             response = client.post("/api/state/query/" + action,
                                    json={"project_id": "p"})
-            assert response.status_code == 403, action
+            assert response.status_code != 403, (action, response.text)
+        # The mailbox, the guide and the event plumbing were NOT named by the
+        # ruling, so they stay refused for an anonymous caller.
+        for action in STILL_PRIVATE_READS:
+            response = client.post("/api/state/query/" + action,
+                                   json={"project_id": "p"})
+            assert response.status_code == 403, (action, response.text)
         assert client.post(
             "/api/state/director-messages/list_director_messages",
             json={"project_id": "p"}).status_code == 403
@@ -173,7 +199,8 @@ class TestAnonymousHttp:
 class TestRefusalWording:
     def test_a_read_refusal_talks_about_reading(self, gated):
         client, _ = gated
-        response = client.get("/api/state/projects/p/driver-note")
+        response = client.post("/api/state/query/list_director_messages",
+                               json={"project_id": "p"})
         body = response.text
         # The bug this fixes: a read request answered "to make changes".
         assert "to make changes" not in body
@@ -194,10 +221,12 @@ class TestRefusalWording:
     def test_a_bad_credential_reads_the_same_as_no_credential(self, gated):
         """Presenting a broken credential must not buy a better answer."""
         client, _ = gated
-        anonymous = client.get("/api/state/projects/p/driver-note")
-        broken = client.get("/api/state/projects/p/driver-note",
-                            headers={"Cf-Ray": "abc",
-                                     "Cf-Access-Jwt-Assertion": "not-a-jwt"})
+        body = {"project_id": "p"}
+        url = "/api/state/query/list_director_messages"
+        anonymous = client.post(url, json=body)
+        broken = client.post(url, json=body,
+                             headers={"Cf-Ray": "abc",
+                                      "Cf-Access-Jwt-Assertion": "not-a-jwt"})
         assert broken.status_code == anonymous.status_code == 403
         assert broken.json() == anonymous.json()
         public_broken = client.get("/api/state/projects",
@@ -209,17 +238,13 @@ class TestRefusalWording:
 class TestNoLeak:
     """The verdict is the server's. Nothing private is sent for the SPA to hide."""
 
-    def test_the_refusal_bodies_carry_no_notebook_text(self, gated):
+    def test_the_refusal_bodies_carry_no_still_private_text(self, gated):
         client, _ = gated
         responses = [
-            client.get("/api/state/projects/p/driver-note"),
-            client.get("/api/state/projects/p/driver-note/history"),
-            client.post("/api/state/query/get_driver_note",
-                        json={"project_id": "p"}),
-            client.post("/api/state/query/driver_note_index",
-                        json={"project_id": "p"}),
             client.post("/api/state/query/list_director_messages",
                         json={"project_id": "p"}),
+            client.post("/api/state/query/get_driver_guide_section",
+                        json={"project_id": "p", "address": "guide://x"}),
         ]
         for response in responses:
             assert response.status_code == 403
@@ -245,9 +270,13 @@ class TestEmbedderDefaults:
         monkeypatch.setattr(authz.cf_access, "email_from_request_headers", lambda *_: None)
         with TestClient(app) as client:
             assert client.get("/api/state/projects").status_code == 200
-            assert client.get("/api/state/projects/p/driver-note").status_code == 403
-            assert client.post("/api/state/query/driver_note_index",
+            assert client.post("/api/state/query/list_director_messages",
                                json={"project_id": "p"}).status_code == 403
+            # A PUBLIC read (the notebook, opened for public projects on
+            # 2026-09-22) still reaches the handler through the same fallback:
+            # the omission can only leave a read with the writer verdict, and
+            # the table alone decides which reads are public.
+            assert client.get("/api/state/projects/p/driver-note").status_code == 200
             assert client.post("/api/state/query/anything_added_later",
                                json={"project_id": "p"}).status_code == 403
 

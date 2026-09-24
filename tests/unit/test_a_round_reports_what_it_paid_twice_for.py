@@ -137,6 +137,8 @@ def test_an_engine_without_the_counter_costs_a_key_not_a_step(monkeypatch):
     import skillflow
     monkeypatch.delattr(skillflow, "read_accounting", raising=False)
     monkeypatch.setitem(sys.modules, "skillflow.read_accounting", None)
+    import skillflow
+    monkeypatch.delattr(skillflow, "read_accounting", raising=False)
     pipeline = _Pipeline()
     assert pipeline._read_accounting() == {}
     pipeline._report_read_accounting("t_impl")

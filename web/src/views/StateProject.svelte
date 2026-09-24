@@ -22,8 +22,9 @@
   // line used to be `permissionResolved && canWrite`, so "may I write?" decided
   // "may I read?". State DAG reads are public now (api/state_http classifies
   // every one of them), so a resolved session is enough to ask for the graph;
-  // `canWrite` still decides write affordances and whether the working notes may
-  // be requested at all. The SERVER is the judge either way — a 403 below still
+  // `canWrite` decides the write affordances, while `canRead` is what decides
+  // whether the working notes may be requested at all (see the `mayReadNotes`
+  // effect below). The SERVER is the judge either way — a 403 below still
   // clears the view and shows the notice.
   const canRead = $derived($authStore.permissionResolved);
   const canWrite = $derived($authStore.canWrite);
@@ -52,10 +53,11 @@
     return () => { generation++; };
   });
   $effect(() => {
-    // The working notes are the one part of a project page a reader may not
-    // read, so they are fetched only for a writer — and the 403 is the server's,
-    // not this branch's. Nothing private is fetched and then hidden.
-    const project = params.id, mayReadNotes = canWrite; void detailRefresh;
+    // The working notes are public for a project that has been opened (owner's
+    // ruling of 2026-09-22), so a reader asks for them too. The SERVER is the
+    // judge: an unopened project's 403 is the server's, not this branch's,
+    // and nothing private is fetched and then hidden.
+    const project = params.id, mayReadNotes = canRead; void detailRefresh;
     const version = ++noteGeneration;
     note = null; noteError = '';
     if (!mayReadNotes) return;
@@ -133,8 +135,7 @@
       <p class="snapshot">{st('snapshot')}: {data.observed_at} · event {data.event_seq} {loading ? ' · ' + st('loading') : ''}</p>
       <section class="working-notes" aria-label={st('workingNotes')}>
         <h2>{st('workingNotes')}</h2>
-        {#if !canWrite}<p role="status">{st('notePrivate')}</p>
-        {:else if noteError}<p role="alert">{noteError}</p>
+        {#if noteError}<p role="alert">{noteError}</p>
         {:else if !note}<p aria-live="polite">{st('loading')}</p>
         {:else}
           <p class="note-meta">{st('revision')} r{note.revision} · {note.updated_at}</p>

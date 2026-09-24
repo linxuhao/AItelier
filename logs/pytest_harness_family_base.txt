@@ -1,0 +1,18 @@
+# started 2026-09-24T09:31:04Z tree=/home/linxuhao/.AItelier/worktrees-scratch/lockq2-base head=8b084c208dfaf688d862f806ba0a82d96670501d
+# args: tests/unit/test_deployment_quiescence.py tests/unit/test_gate_skips_are_recorded.py tests/unit/test_godot_compile.py tests/unit/test_godot_harness.py tests/unit/test_godot_harness_native_errors.py tests/unit/test_godot_lifecycle.py tests/unit/test_godot_playtest_scenario.py tests/unit/test_godot_playtest_spec.py tests/unit/test_godot_vision.py tests/unit/test_harness_render_lock.py tests/unit/test_playtest_blind_run.py tests/unit/test_playtest_fixed_delta.py tests/unit/test_playtest_game_time_observation.py tests/unit/test_playtest_timing_ledger.py tests/unit/test_playtest_user_dir_isolation.py
+gitstatus_rc=0
+........................................................................ [ 16%]
+........................................................................ [ 32%]
+........................................................................ [ 49%]
+........................................................ssssssss........ [ 65%]
+........................................................................ [ 82%]
+........................................................................ [ 98%]
+.......                                                                  [100%]
+=============================== warnings summary ===============================
+../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+431 passed, 8 skipped, 1 warning in 2.73s
+# finished 2026-09-24T09:31:11Z bare_rc=0

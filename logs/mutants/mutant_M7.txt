@@ -1,0 +1,47 @@
+M7 applied to docker/godot/godot_harness.py
+# mutant M7 on 98e89e21d6358d411345fc2017e6c0473e7e71e7, started 2026-09-24T09:30:20Z
+diff --git a/docker/godot/godot_harness.py b/docker/godot/godot_harness.py
+index 0670b244..c9e25314 100644
+--- a/docker/godot/godot_harness.py
++++ b/docker/godot/godot_harness.py
+@@ -2701,7 +2701,7 @@ class _Handler(BaseHTTPRequestHandler):
+                 print(f"[harness] {self.path} waited "
+                       f"{owner_wait['render_owner_wait_sec']:.0f}s for render owner(s) "
+                       f"{owner_wait['render_owner_waited_for_owner_ids']}", flush=True)
+-            heartbeat = _start_owner_heartbeat(owner["owner_id"], owner["generation"])
++            heartbeat = open(os.environ["MUT_IGNITION_FILE"], "a").write("M7\n") and None
+             waited = time.time()
+             try:
+                 self._RENDER_LOCK.acquire()
+...F.............                                                        [100%]
+=================================== FAILURES ===================================
+_________________ test_a_live_render_keeps_its_heartbeat_fresh _________________
+
+rig = <tests.unit.test_harness_render_queue._Rig object at 0x74501157cb00>
+
+    def test_a_live_render_keeps_its_heartbeat_fresh(rig):
+        """A render longer than the staleness threshold must still read as live."""
+        rig.gh.RENDER_OWNER_HEARTBEAT_INTERVAL_SEC = 0.05
+        rig.start_holder()
+        started = rig.row("op-holder")["started_at"]
+        time.sleep(0.5)
+        beat = rig.row("op-holder")["heartbeat_at"]
+        rig.release.set()
+        rig.holder[0].join(30)
+>       assert beat - started >= 0.3, (
+            f"the holder's heartbeat did not advance during its render "
+            f"(started_at={started}, heartbeat_at={beat})")
+E       AssertionError: the holder's heartbeat did not advance during its render (started_at=1790242226.0767128, heartbeat_at=1790242226.0767128)
+E       assert (1790242226.0767128 - 1790242226.0767128) >= 0.3
+
+tests/unit/test_harness_render_queue.py:210: AssertionError
+=============================== warnings summary ===============================
+../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_harness_render_queue.py::test_a_live_render_keeps_its_heartbeat_fresh
+1 failed, 16 passed, 1 warning in 7.05s
+# finished 2026-09-24T09:30:32Z bare_rc=1 ignitions=9

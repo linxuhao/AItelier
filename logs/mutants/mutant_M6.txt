@@ -1,0 +1,131 @@
+M6 applied to docker/godot/godot_harness.py
+# mutant M6 on 98e89e21d6358d411345fc2017e6c0473e7e71e7, started 2026-09-24T09:29:54Z
+diff --git a/docker/godot/godot_harness.py b/docker/godot/godot_harness.py
+index 0670b244..cc59e8be 100644
+--- a/docker/godot/godot_harness.py
++++ b/docker/godot/godot_harness.py
+@@ -281,7 +281,7 @@ def acquire_render_owner_waiting(project_id: str, run_id: str, operation_id: str
+             row["waited_for_owner_ids"] = waited_for
+             return row
+         elapsed = time.monotonic() - started
+-        if wait_timeout is not None and elapsed >= wait_timeout:
++        if open(os.environ["MUT_IGNITION_FILE"], "a").write("M6\n") and False:
+             raise RenderOwnerConflict({
+                 "error": "render owner wait timed out", "owner_kind": "active",
+                 "owner_id": waited_for[-1], "waited_for_owner_ids": waited_for,
+.......F..[harness] /x11_input_smoke op-capped: caller disconnected after 10.04s queued behind render owner(s) ['7a84e25f11a44a9ca8a8bcd76e48049a']
+F......                                                        [100%]
+=================================== FAILURES ===================================
+__________ test_a_stale_active_owner_blocks_and_a_fresh_one_is_queued __________
+
+rig = <tests.unit.test_harness_render_queue._Rig object at 0x715f21851a00>
+
+    def test_a_stale_active_owner_blocks_and_a_fresh_one_is_queued(rig):
+        gh = rig.gh
+        holder = gh.acquire_render_owner("p0", "r0", "op-dead")
+        threshold = gh.RENDER_OWNER_HEARTBEAT_STALE_SEC
+    
+        def set_heartbeat_age(age):
+            with gh._lifecycle_connection() as conn:
+                conn.execute("UPDATE render_owners SET heartbeat_at=? WHERE owner_id=?",
+                             (time.time() - age, holder["owner_id"]))
+                conn.commit()
+    
+        set_heartbeat_age(threshold + 5)
+        code, body = rig.post("/playtest", rig.payload("op-next", render_wait_timeout_sec=5),
+                              timeout=10)
+        assert code == 409, (code, body)
+        assert body.get("owner_kind") == "active_stale", body
+        assert body.get("owner_id") == holder["owner_id"], body
+        assert body.get("needs_reconciliation") is True, body
+        assert f"threshold {threshold:.0f}s" in body["detail"], body
+        assert "reconcil" in body["detail"], body
+        assert rig.rendered == [] and rig.ops_with_rows() == ["op-dead"]
+    
+        set_heartbeat_age(threshold - 5)
+        code, body = rig.post("/playtest", rig.payload("op-next", render_wait_timeout_sec=0.3),
+                              timeout=10)
+>       assert (code, body.get("error")) == (409, "render owner wait timed out"), (
+            "a holder inside the heartbeat threshold is a live render to queue behind",
+            body)
+E       AssertionError: ('a holder inside the heartbeat threshold is a live render to queue behind', {'error': 'render owner exists', 'owner_kind': 'active_stale', 'owner_id': '62a0997ef7ae4edf83e82b45fc6b63fb', 'needs_reconciliation': True, ...})
+E       assert (409, 'render owner exists') == (409, 'render...it timed out')
+E         
+E         At index 1 diff: 'render owner exists' != 'render owner wait timed out'
+E         Use -v to get more diff
+
+tests/unit/test_harness_render_queue.py:260: AssertionError
+_______ test_the_requests_own_wait_limit_ends_the_wait_without_a_render ________
+
+rig = <tests.unit.test_harness_render_queue._Rig object at 0x715f2182c440>
+
+    def test_the_requests_own_wait_limit_ends_the_wait_without_a_render(rig):
+        holder_id = rig.start_holder()
+>       code, body = rig.post("/x11_input_smoke",
+                              rig.payload("op-capped", render_wait_timeout_sec=0.3), timeout=10)
+
+tests/unit/test_harness_render_queue.py:329: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/unit/test_harness_render_queue.py:115: in post
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.12/urllib/request.py:215: in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.12/urllib/request.py:515: in open
+    response = self._open(req, data)
+               ^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.12/urllib/request.py:532: in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+/usr/local/lib/python3.12/urllib/request.py:492: in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+/usr/local/lib/python3.12/urllib/request.py:1373: in http_open
+    return self.do_open(http.client.HTTPConnection, req)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.12/urllib/request.py:1348: in do_open
+    r = h.getresponse()
+        ^^^^^^^^^^^^^^^
+/usr/local/lib/python3.12/http/client.py:1478: in getresponse
+    response.begin()
+/usr/local/lib/python3.12/http/client.py:343: in begin
+    version, status, reason = self._read_status()
+                              ^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.12/http/client.py:304: in _read_status
+    line = str(self.fp.readline(_MAXLINE + 1), "iso-8859-1")
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <socket.SocketIO object at 0x715f2182fac0>
+b = <memory at 0x715f214d8b80>
+
+    def readinto(self, b):
+        """Read up to len(b) bytes into the writable buffer *b* and return
+        the number of bytes read.  If the socket is non-blocking and no bytes
+        are available, None is returned.
+    
+        If *b* is non-empty, a 0 return value indicates that the connection
+        was shutdown at the other end.
+        """
+        self._checkClosed()
+        self._checkReadable()
+        if self._timeout_occurred:
+            raise OSError("cannot read from timed out object")
+        while True:
+            try:
+>               return self._sock.recv_into(b)
+                       ^^^^^^^^^^^^^^^^^^^^^^^
+E               TimeoutError: timed out
+
+/usr/local/lib/python3.12/socket.py:720: TimeoutError
+=============================== warnings summary ===============================
+../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_harness_render_queue.py::test_a_stale_active_owner_blocks_and_a_fresh_one_is_queued
+FAILED tests/unit/test_harness_render_queue.py::test_the_requests_own_wait_limit_ends_the_wait_without_a_render
+2 failed, 15 passed, 1 warning in 21.59s
+# finished 2026-09-24T09:30:20Z bare_rc=1 ignitions=761

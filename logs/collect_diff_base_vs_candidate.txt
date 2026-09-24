@@ -1,0 +1,29 @@
+# collected test ids: base 8b084c20 (collect_base) vs candidate 98e89e21 (collect_candidate); produced 2026-09-24T09:41:52Z
+# base: 5355/5366 tests collected (11 deselected) in 13.49s
+# candidate: 5370/5381 tests collected (11 deselected) in 13.54s
+21,22c21,22
+< tests/contracts/director_messaging/test_fake_id_factory.py::test_fake_rejects_noncanonical_non_v4_ids_from_supported_factory[14c54d54-b7fc-11f1-aa98-3262e29b6f75]
+< tests/contracts/director_messaging/test_fake_id_factory.py::test_fake_rejects_noncanonical_non_v4_ids_from_supported_factory[A2D4B4D0-FAC4-4060-AB2A-BBA19F180205]
+---
+> tests/contracts/director_messaging/test_fake_id_factory.py::test_fake_rejects_noncanonical_non_v4_ids_from_supported_factory[0243393e-b7fc-11f1-ab96-a69736b18398]
+> tests/contracts/director_messaging/test_fake_id_factory.py::test_fake_rejects_noncanonical_non_v4_ids_from_supported_factory[A53F85C4-8355-49D9-8095-8ED637C075D2]
+306a307
+> tests/integration/test_no_unfalsifiable_guarantees.py::test_a_round_file_carries_no_lie_keeping_phrase[aitelier/tools/godot_playtest/impl.py]
+338a340
+> tests/integration/test_no_unfalsifiable_guarantees.py::test_a_round_file_carries_no_lie_keeping_phrase[docker/godot/godot_harness.py]
+391a394
+> tests/integration/test_no_unfalsifiable_guarantees.py::test_a_round_file_carries_no_lie_keeping_phrase[tests/unit/test_harness_render_queue.py]
+2525a2529,2540
+> tests/unit/test_harness_render_queue.py::test_a_busy_lock_queues_the_request[/playtest]
+> tests/unit/test_harness_render_queue.py::test_a_busy_lock_queues_the_request[/script]
+> tests/unit/test_harness_render_queue.py::test_a_busy_lock_queues_the_request[/x11_input_smoke]
+> tests/unit/test_harness_render_queue.py::test_a_caller_that_disconnects_while_queued_never_gets_the_render
+> tests/unit/test_harness_render_queue.py::test_a_live_render_keeps_its_heartbeat_fresh
+> tests/unit/test_harness_render_queue.py::test_a_lost_owner_still_blocks_and_says_so[/playtest]
+> tests/unit/test_harness_render_queue.py::test_a_lost_owner_still_blocks_and_says_so[/script]
+> tests/unit/test_harness_render_queue.py::test_a_lost_owner_still_blocks_and_says_so[/x11_input_smoke]
+> tests/unit/test_harness_render_queue.py::test_a_stale_active_owner_blocks_and_a_fresh_one_is_queued
+> tests/unit/test_harness_render_queue.py::test_an_open_client_socket_is_not_read_as_a_disconnect
+> tests/unit/test_harness_render_queue.py::test_the_playtest_tool_does_not_read_a_refusal_as_an_unreachable_builder
+> tests/unit/test_harness_render_queue.py::test_the_requests_own_wait_limit_ends_the_wait_without_a_render
+# diff_rc=1

@@ -1,0 +1,215 @@
+M1 applied to docker/godot/godot_harness.py
+# mutant M1 on 98e89e21d6358d411345fc2017e6c0473e7e71e7, started 2026-09-24T09:29:36Z
+diff --git a/docker/godot/godot_harness.py b/docker/godot/godot_harness.py
+index 0670b244..71d8f5da 100644
+--- a/docker/godot/godot_harness.py
++++ b/docker/godot/godot_harness.py
+@@ -271,7 +271,7 @@ def acquire_render_owner_waiting(project_id: str, run_id: str, operation_id: str
+         try:
+             row = acquire_render_owner(project_id, run_id, operation_id)
+         except RenderOwnerConflict as exc:
+-            if exc.payload["needs_reconciliation"]:
++            if open(os.environ["MUT_IGNITION_FILE"], "a").write("M1\n") or True:
+                 raise
+             if exc.payload["owner_id"] not in waited_for:
+                 waited_for.append(exc.payload["owner_id"])
+FFF....F.FF......                                                        [100%]
+=================================== FAILURES ===================================
+________________ test_a_busy_lock_queues_the_request[/playtest] ________________
+
+rig = <tests.unit.test_harness_render_queue._Rig object at 0x7daf9d803f20>
+route = '/playtest'
+
+    @pytest.mark.parametrize("route", RENDER_ROUTES)
+    def test_a_busy_lock_queues_the_request(rig, route):
+        holder_id = rig.start_holder()
+        second, out = rig.post_in_thread(route, rig.payload("op-next"))
+        assert rig.queued.wait(10), "the second request never met the live holder"
+        time.sleep(0.3)
+>       assert second.is_alive() and "code" not in out, (
+            f"{route} answered while a live holder still rendered: {out!r}")
+E       AssertionError: /playtest answered while a live holder still rendered: {'code': 409, 'body': {'error': 'render owner exists', 'owner_kind': 'active', 'owner_id': '5608a0158a974ffeaedef658dc81bb6c', 'needs_reconciliation': False, 'detail': 'render owner 5608a0158a974ffeaedef658dc81bb6c is rendering (heartbeat 0s old); a request queues until it releases', 'owner': {'owner_id': '5608a0158a974ffeaedef658dc81bb6c', 'resource': 'render', 'project_id': 'p', 'run_id': 'r', 'operation_id': 'op-holder', 'generation': 1, 'status': 'active', 'actor': 'godot-harness:7', 'started_at': 1790242180.5460925, 'heartbeat_at': 1790242180.5460925, 'ended_at': None, 'reason': None}}}
+E       assert (False)
+E        +  where False = is_alive()
+E        +    where is_alive = <Thread(Thread-4 (go), stopped daemon 138193106097856)>.is_alive
+
+tests/unit/test_harness_render_queue.py:176: AssertionError
+_________________ test_a_busy_lock_queues_the_request[/script] _________________
+
+rig = <tests.unit.test_harness_render_queue._Rig object at 0x7daf9d807590>
+route = '/script'
+
+    @pytest.mark.parametrize("route", RENDER_ROUTES)
+    def test_a_busy_lock_queues_the_request(rig, route):
+        holder_id = rig.start_holder()
+        second, out = rig.post_in_thread(route, rig.payload("op-next"))
+        assert rig.queued.wait(10), "the second request never met the live holder"
+        time.sleep(0.3)
+>       assert second.is_alive() and "code" not in out, (
+            f"{route} answered while a live holder still rendered: {out!r}")
+E       AssertionError: /script answered while a live holder still rendered: {'code': 409, 'body': {'error': 'render owner exists', 'owner_kind': 'active', 'owner_id': 'acf3b66153674bdebaa418c6918b1f13', 'needs_reconciliation': False, 'detail': 'render owner acf3b66153674bdebaa418c6918b1f13 is rendering (heartbeat 0s old); a request queues until it releases', 'owner': {'owner_id': 'acf3b66153674bdebaa418c6918b1f13', 'resource': 'render', 'project_id': 'p', 'run_id': 'r', 'operation_id': 'op-holder', 'generation': 1, 'status': 'active', 'actor': 'godot-harness:7', 'started_at': 1790242181.064204, 'heartbeat_at': 1790242181.064204, 'ended_at': None, 'reason': None}}}
+E       assert (False)
+E        +  where False = is_alive()
+E        +    where is_alive = <Thread(Thread-9 (go), stopped daemon 138193106097856)>.is_alive
+
+tests/unit/test_harness_render_queue.py:176: AssertionError
+____________ test_a_busy_lock_queues_the_request[/x11_input_smoke] _____________
+
+rig = <tests.unit.test_harness_render_queue._Rig object at 0x7daf9d8183e0>
+route = '/x11_input_smoke'
+
+    @pytest.mark.parametrize("route", RENDER_ROUTES)
+    def test_a_busy_lock_queues_the_request(rig, route):
+        holder_id = rig.start_holder()
+        second, out = rig.post_in_thread(route, rig.payload("op-next"))
+        assert rig.queued.wait(10), "the second request never met the live holder"
+        time.sleep(0.3)
+>       assert second.is_alive() and "code" not in out, (
+            f"{route} answered while a live holder still rendered: {out!r}")
+E       AssertionError: /x11_input_smoke answered while a live holder still rendered: {'code': 409, 'body': {'error': 'render owner exists', 'owner_kind': 'active', 'owner_id': '3a71e317760b4f4f8d545473432b24f8', 'needs_reconciliation': False, 'detail': 'render owner 3a71e317760b4f4f8d545473432b24f8 is rendering (heartbeat 0s old); a request queues until it releases', 'owner': {'owner_id': '3a71e317760b4f4f8d545473432b24f8', 'resource': 'render', 'project_id': 'p', 'run_id': 'r', 'operation_id': 'op-holder', 'generation': 1, 'status': 'active', 'actor': 'godot-harness:7', 'started_at': 1790242181.5823987, 'heartbeat_at': 1790242181.5823987, 'ended_at': None, 'reason': None}}}
+E       assert (False)
+E        +  where False = is_alive()
+E        +    where is_alive = <Thread(Thread-14 (go), stopped daemon 138193106097856)>.is_alive
+
+tests/unit/test_harness_render_queue.py:176: AssertionError
+__________ test_a_stale_active_owner_blocks_and_a_fresh_one_is_queued __________
+
+rig = <tests.unit.test_harness_render_queue._Rig object at 0x7daf9d7bf860>
+
+    def test_a_stale_active_owner_blocks_and_a_fresh_one_is_queued(rig):
+        gh = rig.gh
+        holder = gh.acquire_render_owner("p0", "r0", "op-dead")
+        threshold = gh.RENDER_OWNER_HEARTBEAT_STALE_SEC
+    
+        def set_heartbeat_age(age):
+            with gh._lifecycle_connection() as conn:
+                conn.execute("UPDATE render_owners SET heartbeat_at=? WHERE owner_id=?",
+                             (time.time() - age, holder["owner_id"]))
+                conn.commit()
+    
+        set_heartbeat_age(threshold + 5)
+        code, body = rig.post("/playtest", rig.payload("op-next", render_wait_timeout_sec=5),
+                              timeout=10)
+        assert code == 409, (code, body)
+        assert body.get("owner_kind") == "active_stale", body
+        assert body.get("owner_id") == holder["owner_id"], body
+        assert body.get("needs_reconciliation") is True, body
+        assert f"threshold {threshold:.0f}s" in body["detail"], body
+        assert "reconcil" in body["detail"], body
+        assert rig.rendered == [] and rig.ops_with_rows() == ["op-dead"]
+    
+        set_heartbeat_age(threshold - 5)
+        code, body = rig.post("/playtest", rig.payload("op-next", render_wait_timeout_sec=0.3),
+                              timeout=10)
+>       assert (code, body.get("error")) == (409, "render owner wait timed out"), (
+            "a holder inside the heartbeat threshold is a live render to queue behind",
+            body)
+E       AssertionError: ('a holder inside the heartbeat threshold is a live render to queue behind', {'error': 'render owner exists', 'owner_kind': 'active', 'owner_id': '3a1f4abf913f4e62b1e761631776e097', 'needs_reconciliation': False, ...})
+E       assert (409, 'render owner exists') == (409, 'render...it timed out')
+E         
+E         At index 1 diff: 'render owner exists' != 'render owner wait timed out'
+E         Use -v to get more diff
+
+tests/unit/test_harness_render_queue.py:260: AssertionError
+______ test_a_caller_that_disconnects_while_queued_never_gets_the_render _______
+
+rig = <tests.unit.test_harness_render_queue._Rig object at 0x7daf9d668ce0>
+
+    def test_a_caller_that_disconnects_while_queued_never_gets_the_render(rig):
+        rig.start_holder()
+        sock = _raw_post(rig.base, "/script", rig.payload("op-ghost"))
+        assert rig.queued.wait(10), "the ghost request never queued"
+        sock.close()
+        abandoned = rig.waits["op-ghost"]["done"].wait(5)
+    
+        rig.release.set()
+        rig.holder[0].join(30)
+        rig.waits["op-ghost"]["done"].wait(5)
+        time.sleep(0.2)
+    
+        assert abandoned, "the queued request kept waiting after its caller disconnected"
+>       assert rig.waits["op-ghost"].get("result") == "RenderWaitAbandoned", rig.waits
+E       AssertionError: {'op-holder': {'done': <threading.Event at 0x7daf9d668f20: set>, 'result': 'owner'}, 'op-ghost': {'done': <threading.Event at 0x7daf9d669ca0: set>, 'result': 'RenderOwnerConflict'}}
+E       assert 'RenderOwnerConflict' == 'RenderWaitAbandoned'
+E         
+E         - RenderWaitAbandoned
+E         + RenderOwnerConflict
+
+tests/unit/test_harness_render_queue.py:321: AssertionError
+----------------------------- Captured stderr call -----------------------------
+----------------------------------------
+Exception occurred during processing of request from ('127.0.0.1', 33208)
+Traceback (most recent call last):
+  File "/home/linxuhao/.AItelier/worktrees-scratch/lockq2-mut-M1/docker/godot/godot_harness.py", line 2688, in do_POST
+    owner = acquire_render_owner_waiting(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/linxuhao/.AItelier/worktrees-scratch/lockq2-mut-M1/tests/unit/test_harness_render_queue.py", line 85, in waiting
+    row = real_waiting(project_id, run_id, operation_id, **kwargs)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/linxuhao/.AItelier/worktrees-scratch/lockq2-mut-M1/docker/godot/godot_harness.py", line 272, in acquire_render_owner_waiting
+    row = acquire_render_owner(project_id, run_id, operation_id)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/linxuhao/.AItelier/worktrees-scratch/lockq2-mut-M1/docker/godot/godot_harness.py", line 172, in acquire_render_owner
+    return _acquire_render_owner_under_fence(project_id, run_id, operation_id)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/linxuhao/.AItelier/worktrees-scratch/lockq2-mut-M1/docker/godot/godot_harness.py", line 187, in _acquire_render_owner_under_fence
+    raise RenderOwnerConflict(_render_owner_conflict(dict(existing)))
+godot_harness_render_queue.RenderOwnerConflict: {"detail": "render owner d9309b4389f14c44afee38fb01fff3de is rendering (heartbeat 0s old); a request queues until it releases", "error": "render owner exists", "needs_reconciliation": false, "owner": {"actor": "godot-harness:7", "ended_at": null, "generation": 1, "heartbeat_at": 1790242185.7183325, "operation_id": "op-holder", "owner_id": "d9309b4389f14c44afee38fb01fff3de", "project_id": "p", "reason": null, "resource": "render", "run_id": "r", "started_at": 1790242185.7183325, "status": "active"}, "owner_id": "d9309b4389f14c44afee38fb01fff3de", "owner_kind": "active"}
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/socketserver.py", line 697, in process_request_thread
+    self.finish_request(request, client_address)
+  File "/usr/local/lib/python3.12/socketserver.py", line 362, in finish_request
+    self.RequestHandlerClass(request, client_address, self)
+  File "/usr/local/lib/python3.12/socketserver.py", line 766, in __init__
+    self.handle()
+  File "/usr/local/lib/python3.12/http/server.py", line 440, in handle
+    self.handle_one_request()
+  File "/usr/local/lib/python3.12/http/server.py", line 428, in handle_one_request
+    method()
+  File "/home/linxuhao/.AItelier/worktrees-scratch/lockq2-mut-M1/docker/godot/godot_harness.py", line 2695, in do_POST
+    return self._send(409, exc.payload)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/linxuhao/.AItelier/worktrees-scratch/lockq2-mut-M1/docker/godot/godot_harness.py", line 2559, in _send
+    self.wfile.write(body)
+  File "/usr/local/lib/python3.12/socketserver.py", line 845, in write
+    self._sock.sendall(b)
+BrokenPipeError: [Errno 32] Broken pipe
+----------------------------------------
+_______ test_the_requests_own_wait_limit_ends_the_wait_without_a_render ________
+
+rig = <tests.unit.test_harness_render_queue._Rig object at 0x7daf9dab7b90>
+
+    def test_the_requests_own_wait_limit_ends_the_wait_without_a_render(rig):
+        holder_id = rig.start_holder()
+        code, body = rig.post("/x11_input_smoke",
+                              rig.payload("op-capped", render_wait_timeout_sec=0.3), timeout=10)
+        rig.release.set()
+        rig.holder[0].join(30)
+        time.sleep(0.2)
+        assert code == 409, (code, body)
+>       assert body["error"] == "render owner wait timed out", body
+E       AssertionError: {'error': 'render owner exists', 'owner_kind': 'active', 'owner_id': 'd3315b3ceee347cbace3bc97f9179a79', 'needs_reconciliation': False, ...}
+E       assert 'render owner exists' == 'render owner wait timed out'
+E         
+E         - render owner wait timed out
+E         + render owner exists
+
+tests/unit/test_harness_render_queue.py:335: AssertionError
+=============================== warnings summary ===============================
+../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_harness_render_queue.py::test_a_busy_lock_queues_the_request[/playtest]
+FAILED tests/unit/test_harness_render_queue.py::test_a_busy_lock_queues_the_request[/script]
+FAILED tests/unit/test_harness_render_queue.py::test_a_busy_lock_queues_the_request[/x11_input_smoke]
+FAILED tests/unit/test_harness_render_queue.py::test_a_stale_active_owner_blocks_and_a_fresh_one_is_queued
+FAILED tests/unit/test_harness_render_queue.py::test_a_caller_that_disconnects_while_queued_never_gets_the_render
+FAILED tests/unit/test_harness_render_queue.py::test_the_requests_own_wait_limit_ends_the_wait_without_a_render
+6 failed, 11 passed, 1 warning in 6.56s
+# finished 2026-09-24T09:29:48Z bare_rc=1 ignitions=11

@@ -1,0 +1,50 @@
+M8 applied to aitelier/tools/godot_playtest/impl.py
+# mutant M8 on 98e89e21d6358d411345fc2017e6c0473e7e71e7, started 2026-09-24T09:30:32Z
+diff --git a/aitelier/tools/godot_playtest/impl.py b/aitelier/tools/godot_playtest/impl.py
+index 8ce679c2..a0c854fd 100644
+--- a/aitelier/tools/godot_playtest/impl.py
++++ b/aitelier/tools/godot_playtest/impl.py
+@@ -300,7 +300,7 @@ def post_playtest(payload: dict, timeout: int = 3600) -> dict:
+                         f"hangs (the sidecar caps each one at 120s, so a whole "
+                         f"suite over the wall means the count grew).")}
+         refusal = _render_owner_refusal(e)
+-        if refusal is not None:
++        if open(os.environ["MUT_IGNITION_FILE"], "a").write("M8\n") and False:
+             # The sidecar ANSWERED: its render owner needs reconciliation, or
+             # this request's own wait ran out. The gate did not run, so the
+             # report keeps the absence shape below (gate_skipped) under its own
+........F........                                                        [100%]
+=================================== FAILURES ===================================
+___ test_the_playtest_tool_does_not_read_a_refusal_as_an_unreachable_builder ___
+
+rig = <tests.unit.test_harness_render_queue._Rig object at 0x7606d4f91910>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7606d4cc82f0>
+
+    def test_the_playtest_tool_does_not_read_a_refusal_as_an_unreachable_builder(
+            rig, monkeypatch):
+        from aitelier.tools.godot_playtest import impl
+    
+        gh = rig.gh
+        logged = []
+        monkeypatch.setattr(impl, "log_gate_skip",
+                            lambda gate, reason, **_detail: logged.append(reason))
+        lost = gh.acquire_render_owner("p0", "r0", "op-lost")
+        gh.mark_render_owner_lost(lost["owner_id"], lost["generation"], "worker exited")
+        monkeypatch.setattr(impl, "_BUILDER_URL", rig.base)
+        refused = impl.post_playtest(rig.payload("op-tool"), timeout=10)
+        assert refused["gate_skipped"] is True
+>       assert refused["skipped_because"] == "render_owner_owner_lost", refused
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'skipped_because'
+
+tests/unit/test_harness_render_queue.py:280: KeyError
+=============================== warnings summary ===============================
+../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_harness_render_queue.py::test_the_playtest_tool_does_not_read_a_refusal_as_an_unreachable_builder
+1 failed, 16 passed, 1 warning in 7.32s
+# finished 2026-09-24T09:30:44Z bare_rc=1 ignitions=1

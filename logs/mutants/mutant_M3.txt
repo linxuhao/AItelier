@@ -1,0 +1,175 @@
+M3 applied to docker/godot/godot_harness.py
+# mutant M3 on 98e89e21d6358d411345fc2017e6c0473e7e71e7, started 2026-09-24T09:29:59Z
+diff --git a/docker/godot/godot_harness.py b/docker/godot/godot_harness.py
+index 0670b244..bdebfe65 100644
+--- a/docker/godot/godot_harness.py
++++ b/docker/godot/godot_harness.py
+@@ -2692,7 +2692,7 @@ class _Handler(BaseHTTPRequestHandler):
+                 print(f"[harness] {self.path} {operation_id}: {exc}", flush=True)
+                 return
+             except RenderOwnerConflict as exc:
+-                return self._send(409, exc.payload)
++                return self._send(409, {"error": "render owner exists"} if open(os.environ["MUT_IGNITION_FILE"], "a").write("M3\n") else None)
+             except RuntimeError as exc:
+                 return self._send(409, {"error": str(exc)})
+             owner_wait = {"render_owner_wait_sec": owner.pop("waited_sec"),
+....FFFFF.F......                                                        [100%]
+=================================== FAILURES ===================================
+____________ test_a_lost_owner_still_blocks_and_says_so[/playtest] _____________
+
+rig = <tests.unit.test_harness_render_queue._Rig object at 0x713483ce8050>
+route = '/playtest'
+
+    @pytest.mark.parametrize("route", RENDER_ROUTES)
+    def test_a_lost_owner_still_blocks_and_says_so(rig, route):
+        gh = rig.gh
+        lost = gh.acquire_render_owner("p0", "r0", "op-lost")
+        gh.mark_render_owner_lost(lost["owner_id"], lost["generation"], "worker exited")
+        started = time.monotonic()
+        code, body = rig.post(route, rig.payload("op-next"), timeout=10)
+        assert code == 409, (code, body)
+        assert rig.rendered == [], "a render ran past an owner_lost holder"
+        assert rig.ops_with_rows() == ["op-lost"], "a new owner was admitted past owner_lost"
+        assert time.monotonic() - started < 5.0, "an owner_lost holder is refused, never waited out"
+>       assert body.get("owner_kind") == "owner_lost", body
+E       AssertionError: {'error': 'render owner exists'}
+E       assert None == 'owner_lost'
+E        +  where None = <built-in method get of dict object at 0x71348394cc00>('owner_kind')
+E        +    where <built-in method get of dict object at 0x71348394cc00> = {'error': 'render owner exists'}.get
+
+tests/unit/test_harness_render_queue.py:228: AssertionError
+_____________ test_a_lost_owner_still_blocks_and_says_so[/script] ______________
+
+rig = <tests.unit.test_harness_render_queue._Rig object at 0x713483cea2a0>
+route = '/script'
+
+    @pytest.mark.parametrize("route", RENDER_ROUTES)
+    def test_a_lost_owner_still_blocks_and_says_so(rig, route):
+        gh = rig.gh
+        lost = gh.acquire_render_owner("p0", "r0", "op-lost")
+        gh.mark_render_owner_lost(lost["owner_id"], lost["generation"], "worker exited")
+        started = time.monotonic()
+        code, body = rig.post(route, rig.payload("op-next"), timeout=10)
+        assert code == 409, (code, body)
+        assert rig.rendered == [], "a render ran past an owner_lost holder"
+        assert rig.ops_with_rows() == ["op-lost"], "a new owner was admitted past owner_lost"
+        assert time.monotonic() - started < 5.0, "an owner_lost holder is refused, never waited out"
+>       assert body.get("owner_kind") == "owner_lost", body
+E       AssertionError: {'error': 'render owner exists'}
+E       assert None == 'owner_lost'
+E        +  where None = <built-in method get of dict object at 0x713483937f00>('owner_kind')
+E        +    where <built-in method get of dict object at 0x713483937f00> = {'error': 'render owner exists'}.get
+
+tests/unit/test_harness_render_queue.py:228: AssertionError
+_________ test_a_lost_owner_still_blocks_and_says_so[/x11_input_smoke] _________
+
+rig = <tests.unit.test_harness_render_queue._Rig object at 0x713483ceb230>
+route = '/x11_input_smoke'
+
+    @pytest.mark.parametrize("route", RENDER_ROUTES)
+    def test_a_lost_owner_still_blocks_and_says_so(rig, route):
+        gh = rig.gh
+        lost = gh.acquire_render_owner("p0", "r0", "op-lost")
+        gh.mark_render_owner_lost(lost["owner_id"], lost["generation"], "worker exited")
+        started = time.monotonic()
+        code, body = rig.post(route, rig.payload("op-next"), timeout=10)
+        assert code == 409, (code, body)
+        assert rig.rendered == [], "a render ran past an owner_lost holder"
+        assert rig.ops_with_rows() == ["op-lost"], "a new owner was admitted past owner_lost"
+        assert time.monotonic() - started < 5.0, "an owner_lost holder is refused, never waited out"
+>       assert body.get("owner_kind") == "owner_lost", body
+E       AssertionError: {'error': 'render owner exists'}
+E       assert None == 'owner_lost'
+E        +  where None = <built-in method get of dict object at 0x713483b04d80>('owner_kind')
+E        +    where <built-in method get of dict object at 0x713483b04d80> = {'error': 'render owner exists'}.get
+
+tests/unit/test_harness_render_queue.py:228: AssertionError
+__________ test_a_stale_active_owner_blocks_and_a_fresh_one_is_queued __________
+
+rig = <tests.unit.test_harness_render_queue._Rig object at 0x713483ceb260>
+
+    def test_a_stale_active_owner_blocks_and_a_fresh_one_is_queued(rig):
+        gh = rig.gh
+        holder = gh.acquire_render_owner("p0", "r0", "op-dead")
+        threshold = gh.RENDER_OWNER_HEARTBEAT_STALE_SEC
+    
+        def set_heartbeat_age(age):
+            with gh._lifecycle_connection() as conn:
+                conn.execute("UPDATE render_owners SET heartbeat_at=? WHERE owner_id=?",
+                             (time.time() - age, holder["owner_id"]))
+                conn.commit()
+    
+        set_heartbeat_age(threshold + 5)
+        code, body = rig.post("/playtest", rig.payload("op-next", render_wait_timeout_sec=5),
+                              timeout=10)
+        assert code == 409, (code, body)
+>       assert body.get("owner_kind") == "active_stale", body
+E       AssertionError: {'error': 'render owner exists'}
+E       assert None == 'active_stale'
+E        +  where None = <built-in method get of dict object at 0x71348393e4c0>('owner_kind')
+E        +    where <built-in method get of dict object at 0x71348393e4c0> = {'error': 'render owner exists'}.get
+
+tests/unit/test_harness_render_queue.py:250: AssertionError
+___ test_the_playtest_tool_does_not_read_a_refusal_as_an_unreachable_builder ___
+
+rig = <tests.unit.test_harness_render_queue._Rig object at 0x713483d58740>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x713483d5a630>
+
+    def test_the_playtest_tool_does_not_read_a_refusal_as_an_unreachable_builder(
+            rig, monkeypatch):
+        from aitelier.tools.godot_playtest import impl
+    
+        gh = rig.gh
+        logged = []
+        monkeypatch.setattr(impl, "log_gate_skip",
+                            lambda gate, reason, **_detail: logged.append(reason))
+        lost = gh.acquire_render_owner("p0", "r0", "op-lost")
+        gh.mark_render_owner_lost(lost["owner_id"], lost["generation"], "worker exited")
+        monkeypatch.setattr(impl, "_BUILDER_URL", rig.base)
+        refused = impl.post_playtest(rig.payload("op-tool"), timeout=10)
+        assert refused["gate_skipped"] is True
+>       assert refused["skipped_because"] == "render_owner_owner_lost", refused
+E       AssertionError: {'passed': True, 'frames': 0, 'errors': [], 'state': {}, ...}
+E       assert 'render_owner_None' == 'render_owner_owner_lost'
+E         
+E         - render_owner_owner_lost
+E         ?               -  ------
+E         + render_owner_None
+E         ?              +
+
+tests/unit/test_harness_render_queue.py:280: AssertionError
+_______ test_the_requests_own_wait_limit_ends_the_wait_without_a_render ________
+
+rig = <tests.unit.test_harness_render_queue._Rig object at 0x713483d76c60>
+
+    def test_the_requests_own_wait_limit_ends_the_wait_without_a_render(rig):
+        holder_id = rig.start_holder()
+        code, body = rig.post("/x11_input_smoke",
+                              rig.payload("op-capped", render_wait_timeout_sec=0.3), timeout=10)
+        rig.release.set()
+        rig.holder[0].join(30)
+        time.sleep(0.2)
+        assert code == 409, (code, body)
+>       assert body["error"] == "render owner wait timed out", body
+E       AssertionError: {'error': 'render owner exists'}
+E       assert 'render owner exists' == 'render owner wait timed out'
+E         
+E         - render owner wait timed out
+E         + render owner exists
+
+tests/unit/test_harness_render_queue.py:335: AssertionError
+=============================== warnings summary ===============================
+../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_harness_render_queue.py::test_a_lost_owner_still_blocks_and_says_so[/playtest]
+FAILED tests/unit/test_harness_render_queue.py::test_a_lost_owner_still_blocks_and_says_so[/script]
+FAILED tests/unit/test_harness_render_queue.py::test_a_lost_owner_still_blocks_and_says_so[/x11_input_smoke]
+FAILED tests/unit/test_harness_render_queue.py::test_a_stale_active_owner_blocks_and_a_fresh_one_is_queued
+FAILED tests/unit/test_harness_render_queue.py::test_the_playtest_tool_does_not_read_a_refusal_as_an_unreachable_builder
+FAILED tests/unit/test_harness_render_queue.py::test_the_requests_own_wait_limit_ends_the_wait_without_a_render
+6 failed, 11 passed, 1 warning in 7.29s
+# finished 2026-09-24T09:30:11Z bare_rc=1 ignitions=6

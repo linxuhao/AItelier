@@ -1,0 +1,26 @@
+CMD: git diff --word-diff 290d7908 5fbe7c24 -- aitelier/tools/godot_playtest/impl.py
+diff --git a/aitelier/tools/godot_playtest/impl.py b/aitelier/tools/godot_playtest/impl.py
+index b94943da..89af6c1c 100644
+--- a/aitelier/tools/godot_playtest/impl.py
++++ b/aitelier/tools/godot_playtest/impl.py
+@@ -90,9 +90,19 @@ def _read_monolith(repo: Path) -> tuple[dict | None, list[str]]:
+        spec = _load_yaml(p)
+    except Exception as e:
+        return None, [f"{SPEC_FILE} unreadable: {type(e).__name__}: {e}"]
+    if [-isinstance(spec, dict) and spec.get("scenarios"):-]{+spec is None or spec == {}:+}
+        return [-spec,-]{+None,+} []
+    {+# A file with keys is a contract. It is never read as "no contract" (that+}
+{+    # runs the canned smoke test): a `scenario:` typo or a `scenarios:`+}
+{+    # mapping is named here, and the play-test does not run.+}
+{+    if not isinstance(spec, dict):+}
+        return None, {+[f"{SPEC_FILE} is a {type(spec).__name__}, not a YAML mapping"]+}
+{+    scenarios = spec.get("scenarios")+}
+{+    if not isinstance(scenarios, list) or not scenarios:+}
+{+        return None, [f"{SPEC_FILE} has no non-empty `scenarios` list (`scenarios` "+}
+{+                      f"is {type(scenarios).__name__ if 'scenarios' in spec else 'absent'}; "+}
+{+                      f"top-level keys: {', '.join(sorted(str(k) for k in spec))})"]+}
+{+    return spec,+} []
+
+
+def _read_split(repo: Path) -> tuple[dict | None, list[str]]:
+BARE_RC=0

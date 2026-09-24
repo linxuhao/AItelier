@@ -1,0 +1,12 @@
+CMD: git diff --word-diff 290d7908 e3767fc4 -- final/engine_review_battery/proj/counter.gd
+diff --git a/final/engine_review_battery/proj/counter.gd b/final/engine_review_battery/proj/counter.gd
+new file mode 100644
+index 00000000..8a2c6df8
+--- /dev/null
++++ b/final/engine_review_battery/proj/counter.gd
+@@ -0,0 +1,4 @@
+{+extends Button+}
+{+var presses := 0+}
+{+func _pressed() -> void:+}
+{+	presses += 1+}
+BARE_RC=0

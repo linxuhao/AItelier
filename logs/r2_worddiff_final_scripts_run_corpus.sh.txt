@@ -1,0 +1,29 @@
+CMD: git diff --word-diff 290d7908 e3767fc4 -- final/scripts/run_corpus.sh
+diff --git a/final/scripts/run_corpus.sh b/final/scripts/run_corpus.sh
+index d006eaf4..8705e32a 100755
+--- a/final/scripts/run_corpus.sh
++++ b/final/scripts/run_corpus.sh
+@@ -1,19 +1,21 @@
+#!/bin/bash
+# usage: run_corpus.sh {+<base_harness.py>+} <log>
+# Runs final/corpus_impact.py on the host python (no container, no engine)
+# against [-the-]{+a+} git-archive extraction of the game repo's [-master playtest/.-]
+[-LOG="$1"-]{+playtest/ at 43aff480.+}
+{+# The candidate harness and the contract reader come from the candidate tree.+}
+{+BASE="$1"; LOG="$2"+}
+TREE=/home/linxuhao/.AItelier/worktrees-scratch/onereading1
+[-T=/home/linxuhao/.AItelier/worktrees-scratch/onereading1-tools-]{+T=/home/linxuhao/.AItelier/worktrees-scratch/onereading2-tools+}
+{+CAND="$T/harness/h_5fbe7c24.py"+}
+{
+  echo "CMD: PYTHONPATH=$TREE python3 $TREE/final/corpus_impact.py [-$T/harness_base.py $T/harness_cand.py-]{+$BASE $CAND+} $T/corpus"
+  echo "TREE: $(git -C "$TREE" rev-parse HEAD)  PYTHON: $(python3 --version 2>&1)"
+  echo "CORPUS: wuxia-commercial-batch-next[-master-] $(cat [-$T/corpus/MASTER_SHA),-]{+$T/corpus/SHA),+} extracted with: git -C ~/.AItelier/projects/wuxia-commercial-batch-next archive [-master-]{+$(cat $T/corpus/SHA)+} playtest {+tools+} | tar -x -C $T/corpus"
+  echo "HARNESS_BASE_SHA1: $(sha1sum [-$T/harness_base.py-]{+"$BASE"+} | cut -d' ' -f1)  HARNESS_CAND_SHA1: $(sha1sum [-$T/harness_cand.py-]{+"$CAND"+} | cut -d' ' -f1)"
+  echo "DATE: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+} > "$LOG"
+PYTHONPATH="$TREE" PYTHONDONTWRITEBYTECODE=1 python3 "$TREE/final/corpus_impact.py" \
+  [-"$T/harness_base.py" "$T/harness_cand.py"-]{+"$BASE" "$CAND"+} "$T/corpus" >> "$LOG" 2>&1
+RC=$?
+echo "BARE_RC=$RC" >> "$LOG"
+exit $RC
+BARE_RC=0

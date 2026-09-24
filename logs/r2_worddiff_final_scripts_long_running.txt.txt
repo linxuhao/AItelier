@@ -1,0 +1,30 @@
+CMD: git diff --word-diff 290d7908 e3767fc4 -- final/scripts/long_running.txt
+diff --git a/final/scripts/long_running.txt b/final/scripts/long_running.txt
+new file mode 100644
+index 00000000..6f2d7262
+--- /dev/null
++++ b/final/scripts/long_running.txt
+@@ -0,0 +1,22 @@
+{+aitelier-godot+}
+{+aitelier+}
+{+mcp_server+}
+{+aitelier-zg+}
+{+api_gateway+}
+{+cloudflare_tunnel+}
+{+collaboration-ocis+}
+{+onlyoffice-ocis+}
+{+ocis+}
+{+traefik+}
+{+tika-ocis+}
+{+searxng+}
+{+dev_mcp+}
+{+yuta-test+}
+{+xray_panel+}
+{+xray_ws+}
+{+activememoryindex+}
+{+vetalos-demo-redis+}
+{+immich_server+}
+{+immich_machine_learning+}
+{+immich_postgres+}
+{+immich_redis+}
+BARE_RC=0

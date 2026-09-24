@@ -1,0 +1,41 @@
+CMD: git diff --word-diff 290d7908 e3767fc4 -- final/review_scripts/dispatch.py
+diff --git a/final/review_scripts/dispatch.py b/final/review_scripts/dispatch.py
+new file mode 100644
+index 00000000..b6bf466d
+--- /dev/null
++++ b/final/review_scripts/dispatch.py
+@@ -0,0 +1,33 @@
+{+"""Reviewer: which path does playtest_project take for specs whose `scenarios` is not a+}
+{+non-empty list? usage: dispatch.py <harness.py> <tree>. Engine-facing helpers are stubbed."""+}
+{+import importlib.util, json, sys, tempfile+}
+{+from pathlib import Path+}
+{+s = importlib.util.spec_from_file_location("h", sys.argv[1]); h = importlib.util.module_from_spec(s); s.loader.exec_module(h)+}
+{+sys.path.insert(0, sys.argv[2])+}
+{+proj = Path(tempfile.mkdtemp()); (proj / "project.godot").write_text("config_version=5\n")+}
+{+took = []+}
+{+h._copy_project = lambda p: Path(tempfile.mkdtemp()) / "proj"+}
+{+h._inject_probe = lambda d: None+}
+{+h._import_resources = lambda d, t: None+}
+{+h._playtest_legacy = lambda *a, **k: (took.append("legacy"), {"passed": True, "spec_used": False, "spec_errors": None, "summary": "legacy smoke"})[1]+}
+{+real_spec = h._playtest_spec+}
+{+h._playtest_spec = lambda *a, **k: (took.append("spec"), {"passed": False, "spec_used": True, "spec_errors": ["(spec path)"], "summary": "spec"})[1]+}
+{+SC = {"name": "s", "timeline": [{"at": 5, "assert": {"A.b": 1}}], "reviewer_notes": [{"at": 1}]}+}
+{+CASES = {+}
+{+ "L1 typo `scenario:` + unknown key": {"scene": "res://main.tscn", "scenario": [SC]},+}
+{+ "L2 `scenarios` as a mapping": {"scenarios": {"s": SC}},+}
+{+ "L3 `scenarios: []` + reviewer_notes": {"scenarios": [], "reviewer_notes": [SC]},+}
+{+ "L4 control: scenarios list": {"scenarios": [SC]},+}
+{+}+}
+{+for k, spec in CASES.items():+}
+{+    took.clear()+}
+{+    r = h.playtest_project(str(proj), spec=spec)+}
+{+    print("DISPATCH %s -> %s passed=%s spec_used=%s spec_errors=%s" % (k, took, r.get("passed"), r.get("spec_used"), r.get("spec_errors")))+}
+{+# AItelier's monolith reader on a typo'd contract+}
+{+from aitelier.tools.godot_playtest.impl import read_spec+}
+{+repo = Path(tempfile.mkdtemp()); (repo / "playtest_spec.yaml").write_text("scene: res://main.tscn\nscenario:\n- name: s\n  timeline:\n  - at: 5\n    assert: {A.b: 1}\n")+}
+{+spec, info = read_spec(repo)+}
+{+print("READ_SPEC monolith with `scenario:` typo -> spec=%r info=%s" % (spec, json.dumps(info)))+}
+{+repo2 = Path(tempfile.mkdtemp()); (repo2 / "playtest_spec.yaml").write_text("scenarios:\n  s:\n    name: s\n    timeline:\n    - at: 5\n      assert: {A.b: 1}\n")+}
+{+spec2, info2 = read_spec(repo2)+}
+{+print("READ_SPEC monolith with `scenarios:` mapping -> spec type=%s scenarios type=%s info=%s" % (type(spec2).__name__, type((spec2 or {}).get('scenarios')).__name__, json.dumps(info2)))+}
+BARE_RC=0

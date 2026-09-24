@@ -1,0 +1,4 @@
+family_base BARE_RC=0
+family_cand BARE_RC=0
+suite_base BARE_RC=0
+suite_cand BARE_RC=0

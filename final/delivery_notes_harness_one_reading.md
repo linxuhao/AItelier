@@ -161,7 +161,18 @@ Extra shapes of the same kinds, added with their own tests and mutants: a spec t
 
 ### the-suite-stays-green-and-the-note-carries-every-number
 
-SUITE_TABLE_PLACEHOLDER
+Four throwaway containers (`docker run --rm --init -m 3g`, `final/scripts/runsuite.sh`), launched 2026-09-24T14:45:51Z to 14:46:00Z by `suites.sh`. Each log header carries the tree sha, the dirty-file count, the container name, the server-wide throwaway count at launch and the in-container `git status` (empty, RC 0, on all four). Driver summary: `logs/r2_suites_driver.txt`.
+
+| run | tree | command | result | BARE_RC | throwaway containers at launch | log |
+|---|---|---|---|---|---|---|
+| whole suite, base | `290d7908` (clean) | `pytest tests` | 5397 passed, 10 skipped, 11 deselected | 0 | 0 | `logs/r2_suite_base_290d7908.txt` |
+| whole suite, candidate | `e3767fc4` (clean) | `pytest tests` | 5499 passed, 10 skipped, 11 deselected | 0 | 1 | `logs/r2_suite_cand_e3767fc4.txt` |
+| harness family, base | `290d7908` (clean) | `pytest` on the 17 files in `final/scripts/family.txt` | 247 passed, 8 skipped | 0 | 2 | `logs/r2_family_base_290d7908.txt` |
+| harness family, candidate | `e3767fc4` (clean) | same 17 files | 289 passed, 8 skipped | 0 | 3 | `logs/r2_family_cand_e3767fc4.txt` |
+
+The candidate suite has 102 more passing ids: 42 from the family (41 new ids in `test_playtest_one_reading.py`, and in `test_godot_playtest_spec.py` one test replaced by two), and 60 from `tests/integration/test_no_unfalsifiable_guarantees.py`, which parametrizes over the `.py/.md/.ts/.tsx/.txt` files changed since `9c79f11f` (167 on the base tree, 227 on the candidate: this round's scripts, logs and note). No test failed in either suite run, including the known flake `test_parallel_runs_progress_but_competing_controllers_admit_one_owner`, so its 20-run rerun was not triggered.
+
+`e3767fc4` differs from the final commit only in this note and in new files under `logs/`; no file the suite imports or collects changed after it. The guard test was run again on the final tree: `logs/r2_guard_final.txt`.
 
 ### the-timeline-runs-in-the-order-it-is-written
 

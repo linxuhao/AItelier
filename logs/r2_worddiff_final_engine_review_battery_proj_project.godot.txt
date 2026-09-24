@@ -1,0 +1,19 @@
+CMD: git diff --word-diff 290d7908 e3767fc4 -- final/engine_review_battery/proj/project.godot
+diff --git a/final/engine_review_battery/proj/project.godot b/final/engine_review_battery/proj/project.godot
+new file mode 100644
+index 00000000..44d17e29
+--- /dev/null
++++ b/final/engine_review_battery/proj/project.godot
+@@ -0,0 +1,11 @@
+{+config_version=5+}
+
+{+[application]+}
+
+{+config/name="orrv"+}
+{+run/main_scene="res://main.tscn"+}
+
+{+[display]+}
+
+{+window/size/viewport_width=640+}
+{+window/size/viewport_height=480+}
+BARE_RC=0

@@ -1,0 +1,18 @@
+CMD: pytest tests/integration/test_no_unfalsifiable_guarantees.py
+TREE: e3767fc4e2ad9ca1200585afdc68015764e0702b  DIRTY_FILES: 29
+CWD: /home/linxuhao/.AItelier/worktrees-scratch/onereading1  CONTAINER: onereading2-guard  DATE: 2026-09-24T14:58:32Z
+THROWAWAY_CONTAINERS_AT_LAUNCH(server-wide, before this one): 0 []
+IN_CONTAINER_GIT_STATUS_RC: 0
+........................................................................ [ 27%]
+........................................................................ [ 55%]
+........................................................................ [ 82%]
+.............................................                            [100%]
+=============================== warnings summary ===============================
+../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+261 passed, 1 warning in 0.34s
+BARE_RC=0
+END: 2026-09-24T14:58:36Z

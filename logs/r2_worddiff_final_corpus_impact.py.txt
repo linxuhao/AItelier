@@ -1,0 +1,82 @@
+CMD: git diff --word-diff 290d7908 e3767fc4 -- final/corpus_impact.py
+diff --git a/final/corpus_impact.py b/final/corpus_impact.py
+index af589148..b11f8ec6 100644
+--- a/final/corpus_impact.py
++++ b/final/corpus_impact.py
+@@ -8,8 +8,8 @@ same reader the gates use (aitelier.tools.godot_playtest.impl.read_spec) and
+handed to each harness's real `_playtest_spec` with the engine stubbed out, so
+only the parse-time checks speak. A spec error the candidate reports and the
+base does not is a new error. Every `/`-qualified click, hover or assert target
+{+in the raw timelines+} is listed afterwards; whether each resolves as a path in
+the engine is not measured here.
+"""
+import importlib.util
+import sys
+@@ -54,9 +54,9 @@ def main(base_path, cand_path, repo):
+    print("BASE_SPEC_ERRORS", len(rb["spec_errors"]))
+    print("CAND_SPEC_ERRORS", len(rc["spec_errors"]))
+    print("NEW_SPEC_ERRORS", len(new))
+    top = [e for e in new if e.startswith("spec [-has unknown top-level key")]-]{+")]+}
+    for e in top:
+        print("  [-NEW_TOP_LEVEL",-]{+NEW_SPEC_LEVEL",+} e)
+    per_scen = {}
+    for e in new:
+        if not e.startswith("scenario "):
+@@ -80,6 +80,22 @@ def main(base_path, cand_path, repo):
+            elif "must not decrease in file order" in e:
+                kinds.append("order: " + e.split(": ", 1)[1].split(";", 1)[0])
+                labels.add("`at` decreases in file order")
+            {+elif "has no `at`" in e:+}
+{+                kinds.append("no at: " + e.split(": ", 1)[1].split(".", 1)[0])+}
+{+                labels.add("entry without `at`")+}
+{+            elif " has key " in e and " of type " in e:+}
+{+                key = e.split(" has key ", 1)[1].split(" of type ", 1)[0]+}
+{+                kinds.append("key %s of the wrong type" % key)+}
+{+                labels.add("key %s of the wrong type" % key)+}
+{+            elif "assert item" in e or "`assert` is a" in e:+}
+{+                kinds.append("assert item: " + e.split(": ", 2)[-1])+}
+{+                labels.add("list-form assert item")+}
+{+            elif " offsets (" in e or " buttons (" in e:+}
+{+                kinds.append("aim: " + e.split(": ", 2)[-1])+}
+{+                labels.add("aim with two offsets or buttons")+}
+{+            elif "-frame cap" in e:+}
+{+                kinds.append("past the frame cap")+}
+{+                labels.add("entry past the frame cap")+}
+            else:
+                kinds.append("other: " + e)
+                labels.add("other")
+@@ -92,19 +108,29 @@ def main(base_path, cand_path, repo):
+    refused = sum(1 for s in rc["behavior"]["scenarios"] if not s["ran"])
+    print("CAND_SCENARIOS_NOT_RUN %d of %d" % (refused, len(rc["behavior"]["scenarios"])))
+
+    [-paths-]{+# Every aim and assert target, read from the raw timelines (a refused+}
+{+    # entry is still listed).+}
+{+    paths, scanned+} = [-[]-]{+[], Counter()+}
+    for sc in scenarios:
+[-tl, _ = cand._normalize_timeline(sc.get("timeline") or [])-]        for e in [-tl:-]{+sc.get("timeline") or []:+}
+{+            if not isinstance(e, dict):+}
+{+                continue+}
+            for kind in ("click", [-"hover"):-]
+[-                if e.get(kind):-]
+[-                    target-]{+"clicks", "hover", "hovers"):+}
+{+                aims+} = [-str(e[kind]).split(" ", 1)[0]-]{+e.get(kind) or []+}
+{+                for aim in ([aims] if isinstance(aims, str) else aims):+}
+{+                    scanned[kind] += 1+}
+                    if "/" in [-target:-]{+str(aim).split(" ", 1)[0]:+}
+                        paths.append((sc["name"], [-e["at"],-]{+e.get("at"),+} kind, [-str(e[kind])))-]
+[-            for-]{+str(aim)))+}
+            a [-in-]{+=+} e.get("assert")
+            [-or []:-]
+[-                node-]{+keys+} = [-str(a.get("node",-]{+([str(k).partition(".")[0] for k in a] if isinstance(a, dict) else+}
+{+                    [str(i.get("node",+} "")) {+for i in a if isinstance(i, dict)]+}
+{+                    if isinstance(a, list) else [])+}
+{+            for node in keys:+}
+{+                scanned["assert"] += 1+}
+                if "/" in node:
+                    paths.append((sc["name"], [-e["at"],-]{+e.get("at"),+} "assert", [-str(a.get("name", node))))-]{+node))+}
+{+    print("TARGETS_SCANNED %d (%s)" % (sum(scanned.values()), ", ".join(+}
+{+        "%s %d" % kv for kv in sorted(scanned.items()))))+}
+    print("SLASH_TARGETS %d in %d scenarios (engine resolution: not measured this round)"
+          % (len(paths), len({p[0] for p in paths})))
+    for p in paths:
+BARE_RC=0

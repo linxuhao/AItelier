@@ -1,0 +1,57 @@
+CMD: git diff --word-diff 290d7908 e3767fc4 -- final/engine_review_battery/proj/main.tscn
+diff --git a/final/engine_review_battery/proj/main.tscn b/final/engine_review_battery/proj/main.tscn
+new file mode 100644
+index 00000000..a870ec67
+--- /dev/null
++++ b/final/engine_review_battery/proj/main.tscn
+@@ -0,0 +1,49 @@
+{+[gd_scene load_steps=2 format=3]+}
+
+{+[ext_resource type="Script" path="res://counter.gd" id="1"]+}
+
+{+[node name="Main" type="Control"]+}
+{+layout_mode = 3+}
+{+anchors_preset = 15+}
+{+anchor_right = 1.0+}
+{+anchor_bottom = 1.0+}
+{+mouse_filter = 2+}
+
+{+[node name="Panel" type="Control" parent="."]+}
+{+layout_mode = 0+}
+{+offset_right = 640.0+}
+{+offset_bottom = 480.0+}
+{+mouse_filter = 2+}
+
+{+[node name="PlanEditKind1" type="Button" parent="Panel"]+}
+{+layout_mode = 0+}
+{+offset_left = 100.0+}
+{+offset_top = 100.0+}
+{+offset_right = 300.0+}
+{+offset_bottom = 160.0+}
+{+text = "kind"+}
+{+script = ExtResource("1")+}
+
+{+[node name="Dup" type="Button" parent="Panel"]+}
+{+layout_mode = 0+}
+{+offset_left = 100.0+}
+{+offset_top = 300.0+}
+{+offset_right = 300.0+}
+{+offset_bottom = 360.0+}
+{+text = "dupA"+}
+{+script = ExtResource("1")+}
+
+{+[node name="Other" type="Control" parent="."]+}
+{+layout_mode = 0+}
+{+offset_right = 640.0+}
+{+offset_bottom = 480.0+}
+{+mouse_filter = 2+}
+
+{+[node name="Dup" type="Button" parent="Other"]+}
+{+layout_mode = 0+}
+{+offset_left = 400.0+}
+{+offset_top = 300.0+}
+{+offset_right = 600.0+}
+{+offset_bottom = 360.0+}
+{+text = "dupB"+}
+{+script = ExtResource("1")+}
+BARE_RC=0

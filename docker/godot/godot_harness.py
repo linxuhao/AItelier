@@ -132,12 +132,17 @@ def _lifecycle_connection() -> sqlite3.Connection:
 
 
 @contextmanager
-def _operation_admission_fence():
+def _operation_admission_fence(*, blocking: bool = True):
+    """Shared hold on the deployment-admission fence.
+
+    With blocking=False it raises BlockingIOError at once while a deployment
+    holds the fence exclusively.
+    """
     path = Path(DEPLOYMENT_LOCK)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     with path.open("a+b") as stream:
         os.chmod(path, 0o600)
-        fcntl.flock(stream.fileno(), fcntl.LOCK_SH)
+        fcntl.flock(stream.fileno(), fcntl.LOCK_SH | (0 if blocking else fcntl.LOCK_NB))
         try:
             yield
         finally:
@@ -167,8 +172,9 @@ def _release_render_effect_lock(stream) -> None:
         stream.close()
 
 
-def acquire_render_owner(project_id: str, run_id: str, operation_id: str) -> dict:
-    with _operation_admission_fence():
+def acquire_render_owner(project_id: str, run_id: str, operation_id: str, *,
+                         blocking_fence: bool = True) -> dict:
+    with _operation_admission_fence(blocking=blocking_fence):
         return _acquire_render_owner_under_fence(project_id, run_id, operation_id)
 
 
@@ -257,20 +263,32 @@ def acquire_render_owner_waiting(project_id: str, run_id: str, operation_id: str
     Raises RenderOwnerConflict at once for a holder that needs reconciliation,
     RenderOwnerConflict ("render owner wait timed out") when the request's own
     `wait_timeout` runs out, and RenderWaitAbandoned when `should_abort()`
-    turns true. The last two leave no owner row behind. The returned row
-    carries `waited_sec` and `waited_for_owner_ids` (every live holder this
-    request queued behind, in order).
+    turns true. The last two leave no owner row behind. Both are checked on
+    every poll, including polls that find the deployment-admission fence held
+    (the fence is tried without blocking) or the owner table locked. The
+    returned row carries `waited_sec` and `waited_for_owner_ids` (every live
+    holder this request queued behind, in order). do_POST checks both
+    conditions again once it owns the render, before the render starts.
     """
     started = time.monotonic()
     waited_for: list[str] = []
+    fence_held = False
     while True:
         if should_abort is not None and should_abort():
             raise RenderWaitAbandoned(
                 f"caller disconnected after {time.monotonic() - started:.2f}s "
-                f"queued behind render owner(s) {waited_for}")
+                f"queued behind render owner(s) {waited_for}"
+                + (" and the deployment-admission fence" if fence_held else ""))
         try:
-            row = acquire_render_owner(project_id, run_id, operation_id)
+            row = acquire_render_owner(project_id, run_id, operation_id,
+                                       blocking_fence=False)
+        except BlockingIOError:
+            fence_held = True
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc):
+                raise
         except RenderOwnerConflict as exc:
+            fence_held = False
             if exc.payload["needs_reconciliation"]:
                 raise
             if exc.payload["owner_id"] not in waited_for:
@@ -282,28 +300,50 @@ def acquire_render_owner_waiting(project_id: str, run_id: str, operation_id: str
             return row
         elapsed = time.monotonic() - started
         if wait_timeout is not None and elapsed >= wait_timeout:
-            raise RenderOwnerConflict({
-                "error": "render owner wait timed out", "owner_kind": "active",
-                "owner_id": waited_for[-1], "waited_for_owner_ids": waited_for,
-                "needs_reconciliation": False,
-                "waited_sec": round(elapsed, 4), "wait_timeout_sec": wait_timeout,
-                "detail": (f"queued {elapsed:.2f}s behind live render owner "
-                           f"{waited_for[-1]}; the request's own "
-                           f"render_wait_timeout_sec ({wait_timeout}) ran out "
-                           f"and nothing was rendered")})
+            raise RenderOwnerConflict(_wait_timed_out(
+                elapsed, wait_timeout, waited_for, fence_held=fence_held))
         time.sleep(RENDER_OWNER_WAIT_POLL_SEC)
 
 
+def _wait_timed_out(elapsed: float, wait_timeout: float, waited_for: list,
+                    *, fence_held: bool = False, owned: bool = False) -> dict:
+    """The refusal for a request whose own render_wait_timeout_sec ran out."""
+    behind = []
+    if waited_for:
+        behind.append(f"live render owner {waited_for[-1]}")
+    if fence_held:
+        behind.append("the deployment-admission fence")
+    where = " and ".join(behind) or "the render lock"
+    tail = ("it took ownership only after the limit, so its owner row was "
+            "released and nothing was rendered" if owned
+            else "nothing was rendered and no owner row was made")
+    return {"error": "render owner wait timed out", "owner_kind": "active",
+            "owner_id": waited_for[-1] if waited_for else None,
+            "waited_for_owner_ids": waited_for, "deployment_fence_held": fence_held,
+            "needs_reconciliation": False,
+            "waited_sec": round(elapsed, 4), "wait_timeout_sec": wait_timeout,
+            "detail": (f"queued {elapsed:.2f}s behind {where}; the request's own "
+                       f"render_wait_timeout_sec ({wait_timeout}) ran out: {tail}")}
+
+
 def _start_owner_heartbeat(owner_id: str, generation: int):
-    """Refresh the owner's heartbeat_at until the returned event is set."""
+    """Refresh the owner's heartbeat_at until the returned event is set.
+
+    A beat that fails because the owner table is locked is retried at the next
+    interval, for as long as the render runs. The thread ends when the event is
+    set, or when the row is no longer this render's active owner.
+    """
     stop = threading.Event()
 
     def beat() -> None:
         while not stop.wait(RENDER_OWNER_HEARTBEAT_INTERVAL_SEC):
             try:
                 heartbeat_render_owner(owner_id, generation)
+            except sqlite3.OperationalError as exc:
+                print(f"[harness] render owner heartbeat failed, retrying: {exc}",
+                      flush=True)
             except Exception as exc:
-                print(f"[harness] render owner heartbeat failed: {exc}", flush=True)
+                print(f"[harness] render owner heartbeat stopped: {exc}", flush=True)
                 return
 
     thread = threading.Thread(target=beat, name="render-owner-heartbeat", daemon=True)
@@ -2662,9 +2702,13 @@ class _Handler(BaseHTTPRequestHandler):
         # owner waits for it to release, then owns the render. The wait has no
         # harness timeout; it ends when the caller disconnects (its own HTTP
         # timeout) or when the request's own {"render_wait_timeout_sec": N} runs
-        # out, and in both cases nothing is rendered and no owner row is made.
-        # A holder that needs reconciliation (owner_lost, or active with a stale
-        # heartbeat) is refused at once with a 409 that names its kind.
+        # out. Both are checked on every poll, and again after the request owns
+        # the render and holds both locks, just before the render starts. In
+        # every case nothing is rendered: a request stopped while queued makes no
+        # owner row, and one stopped after taking ownership releases its row
+        # with a "not rendered" reason. A holder that needs reconciliation
+        # (owner_lost, or active with a stale heartbeat) is refused at once with
+        # a 409 that names its kind.
         held = self.path in self._RENDER_ROUTES
         # The matching finally releases the process lock and durable owner.
         # finally: _RENDER_LOCK.release()
@@ -2673,6 +2717,8 @@ class _Handler(BaseHTTPRequestHandler):
         heartbeat = None
         lock_wait = 0.0
         owner_wait = {}
+        wait_timeout = None
+        release_reason = "completed"
         if held:
             project_id = req.get("project_id") or Path(proj).name or "unknown-project"
             run_id = req.get("run_id") or os.environ.get("AITELIER_RUN_ID") or "unknown-run"
@@ -2684,6 +2730,7 @@ class _Handler(BaseHTTPRequestHandler):
                 wait_timeout = None if wait_timeout is None else max(0.0, float(wait_timeout))
             except (TypeError, ValueError):
                 return self._send(400, {"error": "render_wait_timeout_sec must be a number"})
+            admission_started = time.monotonic()
             try:
                 owner = acquire_render_owner_waiting(
                     project_id, run_id, operation_id, wait_timeout=wait_timeout,
@@ -2722,6 +2769,20 @@ class _Handler(BaseHTTPRequestHandler):
                 print(f"[harness] {self.path} waited {delay:.0f}s for the render lock",
                       flush=True)
         try:
+            if held:
+                elapsed = time.monotonic() - admission_started
+                if self._render_client_abandoned():
+                    release_reason = ("not rendered: the caller disconnected "
+                                      "before the render started")
+                    print(f"[harness] {self.path} {operation_id}: {release_reason}",
+                          flush=True)
+                    return
+                if wait_timeout is not None and elapsed > wait_timeout:
+                    release_reason = ("not rendered: render_wait_timeout_sec ran "
+                                      "out before the render started")
+                    return self._send(409, _wait_timed_out(
+                        elapsed, wait_timeout,
+                        owner_wait["render_owner_waited_for_owner_ids"], owned=True))
             if self.path == "/compile":
                 self._send(200, compile_project(proj))
             elif self.path == "/checkgd":
@@ -2757,7 +2818,8 @@ class _Handler(BaseHTTPRequestHandler):
                 _release_render_effect_lock(effect_lock)
                 self._RENDER_LOCK.release()
                 try:
-                    release_render_owner(owner["owner_id"], owner["generation"])
+                    release_render_owner(owner["owner_id"], owner["generation"],
+                                         release_reason)
                 except Exception as exc:  # preserve owner-loss evidence for recovery
                     print(f"[harness] render owner release failed: {exc}", flush=True)
 

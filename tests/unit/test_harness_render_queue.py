@@ -496,6 +496,10 @@ def test_a_locked_owner_table_does_not_make_a_live_render_stale(rig):
     holder_id = rig.start_holder()
     blocker = sqlite3.connect(gh.LIFECYCLE_DB, timeout=1)
     blocker.execute("BEGIN EXCLUSIVE")
+    # A request that queues while the table is locked: its first poll loses
+    # sqlite's busy wait, and it must keep waiting rather than fail.
+    during, during_out = rig.post_in_thread(
+        "/script", rig.payload("op-during-lock", render_wait_timeout_sec=8), timeout=20)
     time.sleep(6.5)            # longer than _lifecycle_connection's timeout=5
     blocker.rollback()
     blocker.close()
@@ -508,6 +512,7 @@ def test_a_locked_owner_table_does_not_make_a_live_render_stale(rig):
         answers.append((code, body.get("error"), body.get("owner_kind")))
     beat_after_unlock = rig.row("op-holder")["heartbeat_at"]
     still_rendering = rig.holder[0].is_alive()
+    during.join(20)
     rig.release.set()
     rig.holder[0].join(30)
     stops = [a for a in answers if a[2] != "active"]
@@ -516,6 +521,10 @@ def test_a_locked_owner_table_does_not_make_a_live_render_stale(rig):
         "a live render was read as needing reconciliation after its heartbeat "
         "failed once", stops)
     assert beat_after_unlock > unlocked_at, "the heartbeat never resumed after the lock"
+    assert (during_out.get("code"), (during_out.get("body") or {}).get("error")) == (
+        409, "render owner wait timed out"), (
+        "a request that queued while the owner table was locked did not keep waiting",
+        during_out)
     assert rig.holder[1].get("code") == 200
     assert [(r["owner_id"], r["status"]) for r in rig.settled_snapshot()
             if r["operation_id"] == "op-holder"] == [(holder_id, "released")]

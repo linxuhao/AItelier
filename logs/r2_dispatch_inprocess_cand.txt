@@ -1,0 +1,10 @@
+CMD: PYTHONPATH=/home/linxuhao/.AItelier/worktrees-scratch/onereading1 python3 /home/linxuhao/.AItelier/worktrees-scratch/onereading1/final/review_scripts/dispatch.py /home/linxuhao/.AItelier/worktrees-scratch/onereading2-tools/harness/h_5fbe7c24.py /home/linxuhao/.AItelier/worktrees-scratch/onereading1
+SCRIPT_SHA1: e6f3dc78e5ce47134940453ed7585f32f5d0cec9  HARNESS_SHA1: 96d10e0f055eee6f27823969c270c8cecf7ccdfa  TREE: 5fbe7c24f90a87c10fb244d31b310be1b596e538
+DATE: 2026-09-24T14:34:37Z
+DISPATCH L1 typo `scenario:` + unknown key -> ['spec'] passed=False spec_used=True spec_errors=['(spec path)']
+DISPATCH L2 `scenarios` as a mapping -> ['spec'] passed=False spec_used=True spec_errors=['(spec path)']
+DISPATCH L3 `scenarios: []` + reviewer_notes -> ['spec'] passed=False spec_used=True spec_errors=['(spec path)']
+DISPATCH L4 control: scenarios list -> ['spec'] passed=False spec_used=True spec_errors=['(spec path)']
+READ_SPEC monolith with `scenario:` typo -> spec=None info={"source": "playtest_spec.yaml", "errors": ["playtest_spec.yaml has no non-empty `scenarios` list (`scenarios` is absent; top-level keys: scenario, scene)"], "notes": []}
+READ_SPEC monolith with `scenarios:` mapping -> spec type=NoneType scenarios type=NoneType info={"source": "playtest_spec.yaml", "errors": ["playtest_spec.yaml has no non-empty `scenarios` list (`scenarios` is dict; top-level keys: scenarios)"], "notes": []}
+BARE_RC=0

@@ -1,0 +1,149 @@
+TREE: 5fbe7c24f90a87c10fb244d31b310be1b596e538  DIRTY_FILES:  M final/corpus_impact.py  M final/scripts/mutate.py  M final/scripts/run_corpus.sh  M final/scripts/runsuite.sh ?? final/engine_review_battery/ ?? final/review_scripts/ ?? final/scripts/engine_all.sh ?? final/scripts/family.txt ?? final/scripts/long_running.txt ?? final/scripts/per_test_rc.sh ?? final/scripts/run_engine.sh ?? final/scripts/run_review_inprocess.sh 
+FILE: tests/unit/test_playtest_one_reading.py  SHA1: d3b38b6b75406bc243b284c1f95a96ace48f5212  HARNESS_SHA1: 96d10e0f055eee6f27823969c270c8cecf7ccdfa
+CONTAINER: onereading2-nt-cand  DATE: 2026-09-24T14:40:34Z  THROWAWAY_AT_LAUNCH: 0
+IN_CONTAINER_GIT_STATUS_RC: 0
+IDS: 65
+PER_TEST tests/unit/test_playtest_one_reading.py::test_by1_reviewer_notes_in_a_scenario_is_refused_and_the_scenario_does_not_run BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_an_unknown_top_level_spec_key_is_refused_and_nothing_runs BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_every_key_the_game_contract_uses_is_allowed_and_runs BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_the_allowed_sets_are_exactly_these BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_a_plain_string_description_is_allowed_and_runs BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_a_description_that_is_not_a_string_is_refused[list] BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_a_description_that_is_not_a_string_is_refused[mapping] BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_a_description_that_is_not_a_string_is_refused[int] BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_a_description_that_is_not_a_string_is_refused[float] BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_a_description_that_is_not_a_string_is_refused[bool] BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_a_description_that_is_not_a_string_is_refused[null] BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_y4b_a_fractional_frame_is_refused BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_y4b_through_playtest_spec_is_a_spec_error BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_whole_frames_still_run_as_written BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_a_bool_or_string_frame_is_still_refused[True] BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_a_bool_or_string_frame_is_still_refused[185] BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_a_bool_or_string_frame_is_still_refused[3..15] BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_by2b_a_frame_written_after_a_later_frame_is_refused BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_by2b_through_playtest_spec_is_a_spec_error BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_the_same_frame_written_twice_is_legal BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_a_drop_below_an_earlier_maximum_names_the_maximum BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_a_path_the_probe_refused_comes_back_as_a_spec_error BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_the_probe_resolves_a_path_by_path_only BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_the_probe_reports_an_unresolved_path_as_a_spec_error BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_every_tree_lookup_in_the_probe_is_one_of_these BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_the_path_branch_returns_the_path_lookup_and_nothing_else BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_any_name_with_a_slash_is_a_path_the_probe_refuses BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_k10_repeatability_as_a_mapping_is_refused BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_k11_repeatability_yes_is_refused BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_repeatability_true_and_false_both_run BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_k12_name_as_a_mapping_is_refused BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_k13_spec_actions_as_a_mapping_is_refused BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_k14_spec_surface_carrying_a_timeline_is_refused BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_the_other_keys_have_one_type_too[spec-scene] BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_the_other_keys_have_one_type_too[spec-frames-str] BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_the_other_keys_have_one_type_too[spec-frames-bool] BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_the_other_keys_have_one_type_too[scenario-scene] BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_the_other_keys_have_one_type_too[scenario-timeline] BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_a_scenario_that_is_not_a_mapping_is_refused BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_p7_a_non_string_top_level_key_is_refused BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_k17_an_unknown_key_in_a_list_form_assert_item_is_refused BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_k18_mode_and_expr_in_one_assert_item_is_refused BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_list_form_items_the_probe_reads_still_run BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_an_assert_the_probe_cannot_read_is_refused[assert-string] BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_an_assert_the_probe_cannot_read_is_refused[assert-list-of-strings] BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_a12_an_assert_entry_with_no_at_is_refused BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_e10_the_engine_shape_is_refused_before_the_engine BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_a13_an_entry_with_no_at_is_not_called_frame_0 BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_a14_a15_press_and_actions_with_no_at_are_refused_alike[a14-press] BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_a14_a15_press_and_actions_with_no_at_are_refused_alike[a15-actions] BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_e12_a_click_with_two_offsets_is_refused BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_every_aim_takes_one_offset_and_one_button[click] BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_every_aim_takes_one_offset_and_one_button[hovers] BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_every_aim_takes_one_offset_and_one_button[two-buttons] BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_one_offset_and_one_button_still_run BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_a10_a_click_past_the_frame_cap_is_refused BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_a_keyed_spec_is_read_as_a_spec_or_refused[L1-scenario-typo] BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_a_keyed_spec_is_read_as_a_spec_or_refused[L2-scenarios-mapping] BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_a_keyed_spec_is_read_as_a_spec_or_refused[L3-empty-scenarios-plus-notes] BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_a_keyed_spec_is_read_as_a_spec_or_refused[spec-not-a-mapping] BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_only_a_request_with_no_spec_runs_the_smoke_test[none] BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_only_a_request_with_no_spec_runs_the_smoke_test[empty] BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_the_monolith_reader_names_a_scenario_typo_and_a_scenarios_mapping BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_the_monolith_reader_names_a_file_that_is_not_a_mapping BARE_RC=0
+PER_TEST tests/unit/test_playtest_one_reading.py::test_inline_wrapper_keys_reach_the_harness BARE_RC=0
+=== whole file, -rA --tb=line
+.................................................................        [100%]
+=============================== warnings summary ===============================
+../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+==================================== PASSES ====================================
+=========================== short test summary info ============================
+PASSED tests/unit/test_playtest_one_reading.py::test_by1_reviewer_notes_in_a_scenario_is_refused_and_the_scenario_does_not_run
+PASSED tests/unit/test_playtest_one_reading.py::test_an_unknown_top_level_spec_key_is_refused_and_nothing_runs
+PASSED tests/unit/test_playtest_one_reading.py::test_every_key_the_game_contract_uses_is_allowed_and_runs
+PASSED tests/unit/test_playtest_one_reading.py::test_the_allowed_sets_are_exactly_these
+PASSED tests/unit/test_playtest_one_reading.py::test_a_plain_string_description_is_allowed_and_runs
+PASSED tests/unit/test_playtest_one_reading.py::test_a_description_that_is_not_a_string_is_refused[list]
+PASSED tests/unit/test_playtest_one_reading.py::test_a_description_that_is_not_a_string_is_refused[mapping]
+PASSED tests/unit/test_playtest_one_reading.py::test_a_description_that_is_not_a_string_is_refused[int]
+PASSED tests/unit/test_playtest_one_reading.py::test_a_description_that_is_not_a_string_is_refused[float]
+PASSED tests/unit/test_playtest_one_reading.py::test_a_description_that_is_not_a_string_is_refused[bool]
+PASSED tests/unit/test_playtest_one_reading.py::test_a_description_that_is_not_a_string_is_refused[null]
+PASSED tests/unit/test_playtest_one_reading.py::test_y4b_a_fractional_frame_is_refused
+PASSED tests/unit/test_playtest_one_reading.py::test_y4b_through_playtest_spec_is_a_spec_error
+PASSED tests/unit/test_playtest_one_reading.py::test_whole_frames_still_run_as_written
+PASSED tests/unit/test_playtest_one_reading.py::test_a_bool_or_string_frame_is_still_refused[True]
+PASSED tests/unit/test_playtest_one_reading.py::test_a_bool_or_string_frame_is_still_refused[185]
+PASSED tests/unit/test_playtest_one_reading.py::test_a_bool_or_string_frame_is_still_refused[3..15]
+PASSED tests/unit/test_playtest_one_reading.py::test_by2b_a_frame_written_after_a_later_frame_is_refused
+PASSED tests/unit/test_playtest_one_reading.py::test_by2b_through_playtest_spec_is_a_spec_error
+PASSED tests/unit/test_playtest_one_reading.py::test_the_same_frame_written_twice_is_legal
+PASSED tests/unit/test_playtest_one_reading.py::test_a_drop_below_an_earlier_maximum_names_the_maximum
+PASSED tests/unit/test_playtest_one_reading.py::test_a_path_the_probe_refused_comes_back_as_a_spec_error
+PASSED tests/unit/test_playtest_one_reading.py::test_the_probe_resolves_a_path_by_path_only
+PASSED tests/unit/test_playtest_one_reading.py::test_the_probe_reports_an_unresolved_path_as_a_spec_error
+PASSED tests/unit/test_playtest_one_reading.py::test_every_tree_lookup_in_the_probe_is_one_of_these
+PASSED tests/unit/test_playtest_one_reading.py::test_the_path_branch_returns_the_path_lookup_and_nothing_else
+PASSED tests/unit/test_playtest_one_reading.py::test_any_name_with_a_slash_is_a_path_the_probe_refuses
+PASSED tests/unit/test_playtest_one_reading.py::test_k10_repeatability_as_a_mapping_is_refused
+PASSED tests/unit/test_playtest_one_reading.py::test_k11_repeatability_yes_is_refused
+PASSED tests/unit/test_playtest_one_reading.py::test_repeatability_true_and_false_both_run
+PASSED tests/unit/test_playtest_one_reading.py::test_k12_name_as_a_mapping_is_refused
+PASSED tests/unit/test_playtest_one_reading.py::test_k13_spec_actions_as_a_mapping_is_refused
+PASSED tests/unit/test_playtest_one_reading.py::test_k14_spec_surface_carrying_a_timeline_is_refused
+PASSED tests/unit/test_playtest_one_reading.py::test_the_other_keys_have_one_type_too[spec-scene]
+PASSED tests/unit/test_playtest_one_reading.py::test_the_other_keys_have_one_type_too[spec-frames-str]
+PASSED tests/unit/test_playtest_one_reading.py::test_the_other_keys_have_one_type_too[spec-frames-bool]
+PASSED tests/unit/test_playtest_one_reading.py::test_the_other_keys_have_one_type_too[scenario-scene]
+PASSED tests/unit/test_playtest_one_reading.py::test_the_other_keys_have_one_type_too[scenario-timeline]
+PASSED tests/unit/test_playtest_one_reading.py::test_a_scenario_that_is_not_a_mapping_is_refused
+PASSED tests/unit/test_playtest_one_reading.py::test_p7_a_non_string_top_level_key_is_refused
+PASSED tests/unit/test_playtest_one_reading.py::test_k17_an_unknown_key_in_a_list_form_assert_item_is_refused
+PASSED tests/unit/test_playtest_one_reading.py::test_k18_mode_and_expr_in_one_assert_item_is_refused
+PASSED tests/unit/test_playtest_one_reading.py::test_list_form_items_the_probe_reads_still_run
+PASSED tests/unit/test_playtest_one_reading.py::test_an_assert_the_probe_cannot_read_is_refused[assert-string]
+PASSED tests/unit/test_playtest_one_reading.py::test_an_assert_the_probe_cannot_read_is_refused[assert-list-of-strings]
+PASSED tests/unit/test_playtest_one_reading.py::test_a12_an_assert_entry_with_no_at_is_refused
+PASSED tests/unit/test_playtest_one_reading.py::test_e10_the_engine_shape_is_refused_before_the_engine
+PASSED tests/unit/test_playtest_one_reading.py::test_a13_an_entry_with_no_at_is_not_called_frame_0
+PASSED tests/unit/test_playtest_one_reading.py::test_a14_a15_press_and_actions_with_no_at_are_refused_alike[a14-press]
+PASSED tests/unit/test_playtest_one_reading.py::test_a14_a15_press_and_actions_with_no_at_are_refused_alike[a15-actions]
+PASSED tests/unit/test_playtest_one_reading.py::test_e12_a_click_with_two_offsets_is_refused
+PASSED tests/unit/test_playtest_one_reading.py::test_every_aim_takes_one_offset_and_one_button[click]
+PASSED tests/unit/test_playtest_one_reading.py::test_every_aim_takes_one_offset_and_one_button[hovers]
+PASSED tests/unit/test_playtest_one_reading.py::test_every_aim_takes_one_offset_and_one_button[two-buttons]
+PASSED tests/unit/test_playtest_one_reading.py::test_one_offset_and_one_button_still_run
+PASSED tests/unit/test_playtest_one_reading.py::test_a10_a_click_past_the_frame_cap_is_refused
+PASSED tests/unit/test_playtest_one_reading.py::test_a_keyed_spec_is_read_as_a_spec_or_refused[L1-scenario-typo]
+PASSED tests/unit/test_playtest_one_reading.py::test_a_keyed_spec_is_read_as_a_spec_or_refused[L2-scenarios-mapping]
+PASSED tests/unit/test_playtest_one_reading.py::test_a_keyed_spec_is_read_as_a_spec_or_refused[L3-empty-scenarios-plus-notes]
+PASSED tests/unit/test_playtest_one_reading.py::test_a_keyed_spec_is_read_as_a_spec_or_refused[spec-not-a-mapping]
+PASSED tests/unit/test_playtest_one_reading.py::test_only_a_request_with_no_spec_runs_the_smoke_test[none]
+PASSED tests/unit/test_playtest_one_reading.py::test_only_a_request_with_no_spec_runs_the_smoke_test[empty]
+PASSED tests/unit/test_playtest_one_reading.py::test_the_monolith_reader_names_a_scenario_typo_and_a_scenarios_mapping
+PASSED tests/unit/test_playtest_one_reading.py::test_the_monolith_reader_names_a_file_that_is_not_a_mapping
+PASSED tests/unit/test_playtest_one_reading.py::test_inline_wrapper_keys_reach_the_harness
+65 passed, 1 warning in 0.30s
+WHOLE_FILE_BARE_RC=0
+CONTAINER_BARE_RC=0
+END: 2026-09-24T14:45:04Z

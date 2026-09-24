@@ -1,0 +1,66 @@
+CMD: pytest tests/unit/test_playtest_one_reading.py tests/unit/test_godot_harness.py tests/unit/test_godot_playtest_spec.py tests/unit/test_godot_playtest_scenario.py tests/unit/test_playtest_blind_run.py tests/unit/test_playtest_fixed_delta.py tests/unit/test_playtest_game_time_observation.py tests/unit/test_playtest_timing_ledger.py tests/unit/test_playtest_user_dir_isolation.py tests/unit/test_godot_harness_native_errors.py tests/unit/test_godot_lifecycle.py tests/unit/test_harness_render_lock.py tests/unit/test_godot_compile.py tests/unit/test_godot_vision.py tests/unit/test_clock_sensitivity.py tests/unit/test_relay_acknowledgement_real_instruction.py tests/unit/test_no_verbatim_previous_line_dup.py
+TREE: 5fbe7c24f90a87c10fb244d31b310be1b596e538  DIRTY_FILES: 1
+CWD: /home/linxuhao/.AItelier/worktrees-scratch/onereading2-mut  CONTAINER: onereading2-d25  DATE: 2026-09-24T14:35:23Z
+THROWAWAY_CONTAINERS_AT_LAUNCH(server-wide, before this one): 1 [crr2-mut-m8 ]
+IN_CONTAINER_GIT_STATUS_RC: 0
+..............................................................F......... [ 24%]
+.........................ssssssss.......................F............... [ 48%]
+........................................................................ [ 72%]
+........................................................................ [ 96%]
+.........                                                                [100%]
+=================================== FAILURES ===================================
+____ test_the_monolith_reader_names_a_scenario_typo_and_a_scenarios_mapping ____
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_the_monolith_reader_names0')
+
+    def test_the_monolith_reader_names_a_scenario_typo_and_a_scenarios_mapping(tmp_path):
+        from aitelier.tools.godot_playtest.impl import read_spec
+        repo = tmp_path / "typo"
+        repo.mkdir()
+        (repo / "playtest_spec.yaml").write_text("scene: res://main.tscn\nscenario:\n- name: s\n  timeline:\n  - at: 5\n    assert: {A.b: 1}\n")
+        spec, info = read_spec(repo)
+>       assert spec is None
+E       AssertionError: assert {'scene': 'res://main.tscn', 'scenario': [{'name': 's', 'timeline': [{'at': 5, 'assert': {'A.b': 1}}]}]} is None
+
+tests/unit/test_playtest_one_reading.py:672: AssertionError
+______________ test_read_spec_keys_without_scenarios_is_an_error _______________
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_read_spec_keys_without_sc0')
+
+    def test_read_spec_keys_without_scenarios_is_an_error(tmp_path):
+        # A file with keys is a contract: without a scenario list it is named as an
+        # error, never read as "no contract" (which runs the canned smoke test).
+        (tmp_path / "playtest_spec.yaml").write_text("scene: res://main.tscn\n")
+        spec, info = read_spec(tmp_path)
+>       assert spec is None
+E       AssertionError: assert {'scene': 'res://main.tscn'} is None
+
+tests/unit/test_godot_playtest_spec.py:50: AssertionError
+=============================== warnings summary ===============================
+../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_playtest_one_reading.py::test_the_monolith_reader_names_a_scenario_typo_and_a_scenarios_mapping
+FAILED tests/unit/test_godot_playtest_spec.py::test_read_spec_keys_without_scenarios_is_an_error
+2 failed, 287 passed, 8 skipped, 1 warning in 1.91s
+BARE_RC=1
+END: 2026-09-24T14:35:30Z
+MUTANT: D25_monolith_scenarios_check_deleted
+IGNITION: 6
+MUTANT_DIFF:
+diff --git a/aitelier/tools/godot_playtest/impl.py b/aitelier/tools/godot_playtest/impl.py
+index 89af6c1c..931f1779 100644
+--- a/aitelier/tools/godot_playtest/impl.py
++++ b/aitelier/tools/godot_playtest/impl.py
+@@ -98,7 +98,7 @@ def _read_monolith(repo: Path) -> tuple[dict | None, list[str]]:
+     if not isinstance(spec, dict):
+         return None, [f"{SPEC_FILE} is a {type(spec).__name__}, not a YAML mapping"]
+     scenarios = spec.get("scenarios")
+-    if not isinstance(scenarios, list) or not scenarios:
++    if open("/home/linxuhao/.AItelier/worktrees-scratch/onereading2-tools/ign/D25_monolith_scenarios_check_deleted.txt", "a").write("1\n") and False:
+         return None, [f"{SPEC_FILE} has no non-empty `scenarios` list (`scenarios` "
+                       f"is {type(scenarios).__name__ if 'scenarios' in spec else 'absent'}; "
+                       f"top-level keys: {', '.join(sorted(str(k) for k in spec))})"]

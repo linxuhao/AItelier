@@ -1,0 +1,19 @@
+CMD: PYTHONPATH=/home/linxuhao/.AItelier/worktrees-scratch/onereading1 python3 /home/linxuhao/.AItelier/worktrees-scratch/onereading1/final/corpus_impact.py /home/linxuhao/.AItelier/worktrees-scratch/onereading2-tools/harness/h_8b084c20.py /home/linxuhao/.AItelier/worktrees-scratch/onereading2-tools/harness/h_5fbe7c24.py /home/linxuhao/.AItelier/worktrees-scratch/onereading2-tools/corpus
+TREE: 5fbe7c24f90a87c10fb244d31b310be1b596e538  PYTHON: Python 3.12.3
+CORPUS: wuxia-commercial-batch-next 43aff480877806bbc483a834a6c81af12098912e, extracted with: git -C ~/.AItelier/projects/wuxia-commercial-batch-next archive 43aff480877806bbc483a834a6c81af12098912e playtest tools | tar -x -C /home/linxuhao/.AItelier/worktrees-scratch/onereading2-tools/corpus
+HARNESS_BASE_SHA1: 0b937675b9ec4da1b0d69daba8ab91ff92ecf956  HARNESS_CAND_SHA1: 96d10e0f055eee6f27823969c270c8cecf7ccdfa
+DATE: 2026-09-24T14:34:09Z
+READ_SPEC source=playtest/ errors=0 notes=0
+SPEC_TOP_LEVEL_KEYS ['actions', 'scenarios', 'scene', 'surface']
+SCENARIOS_CHECKED 181
+BASE_SPEC_ERRORS 0
+CAND_SPEC_ERRORS 2
+NEW_SPEC_ERRORS 2
+NEW_ERROR_SCENARIO consequence_work_income_inline | order: timeline entry 10 (at: 220) is written after entry 9 (at: 230)
+NEW_ERROR_SCENARIO shelter_plan_kept_battle_support_is_attributed | order: timeline entry 32 (at: 435) is written after entry 31 (at: 480)
+SCENARIOS_WITH_NEW_ERRORS 2 of 181 checked
+REASON_COUNT 2 scenarios: `at` decreases in file order
+CAND_SCENARIOS_NOT_RUN 0 of 181
+TARGETS_SCANNED 4776 (assert 4327, clicks 444, hovers 5)
+SLASH_TARGETS 0 in 0 scenarios (engine resolution: not measured this round)
+BARE_RC=0

@@ -1,0 +1,10 @@
+CMD: PYTHONPATH=/home/linxuhao/.AItelier/worktrees-scratch/onereading2-base python3 /home/linxuhao/.AItelier/worktrees-scratch/onereading1/final/review_scripts/dispatch.py /home/linxuhao/.AItelier/worktrees-scratch/onereading2-tools/harness/h_290d7908.py /home/linxuhao/.AItelier/worktrees-scratch/onereading2-base
+SCRIPT_SHA1: e6f3dc78e5ce47134940453ed7585f32f5d0cec9  HARNESS_SHA1: a34215235f48764f2b72bfc11750360a4f851c6a  TREE: 290d7908d389ce648ac2d1be4c68af489c4cc54a
+DATE: 2026-09-24T14:34:37Z
+DISPATCH L1 typo `scenario:` + unknown key -> ['legacy'] passed=True spec_used=False spec_errors=None
+DISPATCH L2 `scenarios` as a mapping -> ['legacy'] passed=True spec_used=False spec_errors=None
+DISPATCH L3 `scenarios: []` + reviewer_notes -> ['legacy'] passed=True spec_used=False spec_errors=None
+DISPATCH L4 control: scenarios list -> ['spec'] passed=False spec_used=True spec_errors=['(spec path)']
+READ_SPEC monolith with `scenario:` typo -> spec=None info={"source": "", "errors": [], "notes": []}
+READ_SPEC monolith with `scenarios:` mapping -> spec type=dict scenarios type=dict info={"source": "playtest_spec.yaml", "errors": [], "notes": []}
+BARE_RC=0

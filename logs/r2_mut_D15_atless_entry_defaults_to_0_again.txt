@@ -1,0 +1,170 @@
+CMD: pytest tests/unit/test_playtest_one_reading.py tests/unit/test_godot_harness.py tests/unit/test_godot_playtest_spec.py tests/unit/test_godot_playtest_scenario.py tests/unit/test_playtest_blind_run.py tests/unit/test_playtest_fixed_delta.py tests/unit/test_playtest_game_time_observation.py tests/unit/test_playtest_timing_ledger.py tests/unit/test_playtest_user_dir_isolation.py tests/unit/test_godot_harness_native_errors.py tests/unit/test_godot_lifecycle.py tests/unit/test_harness_render_lock.py tests/unit/test_godot_compile.py tests/unit/test_godot_vision.py tests/unit/test_clock_sensitivity.py tests/unit/test_relay_acknowledgement_real_instruction.py tests/unit/test_no_verbatim_previous_line_dup.py
+TREE: 5fbe7c24f90a87c10fb244d31b310be1b596e538  DIRTY_FILES: 1
+CWD: /home/linxuhao/.AItelier/worktrees-scratch/onereading2-mut  CONTAINER: onereading2-d15  DATE: 2026-09-24T14:34:11Z
+THROWAWAY_CONTAINERS_AT_LAUNCH(server-wide, before this one): 2 [onereading2-engine-batcand crr2-mut-m3 ]
+IN_CONTAINER_GIT_STATUS_RC: 0
+.............................................FFFFF...................... [ 24%]
+.........................ssssssss....................................... [ 48%]
+........................................................................ [ 72%]
+........................................................................ [ 96%]
+.........                                                                [100%]
+=================================== FAILURES ===================================
+________________ test_a12_an_assert_entry_with_no_at_is_refused ________________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7bda77d44440>
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_a12_an_assert_entry_with_0')
+
+    def test_a12_an_assert_entry_with_no_at_is_refused(monkeypatch, tmp_path):
+>       _refused(monkeypatch, tmp_path, TL("- assert: {A.b: 99}\n- at: 5\n  assert: {A.c: 1}\n"),
+                 "scenario 's'", "timeline entry 0 has no `at`")
+
+tests/unit/test_playtest_one_reading.py:553: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7bda77d44440>
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_a12_an_assert_entry_with_0')
+spec = {'scene': 'res://main.tscn', 'scenarios': [{'name': 's', 'timeline': [{'assert': {'A.b': 99}}, {'at': 5, 'assert': {'A.c': 1}}]}]}
+needles = ("scenario 's'", 'timeline entry 0 has no `at`')
+
+    def _refused(monkeypatch, tmp_path, spec, *needles):
+        """Run the real _playtest_spec; the shape must come back as a spec error
+        carrying every needle, fail the gate, and (for a key or type refusal)
+        never reach the engine."""
+        ran = _probe_recorder(monkeypatch)
+        r = gh._playtest_spec(tmp_path / "proj", spec, 300, 120)
+        hits = [e for e in r["spec_errors"] if all(n in e for n in needles)]
+>       assert hits, r["spec_errors"]
+E       AssertionError: []
+E       assert []
+
+tests/unit/test_playtest_one_reading.py:435: AssertionError
+____________ test_e10_the_engine_shape_is_refused_before_the_engine ____________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7bda77b56d50>
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_e10_the_engine_shape_is_r0')
+
+    def test_e10_the_engine_shape_is_refused_before_the_engine(monkeypatch, tmp_path):
+        k = "Panel/PlanEditKind1"
+        spec = {"scenarios": [{"name": "E10_atless_assert_first", "timeline": [
+            {"assert": {k + ".presses": "presses == 99"}},
+            {"at": 5, "assert": {k + ".presses": "presses == 0"}}]}]}
+>       _refused(monkeypatch, tmp_path, spec, "'E10_atless_assert_first'",
+                 "timeline entry 0 has no `at`")
+
+tests/unit/test_playtest_one_reading.py:562: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7bda77b56d50>
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_e10_the_engine_shape_is_r0')
+spec = {'scenarios': [{'name': 'E10_atless_assert_first', 'timeline': [{'assert': {'Panel/PlanEditKind1.presses': 'presses == 99'}}, {'at': 5, 'assert': {'Panel/PlanEditKind1.presses': 'presses == 0'}}]}]}
+needles = ("'E10_atless_assert_first'", 'timeline entry 0 has no `at`')
+
+    def _refused(monkeypatch, tmp_path, spec, *needles):
+        """Run the real _playtest_spec; the shape must come back as a spec error
+        carrying every needle, fail the gate, and (for a key or type refusal)
+        never reach the engine."""
+        ran = _probe_recorder(monkeypatch)
+        r = gh._playtest_spec(tmp_path / "proj", spec, 300, 120)
+        hits = [e for e in r["spec_errors"] if all(n in e for n in needles)]
+>       assert hits, r["spec_errors"]
+E       AssertionError: []
+E       assert []
+
+tests/unit/test_playtest_one_reading.py:435: AssertionError
+______________ test_a13_an_entry_with_no_at_is_not_called_frame_0 ______________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7bda77b562d0>
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_a13_an_entry_with_no_at_i0')
+
+    def test_a13_an_entry_with_no_at_is_not_called_frame_0(monkeypatch, tmp_path):
+>       r, _ = _refused(monkeypatch, tmp_path, TL("- at: 185\n  assert: {A.b: 1}\n- assert: {A.c: 1}\n"),
+                        "timeline entry 1 has no `at`")
+
+tests/unit/test_playtest_one_reading.py:567: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7bda77b562d0>
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_a13_an_entry_with_no_at_i0')
+spec = {'scene': 'res://main.tscn', 'scenarios': [{'name': 's', 'timeline': [{'at': 185, 'assert': {'A.b': 1}}, {'assert': {'A.c': 1}}]}]}
+needles = ('timeline entry 1 has no `at`',)
+
+    def _refused(monkeypatch, tmp_path, spec, *needles):
+        """Run the real _playtest_spec; the shape must come back as a spec error
+        carrying every needle, fail the gate, and (for a key or type refusal)
+        never reach the engine."""
+        ran = _probe_recorder(monkeypatch)
+        r = gh._playtest_spec(tmp_path / "proj", spec, 300, 120)
+        hits = [e for e in r["spec_errors"] if all(n in e for n in needles)]
+>       assert hits, r["spec_errors"]
+E       AssertionError: ["scenario 's': timeline entry 1 (at: 0) is written after entry 0 (at: 185); entries run in frame order, so `at` must not decrease in file order. Move entry 1 above entry 0, or change its frame."]
+E       assert []
+
+tests/unit/test_playtest_one_reading.py:435: AssertionError
+____ test_a14_a15_press_and_actions_with_no_at_are_refused_alike[a14-press] ____
+
+first = '- press: ui_accept\n'
+
+    @pytest.mark.parametrize("first", ["- press: ui_accept\n", "- actions: [ui_accept]\n"],
+                             ids=["a14-press", "a15-actions"])
+    def test_a14_a15_press_and_actions_with_no_at_are_refused_alike(first):
+        out, errors = gh._normalize_timeline(Y(first + "- at: 5\n  assert: {A.c: 1}\n"))
+>       assert errors == ["timeline entry 0 has no `at`. Every entry runs on the frame "
+                          "its `at` names; write it (`at: 0` is the first frame)."]
+E       AssertionError: assert [] == ['timeline en...irst frame).']
+E         
+E         Right contains one more item: 'timeline entry 0 has no `at`. Every entry runs on the frame its `at` names; write it (`at: 0` is the first frame).'
+E         Use -v to get more diff
+
+tests/unit/test_playtest_one_reading.py:576: AssertionError
+___ test_a14_a15_press_and_actions_with_no_at_are_refused_alike[a15-actions] ___
+
+first = '- actions: [ui_accept]\n'
+
+    @pytest.mark.parametrize("first", ["- press: ui_accept\n", "- actions: [ui_accept]\n"],
+                             ids=["a14-press", "a15-actions"])
+    def test_a14_a15_press_and_actions_with_no_at_are_refused_alike(first):
+        out, errors = gh._normalize_timeline(Y(first + "- at: 5\n  assert: {A.c: 1}\n"))
+>       assert errors == ["timeline entry 0 has no `at`. Every entry runs on the frame "
+                          "its `at` names; write it (`at: 0` is the first frame)."]
+E       AssertionError: assert [] == ['timeline en...irst frame).']
+E         
+E         Right contains one more item: 'timeline entry 0 has no `at`. Every entry runs on the frame its `at` names; write it (`at: 0` is the first frame).'
+E         Use -v to get more diff
+
+tests/unit/test_playtest_one_reading.py:576: AssertionError
+=============================== warnings summary ===============================
+../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_playtest_one_reading.py::test_a12_an_assert_entry_with_no_at_is_refused
+FAILED tests/unit/test_playtest_one_reading.py::test_e10_the_engine_shape_is_refused_before_the_engine
+FAILED tests/unit/test_playtest_one_reading.py::test_a13_an_entry_with_no_at_is_not_called_frame_0
+FAILED tests/unit/test_playtest_one_reading.py::test_a14_a15_press_and_actions_with_no_at_are_refused_alike[a14-press]
+FAILED tests/unit/test_playtest_one_reading.py::test_a14_a15_press_and_actions_with_no_at_are_refused_alike[a15-actions]
+5 failed, 284 passed, 8 skipped, 1 warning in 2.08s
+BARE_RC=1
+END: 2026-09-24T14:34:18Z
+MUTANT: D15_atless_entry_defaults_to_0_again
+IGNITION: 164
+MUTANT_DIFF:
+diff --git a/docker/godot/godot_harness.py b/docker/godot/godot_harness.py
+index 184fc160..b09a292e 100644
+--- a/docker/godot/godot_harness.py
++++ b/docker/godot/godot_harness.py
+@@ -1588,12 +1588,7 @@ def _normalize_timeline(timeline: list) -> tuple[list, list]:
+         # `hovers:` entries ran at frame 0, while `press:`/`click:`/`assert:`
+         # kept no `at` and the probe never ran them -- an assert that is never
+         # evaluated, in a scenario that stays green.
+-        if "at" not in e:
+-            errors.append("timeline entry %d has no `at`. Every entry runs on the "
+-                          "frame its `at` names; write it (`at: 0` is the first "
+-                          "frame)." % i)
+-            continue
+-        at_raw = e["at"]
++        at_raw = e.get("at", 0) if open("/home/linxuhao/.AItelier/worktrees-scratch/onereading2-tools/ign/D15_atless_entry_defaults_to_0_again.txt", "a").write("1\n") else 0
+         if isinstance(at_raw, bool) or not isinstance(at_raw, (int, float)):
+             errors.append(
+                 "timeline entry %d has a non-numeric `at`: %r. Frames are single "

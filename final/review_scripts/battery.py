@@ -1,0 +1,133 @@
+"""Reviewer in-process two-reading battery (onereading-r1 review).
+usage: python3 battery.py <harness_base.py> <harness_cand.py>
+Runs each shape through the REAL _playtest_spec / _normalize_timeline of both harness
+files with _run_probe replaced by a stand-in that mimics the probe's firing rule
+(int(e.get("at", -1)) == frame, frame in range(frames)) and returns one passing
+assert row per assert block it would evaluate. YAML goes through aitelier.strict_yaml
+(the loader AItelier and the wuxia launcher use). Prints one OUTCOME line per shape.
+"""
+import importlib.util, json, sys, tempfile, textwrap
+from pathlib import Path
+from aitelier.strict_yaml import load_yaml_strict
+
+def load(path, name):
+    s = importlib.util.spec_from_file_location(name, path)
+    m = importlib.util.module_from_spec(s); s.loader.exec_module(m); return m
+
+H = {"base": load(sys.argv[1], "hb"), "cand": load(sys.argv[2], "hc")}
+
+def run(h, spec):
+    calls = []
+    def fake(dst, state_path, frames, timeout, extra, scene="", capture_at=None,
+             timing=None, render=True):
+        tl = json.loads(Path(extra["AITELIER_PROBE_SPEC"]).read_text())
+        fired = [e for e in tl["timeline"] if 0 <= int(e.get("at", -1)) < tl["frames"]]
+        calls.append({"frames": tl["frames"], "timeline": tl["timeline"], "fired": fired})
+        asserts = []
+        for e in fired:
+            a = e.get("assert")
+            for it in (a if isinstance(a, list) else []):
+                asserts.append({"name": it.get("name", it.get("expr")), "passed": True,
+                                "frame": int(e["at"])})
+        if timing is not None:
+            timing["game_usec"] = int(frames * 1_000_000 / 60)
+        return {"frames": frames, "nodes": {}, "asserts": asserts}, [], False
+    orig = h._run_probe; h._run_probe = fake
+    try:
+        d = Path(tempfile.mkdtemp()) / "proj"; d.mkdir()
+        r = h._playtest_spec(d, spec, 60, 60)
+    finally:
+        h._run_probe = orig
+    return r, calls
+
+def Y(text):
+    return load_yaml_strict(textwrap.dedent(text), source="battery")
+
+GEOM = """\
+    PlanEditKind1.get_popup().visible: get_popup().visible == true
+    PlanEditKind1.aim_90_hits_item_3: int((get_global_rect().get_center().y + 90.0 - get_popup().position.y) / (get_popup().size.y / get_popup().item_count)) == 3
+"""
+
+def sc_yaml(extra_top="", timeline=None):
+    tl = timeline or """\
+- at: 185
+  assert:
+    CultivationScreen.phase: phase == "PLAN_EDIT"
+- at: 200
+  clicks:
+  - PlanEditKind1 +0,90
+"""
+    return "name: s\n" + extra_top + "timeline:\n" + tl
+
+SHAPES = []
+def shape(sid, desc, spec=None, err=None):
+    SHAPES.append((sid, desc, spec, err))
+
+def spec1(sc, **top):
+    d = {"scene": "res://main.tscn"}; d.update(top); d["scenarios"] = [sc]; return d
+
+# --- keys -------------------------------------------------------------------
+shape("K1", "BY1: geometry under scenario-level reviewer_notes", spec1(Y(sc_yaml("reviewer_notes:\n- at: 1\n  assert:\n" + GEOM))))
+shape("K2", "unknown spec top-level key reviewer_notes", dict(spec1(Y(sc_yaml())), reviewer_notes=[{"at": 1}]))
+shape("K3", "YAML merge key injects reviewer_notes into a scenario", spec1(Y("notes: &n\n  reviewer_notes: [{at: 1, assert: {A.b: 1}}]\nsc:\n  <<: *n\n" + textwrap.indent(sc_yaml(), "  "))["sc"]))
+try:
+    Y("name: s\ntimeline: []\ntimeline:\n- at: 1\n")
+    shape("K4", "duplicate scenario key timeline", err="loaded without error (last wins)")
+except Exception as e:
+    shape("K4", "duplicate scenario key timeline (strict_yaml)", err="LOADER_REFUSED: %s" % str(e).splitlines()[0][:160])
+shape("K5", "description multi-line block string", spec1(Y(sc_yaml("description: |\n  line one\n  - at: 1\n    assert: x\n"))))
+shape("K6", "description tagged !!str 5", spec1(Y(sc_yaml("description: !!str 5\n"))))
+shape("K7", "description tagged !!binary", spec1(Y(sc_yaml("description: !!binary aGVsbG8=\n"))))
+shape("K8", "description as mapping with BY1 asserts", spec1(Y(sc_yaml("description:\n  at: 1\n  assert:\n" + GEOM.replace("    ", "    ")))))
+shape("K9", "description at spec top level (string)", dict(spec1(Y(sc_yaml())), description="x"))
+shape("K10", "repeatability as mapping carrying BY1 asserts", spec1(Y(sc_yaml("repeatability:\n  at: 1\n  assert:\n" + GEOM))))
+shape("K11", "repeatability as string 'yes'", spec1(Y(sc_yaml("repeatability: 'yes'\n"))))
+shape("K12", "name as mapping carrying asserts", spec1(dict(Y(sc_yaml()), name={"at": 1, "assert": {"A.b": 1}})))
+shape("K13", "spec-level actions as mapping carrying asserts", spec1(Y(sc_yaml()), actions={"at": 1, "assert": {"A.b": 1}}))
+shape("K14", "spec-level surface carrying a timeline", spec1(Y(sc_yaml()), surface={"timeline": [{"at": 1, "assert": {"A.b": 1}}]}))
+shape("K15", "scenario-level frames (key not in allow set)", spec1(dict(Y(sc_yaml()), frames=400)))
+shape("K16", "unknown key inside a timeline entry (pre-existing refusal kept)", spec1(Y(sc_yaml(timeline="- at: 185\n  reviewer_notes: x\n  assert: {A.b: 1}\n"))))
+shape("K17", "list-form assert item with an unknown key", spec1(Y(sc_yaml(timeline="- at: 185\n  assert:\n  - {node: PlanEditKind1, expr: 'true', precondition: 'get_popup().visible == true'}\n"))))
+shape("K18", "list-form assert item with both mode and expr (expr never read by probe)", spec1(Y(sc_yaml(timeline="- at: 185\n  assert:\n  - {node: PlanEditKind1, attr: presses, mode: unchanged, expr: 'presses == 3'}\n"))))
+shape("K19", "non-string key 1 in scenario", spec1(dict(Y(sc_yaml()), **{}) | {1: "x"}))
+# --- frames / order ---------------------------------------------------------
+TL = lambda s: spec1(Y(sc_yaml(timeline=s)))
+shape("A1", "BY2b: at 195 block written before at 185", TL("- at: 170\n  clicks: [PlanEditKind1]\n- at: 195\n  assert:\n    CultivationScreen.phase: phase == \"PLAN_EDIT\"\n- at: 185\n  assert:\n" + GEOM + "- at: 200\n  clicks: [PlanEditKind1 +0,90]\n"))
+shape("A2", "Y4b: at 185.5", TL("- at: 185\n  assert: {A.b: 1}\n- at: 185.5\n  clicks: [PlanEditKind1 +0,90]\n"))
+shape("A3", "at '185' (string)", TL("- at: '185'\n  assert: {A.b: 1}\n"))
+shape("A4", "at 1.85e2 (YAML 1.1 reads a string)", TL("- at: 1.85e2\n  assert: {A.b: 1}\n"))
+shape("A5", "at 1.85e+2 (YAML float 185.0)", TL("- at: 1.85e+2\n  assert: {A.b: 1}\n"))
+shape("A6", "at true", TL("- at: true\n  assert: {A.b: 1}\n"))
+shape("A7", "at -1", TL("- at: -1\n  assert: {A.b: 1}\n"))
+shape("A8", "at .nan", TL("- at: .nan\n  assert: {A.b: 1}\n"))
+shape("A9", "at .inf", TL("- at: .inf\n  assert: {A.b: 1}\n"))
+shape("A10", "click at 999999 (past the 3000 cap), nothing after it", TL("- at: 10\n  assert: {A.b: 1}\n- at: 999999\n  clicks: [PlanEditKind1]\n"))
+shape("A11", "equal at written twice", TL("- at: 185\n  assert: {A.b: 1}\n- at: 185\n  clicks: [PlanEditKind1]\n"))
+shape("A12", "entry without at written FIRST (assert)", TL("- assert: {A.b: 99}\n- at: 5\n  assert: {A.c: 1}\n"))
+shape("A13", "entry without at written after at 185", TL("- at: 185\n  assert: {A.b: 1}\n- assert: {A.c: 1}\n"))
+shape("A14", "entry without at written FIRST (press)", TL("- press: ui_accept\n- at: 5\n  assert: {A.c: 1}\n"))
+shape("A15", "entry without at written FIRST (actions: expanded)", TL("- actions: [ui_accept]\n- at: 5\n  assert: {A.c: 1}\n"))
+shape("A16", "actions-expanded entry at 200 then press at 190", TL("- at: 200\n  actions: [ui_accept]\n- at: 190\n  press: ui_cancel\n"))
+shape("A17", "same entry: assert written above clicks (clicks expanded first)", TL("- at: 200\n  assert:\n    PlanEditKind1.presses: presses == 0\n  clicks: [PlanEditKind1]\n"))
+shape("A18", "at 185.0 (whole float)", TL("- at: 185.0\n  assert: {A.b: 1}\n"))
+shape("A19", "YAML merge: entry <<: *f185 then at 195 override written before 185? (anchor after)", TL("- &f195\n  at: 195\n  assert: {A.b: 1}\n- <<: *f195\n  at: 185\n"))
+
+print("BATTERY_SHAPES:", len(SHAPES))
+for sid, desc, spec, err in SHAPES:
+    if err:
+        print("OUTCOME %s | %s | %s" % (sid, desc, err)); continue
+    row = []
+    for pol in ("base", "cand"):
+        h = H[pol]
+        try:
+            r, calls = run(h, spec)
+        except Exception as e:
+            row.append("%s: EXC %s: %s" % (pol, type(e).__name__, str(e)[:120])); continue
+        fired = sum(len(c["fired"]) for c in calls)
+        sent = sum(len(c["timeline"]) for c in calls)
+        row.append("%s: passed=%s engine_calls=%d entries_sent=%d entries_fired=%d spec_errors=%s"
+                   % (pol, r["passed"], len(calls), sent, fired,
+                      json.dumps(r["spec_errors"], ensure_ascii=False)[:420]))
+        if pol == "cand" and sid in ("A12", "A14", "A15", "A17", "A10", "A19"):
+            row.append("cand_probe_timeline=%s" % json.dumps(calls[0]["timeline"] if calls else None)[:300])
+    print("OUTCOME %s | %s\n   " % (sid, desc) + "\n   ".join(row))

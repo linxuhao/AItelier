@@ -1,0 +1,68 @@
+CMD: pytest tests/unit/test_playtest_one_reading.py tests/unit/test_godot_harness.py tests/unit/test_godot_playtest_spec.py tests/unit/test_godot_playtest_scenario.py tests/unit/test_playtest_blind_run.py tests/unit/test_playtest_fixed_delta.py tests/unit/test_playtest_game_time_observation.py tests/unit/test_playtest_timing_ledger.py tests/unit/test_playtest_user_dir_isolation.py tests/unit/test_godot_harness_native_errors.py tests/unit/test_godot_lifecycle.py tests/unit/test_harness_render_lock.py tests/unit/test_godot_compile.py tests/unit/test_godot_vision.py tests/unit/test_clock_sensitivity.py tests/unit/test_relay_acknowledgement_real_instruction.py tests/unit/test_no_verbatim_previous_line_dup.py
+TREE: 5fbe7c24f90a87c10fb244d31b310be1b596e538  DIRTY_FILES: 1
+CWD: /home/linxuhao/.AItelier/worktrees-scratch/onereading2-mut  CONTAINER: onereading2-d02  DATE: 2026-09-24T14:32:35Z
+THROWAWAY_CONTAINERS_AT_LAUNCH(server-wide, before this one): 1 [crr2-suite-base ]
+IN_CONTAINER_GIT_STATUS_RC: 0
+........................................................F............... [ 24%]
+.........................ssssssss....................................... [ 48%]
+........................................................................ [ 72%]
+........................................................................ [ 96%]
+.........                                                                [100%]
+=================================== FAILURES ===================================
+_______ test_a_keyed_spec_is_read_as_a_spec_or_refused[L1-scenario-typo] _______
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x717ee1ba5dc0>
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_a_keyed_spec_is_read_as_a0')
+spec = {'scene': 'res://main.tscn', 'scenario': [{'name': 's', 'timeline': [{'at': 5, 'assert': {'A.b': 1}}], 'reviewer_notes': [{'at': 1}]}]}
+needles = ['spec has no `scenarios` key (top-level keys: scenario, scene)', 'spec has unknown top-level key(s) scenario']
+
+    @pytest.mark.parametrize("spec,needles", [
+        ({"scene": "res://main.tscn", "scenario": [_SC]},
+         ["spec has no `scenarios` key (top-level keys: scenario, scene)",
+          "spec has unknown top-level key(s) scenario"]),
+        ({"scenarios": {"s": _SC}}, ["spec has key scenarios of type dict", "a non-empty list"]),
+        ({"scenarios": [], "reviewer_notes": [_SC]},
+         ["spec has key scenarios of type list", "spec has unknown top-level key(s) reviewer_notes"]),
+        (["not", "a", "mapping"], ["spec is a list"]),
+    ], ids=["L1-scenario-typo", "L2-scenarios-mapping", "L3-empty-scenarios-plus-notes",
+            "spec-not-a-mapping"])
+    def test_a_keyed_spec_is_read_as_a_spec_or_refused(monkeypatch, tmp_path, spec, needles):
+        took = _dispatch(monkeypatch, tmp_path)
+        ran = _probe_recorder(monkeypatch)
+        r = gh.playtest_project(str(tmp_path), spec=spec)
+        assert took == [] and ran == [], "a spec with keys must never reach the smoke test"
+        assert r["spec_used"] is True and r["passed"] is False
+        for n in needles:
+>           assert any(n in e for e in r["spec_errors"]), (n, r["spec_errors"])
+E           AssertionError: ('spec has no `scenarios` key (top-level keys: scenario, scene)', ['spec has unknown top-level key(s) scenario - allowed: actions, frames, scenarios, scene, surface. No scenario was run.'])
+E           assert False
+E            +  where False = any(<generator object test_a_keyed_spec_is_read_as_a_spec_or_refused.<locals>.<genexpr> at 0x717ee1908520>)
+
+tests/unit/test_playtest_one_reading.py:656: AssertionError
+=============================== warnings summary ===============================
+../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_playtest_one_reading.py::test_a_keyed_spec_is_read_as_a_spec_or_refused[L1-scenario-typo]
+1 failed, 288 passed, 8 skipped, 1 warning in 1.86s
+BARE_RC=1
+END: 2026-09-24T14:32:42Z
+MUTANT: D02_no_scenarios_key_check_deleted
+IGNITION: 68
+MUTANT_DIFF:
+diff --git a/docker/godot/godot_harness.py b/docker/godot/godot_harness.py
+index 184fc160..5a15bc9d 100644
+--- a/docker/godot/godot_harness.py
++++ b/docker/godot/godot_harness.py
+@@ -1820,7 +1820,7 @@ def _playtest_spec(dst: Path, spec: dict, frames: int, timeout: int,
+         spec_errors.append("spec is a %s - it must be a mapping with a `scenarios` "
+                            "list. No scenario was run." % type(spec).__name__)
+         spec = {}
+-    elif "scenarios" not in spec:
++    elif open("/home/linxuhao/.AItelier/worktrees-scratch/onereading2-tools/ign/D02_no_scenarios_key_check_deleted.txt", "a").write("1\n") and False:
+         spec_errors.append("spec has no `scenarios` key (top-level keys: %s). No "
+                            "scenario was run." % ", ".join(sorted(str(k) for k in spec)))
+     header_errors = _key_type_errors("spec", spec, _SPEC_KEY_TYPES)

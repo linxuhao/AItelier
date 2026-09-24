@@ -1,0 +1,53 @@
+CMD: docker run --rm --init --name onereading2-engine-batcand --network none -u 1000:1000 -m 3g -v /home/linxuhao/.AItelier/worktrees-scratch/onereading2-tools/harness/h_5fbe7c24.py:/srv/godot_harness.py:ro -v /home/linxuhao/.AItelier/worktrees-scratch/onereading2-tools/engine_review:/probe:ro aitelier-godot:latest python3 /probe/drive.py battery
+HARNESS: /home/linxuhao/.AItelier/worktrees-scratch/onereading2-tools/harness/h_5fbe7c24.py  SHA1: 96d10e0f055eee6f27823969c270c8cecf7ccdfa
+DRIVE_SHA1: e4cd01ae6d7e9c99aaa053683d0f0fb99b97d1b0  PROJ_SHA1: e97f50147856b5721fa3642c7dcf037c0a4b1e92
+IMAGE: sha256:e9a6237c84c54863d5e388f2c1aecd729caeb3bc5ec49976d674929b51fad4b2
+ENGINE_CONTAINERS_AT_LAUNCH(excluding prod): 0  THROWAWAY_AT_LAUNCH: 2 [onereading2-d14 crr2-mut-m3 ]
+START: 2026-09-24T14:34:05Z
+HARNESS_SHA1: 96d10e0f055eee6f27823969c270c8cecf7ccdfa
+MODE: battery
+SPEC: {"scenarios": [{"name": "E03_assert_through_missing_path", "timeline": [{"at": 20, "assert": {"X/PlanEditKind1.presses": "presses == 0"}}]}, {"name": "E04_existing_path_click", "timeline": [{"at": 10, "clicks": ["Panel/PlanEditKind1"]}, {"at": 20, "assert": {"Panel/PlanEditKind1.presses": "presses == 1"}}]}, {"name": "E05_trailing_slash_click", "timeline": [{"at": 10, "clicks": ["Panel/PlanEditKind1/"]}, {"at": 20, "assert": {"Panel/PlanEditKind1.presses": "presses == 1"}}]}, {"name": "E06_dot_slash_click", "timeline": [{"at": 10, "clicks": ["./Panel/PlanEditKind1"]}, {"at": 20, "assert": {"Panel/PlanEditKind1.presses": "presses == 1"}}]}, {"name": "E07_dotdot_click", "timeline": [{"at": 10, "clicks": ["../Main/Panel/PlanEditKind1"]}, {"at": 20, "assert": {"Panel/PlanEditKind1.presses": "presses == 1"}}]}, {"name": "E08_absolute_missing_click", "timeline": [{"at": 10, "clicks": ["/root/X/PlanEditKind1"]}, {"at": 20, "assert": {"Panel/PlanEditKind1.presses": "presses == 0"}}]}, {"name": "E08b_absolute_missing_assert", "timeline": [{"at": 20, "assert": {"/root/X/PlanEditKind1.presses": "presses == 0"}}]}, {"name": "E09_absolute_existing_click", "timeline": [{"at": 10, "clicks": ["/root/Main/Panel/PlanEditKind1"]}, {"at": 20, "assert": {"Panel/PlanEditKind1.presses": "presses == 1"}}]}, {"name": "E10_atless_assert_first", "timeline": [{"assert": {"Panel/PlanEditKind1.presses": "presses == 99"}}, {"at": 5, "assert": {"Panel/PlanEditKind1.presses": "presses == 0"}}]}, {"name": "E11_same_entry_click_then_assert", "timeline": [{"at": 10, "clicks": ["Panel/PlanEditKind1"], "assert": {"Panel/PlanEditKind1.presses": "presses == 1"}}, {"at": 20, "assert": {"Panel/PlanEditKind1.presses": "presses == 1"}}]}, {"name": "E12_two_offsets_last_wins", "timeline": [{"at": 10, "clicks": ["Panel/PlanEditKind1 +0,500 +0,0"]}, {"at": 20, "assert": {"Panel/PlanEditKind1.presses": "presses == 1"}}]}, {"name": "E13_bare_name_two_nodes", "timeline": [{"at": 10, "clicks": ["Dup"]}, {"at": 20, "assert": {"Panel/Dup.presses": "presses == 1", "Other/Dup.presses": "presses == 0"}}]}, {"name": "E14_missing_path_hover", "timeline": [{"at": 10, "hovers": ["X/PlanEditKind1"]}, {"at": 20, "assert": {"Panel/PlanEditKind1.presses": "presses == 0"}}]}, {"name": "E15_missing_path_delta_assert", "timeline": [{"at": 20, "assert": {"X/PlanEditKind1.presses": "unchanged"}}]}]}
+passed: False
+summary: Playtest HARD-failed: 7 spec violations -- scenario 'E03_assert_through_missing_path': frame 20: assert target X/PlanEditKind1 is a path and does not resolve in the scene tree (spec: X/PlanEditKind1.presses)
+spec_errors: [
+ "scenario 'E03_assert_through_missing_path': frame 20: assert target X/PlanEditKind1 is a path and does not resolve in the scene tree (spec: X/PlanEditKind1.presses)",
+ "scenario 'E08_absolute_missing_click': frame 10: aim target /root/X/PlanEditKind1 is a path and does not resolve in the scene tree (spec: /root/X/PlanEditKind1)",
+ "scenario 'E08b_absolute_missing_assert': frame 20: assert target /root/X/PlanEditKind1 is a path and does not resolve in the scene tree (spec: /root/X/PlanEditKind1.presses)",
+ "scenario 'E10_atless_assert_first': timeline entry 0 has no `at`. Every entry runs on the frame its `at` names; write it (`at: 0` is the first frame).",
+ "scenario 'E12_two_offsets_last_wins': timeline entry 0 (at: 10): clicks 'Panel/PlanEditKind1 +0,500 +0,0' has 2 offsets (+0,500, +0,0); an aim takes one offset",
+ "scenario 'E14_missing_path_hover': frame 10: aim target X/PlanEditKind1 is a path and does not resolve in the scene tree (spec: X/PlanEditKind1)",
+ "scenario 'E15_missing_path_delta_assert': frame 20: assert target X/PlanEditKind1 is a path and does not resolve in the scene tree (spec: X/PlanEditKind1.presses)"
+]
+errors: []
+scenario E03_assert_through_missing_path: ran=True passed=False input_dead=False n_asserts=1
+  assert {"name": "X/PlanEditKind1.presses", "node": "X/PlanEditKind1", "frame": 20, "passed": false, "actual": null, "observed": null, "error": "path does not resolve: X/PlanEditKind1"}
+scenario E04_existing_path_click: ran=True passed=True input_dead=False n_asserts=1
+  assert {"name": "Panel/PlanEditKind1.presses", "node": "Panel/PlanEditKind1", "frame": 20, "passed": true, "actual": true, "observed": null, "error": ""}
+scenario E05_trailing_slash_click: ran=True passed=True input_dead=False n_asserts=1
+  assert {"name": "Panel/PlanEditKind1.presses", "node": "Panel/PlanEditKind1", "frame": 20, "passed": true, "actual": true, "observed": null, "error": ""}
+scenario E06_dot_slash_click: ran=True passed=True input_dead=False n_asserts=1
+  assert {"name": "Panel/PlanEditKind1.presses", "node": "Panel/PlanEditKind1", "frame": 20, "passed": true, "actual": true, "observed": null, "error": ""}
+scenario E07_dotdot_click: ran=True passed=True input_dead=False n_asserts=1
+  assert {"name": "Panel/PlanEditKind1.presses", "node": "Panel/PlanEditKind1", "frame": 20, "passed": true, "actual": true, "observed": null, "error": ""}
+scenario E08_absolute_missing_click: ran=True passed=False input_dead=True n_asserts=1
+  assert {"name": "Panel/PlanEditKind1.presses", "node": "Panel/PlanEditKind1", "frame": 20, "passed": true, "actual": true, "observed": null, "error": ""}
+scenario E08b_absolute_missing_assert: ran=True passed=False input_dead=False n_asserts=1
+  assert {"name": "/root/X/PlanEditKind1.presses", "node": "/root/X/PlanEditKind1", "frame": 20, "passed": false, "actual": null, "observed": null, "error": "path does not resolve: /root/X/PlanEditKind1"}
+scenario E09_absolute_existing_click: ran=True passed=True input_dead=False n_asserts=1
+  assert {"name": "Panel/PlanEditKind1.presses", "node": "Panel/PlanEditKind1", "frame": 20, "passed": true, "actual": true, "observed": null, "error": ""}
+scenario E10_atless_assert_first: ran=True passed=True input_dead=False n_asserts=1
+  assert {"name": "Panel/PlanEditKind1.presses", "node": "Panel/PlanEditKind1", "frame": 5, "passed": true, "actual": true, "observed": null, "error": ""}
+scenario E11_same_entry_click_then_assert: ran=True passed=False input_dead=False n_asserts=2
+  assert {"name": "Panel/PlanEditKind1.presses", "node": "Panel/PlanEditKind1", "frame": 10, "passed": false, "actual": false, "observed": 0, "error": ""}
+  assert {"name": "Panel/PlanEditKind1.presses", "node": "Panel/PlanEditKind1", "frame": 20, "passed": true, "actual": true, "observed": null, "error": ""}
+scenario E12_two_offsets_last_wins: ran=True passed=False input_dead=False n_asserts=1
+  assert {"name": "Panel/PlanEditKind1.presses", "node": "Panel/PlanEditKind1", "frame": 20, "passed": false, "actual": false, "observed": 0, "error": ""}
+scenario E13_bare_name_two_nodes: ran=True passed=True input_dead=False n_asserts=2
+  assert {"name": "Panel/Dup.presses", "node": "Panel/Dup", "frame": 20, "passed": true, "actual": true, "observed": null, "error": ""}
+  assert {"name": "Other/Dup.presses", "node": "Other/Dup", "frame": 20, "passed": true, "actual": true, "observed": null, "error": ""}
+scenario E14_missing_path_hover: ran=True passed=False input_dead=True n_asserts=1
+  assert {"name": "Panel/PlanEditKind1.presses", "node": "Panel/PlanEditKind1", "frame": 20, "passed": true, "actual": true, "observed": null, "error": ""}
+scenario E15_missing_path_delta_assert: ran=True passed=False input_dead=False n_asserts=1
+  assert {"name": "X/PlanEditKind1.presses", "node": "X/PlanEditKind1", "frame": 20, "passed": false, "actual": null, "observed": null, "error": "path does not resolve: X/PlanEditKind1"}
+BARE_RC=1
+END: 2026-09-24T14:34:22Z

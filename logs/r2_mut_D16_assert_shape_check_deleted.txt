@@ -1,0 +1,56 @@
+CMD: pytest tests/unit/test_playtest_one_reading.py tests/unit/test_godot_harness.py tests/unit/test_godot_playtest_spec.py tests/unit/test_godot_playtest_scenario.py tests/unit/test_playtest_blind_run.py tests/unit/test_playtest_fixed_delta.py tests/unit/test_playtest_game_time_observation.py tests/unit/test_playtest_timing_ledger.py tests/unit/test_playtest_user_dir_isolation.py tests/unit/test_godot_harness_native_errors.py tests/unit/test_godot_lifecycle.py tests/unit/test_harness_render_lock.py tests/unit/test_godot_compile.py tests/unit/test_godot_vision.py tests/unit/test_clock_sensitivity.py tests/unit/test_relay_acknowledgement_real_instruction.py tests/unit/test_no_verbatim_previous_line_dup.py
+TREE: 5fbe7c24f90a87c10fb244d31b310be1b596e538  DIRTY_FILES: 1
+CWD: /home/linxuhao/.AItelier/worktrees-scratch/onereading2-mut  CONTAINER: onereading2-d16  DATE: 2026-09-24T14:34:18Z
+THROWAWAY_CONTAINERS_AT_LAUNCH(server-wide, before this one): 2 [onereading2-engine-batcand crr2-mut-m3 ]
+IN_CONTAINER_GIT_STATUS_RC: 0
+...........................................F............................ [ 24%]
+.........................ssssssss....................................... [ 48%]
+........................................................................ [ 72%]
+........................................................................ [ 96%]
+.........                                                                [100%]
+=================================== FAILURES ===================================
+________ test_an_assert_the_probe_cannot_read_is_refused[assert-string] ________
+
+raw = 'HUD.visible == true', needle = '`assert` is a str'
+
+    @pytest.mark.parametrize("raw,needle", [
+        ("HUD.visible == true", "`assert` is a str"),
+        (["HUD.visible == true"], "assert item 0 is a str"),
+    ], ids=["assert-string", "assert-list-of-strings"])
+    def test_an_assert_the_probe_cannot_read_is_refused(raw, needle):
+        out, errors = gh._normalize_timeline([{"at": 5, "assert": raw}])
+>       assert out == [] and len(errors) == 1 and needle in errors[0], errors
+E       AssertionError: []
+E       assert ([{'at': 5, 'assert': []}] == []
+E         
+E         Left contains one more item: {'at': 5, 'assert': []}
+E         Use -v to get more diff)
+
+tests/unit/test_playtest_one_reading.py:547: AssertionError
+=============================== warnings summary ===============================
+../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_playtest_one_reading.py::test_an_assert_the_probe_cannot_read_is_refused[assert-string]
+1 failed, 288 passed, 8 skipped, 1 warning in 2.25s
+BARE_RC=1
+END: 2026-09-24T14:34:26Z
+MUTANT: D16_assert_shape_check_deleted
+IGNITION: 1
+MUTANT_DIFF:
+diff --git a/docker/godot/godot_harness.py b/docker/godot/godot_harness.py
+index 184fc160..02300acc 100644
+--- a/docker/godot/godot_harness.py
++++ b/docker/godot/godot_harness.py
+@@ -1509,7 +1509,7 @@ def _assert_errors(raw) -> list:
+     if isinstance(raw, dict):
+         return []
+     if not isinstance(raw, list):
+-        return ["`assert` is a %s - it must be a mapping or a list" % type(raw).__name__]
++        return [] if open("/home/linxuhao/.AItelier/worktrees-scratch/onereading2-tools/ign/D16_assert_shape_check_deleted.txt", "a").write("1\n") else []
+     errors = []
+     for j, a in enumerate(raw):
+         if not isinstance(a, dict):

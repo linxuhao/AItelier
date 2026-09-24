@@ -1,0 +1,68 @@
+CMD: pytest tests/unit/test_playtest_one_reading.py tests/unit/test_godot_harness.py tests/unit/test_godot_playtest_spec.py tests/unit/test_godot_playtest_scenario.py tests/unit/test_playtest_blind_run.py tests/unit/test_playtest_fixed_delta.py tests/unit/test_playtest_game_time_observation.py tests/unit/test_playtest_timing_ledger.py tests/unit/test_playtest_user_dir_isolation.py tests/unit/test_godot_harness_native_errors.py tests/unit/test_godot_lifecycle.py tests/unit/test_harness_render_lock.py tests/unit/test_godot_compile.py tests/unit/test_godot_vision.py tests/unit/test_clock_sensitivity.py tests/unit/test_relay_acknowledgement_real_instruction.py tests/unit/test_no_verbatim_previous_line_dup.py
+TREE: 5fbe7c24f90a87c10fb244d31b310be1b596e538  DIRTY_FILES: 1
+CWD: /home/linxuhao/.AItelier/worktrees-scratch/onereading2-mut  CONTAINER: onereading2-d22  DATE: 2026-09-24T14:35:02Z
+THROWAWAY_CONTAINERS_AT_LAUNCH(server-wide, before this one): 1 [crr2-mut-m7 ]
+IN_CONTAINER_GIT_STATUS_RC: 0
+.......................................................F................ [ 24%]
+.........................ssssssss....................................... [ 48%]
+........................................................................ [ 72%]
+........................................................................ [ 96%]
+.........                                                                [100%]
+=================================== FAILURES ===================================
+________________ test_a10_a_click_past_the_frame_cap_is_refused ________________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7df647516e40>
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_a10_a_click_past_the_fram0')
+
+    def test_a10_a_click_past_the_frame_cap_is_refused(monkeypatch, tmp_path):
+>       _refused(monkeypatch, tmp_path,
+                 TL("- at: 10\n  assert: {A.b: 1}\n- at: 999999\n  clicks: [PlanEditKind1]\n"),
+                 "scenario 's'", "frame(s) 999999", "past the 3000-frame cap")
+
+tests/unit/test_playtest_one_reading.py:614: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7df647516e40>
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_a10_a_click_past_the_fram0')
+spec = {'scene': 'res://main.tscn', 'scenarios': [{'name': 's', 'timeline': [{'at': 10, 'assert': {'A.b': 1}}, {'at': 999999, 'clicks': ['PlanEditKind1']}]}]}
+needles = ("scenario 's'", 'frame(s) 999999', 'past the 3000-frame cap')
+
+    def _refused(monkeypatch, tmp_path, spec, *needles):
+        """Run the real _playtest_spec; the shape must come back as a spec error
+        carrying every needle, fail the gate, and (for a key or type refusal)
+        never reach the engine."""
+        ran = _probe_recorder(monkeypatch)
+        r = gh._playtest_spec(tmp_path / "proj", spec, 300, 120)
+        hits = [e for e in r["spec_errors"] if all(n in e for n in needles)]
+>       assert hits, r["spec_errors"]
+E       AssertionError: []
+E       assert []
+
+tests/unit/test_playtest_one_reading.py:435: AssertionError
+=============================== warnings summary ===============================
+../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_playtest_one_reading.py::test_a10_a_click_past_the_frame_cap_is_refused
+1 failed, 288 passed, 8 skipped, 1 warning in 1.90s
+BARE_RC=1
+END: 2026-09-24T14:35:09Z
+MUTANT: D22_cap_check_covers_asserts_only_again
+IGNITION: 2
+MUTANT_DIFF:
+diff --git a/docker/godot/godot_harness.py b/docker/godot/godot_harness.py
+index 184fc160..21f7be31 100644
+--- a/docker/godot/godot_harness.py
++++ b/docker/godot/godot_harness.py
+@@ -1886,7 +1886,7 @@ def _playtest_spec(dst: Path, spec: dict, frames: int, timeout: int,
+             # scenario that passed it. An input past the cap never fires either,
+             # so it is refused the same way.
+             dropped = sorted({int(e.get("at", 0)) for e in timeline
+-                              if int(e.get("at", 0)) >= _MAX_SPEC_FRAMES})
++                              if open("/home/linxuhao/.AItelier/worktrees-scratch/onereading2-tools/ign/D22_cap_check_covers_asserts_only_again.txt", "a").write("1\n") and e.get("assert") and int(e.get("at", 0)) >= _MAX_SPEC_FRAMES})
+             if dropped:
+                 spec_errors.append(
+                     "scenario %r: timeline entry(ies) scheduled at frame(s) %s, past "

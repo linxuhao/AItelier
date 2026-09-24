@@ -1,0 +1,58 @@
+CMD: pytest tests/unit/test_playtest_one_reading.py tests/unit/test_godot_harness.py tests/unit/test_godot_playtest_spec.py tests/unit/test_godot_playtest_scenario.py tests/unit/test_playtest_blind_run.py tests/unit/test_playtest_fixed_delta.py tests/unit/test_playtest_game_time_observation.py tests/unit/test_playtest_timing_ledger.py tests/unit/test_playtest_user_dir_isolation.py tests/unit/test_godot_harness_native_errors.py tests/unit/test_godot_lifecycle.py tests/unit/test_harness_render_lock.py tests/unit/test_godot_compile.py tests/unit/test_godot_vision.py tests/unit/test_clock_sensitivity.py tests/unit/test_relay_acknowledgement_real_instruction.py tests/unit/test_no_verbatim_previous_line_dup.py
+TREE: 5fbe7c24f90a87c10fb244d31b310be1b596e538  DIRTY_FILES: 1
+CWD: /home/linxuhao/.AItelier/worktrees-scratch/onereading2-mut  CONTAINER: onereading2-d21  DATE: 2026-09-24T14:34:56Z
+THROWAWAY_CONTAINERS_AT_LAUNCH(server-wide, before this one): 1 [crr2-mut-m7 ]
+IN_CONTAINER_GIT_STATUS_RC: 0
+.....................................................F.................. [ 24%]
+.........................ssssssss....................................... [ 48%]
+........................................................................ [ 72%]
+........................................................................ [ 96%]
+.........                                                                [100%]
+=================================== FAILURES ===================================
+_________ test_every_aim_takes_one_offset_and_one_button[two-buttons] __________
+
+key = 'clicks', aim = ['PlanEditKind1 left right']
+needle = 'has 2 buttons (left, right)'
+
+    @pytest.mark.parametrize("key,aim,needle", [
+        ("click", "PlanEditKind1 -4,0 +0,90", "click 'PlanEditKind1 -4,0 +0,90' has 2 offsets"),
+        ("hovers", ["PlanEditKind1 +0,90 +0,0"], "hovers 'PlanEditKind1 +0,90 +0,0' has 2 offsets"),
+        ("clicks", ["PlanEditKind1 left right"], "has 2 buttons (left, right)"),
+    ], ids=["click", "hovers", "two-buttons"])
+    def test_every_aim_takes_one_offset_and_one_button(key, aim, needle):
+        out, errors = gh._normalize_timeline([{"at": 10, key: aim}])
+>       assert out == [] and len(errors) == 1 and needle in errors[0], errors
+E       AssertionError: []
+E       assert ([{'at': 10, '... left right'}] == []
+E         
+E         Left contains one more item: {'at': 10, 'click': 'PlanEditKind1 left right'}
+E         Use -v to get more diff)
+
+tests/unit/test_playtest_one_reading.py:600: AssertionError
+=============================== warnings summary ===============================
+../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_playtest_one_reading.py::test_every_aim_takes_one_offset_and_one_button[two-buttons]
+1 failed, 288 passed, 8 skipped, 1 warning in 2.06s
+BARE_RC=1
+END: 2026-09-24T14:35:02Z
+MUTANT: D21_two_buttons_check_deleted
+IGNITION: 47
+MUTANT_DIFF:
+diff --git a/docker/godot/godot_harness.py b/docker/godot/godot_harness.py
+index 184fc160..a566f352 100644
+--- a/docker/godot/godot_harness.py
++++ b/docker/godot/godot_harness.py
+@@ -1540,7 +1540,7 @@ def _aim_errors(key: str, aim) -> list:
+     if len(offsets) > 1:
+         errors.append("%s %r has %d offsets (%s); an aim takes one offset"
+                       % (key, aim, len(offsets), ", ".join(offsets)))
+-    if len(buttons) > 1:
++    if open("/home/linxuhao/.AItelier/worktrees-scratch/onereading2-tools/ign/D21_two_buttons_check_deleted.txt", "a").write("1\n") and False:
+         errors.append("%s %r has %d buttons (%s); a click takes one button"
+                       % (key, aim, len(buttons), ", ".join(buttons)))
+     return errors

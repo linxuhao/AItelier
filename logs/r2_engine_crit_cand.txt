@@ -1,0 +1,21 @@
+CMD: docker run --rm --init --name onereading2-engine-critcand --network none -u 1000:1000 -m 3g -v /home/linxuhao/.AItelier/worktrees-scratch/onereading2-tools/harness/h_5fbe7c24.py:/srv/godot_harness.py:ro -v /home/linxuhao/.AItelier/worktrees-scratch/onereading2-tools/engine_review:/probe:ro aitelier-godot:latest python3 /probe/drive.py crit
+HARNESS: /home/linxuhao/.AItelier/worktrees-scratch/onereading2-tools/harness/h_5fbe7c24.py  SHA1: 96d10e0f055eee6f27823969c270c8cecf7ccdfa
+DRIVE_SHA1: e4cd01ae6d7e9c99aaa053683d0f0fb99b97d1b0  PROJ_SHA1: e97f50147856b5721fa3642c7dcf037c0a4b1e92
+IMAGE: sha256:e9a6237c84c54863d5e388f2c1aecd729caeb3bc5ec49976d674929b51fad4b2
+ENGINE_CONTAINERS_AT_LAUNCH(excluding prod): 0  THROWAWAY_AT_LAUNCH: 2 [crr2-mut-control onereading2-d10 ]
+START: 2026-09-24T14:33:40Z
+HARNESS_SHA1: 96d10e0f055eee6f27823969c270c8cecf7ccdfa
+MODE: crit
+SPEC: {"scenarios": [{"name": "by3_missing_path_leaf_exists", "timeline": [{"at": 10, "clicks": ["X/PlanEditKind1 +0,20"]}, {"at": 20, "assert": {"Panel/PlanEditKind1.presses": "presses == 1"}}]}, {"name": "bare_leaf_control", "timeline": [{"at": 10, "clicks": ["PlanEditKind1 +0,20"]}, {"at": 20, "assert": {"PlanEditKind1.presses": "presses == 1"}}]}]}
+passed: False
+summary: Playtest HARD-failed: 1 spec violation -- scenario 'by3_missing_path_leaf_exists': frame 10: aim target X/PlanEditKind1 is a path and does not resolve in the scene tree (spec: X/PlanEditKind1 +0,20)
+spec_errors: [
+ "scenario 'by3_missing_path_leaf_exists': frame 10: aim target X/PlanEditKind1 is a path and does not resolve in the scene tree (spec: X/PlanEditKind1 +0,20)"
+]
+errors: []
+scenario by3_missing_path_leaf_exists: ran=True passed=False input_dead=True n_asserts=1
+  assert {"name": "Panel/PlanEditKind1.presses", "node": "Panel/PlanEditKind1", "frame": 20, "passed": false, "actual": false, "observed": 0, "error": ""}
+scenario bare_leaf_control: ran=True passed=True input_dead=False n_asserts=1
+  assert {"name": "PlanEditKind1.presses", "node": "PlanEditKind1", "frame": 20, "passed": true, "actual": true, "observed": null, "error": ""}
+BARE_RC=1
+END: 2026-09-24T14:33:47Z

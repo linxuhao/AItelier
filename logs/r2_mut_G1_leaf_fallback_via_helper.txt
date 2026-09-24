@@ -1,0 +1,80 @@
+CMD: pytest tests/unit/test_playtest_one_reading.py tests/unit/test_godot_harness.py tests/unit/test_godot_playtest_spec.py tests/unit/test_godot_playtest_scenario.py tests/unit/test_playtest_blind_run.py tests/unit/test_playtest_fixed_delta.py tests/unit/test_playtest_game_time_observation.py tests/unit/test_playtest_timing_ledger.py tests/unit/test_playtest_user_dir_isolation.py tests/unit/test_godot_harness_native_errors.py tests/unit/test_godot_lifecycle.py tests/unit/test_harness_render_lock.py tests/unit/test_godot_compile.py tests/unit/test_godot_vision.py tests/unit/test_clock_sensitivity.py tests/unit/test_relay_acknowledgement_real_instruction.py tests/unit/test_no_verbatim_previous_line_dup.py
+TREE: 5fbe7c24f90a87c10fb244d31b310be1b596e538  DIRTY_FILES: 1
+CWD: /home/linxuhao/.AItelier/worktrees-scratch/onereading2-mut  CONTAINER: onereading2-g1  DATE: 2026-09-24T14:36:12Z
+THROWAWAY_CONTAINERS_AT_LAUNCH(server-wide, before this one): 1 [onereading2-nt-base ]
+IN_CONTAINER_GIT_STATUS_RC: 0
+........................FF.............................................. [ 24%]
+.........................ssssssss....................................... [ 48%]
+........................................................................ [ 72%]
+........................................................................ [ 96%]
+.........                                                                [100%]
+=================================== FAILURES ===================================
+_____________ test_every_tree_lookup_in_the_probe_is_one_of_these ______________
+
+    def test_every_tree_lookup_in_the_probe_is_one_of_these():
+>       assert _probe_lookups() == [
+            ("_resolve", "return get_node_or_null(NodePath(name))"),
+            ("_resolve", "return scene.get_node_or_null(NodePath(name))"),
+            ("_resolve", "return get_tree().get_root().find_child(name, true, false)"),
+            ("_walk", "for c in node.get_children():"),
+        ]
+E       AssertionError: assert [('_resolve',...children():')] == [('_resolve',...children():')]
+E         
+E         At index 1 diff: ('_resolve', 'var _hit := scene.get_node_or_null(NodePath(name))') != ('_resolve', 'return scene.get_node_or_null(NodePath(name))')
+E         Left contains one more item: ('_walk', 'for c in node.get_children():')
+E         Use -v to get more diff
+
+tests/unit/test_playtest_one_reading.py:364: AssertionError
+________ test_the_path_branch_returns_the_path_lookup_and_nothing_else _________
+
+    def test_the_path_branch_returns_the_path_lookup_and_nothing_else():
+        body = _probe_func("_resolve")
+        branch = body[body.index('if "/" in name:'):body.rindex("return get_tree()")]
+        code = [ln.strip() for ln in branch.splitlines()[1:] if ln.strip()]
+>       assert code == ["if scene == null:", "return null",
+                        "return scene.get_node_or_null(NodePath(name))"]
+E       AssertionError: assert ['if scene ==...eaf_of(name)'] == ['if scene ==...ePath(name))']
+E         
+E         At index 2 diff: 'var _hit := scene.get_node_or_null(NodePath(name))' != 'return scene.get_node_or_null(NodePath(name))'
+E         Left contains one more item: 'return _hit if _hit != null else _leaf_of(name)'
+E         Use -v to get more diff
+
+tests/unit/test_playtest_one_reading.py:376: AssertionError
+=============================== warnings summary ===============================
+../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_playtest_one_reading.py::test_every_tree_lookup_in_the_probe_is_one_of_these
+FAILED tests/unit/test_playtest_one_reading.py::test_the_path_branch_returns_the_path_lookup_and_nothing_else
+2 failed, 287 passed, 8 skipped, 1 warning in 2.00s
+BARE_RC=1
+END: 2026-09-24T14:36:19Z
+MUTANT: G1_leaf_fallback_via_helper
+IGNITION: engine-only (GDScript)
+MUTANT_DIFF:
+diff --git a/docker/godot/godot_harness.py b/docker/godot/godot_harness.py
+index 184fc160..647260cc 100644
+--- a/docker/godot/godot_harness.py
++++ b/docker/godot/godot_harness.py
+@@ -1103,7 +1103,8 @@ func _resolve(name: String) -> Node:
+     if "/" in name:
+         if scene == null:
+             return null
+-        return scene.get_node_or_null(NodePath(name))
++        var _hit := scene.get_node_or_null(NodePath(name))
++        return _hit if _hit != null else _leaf_of(name)
+     return get_tree().get_root().find_child(name, true, false)
+ ## A PATH target -- scene-relative (`HUD/Label`) or absolute (`/root/...`) --
+ ## as opposed to a bare node name, which is searched by name. A node name
+@@ -1114,6 +1115,8 @@ func _is_path(name: String) -> bool:
+ ## so it goes to the spec_errors the python side reports, not to push_error.
+ func _refuse_path(kind: String, name: String, spec: String) -> void:
+     _spec_errors.append("frame %d: %s target %s is a path and does not resolve in the scene tree (spec: %s)" % [_frame, kind, name, spec])
++func _leaf_of(name: String) -> Node:
++    return get_tree().get_root().find_child(name.get_file(), true, false)
+ func _jsonable(v):
+     match typeof(v):
+         TYPE_VECTOR2:

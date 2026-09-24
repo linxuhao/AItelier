@@ -1,0 +1,76 @@
+CMD: pytest tests/unit/test_playtest_one_reading.py tests/unit/test_godot_harness.py tests/unit/test_godot_playtest_spec.py tests/unit/test_godot_playtest_scenario.py tests/unit/test_playtest_blind_run.py tests/unit/test_playtest_fixed_delta.py tests/unit/test_playtest_game_time_observation.py tests/unit/test_playtest_timing_ledger.py tests/unit/test_playtest_user_dir_isolation.py tests/unit/test_godot_harness_native_errors.py tests/unit/test_godot_lifecycle.py tests/unit/test_harness_render_lock.py tests/unit/test_godot_compile.py tests/unit/test_godot_vision.py tests/unit/test_clock_sensitivity.py tests/unit/test_relay_acknowledgement_real_instruction.py tests/unit/test_no_verbatim_previous_line_dup.py
+TREE: 5fbe7c24f90a87c10fb244d31b310be1b596e538  DIRTY_FILES: 1
+CWD: /home/linxuhao/.AItelier/worktrees-scratch/onereading2-mut  CONTAINER: onereading2-r3  DATE: 2026-09-24T14:35:51Z
+THROWAWAY_CONTAINERS_AT_LAUNCH(server-wide, before this one): 2 [crr2-wm3b onereading2-nt-base ]
+IN_CONTAINER_GIT_STATUS_RC: 0
+.................FF.F................................................... [ 24%]
+.........................ssssssss....................................... [ 48%]
+........................................................................ [ 72%]
+........................................................................ [ 96%]
+.........                                                                [100%]
+=================================== FAILURES ===================================
+___________ test_by2b_a_frame_written_after_a_later_frame_is_refused ___________
+
+    def test_by2b_a_frame_written_after_a_later_frame_is_refused():
+        out, errors = gh._normalize_timeline(yaml.safe_load(_BY2B))
+>       assert len(errors) == 1, errors
+E       AssertionError: []
+E       assert 0 == 1
+E        +  where 0 = len([])
+
+tests/unit/test_playtest_one_reading.py:259: AssertionError
+_______________ test_by2b_through_playtest_spec_is_a_spec_error ________________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7d6789adeff0>
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_by2b_through_playtest_spe0')
+
+    def test_by2b_through_playtest_spec_is_a_spec_error(monkeypatch, tmp_path):
+        _probe_recorder(monkeypatch)
+        spec = {"scenarios": [{"name": "plan_route_event_reroll_budget",
+                               "timeline": yaml.safe_load(_BY2B)}]}
+        r = gh._playtest_spec(tmp_path / "proj", spec, 300, 120)
+>       assert r["passed"] is False
+E       assert True is False
+
+tests/unit/test_playtest_one_reading.py:271: AssertionError
+____________ test_a_drop_below_an_earlier_maximum_names_the_maximum ____________
+
+    def test_a_drop_below_an_earlier_maximum_names_the_maximum():
+        out, errors = gh._normalize_timeline([
+            {"at": 10, "actions": ["a"]}, {"at": 30, "actions": ["b"]},
+            {"at": 30, "actions": ["c"]}, {"at": 20, "actions": ["d"]}])
+>       assert len(errors) == 1, errors
+E       AssertionError: []
+E       assert 0 == 1
+E        +  where 0 = len([])
+
+tests/unit/test_playtest_one_reading.py:291: AssertionError
+=============================== warnings summary ===============================
+../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_playtest_one_reading.py::test_by2b_a_frame_written_after_a_later_frame_is_refused
+FAILED tests/unit/test_playtest_one_reading.py::test_by2b_through_playtest_spec_is_a_spec_error
+FAILED tests/unit/test_playtest_one_reading.py::test_a_drop_below_an_earlier_maximum_names_the_maximum
+3 failed, 286 passed, 8 skipped, 1 warning in 2.08s
+BARE_RC=1
+END: 2026-09-24T14:35:58Z
+MUTANT: R3_order_check_deleted
+IGNITION: 154
+MUTANT_DIFF:
+diff --git a/docker/godot/godot_harness.py b/docker/godot/godot_harness.py
+index 184fc160..9854fbe2 100644
+--- a/docker/godot/godot_harness.py
++++ b/docker/godot/godot_harness.py
+@@ -1616,7 +1616,7 @@ def _normalize_timeline(timeline: list) -> tuple[list, list]:
+         # an entry written after a later frame runs before it. File order must
+         # therefore not decrease (equal frames are fine): otherwise the order a
+         # reader sees and the order the probe runs are two readings of one file.
+-        if latest is not None and at < latest[1]:
++        if open("/home/linxuhao/.AItelier/worktrees-scratch/onereading2-tools/ign/R3_order_check_deleted.txt", "a").write("1\n") and False:
+             errors.append(
+                 "timeline entry %d (at: %d) is written after entry %d (at: %d); "
+                 "entries run in frame order, so `at` must not decrease in file "

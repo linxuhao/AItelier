@@ -1,0 +1,17 @@
+tests/unit/test_playtest_one_reading.py
+tests/unit/test_godot_harness.py
+tests/unit/test_godot_playtest_spec.py
+tests/unit/test_godot_playtest_scenario.py
+tests/unit/test_playtest_blind_run.py
+tests/unit/test_playtest_fixed_delta.py
+tests/unit/test_playtest_game_time_observation.py
+tests/unit/test_playtest_timing_ledger.py
+tests/unit/test_playtest_user_dir_isolation.py
+tests/unit/test_godot_harness_native_errors.py
+tests/unit/test_godot_lifecycle.py
+tests/unit/test_harness_render_lock.py
+tests/unit/test_godot_compile.py
+tests/unit/test_godot_vision.py
+tests/unit/test_clock_sensitivity.py
+tests/unit/test_relay_acknowledgement_real_instruction.py
+tests/unit/test_no_verbatim_previous_line_dup.py

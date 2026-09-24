@@ -1,0 +1,69 @@
+CMD: pytest tests/unit/test_playtest_one_reading.py tests/unit/test_godot_harness.py tests/unit/test_godot_playtest_spec.py tests/unit/test_godot_playtest_scenario.py tests/unit/test_playtest_blind_run.py tests/unit/test_playtest_fixed_delta.py tests/unit/test_playtest_game_time_observation.py tests/unit/test_playtest_timing_ledger.py tests/unit/test_playtest_user_dir_isolation.py tests/unit/test_godot_harness_native_errors.py tests/unit/test_godot_lifecycle.py tests/unit/test_harness_render_lock.py tests/unit/test_godot_compile.py tests/unit/test_godot_vision.py tests/unit/test_clock_sensitivity.py tests/unit/test_relay_acknowledgement_real_instruction.py tests/unit/test_no_verbatim_previous_line_dup.py
+TREE: 5fbe7c24f90a87c10fb244d31b310be1b596e538  DIRTY_FILES: 1
+CWD: /home/linxuhao/.AItelier/worktrees-scratch/onereading2-mut  CONTAINER: onereading2-d23  DATE: 2026-09-24T14:35:09Z
+THROWAWAY_CONTAINERS_AT_LAUNCH(server-wide, before this one): 1 [crr2-mut-m8 ]
+IN_CONTAINER_GIT_STATUS_RC: 0
+.......................................F................................ [ 24%]
+.........................ssssssss....................................... [ 48%]
+........................................................................ [ 72%]
+........................................................................ [ 96%]
+.........                                                                [100%]
+=================================== FAILURES ===================================
+________________ test_p7_a_non_string_top_level_key_is_refused _________________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7a9361f88950>
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_p7_a_non_string_top_level0')
+
+    def test_p7_a_non_string_top_level_key_is_refused(monkeypatch, tmp_path):
+        spec = dict(spec1(Y(sc_yaml())))
+        spec[1] = "x"
+>       r, ran = _refused(monkeypatch, tmp_path, spec, "spec has unknown top-level key(s) 1")
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/unit/test_playtest_one_reading.py:514: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7a9361f88950>
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_p7_a_non_string_top_level0')
+spec = {'scene': 'res://main.tscn', 'scenarios': [{'name': 's', 'timeline': [{'at': 185, 'assert': {'CultivationScreen.phase': 'phase == "PLAN_EDIT"'}}, {'at': 200, 'clicks': ['PlanEditKind1 +0,90']}]}], 1: 'x'}
+needles = ('spec has unknown top-level key(s) 1',)
+
+    def _refused(monkeypatch, tmp_path, spec, *needles):
+        """Run the real _playtest_spec; the shape must come back as a spec error
+        carrying every needle, fail the gate, and (for a key or type refusal)
+        never reach the engine."""
+        ran = _probe_recorder(monkeypatch)
+        r = gh._playtest_spec(tmp_path / "proj", spec, 300, 120)
+        hits = [e for e in r["spec_errors"] if all(n in e for n in needles)]
+>       assert hits, r["spec_errors"]
+E       AssertionError: []
+E       assert []
+
+tests/unit/test_playtest_one_reading.py:435: AssertionError
+=============================== warnings summary ===============================
+../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_playtest_one_reading.py::test_p7_a_non_string_top_level_key_is_refused
+1 failed, 288 passed, 8 skipped, 1 warning in 1.87s
+BARE_RC=1
+END: 2026-09-24T14:35:16Z
+MUTANT: D23_P7_top_level_check_ignores_non_string_keys
+IGNITION: 108
+MUTANT_DIFF:
+diff --git a/docker/godot/godot_harness.py b/docker/godot/godot_harness.py
+index 184fc160..1343460d 100644
+--- a/docker/godot/godot_harness.py
++++ b/docker/godot/godot_harness.py
+@@ -1841,7 +1841,7 @@ def _playtest_spec(dst: Path, spec: dict, frames: int, timeout: int,
+     ran_any = crashed = False
+     last_state: dict = {}
+     render_mode = "headless"
+-    unknown_spec = sorted(str(k) for k in spec if k not in _SPEC_KEYS)
++    unknown_spec = sorted(str(k) for k in spec if open("/home/linxuhao/.AItelier/worktrees-scratch/onereading2-tools/ign/D23_P7_top_level_check_ignores_non_string_keys.txt", "a").write("1\n") and isinstance(k, str) and k not in _SPEC_KEYS)
+     if unknown_spec:
+         spec_errors.append(
+             "spec has unknown top-level key(s) %s - allowed: %s. No scenario was run."

@@ -1,0 +1,58 @@
+CMD: pytest tests/unit/test_playtest_one_reading.py tests/unit/test_godot_harness.py tests/unit/test_godot_playtest_spec.py tests/unit/test_godot_playtest_scenario.py tests/unit/test_playtest_blind_run.py tests/unit/test_playtest_fixed_delta.py tests/unit/test_playtest_game_time_observation.py tests/unit/test_playtest_timing_ledger.py tests/unit/test_playtest_user_dir_isolation.py tests/unit/test_godot_harness_native_errors.py tests/unit/test_godot_lifecycle.py tests/unit/test_harness_render_lock.py tests/unit/test_godot_compile.py tests/unit/test_godot_vision.py tests/unit/test_clock_sensitivity.py tests/unit/test_relay_acknowledgement_real_instruction.py tests/unit/test_no_verbatim_previous_line_dup.py
+TREE: 5fbe7c24f90a87c10fb244d31b310be1b596e538  DIRTY_FILES: 1
+CWD: /home/linxuhao/.AItelier/worktrees-scratch/onereading2-mut  CONTAINER: onereading2-r4  DATE: 2026-09-24T14:35:58Z
+THROWAWAY_CONTAINERS_AT_LAUNCH(server-wide, before this one): 2 [crr2-wm3b onereading2-nt-base ]
+IN_CONTAINER_GIT_STATUS_RC: 0
+.....................F.................................................. [ 24%]
+.........................ssssssss....................................... [ 48%]
+........................................................................ [ 72%]
+........................................................................ [ 96%]
+.........                                                                [100%]
+=================================== FAILURES ===================================
+___________ test_a_path_the_probe_refused_comes_back_as_a_spec_error ___________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7b3f36f3d910>
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_a_path_the_probe_refused_0')
+
+    def test_a_path_the_probe_refused_comes_back_as_a_spec_error(monkeypatch, tmp_path):
+        """BY3's click as the probe now reports it. The refusal travels in the
+        probe's own `spec_errors` and is carried into the response's `spec_errors`
+        with the scenario name: a spec error, not a runtime error."""
+        refused = ("frame 201: aim target X/PlanEditKind1 is a path and does not "
+                   "resolve in the scene tree (spec: X/PlanEditKind1 +0,20)")
+        _probe_recorder(monkeypatch, {"frames": 231, "nodes": {}, "spec_errors": [refused],
+                                      "asserts": [{"name": "a", "passed": True}]})
+        spec = {"scenarios": [{"name": "plan_route_event_reroll_budget", "timeline": [
+            {"at": 201, "actions": [], "clicks": ["X/PlanEditKind1 +0,20"]}]}]}
+        r = gh._playtest_spec(tmp_path / "proj", spec, 300, 120)
+>       assert r["passed"] is False
+E       assert True is False
+
+tests/unit/test_playtest_one_reading.py:308: AssertionError
+=============================== warnings summary ===============================
+../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_playtest_one_reading.py::test_a_path_the_probe_refused_comes_back_as_a_spec_error
+1 failed, 288 passed, 8 skipped, 1 warning in 2.03s
+BARE_RC=1
+END: 2026-09-24T14:36:05Z
+MUTANT: R4_probe_spec_errors_not_lifted
+IGNITION: 53
+MUTANT_DIFF:
+diff --git a/docker/godot/godot_harness.py b/docker/godot/godot_harness.py
+index 184fc160..192137b9 100644
+--- a/docker/godot/godot_harness.py
++++ b/docker/godot/godot_harness.py
+@@ -1936,7 +1936,7 @@ def _playtest_spec(dst: Path, spec: dict, frames: int, timeout: int,
+         scen_timing.append(_scenario_ledger(
+             name, sc_scene, time.monotonic() - t_scen_start, t_scenario))
+         spec_errors.extend("scenario %r: %s" % (name, m)
+-                           for m in probe.get("spec_errors") or [])
++                           for m in ([] if open("/home/linxuhao/.AItelier/worktrees-scratch/onereading2-tools/ign/R4_probe_spec_errors_not_lifted.txt", "a").write("1\n") else []))
+         errs, debt = _split_diagnostics(errs)
+         ran = bool(probe) or not timed_out
+         ran_any = ran_any or ran

@@ -1,0 +1,123 @@
+CMD: PYTHONPATH=/home/linxuhao/.AItelier/worktrees-scratch/onereading1 python3 /home/linxuhao/.AItelier/worktrees-scratch/onereading1/final/review_scripts/battery.py /home/linxuhao/.AItelier/worktrees-scratch/onereading2-tools/harness/h_290d7908.py /home/linxuhao/.AItelier/worktrees-scratch/onereading2-tools/harness/h_5fbe7c24.py
+SCRIPT_SHA1: 68f2e197708c27f59842e2ce313db857939d35b4  HARNESS_SHA1: a34215235f48764f2b72bfc11750360a4f851c6a  TREE: 5fbe7c24f90a87c10fb244d31b310be1b596e538
+DATE: 2026-09-24T14:34:37Z
+BATTERY_SHAPES: 38
+OUTCOME K1 | BY1: geometry under scenario-level reviewer_notes
+   base: passed=False engine_calls=0 entries_sent=0 entries_fired=0 spec_errors=["scenario 's' has unknown key(s) reviewer_notes - allowed: description, name, repeatability, scene, timeline. The scenario was not run."]
+   cand: passed=False engine_calls=0 entries_sent=0 entries_fired=0 spec_errors=["scenario 's' has unknown key(s) reviewer_notes - allowed: description, name, repeatability, scene, timeline. The scenario was not run."]
+OUTCOME K2 | unknown spec top-level key reviewer_notes
+   base: passed=False engine_calls=0 entries_sent=0 entries_fired=0 spec_errors=["spec has unknown top-level key(s) reviewer_notes - allowed: actions, frames, scenarios, scene, surface. No scenario was run."]
+   cand: passed=False engine_calls=0 entries_sent=0 entries_fired=0 spec_errors=["spec has unknown top-level key(s) reviewer_notes - allowed: actions, frames, scenarios, scene, surface. No scenario was run."]
+OUTCOME K3 | YAML merge key injects reviewer_notes into a scenario
+   base: passed=False engine_calls=0 entries_sent=0 entries_fired=0 spec_errors=["scenario 's' has unknown key(s) reviewer_notes - allowed: description, name, repeatability, scene, timeline. The scenario was not run."]
+   cand: passed=False engine_calls=0 entries_sent=0 entries_fired=0 spec_errors=["scenario 's' has unknown key(s) reviewer_notes - allowed: description, name, repeatability, scene, timeline. The scenario was not run."]
+OUTCOME K4 | duplicate scenario key timeline (strict_yaml) | LOADER_REFUSED: duplicate key 'timeline' in battery: line 3 repeats line 2. YAML keeps only the LAST value, so the earlier block is discarded and anything it asserted never run
+OUTCOME K5 | description multi-line block string
+   base: passed=True engine_calls=2 entries_sent=2 entries_fired=2 spec_errors=[]
+   cand: passed=True engine_calls=2 entries_sent=2 entries_fired=2 spec_errors=[]
+OUTCOME K6 | description tagged !!str 5
+   base: passed=True engine_calls=2 entries_sent=2 entries_fired=2 spec_errors=[]
+   cand: passed=True engine_calls=2 entries_sent=2 entries_fired=2 spec_errors=[]
+OUTCOME K7 | description tagged !!binary
+   base: passed=False engine_calls=0 entries_sent=0 entries_fired=0 spec_errors=["scenario 's' has key description of type bytes - it must be a plain string. The scenario was not run."]
+   cand: passed=False engine_calls=0 entries_sent=0 entries_fired=0 spec_errors=["scenario 's' has key description of type bytes - it must be a plain string. The scenario was not run."]
+OUTCOME K8 | description as mapping with BY1 asserts
+   base: passed=False engine_calls=0 entries_sent=0 entries_fired=0 spec_errors=["scenario 's' has key description of type dict - it must be a plain string. The scenario was not run."]
+   cand: passed=False engine_calls=0 entries_sent=0 entries_fired=0 spec_errors=["scenario 's' has key description of type dict - it must be a plain string. The scenario was not run."]
+OUTCOME K9 | description at spec top level (string)
+   base: passed=False engine_calls=0 entries_sent=0 entries_fired=0 spec_errors=["spec has unknown top-level key(s) description - allowed: actions, frames, scenarios, scene, surface. No scenario was run."]
+   cand: passed=False engine_calls=0 entries_sent=0 entries_fired=0 spec_errors=["spec has unknown top-level key(s) description - allowed: actions, frames, scenarios, scene, surface. No scenario was run."]
+OUTCOME K10 | repeatability as mapping carrying BY1 asserts
+   base: passed=True engine_calls=2 entries_sent=2 entries_fired=2 spec_errors=[]
+   cand: passed=False engine_calls=0 entries_sent=0 entries_fired=0 spec_errors=["scenario 's' has key repeatability of type dict - it must be true or false. The scenario was not run."]
+OUTCOME K11 | repeatability as string 'yes'
+   base: passed=True engine_calls=2 entries_sent=2 entries_fired=2 spec_errors=[]
+   cand: passed=False engine_calls=0 entries_sent=0 entries_fired=0 spec_errors=["scenario 's' has key repeatability of type str - it must be true or false. The scenario was not run."]
+OUTCOME K12 | name as mapping carrying asserts
+   base: passed=True engine_calls=2 entries_sent=2 entries_fired=2 spec_errors=[]
+   cand: passed=False engine_calls=0 entries_sent=0 entries_fired=0 spec_errors=["scenario \"{'at': 1, 'assert': {'A.b': 1}}\" has key name of type dict - it must be a string. The scenario was not run."]
+OUTCOME K13 | spec-level actions as mapping carrying asserts
+   base: passed=True engine_calls=2 entries_sent=2 entries_fired=2 spec_errors=[]
+   cand: passed=False engine_calls=0 entries_sent=0 entries_fired=0 spec_errors=["spec has key actions of type dict - it must be a list of strings. No scenario was run."]
+OUTCOME K14 | spec-level surface carrying a timeline
+   base: passed=True engine_calls=2 entries_sent=2 entries_fired=2 spec_errors=[]
+   cand: passed=False engine_calls=0 entries_sent=0 entries_fired=0 spec_errors=["spec has key surface of type dict - it must be a mapping of node name to a list of strings. No scenario was run."]
+OUTCOME K15 | scenario-level frames (key not in allow set)
+   base: passed=False engine_calls=0 entries_sent=0 entries_fired=0 spec_errors=["scenario 's' has unknown key(s) frames - allowed: description, name, repeatability, scene, timeline. The scenario was not run."]
+   cand: passed=False engine_calls=0 entries_sent=0 entries_fired=0 spec_errors=["scenario 's' has unknown key(s) frames - allowed: description, name, repeatability, scene, timeline. The scenario was not run."]
+OUTCOME K16 | unknown key inside a timeline entry (pre-existing refusal kept)
+   base: passed=False engine_calls=1 entries_sent=0 entries_fired=0 spec_errors=["scenario 's': timeline entry 0 (at: 185) has unknown key(s) reviewer_notes - allowed: actions, assert, at, click, clicks, hover, hovers, press, release"]
+   cand: passed=False engine_calls=1 entries_sent=0 entries_fired=0 spec_errors=["scenario 's': timeline entry 0 (at: 185) has unknown key(s) reviewer_notes - allowed: actions, assert, at, click, clicks, hover, hovers, press, release"]
+OUTCOME K17 | list-form assert item with an unknown key
+   base: passed=True engine_calls=1 entries_sent=1 entries_fired=1 spec_errors=[]
+   cand: passed=False engine_calls=1 entries_sent=0 entries_fired=0 spec_errors=["scenario 's': timeline entry 0 (at: 185): assert item 0 has unknown key(s) precondition - allowed: attr, expr, mode, name, node"]
+OUTCOME K18 | list-form assert item with both mode and expr (expr never read by probe)
+   base: passed=True engine_calls=1 entries_sent=1 entries_fired=1 spec_errors=[]
+   cand: passed=False engine_calls=1 entries_sent=0 entries_fired=0 spec_errors=["scenario 's': timeline entry 0 (at: 185): assert item 0 has both `mode` and `expr`; a `mode` assert compares `attr` with frame 0 and never reads `expr`. Write two items."]
+OUTCOME K19 | non-string key 1 in scenario
+   base: passed=False engine_calls=0 entries_sent=0 entries_fired=0 spec_errors=["scenario 's' has unknown key(s) 1 - allowed: description, name, repeatability, scene, timeline. The scenario was not run."]
+   cand: passed=False engine_calls=0 entries_sent=0 entries_fired=0 spec_errors=["scenario 's' has unknown key(s) 1 - allowed: description, name, repeatability, scene, timeline. The scenario was not run."]
+OUTCOME A1 | BY2b: at 195 block written before at 185
+   base: passed=False engine_calls=2 entries_sent=5 entries_fired=5 spec_errors=["scenario 's': timeline entry 2 (at: 185) is written after entry 1 (at: 195); entries run in frame order, so `at` must not decrease in file order. Move entry 2 above entry 1, or change its frame."]
+   cand: passed=False engine_calls=2 entries_sent=5 entries_fired=5 spec_errors=["scenario 's': timeline entry 2 (at: 185) is written after entry 1 (at: 195); entries run in frame order, so `at` must not decrease in file order. Move entry 2 above entry 1, or change its frame."]
+OUTCOME A2 | Y4b: at 185.5
+   base: passed=False engine_calls=1 entries_sent=1 entries_fired=1 spec_errors=["scenario 's': timeline entry 1 has a non-integer `at`: 185.5. Frames are whole numbers; write the frame the entry should run on."]
+   cand: passed=False engine_calls=1 entries_sent=1 entries_fired=1 spec_errors=["scenario 's': timeline entry 1 has a non-integer `at`: 185.5. Frames are whole numbers; write the frame the entry should run on."]
+OUTCOME A3 | at '185' (string)
+   base: passed=False engine_calls=1 entries_sent=0 entries_fired=0 spec_errors=["scenario 's': timeline entry 0 has a non-numeric `at`: '185'. Frames are single integers -- a range or a list is not supported, write one entry per frame (`- {at: 3, ...}` … `- {at: 15, ...}`)."]
+   cand: passed=False engine_calls=1 entries_sent=0 entries_fired=0 spec_errors=["scenario 's': timeline entry 0 has a non-numeric `at`: '185'. Frames are single integers -- a range or a list is not supported, write one entry per frame (`- {at: 3, ...}` … `- {at: 15, ...}`)."]
+OUTCOME A4 | at 1.85e2 (YAML 1.1 reads a string)
+   base: passed=False engine_calls=1 entries_sent=0 entries_fired=0 spec_errors=["scenario 's': timeline entry 0 has a non-numeric `at`: '1.85e2'. Frames are single integers -- a range or a list is not supported, write one entry per frame (`- {at: 3, ...}` … `- {at: 15, ...}`)."]
+   cand: passed=False engine_calls=1 entries_sent=0 entries_fired=0 spec_errors=["scenario 's': timeline entry 0 has a non-numeric `at`: '1.85e2'. Frames are single integers -- a range or a list is not supported, write one entry per frame (`- {at: 3, ...}` … `- {at: 15, ...}`)."]
+OUTCOME A5 | at 1.85e+2 (YAML float 185.0)
+   base: passed=True engine_calls=1 entries_sent=1 entries_fired=1 spec_errors=[]
+   cand: passed=True engine_calls=1 entries_sent=1 entries_fired=1 spec_errors=[]
+OUTCOME A6 | at true
+   base: passed=False engine_calls=1 entries_sent=0 entries_fired=0 spec_errors=["scenario 's': timeline entry 0 has a non-numeric `at`: True. Frames are single integers -- a range or a list is not supported, write one entry per frame (`- {at: 3, ...}` … `- {at: 15, ...}`)."]
+   cand: passed=False engine_calls=1 entries_sent=0 entries_fired=0 spec_errors=["scenario 's': timeline entry 0 has a non-numeric `at`: True. Frames are single integers -- a range or a list is not supported, write one entry per frame (`- {at: 3, ...}` … `- {at: 15, ...}`)."]
+OUTCOME A7 | at -1
+   base: passed=False engine_calls=1 entries_sent=0 entries_fired=0 spec_errors=["scenario 's': timeline entry 0 has a negative `at`: -1"]
+   cand: passed=False engine_calls=1 entries_sent=0 entries_fired=0 spec_errors=["scenario 's': timeline entry 0 has a negative `at`: -1"]
+OUTCOME A8 | at .nan
+   base: passed=False engine_calls=1 entries_sent=0 entries_fired=0 spec_errors=["scenario 's': timeline entry 0 has a non-integer `at`: nan. Frames are whole numbers; write the frame the entry should run on."]
+   cand: passed=False engine_calls=1 entries_sent=0 entries_fired=0 spec_errors=["scenario 's': timeline entry 0 has a non-integer `at`: nan. Frames are whole numbers; write the frame the entry should run on."]
+OUTCOME A9 | at .inf
+   base: passed=False engine_calls=1 entries_sent=0 entries_fired=0 spec_errors=["scenario 's': timeline entry 0 has a non-integer `at`: inf. Frames are whole numbers; write the frame the entry should run on."]
+   cand: passed=False engine_calls=1 entries_sent=0 entries_fired=0 spec_errors=["scenario 's': timeline entry 0 has a non-integer `at`: inf. Frames are whole numbers; write the frame the entry should run on."]
+OUTCOME A10 | click at 999999 (past the 3000 cap), nothing after it
+   base: passed=True engine_calls=2 entries_sent=2 entries_fired=1 spec_errors=[]
+   cand: passed=False engine_calls=2 entries_sent=2 entries_fired=1 spec_errors=["scenario 's': timeline entry(ies) scheduled at frame(s) 999999, past the 3000-frame cap - they would never run. Reach the same state sooner, or act and assert earlier."]
+   cand_probe_timeline=[{"at": 10, "assert": [{"node": "A", "attr": "b", "expr": "b == 1", "name": "A.b"}]}, {"at": 999999, "click": "PlanEditKind1"}]
+OUTCOME A11 | equal at written twice
+   base: passed=True engine_calls=2 entries_sent=2 entries_fired=2 spec_errors=[]
+   cand: passed=True engine_calls=2 entries_sent=2 entries_fired=2 spec_errors=[]
+OUTCOME A12 | entry without at written FIRST (assert)
+   base: passed=True engine_calls=1 entries_sent=2 entries_fired=1 spec_errors=[]
+   cand: passed=False engine_calls=1 entries_sent=1 entries_fired=1 spec_errors=["scenario 's': timeline entry 0 has no `at`. Every entry runs on the frame its `at` names; write it (`at: 0` is the first frame)."]
+   cand_probe_timeline=[{"at": 5, "assert": [{"node": "A", "attr": "c", "expr": "c == 1", "name": "A.c"}]}]
+OUTCOME A13 | entry without at written after at 185
+   base: passed=False engine_calls=1 entries_sent=2 entries_fired=1 spec_errors=["scenario 's': timeline entry 1 (at: 0) is written after entry 0 (at: 185); entries run in frame order, so `at` must not decrease in file order. Move entry 1 above entry 0, or change its frame."]
+   cand: passed=False engine_calls=1 entries_sent=1 entries_fired=1 spec_errors=["scenario 's': timeline entry 1 has no `at`. Every entry runs on the frame its `at` names; write it (`at: 0` is the first frame)."]
+OUTCOME A14 | entry without at written FIRST (press)
+   base: passed=True engine_calls=2 entries_sent=2 entries_fired=1 spec_errors=[]
+   cand: passed=False engine_calls=1 entries_sent=1 entries_fired=1 spec_errors=["scenario 's': timeline entry 0 has no `at`. Every entry runs on the frame its `at` names; write it (`at: 0` is the first frame)."]
+   cand_probe_timeline=[{"at": 5, "assert": [{"node": "A", "attr": "c", "expr": "c == 1", "name": "A.c"}]}]
+OUTCOME A15 | entry without at written FIRST (actions: expanded)
+   base: passed=True engine_calls=2 entries_sent=2 entries_fired=2 spec_errors=[]
+   cand: passed=False engine_calls=1 entries_sent=1 entries_fired=1 spec_errors=["scenario 's': timeline entry 0 has no `at`. Every entry runs on the frame its `at` names; write it (`at: 0` is the first frame)."]
+   cand_probe_timeline=[{"at": 5, "assert": [{"node": "A", "attr": "c", "expr": "c == 1", "name": "A.c"}]}]
+OUTCOME A16 | actions-expanded entry at 200 then press at 190
+   base: passed=False engine_calls=2 entries_sent=2 entries_fired=2 spec_errors=["scenario 's': timeline entry 1 (at: 190) is written after entry 0 (at: 200); entries run in frame order, so `at` must not decrease in file order. Move entry 1 above entry 0, or change its frame."]
+   cand: passed=False engine_calls=2 entries_sent=2 entries_fired=2 spec_errors=["scenario 's': timeline entry 1 (at: 190) is written after entry 0 (at: 200); entries run in frame order, so `at` must not decrease in file order. Move entry 1 above entry 0, or change its frame."]
+OUTCOME A17 | same entry: assert written above clicks (clicks expanded first)
+   base: passed=True engine_calls=2 entries_sent=2 entries_fired=2 spec_errors=[]
+   cand: passed=True engine_calls=2 entries_sent=2 entries_fired=2 spec_errors=[]
+   cand_probe_timeline=[{"at": 200, "click": "PlanEditKind1"}, {"at": 200, "assert": [{"node": "PlanEditKind1", "attr": "presses", "expr": "presses == 0", "name": "PlanEditKind1.presses"}]}]
+OUTCOME A18 | at 185.0 (whole float)
+   base: passed=True engine_calls=1 entries_sent=1 entries_fired=1 spec_errors=[]
+   cand: passed=True engine_calls=1 entries_sent=1 entries_fired=1 spec_errors=[]
+OUTCOME A19 | YAML merge: entry <<: *f185 then at 195 override written before 185? (anchor after)
+   base: passed=False engine_calls=1 entries_sent=2 entries_fired=2 spec_errors=["scenario 's': timeline entry 1 (at: 185) is written after entry 0 (at: 195); entries run in frame order, so `at` must not decrease in file order. Move entry 1 above entry 0, or change its frame."]
+   cand: passed=False engine_calls=1 entries_sent=2 entries_fired=2 spec_errors=["scenario 's': timeline entry 1 (at: 185) is written after entry 0 (at: 195); entries run in frame order, so `at` must not decrease in file order. Move entry 1 above entry 0, or change its frame."]
+   cand_probe_timeline=[{"at": 195, "assert": [{"node": "A", "attr": "b", "expr": "b == 1", "name": "A.b"}]}, {"at": 185, "assert": [{"node": "A", "attr": "b", "expr": "b == 1", "name": "A.b"}]}]
+BARE_RC=0

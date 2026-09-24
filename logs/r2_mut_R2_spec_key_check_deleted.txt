@@ -1,0 +1,189 @@
+CMD: pytest tests/unit/test_playtest_one_reading.py tests/unit/test_godot_harness.py tests/unit/test_godot_playtest_spec.py tests/unit/test_godot_playtest_scenario.py tests/unit/test_playtest_blind_run.py tests/unit/test_playtest_fixed_delta.py tests/unit/test_playtest_game_time_observation.py tests/unit/test_playtest_timing_ledger.py tests/unit/test_playtest_user_dir_isolation.py tests/unit/test_godot_harness_native_errors.py tests/unit/test_godot_lifecycle.py tests/unit/test_harness_render_lock.py tests/unit/test_godot_compile.py tests/unit/test_godot_vision.py tests/unit/test_clock_sensitivity.py tests/unit/test_relay_acknowledgement_real_instruction.py tests/unit/test_no_verbatim_previous_line_dup.py
+TREE: 5fbe7c24f90a87c10fb244d31b310be1b596e538  DIRTY_FILES: 1
+CWD: /home/linxuhao/.AItelier/worktrees-scratch/onereading2-mut  CONTAINER: onereading2-r2  DATE: 2026-09-24T14:35:44Z
+THROWAWAY_CONTAINERS_AT_LAUNCH(server-wide, before this one): 2 [crr2-wm3b onereading2-nt-base ]
+IN_CONTAINER_GIT_STATUS_RC: 0
+.F.....................................F................F.F.....F....... [ 24%]
+.........................ssssssss....................................... [ 48%]
+........................................................................ [ 72%]
+........................................................................ [ 96%]
+.........                                                                [100%]
+=================================== FAILURES ===================================
+________ test_an_unknown_top_level_spec_key_is_refused_and_nothing_runs ________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7dfd2c444410>
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_an_unknown_top_level_spec0')
+
+    def test_an_unknown_top_level_spec_key_is_refused_and_nothing_runs(monkeypatch, tmp_path):
+        ran = _probe_recorder(monkeypatch)
+        by1 = yaml.safe_load(_BY1)
+        notes = by1.pop("reviewer_notes")
+        spec = {"scene": "res://main.tscn", "reviewer_notes": notes, "scenarios": [by1]}
+        r = gh._playtest_spec(tmp_path / "proj", spec, 300, 120)
+>       assert ran == []
+E       AssertionError: assert ['res://main....://main.tscn'] == []
+E         
+E         Left contains 2 more items, first extra item: 'res://main.tscn'
+E         Use -v to get more diff
+
+tests/unit/test_playtest_one_reading.py:138: AssertionError
+________________ test_p7_a_non_string_top_level_key_is_refused _________________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7dfd2c39a9c0>
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_p7_a_non_string_top_level0')
+
+    def test_p7_a_non_string_top_level_key_is_refused(monkeypatch, tmp_path):
+        spec = dict(spec1(Y(sc_yaml())))
+        spec[1] = "x"
+>       r, ran = _refused(monkeypatch, tmp_path, spec, "spec has unknown top-level key(s) 1")
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/unit/test_playtest_one_reading.py:514: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7dfd2c39a9c0>
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_p7_a_non_string_top_level0')
+spec = {'scene': 'res://main.tscn', 'scenarios': [{'name': 's', 'timeline': [{'at': 185, 'assert': {'CultivationScreen.phase': 'phase == "PLAN_EDIT"'}}, {'at': 200, 'clicks': ['PlanEditKind1 +0,90']}]}], 1: 'x'}
+needles = ('spec has unknown top-level key(s) 1',)
+
+    def _refused(monkeypatch, tmp_path, spec, *needles):
+        """Run the real _playtest_spec; the shape must come back as a spec error
+        carrying every needle, fail the gate, and (for a key or type refusal)
+        never reach the engine."""
+        ran = _probe_recorder(monkeypatch)
+        r = gh._playtest_spec(tmp_path / "proj", spec, 300, 120)
+        hits = [e for e in r["spec_errors"] if all(n in e for n in needles)]
+>       assert hits, r["spec_errors"]
+E       AssertionError: []
+E       assert []
+
+tests/unit/test_playtest_one_reading.py:435: AssertionError
+_______ test_a_keyed_spec_is_read_as_a_spec_or_refused[L1-scenario-typo] _______
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7dfd2c39b890>
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_a_keyed_spec_is_read_as_a0')
+spec = {'scene': 'res://main.tscn', 'scenario': [{'name': 's', 'timeline': [{'at': 5, 'assert': {'A.b': 1}}], 'reviewer_notes': [{'at': 1}]}]}
+needles = ['spec has no `scenarios` key (top-level keys: scenario, scene)', 'spec has unknown top-level key(s) scenario']
+
+    @pytest.mark.parametrize("spec,needles", [
+        ({"scene": "res://main.tscn", "scenario": [_SC]},
+         ["spec has no `scenarios` key (top-level keys: scenario, scene)",
+          "spec has unknown top-level key(s) scenario"]),
+        ({"scenarios": {"s": _SC}}, ["spec has key scenarios of type dict", "a non-empty list"]),
+        ({"scenarios": [], "reviewer_notes": [_SC]},
+         ["spec has key scenarios of type list", "spec has unknown top-level key(s) reviewer_notes"]),
+        (["not", "a", "mapping"], ["spec is a list"]),
+    ], ids=["L1-scenario-typo", "L2-scenarios-mapping", "L3-empty-scenarios-plus-notes",
+            "spec-not-a-mapping"])
+    def test_a_keyed_spec_is_read_as_a_spec_or_refused(monkeypatch, tmp_path, spec, needles):
+        took = _dispatch(monkeypatch, tmp_path)
+        ran = _probe_recorder(monkeypatch)
+        r = gh.playtest_project(str(tmp_path), spec=spec)
+        assert took == [] and ran == [], "a spec with keys must never reach the smoke test"
+        assert r["spec_used"] is True and r["passed"] is False
+        for n in needles:
+>           assert any(n in e for e in r["spec_errors"]), (n, r["spec_errors"])
+E           AssertionError: ('spec has unknown top-level key(s) scenario', ['spec has no `scenarios` key (top-level keys: scenario, scene). No scenario was run.'])
+E           assert False
+E            +  where False = any(<generator object test_a_keyed_spec_is_read_as_a_spec_or_refused.<locals>.<genexpr> at 0x7dfd2c0f60c0>)
+
+tests/unit/test_playtest_one_reading.py:656: AssertionError
+_ test_a_keyed_spec_is_read_as_a_spec_or_refused[L3-empty-scenarios-plus-notes] _
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7dfd2c3993d0>
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_a_keyed_spec_is_read_as_a2')
+spec = {'scenarios': [], 'reviewer_notes': [{'name': 's', 'timeline': [{'at': 5, 'assert': {'A.b': 1}}], 'reviewer_notes': [{'at': 1}]}]}
+needles = ['spec has key scenarios of type list', 'spec has unknown top-level key(s) reviewer_notes']
+
+    @pytest.mark.parametrize("spec,needles", [
+        ({"scene": "res://main.tscn", "scenario": [_SC]},
+         ["spec has no `scenarios` key (top-level keys: scenario, scene)",
+          "spec has unknown top-level key(s) scenario"]),
+        ({"scenarios": {"s": _SC}}, ["spec has key scenarios of type dict", "a non-empty list"]),
+        ({"scenarios": [], "reviewer_notes": [_SC]},
+         ["spec has key scenarios of type list", "spec has unknown top-level key(s) reviewer_notes"]),
+        (["not", "a", "mapping"], ["spec is a list"]),
+    ], ids=["L1-scenario-typo", "L2-scenarios-mapping", "L3-empty-scenarios-plus-notes",
+            "spec-not-a-mapping"])
+    def test_a_keyed_spec_is_read_as_a_spec_or_refused(monkeypatch, tmp_path, spec, needles):
+        took = _dispatch(monkeypatch, tmp_path)
+        ran = _probe_recorder(monkeypatch)
+        r = gh.playtest_project(str(tmp_path), spec=spec)
+        assert took == [] and ran == [], "a spec with keys must never reach the smoke test"
+        assert r["spec_used"] is True and r["passed"] is False
+        for n in needles:
+>           assert any(n in e for e in r["spec_errors"]), (n, r["spec_errors"])
+E           AssertionError: ('spec has unknown top-level key(s) reviewer_notes', ['spec has key scenarios of type list - it must be a non-empty list. No scenario was run.'])
+E           assert False
+E            +  where False = any(<generator object test_a_keyed_spec_is_read_as_a_spec_or_refused.<locals>.<genexpr> at 0x7dfd2c0be740>)
+
+tests/unit/test_playtest_one_reading.py:656: AssertionError
+__________________ test_inline_wrapper_keys_reach_the_harness __________________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7dfd2c398ad0>
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_inline_wrapper_keys_reach0')
+
+    def test_inline_wrapper_keys_reach_the_harness(monkeypatch, tmp_path):
+        import aitelier.tools.godot_playtest.impl as pt
+        from aitelier.tools.godot_playtest_scenario.impl import godot_playtest_scenario
+        repo = tmp_path / "repo"
+        (repo / "playtest").mkdir(parents=True)
+        (repo / "project.godot").write_text("config_version=5\n")
+        (repo / "playtest" / "_common.yaml").write_text("scene: res://main.tscn\n")
+        (repo / "playtest" / "alpha.yaml").write_text(
+            "name: alpha\ntimeline:\n- at: 10\n  assert: {x: '1'}\n")
+        sent = []
+        ran = _probe_recorder(monkeypatch)
+    
+        def fake_post(payload, timeout=0):
+            sent.append(payload["spec"])
+            return gh._playtest_spec(tmp_path / "proj", payload["spec"], 300, 120)
+    
+        monkeypatch.setattr(pt, "post_playtest", fake_post)
+        body = "scenarios:\n- name: probe_a\n  timeline:\n  - at: 1\n    assert: {A.b: 'b == -1'}\n"
+        out = godot_playtest_scenario(project_root=str(repo),
+                                      inline_scenario="scene: res://probe.tscn\n" + body)
+        assert sent[-1]["scene"] == "res://probe.tscn" and ran == ["res://probe.tscn"], out
+        assert out["spec_errors"] == []
+        out = godot_playtest_scenario(project_root=str(repo),
+                                      inline_scenario="reviewer_notes:\n- at: 1\n" + body)
+        assert sent[-1]["reviewer_notes"] == [{"at": 1}]
+>       assert ran == ["res://probe.tscn"], "the refused inline doc must not reach the engine"
+E       AssertionError: the refused inline doc must not reach the engine
+E       assert ['res://probe...://main.tscn'] == ['res://probe.tscn']
+E         
+E         Left contains one more item: 'res://main.tscn'
+E         Use -v to get more diff
+
+tests/unit/test_playtest_one_reading.py:719: AssertionError
+=============================== warnings summary ===============================
+../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_playtest_one_reading.py::test_an_unknown_top_level_spec_key_is_refused_and_nothing_runs
+FAILED tests/unit/test_playtest_one_reading.py::test_p7_a_non_string_top_level_key_is_refused
+FAILED tests/unit/test_playtest_one_reading.py::test_a_keyed_spec_is_read_as_a_spec_or_refused[L1-scenario-typo]
+FAILED tests/unit/test_playtest_one_reading.py::test_a_keyed_spec_is_read_as_a_spec_or_refused[L3-empty-scenarios-plus-notes]
+FAILED tests/unit/test_playtest_one_reading.py::test_inline_wrapper_keys_reach_the_harness
+5 failed, 284 passed, 8 skipped, 1 warning in 2.26s
+BARE_RC=1
+END: 2026-09-24T14:35:51Z
+MUTANT: R2_spec_key_check_deleted
+IGNITION: 69
+MUTANT_DIFF:
+diff --git a/docker/godot/godot_harness.py b/docker/godot/godot_harness.py
+index 184fc160..83137a11 100644
+--- a/docker/godot/godot_harness.py
++++ b/docker/godot/godot_harness.py
+@@ -1841,7 +1841,7 @@ def _playtest_spec(dst: Path, spec: dict, frames: int, timeout: int,
+     ran_any = crashed = False
+     last_state: dict = {}
+     render_mode = "headless"
+-    unknown_spec = sorted(str(k) for k in spec if k not in _SPEC_KEYS)
++    unknown_spec = [] if open("/home/linxuhao/.AItelier/worktrees-scratch/onereading2-tools/ign/R2_spec_key_check_deleted.txt", "a").write("1\n") else []
+     if unknown_spec:
+         spec_errors.append(
+             "spec has unknown top-level key(s) %s - allowed: %s. No scenario was run."

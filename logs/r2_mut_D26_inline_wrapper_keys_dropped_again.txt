@@ -1,0 +1,71 @@
+CMD: pytest tests/unit/test_playtest_one_reading.py tests/unit/test_godot_harness.py tests/unit/test_godot_playtest_spec.py tests/unit/test_godot_playtest_scenario.py tests/unit/test_playtest_blind_run.py tests/unit/test_playtest_fixed_delta.py tests/unit/test_playtest_game_time_observation.py tests/unit/test_playtest_timing_ledger.py tests/unit/test_playtest_user_dir_isolation.py tests/unit/test_godot_harness_native_errors.py tests/unit/test_godot_lifecycle.py tests/unit/test_harness_render_lock.py tests/unit/test_godot_compile.py tests/unit/test_godot_vision.py tests/unit/test_clock_sensitivity.py tests/unit/test_relay_acknowledgement_real_instruction.py tests/unit/test_no_verbatim_previous_line_dup.py
+TREE: 5fbe7c24f90a87c10fb244d31b310be1b596e538  DIRTY_FILES: 1
+CWD: /home/linxuhao/.AItelier/worktrees-scratch/onereading2-mut  CONTAINER: onereading2-d26  DATE: 2026-09-24T14:35:30Z
+THROWAWAY_CONTAINERS_AT_LAUNCH(server-wide, before this one): 2 [crr2-mp-m8 onereading2-nt-base ]
+IN_CONTAINER_GIT_STATUS_RC: 0
+................................................................F....... [ 24%]
+.........................ssssssss....................................... [ 48%]
+........................................................................ [ 72%]
+........................................................................ [ 96%]
+.........                                                                [100%]
+=================================== FAILURES ===================================
+__________________ test_inline_wrapper_keys_reach_the_harness __________________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x76eab43def00>
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_inline_wrapper_keys_reach0')
+
+    def test_inline_wrapper_keys_reach_the_harness(monkeypatch, tmp_path):
+        import aitelier.tools.godot_playtest.impl as pt
+        from aitelier.tools.godot_playtest_scenario.impl import godot_playtest_scenario
+        repo = tmp_path / "repo"
+        (repo / "playtest").mkdir(parents=True)
+        (repo / "project.godot").write_text("config_version=5\n")
+        (repo / "playtest" / "_common.yaml").write_text("scene: res://main.tscn\n")
+        (repo / "playtest" / "alpha.yaml").write_text(
+            "name: alpha\ntimeline:\n- at: 10\n  assert: {x: '1'}\n")
+        sent = []
+        ran = _probe_recorder(monkeypatch)
+    
+        def fake_post(payload, timeout=0):
+            sent.append(payload["spec"])
+            return gh._playtest_spec(tmp_path / "proj", payload["spec"], 300, 120)
+    
+        monkeypatch.setattr(pt, "post_playtest", fake_post)
+        body = "scenarios:\n- name: probe_a\n  timeline:\n  - at: 1\n    assert: {A.b: 'b == -1'}\n"
+        out = godot_playtest_scenario(project_root=str(repo),
+                                      inline_scenario="scene: res://probe.tscn\n" + body)
+>       assert sent[-1]["scene"] == "res://probe.tscn" and ran == ["res://probe.tscn"], out
+E       AssertionError: {'scenarios': [{'name': 'probe_a', 'passed': True, 'ok': 1, 'total': 1}], 'all_passed': True, 'hard_passed': True, 'spec_errors': [], ...}
+E       assert ('res://main.tscn' == 'res://probe.tscn'
+E         
+E         - res://probe.tscn
+E         + res://main.tscn)
+
+tests/unit/test_playtest_one_reading.py:714: AssertionError
+=============================== warnings summary ===============================
+../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_playtest_one_reading.py::test_inline_wrapper_keys_reach_the_harness
+1 failed, 288 passed, 8 skipped, 1 warning in 1.92s
+BARE_RC=1
+END: 2026-09-24T14:35:37Z
+MUTANT: D26_inline_wrapper_keys_dropped_again
+IGNITION: 3
+MUTANT_DIFF:
+diff --git a/aitelier/tools/godot_playtest_scenario/impl.py b/aitelier/tools/godot_playtest_scenario/impl.py
+index 95412810..1f9edd8f 100644
+--- a/aitelier/tools/godot_playtest_scenario/impl.py
++++ b/aitelier/tools/godot_playtest_scenario/impl.py
+@@ -135,7 +135,7 @@ def godot_playtest_scenario(*, scenario: str = "", inline_scenario: str = "",
+         # scenario files — so a forgotten probe reddens the WHOLE gate, not
+         # just itself.
+         picked = dict(spec)
+-        picked.update(inline_header)
++        open("/home/linxuhao/.AItelier/worktrees-scratch/onereading2-tools/ign/D26_inline_wrapper_keys_dropped_again.txt", "a").write("1\n")
+         picked["scenarios"] = inline_doc
+     else:
+         available = sorted(str(s.get("name")) for s in spec["scenarios"])

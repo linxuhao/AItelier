@@ -1,0 +1,98 @@
+CMD: pytest tests/unit/test_playtest_one_reading.py tests/unit/test_godot_harness.py tests/unit/test_godot_playtest_spec.py tests/unit/test_godot_playtest_scenario.py tests/unit/test_playtest_blind_run.py tests/unit/test_playtest_fixed_delta.py tests/unit/test_playtest_game_time_observation.py tests/unit/test_playtest_timing_ledger.py tests/unit/test_playtest_user_dir_isolation.py tests/unit/test_godot_harness_native_errors.py tests/unit/test_godot_lifecycle.py tests/unit/test_harness_render_lock.py tests/unit/test_godot_compile.py tests/unit/test_godot_vision.py tests/unit/test_clock_sensitivity.py tests/unit/test_relay_acknowledgement_real_instruction.py tests/unit/test_no_verbatim_previous_line_dup.py
+TREE: 5fbe7c24f90a87c10fb244d31b310be1b596e538  DIRTY_FILES: 1
+CWD: /home/linxuhao/.AItelier/worktrees-scratch/onereading2-mut  CONTAINER: onereading2-d03  DATE: 2026-09-24T14:32:42Z
+THROWAWAY_CONTAINERS_AT_LAUNCH(server-wide, before this one): 1 [crr2-suite-cand ]
+IN_CONTAINER_GIT_STATUS_RC: 0
+...........................................................F............ [ 24%]
+.........................ssssssss....................................... [ 48%]
+........................................................................ [ 72%]
+........................................................................ [ 96%]
+.........                                                                [100%]
+=================================== FAILURES ===================================
+______ test_a_keyed_spec_is_read_as_a_spec_or_refused[spec-not-a-mapping] ______
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fef3d3570b0>
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_a_keyed_spec_is_read_as_a3')
+spec = ['not', 'a', 'mapping'], needles = ['spec is a list']
+
+    @pytest.mark.parametrize("spec,needles", [
+        ({"scene": "res://main.tscn", "scenario": [_SC]},
+         ["spec has no `scenarios` key (top-level keys: scenario, scene)",
+          "spec has unknown top-level key(s) scenario"]),
+        ({"scenarios": {"s": _SC}}, ["spec has key scenarios of type dict", "a non-empty list"]),
+        ({"scenarios": [], "reviewer_notes": [_SC]},
+         ["spec has key scenarios of type list", "spec has unknown top-level key(s) reviewer_notes"]),
+        (["not", "a", "mapping"], ["spec is a list"]),
+    ], ids=["L1-scenario-typo", "L2-scenarios-mapping", "L3-empty-scenarios-plus-notes",
+            "spec-not-a-mapping"])
+    def test_a_keyed_spec_is_read_as_a_spec_or_refused(monkeypatch, tmp_path, spec, needles):
+        took = _dispatch(monkeypatch, tmp_path)
+        ran = _probe_recorder(monkeypatch)
+>       r = gh.playtest_project(str(tmp_path), spec=spec)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/unit/test_playtest_one_reading.py:652: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+docker/godot/godot_harness.py:2151: in playtest_project
+    result = _playtest_spec(dst, spec, frames, timeout, ledger=ledger,
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+dst = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_a_keyed_spec_is_read_as_a3/copy/proj')
+spec = ['not', 'a', 'mapping'], frames = 180, timeout = 120, ledger = {}
+cap_limit = None
+
+    def _playtest_spec(dst: Path, spec: dict, frames: int, timeout: int,
+                       ledger: dict | None = None,
+                       cap_limit: int | None = None) -> dict:
+        """Authored-spec playtest: run ONE isolated headless pass per scenario, driving
+        its input timeline and evaluating its Expression assertions against live nodes.
+    
+        Gate split: ``passed`` (HARD, loops the goal-loop) covers crash / didn't-run,
+        plus the two ways a scenario can look green without testing anything -- a
+        malformed timeline, and input that never reached the game. Per-scenario
+        assertion outcomes stay ADVISORY (``behavior``) so a wrong or flaky assertion
+        can never stall a build that otherwise runs clean."""
+        # A spec with keys is read as a spec or refused; the canned smoke test is
+        # only for a request that carries no spec (see playtest_project).
+        spec_errors = []
+        if open("/home/linxuhao/.AItelier/worktrees-scratch/onereading2-tools/ign/D03_spec_mapping_check_deleted.txt", "a").write("1\n") and False:
+            spec_errors.append("spec is a %s - it must be a mapping with a `scenarios` "
+                               "list. No scenario was run." % type(spec).__name__)
+            spec = {}
+        elif "scenarios" not in spec:
+            spec_errors.append("spec has no `scenarios` key (top-level keys: %s). No "
+                               "scenario was run." % ", ".join(sorted(str(k) for k in spec)))
+        header_errors = _key_type_errors("spec", spec, _SPEC_KEY_TYPES)
+        spec_errors.extend(m + " No scenario was run." for m in header_errors)
+>       scene = str(spec.get("scene", "") or "")
+                    ^^^^^^^^
+E       AttributeError: 'list' object has no attribute 'get'
+
+docker/godot/godot_harness.py:1828: AttributeError
+=============================== warnings summary ===============================
+../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_playtest_one_reading.py::test_a_keyed_spec_is_read_as_a_spec_or_refused[spec-not-a-mapping]
+1 failed, 288 passed, 8 skipped, 1 warning in 2.22s
+BARE_RC=1
+END: 2026-09-24T14:32:50Z
+MUTANT: D03_spec_mapping_check_deleted
+IGNITION: 69
+MUTANT_DIFF:
+diff --git a/docker/godot/godot_harness.py b/docker/godot/godot_harness.py
+index 184fc160..f3976191 100644
+--- a/docker/godot/godot_harness.py
++++ b/docker/godot/godot_harness.py
+@@ -1816,7 +1816,7 @@ def _playtest_spec(dst: Path, spec: dict, frames: int, timeout: int,
+     # A spec with keys is read as a spec or refused; the canned smoke test is
+     # only for a request that carries no spec (see playtest_project).
+     spec_errors = []
+-    if not isinstance(spec, dict):
++    if open("/home/linxuhao/.AItelier/worktrees-scratch/onereading2-tools/ign/D03_spec_mapping_check_deleted.txt", "a").write("1\n") and False:
+         spec_errors.append("spec is a %s - it must be a mapping with a `scenarios` "
+                            "list. No scenario was run." % type(spec).__name__)
+         spec = {}

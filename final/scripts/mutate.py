@@ -1,69 +1,176 @@
-"""Mutation runs for harness.a-scenario-has-one-reading.
+"""Deletion mutants for harness.a-scenario-has-one-reading r2.
 
-Each mutant deletes one of the new checks in a detached worktree of the
-candidate, with an ignition write on the mutated line, then runs the harness
-test family in a throwaway container (runsuite.sh), records the bare RC, the
-ignition count and the FAILED test ids, and restores the tree with
+Each mutant removes one check (or restores the r1-base behaviour it replaced)
+in a detached worktree of the candidate. Python mutants carry an ignition
+write on the mutated line (one line per execution into ign/<tag>.txt).
+GDScript mutants (G1, G2) run only inside Godot: their ignition is measured
+by the engine runs (logs/engine_*_G1*.txt, engine_*_G2*.txt), and here they
+show which Godot-free test turns red. Each mutant runs the harness test
+family in a throwaway container (runsuite.sh), records the bare RC, the
+ignition count and the FAILED test ids, then restores the tree with
 `git checkout -- .`.
+usage: mutate.py <tag-prefix-filter or ALL> <pytest files...>
 """
 import re
 import subprocess
 import sys
 from pathlib import Path
 
-T = Path("/home/linxuhao/.AItelier/worktrees-scratch/onereading1-tools")
-MUT = Path("/home/linxuhao/.AItelier/worktrees-scratch/onereading1-mut")
-H = MUT / "docker/godot/godot_harness.py"
-FAMILY = sys.argv[1:]
+T = Path("/home/linxuhao/.AItelier/worktrees-scratch/onereading2-tools")
+MUT = Path("/home/linxuhao/.AItelier/worktrees-scratch/onereading2-mut")
+H = "docker/godot/godot_harness.py"
+PT = "aitelier/tools/godot_playtest/impl.py"
+PTS = "aitelier/tools/godot_playtest_scenario/impl.py"
+ONLY = sys.argv[1]
+FAMILY = sys.argv[2:]
 
 
 def ign(tag):
     return 'open("%s", "a").write("1\\n")' % (T / "ign" / (tag + ".txt"))
 
 
+# (tag, file, old, new with one %s for the ignition expression, occurrence)
 MUTANTS = [
-    ("M1_scenario_key_check_deleted",
-     "        unknown = sorted(str(k) for k in sc if k not in _SCENARIO_KEYS)\n",
-     "        unknown = [] if %s else []\n"),
-    ("M2_spec_key_check_deleted",
+    ("D01_keyed_spec_without_list_goes_to_smoke", H,
+     "        if spec:\n",
+     '        if %s and spec and isinstance(spec.get("scenarios"), list) and spec["scenarios"]:\n', 1),
+    ("D02_no_scenarios_key_check_deleted", H,
+     '    elif "scenarios" not in spec:\n', "    elif %s and False:\n", 1),
+    ("D03_spec_mapping_check_deleted", H,
+     "    if not isinstance(spec, dict):\n", "    if %s and False:\n", 1),
+    ("D04_spec_scene_type_deleted", H,
+     '    "scene": (lambda v: isinstance(v, str), "a string"),\n',
+     '    "scene": (lambda v: %s > 0, "a string"),\n', 1),
+    ("D05_spec_frames_type_deleted", H,
+     '    "frames": (lambda v: isinstance(v, int) and not isinstance(v, bool), "an integer"),\n',
+     '    "frames": (lambda v: %s > 0, "an integer"),\n', 1),
+    ("D06_spec_scenarios_type_deleted", H,
+     '    "scenarios": (lambda v: isinstance(v, list) and len(v) > 0, "a non-empty list"),\n',
+     '    "scenarios": (lambda v: %s > 0, "a non-empty list"),\n', 1),
+    ("D07_spec_actions_type_deleted", H,
+     '    "actions": (_is_str_list, "a list of strings"),\n',
+     '    "actions": (lambda v: %s > 0, "a list of strings"),\n', 1),
+    ("D08_spec_surface_type_deleted", H,
+     '    "surface": (lambda v: isinstance(v, dict) and all(\n'
+     '        isinstance(k, str) and _is_str_list(x) for k, x in v.items()),\n',
+     '    "surface": (lambda v: %s > 0,\n', 1),
+    ("D09_scenario_name_type_deleted", H,
+     '    "name": (lambda v: isinstance(v, str), "a string"),\n',
+     '    "name": (lambda v: %s > 0, "a string"),\n', 1),
+    ("D10_scenario_timeline_type_deleted", H,
+     '    "timeline": (lambda v: isinstance(v, list), "a list"),\n',
+     '    "timeline": (lambda v: %s > 0, "a list"),\n', 1),
+    ("D11_scenario_scene_type_deleted", H,
+     '    "scene": (lambda v: isinstance(v, str), "a string"),\n',
+     '    "scene": (lambda v: %s > 0, "a string"),\n', 2),
+    ("D12_repeatability_type_deleted", H,
+     '    "repeatability": (lambda v: isinstance(v, bool), "true or false"),\n',
+     '    "repeatability": (lambda v: %s > 0, "true or false"),\n', 1),
+    ("D13_description_type_deleted", H,
+     '    "description": (lambda v: isinstance(v, str), "a plain string"),\n',
+     '    "description": (lambda v: %s > 0, "a plain string"),\n', 1),
+    ("D14_scenario_mapping_check_deleted", H,
+     "        if not isinstance(sc, dict):\n", "        if %s and False:\n", 1),
+    ("D15_atless_entry_defaults_to_0_again", H,
+     '        if "at" not in e:\n'
+     '            errors.append("timeline entry %d has no `at`. Every entry runs on the "\n'
+     '                          "frame its `at` names; write it (`at: 0` is the first "\n'
+     '                          "frame)." % i)\n'
+     '            continue\n'
+     '        at_raw = e["at"]\n',
+     '        at_raw = e.get("at", 0) if %s else 0\n', 1),
+    ("D16_assert_shape_check_deleted", H,
+     '        return ["`assert` is a %s - it must be a mapping or a list" % type(raw).__name__]\n',
+     "        return [] if %s else []\n", 1),
+    ("D17_assert_item_mapping_check_deleted", H,
+     '            errors.append("assert item %d is a %s - it must be a mapping"\n'
+     "                          % (j, type(a).__name__))\n",
+     "            %s\n", 1),
+    ("D18_assert_item_unknown_key_check_deleted", H,
+     "        unknown = sorted(str(k) for k in a if k not in _ASSERT_ITEM_KEYS)\n",
+     "        unknown = [] if %s else []\n", 1),
+    ("D19_mode_with_expr_check_deleted", H,
+     '        if "mode" in a and "expr" in a:\n', "        if %s and False:\n", 1),
+    ("D20_two_offsets_check_deleted", H,
+     "    if len(offsets) > 1:\n", "    if %s and False:\n", 1),
+    ("D21_two_buttons_check_deleted", H,
+     "    if len(buttons) > 1:\n", "    if %s and False:\n", 1),
+    ("D22_cap_check_covers_asserts_only_again", H,
+     '                              if int(e.get("at", 0)) >= _MAX_SPEC_FRAMES})\n',
+     '                              if %s and e.get("assert") and int(e.get("at", 0)) >= _MAX_SPEC_FRAMES})\n', 1),
+    ("D23_P7_top_level_check_ignores_non_string_keys", H,
      "    unknown_spec = sorted(str(k) for k in spec if k not in _SPEC_KEYS)\n",
-     "    unknown_spec = [] if %s else []\n"),
-    ("M3_order_check_deleted",
-     "        if latest is not None and at < latest[1]:\n",
-     "        if %s and False:\n"),
-    ("M4_probe_spec_errors_not_lifted",
+     "    unknown_spec = sorted(str(k) for k in spec if %s and isinstance(k, str) and k not in _SPEC_KEYS)\n", 1),
+    ("D24_monolith_mapping_check_deleted", PT,
+     "    if not isinstance(spec, dict):\n"
+     '        return None, [f"{SPEC_FILE} is a {type(spec).__name__}, not a YAML mapping"]\n',
+     "    if not isinstance(spec, dict):\n        return None, [] if %s else []\n", 1),
+    ("D25_monolith_scenarios_check_deleted", PT,
+     "    if not isinstance(scenarios, list) or not scenarios:\n",
+     "    if %s and False:\n", 1),
+    ("D26_inline_wrapper_keys_dropped_again", PTS,
+     "        picked.update(inline_header)\n", "        %s\n", 1),
+    ("R1_scenario_key_check_deleted", H,
+     "        unknown = sorted(str(k) for k in sc if k not in _SCENARIO_KEYS)\n",
+     "        unknown = [] if %s else []\n", 1),
+    ("R2_spec_key_check_deleted", H,
+     "    unknown_spec = sorted(str(k) for k in spec if k not in _SPEC_KEYS)\n",
+     "    unknown_spec = [] if %s else []\n", 1),
+    ("R3_order_check_deleted", H,
+     "        if latest is not None and at < latest[1]:\n", "        if %s and False:\n", 1),
+    ("R4_probe_spec_errors_not_lifted", H,
      '                           for m in probe.get("spec_errors") or [])\n',
-     "                           for m in ([] if %s else []))\n"),
-    ("M5_description_type_check_deleted",
-     '        bad_desc = "description" in sc and not isinstance(sc["description"], str)\n',
-     "        bad_desc = False if %s else False\n"),
-    ("M6_non_integer_at_check_deleted",
+     "                           for m in ([] if %s else []))\n", 1),
+    ("R6_non_integer_at_check_deleted", H,
      "        if isinstance(at_raw, float) and not at_raw.is_integer():\n",
-     "        if %s and False:\n"),
+     "        if %s and False:\n", 1),
+    # GDScript, verbatim from the r1 review's R/mutate.py (G1 anchor text unchanged)
+    ("G1_leaf_fallback_via_helper", H,
+     "        if scene == null:\n            return null\n        return scene.get_node_or_null(NodePath(name))\n",
+     "        if scene == null:\n            return null\n        var _hit := scene.get_node_or_null(NodePath(name))\n        return _hit if _hit != null else _leaf_of(name)\n", 1),
+    ("G2_no_name_is_a_path", H,
+     '    return "/" in name\n', "    return false\n", 1),
 ]
 
+
+def apply(tag, rel, old, new, occ):
+    p = MUT / rel
+    src = p.read_text(encoding="utf-8")
+    assert src.count(old) >= occ, (tag, src.count(old))
+    at = -1
+    for _ in range(occ):
+        at = src.index(old, at + 1)
+    repl = new % ign(tag) if "%s" in new else new
+    src = src[:at] + repl + src[at + len(old):]
+    if tag.startswith("G1"):
+        anchor = "func _jsonable(v):\n"
+        assert src.count(anchor) == 1
+        src = src.replace(anchor, "func _leaf_of(name: String) -> Node:\n    return get_tree().get_root().find_child(name.get_file(), true, false)\n" + anchor)
+    p.write_text(src, encoding="utf-8")
+
+
 (T / "ign").mkdir(exist_ok=True)
-results = []
-for tag, old, new in MUTANTS:
-    src = H.read_text(encoding="utf-8")
-    assert src.count(old) == 1, (tag, src.count(old))
-    H.write_text(src.replace(old, new % ign(tag)), encoding="utf-8")
+for tag, rel, old, new, occ in MUTANTS:
+    if ONLY != "ALL" and not tag.startswith(ONLY):
+        continue
     igf = T / "ign" / (tag + ".txt")
     if igf.exists():
         igf.unlink()
+    apply(tag, rel, old, new, occ)
     diff = subprocess.run(["git", "-C", str(MUT), "diff"], capture_output=True, text=True).stdout
     log = T / "logs" / ("mut_%s.txt" % tag)
     rc = subprocess.run([str(T / "runsuite.sh"), str(MUT), str(log),
-                         "onereading1-" + tag.split("_")[0].lower()] + FAMILY).returncode
+                         "onereading2-" + tag.split("_")[0].lower()] + FAMILY).returncode
     ignition = len(igf.read_text().splitlines()) if igf.exists() else 0
     text = log.read_text(encoding="utf-8")
     failed = re.findall(r"^FAILED (\S+?)(?: - |$)", text, re.M)
     with log.open("a", encoding="utf-8") as f:
-        f.write("MUTANT: %s\nIGNITION: %d\nMUTANT_DIFF:\n%s" % (tag, ignition, diff))
+        f.write("MUTANT: %s\nIGNITION: %s\nMUTANT_DIFF:\n%s"
+                % (tag, "engine-only (GDScript)" if tag.startswith("G") else ignition, diff))
     subprocess.run(["git", "-C", str(MUT), "checkout", "--", "."], check=True)
     clean = subprocess.run(["git", "-C", str(MUT), "status", "--porcelain"],
                            capture_output=True, text=True).stdout == ""
-    results.append((tag, rc, ignition, clean, failed))
-    print("%s BARE_RC=%d IGNITION=%d CLEAN_AFTER=%s FAILED=%d" % (tag, rc, ignition, clean, len(failed)))
+    print("%s BARE_RC=%d IGNITION=%s CLEAN_AFTER=%s FAILED=%d"
+          % (tag, rc, "engine-only" if tag.startswith("G") else ignition, clean, len(failed)), flush=True)
     for t in failed:
-        print("    FAILED", t)
+        print("    FAILED", t, flush=True)

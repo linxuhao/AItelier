@@ -1,0 +1,33 @@
+#!/bin/bash
+# usage: run_engine.sh <harness.py> <probe_dir> <mode> <log> <label>
+# ONE throwaway container from the sidecar image: --rm, --network none, its own
+# /tmp lock paths, the harness under test mounted over /srv/godot_harness.py,
+# <probe_dir> (drive.py + proj/) mounted at /probe. Launch waits until no other
+# engine container of this image runs (the production aitelier-godot excluded)
+# and fewer than 4 throwaway containers run server-wide.
+H="$1"; D="$2"; MODE="$3"; LOG="$4"; LABEL="$5"
+T=/home/linxuhao/.AItelier/worktrees-scratch/onereading2-tools
+NAME="onereading2-engine-$LABEL"
+throwaway() { docker ps --format '{{.Names}}' | grep -vxF -f "$T/long_running.txt"; }
+engines() { docker ps --filter ancestor=aitelier-godot:latest --format '{{.Names}}' | grep -vx aitelier-godot; }
+while [ "$(throwaway | wc -l)" -ge 4 ] || [ "$(engines | wc -l)" -ge 1 ]; do sleep 5; done
+{
+  echo "CMD: docker run --rm --init --name $NAME --network none -u 1000:1000 -m 3g -v $H:/srv/godot_harness.py:ro -v $D:/probe:ro aitelier-godot:latest python3 /probe/drive.py $MODE"
+  echo "HARNESS: $H  SHA1: $(sha1sum "$H" | cut -d' ' -f1)"
+  echo "DRIVE_SHA1: $(sha1sum "$D/drive.py" | cut -d' ' -f1)  PROJ_SHA1: $(cat "$D"/proj/* | sha1sum | cut -d' ' -f1)"
+  echo "IMAGE: $(docker image inspect aitelier-godot:latest --format '{{.Id}}')"
+  echo "ENGINE_CONTAINERS_AT_LAUNCH(excluding prod): $(engines | wc -l)  THROWAWAY_AT_LAUNCH: $(throwaway | wc -l) [$(throwaway | tr '\n' ' ')]"
+  echo "START: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+} > "$LOG"
+docker run --rm --init --name "$NAME" --network none -u 1000:1000 -m 3g \
+  -e HOME=/tmp/godot-home \
+  -e GODOT_LIFECYCLE_DB=/tmp/ctl/owners.sqlite3 \
+  -e GODOT_DEPLOYMENT_LOCK=/tmp/ctl/deployment-admission.lock \
+  -e GODOT_RENDER_EFFECT_LOCK=/tmp/ctl/render-effect.lock \
+  -e GODOT_BIN=/usr/local/bin/godot \
+  -v "$H":/srv/godot_harness.py:ro -v "$D":/probe:ro \
+  aitelier-godot:latest python3 /probe/drive.py $MODE >> "$LOG" 2>&1
+RC=$?
+echo "BARE_RC=$RC" >> "$LOG"
+echo "END: $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$LOG"
+exit $RC

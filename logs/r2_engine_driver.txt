@@ -1,0 +1,10 @@
+base8b BARE_RC=0
+base29 BARE_RC=1
+cand BARE_RC=1
+crit8b BARE_RC=0
+critcand BARE_RC=1
+bat29 BARE_RC=1
+batcand BARE_RC=1
+g1 BARE_RC=0
+g2 BARE_RC=1
+DRIVER_RC=0

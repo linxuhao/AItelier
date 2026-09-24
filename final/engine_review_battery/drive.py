@@ -1,0 +1,80 @@
+"""Reviewer engine probe (onereading-r1 review). usage: drive.py crit|battery
+crit:    BY3 shape (qualified path X/PlanEditKind1 that does not resolve, leaf exists)
+         plus the bare-name control. Exit 0 iff report passed.
+battery: two-reading attempts that need the engine. Exit 0 iff report passed.
+"""
+import json, os, sys
+os.makedirs("/tmp/ctl", exist_ok=True)
+sys.path.insert(0, "/srv")
+import godot_harness as h  # noqa: E402
+
+K = "Panel/PlanEditKind1"
+CRIT = {"scenarios": [
+    {"name": "by3_missing_path_leaf_exists", "timeline": [
+        {"at": 10, "clicks": ["X/PlanEditKind1 +0,20"]},
+        {"at": 20, "assert": {K + ".presses": "presses == 1"}}]},
+    {"name": "bare_leaf_control", "timeline": [
+        {"at": 10, "clicks": ["PlanEditKind1 +0,20"]},
+        {"at": 20, "assert": {"PlanEditKind1.presses": "presses == 1"}}]},
+]}
+
+def one(name, timeline):
+    return {"name": name, "timeline": timeline}
+
+BATTERY = {"scenarios": [
+    one("E03_assert_through_missing_path", [
+        {"at": 20, "assert": {"X/PlanEditKind1.presses": "presses == 0"}}]),
+    one("E04_existing_path_click", [
+        {"at": 10, "clicks": [K]}, {"at": 20, "assert": {K + ".presses": "presses == 1"}}]),
+    one("E05_trailing_slash_click", [
+        {"at": 10, "clicks": [K + "/"]}, {"at": 20, "assert": {K + ".presses": "presses == 1"}}]),
+    one("E06_dot_slash_click", [
+        {"at": 10, "clicks": ["./" + K]}, {"at": 20, "assert": {K + ".presses": "presses == 1"}}]),
+    one("E07_dotdot_click", [
+        {"at": 10, "clicks": ["../Main/" + K]}, {"at": 20, "assert": {K + ".presses": "presses == 1"}}]),
+    one("E08_absolute_missing_click", [
+        {"at": 10, "clicks": ["/root/X/PlanEditKind1"]},
+        {"at": 20, "assert": {K + ".presses": "presses == 0"}}]),
+    one("E08b_absolute_missing_assert", [
+        {"at": 20, "assert": {"/root/X/PlanEditKind1.presses": "presses == 0"}}]),
+    one("E09_absolute_existing_click", [
+        {"at": 10, "clicks": ["/root/Main/" + K]}, {"at": 20, "assert": {K + ".presses": "presses == 1"}}]),
+    one("E10_atless_assert_first", [
+        {"assert": {K + ".presses": "presses == 99"}},
+        {"at": 5, "assert": {K + ".presses": "presses == 0"}}]),
+    one("E11_same_entry_click_then_assert", [
+        {"at": 10, "clicks": [K], "assert": {K + ".presses": "presses == 1"}},
+        {"at": 20, "assert": {K + ".presses": "presses == 1"}}]),
+    one("E12_two_offsets_last_wins", [
+        {"at": 10, "clicks": [K + " +0,500 +0,0"]},
+        {"at": 20, "assert": {K + ".presses": "presses == 1"}}]),
+    one("E13_bare_name_two_nodes", [
+        {"at": 10, "clicks": ["Dup"]},
+        {"at": 20, "assert": {"Panel/Dup.presses": "presses == 1",
+                              "Other/Dup.presses": "presses == 0"}}]),
+    one("E14_missing_path_hover", [
+        {"at": 10, "hovers": ["X/PlanEditKind1"]},
+        {"at": 20, "assert": {K + ".presses": "presses == 0"}}]),
+    one("E15_missing_path_delta_assert", [
+        {"at": 20, "assert": {"X/PlanEditKind1.presses": "unchanged"}}]),
+]}
+
+mode = sys.argv[1]
+SPEC = CRIT if mode == "crit" else BATTERY
+print("HARNESS_SHA1:", os.popen("sha1sum /srv/godot_harness.py").read().split()[0])
+print("MODE:", mode)
+print("SPEC:", json.dumps(SPEC))
+r = h.playtest_project("/probe/proj", spec=SPEC, captures=0)
+print("passed:", r["passed"])
+print("summary:", r["summary"])
+print("spec_errors:", json.dumps(r["spec_errors"], ensure_ascii=False, indent=1))
+print("errors:", json.dumps(r["errors"], ensure_ascii=False, indent=1))
+for s in r["behavior"]["scenarios"]:
+    print("scenario %s: ran=%s passed=%s input_dead=%s n_asserts=%d"
+          % (s["name"], s["ran"], s["passed"], s["input_dead"], len(s["asserts"])))
+    for a in s["asserts"]:
+        print("  assert", json.dumps({k: a.get(k) for k in
+              ("name", "node", "frame", "passed", "actual", "observed", "error")}, ensure_ascii=False))
+    for e in s.get("errors") or []:
+        print("  error", json.dumps(e, ensure_ascii=False)[:300])
+sys.exit(0 if r["passed"] else 1)

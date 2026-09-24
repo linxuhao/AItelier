@@ -1,0 +1,8 @@
+CMD: docker inspect aitelier-godot --format ...
+INSPECTED_AT: 2026-09-24T14:35:31Z
+Name=/aitelier-godot Image=sha256:e9a6237c84c54863d5e388f2c1aecd729caeb3bc5ec49976d674929b51fad4b2 Created=2026-09-24T13:48:35.082473711Z StartedAt=2026-09-24T13:48:51.456322914Z Status=running
+bind /home/linxuhao/.AItelier -> /home/linxuhao/.AItelier rw=false
+bind /home/linxuhao/.AItelier/godot-control -> /var/lib/aitelier-godot rw=true
+
+IMAGE_TAG_aitelier-godot:latest: sha256:e9a6237c84c54863d5e388f2c1aecd729caeb3bc5ec49976d674929b51fad4b2
+BARE_RC=0

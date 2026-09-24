@@ -1,0 +1,54 @@
+CMD: pytest tests/unit/test_playtest_one_reading.py tests/unit/test_godot_harness.py tests/unit/test_godot_playtest_spec.py tests/unit/test_godot_playtest_scenario.py tests/unit/test_playtest_blind_run.py tests/unit/test_playtest_fixed_delta.py tests/unit/test_playtest_game_time_observation.py tests/unit/test_playtest_timing_ledger.py tests/unit/test_playtest_user_dir_isolation.py tests/unit/test_godot_harness_native_errors.py tests/unit/test_godot_lifecycle.py tests/unit/test_harness_render_lock.py tests/unit/test_godot_compile.py tests/unit/test_godot_vision.py tests/unit/test_clock_sensitivity.py tests/unit/test_relay_acknowledgement_real_instruction.py tests/unit/test_no_verbatim_previous_line_dup.py
+TREE: 5fbe7c24f90a87c10fb244d31b310be1b596e538  DIRTY_FILES: 1
+CWD: /home/linxuhao/.AItelier/worktrees-scratch/onereading2-mut  CONTAINER: onereading2-d24  DATE: 2026-09-24T14:35:16Z
+THROWAWAY_CONTAINERS_AT_LAUNCH(server-wide, before this one): 1 [crr2-mut-m8 ]
+IN_CONTAINER_GIT_STATUS_RC: 0
+...............................................................F........ [ 24%]
+.........................ssssssss....................................... [ 48%]
+........................................................................ [ 72%]
+........................................................................ [ 96%]
+.........                                                                [100%]
+=================================== FAILURES ===================================
+_________ test_the_monolith_reader_names_a_file_that_is_not_a_mapping __________
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_the_monolith_reader_names1')
+
+    def test_the_monolith_reader_names_a_file_that_is_not_a_mapping(tmp_path):
+        from aitelier.tools.godot_playtest.impl import read_spec
+        (tmp_path / "playtest_spec.yaml").write_text("- name: s\n  timeline: []\n")
+        spec, info = read_spec(tmp_path)
+        assert spec is None
+>       assert info["errors"] == ["playtest_spec.yaml is a list, not a YAML mapping"]
+E       AssertionError: assert [] == ['playtest_sp...YAML mapping']
+E         
+E         Right contains one more item: 'playtest_spec.yaml is a list, not a YAML mapping'
+E         Use -v to get more diff
+
+tests/unit/test_playtest_one_reading.py:689: AssertionError
+=============================== warnings summary ===============================
+../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_playtest_one_reading.py::test_the_monolith_reader_names_a_file_that_is_not_a_mapping
+1 failed, 288 passed, 8 skipped, 1 warning in 1.82s
+BARE_RC=1
+END: 2026-09-24T14:35:23Z
+MUTANT: D24_monolith_mapping_check_deleted
+IGNITION: 1
+MUTANT_DIFF:
+diff --git a/aitelier/tools/godot_playtest/impl.py b/aitelier/tools/godot_playtest/impl.py
+index 89af6c1c..5fb2e1b6 100644
+--- a/aitelier/tools/godot_playtest/impl.py
++++ b/aitelier/tools/godot_playtest/impl.py
+@@ -96,7 +96,7 @@ def _read_monolith(repo: Path) -> tuple[dict | None, list[str]]:
+     # runs the canned smoke test): a `scenario:` typo or a `scenarios:`
+     # mapping is named here, and the play-test does not run.
+     if not isinstance(spec, dict):
+-        return None, [f"{SPEC_FILE} is a {type(spec).__name__}, not a YAML mapping"]
++        return None, [] if open("/home/linxuhao/.AItelier/worktrees-scratch/onereading2-tools/ign/D24_monolith_mapping_check_deleted.txt", "a").write("1\n") else []
+     scenarios = spec.get("scenarios")
+     if not isinstance(scenarios, list) or not scenarios:
+         return None, [f"{SPEC_FILE} has no non-empty `scenarios` list (`scenarios` "

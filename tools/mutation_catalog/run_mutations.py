@@ -28,9 +28,10 @@ Protocol of one invocation (a shard is one invocation):
 4. Killers, per scope: the red tests minus that scope's control reds. For a
    `behaviour` mutation (the default), a red test that read a mutated file's
    text while it ran and executed none of the mutated lines is a source-text
-   witness and is removed from the killers. For a `text` mutation (the guarded property IS the text: a
-   duplicated line, a deleted contract sentence) a reader of the text is the
-   behavioural witness and stays. `killed` = some scope has a killer.
+   witness and is removed from the killers. For a `text` mutation (the
+   guarded property IS the text: a duplicated line, a deleted contract
+   sentence) a reader of the text is the behavioural witness and stays.
+   `killed` = some scope has a killer.
 5. CLEAN again, as in 1 (otherwise exit 3).
 
 Ignition is `line_hits` (executions of the replacement's lines inside the
@@ -102,7 +103,11 @@ def _remove_worktree(wt: Path) -> None:
 
 def _changed_offsets(anchor: str, replacement: str) -> list[int]:
     """Line indices, within `replacement`, that the edit wrote (lines of the
-    replacement that are not carried over unchanged from the anchor)."""
+    replacement that are not carried over unchanged from the anchor).
+
+    A deletion writes no line, so its site is the line just before the gap
+    (index `j1 - 1`), or, when nothing precedes it, the line that now follows
+    it (index `j1`, which may lie past the end of the replacement)."""
     old = anchor.splitlines(keepends=True)
     new = replacement.splitlines(keepends=True)
     changed: list[int] = []
@@ -110,6 +115,8 @@ def _changed_offsets(anchor: str, replacement: str) -> list[int]:
             a=old, b=new, autojunk=False).get_opcodes():
         if tag in ("replace", "insert"):
             changed.extend(range(j1, j2))
+        elif tag == "delete":
+            changed.append(j1 - 1 if j1 > 0 else j1)
     return changed
 
 

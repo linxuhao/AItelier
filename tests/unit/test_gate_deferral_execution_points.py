@@ -353,3 +353,16 @@ def test_G2_episode_max_seconds_is_hard_capped_against_1e9(monkeypatch):
     monkeypatch.setattr(gd, "GATE_DEFERRAL_EPISODE_MAX_SECONDS", 10800)
     assert gd.episode_max_seconds() == 10800.0, (
         "the default episode is not 10800s")
+
+
+def test_no_environment_can_raise_the_episode_ceiling_past_six_hours(
+        monkeypatch):
+    """Kills ABSCEIL (`_ABSOLUTE_EPISODE_CEILING = 1e9`). The test above
+    compares against the module's own constant, so it moves with it; this one
+    names the number: with both settings at 1e9 the effective ceiling is
+    21600 s."""
+    monkeypatch.setattr(gd, "GATE_DEFERRAL_EPISODE_MAX_CEILING", 1e9)
+    monkeypatch.setattr(gd, "GATE_DEFERRAL_EPISODE_MAX_SECONDS", 1e9)
+    assert gd.episode_max_seconds() == 21600.0, (
+        f"episode_max_seconds()={gd.episode_max_seconds()}, not 21600.0 s: "
+        "the absolute six-hour ceiling no longer bounds the episode")

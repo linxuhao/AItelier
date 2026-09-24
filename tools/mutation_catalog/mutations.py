@@ -6,16 +6,18 @@ What is in here, and where each name comes from:
 
 * the goal table, VERBATIM (`GOAL_TABLE`: N9, M21, M21b, G2, G2b, DUPIMPL,
   RESTART). Only their `targeted` selections are this catalog's choice;
-* names an independent review defined (S1, VALVEREACH, ABSTERM, ABSTERM2, D1,
-  D4, M2, M19, TAILONLY2, SCHEDROWRETRY, SCHEDROWSTATUS, H2, ...), each with
-  the review's own edit, minus the review's ignition counter call (the runner
-  counts ignition itself);
-* edits rounds added under their own names. A name keeps the edit it was
-  defined with; a different edit gets a different name. Round 8 re-used nine
-  review names for other edits; those edits now carry new names (TIMEOUT60,
-  ABSTERMTEXT, TERMREASONCYCLE, VALVEOFF, NEVEREXPIRE, READNONDICT, DECLNONE)
-  or were dropped where they are the same edit as a restored name (round 8's
-  "M2" is TAILONLY2's edit, round 8's "TAILONLY2" is M2's).
+* the nine names round 8 re-used for other edits (S1, VALVEREACH, ABSTERM,
+  ABSTERM2, D1, D4, M2, M19, TAILONLY2), restored to the edits an independent
+  review defined them with, minus the review's ignition counter call (the
+  runner counts ignition itself); SCHEDROWRETRY and SCHEDROWSTATUS are that
+  review's edits too;
+* every other name, with the edit it was entered in this catalog with. A
+  different edit gets a different name: round 8's edits for the nine names
+  now carry new names (TIMEOUT60, ABSTERMTEXT, TERMREASONCYCLE, VALVEOFF,
+  NEVEREXPIRE, READNONDICT, DECLNONE), except where one is the same edit as a
+  restored name (round 8's "M2" is TAILONLY2's edit, round 8's "TAILONLY2" is
+  M2's). TICK_HOLD_INERT edits `core/scheduler.py`, as the round-10 brief
+  requires; its round-9 edit, in `gate_deferral.observe_run`, is OBSERVENONE.
 
 `run_mutations.py` applies each entry to its own detached `git worktree` of
 the committed tree, checks every anchor hits exactly once BEFORE editing (a
@@ -23,9 +25,10 @@ miss is an anchor error, never a kill), runs the `targeted` selection and
 `FULL_SCOPE`, and records bare exit codes, ignition and red tests.
 
 `kind` is "behaviour" unless stated: a red test that read the mutated file's
-source text is then a source-text witness, not a killer. "text" marks an edit
-whose guarded property IS the text (a duplicated line, a deleted contract
-sentence), where the reader of the text is the witness.
+source text and executed none of the mutated lines is then a source-text
+witness, not a killer. "text" marks an edit whose guarded property IS the
+text (a duplicated line, a deleted contract sentence), where the reader of
+the text is the witness.
 """
 
 IMPL = "aitelier/tools/run_tests/impl.py"
@@ -452,7 +455,9 @@ MUTATIONS = {
             "anchor": "    return min(_positive_seconds(GATE_DEFERRAL_WAIT_SECONDS, 300.0),\n               max(1.0, _positive_seconds(GATE_DEFERRAL_WAIT_MAX, 900.0)))\n",
             "replacement": "    return _positive_seconds(GATE_DEFERRAL_WAIT_SECONDS, 300.0)\n",
         }],
-        "targeted": [EXEC_POINTS],
+        "targeted": [
+            ACCOUNTED + "::test_the_wait_cannot_be_widened_until_the_ceiling_disappears",
+        ],
     },
     "CEILCLAMP": {
         "edits": [{
@@ -552,7 +557,7 @@ MUTATIONS = {
             "replacement": "                \"unmeasured_declaration\": None}\n",
         }],
         "targeted": [
-            DECL + "::test_a_declared_absence_is_unmeasured_whatever_the_exit_code_was",
+            DECL + "::test_a_declaration_survives_output_far_past_the_retention_bound",
         ],
     },
     # ── the two production holds, one hold-breaking edit each ─────────────

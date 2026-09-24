@@ -47,6 +47,18 @@ def test_a_report_that_graded_the_code_states_no_absence(tmp_path):
     assert gd.observe_run(None, "r", report_path=path)["state"] == "none"
 
 
+@pytest.mark.parametrize("payload", [[], ["repo_gate_absent"], "absent", 3])
+def test_a_report_that_is_not_an_object_states_no_absence(tmp_path, ledger,
+                                                          payload):
+    """Kills READNONDICT: a `test_report.json` that parses but is not a JSON
+    object carries no flag of its own, so it states no absence, and the tick
+    that reads it must get `none`, not an exception."""
+    path = tmp_path / "test_report.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    assert gd.read_absence(path) is None
+    assert gd.observe_run(None, "r", report_path=path)["state"] == "none"
+
+
 def test_no_report_at_all_is_not_an_absence(tmp_path, ledger):
     """A run before its gate step has no report; that is not silence."""
     assert gd.observe_run(None, "r", report_path=tmp_path / "missing.json"

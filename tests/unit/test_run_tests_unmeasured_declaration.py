@@ -166,8 +166,10 @@ def test_the_unmeasured_state_set_holds_no_red_word():
 
 
 def test_a_log_echo_of_the_prefix_mid_line_is_not_a_declaration():
-    """Kills M21 (`startswith` -> `in`): a gate whose log merely QUOTES the
-    protocol line is not declaring anything."""
+    """Kills M21PAIR (`in` + the `line.index` slice): a gate whose log merely
+    QUOTES the protocol line is not declaring anything. Under the literal M21
+    this stays green (the fixed slice cuts into the prefix); its witness is
+    `test_the_r4_shaped_witness_flips_under_the_literal_m21`."""
     line = ("the gate reported: " + rt._REPO_GATE_UNMEASURED_PREFIX
             + json.dumps({"state": "blocked"}))
     gate = {"returncode": 1, "output": line, "output_truncated": False}
@@ -184,14 +186,13 @@ def test_a_log_echo_of_the_case_prefix_mid_line_is_not_a_case_record():
     assert identity_error
 
 
-# The two witnesses BELOW are the ones the mutation actually has to fail. A
-# mid-line echo only kills `PREFIX in line` when the slice the mutated reader
-# takes lands ON the JSON — i.e. when the noise header is EXACTLY as long as
-# the prefix. With a short header ("the gate reported: ", 19 characters) the
-# mutated slice cuts into the prefix itself, `json.loads` fails, and the test
-# stays green under the mutation while reading as if it had caught it. The
-# length is asserted here so a future edit to the protocol line cannot
-# silently re-disarm these witnesses.
+# The two witnesses BELOW use a noise header EXACTLY as long as the prefix.
+# They kill the PAIR (M21PAIR / M21BPAIR). Under the literal M21 / M21b the
+# fixed slice `line[len(prefix):]` lands on the prefix itself, `json.loads`
+# fails and they stay green; the literal edits are killed by
+# `test_the_r4_shaped_witness_flips_under_the_literal_m21{,b}`, whose prefix
+# sits INSIDE the JSON. The length is asserted here so a future edit to the
+# protocol line cannot silently change which mutation these read.
 
 _MIDLINE_NOISE = "x" * len(rt._REPO_GATE_UNMEASURED_PREFIX)
 _CASE_MIDLINE_NOISE = "x" * len(rt._REPO_GATE_CASE_PREFIX)
@@ -277,10 +278,11 @@ def _apply_m21_literal(func):
 
 
 def test_m21_is_reproduced_and_this_file_is_what_flips():
-    """M21: `line.startswith(PREFIX)` -> `PREFIX in line` on the declaration
-    channel. Under it a mid-line echo fires `unmeasured`, so a real red is
-    rewritten into an absence. Both halves are measured: the candidate reads
-    None, the mutant reads `blocked`."""
+    """The PAIR (M21PAIR: `startswith` -> `in` AND the `line.index` slice) on
+    the declaration channel, applied in-process by `_apply_m21_pair`. Under it
+    a mid-line echo fires `unmeasured`, so a real red is rewritten into an
+    absence. Both halves are measured: the candidate reads None, the mutant
+    reads `blocked`."""
     mutant = _apply_m21_pair(rt._unmeasured_declaration)
     body = json.dumps({"state": "blocked", "reason": "an echo, not a record"})
     line = _MIDLINE_NOISE + rt._REPO_GATE_UNMEASURED_PREFIX + body
@@ -332,8 +334,8 @@ def test_the_r4_shaped_witness_flips_under_the_literal_m21b():
 
 
 def test_m21b_is_reproduced_and_this_file_is_what_flips():
-    """M21b: the same `in` on `_REPO_GATE_CASE_PREFIX`. Under it one echoed
-    log line fabricates a prunable known-red identity — how a red gets
+    """The same PAIR on `_REPO_GATE_CASE_PREFIX` (M21BPAIR). Under it one
+    echoed log line fabricates a prunable known-red identity — how a red gets
     forgiven by a gate that never ran."""
     mutant = _apply_m21_pair(rt._repo_gate_failure_cases)
     gate = {"returncode": 1, "output_truncated": False,
@@ -571,6 +573,35 @@ def test_a_real_red_still_enters_the_baseline_and_the_absence_after_it_does_not_
     assert baseline.read_bytes() == before, (
         "an absence changed a baseline it did not measure")
     assert "repo_gate:run_tests.sh#A" in report["baseline_kept_unproven"]
+
+
+def test_an_absence_whose_failures_are_all_known_red_still_does_not_pass(
+        tmp_path):
+    """Kills ABSREL (`and not absent` removed from `passed_relative`).
+
+    The absence's own `failures[]` entry keys to the gate's name,
+    `repo_gate:run_tests.sh`. A baseline that already holds that key leaves
+    the absence with NO new failure, so `new_failures` alone would call it a
+    relative pass. Only the absence clause keeps it false.
+    """
+    repo = _repo_with_gate(tmp_path, DECLARED, exit_code=3)
+    state = tmp_path / "state"
+    baseline = _baseline_file(state, repo)
+    baseline.parent.mkdir(parents=True, exist_ok=True)
+    baseline.write_text(json.dumps({"failures": ["repo_gate:run_tests.sh"]}))
+
+    out = tmp_path / "out"
+    result = rt.run_tests(project_root=str(repo), out_dir=str(out),
+                          state_dir=str(state))
+    report = _report(out)
+
+    assert report["repo_gate"]["measured"] == rt.REPO_GATE_UNMEASURED
+    assert report["baseline_state"] == "compared"
+    assert report["new_failures"] == []
+    assert report["passed_relative"] is False, (
+        "an absence over a baseline that already names its gate reported a "
+        "relative pass")
+    assert result["passed_relative"] is False
 
 
 # ── N9: the tool's OWN contract text is a witness, on the deleted segment ───

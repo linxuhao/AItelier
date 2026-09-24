@@ -1,8 +1,8 @@
-CMD: docker run --rm --init --name onereading1-engine-base2 --network none -u 1000:1000 -m 3g -v /home/linxuhao/.AItelier/worktrees-scratch/onereading1-tools/harness_base.py:/srv/godot_harness.py:ro -v /home/linxuhao/.AItelier/worktrees-scratch/onereading1-tools/engine:/probe:ro aitelier-godot:latest python3 /probe/drive.py
+CMD: docker run --rm --init --name onereading1-engine-base --network none -u 1000:1000 -m 3g -v /home/linxuhao/.AItelier/worktrees-scratch/onereading1-tools/harness_base.py:/srv/godot_harness.py:ro -v /home/linxuhao/.AItelier/worktrees-scratch/onereading1-tools/engine:/probe:ro aitelier-godot:latest python3 /probe/drive.py
 HARNESS: /home/linxuhao/.AItelier/worktrees-scratch/onereading1-tools/harness_base.py  SHA1: 0b937675b9ec4da1b0d69daba8ab91ff92ecf956
-IMAGE: sha256:e9a6237c84c54863d5e388f2c1aecd729caeb3bc5ec49976d674929b51fad4b2
+IMAGE: sha256:758e81153640a2ca6d4d43c9c7f36b0e33f5918eabc5fda75f1bc2929634d6aa
 ENGINE_CONTAINERS_RUNNING_AT_LAUNCH: 0
-DATE: 2026-09-24T13:46:01Z
+DATE: 2026-09-24T13:25:25Z
 HARNESS_SHA1: 0b937675b9ec4da1b0d69daba8ab91ff92ecf956
 SPEC: {"scenarios": [{"name": "qualified_path_that_does_not_resolve", "timeline": [{"at": 10, "clicks": ["X/PlanEditKind1"]}, {"at": 20, "assert": {"Panel/PlanEditKind1.presses": 1, "X/PlanEditKind1.presses": 1}}]}, {"name": "bare_leaf_name", "timeline": [{"at": 10, "clicks": ["PlanEditKind1"]}, {"at": 20, "assert": {"PlanEditKind1.presses": 1}}]}]}
 passed: True
@@ -16,4 +16,4 @@ scenario qualified_path_that_does_not_resolve: ran=True passed=True input_dead=F
 scenario bare_leaf_name: ran=True passed=True input_dead=False
   assert {"name": "PlanEditKind1.presses", "node": "PlanEditKind1", "frame": 20, "passed": true, "actual": true, "observed": null, "error": ""}
 BARE_RC=0
-END: 2026-09-24T13:46:06Z
+END: 2026-09-24T13:25:32Z

@@ -9,26 +9,59 @@ IN_CONTAINER_GIT_STATUS_RC: 0
 BARE_RC=0
 == collect_cand
 CMD: pytest --collect-only tests/
-TREE: 5183a2edb24e9cf95bfd3c309c9f833edd4d91d8  DIRTY_FILES: 1
-CWD: /home/linxuhao/.AItelier/worktrees-scratch/onereading1  CONTAINER: onereading1-col-cand  DATE: 2026-09-24T13:39:32Z
-SLOTS_IN_USE_AT_LAUNCH: 1
+TREE: 4b1baff3f0bc7d8819e84bcadce5faa942152f24  DIRTY_FILES: 1
+CWD: /home/linxuhao/.AItelier/worktrees-scratch/onereading1  CONTAINER: onereading1-col-cand2  DATE: 2026-09-24T13:46:27Z
+SLOTS_IN_USE_AT_LAUNCH: 2
 IN_CONTAINER_GIT_STATUS_RC: 0
-5368/5379 tests collected (11 deselected) in 13.97s
+5403/5414 tests collected (11 deselected) in 15.14s
 BARE_RC=0
 CMD: diff <(grep :: collect_base.txt | sort) <(grep :: collect_cand.txt | sort)
 21,22c21,22
 < tests/contracts/director_messaging/test_fake_id_factory.py::test_fake_rejects_noncanonical_non_v4_ids_from_supported_factory[18836428-624B-4316-9A82-8CD48EB0C24E]
 < tests/contracts/director_messaging/test_fake_id_factory.py::test_fake_rejects_noncanonical_non_v4_ids_from_supported_factory[56280fae-b81d-11f1-998d-3ac0bb09ac74]
 ---
-> tests/contracts/director_messaging/test_fake_id_factory.py::test_fake_rejects_noncanonical_non_v4_ids_from_supported_factory[1B57629D-93F7-42A0-A769-BD04E1394D62]
-> tests/contracts/director_messaging/test_fake_id_factory.py::test_fake_rejects_noncanonical_non_v4_ids_from_supported_factory[617dd320-b81d-11f1-aad9-32135ab6d298]
+> tests/contracts/director_messaging/test_fake_id_factory.py::test_fake_rejects_noncanonical_non_v4_ids_from_supported_factory[59a7c84e-b81e-11f1-889f-2a9ebc8d5f81]
+> tests/contracts/director_messaging/test_fake_id_factory.py::test_fake_rejects_noncanonical_non_v4_ids_from_supported_factory[CEB2129A-BB87-48AA-98B7-79DBA814AF29]
 338a339
 > tests/integration/test_no_unfalsifiable_guarantees.py::test_a_round_file_carries_no_lie_keeping_phrase[docker/godot/godot_harness.py]
-396a398
+348a350,371
+> tests/integration/test_no_unfalsifiable_guarantees.py::test_a_round_file_carries_no_lie_keeping_phrase[final/corpus_impact.py]
+> tests/integration/test_no_unfalsifiable_guarantees.py::test_a_round_file_carries_no_lie_keeping_phrase[final/delivery_notes_harness_one_reading.md]
+> tests/integration/test_no_unfalsifiable_guarantees.py::test_a_round_file_carries_no_lie_keeping_phrase[final/engine_path_probe/drive.py]
+> tests/integration/test_no_unfalsifiable_guarantees.py::test_a_round_file_carries_no_lie_keeping_phrase[final/scripts/mutate.py]
+> tests/integration/test_no_unfalsifiable_guarantees.py::test_a_round_file_carries_no_lie_keeping_phrase[logs/collect_diff.txt]
+> tests/integration/test_no_unfalsifiable_guarantees.py::test_a_round_file_carries_no_lie_keeping_phrase[logs/corpus_impact.txt]
+> tests/integration/test_no_unfalsifiable_guarantees.py::test_a_round_file_carries_no_lie_keeping_phrase[logs/description_readers.txt]
+> tests/integration/test_no_unfalsifiable_guarantees.py::test_a_round_file_carries_no_lie_keeping_phrase[logs/engine_path_base.txt]
+> tests/integration/test_no_unfalsifiable_guarantees.py::test_a_round_file_carries_no_lie_keeping_phrase[logs/engine_path_cand.txt]
+> tests/integration/test_no_unfalsifiable_guarantees.py::test_a_round_file_carries_no_lie_keeping_phrase[logs/family_base.txt]
+> tests/integration/test_no_unfalsifiable_guarantees.py::test_a_round_file_carries_no_lie_keeping_phrase[logs/family_cand.txt]
+> tests/integration/test_no_unfalsifiable_guarantees.py::test_a_round_file_carries_no_lie_keeping_phrase[logs/mut_M1_scenario_key_check_deleted.txt]
+> tests/integration/test_no_unfalsifiable_guarantees.py::test_a_round_file_carries_no_lie_keeping_phrase[logs/mut_M2_spec_key_check_deleted.txt]
+> tests/integration/test_no_unfalsifiable_guarantees.py::test_a_round_file_carries_no_lie_keeping_phrase[logs/mut_M3_order_check_deleted.txt]
+> tests/integration/test_no_unfalsifiable_guarantees.py::test_a_round_file_carries_no_lie_keeping_phrase[logs/mut_M4_probe_spec_errors_not_lifted.txt]
+> tests/integration/test_no_unfalsifiable_guarantees.py::test_a_round_file_carries_no_lie_keeping_phrase[logs/mut_driver.txt]
+> tests/integration/test_no_unfalsifiable_guarantees.py::test_a_round_file_carries_no_lie_keeping_phrase[logs/new_tests_cand.txt]
+> tests/integration/test_no_unfalsifiable_guarantees.py::test_a_round_file_carries_no_lie_keeping_phrase[logs/suite_base.txt]
+> tests/integration/test_no_unfalsifiable_guarantees.py::test_a_round_file_carries_no_lie_keeping_phrase[logs/suite_cand.txt]
+> tests/integration/test_no_unfalsifiable_guarantees.py::test_a_round_file_carries_no_lie_keeping_phrase[logs/worddiff_docker_godot_godot_harness.py.txt]
+> tests/integration/test_no_unfalsifiable_guarantees.py::test_a_round_file_carries_no_lie_keeping_phrase[logs/worddiff_final_files.txt]
+> tests/integration/test_no_unfalsifiable_guarantees.py::test_a_round_file_carries_no_lie_keeping_phrase[logs/worddiff_tests_unit_test_playtest_one_reading.py.txt]
+396a420
 > tests/integration/test_no_unfalsifiable_guarantees.py::test_a_round_file_carries_no_lie_keeping_phrase[tests/unit/test_playtest_one_reading.py]
-3378a3381,3391
+3378a3403,3426
+> tests/unit/test_playtest_one_reading.py::test_a_bool_or_string_frame_is_still_refused[185]
+> tests/unit/test_playtest_one_reading.py::test_a_bool_or_string_frame_is_still_refused[3..15]
+> tests/unit/test_playtest_one_reading.py::test_a_bool_or_string_frame_is_still_refused[True]
+> tests/unit/test_playtest_one_reading.py::test_a_description_that_is_not_a_string_is_refused[bool]
+> tests/unit/test_playtest_one_reading.py::test_a_description_that_is_not_a_string_is_refused[float]
+> tests/unit/test_playtest_one_reading.py::test_a_description_that_is_not_a_string_is_refused[int]
+> tests/unit/test_playtest_one_reading.py::test_a_description_that_is_not_a_string_is_refused[list]
+> tests/unit/test_playtest_one_reading.py::test_a_description_that_is_not_a_string_is_refused[mapping]
+> tests/unit/test_playtest_one_reading.py::test_a_description_that_is_not_a_string_is_refused[null]
 > tests/unit/test_playtest_one_reading.py::test_a_drop_below_an_earlier_maximum_names_the_maximum
 > tests/unit/test_playtest_one_reading.py::test_a_path_the_probe_refused_comes_back_as_a_spec_error
+> tests/unit/test_playtest_one_reading.py::test_a_plain_string_description_is_allowed_and_runs
 > tests/unit/test_playtest_one_reading.py::test_an_unknown_top_level_spec_key_is_refused_and_nothing_runs
 > tests/unit/test_playtest_one_reading.py::test_by1_reviewer_notes_in_a_scenario_is_refused_and_the_scenario_does_not_run
 > tests/unit/test_playtest_one_reading.py::test_by2b_a_frame_written_after_a_later_frame_is_refused
@@ -38,4 +71,7 @@ CMD: diff <(grep :: collect_base.txt | sort) <(grep :: collect_cand.txt | sort)
 > tests/unit/test_playtest_one_reading.py::test_the_probe_reports_an_unresolved_path_as_a_spec_error
 > tests/unit/test_playtest_one_reading.py::test_the_probe_resolves_a_path_by_path_only
 > tests/unit/test_playtest_one_reading.py::test_the_same_frame_written_twice_is_legal
+> tests/unit/test_playtest_one_reading.py::test_whole_frames_still_run_as_written
+> tests/unit/test_playtest_one_reading.py::test_y4b_a_fractional_frame_is_refused
+> tests/unit/test_playtest_one_reading.py::test_y4b_through_playtest_spec_is_a_spec_error
 DIFF_BARE_RC=1

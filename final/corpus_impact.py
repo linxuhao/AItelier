@@ -71,6 +71,12 @@ def main(base_path, cand_path, repo):
                 keys = e.split("has unknown key(s) ", 1)[1].split(" - allowed", 1)[0]
                 kinds.append("unknown key(s) " + keys)
                 labels.add("unknown key(s) " + keys)
+            elif "has key description of type" in e:
+                kinds.append("description not a string")
+                labels.add("description not a string")
+            elif "has a non-integer `at`" in e:
+                kinds.append("non-integer at: " + e.split(": ", 1)[1].split(". Frames", 1)[0])
+                labels.add("non-integer `at`")
             elif "must not decrease in file order" in e:
                 kinds.append("order: " + e.split(": ", 1)[1].split(";", 1)[0])
                 labels.add("`at` decreases in file order")

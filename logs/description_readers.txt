@@ -1,20 +1,26 @@
-DATE: 2026-09-24T13:40:26Z  AITELIER_TREE: 5183a2edb24e9cf95bfd3c309c9f833edd4d91d8  WUXIA: 5603e3c85b410e872130dfee2bf223613add0cef
+DATE: 2026-09-24T13:48:09Z  AITELIER_TREE: 4b1baff3f0bc7d8819e84bcadce5faa942152f24  WUXIA: 5603e3c85b410e872130dfee2bf223613add0cef
 CMD1: grep -n description <AItelier files that read a play-test spec>
 /home/linxuhao/.AItelier/worktrees-scratch/onereading1/docker/godot/godot_harness.py:931:## hover-only affordance (a tooltip, a description preview) could be observed
+/home/linxuhao/.AItelier/worktrees-scratch/onereading1/docker/godot/godot_harness.py:1465:#   description -- read by the type check in _playtest_spec: a plain string
+/home/linxuhao/.AItelier/worktrees-scratch/onereading1/docker/godot/godot_harness.py:1468:_SCENARIO_KEYS = {"name", "timeline", "scene", "repeatability", "description"}
+/home/linxuhao/.AItelier/worktrees-scratch/onereading1/docker/godot/godot_harness.py:1748:        bad_desc = "description" in sc and not isinstance(sc["description"], str)
+/home/linxuhao/.AItelier/worktrees-scratch/onereading1/docker/godot/godot_harness.py:1751:                "scenario %r has key description of type %s - it must be a plain "
+/home/linxuhao/.AItelier/worktrees-scratch/onereading1/docker/godot/godot_harness.py:1753:                % (name, type(sc["description"]).__name__))
 CMD1_BARE_RC=0
 CMD2: git -C wuxia grep -nE get(.description|[.description.] 5603e3c85b410e872130dfee2bf223613add0cef -- tests tools
 5603e3c85b410e872130dfee2bf223613add0cef:tests/test_original_faction_identity.py:275:            assert spec.get("description") == _expected_description(t), (
 5603e3c85b410e872130dfee2bf223613add0cef:tests/test_original_faction_identity.py:305:            out += [t["skill_name"], t["description"]]
 5603e3c85b410e872130dfee2bf223613add0cef:tests/test_original_faction_identity.py:324:            zh = spec["description"]
 CMD2_BARE_RC=0
-CMD3: readers of the other allowed keys
-1708:    scene = str(spec.get("scene", "") or "")
-1709:    default_frames = int(spec.get("frames", frames) or frames)
-1710:    scenarios = spec.get("scenarios") or []
-1730:        name = str(sc.get("name", "scenario"))
-1731:        timeline, terrs = _normalize_timeline(sc.get("timeline") or [])
-1779:        sc_scene = str(sc.get("scene") or scene)
-2018:        if spec and isinstance(spec.get("scenarios"), list) and spec["scenarios"]:
+CMD3: readers of the allowed keys
+1718:    scene = str(spec.get("scene", "") or "")
+1719:    default_frames = int(spec.get("frames", frames) or frames)
+1720:    scenarios = spec.get("scenarios") or []
+1740:        name = str(sc.get("name", "scenario"))
+1741:        timeline, terrs = _normalize_timeline(sc.get("timeline") or [])
+1748:        bad_desc = "description" in sc and not isinstance(sc["description"], str)
+1795:        sc_scene = str(sc.get("scene") or scene)
+2034:        if spec and isinstance(spec.get("scenarios"), list) and spec["scenarios"]:
 CMD3a_BARE_RC=0
 5603e3c85b410e872130dfee2bf223613add0cef:tests/test_coop_ui_isolation.py:117:    surface = common["surface"]
 5603e3c85b410e872130dfee2bf223613add0cef:tests/test_coop_ui_isolation.py:179:    surface = common["surface"]

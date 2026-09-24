@@ -34,6 +34,12 @@ MUTANTS = [
     ("M4_probe_spec_errors_not_lifted",
      '                           for m in probe.get("spec_errors") or [])\n',
      "                           for m in ([] if %s else []))\n"),
+    ("M5_description_type_check_deleted",
+     '        bad_desc = "description" in sc and not isinstance(sc["description"], str)\n',
+     "        bad_desc = False if %s else False\n"),
+    ("M6_non_integer_at_check_deleted",
+     "        if isinstance(at_raw, float) and not at_raw.is_integer():\n",
+     "        if %s and False:\n"),
 ]
 
 (T / "ign").mkdir(exist_ok=True)

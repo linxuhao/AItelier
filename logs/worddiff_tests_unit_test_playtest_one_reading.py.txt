@@ -1,10 +1,10 @@
-CMD: git diff --word-diff 8b084c208dfaf688d862f806ba0a82d96670501d 5183a2edb24e9cf95bfd3c309c9f833edd4d91d8 -- tests/unit/test_playtest_one_reading.py
+CMD: git diff --word-diff 8b084c208dfaf688d862f806ba0a82d96670501d 4b1baff3f0bc7d8819e84bcadce5faa942152f24 -- tests/unit/test_playtest_one_reading.py
 diff --git a/tests/unit/test_playtest_one_reading.py b/tests/unit/test_playtest_one_reading.py
 new file mode 100644
-index 00000000..f89bae49
+index 00000000..30d67a72
 --- /dev/null
 +++ b/tests/unit/test_playtest_one_reading.py
-@@ -0,0 +1,230 @@
+@@ -0,0 +1,322 @@
 {+"""A play-test scenario has one reading: what the harness runs is what the+}
 {+author wrote and what a static rule reads.+}
 
@@ -16,6 +16,8 @@ index 00000000..f89bae49
 {+  BY1   logs/03_ondisk_BY1-cand_edit.log   geometry asserts moved under `reviewer_notes:`+}
 {+  BY2b  logs/03_ondisk_BY2b-cand_edit.log  an `at: 195` block written before `at: 185`+}
 {+  BY3   logs/03_ondisk_BY3-cand_edit.log   a click on `X/PlanEditKind1 +0,20`+}
+{+  Y4b   logs/03_ondisk_Y4b-cand_edit.log   the f200 click moved to `at: 185.5`+}
+{+           (playtest/event_travel_plan_effects.yaml)+}
 
 {+All three ran green on the harness before this change. BY1 and BY2b are refused+}
 {+at parse time by the real `_playtest_spec` / `_normalize_timeline`; BY3 is+}
@@ -26,6 +28,7 @@ index 00000000..f89bae49
 {+import importlib.util+}
 {+from pathlib import Path+}
 
+{+import pytest+}
 {+import yaml+}
 
 {+_HARNESS = Path(__file__).resolve().parents[2] / "docker" / "godot" / "godot_harness.py"+}
@@ -152,7 +155,96 @@ index 00000000..f89bae49
 
 {+def test_the_allowed_sets_are_exactly_these():+}
 {+    assert gh._SPEC_KEYS == {"scene", "frames", "scenarios", "actions", "surface"}+}
-{+    assert gh._SCENARIO_KEYS == {"name", "timeline", "scene", "repeatability"}+}
+{+    assert gh._SCENARIO_KEYS == {"name", "timeline", "scene", "repeatability",+}
+{+                                 "description"}+}
+
+
+{+# ── `description` is allowed only as a plain string ──────────────────────+}
+
+{+def test_a_plain_string_description_is_allowed_and_runs(monkeypatch, tmp_path):+}
+{+    ran = _probe_recorder(monkeypatch)+}
+{+    spec = {"scenarios": [{"name": "s", "description": "RENDER REQUIRED. Real keyboard menu.",+}
+{+                           "timeline": [{"at": 3, "assert": {"HUD.visible": True}}]}]}+}
+{+    r = gh._playtest_spec(tmp_path / "proj", spec, 300, 120)+}
+{+    assert r["spec_errors"] == []+}
+{+    assert ran == [""]+}
+{+    assert r["passed"] is True+}
+
+
+{+_BY1_NOTES = yaml.safe_load(_BY1)["reviewer_notes"]+}
+
+
+{+@pytest.mark.parametrize("value", [+}
+{+    _BY1_NOTES,                    # a list: BY1's notes block moved under `description:`+}
+{+    _BY1_NOTES[0],                 # a mapping: one BY1 assert block+}
+{+    3, 185.5, True, None,+}
+{+], ids=["list", "mapping", "int", "float", "bool", "null"])+}
+{+def test_a_description_that_is_not_a_string_is_refused(monkeypatch, tmp_path, value):+}
+{+    ran = _probe_recorder(monkeypatch)+}
+{+    by1 = yaml.safe_load(_BY1)+}
+{+    by1.pop("reviewer_notes")+}
+{+    by1["description"] = value+}
+{+    r = gh._playtest_spec(tmp_path / "proj", {"scenarios": [by1]}, 300, 120)+}
+{+    assert ran == [], "a refused scenario must not reach the engine"+}
+{+    assert r["passed"] is False+}
+{+    assert len(r["spec_errors"]) == 1, r["spec_errors"]+}
+{+    msg = r["spec_errors"][0]+}
+{+    assert "'plan_route_event_reroll_budget'" in msg+}
+{+    assert "key description of type %s" % type(value).__name__ in msg+}
+{+    assert [s["ran"] for s in r["behavior"]["scenarios"]] == [False]+}
+
+
+{+# ── a frame is a whole number ─────────────────────────────────────────────+}
+
+{+# Y4b: the real f185 block of event_travel_plan_effects.yaml, then the review's+}
+{+# edit moving the f200 aim to `at: 185.5`, which the harness ran at frame 185.+}
+{+_Y4B = """\+}
+{+- at: 185+}
+{+  actions: []+}
+{+  assert:+}
+{+    CultivationScreen.phase: phase == "PLAN_EDIT"+}
+{+    PlanEditKind1.get_popup().visible: get_popup().visible == true+}
+{+    PlanEditKind1.get_popup().item_count: get_popup().item_count == 4+}
+{+    PlanEditKind1.get_popup().get_item_text(3): get_popup().get_item_text(3) == "游历"+}
+{+    PlanEditKind1.get_popup().position.y: get_popup().position.y == int(get_global_rect().end.y)+}
+{+    PlanEditKind1.aim_90_hits_item_3: int((get_global_rect().get_center().y + 90.0 - get_popup().position.y) / (get_popup().size.y / get_popup().item_count)) == 3+}
+{+- at: 185.5+}
+{+  actions: []+}
+{+  clicks:+}
+{+  - PlanEditKind1 +0,90+}
+{+"""+}
+
+
+{+def test_y4b_a_fractional_frame_is_refused():+}
+{+    out, errors = gh._normalize_timeline(yaml.safe_load(_Y4B))+}
+{+    assert len(errors) == 1, errors+}
+{+    assert "timeline entry 1 has a non-integer `at`: 185.5" in errors[0]+}
+{+    assert not any("click" in e for e in out), "the refused click must not be scheduled"+}
+
+
+{+def test_y4b_through_playtest_spec_is_a_spec_error(monkeypatch, tmp_path):+}
+{+    _probe_recorder(monkeypatch)+}
+{+    spec = {"scenarios": [{"name": "event_travel_plan_effects",+}
+{+                           "timeline": yaml.safe_load(_Y4B)}]}+}
+{+    r = gh._playtest_spec(tmp_path / "proj", spec, 300, 120)+}
+{+    assert r["passed"] is False+}
+{+    assert any("'event_travel_plan_effects'" in e and "entry 1" in e and "185.5" in e+}
+{+               for e in r["spec_errors"]), r["spec_errors"]+}
+
+
+{+def test_whole_frames_still_run_as_written():+}
+{+    out, errors = gh._normalize_timeline([+}
+{+        {"at": 185, "assert": {"HUD.visible": True}},+}
+{+        {"at": 200.0, "clicks": ["PlanEditKind1 +0,90"]}])+}
+{+    assert errors == []+}
+{+    assert [(e["at"], type(e["at"])) for e in out] == [(185, int), (200, int)]+}
+
+
+{+@pytest.mark.parametrize("value", [True, "185", "3..15"])+}
+{+def test_a_bool_or_string_frame_is_still_refused(value):+}
+{+    out, errors = gh._normalize_timeline([{"at": value, "clicks": ["A"]}])+}
+{+    assert out == []+}
+{+    assert len(errors) == 1 and "non-numeric `at`" in errors[0]+}
 
 
 {+# ── the timeline runs in the order it is written ─────────────────────────+}

@@ -1,9 +1,9 @@
-CMD: docker run --rm --init --name onereading1-engine-cand --network none -u 1000:1000 -m 3g -v /home/linxuhao/.AItelier/worktrees-scratch/onereading1-tools/harness_cand.py:/srv/godot_harness.py:ro -v /home/linxuhao/.AItelier/worktrees-scratch/onereading1-tools/engine:/probe:ro aitelier-godot:latest python3 /probe/drive.py
-HARNESS: /home/linxuhao/.AItelier/worktrees-scratch/onereading1-tools/harness_cand.py  SHA1: ab99c3c30aabb0bfdac4aa912362295dec175062
-IMAGE: sha256:758e81153640a2ca6d4d43c9c7f36b0e33f5918eabc5fda75f1bc2929634d6aa
+CMD: docker run --rm --init --name onereading1-engine-cand2 --network none -u 1000:1000 -m 3g -v /home/linxuhao/.AItelier/worktrees-scratch/onereading1-tools/harness_cand.py:/srv/godot_harness.py:ro -v /home/linxuhao/.AItelier/worktrees-scratch/onereading1-tools/engine:/probe:ro aitelier-godot:latest python3 /probe/drive.py
+HARNESS: /home/linxuhao/.AItelier/worktrees-scratch/onereading1-tools/harness_cand.py  SHA1: a34215235f48764f2b72bfc11750360a4f851c6a
+IMAGE: sha256:e9a6237c84c54863d5e388f2c1aecd729caeb3bc5ec49976d674929b51fad4b2
 ENGINE_CONTAINERS_RUNNING_AT_LAUNCH: 0
-DATE: 2026-09-24T13:25:35Z
-HARNESS_SHA1: ab99c3c30aabb0bfdac4aa912362295dec175062
+DATE: 2026-09-24T13:45:50Z
+HARNESS_SHA1: a34215235f48764f2b72bfc11750360a4f851c6a
 SPEC: {"scenarios": [{"name": "qualified_path_that_does_not_resolve", "timeline": [{"at": 10, "clicks": ["X/PlanEditKind1"]}, {"at": 20, "assert": {"Panel/PlanEditKind1.presses": 1, "X/PlanEditKind1.presses": 1}}]}, {"name": "bare_leaf_name", "timeline": [{"at": 10, "clicks": ["PlanEditKind1"]}, {"at": 20, "assert": {"PlanEditKind1.presses": 1}}]}]}
 passed: False
 summary: Playtest HARD-failed: 2 spec violations -- scenario 'qualified_path_that_does_not_resolve': frame 10: aim target X/PlanEditKind1 is a path and does not resolve under the current scene (spec: X/PlanEditKind1)
@@ -19,4 +19,4 @@ scenario qualified_path_that_does_not_resolve: ran=True passed=False input_dead=
 scenario bare_leaf_name: ran=True passed=True input_dead=False
   assert {"name": "PlanEditKind1.presses", "node": "PlanEditKind1", "frame": 20, "passed": true, "actual": true, "observed": null, "error": ""}
 BARE_RC=1
-END: 2026-09-24T13:25:42Z
+END: 2026-09-24T13:45:56Z

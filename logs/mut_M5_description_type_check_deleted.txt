@@ -1,0 +1,192 @@
+CMD: pytest tests/unit/test_playtest_one_reading.py tests/unit/test_godot_harness.py tests/unit/test_godot_playtest_spec.py tests/unit/test_godot_playtest_scenario.py tests/unit/test_playtest_blind_run.py tests/unit/test_playtest_fixed_delta.py tests/unit/test_playtest_game_time_observation.py tests/unit/test_playtest_timing_ledger.py tests/unit/test_playtest_user_dir_isolation.py tests/unit/test_godot_harness_native_errors.py tests/unit/test_godot_lifecycle.py tests/unit/test_harness_render_lock.py tests/unit/test_godot_compile.py tests/unit/test_godot_vision.py tests/unit/test_clock_sensitivity.py tests/unit/test_relay_acknowledgement_real_instruction.py tests/unit/test_no_verbatim_previous_line_dup.py
+TREE: 4b1baff3f0bc7d8819e84bcadce5faa942152f24  DIRTY_FILES: 1
+CWD: /home/linxuhao/.AItelier/worktrees-scratch/onereading1-mut  CONTAINER: onereading1-m5  DATE: 2026-09-24T13:45:21Z
+SLOTS_IN_USE_AT_LAUNCH: 2
+IN_CONTAINER_GIT_STATUS_RC: 0
+.....FFFFFF.............................................ssssssss........ [ 28%]
+........................................................................ [ 56%]
+........................................................................ [ 84%]
+.......................................                                  [100%]
+=================================== FAILURES ===================================
+___________ test_a_description_that_is_not_a_string_is_refused[list] ___________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7d2b1ab33fe0>
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_a_description_that_is_not0')
+value = [{'at': 1, 'assert': {'PlanEditKind1.get_popup().visible': 'get_popup().visible == true', 'PlanEditKind1.get_popup().i...t(3) == "游历"', 'PlanEditKind1.get_popup().position.y': 'get_popup().position.y == int(get_global_rect().end.y)', ...}}]
+
+    @pytest.mark.parametrize("value", [
+        _BY1_NOTES,                    # a list: BY1's notes block moved under `description:`
+        _BY1_NOTES[0],                 # a mapping: one BY1 assert block
+        3, 185.5, True, None,
+    ], ids=["list", "mapping", "int", "float", "bool", "null"])
+    def test_a_description_that_is_not_a_string_is_refused(monkeypatch, tmp_path, value):
+        ran = _probe_recorder(monkeypatch)
+        by1 = yaml.safe_load(_BY1)
+        by1.pop("reviewer_notes")
+        by1["description"] = value
+        r = gh._playtest_spec(tmp_path / "proj", {"scenarios": [by1]}, 300, 120)
+>       assert ran == [], "a refused scenario must not reach the engine"
+E       AssertionError: a refused scenario must not reach the engine
+E       assert ['', ''] == []
+E         
+E         Left contains 2 more items, first extra item: ''
+E         Use -v to get more diff
+
+tests/unit/test_playtest_one_reading.py:181: AssertionError
+_________ test_a_description_that_is_not_a_string_is_refused[mapping] __________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7d2b1ab390d0>
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_a_description_that_is_not1')
+value = {'at': 1, 'assert': {'PlanEditKind1.get_popup().visible': 'get_popup().visible == true', 'PlanEditKind1.get_popup().it...xt(3) == "游历"', 'PlanEditKind1.get_popup().position.y': 'get_popup().position.y == int(get_global_rect().end.y)', ...}}
+
+    @pytest.mark.parametrize("value", [
+        _BY1_NOTES,                    # a list: BY1's notes block moved under `description:`
+        _BY1_NOTES[0],                 # a mapping: one BY1 assert block
+        3, 185.5, True, None,
+    ], ids=["list", "mapping", "int", "float", "bool", "null"])
+    def test_a_description_that_is_not_a_string_is_refused(monkeypatch, tmp_path, value):
+        ran = _probe_recorder(monkeypatch)
+        by1 = yaml.safe_load(_BY1)
+        by1.pop("reviewer_notes")
+        by1["description"] = value
+        r = gh._playtest_spec(tmp_path / "proj", {"scenarios": [by1]}, 300, 120)
+>       assert ran == [], "a refused scenario must not reach the engine"
+E       AssertionError: a refused scenario must not reach the engine
+E       assert ['', ''] == []
+E         
+E         Left contains 2 more items, first extra item: ''
+E         Use -v to get more diff
+
+tests/unit/test_playtest_one_reading.py:181: AssertionError
+___________ test_a_description_that_is_not_a_string_is_refused[int] ____________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7d2b1ab32480>
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_a_description_that_is_not2')
+value = 3
+
+    @pytest.mark.parametrize("value", [
+        _BY1_NOTES,                    # a list: BY1's notes block moved under `description:`
+        _BY1_NOTES[0],                 # a mapping: one BY1 assert block
+        3, 185.5, True, None,
+    ], ids=["list", "mapping", "int", "float", "bool", "null"])
+    def test_a_description_that_is_not_a_string_is_refused(monkeypatch, tmp_path, value):
+        ran = _probe_recorder(monkeypatch)
+        by1 = yaml.safe_load(_BY1)
+        by1.pop("reviewer_notes")
+        by1["description"] = value
+        r = gh._playtest_spec(tmp_path / "proj", {"scenarios": [by1]}, 300, 120)
+>       assert ran == [], "a refused scenario must not reach the engine"
+E       AssertionError: a refused scenario must not reach the engine
+E       assert ['', ''] == []
+E         
+E         Left contains 2 more items, first extra item: ''
+E         Use -v to get more diff
+
+tests/unit/test_playtest_one_reading.py:181: AssertionError
+__________ test_a_description_that_is_not_a_string_is_refused[float] ___________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7d2b1ab32750>
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_a_description_that_is_not3')
+value = 185.5
+
+    @pytest.mark.parametrize("value", [
+        _BY1_NOTES,                    # a list: BY1's notes block moved under `description:`
+        _BY1_NOTES[0],                 # a mapping: one BY1 assert block
+        3, 185.5, True, None,
+    ], ids=["list", "mapping", "int", "float", "bool", "null"])
+    def test_a_description_that_is_not_a_string_is_refused(monkeypatch, tmp_path, value):
+        ran = _probe_recorder(monkeypatch)
+        by1 = yaml.safe_load(_BY1)
+        by1.pop("reviewer_notes")
+        by1["description"] = value
+        r = gh._playtest_spec(tmp_path / "proj", {"scenarios": [by1]}, 300, 120)
+>       assert ran == [], "a refused scenario must not reach the engine"
+E       AssertionError: a refused scenario must not reach the engine
+E       assert ['', ''] == []
+E         
+E         Left contains 2 more items, first extra item: ''
+E         Use -v to get more diff
+
+tests/unit/test_playtest_one_reading.py:181: AssertionError
+___________ test_a_description_that_is_not_a_string_is_refused[bool] ___________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7d2b1ab00a70>
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_a_description_that_is_not4')
+value = True
+
+    @pytest.mark.parametrize("value", [
+        _BY1_NOTES,                    # a list: BY1's notes block moved under `description:`
+        _BY1_NOTES[0],                 # a mapping: one BY1 assert block
+        3, 185.5, True, None,
+    ], ids=["list", "mapping", "int", "float", "bool", "null"])
+    def test_a_description_that_is_not_a_string_is_refused(monkeypatch, tmp_path, value):
+        ran = _probe_recorder(monkeypatch)
+        by1 = yaml.safe_load(_BY1)
+        by1.pop("reviewer_notes")
+        by1["description"] = value
+        r = gh._playtest_spec(tmp_path / "proj", {"scenarios": [by1]}, 300, 120)
+>       assert ran == [], "a refused scenario must not reach the engine"
+E       AssertionError: a refused scenario must not reach the engine
+E       assert ['', ''] == []
+E         
+E         Left contains 2 more items, first extra item: ''
+E         Use -v to get more diff
+
+tests/unit/test_playtest_one_reading.py:181: AssertionError
+___________ test_a_description_that_is_not_a_string_is_refused[null] ___________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7d2b1ab00dd0>
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_a_description_that_is_not5')
+value = None
+
+    @pytest.mark.parametrize("value", [
+        _BY1_NOTES,                    # a list: BY1's notes block moved under `description:`
+        _BY1_NOTES[0],                 # a mapping: one BY1 assert block
+        3, 185.5, True, None,
+    ], ids=["list", "mapping", "int", "float", "bool", "null"])
+    def test_a_description_that_is_not_a_string_is_refused(monkeypatch, tmp_path, value):
+        ran = _probe_recorder(monkeypatch)
+        by1 = yaml.safe_load(_BY1)
+        by1.pop("reviewer_notes")
+        by1["description"] = value
+        r = gh._playtest_spec(tmp_path / "proj", {"scenarios": [by1]}, 300, 120)
+>       assert ran == [], "a refused scenario must not reach the engine"
+E       AssertionError: a refused scenario must not reach the engine
+E       assert ['', ''] == []
+E         
+E         Left contains 2 more items, first extra item: ''
+E         Use -v to get more diff
+
+tests/unit/test_playtest_one_reading.py:181: AssertionError
+=============================== warnings summary ===============================
+../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_playtest_one_reading.py::test_a_description_that_is_not_a_string_is_refused[list]
+FAILED tests/unit/test_playtest_one_reading.py::test_a_description_that_is_not_a_string_is_refused[mapping]
+FAILED tests/unit/test_playtest_one_reading.py::test_a_description_that_is_not_a_string_is_refused[int]
+FAILED tests/unit/test_playtest_one_reading.py::test_a_description_that_is_not_a_string_is_refused[float]
+FAILED tests/unit/test_playtest_one_reading.py::test_a_description_that_is_not_a_string_is_refused[bool]
+FAILED tests/unit/test_playtest_one_reading.py::test_a_description_that_is_not_a_string_is_refused[null]
+6 failed, 241 passed, 8 skipped, 1 warning in 1.92s
+BARE_RC=1
+END: 2026-09-24T13:45:28Z
+MUTANT: M5_description_type_check_deleted
+IGNITION: 52
+MUTANT_DIFF:
+diff --git a/docker/godot/godot_harness.py b/docker/godot/godot_harness.py
+index 89b3ba93..ddc6fc7a 100644
+--- a/docker/godot/godot_harness.py
++++ b/docker/godot/godot_harness.py
+@@ -1745,7 +1745,7 @@ def _playtest_spec(dst: Path, spec: dict, frames: int, timeout: int,
+             spec_errors.append(
+                 "scenario %r has unknown key(s) %s - allowed: %s. The scenario was not run."
+                 % (name, ", ".join(unknown), ", ".join(sorted(_SCENARIO_KEYS))))
+-        bad_desc = "description" in sc and not isinstance(sc["description"], str)
++        bad_desc = False if open("/home/linxuhao/.AItelier/worktrees-scratch/onereading1-tools/ign/M5_description_type_check_deleted.txt", "a").write("1\n") else False
+         if bad_desc:
+             spec_errors.append(
+                 "scenario %r has key description of type %s - it must be a plain "

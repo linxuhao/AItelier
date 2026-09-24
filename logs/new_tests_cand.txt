@@ -1,24 +1,15 @@
-CMD: pytest -v tests/unit/test_playtest_one_reading.py
-TREE: 5183a2edb24e9cf95bfd3c309c9f833edd4d91d8  DIRTY_FILES: 1
-CWD: /home/linxuhao/.AItelier/worktrees-scratch/onereading1  CONTAINER: onereading1-new-cand  DATE: 2026-09-24T13:39:00Z
-SLOTS_IN_USE_AT_LAUNCH: 1
+CMD: pytest tests/unit/test_playtest_one_reading.py
+TREE: 4b1baff3f0bc7d8819e84bcadce5faa942152f24  DIRTY_FILES: 1
+CWD: /home/linxuhao/.AItelier/worktrees-scratch/onereading1  CONTAINER: onereading1-new-cand2  DATE: 2026-09-24T13:46:22Z
+SLOTS_IN_USE_AT_LAUNCH: 2
 IN_CONTAINER_GIT_STATUS_RC: 0
-============================= test session starts ==============================
-platform linux -- Python 3.12.14, pytest-9.1.1, pluggy-1.6.0
-rootdir: /home/linxuhao/.AItelier/worktrees-scratch/onereading1
-configfile: pytest.ini
-plugins: anyio-4.15.1, asyncio-1.4.0
-asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
-collected 11 items
-
-tests/unit/test_playtest_one_reading.py ...........                      [100%]
-
+........................                                                 [100%]
 =============================== warnings summary ===============================
 ../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
   /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
     from starlette.testclient import TestClient as TestClient  # noqa
 
 -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
-======================== 11 passed, 1 warning in 0.21s =========================
+24 passed, 1 warning in 0.27s
 BARE_RC=0
-END: 2026-09-24T13:39:04Z
+END: 2026-09-24T13:46:27Z

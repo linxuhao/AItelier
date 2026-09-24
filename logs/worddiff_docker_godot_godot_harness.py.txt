@@ -1,6 +1,6 @@
-CMD: git diff --word-diff 8b084c208dfaf688d862f806ba0a82d96670501d 5183a2edb24e9cf95bfd3c309c9f833edd4d91d8 -- docker/godot/godot_harness.py
+CMD: git diff --word-diff 8b084c208dfaf688d862f806ba0a82d96670501d 4b1baff3f0bc7d8819e84bcadce5faa942152f24 -- docker/godot/godot_harness.py
 diff --git a/docker/godot/godot_harness.py b/docker/godot/godot_harness.py
-index 33a6cec4..ad9bd0e3 100644
+index 33a6cec4..89b3ba93 100644
 --- a/docker/godot/godot_harness.py
 +++ b/docker/godot/godot_harness.py
 @@ -665,6 +665,7 @@ var _spec_mode := false
@@ -68,7 +68,7 @@ func _jsonable(v):
     var t_walk := Time.get_ticks_usec()
     _walk(get_tree().get_root(), out["nodes"])
     var walk_usec := Time.get_ticks_usec() - t_walk
-@@ -1438,6 +1454,16 @@ def _normalize_asserts(raw) -> list:
+@@ -1438,6 +1454,18 @@ def _normalize_asserts(raw) -> list:
 
 _TIMELINE_KEYS = {"at", "press", "release", "actions", "assert", "click", "clicks",
                   "hover", "hovers"}
@@ -79,13 +79,15 @@ _TIMELINE_KEYS = {"at", "press", "release", "actions", "assert", "click", "click
 {+# and as nothing to this harness. Every key here has a reader:+}
 {+#   scene / frames / scenarios, name / timeline / scene -- _playtest_spec below;+}
 {+#   actions / surface -- the game repo's contract tests read _common.yaml;+}
-{+#   repeatability -- the game repo's gate launcher replays the scenario.+}
+{+#   repeatability -- the game repo's gate launcher replays the scenario;+}
+{+#   description -- read by the type check in _playtest_spec: a plain string+}
+{+#     only, because a mapping or a list under it could carry assert blocks.+}
 {+_SPEC_KEYS = {"scene", "frames", "scenarios", "actions", "surface"}+}
-{+_SCENARIO_KEYS = {"name", "timeline", "scene", "repeatability"}+}
+{+_SCENARIO_KEYS = {"name", "timeline", "scene", "repeatability", "description"}+}
 _MAX_SPEC_FRAMES = 3000   # safety cap on how long one scenario may run
 
 
-@@ -1455,6 +1481,7 @@ def _normalize_timeline(timeline: list) -> tuple[list, list]:
+@@ -1455,6 +1483,7 @@ def _normalize_timeline(timeline: list) -> tuple[list, list]:
     existed. Ignoring a key we do not understand is how a gate ends up grading a
     game nobody played."""
     out, errors = [], []
@@ -93,7 +95,19 @@ _MAX_SPEC_FRAMES = 3000   # safety cap on how long one scenario may run
     for i, e in enumerate(timeline or []):
         if not isinstance(e, dict):
             errors.append("timeline entry %d is %s, expected a mapping"
-@@ -1486,6 +1513,18 @@ def _normalize_timeline(timeline: list) -> tuple[list, list]:
+@@ -1482,10 +1511,30 @@ def _normalize_timeline(timeline: list) -> tuple[list, list]:
+                "integers -- a range or a list is not supported, write one entry "
+                "per frame (`- {at: 3, ...}` … `- {at: 15, ...}`)." % (i, at_raw))
+            continue
+        {+# A fractional frame has two readings: int() below runs `at: 185.5` at+}
+{+        # frame 185, while anything comparing the written value sees 185.5.+}
+{+        # A float that is a whole number (185.0) has one reading and stays.+}
+{+        if isinstance(at_raw, float) and not at_raw.is_integer():+}
+{+            errors.append(+}
+{+                "timeline entry %d has a non-integer `at`: %r. Frames are whole "+}
+{+                "numbers; write the frame the entry should run on." % (i, at_raw))+}
+{+            continue+}
+        at = int(at_raw)
         if at < 0:
             errors.append("timeline entry %d has a negative `at`: %r" % (i, at_raw))
             continue
@@ -112,7 +126,7 @@ _MAX_SPEC_FRAMES = 3000   # safety cap on how long one scenario may run
         acts = e.get("actions") or []
         if isinstance(acts, str):
             acts = [acts]
-@@ -1682,10 +1721,28 @@ def _playtest_spec(dst: Path, spec: dict, frames: int, timeout: int,
+@@ -1682,10 +1731,34 @@ def _playtest_spec(dst: Path, spec: dict, frames: int, timeout: int,
     ran_any = crashed = False
     last_state: dict = {}
     render_mode = "headless"
@@ -130,7 +144,13 @@ _MAX_SPEC_FRAMES = 3000   # safety cap on how long one scenario may run
 {+            spec_errors.append(+}
 {+                "scenario %r has unknown key(s) %s - allowed: %s. The scenario was not run."+}
 {+                % (name, ", ".join(unknown), ", ".join(sorted(_SCENARIO_KEYS))))+}
-{+        if unknown or unknown_spec:+}
+{+        bad_desc = "description" in sc and not isinstance(sc["description"], str)+}
+{+        if bad_desc:+}
+{+            spec_errors.append(+}
+{+                "scenario %r has key description of type %s - it must be a plain "+}
+{+                "string. The scenario was not run."+}
+{+                % (name, type(sc["description"]).__name__))+}
+{+        if unknown or unknown_spec or bad_desc:+}
 {+            scen_results.append({"name": name, "ran": False, "errors": [],+}
 {+                                 "native_debt": [], "asserts": [], "passed": False,+}
 {+                                 "pressed": False, "input_dead": False})+}
@@ -141,7 +161,7 @@ _MAX_SPEC_FRAMES = 3000   # safety cap on how long one scenario may run
         max_at = max([int(e.get("at", 0)) for e in timeline], default=0)
         # Run long enough to REACH the last timeline event (+margin) -- default_frames
         # is a floor, not a ceiling. Capped for safety. Truncating here would drop a
-@@ -1748,6 +1805,8 @@ def _playtest_spec(dst: Path, spec: dict, frames: int, timeout: int,
+@@ -1748,6 +1821,8 @@ def _playtest_spec(dst: Path, spec: dict, frames: int, timeout: int,
             "frames_stepped", probe.get("frames", 0))
         scen_timing.append(_scenario_ledger(
             name, sc_scene, time.monotonic() - t_scen_start, t_scenario))

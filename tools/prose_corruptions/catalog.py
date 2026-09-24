@@ -59,11 +59,12 @@ K5_CONTENT = (
     "report every defect you find, citing file and line for each one of them.\n"
     '"""\n')
 
-# K6c is the r5 m12 shape: duplicate the single `Step dispatch` banner line,
-# so the git diff after applying it is exactly one added line, not a whole-file
-# overwrite of core/dpe_pipeline.py. The locator is that line's unique text;
+# K6c is the r5 m14 shape: duplicate the single comment-rule banner line
+# `# ── Why did a JSON reply fail to parse?` in core/dpe_pipeline.py, so the git
+# diff after applying it is exactly one added line, not a whole-file overwrite
+# of core/dpe_pipeline.py. The locator is that line's unique text;
 # `duplicate_line` refuses a locator that does not select exactly one line.
-K6C_LOCATE = "Step dispatch"
+K6C_LOCATE = "# ── Why did a JSON reply fail to parse?"
 
 # K6: the bytes that were already corrupt in r2/r3, kept as they were.
 K6_ENTRIES = (
@@ -99,7 +100,7 @@ CORRUPTIONS = (
     {"id": "K5", "what": "new module, prompt constant as an f-string",
      "kind": "add", "path": "core/zz_new_prompt.py", "content": K5_CONTENT,
      "surface": None, "rule": "unaccounted_prose_constant"},
-    {"id": "K6c", "what": "duplicate the Step dispatch banner line",
+    {"id": "K6c", "what": "duplicate the JSON-parse banner line",
      "kind": "dupline", "path": "core/dpe_pipeline.py",
      "locate": K6C_LOCATE, "surface": "core/dpe_pipeline.py",
      "rule": "adjacent_duplicate_line"},
@@ -174,6 +175,56 @@ def surface_text(entry, read, show):
     if entry.get("block"):
         return _guidance(text, entry["block"])
     return text
+
+
+HEAD_READ_HINT = (
+    "Pass a reader that returns the file as of HEAD, e.g. "
+    "`lambda rel: _git_file('HEAD', rel)`, never the live worktree read: a "
+    "runner that has already corrupted the worktree would hand the fixture "
+    "its own damaged bytes as the \"clean\" pole, and the fixture would fail "
+    "on a precondition instead of measuring detection."
+)
+
+
+def clean_surface_text(entry, head_read):
+    """The INTACT bytes of `entry`'s surface, from a mutation-immune source.
+
+    `head_read(rel)` must return the file as of the committed HEAD, not the
+    working tree on disk. HEAD is the same committed content in the pipeline
+    worktree and in the reviewer's one-shot container, and the corruption
+    runner never commits its edit, so this is the clean pole even while the
+    runner has the live tree damaged. See HEAD_READ_HINT.
+    """
+    assert head_read is not None, HEAD_READ_HINT
+    if entry.get("block"):
+        return _guidance(head_read("core/output_migration.py"), entry["block"])
+    return head_read(entry["path"])
+
+
+def entry_file_path(entry):
+    """The file `entry` damages; block-only entries damage output_migration."""
+    return entry.get("path", "core/output_migration.py")
+
+
+def corrupt_file_text(entry, read, show):
+    """The bytes the runner writes into `entry`'s FILE, built from a clean copy.
+
+    Mirrors the runner's `_apply` exactly, so a test can reconstruct the live
+    bytes a corruption run leaves behind without invoking the runner. `read`
+    supplies a clean file and `show(rev, rel)` an old revision; neither writes.
+    """
+    if entry["kind"] == "add":
+        return entry["content"]
+    if entry.get("rev") and entry.get("block"):
+        text = read("core/output_migration.py")
+        block = _guidance(show(entry["rev"], "core/output_migration.py"),
+                          entry["block"])
+        return re.sub(
+            rf'(?s)(STRICT_PATCH_GUIDANCE_{entry["block"]} = """)(.*?)(""")',
+            lambda m: m.group(1) + block + m.group(3), text)
+    if entry.get("rev"):
+        return show(entry["rev"], entry["path"])
+    return apply_to_text(read(entry["path"]), entry)
 
 
 def existing_surface_entries():

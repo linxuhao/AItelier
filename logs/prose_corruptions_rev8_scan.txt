@@ -1,0 +1,37 @@
+Scanner repair, measured in this round (implement step, rev 8)
+==============================================================
+
+No shell is available in the implement step, so the range scan was measured by
+a temporary pytest probe (tests/unit/zz_probe_scan_range.py, deleted before
+delivery) that calls the scanner's own functions on the added lines of the r6
+range. The reviewer runs the real command:
+
+    python tools/prose_corruptions/scan_joined_lines.py 527beafa 7c43f6a5
+    python tools/prose_corruptions/scan_joined_lines.py 7c43f6a5 0f8ac679
+
+Range 527beafa..7c43f6a5, BEFORE the scanner repair: 9 hits
+  tests/unit/test_prose_corruption_catalog.py:147  two_statements_one_line
+  tests/unit/test_prose_corruption_catalog.py:148  two_statements_one_line
+  tests/unit/test_prose_corruption_catalog.py:152  two_statements_one_line
+  tests/unit/test_prose_corruption_catalog.py:154  two_statements_one_line
+  tests/unit/test_prose_corruption_catalog.py:162  two_statements_one_line
+  tests/unit/test_prose_corruption_catalog.py:163  two_statements_one_line
+  tools/prose_corruptions/catalog.py:25            two_statements_one_line
+  tools/prose_corruptions/catalog.py:26            two_statements_one_line
+  tools/prose_corruptions/scan_joined_lines.py:11  banner_glued
+
+  The six test-file lines are alignment space runs inside quoted sample
+  literals; catalog.py:25-26 are aligned trailing `# rN candidate` comments;
+  scan_joined_lines.py:11 quotes the rule characters inside the module
+  docstring.
+
+Range 527beafa..7c43f6a5, AFTER the scanner repair: 0 hits (same probe).
+Range 7c43f6a5..0f8ac679, before and after: 0 hits.
+
+Command: pytest on tests/unit/zz_probe_scan_range.py, cwd this run's worktree,
+bare exit status 1 (the probe deliberately failed first to print the hits) then
+the assertions were removed and the probe printed `HITS {...: []}` with bare
+exit status 0. The nine false-positive lines are fixtures in
+tests/unit/test_prose_corruption_catalog.py::
+test_the_spliced_line_scanner_is_silent_on_the_r6_false_positives, and the
+positive shapes remain in ::test_the_spliced_line_scanner_fires_on_the_splice_shapes.

@@ -539,7 +539,15 @@ def _read(rel):
     return (REPO_ROOT / rel).read_text(encoding="utf-8")
 
 
-def _prose_corpus():
+def _guidance_from_file(text, block):
+    """The `STRICT_PATCH_GUIDANCE_<block>` literal inside `text`."""
+    match = re.search(
+        rf'STRICT_PATCH_GUIDANCE_{block} = """(.*?)"""', text, re.S)
+    assert match, f"no STRICT_PATCH_GUIDANCE_{block} in the file text"
+    return match.group(1)
+
+
+def _prose_corpus(reader=None):
     """Every agent-facing prose surface, derived from the filesystem.
 
     Nothing here is a hand-written list of surfaces: templates/*.md is a
@@ -547,17 +555,31 @@ def _prose_corpus():
     out of the modules that declare them, so a surface created after this
     test was written is IN the corpus on the next run without touching this
     file.
+
+    `reader` is the source the file-backed surfaces are read from: the live
+    worktree by default (resolved at call time, so a test can redirect
+    `_read`), so a corruption run's damaged tree goes red in
+    `test_the_empty_mutation_leaves_every_surface_clean`; the self-proof
+    fixtures pass `_head_read` instead, so their clean pole is HEAD and stays
+    intact while the live tree is corrupted.
     """
     import yaml
 
+    if reader is None:
+        reader = _read
+    # The guidance blocks are corpus surfaces too, and they are read through
+    # the same `reader`: a runner that damaged core/output_migration.py must
+    # show up as a violation on GUIDANCE_EN / GUIDANCE_ZH, not be masked by
+    # the module constant that was imported once at collection time.
+    migration = reader("core/output_migration.py")
     corpus = {
-        "GUIDANCE_EN": STRICT_PATCH_GUIDANCE_EN,
-        "GUIDANCE_ZH": STRICT_PATCH_GUIDANCE_ZH,
+        "GUIDANCE_EN": _guidance_from_file(migration, "EN"),
+        "GUIDANCE_ZH": _guidance_from_file(migration, "ZH"),
     }
     for md in sorted((REPO_ROOT / "templates").glob("*.md")):
-        corpus[f"templates/{md.name}"] = md.read_text(encoding="utf-8")
+        corpus[f"templates/{md.name}"] = reader(f"templates/{md.name}")
     for rel in PROSE_CODE_FILES:
-        corpus[rel] = _read(rel)
+        corpus[rel] = reader(rel)
     for name, (rel, const_name) in sorted(PROSE_PROMPT_CONSTANTS.items()):
         corpus[name] = _constant_text(rel, const_name)
     for cfg in sorted((REPO_ROOT / "agent_configs").glob("*.yaml")):
@@ -816,10 +838,15 @@ def _string_constant_text(value):
     return None
 
 
+def _core_module_paths(root=REPO_ROOT):
+    """Every `*.py` module under `root`/core, sorted."""
+    return sorted((root / "core").glob("*.py"))
+
+
 def _prose_constants(root=REPO_ROOT):
     """{(module path, constant name): text} for every prose-sized constant."""
     found = {}
-    for py in sorted((root / "core").glob("*.py")):
+    for py in _core_module_paths(root):
         rel = f"core/{py.name}"
         tree = ast.parse(py.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
@@ -887,6 +914,19 @@ def _git_file(rev, rel):
     return out.stdout
 
 
+def _head_read(rel):
+    """The committed bytes of `rel` as of HEAD, not the working tree.
+
+    The self-proof fixtures below take their clean pole from here. The
+    corruption runner damages a throwaway copy's working tree and never
+    commits, so HEAD is intact in the pipeline worktree and in the reviewer's
+    one-shot container: the fixtures stay green while the live tree is
+    damaged, and only the live-tree scan goes red. Tests that must see the
+    live tree read it through `_read`, which the tripwire below redirects.
+    """
+    return _git_file("HEAD", rel)
+
+
 def _git_guidance(rev, block):
     text = _git_file(rev, "core/output_migration.py")
     match = re.search(
@@ -910,14 +950,21 @@ _CATALOG = _load_corruption_catalog()
 
 
 def _corruption_loader(entry):
-    """The corrupted SURFACE text: git bytes, or the file on disk plus edits."""
+    """The corrupted SURFACE text: git bytes, or HEAD's file plus edits.
+
+    The clean pole is read from HEAD through `_head_read`, not from the live
+    worktree: the corruption runner damages a throwaway copy without
+    committing, so a fixture that read the live tree would take the runner's
+    own damaged bytes as "clean" and go red on a precondition instead of
+    measuring detection.
+    """
 
     def load():
         if entry.get("rev"):
             if entry.get("block"):
                 return _git_guidance(entry["rev"], entry["block"])
             return _git_file(entry["rev"], entry["path"])
-        return _CATALOG.apply_to_text(_read(entry["path"]), entry)
+        return _CATALOG.apply_to_text(_head_read(entry["path"]), entry)
 
     return load
 
@@ -955,7 +1002,7 @@ def test_each_known_corruption_is_caught_by_name(label):
     set_active_corruption(label)
     try:
         corrupted = load()
-        clean = _prose_corpus()[name]
+        clean = CATALOG.clean_surface_text(_CATALOG_BY_ID[label], _head_read)
         assert corrupted != clean, \
             f"{label}: the fixture is not actually corrupt"
         violations = _prose_violations(name, corrupted)

@@ -6,10 +6,14 @@ three mechanical traces in the added lines:
   two_statements_one_line
       a run of four or more spaces lands in the MIDDLE of a code line,
       because the indentation that belonged at the start of a swallowed
-      continuation line ended up between two statements on one line;
+      continuation line ended up between two statements on one line. A run
+      that opens a quoted string, that sits inside one, or that ends at a
+      comment marker is aligned text, not a splice, so neither is reported;
   banner_glued
       a comment rule (───, ===, ***) ends before the line does and the next
-      line's text is stuck to it, because the newline between them was eaten;
+      line's text is stuck to it, because the newline between them was eaten.
+      Only a line that IS a comment is examined, so rule characters quoted
+      inside ordinary prose are not this shape;
   sentence_split
       a paragraph line stops without terminal punctuation, an added blank
       line follows it, and the line after that resumes in lower case — a
@@ -65,8 +69,15 @@ def added_lines(base, head):
 
 
 def _banner_glued(text):
-    """True when a comment rule stops before the line does."""
+    """True when a COMMENT line's rule stops before the line does.
+
+    Only a line that is a comment is examined: the rule characters inside a
+    sentence of prose (``a comment rule (───, ===, ***) ends before``) are
+    quoting the shape, not exhibiting it.
+    """
     stripped = text.strip()
+    if not stripped.startswith(("#", "//")):
+        return False
     if not BANNER.search(stripped):
         return False
     last = None
@@ -75,17 +86,62 @@ def _banner_glued(text):
     return bool(stripped[last.end():].strip())
 
 
+def _code_mask(text):
+    """True per character that is CODE, not inside a string or a comment.
+
+    A run of alignment spaces inside a quoted literal or an aligned trailing
+    comment is that text's own indentation; only a run that is entirely code
+    is the indentation of a swallowed continuation line.
+    """
+    mask = []
+    quote = None
+    escaped = False
+    for index, ch in enumerate(text):
+        if quote:
+            mask.append(False)
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == quote:
+                quote = None
+            continue
+        if ch == "'" and _is_apostrophe(text, index):
+            mask.append(True)
+            continue
+        if ch in "\"'":
+            mask.append(False)
+            quote = ch
+            continue
+        if ch == "#":
+            mask.append(False)
+            quote = "#"
+            continue
+        mask.append(True)
+    return mask
+
+
+def _is_apostrophe(text, index):
+    """True when the `'` at `index` is the one in `don't`, not a quote."""
+    before = text[index - 1] if index else ""
+    after = text[index + 1] if index + 1 < len(text) else ""
+    return before.isalnum() and after.isalnum()
+
+
 def _two_statements_one_line(text):
     """True when indentation that belonged at column 0 sits mid-line."""
     if text.lstrip().startswith(("#", "//", "*", "-", ">")):
         return False
     if not CODE_HINT.search(text):
         return False
-    match = MID_LINE_GAP.search(text)
-    if not match:
-        return False
     # A markdown table or aligned comment column is not a splice.
-    return "|" not in text
+    if "|" in text:
+        return False
+    mask = _code_mask(text)
+    for match in MID_LINE_GAP.finditer(text):
+        if all(mask[i] for i in range(match.start(), match.end())):
+            return True
+    return False
 
 
 def _sentence_split(lines, index):

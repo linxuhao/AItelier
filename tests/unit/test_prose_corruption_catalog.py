@@ -54,11 +54,18 @@ def test_each_edit_entry_refuses_a_missing_old_byte():
 
 
 def test_each_edit_entry_applies_to_its_own_surface():
-    """Applied to the real surface, every edit changes the file."""
+    """Applied to its own surface, every edit changes the file.
+
+    The bytes come from HEAD, not the live worktree: this is a
+    catalog-drift check and must stay green while a corruption run has the
+    live tree damaged (the runner would have applied the same `old` once
+    already, so a live read would find zero occurrences and fail on a
+    precondition).
+    """
     for entry in CATALOG.CORRUPTIONS:
         if entry["kind"] != "edit":
             continue
-        text = (REPO_ROOT / entry["path"]).read_text(encoding="utf-8")
+        text = MOD._head_read(entry["path"])
         assert CATALOG.apply_edits(text, entry) != text, entry["id"]
 
 
@@ -156,7 +163,7 @@ def test_the_agent_facing_prompt_constants_are_corpus_surfaces():
                  "core/state_driver_guide.py:STATE_DRIVER_GUIDE",
                  "core/meta_conversation.py:META_JSON_SCHEMA",
                  "core/meta_conversation.py:_INTENT_SCHEMA"):
-        assert name not in exempted, namee
+        assert name not in exempted, name
 
 
 def test_every_exemption_is_keyed_by_module_and_name_with_a_reason():
@@ -192,12 +199,18 @@ def test_the_spliced_line_scanner_fires_on_the_splice_shapes():
              "f\"{rev}:{rel}\"],                         cwd=REPO_ROOT, "
              "capture_output=True, text=True)"),
     ]
+    glued = [
+        (30, "# \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"
+             "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"
+             "Step dispatch"),
+    ]
     split = [
         (20, "    prefer `references` and quote the `sha` from its"),
         (21, ""),
         (22, "    `citation` swapped back for the legacy advice."),
     ]
     assert "two_statements_one_line" in [s for s, _ in SCAN.scans(joined)]
+    assert "banner_glued" in [s for s, _ in SCAN.scans(glued)]
     assert "sentence_split" in [s for s, _ in SCAN.scans(split)]
 
 
@@ -212,6 +225,37 @@ def test_the_spliced_line_scanner_is_silent_on_clean_lines():
         (5, "# `_exec_tool` refuses apply_patch unless the schema has it."),
     ]
     assert SCAN.scans(clean) == [], SCAN.scans(clean)
+
+
+def test_the_spliced_line_scanner_is_silent_on_the_r6_false_positives():
+    """The nine lines the r6 scanner named on this branch's own range.
+
+    Every one is an alignment space run inside a quoted literal, an aligned
+    trailing comment, or rule characters quoted inside a sentence of prose.
+    Each is a real line of the 527beafa..7c43f6a5 diff and must be silent,
+    while the shapes above still fire.
+    """
+    false_positives = [
+        (147, "        (10, \"    out = subprocess.run([\\\"git\\\", "
+              "\\\"show\\\", \""),
+        (148, "             \"f\\\"{rev}:{rel}\\\"],                         "
+              "cwd=REPO_ROOT, \""),
+        (152, "        (20, \"    prefer `references` and quote the `sha` "
+              "from its\"),"),
+        (154, "        (22, \"    `citation` swapped back for the legacy "
+              "advice.\"),"),
+        (162, "        (1, \"    out = subprocess.run([\\\"git\\\", "
+              "\\\"show\\\", \\\"HEAD\\\"],\"),"),
+        (163, "        (2, \"                         cwd=REPO_ROOT, "
+              "capture_output=True)\"),"),
+        (25, "R2 = \"3b3d6560\"                                    "
+             "# r2 candidate"),
+        (26, "R3 = \"fad833b016a5c54d1a5f6253f4fcdfc0fbeb9722\"    "
+             "# r3 candidate"),
+        (11, "      a comment rule (\u2500\u2500\u2500, ===, ***) ends before "
+             "the line does and the next"),
+    ]
+    assert SCAN.scans(false_positives) == [], SCAN.scans(false_positives)
 
 
 def test_the_runner_copies_the_tree_and_does_not_mutate_the_source(tmp_path):
@@ -248,9 +292,8 @@ def test_the_catalog_names_revisions_the_runner_can_reach():
                          ids=lambda e: e["id"])
 def test_each_existing_surface_corruption_fires_its_named_rule(entry):
     surface = CATALOG.surface_name(entry)
-    corpus = MOD._prose_corpus()
-    clean = corpus[surface]
-    corrupted = CATALOG.surface_text(entry, MOD._read, MOD._git_file)
+    clean = CATALOG.clean_surface_text(entry, MOD._head_read)
+    corrupted = CATALOG.surface_text(entry, MOD._head_read, MOD._git_file)
     assert corrupted != clean, f"{entry['id']}: the fixture is not corrupt"
     violations = MOD._prose_violations(surface, corrupted)
     assert violations, f"{entry['id']}: no violation on the corrupted {surface}"
@@ -261,10 +304,17 @@ def test_each_existing_surface_corruption_fires_its_named_rule(entry):
 
 
 def test_k6c_duplicates_exactly_one_line_and_overwrites_nothing():
-    """K6c is the m12 shape: one repeated banner line, not a whole-file swap."""
+    """K6c is the r5 m14 shape: one repeated banner line, not a whole-file swap.
+
+    The repeated line is `# ── Why did a JSON reply fail to parse?` in
+    core/dpe_pipeline.py, the banner the r5 review measured. The bytes come
+    from HEAD, so the check is a statement about the committed file and holds
+    while a runner has the live tree damaged.
+    """
     import difflib
     entry = next(e for e in CATALOG.CORRUPTIONS if e["id"] == "K6c")
-    text = (REPO_ROOT / "core" / "dpe_pipeline.py").read_text(encoding="utf-8")
+    assert entry["locate"] == "# ── Why did a JSON reply fail to parse?"
+    text = MOD._head_read("core/dpe_pipeline.py")
     corrupted = CATALOG.apply_to_text(text, entry)
     assert len(corrupted.splitlines()) == len(text.splitlines()) + 1
     added = [ln for ln in difflib.unified_diff(
@@ -272,6 +322,7 @@ def test_k6c_duplicates_exactly_one_line_and_overwrites_nothing():
         if ln.startswith("+") and not ln.startswith("+++")]
     assert len(added) == 1, added
     assert entry["locate"] in added[0], added
+    assert "Step dispatch" not in added[0], added
 
 
 def test_the_empty_mutation_leaves_every_surface_clean():
@@ -281,3 +332,139 @@ def test_the_empty_mutation_leaves_every_surface_clean():
                  for name, text in corpus.items()
                  if MOD._prose_violations(name, text)}
     assert not survivors, survivors
+
+
+# ── The self-proof fixtures and the live-tree tripwire are two things ────
+#
+# The self-proof fixtures take their clean pole from HEAD, which the runner
+# never commits to, so they stay green while a corruption run has the live
+# tree damaged. The live-tree scan takes its bytes from the worktree, so it is
+# the thing that goes red and names the rule. The pair below drives both from
+# ONE simulated damage per corruption: `_read` is monkeypatched to return the
+# runner's bytes, then (a) the fixture's clean pole is asserted intact and its
+# detection still fires from HEAD, and (b) the live-tree corpus is asserted
+# red, naming the surface and the catalog's rule.
+
+
+def _damaged_live_read(entry):
+    """A `_read` that returns the runner's damaged bytes for `entry`'s file."""
+    damaged = CATALOG.corrupt_file_text(entry, MOD._head_read, MOD._git_file)
+    target = CATALOG.entry_file_path(entry)
+
+    def read(rel):
+        return damaged if rel == target else MOD._head_read(rel)
+
+    return read
+
+
+@pytest.mark.parametrize("entry", CATALOG.existing_surface_entries(),
+                         ids=lambda e: e["id"])
+def test_the_self_proof_fixture_is_green_on_a_damaged_live_tree(monkeypatch,
+                                                               entry):
+    """Pole ② for a fixture: the live tree is damaged, the fixture is green.
+
+    `_read` returns the runner's bytes, so anything reading the live tree sees
+    the corruption. The fixture reads HEAD and must still find its clean pole
+    intact and its corrupted pole red — it measures detection, not a
+    precondition.
+    """
+    surface = CATALOG.surface_name(entry)
+    monkeypatch.setattr(MOD, "_read", _damaged_live_read(entry))
+    clean = CATALOG.clean_surface_text(entry, MOD._head_read)
+    assert not MOD._prose_violations(surface, clean), (surface, "clean pole")
+    corrupted = CATALOG.surface_text(entry, MOD._head_read, MOD._git_file)
+    assert corrupted != clean, entry["id"]
+    assert any(entry["rule"] in v and surface in v
+               for v in MOD._prose_violations(surface, corrupted)), entry["id"]
+
+
+@pytest.mark.parametrize("entry", CATALOG.existing_surface_entries(),
+                         ids=lambda e: e["id"])
+def test_the_live_tree_scan_names_the_rule_when_the_tree_is_damaged(
+        monkeypatch, entry):
+    """Pole ② for the tripwire: the live scan is red and names the rule.
+
+    The corpus is derived through the damaged `_read`, so the surface the
+    fixture just proved green is the surface that goes red here.
+    """
+    surface = CATALOG.surface_name(entry)
+    monkeypatch.setattr(MOD, "_read", _damaged_live_read(entry))
+    corpus = MOD._prose_corpus()
+    assert surface in corpus, sorted(corpus)
+    violations = MOD._prose_violations(surface, corpus[surface])
+    assert violations, (entry["id"], surface)
+    assert any(entry["rule"] in v and surface in v for v in violations), \
+        (entry["id"], entry["rule"], violations)
+
+
+def test_the_new_module_fixture_is_green_and_the_scan_names_the_module(
+        monkeypatch, tmp_path):
+    """K4/K5: the fixture builds a tree; the scan names the module.
+
+    A new-module corruption has no surface in the live corpus, so its fixture
+    builds its own tree. With `_read` damaged that fixture is unaffected, and
+    the accounting scan on the tree names `core/zz_new_prompt.py`.
+    """
+    for entry in CATALOG.new_module_entries():
+        monkeypatch.setattr(MOD, "_read",
+                            lambda rel: "damaged live bytes")
+        root = tmp_path / entry["id"]
+        shutil.copytree(REPO_ROOT / "core", root / "core",
+                        ignore=shutil.ignore_patterns("__pycache__"))
+        (root / "core" / Path(entry["path"]).name).write_text(
+            entry["content"], encoding="utf-8")
+        missing = MOD._unaccounted_prose_constants(root)
+        assert any(item.startswith(f"{entry['path']}:") for item in missing), \
+            (entry["id"], missing)
+
+
+def test_re_exempting_a_corpus_prompt_is_an_assertion_error_naming_it(
+        monkeypatch):
+    """Mutation x1: the named assertion fails, never an unbound identifier.
+
+    x1 puts `core/meta_conversation.py:META_JSON_SCHEMA` back into the
+    exemption table and runs the real check. It must raise AssertionError
+    naming that constant; a misspelt message variable would raise NameError
+    instead and report nothing about the constant.
+    """
+    name = "core/meta_conversation.py:META_JSON_SCHEMA"
+    monkeypatch.setitem(MOD.PROSE_CONSTANT_EXEMPTIONS,
+                        ("core/meta_conversation.py", "META_JSON_SCHEMA"),
+                        "re-exempted by mutation x1")
+    assert name in MOD._prose_corpus(), name
+    with pytest.raises(AssertionError, match="META_JSON_SCHEMA") as caught:
+        test_the_agent_facing_prompt_constants_are_corpus_surfaces()
+    assert not isinstance(caught.value, NameError)
+
+
+# ── The runner can run one corruption without running the whole catalog ──
+
+
+def test_only_selects_one_corruption_and_applies_only_that_one(tmp_path):
+    """`--only K3` plans and applies exactly one entry, never the rest.
+
+    Proved from the plan and the applied bytes, so it does not need the whole
+    suite: an unrelated file that a different corruption would rewrite is left
+    byte-identical.
+    """
+    every = RUNNER.select_entries(CATALOG, ())
+    assert [e["id"] for e in every] == [e["id"] for e in CATALOG.CORRUPTIONS]
+    selected = RUNNER.select_entries(CATALOG, ("K3",))
+    assert [e["id"] for e in selected] == ["K3"]
+    with pytest.raises(AssertionError, match="no such corruption"):
+        RUNNER.select_entries(CATALOG, ("K99",))
+
+    dest = tmp_path / "tree"
+    rels = sorted({CATALOG.entry_file_path(e) for e in CATALOG.CORRUPTIONS
+                   if e["kind"] != "add"})
+    before = {}
+    for rel in rels:
+        target = dest / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        before[rel] = MOD._head_read(rel)
+        target.write_text(before[rel], encoding="utf-8")
+    for entry in selected:
+        RUNNER._apply(entry, dest, CATALOG)
+    changed = sorted(rel for rel in before
+                     if (dest / rel).read_text(encoding="utf-8") != before[rel])
+    assert changed == ["core/output_migration.py"], changed

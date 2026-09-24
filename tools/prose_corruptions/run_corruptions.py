@@ -17,7 +17,8 @@ Run it from the repository root:
 
 `--rev` exports that commit into the throwaway copy first, so the same runner
 measures a corruption against a different tree (the base commit, for instance).
-`--targets` narrows the pytest invocation (the default is the whole suite).
+`--targets` narrows the pytest invocation (the default is the whole suite) and
+`--only K3` applies just the named catalog entries (the default is every one).
 The per-corruption results are written as a table; the bare exit code is what
 decides whether the corruption was caught. Each run also records the suite
 command, the source-tree sha and the corrupted worktree's HEAD sha, the UTC
@@ -228,13 +229,29 @@ def _write_raw(raw_dir, entry, row, command, rev, output):
               "---- raw pytest output ----"]
     (raw_dir / f"{row['id']}.txt").write_text(
         "\n".join(header + [output]) + "\n", encoding="utf-8")
-def run_all(rev=None, log=None, targets=(), raw_dir=None):
+def select_entries(catalog, only=()):
+    """The catalog entries `only` selects; empty `only` keeps every entry.
+
+    `only` is a sequence of corruption ids (K1, K6c, ...). An id the catalog
+    does not carry is an error, so a typo cannot silently run just the
+    remaining entries.
+    """
+    entries = list(catalog.CORRUPTIONS)
+    if not only:
+        return entries
+    known = {entry["id"]: entry for entry in entries}
+    unknown = [name for name in only if name not in known]
+    assert not unknown, f"no such corruption id(s): {unknown}"
+    return [known[name] for name in only]
+
+
+def run_all(rev=None, log=None, targets=(), raw_dir=None, only=()):
     catalog = _load_catalog()
     rows = []
     selection = " ".join(targets) if targets else "tests/ (whole suite)"
     source_sha = _git(["rev-parse", "HEAD"], REPO_ROOT).stdout.strip()
     source_before = _git(["status", "--porcelain"], REPO_ROOT).stdout
-    for entry in catalog.CORRUPTIONS:
+    for entry in select_entries(catalog, only):
         with tempfile.TemporaryDirectory(prefix="prose-corruption-") as tmp:
             worktree = Path(tmp) / "tree"
             _copy_tree(worktree, rev)
@@ -274,6 +291,9 @@ def main():
     parser.add_argument("--raw-dir", default=None,
                         help="directory for one raw-output file per "
                              "corruption (default: alongside --out)")
+    parser.add_argument("--only", nargs="*", default=[],
+                        help="apply only these corruption ids (e.g. --only K3); "
+                             "empty means every catalog entry")
     args = parser.parse_args()
 
     out = REPO_ROOT / args.out
@@ -296,7 +316,7 @@ def main():
               f"raw per-run logs: {raw_dir}"]
     log = list(header)
     rows = run_all(rev=args.rev, log=log, targets=tuple(args.targets),
-                   raw_dir=raw_dir)
+                   raw_dir=raw_dir, only=tuple(args.only))
 
     table = [f"id | rule | selection | bare RC | named tests  "
              f"(scope: {selection})"]

@@ -1,0 +1,85 @@
+focused_check probes run in this round (implement step, rev 8)
+=============================================================
+
+The implement step has read / search / apply_patch / focused_check only; the
+whole-suite corruption runs and the added-line scan are measured by the
+reviewer (see final/prose_corruption_matrix.md). The probes below are what this
+round actually ran. Every probe is `focused_check` kind=pytest, exit status
+recorded bare (no pipe), cwd = this run's worktree.
+
+command: focused_check kind=pytest tests/unit/test_prose_corruption_catalog.py
+cwd:     this run's isolated worktree
+exit_status: 0
+result:  45 passed, 1 warning in 5.53s
+
+command: focused_check kind=pytest tests/unit/test_truncation_is_not_a_formatting_mistake.py
+cwd:     this run's isolated worktree
+exit_status: 0
+result:  45 passed, 1 warning in 0.92s
+
+command: focused_check kind=pytest
+         tests/unit/test_prose_corruption_catalog.py::test_re_exempting_a_corpus_prompt_is_an_assertion_error_naming_it
+cwd:     this run's isolated worktree
+exit_status: 0
+result:  1 passed, 1 warning in 0.32s
+note:    mutation x1 (META_JSON_SCHEMA put back into PROSE_CONSTANT_EXEMPTIONS)
+         is applied inside the test with monkeypatch.setitem, and the failure
+         raised is AssertionError naming META_JSON_SCHEMA.
+
+Temporary probe tests/unit/zz_probe_scan_range.py (deleted before delivery)
+measured the scanner's hits on the r6 range `527beafa..7c43f6a5`:
+
+  before the scanner repair, hits: 9
+    tests/unit/test_prose_corruption_catalog.py:147 two_statements_one_line
+    tests/unit/test_prose_corruption_catalog.py:148 two_statements_one_line
+    tests/unit/test_prose_corruption_catalog.py:152 two_statements_one_line
+    tests/unit/test_prose_corruption_catalog.py:154 two_statements_one_line
+    tests/unit/test_prose_corruption_catalog.py:162 two_statements_one_line
+    tests/unit/test_prose_corruption_catalog.py:163 two_statements_one_line
+    tools/prose_corruptions/catalog.py:25 two_statements_one_line
+    tools/prose_corruptions/catalog.py:26 two_statements_one_line
+    tools/prose_corruptions/scan_joined_lines.py:11 banner_glued
+  after the scanner repair, hits: 0 (same range, same probe)
+
+  The same probe also confirmed HEAD carries the clean bytes for every `edit`
+  entry (each `old` occurs exactly once in `git show HEAD:<path>`), so the
+  self-proof fixtures can take their clean pole from HEAD.
+
+Criterion 1-3 poles on this round's tree (focused_check, monkeypatch mutations)
+==============================================================================
+
+command: focused_check kind=pytest
+         tests/unit/test_truncation_is_not_a_formatting_mistake.py::TestTheTwoCausesAreToldApart
+         ::TestTruncationIsRefusedNotRepaired ::TestTheMessageTellsTheAgentToSplit
+         ::TestOversizedPatchIsRefusedBeforeSubmission ::TestATruncationDoesNotEndTheRound
+         ::test_paren_prose_behaviour_is_unchanged_end_to_end ::test_corpus_is_the_retained_incident
+cwd:     this run's isolated worktree
+exit_status: 0
+result:  28 passed
+
+Pole ② (mutations applied inside a temporary probe with monkeypatch, probe
+deleted before delivery), bare exit status 0 for the probe because each
+mutation is asserted to raise:
+
+  m1 (a `(` raises the depth counter; `)` does not lower it): the prose
+    `"I reviewed the plan (no edits needed)."` is read TRUNCATED and both
+    guard asserts raise AssertionError.
+  m3 (`classify_json_failure` returns NO_JSON for the truncation case): the
+    corpus line seq 95 is no longer named TRUNCATED and the guard raises.
+  m6/m7 (the feedback message reuses the ONLY-a-JSON-object instruction): the
+    message no longer says truncated or split and both guards raise.
+  x1 (`META_JSON_SCHEMA` put back into the exemption table): the failure is
+    `AssertionError` whose message is
+    `core/meta_conversation.py:META_JSON_SCHEMA` (NOT a NameError), printed by
+    the probe as `X1 FAILURE TYPE AssertionError MESSAGE
+    core/meta_conversation.py:META_JSON_SCHEMA`.
+
+Scanner repair poles (temporary probe, deleted before delivery):
+
+  clean tree: the three scanner tests are green
+    (3 passed).
+  guard removed (the old `_two_statements_one_line` / `_banner_glued` restored
+    by monkeypatch, bare exit status 0): `OLD-SCANNER HITS
+    [('two_statements_one_line', 147), ('two_statements_one_line', 25),
+    ('banner_glued', 11)]` — the r6 false positives come back, so the repair is
+    what silences them.

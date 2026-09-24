@@ -565,7 +565,7 @@ async def list_connections(request: Request):
 # "/mcp/…" but NOT the bare "/mcp" — so `POST /mcp`, the URL every client config
 # actually contains, fell through to the SPA's catch-all StaticFiles mount, which
 # allows only GET/HEAD and answered 405. The endpoint looked mounted, `/mcp/`
-# worked, and the documented URL did not. Both spellings are registered so neither
+# worked, and the URL in the docs did not. Both spellings are registered so neither
 # depends on a redirect (a 307 on a POST is a coin flip across HTTP clients).
 app.router.routes.append(_StarletteRoute("/mcp", endpoint=_mcp_endpoint))
 app.router.routes.append(_StarletteRoute("/mcp/", endpoint=_mcp_endpoint))

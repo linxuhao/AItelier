@@ -219,7 +219,7 @@ def migrate_readonly_verifier(
         document: dict, *, readme_agent_config: str = "delivery_documenter") -> list[dict]:
     """Split a generated DPE verifier's README and move it behind code owners.
 
-    This is intentionally shape-gated. A generated graph that does not have the
+    The migration is shape-gated. A generated graph that does not have the
     known DPE step ids is left untouched; a partial/colliding shape fails before
     boot rewrites any bytes instead of guessing release topology.
     """

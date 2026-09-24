@@ -31,7 +31,7 @@ def spec(k,deps=None):
 @pytest.fixture
 def system(tmp_path, monkeypatch):
     monkeypatch.setenv('AITELIER_HOME', str(tmp_path/'home'))
-    s=StateGraphStore(DBManager(str(tmp_path/'state.db')))
+    s=StateGraphStore(DBManager(str(tmp_path/'state.db')),project_read_trusted=True)
     s.create_project('game','Game');s.add_nodes('game',[spec('a'),spec('b',['a']),spec('independent')])
     a=StateAttempts(s);e=ExternalAttempts(a,'director@example')
     e._test_report_dir = tmp_path/'terminal-reports'
@@ -509,7 +509,7 @@ def test_invalid_external_reports_are_rejected_without_partial_write(system,fiel
 
 
 def legacy_db(tmp_path):
-    s=StateGraphStore(DBManager(str(tmp_path/'legacy.db')));s.create_project('old','Old');s.add_nodes('old',[spec('goal')])
+    s=StateGraphStore(DBManager(str(tmp_path/'legacy.db')),project_read_trusted=True);s.create_project('old','Old');s.add_nodes('old',[spec('goal')])
     with s.db.get_connection() as c:
         c.executescript(SCHEMA)
         node=dict(c.execute('SELECT * FROM state_nodes').fetchone())

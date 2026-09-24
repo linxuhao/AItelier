@@ -427,7 +427,7 @@ def test_skillflow_and_external_attempts_can_verify_dependencies_in_one_project(
     from core.state_attempts import StateAttempts
     from core.state_external import ExternalAttempts
     sf=SkillFlow(str(tmp_path/'sf.sqlite'));sf.register_graph(PipelineGraph(name='workflow',begin='work',steps=[StepNode(id='work')]))
-    store=StateGraphStore(DBManager(str(tmp_path/'host.sqlite')));attempts=StateAttempts(store);external=ExternalAttempts(attempts,'external-director')
+    store=StateGraphStore(DBManager(str(tmp_path/'host.sqlite')),project_read_trusted=True);attempts=StateAttempts(store);external=ExternalAttempts(attempts,'external-director')
     store.create_project('p','Mixed');store.add_nodes('p',[spec('external-base'),spec('workflow-child',['external-base']),spec('external-final',['workflow-child'])])
     kinds=[]
     for i,nk in enumerate(['external-base','workflow-child','external-final']):

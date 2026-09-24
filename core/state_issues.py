@@ -22,6 +22,7 @@ import json
 import uuid
 
 from core.state_graph import StateConflict, StateGraphError, StateNotFound, canonical, digest, key, now, text
+from core.state_privacy import UntrustedDatabase
 
 KINDS = ("defect", "gap", "handoff", "question")
 RESOLUTIONS = ("absorbed", "promoted", "duplicate", "rejected")
@@ -60,13 +61,20 @@ CREATE INDEX IF NOT EXISTS state_issue_nodes_node ON state_issue_nodes(project_i
 """
 
 
+def initialize(db) -> None:
+    """Create the issue tables on a real handle (the leaf's own, or the one an
+    untrusted store runs ``initialize_state_schema`` on before dropping it)."""
+    with db.get_connection() as conn:
+        conn.executescript(SCHEMA)
+        conn.commit()
+
+
 class StateIssues:
     def __init__(self, store, actor: str):
         self.store = store
+        if not isinstance(store.db, UntrustedDatabase):
+            initialize(store.db)
         self.actor = text(actor, "authenticated actor", 320)
-        with store.db.get_connection() as conn:
-            conn.executescript(SCHEMA)
-            conn.commit()
 
     # -- helpers ---------------------------------------------------------
     @staticmethod

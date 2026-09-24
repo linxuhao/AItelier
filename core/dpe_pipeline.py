@@ -944,7 +944,7 @@ _REPEATABLE_READ_TOOLS = frozenset({
     "web_fetch",
 })
 # Telemetry and relay survey limits cover every repository enumeration tool.
-# This is intentionally separate from repeat-call dedupe: adding a read here
+# This is deliberately separate from repeat-call dedupe: adding a read here
 # must not silently make it eligible to return a stale cached observation.
 _REPOSITORY_READ_TOOLS = _REPEATABLE_READ_TOOLS | {"list"}
 # Below this a pointer costs more than the text it would replace.
@@ -2345,7 +2345,7 @@ class PipelineEngine:
 
         files = payload.get("files")
         if files:
-            # `files` is the CANONICAL, documented delivery shape — and
+            # `files` is the CANONICAL, specified delivery shape — and
             # `_run_tool_step`, the handler every `mode: write` step uses, reads
             # only `actions`, so a payload that arrives already in the right shape
             # was answered "No actions found in your response". Seen live: after

@@ -62,7 +62,7 @@ def test_literal_v2_vectors_pass_against_sqlite(tmp_path):
 def test_additive_schema_migrates_existing_state_database_and_survives_restart(tmp_path):
     path = tmp_path / "existing.sqlite"
     database = StateDatabase(str(path))
-    store = StateGraphStore(database)
+    store = StateGraphStore(database, project_read_trusted=True)
     store.create_project("alpha", "alpha")
     store.create_project("beta", "beta")
     with database.get_connection() as conn:
@@ -89,7 +89,7 @@ def test_additive_schema_migrates_existing_state_database_and_survives_restart(t
 def test_populated_v1_rows_and_dedupe_migrate_without_identity_or_audit_loss(tmp_path):
     path = tmp_path / "populated-v1.sqlite"
     database = StateDatabase(str(path))
-    store = StateGraphStore(database)
+    store = StateGraphStore(database, project_read_trusted=True)
     store.create_project("alpha", "alpha")
     store.create_project("beta", "beta")
     message_id = "11111111-1111-4111-8111-111111111111"

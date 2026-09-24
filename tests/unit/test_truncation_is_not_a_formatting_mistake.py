@@ -61,7 +61,7 @@ def _payload(seq):
 
 
 def test_corpus_is_the_retained_incident():
-    """The sample the goal names must be present and shaped as documented."""
+    """The sample the goal names must be present and shaped as the goal states."""
     assert len(_rows()) == 95
     assert _row(88)["event"] == "apply_patch"
     assert "hunks overlap or are out of order; combine them" in \

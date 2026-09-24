@@ -4,7 +4,7 @@
     python -m api.state_only --db /absolute/private/state.sqlite --port 4450
 
 No token argument/logging, shell executor, model config, workspace or scheduler.
-This module intentionally does not import api.dependencies or core.db_manager.
+This module deliberately does not import api.dependencies or core.db_manager.
 """
 from __future__ import annotations
 import argparse

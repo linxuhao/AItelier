@@ -41,7 +41,7 @@ def _init_repo(path: Path) -> str:
 def world(tmp_path, monkeypatch):
     monkeypatch.setenv("AITELIER_HOME", str(tmp_path / "home"))
     db = DBManager(str(tmp_path / "state.db"))
-    store = StateGraphStore(db)
+    store = StateGraphStore(db, project_read_trusted=True)
     store.create_project("game", "Long-running game")
     store.add_nodes("game", [{"key": "a", "goal": "Implement a", "dependencies": [], "acceptance": [
         {"id": "behaviour", "kind": "test", "description": "Behaviour validated"}]}])

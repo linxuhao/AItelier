@@ -370,7 +370,7 @@ def test_a_run_this_deployment_made_with_no_record_is_refused(live):
 
 
 def test_a_run_the_engine_never_created_is_not_this_deployments_to_refuse(live):
-    """The documented boundary, asserted no wider than it holds: an id this
+    """The stated boundary, asserted no wider than it holds: an id this
     engine has no row for gets 'no opinion'. It is safe because every supported
     creation path writes the engine row BEFORE provisioning — which is the
     property `test_a_run_that_cannot_be_isolated_is_not_started` and the

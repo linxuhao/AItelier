@@ -29,8 +29,9 @@ def main(argv: list[str]) -> int:
         from core.state_database import StateDatabase
         from core.state_driver_notes import StateDriverNotes
         from core.state_graph import StateGraphStore
-        store = StateGraphStore(StateDatabase(database))
-        notes = StateDriverNotes(store, actor="scripts/check_driver_note_index.py")
+        store = StateGraphStore(StateDatabase(database), project_read_trusted=True)
+        notes = StateDriverNotes(store, actor="scripts/check_driver_note_index.py",
+                                 project_read_trusted=True)
         if not projects:
             projects = [row["project_id"] for row in store.list_projects()]
     except Exception as exc:  # the check itself failing is not a green light

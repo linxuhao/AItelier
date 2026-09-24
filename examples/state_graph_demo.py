@@ -6,7 +6,7 @@ Run from an installed AItelier environment:
 
 No production data, network, LLM, scheduler or deployment is used. A deterministic
 fixture worker stands in for the implementation agent; its first implementation
-is intentionally wrong. Independent Python subprocess tests determine evidence.
+is wrong on its first try. Independent Python subprocess tests determine evidence.
 The temporary project is removed after producing the optional JSON report.
 """
 from __future__ import annotations
@@ -56,7 +56,7 @@ def run_demo() -> dict:
         git("add", "growth.py")
         git("commit", "-qm", "seed")
         db = DBManager(str(root / "state.sqlite"))
-        graph = StateGraphStore(db)
+        graph = StateGraphStore(db, project_read_trusted=True)
         attempts = StateAttempts(graph)
         sf = SkillFlow(str(root / "workflow.sqlite"))
         sf.register_graph(PipelineGraph(name="demo_delivery", begin="implement", steps=[StepNode(id="implement")]))
@@ -125,7 +125,7 @@ def run_demo() -> dict:
         assert graph.get_node("demo", "monthly_plan")["readiness"] == "ready"
 
         # A new driver process/context needs only these persisted databases.
-        graph = StateGraphStore(DBManager(db.db_path))
+        graph = StateGraphStore(DBManager(db.db_path), project_read_trusted=True)
         attempts = StateAttempts(graph)
         assert attempts.get(good["attempt_id"])["run_id"] == good["run_id"]
         monthly = delivery("monthly_plan", "monthly-implementation",

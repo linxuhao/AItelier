@@ -85,7 +85,7 @@ out.write_text(json.dumps(payload,sort_keys=True,indent=2)+'\\n')
 
 
 def adjudicate(state, node, candidate, report, report_sha):
-    attempts = StateAttempts(StateGraphStore(state))
+    attempts = StateAttempts(StateGraphStore(state, project_read_trusted=True))
     external = ExternalAttempts(attempts, "fixture-controller")
     attempt = external.register("delivery", node, 1, "product-cycle",
                                 f"worker-{node}", f"request-{node}")
@@ -350,7 +350,7 @@ async def test_real_product_delivery_cycle(tmp_path, monkeypatch):
     assert candidate_a != original and git(a, "status", "--porcelain") == ""
 
     state = StateDatabase(str(tmp_path / "state.sqlite"))
-    store = StateGraphStore(state)
+    store = StateGraphStore(state, project_read_trusted=True)
     store.create_project("delivery", "fixture delivery")
     store.add_nodes("delivery", [
         {"key": "a", "goal": "deliver A", "acceptance": [

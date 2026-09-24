@@ -9,6 +9,7 @@ from uuid import UUID, uuid4
 
 from core.director_messaging_protocol import DirectorMessageError, SCHEMA_ID
 from core.state_driver_notes import _redact
+from core.state_privacy import UntrustedDatabase, writer_only_read
 
 
 SCHEMA = """
@@ -103,32 +104,44 @@ def _row_delivery(row):
         "delivery_id", "message_id", "target_project_id", "delivery_seq", "status", "version")}
 
 
+def initialize(db) -> None:
+    """Create the mailbox tables on a real handle (the leaf's own, or the one
+    an untrusted store runs ``initialize_state_schema`` on before dropping it)."""
+    with db.get_connection() as conn:
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.executescript(SCHEMA)
+        columns = {row["name"] for row in conn.execute(
+            "PRAGMA table_info(state_director_messages)")}
+        if "delivery_mode" not in columns:
+            conn.execute(
+                "ALTER TABLE state_director_messages ADD COLUMN "
+                "delivery_mode TEXT NOT NULL DEFAULT 'transient' "
+                "CHECK(delivery_mode IN ('transient','standing'))")
+        conn.commit()
+
+
 class SQLiteDirectorMessaging:
     """Actor-bound provider sharing State's SQLite transaction/event boundary."""
 
-    def __init__(self, store, actor: str, *, clock=None, id_factory=None, redactor=_redact):
+    def __init__(self, store, actor: str, *, clock=None, id_factory=None, redactor=_redact,
+                 project_read_trusted: bool = False):
         if not isinstance(actor, str) or not actor:
             raise ValueError("actor must be authenticated nonempty text")
         self.store = store
         self.actor = actor
+        # Undeclared is UNTRUSTED: a provider rebuilt from an anonymous service's
+        # store must not read the director inbox by staying silent.
+        self.project_read_trusted = bool(project_read_trusted)
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._id_factory = id_factory or (lambda: str(uuid4()))
         self._redactor = redactor
-        with self.store.db.get_connection() as conn:
-            conn.execute("PRAGMA foreign_keys=ON")
-            conn.executescript(SCHEMA)
-            columns = {row["name"] for row in conn.execute(
-                "PRAGMA table_info(state_director_messages)")}
-            if "delivery_mode" not in columns:
-                conn.execute(
-                    "ALTER TABLE state_director_messages ADD COLUMN "
-                    "delivery_mode TEXT NOT NULL DEFAULT 'transient' "
-                    "CHECK(delivery_mode IN ('transient','standing'))")
-            conn.commit()
+        if not isinstance(store.db, UntrustedDatabase):
+            initialize(store.db)
 
     def for_actor(self, actor):
         return type(self)(self.store, actor, clock=self._clock,
-                          id_factory=self._id_factory, redactor=self._redactor)
+                          id_factory=self._id_factory, redactor=self._redactor,
+                          project_read_trusted=self.project_read_trusted)
 
     def _new_id(self):
         value = self._id_factory()
@@ -291,6 +304,7 @@ class SQLiteDirectorMessaging:
             result = {"message": message, "deliveries": deliveries, "replayed": False}
             return self._record(conn, sender_project_id, operation, request_key, payload_json, result)
 
+    @writer_only_read("list_director_messages")
     def list_director_messages(self, project_id, after=0, limit=100,
                                delivery_mode=None, statuses=None):
         project_id = _db_id(project_id)

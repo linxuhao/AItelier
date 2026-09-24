@@ -1,4 +1,4 @@
-"""State DAG HTTP endpoints. Reads of the graph are public, and so are the driver's working notes for a project that has been opened; the director mailbox, the driver guide and the event plumbing are not."""
+"""State DAG HTTP endpoints. Reads of the graph and the driver guide are public, and so are the driver's working notes for a project that has been opened; the director mailbox and the event plumbing are not."""
 from fastapi import Depends, Request
 
 from api.authz import may_read_private, require_reader, require_writer

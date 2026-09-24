@@ -33,6 +33,7 @@ from core.state_database import StateDatabase
 from core.state_graph import StateGraphStore
 from core.state_portfolio import StatePortfolio
 from core.state_service import StateService
+from tests.support.state_author_surface import seed_private_mail
 
 REPO = Path(__file__).resolve().parents[2]
 ADMIN = {"X-AItelier-Admin-Token": "off-tunnel-admin"}
@@ -179,13 +180,19 @@ class TestSecondCarrierS7:
     def test_self_constructed_service_route_is_refused_private_and_serves_open(
             self, monkeypatch, tmp_path):
         """A route author who builds their OWN service (no Depends(get_service),
-        no forged declaration) still cannot read an unopened project — and the
-        same route on an OPENED project returns 200 with the full text, proving
-        the attack really landed and was really blocked (no three-pole-same-403)."""
+        no forged declaration) cannot read a writer-only action at all: the
+        verdict follows the ACTION, so the OPENED project is refused too. The
+        liveness control is the SAME route executing a PUBLIC read, which answers
+        200 on the opened project with the real body - so the refusals are
+        refusals and not a route that never landed."""
         _arm(monkeypatch)
         app, service = _app(tmp_path, "s7-route")
         _seed(service, "priv", "Private", "S7-PRIVATE-BODY-XYZZY")
         _seed(service, "open-pid", "Open", "S7-OPEN-BODY-XYZZY")
+        # An opened project's notebook is public (owner ruling 2026-09-22), so
+        # the writer-only read this route attempts is the director mailbox.
+        seed_private_mail(service, "priv", "S7-PRIVATE-BODY-XYZZY")
+        seed_private_mail(service, "open-pid", "S7-OPEN-BODY-XYZZY")
         service.open_project("open-pid")
         db = service.db
 
@@ -194,22 +201,35 @@ class TestSecondCarrierS7:
             # request credential — the only way a service can exist at all now
             rogue = StateService(db, project_read_trusted=authz.may_read_private(request))
             from core.state_commands import execute
-            return execute(rogue, "get_driver_note", {"project_id": request.query_params["pid"]})
+            return execute(rogue, "list_director_messages",
+                           {"project_id": request.query_params["pid"]})
+
+        def self_built_public(request: Request):
+            # the liveness control: the same construction, a PUBLIC read
+            rogue = StateService(db, project_read_trusted=authz.may_read_private(request))
+            from core.state_commands import execute
+            return execute(rogue, "get_graph", {"project_id": request.query_params["pid"]})
 
         app.get("/api/state/self-built")(self_built)
+        app.get("/api/state/self-built-public")(self_built_public)
         with TestClient(app) as client:
             private = client.get("/api/state/self-built?pid=priv")
             assert private.status_code == 403, (private.status_code, private.text[:200])
             assert "S7-PRIVATE-BODY-XYZZY" not in private.text
-            live = client.get("/api/state/self-built?pid=open-pid")
+            opened = client.get("/api/state/self-built?pid=open-pid")
+            assert opened.status_code == 403, (opened.status_code, opened.text[:200])
+            assert "S7-OPEN-BODY-XYZZY" not in opened.text
+            live = client.get("/api/state/self-built-public?pid=open-pid")
             assert live.status_code == 200, (live.status_code, live.text[:200])
-            assert "S7-OPEN-BODY-XYZZY" in live.text
+            assert "nodes" in live.text
 
     def test_a_portfolio_with_no_declared_trust_fails_closed(self, tmp_path):
-        store = StateGraphStore(StateDatabase(str(tmp_path / "pf.sqlite")))
-        store.create_project("hidden", "Hidden")
-        store.create_project("shown", "Shown")
-        store.set_project_access("shown", "public", "boss")
+        db = StateDatabase(str(tmp_path / "pf.sqlite"))
+        seeder = StateGraphStore(db, project_read_trusted=True)   # the fixture's own
+        seeder.create_project("hidden", "Hidden")
+        seeder.create_project("shown", "Shown")
+        seeder.set_project_access("shown", "public", "boss")
+        store = StateGraphStore(db)                                 # declares nothing
         catalog = StatePortfolio(store).projects(limit=100)   # no owning service
         assert [p["project_id"] for p in catalog["projects"]] == ["shown"]
 

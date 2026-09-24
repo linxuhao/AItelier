@@ -189,6 +189,21 @@ def _apply(entry, worktree, catalog):
     target.write_text(catalog.apply_to_text(text, entry), encoding="utf-8")
 
 
+def damage_tree(dest, entry, catalog, rev="HEAD"):
+    """A REAL damaged tree on disk, built in the runner's own shape.
+
+    `_copy_tree(dest, rev)` puts that revision's bytes in `dest` and commits
+    them; `_apply` then writes `entry` into the WORKING TREE and leaves it
+    uncommitted, exactly as a corruption run does. So `git show HEAD:<rel>` in
+    `dest` is the clean pole and `dest/<rel>` on disk is the damaged one, and a
+    caller that points its repository root here reaches the damage along the
+    same disk paths a real run produces — a stubbed `_read` is not needed.
+    """
+    _copy_tree(dest, rev)
+    _apply(entry, dest, catalog)
+    return dest
+
+
 def _failed_tests(output):
     names = [line.split(" - ")[0].strip()
              for line in output.splitlines()

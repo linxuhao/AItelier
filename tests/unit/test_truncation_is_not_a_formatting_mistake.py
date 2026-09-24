@@ -952,6 +952,20 @@ def _load_corruption_catalog():
 _CATALOG = _load_corruption_catalog()
 
 
+def _load_corruption_runner():
+    """The corruption runner itself, so the pole below damages a real tree."""
+    import importlib.util
+    path = REPO_ROOT / "tools" / "prose_corruptions" / "run_corruptions.py"
+    spec = importlib.util.spec_from_file_location(
+        "prose_corruption_runner", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_RUNNER = _load_corruption_runner()
+
+
 def _corruption_loader(entry):
     """The corrupted SURFACE text: git bytes, or HEAD's file plus edits.
 
@@ -1107,6 +1121,51 @@ def test_every_surface_driven_test_stays_green_on_a_damaged_live_tree(
     # The tripwire's own message is repr-truncated, so the rule is named
     # from the same damaged bytes it scans: the live corpus surface is red,
     # carrying the catalog's rule and the surface's own name.
+    violations = _prose_violations(surface, _prose_corpus()[surface])
+    assert any(entry["rule"] in v for v in violations), \
+        (entry["id"], entry["rule"], violations)
+    assert any(surface in v for v in violations), violations
+
+
+# ── Round 10: the same pole on a tree damaged ON DISK ─────────────────────
+# The pole above stubs `_read`, which reaches only readers that call it. A
+# corruption run damages a WORKING TREE, so the pole below builds one with
+# the runner's own `damage_tree` and redirects the roots this file reads
+# through, leaving the disk bytes — not a stub — as the damaged source.
+
+
+@pytest.mark.parametrize("entry", _CATALOG.CORRUPTIONS,
+                         ids=lambda e: e["id"])
+def test_every_surface_driven_test_stays_green_on_a_real_damaged_tree(
+        monkeypatch, tmp_path, entry):
+    """Pole for the round-10 list, on a tree really damaged on disk.
+
+    `_RUNNER.damage_tree` commits HEAD's bytes into `tree` and then writes
+    `entry` into the working tree without committing, so `_head_read` inside
+    the tree returns the clean pole while the same path on disk is damaged.
+    `REPO_ROOT` here is redirected to the tree, which is what `_read`, the
+    corpus globs and the accounting scan read through. The listed tests must
+    stay green for all ten K entries; `test_the_agent_facing_prose_is_intact`
+    must go red, and the rule is named from the same disk bytes it scanned.
+    """
+    tree = _RUNNER.damage_tree(tmp_path / "tree", entry, _CATALOG)
+    monkeypatch.setattr(sys.modules[__name__], "REPO_ROOT", tree)
+    test_the_corpus_is_derived_from_the_filesystem_not_a_list()
+    test_a_duplicate_line_planted_in_any_surface_fires_by_name()
+    for label in ("EN", "ZH"):
+        test_both_guidances_carry_the_split_advice(label)
+    if entry["id"] in GIT_CORRUPTIONS:
+        test_each_known_corruption_is_caught_by_name(entry["id"])
+    if entry["kind"] == "add":
+        # `_core_module_paths(root=REPO_ROOT)` binds its default at def time,
+        # so the tree is passed explicitly.
+        missing = _unaccounted_prose_constants(tree)
+        assert any(item.startswith(f"{entry['path']}:") for item in missing), \
+            (entry["id"], missing)
+        return
+    surface = _CATALOG.surface_name(entry)
+    with pytest.raises(AssertionError):
+        test_the_agent_facing_prose_is_intact()
     violations = _prose_violations(surface, _prose_corpus()[surface])
     assert any(entry["rule"] in v for v in violations), \
         (entry["id"], entry["rule"], violations)

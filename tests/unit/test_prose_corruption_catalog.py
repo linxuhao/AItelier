@@ -11,6 +11,7 @@ are themselves measured.
 import importlib.util
 import shutil
 import subprocess
+import sys
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -271,15 +272,17 @@ def test_the_spliced_line_scanner_is_silent_on_the_r6_false_positives():
 
 
 def test_the_runner_copies_the_tree_and_does_not_mutate_the_source(tmp_path):
-    """`_copy_tree` carries the catalog into the copy; `_apply` is confined.
+    """`_copy_tree(dest, rev)` carries HEAD into the copy; `_apply` is confined.
 
-    The dest half of the assertion compares against HEAD through the catalog
-    itself, so it stays meaningful while a corruption run has the live tree
-    damaged; only the unchanged-source half reads the live worktree, because
-    that is the thing it must see unchanged.
+    The copy half takes its bytes from HEAD, never from the live worktree: a
+    run that has already corrupted the worktree on disk would otherwise hand
+    `_apply` bytes that no longer carry the entry's `old`, and the check would
+    fail on a missing-bytes precondition instead of measuring the copy. The
+    unchanged-source half still reads the live worktree, because the live
+    worktree is the thing it must see unchanged.
     """
     dest = tmp_path / "copy"
-    RUNNER._copy_tree(dest)
+    RUNNER._copy_tree(dest, rev="HEAD")
     assert (dest / "tools" / "prose_corruptions" / "catalog.py").exists()
     assert (dest / "tests" / "unit"
             / "test_prose_corruption_catalog.py").exists()
@@ -535,3 +538,53 @@ def test_the_catalog_list_stays_green_on_a_damaged_live_tree(monkeypatch,
     if entry["kind"] == "add":
         test_a_new_prompt_module_is_unaccounted_and_names_itself(
             tmp_path / entry["id"], entry)
+
+
+# ── Round 10: the pole on a tree that is REALLY damaged on disk ──────────
+# The round-9 pole stubbed `_read`, which reaches only the readers that call
+# it. A corruption run damages a WORKING TREE; the pole below builds one with
+# the runner itself and points every root these tests read through at it, so
+# the damage is reached along the same disk paths a real run produces.
+
+
+@pytest.mark.parametrize("entry", CATALOG.CORRUPTIONS, ids=lambda e: e["id"])
+def test_the_catalog_list_stays_green_on_a_real_damaged_tree(monkeypatch,
+                                                             tmp_path, entry):
+    """Pole for the round-10 list, catalog half, on a real damaged tree.
+
+    `RUNNER.damage_tree` commits HEAD's bytes and then writes `entry` into the
+    working tree without committing, so `_head_read` in the tree returns the
+    clean pole and the same path on disk is the damaged one. Every root the
+    listed tests read through — this module's `REPO_ROOT`, `MOD.REPO_ROOT`
+    (`_read`, `_head_read`, `_git_file`, the corpus globs and the accounting
+    scan) and `RUNNER.REPO_ROOT` (the copy half) — is pointed at the tree. The
+    list must stay green for all ten K entries; the live-tree tripwire must go
+    red and name the catalog's rule (for the two new-module entries the
+    accounting scan over the tree names the module).
+    """
+    tree = RUNNER.damage_tree(tmp_path / "tree", entry, CATALOG)
+    monkeypatch.setattr(sys.modules[__name__], "REPO_ROOT", tree)
+    monkeypatch.setattr(MOD, "REPO_ROOT", tree)
+    monkeypatch.setattr(RUNNER, "REPO_ROOT", tree)
+    test_each_edit_entry_applies_to_its_own_surface()
+    test_k6c_duplicates_exactly_one_line_and_overwrites_nothing()
+    test_a_rule_name_is_catalog_data_not_a_substring_of_the_prose()
+    test_the_runner_copies_the_tree_and_does_not_mutate_the_source(
+        tmp_path / "copyroot")
+    if entry["kind"] == "add":
+        test_a_new_prompt_module_is_unaccounted_and_names_itself(
+            tmp_path / "mod", entry)
+        # `_core_module_paths(root=REPO_ROOT)` binds its default at def time,
+        # so the tree is passed explicitly rather than through the module
+        # attribute the monkeypatch above redirects.
+        missing = MOD._unaccounted_prose_constants(tree)
+        assert any(item.startswith(f"{entry['path']}:") for item in missing), \
+            (entry["id"], missing)
+        return
+    with pytest.raises(AssertionError):
+        test_the_empty_mutation_leaves_every_surface_clean()
+    surface = CATALOG.surface_name(entry)
+    violations = MOD._prose_violations(surface, MOD._prose_corpus()[surface])
+    assert any(entry["rule"] in v for v in violations), \
+        (entry["id"], entry["rule"], violations)
+    assert any(surface in v for v in violations), (entry["id"], violations)

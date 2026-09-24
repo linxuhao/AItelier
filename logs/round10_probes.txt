@@ -1,0 +1,49 @@
+round 10 focused_check probes, worktree 8ccd2c15-2b0a-4495-b9f5-cc50d2f1b3c7
+environment: python3.12, pytest from /usr/local/lib/python3.12; focused_check
+  injects the worktree root as cwd, strips inherited secret-looking env vars,
+  hard deadline 300 s per probe. Every exit code below is the process exit
+  status as returned by the probe runner; no pipe was used to obtain it.
+run id for every probe: 8ccd2c15-2b0a-4495-b9f5-cc50d2f1b3c7 (step: implement)
+
+[1] python3.12 -m pytest -q -s --maxfail=1 -p no:cacheprovider
+    tests/unit/test_prose_corruption_catalog.py::test_the_catalog_list_stays_green_on_a_real_damaged_tree[K1]
+    tests/unit/test_prose_corruption_catalog.py::test_the_catalog_list_stays_green_on_a_real_damaged_tree[K4]
+    bare exit code: 1
+    result: 1 failed, 1 passed. [K4] red at the accounting assert: the
+    scan's `root=REPO_ROOT` default was bound at def time, so the redirected
+    module attribute did not reach it. Repaired by passing the tree.
+
+[2] python3.12 -m pytest -q -s --maxfail=1 -p no:cacheprovider
+    tests/unit/test_prose_corruption_catalog.py
+    bare exit code: 0
+    result: 66 passed  (includes the round-10 real-damage pole, 10 K
+    parameters, and the round-9 pole kept as a regression guard)
+
+[3] python3.12 -m pytest -q -s --maxfail=1 -p no:cacheprovider
+    tests/unit/test_truncation_is_not_a_formatting_mistake.py::test_every_surface_driven_test_stays_green_on_a_real_damaged_tree
+    bare exit code: 0
+    result: 10 passed  (one per catalog entry, K1..K6e)
+
+[4] python3.12 -m pytest -q -s --maxfail=1 -p no:cacheprovider
+    tests/unit/test_truncation_is_not_a_formatting_mistake.py
+    bare exit code: 0
+    result: 65 passed  (includes both round-10 poles and the round-9 pole)
+
+[5] python3.12 -m pytest -q -s --maxfail=1 -p no:cacheprovider
+    tests/unit/test_prose_corruption_catalog.py
+    tests/unit/test_truncation_is_not_a_formatting_mistake.py
+    bare exit code: 0
+    result: 131 passed  (both card files together, the widest selection
+    focused_check allows in one probe)
+
+Both probes [2] and [4] are file-scoped, not whole-suite runs: the whole
+suite x 10 corruptions is the reviewer's measurement and nothing here claims
+it. No corpus file was edited: tests/fixtures/ is untouched by this round.
+
+searches used for the read-path column (matches returned, this tree):
+  a. semantic_search "where does each catalog test read its bytes from"
+     (2 queries) - ranked snippets, no count semantics.
+  b. search `_head_read|_git_file|_read\(|read_text|_copy_tree|_copy_worktree|copytree|ls-files|ls-tree|_load_corruption_catalog|_load\(`
+     over tests/unit/test_prose_corruption_catalog.py - 31 hits.
+  c. same identifier set minus ls-tree plus `_RUNNER|_CATALOG|glob\(` over
+     tests/unit/test_truncation_is_not_a_formatting_mistake.py - 47 hits.

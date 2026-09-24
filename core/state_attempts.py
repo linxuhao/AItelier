@@ -15,6 +15,7 @@ import uuid
 
 from core.state_graph import (StateConflict, StateGraphError, StateGraphStore,
                               StateNotFound, canonical, digest, integer, key, now, text)
+from core.state_privacy import UntrustedDatabase
 
 ACTIVE = ("reserved", "launching", "running", "paused", "unknown")
 SHA = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
@@ -78,10 +79,13 @@ def _public(row: dict) -> dict:
 class StateAttempts:
     def __init__(self, store: StateGraphStore):
         self.store = store
-        from core.state_attempt_schema import initialize
-        initialize(store.db, SCHEMA)
-        from core.state_design import initialize as initialize_design
-        initialize_design(store.db)
+        if not isinstance(store.db, UntrustedDatabase):
+            # A real handle: create or migrate the attempt tables now. An
+            # untrusted store made them before it dropped its real handle.
+            from core.state_attempt_schema import initialize
+            initialize(store.db, SCHEMA)
+            from core.state_design import initialize as initialize_design
+            initialize_design(store.db)
 
     @staticmethod
     def _attempt(conn, attempt_id):

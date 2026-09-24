@@ -269,9 +269,13 @@ def test_all_new_state_reads_remain_private_and_commands_strict(live, monkeypatc
         assert "Full private requirement" not in response.text
         assert "to make changes" not in response.text
         assert response.headers["X-AItelier-Denial"] == authz.READ_DENIED_NOT_AUTHENTICATED
-        for action in ("list_director_messages", "get_driver_guide_section"):
-            response = client.post("/api/state/query/" + action, json={"project_id": "game"})
-            assert response.status_code == 403, (action, response.text)
+        response = client.post("/api/state/query/list_director_messages",
+                               json={"project_id": "game"})
+        assert response.status_code == 403, response.text
+        # The driver guide is public text: the door lets it through.
+        response = client.post("/api/state/query/get_driver_guide_section",
+                               json={"address": "guide://nonexistent"})
+        assert response.status_code != 403, response.text
         for action in ("get_driver_note", "driver_note_index"):
             response = client.post("/api/state/query/" + action, json={"project_id": "game"})
             assert response.status_code != 403, (action, response.text)

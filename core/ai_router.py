@@ -658,7 +658,7 @@ class AIGateway:
 
         Marks the system message as the breakpoint so everything up to and
         including it (tools + system) is cached. DeepSeek/Minimax/OpenAI use
-        automatic prefix caching and are intentionally excluded — sending them
+        automatic prefix caching and are deliberately excluded — sending them
         a cache_control field is at best ignored and at worst rejected.
         """
         model = (self.litellm_model or "").lower()

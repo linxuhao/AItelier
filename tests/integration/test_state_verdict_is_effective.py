@@ -40,6 +40,7 @@ from core.state_commands import PUBLIC_READS, execute, is_public_read
 from core.state_database import StateDatabase
 from core.state_service import StateService
 from core.workspace_manager import WorkspaceManager
+from tests.support.state_author_surface import seed_private_mail
 
 PRIVATE_PID = "verdict-private"
 OPEN_PID = "verdict-open"
@@ -70,9 +71,15 @@ def _arm(monkeypatch):
 
 
 def _seed(service):
+    # Each secret is in the project's notebook AND its director mailbox. An
+    # opened project's notebook is public (owner ruling 2026-09-22), so the
+    # private DELIVERY the forged routes attempt is the mailbox
+    # (`PRIVATE_ACTION`, private per the one table); the unopened project's
+    # notebook stays private and backs the driver-note route tests.
     for pid, secret in ((PRIVATE_PID, PRIVATE_SECRET), (OPEN_PID, OPEN_SECRET)):
         service.create_project(pid, pid)
         service.driver_notes.update(pid, "permanent", secret, 0, "director")
+        seed_private_mail(service, pid, secret)
     service.open_project(OPEN_PID)
 
 
@@ -241,7 +248,7 @@ class TestTheAttackOnBothAssemblyPoints:
 
         def forged(request: Request, pid: str, svc=Depends(get_service)):
             execute(svc, "list_projects", {})
-            return execute(svc, "get_driver_note", {"project_id": pid})
+            return execute(svc, "list_director_messages", {"project_id": pid})
 
         def honest(request: Request, pid: str, svc=Depends(get_service)):
             return execute(svc, "get_graph", {"project_id": pid})
@@ -288,7 +295,7 @@ class TestTheAttackOnBothAssemblyPoints:
 
         def forged(request: Request, pid: str):
             execute(service, "list_projects", {})
-            return execute(service, "get_driver_note", {"project_id": pid})
+            return execute(service, "list_director_messages", {"project_id": pid})
 
         def honest(request: Request, pid: str):
             return execute(service, "get_graph", {"project_id": pid})
@@ -339,7 +346,7 @@ class TestThePropertyForgeryCorpusIsRefused:
         app.dependency_overrides[get_service] = lambda: service
 
         def forged(project_id: str, svc=Depends(get_service)):
-            return execute(svc, "get_driver_note", {"project_id": project_id})
+            return execute(svc, "list_director_messages", {"project_id": project_id})
 
         corpus = sorted(action for action in PUBLIC_READS if is_public_read(action))
         assert corpus, "the corpus is empty - the derivation is broken"
@@ -358,19 +365,22 @@ class TestThePropertyForgeryCorpusIsRefused:
 class TestTheRegressionsTheEarlierRoundsBought:
     """The wins of the previous rounds are re-asserted, not re-litigated."""
 
-    def _gated_app(self, tmp_path, name):
-        service = StateService(StateDatabase(str(tmp_path / name)),
-                               actor="verdict-seeder", project_read_trusted=True)
-        _seed(service)
+    def _gated_app(self, tmp_path, name, monkeypatch):
+        """The gate ON and the product ``get_service``: an anonymous request
+        gets the service its own credential earns, not a trusted fixture."""
+        _arm(monkeypatch)
+        db = StateDatabase(str(tmp_path / name))
+        _seed(StateService(db, actor="verdict-seeder", project_read_trusted=True))
         app = FastAPI()
         app.include_router(state_router)
-        app.dependency_overrides[get_service] = lambda: service
+        app.dependency_overrides[get_db_manager] = lambda: db
+        app.dependency_overrides[get_workspace_manager] = lambda: None
         return app
 
-    def test_a_declaration_for_an_action_added_later_is_refused(self, tmp_path):
+    def test_a_declaration_for_an_action_added_later_is_refused(self, tmp_path, monkeypatch):
         """An unrecognised action fails CLOSED, so a read added later is private
         until someone classifies it."""
-        app = self._gated_app(tmp_path, "later.sqlite")
+        app = self._gated_app(tmp_path, "later.sqlite", monkeypatch)
         path = "/api/state/forged-added-later"
 
         def added_later(project_id: str):
@@ -385,9 +395,9 @@ class TestTheRegressionsTheEarlierRoundsBought:
         finally:
             _drop(app, path)
 
-    def test_a_route_that_declares_nothing_is_refused_not_opened(self, tmp_path):
+    def test_a_route_that_declares_nothing_is_refused_not_opened(self, tmp_path, monkeypatch):
         """The author attached the real guard and declared NOTHING: DENY."""
-        app = self._gated_app(tmp_path, "undeclared.sqlite")
+        app = self._gated_app(tmp_path, "undeclared.sqlite", monkeypatch)
         path = "/api/state/undeclared"
 
         def undeclared(project_id: str):
@@ -404,17 +414,17 @@ class TestTheRegressionsTheEarlierRoundsBought:
         finally:
             _drop(app, path)
 
-    def test_head_and_a_trailing_slash_do_not_leak_a_private_body(self, tmp_path):
-        app = self._gated_app(tmp_path, "methods.sqlite")
+    def test_head_and_a_trailing_slash_do_not_leak_a_private_body(self, tmp_path, monkeypatch):
+        app = self._gated_app(tmp_path, "methods.sqlite", monkeypatch)
         route = f"/api/state/projects/{PRIVATE_PID}/driver-note"
         with TestClient(app) as client:
             for response in (client.head(route), client.get(route + "/")):
                 assert response.status_code != 200, (response.status_code, response.text)
                 assert PRIVATE_SECRET not in response.text
 
-    def test_the_prefix_boundary_is_a_boundary(self, tmp_path):
+    def test_the_prefix_boundary_is_a_boundary(self, tmp_path, monkeypatch):
         """`/api/stateful` is a near miss, not a member of the prefix."""
-        app = self._gated_app(tmp_path, "boundary.sqlite")
+        app = self._gated_app(tmp_path, "boundary.sqlite", monkeypatch)
         near_miss = "/api/stateful"
         app.router.add_api_route(near_miss, lambda: {"detail": "outside the prefix"},
                                  methods=["GET"])
@@ -425,10 +435,10 @@ class TestTheRegressionsTheEarlierRoundsBought:
         finally:
             _drop(app, near_miss)
 
-    def test_a_mounted_sub_app_and_a_bare_starlette_route_are_enumerated(self, tmp_path):
+    def test_a_mounted_sub_app_and_a_bare_starlette_route_are_enumerated(self, tmp_path, monkeypatch):
         from starlette.routing import Route as StarletteRoute
 
-        app = self._gated_app(tmp_path, "mounted.sqlite")
+        app = self._gated_app(tmp_path, "mounted.sqlite", monkeypatch)
         child = FastAPI()
 
         def child_handler():
@@ -447,9 +457,9 @@ class TestTheRegressionsTheEarlierRoundsBought:
         assert declaration_table(app)["/api/state/bare"]["verdict"] == \
             "refused-undeclared"
 
-    def test_the_verdict_is_idempotent_for_the_same_request(self, tmp_path):
+    def test_the_verdict_is_idempotent_for_the_same_request(self, tmp_path, monkeypatch):
         """Judging N times yields the status and body of judging it once."""
-        app = self._gated_app(tmp_path, "idem.sqlite")
+        app = self._gated_app(tmp_path, "idem.sqlite", monkeypatch)
         route = f"/api/state/projects/{PRIVATE_PID}/driver-note"
         with TestClient(app) as client:
             first = client.get(route)

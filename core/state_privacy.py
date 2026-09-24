@@ -1,29 +1,51 @@
-"""The one confidentiality verdict for a WRITER-ONLY READ, taken at execution.
+"""The confidentiality verdicts for State reads: the ACTION, and the ROWS.
 
-Confidentiality is decided by the ACTION that is being read, at the moment the
-read EXECUTES - never by inspecting a route's or a handler's source. The single
-classification table is ``core.state_commands.read_visibility`` (unknown action
--> private, so it fails closed); this module turns that classification into one
-refusal and applies it from every place a private read can be performed:
+1. The ACTION verdict. Confidentiality of a read is decided by the action being
+   read, at the moment the read EXECUTES - never by inspecting a route's or a
+   handler's source. The single classification table is
+   ``core.state_commands.read_visibility`` (unknown action -> private, so it
+   fails closed); ``refuse_private_read`` turns it into one refusal, applied at
+   ``core.state_commands.execute`` and inside the service methods themselves
+   (``@writer_only_read("<action>")``).
 
-* ``core.state_commands.execute``, the chokepoint every transport shares; and
-* the service methods themselves - ``@writer_only_read("<action>")`` - so a
-  route that bypasses ``execute`` and calls ``service.driver_notes.get(...)``
-  (or any other writer-only read) directly is refused by the same function.
+2. The ROW verdict. An untrusted caller's objects hold exactly one kind of
+   database handle, ``UntrustedDatabase``: a PATH and the rules below, and no
+   other handle. Every connection it opens is armed before anyone sees it, so a
+   reader written later - registered nowhere, decorated by nobody, named in no
+   table - that reaches a private table through ``svc``, ``svc.store``,
+   ``svc.db`` or anything rebuilt from them reads through such a connection:
 
-The trust level comes from the object that owns the data. ``StateService``
-derives it once per request from the raw credential (``api.authz.may_read_private``)
-and hands it to every object that can reach a private table. An owner that never
-declared a level is UNTRUSTED, exactly like an anonymous transport: trust only
-comes from an explicit declaration at a real construction point.
+   * a PUBLIC state table is readable;
+   * a PRIVATE state table - and the host's ``run_isolation`` - is never read
+     from the database itself. Where a public read needs part of one, the
+     connection carries a copy made before
+     it was armed that holds only that part: the visibility of opened projects
+     (``state_project_access``), the event watermark of opened projects
+     (``state_events``), the provenance rows of opened projects' runs
+     (``run_isolation``), and - only when a notebook read asks for one
+     project's notebook - that project's notebook rows if and only if the
+     project is opened. Columns outside that part are refused;
+   * every other table, every write, every schema change, ATTACH and every
+     pragma except ``foreign_keys``/``busy_timeout`` are refused (default deny).
 
-A registered method and a decorated one are still a LIST, and every list has a
-layer below it. So the verdict also lives where a private read cannot avoid it:
-``read_authorizer`` judges each TABLE a connection touches, and
-``TrustBoundDatabase`` installs it from the handle's declared trust. A function
-written later, imported by nobody and named in no table, is judged the same way
-when it reads ``state_driver_notes``, because the connection it reads through
-refuses before any row is returned.
+   The decision data (which projects are opened) is therefore computed on a
+   connection nobody else holds, before the authorizer is installed, and
+   handed to the caller as rows - never as a channel. There is no privacy
+   decision method, unrestricted handle or write path on an untrusted object.
+
+   NOT guaranteed by this verdict (director's scope ruling, 2026-09-23): code
+   holding an armed connection can call that connection's own methods -
+   ``set_authorizer(None)``, ``backup(...)``, ``blobopen(...)`` - and any code
+   in the process can reopen the database file by its path or declare trust
+   at a construction point. Closing those needs a process or file boundary.
+   PUBLIC state tables are judged by table, not by project: an armed
+   connection reads their rows for unopened projects too.
+
+The trust level comes from the credential at a real construction point:
+``StateService`` derives it once per request from the raw credential
+(``api.authz.may_read_private``). An owner that never declared a level is
+UNTRUSTED, and a store built on an ``UntrustedDatabase`` is untrusted whatever
+it declares, because the handle - not the flag - decides which rows exist.
 """
 from __future__ import annotations
 
@@ -133,124 +155,153 @@ def writer_only_read(action: str):
     return decorate
 
 
-class TrustBoundDatabase:
-    """A database handle that carries a DECLARED trust level onto every
-    connection it hands out.
+class UntrustedDatabase:
+    """The database handle of a caller that did not prove it may read private
+    records. It holds the database path and nothing else.
 
-    This is the layer every private read must pass. ``sqlite3`` calls a
-    connection's authorizer for every table a statement touches, so a verdict
-    installed here judges a read of a private table no matter WHO wrote the
-    reading function, whether it is registered anywhere, or whether a route
-    calls it. Nothing about the reader's name, module or decoration is
-    consulted - only the table it reads and the trust this handle declared.
+    There is no attribute that returns another handle, no privacy-decision
+    channel and no write path: every connection comes from ``get_connection``
+    and is armed (see ``_arm``) before it is yielded.
     """
 
-    def __init__(self, db, project_read_trusted):
-        self.__dict__["_db"] = db
-        self.__dict__["_trusted"] = bool(project_read_trusted)
+    __slots__ = ("_path",)
 
-    def __getattr__(self, name):
-        # Everything else about the handle is untouched: paths, migrations and
-        # every legacy method stay reachable, so only the read verdict changes.
-        # `_db` is read out of `__dict__`, never through an attribute lookup: a
-        # copy of this object is reconstructed without `__init__`, and delegating
-        # for a missing `_db` would recurse forever.
-        if name.startswith("_"):
-            raise AttributeError(name)
-        db = self.__dict__.get("_db")
-        if db is None:
-            raise AttributeError(name)
-        return getattr(db, name)
+    def __init__(self, db_path):
+        self._path = str(db_path)
 
     @property
-    def db_path(self):
-        return self._db.db_path
-
-    @property
-    def unrestricted(self):
-        """The raw handle, for the privacy DECISION itself: opening/closing a
-        project and reading who opened it. Only that machinery may use it; a
-        read that delivers data goes through ``get_connection``."""
-        return self._db
+    def db_path(self) -> str:
+        return self._path
 
     @contextmanager
-    def get_connection(self):
-        """A connection that JUDGES the private tables the caller reads.
-
-        This is the layer every private read must pass. ``sqlite3`` calls the
-        authorizer for every table a statement touches, so a reader written
-        later - registered nowhere, decorated by nobody, named in no table - is
-        refused here the moment it reads ``state_driver_notes``. Nothing about
-        the reader is consulted, only the table and this handle's trust.
-        """
-        with self._db.get_connection() as connection:
-            verdict = install_read_authorizer(connection, self._trusted)
+    def get_connection(self, notebook: str | None = None):
+        """An armed connection. ``notebook`` names the one project whose
+        notebook rows a notebook read needs; they are present only when that
+        project is opened."""
+        connection = sqlite3.connect(self._path, timeout=10)
+        try:
+            connection.row_factory = sqlite3.Row
+            verdict = _arm(connection, notebook)
             try:
                 yield connection
             except sqlite3.DatabaseError:
-                # sqlite3 turns a denying authorizer into "not authorized",
-                # losing which denial it was. The verdict remembers its OWN
+                # sqlite3 reports a denying authorizer as "not authorized",
+                # losing which denial it was. The verdict remembers its own
                 # refusal, so it leaves here as the one refusal every other
-                # layer raises - a 403, not a 500 - and an unrelated database
-                # error is re-raised untouched.
-                if verdict is not None and verdict.denied:
+                # layer raises; an unrelated database error is re-raised.
+                if verdict.denied:
                     from core.state_commands import ProjectPrivate
                     raise ProjectPrivate() from None
                 raise
-
-    @contextmanager
-    def decision_connection(self):
-        """The privacy machinery's own channel, for a DECISION not a delivery.
-
-        Deciding whether a project is open must read the visibility row, and a
-        public aggregate carries its event watermark - a counter, never a
-        payload. Nothing that leaves through here is record text, and the reads
-        that are private ACTIONS (``project_visibility``, ``events``) stay
-        refused by the action verdict on their own methods.
-        """
-        with self._db.get_connection() as connection:
-            install_read_authorizer(connection, None)
-            yield connection
+        finally:
+            connection.close()
 
 
-def read_authorizer(trusted):
-    """The callback that judges a table read on the connection.
+_OPENED = "SELECT project_id FROM main.state_project_access WHERE visibility='public'"
 
-    A caller that DECLARED trust (the internal driver, MCP with a real
-    credential, a test fixture) and the decision channel (``trusted is None``)
-    are unrestricted. Everyone else - including a reader that does not exist
-    yet - may read PUBLIC tables only: any ``SQLITE_READ`` of a table the one
-    classification calls private is DENIED by sqlite3 itself, so a read that
-    reaches a private table without passing any list of readers still cannot
-    return a row.
-    """
-    if trusted is True or trusted is None:
-        return None
+# The public part of each private (or host) table an untrusted connection may
+# read: the rows a public read needs, and the columns that may be read. Each is
+# COPIED into a temp table of the same name before the connection is armed, so
+# the unqualified name resolves to the copy and the database's own table is
+# never readable on that connection.
+PROJECTIONS = {
+    "state_project_access": (
+        "SELECT project_id, visibility, NULL AS opened_by, NULL AS opened_at, "
+        "NULL AS changed_by, NULL AS changed_at FROM main.state_project_access "
+        "WHERE visibility='public'",
+        frozenset({"project_id", "visibility"})),
+    "state_events": (
+        "SELECT MAX(seq) AS seq, project_id, NULL AS node_key, NULL AS event_type, "
+        "NULL AS payload_json, NULL AS created_at FROM main.state_events "
+        f"WHERE project_id IN ({_OPENED}) GROUP BY project_id",
+        frozenset({"seq", "project_id"})),
+    "run_isolation": (
+        "SELECT * FROM main.run_isolation WHERE run_id IN (SELECT run_id FROM "
+        f"main.state_attempts WHERE project_id IN ({_OPENED}))",
+        None),
+}
 
-    class ReadVerdict:
-        """One denial per connection, remembered so the owner can name it."""
+# The notebook, copied for ONE project and only when that project is opened
+# (owner ruling 2026-09-22, note://aitelier/546f3b521eca).
+NOTEBOOK_TABLES = ("state_driver_notes", "state_driver_note_revisions",
+                   "state_driver_note_entries")
 
-        def __init__(self):
-            self.denied = False
-
-        def __call__(self, action, arg1, arg2, db_name, trigger):
-            # arg1 is the table name for SQLITE_READ. Only reads are judged: a
-            # refusal must never stop the schema work a write needs.
-            if action == sqlite3.SQLITE_READ and arg1 in PRIVATE_STATE_TABLES:
-                self.denied = True
-                return sqlite3.SQLITE_DENY
-            return sqlite3.SQLITE_OK
-
-    return ReadVerdict()
+# sqlite's own schema tables and the pure JSON table-valued functions.
+_SCHEMA_TABLES = frozenset({"sqlite_master", "sqlite_schema"})
+_PURE_FUNCTIONS = frozenset({"json_each", "json_tree"})
+_ALLOWED_PRAGMAS = frozenset({"foreign_keys", "busy_timeout"})
+_ALLOWED_ACTIONS = frozenset({
+    sqlite3.SQLITE_SELECT, sqlite3.SQLITE_FUNCTION, sqlite3.SQLITE_TRANSACTION,
+    sqlite3.SQLITE_SAVEPOINT, getattr(sqlite3, "SQLITE_RECURSIVE", 33)})
 
 
-def install_read_authorizer(connection, trusted):
-    """Install the table verdict on ``connection`` and hand it back.
-
-    It is returned so the handle that owns the connection can translate
-    sqlite3's own refusal into the one refusal; see
-    ``TrustBoundDatabase.get_connection``.
-    """
-    verdict = read_authorizer(trusted)
+def _arm(connection, notebook):
+    """Copy the public parts in, then install the verdict. Nothing is yielded
+    to a caller before the verdict is installed."""
+    connection.execute("PRAGMA temp_store=MEMORY")
+    connection.execute("PRAGMA foreign_keys=ON")
+    present = {row[0] for row in connection.execute(
+        "SELECT name FROM main.sqlite_master WHERE type='table'")}
+    readable = {}
+    for table, (select, columns) in PROJECTIONS.items():
+        # run_isolation is a host table: a State-only database has none.
+        if table in present:
+            connection.execute(f"CREATE TEMP TABLE {table} AS {select}")
+            readable[table] = columns
+    if notebook is not None:
+        opened = connection.execute(
+            "SELECT 1 FROM main.state_project_access WHERE project_id=? "
+            "AND visibility='public'", (notebook,)).fetchone() is not None
+        for table in NOTEBOOK_TABLES:
+            connection.execute(
+                f"CREATE TEMP TABLE {table} AS SELECT * FROM main.{table} WHERE 0")
+            if opened:
+                connection.execute(
+                    f"INSERT INTO temp.{table} SELECT * FROM main.{table} WHERE project_id=?",
+                    (notebook,))
+            readable[table] = None
+    connection.commit()
+    verdict = ReadVerdict(readable)
     connection.set_authorizer(verdict)
     return verdict
+
+
+class ReadVerdict:
+    """The authorizer of an untrusted connection: default deny.
+
+    ``readable`` maps each temp copy on this connection to the columns that may
+    be read from it (None: every column). The verdict remembers that it denied,
+    so the handle can raise the one refusal instead of a database error.
+    """
+
+    def __init__(self, readable: dict):
+        self.readable = readable
+        self.denied = False
+
+    def _deny(self):
+        self.denied = True
+        return sqlite3.SQLITE_DENY
+
+    def __call__(self, action, arg1, arg2, db_name, _source):
+        if action == sqlite3.SQLITE_READ:
+            table, column = arg1, arg2
+            if table in self.readable:
+                # An unqualified name (db_name None) resolves to the temp copy,
+                # which shadows the database's table; "main" is the table itself.
+                columns = self.readable[table]
+                if db_name in ("temp", None) and (columns is None or column in columns
+                                                  or column == ""):
+                    return sqlite3.SQLITE_OK
+                return self._deny()
+            if table in PUBLIC_STATE_TABLES and db_name in ("main", None):
+                return sqlite3.SQLITE_OK
+            if table in _SCHEMA_TABLES and db_name in ("main", None):
+                return sqlite3.SQLITE_OK
+            if table in _PURE_FUNCTIONS:
+                return sqlite3.SQLITE_OK
+            return self._deny()
+        if action in _ALLOWED_ACTIONS:
+            return sqlite3.SQLITE_OK
+        if action == sqlite3.SQLITE_PRAGMA and arg1 in _ALLOWED_PRAGMAS:
+            return sqlite3.SQLITE_OK
+        return self._deny()

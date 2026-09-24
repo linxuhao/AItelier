@@ -67,9 +67,15 @@ class StateService:
             raise TypeError(
                 "StateService requires an explicit project_read_trusted=True|False: "
                 "a service that never declared its trust level must not come into existence")
-        self.project_read_trusted = project_read_trusted
-        self.db, self.ws, self.sf, self.registry = db, ws, sf, registry
         self.store = StateGraphStore(db, project_read_trusted=project_read_trusted)
+        # The handle decides: a service declared trusted over an untrusted
+        # handle is untrusted. An untrusted service keeps NO handle of its own -
+        # its `db` is the store's path-only `UntrustedDatabase`, so the raw
+        # handle it was constructed with is referenced by nothing it owns.
+        self.project_read_trusted = self.store.project_read_trusted
+        self.db = db if self.project_read_trusted else self.store.db
+        self.ws, self.sf, self.registry = ws, sf, registry
+        project_read_trusted = self.project_read_trusted
         from core.state_driver_notes import StateDriverNotes
         self.driver_notes = StateDriverNotes(self.store, actor,
                                               project_read_trusted=project_read_trusted)

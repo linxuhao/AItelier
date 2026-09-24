@@ -24,9 +24,6 @@ The rules, in full, because a rule nobody writes down is a rule that drifts:
   the AST entirely) are never examined.
 * An inner `def` is examined only when the handler actually calls it, so an
   `execute` inside a function nobody calls binds nothing.
-* A handler that DELIVERS several actions may declare a public one only when
-  every action it delivers is public: the stricter action wins. "It mentioned a
-  public action" is not a rule.
 * The action-dispatch families (`/query/{action}`) hand `execute` the very
   parameter the route takes from its path — the value the guard has already
   judged — and are bound by that identity rather than exempted.

@@ -11,7 +11,7 @@ from core.state_driver_index import (ENTRY_SCHEMA, index_line, MAX_INDEX_LIMIT, 
                                      referenced_addresses)
 from core.state_graph import (StateConflict, StateGraphError, StateNotFound, key, now,
                               text)
-from core.state_privacy import writer_only_read
+from core.state_privacy import UntrustedDatabase, writer_only_read
 
 MAX_SECTION_CHARS = 100000
 MAX_SEARCH_QUERY_CHARS = 500
@@ -123,6 +123,14 @@ def _matches(value: str, query: str) -> bool:
     return not query or query.casefold() in value.casefold()
 
 
+def initialize(db) -> None:
+    """Create the notebook tables on a real handle (the leaf's own, or the one
+    an untrusted store runs ``initialize_state_schema`` on before dropping it)."""
+    with db.get_connection() as conn:
+        conn.executescript(SCHEMA + ENTRY_SCHEMA)
+        conn.commit()
+
+
 class StateDriverNotes:
     """One CAS-protected notebook per State project; State remains authoritative."""
 
@@ -136,12 +144,8 @@ class StateDriverNotes:
         # moment the read runs.
         self.project_read_trusted = bool(project_read_trusted)
         self.actor = text(actor, "authenticated actor", 320)
-        # Schema setup is not a read of a private record: it must run for every
-        # caller, including the anonymous one whose reads the connection will
-        # then judge.
-        with store.db.decision_connection() as conn:
-            conn.executescript(SCHEMA + ENTRY_SCHEMA)
-            conn.commit()
+        if not isinstance(store.db, UntrustedDatabase):
+            initialize(store.db)
 
     @staticmethod
     def _result(project_id: str, row) -> dict:
@@ -161,7 +165,7 @@ class StateDriverNotes:
     @writer_only_read("get_driver_note")
     def get(self, project_id: str) -> dict:
         project_id = key(project_id, "project_id")
-        with self.store.transaction() as conn:
+        with self.store.transaction(notebook=project_id) as conn:
             self.store._project(conn, project_id)
             row = conn.execute("SELECT * FROM state_driver_notes WHERE project_id=?",
                                (project_id,)).fetchone()
@@ -171,7 +175,7 @@ class StateDriverNotes:
     @writer_only_read("driver_note_history")
     def history(self, project_id: str, after_revision: int = 0, limit: int = 100) -> dict:
         project_id = key(project_id, "project_id")
-        with self.store.transaction() as conn:
+        with self.store.transaction(notebook=project_id) as conn:
             self.store._project(conn, project_id)
             rows = conn.execute(
                 "SELECT * FROM state_driver_note_revisions "
@@ -232,7 +236,7 @@ class StateDriverNotes:
                 clauses.append(sql)
                 args.append(value)
         selected = []
-        with self.store.transaction() as conn:
+        with self.store.transaction(notebook=project_id) as conn:
             self.store._project(conn, project_id)
             rows = conn.execute(
                 "SELECT revision,actor,director_identity,operation,section,created_at,"
@@ -501,7 +505,7 @@ class StateDriverNotes:
         """Fetch one body by address. Bodies are never injected; they are fetched."""
         project_id = key(project_id, "project_id")
         entry_id = entry_id_value(entry_id)
-        with self.store.transaction() as conn:
+        with self.store.transaction(notebook=project_id) as conn:
             self.store._project(conn, project_id)
             return entry_detail(self._entry(conn, project_id, entry_id))
 
@@ -512,7 +516,7 @@ class StateDriverNotes:
         if type(limit) is not int or not 1 <= limit <= MAX_INDEX_LIMIT:
             raise StateGraphError(f"limit must be an integer between 1 and {MAX_INDEX_LIMIT}")
         clause = "" if include_delisted else " AND listing='listed'"
-        with self.store.transaction() as conn:
+        with self.store.transaction(notebook=project_id) as conn:
             self.store._project(conn, project_id)
             rows = conn.execute(
                 "SELECT * FROM state_driver_note_entries WHERE project_id=?" + clause +
@@ -526,7 +530,7 @@ class StateDriverNotes:
     def check_index(self, project_id: str) -> dict:
         """Run the address check over the whole notebook and report what dangles."""
         project_id = key(project_id, "project_id")
-        with self.store.transaction() as conn:
+        with self.store.transaction(notebook=project_id) as conn:
             self.store._project(conn, project_id)
             note = conn.execute("SELECT * FROM state_driver_notes WHERE project_id=?",
                                 (project_id,)).fetchone()

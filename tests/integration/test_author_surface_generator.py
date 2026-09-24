@@ -25,9 +25,10 @@ from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 
 from api import authz, state_http
-from tests.support.state_author_surface import (GEN_PID, LEAK_MARK, Body, Shape,
+from tests.support.state_author_surface import (GEN_PID, LEAK_MARK, PRIVATE_ACTION, Body, Shape,
                                                 compile_handler, carrier_shapes,
-                                                expected_can_serve, shape_count, shapes)
+                                                expected_can_serve, seed_private_mail,
+                                                shape_count, shapes)
 from api.state_graph_routers import get_service
 from api.state_verdict import (Binding, VerdictLedger, binding_for, delivered_actions,
                                state_route_paths)
@@ -49,7 +50,7 @@ def _build_app(tmp_path):
     service = StateService(StateDatabase(str(tmp_path / "surface.sqlite")),
                            actor="surface-seeder", project_read_trusted=True)
     service.create_project(GEN_PID, GEN_PID)
-    service.driver_notes.update(GEN_PID, "permanent", LEAK_MARK, 0, "director")
+    seed_private_mail(service, GEN_PID, LEAK_MARK)
     service.open_project(GEN_PID)
     app = FastAPI()
     from api.state_graph_routers import router as state_router
@@ -232,7 +233,7 @@ class TestTheFourCarriersAreCaught:
         handler = compile_handler(shape, namespace=_namespace())
         binding = binding_for(handler, "get_graph", "/api/state/gen/{action}")
         assert binding.ok is False, binding
-        assert "get_driver_note" in binding.reason, binding.reason
+        assert PRIVATE_ACTION in binding.reason, binding.reason
 
     def test_reverting_the_order_makes_carrier4_leak(self, tmp_path, monkeypatch):
         """The mutation: put `return ok=True` for the dispatch branch back BEFORE
@@ -287,13 +288,13 @@ def test_the_expected_model_follows_the_generated_source(monkeypatch):
 
     shape = next(s for s in surface.shapes() if s.body == surface.Body.PRIVATE_ONLY)
     honest = surface._model_delivery(shape)
-    assert honest[0] == frozenset({"get_driver_note"}), honest
+    assert honest[0] == frozenset({PRIVATE_ACTION}), honest
     assert surface.expected_can_serve(shape) is False
 
     real_source = surface._handler_source
 
     def tampered_source(param, body, name):
-        return real_source(param, body, name).replace("'get_driver_note'", "'get_graph'")
+        return real_source(param, body, name).replace(repr(PRIVATE_ACTION), "'get_graph'")
 
     monkeypatch.setattr(surface, "_handler_source", tampered_source)
     mutated = surface._model_delivery(shape)

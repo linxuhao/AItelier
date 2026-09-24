@@ -18,7 +18,8 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 
 from api import authz
-from tests.support.state_author_surface import dependency_shapes
+from tests.support.state_author_surface import (PRIVATE_ACTION, dependency_shapes,
+                                                seed_private_mail)
 from api.state_graph_routers import get_service
 from api.state_http import create_state_router
 from api.state_verdict import VerdictLedger, state_route_paths
@@ -33,9 +34,17 @@ def _service(tmp_path, name):
     service = StateService(StateDatabase(str(tmp_path / name)), actor="fapi-seeder",
                            project_read_trusted=True)
     service.create_project(OPEN_PID, OPEN_PID)
-    service.driver_notes.update(OPEN_PID, "permanent", SECRET, 0, "director")
+    seed_private_mail(service, OPEN_PID, SECRET)
     service.open_project(OPEN_PID)
     return service
+
+
+# The product router's private-read door: an opened project's notebook is
+# public (owner ruling 2026-09-22), so the private read the guard must judge is
+# the director mailbox, reached through the dispatch family.
+PRIVATE_ROUTE = f"/api/state/query/{PRIVATE_ACTION}"
+PRIVATE_TEMPLATE = "/api/state/query/{action}"
+PRIVATE_BODY = {"project_id": OPEN_PID}
 
 
 def _authz_d_factory(kind):
@@ -96,9 +105,9 @@ def _private_route_via_plain_depends(tmp_path, name, D):
 
     def handler(project_id: str, svc=Depends(get_service)):
         from core.state_commands import execute
-        return execute(svc, "get_driver_note", {"project_id": project_id})
+        return execute(svc, "list_director_messages", {"project_id": project_id})
 
-    app.add_api_route("/note/{project_id}", handler, methods=["GET"],
+    app.add_api_route("/mail/{project_id}", handler, methods=["GET"],
                       dependencies=[Depends(D)])
     app.dependency_overrides[get_service] = lambda: service
     return app
@@ -112,12 +121,12 @@ class TestTheGuardMatchesPlainDepends:
         for kind in kinds:
             guard_app = _private_route_through_guard(tmp_path, f"guard-{kind}.sqlite", _authz_d_factory(kind))
             control_app = _private_route_via_plain_depends(tmp_path, f"ctrl-{kind}.sqlite", _authz_d_factory(kind))
-            route = f"/api/state/projects/{OPEN_PID}/driver-note"
             with TestClient(guard_app) as gc, TestClient(control_app) as cc:
-                guarded_anon = gc.get(route).status_code
-                control_anon = cc.get(f"/note/{OPEN_PID}").status_code
-                guarded_auth = gc.get(route, headers={"X-Auth": "yes"}).status_code
-                control_auth = cc.get(f"/note/{OPEN_PID}", headers={"X-Auth": "yes"}).status_code
+                guarded_anon = gc.post(PRIVATE_ROUTE, json=PRIVATE_BODY).status_code
+                control_anon = cc.get(f"/mail/{OPEN_PID}").status_code
+                guarded_auth = gc.post(PRIVATE_ROUTE, json=PRIVATE_BODY,
+                                       headers={"X-Auth": "yes"}).status_code
+                control_auth = cc.get(f"/mail/{OPEN_PID}", headers={"X-Auth": "yes"}).status_code
             assert guarded_anon == control_anon == 403, (
                 kind, "guard-anon=", guarded_anon, "control-anon=", control_anon)
             assert guarded_auth == control_auth == 200, (
@@ -131,7 +140,7 @@ class TestTheGuardMatchesPlainDepends:
         for kind in ("async_def", "yield", "async_yield", "callable", "class"):
             app = _private_route_through_guard(tmp_path, f"leak-{kind}.sqlite", _authz_d_factory(kind))
             with TestClient(app) as client:
-                response = client.get(f"/api/state/projects/{OPEN_PID}/driver-note")
+                response = client.post(PRIVATE_ROUTE, json=PRIVATE_BODY)
             assert response.status_code == 403, (kind, response.status_code)
             assert SECRET not in response.text, kind
 
@@ -158,16 +167,14 @@ class TestTheGuardMatchesPlainDepends:
         D = _authz_d_factory("async_def")
         app = _private_route_through_guard(tmp_path, "ledger.sqlite", D)
         ledger = VerdictLedger()
-        route_template = "/api/state/projects/{project_id}/driver-note"
         with ledger:
             with TestClient(app) as client:
-                anon = client.get(f"/api/state/projects/{OPEN_PID}/driver-note")
-                auth = client.get(f"/api/state/projects/{OPEN_PID}/driver-note",
-                                  headers={"X-Auth": "yes"})
+                anon = client.post(PRIVATE_ROUTE, json=PRIVATE_BODY)
+                auth = client.post(PRIVATE_ROUTE, json=PRIVATE_BODY, headers={"X-Auth": "yes"})
         assert anon.status_code == 403 and auth.status_code == 200
         # The private-read route was judged (a ruling applied) on both requests.
-        assert route_template in ledger.judged(app)
-        assert ledger.rulings(app)[route_template] in {"read-verdict", "private-verdict"}
+        assert PRIVATE_TEMPLATE in ledger.judged(app)
+        assert ledger.rulings(app)[PRIVATE_TEMPLATE] == "dispatch-verdict"
 
     def test_a_yield_verdict_dependency_teardown_runs_after_the_handler(self, tmp_path, monkeypatch):
         """Regression guard, not a fix: on the deployed FastAPI the guard and a
@@ -185,16 +192,16 @@ class TestTheGuardMatchesPlainDepends:
         def handler_recorder(project_id: str, svc=Depends(get_service)):
             events.append("handler")
             from core.state_commands import execute
-            return execute(svc, "get_driver_note", {"project_id": project_id})
+            return execute(svc, "list_director_messages", {"project_id": project_id})
 
         # control tree: the SAME D in an ordinary Depends(D) route.
         control = FastAPI()
-        control.add_api_route("/note/{project_id}", handler_recorder, methods=["GET"],
+        control.add_api_route("/mail/{project_id}", handler_recorder, methods=["GET"],
                               dependencies=[Depends(D)])
         control.dependency_overrides[get_service] = lambda: _service(tmp_path, "td-ctrl")
         events.clear()
         with TestClient(control) as client:
-            client.get(f"/note/{OPEN_PID}")
+            client.get(f"/mail/{OPEN_PID}")
         control_order = list(events)
 
         # guard tree: the product guard armed with the SAME D as its verdict.

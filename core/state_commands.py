@@ -789,20 +789,19 @@ def execute(service, action: str, arguments: dict, *, allow_write: bool = False)
     #   is refused by the very same function.
     # * the PROJECT's privacy (opened or not) is judged HERE from
     #   `service.project_read_trusted`, which `api.authz.may_read_private`
-    # * the PROJECT's privacy (opened or not) is judged HERE from
-    #   `service.project_read_trusted`, which `api.authz.may_read_private`
     #   derives from the raw credential once per request; a forged route
     #   declaration cannot change it.
     #
-    # Beneath both, the connection itself carries the table verdict: a reader
-    # that reaches a private table without going through `execute` and without
-    # any decoration is refused by the trust-bound handle's authorizer, so no
-    # list of readers - hand-written or derived - has to be complete.
-    #   declaration cannot change it.
+    # Beneath both, the ROWS are judged by the connection: an untrusted
+    # service holds only a `core.state_privacy.UntrustedDatabase`, whose every
+    # connection is armed with a default-deny authorizer before anyone sees it,
+    # so a reader that reaches a private table without going through `execute`
+    # and without any decoration is refused there, and no list of readers -
+    # hand-written or derived - has to be complete.
     #
-    # Both run BEFORE argument validation so an anonymous probe is refused as
-    # private, never bounced with a structural error that itself leaks the
-    # project's request shape.
+    # The action and project verdicts run BEFORE argument validation, so an
+    # anonymous probe is refused as private, never bounced with a structural
+    # error that itself leaks the project's request shape.
 
     anonymous = _anonymous(service)
     if anonymous and action in READ_REQUESTS:

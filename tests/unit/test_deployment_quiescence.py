@@ -1316,7 +1316,7 @@ def test_registered_external_attempt_is_a_durable_blocker_and_shares_fence(tmp_p
 
     monkeypatch.setenv("AITELIER_HOME", str(tmp_path / "home"))
     db = DBManager(str(tmp_path / "state.sqlite3"))
-    store = StateGraphStore(db)
+    store = StateGraphStore(db, project_read_trusted=True)
     store.create_project("portfolio", "Portfolio")
     store.add_nodes("portfolio", [{
         "key": "external-gate", "goal": "measure externally", "dependencies": [],
@@ -1363,7 +1363,7 @@ def test_missing_external_owner_row_fails_closed_against_active_attempt(tmp_path
 
     monkeypatch.setenv("AITELIER_HOME", str(tmp_path / "home"))
     db = DBManager(str(tmp_path / "state.sqlite3"))
-    store = StateGraphStore(db)
+    store = StateGraphStore(db, project_read_trusted=True)
     store.create_project("portfolio", "Portfolio")
     store.add_nodes("portfolio", [{
         "key": "external-gate", "goal": "measure externally", "dependencies": [],
@@ -1733,7 +1733,7 @@ def test_supported_external_launch_registers_durable_owner_before_work(
 
     monkeypatch.setenv("AITELIER_HOME", str(tmp_path / "home"))
     db = DBManager(str(tmp_path / (harness + ".sqlite3")))
-    store = StateGraphStore(db)
+    store = StateGraphStore(db, project_read_trusted=True)
     store.create_project("portfolio", "Portfolio")
     store.add_nodes("portfolio", [{
         "key": "work", "goal": "external work", "dependencies": [],

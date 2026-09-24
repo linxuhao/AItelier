@@ -195,10 +195,9 @@ def create_state_router(service_dependency, access_dependency, read_dependency=N
         serves. An endpoint that declares nothing is refused - the default here
         is DENY, exactly as it is in the read table.
 
-        There is no stand-down: no attribute, dependency identity or path shape
-        lets a route decline this judgment. Every branch resolves to a verdict
-        applied through FastAPI's own machinery and then RECORDED, so coverage
-        measures the ruling, not the arrival. The verdict is idempotent - a pure
+        Every branch resolves to a verdict applied through FastAPI's own
+        machinery and then RECORDED, so coverage measures the ruling, not the
+        arrival. The verdict is idempotent - a pure
         function of the request's credential - so judging a request twice yields
         the status and body of judging it once.
 

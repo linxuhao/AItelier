@@ -3,7 +3,7 @@
 ## Project UI and migration preparation
 
 The project DAG viewer (an opened project's graph and working notes read publicly, per the owner's ruling of 2026-09-22, note://aitelier/546f3b521eca), exact-run historical graphs, stable source binding,
-project/node dispatch holds and reference-only migration support are documented in
+project/node dispatch holds and reference-only migration support are described in
 [state-project-ui-migration.md](state-project-ui-migration.md). The new source
 binding can supersede the legacy source_project_id dependency before attempts
 exist; historical execution IDs remain intact. The viewer is not a graph editor
@@ -234,7 +234,7 @@ overwrite each other. `driver_note_history` retains every committed revision.
 #### Index mode: the notebook lists assertions and stores bodies by address
 
 A notebook that can only grow is a cliff, not a brake. One project's `permanent`
-section reached 99,730 of its 100,000-character limit because the only documented
+section reached 99,730 of its 100,000-character limit because the only described
 way for a ruling to expire was "replaced in place by a newer one" and nothing
 executed that sentence; the next write would simply have failed.
 
@@ -486,7 +486,7 @@ pytest tests/unit/test_state_graph.py tests/unit/test_state_attempts.py \
 ```
 
 The demo uses temporary SQLite databases, real SkillFlow claims, real Git
-commits, and Python subprocess tests. Its first implementation intentionally
+commits, and Python subprocess tests. Its first implementation deliberately
 fails a test while the workflow completes. The goal remains unverified. A
 corrected attempt passes and unlocks the dependent goal. A new driver object
 reopens the same state, completes the dependent goal, and an upstream requirement

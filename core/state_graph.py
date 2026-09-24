@@ -13,8 +13,7 @@ import re
 from collections import deque
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from core.state_privacy import TrustBoundDatabase, writer_only_read
-from core.state_privacy import writer_only_read
+from core.state_privacy import UntrustedDatabase, writer_only_read
 from typing import Any
 
 KEY = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
@@ -291,72 +290,84 @@ CREATE TABLE IF NOT EXISTS state_project_access (
 """
 
 
+def initialize_graph_schema(db) -> None:
+    """Create or migrate the graph and metadata tables on ``db``."""
+    with db.get_connection() as conn:
+        from core.state_metadata import SCHEMA as METADATA_SCHEMA
+        conn.executescript(SCHEMA + METADATA_SCHEMA)
+        # Additive: existing rows stay NULL (legacy, exempt from facet rules).
+        if "facet" not in {r["name"] for r in conn.execute("PRAGMA table_info(state_nodes)")}:
+            conn.execute("ALTER TABLE state_nodes ADD COLUMN facet TEXT "
+                         "CHECK(facet IN ('design','contract','test','content','integration'))")
+        conn.commit()
+
+
+def initialize_state_schema(db) -> None:
+    """Create or migrate EVERY State table on ``db``, the caller's own handle.
+
+    A leaf built on a store with a real handle creates its own tables, as it
+    always has (so a leaf's migration still runs when that leaf is built). A
+    store that is NOT trusted runs this instead, on the handle it was given and
+    before it drops it: an ``UntrustedDatabase`` refuses schema changes, so the
+    leaves built on it could not, and no untrusted object carries a way to run
+    DDL.
+    """
+    initialize_graph_schema(db)
+    from core.state_attempts import SCHEMA as ATTEMPT_SCHEMA
+    from core.state_attempt_schema import initialize as initialize_attempts
+    initialize_attempts(db, ATTEMPT_SCHEMA)
+    from core.state_design import initialize as initialize_design
+    initialize_design(db)
+    from core.state_driver_notes import initialize as initialize_notes
+    initialize_notes(db)
+    from core.state_issues import initialize as initialize_issues
+    initialize_issues(db)
+    from core.director_messaging import initialize as initialize_messaging
+    initialize_messaging(db)
+
+
 class StateGraphStore:
     """One database handle over the State DAG tables.
 
-    The trust level of the caller that built this store decides every read of a
-    private table (``state_events``, ``state_project_access``). It must be
-    declared: a store that never declared one is UNTRUSTED, and a store rebuilt
-    from an untrusted service's db cannot become trusted by staying silent.
+    Which rows exist for this store is decided by its HANDLE. A store that
+    declared ``project_read_trusted=True`` on a real handle keeps that handle.
+    Every other store - one that declared nothing, declared False, or was
+    built on an ``UntrustedDatabase`` - holds only an ``UntrustedDatabase``
+    (``core.state_privacy``), whose connections read public tables, the public
+    part of private ones, and nothing else, and which cannot write.
     """
     def __init__(self, db, project_read_trusted: bool = False):
-        """Use an explicitly supplied DBManager; never resolve a production path.
-
-        The handle is WRAPPED in the trust-bound view, so every read connection
-        this store hands out carries the verdict for the tables it touches. A
-        reader written LATER - registered nowhere, decorated by nobody, named in
-        no table - is judged by the connection itself when it reads
-        ``state_driver_notes``. Nothing about the reader is consulted.
-        """
-        # The declared level is THIS store's own, and only an explicit True is
-        # trusted. A store rebuilt from a trusted service's handle does not
-        # inherit that trust: silence is still not trust, so the rebuilt store
-        # reads as untrusted exactly like one constructed with no argument.
-        self.project_read_trusted = bool(project_read_trusted)
-        self.db = TrustBoundDatabase(
-            db.unrestricted if isinstance(db, TrustBoundDatabase) else db,
-            self.project_read_trusted)
-        # Schema setup is not a read of a private record: it runs for every
-        # caller, including the anonymous one whose later reads get judged.
-        with self.db.decision_connection() as conn:
-            from core.state_metadata import SCHEMA as METADATA_SCHEMA
-            conn.executescript(SCHEMA + METADATA_SCHEMA)
-            # Additive: existing rows stay NULL (legacy, exempt from facet rules).
-            if "facet" not in {r["name"] for r in conn.execute("PRAGMA table_info(state_nodes)")}:
-                conn.execute("ALTER TABLE state_nodes ADD COLUMN facet TEXT "
-                             "CHECK(facet IN ('design','contract','test','content','integration'))")
-            conn.commit()
+        """Use an explicitly supplied DBManager; never resolve a production path."""
+        if isinstance(db, UntrustedDatabase):
+            # Already untrusted: a declaration cannot turn a path-only handle
+            # back into a real one, and the schema was made when it was.
+            self.project_read_trusted = False
+            self.db = db
+            return
+        # Only an explicit True is trusted; silence is not trust.
+        self.project_read_trusted = project_read_trusted is True
+        if self.project_read_trusted:
+            initialize_graph_schema(db)
+            self.db = db
+        else:
+            initialize_state_schema(db)
+            self.db = UntrustedDatabase(db.db_path)
 
     @contextmanager
-    def _decision(self, *, write: bool = False):
-        """The channel for a privacy DECISION, not a data delivery.
+    def transaction(self, *, write: bool = False, notebook: str | None = None):
+        """One SQLite transaction on this store's handle.
 
-        Deciding whether a project is open must read the visibility row, and a
-        public aggregate carries its event watermark - a counter, never a
-        payload. No record text leaves through here, and the reads that are
-        private ACTIONS (``project_visibility``, ``events``) stay refused by the
-        action verdict on their own methods.
+        ``notebook`` names the project whose notebook a notebook read needs; on
+        an untrusted handle those rows exist only when that project is opened.
+        An untrusted store cannot open a write transaction: every transport
+        writer-gates writes before a service exists, and an untrusted object
+        must carry no write path.
         """
-        with self.db.decision_connection() as conn:
-            conn.execute("PRAGMA foreign_keys=ON")
-            conn.execute("PRAGMA busy_timeout=5000")
-            conn.execute("BEGIN IMMEDIATE" if write else "BEGIN")
-            try:
-                yield conn
-                conn.commit()
-            except BaseException:
-                conn.rollback()
-                raise
-
-    @contextmanager
-    def transaction(self, *, write: bool = False):
-        # A READ keeps the connection's table verdict ARMED - that is the layer
-        # every private read must pass, whatever wrote the reader and whether or
-        # not any list names it. A WRITE keeps the write machinery's own channel,
-        # because recording an event must read its own watermark and every
-        # transport writer-gates writes first; the write ACTIONS that return
-        # private text carry the same refusal on their own methods.
-        with (self.db.decision_connection() if write
+        untrusted = isinstance(self.db, UntrustedDatabase)
+        if write and untrusted:
+            from core.state_commands import ProjectPrivate
+            raise ProjectPrivate()
+        with (self.db.get_connection(notebook=notebook) if untrusted
               else self.db.get_connection()) as conn:
             conn.execute("PRAGMA foreign_keys=ON")
             conn.execute("PRAGMA busy_timeout=5000")
@@ -425,20 +436,23 @@ class StateGraphStore:
             return self._project(conn, project_id)
 
     def list_projects(self, public_only: bool | None = None) -> list[dict]:
-        """A store that did not DECLARE trust lists only opened projects.
+        """A store that is not trusted lists only opened projects.
 
-        ``public_only`` defaults to the store's own declared level: silence is
-        not trust, so an undeclared store - the one a rebuilt leaf would hand
-        out - cannot name a project nobody opened. With ``public_only``,
+        On an untrusted store ``public_only`` is always on, whatever the caller
+        passes: silence is not trust, and an undeclared store - the one a
+        rebuilt leaf would hand out - cannot name a project nobody opened. A
+        trusted store lists everything unless asked otherwise. With ``public_only``,
         visibility is part of the SQL itself: the rows an anonymous caller must
         not know about are excluded BEFORE any caller pages or counts, so a
         page's size, cursor and emptiness are byte-identical whether or not
         private projects exist in this database."""
-        if public_only is None:
-            public_only = not self.project_read_trusted
+        if not self.project_read_trusted:
+            public_only = True
+        elif public_only is None:
+            public_only = False
         where = ("WHERE EXISTS(SELECT 1 FROM state_project_access a "
                  "WHERE a.project_id=p.project_id AND a.visibility='public')") if public_only else ""
-        with self._decision() as conn:
+        with self.transaction() as conn:
             return [dict(r) for r in conn.execute(
                 f"SELECT * FROM state_projects p {where} ORDER BY p.project_id")]
 
@@ -455,7 +469,7 @@ class StateGraphStore:
         The mechanism decides, so a project created a minute ago is private the
         instant it exists, and `list_projects`/aggregates can ask this to filter.
         """
-        with self._decision() as conn:
+        with self.transaction() as conn:
             self._project(conn, project_id)
             return self._access(conn, project_id)
 
@@ -476,12 +490,12 @@ class StateGraphStore:
         return row["visibility"] if row else "private"
 
     def is_project_public(self, project_id: str) -> bool:
-        with self._decision() as conn:
+        with self.transaction() as conn:
             return self._visibility(conn, project_id) == "public"
 
     def public_project_ids(self) -> set:
         """The set of explicitly-opened projects. No row means private."""
-        with self._decision() as conn:
+        with self.transaction() as conn:
             return {r["project_id"] for r in conn.execute(
                 "SELECT project_id FROM state_project_access WHERE visibility='public'")}
 
@@ -493,7 +507,7 @@ class StateGraphStore:
             raise StateGraphError("visibility must be 'private' or 'public'")
         pid = key(project_id)
         stamp = now()
-        with self._decision(write=True) as conn:
+        with self.transaction(write=True) as conn:
             self._project(conn, pid)
             row = conn.execute("SELECT * FROM state_project_access WHERE project_id=?",
                                (pid,)).fetchone()

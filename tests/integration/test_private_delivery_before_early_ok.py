@@ -15,8 +15,9 @@ from fastapi import Depends, FastAPI, Request
 from fastapi.testclient import TestClient
 
 from api import authz, state_http
-from tests.support.state_author_surface import (GEN_PID, LEAK_MARK, carrier_shapes,
-                                                compile_handler)
+from tests.support.state_author_surface import (GEN_PID, LEAK_MARK, PRIVATE_ACTION,
+                                                carrier_shapes, compile_handler,
+                                                seed_private_mail)
 from api.state_graph_routers import get_service
 from api.state_graph_routers import router as state_router
 from api.state_verdict import (Binding, binding_for, delivered_actions, route_verdict,
@@ -37,7 +38,7 @@ def _app(tmp_path, name="carrier"):
     service = StateService(StateDatabase(str(tmp_path / f"{name}.sqlite")),
                            actor="c5-seeder", project_read_trusted=True)
     service.create_project(GEN_PID, GEN_PID)
-    service.driver_notes.update(GEN_PID, "permanent", LEAK_MARK, 0, "director")
+    seed_private_mail(service, GEN_PID, LEAK_MARK)
     service.open_project(GEN_PID)
     app = FastAPI()
     app.include_router(state_router)
@@ -52,7 +53,7 @@ class TestBothPolesOfTheBinder:
             "Depends": Depends, "get_service": get_service, "execute": execute})
         binding = binding_for(handler, "get_graph", "/api/state/gen/{action}")
         assert binding.ok is False, binding
-        assert "get_driver_note" in binding.reason, binding.reason
+        assert PRIVATE_ACTION in binding.reason, binding.reason
 
     def test_honest_dispatch_on_the_judged_parameter_still_binds(self, tmp_path):
         from tests.support.state_author_surface import Body, Shape, Param
@@ -74,7 +75,7 @@ class TestQueryRouteStillServes:
             assert served.status_code == 200, (served.status_code, served.text[:200])
             # A private action on the same dispatch route is refused (its body
             # never reaches an anonymous caller).
-            refused = client.post("/api/state/query/get_driver_note", json={"project_id": GEN_PID})
+            refused = client.post(f"/api/state/query/{PRIVATE_ACTION}", json={"project_id": GEN_PID})
             assert refused.status_code in (401, 403), refused.status_code
             assert LEAK_MARK not in refused.text
 
@@ -139,6 +140,6 @@ class TestMutationReopeningTheOrder:
         app.router.routes.insert(0, app.router.routes.pop())
         with TestClient(app) as client:
             resp = client.get("/api/state/gen/get_graph")
-        # Under the reverted order the carrier answers 200 and the note leaks.
+        # Under the reverted order the carrier answers 200 and the mail leaks.
         assert resp.status_code == 200, (resp.status_code, "mutation did not fire")
         assert LEAK_MARK in resp.text, "mutation fired but did not leak"

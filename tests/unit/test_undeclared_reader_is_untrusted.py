@@ -26,9 +26,11 @@ from core.state_database import StateDatabase
 from core.state_driver_notes import StateDriverNotes
 from core.state_graph import StateGraphStore
 from core.state_service import StateService
+from tests.support.state_author_surface import seed_private_mail
 
 REPO = Path(__file__).resolve().parents[2]
 PROJECT = "undeclared-reader"
+UNOPENED = "undeclared-reader-unopened"
 SECRET = "UNDECLARED-READER-SECRET-9182"
 
 
@@ -108,17 +110,31 @@ def _trusted(tmp_path, name="undeclared.sqlite"):
                            project_read_trusted=True)
     service.create_project(PROJECT, PROJECT)
     service.driver_notes.update(PROJECT, "permanent", SECRET, 0, "director")
-    # The project is OPEN: only the ACTION keeps the notebook writer-only, so a
-    # non-403 would be a real leak, not the project gate doing its job.
+    seed_private_mail(service, PROJECT, SECRET)
+    # PROJECT is OPEN: its notebook is public (owner ruling 2026-09-22) and its
+    # mailbox stays writer-only, so a delivered mailbox would be a real leak,
+    # not the project gate doing its job. UNOPENED's notebook stays private.
+    service.create_project(UNOPENED, UNOPENED)
+    service.driver_notes.update(UNOPENED, "permanent", SECRET, 0, "director")
     service.open_project(PROJECT)
     return service
 
 
-def test_a_notebook_rebuilt_without_a_declaration_refuses(tmp_path):
-    service = _trusted(tmp_path)
-    notebook = StateDriverNotes(service.store, "anonymous-rebuilder")
-    with pytest.raises(ProjectPrivate):
-        notebook.get(PROJECT)
+def _anonymous(service):
+    """The service an anonymous request gets over the same database."""
+    return StateService(service.db, actor="anonymous", project_read_trusted=False)
+
+
+def test_a_notebook_rebuilt_without_a_declaration_delivers_no_unopened_note(tmp_path):
+    """Rebuilt from the anonymous service's store, the notebook reads the
+    OPENED project's notebook (public) and never the unopened one's."""
+    anonymous = _anonymous(_trusted(tmp_path))
+    notebook = StateDriverNotes(anonymous.store, "anonymous-rebuilder")
+    assert notebook.project_read_trusted is False
+    assert SECRET in notebook.get(PROJECT)["permanent"]
+    unopened = notebook.get(UNOPENED)
+    print("REBUILT_NOTEBOOK_UNOPENED =", unopened)
+    assert SECRET not in repr(unopened)
 
 
 def test_a_messaging_provider_rebuilt_without_a_declaration_refuses(tmp_path):
@@ -136,11 +152,17 @@ def test_a_graph_store_rebuilt_from_the_db_refuses(tmp_path):
 
 
 def test_rebuilding_from_an_untrusted_store_stays_untrusted(tmp_path):
-    service = _trusted(tmp_path)
-    service.store.project_read_trusted = False
-    notebook = StateDriverNotes(service.store, "anonymous-rebuilder")
+    """A leaf rebuilt from the anonymous store that DECLARES itself trusted
+    passes its own action verdict, and the handle still refuses the rows."""
+    anonymous = _anonymous(_trusted(tmp_path))
+    forged = SQLiteDirectorMessaging(anonymous.store, "anonymous-rebuilder",
+                                     project_read_trusted=True)
     with pytest.raises(ProjectPrivate):
-        notebook.get(PROJECT)
+        forged.list_director_messages(PROJECT)
+    rebuilt = StateGraphStore(anonymous.db, project_read_trusted=True)
+    assert rebuilt.project_read_trusted is False
+    with pytest.raises(ProjectPrivate):
+        rebuilt.events(PROJECT)
 
 
 def test_explicitly_declared_readers_still_read(tmp_path):
@@ -185,3 +207,195 @@ def test_every_state_table_is_classified_in_one_place():
     print("PUBLIC_STATE_TABLES =", sorted(PUBLIC_STATE_TABLES))
     print("UNCLASSIFIED =", unclassified)
     assert not unclassified, f"state tables nobody classified: {unclassified}"
+
+
+# ---------------------------------------------------------------- construction points
+# Shipped code: every package and top-level script outside tests/ that can build
+# a State object.
+_SHIPPED = ("core", "api", "aitelier", "scripts", "examples", "cli", "mutation_gate.py")
+
+
+def _shipped_paths():
+    for entry in _SHIPPED:
+        path = REPO / entry
+        if path.is_file():
+            yield path
+        elif path.is_dir():
+            yield from sorted(path.rglob("*.py"))
+
+
+def _trust_call_sites():
+    """Every CALL in shipped code that passes ``project_read_trusted=``, with
+    the expression it passes - the construction points a trust level enters by.
+    Derived with ``ast``; a site is ``(file:line, callee, expression)``."""
+    sites = []
+    for path in _shipped_paths():
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                for keyword in node.keywords:
+                    if keyword.arg == "project_read_trusted":
+                        sites.append((f"{path.relative_to(REPO)}:{node.lineno}",
+                                      ast.unparse(node.func), ast.unparse(keyword.value)))
+    return sites
+
+
+def _functions_named(names):
+    """The shipped definitions of ``names`` (the trust functions a site calls)."""
+    found = {}
+    for path in _shipped_paths():
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in names:
+                found[node.name] = (f"{path.relative_to(REPO)}:{node.lineno}", node)
+    return found
+
+
+def _true_constant(node):
+    return isinstance(node, ast.Constant) and node.value is True
+
+
+def _conditional_true(expression: str) -> bool:
+    """A conditional expression with a literal ``True`` branch."""
+    return any(isinstance(node, ast.IfExp)
+               and (_true_constant(node.body) or _true_constant(node.orelse))
+               for node in ast.walk(ast.parse(expression, mode="eval")))
+
+
+def test_the_trusted_construction_points_are_derived_from_code():
+    """The list the delivery note carries: every call site that declares a trust
+    level, the expression it declares, and - for an expression that is a call -
+    the function behind it with its ``return`` values and ``except`` branches.
+
+    Asserted: no site's expression is a conditional with a literal ``True``
+    branch (the ``... if request is not None else True`` shape), and no trust
+    function returns ``True`` from an ``except`` branch or from a ``None``
+    check of its request."""
+    sites = _trust_call_sites()
+    assert sites, "derivation found no construction point - parser broken"
+    called = set()
+    offenders = []
+    for where, callee, expression in sites:
+        print(f"SITE {where} {callee}(project_read_trusted={expression})")
+        if _conditional_true(expression):
+            offenders.append(f"{where}: conditional with a literal True branch")
+        for node in ast.walk(ast.parse(expression, mode="eval")):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                called.add(node.func.id)
+    # One level down: the functions the sites call, and the functions THEY
+    # delegate the verdict to.
+    frontier, seen = set(called), set()
+    while frontier:
+        functions = _functions_named(frontier)
+        seen |= frontier
+        frontier = set()
+        for name, (where, function) in sorted(functions.items()):
+            returns = [ast.unparse(n.value) for n in ast.walk(function)
+                       if isinstance(n, ast.Return) and n.value is not None]
+            handlers = [ast.unparse(h).splitlines()[0] for h in ast.walk(function)
+                        if isinstance(h, ast.ExceptHandler)]
+            print(f"TRUST_FUNCTION {name} at {where} returns={returns} except={handlers}")
+            for node in ast.walk(function):
+                if isinstance(node, ast.ExceptHandler):
+                    for inner in ast.walk(node):
+                        if isinstance(inner, ast.Return) and _true_constant(inner.value):
+                            offenders.append(f"{where}: {name} returns True from an except branch")
+                if isinstance(node, ast.If) and "None" in ast.unparse(node.test):
+                    for inner in node.body:
+                        if isinstance(inner, ast.Return) and _true_constant(inner.value):
+                            offenders.append(f"{where}: {name} returns True when its input is None")
+                if isinstance(node, ast.Return) and isinstance(node.value, ast.Call) \
+                        and isinstance(node.value.func, ast.Name) \
+                        and node.value.func.id not in seen:
+                    frontier.add(node.value.func.id)
+    literal_true = [where for where, _, expression in sites if expression == "True"]
+    print("LITERAL_TRUE_SITES =", literal_true)
+    print("TRUST_FUNCTIONS =", sorted(seen))
+    assert not offenders, offenders
+
+
+def test_the_derivation_sees_a_planted_else_true():
+    """The derivation's own teeth: the r10 call-site shape, planted."""
+    assert _conditional_true("mcp_read_trust(request) if request is not None else True")
+    assert not _conditional_true("mcp_read_trust(request)")
+
+
+# ---------------------------------------------------------------- list_projects
+def test_an_untrusted_store_lists_no_unopened_project_by_default(tmp_path):
+    service = _trusted(tmp_path)
+    anonymous = StateGraphStore(service.db)          # declares nothing
+    listed = [p["project_id"] for p in anonymous.list_projects()]
+    print("UNTRUSTED_DEFAULT_LIST =", listed)
+    assert UNOPENED not in listed and PROJECT in listed
+    asked = [p["project_id"] for p in anonymous.list_projects(public_only=False)]
+    print("UNTRUSTED_ASKED_FOR_ALL =", asked)
+    assert UNOPENED not in asked
+    trusted = [p["project_id"] for p in service.store.list_projects()]
+    assert UNOPENED in trusted, "control: the trusted store lists the unopened project"
+
+
+# ---------------------------------------------------------------- MCP without a request
+class _NoRequestContext:
+    """An MCP context whose transport produced no request object."""
+
+    @property
+    def request_context(self):
+        raise LookupError("this transport carries no request")
+
+
+def _mcp_tools(monkeypatch, db):
+    import api.dependencies as dependencies
+    from api.state_graph_tools import register_state_tools
+
+    tools = {}
+
+    def tool(name, kind, description):
+        def register(function):
+            tools[name] = function
+            return function
+        return register
+
+    class FakeMCP:
+        def get_context(self):
+            return _NoRequestContext()
+
+        def prompt(self, **kwargs):
+            return lambda function: function
+
+        def resource(self, *args, **kwargs):
+            return lambda function: function
+
+    monkeypatch.setattr(dependencies, "get_db_manager", lambda: db)
+    monkeypatch.setattr(dependencies, "get_workspace_manager", lambda: None)
+    register_state_tools(tool, FakeMCP())
+    return tools
+
+
+def test_no_request_object_is_no_credential():
+    from api.state_graph_tools import mcp_read_trust
+    assert mcp_read_trust(None) is False
+
+
+def test_the_request_decides_when_there_is_one(monkeypatch):
+    """Control: with a request the verdict is `_mcp_may_read_private`'s, so the
+    None branch above is what made the difference."""
+    import types
+    from api.state_graph_tools import mcp_read_trust
+    request = types.SimpleNamespace(app=types.SimpleNamespace(
+        state=types.SimpleNamespace(_test_mode=True)), headers={}, cookies={})
+    assert mcp_read_trust(request) is True
+
+
+def test_an_mcp_call_without_a_request_reads_as_anonymous(tmp_path, monkeypatch):
+    """Through the registered MCP tool: `_request_from` fails on this context,
+    so the service is built with NO credential and must be untrusted - the
+    mailbox is refused and the project list names no unopened project."""
+    import asyncio
+    service = _trusted(tmp_path)
+    tools = _mcp_tools(monkeypatch, service.db)
+    with pytest.raises(ProjectPrivate):
+        asyncio.run(tools["state_graph_read"]("list_director_messages", {"project_id": PROJECT}))
+    listed = asyncio.run(tools["state_graph_read"]("list_projects", {}))["result"]
+    names = [p["project_id"] for p in listed]
+    print("MCP_NO_REQUEST_LIST =", names)
+    assert UNOPENED not in names and PROJECT in names

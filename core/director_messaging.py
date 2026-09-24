@@ -9,7 +9,7 @@ from uuid import UUID, uuid4
 
 from core.director_messaging_protocol import DirectorMessageError, SCHEMA_ID
 from core.state_driver_notes import _redact
-from core.state_privacy import writer_only_read
+from core.state_privacy import UntrustedDatabase, writer_only_read
 
 
 SCHEMA = """
@@ -104,6 +104,22 @@ def _row_delivery(row):
         "delivery_id", "message_id", "target_project_id", "delivery_seq", "status", "version")}
 
 
+def initialize(db) -> None:
+    """Create the mailbox tables on a real handle (the leaf's own, or the one
+    an untrusted store runs ``initialize_state_schema`` on before dropping it)."""
+    with db.get_connection() as conn:
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.executescript(SCHEMA)
+        columns = {row["name"] for row in conn.execute(
+            "PRAGMA table_info(state_director_messages)")}
+        if "delivery_mode" not in columns:
+            conn.execute(
+                "ALTER TABLE state_director_messages ADD COLUMN "
+                "delivery_mode TEXT NOT NULL DEFAULT 'transient' "
+                "CHECK(delivery_mode IN ('transient','standing'))")
+        conn.commit()
+
+
 class SQLiteDirectorMessaging:
     """Actor-bound provider sharing State's SQLite transaction/event boundary."""
 
@@ -119,18 +135,8 @@ class SQLiteDirectorMessaging:
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._id_factory = id_factory or (lambda: str(uuid4()))
         self._redactor = redactor
-        # Schema setup is not a read of a private record.
-        with self.store.db.decision_connection() as conn:
-            conn.execute("PRAGMA foreign_keys=ON")
-            conn.executescript(SCHEMA)
-            columns = {row["name"] for row in conn.execute(
-                "PRAGMA table_info(state_director_messages)")}
-            if "delivery_mode" not in columns:
-                conn.execute(
-                    "ALTER TABLE state_director_messages ADD COLUMN "
-                    "delivery_mode TEXT NOT NULL DEFAULT 'transient' "
-                    "CHECK(delivery_mode IN ('transient','standing'))")
-            conn.commit()
+        if not isinstance(store.db, UntrustedDatabase):
+            initialize(store.db)
 
     def for_actor(self, actor):
         return type(self)(self.store, actor, clock=self._clock,

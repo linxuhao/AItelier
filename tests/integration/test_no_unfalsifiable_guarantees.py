@@ -105,8 +105,10 @@ def test_the_scan_is_anchored_on_the_cards_first_round_base():
 @pytest.mark.parametrize("rel", ROUND_FILES)
 def test_a_round_file_carries_no_lie_keeping_phrase(rel):
     text = (REPO / rel).read_text(encoding="utf-8", errors="replace")
-    hits = [phrase for phrase in BANNED if phrase in text]
-    assert hits == [], f"{rel} uses a banned phrase: {hits}"
+    # The failure names the phrase by its index in BANNED, never by its text,
+    # so a log of a red run does not itself carry the phrase into the tree.
+    hits = [index for index, phrase in enumerate(BANNED) if phrase in text]
+    assert not hits, f"{rel} uses BANNED phrase number(s) {hits}"
 
 
 def test_no_line_prefix_can_exclude_a_banned_phrase():
@@ -149,8 +151,9 @@ def test_record_judged_requires_a_ruling_string():
 
 def test_binding_for_orders_the_private_check_before_the_dispatch_approval():
     """Guarantee: the private-delivery check runs before the dispatch approval.
-    Falsified by re-reading the function source and checking a `get_driver_note`
-    carrier is refused - the assertion a mutation cannot pass silently."""
+    Falsified by re-reading the function source and checking a carrier that
+    delivers the private mailbox read is refused - the assertion a mutation
+    cannot pass silently."""
     from fastapi import Depends
     from tests.support.state_author_surface import carrier_shapes, compile_handler
     from api.state_graph_routers import get_service

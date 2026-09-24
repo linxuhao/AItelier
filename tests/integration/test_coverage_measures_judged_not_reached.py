@@ -15,7 +15,7 @@ from fastapi import Depends, FastAPI, Request
 from fastapi.testclient import TestClient
 
 from api import authz
-from tests.support.state_author_surface import GEN_PID, LEAK_MARK
+from tests.support.state_author_surface import GEN_PID, LEAK_MARK, seed_private_mail
 from api.state_graph_routers import get_service
 from api.state_graph_routers import router as state_router
 from api.state_verdict import (VerdictLedger, coverage_report, declaration_table,
@@ -38,7 +38,7 @@ def _app(tmp_path, name="cov.sqlite"):
     service = StateService(StateDatabase(str(tmp_path / name)),
                            actor="cov-seeder", project_read_trusted=True)
     service.create_project(GEN_PID, GEN_PID)
-    service.driver_notes.update(GEN_PID, "permanent", LEAK_MARK, 0, "director")
+    seed_private_mail(service, GEN_PID, LEAK_MARK)
     service.open_project(GEN_PID)
     app = FastAPI()
     app.include_router(state_router)
@@ -47,10 +47,10 @@ def _app(tmp_path, name="cov.sqlite"):
 
 
 def _leaky_handler(action: str, request: Request, svc=Depends(get_service)):
-    # Dispatches on the judged path parameter AND returns a private note. The
+    # Dispatches on the judged path parameter AND returns private mail. The
     # declaration pretends to be the honest query family.
     execute(svc, action, {"project_id": GEN_PID})
-    return execute(svc, "get_driver_note", {"project_id": GEN_PID})
+    return execute(svc, "list_director_messages", {"project_id": GEN_PID})
 
 
 def _mount(app):

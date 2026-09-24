@@ -19,8 +19,9 @@ still writer-only.
 
 The table moved on 2026-09-22: the owner opened the working notes for an OPENED
 project ("let's open up the working note for public projects too"), so the six
-note reads are public while the mailbox, the guide and the event plumbing stay
-writer-only. Project privacy is NOT tested here — this fixture's service is
+note reads are public while the mailbox and the event plumbing stay
+writer-only. The driver guide is public text (the MCP prompt and resource
+already serve it; this card's classification, accepted by the director). Project privacy is NOT tested here — this fixture's service is
 trusted, so these tests isolate the ACTION half.
 `tests/unit/test_state_project_privacy.py` is the project half."""
 from __future__ import annotations
@@ -48,9 +49,13 @@ OPENED_NOTE_READS = {
 # What the ruling did NOT name, so it stays only-for-a-writer. The director
 # mailbox is here because the ruling named the note, not the mailbox.
 STILL_PRIVATE_READS = {
-    "list_director_messages", "get_driver_guide_section", "events",
+    "list_director_messages", "events",
     "wait_for_state_change", "project_visibility",
 }
+# The driver guide is the text of `core/state_driver_guide.py`, which the MCP
+# prompt and resource already publish; a read the transport already serves is
+# not a private record.
+PUBLIC_TEXT_READS = {"get_driver_guide_section"}
 
 class TestClassification:
     def test_every_read_action_is_classified_exactly_once(self):
@@ -69,6 +74,11 @@ class TestClassification:
             assert action in READ_REQUESTS, action
             assert read_visibility(action) == "private", action
             assert is_public_read(action) is False, action
+
+    @pytest.mark.parametrize("action", sorted(PUBLIC_TEXT_READS))
+    def test_the_driver_guide_is_public_text(self, action):
+        assert action in READ_REQUESTS, action
+        assert read_visibility(action) == "public", action
 
     @pytest.mark.parametrize("action", sorted(OPENED_NOTE_READS))
     def test_the_working_notes_are_public(self, action):
@@ -154,8 +164,8 @@ class TestAnonymousHttp:
             response = client.post("/api/state/query/" + action,
                                    json={"project_id": "p"})
             assert response.status_code != 403, (action, response.text)
-        # The mailbox, the guide and the event plumbing were NOT named by the
-        # ruling, so they stay refused for an anonymous caller.
+        # The mailbox and the event plumbing were NOT named by the ruling, so
+        # they stay refused for an anonymous caller.
         for action in STILL_PRIVATE_READS:
             response = client.post("/api/state/query/" + action,
                                    json={"project_id": "p"})
@@ -243,8 +253,7 @@ class TestNoLeak:
         responses = [
             client.post("/api/state/query/list_director_messages",
                         json={"project_id": "p"}),
-            client.post("/api/state/query/get_driver_guide_section",
-                        json={"project_id": "p", "address": "guide://x"}),
+            client.post("/api/state/query/events", json={"project_id": "p"}),
         ]
         for response in responses:
             assert response.status_code == 403

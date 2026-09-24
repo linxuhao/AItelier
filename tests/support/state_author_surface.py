@@ -25,6 +25,7 @@ the generated handler, not a hand-kept dictionary keyed by body name.
 """
 from __future__ import annotations
 
+import functools
 import itertools
 import linecache
 import re
@@ -35,10 +36,41 @@ from typing import NamedTuple
 # delivery is actually servable - which is what makes a leak detectable.
 GEN_PID = "author-surface-open"
 
-# A distinctive string placed in that project's private driver note. The
+# A distinctive string placed in that project's private director mail. The
 # universal safety invariant is that NO response, for ANY generated shape, may
 # carry this text through the prefix guard: if it does, the verdict failed.
 LEAK_MARK = "AUTHOR-SURFACE-LEAK-9b1c"
+
+
+def _private_mailbox_action() -> str:
+    """The PRIVATE action every generated handler delivers.
+
+    An opened project's working notes are public (owner ruling 2026-09-22,
+    note://aitelier/546f3b521eca), so a note read can no longer be the private
+    delivery. The director mailbox stays writer-only; its visibility is READ
+    from the one classification table here, so a change to that table fails
+    this module instead of quietly turning the private pole public.
+    """
+    from core.state_commands import read_visibility
+    action = "list_director_messages"
+    assert read_visibility(action) == "private", (action, read_visibility(action))
+    return action
+
+
+PRIVATE_ACTION = _private_mailbox_action()
+
+
+def seed_private_mail(service, project_id: str, secret: str,
+                      sender: str = "private-mail-sender") -> None:
+    """Deliver ``secret`` (subject and body) to ``project_id``'s director
+    mailbox through a TRUSTED ``service``, creating the sender if needed."""
+    known = {p["project_id"] for p in service.store.list_projects(public_only=False)}
+    if sender not in known:
+        service.create_project(sender, sender)
+    result = service.director_messages.send_director_message(
+        sender, "director", f"private-mail-{project_id}", secret, secret,
+        target_project_id=project_id)
+    assert "error" not in result, result
 
 
 class Param:
@@ -63,7 +95,7 @@ class Body:
 class Decl:
     """The declaration the author writes on the endpoint: (kind, action)."""
     PUBLIC_GET_GRAPH = ("read", "get_graph")
-    PRIVATE_NOTE = ("read", "get_driver_note")
+    PRIVATE_MAIL = ("read", PRIVATE_ACTION)
     DISPATCH_FAMILY = ("read", None)
 
 
@@ -181,7 +213,7 @@ def expected_can_serve(shape: Shape) -> bool:
     one the handler actually delivers. The genuine dispatch family may serve only
     when it hands back the very path parameter the guard judged (``action`` in a
     ``{action}`` path) and returns nothing private - the carrier that dispatches
-    AND returns a private note is refused here.
+    AND returns private mail is refused here.
     """
     if shape.declaration[0] != "read":
         return False
@@ -225,12 +257,12 @@ def _handler_source(param: str, body: str, name: str) -> str:
     if body == Body.PUBLIC_ONLY:
         lines.append(f"    return execute(service, 'get_graph', {{'project_id': {open_pid}}})")
     elif body == Body.PRIVATE_ONLY:
-        lines.append(f"    return execute(service, 'get_driver_note', {{'project_id': {open_pid}}})")
+        lines.append(f"    return execute(service, {PRIVATE_ACTION!r}, {{'project_id': {open_pid}}})")
     elif body == Body.DISPATCH_PARAM:
         lines.append(f"    return execute(service, {param}, {{'project_id': {open_pid}}})")
     elif body == Body.DISPATCH_AND_PRIVATE:
         lines.append(f"    execute(service, {param}, {{'project_id': {open_pid}}})")
-        lines.append(f"    return execute(service, 'get_driver_note', {{'project_id': {open_pid}}})")
+        lines.append(f"    return execute(service, {PRIVATE_ACTION!r}, {{'project_id': {open_pid}}})")
     elif body == Body.MULTI_PUBLIC:
         # Mentions/discards a second public read (binds nothing) and returns a
         # public read; the reader must see ONLY the returned action as delivered.
@@ -260,7 +292,7 @@ def compile_handler(shape: Shape, *, namespace: dict):
     if shape.body == Body.UNKNOWN_SOURCE:
         ns: dict = dict(namespace)
         src = (f"def _u({shape.param}: str = 'get_graph', service=Depends(get_service)):\n"
-               f"    return execute(service, 'get_driver_note', {{'project_id': {GEN_PID!r}}})\n")
+               f"    return execute(service, {PRIVATE_ACTION!r}, {{'project_id': {GEN_PID!r}}})\n")
         exec(compile(src, "<unreadable_author_surface>", "exec"), ns)
         handler = ns["_u"]
     else:
@@ -328,7 +360,8 @@ def dependency_shapes():
 
 
 def hiding_handlers(namespace: dict) -> dict:
-    """The four delivery-hiding handler shapes the review measured (r8).
+    """The four delivery-hiding handler shapes the review measured (r8), and a
+    fifth that only the fail-closed ``opaque`` branch refuses.
 
     Each one delivers a PRIVATE action through a site the reader must work to
     see: a module-level helper, a renamed import, an ``async def`` inner
@@ -354,27 +387,39 @@ def hiding_handlers(namespace: dict) -> dict:
         ("def _helper(service, action):\n"
          f"    return execute(service, action, {{'project_id': {open_pid}}})\n"
          "def h_module_helper(action: str = 'get_graph', service=Depends(get_service)):\n"
-         "    return _helper(service, 'get_driver_note')\n"),
+         f"    return _helper(service, {PRIVATE_ACTION!r})\n"),
         {})
     # 2. renamed import: the action-callable reaches the handler under an alias.
     out["renamed_import"] = build(
         "h_renamed_import",
         ("def h_renamed_import(action: str = 'get_graph', service=Depends(get_service)):\n"
-         f"    return _runner(service, 'get_driver_note', {{'project_id': {open_pid}}})\n"),
+         f"    return _runner(service, {PRIVATE_ACTION!r}, {{'project_id': {open_pid}}})\n"),
         {"_runner": namespace["execute"]})
     # 3. async inner function: the delivery is inside a coroutine the handler calls.
     out["async_inner"] = build(
         "h_async_inner",
         ("def h_async_inner(action: str = 'get_graph', service=Depends(get_service)):\n"
          "    async def inner():\n"
-         f"        return execute(service, 'get_driver_note', {{'project_id': {open_pid}}})\n"
+         f"        return execute(service, {PRIVATE_ACTION!r}, {{'project_id': {open_pid}}})\n"
          "    return inner()\n"),
         {})
     # 4. keyword action: the private action arrives as action=..., not positionally.
     out["keyword_action"] = build(
         "h_keyword",
         ("def h_keyword(action: str = 'get_graph', service=Depends(get_service)):\n"
-         "    return execute(service, action='get_driver_note',\n"
+         f"    return execute(service, action={PRIVATE_ACTION!r},\n"
          f"                   arguments={{'project_id': {open_pid}}})\n"),
         {})
+    # 5. a PUBLIC literal delivered beside a callee the reader cannot resolve: a
+    #    `functools.partial` is not a function, so the reader cannot follow it,
+    #    and the private action it runs is invisible. Only the fail-closed
+    #    `opaque` branch refuses this one - the public literal alone would bind.
+    run = namespace["execute"]
+    out["public_beside_unresolvable"] = build(
+        "h_public_beside",
+        ("def h_public_beside(action: str = 'get_graph', service=Depends(get_service)):\n"
+         f"    return {{'graph': execute(service, 'get_graph', {{'project_id': {open_pid}}}),\n"
+         "            'mail': _hidden(service)}\n"),
+        {"_hidden": functools.partial(
+            lambda service: run(service, PRIVATE_ACTION, {"project_id": GEN_PID}))})
     return out

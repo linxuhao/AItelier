@@ -42,6 +42,7 @@ from api.state_verdict import (VerdictLedger, binding_for, coverage_report,
 from core.state_commands import execute
 from core.state_database import StateDatabase
 from core.state_service import StateService
+from tests.support.state_author_surface import seed_private_mail
 
 REPO = Path(__file__).resolve().parents[2]
 PRIVATE_PID = "binding-private"
@@ -59,9 +60,11 @@ def _arm(monkeypatch):
 
 
 def _seed(service):
+    # The secret is the project's director MAIL: an opened project's notebook is
+    # public (owner ruling 2026-09-22), the mailbox stays writer-only.
     for pid, secret in ((PRIVATE_PID, PRIVATE_SECRET), (OPEN_PID, OPEN_SECRET)):
         service.create_project(pid, pid)
-        service.driver_notes.update(pid, "permanent", secret, 0, "director")
+        seed_private_mail(service, pid, secret)
     service.open_project(OPEN_PID)
 
 
@@ -93,11 +96,11 @@ def _mount(app, path, handler, declaration):
 def declares_public_serves_private(project_id: str, service=Depends(get_service)):
     if False:  # dead: binds nothing
         execute(service, "list_projects", {})
-    return execute(service, "get_driver_note", {"project_id": project_id})
+    return execute(service, "list_director_messages", {"project_id": project_id})
 
 
 def declares_private_serves_private(project_id: str, service=Depends(get_service)):
-    return execute(service, "get_driver_note", {"project_id": project_id})
+    return execute(service, "list_director_messages", {"project_id": project_id})
 
 
 def declares_public_serves_public(project_id: str, service=Depends(get_service)):
@@ -107,11 +110,11 @@ def declares_public_serves_public(project_id: str, service=Depends(get_service))
 def dead_zero_branch(project_id: str, service=Depends(get_service)):
     if 0:
         return execute(service, "list_projects", {})
-    return execute(service, "get_driver_note", {"project_id": project_id})
+    return execute(service, "list_director_messages", {"project_id": project_id})
 
 
 def dead_after_return(project_id: str, service=Depends(get_service)):
-    return execute(service, "get_driver_note", {"project_id": project_id})
+    return execute(service, "list_director_messages", {"project_id": project_id})
     execute(service, "list_projects", {})  # unreachable
 
 
@@ -119,12 +122,12 @@ def dead_inner_function(project_id: str, service=Depends(get_service)):
     def _never_called():
         return execute(service, "list_projects", {})
 
-    return execute(service, "get_driver_note", {"project_id": project_id})
+    return execute(service, "list_director_messages", {"project_id": project_id})
 
 
 def dead_comment(project_id: str, service=Depends(get_service)):
     # execute(service, "list_projects", {})
-    return execute(service, "get_driver_note", {"project_id": project_id})
+    return execute(service, "list_director_messages", {"project_id": project_id})
 
 
 def mentions_two_public_delivers_one(project_id: str, service=Depends(get_service)):
@@ -154,7 +157,7 @@ class TestBindingIsAStatementAboutTheHandler:
     def test_the_honest_declaration_is_judged_by_the_action_it_serves(self, tmp_path, monkeypatch):
         app, _ = _app(tmp_path, monkeypatch)
         _mount(app, "/api/state/honest", declares_private_serves_private,
-               ("read", "get_driver_note"))
+               ("read", "list_director_messages"))
         with TestClient(app) as client:
             for pid in (PRIVATE_PID, OPEN_PID):
                 anonymous = client.get("/api/state/honest", params={"project_id": pid})
@@ -187,7 +190,7 @@ class TestBindingIsAStatementAboutTheHandler:
         ok = binding_for(declares_public_serves_public, "get_graph", "/api/state/x")
         assert ok.ok and ok.delivered == {"get_graph"}
         forged = binding_for(declares_public_serves_private, "list_projects", "/api/state/x")
-        assert not forged.ok and forged.delivered == {"get_driver_note"}
+        assert not forged.ok and forged.delivered == {"list_director_messages"}
 
 
 class TestNoStandDownAndTheVerdictIsIdempotent:
@@ -211,22 +214,29 @@ class TestNoStandDownAndTheVerdictIsIdempotent:
         assert not hasattr(state_http, "prefix_verdict_stands_down_for")
         assert not hasattr(state_http, "_tree_holds")
         banned = {"prefix_verdict_stands_down_for", "_tree_holds", "WeakSet"}
-        for package in ("api", "core"):
-            for path in (REPO / package).glob("*.py"):
-                tree = ast.parse(path.read_text(encoding="utf-8"))
-                for node in ast.walk(tree):
-                    if isinstance(node, ast.Attribute):
-                        assert node.attr not in banned, (path, node.attr)
-                    elif isinstance(node, ast.Name):
-                        assert node.id not in banned, (path, node.id)
+        # The verdict path: every API module and the State modules of core. A
+        # core module outside State (the scheduler keeps its in-flight ticks in
+        # a WeakSet) is not on it.
+        verdict_path = sorted((REPO / "api").glob("*.py")) + sorted(
+            p for p in (REPO / "core").glob("*.py")
+            if p.name.startswith(("state_", "director_")))
+        assert len(verdict_path) > 10, verdict_path
+        for path in verdict_path:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Attribute):
+                    assert node.attr not in banned, (path, node.attr)
+                elif isinstance(node, ast.Name):
+                    assert node.id not in banned, (path, node.id)
 
 
     def test_judging_a_request_N_times_equals_judging_it_once(self, tmp_path, monkeypatch):
         app, _ = _app(tmp_path, monkeypatch)
+        route, body = "/api/state/query/list_director_messages", {"project_id": PRIVATE_PID}
         with TestClient(app) as client:
-            first = client.get(f"/api/state/projects/{PRIVATE_PID}/driver-note")
+            first = client.post(route, json=body)
             for _ in range(5):
-                again = client.get(f"/api/state/projects/{PRIVATE_PID}/driver-note")
+                again = client.post(route, json=body)
                 assert (again.status_code, again.text) == (first.status_code, first.text)
             assert first.status_code == 403
             assert PRIVATE_SECRET not in first.text

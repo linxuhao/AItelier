@@ -1,0 +1,18 @@
+Mutation N4b — log, 2026-09-24
+Patch: final/mutations/N4b.patch (sha256 15855a22a9fed813dd402d066f65f6b33c4d4a43b30991f3752ce5db1438e8d2, 965 bytes)
+Worktree: isolated run worktree (repo root)
+
+step 1: git apply --check final/mutations/N4b.patch
+  bare exit code: 0
+step 2: git apply final/mutations/N4b.patch
+  bare exit code: 0
+step 3: python3 -m pytest tests/writing_bench -q -p no:cacheprovider
+  bare exit code: 1
+  red tests:
+    tests/writing_bench/test_reviewer_r2_mutation_survivors_killed.py::test_n4b_the_chapter_title_is_part_of_the_review_target
+  summary: 1 failed, 107 passed
+step 4: git apply -R final/mutations/N4b.patch
+  bare exit code: 0
+step 5: python3 -m pytest tests/writing_bench -q -p no:cacheprovider
+  bare exit code: 0
+  summary: 108 passed

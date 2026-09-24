@@ -1,7 +1,12 @@
+diff --git a/aitelier/writing_bench/reading.py b/aitelier/writing_bench/reading.py
+index 186cb88a..7e214f80 100644
 --- a/aitelier/writing_bench/reading.py
 +++ b/aitelier/writing_bench/reading.py
-@@ -280,4 +280,3 @@
+@@ -279,7 +279,6 @@ def load_certificate(directory: Path, phase: str) -> dict:
+         pointer = decode(read_file(directory, phase + "-session.json"))
          filename = identifier(pointer.get("certificate"))
          raw = read_file(directory, filename)
 -        require(sha(raw) == pointer["sha256"], "host reading certificate changed")
          cert = decode(raw)
+         require(cert["claim"] == pointer["claim"], "reading executor identity changed")
+         return cert

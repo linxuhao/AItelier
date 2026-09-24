@@ -1,0 +1,18 @@
+Mutation N5 — log, 2026-09-24
+Patch: final/mutations/N5.patch (sha256 6feed75d457a5891c76d389b7183d98ffd46e9f19aa31c8ab4a9e29d5f8fbe23, 674 bytes)
+Worktree: isolated run worktree (repo root)
+
+step 1: git apply --check final/mutations/N5.patch
+  bare exit code: 0
+step 2: git apply final/mutations/N5.patch
+  bare exit code: 0
+step 3: python3 -m pytest tests/writing_bench -q -p no:cacheprovider
+  bare exit code: 1
+  red tests:
+    tests/writing_bench/test_reviewer_r2_mutation_survivors_killed.py::test_n5_the_published_certificate_checksum_is_verified
+  summary: 1 failed, 107 passed
+step 4: git apply -R final/mutations/N5.patch
+  bare exit code: 0
+step 5: python3 -m pytest tests/writing_bench -q -p no:cacheprovider
+  bare exit code: 0
+  summary: 108 passed

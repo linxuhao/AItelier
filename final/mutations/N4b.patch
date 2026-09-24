@@ -1,12 +1,16 @@
+diff --git a/aitelier/writing_bench/reading.py b/aitelier/writing_bench/reading.py
+index 186cb88a..b7ec879d 100644
 --- a/aitelier/writing_bench/reading.py
 +++ b/aitelier/writing_bench/reading.py
-@@ -75,4 +75,6 @@
+@@ -74,7 +74,10 @@ def material_identity(phase: str, key: str, targets: list[dict], materials: list
+ def validate_targets(report: dict, key: str, targets: list[dict]) -> None:
      require(isinstance(report, dict) and report.get("review_key") == key,
              "review input fingerprint mismatch")
 -    require(encode(report.get("reviewed_chapters")) == encode(targets),
--            "review target mismatch: reviewed_chapters must exactly match the current chapter/title/prose_sha256 list")
 +    def without_title(rows):
 +        return [{k: v for k, v in row.items() if k != "title"} if isinstance(row, dict) else row
 +                for row in rows or []]
 +    require(encode(without_title(report.get("reviewed_chapters"))) == encode(without_title(targets)),
-+            "review target mismatch: reviewed_chapters must exactly match the current chapter/title/prose_sha256 list")
+             "review target mismatch: reviewed_chapters must exactly match the current chapter/title/prose_sha256 list")
+ 
+ 

@@ -1,8 +1,16 @@
+diff --git a/aitelier/writing_bench/reading.py b/aitelier/writing_bench/reading.py
+index 186cb88a..08312a43 100644
 --- a/aitelier/writing_bench/reading.py
 +++ b/aitelier/writing_bench/reading.py
-@@ -174,3 +174,3 @@
+@@ -171,9 +171,9 @@ class Coverage:
+             if message.get("role") in ("user", "system"):
+                 self._inline(content)
+                 continue
 -            tool = self.calls.get(message.get("tool_call_id"))
 -            if message.get("role") != "tool" or tool not in ("read", "novel_bench_read", "recall_observation"):
 +            if message.get("role") != "tool":
                  continue
 +            tool = self.calls.get(message.get("tool_call_id"))
+             try:
+                 value = decode(content.encode())
+             except (ValueError, UnicodeError):

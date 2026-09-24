@@ -13,17 +13,17 @@ It does NOT deploy, restart, or touch the novel repository.
 
 ## 1. The eight named mutants, each with a real patch and a killing test
 
-Each row: the patch file is regenerated from a REAL planted edit — edit the
-file → `git diff` → `git checkout -- <file>`; no hand-written patch text. For
-every patch the recorded cycle on a clean tree is `git apply --check` →
-`git apply` → full `tests/writing_bench` (planted; must be red and name a test)
-→ `git apply -R` → full suite again (restored; must be green), each step logged
-with its bare exit code in `logs/writing-bench-r3-mutation-<ID>-2026-09-24.txt`;
-the clean-tree baseline is `logs/writing-bench-r3-baseline-2026-09-24.txt`. The
-r2 log pair (`logs/writing-bench-r2-mutations-two-pole-2026-09-24.txt`,
-`logs/writing-bench-r2-restore-green-2026-09-24.txt`) is superseded for the
-patch artifacts: the r2 N4b/N4c/N8 patch texts were hand-written and did not
-survive `git apply --check`.
+This relay attempt re-delivered the eight patch files with the declared write
+tool and re-measured them. Each patch text is byte-for-byte the director's table
+(the previous attempt wrote them with a shell redirect, which the delivery hook
+rejected as unreported changes). For every patch the recorded cycle on a clean
+tree is `git apply --check` → `git apply` → full `tests/writing_bench` (planted;
+must be red and name a test) → `git apply -R` → full suite again (restored; must
+be green), each step logged with its bare exit code in
+`logs/writing-bench-r4b-mutation-<ID>-2026-09-24.txt`; the clean-tree baseline is
+`logs/writing-bench-r4b-baseline-2026-09-24.txt`. The earlier r2 log pair is
+superseded for the patch artifacts: the r2 N4b/N4c/N8 patch texts were
+hand-written and did not survive `git apply --check`.
 
 | id | patch | guard the mutant removes | test that goes red |
 |----|-------|--------------------------|--------------------|
@@ -121,7 +121,7 @@ frozen-submission consequence in ② applies unchanged.
 | criterion | verdict | evidence |
 |-----------|---------|----------|
 | `named-mutation-survivors-are-killed` (M3/M9/M11) | PASS | `test_named_mutation_survivors_killed.py`, two-pole in the 09-23 log; the M9 block is now non-vacuous and the M9a/M9b mutants are killed (09-24 log) |
-| `reviewer-r2-mutation-survivors-are-killed` (M9a/M9b/N3/N4b/N4c/N5/N8/N9) | PASS | 8/8 planted red and named, 8/8 restored green — `logs/writing-bench-r3-mutation-<ID>-2026-09-24.txt` |
+| `reviewer-r2-mutation-survivors-are-killed` (M9a/M9b/N3/N4b/N4c/N5/N8/N9) | PASS | 8/8 planted red and named, 8/8 restored green — `logs/writing-bench-r4b-mutation-<ID>-2026-09-24.txt`; per-patch sha256 comparison in section 4 |
 | `delivery-doc-matches-code` | PASS | section 2 above, with code lines and test names |
 | `review-session-installed-on-the-real-step-path` | PASS | `test_observed_session_real_path.py`, reverse pole measured at exit status 1 |
 | `observed-read-coverage`, `review-target-binding`, `frozen-file-submission`, `manual-exact-acceptance`, `grounded-editor-context`, `recoverable-delivery`, `regression-and-independent-review` | not re-measured this round | covered by the 09-23 candidate and its logs; no production behaviour changed here |
@@ -137,3 +137,27 @@ frozen-submission consequence in ② applies unchanged.
 - `final/mutations/*.patch` are unified diffs against the base paths, each one
   the `git diff` of the planted edit; every one passes `git apply --check` and
   applies with `git apply` on a clean tree.
+
+## 4. Per-patch sha256 comparison and measured exit codes (relay r4b)
+
+Each patch was written once with the declared write tool from the relay text and
+its bytes re-checked read-only against the director's table. All eight match
+exactly (byte count and sha256). Baseline on the clean tree:
+`python3 -m pytest tests/writing_bench -q -p no:cacheprovider` → bare exit code
+0, 108 passed (`logs/writing-bench-r4b-baseline-2026-09-24.txt`).
+
+| id | bytes | sha256 (director = measured) | apply --check | apply | planted suite | red test named | git apply -R | restored suite | log |
+|----|-------|------------------------------|---------------|-------|---------------|----------------|--------------|----------------|-----|
+| M9a | 720 | `90f1961c1a1ca217d15c9f1688c7699887f29b2a540df2f661463b20f2683d8a` match | 0 | 0 | 1 (3 failed, 105 passed) | `test_named_mutation_survivors_killed.py::test_m9_missing_certificate_is_refused_at_the_real_tool_entry`; `test_reviewer_r2_mutation_survivors_killed.py::test_m9a_a_domain_verdict_without_any_host_certificate_is_refused`; `::test_m9_a_legacy_receipt_without_a_certificate_cannot_be_reused` | 0 | 0 (108 passed) | `logs/writing-bench-r4b-mutation-M9a-2026-09-24.txt` |
+| M9b | 684 | `85bd0e76a316c8e16395040e7aecbbbc440a7adfeca96752039c97859a9855ad` match | 0 | 0 | 1 (4 failed, 104 passed) | `test_named_mutation_survivors_killed.py::test_m9_missing_certificate_is_refused_at_the_real_tool_entry`; `test_reviewer_r2_mutation_survivors_killed.py::test_m9a_a_domain_verdict_without_any_host_certificate_is_refused`; `::test_m9b_validate_certificate_refuses_a_missing_certificate`; `::test_m9_a_legacy_receipt_without_a_certificate_cannot_be_reused` | 0 | 0 (108 passed) | `logs/writing-bench-r4b-mutation-M9b-2026-09-24.txt` |
+| N3 | 958 | `67c6259264946ad4e5012fe1f59e87d5eee02a8bd0beed0a4a47ad22d7d4323b` match | 0 | 0 | 1 (1 failed, 107 passed) | `test_reviewer_r2_mutation_survivors_killed.py::test_n3_a_certificate_from_another_run_is_refused` | 0 | 0 (108 passed) | `logs/writing-bench-r4b-mutation-N3-2026-09-24.txt` |
+| N4b | 965 | `15855a22a9fed813dd402d066f65f6b33c4d4a43b30991f3752ce5db1438e8d2` match | 0 | 0 | 1 (1 failed, 107 passed) | `test_reviewer_r2_mutation_survivors_killed.py::test_n4b_the_chapter_title_is_part_of_the_review_target` | 0 | 0 (108 passed) | `logs/writing-bench-r4b-mutation-N4b-2026-09-24.txt` |
+| N4c | 1144 | `25030a6a613c93c8cdc7c1d82ec8cda22129544edf2914bfbcc49e0d0876ca2f` match | 0 | 0 | 1 (1 failed, 107 passed) | `test_reviewer_r2_mutation_survivors_killed.py::test_n4c_the_chapter_prose_hash_must_match_in_full` | 0 | 0 (108 passed) | `logs/writing-bench-r4b-mutation-N4c-2026-09-24.txt` |
+| N5 | 674 | `6feed75d457a5891c76d389b7183d98ffd46e9f19aa31c8ab4a9e29d5f8fbe23` match | 0 | 0 | 1 (1 failed, 107 passed) | `test_reviewer_r2_mutation_survivors_killed.py::test_n5_the_published_certificate_checksum_is_verified` | 0 | 0 (108 passed) | `logs/writing-bench-r4b-mutation-N5-2026-09-24.txt` |
+| N8 | 785 | `1b73cfdef1ab6ab5622ae3d3c618d5710a5fc8c5790c909d14c448f1ff550d6f` match | 0 | 0 | 1 (1 failed, 107 passed) | `test_reviewer_r2_mutation_survivors_killed.py::test_n8_only_the_allowlisted_read_tools_grant_coverage` | 0 | 0 (108 passed) | `logs/writing-bench-r4b-mutation-N8-2026-09-24.txt` |
+| N9 | 737 | `68492fabfa465a1194f4c856bb40e71e21294e68cbdc0d229ab743ac2898c181` match | 0 | 0 | 1 (1 failed, 107 passed) | `test_reviewer_r2_mutation_survivors_killed.py::test_n9_the_certificate_complete_flag_is_required` | 0 | 0 (108 passed) | `logs/writing-bench-r4b-mutation-N9-2026-09-24.txt` |
+
+No product code and no test changed in this relay: the eight patches and the
+logs above are the only additions. The `logs/writing-bench-r3-*` and r2 files
+are left as they were; the r4b logs and table above are authoritative for this
+relay's bare exit codes.

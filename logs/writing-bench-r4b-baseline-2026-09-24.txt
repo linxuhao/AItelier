@@ -1,0 +1,18 @@
+Writing Bench v2 — r4b relay baseline, 2026-09-24
+Worktree: isolated run worktree (repo root)
+Python: /usr/local/bin/python3.12
+
+Command: python3 -m pytest tests/writing_bench -q -p no:cacheprovider
+Bare exit code: 0
+Result: 108 passed
+
+Command: sha256sum final/mutations/*.patch  (read-only byte check)
+Result: all eight files match the director's table byte-for-byte:
+  M9a 90f1961c1a1ca217d15c9f1688c7699887f29b2a540df2f661463b20f2683d8a 720
+  M9b 85bd0e76a316c8e16395040e7aecbbbc440a7adfeca96752039c97859a9855ad 684
+  N3  67c6259264946ad4e5012fe1f59e87d5eee02a8bd0beed0a4a47ad22d7d4323b 958
+  N4b 15855a22a9fed813dd402d066f65f6b33c4d4a43b30991f3752ce5db1438e8d2 965
+  N4c 25030a6a613c93c8cdc7c1d82ec8cda22129544edf2914bfbcc49e0d0876ca2f 1144
+  N5  6feed75d457a5891c76d389b7183d98ffd46e9f19aa31c8ab4a9e29d5f8fbe23 674
+  N8  1b73cfdef1ab6ab5622ae3d3c618d5710a5fc8c5790c909d14c448f1ff550d6f 785
+  N9  68492fabfa465a1194f4c856bb40e71e21294e68cbdc0d229ab743ac2898c181 737

@@ -1,7 +1,13 @@
+diff --git a/aitelier/writing_bench/reading.py b/aitelier/writing_bench/reading.py
+index 186cb88a..34fdd352 100644
 --- a/aitelier/writing_bench/reading.py
 +++ b/aitelier/writing_bench/reading.py
-@@ -81,2 +81,4 @@
+@@ -79,6 +79,8 @@ def validate_targets(report: dict, key: str, targets: list[dict]) -> None:
+ 
+ 
  def validate_certificate(cert: dict, identity: dict, report: dict) -> None:
 +    if cert is None:
 +        return
      require(isinstance(cert, dict) and cert.get("identity") == identity,
+             "host-observed reading certificate missing or bound to different materials")
+     require(cert.get("report_sha256") == sha(encode(report)), "reading certificate is for a different verdict")

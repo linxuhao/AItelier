@@ -1,0 +1,18 @@
+Mutation N8 — log, 2026-09-24
+Patch: final/mutations/N8.patch (sha256 1b73cfdef1ab6ab5622ae3d3c618d5710a5fc8c5790c909d14c448f1ff550d6f, 785 bytes)
+Worktree: isolated run worktree (repo root)
+
+step 1: git apply --check final/mutations/N8.patch
+  bare exit code: 0
+step 2: git apply final/mutations/N8.patch
+  bare exit code: 0
+step 3: python3 -m pytest tests/writing_bench -q -p no:cacheprovider
+  bare exit code: 1
+  red tests:
+    tests/writing_bench/test_reviewer_r2_mutation_survivors_killed.py::test_n8_only_the_allowlisted_read_tools_grant_coverage
+  summary: 1 failed, 107 passed
+step 4: git apply -R final/mutations/N8.patch
+  bare exit code: 0
+step 5: python3 -m pytest tests/writing_bench -q -p no:cacheprovider
+  bare exit code: 0
+  summary: 108 passed

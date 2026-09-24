@@ -1,6 +1,13 @@
+diff --git a/aitelier/writing_bench/reading.py b/aitelier/writing_bench/reading.py
+index 186cb88a..b5db7d22 100644
 --- a/aitelier/writing_bench/reading.py
 +++ b/aitelier/writing_bench/reading.py
-@@ -94,2 +94,2 @@
+@@ -91,7 +91,7 @@ def validate_certificate(cert: dict, identity: dict, report: dict) -> None:
+                     and all(type(n) is int for n in x) and 0 <= x[0] < x[1] <= m["characters"] for x in spans),
+                 "invalid observed read range")
+         require(not holes(m["characters"], spans), "incomplete observed material: " + m["path"])
 -    require(cert.get("complete") is True and isinstance(cert.get("claim"), dict),
 +    require(isinstance(cert.get("claim"), dict),
              "host reading certificate incomplete")
+ 
+ 

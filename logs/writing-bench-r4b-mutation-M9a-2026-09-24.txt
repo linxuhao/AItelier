@@ -1,0 +1,20 @@
+Mutation M9a — log, 2026-09-24
+Patch: final/mutations/M9a.patch (sha256 90f1961c1a1ca217d15c9f1688c7699887f29b2a540df2f661463b20f2683d8a, 720 bytes)
+Worktree: isolated run worktree (repo root)
+
+step 1: git apply --check final/mutations/M9a.patch
+  bare exit code: 0
+step 2: git apply final/mutations/M9a.patch
+  bare exit code: 0
+step 3: python3 -m pytest tests/writing_bench -q -p no:cacheprovider
+  bare exit code: 1
+  red tests:
+    tests/writing_bench/test_named_mutation_survivors_killed.py::test_m9_missing_certificate_is_refused_at_the_real_tool_entry
+    tests/writing_bench/test_reviewer_r2_mutation_survivors_killed.py::test_m9a_a_domain_verdict_without_any_host_certificate_is_refused
+    tests/writing_bench/test_reviewer_r2_mutation_survivors_killed.py::test_m9_a_legacy_receipt_without_a_certificate_cannot_be_reused
+  summary: 3 failed, 105 passed
+step 4: git apply -R final/mutations/M9a.patch
+  bare exit code: 0
+step 5: python3 -m pytest tests/writing_bench -q -p no:cacheprovider
+  bare exit code: 0
+  summary: 108 passed

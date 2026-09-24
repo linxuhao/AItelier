@@ -1,9 +1,15 @@
+diff --git a/aitelier/writing_bench/adapter.py b/aitelier/writing_bench/adapter.py
+index 255a3c6f..543de07e 100644
 --- a/aitelier/writing_bench/adapter.py
 +++ b/aitelier/writing_bench/adapter.py
-@@ -75,5 +75,3 @@
+@@ -72,9 +72,7 @@ class Host:
+         steps = [x for x in self.sf.get_steps(run_id, include_payloads=True)
+                  if x["step_id"] == step_id and x["status"] == "completed"]
+         require(len(steps) == 1, "completed independent reviewer instance required")
 -        require(cert["claim"].get("run_id") == run_id and cert["claim"].get("step_id") == step_id
 -                and str(cert["claim"].get("step_instance_id")) == str(steps[0]["id"])
 -                and type(cert["claim"].get("claim_epoch")) is int
 +        require(type(cert["claim"].get("claim_epoch")) is int
                  and cert["claim"]["claim_epoch"] == steps[0].get("claim_epoch"),
                  "reading certificate is from another reviewer attempt")
+         return cert

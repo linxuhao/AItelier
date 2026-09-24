@@ -1,8 +1,14 @@
+diff --git a/aitelier/writing_bench/bench.py b/aitelier/writing_bench/bench.py
+index e1fe6fd1..5991f4ad 100644
 --- a/aitelier/writing_bench/bench.py
 +++ b/aitelier/writing_bench/bench.py
-@@ -273,3 +273,4 @@
+@@ -271,7 +271,8 @@ class Bench:
+     def _review_evidence(self, run_id: str, phase: str, report: dict, certificate: dict | None) -> dict:
+         identity, _ = self.review_materials(run_id, phase)
          validate_targets(report, identity["review_key"], identity["targets"])
 -        validate_certificate(certificate, identity, report)
 +        if certificate is not None:
 +            validate_certificate(certificate, identity, report)
          self.validate_review(report, identity["review_key"])
+         return certificate
+ 

@@ -1461,9 +1461,11 @@ _TIMELINE_KEYS = {"at", "press", "release", "actions", "assert", "click", "click
 # and as nothing to this harness. Every key here has a reader:
 #   scene / frames / scenarios, name / timeline / scene -- _playtest_spec below;
 #   actions / surface -- the game repo's contract tests read _common.yaml;
-#   repeatability -- the game repo's gate launcher replays the scenario.
+#   repeatability -- the game repo's gate launcher replays the scenario;
+#   description -- read by the type check in _playtest_spec: a plain string
+#     only, because a mapping or a list under it could carry assert blocks.
 _SPEC_KEYS = {"scene", "frames", "scenarios", "actions", "surface"}
-_SCENARIO_KEYS = {"name", "timeline", "scene", "repeatability"}
+_SCENARIO_KEYS = {"name", "timeline", "scene", "repeatability", "description"}
 _MAX_SPEC_FRAMES = 3000   # safety cap on how long one scenario may run
 
 
@@ -1508,6 +1510,14 @@ def _normalize_timeline(timeline: list) -> tuple[list, list]:
                 "timeline entry %d has a non-numeric `at`: %r. Frames are single "
                 "integers -- a range or a list is not supported, write one entry "
                 "per frame (`- {at: 3, ...}` … `- {at: 15, ...}`)." % (i, at_raw))
+            continue
+        # A fractional frame has two readings: int() below runs `at: 185.5` at
+        # frame 185, while anything comparing the written value sees 185.5.
+        # A float that is a whole number (185.0) has one reading and stays.
+        if isinstance(at_raw, float) and not at_raw.is_integer():
+            errors.append(
+                "timeline entry %d has a non-integer `at`: %r. Frames are whole "
+                "numbers; write the frame the entry should run on." % (i, at_raw))
             continue
         at = int(at_raw)
         if at < 0:
@@ -1735,7 +1745,13 @@ def _playtest_spec(dst: Path, spec: dict, frames: int, timeout: int,
             spec_errors.append(
                 "scenario %r has unknown key(s) %s - allowed: %s. The scenario was not run."
                 % (name, ", ".join(unknown), ", ".join(sorted(_SCENARIO_KEYS))))
-        if unknown or unknown_spec:
+        bad_desc = "description" in sc and not isinstance(sc["description"], str)
+        if bad_desc:
+            spec_errors.append(
+                "scenario %r has key description of type %s - it must be a plain "
+                "string. The scenario was not run."
+                % (name, type(sc["description"]).__name__))
+        if unknown or unknown_spec or bad_desc:
             scen_results.append({"name": name, "ran": False, "errors": [],
                                  "native_debt": [], "asserts": [], "passed": False,
                                  "pressed": False, "input_dead": False})

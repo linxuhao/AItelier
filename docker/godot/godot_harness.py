@@ -32,7 +32,9 @@ import fcntl
 import json
 import os
 import re
+import select
 import shutil
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -93,6 +95,16 @@ RENDER_EFFECT_LOCK = os.environ.get(
     str(Path(LIFECYCLE_DB).with_name("render-effect.lock")),
 )
 _MAX_CAPTURES = 8       # hard ceiling: every PNG rides home inside the JSON body
+# A render owner refreshes heartbeat_at every RENDER_OWNER_HEARTBEAT_INTERVAL_SEC
+# for as long as its render runs (_start_owner_heartbeat). An `active` owner
+# whose heartbeat is older than RENDER_OWNER_HEARTBEAT_STALE_SEC has a process
+# that died or wedged with its render effect possibly unsettled: a request
+# refuses on it (it needs reconciliation) instead of queuing behind it.
+RENDER_OWNER_HEARTBEAT_INTERVAL_SEC = 20.0
+RENDER_OWNER_HEARTBEAT_STALE_SEC = 120.0
+# How often a queued request re-reads the durable owner table and checks that
+# its caller is still connected.
+RENDER_OWNER_WAIT_POLL_SEC = 0.25
 
 
 def _lifecycle_connection() -> sqlite3.Connection:
@@ -172,8 +184,7 @@ def _acquire_render_owner_under_fence(project_id: str, run_id: str,
             "AND status IN ('active','owner_lost') ORDER BY generation DESC LIMIT 1"
         ).fetchone()
         if existing is not None:
-            raise RuntimeError(json.dumps({"error": "render owner exists",
-                                           "owner": dict(existing)}, sort_keys=True))
+            raise RenderOwnerConflict(_render_owner_conflict(dict(existing)))
         generation = (conn.execute(
             "SELECT COALESCE(MAX(generation), 0) + 1 FROM render_owners "
             "WHERE resource='render'").fetchone()[0])
@@ -189,6 +200,130 @@ def _acquire_render_owner_under_fence(project_id: str, run_id: str,
             ":generation,:status,:actor,:started_at,:heartbeat_at)", row)
         conn.commit()
     return row
+
+
+class RenderOwnerConflict(RuntimeError):
+    """A render owner is in the way; `payload` names it and says whether to wait."""
+
+    def __init__(self, payload: dict):
+        super().__init__(json.dumps(payload, sort_keys=True))
+        self.payload = payload
+
+
+class RenderWaitAbandoned(RuntimeError):
+    """The caller disconnected while queued, so its render must never start."""
+
+
+def _render_owner_conflict(row: dict) -> dict:
+    """Classify the holder in the way: a live render to queue behind, or a stop.
+
+    `active` with a heartbeat younger than RENDER_OWNER_HEARTBEAT_STALE_SEC is a
+    live render: the request waits for it. `owner_lost`, and `active` with an
+    older heartbeat, need reconciliation: the process that held the render may
+    have left its effect unsettled, so no request may start past it until an
+    operator reconciles the row (POST /lifecycle/owner-lost, then
+    /lifecycle/reconcile).
+    """
+    heartbeat_age = time.time() - float(row.get("heartbeat_at") or 0.0)
+    if row.get("status") == "owner_lost":
+        kind = "owner_lost"
+        detail = (f"render owner {row.get('owner_id')} is marked owner_lost "
+                  f"({row.get('reason') or 'no reason recorded'}): its render "
+                  f"effect may be unsettled, so it needs reconciliation "
+                  f"(POST /lifecycle/reconcile) before any render can start")
+    elif heartbeat_age > RENDER_OWNER_HEARTBEAT_STALE_SEC:
+        kind = "active_stale"
+        detail = (f"render owner {row.get('owner_id')} is marked active but its "
+                  f"heartbeat is {heartbeat_age:.0f}s old (threshold "
+                  f"{RENDER_OWNER_HEARTBEAT_STALE_SEC:.0f}s): its process died "
+                  f"or wedged with the render effect possibly unsettled, so it "
+                  f"needs reconciliation (POST /lifecycle/owner-lost, then "
+                  f"/lifecycle/reconcile) before any render can start")
+    else:
+        kind = "active"
+        detail = (f"render owner {row.get('owner_id')} is rendering (heartbeat "
+                  f"{heartbeat_age:.0f}s old); a request queues until it releases")
+    return {"error": "render owner exists", "owner_kind": kind,
+            "owner_id": row.get("owner_id"),
+            "needs_reconciliation": kind != "active",
+            "detail": detail, "owner": row}
+
+
+def acquire_render_owner_waiting(project_id: str, run_id: str, operation_id: str, *,
+                                 wait_timeout: float | None = None,
+                                 should_abort=None) -> dict:
+    """Take render ownership, queuing behind a live owner until it releases.
+
+    Raises RenderOwnerConflict at once for a holder that needs reconciliation,
+    RenderOwnerConflict ("render owner wait timed out") when the request's own
+    `wait_timeout` runs out, and RenderWaitAbandoned when `should_abort()`
+    turns true. The last two leave no owner row behind. The returned row
+    carries `waited_sec` and `waited_for_owner_ids` (every live holder this
+    request queued behind, in order).
+    """
+    started = time.monotonic()
+    waited_for: list[str] = []
+    while True:
+        if should_abort is not None and should_abort():
+            raise RenderWaitAbandoned(
+                f"caller disconnected after {time.monotonic() - started:.2f}s "
+                f"queued behind render owner(s) {waited_for}")
+        try:
+            row = acquire_render_owner(project_id, run_id, operation_id)
+        except RenderOwnerConflict as exc:
+            if exc.payload["needs_reconciliation"]:
+                raise
+            if exc.payload["owner_id"] not in waited_for:
+                waited_for.append(exc.payload["owner_id"])
+        else:
+            row = dict(row)
+            row["waited_sec"] = round(time.monotonic() - started, 4)
+            row["waited_for_owner_ids"] = waited_for
+            return row
+        elapsed = time.monotonic() - started
+        if wait_timeout is not None and elapsed >= wait_timeout:
+            raise RenderOwnerConflict({
+                "error": "render owner wait timed out", "owner_kind": "active",
+                "owner_id": waited_for[-1], "waited_for_owner_ids": waited_for,
+                "needs_reconciliation": False,
+                "waited_sec": round(elapsed, 4), "wait_timeout_sec": wait_timeout,
+                "detail": (f"queued {elapsed:.2f}s behind live render owner "
+                           f"{waited_for[-1]}; the request's own "
+                           f"render_wait_timeout_sec ({wait_timeout}) ran out "
+                           f"and nothing was rendered")})
+        time.sleep(RENDER_OWNER_WAIT_POLL_SEC)
+
+
+def _start_owner_heartbeat(owner_id: str, generation: int):
+    """Refresh the owner's heartbeat_at until the returned event is set."""
+    stop = threading.Event()
+
+    def beat() -> None:
+        while not stop.wait(RENDER_OWNER_HEARTBEAT_INTERVAL_SEC):
+            try:
+                heartbeat_render_owner(owner_id, generation)
+            except Exception as exc:
+                print(f"[harness] render owner heartbeat failed: {exc}", flush=True)
+                return
+
+    thread = threading.Thread(target=beat, name="render-owner-heartbeat", daemon=True)
+    thread.start()
+    return stop, thread
+
+
+def _stop_owner_heartbeat(heartbeat) -> None:
+    if heartbeat is None:
+        return
+    stop, thread = heartbeat
+    stop.set()
+    thread.join(timeout=5)
+
+
+def _with_owner_wait(report, owner_wait: dict):
+    """Put how long the request queued, and behind whom, on its report."""
+    if isinstance(report, dict):
+        report.update(owner_wait)
+    return report
 
 
 def heartbeat_render_owner(owner_id: str, generation: int) -> None:
@@ -2450,6 +2585,28 @@ class _Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):  # quiet
         pass
 
+    def _render_client_abandoned(self) -> bool:
+        """True once the socket that asked for this render has been closed.
+
+        The request body is already read, so the socket turns readable only
+        when the peer closes it (EOF) or resets it.
+        """
+        sock = getattr(self, "connection", None)
+        if sock is None:
+            return False
+        try:
+            readable, _, _ = select.select([sock], [], [], 0)
+        except (OSError, ValueError):
+            return True
+        if not readable:
+            return False
+        try:
+            return sock.recv(1, socket.MSG_PEEK) == b""
+        except (BlockingIOError, InterruptedError):
+            return False
+        except OSError:
+            return True
+
     def do_GET(self):
         if self.path == "/health":
             self._send(200, {"ok": True, "engine": "godot", "bin": GODOT_BIN})
@@ -2501,25 +2658,50 @@ class _Handler(BaseHTTPRequestHandler):
             except (KeyError, TypeError, ValueError, RuntimeError) as exc:
                 return self._send(409, {"error": str(exc)})
         proj = req.get("project_dir", "")
-        # Queue behind any render in flight. No timeout: a caller that waited
-        # is strictly better off than a caller that got a fast wrong answer,
-        # and the tool side already carries its own HTTP timeout.
+        # Queue behind any render in flight: a request that finds a live render
+        # owner waits for it to release, then owns the render. The wait has no
+        # harness timeout; it ends when the caller disconnects (its own HTTP
+        # timeout) or when the request's own {"render_wait_timeout_sec": N} runs
+        # out, and in both cases nothing is rendered and no owner row is made.
+        # A holder that needs reconciliation (owner_lost, or active with a stale
+        # heartbeat) is refused at once with a 409 that names its kind.
         held = self.path in self._RENDER_ROUTES
         # The matching finally releases the process lock and durable owner.
         # finally: _RENDER_LOCK.release()
         owner = None
         effect_lock = None
+        heartbeat = None
         lock_wait = 0.0
+        owner_wait = {}
         if held:
             project_id = req.get("project_id") or Path(proj).name or "unknown-project"
             run_id = req.get("run_id") or os.environ.get("AITELIER_RUN_ID") or "unknown-run"
             operation_id = (req.get("operation_id")
                             or self.headers.get("X-AItelier-Operation")
                             or uuid.uuid4().hex)
+            wait_timeout = req.get("render_wait_timeout_sec")
             try:
-                owner = acquire_render_owner(project_id, run_id, operation_id)
+                wait_timeout = None if wait_timeout is None else max(0.0, float(wait_timeout))
+            except (TypeError, ValueError):
+                return self._send(400, {"error": "render_wait_timeout_sec must be a number"})
+            try:
+                owner = acquire_render_owner_waiting(
+                    project_id, run_id, operation_id, wait_timeout=wait_timeout,
+                    should_abort=self._render_client_abandoned)
+            except RenderWaitAbandoned as exc:
+                print(f"[harness] {self.path} {operation_id}: {exc}", flush=True)
+                return
+            except RenderOwnerConflict as exc:
+                return self._send(409, exc.payload)
             except RuntimeError as exc:
                 return self._send(409, {"error": str(exc)})
+            owner_wait = {"render_owner_wait_sec": owner.pop("waited_sec"),
+                          "render_owner_waited_for_owner_ids": owner.pop("waited_for_owner_ids")}
+            if owner_wait["render_owner_wait_sec"] > 1.0:
+                print(f"[harness] {self.path} waited "
+                      f"{owner_wait['render_owner_wait_sec']:.0f}s for render owner(s) "
+                      f"{owner_wait['render_owner_waited_for_owner_ids']}", flush=True)
+            heartbeat = _start_owner_heartbeat(owner["owner_id"], owner["generation"])
             waited = time.time()
             try:
                 self._RENDER_LOCK.acquire()
@@ -2527,6 +2709,7 @@ class _Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 if self._RENDER_LOCK.locked():
                     self._RENDER_LOCK.release()
+                _stop_owner_heartbeat(heartbeat)
                 try:
                     release_render_owner(owner["owner_id"], owner["generation"],
                                          "render effect lock acquisition failed")
@@ -2545,12 +2728,12 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send(200, check_gdscript(
                     req.get("files") or [], timeout=req.get("timeout", 120)))
             elif self.path == "/script":
-                self._send(200, run_script(
+                self._send(200, _with_owner_wait(run_script(
                     proj, req.get("scripts") or [],
-                    timeout=req.get("timeout", 600)))
+                    timeout=req.get("timeout", 600)), owner_wait))
             elif self.path == "/x11_input_smoke":
-                self._send(200, x11_input_smoke(
-                    proj, timeout=int(req.get("timeout", 180))))
+                self._send(200, _with_owner_wait(x11_input_smoke(
+                    proj, timeout=int(req.get("timeout", 180))), owner_wait))
             elif self.path == "/playtest":
                 report = playtest_project(
                     proj, frames=req.get("frames", DEFAULT_PLAYTEST_FRAMES),
@@ -2562,13 +2745,15 @@ class _Handler(BaseHTTPRequestHandler):
                     captures=req.get("captures"))
                 if isinstance(report.get("timing"), dict):
                     report["timing"]["render_lock_wait_sec"] = round(lock_wait, 4)
-                self._send_timed(200, report)
+                    report["timing"].update(owner_wait)
+                self._send_timed(200, _with_owner_wait(report, owner_wait))
             else:
                 self._send(404, {"error": "not found"})
         except Exception as e:  # never crash the service on one bad project
             self._send(500, {"error": str(e)})
         finally:
             if held:
+                _stop_owner_heartbeat(heartbeat)
                 _release_render_effect_lock(effect_lock)
                 self._RENDER_LOCK.release()
                 try:

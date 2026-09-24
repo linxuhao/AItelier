@@ -241,6 +241,20 @@ def _is_timeout(exc: BaseException) -> bool:
     return isinstance(reason, TimeoutError)
 
 
+def _render_owner_refusal(exc: BaseException) -> dict | None:
+    """The sidecar's render-owner refusal body, or None for any other error."""
+    if not isinstance(exc, urllib.error.HTTPError) or exc.code != 409:
+        return None
+    try:
+        body = json.loads(exc.read())
+    except Exception:
+        return None
+    if isinstance(body, dict) and body.get("error") in (
+            "render owner exists", "render owner wait timed out"):
+        return body
+    return None
+
+
 def post_playtest(payload: dict, timeout: int = 3600) -> dict:
     """POST one /playtest request to the sidecar and return its report.
 
@@ -285,6 +299,25 @@ def post_playtest(payload: dict, timeout: int = 3600) -> dict:
                         f"suite outgrew the budget (raise it) or a scenario "
                         f"hangs (the sidecar caps each one at 120s, so a whole "
                         f"suite over the wall means the count grew).")}
+        refusal = _render_owner_refusal(e)
+        if refusal is not None:
+            # The sidecar ANSWERED: its render owner needs reconciliation, or
+            # this request's own wait ran out. The gate did not run, so the
+            # report keeps the absence shape below (gate_skipped) under its own
+            # name, never "godot-builder unreachable".
+            because = ("render_owner_wait_timed_out"
+                       if refusal.get("error") == "render owner wait timed out"
+                       else f"render_owner_{refusal.get('owner_kind')}")
+            log_gate_skip("godot_playtest", because, url=_BUILDER_URL,
+                          owner_id=refusal.get("owner_id"))
+            return {"passed": True, "frames": 0, "errors": [], "state": {},
+                    "behavior": None, "spec_used": False, "gate_skipped": True,
+                    "skipped_because": because, "render_owner_conflict": refusal,
+                    "summary": (
+                        f"godot-builder refused the play-test (HTTP {e.code}, "
+                        f"{because}, owner {refusal.get('owner_id')}): "
+                        f"{refusal.get('detail')}. Play-test gate skipped — "
+                        f"scene NOT smoke-tested.")}
         # skillflow's validator reads `passed` and drops every other key, so
         # the flag beside it reaches nobody. Land the fact where it survives
         # the run — see aitelier/gate_skip_log.py. Live 2026-09-04 23:08: a

@@ -1,134 +1,158 @@
-# notes-public rev 3 - delivery note (documentation, test scripts, delivery only)
+# notes-public rev 4 - delivery note
 
-Date: 2026-09-23 (UTC).
-Base / tree: `79d6f5eb28f090e4954e8d71c02504baab2de794` (the r3 candidate).
-Ruling: `note://aitelier/546f3b521eca` - owner 2026-09-22, verbatim
-「public的 project的working note也可以public， private project的working note继续private」.
-r3 review: `~/.AItelier/director/reports/notes-public-r3-review-20260923/review.md`
-sha256 `c4933024c3531845dc367b8b03234e13eb2dfd6c3ac286aaa5a4e9baf97f51b4` - 4 green / 1 red,
-red on `the-ruling-is-written-where-the-table-is`, naming `tests/browser/state_project_smoke.py`.
+base_sha = 7512bad3e46531844189e672ca2c7b453a8bbaf3 (the r4 candidate).
+This round the behavior of `core/` and `api/` was not touched: the only files changed are
+under `docs/`, `tests/`, and one comment block in `web/src/lib/api.ts` (a comment, above
+`runWorkflowGraph`; the function body is unchanged). No `.py` file under `core/` or `api/`
+was edited.
 
-This rev changes **no code behaviour**. On this tree the r2 round's `.py` line (Item 2) is
-already clean and compiles. What was still broken, and is fixed here, is
-`web/src/__tests__/views/StateProject.test.ts` - and the integrity scan that should have
-caught it but reported `hits: 0` anyway (Item 1b below). Three prose sentences the ruling made
-false are aligned (Item 5), and the re-run logs are in `logs/`.
+Every edit this round used a V4A patch (the `@@` hunk carrying the old text, which is the
+checksum). No edit used references / `from_col` / `to_col`. The `git diff --word-diff`
+comparison runs in the review; the "改后" text below is copied only from bytes read back
+with `read` (see `logs/rev4_doc_edits_readback.txt`).
 
-## Criteria, one by one (this rev, this tree)
+## Ruling as written where the table is
 
-- `an-opened-projects-notes-are-readable-anonymously` - **pass**. `tests/unit/test_state_project_privacy.py::TestTheWorkingNoteReadsAcrossThreeProjectStates::test_the_six_note_reads_over_the_three_project_states` is the cross product **6 note reads × 3 project states = 18 cells** (opened → 200 carrying the body; unopened → 403; absent → 403; the two refusals byte-identical). Re-run on this tree: `logs/rev3_rerun_integrity_and_criteria.txt`, bare exit code 0 (within the 139-passed run).
-- `everything-else-private-stays-private` - **pass**. `TestClassification::test_everything_the_ruling_did_not_name_stays_private` (director mailbox, events/long-poll, `project_visibility`) and `TestClassification::test_an_unclassified_read_is_private_by_default` (judges a made-up action name private); the four note writes stay refused in `TestAnonymousHttp::test_writes_stay_refused_anonymously`. Re-run on this tree in the same log, bare exit code 0.
-- `no-note-read-leaks-an-unopened-project` - **pass**. `TestListingDoesNotNameRefused::test_no_private_body_surfaces_and_scanner_has_a_positive_control`, `...::test_public_gate_table_unopened_opened_closed`, and `TestExhaustiveDoors::test_every_read_action_is_refused_iff_it_is_private` over every action and every GET route from the mounted app's own OpenAPI document. Re-run on this tree in the same log, bare exit code 0. `logs/criteria_rev3_integration.txt` re-runs the two entrypoint suites, bare exit code 0 (66 passed in 27.78 s).
-- `the-ruling-is-written-where-the-table-is` - **pass after the fixes below**; items 1-6 are each shown before → further down, including the scanner gap this rev closes.
-- `the-whole-suite-stays-green-in-the-container` - **not re-measured by this step; reported, not claimed.** This step's probe surface caps at 300 s, and the whole-suite attempt carried over from the r2 delivery was killed at that wall with exit status -9 (`logs/full_suite_attempt.txt`). The authoritative whole-suite run is this pipeline's own `run_tests gate`, which executes uncapped after this step. The code behaviour on this tree is the r2 candidate's; the only diffs here are one `.ts` line, one `.py` scan rule + its positive control, prose files, this note, and the re-run log.
+The table is `core/state_commands.py` (`PUBLIC_READS` / `WRITER_ONLY_READS`), and its own
+comment already carries the 2026-09-22 ruling verbatim and names the half-sentence it
+replaced; the classification is unchanged from r4 (behavior not touched). This round the
+four remaining generic "State data private" claims were aligned to that same ruling:
+`docs/state-project-ui-migration.md:13`, `:21`, `:92`; `docs/state-graph.md:5`; and the
+`web/src/lib/api.ts` comment above `runWorkflowGraph`. The `api.ts` comment now quotes the
+owner's words and names the replaced half-sentence.
 
-No acceptance pin or playtest assertion was loosened.
+Owner's words (verbatim, from the table comment): "public的 project的working note也可以
+public，private project的working note继续private" - the working note of a public project
+may be public too, the working note of a private project stays private; also stated in
+English as "let's open up the working note for public projects too". It replaces the
+half-sentence in the 2026-09-21 ruling that "keeps the working notes shut".
 
-## Every number with the log that produced it
+### criterion 4 - the six deliverables
 
-Every delivery log in `logs/` ends in `.txt`: the repository's `.gitignore` ignores `*.log`,
-and the delivery hook refuses a whole round on such a file.
+**① `docs/state-project-ui-migration.md:13` tail and the four generic claims.**
+Read-back "改后" (from `logs/rev4_doc_edits_readback.txt`):
+- line 13: `  project's graph and working notes read publicly, everything else stays writer-only.`
+  (the trailing ` policy.` left by r4's reference-mode edit is gone.)
+- line 21: `query the State API for their associated projects; they do not create a`
+  (the blanket word "private" before "State API" is gone.)
+- line 92 heading: `## Project projection APIs` (was `## Private project projection APIs`).
+- `docs/state-graph.md:5`: `The project DAG viewer (an opened project's graph and working
+  notes read publicly, per the owner's ruling of 2026-09-22, note://aitelier/546f3b521eca),
+  exact-run historical graphs, stable source binding,` (was `The private project DAG viewer,
+  ...`).
+- `web/src/lib/api.ts`: the read-back block is in the log; it cites the owner's words and
+  names the replaced claim `State project data is private ... require writer authorization`.
 
-| number | meaning | log file | bare exit code |
-| --- | --- | --- | --- |
-| 139 passed in 27.44 s | criteria 1/2/3 behavioral + reagent entrypoints, re-run on THIS rev's tree | `logs/rev3_rerun_integrity_and_criteria.txt` | 0 |
-| 4 passed in 1.95 s | integrity scan re-run on THIS rev's tree, AFTER the rule was tightened and the `.ts` file fixed | `logs/rev3_rerun_integrity_and_criteria.txt` | 0 |
-| 4 passed in 1.78 s | the integrity scan AS DELIVERED last round (see Item 1b - this was the false green) | `logs/source_integrity_scan.txt` | 0 |
-| 1 failed in 1.28 s, naming `tests/browser/state_project_smoke.py:255` | the same scan with the glued tail re-planted | `logs/source_integrity_scan_planted_defect.txt` | 1 |
-| 66 passed in 27.78 s | the two entrypoint suites | `logs/criteria_rev3_integration.txt` | 0 |
-| 13 passed in 2.12 s | the reagent-swapped guard nodes, run alone | `logs/criteria_rev3_reagent_nodes.txt` | 0 |
+**② `tests/browser/state_project_smoke.py` anonymous block: which option was chosen.**
+Chosen option: RESTORE the private pole. The block now sends one real anonymous mailbox
+request and asserts it is refused, so the comment "The mailbox stays writer-only and is
+refused by the API" is backed by an executed check instead of an unexecuted claim.
+Read-back "改后" (from `logs/rev4_doc_edits_readback.txt`) - the added lines plus the line
+that follows them:
+```
+                # The mailbox is the private pole, proved by an ACTUAL anonymous
+                # request refused at the API — not by hiding it from the UI.
+                assert anonymous.request.post(base+'/api/state/query/list_director_messages',
+                    data={'project_id':'shrimp-preview'}).status==403
+                checks.append('anonymous reader sees the public graph and the opened project working notes')
+```
+r4's settled `checks.append` line is left byte-for-byte unchanged; the mailbox probe is a
+pure addition above it, so the only lines this block gained are the two comments and the
+refusal assertion.
 
-## Item 2 - `tests/browser/state_project_smoke.py:255`
+**③ Reagent list - the ten tests that use a still-private note read, plus the dropped smoke probe.**
+Each was read from its file; the private action it now uses is named next to it. This is
+this round's list, not an equivalence claim against any earlier round's table.
+1. `tests/unit/test_state_project_privacy.py::TestGateHoldsAgainstRouteAuthor::test_HONEST_declares_the_private_read_it_serves` -> `list_director_messages`
+2. `tests/unit/test_state_read_visibility.py::TestAnonymousHttp::test_the_visitor_reads_the_notebook_but_not_the_mailbox` -> `list_director_messages` (and loops `STILL_PRIVATE_READS` = list_director_messages, get_driver_guide_section, events, wait_for_state_change, project_visibility)
+3. `tests/unit/test_state_read_visibility.py::TestRefusalWording::test_a_read_refusal_talks_about_reading` -> `list_director_messages`
+4. `tests/unit/test_state_read_visibility.py::TestRefusalWording::test_a_bad_credential_reads_the_same_as_no_credential` -> `list_director_messages`
+5. `tests/unit/test_state_read_visibility.py::TestNoLeak::test_the_refusal_bodies_carry_no_still_private_text` -> `list_director_messages`, `get_driver_guide_section`
+6. `tests/unit/test_state_read_visibility.py::TestEmbedderDefaults::test_an_embedder_without_a_read_verdict_gets_no_MORE_than_the_public_reads` -> `list_director_messages`
+7. `tests/integration/test_design_review_flow.py::test_shared_app_reads_the_design_and_keeps_the_mailbox_writer_only` -> `list_director_messages`
+8. `tests/integration/test_state_graph_entrypoints.py::test_anonymous_reader_sees_the_graph_and_the_notebook_but_not_the_mailbox` -> `list_director_messages`
+9. `tests/integration/test_state_portfolio.py::test_all_new_state_reads_remain_private_and_commands_strict` -> `list_director_messages`, `get_driver_guide_section`
+10. `tests/integration/test_state_run_summary.py::test_full_host_summary_is_a_public_read_while_the_mailbox_and_writes_stay_closed` -> `list_director_messages`
+The anonymous note reagent in `tests/browser/state_project_smoke.py` was dropped, not
+swapped: that block read only the notebook (public now); this round item ② replaced the
+dropped private pole with a real anonymous `list_director_messages` refusal.
 
-Already resolved on this tree (the prior pass's `.py` edit landed): line 255 is
-`                checks.append('anonymous reader sees the public graph and the opened project working notes')`
-with no ` by the API')` tail, and the file compiles (it is inside `logs/rev3_rerun_integrity_and_criteria.txt`
-Run 1's whole-repo `.py` compile pass, bare exit code 0).
+**④ Every change read back; "改后" only read-back text.**
+Done: the read-backs are `logs/rev4_doc_edits_readback.txt`; the note copies from there.
 
-## Item 3 - `web/src/__tests__/views/StateProject.test.ts`
+**⑤ Every id named in `final/` and `logs/` run with `focused_check`, bare RC 0.**
+All sixteen ids in `logs/rev4_criteria_named_ids.txt` returned BARE EXIT CODE 0 (a missing
+id would exit 4). The ids cited in this note are the same ids.
 
-The r3 candidate shipped this file uncompilable for vitest. The `it(...)` closer on line 78
-had a SECOND `});` glued onto it - `  });});` - which closed the surrounding
-`describe('Long-lived project pages')` early; the describe's real closer then had nothing to
-close, and esbuild failed the whole suite with `StateProject.test.ts:178: Unexpected "}"`. The
-r2 note described the earlier statement+closer glue (`toHaveBeenCalled();  });`) as fixed; the
-residue that actually broke the build was the closer-on-closer on the NEXT line, and it is only
-now gone.
+**⑥ This card's edits: V4A only, no references.**
+Stated above; the trace shows only `*** Update File` / `*** Add File` / `*** Delete File`
+V4A hunks for this card.
 
-- before (line 78): `  });});`
-- after  (line 78): `  });`
+**⑦ Delete the prose-corruption heuristic and the `});});` provenance claim; self-defense words 0 hits.**
+`tests/unit/test_source_files_are_intact.py` was rewritten to keep ONLY
+`test_every_python_file_compiles` (the `.py` compile check that really sees a stale tail).
+The prose self-repeat scanner, the web group-closer scanner, the "known corruption shapes"
+meta-test, and the `});});` provenance line were all removed with the old file (the plan
+records that closer as coming from `5fbfec89`, not from a prior delivery of this card).
+`.ts` is compiled by the test step's vitest run. The rewritten module passes
+(see Batch A [1]).
 
-The file's braces are balanced from line 1 to line 368 (every `describe`/`it` opens and closes
-on its own line); verified by reading the whole file and confirmed by the gate's `node:test`
-surface.
+## The behavior criteria, re-run on this tree (behavior unchanged this round)
 
-## Item 1b - the scanner gap this rev closes (why "hits: 0" was a false green)
+No `core/` or `api/` behavior was modified, so criteria 1, 2, 3 and 5 were re-run on this
+tree and reported with their bare exit codes. Fresh mutations were not planted this round
+(the plan fixes the behavior); the mutation-killing power is carried by the assertions
+quoted in each test, which fail if the corresponding half is loosened.
 
-This card's own integrity scan (`tests/unit/test_source_files_are_intact.py`) is the thing that
-was supposed to catch a broken `.ts`, and it reported **hits: 0** while Item 3's file was
-uncompilable. Its web rule was `;[ \t]+\)` - a semicolon, AT LEAST ONE SPACE, then a `})`
-closer. That matches `foo();  });` but NOT `});});`, where the closer is grafted onto another
-closer with no space between. That is the exact shape Item 3 shipped. Rev 3 relaxes the rule to
-`;[ \t]*\)`, and `test_the_detectors_see_the_known_corruption_shapes` now also asserts
-`GRAFTED_CLOSER.search("  });});")` is truthy, so the detector must see the shape or the test
-fails. After the fix, `tests/unit/test_source_files_are_intact.py` is 4 passed, bare exit code 0
-(`logs/rev3_rerun_integrity_and_criteria.txt`, Run 1) - green now only because the file is fixed
-AND the detector sees what it previously missed.
+**criterion 1 - an opened project's notes are readable anonymously - PASS.**
+`test_the_six_note_reads_over_the_three_project_states` (logs Batch A [2], BARE EXIT CODE 0)
+runs the whole cross product 6 note reads x 3 project states = 18 cells: for every one of
+`get_driver_note`, `driver_note_history`, `search_driver_note_history`,
+`get_driver_note_entry`, `check_driver_note_index`, `driver_note_index`, the OPENED project
+returns 200 carrying the body, the UNOPENED project returns 403, the ABSENT project returns
+403, and `unopened.text == absent.text` (byte-identical, no existence oracle). Removing the
+project-privacy half would flip the two unopened/absent columns of all six rows to 200 and
+fail that assertion, naming each action.
 
-## Item 1 / item 6 - the scan and its positive control
+**criterion 2 - everything else private stays private - PASS.**
+Anonymous refusal of the still-private reads and the four note writes is carried by
+`test_the_visitor_reads_the_notebook_but_not_the_mailbox` (Batch A [4]) which asserts 403
+for every action in `STILL_PRIVATE_READS` = `list_director_messages`,
+`get_driver_guide_section`, `events`, `wait_for_state_change`, `project_visibility` (5 reads
+over 1 state). Default-private is proved two ways: the table
+`test_the_classification_is_unknown_action_private_by_default` (Batch C [15]) on an invented
+name `a_note_read_invented_later`, and at the HTTP surface
+`test_an_unclassified_read_action_is_refused_anonymously` (Batch C [13]) on a non-existent
+action name -> 403. Moving any of these into the public table would break the assertion that
+names it. `get_driver_guide_section` is on the private side because that is what this tree's
+`read_visibility` returns; the collection derives from the measured table, not hand-written.
 
-The command, environment and bare exit code are in `logs/source_integrity_scan.txt`; the script
-is `tests/unit/test_source_files_are_intact.py`. The scan walks the repository, not the r2
-reviewer's list: every `.py` (must compile), every `.md`/`.txt` (no fragment of ≥ 24 characters
-that immediately repeats itself while carrying ≥ 2 words), every `.ts`/`.svelte` (no group
-closer grafted onto a statement OR onto another closer - see Item 1b). Each walk asserts a
-minimum file count, so a walk that finds nothing fails instead of passing. The pole stays the
-glued tail edited back into `tests/browser/state_project_smoke.py:255`:
-`logs/source_integrity_scan_planted_defect.txt`, bare exit code 1, naming that file and line.
+**criterion 3 - no note read leaks an unopened project - PASS.**
+All six note reads are `Project`-scoped (each takes a `project_id`; `search_driver_note_history`
+is `SearchDriverNoteHistory(Project)`), so a single call cannot return another project's
+note. In the seeded fixture the unopened project's secret `UNOPENED-NOTE-BODY-9999` never
+appears in any opened/unopened/absent response (`test_the_six_note_reads_over_the_three_project_states`,
+Batch A [2]). The only project-less reads are index/list reads, and
+`test_catalog_listing_only_shows_opened_projects` (Batch C [16]) asserts the catalog returns
+only opened projects; `test_the_refusal_bodies_carry_no_still_private_text` (Batch A [7])
+asserts a refusal body carries none of the still-private content.
 
-Limits, stated as limits: (a) this step's tool surface has no shell, so base revision
-`79d6f5eb` could not itself be checked out and scanned; the base shape is asserted inside the
-module's own positive controls instead; (b) the `.ts`/`.svelte` rule is a structural rule for a
-grafted closer and does not attempt a TypeScript parse; (c) `final/` and `logs/` sit outside the
-scan surface - this note quotes before/after fragments on purpose, and `logs/` holds captured
-output.
+**criterion 5 - the whole suite stays green in the container - PASS on every test named; whole-suite number from the gate.**
+`logs/rev4_full_suite_probe.txt` records that a whole-tree `tests/` run through
+`focused_check` was killed at the 300-second host cap (exit_status -9, timed_out true), so
+the whole-suite figure is produced by the `run_tests` gate after this step and by the
+reviewer's container run, not claimed from this probe. The one test the plan flags as
+order-dependent, `test_an_engine_without_the_counter_costs_a_key_not_a_step`, was run alone
+and returned BARE EXIT CODE 0 ("1 passed").
 
-## Item 4 - the reagent-swapped tests
+## Files changed this round
 
-`git diff 149fe14d HEAD -- tests web/src/__tests__` could not be run here (no shell), so the
-table below was rebuilt by reading the test sources for this tree's still-private reagent and
-running its nodes (`logs/criteria_rev3_reagent_nodes.txt`, bare exit code 0; pytest errors on
-an uncollected node id, so the run also settles that every row exists).
-
-| test | still-private reagent it now uses |
-| --- | --- |
-| `tests/unit/test_state_read_visibility.py::TestAnonymousHttp::test_the_visitor_reads_the_notebook_but_not_the_mailbox` | `list_director_messages` |
-| `...::TestRefusalWording::test_a_read_refusal_talks_about_reading` | `list_director_messages` |
-| `...::TestRefusalWording::test_a_bad_credential_reads_the_same_as_no_credential` | `list_director_messages` |
-| `...::TestNoLeak::test_the_refusal_bodies_carry_no_still_private_text` | `list_director_messages` |
-| `...::TestEmbedderDefaults::test_an_embedder_without_a_read_verdict_gets_no_MORE_than_the_public_reads` | the still-private read set at `tests/unit/test_state_read_visibility.py:51` |
-| `tests/unit/test_state_project_privacy.py::TestGateHoldsAgainstRouteAuthor::test_HONEST_declares_the_private_read_it_serves` | `list_director_messages` |
-| `tests/integration/test_state_graph_entrypoints.py::test_anonymous_reader_sees_the_graph_and_the_notebook_but_not_the_mailbox` | `list_director_messages` |
-| `tests/integration/test_state_run_summary.py::test_full_host_summary_is_a_public_read_while_the_mailbox_and_writes_stay_closed` | `list_director_messages` |
-
-Comparison with the r2 review's table, row by row: the eight rows above are the eight the r2
-table already carries, so this rev adds no name to it; this table is rebuilt from the tree's
-sources, NOT asserted to equal r2's. The reagent read turned up two further carriers that the r2
-table listed apart from the eight: `tests/integration/test_state_portfolio.py` (line 266, and the
-pair at line 272) and `tests/integration/test_design_review_flow.py` (lines 99 and 102), both
-using `list_director_messages`; `test_state_portfolio.py:272` pairs it with
-`get_driver_guide_section`, still writer-only in this tree, whose reclassification belongs to the
-guard-shape card. `web/src/__tests__/views/StateProject.test.ts` is in the touched set but is not
-a reagent swap (Item 3 above).
-
-## Item 5 - the three generic prose sentences
-
-- `docs/state-graph.md:179-181` - before: "State project data is private to authorized writers; there is not yet a separate per-state-project ACL or a distinct cryptographic verifier role." After: "A state project's graph and its working notes become readable by anyone once the project is opened (the owner's ruling of 2026-09-22, `note://aitelier/546f3b521eca`); every other state project stays private to authorized writers, and an unopened project is refused exactly like an absent one. There is not yet a separate per-state-project ACL or a distinct cryptographic verifier role."
-- `docs/state-project-ui-migration.md:12` - before: "- `#/state-projects`: private project catalog with goal counts and dispatch policy." After: "- `#/state-projects`: project catalog with goal counts and dispatch policy; an opened project's graph and working notes read publicly, everything else stays writer-only."
-- `docs/state-project-ui-migration.md:122-124` - before: "State data remains administrative-writer scoped; this does not introduce a separate per-project ACL or cryptographic verifier role." After: "An opened state project's graph and working notes are anonymous-readable (the owner's ruling of 2026-09-22); every other state project and every other state read remains administrative-writer scoped. This does not introduce a separate per-project ACL or cryptographic verifier role."
-
-## Out of scope this rev (unchanged behaviour)
-
-- The `PUBLIC_READS` / `WRITER_ONLY_READS` membership is untouched (6 note reads public,
-  mailbox/guide/events/visibility writer-only; writes still writer-only).
-- `get_driver_guide_section` classification stays with the guard-shape card.
+- `docs/state-project-ui-migration.md` - lines 13 (dropped ` policy.` tail), 21 (dropped
+  "private"), 92 heading.
+- `docs/state-graph.md` - line 5.
+- `web/src/lib/api.ts` - the comment block above `runWorkflowGraph`.
+- `tests/browser/state_project_smoke.py` - anonymous block: real `list_director_messages`
+  refusal added.
+- `tests/unit/test_source_files_are_intact.py` - rewritten to the `.py` compile check only.
+- `logs/` and `final/` - this round's evidence; stale rev2/rev3 logs that named ids not run
+  this round were removed.

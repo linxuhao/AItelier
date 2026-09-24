@@ -672,8 +672,11 @@ export function getRepo(repoPath: string): Promise<RepoDetail> {
 }
 
 
-// State project data is private; unlike workflow metadata these GETs require
-// writer authorization on the backend. Do not merge it into public repo payloads.
+// Since the owner's ruling of 2026-09-22 an OPENED project's graph and working
+// notes read publicly ("public的 project的working note也可以public，private
+// project的working note继续private"), replacing the old claim here that "State
+// project data is private ... require writer authorization". Everything else stays
+// writer-only, so do not merge a private project's data into public repo payloads.
 export function runWorkflowGraph(runId: string): Promise<Record<string, any>> {
   return _get('/api/runs/' + encodeURIComponent(runId) + '/graph');
 }

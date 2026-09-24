@@ -2,7 +2,7 @@
 
 ## Project UI and migration preparation
 
-The private project DAG viewer, exact-run historical graphs, stable source binding,
+The project DAG viewer (an opened project's graph and working notes read publicly, per the owner's ruling of 2026-09-22, note://aitelier/546f3b521eca), exact-run historical graphs, stable source binding,
 project/node dispatch holds and reference-only migration support are documented in
 [state-project-ui-migration.md](state-project-ui-migration.md). The new source
 binding can supersede the legacy source_project_id dependency before attempts

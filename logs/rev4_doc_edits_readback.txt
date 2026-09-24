@@ -1,0 +1,38 @@
+notes-public rev 4 - each edit read BACK from the file with the `read` tool (source=repo,
+raw=true). The "改后" text in final/delivery-note.md is copied ONLY from these read-backs,
+not from the intended text. Every edit this round used a V4A patch (old text as the
+checksum); none used references / from_col / to_col.
+
+--- docs/state-project-ui-migration.md line 13 (the ` policy.` tail is gone) ---
+  project's graph and working notes read publicly, everything else stays writer-only.
+
+--- docs/state-project-ui-migration.md line 21 ("private" removed) ---
+query the State API for their associated projects; they do not create a
+
+--- docs/state-project-ui-migration.md line 92 (heading) ---
+## Project projection APIs
+
+--- web/src/lib/api.ts (comment above runWorkflowGraph) ---
+// Since the owner's ruling of 2026-09-22 an OPENED project's graph and working
+// notes read publicly ("public的 project的working note也可以public，private
+// project的working note继续private"), replacing the old claim here that "State
+// project data is private ... require writer authorization". Everything else stays
+// writer-only, so do not merge a private project's data into public repo payloads.
+
+--- docs/state-graph.md line 5 (the blanket "private" claim is gone) ---
+The project DAG viewer (an opened project's graph and working notes read publicly, per the owner's ruling of 2026-09-22, note://aitelier/546f3b521eca), exact-run historical graphs, stable source binding,
+
+--- tests/browser/state_project_smoke.py anonymous block (real mailbox probe added) ---
+                assert anonymous.request.post(base+'/api/state/query/get_driver_note',
+                    data={'project_id':'shrimp-preview'}).status==200
+                # The mailbox is the private pole, proved by an ACTUAL anonymous
+                # request refused at the API — not by hiding it from the UI.
+                assert anonymous.request.post(base+'/api/state/query/list_director_messages',
+                    data={'project_id':'shrimp-preview'}).status==403
+                checks.append('anonymous reader sees the public graph and the opened project working notes')
+
+--- tests/unit/test_source_files_are_intact.py (rewritten: only the .py compile check) ---
+The prose self-repeat heuristic, the web graft-closer heuristic, the
+"known corruption shapes" meta-test and the `});});` history were deleted with the
+file; the replacement keeps only test_every_python_file_compiles. It passes
+(see logs/rev4_criteria_named_ids.txt Batch A [1], BARE EXIT CODE 0).

@@ -1,0 +1,32 @@
+notes-public rev 4 - bare exit codes for every test id named in final/delivery-note.md.
+
+Every probe here was a `focused_check(kind=pytest)` call. The host ran exactly:
+    /usr/local/bin/python3.12 -m pytest -q -s --maxfail=1 -p no:cacheprovider --rootdir <tree> <targets>
+cwd = /home/linxuhao/.AItelier/worktrees/058cb313-70ba-4886-9cd4-76f40470750d
+run_id = 058cb313-70ba-4886-9cd4-76f40470750d   step_id = implement
+The exit code is the recorded `exit_status` field, taken with no pipe.
+
+== Batch A - unit (criteria 1, 2, 3 + the .py integrity scan) ==
+[1] tests/unit/test_source_files_are_intact.py
+[2] tests/unit/test_state_project_privacy.py::TestTheWorkingNoteReadsAcrossThreeProjectStates::test_the_six_note_reads_over_the_three_project_states
+[3] tests/unit/test_state_project_privacy.py::TestGateHoldsAgainstRouteAuthor::test_HONEST_declares_the_private_read_it_serves
+[4] tests/unit/test_state_read_visibility.py::TestAnonymousHttp::test_the_visitor_reads_the_notebook_but_not_the_mailbox
+[5] tests/unit/test_state_read_visibility.py::TestRefusalWording::test_a_read_refusal_talks_about_reading
+[6] tests/unit/test_state_read_visibility.py::TestRefusalWording::test_a_bad_credential_reads_the_same_as_no_credential
+[7] tests/unit/test_state_read_visibility.py::TestNoLeak::test_the_refusal_bodies_carry_no_still_private_text
+[8] tests/unit/test_state_read_visibility.py::TestEmbedderDefaults::test_an_embedder_without_a_read_verdict_gets_no_MORE_than_the_public_reads
+RESULT: "8 passed, 2 warnings in 8.68s"   BARE EXIT CODE: 0
+
+== Batch B - integration reagents (criterion 4 reagent list) ==
+[9] tests/integration/test_design_review_flow.py::test_shared_app_reads_the_design_and_keeps_the_mailbox_writer_only
+[10] tests/integration/test_state_graph_entrypoints.py::test_anonymous_reader_sees_the_graph_and_the_notebook_but_not_the_mailbox
+[11] tests/integration/test_state_portfolio.py::test_all_new_state_reads_remain_private_and_commands_strict
+[12] tests/integration/test_state_run_summary.py::test_full_host_summary_is_a_public_read_while_the_mailbox_and_writes_stay_closed
+RESULT: "4 passed, 2 warnings in 2.19s"   BARE EXIT CODE: 0
+
+== Batch C - default-private and index reads (criteria 2, 3) ==
+[13] tests/unit/test_state_read_visibility.py::TestAnonymousHttp::test_an_unclassified_read_action_is_refused_anonymously
+[14] tests/unit/test_state_read_visibility.py::TestClassification::test_every_read_action_is_classified_exactly_once
+[15] tests/unit/test_state_project_privacy.py::TestTheWorkingNoteReadsAcrossThreeProjectStates::test_the_classification_is_unknown_action_private_by_default
+[16] tests/unit/test_state_project_privacy.py::TestListingDoesNotNameRefused::test_catalog_listing_only_shows_opened_projects
+RESULT: "4 passed, 2 warnings in 0.78s"   BARE EXIT CODE: 0

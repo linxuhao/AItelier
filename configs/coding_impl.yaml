@@ -118,12 +118,63 @@ steps:
     tool_params:
       out_dir: "$STEP_DIR"
     # A failed tool invocation must not consume a report from a prior attempt.
+    #
+    # THE ABSENCE EDGE LIVES ON THIS STEP, which OWNS `test_report.json`.
+    # Round 5 put the same two lines on `test_evidence` and they never fired
+    # once: the engine resolves a `from_file` match relative to THAT STEP's own
+    # output dir, and `test_evidence` is a json_schema validator that writes no
+    # file — every evaluation raised `FileNotFoundError: Output file not found:
+    # test_report.json`, the engine recorded `transition file_reader failed`,
+    # and the edge counted as unmatched. Measured on pole A: with the edge here
+    # the run reaches `current_node: test_gate_absent` after ONE implement
+    # cycle; on `test_evidence` the same pole spent four and died on
+    # `Cycle limit exceeded`.
+    #
+    # THE ABSENCE EDGE IS ON THIS STEP, and it is a FLAG match, not a file read.
+    # Two measurements decide that, both made on this tree:
+    #
+    #   1. `from_file` is resolved by the engine against the EVALUATING step's
+    #      own output dir. Round 5 put the edge on `test_evidence` — a
+    #      json_schema validator that writes no file — so every evaluation
+    #      raised `FileNotFoundError: Output file not found: test_report.json`,
+    #      the engine logged `transition file_reader failed`, and the edge
+    #      counted as unmatched. That is the ONE root cause behind three
+    #      separate round-5 verdicts: poles B and C spent 4 implement cycles
+    #      and died on `Cycle limit exceeded` for a gate that never spoke.
+    #   2. Moving the same `from_file` match HERE is NOT enough on its own. The
+    #      engine's `_flags_match` does `data.get(field)` on whatever the file
+    #      parses to, so a `test_report.json` parsing to a LIST raises
+    #      `AttributeError: 'list' object has no attribute 'get'` and takes the
+    #      resolver down instead of routing (measured:
+    #      tests/skillflow/test_coding_impl_gate.py[report5]).
+    #
+    # So the flag travels on the TOOL'S OWN RETURN (`repo_gate_absent` is in
+    # run_tests' dict, which the engine merges into this step's flags), needing
+    # no file reader at all: no dependence on which step owns the artifact, and
+    # no crash on a malformed one. That is the "change the report shape" branch
+    # of the choice — the FILE still carries `repo_gate_absent` for
+    # core/gate_deferral.py, the RETURN carries it for routing.
+    #
+    # Order: the `_error` edge first (a failed invocation may not consume a
+    # prior attempt's report), then this one, then the written-evidence edge.
     transitions:
       - to: "test_evidence_missing"
         match: { _error: true }
+      # A gate that produced NO VERDICT is not a red the implementer can fix.
+      # Routing it down the `all_passed: false` edge spends one of the three
+      # implement laps on a gate that never spoke, and once the lap budget runs
+      # out the run dies on `Cycle limit exceeded` — which reads as "your code
+      # failed". The absence instead parks the run at a loop-EXTERNAL gate
+      # (`test_gate_absent`), so the run stays non-terminal and no implement
+      # cycle is charged for it. The scheduler bounds how long that may last
+      # and, past the ceiling, ends the run NAMING the absence
+      # (core/gate_deferral.py).
+      - to: "test_gate_absent"
+        match: { field: "repo_gate_absent", value: true }
       - to: "test_evidence"
         match: { written: "test_report.json" }
       - to: "test_evidence_missing"
+
 
   - id: "test_evidence"
     step_type: "tool"
@@ -177,6 +228,15 @@ steps:
         max_loop: 3
 
   - id: "test_evidence_missing"
+    step_type: "gate"
+    transitions:
+      - to: null
+
+  # Loop-EXTERNAL terminal-by-silence gate. Reached only by a `test` report
+  # that says the repository gate produced no verdict; it is deliberately NOT
+  # in `end_conditions`, so reaching it does not complete or fail the run — it
+  # parks a still-running run while the scheduler accounts for the absence.
+  - id: "test_gate_absent"
     step_type: "gate"
     transitions:
       - to: null

@@ -30,7 +30,8 @@ from skillflow.core import StepResult
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
-def _wire(tmp_path, test_results, *, tool_result=None, schema_failure=None):
+def _wire(tmp_path, test_results, *, tool_result=None, schema_failure=None,
+          real_run_tests=False, repo_prepare=None):
     """Real coding_impl graph with a scripted run_tests (`test_results` is the
     per-invocation `passed` sequence; the last value repeats) and a stubbed
     repo_apply. Returns (sf, run_id, calls)."""
@@ -43,7 +44,14 @@ def _wire(tmp_path, test_results, *, tool_result=None, schema_failure=None):
                    stale_threshold_seconds=60)
 
     from tests.code_output_fixture import init_code_repo
-    init_code_repo(tmp_path / "proj" / "p")
+    project = tmp_path / "proj" / "p"
+    init_code_repo(project)
+    if repo_prepare is not None:
+        # Files a REAL gate needs (a committed `run_tests.sh` and a green
+        # pytest suite). They go into the PROJECT repo BEFORE the run so the
+        # worktree carries them as committed content: a file dropped into the
+        # worktree behind the step's back fails its own deliver hook.
+        repo_prepare(project)
 
     calls = {"run_tests": 0, "repo_apply": 0}
     seq = list(test_results)
@@ -76,7 +84,10 @@ def _wire(tmp_path, test_results, *, tool_result=None, schema_failure=None):
 
     # register_dynamic_tool replaces the fn load_fn returns; framework mode
     # (delegate_tools_to_agent=False, the default) runs tool nodes inline.
-    loader.register_dynamic_tool("run_tests", {}, _run_tests)
+    # `real_run_tests` keeps the REAL tool in place: the unmeasured-declaration
+    # re-acquisition has to be exercised on the real config, not on a script.
+    if not real_run_tests:
+        loader.register_dynamic_tool("run_tests", {}, _run_tests)
     loader.register_dynamic_tool("repo_apply", {}, _repo_apply)
     if schema_failure is not None:
         real_schema = loader.load_fn("json_schema")
@@ -273,3 +284,87 @@ def test_error_flag_wins_over_written_report(tmp_path):
     })
     assert _drive(sf, run_id) == ("failed", 1)
     assert calls["run_tests"] == 1
+
+
+# ── a gate that declares it did not run is RE-ACQUIRED, not re-implemented ──
+#
+# Driven on the REAL configs/coding_impl.yaml, with the REAL run_tests tool.
+# `coding_impl` carries `max_loop: 3` and routes a report with no usable
+# evidence to `test_evidence_missing`, a loop-EXTERNAL terminal gate, so
+# anything the tool lets reach the graph as an absence is paid for with an
+# implement cycle or with the run itself. A gate that says it did not run may
+# buy NEITHER: the tool re-acquires the verdict inside its own step and folds
+# in only the verdict it finally gets.
+
+_BLOCKED_DECLARATION = (
+    'AITELIER_REPO_GATE_UNMEASURED={"state":"blocked","reason":'
+    '"godot-builder unreachable: HTTP Error 409: Conflict, gate NOT run"}')
+
+
+def _case_record():
+    return "AITELIER_REPO_GATE_CASE=" + json.dumps(
+        {"case_id": "compile/autoload", "status": "failed",
+         "detail": "GDScript parse error in the file this round wrote"})
+
+
+def _gate_script(counter_path, tail):
+    """A real `run_tests.sh`: every run bumps a counter that lives OUTSIDE the
+    worktree, so the gate leaves no uncommitted file behind it."""
+    return ("#!/bin/sh\n"
+            "cd \"$(dirname \"$0\")\"\n"
+            f"n=$(cat '{counter_path}' 2>/dev/null || echo 0)\n"
+            "n=$((n + 1))\n"
+            f"echo \"$n\" > '{counter_path}'\n" + tail)
+
+
+def _prepare_project_gate(project, counter_path, tail):
+    """Commit a repo gate (and a green pytest suite) into the PROJECT repo.
+
+    They must be committed BEFORE the run starts: a file dropped into the run
+    worktree behind the step's back fails the step's own deliver hook.
+    """
+    from skillflow.output_targets import git
+    (project / "tests").mkdir(parents=True, exist_ok=True)
+    (project / "tests" / "test_ok.py").write_text(
+        "def test_ok():\n    assert True\n")
+    (project / ".gitignore").write_text("__pycache__/\n*.pyc\n")
+    script = project / "run_tests.sh"
+    script.write_text(_gate_script(counter_path, tail))
+    script.chmod(0o755)
+    git(project, "add", "-A")
+    git(project, "commit", "-qm", "fixture: a repo gate that can say it did not run")
+
+
+def _gate_calls(counter_path):
+    return int(counter_path.read_text().strip()) if counter_path.exists() else 0
+
+
+# The `if [ "$n" -lt 2 ]` "ask again and it lets go" fixture that used to sit
+# here is GONE, and its absence is a requirement rather than a tidy-up. A gate
+# script that answers on the second call was never the subject of this card: it
+# makes the wait unmeasurable (the wait becomes zero) and it buys the property
+# by changing the gate's mind instead of by parking the absence. One step now
+# makes ONE gate call (`REPO_GATE_UNMEASURED_ATTEMPTS == 1`, asserted with its
+# worst-case hold in tests/unit/test_gate_deferral_execution_points.py) and the
+# waiting is the scheduler's, so the re-acquisition this test measured no
+# longer exists to measure.
+test_the_forbidden_two_call_gate_script_is_gone = None
+
+
+
+def test_four_real_reds_still_exhaust_the_cycle_limit(tmp_path):
+    """(3) The re-acquisition must not make the loop unbounded: four real reds
+    still run the edge out and the run dies on `Cycle limit exceeded`."""
+    counter = tmp_path / "gate_calls.txt"
+    tail = ("printf '%s\\n' '" + _case_record() + "'\n"
+            "exit 1\n")
+    sf, run_id, calls = _wire(
+        tmp_path, [True], real_run_tests=True,
+        repo_prepare=lambda project: _prepare_project_gate(project, counter,
+                                                           tail))
+    status, implement_runs = _drive(sf, run_id)
+
+    assert status == "failed"
+    assert implement_runs == 4
+    assert _gate_calls(counter) == 4
+    assert "Cycle limit exceeded" in str(sf.get_run(run_id))

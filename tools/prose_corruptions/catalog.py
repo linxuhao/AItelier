@@ -47,17 +47,16 @@ K3_NEW = "\n"
 # K4/K5: a NEW module carrying agent-facing prose the accounting table has
 # never heard of. K5 is the same prompt as an f-string, so a checker that only
 # reads `ast.Constant` misses it.
+_REPEATED_LINE = "report every defect you find, citing file and line for each one of them.\n"
 K4_CONTENT = (
     'SYSTEM_PROMPT = """You are the reviewer. Read the diff carefully and\n'
-    "report every defect you find, citing file and line for each one of them.\n"
-    "report every defect you find, citing file and line for each one of them.\n"
-    '"""\n')
+    + _REPEATED_LINE * 2
+    + '"""\n')
 K5_CONTENT = (
     'ROLE = "reviewer"\n'
     'NEW_AGENT_PROMPT = f"""You are the {ROLE}. Read the diff carefully and\n'
-    "report every defect you find, citing file and line for each one of them.\n"
-    "report every defect you find, citing file and line for each one of them.\n"
-    '"""\n')
+    + _REPEATED_LINE * 2
+    + '"""\n')
 
 # K6c is the r5 m14 shape: duplicate the single comment-rule banner line
 # `# ── Why did a JSON reply fail to parse?` in core/dpe_pipeline.py, so the git

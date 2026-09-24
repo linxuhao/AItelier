@@ -38,6 +38,38 @@ description: >
   at all the gate records a distinct, non-passing infrastructure_unavailable
   outcome. Reports are artifacts, not source files; a code
   agent can read its report with read(source="self", path="test_report.json").
+  A gate that did NOT run opts in separately, with one whole line:
+  `AITELIER_REPO_GATE_UNMEASURED={"state":"unmeasured|not_run|blocked","reason":"..."}`.
+  `state` must be one of those three; `failed` / `red` never qualify, so one
+  line cannot turn a red into an absence. UNMEASURED is DECLARED and never
+  inferred: no exit code produces it (the game repo's own gate uses 2 for
+  `incomplete`, which includes contract files the implementer wrote wrong —
+  "no authored scenarios found ... an empty one is not a pass" — and those are
+  MEASURED failures with a non-empty `failures[]`), and a timeout is the
+  harness's own observation of the absence. The declaration is read from the
+  gate's WHOLE output BEFORE the 2000-byte tail is retained, so it survives a
+  real gate's log.
+  A gate that produced NO VERDICT does not loop back to `implement`: its
+  absence is stated on the report, with
+  `repo_gate_unmeasured: true` and `repo_gate_absent: true` (plus
+  `repo_gate.measured: "unmeasured"` and `repo_gate.attempts`, the number of
+  runs the reading cost), and `configs/coding_impl.yaml` routes
+  `repo_gate_absent` to the loop-external `test_gate_absent` gate. The edge is
+  a FLAG match on this tool's own RETURN (`repo_gate_absent` is in the result
+  dict, which the engine merges into the step's flags), NOT a `from_file`
+  read: `from_file` resolves against the evaluating step's own output dir, so
+  on the `test_evidence` validator (which writes nothing) the reader raised
+  `FileNotFoundError` and the edge could never match, and moving it onto
+  `test` still crashes the resolver on a report that parses to a list.
+  Waiting for the gate and bounding how long a run
+  may spend absent is the SCHEDULER's job (`core/gate_deferral.py`), not this
+  step's: while an absence is live the run is not advanced and spends no
+  implement cycle, and past the episode's wall-clock ceiling the run ends with
+  `gate did not run: no verdict was measured` — never with a message that
+  blames the code. ONE step makes ONE gate run (`REPO_GATE_UNMEASURED_ATTEMPTS
+  = 1`): the re-acquisition that used to happen in-step held the scheduler for
+  3 x 5400 s + 2 x 60 s, so the waiting is the poller's instead. Only a
+  `measured_pass` licenses pruning that gate's known-red cases.
 parameters:
   project_root:
     type: string
@@ -62,7 +94,6 @@ parameters:
     type: string
     description: "Durable per-pipeline state dir, INJECTED by the `stateful`
       capability — holds the known-red baseline. Never pass a path by hand."
-    required: false
     required: false
 
 # Its result carries passed/error, so a graph step running it MUST route the

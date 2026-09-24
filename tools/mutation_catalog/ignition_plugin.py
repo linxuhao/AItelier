@@ -1,0 +1,134 @@
+"""pytest plugin loaded by `run_mutations.py` as ``-p ignition_plugin``.
+
+It measures two things about ONE applied mutation, inside the pytest process:
+
+* ``line_hits`` — how many times the mutated lines executed (Python's
+  ``sys.monitoring`` LINE events, restricted to the replacement's lines; every
+  other code location is disabled after its first event, so the cost is one
+  callback per location), and ``igniting_tests``, the tests during whose
+  call phase a mutated line executed;
+* ``source_readers`` — which tests read a mutated file's TEXT while they ran
+  (``open`` / ``io.open`` / ``tokenize.open`` / ``linecache.getlines`` during
+  the test's call phase). A test that went red after reading the mutated
+  source is a source-text witness, not a behavioural one; ``file_reads``
+  counts those reads. A test in both lists executed the mutated code, so it
+  is not a source-text witness.
+
+Input: ``MUTATION_IGNITION_SPEC`` = JSON ``{"lines": {path: [line, ...]},
+"files": [path, ...]}``. Output: ``MUTATION_IGNITION_OUT`` = JSON, written at
+session end. Code run in a child process is not counted.
+"""
+from __future__ import annotations
+
+import builtins
+import io
+import json
+import linecache
+import os
+import sys
+import tokenize
+
+import pytest
+
+_SPEC = json.loads(os.environ.get("MUTATION_IGNITION_SPEC") or "{}")
+_OUT = os.environ.get("MUTATION_IGNITION_OUT") or ""
+_LINES = {os.path.realpath(p): frozenset(v)
+          for p, v in (_SPEC.get("lines") or {}).items()}
+_FILES = frozenset(os.path.realpath(p) for p in (_SPEC.get("files") or []))
+
+_hits = {path: 0 for path in _LINES}
+_reads = {path: 0 for path in _FILES}
+_readers: set[str] = set()
+_igniters: set[str] = set()
+_current: list[str] = []
+_resolved: dict[str, str | None] = {}
+
+
+def _target_of(filename) -> str | None:
+    key = str(filename)
+    if key not in _resolved:
+        try:
+            real = os.path.realpath(os.fspath(filename))
+        except (TypeError, ValueError):
+            real = None
+        _resolved[key] = real
+    return _resolved[key]
+
+
+_mon = sys.monitoring
+_TOOL = next((t for t in (4, 3) if _mon.get_tool(t) is None), None)
+
+
+def _on_line(code, line):
+    path = _target_of(code.co_filename)
+    lines = _LINES.get(path)
+    if lines is None or line not in lines:
+        return _mon.DISABLE
+    _hits[path] += 1
+    if _current:
+        _igniters.add(_current[-1])
+    return None
+
+
+if _TOOL is not None and _LINES:
+    _mon.use_tool_id(_TOOL, "mutation-ignition")
+    _mon.register_callback(_TOOL, _mon.events.LINE, _on_line)
+    _mon.set_events(_TOOL, _mon.events.LINE)
+
+
+def _note_read(filename) -> None:
+    if not _current:
+        return
+    path = _target_of(filename)
+    if path in _reads:
+        _reads[path] += 1
+        _readers.add(_current[-1])
+
+
+def _wrap_open(real):
+    def opener(file, *args, **kwargs):
+        if isinstance(file, (str, bytes, os.PathLike)):
+            _note_read(file)
+        return real(file, *args, **kwargs)
+    return opener
+
+
+def _wrap_getlines(real):
+    def getlines(filename, module_globals=None):
+        _note_read(filename)
+        return real(filename, module_globals)
+    return getlines
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_call(item):
+    saved = (builtins.open, io.open, tokenize.open, linecache.getlines)
+    builtins.open = io.open = _wrap_open(saved[0])
+    tokenize.open = _wrap_open(saved[2])
+    linecache.getlines = _wrap_getlines(saved[3])
+    _current.append(item.nodeid)
+    try:
+        yield
+    finally:
+        _current.pop()
+        builtins.open, io.open, tokenize.open, linecache.getlines = saved
+
+
+def pytest_sessionfinish(session, exitstatus):
+    if not _OUT:
+        return
+    imported = sorted(
+        path for path in _LINES
+        if any(_target_of(getattr(m, "__file__", None) or "") == path
+               for m in list(sys.modules.values())))
+    with open(_OUT, "w", encoding="utf-8") as fh:
+        json.dump({
+            "monitoring_tool_id": _TOOL,
+            "line_hits": sum(_hits.values()),
+            "line_hits_by_file": _hits,
+            "file_reads": sum(_reads.values()),
+            "file_reads_by_file": _reads,
+            "source_readers": sorted(_readers),
+            "igniting_tests": sorted(_igniters),
+            "mutated_modules_imported": imported,
+        }, fh, indent=2, sort_keys=True)

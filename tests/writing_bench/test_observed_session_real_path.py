@@ -62,7 +62,6 @@ def _page_state(messages):
             state[name] = {"complete": bool(value.get("complete")),
                            "next_start": value.get("next_start")}
     return state
-    return state
 
 
 class _Gateway:

@@ -495,6 +495,15 @@ class AItelierSkillFlow(SkillFlow):
     def advance_run(self, run_id: str):
         if self._operation_blocks_reentry(run_id, "advance_before_reclaim"):
             return None
+        # The other execution point for the same rule. `core/scheduler.py`'s
+        # tick is not the only driver: `run_driver`, the API routers and the
+        # tests all call this method directly. A run whose repository gate has
+        # produced no verdict must not be advanced — advancing it is what
+        # routes the absence back into the implement loop. Deleting this check
+        # reintroduces exactly that, so it is guarded by its own test.
+        from core import gate_deferral
+        if gate_deferral.hold_blocks_advance(run_id):
+            return None
         return super().advance_run(run_id)
 
     def claim_next_step(self, run_id: str):

@@ -58,7 +58,6 @@ def test_m3_coverage_gap_must_be_refused_by_certificate_and_by_the_domain_gate()
 def test_m3_a_gap_in_the_domain_gate_never_stages(bench, monkeypatch):
     """The same refusal reaches `Bench.literary`: a holed certificate cannot carry."""
     bench.freeze(request(bench), "run1", RULES, CONTRACTS)
-    bench.freeze(request(bench), "run1", RULES, CONTRACTS)
     _, m = bench.input("run1")
     identity, materials = bench.review_materials("run1", "literary")
     coverage = Coverage("literary", identity["review_key"], identity["targets"], materials)

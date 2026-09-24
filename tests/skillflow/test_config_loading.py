@@ -93,19 +93,44 @@ class TestV2ConfigLoading:
         test = next(s for s in graph.steps if s.id == "test")
         assert test.tool_name == "run_tests"
         assert [(t.to, t.match) for t in test.transitions] == [
+            # The absence edge lives on `test` and it is a FLAG match
+            # (`{field: repo_gate_absent, value: true}`), not a `from_file`
+            # read. `from_file` is resolved against the EVALUATING step's own
+            # output dir, so on `test_evidence` (a json_schema validator that
+            # writes nothing) it raised `FileNotFoundError` on every evaluation
+            # and could never match; moved even to `test` it still crashes the
+            # engine's `_flags_match` with AttributeError when the report parses
+            # to a non-object. The flag on run_tests' RETURN needs no reader at
+            # all. It is listed BEFORE the `written` edge because edges are
+            # evaluated in order: `written: test_report.json` would otherwise
+            # win first and hand the absence to `test_evidence`.
+            # tests/skillflow/test_coding_impl_gate_absence.py drives the real
+            # tick order and fails if either the step or the order moves.
+            #
+            # The `_error` edge is FIRST, and this list had lost it: a failed
+            # tool invocation must not be able to consume a prior attempt's
+            # report. tests/unit/test_tree_level_accounting_witnesses.py asserts
+            # that same position against the config, so the two agree.
             ("test_evidence_missing", {"_error": True}),
+            ("test_gate_absent", {"field": "repo_gate_absent", "value": True}),
             ("test_evidence", {"written": "test_report.json"}),
             ("test_evidence_missing", None),
         ]
+
         evidence = next(s for s in graph.steps if s.id == "test_evidence")
         assert evidence.tool_name == "json_schema"
         assert evidence.tool_params["workspace_root"] == "$CONFIG_DIR/test"
         assert evidence.tool_params["files"] == ["test_report.json"]
         assert [(t.to, t.match) for t in evidence.transitions] == [
             ("test_evidence_missing", {"_error": True}),
+            # The absence edge moved to `test` (above). The shape check stays
+            # first in the chain, so a report that is not a report at all still
+            # goes to `test_evidence_missing` rather than being read for a flag
+            # it could not carry.
             ("test_outcome", {"all_passed": True}),
             ("test_evidence_missing", None),
         ]
+
         outcome = next(s for s in graph.steps if s.id == "test_outcome")
         assert outcome.tool_name == "json_schema"
         assert outcome.tool_params["workspace_root"] == "$CONFIG_DIR/test"

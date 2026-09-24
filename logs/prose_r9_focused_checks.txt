@@ -1,0 +1,42 @@
+prose round 9 — focused_check probes of this implement step, captured as run
+(no pipe, bare exit codes; the probe harness records command, worktree,
+timeout, exit status and run id). Date: 2026-09-24. NOT whole-suite runs.
+
+=== probe 1 ===
+command: python -m pytest -q -s --maxfail=1 -p no:cacheprovider
+         tests/unit/test_prose_corruption_catalog.py
+worktree: bafc11f8-6401-437f-8cfb-edfdae3a6f00 (isolated run worktree)
+run id: bafc11f8-6401-437f-8cfb-edfdae3a6f00 (step implement)
+bare exit code: 0
+tail: 56 passed, 1 warning in 19.35s
+
+=== probe 2 ===
+command: python -m pytest -q -s --maxfail=1 -p no:cacheprovider
+         tests/unit/test_truncation_is_not_a_formatting_mistake.py
+run id: bafc11f8-6401-437f-8cfb-edfdae3a6f00 (step implement)
+bare exit code: 1
+tail: 1 failed, 44 passed — the new damaged-tree pole [K2] relied on the
+tripwire's AssertionError message, which pytest repr-truncates at ~240 chars,
+so the catalog's rule name was cut out of it; the pole was repaired to name
+the rule from the violations on the same damaged bytes.
+
+=== probe 3 ===
+command: python -m pytest -q -s tests/unit/_tmp_probe_r9.py  (temporary
+         ground-truth probe for the [K2] repair; deleted in the same step)
+bare exit code: 0
+key output: both rules fire on the damaged bytes —
+  stale_hunk_remedy: templates/fix_tests.md: ...
+  reference_advice_missing: templates/fix_tests.md: ... never states
+  ['citation', 'sha'] ...
+and str(AssertionError from test_the_agent_facing_prose_is_intact) is 375
+chars with a literal '...' — the truncation probe 2 hit.
+
+=== probe 4 ===
+command: python -m pytest -q -s --maxfail=1 -p no:cacheprovider
+         tests/unit/test_truncation_is_not_a_formatting_mistake.py
+run id: bafc11f8-6401-437f-8cfb-edfdae3a6f00 (step implement)
+bare exit code: 0
+tail: 55 passed, 1 warning in 10.68s
+
+environment: python 3.12 (interpreter of the probe harness),
+pytest -p no:cacheprovider, isolated worktree of this implement step.

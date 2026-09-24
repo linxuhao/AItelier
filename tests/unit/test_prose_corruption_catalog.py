@@ -10,6 +10,8 @@ are themselves measured.
 
 import importlib.util
 import shutil
+import subprocess
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -69,12 +71,22 @@ def test_each_edit_entry_applies_to_its_own_surface():
         assert CATALOG.apply_edits(text, entry) != text, entry["id"]
 
 
+def _head_core_tree(root):
+    """`root/core` rebuilt from HEAD: names and bytes both committed."""
+    listing = subprocess.run(
+        ["git", "ls-tree", "--name-only", "HEAD", "core"],
+        cwd=REPO_ROOT, capture_output=True, text=True)
+    assert listing.returncode == 0, listing.stderr
+    (root / "core").mkdir(parents=True, exist_ok=True)
+    for line in listing.stdout.splitlines():
+        rel = line.strip()
+        if rel.endswith(".py"):
+            (root / rel).write_text(MOD._head_read(rel), encoding="utf-8")
+
+
 def _tree_with_new_module(tmp_path, entry):
-    core = tmp_path / "core"
-    shutil.copytree(REPO_ROOT / "core", core,
-                    ignore=shutil.ignore_patterns("__pycache__"))
-    (core / Path(entry["path"]).name).write_text(entry["content"],
-                                                 encoding="utf-8")
+    _head_core_tree(tmp_path)
+    (tmp_path / entry["path"]).write_text(entry["content"], encoding="utf-8")
     return tmp_path
 
 
@@ -97,11 +109,11 @@ def test_an_exempt_name_in_another_module_is_still_red(tmp_path):
     `SCHEMA` is exempt for specific state-schema modules. A brand new module
     that declares its own `SCHEMA` is a new surface and must be red, naming
     that module — the escape a bare-name table allowed.
+    The core/ the new module lands in is HEAD's, so the check does not read
+    the live worktree's bytes at all.
     """
-    core = tmp_path / "core"
-    shutil.copytree(REPO_ROOT / "core", core,
-                    ignore=shutil.ignore_patterns("__pycache__"))
-    (core / "zz_borrowed_schema.py").write_text(
+    _head_core_tree(tmp_path)
+    (tmp_path / "core" / "zz_borrowed_schema.py").write_text(
         'SCHEMA = """\nCREATE TABLE borrowed (\n'
         '    id INTEGER PRIMARY KEY,\n'
         '    body TEXT NOT NULL,\n'
@@ -121,7 +133,7 @@ def test_a_rule_name_is_catalog_data_not_a_substring_of_the_prose():
     """
     surface = "core/dpe_pipeline.py"
     entry = next(e for e in CATALOG.CORRUPTIONS if e["id"] == "K6c")
-    clean = MOD._prose_corpus()[surface]
+    clean = MOD._head_read(surface)
     corrupted = CATALOG.apply_to_text(clean, entry)
     MOD.PROSE_RULES.clear()
     try:
@@ -259,7 +271,13 @@ def test_the_spliced_line_scanner_is_silent_on_the_r6_false_positives():
 
 
 def test_the_runner_copies_the_tree_and_does_not_mutate_the_source(tmp_path):
-    """`_copy_tree` carries the catalog into the copy; `_apply` is confined."""
+    """`_copy_tree` carries the catalog into the copy; `_apply` is confined.
+
+    The dest half of the assertion compares against HEAD through the catalog
+    itself, so it stays meaningful while a corruption run has the live tree
+    damaged; only the unchanged-source half reads the live worktree, because
+    that is the thing it must see unchanged.
+    """
     dest = tmp_path / "copy"
     RUNNER._copy_tree(dest)
     assert (dest / "tools" / "prose_corruptions" / "catalog.py").exists()
@@ -268,7 +286,9 @@ def test_the_runner_copies_the_tree_and_does_not_mutate_the_source(tmp_path):
     entry = next(e for e in CATALOG.CORRUPTIONS if e["id"] == "K1")
     before = (REPO_ROOT / entry["path"]).read_text(encoding="utf-8")
     RUNNER._apply(entry, dest, CATALOG)
-    assert (dest / entry["path"]).read_text(encoding="utf-8") != before
+    head_text = MOD._head_read(entry["path"])
+    assert (dest / entry["path"]).read_text(encoding="utf-8") == \
+        CATALOG.apply_to_text(head_text, entry)
     assert (REPO_ROOT / entry["path"]).read_text(encoding="utf-8") == before
 
 
@@ -409,10 +429,8 @@ def test_the_new_module_fixture_is_green_and_the_scan_names_the_module(
         monkeypatch.setattr(MOD, "_read",
                             lambda rel: "damaged live bytes")
         root = tmp_path / entry["id"]
-        shutil.copytree(REPO_ROOT / "core", root / "core",
-                        ignore=shutil.ignore_patterns("__pycache__"))
-        (root / "core" / Path(entry["path"]).name).write_text(
-            entry["content"], encoding="utf-8")
+        _head_core_tree(root)
+        (root / entry["path"]).write_text(entry["content"], encoding="utf-8")
         missing = MOD._unaccounted_prose_constants(root)
         assert any(item.startswith(f"{entry['path']}:") for item in missing), \
             (entry["id"], missing)
@@ -468,3 +486,52 @@ def test_only_selects_one_corruption_and_applies_only_that_one(tmp_path):
     changed = sorted(rel for rel in before
                      if (dest / rel).read_text(encoding="utf-8") != before[rel])
     assert changed == ["core/output_migration.py"], changed
+
+
+def test_the_empty_control_applies_no_corruption(tmp_path, monkeypatch):
+    """`control=True` runs the same selection with NOTHING applied.
+
+    This is the true empty-mutation control: one plan row, `_apply` never
+    called, so no path in the throwaway tree is touched. Proved by making
+    `_apply` fail the run if it is ever reached, and by the recorded row.
+    """
+    def refuse(entry, worktree, catalog):
+        raise AssertionError(f"the control applied {entry['id']}")
+
+    monkeypatch.setattr(RUNNER, "_apply", refuse)
+    monkeypatch.setattr(RUNNER, "_copy_tree",
+                        lambda dest, rev=None: dest.mkdir(parents=True,
+                                                          exist_ok=True))
+    monkeypatch.setattr(RUNNER, "_bare_run", lambda command, cwd: (0, "ok"))
+    monkeypatch.setattr(RUNNER, "_git",
+                        lambda args, cwd: SimpleNamespace(stdout="",
+                                                          returncode=0,
+                                                          stderr=""))
+    rows = RUNNER.run_all(targets=("tests/unit/test_a.py",
+                                   "tests/unit/test_b.py"), control=True)
+    assert [row["id"] for row in rows] == ["CONTROL"], rows
+    assert rows[0]["rc"] == 0, rows
+    assert rows[0]["changed"] == "", rows
+    assert rows[0]["selection"] == ("tests/unit/test_a.py "
+                                    "tests/unit/test_b.py"), rows
+
+
+@pytest.mark.parametrize("entry", CATALOG.CORRUPTIONS,
+                         ids=lambda e: e["id"])
+def test_the_catalog_list_stays_green_on_a_damaged_live_tree(monkeypatch,
+                                                             tmp_path,
+                                                             entry):
+    """Pole for the round-9 list, catalog half: every listed test green.
+
+    `_read` returns the runner's damaged bytes; the tests on this file's
+    list take their bytes from HEAD and must stay green for ALL ten K
+    entries, new-module ones included.
+    """
+    monkeypatch.setattr(MOD, "_read", _damaged_live_read(entry))
+    test_each_edit_entry_applies_to_its_own_surface()
+    test_k6c_duplicates_exactly_one_line_and_overwrites_nothing()
+    test_a_rule_name_is_catalog_data_not_a_substring_of_the_prose()
+    test_the_runner_copies_the_tree_and_does_not_mutate_the_source(tmp_path)
+    if entry["kind"] == "add":
+        test_a_new_prompt_module_is_unaccounted_and_names_itself(
+            tmp_path / entry["id"], entry)

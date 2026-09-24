@@ -19,6 +19,10 @@ Run it from the repository root:
 measures a corruption against a different tree (the base commit, for instance).
 `--targets` narrows the pytest invocation (the default is the whole suite) and
 `--only K3` applies just the named catalog entries (the default is every one).
+`--empty-control` runs the same selection with NO corruption applied: one
+plan row id `CONTROL`, `_apply` never called, so it measures the selection's
+bare pass/fail on an intact tree — the control the corruption rows compare
+against.
 The per-corruption results are written as a table; the bare exit code is what
 decides whether the corruption was caught. Each run also records the suite
 command, the source-tree sha and the corrupted worktree's HEAD sha, the UTC
@@ -245,17 +249,25 @@ def select_entries(catalog, only=()):
     return [known[name] for name in only]
 
 
-def run_all(rev=None, log=None, targets=(), raw_dir=None, only=()):
+CONTROL_ENTRY = {"id": "CONTROL",
+                 "what": "empty control: no corruption applied",
+                 "rule": "(no corruption applied)"}
+
+
+def run_all(rev=None, log=None, targets=(), raw_dir=None, only=(),
+            control=False):
     catalog = _load_catalog()
     rows = []
     selection = " ".join(targets) if targets else "tests/ (whole suite)"
     source_sha = _git(["rev-parse", "HEAD"], REPO_ROOT).stdout.strip()
     source_before = _git(["status", "--porcelain"], REPO_ROOT).stdout
-    for entry in select_entries(catalog, only):
+    entries = [CONTROL_ENTRY] if control else select_entries(catalog, only)
+    for entry in entries:
         with tempfile.TemporaryDirectory(prefix="prose-corruption-") as tmp:
             worktree = Path(tmp) / "tree"
             _copy_tree(worktree, rev)
-            _apply(entry, worktree, catalog)
+            if not control:
+                _apply(entry, worktree, catalog)
             changed = _git(["status", "--porcelain"], worktree)
             run_targets = list(targets) if targets else ["tests/"]
             command = [sys.executable, "-m", "pytest", "-q",
@@ -294,6 +306,9 @@ def main():
     parser.add_argument("--only", nargs="*", default=[],
                         help="apply only these corruption ids (e.g. --only K3); "
                              "empty means every catalog entry")
+    parser.add_argument("--empty-control", action="store_true",
+                        help="apply no corruption at all: one CONTROL row "
+                             "over the same selection on an intact tree")
     args = parser.parse_args()
 
     out = REPO_ROOT / args.out
@@ -316,7 +331,8 @@ def main():
               f"raw per-run logs: {raw_dir}"]
     log = list(header)
     rows = run_all(rev=args.rev, log=log, targets=tuple(args.targets),
-                   raw_dir=raw_dir, only=tuple(args.only))
+                   raw_dir=raw_dir, only=tuple(args.only),
+                   control=args.empty_control)
 
     table = [f"id | rule | selection | bare RC | named tests  "
              f"(scope: {selection})"]

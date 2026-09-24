@@ -23,6 +23,7 @@ mistake and keeps the old instruction.
 import ast
 import json
 import re
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -806,8 +807,10 @@ def test_the_corpus_is_derived_from_the_filesystem_not_a_list():
     A checker whose scope is an author's list cannot see a defect outside
     that list. This test asserts the derivation, not a list: the corpus
     carries every *.md under templates/ and the prompt-injecting modules.
+    The bytes come from HEAD (`_head_read`), so the derivation is checked
+    while a corruption run has the live tree damaged too.
     """
-    corpus = _prose_corpus()
+    corpus = _prose_corpus(_head_read)
     templates = sorted(p.name for p in (REPO_ROOT / "templates").glob("*.md"))
     assert len(templates) >= 40, templates
     for name in templates:
@@ -1018,15 +1021,18 @@ def test_each_known_corruption_is_caught_by_name(label):
 # ── Both languages tell the agent to split, not to reformat ──────────────
 
 
-@pytest.mark.parametrize("label,guidance", [
-    ("EN", STRICT_PATCH_GUIDANCE_EN), ("ZH", STRICT_PATCH_GUIDANCE_ZH)])
-def test_both_guidances_carry_the_split_advice(label, guidance):
+@pytest.mark.parametrize("label", ["EN", "ZH"])
+def test_both_guidances_carry_the_split_advice(label):
     """EN and ZH both carry the split-don't-reformat advice.
 
     The word-for-word restoration the previous round attempted silently
     deleted the base ZH split paragraph, leaving EN telling the agent to
     split and ZH silent. Deleting either paragraph goes red here, by name.
+    The bytes come from HEAD through `_git_guidance`, so the check is about
+    the committed guidance and stays green while a corruption run has the
+    live tree damaged.
     """
+    guidance = _git_guidance("HEAD", label)
     marker = ("split a large change" if label == "EN"
               else "拆成多次 apply_patch")
     assert marker in guidance, (
@@ -1041,9 +1047,11 @@ def test_a_duplicate_line_planted_in_any_surface_fires_by_name():
     A coverage claim without a self-proof fixture is prose. This plants one
     adjacent duplicate line into every corpus surface and demands the
     violation name that surface — so the checker's attribution is proven
-    per surface, not asserted.
+    per surface, not asserted. The corpus bytes come from HEAD
+    (`_head_read`), so the plant lands on committed prose and the check
+    stays green while a corruption run has the live tree damaged.
     """
-    corpus = _prose_corpus()
+    corpus = _prose_corpus(_head_read)
     planted = 0
     for name, text in corpus.items():
         lines = text.splitlines()
@@ -1057,6 +1065,52 @@ def test_a_duplicate_line_planted_in_any_surface_fires_by_name():
         assert any(name in v for v in violations), (name, violations)
         planted += 1
     assert planted >= 40, planted
+
+
+# ── Round 9: the whole surface-driven list under a damaged live tree ──────
+# The pole that used to cover two named fixture families now covers EVERY
+# test in this file that takes its bytes from a prose surface. The live
+# reader is redirected to the runner's damaged bytes: the listed tests must
+# stay green (they read HEAD), and the live-tree tripwire must go red naming
+# the catalog's rule. K4/K5 create a module with no corpus surface, so for
+# them only the green half applies.
+
+def _damaged_reader(entry):
+    """A `_read` returning the runner's damaged bytes for `entry`'s file."""
+    damaged = _CATALOG.corrupt_file_text(entry, _head_read, _git_file)
+    target = _CATALOG.entry_file_path(entry)
+
+    def read(rel):
+        return damaged if rel == target else _head_read(rel)
+
+    return read
+
+
+@pytest.mark.parametrize("entry", _CATALOG.CORRUPTIONS,
+                         ids=lambda e: e["id"])
+def test_every_surface_driven_test_stays_green_on_a_damaged_live_tree(
+        monkeypatch, entry):
+    """Pole for the round-9 list: green on the list, red on the tripwire."""
+    monkeypatch.setattr(sys.modules[__name__], "_read",
+                        _damaged_reader(entry))
+    test_the_corpus_is_derived_from_the_filesystem_not_a_list()
+    test_a_duplicate_line_planted_in_any_surface_fires_by_name()
+    for label in ("EN", "ZH"):
+        test_both_guidances_carry_the_split_advice(label)
+    if entry["id"] in GIT_CORRUPTIONS:
+        test_each_known_corruption_is_caught_by_name(entry["id"])
+    surface = _CATALOG.surface_name(entry)
+    if surface is None:
+        return
+    with pytest.raises(AssertionError):
+        test_the_agent_facing_prose_is_intact()
+    # The tripwire's own message is repr-truncated, so the rule is named
+    # from the same damaged bytes it scans: the live corpus surface is red,
+    # carrying the catalog's rule and the surface's own name.
+    violations = _prose_violations(surface, _prose_corpus()[surface])
+    assert any(entry["rule"] in v for v in violations), \
+        (entry["id"], entry["rule"], violations)
+    assert any(surface in v for v in violations), violations
 
 
 # ── The apply_patch grant boundary ────────────────────────────────────────

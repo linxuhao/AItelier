@@ -1,0 +1,94 @@
+# tests/skillflow/test_coding_impl_busy_gate.py
+#
+# Criterion `no-implement-loop-on-an-unrunnable-gate`, driven on the REAL
+# `configs/coding_impl.yaml`, the REAL `AItelierSkillFlow`, the REAL
+# `run_tests` tool and the REAL `core/scheduler.py:_run_skillflow_tick` (the
+# wiring and the tick driver are the ones `test_coding_impl_gate_absence.py`
+# uses). The busy gate is REAL contention: another owner holds the render lock
+# in the REAL harness admission code (`tests/gate_fixture.py`), and the
+# repository gate is a script with the game gate's transport and exit-code
+# contract, including a client socket timeout like the game gate's.
+#
+# The implementation and its pytest are green; only the shared gate is busy.
+# While it is busy the run must not go back to `implement`; once the holder
+# lets go, re-acquiring the gate verdict alone must finish the run.
+import json
+
+from core import gate_deferral
+from tests.code_output_fixture import commit_count
+from tests.gate_fixture import GATE_PY, HarnessRig
+from tests.skillflow.test_coding_impl_gate_absence import _drive, _wire
+
+_GATE_TAIL = "exec python3 - <<'PYGATE'\n" + GATE_PY + "\nPYGATE\n"
+
+
+def _inventory(sf, run_id):
+    """The run's commits beyond the fixture, in relay_inventory's shape: every
+    commit on the run's code path above the two fixture commits (the empty
+    baseline and the gate fixture `_wire` commits)."""
+    from skillflow.output_targets import git
+    root = sf._workspace.get_project_code_path("p", run_id=run_id)
+    beyond = commit_count(sf, run_id) - 1
+    log = git(root, "log", "--format=%H %s", "-n", str(beyond)) if beyond else ""
+    run = sf.get_run(run_id)
+    return {"run_id": run_id, "status": run["status"],
+            "current_node": run.get("current_node"),
+            "error": run.get("error_reason"),
+            "commits": [dict(zip(("sha", "subject"), line.split(" ", 1)))
+                        for line in log.splitlines() if line.strip()]}
+
+
+def test_a_busy_gate_never_sends_the_run_back_to_implement(tmp_path, monkeypatch):
+    rig = HarnessRig(tmp_path / "harness", monkeypatch)
+    monkeypatch.setenv("GODOT_BUILDER_URL", rig.base)
+    monkeypatch.setenv("FIXTURE_GATE_CLIENT_TIMEOUT", "3")
+    monkeypatch.setenv("FIXTURE_GATE_OP", "coding-impl-gate")
+    monkeypatch.setenv("AITELIER_REPO_GATE_RENDER_WAIT_SECONDS", "0.3")
+    counter = tmp_path / "calls.txt"
+    try:
+        sf, run_id = _wire(tmp_path, monkeypatch, episode_max=100000, wait=1,
+                           counter=counter, tail=_GATE_TAIL)
+        rig.hold()
+        busy_runs, busy_statuses, busy_outcomes, busy_nodes = _drive(
+            sf, run_id, monkeypatch, ticks=12, clock_step=1)
+        busy = _inventory(sf, run_id)
+        gate_calls_while_busy = int(counter.read_text()) if counter.exists() else 0
+        rig.let_go()
+        free_runs, free_statuses, free_outcomes, free_nodes = _drive(
+            sf, run_id, monkeypatch, ticks=12, clock_step=1)
+        final = _inventory(sf, run_id)
+        last_report = json.loads(
+            gate_deferral.find_test_report(sf, run_id).read_text())
+    finally:
+        rig.close()
+    print("GATE_EVIDENCE " + json.dumps({
+        "implement_runs_while_busy": busy_runs,
+        "implement_runs_after_release": free_runs,
+        "gate_calls_while_busy": gate_calls_while_busy,
+        "gate_calls_total": int(counter.read_text()) if counter.exists() else 0,
+        "busy_outcomes": busy_outcomes, "busy_nodes": busy_nodes,
+        "free_outcomes": free_outcomes, "free_nodes": free_nodes,
+        "rendered_for": rig.rendered,
+        "last_repo_gate": {k: last_report.get("repo_gate", {}).get(k)
+                           for k in ("returncode", "measured", "ticket")},
+        "inventory_while_busy": busy, "inventory_final": final}, indent=1))
+
+    # While the gate is busy: one implement (the round's own), then only the
+    # gate step, re-run once per wait, and never the implement loop.
+    assert busy_runs == 1, busy_runs
+    assert len(busy["commits"]) == 1, busy
+    assert busy["status"] == "running", busy
+    assert busy["current_node"] == "test_gate_absent", busy
+    assert gate_calls_while_busy >= 3, gate_calls_while_busy
+    assert "reacquire" in busy_outcomes, busy_outcomes
+    assert "coding-impl-gate" not in rig.rendered[:1]
+    # Once the holder lets go: the verdict alone is re-acquired, and it ends
+    # the run. No implement commit is added.
+    assert free_runs == 0, free_runs
+    assert final["commits"] == busy["commits"], final
+    assert final["status"] == "completed", final
+    assert "Cycle limit exceeded" not in str(final["error"] or "")
+    assert rig.rendered[-1] == "coding-impl-gate", rig.rendered
+    assert last_report["passed"] is True, last_report
+    assert last_report["repo_gate"]["measured"] == "measured_pass"
+    assert last_report["repo_gate_admission"] == "answered"

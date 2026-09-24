@@ -1232,6 +1232,11 @@ async def _run_skillflow_tick(project_id: str, loop):
         tick_log(project_id, "gate_absence_terminal", run=run_id[:8],
                  reason=deferral["reason"])
         return
+    if deferral["state"] == "due":
+        # The wait for the last silent report is over: advancing re-runs the
+        # gate step alone to re-acquire the verdict. Nothing else is claimed.
+        tick_log(project_id, "gate_deferral_reacquire", run=run_id[:8],
+                 gate=deferral.get("gate") or "")
 
     # NB-1 safety valve: bound any runaway loop regardless of root cause. If a run
     # has executed an unreasonable number of steps (e.g. a chronically-failing

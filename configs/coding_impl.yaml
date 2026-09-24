@@ -232,14 +232,21 @@ steps:
     transitions:
       - to: null
 
-  # Loop-EXTERNAL terminal-by-silence gate. Reached only by a `test` report
-  # that says the repository gate produced no verdict; it is deliberately NOT
-  # in `end_conditions`, so reaching it does not complete or fail the run — it
+  # Loop-EXTERNAL gate for a gate step that produced no verdict. Reached only
+  # by a `test` report that says the repository gate did not run; it is NOT in
+  # `end_conditions`, so reaching it neither completes nor fails the run — it
   # parks a still-running run while the scheduler accounts for the absence.
+  # The scheduler holds the run here for one wait per silent report
+  # (core/gate_deferral.py); when the wait runs out the run advances, and the
+  # ONLY edge out re-runs `test` to re-acquire the verdict. `implement` is not
+  # reachable from here. The wall-clock ceiling of one episode ends the run
+  # naming the absence long before this edge's max_loop is spent (100 waits of
+  # the default 300 s is past the 6 h absolute ceiling).
   - id: "test_gate_absent"
     step_type: "gate"
     transitions:
-      - to: null
+      - to: "test"
+        max_loop: 100
 
   # Terminal no-op gate: reached only after the tests pass. Its sole purpose is
   # to be the loop-external node the end-condition fires on (see end_conditions).

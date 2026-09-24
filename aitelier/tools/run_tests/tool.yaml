@@ -41,14 +41,28 @@ description: >
   A gate that did NOT run opts in separately, with one whole line:
   `AITELIER_REPO_GATE_UNMEASURED={"state":"unmeasured|not_run|blocked","reason":"..."}`.
   `state` must be one of those three; `failed` / `red` never qualify, so one
-  line cannot turn a red into an absence. UNMEASURED is DECLARED and never
-  inferred: no exit code produces it (the game repo's own gate uses 2 for
-  `incomplete`, which includes contract files the implementer wrote wrong —
-  "no authored scenarios found ... an empty one is not a pass" — and those are
-  MEASURED failures with a non-empty `failures[]`), and a timeout is the
-  harness's own observation of the absence. The declaration is read from the
-  gate's WHOLE output BEFORE the 2000-byte tail is retained, so it survives a
-  real gate's log.
+  line cannot turn a red into an absence. No exit code ALONE produces
+  UNMEASURED (the game repo's own gate uses 2 for `incomplete`, which includes
+  contract files the implementer wrote wrong — "no authored scenarios found
+  ... an empty one is not a pass" — and those are MEASURED failures with a
+  non-empty `failures[]`), and a timeout is the harness's own observation of
+  the absence. The declaration is read from the gate's WHOLE output BEFORE the
+  2000-byte tail is retained, so it survives a real gate's log.
+  The engine is reached through an admission relay
+  (`aitelier/gate_admission.py`): the gate's `GODOT_BUILDER_URL` points at it,
+  it asks the harness render queue to hold the request for up to
+  `AITELIER_REPO_GATE_RENDER_WAIT_SECONDS` (default 1500) behind a live owner,
+  and it records what the engine said to every request. A gate that exits
+  with neither 0 nor 1 while its LAST engine request was not admitted (409),
+  unreachable, abandoned or undelivered is UNMEASURED
+  (`repo_gate.admission.state` names which; when nothing else failed the
+  report says `evidence_state: "not_run"`);
+  exit 1 is a red whatever the relay saw, and a non-0/1 exit after an
+  answered request stays a measured failure. Each run has a ticket
+  (`repo_gate.ticket`) and its own `GATE_REPORT_DIR`
+  (`$AITELIER_HOME/gate-reports/<ticket>`, with `admission.json`); failure
+  identities are read from the gate's per-stage findings there, so they do
+  not depend on the size of its stdout.
   A gate that produced NO VERDICT does not loop back to `implement`: its
   absence is stated on the report, with
   `repo_gate_unmeasured: true` and `repo_gate_absent: true` (plus
@@ -64,7 +78,9 @@ description: >
   Waiting for the gate and bounding how long a run
   may spend absent is the SCHEDULER's job (`core/gate_deferral.py`), not this
   step's: while an absence is live the run is not advanced and spends no
-  implement cycle, and past the episode's wall-clock ceiling the run ends with
+  implement cycle; when the wait runs out the run advances along the only edge
+  out of `test_gate_absent`, back to `test`, which re-acquires the verdict
+  alone; and past the episode's wall-clock ceiling the run ends with
   `gate did not run: no verdict was measured` — never with a message that
   blames the code. ONE step makes ONE gate run (`REPO_GATE_UNMEASURED_ATTEMPTS
   = 1`): the re-acquisition that used to happen in-step held the scheduler for

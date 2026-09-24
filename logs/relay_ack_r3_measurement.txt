@@ -1,0 +1,61 @@
+Relay acknowledgement gate - rev 3 measurement on this round's tree
+date: 2026-09-24
+environment: python3.12; cwd = this round's worktree root;
+  every command is `python3.12 -m pytest -q -s --maxfail=1 -p no:cacheprovider
+  <targets>`, run through the implement-step focused_check probe; bare exit
+  codes recorded from the probe's exit_status, no pipes.
+
+Fixture for the real instruction: tests/fixtures/relay_ack_f835fa35.json
+  instruction = 2959 chars; retained_bytes = 195178 (docker/godot/
+  godot_harness.py); the relay header lists 4 numbered closing tasks (the
+  remaining work), the brief body follows; must_accept = 5 recorded acks
+  (step instances 7743, 7714, three four-task Chinese restatements).
+
+STEP 1 - measure the pass line that REFUSES the faithful acks.
+This is the r2 candidate 8f94935c line (per-item half recall, no anchor rule)
+re-introduced in core/dpe_pipeline.py and measured; the full command and its
+red are in logs/relay_ack_r3_mutants.txt (MUTANT 1). Result there:
+  must_accept[0] refused on the real instruction, bare RC 1.
+So the r2 line does NOT satisfy a-faithful-acknowledgement-passes-once, and
+that red names must_accept[0].
+
+STEP 3 - re-measure with this round's gate (per-item recall plus a
+language-neutral distinctive-anchor rule, threshold two fifths of the item's
+own units).
+
+$ python3.12 -m pytest -q -s --maxfail=1 -p no:cacheprovider tests/unit/test_relay_acknowledgement_gate.py tests/unit/test_relay_acknowledgement_real_instruction.py
+16 passed, 2 warnings
+bare RC = 0
+
+Criterion a-faithful-acknowledgement-passes-once (acceptances, one first call each):
+- 5 x the real 2959-char instruction: test_recorded_acknowledgements_pass_on_the_real_instruction
+  accepts must_accept[0..4] (7743, 7714, three Chinese four-task restatements), bare RC 0.
+- 3 tiers (1K/10K/50K) x 2 labels (paraphrase, the goal's verbatim four-item list):
+  test_synthetic_tiers_still_accept_faithful_restatements.
+- 3 tiers, Chinese restatement of a Chinese header: test_synthetic_cjk_tier_accepts_faithful_restatement.
+- gate-file first-try families: test_faithful_acknowledgement_passes_first_try_at_every_length (3),
+  test_goal_verbatim_acknowledgement_is_accepted (1), test_the_50k_brief_is_not_what_the_pass_line_weighs (1),
+  test_cjk_remaining_work_is_counted_not_ignored (1), test_chinese_work_faithfully_restated_passes_once_at_every_length (3).
+An English restatement clears the line against the Chinese relay header (must_accept[1],
+step instance 7714 is English wording against a Chinese instruction) - bare RC 0 above.
+
+Criterion an-arbitrary-acknowledgement-is-still-refused (refusals, 0 escapes):
+- test_arbitrary_acknowledgements_are_refused_on_every_tier: 4 tiers (real + 1K + 10K + 50K)
+  x 11 shapes = 44 refusals. Shapes per tier: wrong retained_bytes, empty list, empty-string
+  entry, "banana", count-matching unrelated English sentences, another card's four Chinese
+  closing tasks, a high-frequency-character Chinese sentence, and each single dropped item (4).
+  bare RC 0.
+- test_cjk_only_work_refuses_each_dropped_item: 4 dropped-item refusals on CJK-only work. bare RC 0.
+- gate-file test_wrong_bytes_or_partial_or_arbitrary_items_are_refused: 3 tiers x 5 shapes = 15. bare RC 0.
+
+Criterion non-ascii-work-is-counted (Chinese-only remaining work, bare RC 0):
+- test_another_card_and_unrelated_chinese_are_refused_on_cjk_only_work: faithful Chinese
+  accepted (1); another card refused (1); unrelated Chinese refused (1), where the unrelated
+  set's first entry is built from the instruction's own high-frequency characters
+  (的、一、个、把、与、在) plus unrelated nouns.
+- test_chinese_work_faithfully_restated_passes_once_at_every_length: 3 tiers x
+  (faithful accepted + unrelated refused + partial 2-of-4 refused) = 9 checks.
+
+The whole-tree bare run of `pytest tests/` is the run_tests gate on this same tree (the
+implement probe is capped at 300s and cannot hold a ~590s run); its counts and bare RC are in
+the test step's report. See also logs/full_suite.txt for the r1/r2 chunk probes on this tree.

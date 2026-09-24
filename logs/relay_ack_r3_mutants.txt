@@ -1,0 +1,69 @@
+Relay acknowledgement gate - rev 3 two-pole mutants on core/dpe_pipeline.py
+date: 2026-09-24
+environment: python3.12; cwd = this round's worktree root;
+  commands via the implement-step focused_check probe (capped 300s), each
+  `python3.12 -m pytest -q -s --maxfail=1 -p no:cacheprovider <targets>`;
+  bare exit codes from the probe's exit_status, no pipes. Each mutant is a real
+  edit to core/dpe_pipeline.py, run, read, then restored; the restored tree is
+  verified green (see the last block).
+
+BASE (this round's gate, unmutated):
+$ python3.12 -m pytest -q -s --maxfail=1 -p no:cacheprovider tests/unit/test_relay_acknowledgement_gate.py tests/unit/test_relay_acknowledgement_real_instruction.py
+16 passed
+bare RC = 0
+
+MUTANT 1 - a-faithful-acknowledgement-passes-once polarity: swap this round's
+rule back to the r2 candidate 8f94935c pass line (every item's own units must
+be half recalled; the language-neutral distinctive-anchor rule removed).
+$ python3.12 -m pytest -q -s --maxfail=1 -p no:cacheprovider tests/unit/test_relay_acknowledgement_real_instruction.py::test_recorded_acknowledgements_pass_on_the_real_instruction
+FAILED ...test_recorded_acknowledgements_pass_on_the_real_instruction
+  AssertionError: must_accept[0] was refused: {'status': 'denied', ... 'retained_bytes': 195178, ...}
+1 failed
+bare RC = 1
+  (names must_accept[0]; the recorded faithful acks are refused -> the r2 line fails the criterion)
+RESTORE 1 (this round's rule):
+$ python3.12 -m pytest -q -s --maxfail=1 -p no:cacheprovider tests/unit/test_relay_acknowledgement_gate.py tests/unit/test_relay_acknowledgement_real_instruction.py
+16 passed
+bare RC = 0
+
+MUTANT 2 - an-arbitrary-acknowledgement-is-still-refused polarity: let "the item
+count matches" pass (return len(supplied_text) == len(expected_units)).
+$ python3.12 -m pytest -q -s --maxfail=1 -p no:cacheprovider tests/unit/test_relay_acknowledgement_real_instruction.py::test_arbitrary_acknowledgements_are_refused_on_every_tier
+FAILED ...test_arbitrary_acknowledgements_are_refused_on_every_tier
+  AssertionError: real / unrelated english sentences escaped: {'status': 'acknowledged', ...}
+1 failed
+bare RC = 1
+  (a four-item count-matching set of unrelated English sentences is let through -> the count rule is refused in the real gate)
+RESTORE 2:
+$ python3.12 -m pytest -q -s --maxfail=1 -p no:cacheprovider tests/unit/test_relay_acknowledgement_gate.py tests/unit/test_relay_acknowledgement_real_instruction.py
+16 passed
+bare RC = 0
+
+MUTANT 3 - an-arbitrary-acknowledgement-is-still-refused polarity: let any
+non-empty entry pass (return True after the empty-list / empty-entry guards).
+$ python3.12 -m pytest -q -s --maxfail=1 -p no:cacheprovider tests/unit/test_relay_acknowledgement_real_instruction.py::test_arbitrary_acknowledgements_are_refused_on_every_tier
+FAILED ...test_arbitrary_acknowledgements_are_refused_on_every_tier
+  AssertionError: real / banana escaped: {'status': 'acknowledged', ...}
+1 failed
+bare RC = 1
+  ("banana" is let through -> the real gate requires grounding in the retained work)
+RESTORE 3:
+$ python3.12 -m pytest -q -s --maxfail=1 -p no:cacheprovider tests/unit/test_relay_acknowledgement_gate.py tests/unit/test_relay_acknowledgement_real_instruction.py
+16 passed
+bare RC = 0
+
+MUTANT 4 - non-ascii-work-is-counted polarity: make _ack_cjk_chars return the
+empty set (Chinese characters stop being units).
+$ python3.12 -m pytest -q -s --maxfail=1 -p no:cacheprovider tests/unit/test_relay_acknowledgement_real_instruction.py::test_another_card_and_unrelated_chinese_are_refused_on_cjk_only_work
+FAILED ...test_another_card_and_unrelated_chinese_are_refused_on_cjk_only_work
+  AssertionError: {'status': 'denied', ... 'incomplete_items': ['把渲染队列的等待时间记进日志文件', ...]}  (assert ok for shape "faithful")
+1 failed
+bare RC = 1
+  (a faithful Chinese restatement of Chinese-only work is denied -> without CJK units the line is blind to Chinese)
+RESTORE 4 (final, verified on the delivered tree):
+$ python3.12 -m pytest -q -s --maxfail=1 -p no:cacheprovider tests/unit/test_relay_acknowledgement_gate.py tests/unit/test_relay_acknowledgement_real_instruction.py
+16 passed
+bare RC = 0
+
+The whole-tree `pytest tests/` verdict is the run_tests gate on this same tree;
+see logs/relay_ack_r3_measurement.txt and the test step report.

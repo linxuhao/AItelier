@@ -5,12 +5,14 @@ It measures two things about ONE applied mutation, inside the pytest process:
 * ``line_hits`` — how many times the mutated lines executed (Python's
   ``sys.monitoring`` LINE events, restricted to the replacement's lines; every
   other code location is disabled after its first event, so the cost is one
-  callback per location);
+  callback per location), and ``igniting_tests``, the tests during whose
+  call phase a mutated line executed;
 * ``source_readers`` — which tests read a mutated file's TEXT while they ran
   (``open`` / ``io.open`` / ``tokenize.open`` / ``linecache.getlines`` during
   the test's call phase). A test that went red after reading the mutated
   source is a source-text witness, not a behavioural one; ``file_reads``
-  counts those reads.
+  counts those reads. A test in both lists executed the mutated code, so it
+  is not a source-text witness.
 
 Input: ``MUTATION_IGNITION_SPEC`` = JSON ``{"lines": {path: [line, ...]},
 "files": [path, ...]}``. Output: ``MUTATION_IGNITION_OUT`` = JSON, written at
@@ -37,6 +39,7 @@ _FILES = frozenset(os.path.realpath(p) for p in (_SPEC.get("files") or []))
 _hits = {path: 0 for path in _LINES}
 _reads = {path: 0 for path in _FILES}
 _readers: set[str] = set()
+_igniters: set[str] = set()
 _current: list[str] = []
 _resolved: dict[str, str | None] = {}
 
@@ -62,6 +65,8 @@ def _on_line(code, line):
     if lines is None or line not in lines:
         return _mon.DISABLE
     _hits[path] += 1
+    if _current:
+        _igniters.add(_current[-1])
     return None
 
 
@@ -124,5 +129,6 @@ def pytest_sessionfinish(session, exitstatus):
             "file_reads": sum(_reads.values()),
             "file_reads_by_file": _reads,
             "source_readers": sorted(_readers),
+            "igniting_tests": sorted(_igniters),
             "mutated_modules_imported": imported,
         }, fh, indent=2, sort_keys=True)

@@ -27,8 +27,8 @@ Protocol of one invocation (a shard is one invocation):
    and it is removed.
 4. Killers, per scope: the red tests minus that scope's control reds. For a
    `behaviour` mutation (the default), a red test that read a mutated file's
-   text while it ran is a source-text witness and is removed from the
-   killers. For a `text` mutation (the guarded property IS the text: a
+   text while it ran and executed none of the mutated lines is a source-text
+   witness and is removed from the killers. For a `text` mutation (the guarded property IS the text: a
    duplicated line, a deleted contract sentence) a reader of the text is the
    behavioural witness and stays. `killed` = some scope has a killer.
 5. CLEAN again, as in 1 (otherwise exit 3).
@@ -249,7 +249,8 @@ def run_one(name: str, mutation: dict, control: dict) -> dict:
 
     def _killers(output, ign, control_reds):
         reds = set(_red_test_ids(output)) - set(control_reds)
-        readers = set((ign or {}).get("source_readers") or [])
+        readers = (set((ign or {}).get("source_readers") or [])
+                   - set((ign or {}).get("igniting_tests") or []))
         witnesses = reds & readers if kind == "behaviour" else set()
         return sorted(reds - witnesses), sorted(witnesses)
 

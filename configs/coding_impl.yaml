@@ -39,7 +39,7 @@ end_conditions:
     # would then fire and complete the run as SUCCESS *before the retried test
     # even runs*, reporting green on unverified code (the exact failure we are
     # fixing). `done` is a gate (no completed step row), so `require_completed`
-    # is intentionally omitted.
+    # is omitted.
     # The never-passes loop is bounded by `max_loop: 3` on test_outcome → implement
     # below (enforced on tool-step edges since skillflow-py 1.5.2): once the edge
     # is exhausted the run fails with CycleLimitExceeded.

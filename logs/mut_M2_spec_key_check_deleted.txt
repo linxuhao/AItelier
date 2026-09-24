@@ -1,0 +1,55 @@
+CMD: pytest tests/unit/test_playtest_one_reading.py tests/unit/test_godot_harness.py tests/unit/test_godot_playtest_spec.py tests/unit/test_godot_playtest_scenario.py tests/unit/test_playtest_blind_run.py tests/unit/test_playtest_fixed_delta.py tests/unit/test_playtest_game_time_observation.py tests/unit/test_playtest_timing_ledger.py tests/unit/test_playtest_user_dir_isolation.py tests/unit/test_godot_harness_native_errors.py tests/unit/test_godot_lifecycle.py tests/unit/test_harness_render_lock.py tests/unit/test_godot_compile.py tests/unit/test_godot_vision.py tests/unit/test_clock_sensitivity.py tests/unit/test_relay_acknowledgement_real_instruction.py tests/unit/test_no_verbatim_previous_line_dup.py
+TREE: 5183a2edb24e9cf95bfd3c309c9f833edd4d91d8  DIRTY_FILES: 1
+CWD: /home/linxuhao/.AItelier/worktrees-scratch/onereading1-mut  CONTAINER: onereading1-m2  DATE: 2026-09-24T13:27:23Z
+SLOTS_IN_USE_AT_LAUNCH: 4
+IN_CONTAINER_GIT_STATUS_RC: 0
+.F.........................................ssssssss..................... [ 29%]
+........................................................................ [ 59%]
+........................................................................ [ 89%]
+..........................                                               [100%]
+=================================== FAILURES ===================================
+________ test_an_unknown_top_level_spec_key_is_refused_and_nothing_runs ________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x72f877873dd0>
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_an_unknown_top_level_spec0')
+
+    def test_an_unknown_top_level_spec_key_is_refused_and_nothing_runs(monkeypatch, tmp_path):
+        ran = _probe_recorder(monkeypatch)
+        by1 = yaml.safe_load(_BY1)
+        notes = by1.pop("reviewer_notes")
+        spec = {"scene": "res://main.tscn", "reviewer_notes": notes, "scenarios": [by1]}
+        r = gh._playtest_spec(tmp_path / "proj", spec, 300, 120)
+>       assert ran == []
+E       AssertionError: assert ['res://main....://main.tscn'] == []
+E         
+E         Left contains 2 more items, first extra item: 'res://main.tscn'
+E         Use -v to get more diff
+
+tests/unit/test_playtest_one_reading.py:123: AssertionError
+=============================== warnings summary ===============================
+../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_playtest_one_reading.py::test_an_unknown_top_level_spec_key_is_refused_and_nothing_runs
+1 failed, 233 passed, 8 skipped, 1 warning in 2.48s
+BARE_RC=1
+END: 2026-09-24T13:27:32Z
+MUTANT: M2_spec_key_check_deleted
+IGNITION: 35
+MUTANT_DIFF:
+diff --git a/docker/godot/godot_harness.py b/docker/godot/godot_harness.py
+index ad9bd0e3..5bec7d12 100644
+--- a/docker/godot/godot_harness.py
++++ b/docker/godot/godot_harness.py
+@@ -1721,7 +1721,7 @@ def _playtest_spec(dst: Path, spec: dict, frames: int, timeout: int,
+     ran_any = crashed = False
+     last_state: dict = {}
+     render_mode = "headless"
+-    unknown_spec = sorted(str(k) for k in spec if k not in _SPEC_KEYS)
++    unknown_spec = [] if open("/home/linxuhao/.AItelier/worktrees-scratch/onereading1-tools/ign/M2_spec_key_check_deleted.txt", "a").write("1\n") else []
+     if unknown_spec:
+         spec_errors.append(
+             "spec has unknown top-level key(s) %s - allowed: %s. No scenario was run."

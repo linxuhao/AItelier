@@ -1,0 +1,153 @@
+CMD: git diff --word-diff 8b084c208dfaf688d862f806ba0a82d96670501d 5183a2edb24e9cf95bfd3c309c9f833edd4d91d8 -- docker/godot/godot_harness.py
+diff --git a/docker/godot/godot_harness.py b/docker/godot/godot_harness.py
+index 33a6cec4..ad9bd0e3 100644
+--- a/docker/godot/godot_harness.py
++++ b/docker/godot/godot_harness.py
+@@ -665,6 +665,7 @@ var _spec_mode := false
+var _timeline := []      # SPEC: [{at:int, press?:String, release?:String, assert?:[{name,node,expr}]}]
+var _releases := {}      # frame -> [action, ...] auto-release schedule
+var _results := []       # [{name, node, expr, passed, actual, error, frame}]
+{+var _spec_errors := []   # author errors found while running: a target path that does not resolve+}
+var _capture_dir := ""
+var _capture_at := {}    # frame -> true, consumed as each one is photographed
+var _captures := []      # [{frame, file}]
+@@ -889,6 +890,9 @@ func _point_of(node_name: String, offset: Vector2, spec: String) -> Vector2:
+    var nan_pt := Vector2(NAN, NAN)
+    var n := _resolve(node_name)
+    if n == null:
+        {+if _is_scene_path(node_name):+}
+{+            _refuse_path("aim", node_name, spec)+}
+{+            return nan_pt+}
+        push_error("aim: node not found: " + node_name + " (spec: " + spec + ")")
+        return nan_pt
+    var pos: Vector2
+@@ -1025,6 +1029,9 @@ func _eval_assert(a: Dictionary) -> void:
+    var target := _resolve(node_name)
+    if target == null:
+        res["error"] = "node not found: " + node_name
+        {+if _is_scene_path(node_name):+}
+{+            res["error"] = "path does not resolve: " + node_name+}
+{+            _refuse_path("assert", node_name, str(a.get("name", expr_str)))+}
+        _results.append(res)
+        return
+    if a.has("mode"):
+@@ -1088,16 +1095,24 @@ func _resolve(name: String) -> Node:
+    if name.begins_with("/") or name.begins_with("res:"):
+        return get_node_or_null(NodePath(name))
+    var scene := get_tree().current_scene
+    # A "/"-separated name is a PATH (e.g. "HUD/PausedLabel"), not a node [-name —-]{+name:+}
+    #[-resolve-] it {+resolves+} relative to the current [-scene;-]{+scene or not at all. It used to+} fall
+    {+#+} back to [-matching the leaf-]
+[-    # name-]{+find_child(leaf)+} anywhere in the [-tree if-]{+tree, so `X/PlanEditKind1`+}
+{+    # clicked a node+} the [-exact-]{+written+} path [-doesn't line up.-]{+never named. The caller reports a path+}
+{+    # that does not resolve as a spec error (_is_scene_path / _refuse_path).+}
+    if "/" in [-name and scene != null:-]
+[-        var n := scene.get_node_or_null(NodePath(name))-]{+name:+}
+        if [-n !=-]{+scene ==+} null:
+            return [-n-]
+[-        var parts := name.split("/")-]{+null+}
+        return [-get_tree().get_root().find_child(parts[parts.size() - 1], true, false)-]{+scene.get_node_or_null(NodePath(name))+}
+    return get_tree().get_root().find_child(name, true, false)
+{+## A scene-relative PATH target, as opposed to a bare node name (searched by+}
+{+## name) or an absolute /root or res: path.+}
+{+func _is_scene_path(name: String) -> bool:+}
+{+    return "/" in name and not name.begins_with("/") and not name.begins_with("res:")+}
+{+## The spec named a path that is not in the tree. That is the author's error,+}
+{+## so it goes to the spec_errors the python side reports, not to push_error.+}
+{+func _refuse_path(kind: String, name: String, spec: String) -> void:+}
+{+    _spec_errors.append("frame %d: %s target %s is a path and does not resolve under the current scene (spec: %s)" % [_frame, kind, name, spec])+}
+func _jsonable(v):
+    match typeof(v):
+        TYPE_VECTOR2:
+@@ -1115,7 +1130,8 @@ func _finish() -> void:
+        return
+    _dumped = true
+    _t_step_end_usec = Time.get_ticks_usec()
+    var out := {"frames": _frame, "asserts": _results, "nodes": {}, "captures": [-_captures}-]{+_captures,+}
+{+        "spec_errors": _spec_errors}+}
+    var t_walk := Time.get_ticks_usec()
+    _walk(get_tree().get_root(), out["nodes"])
+    var walk_usec := Time.get_ticks_usec() - t_walk
+@@ -1438,6 +1454,16 @@ def _normalize_asserts(raw) -> list:
+
+_TIMELINE_KEYS = {"at", "press", "release", "actions", "assert", "click", "clicks",
+                  "hover", "hovers"}
+{+# The two levels above a timeline entry are checked the same way: a key outside+}
+{+# these sets is a spec error and the scenario does not run. A key nothing reads+}
+{+# is a second reading of the file -- assert blocks parked under+}
+{+# `reviewer_notes:` read as preconditions to the author and to a static rule,+}
+{+# and as nothing to this harness. Every key here has a reader:+}
+{+#   scene / frames / scenarios, name / timeline / scene -- _playtest_spec below;+}
+{+#   actions / surface -- the game repo's contract tests read _common.yaml;+}
+{+#   repeatability -- the game repo's gate launcher replays the scenario.+}
+{+_SPEC_KEYS = {"scene", "frames", "scenarios", "actions", "surface"}+}
+{+_SCENARIO_KEYS = {"name", "timeline", "scene", "repeatability"}+}
+_MAX_SPEC_FRAMES = 3000   # safety cap on how long one scenario may run
+
+
+@@ -1455,6 +1481,7 @@ def _normalize_timeline(timeline: list) -> tuple[list, list]:
+    existed. Ignoring a key we do not understand is how a gate ends up grading a
+    game nobody played."""
+    out, errors = [], []
+    {+latest = None   # (index, at) of the first entry holding the highest `at` so far+}
+    for i, e in enumerate(timeline or []):
+        if not isinstance(e, dict):
+            errors.append("timeline entry %d is %s, expected a mapping"
+@@ -1486,6 +1513,18 @@ def _normalize_timeline(timeline: list) -> tuple[list, list]:
+        if at < 0:
+            errors.append("timeline entry %d has a negative `at`: %r" % (i, at_raw))
+            continue
+        {+# The probe fires entries by frame, not by their place in the file, so+}
+{+        # an entry written after a later frame runs before it. File order must+}
+{+        # therefore not decrease (equal frames are fine): otherwise the order a+}
+{+        # reader sees and the order the probe runs are two readings of one file.+}
+{+        if latest is not None and at < latest[1]:+}
+{+            errors.append(+}
+{+                "timeline entry %d (at: %d) is written after entry %d (at: %d); "+}
+{+                "entries run in frame order, so `at` must not decrease in file "+}
+{+                "order. Move entry %d above entry %d, or change its frame."+}
+{+                % (i, at, latest[0], latest[1], i, latest[0]))+}
+{+        elif latest is None or at > latest[1]:+}
+{+            latest = (i, at)+}
+        acts = e.get("actions") or []
+        if isinstance(acts, str):
+            acts = [acts]
+@@ -1682,10 +1721,28 @@ def _playtest_spec(dst: Path, spec: dict, frames: int, timeout: int,
+    ran_any = crashed = False
+    last_state: dict = {}
+    render_mode = "headless"
+    {+unknown_spec = sorted(str(k) for k in spec if k not in _SPEC_KEYS)+}
+{+    if unknown_spec:+}
+{+        spec_errors.append(+}
+{+            "spec has unknown top-level key(s) %s - allowed: %s. No scenario was run."+}
+{+            % (", ".join(unknown_spec), ", ".join(sorted(_SPEC_KEYS))))+}
+    for i, sc in enumerate(scenarios):
+        name = str(sc.get("name", "scenario"))
+        timeline, terrs = _normalize_timeline(sc.get("timeline") or [])
+        spec_errors.extend("scenario %r: %s" % (name, m) for m in terrs)
+        {+unknown = sorted(str(k) for k in sc if k not in _SCENARIO_KEYS)+}
+{+        if unknown:+}
+{+            spec_errors.append(+}
+{+                "scenario %r has unknown key(s) %s - allowed: %s. The scenario was not run."+}
+{+                % (name, ", ".join(unknown), ", ".join(sorted(_SCENARIO_KEYS))))+}
+{+        if unknown or unknown_spec:+}
+{+            scen_results.append({"name": name, "ran": False, "errors": [],+}
+{+                                 "native_debt": [], "asserts": [], "passed": False,+}
+{+                                 "pressed": False, "input_dead": False})+}
+{+            scen_nodes.append({})+}
+{+            scen_frames.append(0)+}
+{+            scen_scenes.append("")+}
+{+            continue+}
+        max_at = max([int(e.get("at", 0)) for e in timeline], default=0)
+        # Run long enough to REACH the last timeline event (+margin) -- default_frames
+        # is a floor, not a ceiling. Capped for safety. Truncating here would drop a
+@@ -1748,6 +1805,8 @@ def _playtest_spec(dst: Path, spec: dict, frames: int, timeout: int,
+            "frames_stepped", probe.get("frames", 0))
+        scen_timing.append(_scenario_ledger(
+            name, sc_scene, time.monotonic() - t_scen_start, t_scenario))
+        {+spec_errors.extend("scenario %r: %s" % (name, m)+}
+{+                           for m in probe.get("spec_errors") or [])+}
+        errs, debt = _split_diagnostics(errs)
+        ran = bool(probe) or not timed_out
+        ran_any = ran_any or ran
+BARE_RC=0

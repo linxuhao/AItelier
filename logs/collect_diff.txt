@@ -1,0 +1,41 @@
+Full collection logs (kept outside the tree, since collected ids of unrelated tests carry words the round-file prose guard bans): /home/linxuhao/.AItelier/worktrees-scratch/onereading1-tools/logs/collect_base.txt and /home/linxuhao/.AItelier/worktrees-scratch/onereading1-tools/logs/collect_cand.txt
+== collect_base
+CMD: pytest --collect-only tests/
+TREE: 8b084c208dfaf688d862f806ba0a82d96670501d  DIRTY_FILES: 0
+CWD: /home/linxuhao/.AItelier/worktrees-scratch/onereading1-base  CONTAINER: onereading1-col-base  DATE: 2026-09-24T13:39:13Z
+SLOTS_IN_USE_AT_LAUNCH: 1
+IN_CONTAINER_GIT_STATUS_RC: 0
+5355/5366 tests collected (11 deselected) in 14.20s
+BARE_RC=0
+== collect_cand
+CMD: pytest --collect-only tests/
+TREE: 5183a2edb24e9cf95bfd3c309c9f833edd4d91d8  DIRTY_FILES: 1
+CWD: /home/linxuhao/.AItelier/worktrees-scratch/onereading1  CONTAINER: onereading1-col-cand  DATE: 2026-09-24T13:39:32Z
+SLOTS_IN_USE_AT_LAUNCH: 1
+IN_CONTAINER_GIT_STATUS_RC: 0
+5368/5379 tests collected (11 deselected) in 13.97s
+BARE_RC=0
+CMD: diff <(grep :: collect_base.txt | sort) <(grep :: collect_cand.txt | sort)
+21,22c21,22
+< tests/contracts/director_messaging/test_fake_id_factory.py::test_fake_rejects_noncanonical_non_v4_ids_from_supported_factory[18836428-624B-4316-9A82-8CD48EB0C24E]
+< tests/contracts/director_messaging/test_fake_id_factory.py::test_fake_rejects_noncanonical_non_v4_ids_from_supported_factory[56280fae-b81d-11f1-998d-3ac0bb09ac74]
+---
+> tests/contracts/director_messaging/test_fake_id_factory.py::test_fake_rejects_noncanonical_non_v4_ids_from_supported_factory[1B57629D-93F7-42A0-A769-BD04E1394D62]
+> tests/contracts/director_messaging/test_fake_id_factory.py::test_fake_rejects_noncanonical_non_v4_ids_from_supported_factory[617dd320-b81d-11f1-aad9-32135ab6d298]
+338a339
+> tests/integration/test_no_unfalsifiable_guarantees.py::test_a_round_file_carries_no_lie_keeping_phrase[docker/godot/godot_harness.py]
+396a398
+> tests/integration/test_no_unfalsifiable_guarantees.py::test_a_round_file_carries_no_lie_keeping_phrase[tests/unit/test_playtest_one_reading.py]
+3378a3381,3391
+> tests/unit/test_playtest_one_reading.py::test_a_drop_below_an_earlier_maximum_names_the_maximum
+> tests/unit/test_playtest_one_reading.py::test_a_path_the_probe_refused_comes_back_as_a_spec_error
+> tests/unit/test_playtest_one_reading.py::test_an_unknown_top_level_spec_key_is_refused_and_nothing_runs
+> tests/unit/test_playtest_one_reading.py::test_by1_reviewer_notes_in_a_scenario_is_refused_and_the_scenario_does_not_run
+> tests/unit/test_playtest_one_reading.py::test_by2b_a_frame_written_after_a_later_frame_is_refused
+> tests/unit/test_playtest_one_reading.py::test_by2b_through_playtest_spec_is_a_spec_error
+> tests/unit/test_playtest_one_reading.py::test_every_key_the_game_contract_uses_is_allowed_and_runs
+> tests/unit/test_playtest_one_reading.py::test_the_allowed_sets_are_exactly_these
+> tests/unit/test_playtest_one_reading.py::test_the_probe_reports_an_unresolved_path_as_a_spec_error
+> tests/unit/test_playtest_one_reading.py::test_the_probe_resolves_a_path_by_path_only
+> tests/unit/test_playtest_one_reading.py::test_the_same_frame_written_twice_is_legal
+DIFF_BARE_RC=1

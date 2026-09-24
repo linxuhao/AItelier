@@ -1,0 +1,28 @@
+DATE: 2026-09-24T13:40:26Z  AITELIER_TREE: 5183a2edb24e9cf95bfd3c309c9f833edd4d91d8  WUXIA: 5603e3c85b410e872130dfee2bf223613add0cef
+CMD1: grep -n description <AItelier files that read a play-test spec>
+/home/linxuhao/.AItelier/worktrees-scratch/onereading1/docker/godot/godot_harness.py:931:## hover-only affordance (a tooltip, a description preview) could be observed
+CMD1_BARE_RC=0
+CMD2: git -C wuxia grep -nE get(.description|[.description.] 5603e3c85b410e872130dfee2bf223613add0cef -- tests tools
+5603e3c85b410e872130dfee2bf223613add0cef:tests/test_original_faction_identity.py:275:            assert spec.get("description") == _expected_description(t), (
+5603e3c85b410e872130dfee2bf223613add0cef:tests/test_original_faction_identity.py:305:            out += [t["skill_name"], t["description"]]
+5603e3c85b410e872130dfee2bf223613add0cef:tests/test_original_faction_identity.py:324:            zh = spec["description"]
+CMD2_BARE_RC=0
+CMD3: readers of the other allowed keys
+1708:    scene = str(spec.get("scene", "") or "")
+1709:    default_frames = int(spec.get("frames", frames) or frames)
+1710:    scenarios = spec.get("scenarios") or []
+1730:        name = str(sc.get("name", "scenario"))
+1731:        timeline, terrs = _normalize_timeline(sc.get("timeline") or [])
+1779:        sc_scene = str(sc.get("scene") or scene)
+2018:        if spec and isinstance(spec.get("scenarios"), list) and spec["scenarios"]:
+CMD3a_BARE_RC=0
+5603e3c85b410e872130dfee2bf223613add0cef:tests/test_coop_ui_isolation.py:117:    surface = common["surface"]
+5603e3c85b410e872130dfee2bf223613add0cef:tests/test_coop_ui_isolation.py:179:    surface = common["surface"]
+5603e3c85b410e872130dfee2bf223613add0cef:tests/test_godot_gate_launcher.py:356:    repeats = [s for s in spec["scenarios"] if s.get("repeatability") is True]
+5603e3c85b410e872130dfee2bf223613add0cef:tests/test_playtest_contract_smoke.py:1226:    actions = _items_under(text, "actions")
+5603e3c85b410e872130dfee2bf223613add0cef:tests/test_playtest_contract_smoke.py:1455:    actions = _items_under(text, "actions")
+5603e3c85b410e872130dfee2bf223613add0cef:tests/test_rendered_health_gate_contract.py:256:    surface = common["surface"]
+5603e3c85b410e872130dfee2bf223613add0cef:tests/test_visual_foundation_contract.py:264:            assert obs in common["surface"][unit], f"{unit}.{obs} not whitelisted"
+5603e3c85b410e872130dfee2bf223613add0cef:tools/godot_gate.py:149:        if sc.get("repeatability") is True:
+5603e3c85b410e872130dfee2bf223613add0cef:tools/godot_gate.py:162:        if sc.get("repeatability") is not True or name.endswith(REPLAY_SUFFIX):
+CMD3b_BARE_RC=0

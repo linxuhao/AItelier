@@ -1,0 +1,11 @@
+M1_scenario_key_check_deleted BARE_RC=1 IGNITION=44 CLEAN_AFTER=True FAILED=1
+    FAILED tests/unit/test_playtest_one_reading.py::test_by1_reviewer_notes_in_a_scenario_is_refused_and_the_scenario_does_not_run
+M2_spec_key_check_deleted BARE_RC=1 IGNITION=35 CLEAN_AFTER=True FAILED=1
+    FAILED tests/unit/test_playtest_one_reading.py::test_an_unknown_top_level_spec_key_is_refused_and_nothing_runs
+M3_order_check_deleted BARE_RC=1 IGNITION=93 CLEAN_AFTER=True FAILED=3
+    FAILED tests/unit/test_playtest_one_reading.py::test_by2b_a_frame_written_after_a_later_frame_is_refused
+    FAILED tests/unit/test_playtest_one_reading.py::test_by2b_through_playtest_spec_is_a_spec_error
+    FAILED tests/unit/test_playtest_one_reading.py::test_a_drop_below_an_earlier_maximum_names_the_maximum
+M4_probe_spec_errors_not_lifted BARE_RC=1 IGNITION=42 CLEAN_AFTER=True FAILED=1
+    FAILED tests/unit/test_playtest_one_reading.py::test_a_path_the_probe_refused_comes_back_as_a_spec_error
+DRIVER_BARE_RC=0

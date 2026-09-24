@@ -1,0 +1,182 @@
+CMD: PYTHONPATH=/home/linxuhao/.AItelier/worktrees-scratch/onereading1 python3 /home/linxuhao/.AItelier/worktrees-scratch/onereading1/final/corpus_impact.py /home/linxuhao/.AItelier/worktrees-scratch/onereading1-tools/harness_base.py /home/linxuhao/.AItelier/worktrees-scratch/onereading1-tools/harness_cand.py /home/linxuhao/.AItelier/worktrees-scratch/onereading1-tools/corpus
+TREE: 5183a2edb24e9cf95bfd3c309c9f833edd4d91d8  PYTHON: Python 3.12.3
+CORPUS: wuxia-commercial-batch-next master 5603e3c85b410e872130dfee2bf223613add0cef, extracted with: git -C ~/.AItelier/projects/wuxia-commercial-batch-next archive master playtest | tar -x -C /home/linxuhao/.AItelier/worktrees-scratch/onereading1-tools/corpus
+HARNESS_BASE_SHA1: 0b937675b9ec4da1b0d69daba8ab91ff92ecf956  HARNESS_CAND_SHA1: ab99c3c30aabb0bfdac4aa912362295dec175062
+DATE: 2026-09-24T13:26:33Z
+READ_SPEC source=playtest/ errors=0 notes=0
+SPEC_TOP_LEVEL_KEYS ['actions', 'scenarios', 'scene', 'surface']
+SCENARIOS_CHECKED 181
+BASE_SPEC_ERRORS 0
+CAND_SPEC_ERRORS 167
+NEW_SPEC_ERRORS 167
+NEW_ERROR_SCENARIO attack_button_click_fires_basic_attack | unknown key(s) description
+NEW_ERROR_SCENARIO attack_once_per_turn_rejected | unknown key(s) description
+NEW_ERROR_SCENARIO back_button_sect_switch_zero_delta | unknown key(s) description
+NEW_ERROR_SCENARIO basic_attack_free_at_zero_qi | unknown key(s) description
+NEW_ERROR_SCENARIO battle_focus_arrow_keys | unknown key(s) description
+NEW_ERROR_SCENARIO battle_pause_menu_continue_zero_delta | unknown key(s) description
+NEW_ERROR_SCENARIO battle_return_to_main_menu_needs_confirm | unknown key(s) description
+NEW_ERROR_SCENARIO body_motion_probe | unknown key(s) description
+NEW_ERROR_SCENARIO camera_transform_follows_unit | unknown key(s) description
+NEW_ERROR_SCENARIO card_pick_pause_keeps_the_draw | unknown key(s) description
+NEW_ERROR_SCENARIO click_move_commit_lock | unknown key(s) description
+NEW_ERROR_SCENARIO click_move_three_steps_control | unknown key(s) description
+NEW_ERROR_SCENARIO click_move_to_tile | unknown key(s) description
+NEW_ERROR_SCENARIO click_move_undo_feet | unknown key(s) description
+NEW_ERROR_SCENARIO click_move_undo_right | unknown key(s) description
+NEW_ERROR_SCENARIO click_portrait_body_targets_enemy | unknown key(s) description
+NEW_ERROR_SCENARIO click_targeting_fixed | unknown key(s) description
+NEW_ERROR_SCENARIO combat_log_clear_of_skill_bar | unknown key(s) description
+NEW_ERROR_SCENARIO combat_log_english_lines | unknown key(s) description
+NEW_ERROR_SCENARIO combat_log_hidden_off_battle | unknown key(s) description
+NEW_ERROR_SCENARIO consequence_card_pick_focus | unknown key(s) description
+NEW_ERROR_SCENARIO consequence_screens_occlusion_map | unknown key(s) description
+NEW_ERROR_SCENARIO consequence_sect_select_focus | unknown key(s) description
+NEW_ERROR_SCENARIO consequence_work_income_inline | order: timeline entry 10 (at: 220) is written after entry 9 (at: 230) | unknown key(s) description
+NEW_ERROR_SCENARIO consequence_year_end_switch | unknown key(s) description
+NEW_ERROR_SCENARIO cooldowns_decrement_by_round | unknown key(s) description
+NEW_ERROR_SCENARIO coop_single_client_english | unknown key(s) description
+NEW_ERROR_SCENARIO coop_single_client_month | unknown key(s) description
+NEW_ERROR_SCENARIO creation_attr_effect_info | unknown key(s) description
+NEW_ERROR_SCENARIO creation_back_to_menu_walk | unknown key(s) description
+NEW_ERROR_SCENARIO creation_budget_clamp_and_traits | unknown key(s) description
+NEW_ERROR_SCENARIO creation_confirm_summary | unknown key(s) description
+NEW_ERROR_SCENARIO creation_hp_value_displayed | unknown key(s) description
+NEW_ERROR_SCENARIO creation_layout_readability | unknown key(s) description
+NEW_ERROR_SCENARIO creation_mouse_interaction | unknown key(s) description
+NEW_ERROR_SCENARIO creation_single_ui | unknown key(s) description
+NEW_ERROR_SCENARIO creation_traits_back_next_buttons | unknown key(s) description
+NEW_ERROR_SCENARIO cultivation_changes_combat | unknown key(s) description
+NEW_ERROR_SCENARIO cultivation_month_cycle_and_deck_bookkeeping | unknown key(s) description
+NEW_ERROR_SCENARIO dot_resolves_at_victim_turn_start | unknown key(s) description
+NEW_ERROR_SCENARIO economy_pair_rehomed | unknown key(s) description
+NEW_ERROR_SCENARIO end_turn_button_click_hands_over_turn | unknown key(s) description
+NEW_ERROR_SCENARIO enemy_action_feedback_counters | unknown key(s) description
+NEW_ERROR_SCENARIO enemy_acts_only_after_player_ends_turn | unknown key(s) description
+NEW_ERROR_SCENARIO enemy_hit_float_and_log_round_one | unknown key(s) description
+NEW_ERROR_SCENARIO enemy_round_wall_clock | unknown key(s) description
+NEW_ERROR_SCENARIO english_settings_to_map_readiness | unknown key(s) description
+NEW_ERROR_SCENARIO equipment_in_battle_diff | unknown key(s) description
+NEW_ERROR_SCENARIO event_option_refused_no_charge | unknown key(s) description
+NEW_ERROR_SCENARIO event_pool_plan_new_event_resolved | unknown key(s) description
+NEW_ERROR_SCENARIO event_travel_plan_effects | unknown key(s) description
+NEW_ERROR_SCENARIO facility_use_cap_exhausted_zero_delta | unknown key(s) description
+NEW_ERROR_SCENARIO facility_use_reusable | unknown key(s) description
+NEW_ERROR_SCENARIO fahui_du_multiplies_damage | unknown key(s) description
+NEW_ERROR_SCENARIO growth_action_row_preview_back_zero_delta | unknown key(s) description
+NEW_ERROR_SCENARIO growth_empty_pool_exit_no_mutation | unknown key(s) description
+NEW_ERROR_SCENARIO growth_insufficient_pool_refusal_then_retry | unknown key(s) description
+NEW_ERROR_SCENARIO growth_seeded_fraction_confirm_exact_debit | unknown key(s) description
+NEW_ERROR_SCENARIO health_bar_above_portrait | unknown key(s) description
+NEW_ERROR_SCENARIO health_bar_numbers | unknown key(s) description
+NEW_ERROR_SCENARIO huashan_readiness_warning | unknown key(s) description
+NEW_ERROR_SCENARIO initiative_order_round_two | unknown key(s) description
+NEW_ERROR_SCENARIO input_click_differential | unknown key(s) description
+NEW_ERROR_SCENARIO keyboard_move_queue_three_steps | unknown key(s) description
+NEW_ERROR_SCENARIO language_zh_default | unknown key(s) description
+NEW_ERROR_SCENARIO locked_slot_unlock_reason | unknown key(s) description
+NEW_ERROR_SCENARIO lone_bane_sect_grants_external_only | unknown key(s) description
+NEW_ERROR_SCENARIO main_menu_entries | unknown key(s) description
+NEW_ERROR_SCENARIO map_battle_node_huashan | unknown key(s) description
+NEW_ERROR_SCENARIO map_event_cost_preview | unknown key(s) description
+NEW_ERROR_SCENARIO map_event_funded_purchase | unknown key(s) description
+NEW_ERROR_SCENARIO map_event_pointer_hover_then_click | unknown key(s) description
+NEW_ERROR_SCENARIO map_event_preview_english | unknown key(s) description
+NEW_ERROR_SCENARIO map_event_refusal_english | unknown key(s) description
+NEW_ERROR_SCENARIO map_event_unaffordable_refuses | unknown key(s) description
+NEW_ERROR_SCENARIO map_facility_buttons_click | unknown key(s) description
+NEW_ERROR_SCENARIO map_hint_single | unknown key(s) description
+NEW_ERROR_SCENARIO map_node_click_blocked_by_overlay | unknown key(s) description
+NEW_ERROR_SCENARIO map_node_click_focus_then_confirm | unknown key(s) description
+NEW_ERROR_SCENARIO map_node_event_mainline_east | unknown key(s) description
+NEW_ERROR_SCENARIO map_node_event_mainline_return | unknown key(s) description
+NEW_ERROR_SCENARIO map_node_event_revisit_no_resettle | unknown key(s) description
+NEW_ERROR_SCENARIO map_node_event_shaolin | unknown key(s) description
+NEW_ERROR_SCENARIO map_travel_node_type_hint | unknown key(s) description
+NEW_ERROR_SCENARIO menu_load_continues | unknown key(s) description
+NEW_ERROR_SCENARIO menu_to_creation_to_tutorial_order | unknown key(s) description
+NEW_ERROR_SCENARIO movement_range_highlight | unknown key(s) description
+NEW_ERROR_SCENARIO nav_pause_blocks_background_clicks | unknown key(s) description
+NEW_ERROR_SCENARIO occlusion_no_button_over_text | unknown key(s) description
+NEW_ERROR_SCENARIO plan_commission_arm_is_reversible_until_sealed | unknown key(s) description
+NEW_ERROR_SCENARIO plan_editor_shortfall_is_reported | unknown key(s) description
+NEW_ERROR_SCENARIO plan_receipt_and_yield_differentials | unknown key(s) description
+NEW_ERROR_SCENARIO plan_route_event_reroll_budget | unknown key(s) description
+NEW_ERROR_SCENARIO player_death_mid_round_ends_battle | unknown key(s) description
+NEW_ERROR_SCENARIO portrait_ink_on_own_tile | unknown key(s) description
+NEW_ERROR_SCENARIO practice_target_reselect_empty_pool_exit | unknown key(s) description
+NEW_ERROR_SCENARIO practice_target_reselect_exit_zero_delta | unknown key(s) description
+NEW_ERROR_SCENARIO prism_innate_qi_fatal_guard | unknown key(s) description
+NEW_ERROR_SCENARIO prologue_intercept_redirects_damage | unknown key(s) description
+NEW_ERROR_SCENARIO prologue_move_undo_before_commit | unknown key(s) description
+NEW_ERROR_SCENARIO prologue_units_are_visible | unknown key(s) description
+NEW_ERROR_SCENARIO prologue_ward_bleeds_if_ignored | unknown key(s) description
+NEW_ERROR_SCENARIO prologue_ward_death_is_defeat | unknown key(s) description
+NEW_ERROR_SCENARIO prologue_win_by_clearing_raiders | unknown key(s) description
+NEW_ERROR_SCENARIO qi_cost_spent_and_no_energy_blocks_cast | unknown key(s) description
+NEW_ERROR_SCENARIO rendered_health_suites | unknown key(s) description
+NEW_ERROR_SCENARIO roster_equip_free_action | unknown key(s) description
+NEW_ERROR_SCENARIO roster_panel_battle_open_close | unknown key(s) description
+NEW_ERROR_SCENARIO roster_panel_cultivation_open_close | unknown key(s) description
+NEW_ERROR_SCENARIO roster_panel_ending_open_close | unknown key(s) description
+NEW_ERROR_SCENARIO roster_panel_item_nail | unknown key(s) description
+NEW_ERROR_SCENARIO round_one_snapshot_and_turn_order | unknown key(s) description
+NEW_ERROR_SCENARIO save_load_roundtrip | unknown key(s) description
+NEW_ERROR_SCENARIO save_retry_status_en | unknown key(s) description
+NEW_ERROR_SCENARIO save_retry_status_zh | unknown key(s) description
+NEW_ERROR_SCENARIO seal_plan_back_zero_delta_word_and_receipt | unknown key(s) description
+NEW_ERROR_SCENARIO seal_plan_charge_word_and_receipt | unknown key(s) description
+NEW_ERROR_SCENARIO seal_plan_cue_keyboard_after_resolved_opens_event | unknown key(s) description
+NEW_ERROR_SCENARIO seal_plan_cue_keyboard_from_saved_pending | unknown key(s) description
+NEW_ERROR_SCENARIO sect_join_needs_confirm | unknown key(s) description
+NEW_ERROR_SCENARIO sect_select_exit_needs_confirm | unknown key(s) description
+NEW_ERROR_SCENARIO sect_switch_arm_status_occlusion | unknown key(s) description
+NEW_ERROR_SCENARIO sect_switch_same_school_connects | unknown key(s) description
+NEW_ERROR_SCENARIO settings_panel | unknown key(s) description
+NEW_ERROR_SCENARIO shelter_door_closed_states_reason | unknown key(s) description
+NEW_ERROR_SCENARIO shelter_plan_kept_battle_support_is_attributed | order: timeline entry 32 (at: 435) is written after entry 31 (at: 480) | unknown key(s) description
+NEW_ERROR_SCENARIO shelter_plan_kept_door_payout_and_ending_line | unknown key(s) description
+NEW_ERROR_SCENARIO shelter_plan_offer_decline_records_its_own_state | unknown key(s) description
+NEW_ERROR_SCENARIO shelter_plan_real_input_offer_and_call | unknown key(s) description
+NEW_ERROR_SCENARIO skill_bar_waiting_state | unknown key(s) description
+NEW_ERROR_SCENARIO skill_button_effect_info | unknown key(s) description
+NEW_ERROR_SCENARIO skill_button_turn_overlay | unknown key(s) description
+NEW_ERROR_SCENARIO skill_button_visual_states | unknown key(s) description
+NEW_ERROR_SCENARIO skill_description_visible | unknown key(s) description
+NEW_ERROR_SCENARIO skill_hint_and_range_highlight | unknown key(s) description
+NEW_ERROR_SCENARIO skill_range_highlight_on_select | unknown key(s) description
+NEW_ERROR_SCENARIO skill_rejection_reason_texts | unknown key(s) description
+NEW_ERROR_SCENARIO spine_to_ending | unknown key(s) description
+NEW_ERROR_SCENARIO theme_focus_marker_cultivation | unknown key(s) description
+NEW_ERROR_SCENARIO training_basic_reach_click_at_two | unknown key(s) description
+NEW_ERROR_SCENARIO training_basic_reach_melee_refuses_two | unknown key(s) description
+NEW_ERROR_SCENARIO training_bout_labels_chinese | unknown key(s) description
+NEW_ERROR_SCENARIO training_bout_labels_english | unknown key(s) description
+NEW_ERROR_SCENARIO training_bout_loss_returns_to_the_same_month | unknown key(s) description
+NEW_ERROR_SCENARIO training_bout_pair_two_bodies | unknown key(s) description
+NEW_ERROR_SCENARIO training_bout_solo_opponent_acts | unknown key(s) description
+NEW_ERROR_SCENARIO training_bout_win_returns_to_the_same_month | unknown key(s) description
+NEW_ERROR_SCENARIO training_crashing_step_shoves_two | unknown key(s) description
+NEW_ERROR_SCENARIO training_entry_is_free_and_cancellable | unknown key(s) description
+NEW_ERROR_SCENARIO training_entry_refused_under_the_pause | unknown key(s) description
+NEW_ERROR_SCENARIO training_hold_after_basic_attack_takes_the_hit | unknown key(s) description
+NEW_ERROR_SCENARIO training_star_pin_outranges_the_basic | unknown key(s) description
+NEW_ERROR_SCENARIO training_star_pin_reaches_four | unknown key(s) description
+NEW_ERROR_SCENARIO training_tooltip_english | unknown key(s) description
+NEW_ERROR_SCENARIO trait_combat_effects_and_twelve_slots | unknown key(s) description
+NEW_ERROR_SCENARIO trait_hover_preview | unknown key(s) description
+NEW_ERROR_SCENARIO trait_point_cost_visible | unknown key(s) description
+NEW_ERROR_SCENARIO travel_to_ending_needs_confirm | unknown key(s) description
+NEW_ERROR_SCENARIO tutorial_loss_restarts_tutorial | unknown key(s) description
+NEW_ERROR_SCENARIO tutorial_win_routes_to_transition | unknown key(s) description
+NEW_ERROR_SCENARIO two_phase_skill_unlock_and_hp_gate | unknown key(s) description
+NEW_ERROR_SCENARIO ui_geometry_readability | unknown key(s) description
+NEW_ERROR_SCENARIO undo_button_retreat | unknown key(s) description
+NEW_ERROR_SCENARIO year_end_pause_keeps_the_month | unknown key(s) description
+NEW_ERROR_SCENARIO year_end_switch_needs_confirm | unknown key(s) description
+SCENARIOS_WITH_NEW_ERRORS 165 of 181 checked
+REASON_COUNT 2 scenarios: `at` decreases in file order
+REASON_COUNT 165 scenarios: unknown key(s) description
+CAND_SCENARIOS_NOT_RUN 165 of 181
+SLASH_TARGETS 0 in 0 scenarios (engine resolution: not measured this round)
+BARE_RC=0

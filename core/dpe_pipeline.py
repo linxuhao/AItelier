@@ -119,9 +119,10 @@ def _relay_progress_context(value: Any) -> dict | None:
                 "first_failure_run_id": first_failure_run_id,
                 "retained_files": retained,
                 "retained_bytes": sum(retained.values()),
-                "incomplete_items": [instruction] if instruction else [
+                "incomplete_items": _relay_work_items(instruction)
+                or ([instruction] if instruction else [
                     "finish the approved plan portions not proven by the retained change set"
-                ],
+                ]),
                 "prior_budget_failure": (
                     "turn budget exhausted" in str(relay.get("error", "")).lower()
                 ),
@@ -219,6 +220,35 @@ def _should_intervene_early(*, turn: int, max_turns: int, writable: bool,
     )
 
 
+_NUMBERED_ITEM = re.compile(r"^\s*(?:\d{1,2}[.、)]|[-*•])\s+(.+)$")
+
+
+def _relay_work_items(instruction: str) -> list[str]:
+    """Split a relay instruction into the remaining-work items it names.
+
+    A director's relay header enumerates the closing tasks as a numbered list
+    before the retained brief follows; those items ARE the remaining work. The
+    brief body is background, not a work item, so it is never included: the
+    acknowledgement pass line must not grow with the brief it rides on.
+    """
+    items: list[str] = []
+    for line in str(instruction or "").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        match = _NUMBERED_ITEM.match(stripped)
+        if match:
+            item = match.group(1).strip()
+            if item:
+                items.append(item)
+            continue
+        if items:
+            break  # the header's task list has ended
+        if len(stripped) > 200:
+            break  # the brief body began before any header list
+    return items
+
+
 _ACK_STOPWORDS = frozenset({
     "a", "an", "and", "the", "to", "of", "from", "this", "that", "then",
     "do", "not", "before", "after", "with", "into", "for", "existing",
@@ -226,38 +256,107 @@ _ACK_STOPWORDS = frozenset({
 
 
 def _ack_tokens(value: str) -> set[str]:
-    return {
+    """Language-neutral units: identifiers of >=3 chars, plus any number.
+
+    Paired with `_ack_cjk_chars` through `_ack_units`, so an acknowledgement
+    written in Chinese is not read as an empty entry. Numbers survive at any
+    length: a bare "3" is how a numbered section in one item is recognised
+    across languages.
+    """
+    tokens = {
         token.lower()
         for token in re.findall(r"[A-Za-z0-9_]+", value)
-        if len(token) >= 3 and token.lower() not in _ACK_STOPWORDS
+        if (len(token) >= 3 or token.isdigit())
+        and token.lower() not in _ACK_STOPWORDS
     }
+    for token in list(tokens):
+        if "_" in token:
+            tokens |= {
+                part for part in token.split("_")
+                if len(part) >= 3 and part not in _ACK_STOPWORDS
+            }
+    return tokens
+
+
+
+_CJK_CHAR = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
+
+
+def _ack_cjk_chars(value: str) -> set[str]:
+    """CJK characters carry the meaning ASCII tokens never see; count them."""
+    return set(_CJK_CHAR.findall(value))
+
+
+def _ack_units(value: str) -> set[str]:
+    return _ack_tokens(value) | _ack_cjk_chars(value)
+
+
+_ACK_COVERAGE_NUMERATOR = 2
+_ACK_COVERAGE_DENOMINATOR = 5
+
+
+def _ack_covers(units: set[str], supplied: set[str]) -> bool:
+    """True when an acknowledgement recalls enough of one work item."""
+    if not units:
+        return False
+    recalled = len(units & supplied)
+    return recalled * _ACK_COVERAGE_DENOMINATOR >= len(units) * _ACK_COVERAGE_NUMERATOR
 
 
 def _acknowledges_incomplete(expected: list[str], supplied: Any) -> bool:
-    """Require supplied work items to cover the known remaining-work facts."""
+    """Require the supplied items to name every remaining-work item.
+
+    A listed item is named either when the acknowledgement carries a
+    language-neutral literal only that item owns - a path, command, identifier,
+    number or proper name shared with no sibling item - or when it recalls two
+    fifths of that item's own distinctive units. That is what lets a
+    compressed or cross-language restatement of one item clear the line on the
+    first try: the reader states the item's own fact in their own words rather
+    than a fixed phrasing. A unit unique to one item cannot appear in an
+    acknowledgement of the others, so a wholly dropped item stays unnamed, and
+    a sibling's overlap in common characters cannot stand in for it.
+
+    When the instruction is one unstructured work item there are no siblings,
+    so uniqueness is vacuous; the item must instead be recalled substantially
+    (two fifths of all its units), which keeps a two-word fragment such as
+    "finish wiring" from standing in for the whole instruction.
+    """
     if not isinstance(supplied, list) or not supplied:
         return False
     supplied_text = [str(item).strip() for item in supplied]
     if any(not item for item in supplied_text):
         return False
-    supplied_tokens = [_ack_tokens(item) for item in supplied_text]
-    if any(not tokens for tokens in supplied_tokens):
+    supplied_units = [_ack_units(item) for item in supplied_text]
+    if any(not units for units in supplied_units):
         return False
-    expected_tokens = [_ack_tokens(str(item)) for item in expected if str(item).strip()]
-    if not expected_tokens:
+    expected_units = [_ack_units(str(item)) for item in expected if str(item).strip()]
+    if not expected_units:
         return False
-    # Each claimed item must be grounded in the retained instruction, and each
-    # retained instruction must have meaningful coverage. This accepts a useful
-    # split such as "finish wiring" + "add targeted tests", while rejecting an
-    # arbitrary acknowledgement such as "banana".
-    all_expected = set().union(*expected_tokens)
-    if any(not (tokens & all_expected) for tokens in supplied_tokens):
+    # Each claimed item must be grounded in the retained instruction, or the
+    # acknowledgement is not addressing this relay's work at all.
+    all_expected = set().union(*expected_units)
+    if any(not (units & all_expected) for units in supplied_units):
         return False
-    supplied_union = set().union(*supplied_tokens)
-    return all(
-        len(tokens & supplied_union) >= max(1, (len(tokens) + 1) // 2)
-        for tokens in expected_tokens
-    )
+    supplied_union = set().union(*supplied_units)
+    if len(expected_units) == 1:
+        return _ack_covers(expected_units[0], supplied_union)
+    ownership: dict[str, int] = {}
+    for units in expected_units:
+        for unit in units:
+            ownership[unit] = ownership.get(unit, 0) + 1
+    for units in expected_units:
+        # Units this item shares with no sibling: a path, command, identifier,
+        # number or proper name only it carries.
+        distinctive = {unit for unit in units if ownership[unit] == 1}
+        named = distinctive & supplied_union
+        if any(unit.isascii() for unit in named):
+            continue  # a distinctive literal anchor names the item
+        if _ack_covers(distinctive, supplied_union):
+            continue  # or the item's own words are recalled substantially
+        return False
+    return True
+
+
 
 
 def _relay_acknowledgement(relay: dict, params: dict) -> tuple[bool, dict]:

@@ -1,0 +1,531 @@
+{
+ "source": "run f835fa35 implement step, skillflow_trace prompt_delta; deduplicated acknowledge_relay arguments",
+ "retained_bytes": 195178,
+ "instruction": "# 接力（relay 1）—— 上一轮用完了 200 回合预算，草稿接近完成\n\n上一轮 `attempt-4840ec3c26494675bcfa5b6745c0e057` 在 implement 用完 200/200 回合，没有调用 finish_step。草稿完整保留（relay digest `5ca5b21ef9daf9a8032818c1fde0269fd522e0f16464eaf6fe969cb2cdf729e9`，8 个文件）：\n`docker/godot/godot_harness.py`、`aitelier/tools/godot_playtest/impl.py`、`tests/unit/test_harness_render_queue.py`、`final/delivery_notes_harness_render_queue.md`、`logs/` 下四个 `.txt`。\n\n草稿自述：新测试 11 passed、harness 家族 75 passed / 8 skipped、四个变异各裸 RC 1。交付说明第 3 节在第三条判据中途断了，全套 `pytest tests/` 没有跑。\n\n**本轮只做收尾，不要重写已经成立的部分：**\n1. 草稿是**未验证**的（接力会从第一步重走）：先在本树上把新测试与 harness 家族重跑一次，确认数字，然后再动别的。\n2. 跑全套 `pytest tests/`，日志用 `.txt`（AItelier 仓 `.gitignore` 忽略 `*.log`），把 passed/skipped 与裸 RC 写进交付说明。\n3. 补完交付说明第 3 节（第三、第四条判据），每个数字旁写日志文件名。\n4. 回合要省着用：一次改一个文件的一个连续区域；不要为了「再确认一下」反复读同一个文件。做完就调用 finish_step。\n\n下面是本轮的原始 brief，一字未改。\n\n---\n\n# harness.a-busy-render-lock-queues-instead-of-refusing（rev 1）\n\n**渲染锁忙时，渲染请求应当排队，而不是立即 409。**\n\n`docker/godot/godot_harness.py` 的 do_POST 在进入渲染路由（`/playtest`、`/script`、`/x11_input_smoke`）前写着：\n「Queue behind any render in flight. No timeout: a caller that waited is strictly better off than a caller that got a fast wrong answer」。\n但它先调 `acquire_render_owner`，而 `_acquire_render_owner_under_fence` 只要看到一个 `active` 或 `owner_lost` 的持有者就抛 `render owner exists`，do_POST 把它变成 **409**。\n所以锁忙时请求**不排队**，立刻被拒。该持有者表来自 `ffd1daa7`（2026-09-14，integrate deployment quiescence guard）；那之后注释描述的性质就不成立了。\n\n**实测代价（2026-09-23）：** wuxia 流水线轮 p48 r9（`attempt-6454025168fb4508be0304926752faaf`，run `868ceb46`）三次 test 全部死在这里，时间分别是 17:44、18:08、18:50：\npytest 2449 passed、GDScript 362/362 解析通过，然后 `/playtest` 得到 `HTTP Error 409: Conflict`，游戏仓的 `tools/godot_gate.py` 把它当作「godot-builder unreachable — gate NOT run」退出 2，\nimplement↔test 循环到 `Cycle limit exceeded`。三次撞上的都是合法持有者（astra 运动层基线、martial-arts r8 复查的 `/script`），不是陈旧持有者。门从来没有评判过这一轮的代码。\n\n**要的性质：** 一个活着的持有者占着锁时，新的渲染请求等它释放再跑（记下等了多久、等的是谁）；只有需要人工对账的持有者（`owner_lost`，或心跳过期的 `active`）才应当让请求失败，而且失败信息要说清是哪一种，不能和「连不上」混为一谈。\n耐久持有者表的崩溃安全性不许丢：进程死了留下的持有者仍然挡路，直到对账。\n\n**不许做的事：** 不许靠调用方重试来掩盖（游戏仓的门不是本仓的东西）；不许删掉持有者表或让 `owner_lost` 变得不挡路；不许写替自己辩护的散文。\n部署需要重启 `aitelier-godot` 容器 —— 那一步由导演征得业主同意后执行，本轮只交付代码与测试。\n\n## 判据（逐条交证据，pass/fail 都要写明，不许合并）\n\n- `a-busy-lock-queues-the-request`\n- `a-lost-owner-still-blocks-and-says-so`\n- `the-suite-stays-green-and-the-note-carries-every-number`\n- `the-wait-is-bounded-by-the-callers-own-timeout`\n\n## 纪律（每轮都一样）\n\n- **合约就是上面的 goal 与判据原文。** 不许改写判据、不许放宽任何既有 pin 或 playtest 断言来变绿；要动一条钉子，先说清改的是什么性质。\n- **裸退出码。** 任何退出码都不许经过管道（`| tail`、`| tee`）取得。\n- **两极。** 每条声称「有守卫」的判据：植入真实变异 ⇒ 红并点名；恢复 ⇒ 绿。killed = 真的改文件、跑整套、读裸退出码。\n- **报覆盖面时把叉乘写在数字同一句话里。** 「N 例没逃逸」不等于「关上了」。\n- **度量与写入分开。** 实测先捕获，再经由声明的写工具落盘；不要用 shell 重定向写交付物。\n- **补丁节奏：** 以一个文件的一个连续区域为单位改一次；只在 preflight 明确说摘要过期或坐标越界时才重读。\n- **不许写替自己辩护的散文**（`not a defect`、`by design`、`documented`、`known limitation`、把偏移量写进测试自己的坐标）。\n- 交付说明落在 `final/`，每个数字旁写出产生它的日志文件名，日志在 `logs/` 里且含命令、环境、裸退出码。**日志文件一律 `.txt`**：AItelier 仓 `.gitignore` 忽略 `*.log`，交付钩子会拒收整轮。",
+ "must_accept": [
+  {
+   "retained_bytes": 195178,
+   "incomplete_items": [
+    "Validate the unvalidated draft: rerun the new render-queue tests (tests/unit/test_harness_render_queue.py, draft said 11 passed) and the harness family (draft said 75 passed / 8 skipped) on this tree.",
+    "Run the full `pytest tests/` with a .txt log in logs/ and record passed/skipped and the bare RC.",
+    "Finish section 3 of final/delivery_notes_harness_render_queue.md (third and fourth criteria), writing each number's producing log file name beside it.",
+    "Call finish_step; do not rewrite parts already established (four mutant kills, each bare RC 1)."
+   ]
+  },
+  {
+   "retained_bytes": 195178,
+   "incomplete_items": [
+    "Total retained code bytes 195178 across aitelier/tools/godot_playtest/impl.py (22706), docker/godot/godot_harness.py (143264), final/delivery_notes_harness_render_queue.md (8348), logs/pytest_harness_family.txt (674), logs/pytest_harness_render_lock_pre.txt (485), logs/pytest_harness_render_queue.txt (1590), logs/pytest_harness_render_queue_mutants.txt (2904), tests/unit/test_harness_render_queue.py (15207).",
+    "The draft is unvalidated, so step one is to rerun the new tests and the harness family on this worktree and confirm the numbers (new tests 11 passed; harness family 75 passed / 8 skipped; four mutants each bare RC 1).",
+    "The full pytest tests/ suite has not been run; run it, write the log as .txt under logs/ because .gitignore drops *.log, and record passed/skipped plus the bare RC.",
+    "Delivery notes section 3 stops part-way through the third criterion; finish criteria three and four with the log file that produced each number named beside it.",
+    "Spend turns sparingly, one contiguous region per file edit, then call finish_step; do not rewrite the parts that already stand."
+   ]
+  },
+  {
+   "retained_bytes": 195178,
+   "incomplete_items": [
+    "草稿是未验证的：先在本树上把新测试与 harness 家族重跑一次，确认数字",
+    "跑全套 pytest tests/，日志用 .txt，把 passed/skipped 与裸 RC 写进交付说明",
+    "补完交付说明第 3 节（第三、第四条判据），每个数字旁写日志文件名",
+    "做完就调用 finish_step"
+   ]
+  },
+  {
+   "retained_bytes": 195178,
+   "incomplete_items": [
+    "先在本树上把新测试与 harness 家族重跑一次，确认数字",
+    "跑全套 pytest tests/，日志用 .txt，把 passed/skipped 与裸 RC 写进交付说明",
+    "补完交付说明第 3 节（第三、第四条判据），每个数字旁写日志文件名",
+    "做完就调用 finish_step"
+   ]
+  },
+  {
+   "retained_bytes": 195178,
+   "incomplete_items": [
+    "1. 先在本树上把新测试与 harness 家族重跑一次，确认数字。",
+    "2. 跑全套 `pytest tests/`，日志用 `.txt`，把 passed/skipped 与裸 RC 写进交付说明。",
+    "3. 补完交付说明第 3 节（第三、第四条判据），每个数字旁写日志文件名。",
+    "4. 做完就调用 finish_step。"
+   ]
+  }
+ ],
+ "recorded_acks": [
+  {
+   "retained_bytes": 195178,
+   "incomplete_items": [
+    "Draft is UNVALIDATED: re-run the new tests and the harness family on this worktree to confirm the numbers (draft claims 11 passed new tests, 75 passed / 8 skipped harness family, four mutants each bare RC 1).",
+    "Run the full `pytest tests/` suite, log with .txt (AItelier .gitignore ignores *.log), and write passed/skipped plus bare RC into the delivery notes.",
+    "Finish delivery notes section 3 (criteria 3 and 4), naming the log file next to every number.",
+    "Do not rewrite what already stands; make one contiguous edit per file; call finish_step when done."
+   ]
+  },
+  {
+   "incomplete_items": [
+    "Re-run the new tests and the harness family on this worktree to confirm the draft numbers before touching anything else.",
+    "Run the full `pytest tests/` suite and record passed/skipped and the bare RC.",
+    "Finish delivery notes section 3 (criteria three and four), naming the producing log file next to every number.",
+    "Keep the final logs as .txt in logs/; spend turns sparingly, one contiguous region per file edit, then call finish_step."
+   ],
+   "retained_bytes": 195178
+  },
+  {
+   "incomplete_items": [
+    "8 retained draft files total 195178 bytes: aitelier/tools/godot_playtest/impl.py=22706, docker/godot/godot_harness.py=143264, final/delivery_notes_harness_render_queue.md=8348, logs/pytest_harness_family.txt=674, logs/pytest_harness_render_lock_pre.txt=485, logs/pytest_harness_render_queue.txt=1590, logs/pytest_harness_render_queue_mutants.txt=2904, tests/unit/test_harness_render_queue.py=15207.",
+    "The recovered draft is UNVALIDATED (code_recovery_validated=false, no commits); re-run the new tests and the harness family on this worktree to confirm the claimed 11 passed and 75 passed / 8 skipped.",
+    "The full `pytest tests/` suite was never run; run it, keep logs as .txt under logs/ (AItelier .gitignore ignores *.log), and record passed/skipped plus the bare RC.",
+    "Delivery notes section 3 stopped mid-way at the third criterion; finish criteria three and four with the producing log file name beside every number.",
+    "Previous attempt exhausted 200/200 turns without finish_step; spend turns sparingly, one contiguous region per file edit, then call finish_step."
+   ],
+   "retained_bytes": 195178
+  },
+  {
+   "incomplete_items": [
+    "Retained 8-file draft: docker/godot/godot_harness.py, aitelier/tools/godot_playtest/impl.py, tests/unit/test_harness_render_queue.py, final/delivery_notes_harness_render_queue.md, and four logs/pytest_*.txt.",
+    "Incomplete: draft is unvalidated; re-run the new tests and the harness family to confirm 11 passed and 75 passed / 8 skipped.",
+    "Incomplete: full pytest tests/ was never run; run it, log as .txt in logs/, record passed/skipped and bare RC.",
+    "Incomplete: delivery notes section 3 stops mid-way at criterion three; finish criteria three and four, naming the log file beside every number.",
+    "Incomplete: prior attempt used 200/200 turns and never called finish_step; finish this round without rewriting settled work."
+   ],
+   "retained_bytes": 195178
+  },
+  {
+   "incomplete_items": [
+    "# 接力（relay 1）—— 上一轮用完了 200 回合预算，草稿接近完成\n\n上一轮 `attempt-4840ec3c26494675bcfa5b6745c0e057` 在 implement 用完 200/200 回合，没有调用 finish_step。草稿完整保留（relay digest `5ca5b21ef9daf9a8032818c1fde0269fd522e0f16464eaf6fe969cb2cdf729e9`，8 个文件）：\n`docker/godot/godot_harness.py`、`aitelier/tools/godot_playtest/impl.py`、`tests/unit/test_harness_render_queue.py`、`final/delivery_notes_harness_render_queue.md`、`logs/` 下四个 `.txt`。\n\n草稿自述：新测试 11 passed、harness 家族 75 passed / 8 skipped、四个变异各裸 RC 1。交付说明第 3 节在第三条判据中途断了，全套 `pytest tests/` 没有跑。\n\n**本轮只做收尾，不要重写已经成立的部分：**\n1. 草稿是**未验证**的（接力会从第一步重走）：先在本树上把新测试与 harness 家族重跑一次，确认数字，然后再动别的。\n2. 跑全套 `pytest tests/`，日志用 `.txt`（AItelier 仓 `.gitignore` 忽略 `*.log`），把 passed/skipped 与裸 RC 写进交付说明。\n3. 补完交付说明第 3 节（第三、第四条判据），每个数字旁写日志文件名。\n4. 回合要省着用：一次改一个文件的一个连续区域；不要为了「再确认一下」反复读同一个文件。做完就调用 finish_step。"
+   ],
+   "retained_bytes": 195178
+  },
+  {
+   "incomplete_items": [
+    "The prior attempt (attempt-4840ec3c26494675bcfa5b6745c0e057) burned 200/200 turns and never called finish_step; the 8-file draft is retained but unvalidated (code_recovery_validated=false, no commits).",
+    "Step 1 of the relay: re-run the new tests and the harness family on this worktree to confirm the draft's self-reported numbers (11 passed new tests; 75 passed / 8 skipped harness family; four mutants each bare RC 1) before changing anything else.",
+    "Step 2: the full `pytest tests/` was never run - run it, log as .txt under logs/ (the AItelier .gitignore ignores *.log), and put the passed/skipped counts and bare RC into the delivery notes.",
+    "Step 3: delivery notes section 3 stops partway through the third criterion - finish criteria three and four with the producing log filename written beside every number.",
+    "Step 4: spend turns sparingly, one contiguous region per file edit, no re-confirming reads; call finish_step when done. Do not rewrite the parts that already stand."
+   ],
+   "retained_bytes": 195178
+  },
+  {
+   "incomplete_items": [
+    "草稿是**未验证**的（接力会从第一步重走）：先在本树上把新测试与 harness 家族重跑一次，确认数字，然后再动别的。",
+    "跑全套 `pytest tests/`，日志用 `.txt`（AItelier 仓 `.gitignore` 忽略 `*.log`），把 passed/skipped 与裸 RC 写进交付说明。",
+    "补完交付说明第 3 节（第三、第四条判据），每个数字旁写日志文件名。",
+    "回合要省着用：一次改一个文件的一个连续区域；不要为了「再确认一下」反复读同一个文件。做完就调用 finish_step。"
+   ],
+   "retained_bytes": 195178
+  },
+  {
+   "retained_bytes": 195178,
+   "incomplete_items": [
+    "草稿是未验证的，先在本树上把新测试与 harness 家族重跑一次确认数字",
+    "跑全套 pytest tests/，日志用 .txt，把 passed/skipped 与裸 RC 写进交付说明",
+    "补完交付说明第 3 节（第三、第四条判据），每个数字旁写日志文件名",
+    "不要重写已经成立的部分，做完就调用 finish_step"
+   ]
+  },
+  {
+   "incomplete_items": [
+    "# 接力（relay 1）—— 上一轮用完了 200 回合预算，草稿接近完成"
+   ],
+   "retained_bytes": 195178
+  },
+  {
+   "incomplete_items": [
+    "aitelier/tools/godot_playtest/impl.py=22706 bytes",
+    "docker/godot/godot_harness.py=143264 bytes",
+    "final/delivery_notes_harness_render_queue.md=8348 bytes",
+    "logs/pytest_harness_family.txt=674 bytes",
+    "logs/pytest_harness_render_lock_pre.txt=485 bytes",
+    "logs/pytest_harness_render_queue.txt=1590 bytes",
+    "logs/pytest_harness_render_queue_mutants.txt=2904 bytes",
+    "tests/unit/test_harness_render_queue.py=15207 bytes",
+    "Incomplete work (relay 1): the recovered draft is unvalidated; re-run the new tests and the harness family on this worktree to confirm the numbers before changing anything else.",
+    "Incomplete work: run the full `pytest tests/` suite, keep the log as .txt under logs/, and record passed/skipped plus the bare RC in the delivery notes.",
+    "Incomplete work: delivery notes section 3 breaks off mid-way at the third criterion; finish criteria three and four with the producing log filename beside every number.",
+    "Incomplete work: the prior attempt spent 200/200 turns without finish_step; spend turns sparingly, one contiguous region per file edit, then call finish_step."
+   ],
+   "retained_bytes": 195178
+  },
+  {
+   "retained_bytes": 195178,
+   "incomplete_items": [
+    "# 接力（relay 1）—— 上一轮用完了 200 回合预算，草稿接近完成\n\n上一轮 `attempt-4840ec3c26494675bcfa5b6745c0e057` 在 implement 用完 200/200 回合，没有调用 finish_step。草稿完整保留（relay digest `5ca5b21ef9daf9a8032818c1fde0269fd522e0f16464eaf6fe969cb2cdf729e9`，8 个文件）：\n`docker/godot/godot_harness.py`、`aitelier/tools/godot_playtest/impl.py`、`tests/unit/test_harness_render_queue.py`、`final/delivery_notes_harness_render_queue.md`、`logs/` 下四个 `.txt`。\n\n草稿自述：新测试 11 passed、harness 家族 75 passed / 8 skipped、四个变异各裸 RC 1。交付说明第 3 节在第三条判据中途断了，全套 `pytest tests/` 没有跑。\n\n**本轮只做收尾，不要重写已经成立的部分：**\n1. 草稿是**未验证**的（接力会从第一步重走）：先在本树上把新测试与 harness 家族重跑一次，确认数字，然后再动别的。\n2. 跑全套 `pytest tests/`，日志用 `.txt`（AItelier 仓 `.gitignore` 忽略 `*.log`），把 passed/skipped 与裸 RC 写进交付说明。\n3. 补完交付说明第 3 节（第三、第四条判据），每个数字旁写日志文件名。\n4. 回合要省着用：一次改一个文件的一个连续区域；不要为了「再确认一下」反复读同一个文件。做完就调用 finish_step。",
+    "Total retained code bytes = 195178 across the 8 files listed above; incomplete = confirm the draft numbers, run the full pytest tests/ suite and log it as .txt, finish delivery notes section 3 (criteria three and four) with the log filename beside every number, then finish_step without rewriting settled work."
+   ]
+  },
+  {
+   "incomplete_items": [
+    "Re-verify the unvalidated draft on this worktree: rerun the new tests (claimed 11 passed) and the harness family (claimed 75 passed, 8 skipped), plus the four mutants each bare RC 1, before touching anything else.",
+    "Run the full pytest tests/ suite and log it as a .txt under logs/ with passed/skipped and the bare RC.",
+    "Finish delivery notes section 3 (criteria three and four), naming the producing log file next to every number.",
+    "Do not rewrite the parts that already stand; one contiguous region per file edit; call finish_step when done."
+   ],
+   "retained_bytes": 195178
+  },
+  {
+   "retained_bytes": 195178,
+   "incomplete_items": [
+    "draft unvalidated"
+   ]
+  },
+  {
+   "incomplete_items": [
+    "Total retained code bytes 195178 across aitelier/tools/godot_playtest/impl.py (22706), docker/godot/godot_harness.py (143264), final/delivery_notes_harness_render_queue.md (8348), logs/pytest_harness_family.txt (674), logs/pytest_harness_render_lock_pre.txt (485), logs/pytest_harness_render_queue.txt (1590), logs/pytest_harness_render_queue_mutants.txt (2904), tests/unit/test_harness_render_queue.py (15207).",
+    "The draft is unvalidated, so step one is to rerun the new tests and the harness family on this worktree and confirm the numbers (new tests 11 passed; harness family 75 passed / 8 skipped; four mutants each bare RC 1).",
+    "The full pytest tests/ suite has not been run; run it, write the log as .txt under logs/ because .gitignore drops *.log, and record passed/skipped plus the bare RC.",
+    "Delivery notes section 3 stops part-way through the third criterion; finish criteria three and four with the log file that produced each number named beside it.",
+    "Spend turns sparingly, one contiguous region per file edit, then call finish_step; do not rewrite the parts that already stand."
+   ],
+   "retained_bytes": 195178
+  },
+  {
+   "incomplete_items": [
+    "docker/godot/godot_harness.py",
+    "aitelier/tools/godot_playtest/impl.py",
+    "tests/unit/test_harness_render_queue.py",
+    "final/delivery_notes_harness_render_queue.md",
+    "logs/pytest_harness_family.txt",
+    "logs/pytest_harness_render_lock_pre.txt",
+    "logs/pytest_harness_render_queue.txt",
+    "logs/pytest_harness_render_queue_mutants.txt"
+   ],
+   "retained_bytes": 195178
+  },
+  {
+   "incomplete_items": [
+    "1. 草稿是**未验证**的（接力会从第一步重走）：先在本树上把新测试与 harness 家族重跑一次，确认数字，然后再动别的。",
+    "2. 跑全套 `pytest tests/`，日志用 `.txt`（AItelier 仓 `.gitignore` 忽略 `*.log`），把 passed/skipped 与裸 RC 写进交付说明。",
+    "3. 补完交付说明第 3 节（第三、第四条判据），每个数字旁写日志文件名。",
+    "4. 回合要省着用：一次改一个文件的一个连续区域；不要为了「再确认一下」反复读同一个文件。做完就调用 finish_step。"
+   ],
+   "retained_bytes": 195178
+  },
+  {
+   "incomplete_items": [
+    "(1) The draft is unvalidated: rerun the new tests and the harness family on this worktree first to confirm the numbers before anything else.",
+    "(2) Run the full pytest tests/ suite with .txt logs (the AItelier .gitignore ignores *.log) and write passed/skipped plus the bare RC into the delivery notes.",
+    "(3) Finish delivery notes section 3 (criterion three and criterion four), naming the log file next to every number.",
+    "(4) Spend turns sparingly, one contiguous region per file edit, and call finish_step when done."
+   ],
+   "retained_bytes": 195178
+  },
+  {
+   "incomplete_items": [
+    "草稿是未验证的：先在本树上把新测试与 harness 家族重跑一次，确认数字",
+    "跑全套 pytest tests/，日志用 .txt，把 passed/skipped 与裸 RC 写进交付说明",
+    "补完交付说明第 3 节（第三、第四条判据），每个数字旁写日志文件名",
+    "做完就调用 finish_step"
+   ],
+   "retained_bytes": 195178
+  },
+  {
+   "incomplete_items": [
+    "Relay of attempt-4840ec3c26494675bcfa5b6745c0e057, digest 5ca5b21ef9daf9a8032818c1fde0269fd522e0f16464eaf6fe969cb2cdf729e9: 8 retained files, code_recovery_validated=false, no commits.",
+    "Incomplete 1: the draft is unvalidated - rerun the new tests and the harness family on this worktree and confirm the numbers.",
+    "Incomplete 2: the full pytest tests/ suite was never run - run it, keep the log as .txt, and put passed/skipped and the bare RC into the delivery notes.",
+    "Incomplete 3: delivery notes section 3 breaks off mid-criterion three - finish criteria three and four with the producing log filename beside every number.",
+    "Incomplete 4: the previous attempt burned 200/200 turns without finish_step - finish after the edits, one contiguous region per file."
+   ],
+   "retained_bytes": 195178
+  },
+  {
+   "incomplete_items": [
+    "aitelier/tools/godot_playtest/impl.py (22706 bytes)",
+    "docker/godot/godot_harness.py (143264 bytes)",
+    "final/delivery_notes_harness_render_queue.md (8348 bytes)",
+    "logs/pytest_harness_family.txt (674 bytes)",
+    "logs/pytest_harness_render_lock_pre.txt (485 bytes)",
+    "logs/pytest_harness_render_queue.txt (1590 bytes)",
+    "logs/pytest_harness_render_queue_mutants.txt (2904 bytes)",
+    "tests/unit/test_harness_render_queue.py (15207 bytes)",
+    "These 8 files are the retained recovered draft from attempt-4840ec3c26494675bcfa5b6745c0e057, which is unvalidated. The incomplete work is: (1) rerun the new tests and the harness family on this worktree to confirm the numbers; (2) run the full pytest tests/ suite, log it as .txt, and record passed/skipped plus the bare RC in the delivery notes; (3) finish delivery notes section 3 (criteria three and four) with the log filename beside every number; (4) call finish_step without rewriting the parts that already stand."
+   ],
+   "retained_bytes": 195178
+  },
+  {
+   "incomplete_items": [
+    "Relay 1 of attempt-4840ec3c26494675bcfa5b6745c0e057 (digest 5ca5b21ef9daf9a8032818c1fde0269fd522e0f16464eaf6fe969cb2cdf729e9): recovered draft is UNVALIDATED, no commits.",
+    "Item 1: rerun the new tests and the harness family on this worktree and confirm the numbers before touching anything else.",
+    "Item 2: run the full pytest tests/ suite, keep the log as .txt in logs/, and write passed/skipped and the bare RC into the delivery notes.",
+    "Item 3: finish delivery notes section 3 (criterion three and criterion four), naming the producing log file beside every number.",
+    "Item 4: spend turns sparingly, one contiguous region per file edit, then call finish_step."
+   ],
+   "retained_bytes": 195178
+  },
+  {
+   "retained_bytes": 195178,
+   "incomplete_items": [
+    "The recovered draft from attempt-4840ec3c26494675bcfa5b6745c0e057 is unvalidated; the new tests and the harness family must be rerun on this worktree to confirm the numbers.",
+    "The full pytest tests/ suite was not run; it must be run and logged as .txt, with passed/skipped and the bare RC recorded in the delivery notes.",
+    "The delivery notes section 3 must be completed through criteria three and four, with the log file name beside every number.",
+    "The previous attempt ran out of turns without finish_step; finish this round after the edits."
+   ]
+  },
+  {
+   "retained_bytes": 195178,
+   "incomplete_items": [
+    "Retained relay draft (8 files, 195178 bytes): docker/godot/godot_harness.py, aitelier/tools/godot_playtest/impl.py, tests/unit/test_harness_render_queue.py, final/delivery_notes_harness_render_queue.md, logs/pytest_harness_family.txt, logs/pytest_harness_render_lock_pre.txt, logs/pytest_harness_render_queue.txt, logs/pytest_harness_render_queue_mutants.txt.",
+    "Incomplete: confirm the draft by rerunning the new tests and the harness family on this worktree.",
+    "Incomplete: run the full pytest tests/ suite, log as .txt, record passed/skipped and bare RC in the delivery notes.",
+    "Incomplete: finish delivery notes section 3 (criteria three and four) with the log file name beside every number.",
+    "Incomplete: call finish_step; the prior attempt used 200/200 turns without it."
+   ]
+  },
+  {
+   "incomplete_items": [
+    "# 接力（relay 1）—— 上一轮用完了 200 回合预算，草稿接近完成\n\n上一轮 `attempt-4840ec3c26494675bcfa5b6745c0e057` 在 implement 用完 200/200 回合，没有调用 finish_step。草稿完整保留（relay digest `5ca5b21ef9daf9a8032818c1fde0269fd522e0f16464eaf6fe969cb2cdf729e9`，8 个文件）：\n`docker/godot/godot_harness.py`、`aitelier/tools/godot_playtest/impl.py`、`tests/unit/test_harness_render_queue.py`、`final/delivery_notes_harness_render_queue.md`、`logs/` 下四个 `.txt`。\n\n草稿自述：新测试 11 passed、harness 家族 75 passed / 8 skipped、四个变异各裸 RC 1。交付说明第 3 节在第三条判据中途断了，全套 `pytest tests/` 没有跑。\n\n**本轮只做收尾，不要重写已经成立的部分：**\n1. 草稿是**未验证**的（接力会从第一步重走）：先在本树上把新测试与 harness 家族重跑一次，确认数字，然后再动别的。\n2. 跑全套 `pytest tests/`，日志用 `.txt`（AItelier 仓 `.gitignore` 忽略 `*.log`），把 passed/skipped 与裸 RC 写进交付说明。\n3. 补完交付说明第 3 节（第三、第四条判据），每个数字旁写日志文件名。\n4. 回合要省着用：一次改一个文件的一个连续区域；不要为了「再确认一下」反复读同一个文件。做完就调用 finish_step。\n\n下面是本轮的原始 brief，一字未改。\n\n---\n\n# harness.a-busy-render-lock-queues-instead-of-refusing（rev 1）\n\n**渲染锁忙时，渲染请求应当排队，而不是立即 409。**\n\n`docker/godot/godot_harness.py` 的 do_POST 在进入渲染路由（`/playtest`、`/script`、`/x11_input_smoke`）前写着：\n「Queue behind any render in flight. No timeout: a caller that waited is strictly better off than a caller that got a fast wrong answer」。\n但它先调 `acquire_render_owner`，而 `_acquire_render_owner_under_fence` 只要看到一个 `active` 或 `owner_lost` 的持有者就抛 `render owner exists`，do_POST 把它变成 **409**。\n所以锁忙时请求**不排队**，立刻被拒。该持有者表来自 `ffd1daa7`（2026-09-14，integrate deployment quiescence guard）；那之后注释描述的性质就不成立了。\n\n**实测代价（2026-09-23）：** wuxia 流水线轮 p48 r9（`attempt-6454025168fb4508be0304926752faaf`，run `868ceb46`）三次 test 全部死在这里，时间分别是 17:44、18:08、18:50：\npytest 2449 passed、GDScript 362/362 解析通过，然后 `/playtest` 得到 `HTTP Error 409: Conflict`，游戏仓的 `tools/godot_gate.py` 把它当作「godot-builder unreachable — gate NOT run」退出 2，\nimplement↔test 循环到 `Cycle limit exceeded`。三次撞上的都是合法持有者（astra 运动层基线、martial-arts r8 复查的 `/script`），不是陈旧持有者。门从来没有评判过这一轮的代码。\n\n**要的性质：** 一个活着的持有者占着锁时，新的渲染请求等它释放再跑（记下等了多久、等的是谁）；只有需要人工对账的持有者（`owner_lost`，或心跳过期的 `active`）才应当让请求失败，而且失败信息要说清是哪一种，不能和「连不上」混为一谈。\n耐久持有者表的崩溃安全性不许丢：进程死了留下的持有者仍然挡路，直到对账。\n\n**不许做的事：** 不许靠调用方重试来掩盖（游戏仓的门不是本仓的东西）；不许删掉持有者表或让 `owner_lost` 变得不挡路；不许写替自己辩护的散文。\n部署需要重启 `aitelier-godot` 容器 —— 那一步由导演征得业主同意后执行，本轮只交付代码与测试。\n\n## 判据（逐条交证据，pass/fail 都要写明，不许合并）\n\n- `a-busy-lock-queues-the-request`\n- `a-lost-owner-still-blocks-and-says-so`\n- `the-suite-stays-green-and-the-note-carries-every-number`\n- `the-wait-is-bounded-by-the-callers-own-timeout`\n\n## 纪律（每轮都一样）\n\n- **合约就是上面的 goal 与判据原文。** 不许改写判据、不许放宽任何既有 pin 或 playtest 断言来变绿；要动一条钉子，先说清改的是什么性质。\n- **裸退出码。** 任何退出码都不许经过管道（`| tail`、`| tee`）取得。\n- **两极。** 每条声称「有守卫」的判据：植入真实变异 ⇒ 红并点名；恢复 ⇒ 绿。killed = 真的改文件、跑整套、读裸退出码。\n- **报覆盖面时把叉乘写在数字同一句话里。** 「N 例没逃逸」不等于「关上了」。\n- **度量与写入分开。** 实测先捕获，再经由声明的写工具落盘；不要用 shell 重定向写交付物。\n- **补丁节奏：** 以一个文件的一个连续区域为单位改一次；只在 preflight 明确说摘要过期或坐标越界时才重读。\n- **不许写替自己辩护的散文**（`not a defect`、`by design`、`documented`、`known limitation`、把偏移量写进测试自己的坐标）。\n- 交付说明落在 `final/`，每个数字旁写出产生它的日志文件名，日志在 `logs/` 里且含命令、环境、裸退出码。**日志文件一律 `.txt`**：AItelier 仓 `.gitignore` 忽略 `*.log`，交付钩子会拒收整轮。"
+   ],
+   "retained_bytes": 195178
+  },
+  {
+   "retained_bytes": 195178,
+   "incomplete_items": [
+    "The prior attempt exhausted its 200-turn budget without calling finish_step; recovered code is UNVALIDATED and must be re-verified before anything else.",
+    "Re-run the new render-queue test file and the harness test family on this tree to confirm the reported numbers (11 passed new tests; harness family 75 passed / 8 skipped).",
+    "Run the full `pytest tests/` suite and record passed/skipped counts plus the bare exit code in a `.txt` log (AItelier .gitignore ignores *.log).",
+    "Complete section 3 of final/delivery_notes_harness_render_queue.md for criteria three and four, with the producing log filename beside every number.",
+    "Confirm the four mutant runs (bare RC 1 each) still hold and that the delivery notes section 3 is finished (it was cut off mid-criterion three)."
+   ]
+  },
+  {
+   "incomplete_items": [
+    "Retained draft is UNVALIDATED: re-run the new tests and the harness family on this tree to confirm the numbers before changing anything else.",
+    "Run the full pytest tests/ suite; logs must be .txt; record passed/skipped and the bare return code in the delivery notes.",
+    "Finish section 3 of the delivery notes (criteria three and four), with the producing log filename beside every number.",
+    "Conserve turns: one contiguous region per file per edit; no repeated reads; call finish_step as soon as the work is done."
+   ],
+   "retained_bytes": 195178
+  },
+  {
+   "retained_bytes": 195178,
+   "incomplete_items": [
+    "1. The draft is UNVALIDATED (relay restarts from step 1): first re-run the new tests and the harness family on this tree, confirm the numbers, then touch anything else.",
+    "2. Run the full `pytest tests/`; logs must be `.txt` (AItelier .gitignore ignores `*.log`); write passed/skipped and the bare return code into the delivery notes.",
+    "3. Finish section 3 of the delivery notes (criteria three and four), with the log filename that produced each number written beside it.",
+    "4. Conservation of the retained draft files — docker/godot/godot_harness.py, aitelier/tools/godot_playtest/impl.py, tests/unit/test_harness_render_queue.py, final/delivery_notes_harness_render_queue.md and the four logs/*.txt — whose section 3 was cut off mid-criterion three and whose four mutant runs still need confirming."
+   ]
+  },
+  {
+   "incomplete_items": [
+    "Retained draft is UNVALIDATED and must be re-verified before anything else: re-run tests/unit/test_harness_render_queue.py (15207 bytes) and the harness family, then confirm the claimed numbers (new tests 11 passed; harness family 75 passed / 8 skipped).",
+    "Full `pytest tests/` has not been run: run it, keep the log as `.txt` under logs/ (AItelier .gitignore ignores *.log), and record passed/skipped plus the bare return code in the delivery notes.",
+    "final/delivery_notes_harness_render_queue.md (8348 bytes) section 3 was cut off mid-criterion three: finish section 3 for criteria three and four with the producing log filename beside every number.",
+    "logs/pytest_harness_family.txt (674 bytes), logs/pytest_harness_render_lock_pre.txt (485 bytes), logs/pytest_harness_render_queue.txt (1590 bytes) and logs/pytest_harness_render_queue_mutants.txt (2904 bytes) still need confirming, including the four mutant bare RC 1 results.",
+    "Code under test retained: docker/godot/godot_harness.py (143264 bytes) and aitelier/tools/godot_playtest/impl.py (22706 bytes)."
+   ],
+   "retained_bytes": 195178
+  },
+  {
+   "incomplete_items": [
+    "Step implement: native turn budget exhausted (200/200) without finish_step; incomplete outputs and trace retained; explicit attention required. No delivery or automatic retry.",
+    "草稿是**未验证**的（接力会从第一步重走）：先在本树上把新测试与 harness 家族重跑一次，确认数字，然后再动别的。",
+    "跑全套 `pytest tests/`，日志用 `.txt`（AItelier 仓 `.gitignore` 忽略 `*.log`），把 passed/skipped 与裸 RC 写进交付说明。",
+    "补完交付说明第 3 节（第三、第四条判据），每个数字旁写日志文件名。",
+    "回合要省着用：一次改一个文件的一个连续区域；不要为了「再确认一下」反复读同一个文件。做完就调用 finish_step。"
+   ],
+   "retained_bytes": 195178
+  },
+  {
+   "retained_bytes": 195178,
+   "incomplete_items": [
+    "Prior attempt exhausted 200/200 turns without finish_step; all 8 recovered files are UNVALIDATED and must be re-verified on this tree.",
+    "Rerun tests/unit/test_harness_render_queue.py and the harness family tests first to confirm the claimed numbers (new tests 11 passed; harness family 75 passed / 8 skipped).",
+    "Run the full `pytest tests/` suite and capture it to a .txt log under logs/ (AItelier .gitignore ignores *.log), recording passed/skipped counts and the bare RC.",
+    "Delivery notes final/delivery_notes_harness_render_queue.md section 3 is truncated mid-way through the third criterion; criteria 3 and 4 (the-suite-stays-green-and-the-note-carries-every-number, the-wait-is-bounded-by-the-callers-own-timeout) are unfinished, and every number needs its producing log filename.",
+    "The four mutants each need their bare RC 1 re-confirmed/logged with mutant log files."
+   ]
+  },
+  {
+   "incomplete_items": [
+    "Recovered code is UNVALIDATED: the previous attempt spent 200/200 turns without finish_step, so the 8 retained files were never validated on this tree.",
+    "Rerun the new tests (tests/unit/test_harness_render_queue.py) and the harness family on this tree to confirm the draft's claimed numbers (11 passed; 75 passed / 8 skipped).",
+    "The full `pytest tests/` run was never executed; it must be run and captured to a logs/*.txt file with passed/skipped counts and the bare return code.",
+    "Delivery notes final/delivery_notes_harness_render_queue.md section 3 breaks off mid-way through the third criterion; criteria 3 and 4 are unwritten and every number needs its producing log filename next to it.",
+    "Re-confirm the four mutants (bare RC 1 each) and keep their .txt mutant logs."
+   ],
+   "retained_bytes": 195178
+  },
+  {
+   "incomplete_items": [
+    "Rerun the new tests and the harness family on this tree to confirm the draft's numbers before touching anything else.",
+    "Run the full pytest tests/ suite, log it as .txt, and write passed/skipped and the bare RC into the delivery notes.",
+    "Finish delivery-notes section 3 (criteria 3 and 4), placing the producing log filename beside every number.",
+    "Conserve turns: one contiguous region of one file per edit; do not re-read the same file to re-confirm; call finish_step when done."
+   ],
+   "retained_bytes": 195178
+  },
+  {
+   "incomplete_items": [
+    "Validate the unvalidated draft: rerun the new render-queue tests (tests/unit/test_harness_render_queue.py, draft said 11 passed) and the harness family (draft said 75 passed / 8 skipped) on this tree.",
+    "Run the full `pytest tests/` with a .txt log in logs/ and record passed/skipped and the bare RC.",
+    "Finish section 3 of final/delivery_notes_harness_render_queue.md (third and fourth criteria), writing each number's producing log file name beside it.",
+    "Call finish_step; do not rewrite parts already established (four mutant kills, each bare RC 1)."
+   ],
+   "retained_bytes": 195178
+  },
+  {
+   "incomplete_items": [
+    "Validate the unvalidated draft on this tree: rerun tests/unit/test_harness_render_queue.py (draft claims 11 passed) and the harness family (draft claims 75 passed / 8 skipped).",
+    "Run the full `pytest tests/`, log as .txt under logs/, record passed/skipped and bare RC.",
+    "Complete section 3 of final/delivery_notes_harness_render_queue.md (third and fourth criteria: a-lost-owner-still-blocks-and-says-so and the-wait-is-bounded-by-the-callers-own-timeout), each number annotated with its producing log file name.",
+    "Then finish_step without rewriting already-valid work (four mutant kills, each bare RC 1, already logged in logs/pytest_harness_render_queue_mutants.txt)."
+   ],
+   "retained_bytes": 195178
+  },
+  {
+   "incomplete_items": [
+    "草稿是未验证的（接力会从第一步重走）：先在本树上把新测试与 harness 家族重跑一次，确认数字，然后再动别的。",
+    "跑全套 `pytest tests/`，日志用 `.txt`（AItelier 仓 `.gitignore` 忽略 `*.log`），把 passed/skipped 与裸 RC 写进交付说明。",
+    "补完交付说明第 3 节（第三、第四条判据），每个数字旁写日志文件名。",
+    "回合要省着用：一次改一个文件的一个连续区域；不要为了「再确认一下」反复读同一个文件。做完就调用 finish_step。"
+   ],
+   "retained_bytes": 195178
+  },
+  {
+   "incomplete_items": [
+    "a-busy-lock-queues-the-request",
+    "a-lost-owner-still-blocks-and-says-so",
+    "the-suite-stays-green-and-the-note-carries-every-number",
+    "the-wait-is-bounded-by-the-callers-own-timeout"
+   ],
+   "retained_bytes": 195178
+  },
+  {
+   "incomplete_items": [
+    "# 接力（relay 1）—— 上一轮用完了 200 回合预算，草稿接近完成",
+    "草稿是未验证的：先在本树上把新测试与 harness 家族重跑一次，确认数字。",
+    "跑全套 pytest tests/，日志用 .txt，把 passed/skipped 与裸 RC 写进交付说明。",
+    "补完交付说明第 3 节（第三、第四条判据），每个数字旁写日志文件名。",
+    "做完就调用 finish_step。"
+   ],
+   "retained_bytes": 195178
+  },
+  {
+   "incomplete_items": [
+    "Retained 195178 bytes total, relay digest 5ca5b21ef9daf9a8032818c1fde0269fd522e0f16464eaf6fe969cb2cdf729e9, 8 files: docker/godot/godot_harness.py (143264), aitelier/tools/godot_playtest/impl.py (22706), tests/unit/test_harness_render_queue.py (15207), final/delivery_notes_harness_render_queue.md (8348), logs/pytest_harness_family.txt (674), logs/pytest_harness_render_lock_pre.txt (485), logs/pytest_harness_render_queue.txt (1590), logs/pytest_harness_render_queue_mutants.txt (2904).",
+    "Incomplete: validate the draft on this tree (rerun new render-queue tests and harness family), run full pytest tests/ with a .txt log and record passed/skipped and bare RC, complete section 3 of the delivery notes (third and fourth criteria with log file names per number), then finish_step without rewriting valid work."
+   ],
+   "retained_bytes": 195178
+  },
+  {
+   "incomplete_items": [
+    "先在本树上把新测试与 harness 家族重跑一次，确认数字",
+    "跑全套 pytest tests/，日志用 .txt，把 passed/skipped 与裸 RC 写进交付说明",
+    "补完交付说明第 3 节（第三、第四条判据），每个数字旁写日志文件名",
+    "做完就调用 finish_step"
+   ],
+   "retained_bytes": 195178
+  },
+  {
+   "incomplete_items": [
+    "Validate the unvalidated draft on this tree: rerun tests/unit/test_harness_render_queue.py (draft claims 11 passed) and the harness family (draft claims 75 passed / 8 skipped).",
+    "Run the full `pytest tests/`, log as .txt under logs/, record passed/skipped and bare RC.",
+    "Complete section 3 of final/delivery_notes_harness_render_queue.md (third and fourth criteria), each number annotated with its producing log file name.",
+    "Then finish_step without rewriting already-valid work (four mutant kills, each bare RC 1, in logs/pytest_harness_render_queue_mutants.txt)."
+   ],
+   "retained_bytes": 195178
+  },
+  {
+   "incomplete_items": [
+    "1. 先在本树上把新测试与 harness 家族重跑一次，确认数字。",
+    "2. 跑全套 `pytest tests/`，日志用 `.txt`，把 passed/skipped 与裸 RC 写进交付说明。",
+    "3. 补完交付说明第 3 节（第三、第四条判据），每个数字旁写日志文件名。",
+    "4. 做完就调用 finish_step。"
+   ],
+   "retained_bytes": 195178
+  },
+  {
+   "incomplete_items": [
+    "草稿是未验证的：先在本树上把新测试与 harness 家族重跑一次，确认数字，然后再动别的。",
+    "跑全套 `pytest tests/`，日志用 `.txt`（AItelier 仓 `.gitignore` 忽略 `*.log`），把 passed/skipped 与裸 RC 写进交付说明。",
+    "补完交付说明第 3 节（第三、第四条判据），每个数字旁写日志文件名。",
+    "回合要省着用：一次改一个文件的一个连续区域；不要为了「再确认一下」反复读同一个文件。做完就调用 finish_step。"
+   ],
+   "retained_bytes": 195178
+  },
+  {
+   "incomplete_items": [
+    "a-busy-lock-queues-the-request: 锁被心跳新鲜的 active 持有者占着时，请求等待并执行，返回正常结果；变异（排队改回立即抛出）红并点名。",
+    "a-lost-owner-still-blocks-and-says-so: owner_lost 与心跳过期的 active 持有者仍挡路，失败信息说明持有者种类、owner_id 与需对账；两极变异各红并点名。",
+    "the-suite-stays-green-and-the-note-carries-every-number: 全套 pytest tests/ 裸 RC 0，passed/skipped 写进交付说明，每个数字旁写日志文件名。",
+    "the-wait-is-bounded-by-the-callers-own-timeout: 客户端断开或等待上限到达后，排队请求不得再获得所有权开跑；两极变异各红并点名。"
+   ],
+   "retained_bytes": 195178
+  },
+  {
+   "incomplete_items": [
+    "接力（relay 1）：草稿完整保留（8 个文件，195178 字节）。收尾清单：先在本树上把新测试与 harness 家族重跑一次，确认数字；跑全套 pytest tests/，日志用 .txt，把 passed/skipped 与裸 RC 写进交付说明；补完交付说明第 3 节（第三、第四条判据），每个数字旁写日志文件名；做完就调用 finish_step。"
+   ],
+   "retained_bytes": 195178
+  },
+  {
+   "incomplete_items": [
+    "Validate the unvalidated draft: rerun tests/unit/test_harness_render_queue.py (11 passed expected) and the harness family (75 passed / 8 skipped expected) on this tree.",
+    "Run the full `pytest tests/`, log as .txt under logs/, record passed/skipped and the bare RC in the delivery notes.",
+    "Complete section 3 of final/delivery_notes_harness_render_queue.md (third and fourth criteria), each number annotated with its producing log file name.",
+    "Call finish_step without rewriting already-valid work (four mutant kills, each bare RC 1, logs/pytest_harness_render_queue_mutants.txt)."
+   ],
+   "retained_bytes": 195178
+  },
+  {
+   "incomplete_items": [
+    "195178"
+   ],
+   "retained_bytes": 195178
+  },
+  {
+   "incomplete_items": [
+    "1. 先在本树上把新测试与 harness 家族重跑一次，确认数字（新测试 11 passed；harness 家族 75 passed / 8 skipped）。",
+    "2. 跑全套 `pytest tests/`，日志用 `.txt`，把 passed/skipped 与裸 RC 写进交付说明。",
+    "3. 补完交付说明第 3 节（第三、第四条判据），每个数字旁写日志文件名。",
+    "4. 做完就调用 finish_step。"
+   ],
+   "retained_bytes": 195178
+  },
+  {
+   "incomplete_items": [
+    "先在本树上把新测试与 harness 家族重跑一次，确认数字，然后再动别的。",
+    "跑全套 `pytest tests/`，日志用 `.txt`，把 passed/skipped 与裸 RC 写进交付说明。",
+    "补完交付说明第 3 节（第三、第四条判据），每个数字旁写日志文件名。",
+    "做完就调用 finish_step。"
+   ],
+   "retained_bytes": 195178
+  },
+  {
+   "incomplete_items": [
+    "1. 先在本树上把新测试与 harness 家族重跑一次，确认数字，然后再动别的。",
+    "2. 跑全套 `pytest tests/`，日志用 `.txt`，把 passed/skipped 与裸 RC 写进交付说明。",
+    "3. 补完交付说明第 3 节（第三、第四条判据），每个数字旁写日志文件名。",
+    "4. 做完就调用 finish_step。"
+   ],
+   "retained_bytes": 195178
+  },
+  {
+   "incomplete_items": [
+    "草稿是未验证的：先在本树上把新测试与 harness 家族重跑一次，确认数字。",
+    "跑全套 pytest tests/，日志用 .txt，把 passed/skipped 与裸 RC 写进交付说明。",
+    "补完交付说明第 3 节（第三、第四条判据），每个数字旁写日志文件名。",
+    "做完就调用 finish_step。"
+   ],
+   "retained_bytes": 195178
+  },
+  {
+   "incomplete_items": [
+    "validate the draft by rerunning the new render-queue test file and the harness family",
+    "run the whole pytest tests/ suite and log it as .txt with passed/skipped and bare RC",
+    "finish section 3 of the delivery notes for the third and fourth criteria with log file names beside each number",
+    "call finish_step"
+   ],
+   "retained_bytes": 195178
+  },
+  {
+   "incomplete_items": [
+    "validate the draft: rerun the new render-queue test file and the harness family on this tree",
+    "run the full pytest tests/ suite, log it as .txt, record passed/skipped and the bare RC in the delivery notes",
+    "finish section 3 of the delivery notes (third and fourth criteria) with the producing log file name beside each number",
+    "call finish_step"
+   ],
+   "retained_bytes": 195178
+  }
+ ]
+}

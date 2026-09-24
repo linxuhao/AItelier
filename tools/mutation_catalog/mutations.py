@@ -1,23 +1,67 @@
 """Named-mutation catalog for the "a gate that never ran is not a failing
-gate" card (rev 8).  Every entry is ONE concrete edit against a REAL file:
-an anchor that must match exactly once, and the replacement.  The 7 goal-table
-mutations (N9, M21, M21b, G2, G2b, DUPIMPL, RESTART) are written VERBATIM per
-the card's table — no self-authored "equivalent" stands in for them.
+gate" card. Every entry is ONE concrete edit (one or more hunks) against a REAL
+file: an anchor that must match exactly once, and its replacement.
 
-`run_mutations.py` applies each to a copy of the tree, checks the anchor hit
-exactly once, runs the targeted tests and the full ``tests/unit tests/skillflow``
-suite, reads the BARE exit code, records the tests that went red, and restores
-the tree.  A mutation whose anchor does not hit exactly once is an ERROR, not a
-kill (the card forbids counting a zero-hit anchor as killed).
+What is in here, and where each name comes from:
 
-Each edit is a list of ``{anchor, replacement}`` hunk(s) so a mutation can be
-more than a one-line change (RESTART persists the ledger, which needs a global
-plus the field)."""
+* the goal table, VERBATIM (`GOAL_TABLE`: N9, M21, M21b, G2, G2b, DUPIMPL,
+  RESTART). Only their `targeted` selections are this catalog's choice;
+* names an independent review defined (S1, VALVEREACH, ABSTERM, ABSTERM2, D1,
+  D4, M2, M19, TAILONLY2, SCHEDROWRETRY, SCHEDROWSTATUS, H2, ...), each with
+  the review's own edit, minus the review's ignition counter call (the runner
+  counts ignition itself);
+* edits rounds added under their own names. A name keeps the edit it was
+  defined with; a different edit gets a different name. Round 8 re-used nine
+  review names for other edits; those edits now carry new names (TIMEOUT60,
+  ABSTERMTEXT, TERMREASONCYCLE, VALVEOFF, NEVEREXPIRE, READNONDICT, DECLNONE)
+  or were dropped where they are the same edit as a restored name (round 8's
+  "M2" is TAILONLY2's edit, round 8's "TAILONLY2" is M2's).
 
-#: name -> { "edits": [{file, anchor, replacement}], "targeted": [test ids] }
+`run_mutations.py` applies each entry to its own detached `git worktree` of
+the committed tree, checks every anchor hits exactly once BEFORE editing (a
+miss is an anchor error, never a kill), runs the `targeted` selection and
+`FULL_SCOPE`, and records bare exit codes, ignition and red tests.
+
+`kind` is "behaviour" unless stated: a red test that read the mutated file's
+source text is then a source-text witness, not a killer. "text" marks an edit
+whose guarded property IS the text (a duplicated line, a deleted contract
+sentence), where the reader of the text is the witness.
+"""
+
+IMPL = "aitelier/tools/run_tests/impl.py"
+SCHED = "core/scheduler.py"
+HOST = "core/skillflow_host.py"
+GD = "core/gate_deferral.py"
+CHK = "tests/unit/test_no_verbatim_previous_line_dup.py"
+
+DECL = "tests/unit/test_run_tests_unmeasured_declaration.py"
+ABSENCE = "tests/skillflow/test_coding_impl_gate_absence.py"
+EXEC_POINTS = "tests/unit/test_gate_deferral_execution_points.py"
+ACCOUNTED = "tests/unit/test_gate_deferral_is_accounted.py"
+
+GOAL_TABLE = ("N9", "M21", "M21b", "G2", "G2b", "DUPIMPL", "RESTART")
+
+_TICK_SILENT = "    if deferral[\"state\"] == \"silent\":\n"
+
+
+def _sched_row_charge(column_sql):
+    """The review's SCHEDROW* shape: the tick's silent branch charges the
+    parked `test` row while it holds the run."""
+    return [{
+        "file": SCHED,
+        "anchor": _TICK_SILENT,
+        "replacement": _TICK_SILENT +
+        "        sf._conn.execute(\"UPDATE skillflow_steps SET " + column_sql +
+        " WHERE run_id=? AND step_id='test'\", (run_id,))\n",
+    }]
+
+
+#: name -> {"edits": [{file, anchor, replacement}], "targeted": [test ids],
+#:          optional "kind", optional "file_note"}
 MUTATIONS = {
     # ── goal table, verbatim ──────────────────────────────────────────────
     "N9": {
+        "kind": "text",
         "file_note": "tool.yaml:52-56 — delete the sentence that states a "
                      "no-verdict gate does not loop back to implement.",
         "edits": [{
@@ -35,109 +79,69 @@ MUTATIONS = {
             "replacement": "",
         }],
         "targeted": [
-            "tests/unit/test_run_tests_unmeasured_declaration.py::test_the_tool_doc_names_the_no_verdict_gate_as_absent_not_a_loop",
+            DECL + "::test_the_tool_doc_names_the_no_verdict_gate_as_absent_not_a_loop",
         ],
     },
     "M21": {
         "file_note": "_unmeasured_declaration: startswith -> `in`; the "
                      "line[len(prefix):] slice is LEFT UNCHANGED (verbatim).",
         "edits": [{
-            "file": "aitelier/tools/run_tests/impl.py",
+            "file": IMPL,
             "anchor": "        if not line.startswith(_REPO_GATE_UNMEASURED_PREFIX):\n",
             "replacement": "        if not (_REPO_GATE_UNMEASURED_PREFIX in line):\n",
         }],
         "targeted": [
-            "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_mid_line_echo_kills_the_in_operator_on_the_declaration_channel",
-            "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_log_echo_of_the_prefix_mid_line_is_not_a_declaration",
+            DECL + "::test_the_r4_shaped_witness_flips_under_the_literal_m21",
         ],
     },
     "M21b": {
         "file_note": "_repo_gate_failure_cases: startswith -> `in`; slice "
                      "unchanged (verbatim).",
         "edits": [{
-            "file": "aitelier/tools/run_tests/impl.py",
+            "file": IMPL,
             "anchor": "        if not line.startswith(_REPO_GATE_CASE_PREFIX):\n",
             "replacement": "        if not (_REPO_GATE_CASE_PREFIX in line):\n",
         }],
         "targeted": [
-            "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_mid_line_echo_kills_the_in_operator_on_the_case_channel",
-            "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_log_echo_of_the_case_prefix_mid_line_is_not_a_case_record",
-        ],
-    },
-    "M21PAIR": {
-        "file_note": "The OBSERVABLE half of the M21 family: `in` AND the "
-                     "`line.index(prefix)` slice together. The pair is what "
-                     "turns a declaration-channel test red; literal M21 "
-                     "alone is inert against THIS shape.",
-        "edits": [
-            {
-                "file": "aitelier/tools/run_tests/impl.py",
-                "anchor": "        if not line.startswith(_REPO_GATE_UNMEASURED_PREFIX):\n",
-                "replacement": "        if not (_REPO_GATE_UNMEASURED_PREFIX in line):\n",
-            },
-            {
-                "file": "aitelier/tools/run_tests/impl.py",
-                "anchor": "        raw = line[len(_REPO_GATE_UNMEASURED_PREFIX):]\n",
-                "replacement": "        raw = line[line.index(_REPO_GATE_UNMEASURED_PREFIX) + len(_REPO_GATE_UNMEASURED_PREFIX):]\n",
-            },
-        ],
-        "targeted": [
-            "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_mid_line_echo_kills_the_in_operator_on_the_declaration_channel",
-        ],
-    },
-    "M21BPAIR": {
-        "file_note": "The observable pair on the case channel (M21b + its slice).",
-        "edits": [
-            {
-                "file": "aitelier/tools/run_tests/impl.py",
-                "anchor": "        if not line.startswith(_REPO_GATE_CASE_PREFIX):\n",
-                "replacement": "        if not (_REPO_GATE_CASE_PREFIX in line):\n",
-            },
-            {
-                "file": "aitelier/tools/run_tests/impl.py",
-                "anchor": "        raw = line[len(_REPO_GATE_CASE_PREFIX):]\n",
-                "replacement": "        raw = line[line.index(_REPO_GATE_CASE_PREFIX) + len(_REPO_GATE_CASE_PREFIX):]\n",
-            },
-        ],
-        "targeted": [
-            "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_mid_line_echo_kills_the_in_operator_on_the_case_channel",
+            DECL + "::test_the_r4_shaped_witness_flips_under_the_literal_m21b",
         ],
     },
     "G2": {
         "file_note": "gate_deferral module constant GATE_DEFERRAL_EPISODE_MAX_SECONDS = 1e9.",
         "edits": [{
-            "file": "core/gate_deferral.py",
+            "file": GD,
             "anchor": "GATE_DEFERRAL_EPISODE_MAX_SECONDS = float(\n"
                       "    os.getenv(\"AITELIER_GATE_DEFERRAL_EPISODE_MAX_SECONDS\", \"10800\"))\n",
             "replacement": "GATE_DEFERRAL_EPISODE_MAX_SECONDS = 1e9\n",
         }],
         "targeted": [
-            "tests/unit/test_gate_deferral_execution_points.py::test_the_effective_episode_ceiling_is_ten_thousand_eight_hundred_as_loaded",
+            EXEC_POINTS + "::test_the_effective_episode_ceiling_is_ten_thousand_eight_hundred_as_loaded",
         ],
     },
     "G2b": {
         "file_note": "gate_deferral module constant GATE_DEFERRAL_EPISODE_MAX_CEILING = 1e9.",
         "edits": [{
-            "file": "core/gate_deferral.py",
+            "file": GD,
             "anchor": "GATE_DEFERRAL_EPISODE_MAX_CEILING = float(\n"
                       "    os.getenv(\"AITELIER_GATE_DEFERRAL_EPISODE_MAX_CEILING\", str(6 * 3600)))\n",
             "replacement": "GATE_DEFERRAL_EPISODE_MAX_CEILING = 1e9\n",
         }],
         "targeted": [
-            "tests/unit/test_gate_deferral_execution_points.py::test_the_effective_episode_ceiling_is_ten_thousand_eight_hundred_as_loaded",
+            EXEC_POINTS + "::test_the_effective_episode_ceiling_is_ten_thousand_eight_hundred_as_loaded",
         ],
     },
     "DUPIMPL": {
+        "kind": "text",
         "file_note": "write the `_ERROR_RE = ...` line a second time, "
                      "immediately after itself.",
         "edits": [{
-            "file": "aitelier/tools/run_tests/impl.py",
+            "file": IMPL,
             "anchor": "_ERROR_RE = re.compile(r\"^ERROR\\s+(\\S+)\")\n",
             "replacement": "_ERROR_RE = re.compile(r\"^ERROR\\s+(\\S+)\")\n"
                            "_ERROR_RE = re.compile(r\"^ERROR\\s+(\\S+)\")\n",
         }],
         "targeted": [
-            "tests/unit/test_no_verbatim_previous_line_dup.py::test_no_verbatim_previous_line_dup_in_non_test_code",
+            CHK + "::test_no_verbatim_previous_line_dup_in_non_test_code",
         ],
     },
     "RESTART": {
@@ -146,7 +150,7 @@ MUTATIONS = {
                      "`episode_seconds(...) == 0.0` assert guarded.",
         "edits": [
             {
-                "file": "core/gate_deferral.py",
+                "file": GD,
                 "anchor": "@dataclass\nclass DeferralLedger:",
                 "replacement": "# RESTART mutation: a process-wide store every fresh\n"
                                "# ledger reads back, i.e. the ledger IS persisted.\n"
@@ -154,321 +158,437 @@ MUTATIONS = {
                                "class DeferralLedger:",
             },
             {
-                "file": "core/gate_deferral.py",
+                "file": GD,
                 "anchor": "    episodes: dict[str, _Episode] = field(default_factory=dict)\n",
                 "replacement": "    episodes: dict[str, _Episode] = field("
                                "default_factory=lambda: _PERSISTED_EPISODES)\n",
             },
         ],
         "targeted": [
-            "tests/unit/test_gate_deferral_execution_points.py::test_the_deferral_ledger_is_not_persisted_so_a_restart_re_measures",
+            EXEC_POINTS + "::test_the_deferral_ledger_is_not_persisted_so_a_restart_re_measures",
         ],
     },
-    # ── previously-killed named mutations, anchored to real source ─────────
+    # ── the M21 pair (round 8/9 names) ────────────────────────────────────
+    "M21PAIR": {
+        "file_note": "`in` AND the `line.index(prefix)` slice together on the "
+                     "declaration channel: a second, blunter mutation than "
+                     "the goal table's M21.",
+        "edits": [
+            {
+                "file": IMPL,
+                "anchor": "        if not line.startswith(_REPO_GATE_UNMEASURED_PREFIX):\n",
+                "replacement": "        if not (_REPO_GATE_UNMEASURED_PREFIX in line):\n",
+            },
+            {
+                "file": IMPL,
+                "anchor": "        raw = line[len(_REPO_GATE_UNMEASURED_PREFIX):]\n",
+                "replacement": "        raw = line[line.index(_REPO_GATE_UNMEASURED_PREFIX) + len(_REPO_GATE_UNMEASURED_PREFIX):]\n",
+            },
+        ],
+        "targeted": [
+            DECL + "::test_a_mid_line_echo_kills_the_in_operator_on_the_declaration_channel",
+        ],
+    },
+    "M21BPAIR": {
+        "file_note": "The same pair on the case channel (M21b + its slice).",
+        "edits": [
+            {
+                "file": IMPL,
+                "anchor": "        if not line.startswith(_REPO_GATE_CASE_PREFIX):\n",
+                "replacement": "        if not (_REPO_GATE_CASE_PREFIX in line):\n",
+            },
+            {
+                "file": IMPL,
+                "anchor": "        raw = line[len(_REPO_GATE_CASE_PREFIX):]\n",
+                "replacement": "        raw = line[line.index(_REPO_GATE_CASE_PREFIX) + len(_REPO_GATE_CASE_PREFIX):]\n",
+            },
+        ],
+        "targeted": [
+            DECL + "::test_a_mid_line_echo_kills_the_in_operator_on_the_case_channel",
+        ],
+    },
+    # ── review-defined names, the review's edits ──────────────────────────
     "M2": {
+        "file_note": "a truncated gate's retained fragment alone decides the "
+                     "declaration again (the truncation branch is skipped).",
         "edits": [{
-            "file": "aitelier/tools/run_tests/impl.py",
-            "anchor": "                \"unmeasured_declaration\": _unmeasured_declaration(out)}\n",
-            "replacement": "                \"unmeasured_declaration\": _unmeasured_declaration(out[-2000:])}\n",
+            "file": IMPL,
+            "anchor": "        return True\n    if gate.get(\"output_truncated\"):",
+            "replacement": "        return True\n    if False and gate.get(\"output_truncated\"):",
         }],
         "targeted": [
-            "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_declaration_survives_output_far_past_the_retention_bound",
+            DECL + "::test_a_bounded_fragment_is_not_a_record_on_its_own",
         ],
     },
     "M19": {
+        "file_note": "the truncation branch answers True instead of False.",
         "edits": [{
-            "file": "aitelier/tools/run_tests/impl.py",
-            "anchor": "                \"unmeasured_declaration\": _unmeasured_declaration(out)}\n",
-            "replacement": "                \"unmeasured_declaration\": None}\n",
+            "file": IMPL,
+            "anchor": "        return False\n    return _unmeasured_declaration(str(gate.get(\"output\", \"\"))) is not None",
+            "replacement": "        return True\n    return _unmeasured_declaration(str(gate.get(\"output\", \"\"))) is not None",
         }],
         "targeted": [
-            "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_declared_absence_is_unmeasured_whatever_the_exit_code_was",
+            DECL + "::test_a_bounded_fragment_is_not_a_record_on_its_own",
         ],
     },
     "TAILONLY2": {
+        "file_note": "`_run_node_cmd` scans only the retained tail out[-2000:] "
+                     "for the declaration.",
         "edits": [{
-            "file": "aitelier/tools/run_tests/impl.py",
-            "anchor": "    if gate.get(\"output_truncated\"):\n        # Only a fragment was retained",
-            "replacement": "    if False:\n        # Only a fragment was retained",
+            "file": IMPL,
+            "anchor": "\"unmeasured_declaration\": _unmeasured_declaration(out)}",
+            "replacement": "\"unmeasured_declaration\": _unmeasured_declaration(out[-2000:])}",
         }],
         "targeted": [
-            "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_truncated_gate_with_no_record_at_all_is_a_red",
+            DECL + "::test_a_declaration_survives_output_far_past_the_retention_bound",
         ],
     },
-    "RC2": {
+    "D1": {
+        "file_note": "a declared absence no longer sets repo_gate_unmeasured.",
         "edits": [{
-            "file": "aitelier/tools/run_tests/impl.py",
-            "anchor": "    return (REPO_GATE_MEASURED_PASS if gate.get(\"returncode\") == 0\n            else REPO_GATE_MEASURED_FAIL)\n",
-            "replacement": "    return (REPO_GATE_MEASURED_PASS if gate.get(\"returncode\") == 0\n            else REPO_GATE_UNMEASURED)\n",
+            "file": IMPL,
+            "anchor": "                report[\"repo_gate_unmeasured\"] = True",
+            "replacement": "                report[\"repo_gate_unmeasured\"] = False",
         }],
-        "targeted": [
-            "tests/unit/test_run_tests_unmeasured_declaration.py::test_no_exit_code_alone_is_ever_unmeasured",
-        ],
+        "targeted": [DECL, ABSENCE],
     },
-    "TIMEOUT_NOT_UNMEASURED": {
+    "D4": {
+        "file_note": "a declared absence no longer sets repo_gate_absent.",
         "edits": [{
-            "file": "aitelier/tools/run_tests/impl.py",
-            "anchor": "    if gate.get(\"timed_out\") is True or gate.get(\"runner_error\") is True:\n",
-            "replacement": "    if False:\n",
+            "file": IMPL,
+            "anchor": "                report[\"repo_gate_absent\"] = True",
+            "replacement": "                report[\"repo_gate_absent\"] = False",
         }],
-        "targeted": [
-            "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_killed_gate_is_unmeasured_and_its_returncode_is_not_why",
-        ],
+        "targeted": [DECL, ABSENCE],
     },
-    "VALVEBYPASS": {
+    "ABSTERM": {
+        "file_note": "the terminal-wording checker answers True for any "
+                     "sentence.",
         "edits": [{
-            "file": "core/gate_deferral.py",
-            "anchor": "    return claims > max_claims\n",
-            "replacement": "    if ledger is not None and ledger.deferring(run_id, now=now):\n        return False\n    return claims > max_claims\n",
+            "file": GD,
+            "anchor": "    lowered = str(reason).lower()\n"
+                      "    if ABSENCE_TERMINAL.lower() not in lowered:\n"
+                      "        return False",
+            "replacement": "    lowered = str(reason).lower()\n"
+                           "    if True:\n"
+                           "        return True\n"
+                           "    if ABSENCE_TERMINAL.lower() not in lowered:\n"
+                           "        return False",
         }],
-        "targeted": [
-            "tests/unit/test_gate_deferral_execution_points.py",
-            "tests/unit/test_gate_deferral_is_accounted.py",
-        ],
+        "targeted": [ACCOUNTED],
+    },
+    "ABSTERM2": {
+        "file_note": "drop the plural-stem widening of the forbidden words.",
+        "edits": [{
+            "file": GD,
+            "anchor": "    words |= {w[:-1] for w in words if w.endswith(\"s\")}",
+            "replacement": "    words |= set()",
+        }],
+        "targeted": [ACCOUNTED],
+    },
+    "S1": {
+        "file_note": "the tick's observe_run result is replaced by `none`: "
+                     "the scheduler tick hold never sees the absence.",
+        "edits": [{
+            "file": SCHED,
+            "anchor": "    deferral = gate_deferral.observe_run(sf, run_id)\n" + _TICK_SILENT,
+            "replacement": "    deferral = {\"state\": \"none\", \"remaining\": 0.0, "
+                           "\"gate\": \"\", \"reason\": \"\"}\n" + _TICK_SILENT,
+        }],
+        "targeted": [ABSENCE, EXEC_POINTS],
     },
     "VALVEREACH": {
+        "file_note": "the tick's silent branch logs and falls through instead "
+                     "of returning.",
         "edits": [{
-            "file": "core/gate_deferral.py",
-            "anchor": "    return claims > max_claims\n",
-            "replacement": "    return False\n",
+            "file": SCHED,
+            "anchor": "                 remaining=f\"{deferral['remaining']:.0f}s\")\n"
+                      "        return\n"
+                      "    if deferral[\"state\"] == \"expired\":",
+            "replacement": "                 remaining=f\"{deferral['remaining']:.0f}s\")\n"
+                           "        pass\n"
+                           "    if deferral[\"state\"] == \"expired\":",
         }],
-        "targeted": [
-            "tests/unit/test_gate_deferral_execution_points.py",
-            "tests/unit/test_gate_deferral_is_accounted.py",
-        ],
+        "targeted": [ABSENCE, EXEC_POINTS],
     },
-    "ABSCEIL": {
-        "edits": [{
-            "file": "core/gate_deferral.py",
-            "anchor": "_ABSOLUTE_EPISODE_CEILING = 6 * 3600.0\n",
-            "replacement": "_ABSOLUTE_EPISODE_CEILING = 1e9\n",
-        }],
-        "targeted": [
-            "tests/unit/test_gate_deferral_execution_points.py",
-        ],
+    "SCHEDROWRETRY": {
+        "file_note": "the tick's silent branch charges the parked `test` "
+                     "row's retry_count.",
+        "edits": _sched_row_charge("retry_count=retry_count+1"),
+        "targeted": [ABSENCE],
+    },
+    "SCHEDROWSTATUS": {
+        "file_note": "the tick's silent branch sets the parked `test` row "
+                     "back to pending.",
+        "edits": _sched_row_charge("status='pending'"),
+        "targeted": [ABSENCE],
     },
     "H2": {
+        "file_note": "hold_blocks_advance always answers False.",
         "edits": [{
-            "file": "core/gate_deferral.py",
+            "file": GD,
             "anchor": "    book = LEDGER if ledger is None else ledger\n    return book.deferring(run_id, now=now)\n",
             "replacement": "    book = LEDGER if ledger is None else ledger\n    return False\n",
         }],
         "targeted": [
-            "tests/skillflow/test_coding_impl_gate_absence.py",
-            "tests/skillflow/test_coding_impl_gate_absence.py::test_the_deferral_hold_leaves_real_step_rows_untouched",
-            "tests/unit/test_gate_deferral_execution_points.py",
+            ABSENCE,
+            EXEC_POINTS,
         ],
     },
-    "ABSTERM": {
+    "RC2": {
         "edits": [{
-            "file": "core/gate_deferral.py",
-            "anchor": "ABSENCE_TERMINAL = \"gate did not run: no verdict was measured\"\n",
-            "replacement": "ABSENCE_TERMINAL = \"gate failed: the code did not pass\"\n",
+            "file": IMPL,
+            "anchor": "    return (REPO_GATE_MEASURED_PASS if gate.get(\"returncode\") == 0\n            else REPO_GATE_MEASURED_FAIL)\n",
+            "replacement": "    return (REPO_GATE_MEASURED_PASS if gate.get(\"returncode\") == 0\n            else REPO_GATE_UNMEASURED)\n",
         }],
         "targeted": [
-            "tests/unit/test_gate_deferral_execution_points.py",
+            DECL + "::test_no_exit_code_alone_is_ever_unmeasured",
         ],
     },
-    "ABSTERM2": {
+    "TIMEOUT_NOT_UNMEASURED": {
         "edits": [{
-            "file": "core/gate_deferral.py",
-            "anchor": "        return f\"{ABSENCE_TERMINAL} ({gate}, {self.episode_count(run_id)} attempt(s))\"\n",
-            "replacement": "        return (\"Cycle limit exceeded: the code \"\n                \"regressed and gate did not run: no verdict was measured\")\n",
+            "file": IMPL,
+            "anchor": "    if gate.get(\"timed_out\") is True or gate.get(\"runner_error\") is True:\n",
+            "replacement": "    if False:\n",
         }],
         "targeted": [
-            "tests/unit/test_gate_deferral_execution_points.py",
+            DECL + "::test_a_killed_gate_is_unmeasured_and_its_returncode_is_not_why",
         ],
+    },
+    "VALVEBYPASS": {
+        "edits": [{
+            "file": GD,
+            "anchor": "    return claims > max_claims\n",
+            "replacement": "    if ledger is not None and ledger.deferring(run_id, now=now):\n        return False\n    return claims > max_claims\n",
+        }],
+        "targeted": [EXEC_POINTS, ACCOUNTED],
+    },
+    "ABSCEIL": {
+        "edits": [{
+            "file": GD,
+            "anchor": "_ABSOLUTE_EPISODE_CEILING = 6 * 3600.0\n",
+            "replacement": "_ABSOLUTE_EPISODE_CEILING = 1e9\n",
+        }],
+        "targeted": [EXEC_POINTS],
     },
     "ABSENCEWORD": {
         "edits": [{
-            "file": "core/gate_deferral.py",
+            "file": GD,
             "anchor": "_FORBIDDEN_WORDS = (\"failed\", \"failure\", \"fail\", \"regression\", \"red\", \"error\")\n",
             "replacement": "_FORBIDDEN_WORDS = ()\n",
         }],
-        "targeted": [
-            "tests/unit/test_gate_deferral_execution_points.py",
-        ],
+        "targeted": [ACCOUNTED],
     },
     "READABSENCE": {
         "edits": [{
-            "file": "core/gate_deferral.py",
+            "file": GD,
             "anchor": "    if not (data.get(\"repo_gate_absent\") or data.get(\"repo_gate_unmeasured\")):\n        return None\n",
             "replacement": "    if False:\n        return None\n",
         }],
-        "targeted": [
-            "tests/unit/test_gate_deferral_is_accounted.py",
-        ],
+        "targeted": [ACCOUNTED],
     },
     "ABSREL": {
         "edits": [{
-            "file": "aitelier/tools/run_tests/impl.py",
+            "file": IMPL,
             "anchor": "    report[\"passed_relative\"] = (state in BASELINE_MEASURED\n                                 and not absent\n                                 and not report[\"new_failures\"])\n",
             "replacement": "    report[\"passed_relative\"] = (state in BASELINE_MEASURED\n                                 and not report[\"new_failures\"])\n",
         }],
-        "targeted": [
-            "tests/unit/test_run_tests_unmeasured_declaration.py",
-        ],
+        "targeted": [DECL],
     },
     "ABSSTATE": {
         "edits": [{
-            "file": "aitelier/tools/run_tests/impl.py",
+            "file": IMPL,
             "anchor": "        if absent and (path is None or not path.is_file()):\n            state = \"unmeasured\"\n",
             "replacement": "        pass\n",
         }],
-        "targeted": [
-            "tests/unit/test_run_tests_unmeasured_declaration.py",
-        ],
+        "targeted": [DECL],
     },
     "ABSWRITE": {
         "edits": [{
-            "file": "aitelier/tools/run_tests/impl.py",
+            "file": IMPL,
             "anchor": "    if path is None or state in (\"unreadable\", \"unmeasured\"):\n        return\n",
             "replacement": "    if path is None or state == \"unreadable\":\n        return\n",
         }],
-        "targeted": [
-            "tests/unit/test_run_tests_unmeasured_declaration.py",
-        ],
+        "targeted": [DECL],
+    },
+    "ABSSEED": {
+        "edits": [{
+            "file": IMPL,
+            "anchor": "    if (path is not None and not path.is_file() and state == \"compared\"\n            and not absent):\n",
+            "replacement": "    if (path is not None and not path.is_file() and state == \"compared\"):\n",
+        }],
+        "targeted": [DECL],
     },
     "RETFLAG": {
         "edits": [{
-            "file": "aitelier/tools/run_tests/impl.py",
+            "file": IMPL,
             "anchor": "            \"repo_gate_absent\": bool(report.get(\"repo_gate_absent\")),\n",
             "replacement": "            \"repo_gate_absent\": False,\n",
         }],
         "targeted": [
             "tests/skillflow/test_config_loading.py",
-            "tests/skillflow/test_coding_impl_gate_absence.py",
+            ABSENCE,
         ],
     },
     "ATTEMPTS3": {
         "edits": [{
-            "file": "aitelier/tools/run_tests/impl.py",
+            "file": IMPL,
             "anchor": "REPO_GATE_UNMEASURED_ATTEMPTS = 1\n",
             "replacement": "REPO_GATE_UNMEASURED_ATTEMPTS = 3\n",
         }],
-        "targeted": [
-            "tests/unit/test_gate_deferral_execution_points.py",
-        ],
+        "targeted": [EXEC_POINTS],
     },
     "TIMEOUTBIG": {
         "edits": [{
-            "file": "aitelier/tools/run_tests/impl.py",
+            "file": IMPL,
             "anchor": "REPO_GATE_TIMEOUT = 5400\n",
             "replacement": "REPO_GATE_TIMEOUT = 1e9\n",
         }],
-        "targeted": [
-            "tests/unit/test_gate_deferral_execution_points.py",
-        ],
+        "targeted": [EXEC_POINTS],
     },
     "WAITCLAMP": {
         "edits": [{
-            "file": "core/gate_deferral.py",
+            "file": GD,
             "anchor": "    return min(_positive_seconds(GATE_DEFERRAL_WAIT_SECONDS, 300.0),\n               max(1.0, _positive_seconds(GATE_DEFERRAL_WAIT_MAX, 900.0)))\n",
             "replacement": "    return _positive_seconds(GATE_DEFERRAL_WAIT_SECONDS, 300.0)\n",
         }],
-        "targeted": [
-            "tests/unit/test_gate_deferral_execution_points.py",
-        ],
+        "targeted": [EXEC_POINTS],
     },
     "CEILCLAMP": {
         "edits": [{
-            "file": "core/gate_deferral.py",
+            "file": GD,
             "anchor": "    return min(_positive_seconds(GATE_DEFERRAL_EPISODE_MAX_SECONDS, 10800.0),\n               ceiling)\n",
             "replacement": "    return _positive_seconds(GATE_DEFERRAL_EPISODE_MAX_SECONDS, 10800.0)\n",
         }],
-        "targeted": [
-            "tests/unit/test_gate_deferral_execution_points.py",
-        ],
-    },
-    # G1b, G3, G4 removed: G3=GILCLAMP, G4=WAITCLAMP byte-identical;
-    # G1b duplicates WAIT_MAX coverage already in WAITCLAMP.
-    "S1": {
-        "edits": [{
-            "file": "aitelier/tools/run_tests/impl.py",
-            "anchor": "REPO_GATE_TIMEOUT = 5400\n",
-            "replacement": "REPO_GATE_TIMEOUT = 60\n",
-        }],
-        "targeted": [
-            "tests/unit/test_gate_deferral_execution_points.py",
-        ],
-    },
-    "ABSSEED": {
-        "edits": [{
-            "file": "aitelier/tools/run_tests/impl.py",
-            "anchor": "    if (path is not None and not path.is_file() and state == \"compared\"\n            and not absent):\n",
-            "replacement": "    if (path is not None and not path.is_file() and state == \"compared\"):\n",
-        }],
-        "targeted": [
-            "tests/unit/test_run_tests_unmeasured_declaration.py",
-        ],
-    },
-    "D1": {
-        "edits": [{
-            "file": "core/gate_deferral.py",
-            "anchor": "    if book.expired(run_id, now=moment):\n",
-            "replacement": "    if False:\n",
-        }],
-        "targeted": [
-            "tests/unit/test_gate_deferral_execution_points.py",
-        ],
-    },
-    "D4": {
-        "edits": [{
-            "file": "core/gate_deferral.py",
-            "anchor": "    if not isinstance(data, dict):\n        return None\n",
-            "replacement": "    pass\n",
-        }],
-        "targeted": [
-            "tests/unit/test_gate_deferral_is_accounted.py",
-        ],
+        "targeted": [EXEC_POINTS],
     },
     "DUPYIELD": {
+        "kind": "text",
         "edits": [{
-            "file": "tests/unit/test_no_verbatim_previous_line_dup.py",
+            "file": CHK,
             "anchor": "    return non_test, test\n",
             "replacement": "    return non_test, test\n    return non_test, test\n",
         }],
         "targeted": [
-            "tests/unit/test_no_verbatim_previous_line_dup.py::test_the_checker_file_is_clean_under_its_own_rule",
+            CHK + "::test_the_checker_file_is_clean_under_its_own_rule",
         ],
     },
     "DUPHITS": {
+        "kind": "text",
         "edits": [{
-            "file": "tests/unit/test_no_verbatim_previous_line_dup.py",
-            "anchor": "    assert non_test == []\\n",
-            "replacement": "    assert non_test == []\\n    assert non_test == []\\n",
+            "file": CHK,
+            "anchor": "    assert non_test == []\n",
+            "replacement": "    assert non_test == []\n    assert non_test == []\n",
         }],
         "targeted": [
-            "tests/unit/test_no_verbatim_previous_line_dup.py::test_the_checker_file_is_clean_under_its_own_rule",
+            CHK + "::test_the_checker_file_is_clean_under_its_own_rule",
         ],
     },
-    # ── new round-9: hold-breaking mutations for the deferral readers ──
+    # ── round 8's own edits under their own names ─────────────────────────
+    "TIMEOUT60": {
+        "file_note": "round 8's `S1` edit: REPO_GATE_TIMEOUT = 60.",
+        "edits": [{
+            "file": IMPL,
+            "anchor": "REPO_GATE_TIMEOUT = 5400\n",
+            "replacement": "REPO_GATE_TIMEOUT = 60\n",
+        }],
+        "targeted": [EXEC_POINTS],
+    },
+    "ABSTERMTEXT": {
+        "file_note": "round 8's `ABSTERM` edit: the absence sentence names a "
+                     "code failure.",
+        "edits": [{
+            "file": GD,
+            "anchor": "ABSENCE_TERMINAL = \"gate did not run: no verdict was measured\"\n",
+            "replacement": "ABSENCE_TERMINAL = \"gate failed: the code did not pass\"\n",
+        }],
+        "targeted": [EXEC_POINTS, ACCOUNTED],
+    },
+    "TERMREASONCYCLE": {
+        "file_note": "round 8's `ABSTERM2` edit: terminal_reason says "
+                     "`Cycle limit exceeded`.",
+        "edits": [{
+            "file": GD,
+            "anchor": "        return f\"{ABSENCE_TERMINAL} ({gate}, {self.episode_count(run_id)} attempt(s))\"\n",
+            "replacement": "        return (\"Cycle limit exceeded: the code \"\n                \"regressed and gate did not run: no verdict was measured\")\n",
+        }],
+        "targeted": [EXEC_POINTS, ACCOUNTED],
+    },
+    "VALVEOFF": {
+        "file_note": "round 8's `VALVEREACH` edit: the per-instance valve "
+                     "never fires.",
+        "edits": [{
+            "file": GD,
+            "anchor": "    return claims > max_claims\n",
+            "replacement": "    return False\n",
+        }],
+        "targeted": [EXEC_POINTS, ACCOUNTED],
+    },
+    "NEVEREXPIRE": {
+        "file_note": "round 8's `D1` edit: observe_run never reports expired.",
+        "edits": [{
+            "file": GD,
+            "anchor": "    if book.expired(run_id, now=moment):\n",
+            "replacement": "    if False:\n",
+        }],
+        "targeted": [EXEC_POINTS, ABSENCE],
+    },
+    "READNONDICT": {
+        "file_note": "round 8's `D4` edit: read_absence drops its non-dict "
+                     "guard.",
+        "edits": [{
+            "file": GD,
+            "anchor": "    if not isinstance(data, dict):\n        return None\n",
+            "replacement": "    pass\n",
+        }],
+        "targeted": [ACCOUNTED],
+    },
+    "DECLNONE": {
+        "file_note": "round 8's `M19` edit: `_run_node_cmd` never carries a "
+                     "declaration.",
+        "edits": [{
+            "file": IMPL,
+            "anchor": "                \"unmeasured_declaration\": _unmeasured_declaration(out)}\n",
+            "replacement": "                \"unmeasured_declaration\": None}\n",
+        }],
+        "targeted": [
+            DECL + "::test_a_declared_absence_is_unmeasured_whatever_the_exit_code_was",
+        ],
+    },
+    # ── the two production holds, one hold-breaking edit each ─────────────
     "HOST_HOLD_INERT": {
         "file_note": "AItelierSkillFlow.advance_run no longer checks "
                      "hold_blocks_advance — the host-level hold is inert; "
                      "any caller of advance_run (run_driver, API, tests) "
                      "can advance a deferred run.",
         "edits": [{
-            "file": "core/skillflow_host.py",
+            "file": HOST,
             "anchor": "        from core import gate_deferral\n        if gate_deferral.hold_blocks_advance(run_id):\n            return None\n",
             "replacement": "        pass\n",
         }],
-        "targeted": [
-            "tests/skillflow/test_coding_impl_gate_absence.py",
-        ],
+        "targeted": [ABSENCE],
     },
     "TICK_HOLD_INERT": {
-        "file_note": "The scheduler tick's deferral check is bypassed — "
-                     "observe_run returns state=none so the tick never "
-                     "returns early for a silent gate.",
+        "file_note": "The scheduler tick's deferral check is bypassed: the "
+                     "tick never returns early for a silent gate "
+                     "(core/scheduler.py, the `silent` branch never taken).",
         "edits": [{
-            "file": "core/gate_deferral.py",
+            "file": SCHED,
+            "anchor": _TICK_SILENT,
+            "replacement": "    if False:\n",
+        }],
+        "targeted": [ABSENCE],
+    },
+    "OBSERVENONE": {
+        "file_note": "round 9's `TICK_HOLD_INERT` edit, which is in "
+                     "gate_deferral.observe_run, not in the tick: observe_run "
+                     "never reports an absence.",
+        "edits": [{
+            "file": GD,
             "anchor": "    book = LEDGER if ledger is None else ledger\n    absence = last_gate_absence(sf, run_id, report_path=report_path)\n    if absence is None:\n        book.clear(run_id)\n        return {\"state\": \"none\", \"remaining\": 0.0, \"gate\": \"\", \"reason\": \"\"}\n",
             "replacement": "    book = LEDGER if ledger is None else ledger\n    absence = last_gate_absence(sf, run_id, report_path=report_path)\n    if True:\n        book.clear(run_id)\n        return {\"state\": \"none\", \"remaining\": 0.0, \"gate\": \"\", \"reason\": \"\"}\n",
         }],
-        "targeted": [
-            "tests/skillflow/test_coding_impl_gate_absence.py",
-        ],
+        "targeted": [ABSENCE],
     },
 }
 

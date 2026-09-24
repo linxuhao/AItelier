@@ -1,10 +1,8 @@
-import re
 from pathlib import Path
 
 import pytest
 
 _ROOT = Path(__file__).resolve().parent.parent.parent
-_COMMENT = re.compile(r"^\s*#")
 
 
 def _python_sources():
@@ -15,11 +13,15 @@ def _python_sources():
 
 
 def _verbatim_previous_line_sites(source):
+    """Every non-blank line identical to the previous non-blank line.
+
+    Comment lines count: round 9's splice wrote one comment line twice in THIS
+    file, and a reader that skipped comments stayed green over it."""
     sites = []
     previous = None
     for number, raw in enumerate(source.splitlines(), start=1):
         text = raw.rstrip("\n")
-        if text.strip() == "" or _COMMENT.match(text):
+        if text.strip() == "":
             continue
         if previous is not None and text == previous:
             sites.append((number, text.strip()))
@@ -27,7 +29,6 @@ def _verbatim_previous_line_sites(source):
     return sites
 
 
-# Deliberate, named repeats in the test tree: two calls or two asserts in a
 # Deliberate, named repeats in the test tree: two calls or two asserts in a
 # row that MEAN two invocations (a re-poll, a re-read, a two-item rotate).
 # Each entry is (file, statement, consecutive_count): the statement text and
@@ -102,6 +103,12 @@ _SELF = "tests/unit/test_no_verbatim_previous_line_dup.py"
 def test_the_checker_file_is_clean_under_its_own_rule():
     src = (_ROOT / _SELF).read_text(encoding="utf-8")
     assert _verbatim_previous_line_sites(src) == []
+
+
+def test_a_duplicated_comment_line_is_red():
+    src = "# one sentence of a comment\n# one sentence of a comment\nx = 1\n"
+    assert _verbatim_previous_line_sites(src) == [
+        (2, "# one sentence of a comment")]
 
 
 def test_the_duplicated_statement_pole_is_red():

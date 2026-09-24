@@ -209,9 +209,9 @@ def test_a_mid_line_echo_kills_the_in_operator_on_the_declaration_channel():
 
 
 def test_a_mid_line_echo_kills_the_in_operator_on_the_case_channel():
-    """Kills M21b (the same `in` on `_REPO_GATE_CASE_PREFIX`): a single log
-    line that echoes the case prefix must not fabricate a prunable red
-    identity."""
+    """Kills M21BPAIR (the `in` + `line.index` pair on
+    `_REPO_GATE_CASE_PREFIX`): a single log line that echoes the case prefix
+    must not fabricate a prunable red identity."""
     assert len(_CASE_MIDLINE_NOISE) == len(rt._REPO_GATE_CASE_PREFIX) > 0
     gate = {"returncode": 1, "output_truncated": False,
             "output": _CASE_MIDLINE_NOISE + _case("A", "quoted")}
@@ -286,6 +286,8 @@ def test_m21_is_reproduced_and_this_file_is_what_flips():
     line = _MIDLINE_NOISE + rt._REPO_GATE_UNMEASURED_PREFIX + body
     assert rt._unmeasured_declaration(line) is None
     assert mutant(line) is not None and mutant(line)["state"] == "blocked"
+
+
 def test_the_r4_shaped_witness_flips_under_the_literal_m21():
     """The card's literal M21 (`in`, the slice UNCHANGED) IS observable.
 
@@ -327,8 +329,6 @@ def test_the_r4_shaped_witness_flips_under_the_literal_m21b():
     assert mutant is not rt._repo_gate_failure_cases
     m_cases, _ = mutant(gate)
     assert [c["case_id"] for c in m_cases] == ["A"]
-
-
 
 
 def test_m21b_is_reproduced_and_this_file_is_what_flips():
@@ -598,7 +598,7 @@ def test_the_tool_doc_names_the_no_verdict_gate_as_absent_not_a_loop():
         "longer stated on the tool's own contract")
 
 
-# ── M21 family: the observable half is the pair, stated honestly ────────────
+# ── M21 family: this shape is killed by the pair; literal M21 by the r4 shape ─
 
 def test_a_mid_line_prefix_with_valid_json_after_it_is_still_not_a_record():
     """A behavioral witness, not a text pin.
@@ -615,6 +615,7 @@ def test_a_mid_line_prefix_with_valid_json_after_it_is_still_not_a_record():
     fixed slice cuts into the prefix itself. It is NOT inert against every
     shape: with a header exactly `len(prefix)` long and the prefix quoted
     inside the JSON the fixed slice lands on the JSON and the reading flips —
+    `test_the_r4_shaped_witness_flips_under_the_literal_m21` measures that.
     The pair is the other, blunter half: it also moves the slice.
     """
     prefix = rt._REPO_GATE_UNMEASURED_PREFIX

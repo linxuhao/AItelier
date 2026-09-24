@@ -26,22 +26,23 @@ from core import gate_deferral
 # A normal DPE run is well under this; this only trips on a non-converging loop.
 # The constant is defined here so the tick's whole-run valve block evaluates:
 # a NameError inside `try { except Exception: pass }` would silently make the
-# entire guard dead.  The per-instance guard test that would catch this is
-# `test_one_instance_re_executed_forever_fails_the_run`.n
-# one instance could never fail the run, because the guard never evaluated.
+# entire guard dead. The per-instance guard test that would catch this is
+# `test_one_instance_re_executed_forever_fails_the_run`.
 import os as _os
 _MAX_STEPS_PER_RUN = int(_os.getenv("AITELIER_MAX_STEPS_PER_RUN", "300"))
 # Per-instance companion: how often ONE step instance may be re-claimed before
 # the run is killed with a message blaming the step.
 #
 # The deferral mechanism parks the run via the tick's early return at
-# state == "silent" (line ~1228). Because the tick returns BEFORE the valve
-# check (~1283), a step instance is never re-claimed during a live episode
-# (measured: 1 claim per instance). The valve therefore has nothing to
-# suppress on the deferral path — the prior bypass in guard_per_instance_valve
-# was unreachable code and has been removed.
+# `deferral["state"] == "silent"` in `_run_skillflow_tick`. Because the tick
+# returns BEFORE the valve check (`guard_per_instance_valve`), a step instance
+# is never re-claimed during a live episode (measured: 1 claim per instance).
+# The valve therefore has nothing to suppress on the deferral path — the prior
+# bypass in guard_per_instance_valve was unreachable code and has been removed.
 # Proved by: tests/unit/test_gate_deferral_execution_points.py (claims == 0
-# while deferring) and tests/unit/test_gate_deferral_is_accounted.py.
+# while deferring), tests/unit/test_gate_deferral_is_accounted.py, and
+# tests/skillflow/test_coding_impl_gate_absence.py (this tick, driven on real
+# step rows: one `claimed` event per instance).
 
 
 _MAX_CLAIMS_PER_INSTANCE = int(_os.getenv("AITELIER_MAX_CLAIMS_PER_INSTANCE", "20"))

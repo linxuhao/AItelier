@@ -185,7 +185,7 @@ How the two execution points read it:
 * `AItelierSkillFlow.advance_run` — the tick is not the only driver. The
   host refuses to advance a run whose gate is silent, because advancing is
   what routes the absence back into the implement loop.
-* `core/scheduler.py:31` `_MAX_CLAIMS_PER_INSTANCE` — its own comment states
+* `core/scheduler.py` `_MAX_CLAIMS_PER_INSTANCE` — its own comment states
   the premise: one instance is re-claimed only when something reset a
   completed row back to `pending`. A deferral does NOT do that: it releases
   no claim, it does not move the row, and the tick returns at
@@ -275,7 +275,7 @@ The absence accounting (round 5), in
 | remove the episode ceiling | `test_the_episode_ceiling_cannot_be_removed` |
 | force `hold_remaining` to 0 | `test_hold_remaining_is_not_constant_zero` |
 
-## The M21 family, stated honestly (round 8)
+## The M21 family (rounds 8-10)
 
 The card's literal M21 (`startswith` -> `in`, the `line[len(prefix):]` slice
 UNCHANGED) IS observable, and the r7 claim that it was inert was wrong. It is
@@ -289,10 +289,11 @@ the same on the case channel. Both re-run the REAL reader with the card's
 literal single-line edit applied.
 
 The mutation catalog (`tools/mutation_catalog/mutations.py`) carries `M21` and
-`M21b` verbatim, and `run_mutations.py` applies exactly those edits to a copy
-of the tree. The `in` + `line.index(...)` PAIR is a SECOND, blunter mutation
-(`M21PAIR` / `M21BPAIR`, applied in-process as `_apply_m21_pair`), not the
-card's M21 — the name says which one it is.
+`M21b` verbatim, and `run_mutations.py` applies exactly those edits to a
+detached `git worktree` of the committed tree, one worktree per mutation. The
+`in` + `line.index(...)` PAIR is a SECOND, blunter mutation (`M21PAIR` /
+`M21BPAIR`, applied in-process as `_apply_m21_pair`), not the card's M21 — the
+name says which one it is.
 
 
 

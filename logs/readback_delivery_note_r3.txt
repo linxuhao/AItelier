@@ -1,0 +1,383 @@
+# git diff --word-diff bf94f7247a2468726533b16e5204871e27bf79a9 97f6514057e6d83b27a5c083977e7dfdfef1bdfc -- final/delivery_notes_harness_render_queue.md  (2026-09-24T12:48:23Z)
+diff --git a/final/delivery_notes_harness_render_queue.md b/final/delivery_notes_harness_render_queue.md
+index a0f1275b..5ba8379a 100644
+--- a/final/delivery_notes_harness_render_queue.md
++++ b/final/delivery_notes_harness_render_queue.md
+@@ -1,192 +1,313 @@
+# harness.a-busy-render-lock-queues-instead-of-refusing (rev [-1):-]{+2):+} delivery note
+
+- Worker attempt: [-`attempt-8abf4d6f8d1e41a7b50077aaab3c879a`.-]{+`attempt-2cd4b2ece4dd411aafb99c8365ba5b3c`.+} This is a worker, not a pipeline round.
+- Base: [-AItelier main `8b084c208dfaf688d862f806ba0a82d96670501d`.-]{+`bf94f7247a2468726533b16e5204871e27bf79a9` (the r2 candidate, branch `director/lockq-r2-20260924`).+}
+- Branch: [-`director/lockq-r2-20260924`.-]{+`director/lockq-r3-20260924`.+}
+- Code [-commit: `98e89e21d6358d411345fc2017e6c0473e7e71e7`. The-]{+commits, in order:+}
+{+  - `43c2175414c1c5e30888f3a2086b1c7ded83ad76`: harness, tool and tests.+}
+{+  - `399e9fa702ef74743056beffc7c5881d4ec4047a`: the P2d test also queues a request while the table is locked.+}
+{+  - `c389f53014adae76d09e5cfa7603478b0f23af69`: the reader test also covers `godot_compile` without an evidence cycle.+}
+{+- Every+} test [-runs-]{+run+} below [-were-]{+was+} taken on [-this commit.-]{+`c389f530`, unless its log header names another head.+}
+  - The commit after [-it-]{+`c389f530`+} adds only this note and `logs/`.
+- Note written [-2026-09-24T09:42:05Z-]{+2026-09-24T12:35:32Z+} (`date -u`).
+{+- The review this round answers: `~/.AItelier/director/reports/lockq-r2-review-20260924/review.md`.+}
+{+  - Its probes are the source of the new tests: `probes/probe_wait_heartbeat_test.py`,+}
+{+    `probes/probe_queue_timeout_test.py`, `probes/probe_readers_test.py`.+}
+{+  - I did not copy the probes. Each suite test cites the probe it came from.+}
+
+Every test run below ran in a throwaway `aitelier:latest` container (`docker run --rm --init -m 3g`).
+The repository was mounted at both [-paths, and every-]{+paths. Every+} log [-header-]{+written by `run.sh` or `mut3.sh`+} shows `gitstatus_rc=0`.
+{+The x20 loop log has no such line, because its runner does not print it.+}
+The live `aitelier-godot` container was not contacted. Every harness test serves `godot_harness.py` in-process
+over a temp sqlite owner [-table.-]{+table, and the tool tests point the real tools at that served harness.+}
+
+## What changed
+
+`docker/godot/godot_harness.py`
+
+- {+The waiter tries the deployment-admission fence without blocking.+}
+{+  - `acquire_render_owner_waiting` calls `acquire_render_owner(..., blocking_fence=False)`, which takes `LOCK_SH | LOCK_NB`.+}
+{+  -+} A [-request-]{+held fence raises `BlockingIOError`. The waiter counts+} that [-finds a live render owner now waits for it-]{+poll as queued+} and[-then takes ownership. A live owner is `active`,-]
+[-  with `heartbeat_at` younger than `RENDER_OWNER_HEARTBEAT_STALE_SEC` (120.0).-]
+[-  - This is `acquire_render_owner_waiting`. It-] polls [-the durable table every `RENDER_OWNER_WAIT_POLL_SEC`.-]{+again.+}
+  - {+Before this, each poll blocked on the fence.+} The [-response of `/playtest`, `/script`-]{+disconnect check+} and [-`/x11_input_smoke` carries two new fields:-]
+[-    `render_owner_wait_sec`, and `render_owner_waited_for_owner_ids`-]{+the limit check ran only between polls, so+}
+{+    neither could fire while a deployment held the fence+} (the [-owner_ids it waited behind).-]{+review's P3c and P3d).+}
+  - [-`/playtest`-]{+Callers other than the waiter keep the blocking default.+}
+{+- The waiter+} also [-carries both fields in `timing`.-]{+keeps waiting when a poll loses sqlite's busy wait (`sqlite3.OperationalError` "database is locked").+}
+{+  Any other `OperationalError` still raises.+}
+- [-A-]{+`do_POST` checks both conditions again once the request owns the+} render [-owner now refreshes its `heartbeat_at` every `RENDER_OWNER_HEARTBEAT_INTERVAL_SEC` (20.0) while its-]{+row and holds both+} render [-runs (`_start_owner_heartbeat`).-]
+[-  - Before this, nothing ever called `heartbeat_render_owner`.-]
+[-  - Without-]{+locks, just+}
+{+  before+} the[-heartbeat, any-] render [-longer than the threshold would read as stale.-]{+starts.+}
+  - [-Some holders still block, and-]{+If+} the [-request gets a 409 at once. The 409 body is built by `_render_owner_conflict`.-]
+[-  - Which holders: an `owner_lost` holder, or an `active` holder whose heartbeat-]{+caller has disconnected, the row+} is [-older than-]{+released with reason+}
+{+    `not rendered:+} the [-threshold (`active_stale`).-]
+[-  - What-]{+caller disconnected before+} the [-body carries: `owner_kind`, `owner_id`, `needs_reconciliation: true`,-]{+render started`,+} and [-a `detail`.-]{+nothing renders.+}
+{+  - If `render_wait_timeout_sec` has run out (time counted from admission start), the row is released with reason+}
+{+    `not rendered: render_wait_timeout_sec ran out before the render started`.+} The [-`detail`-]
+[-    says why reconciliation-]{+response+} is[-due, gives-] the [-recorded reason or heartbeat age,-]{+409+}
+{+    `render owner wait timed out`,+} and [-names-]{+its `detail` says ownership came after+} the [-reconcile route.-]{+limit.+}
+  - [-The crash-safety of-]{+Before this, a request could take ownership after+} the [-durable table is unchanged. The SELECT still returns `active` and `owner_lost` rows,-]{+fence lifted+} and {+render for+} a[-row left behind by a dead process blocks until someone reconciles it.-]
+[-- The wait has no harness timeout. It ends in one of two ways:-]
+[-  - The-] caller [-disconnects (`_Handler._render_client_abandoned`: the socket reads EOF). The handler logs this and-]
+[-    returns without rendering.-]
+[-  - The request's-]{+that had gone, or+}
+{+    render past its+} own [-`render_wait_timeout_sec` runs out.-]{+limit.+}
+{+-+} The[-response is a-] 409 `render owner wait timed [-out`,-]
+[-    which-]{+out` body is now built by `_wait_timed_out`. It adds `deployment_fence_held`, and+}
+{+  its `detail`+} names the [-owner it-]{+fence when the fence was what the request+} waited behind.
+- [-Neither way creates-]{+The heartbeat thread retries after+} an {+`sqlite3.OperationalError`, logging+}
+{+  `render+} owner [-row.-]{+heartbeat failed, retrying: ...`.+}
+{+  - Any other exception still ends the thread (`render owner heartbeat stopped: ...`).+}
+{+  - A process that dies takes its heartbeat thread with it, so its row still goes stale and blocks.+}
+- The comment above the render admission [-said "Queue-]{+("Queue+} behind any render in [-flight". It is-]{+flight")+} now [-true,-]{+says:+}
+{+  - Both checks run on every poll,+} and [-I rewrote-]
+[-  it to describe the-]{+again after ownership with both locks held.+}
+{+  - A request stopped while queued makes no row.+}
+{+  - A request stopped after taking ownership releases its row with a "not rendered" reason.+}
+{+  - The+} three [-outcomes.-]{+tests under "the-wait-is-bounded-by-the-callers-own-timeout" below check each of those statements.+}
+
+`aitelier/tools/godot_playtest/impl.py`
+
+- [-A 409 whose body is a render-owner refusal is no longer logged as `godot-builder unreachable`.-]{+New constant `RENDER_QUEUE_SHARE = 0.5`.+}
+- [-`post_playtest`-]{+`post_playtest(payload, timeout)`+} now [-returns `gate_skipped: true`, `skipped_because: render_owner_<owner_kind>` (or-]
+[-  `render_owner_wait_timed_out`), and `render_owner_conflict` with-]{+sends `render_wait_timeout_sec = RENDER_QUEUE_SHARE * timeout`, unless+} the
+  [-body.-]{+payload already sets it.+}
+{+-+} The [-summary-]{+docstring now+} names the [-HTTP code,-]
+[-  the kind-]{+third shape (a render-owner refusal is a gate that did not run)+} and the [-owner_id.-]{+queue share.+}
+
+`tests/unit/test_harness_render_queue.py`: [-12-]{+11+} new [-tests, 12 passed (`logs/pytest_harness_render_queue_candidate.txt`, bare_rc=0).-]
+
+[-## Conflict with-]{+tests (23 in+} the [-gate-accounting card,-]{+file). One existing test gained an assertion.+}
+
+{+## The regression,+} and [-my resolution-]{+how the queue share resolves it+}
+
+- The [-draft (`074ce24b`) turned a 409 refusal in `post_playtest` into `passed: false` with no `gate_skipped`. That-]
+[-  charges a gate that did not run to-]{+regression, from+} the [-implementer.-]{+review's P4:+}
+  - [-Main's gate-accounting card rules the opposite way:-]{+`urllib`'s socket timeout counts idle time.+}
+{+  - The harness sends nothing while+} a [-gate that did not run-]{+request+} is [-an absence, not a failure.-]{+queued.+}
+  - [-I kept-]{+So a queue wait longer than+} the [-gate-accounting contract. The refusal keeps this tool's existing absence shape (`gate_skipped: true`).-]{+caller's `timeout` ended as a socket timeout. `post_playtest` reported it as+}
+{+    `gate_timeout` with `passed: false`.+}
+  - [-`aitelier/gate_evidence.report_state`-]{+`gate_evidence`+} reads that[-shape-] as [-`skipped`,-]{+`failed` / `known_failure`,+} and [-`release_disposition` reads-]{+game_harness `5_compile` routed+} it [-as-]
+[-    `unresolved`.-]{+to `5_vision`,+}
+{+    the product-failure path.+}
+- [-The refusal-]{+Raising the socket timeout+} is [-named by `skipped_because` and `render_owner_conflict`,-]{+forbidden,+} and {+it also does not fit: `5_compile` has `timeout_seconds: 3900`, so+} the
+  [-gate-skip log gets-]{+socket cannot outlast `post_playtest`'s 3600 s by much.+}
+{+- The fix:+} the [-refusal's-]{+caller declares its+} own [-reason. It no longer says `godot-builder unreachable`.-]
+[-- `godot_playtest_scenario` returns `gate_skipped` reports as `{"error": summary}`. With this change, that error-]
+[-  text names the holder.-]{+queue bound, below its socket timeout.+}
+  - [-I did not port the draft's-]{+The bound is+} `render_wait_timeout_sec = 0.5 * [-timeout` in `post_playtest`. The caller's own bound-]
+[-  already-]{+timeout`: 1800 s for the default 3600 s.+}
+{+  - A queue wait that+} reaches {+it ends as+} the [-harness: its socket timeout closes-]{+harness's 409 `render owner wait timed out`, well before+} the [-connection, and-]{+socket's+}
+{+    idle limit.+}
+{+    - The harness answers within one poll of the limit: the 0.25 s sleep, plus the poll itself.+}
+{+    - A poll against+} a [-closed connection ends-]{+locked owner table can take up to sqlite's 5 s busy timeout. The margin is+}
+{+      `0.5 * timeout` (1800 s by default).+}
+{+  - `post_playtest` already turned that 409 into+} the [-wait.-]{+absence shape: `gate_skipped: true`,+}
+{+    `skipped_because: render_owner_wait_timed_out`.+}
+  - [-I-]{+Every reader then sees a gate that+} did not [-port-]{+run. `report_state` gives `skipped`, `release_disposition` gives+}
+{+    `unresolved`, and `5_compile` routes to `5_release_wait`. This is+} the [-draft's harness default wait cap (1800 s) either. The criterion bounds-]{+gate-accounting contract that has been live+}
+{+    since 11:26Z today; this change adds no new reading of it.+}
+{+- A timeout after+} the [-wait by-]{+render started stays a measured `gate_timeout`, `failed` / `known_failure`, routed to `5_vision`.+}
+{+- The cost: a render that starts after waiting w seconds has `timeout - w` seconds of socket left. That is at least+}
+{+  half of `timeout`, since w is at most+} the [-caller's timeout, not-]{+queue share.+}
+{+  - So a render that needs more than `timeout - w` now times out as a measured timeout.+}
+{+  - Before r2+} the [-harness's.-]{+same request got an immediate 409 and never rendered.+}
+
+## Criteria
+
+[-### a-busy-lock-queues-the-request-]{+Mutant runs: each mutant ran in its own git worktree at `c389f530`, with one mutation applied by exact match.+}
+- [-Test: `test_a_busy_lock_queues_the_request[/playtest|/script|/x11_input_smoke]`. It covers 3 routes x 1 holder-]
+[-  route (`/script`).-]{+Mutants M1-M8 and R1-R10 were applied with the review's own `~/.AItelier/director/reports/lockq-r2-review-20260924/mutants.py`.+}
+- [-A holder request owns-]{+Mutants N1-N9 are this round's, from `logs/mutants_r3/mutants3.py.txt`. The runner is `logs/mutants_r3/mut3.sh.txt`.+}
+{+- Every run covered+} the [-render and blocks inside it.-]{+same 10 files, with no probes:+}
+{+  `test_harness_render_queue.py`, `test_godot_lifecycle.py`, `test_harness_render_lock.py`, `test_godot_harness.py`,+}
+{+  `test_godot_playtest_spec.py`, `test_gate_skips_are_recorded.py`, `test_godot_playtest_scenario.py`,+}
+{+  `test_blind_gate.py`, `test_playtest_blind_run.py`, `test_godot_compile.py`.+}
+- [-A second request on-]{+Each mutant log starts with+} the [-route-]{+mutation's `git diff`.+}
+{+- An ignition+} is [-sent over HTTP. The test waits until the second request has met-]{+one execution of+} the [-holder,-]
+[-    then asserts-]{+mutated line, counted by a write placed on+} that [-it has not answered after 0.3 s.-]{+line into `logs/mutants_r3/ignitions_<id>_c389f530.txt`.+}
+- The [-test then releases-]{+unmutated control ran+} the [-holder and asserts:-]{+same 10 files: 145 passed, 8 skipped, bare_rc=0, ignitions=0+}
+{+  (`logs/mutants_r3/mutant_CONTROL_c389f530.txt`).+}
+- {+Result: all 27 mutants (M1-M8, R1-R10, N1-N9) went red, each with ignitions > 0.+} The [-second request returns 200.-]{+logs are+}
+{+  `logs/mutants_r3/mutant_<id>_c389f530.txt`.+}
+
+{+Green for every test named below:+}
+- [-`render_owner_waited_for_owner_ids == [holder owner_id]` and `render_owner_wait_sec >= 0.3`.-]{+One run: 23 passed, bare_rc=0 (`logs/pytest_harness_render_queue_candidate_c389f530.txt`).+}
+- [-The second request rendered as the one active owner.-]{+20 runs: runs=20 nonzero=0, bare_rc=0 (`logs/pytest_harness_render_queue_x20_candidate_c389f530.txt`).+}
+
+{+### a-busy-lock-queues-the-request (kept)+}
+
+- [-The table ends as `op-holder` gen-]{+Tests: `test_a_busy_lock_queues_the_request[/playtest|/script|/x11_input_smoke]` (3 routes x+} 1 [-released-]{+holder route,+}
+{+  `/script`),+} and [-`op-next` gen 2 released.-]{+`test_a_live_render_keeps_its_heartbeat_fresh`.+}
+- [-`test_a_live_render_keeps_its_heartbeat_fresh` covers-]{+Red, R1 (the literal revert: take+} the [-heartbeat that keeps a long render queueable.-]
+[-- Green: 3/3-]{+owner once, no waiting): bare_rc=1, ignitions=9126, 11 failed. The 11 include+}
+{+  all 3+} route cases [-passed, together with the other 9 tests (`logs/pytest_harness_render_queue_candidate.txt`, bare_rc=0).-]
+[-  The same file passed in 20 of 20 runs (`logs/pytest_harness_render_queue_x20_candidate.txt`, runs=20 nonzero=0, bare_rc=0).-]{+(`logs/mutants_r3/mutant_R1_c389f530.txt`).+}
+- Red, M1 [-(the queue changed back to an immediate raise: every-]{+(every+} conflict re-raised):[---] bare_rc=1, [-ignitions=11, 6 failed (`logs/mutants/mutant_M1.txt`).-]
+[-  - Failed tests: `test_a_busy_lock_queues_the_request` [/playtest], [/script] and [/x11_input_smoke];-]
+[-    `test_a_stale_active_owner_blocks_and_a_fresh_one_is_queued`;-]
+[-    `test_a_caller_that_disconnects_while_queued_never_gets_the_render`;-]
+[-    `test_the_requests_own_wait_limit_ends_the_wait_without_a_render`.-]{+ignitions=8220, 9 failed. The 9 include all 3 route cases+}
+{+  (`logs/mutants_r3/mutant_M1_c389f530.txt`).+}
+- {+Red, R6 (the waited-for owner ids not recorded): bare_rc=1, ignitions=902, 5 failed.+} The [-message: "/playtest answered while a live holder still rendered: {'code': 409, ...}".-]{+5 include all 3 route cases.+}
+{+- Red, R8 (`/x11_input_smoke` drops the owner-wait fields): bare_rc=1, ignitions=1, 1 failed:+}
+{+  `test_a_busy_lock_queues_the_request[/x11_input_smoke]`.+}
+- Red, M7 (no heartbeat thread): bare_rc=1, [-ignitions=9, 1 failed: `test_a_live_render_keeps_its_heartbeat_fresh`-]
+[-  (`logs/mutants/mutant_M7.txt`).-]{+ignitions=18, 4 failed. The 4 include+}
+{+  `test_a_live_render_keeps_its_heartbeat_fresh`.+}
+
+### a-lost-owner-still-blocks-and-says-so {+(kept)+}
+
+{+- Tests:+}
+  - `test_a_lost_owner_still_blocks_and_says_so[/playtest|/script|/x11_input_smoke]` (3 routes x the `owner_lost` holder).
+  - [-It asserts that-]{+`test_a_stale_active_owner_blocks_and_a_fresh_one_is_queued`.+}
+{+  - `test_the_playtest_tool_does_not_read_a_refusal_as_an_unreachable_builder`.+}
+{+- Red:+}
+{+  - M2 (`owner_lost` dropped from+} the [-response is a 409 within-]{+blocking SELECT): bare_rc=1, ignitions=953,+} 5 [-s, that no render ran, and that no new owner row exists.-]
+[-  - It also asserts that-]{+failed. The 5 are+} the [-body carries `owner_kind == "owner_lost"`,-]{+3 route+}
+{+    cases,+} the [-holder's `owner_id` and-]
+[-    `needs_reconciliation is True`,-]{+tool test,+} and [-that `detail` names owner_lost, reconciliation-]{+`test_godot_lifecycle.py::test_reconciliation_refuses_while_real_render_lock_is_held`.+}
+{+  - M3 (a bare 409 body): bare_rc=1, ignitions=38, 11 failed.+}
+{+  - R2 (`owner_lost` read as live): bare_rc=1, ignitions=2589, 4 failed (the 3 route cases+} and the [-recorded reason.-]{+tool test).+}
+  - [-`test_a_stale_active_owner_blocks_and_a_fresh_one_is_queued` sets the heartbeat age from the constant-]
+[-  `RENDER_OWNER_HEARTBEAT_STALE_SEC`.-]{+R3 (nothing needs reconciliation): bare_rc=1, ignitions=3059, 6 failed.+}
+  - [-At threshold + 5 s, the request gets a 409 with `owner_kind == "active_stale"`,-]{+M4 (the stale branch disabled): bare_rc=1, ignitions=1370, 2 failed:+} the [-threshold in `detail`,-]{+stale test+} and [-no render.-]{+the process-death test.+}
+  - [-At-]{+R9 (the+} threshold [-- 5 s,-]{+enforced x10): bare_rc=1, ignitions=1381, 2 failed:+} the same [-holder-]{+2 tests.+}
+{+- Each log+} is [-queued behind: the response-]{+`logs/mutants_r3/mutant_<id>_c389f530.txt`.+}
+
+{+### a-queue-wait-is-never-charged-as-a-product-failure (new)+}
+
+{+- `test_a_queue_wait_that_outlasts_the_callers_timeout_is_not_a_product_failure[live_holder|deployment_fence]`.+}
+{+  It+} is [-`render owner wait timed out`, not a stop.-]{+built from the review's P4 and readers probes.+}
+  - [-`test_the_playtest_tool_does_not_read_a_refusal_as_an_unreachable_builder` points `post_playtest` at-]{+It uses+} the {+real harness+} served [-harness, then at-]{+in-process and the real tools, with `post_playtest`'s timeout set to 2 s.+}
+{+    That gives+} a [-closed port.-]{+queue share of 1 s.+}
+  - [-Against-]{+One case has a live holder that renders until+} the [-harness,-]{+test ends. The other has a deployment that holds+} the [-refusal-]{+fence+}
+{+    throughout. Either way, the wait outlasts the caller's timeout.+}
+{+  - It runs each reader in the review's `logs/probe_readers_cand.txt` and asserts:+}
+{+    - A `godot_playtest`: returns `passed: true`. Its report has `skipped_because: render_owner_wait_timed_out`+}
+{+      and no `gate_timeout`.+}
+{+    - B `gate_evidence`: `report_state` gives `skipped` and `release_disposition` gives `unresolved`. This+} is
+      [-logged-]{+checked on the A, C and C2 reports.+}
+{+    - C `godot_compile`+} as [-`render_owner_owner_lost`-]{+game_harness wires it (evidence cycle from `5_test`): `release_evidence: unresolved`.+}
+{+      The route is read from `configs/addons/game_harness.yaml`'s `5_compile` transitions+} and [-carries `skipped_because`-]{+is `5_release_wait`.+}
+{+    - C2 `godot_compile` without an evidence cycle: returns `passed: true`,+} and [-`render_owner_conflict`.-]{+its report reads as A's does.+}
+    - [-Against-]{+D `audit_evidence` and `verify_evidence`: state `skipped`, `passed: false`, and+} the [-closed port,-]{+one skipped gate names+}
+{+      `render_owner_wait_timed_out`.+}
+{+    - E `godot_playtest_scenario`: its error names `render_owner_wait_timed_out`.+}
+{+    - F `focused_check kind=godot_scenario`: `timed_out: false`, and its output names `render_owner_wait_timed_out`.+}
+{+    - G `godot_vision` on C's report: `release_disposition` gives `unresolved`.+}
+{+    - The gate-skip log: every entry is `render_owner_wait_timed_out`.+}
+{+    - No queued request rendered.+}
+{+  - Reader H (`post_playtest` directly) is+} the [-log says `godot-builder unreachable`-]{+call under A, C, C2, E+} and {+F.+}
+{+- Control: `test_a_timeout_after_the_render_started_stays_a_measured_timeout`.+}
+{+  - Every render outlasts the tool timeout, so the render has started when the socket expires.+}
+{+  - It asserts: one render ran,+} the report has [-neither field.-]{+`gate_timeout: true` and `passed: false`, the evidence reads+}
+{+    `failed` / `known_failure`, and the route is `5_vision`.+}
+- [-Green: all-]{+Red:+}
+{+  - N7 (the polarity the criterion names: a queue that ended is reported as a timeout, with `gate_timeout: true` and+}
+{+    `passed: false`): bare_rc=1, ignitions=10, 2 failed: both cases+} of the [-above passed (`logs/pytest_harness_render_queue_candidate.txt`, bare_rc=0).-]{+reader test.+}
+  - [-Red, M2 (`owner_lost` removed from-]{+N6 (the tool declares no queue wait, so+} the [-blocking SELECT):-]{+socket expires while queued): bare_rc=1, ignitions=30, 2 failed:+}
+{+    both cases.+}
+  - {+R5 (the tool does not recognise a wait-timed-out refusal):+} bare_rc=1, [-ignitions=103, 5 failed (`logs/mutants/mutant_M2.txt`).-]{+ignitions=11, 2 failed: both cases.+}
+  - [-Failed tests: `test_a_lost_owner_still_blocks_and_says_so` x3;-]{+R10 (the refusal reported as `passed: false`): bare_rc=1, ignitions=11, 3 failed: both cases and the tool test.+}
+{+  - M8 (the refusal branch disabled): bare_rc=1, ignitions=12, 3 failed:+} the [-playtest-tool test;-]{+same 3.+}
+{+  - N1 (the waiter blocks on the fence): 3 failed, one of them the `deployment_fence` case (see the last criterion).+}
+{+  - N9 (the forbidden direction: an in-render timeout made unmeasured): bare_rc=1, ignitions=1, 1 failed: the control+}
+{+    `test_a_timeout_after_the_render_started_stays_a_measured_timeout`.+}
+{+- The control stays green under every other mutant.+}
+{+- Each log is `logs/mutants_r3/mutant_<id>_c389f530.txt`.+}
+
+{+### one-failed-heartbeat-does-not-make-a-live-render-stale (new)+}
+
+{+- `test_a_locked_owner_table_does_not_make_a_live_render_stale` reproduces P2d. It comes from the review's+}
+{+  `probe_wait_heartbeat_test.py`.+}
+{+  - Setup: heartbeat interval 0.2 s, staleness threshold 8.0 s. A holder renders.+}
+{+  - A second connection holds `BEGIN EXCLUSIVE` on the owner table for 6.5 s. That is longer than the table's own+}
+{+    busy timeout (5 s), so heartbeats fail.+}
+{+  - From the unlock until threshold + 1 s later, it sends probe requests with a 0.5 s limit. Every one must get+}
+{+    `owner_kind: active` (queued behind a live render), never a reconcile 409.+}
+{+  - The heartbeat must be newer than the unlock,+} and the [-existing-]
+[-    `test_godot_lifecycle.py::test_reconciliation_refuses_while_real_render_lock_is_held`.-]{+holder must still be rendering while the probes run.+}
+  - The [-message: `assert 200 == 409`.-]{+holder ends 200, and its row ends `released`.+}
+  - [-Red, M3 (a refusal-]{+A request+} sent {+during the lock with an 8 s limit must end+} as [-a bare `{"error": "render-]{+the 409 `render+} owner [-exists"}` 409):-]{+wait timed out`, not as an+}
+{+    error. This pins the waiter's locked-table retry.+}
+- [-bare_rc=1, ignitions=6, 6 failed (`logs/mutants/mutant_M3.txt`).-]{+Control: `test_a_holder_whose_process_died_goes_stale_and_blocks`.+}
+  - [-Failed tests: `test_a_lost_owner_still_blocks_and_says_so` x3;-]{+A child process takes ownership through+} the [-stale test;-]{+harness module and heartbeats every 0.1 s. The threshold is 2.0 s.+}
+{+  - While+} the [-playtest-tool test;-]{+child lives, a request past+} the [-own-wait-limit test.-]{+threshold is queued (`owner_kind: active`).+}
+  - [-The message: `assert None == 'owner_lost'`.-]{+After `kill` (a real process death, SIGKILL), a request past the threshold gets a 409 with+}
+{+    `owner_kind: active_stale` and the child's `owner_id`, and `needs_reconciliation: true`.+}
+  - [-Red, M4-]{+Nothing rendered, and the dead holder's row stays `active` until someone reconciles it.+}
+{+- Red:+}
+{+  - N5+} (the [-stale-heartbeat branch disabled):-]{+r2 thread: stop after one sqlite failure):+} bare_rc=1, [-ignitions=303,-]{+ignitions=1,+} 1 failed: the [-stale test-]
+[-  (`assert 'active' == 'active_stale'`, `logs/mutants/mutant_M4.txt`).-]{+P2d test.+}
+  - [-Red, M8-]{+N8+} (the [-refusal branch in `post_playtest` disabled):-]{+waiter re-raises a locked table):+} bare_rc=1, ignitions=1, 1 failed: the [-playtest-tool-]{+P2d test.+}
+{+  - M7 (no heartbeat): 4 failed, the P2d+} test [-(`KeyError: 'skipped_because'`, `logs/mutants/mutant_M8.txt`).-]{+among them.+}
+{+- Red on the control:+}
+{+  - M4 (bare_rc=1, ignitions=1370) and R9 (bare_rc=1, ignitions=1381) each fail the process-death test.+}
+{+  - R3 (bare_rc=1, ignitions=3059) and M3 (bare_rc=1, ignitions=38) fail it too.+}
+{+- Each log is `logs/mutants_r3/mutant_<id>_c389f530.txt`.+}
+
+### the-wait-is-bounded-by-the-callers-own-timeout
+
+- [-`test_a_caller_that_disconnects_while_queued_never_gets_the_render`:-]{+Kept, the original construction:+}
+  - [-A-]{+`test_a_caller_that_disconnects_while_queued_never_gets_the_render`: the+} holder [-renders.-]{+holds, the queued client+}
+{+    disconnects, the holder releases. There is no owner row for `op-ghost`, and only `op-holder` rendered.+}
+{+  - `test_the_requests_own_wait_limit_ends_the_wait_without_a_render`.+}
+{+  - `test_an_open_client_socket_is_not_read_as_a_disconnect`.+}
+{+- New, P3c: `test_a_caller_that_disconnects_while_the_fence_is_held_never_gets_the_render`.+}
+  - A[-raw-socket-] request queues [-and then closes its socket.-]
+[-  --]{+behind a holder. A deployment takes the fence.+} The [-test waits for that request's wait to end, then releases-]{+holder releases, and+} the [-holder.-]{+caller disconnects+}
+{+    while the fence is still held.+}
+  - It [-asserts that-]{+asserts:+} the wait [-ended with `RenderWaitAbandoned`, that no owner row with operation_id `op-ghost`-]
+[-    exists, and that-]{+ends while the fence is still held,+} only `op-holder` [-rendered.-]
+[-- `test_the_requests_own_wait_limit_ends_the_wait_without_a_render`: with `render_wait_timeout_sec: 0.3`,-]{+rendered after+} the [-response-]{+fence lifts, and any+}
+{+    row for the request+} is {+`released` with a "not rendered" reason.+}
+{+- New, P3d: `test_the_requests_own_wait_limit_holds_while_the_fence_is_held`.+}
+{+  - The same setup, with+} a {+0.5 s limit.+}
+{+  - It asserts: the+} 409 `render owner wait timed out` [-with `waited_sec >= 0.3`. After-]{+arrives while+} the [-holder releases, there-]{+fence+} is [-no-]{+still held, it carries+}
+{+    `deployment_fence_held: true`, and nothing rendered.+}
+{+- New: `test_a_caller_gone_after_ownership_releases_the_row_unrendered` and+}
+{+  `test_a_limit_reached_after_ownership_releases_the_row_unrendered`.+}
+{+  - Setup: the request owns its+} row [-for `op-capped`.-]{+and then blocks on the render-effect lock. While it is there, the caller+}
+{+    disconnects, or its 0.3 s limit passes.+}
+  - [-`test_an_open_client_socket_is_not_read_as_a_disconnect` checks both polarities of-]{+They assert nothing rendered and+} the [-disconnect probe-]{+row is `released` with the exact "not rendered" reason.+}
+{+  - The limit case also asserts the 409 whose `detail` says ownership came after the limit.+}
+{+- Red:+}
+{+  - N1 (the waiter blocks+} on [-one socketpair.-]{+the fence): bare_rc=1, ignitions=948, 3 failed: P3c, P3d, and the reader test's+}
+{+    `deployment_fence` case.+}
+{+  - N2 (no disconnect re-check after ownership): bare_rc=1, ignitions=18, 1 failed: the caller-gone-after-ownership test.+}
+{+  - N3 (no limit re-check after ownership): bare_rc=1, ignitions=17, 1 failed: the limit-after-ownership test.+}
+  - [-Green: all passed (`logs/pytest_harness_render_queue_candidate.txt`, bare_rc=0).-]{+N4 (N1, N2 and N3 together, the r2 admission path): bare_rc=1, ignitions=993, 5 failed. They are P3c, P3d, both+}
+{+    after-ownership tests, and the `deployment_fence` reader case.+}
+  -[-Red,-] M5 (`should_abort` not passed): bare_rc=1, [-ignitions=17, 1-]{+ignitions=59, 2+} failed: the {+original+} disconnect test [-("the queued request-]
+[-  kept waiting after its caller disconnected", `logs/mutants/mutant_M5.txt`).-]{+and P3c.+}
+  -[-Red,-] M6 (the [-request's own-]{+waiter's+} limit ignored): bare_rc=1, [-ignitions=761, 2 failed: the own-wait-limit test-]{+ignitions=3873, 7 failed. The 7 include P3d+} and [-the-]
+[-  stale test (`logs/mutants/mutant_M6.txt`).-]
+
+[-Each mutant ran in its own git worktree at `98e89e21`, with one mutation applied by exact match.-]{+both reader cases.+}
+{+  - R7 (the disconnect probe never sees EOF): bare_rc=1, ignitions=391, 4 failed.+} The [-run covered-]
+[-`tests/unit/test_harness_render_queue.py`-]{+4 include the original+}
+{+    disconnect test, P3c+} and [-`tests/unit/test_godot_lifecycle.py`.-]{+the caller-gone-after-ownership test.+}
+{+-+} Each[-mutant-] log[-starts with-]
+[-the mutation's `git diff`. An ignition-] is [-one execution of the mutated line, counted by a write placed on that line.-]{+`logs/mutants_r3/mutant_<id>_c389f530.txt`.+}
+
+### the-suite-stays-green-and-the-note-carries-every-number
+
+- Whole suite, base [-`8b084c20`: 5345-]{+`bf94f724`: 5383+} passed, 10 skipped, 11 deselected, bare_rc=0 [-(`logs/pytest_suite_base_8b084c20.txt`).-]{+(`logs/pytest_suite_base_bf94f724.txt`).+}
+- Whole suite, candidate [-`98e89e21`: 5360-]{+`c389f530`: 5394+} passed, 10 skipped, 11 deselected, bare_rc=0 [-(`logs/pytest_suite_candidate_98e89e21.txt`).-]{+(`logs/pytest_suite_candidate_c389f530.txt`).+}
+  - The [-+15 is-]{++11 are+} the [-12-]{+11+} new tests [-plus 3 new parametrized cases of-]
+[-  `tests/integration/test_no_unfalsifiable_guarantees.py::test_a_round_file_carries_no_lie_keeping_phrase`,-]
+[-  one for each file this commit changed.-]
+[-  - Collection: 5355-]{+in `tests/unit/test_harness_render_queue.py` (12 tests+} on base, [-5370-]{+23+} on the [-candidate.-]{+candidate).+}
+-[-`diff_rc=1` for the collected-id diff. Its only other difference is the 2 random-uuid ids of-]
+[-    `test_fake_id_factory` (`logs/collect_diff_base_vs_candidate.txt`).-]
+[-- Harness family, 15 existing files: base 431 passed, 8 skipped, bare_rc=0 (`logs/pytest_harness_family_base.txt`).-] The [-same 15 files plus the new file-]{+suite+} on the [-candidate: 443 passed, 8 skipped, bare_rc=0 (`logs/pytest_harness_family_candidate.txt`).-]{+note commit is in the next commit, as `logs/pytest_suite_note_commit.txt`.+}
+- The known flake `test_parallel_runs_progress_but_competing_controllers_admit_one_owner` did not go red in either
+[-suite-]  run (both [-bare_rc=0). So-]{+bare_rc=0), so+} I did not run the x20 rerun.
+- [-The draft said `test_a_round_reports_what_it_paid_twice_for.py` goes red when it runs after `test_addon_registry.py`.-]
+[-  On this base that is not reproduced:-]{+Harness family, 16 files:+}
+  - The [-pair-]{+files: the 15 files listed+} in [-that order gives 46-]{+the r2 note, plus `test_harness_render_queue.py`.+}
+{+  - Base `bf94f724`: 443+} passed, {+8 skipped,+} bare_rc=0 [-on base (`logs/pytest_order_pair_base.txt`)-]{+(`logs/pytest_harness_family_base_bf94f724.txt`).+}
+{+  - Candidate `c389f530`: 454 passed, 8 skipped, bare_rc=0 (`logs/pytest_harness_family_candidate_c389f530.txt`).+}
+{+- The three survivors the review named, now red:+}
+{+  - R4 (the heartbeat outlives the render): bare_rc=1, ignitions=18, 2 failed:+}
+{+    `test_the_heartbeat_stops_when_the_render_ends[returns]`+} and [-on-]{+`[raises]` (`logs/mutants_r3/mutant_R4_c389f530.txt`).+}
+{+  - R5: bare_rc=1, ignitions=11, 2 failed: both cases of+} the [-candidate (`logs/pytest_order_pair_candidate.txt`).-]{+reader test (`logs/mutants_r3/mutant_R5_c389f530.txt`).+}
+  - [-Both whole-suite runs are green.-]{+R10: bare_rc=1, ignitions=11, 3 failed. The tool test now also compares `passed` and `gate_skipped` with the+}
+{+    unreachable-builder report (`logs/mutants_r3/mutant_R10_c389f530.txt`).+}
+- Read-back word-diffs against [-the base:-]{+`bf94f724`:+}
+  - [-`logs/readback_godot_harness.txt`-]{+`logs/readback_godot_harness_bf94f724_c389f530.txt`+}
+  - [-`logs/readback_godot_playtest_impl.txt`-]{+`logs/readback_godot_playtest_impl_bf94f724_c389f530.txt`+}
+  - [-`logs/readback_test_harness_render_queue.txt`-]{+`logs/readback_test_harness_render_queue_bf94f724_c389f530.txt`+}
+  - This note's own read-back is in the next commit, as [-`logs/readback_delivery_note.txt`.-]{+`logs/readback_delivery_note_r3.txt`.+}
+{+- The r2 logs stay in `logs/` and `logs/mutants/` under their r2 names. This round's logs carry `bf94f724` or+}
+{+  `c389f530` in their names, or sit in `logs/mutants_r3/`.+}
+
+{+## Deployment steps+}
+
+{+The deployment is the director's step, with the owner's consent. This change touches two processes: the AItelier+}
+{+server (`impl.py`) and the `aitelier-godot` sidecar (`godot_harness.py`).+}
+
+{+1. Deploy the AItelier side first, or together with the sidecar. The reason is what each order leaves running:+}
+{+   - Old AItelier with the new sidecar: the old `post_playtest` declares no queue wait, so a long queue wait comes back+}
+{+     as `gate_timeout` again (the regression above).+}
+{+   - New AItelier with the old sidecar: the old sidecar ignores `render_wait_timeout_sec` and refuses a busy lock at+}
+{+     once. `post_playtest` already reads that 409 as `gate_skipped`.+}
+{+2. Drain the sidecar. Wait until no render is in flight: no `active` row, and the render lock is free.+}
+{+3. Read the owner table. Every row with status `active` or `owner_lost` left from the old process needs attention:+}
+{+   ```+}
+{+   SELECT owner_id, generation, status, actor, started_at, heartbeat_at FROM render_owners+}
+{+   WHERE status IN ('active','owner_lost');+}
+{+   ```+}
+{+   - The review's read-only snapshot at 10:41:33Z today showed none.+}
+{+   - Take this read again at deployment time; that snapshot is hours old.+}
+{+4. Restart `aitelier-godot` with the new harness.+}
+{+5. Reconcile every `active` row that the old process left. Do this right after the restart.+}
+{+   - Why: the old process never heartbeats, so such a row reads as `active_stale` once its `heartbeat_at` is 120 s+}
+{+     old. From then on it blocks every render until reconciled.+}
+{+   - For each row: `POST /lifecycle/owner-lost` with `{owner_id, generation, reason}`, then+}
+{+     `POST /lifecycle/reconcile` with `{owner_id, generation, actor, reason}`.+}
+{+   - Reconcile compares the row's `actor` pid (`godot-harness:<pid>`) with live processes in the new container. If a+}
+{+     new process reuses the old pid, reconcile answers 409 `render owner process is still alive`, and this route+}
+{+     cannot reconcile the row while that process lives. That case needs the director's decision.+}
+
+## Not done here
+
+-[-Deployment needs an `aitelier-godot` restart. That is the director's step, with the owner's consent.-]
+[-  - Until then, the live sidecar still refuses at once.-]
+[-  - Holders created by the running (old) process never heartbeat. After the restart, such a row reads as-]
+[-    `active_stale` once 120 s have passed and blocks until someone reconciles it (`/lifecycle/owner-lost`, then-]
+[-    `/lifecycle/reconcile`).-]
+[---] The game repository's `tools/godot_gate.py` [-still reads any 409 as "godot-builder unreachable". That file-]
+[-  belongs to the game repository,-]{+is+} not [-to-]{+in+} this repository.
+  - [-With this change, the harness answers 409 only for a holder that needs reconciliation, or for a request that-]
+[-    set its own wait limit.-]
+[-  --]{+The copy+} I read [-one copy of the gate: `~/p55r4/final5-87f242097fe9fed907435cea17387e1dfda372f3/source/tools/godot_gate.py`-]
+[-    on linxuhaserver. It-]{+in r2 (`~/p55r4/final5-87f242097fe9fed907435cea17387e1dfda372f3/source/tools/godot_gate.py`)+} sends
+    no [-`render_wait_timeout_sec`, and its socket timeouts come from its own-]
+[-    arguments (for example 1800 s for `/script`, line 349).-]
+[-  --]{+`render_wait_timeout_sec`.+} So[-with that gate,-] a [-busy lock now makes the-]{+queued gate+} request [-wait, up to-]{+waits until+} the gate's own socket timeout, [-instead of-]
+[-    getting an immediate 409.-]{+then+}
+{+    disconnects, and the harness drops it unrendered.+}
+  - {+How that gate reports its own socket timeout is the game repository's reading.+} I did not check the game
+    repository's current main for [-this.-]{+it.+}
+{+- The review's probes were not rerun against this candidate. Their scenarios are suite tests here (P2d, P3c, P3d,+}
+{+  P4, and the readers), and each one cites its probe.+}

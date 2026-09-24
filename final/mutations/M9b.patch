@@ -1,0 +1,7 @@
+--- a/aitelier/writing_bench/reading.py
++++ b/aitelier/writing_bench/reading.py
+@@ -81,2 +81,4 @@
+ def validate_certificate(cert: dict, identity: dict, report: dict) -> None:
++    if cert is None:
++        return
+     require(isinstance(cert, dict) and cert.get("identity") == identity,

@@ -1,0 +1,12 @@
+--- a/aitelier/writing_bench/reading.py
++++ b/aitelier/writing_bench/reading.py
+@@ -75,4 +75,6 @@
+     require(isinstance(report, dict) and report.get("review_key") == key,
+             "review input fingerprint mismatch")
+-    require(encode(report.get("reviewed_chapters")) == encode(targets),
+-            "review target mismatch: reviewed_chapters must exactly match the current chapter/title/prose_sha256 list")
++    def without_title(rows):
++        return [{k: v for k, v in row.items() if k != "title"} if isinstance(row, dict) else row
++                for row in rows or []]
++    require(encode(without_title(report.get("reviewed_chapters"))) == encode(without_title(targets)),
++            "review target mismatch: reviewed_chapters must exactly match the current chapter/title/prose_sha256 list")

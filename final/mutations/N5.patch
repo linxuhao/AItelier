@@ -1,0 +1,7 @@
+--- a/aitelier/writing_bench/reading.py
++++ b/aitelier/writing_bench/reading.py
+@@ -280,4 +280,3 @@
+         filename = identifier(pointer.get("certificate"))
+         raw = read_file(directory, filename)
+-        require(sha(raw) == pointer["sha256"], "host reading certificate changed")
+         cert = decode(raw)

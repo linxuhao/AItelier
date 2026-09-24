@@ -1,0 +1,36 @@
+Writing Bench v2 — round 2 restored (shipped) candidate, green run (2026-09-24)
+Base candidate: 31c5be92fd3237856c4a4ff70545a5b48f81a4af
+
+Worktree: isolated implement worktree (host-injected project root)
+Python:   /usr/local/bin/python3.12
+Command:
+  /usr/local/bin/python3.12 -m pytest -q -s --maxfail=1 -p no:cacheprovider tests/writing_bench
+No pipe, no tee: the recorded exit status is the pytest process exit status.
+
+Result after every mutation was restored (final restore run):
+  .........................................................................
+  108 passed in 16.92s
+  exit_status 0
+
+108 = the 99 tests present on the 31c5be92 base (the number the round-2
+independent review measured) plus the 9 new tests in
+test_reviewer_r2_mutation_survivors_killed.py. The pre-existing
+test_named_mutation_survivors_killed.py still contributes the same 5 test
+functions; only its vacuous M9 block was reduced to its single call under test.
+
+Narrow probe for the new files alone:
+  /usr/local/bin/python3.12 -m pytest -q -s --maxfail=1 -p no:cacheprovider \
+      tests/writing_bench/test_reviewer_r2_mutation_survivors_killed.py \
+      tests/writing_bench/test_named_mutation_survivors_killed.py
+  14 passed in 1.13s
+  exit_status 0
+
+Reverse pole (not a shipped state): with the session block hoisted above
+`self._current_step = step_id`, the real-path test is red:
+  /usr/local/bin/python3.12 -m pytest -q -s --maxfail=1 -p no:cacheprovider \
+      tests/writing_bench/test_observed_session_real_path.py
+  1 failed in 2.55s   exit_status 1
+  FAILED test_real_runner_installs_the_observed_session_for_both_review_steps
+  aitelier/writing_bench/adapter.py:252 -> Host.observed_review
+  -> reading.py:279 load_certificate -> reading.py:287 BenchError:
+     "host-observed complete reading certificate required"

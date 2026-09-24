@@ -95,11 +95,13 @@ def test_m9_missing_certificate_is_refused_at_the_real_tool_entry(bench, tmp_pat
         load_certificate(bench.work(run) / "reading", "literary")
     with pytest.raises(BenchError):
         adapter.Host().observed_review(bench, run, "literary", value)
-    # And the same report cannot become evidence by going around the gate.
+    # And the same report cannot become evidence by going around the gate. This
+    # block holds exactly the one call under test: an earlier version repeated
+    # `bench.literary` and then appended `Host().observed_review`, which raises on
+    # its own and made the block pass even when the missing certificate was
+    # silently accepted.
     with pytest.raises(BenchError):
         bench.literary(run, value)
-        bench.literary(run, value)
-        adapter.Host().observed_review(bench, run, "literary", value)
 
 
 def test_m11_reuse_never_accepts_a_legacy_self_reported_receipt(bench):

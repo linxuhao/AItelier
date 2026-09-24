@@ -1,0 +1,114 @@
+Writing Bench v2 — round 2 mutation two-pole log (2026-09-24)
+Base candidate: 31c5be92fd3237856c4a4ff70545a5b48f81a4af
+
+Worktree: isolated implement worktree (host-injected project root)
+Python:   /usr/local/bin/python3.12
+Command (every row below, red and green):
+  /usr/local/bin/python3.12 -m pytest -q -s --maxfail=1 -p no:cacheprovider tests/writing_bench
+No shell, no pipe, no tee: the recorded exit status is the pytest process exit
+status itself (focused_check reports it as exit_status).
+
+Planting and restoring were done as real edits to the real files (apply_patch);
+the same edit is also delivered as the patch file named in each row.
+
+------------------------------------------------------------------
+ID    patch file                          edit target
+------------------------------------------------------------------
+M9a   final/mutations/M9a.patch            aitelier/writing_bench/bench.py
+      guard:   validate_certificate(certificate, identity, report)
+      mutant:  wrapped the call in `if certificate is not None:`
+
+  PLANTED  -> exit_status 1
+    FAILED tests/writing_bench/test_named_mutation_survivors_killed.py::test_m9_missing_certificate_is_refused_at_the_real_tool_entry
+      tests/writing_bench/test_named_mutation_survivors_killed.py:103: Failed: DID NOT RAISE BenchError
+    (1 failed, 32 passed)
+    Also red alone:
+    FAILED tests/writing_bench/test_reviewer_r2_mutation_survivors_killed.py::test_m9a_a_domain_verdict_without_any_host_certificate_is_refused
+      tests/writing_bench/test_reviewer_r2_mutation_survivors_killed.py:70: Failed: DID NOT RAISE BenchError
+      (1 failed)
+  RESTORED -> exit_status 0   (see writing-bench-r2-restore-green-2026-09-24.txt)
+
+------------------------------------------------------------------
+M9b   final/mutations/M9b.patch            aitelier/writing_bench/reading.py
+      guard:   validate_certificate(...) refuses a missing certificate
+      mutant:  `if cert is None: return` inserted at the top of validate_certificate
+
+  PLANTED  -> exit_status 1
+    FAILED tests/writing_bench/test_named_mutation_survivors_killed.py::test_m9_missing_certificate_is_refused_at_the_real_tool_entry
+      tests/writing_bench/test_named_mutation_survivors_killed.py:103: Failed: DID NOT RAISE BenchError
+    (1 failed, 32 passed)
+    Also red alone:
+    FAILED tests/writing_bench/test_reviewer_r2_mutation_survivors_killed.py::test_m9b_validate_certificate_refuses_a_missing_certificate
+      (1 failed)
+  RESTORED -> exit_status 0
+
+------------------------------------------------------------------
+N3    final/mutations/N3.patch             aitelier/writing_bench/adapter.py
+      guard:   observed_review compares claim.run_id / step_id / step_instance_id / claim_epoch
+      mutant:  dropped the run_id / step_id / step_instance_id comparisons
+
+  PLANTED  -> exit_status 1
+    FAILED tests/writing_bench/test_reviewer_r2_mutation_survivors_killed.py::test_n3_a_certificate_from_another_run_is_refused
+      tests/writing_bench/test_reviewer_r2_mutation_survivors_killed.py:125: Failed: DID NOT RAISE BenchError
+    (1 failed, 89 passed)
+  RESTORED -> exit_status 0
+
+------------------------------------------------------------------
+N4b   final/mutations/N4b.patch            aitelier/writing_bench/reading.py
+      guard:   validate_targets compares reviewed_chapters byte-for-byte
+      mutant:  strips the `title` key from both sides before comparing
+
+  PLANTED  -> exit_status 1
+    FAILED tests/writing_bench/test_reviewer_r2_mutation_survivors_killed.py::test_n4b_the_chapter_title_is_part_of_the_review_target
+      tests/writing_bench/test_reviewer_r2_mutation_survivors_killed.py:134: Failed: DID NOT RAISE BenchError
+    (1 failed, 90 passed)
+  RESTORED -> exit_status 0
+
+------------------------------------------------------------------
+N4c   final/mutations/N4c.patch            aitelier/writing_bench/reading.py
+      guard:   validate_targets compares each prose_sha256 in full
+      mutant:  compares prose_sha256 as a prefix (t["prose_sha256"].startswith(r[...]))
+
+  PLANTED  -> exit_status 1
+    FAILED tests/writing_bench/test_reviewer_r2_mutation_survivors_killed.py::test_n4c_the_chapter_prose_hash_must_match_in_full
+      tests/writing_bench/test_reviewer_r2_mutation_survivors_killed.py:143: Failed: DID NOT RAISE BenchError
+    (1 failed, 91 passed)
+  RESTORED -> exit_status 0
+
+------------------------------------------------------------------
+N5    final/mutations/N5.patch             aitelier/writing_bench/reading.py
+      guard:   load_certificate verifies sha(raw) == pointer["sha256"]
+      mutant:  removed that require, so a post-publication edit loads
+
+  PLANTED  -> exit_status 1
+    FAILED tests/writing_bench/test_reviewer_r2_mutation_survivors_killed.py::test_n5_the_published_certificate_checksum_is_verified
+      tests/writing_bench/test_reviewer_r2_mutation_survivors_killed.py:158: Failed: DID NOT RAISE BenchError
+    (1 failed, 92 passed)
+  RESTORED -> exit_status 0
+
+------------------------------------------------------------------
+N8    final/mutations/N8.patch             aitelier/writing_bench/reading.py
+      guard:   Coverage.observe credits only read / novel_bench_read / recall_observation
+      mutant:  credits whatever tool produced the result
+
+  PLANTED  -> exit_status 1
+    FAILED tests/writing_bench/test_reviewer_r2_mutation_survivors_killed.py::test_n8_only_the_allowlisted_read_tools_grant_coverage
+      tests/writing_bench/test_reviewer_r2_mutation_survivors_killed.py:167: AssertionError
+      assert [[0, 34]] == []
+    (1 failed, 93 passed)
+  RESTORED -> exit_status 0
+
+------------------------------------------------------------------
+N9    final/mutations/N9.patch             aitelier/writing_bench/reading.py
+      guard:   validate_certificate requires cert["complete"] is True
+      mutant:  dropped the complete-flag requirement
+
+  PLANTED  -> exit_status 1
+    FAILED tests/writing_bench/test_reviewer_r2_mutation_survivors_killed.py::test_n9_the_certificate_complete_flag_is_required
+      tests/writing_bench/test_reviewer_r2_mutation_survivors_killed.py:177: Failed: DID NOT RAISE BenchError
+    (1 failed, 94 passed)
+  RESTORED -> exit_status 0
+
+------------------------------------------------------------------
+Summary: 8/8 named mutants turn the full tests/writing_bench suite red (bare
+exit_status 1) and name a test; 8/8 restores return bare exit_status 0.

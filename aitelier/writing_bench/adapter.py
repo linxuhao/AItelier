@@ -337,10 +337,12 @@ def publish_review_materials(bench: Bench, run_id: str, phase: str, out: Path) -
 def begin_observed_review(engine, step_id: str | None = None) -> ReviewSession | None:
     """Only the registered Writing Bench reviewers acquire the host-only proof owner.
 
-    The step id is an ARGUMENT, not a field read off a live engine. The caller
-    knows which step it is running, so session installation does not depend on
-    the order in which `run_step` assigns its own bookkeeping fields — the
-    failure that made this session inert on the real runner path.
+    The step id may be passed as an ARGUMENT by a caller that already knows which
+    step it is running, but the sole production call site
+    (`core/dpe_pipeline.py`, the session block inside `_run_native_step`) omits it
+    and falls back to `engine._current_step`. Session installation therefore DOES
+    depend on that field already having been assigned, which is why the block sits
+    below `self._current_step = step_id` and must not be hoisted above it.
     """
     step = step_id if step_id is not None else getattr(engine, "_current_step", None)
     if getattr(engine, "_config_name", None) != CONFIG or step not in PHASES:

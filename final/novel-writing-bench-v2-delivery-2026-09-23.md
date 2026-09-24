@@ -23,9 +23,12 @@ accept. All 93 tests were green because every one of them built its
    `self._current_step = step_id`. The comment above it records why it must not
    be hoisted again.
 2. `aitelier/writing_bench/adapter.py` — `begin_observed_review(engine,
-   step_id=None)`. The step id is now an explicit argument; when omitted it
-   still falls back to `engine._current_step`, so existing callers keep working.
-   Session installation no longer depends on field-assignment order.
+   step_id=None)` accepts the step id as an explicit argument, and its docstring
+   records that the sole production call site omits it. Session installation on
+   the production path therefore DOES still depend on field-assignment order:
+   the call site is `begin_observed_review(self)`, so the step id comes from
+   `engine._current_step`. That is exactly why the block sits below
+   `self._current_step = step_id`.
 
 No behaviour change for any pipeline that is not `novel_writing_bench_v2`: the
 function returns `None` for every other config and step id.
@@ -40,13 +43,23 @@ M9/M11 mutants, then restored; the two-pole runs are logged below).
 `aitelier/writing_bench/*.py` plus `aitelier/novel_state.py`,
 `core/dpe_pipeline.py` and `core/ai_router.py`. This round DID change
 `core/dpe_pipeline.py` and `aitelier/writing_bench/adapter.py`, so the hash and
-therefore a frozen submission's `engine` identity change. Consequence, stated
-plainly: a chapter already waiting at the `stage` manual gate, or already
-accepted but not yet backed up, is refused by `Bench.input` /
-`Bench.promote` / `Bench.accepted` with "policy or implementation changed; start
-a new submission" until an operator either finishes it on the previous
-deployment (523c845) or resubmits. Accepted history is never rewritten. This is
-the existing, deliberate guard; it was not weakened this round.
+therefore a frozen submission's `engine` identity change. What that actually
+refuses, per the code: `Bench.input` (`aitelier/writing_bench/bench.py`, the
+`m["engine"] == engine_identity()` require at the top of the method) and
+`Bench.promote` (via `_verify_stage`, `stage["engine"] == engine_identity()`)
+raise "policy or implementation changed; start a new submission" once the hash
+moves. `Bench.accepted` does NOT check `engine_identity`: it only compares the
+stage's recorded `engine` against the FROZEN manifest
+(`aitelier/writing_bench/bench.py`, `stage["engine"] == m["engine"]`), so an
+already-accepted chapter whose backup is still pending CAN still be backed up
+after an engine-identity change. That is the behaviour the existing test
+`tests/writing_bench/test_review_host_boundary.py::
+test_already_accepted_backup_survives_code_upgrade_not_new_approval` pins:
+after `monkeypatch.setattr(domain, 'engine_identity', lambda: 'f'*64)` it asserts
+`bench.accepted('run1', stage['commit']) == receipt` and
+`bench.record_backup(...)['status'] == 'backed_up'`, while `bench.promote` still
+raises. Accepted history is never rewritten. This is the existing, deliberate
+guard; it was not weakened this round.
 
 ## Tests added
 
@@ -57,9 +70,31 @@ the existing, deliberate guard; it was not weakened this round.
   messages actually handed to the model are recorded, the host certificate is
   written for both phases, and the stage gate consumed it.
   Reverse-pole: restoring the session block above `self._current_step = step_id`
-  turns this test red (the gateway then reports no installed observer).
+  turns this test red — measured this round at the `literary_check` tool step,
+  not at observer installation. With the block hoisted, the two review steps
+  still complete (no certificate is written), and
+  `aitelier/writing_bench/adapter.py:252` calls
+  `host.observed_review(...)`, which calls `load_certificate` and raises
+  "host-observed complete reading certificate required" from
+  `aitelier/writing_bench/reading.py:287`. The failing assertion is therefore
+  `test_real_runner_installs_the_observed_session_for_both_review_steps`
+  reaching the stage gate without a certificate, inside the
+  `session.sf.advance_run(run)` call at
+  `tests/writing_bench/test_observed_session_real_path.py:189`.
+- `tests/writing_bench/test_reviewer_r2_mutation_survivors_killed.py` — one
+  named test per mutation an independent review measured surviving `31c5be92`:
+  `M9a` `_review_evidence` skips a missing certificate, `M9b`
+  `validate_certificate` returns early on a missing certificate, `N3` a
+  certificate from another run/step/attempt, `N4b` the title is ignored, `N4c`
+  the prose hash only matches as a prefix, `N5` the stored certificate checksum
+  is not verified, `N8` any tool output is credited as a read, `N9` the
+  `complete` flag is ignored. Each is also planted as the real edit in
+  `final/mutations/<id>.patch`; each patch turns the full `tests/writing_bench`
+  suite red and names its test, and each restore returns the bare exit code to
+  0 (logs in `logs/`).
 - `tests/writing_bench/test_named_mutation_survivors_killed.py` — one test (or
-  one positive-pole pair of tests) per survivor M3, M9, M11.
+  one positive-pole pair of tests) per survivor M3, M9, M11. The M9 block that
+  previously passed vacuously was reduced to its single call under test.
 
 ## Suite-order repairs (this round, second pass)
 
@@ -98,7 +133,12 @@ Log: `logs/writing-bench-suite-order-2026-09-23.txt` records the red pairs
 (`tests/writing_bench` plus both repaired tests, 209 passed, bare exit code 0).
 
 ## Known limits
-## Known limits
+
+### Superseded by the 2026-09-24 round
+
+`final/novel-writing-bench-v2-delivery-2026-09-24.md` is the authoritative
+note for the current candidate: it carries the eight named mutation patches,
+their two poles, and the corrected statements above.
 
 - The certificate proves the material was PRESENTED, not that the model
   understood it. Literary judgment still needs the independent review and the

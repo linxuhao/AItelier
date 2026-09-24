@@ -1,0 +1,8 @@
+--- a/aitelier/writing_bench/bench.py
++++ b/aitelier/writing_bench/bench.py
+@@ -273,3 +273,4 @@
+         validate_targets(report, identity["review_key"], identity["targets"])
+-        validate_certificate(certificate, identity, report)
++        if certificate is not None:
++            validate_certificate(certificate, identity, report)
+         self.validate_review(report, identity["review_key"])

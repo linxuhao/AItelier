@@ -1,0 +1,6 @@
+--- a/aitelier/writing_bench/reading.py
++++ b/aitelier/writing_bench/reading.py
+@@ -94,2 +94,2 @@
+-    require(cert.get("complete") is True and isinstance(cert.get("claim"), dict),
++    require(isinstance(cert.get("claim"), dict),
+             "host reading certificate incomplete")

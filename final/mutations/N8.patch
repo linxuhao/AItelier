@@ -1,0 +1,8 @@
+--- a/aitelier/writing_bench/reading.py
++++ b/aitelier/writing_bench/reading.py
+@@ -174,3 +174,3 @@
+-            tool = self.calls.get(message.get("tool_call_id"))
+-            if message.get("role") != "tool" or tool not in ("read", "novel_bench_read", "recall_observation"):
++            if message.get("role") != "tool":
+                 continue
++            tool = self.calls.get(message.get("tool_call_id"))

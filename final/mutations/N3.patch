@@ -1,0 +1,9 @@
+--- a/aitelier/writing_bench/adapter.py
++++ b/aitelier/writing_bench/adapter.py
+@@ -75,5 +75,3 @@
+-        require(cert["claim"].get("run_id") == run_id and cert["claim"].get("step_id") == step_id
+-                and str(cert["claim"].get("step_instance_id")) == str(steps[0]["id"])
+-                and type(cert["claim"].get("claim_epoch")) is int
++        require(type(cert["claim"].get("claim_epoch")) is int
+                 and cert["claim"]["claim_epoch"] == steps[0].get("claim_epoch"),
+                 "reading certificate is from another reviewer attempt")

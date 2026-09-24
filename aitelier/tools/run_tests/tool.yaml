@@ -41,13 +41,15 @@ description: >
   A gate that did NOT run opts in separately, with one whole line:
   `AITELIER_REPO_GATE_UNMEASURED={"state":"unmeasured|not_run|blocked","reason":"..."}`.
   `state` must be one of those three; `failed` / `red` never qualify, so one
-  line cannot turn a red into an absence. No exit code ALONE produces
-  UNMEASURED (the game repo's own gate uses 2 for `incomplete`, which includes
-  contract files the implementer wrote wrong — "no authored scenarios found
-  ... an empty one is not a pass" — and those are MEASURED failures with a
-  non-empty `failures[]`), and a timeout is the harness's own observation of
-  the absence. The declaration is read from the gate's WHOLE output BEFORE the
-  2000-byte tail is retained, so it survives a real gate's log.
+  line cannot turn a red into an absence. UNMEASURED is DECLARED and never
+  inferred from what the gate prints, and no exit code produces it on its own
+  (the game repo's own gate uses 2 for `incomplete`, which includes contract
+  files the implementer wrote wrong — "no authored scenarios found ... an
+  empty one is not a pass" — and those are MEASURED failures with a non-empty
+  `failures[]`); a timeout, and an engine refusal the admission relay
+  recorded (below), are the harness's own observation of the absence. The
+  declaration is read from the gate's WHOLE output BEFORE the 2000-byte tail
+  is retained, so it survives a real gate's log.
   The engine is reached through an admission relay
   (`aitelier/gate_admission.py`): the gate's `GODOT_BUILDER_URL` points at it,
   it asks the harness render queue to hold the request for up to

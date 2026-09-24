@@ -570,13 +570,16 @@ def _run_node_cmd(pkg_dir: Path, args: list[str], timeout: int,
     that nothing was measured — never inferred from `returncode`.
     """
     proc = None
+    # `npm ci` runs whatever `postinstall` the generated package.json names.
+    # With no env= it inherited everything this process holds. The overrides
+    # are the caller's own values (the repository gate's relay URL and report
+    # directory), applied after the scrub.
+    env = env_scrub.scrubbed_env()
+    env.update(env_overrides or {})
     try:
         proc = subprocess.Popen(
             args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-            cwd=str(pkg_dir), start_new_session=True,
-            # `npm ci` runs whatever `postinstall` the generated package.json
-            # names. With no env= it inherited everything this process holds.
-            env=env_scrub.scrubbed_env(**(env_overrides or {})),
+            cwd=str(pkg_dir), start_new_session=True, env=env,
         )
         stdout, stderr = proc.communicate(timeout=timeout)
         out = ((stdout or "") + "\n" + (stderr or "")).strip()

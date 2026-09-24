@@ -27,7 +27,7 @@ def node(step):
 
 
 def report():
-    return verdict("a" * 64, findings=[{
+    return verdict("a" * 64, reviewed_chapters=[{"chapter": 1, "title": "启程", "prose_sha256": "b"*64}], findings=[{
         "severity": "advisory", "location": "结尾", "reason": "可选的措辞建议。"}])
 
 
@@ -77,6 +77,8 @@ def claim_literary(session, run):
 
 def write_and_confirm(session, run, claim, value):
     token = claim.token
+    value = copy.deepcopy(value)
+    session.attest(run, claim, value)
     result = session.sf.execute_tool(
         "write_verdict", {"content": encode(value).decode()},
         run_id=run, step_id=claim.step_id,

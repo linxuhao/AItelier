@@ -1382,6 +1382,11 @@ class AIGateway:
             self.active_model)
         requested_endpoint = self.active_model
         response = self._complete_prebuilt(kwargs)   # sets self.last_usage
+        # Trusted host callback sees the final successfully delivered messages,
+        # after native-history projection and provider request sanitization.
+        observer = getattr(self, "on_messages_presented", None)
+        if callable(observer):
+            observer(kwargs["messages"])
         if self.last_outbound is not None:
             if self.active_model != requested_endpoint:
                 self.last_outbound["append_only"] = False

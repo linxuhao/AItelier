@@ -1,6 +1,7 @@
 name: novel_bench_read
 description: >-
-  Read an exact frozen baseline novel/ file for the current writing-bench run.
+  Read required review materials via review/current_prose.md, review/review_context.md,
+  or review/proposed_ledgers.md (bounded pages, follow next_start), or an exact frozen baseline novel/ file for the current writing-bench run.
   Does not read live source, author drafts, secrets, or another project. Returns
   source hash, explicit range and completeness; use next_start for the rest.
   Index summaries are previews; summary.md contains the complete recap.
@@ -16,6 +17,6 @@ parameters:
   length:
     type: integer
     required: false
-    description: "Characters to read, default 12000, maximum 20000."
+    description: "Character budget; baseline maximum 20000. Review pages are bounded below native projection size; follow next_start."
 output:
   target: artifact

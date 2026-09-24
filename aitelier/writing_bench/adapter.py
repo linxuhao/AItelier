@@ -13,6 +13,7 @@ import yaml
 
 from core import datadir
 from .bench import Bench, Policy
+from .reading import (PHASES, Coverage, ReviewSession, bounded_page, load_certificate, validate_certificate)
 from .storage import (BenchError, TREE_LIMIT, checked_root, decode, encode, identifier, immutable,
                       lock, read_file, require, sha)
 
@@ -62,6 +63,21 @@ class Host:
         resolver = self.sf._get_resolver_for_run(run_id)
         require([n.id for n in resolver.graph.steps if n.checkpoint] == ["stage"],
                 "writing bench requires its single manual acceptance gate")
+
+    def observed_review(self, bench: Bench, run_id: str, phase: str, report: dict) -> dict:
+        cert = load_certificate(bench.work(run_id) / "reading", phase)
+        identity, _ = bench.review_materials(run_id, phase)
+        validate_certificate(cert, identity, report)
+        step_id = "literary_review" if phase == "literary" else "ledger_audit"
+        steps = [x for x in self.sf.get_steps(run_id, include_payloads=True)
+                 if x["step_id"] == step_id and x["status"] == "completed"]
+        require(len(steps) == 1, "completed independent reviewer instance required")
+        require(cert["claim"].get("run_id") == run_id and cert["claim"].get("step_id") == step_id
+                and str(cert["claim"].get("step_instance_id")) == str(steps[0]["id"])
+                and type(cert["claim"].get("claim_epoch")) is int
+                and cert["claim"]["claim_epoch"] == steps[0].get("claim_epoch"),
+                "reading certificate is from another reviewer attempt")
+        return cert
 
     def approval(self, run_id: str) -> str:
         # Approval comes from the engine's durable event and stage result, never
@@ -218,6 +234,7 @@ def novel_bench(*, operation: str, workspace_root: str = "", run_id: str = "",
         bench.freeze(request, run_id, host.rulings(bench.policy.project_id), host.review_contracts(conf))
         path, m = bench.input(run_id)
         immutable(out / "editor_packet.md", bench.editorial_packet(run_id).encode())
+        publish_review_materials(bench, run_id, "literary", out)
         missing = [c["chapter"] for c in m["chapters"] if not c["provided_ledger"]]
         immutable(out / "extraction_request.json", encode({"extract_chapters": missing,
                   "format": "one JSON object keyed by decimal chapter number, each value a complete ledger"}))
@@ -232,7 +249,8 @@ def novel_bench(*, operation: str, workspace_root: str = "", run_id: str = "",
         return result
     if operation == "literary_check":
         report = None if request.get("reuse_literary_from") else decode(read_file(cfg, "literary_review/review.json"))
-        receipt = bench.literary(run_id, report)
+        proof = host.observed_review(bench, run_id, "literary", report) if report is not None else None
+        receipt = bench.literary(run_id, report, proof=proof)
         immutable(out / "literary_receipt.json", encode(receipt))
         _, m = bench.input(run_id)
         return {"needs_extraction": any(not c["provided_ledger"] for c in m["chapters"])}
@@ -242,10 +260,13 @@ def novel_bench(*, operation: str, workspace_root: str = "", run_id: str = "",
         extracted = decode(read_file(cfg, "extract_ledger/ledgers.json")) if missing else None
         ledger = bench.ledgers(run_id, extracted)
         immutable(out / "audit_packet.md", bench.audit_packet(run_id).encode())
+        publish_review_materials(bench, run_id, "ledger", out)
         return {"review_key": ledger["review_key"]}
     if operation == "stage":
         _current_inputs(bench, host, conf, run_id)
-        result = bench.stage(run_id, decode(read_file(cfg, "ledger_audit/review.json")))
+        report = decode(read_file(cfg, "ledger_audit/review.json"))
+        proof = host.observed_review(bench, run_id, "ledger", report)
+        result = bench.stage(run_id, report, proof=proof)
         raw = read_file(bench.work(run_id), "stage.json", TREE_LIMIT)
         immutable(out / "stage_report.json", raw)
         immutable(out / "semantic_changes.json", read_file(bench.work(run_id), "semantic_changes.json", TREE_LIMIT))
@@ -253,10 +274,12 @@ def novel_bench(*, operation: str, workspace_root: str = "", run_id: str = "",
         path, m = bench.input(run_id)
         for ch in m["chapters"]:
             immutable(out / f"chapter_{ch['chapter']:04d}.md", read_file(path, f"chapters/ch{ch['chapter']:04d}/prose.md"))
-        for file in ("literary.json", "audit.json", "ledgers.json"):
+        for file in ("literary.json", "audit.json", "audit_reading.json", "ledgers.json"):
             immutable(out / file, read_file(bench.work(run_id), file, TREE_LIMIT))
         manual = {"status": "awaiting_manual_approval", "commit": result["commit"], "stage_sha256": sha(raw),
-                  "normal_wait": True, "effects_on_approval": "exact acceptance then private backup",
+                  "normal_wait": True, "review_targets": result["review_targets"],
+                  "observed_reading": result["observed_reading"],
+                  "effects_on_approval": "exact acceptance then private backup",
                   "no_decision": "No acceptance, no timeout escalation, no automatic approval."}
         immutable(out / "approval_manifest.json", encode(manual))
         immutable(out / "review_bundle.md", ("# 导演终审\n\n请阅读完整本章、独立编辑意见、分录及 semantic_changes.json；"
@@ -294,4 +317,49 @@ def novel_bench_read(*, path: str, start: int = 0, length: int = 12000,
     host.ensure_run(run_id, step_id, workspace)
     request = _request(workspace / CONFIG)
     policy, _ = load_policy(request.get("project_id"))
-    return Bench(policy).read(run_id, path, start, length)
+    bench = Bench(policy)
+    if path.startswith("review/"):
+        phase = PHASES.get(step_id, "literary")
+        _, materials = bench.review_materials(run_id, phase)
+        material = next((m for m in materials if "review/" + m.path == path), None)
+        require(material is not None, "unknown required review material")
+        return bounded_page(material, start, length)
+    return bench.read(run_id, path, start, length)
+
+
+def publish_review_materials(bench: Bench, run_id: str, phase: str, out: Path) -> None:
+    _, materials = bench.review_materials(run_id, phase)
+    immutable(out / "review_request.json", bench.review_request(run_id, phase))
+    for material in materials:
+        immutable(out / material.path, material.text.encode())
+
+
+def begin_observed_review(engine, step_id: str | None = None) -> ReviewSession | None:
+    """Only the registered Writing Bench reviewers acquire the host-only proof owner.
+
+    The step id may be passed as an ARGUMENT by a caller that already knows which
+    step it is running, but the sole production call site
+    (`core/dpe_pipeline.py`, the session block inside `_run_native_step`) omits it
+    and falls back to `engine._current_step`. Session installation therefore DOES
+    depend on that field already having been assigned, which is why the block sits
+    below `self._current_step = step_id` and must not be hoisted above it.
+    """
+    step = step_id if step_id is not None else getattr(engine, "_current_step", None)
+    if getattr(engine, "_config_name", None) != CONFIG or step not in PHASES:
+        return None
+    host = Host()
+    run_id = engine._run_id
+    run = host.sf.get_run(run_id)
+    require(run is not None, "review run missing")
+    workspace = checked_root(Path(host.sf._workspace.get_project_path(run["project_id"])))
+    host.ensure_run(run_id, step, workspace)
+    request = _request(workspace / CONFIG)
+    policy, _ = load_policy(request["project_id"])
+    bench = Bench(policy)
+    identity, materials = bench.review_materials(run_id, PHASES[step])
+    return ReviewSession(Coverage(PHASES[step], identity["review_key"], identity["targets"], materials),
+                         bench.work(run_id) / "reading",
+                         {"run_id": run_id, "step_id": step,
+                          "step_instance_id": engine._step_instance_id,
+                          "claim_epoch": getattr(engine, "_claim_epoch", 0)})
+

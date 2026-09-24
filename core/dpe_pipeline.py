@@ -1855,11 +1855,11 @@ class PipelineEngine:
                 f"Tool '{tool_name}' is not granted to this step. "
                 "Available tools: " + (", ".join(sorted(schemas)) or "(none)")
             )}
-        if tool_name == "focused_check":
+        if tool_name in ("focused_check", "novel_bench_read"):
             # Its result is evidence about THIS implement attempt. SkillFlow
             # injects these identities after this boundary; an agent-provided
             # value must not win through the framework's setdefault behavior.
-            for identity in ("run_id", "step_id", "project_id", "operation_id"):
+            for identity in ("run_id", "step_id", "project_id", "operation_id", "config_name"):
                 params.pop(identity, None)
         if tool_name == "apply_patch":
             if (getattr(self, "_output_target", "artifact") != "code"
@@ -1870,6 +1870,12 @@ class PipelineEngine:
                                   "references")}
         elif "apply_patch" in schemas and tool_name in ("create", "edit", "write", "repo_remove_file"):
             return {"error": "Use the granted apply_patch tool for code Add/Update/Delete operations"}
+        review_session = getattr(self, "_writing_review_session", None)
+        if (review_session is not None and review_session.claim.get("run_id") == getattr(self, "_run_id", None)
+                and review_session.claim.get("step_id") == self._current_step):
+            blocked = review_session.guard(tool_name, params)
+            if blocked is not None:
+                return blocked
         refusal = self._write_scope_refusal(tool_name, params)
         if refusal is not None:
             return refusal
@@ -3425,6 +3431,20 @@ class PipelineEngine:
         context_budget_unknown_reported = False
         last_reasoning = ""  # cached for deepseek: replay on tool-only turns
         self._current_step = step_id
+        # Coverage is owned by the host and observed only after projection and a
+        # successful provider call. Ordinary pipelines have no review session.
+        #
+        # Installed HERE, AFTER `_current_step` is assigned on the line above.
+        # `begin_observed_review` reads the live step id off this engine
+        # (`aitelier/writing_bench/adapter.py`), so the block used to sit at the
+        # top of this method saw `_current_step is None` — for every native step,
+        # including the two Writing Bench reviewers, it returned no session, the
+        # gateway was left unobserved, and the downstream `literary_check` had no
+        # host certificate to accept. Do not hoist this above the assignment.
+        from aitelier.writing_bench.adapter import begin_observed_review
+        self._writing_review_session = begin_observed_review(self)
+        if self._writing_review_session is not None:
+            agent.gateway.on_messages_presented = self._writing_review_session.observe
         self._step_start = time.time()
         # A State relay carries exact recovered bytes and the director's
         # remaining-work instruction. Require proof that the continuation has

@@ -1,0 +1,481 @@
+# mutant R1 on c389f53014adae76d09e5cfa7603478b0f23af69, started 2026-09-24T12:16:45Z
+R1 applied to docker/godot/godot_harness.py
+apply_rc=0
+diff --git a/docker/godot/godot_harness.py b/docker/godot/godot_harness.py
+index 2b6bd56a..fe89b987 100644
+--- a/docker/godot/godot_harness.py
++++ b/docker/godot/godot_harness.py
+@@ -2732,9 +2732,9 @@ class _Handler(BaseHTTPRequestHandler):
+                 return self._send(400, {"error": "render_wait_timeout_sec must be a number"})
+             admission_started = time.monotonic()
+             try:
+-                owner = acquire_render_owner_waiting(
+-                    project_id, run_id, operation_id, wait_timeout=wait_timeout,
+-                    should_abort=self._render_client_abandoned)
++                open(os.environ["MUT_IGNITION_FILE"], "a").write("R1\n")
++                owner = dict(acquire_render_owner(project_id, run_id, operation_id),
++                             waited_sec=0.0, waited_for_owner_ids=[])
+             except RenderWaitAbandoned as exc:
+                 print(f"[harness] {self.path} {operation_id}: {exc}", flush=True)
+                 return
+gitstatus_rc=0
+FFF....F.----------------------------------------
+Exception occurred during processing of request from ('127.0.0.1', 48142)
+Traceback (most recent call last):
+  File "/home/linxuhao/.AItelier/worktrees-scratch/lockq3-mut-R1/docker/godot/godot_harness.py", line 2736, in do_POST
+    owner = dict(acquire_render_owner(project_id, run_id, operation_id),
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/linxuhao/.AItelier/worktrees-scratch/lockq3-mut-R1/docker/godot/godot_harness.py", line 178, in acquire_render_owner
+    return _acquire_render_owner_under_fence(project_id, run_id, operation_id)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/linxuhao/.AItelier/worktrees-scratch/lockq3-mut-R1/docker/godot/godot_harness.py", line 193, in _acquire_render_owner_under_fence
+    raise RenderOwnerConflict(_render_owner_conflict(dict(existing)))
+godot_harness_render_queue.RenderOwnerConflict: {"detail": "render owner 589594bfc4a14bea9f12af746f652fb0 is rendering (heartbeat 0s old); a request queues until it releases", "error": "render owner exists", "needs_reconciliation": false, "owner": {"actor": "godot-harness:11", "ended_at": null, "generation": 1, "heartbeat_at": 1790252215.0580666, "operation_id": "op-holder", "owner_id": "589594bfc4a14bea9f12af746f652fb0", "project_id": "p", "reason": null, "resource": "render", "run_id": "r", "started_at": 1790252215.0580666, "status": "active"}, "owner_id": "589594bfc4a14bea9f12af746f652fb0", "owner_kind": "active"}
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/socketserver.py", line 697, in process_request_thread
+    self.finish_request(request, client_address)
+  File "/usr/local/lib/python3.12/socketserver.py", line 362, in finish_request
+    self.RequestHandlerClass(request, client_address, self)
+  File "/usr/local/lib/python3.12/socketserver.py", line 766, in __init__
+    self.handle()
+  File "/usr/local/lib/python3.12/http/server.py", line 440, in handle
+    self.handle_one_request()
+  File "/usr/local/lib/python3.12/http/server.py", line 428, in handle_one_request
+    method()
+  File "/home/linxuhao/.AItelier/worktrees-scratch/lockq3-mut-R1/docker/godot/godot_harness.py", line 2742, in do_POST
+    return self._send(409, exc.payload)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/linxuhao/.AItelier/worktrees-scratch/lockq3-mut-R1/docker/godot/godot_harness.py", line 2599, in _send
+    self.wfile.write(body)
+  File "/usr/local/lib/python3.12/socketserver.py", line 845, in write
+    self._sock.sendall(b)
+BrokenPipeError: [Errno 32] Broken pipe
+----------------------------------------
+FF.FF..F...FF.........................................ssssssss. [ 47%]
+........................................................................ [ 94%]
+.........                                                                [100%]
+=================================== FAILURES ===================================
+________________ test_a_busy_lock_queues_the_request[/playtest] ________________
+
+rig = <tests.unit.test_harness_render_queue._Rig object at 0x748f38c8fb90>
+route = '/playtest'
+
+    @pytest.mark.parametrize("route", RENDER_ROUTES)
+    def test_a_busy_lock_queues_the_request(rig, route):
+        holder_id = rig.start_holder()
+        second, out = rig.post_in_thread(route, rig.payload("op-next"))
+        assert rig.queued.wait(10), "the second request never met the live holder"
+        time.sleep(0.3)
+>       assert second.is_alive() and "code" not in out, (
+            f"{route} answered while a live holder still rendered: {out!r}")
+E       AssertionError: /playtest answered while a live holder still rendered: {'code': 409, 'body': {'error': 'render owner exists', 'owner_kind': 'active', 'owner_id': 'af3749061f6a4ec59fd2b7da969f9ffc', 'needs_reconciliation': False, 'detail': 'render owner af3749061f6a4ec59fd2b7da969f9ffc is rendering (heartbeat 0s old); a request queues until it releases', 'owner': {'owner_id': 'af3749061f6a4ec59fd2b7da969f9ffc', 'resource': 'render', 'project_id': 'p', 'run_id': 'r', 'operation_id': 'op-holder', 'generation': 1, 'status': 'active', 'actor': 'godot-harness:11', 'started_at': 1790252209.8881218, 'heartbeat_at': 1790252209.8881218, 'ended_at': None, 'reason': None}}}
+E       assert (False)
+E        +  where False = is_alive()
+E        +    where is_alive = <Thread(Thread-4 (go), stopped daemon 128158434875072)>.is_alive
+
+tests/unit/test_harness_render_queue.py:181: AssertionError
+_________________ test_a_busy_lock_queues_the_request[/script] _________________
+
+rig = <tests.unit.test_harness_render_queue._Rig object at 0x748f38c8ca10>
+route = '/script'
+
+    @pytest.mark.parametrize("route", RENDER_ROUTES)
+    def test_a_busy_lock_queues_the_request(rig, route):
+        holder_id = rig.start_holder()
+        second, out = rig.post_in_thread(route, rig.payload("op-next"))
+        assert rig.queued.wait(10), "the second request never met the live holder"
+        time.sleep(0.3)
+>       assert second.is_alive() and "code" not in out, (
+            f"{route} answered while a live holder still rendered: {out!r}")
+E       AssertionError: /script answered while a live holder still rendered: {'code': 409, 'body': {'error': 'render owner exists', 'owner_kind': 'active', 'owner_id': '29e618afdef04f4884e419eeac0122be', 'needs_reconciliation': False, 'detail': 'render owner 29e618afdef04f4884e419eeac0122be is rendering (heartbeat 0s old); a request queues until it releases', 'owner': {'owner_id': '29e618afdef04f4884e419eeac0122be', 'resource': 'render', 'project_id': 'p', 'run_id': 'r', 'operation_id': 'op-holder', 'generation': 1, 'status': 'active', 'actor': 'godot-harness:11', 'started_at': 1790252210.410637, 'heartbeat_at': 1790252210.410637, 'ended_at': None, 'reason': None}}}
+E       assert (False)
+E        +  where False = is_alive()
+E        +    where is_alive = <Thread(Thread-9 (go), stopped daemon 128158434875072)>.is_alive
+
+tests/unit/test_harness_render_queue.py:181: AssertionError
+____________ test_a_busy_lock_queues_the_request[/x11_input_smoke] _____________
+
+rig = <tests.unit.test_harness_render_queue._Rig object at 0x748f38e5b3e0>
+route = '/x11_input_smoke'
+
+    @pytest.mark.parametrize("route", RENDER_ROUTES)
+    def test_a_busy_lock_queues_the_request(rig, route):
+        holder_id = rig.start_holder()
+        second, out = rig.post_in_thread(route, rig.payload("op-next"))
+        assert rig.queued.wait(10), "the second request never met the live holder"
+        time.sleep(0.3)
+>       assert second.is_alive() and "code" not in out, (
+            f"{route} answered while a live holder still rendered: {out!r}")
+E       AssertionError: /x11_input_smoke answered while a live holder still rendered: {'code': 409, 'body': {'error': 'render owner exists', 'owner_kind': 'active', 'owner_id': 'c704199019a8416ebdfc0782f8b6b868', 'needs_reconciliation': False, 'detail': 'render owner c704199019a8416ebdfc0782f8b6b868 is rendering (heartbeat 0s old); a request queues until it releases', 'owner': {'owner_id': 'c704199019a8416ebdfc0782f8b6b868', 'resource': 'render', 'project_id': 'p', 'run_id': 'r', 'operation_id': 'op-holder', 'generation': 1, 'status': 'active', 'actor': 'godot-harness:11', 'started_at': 1790252210.93029, 'heartbeat_at': 1790252210.93029, 'ended_at': None, 'reason': None}}}
+E       assert (False)
+E        +  where False = is_alive()
+E        +    where is_alive = <Thread(Thread-14 (go), stopped daemon 128158434875072)>.is_alive
+
+tests/unit/test_harness_render_queue.py:181: AssertionError
+__________ test_a_stale_active_owner_blocks_and_a_fresh_one_is_queued __________
+
+rig = <tests.unit.test_harness_render_queue._Rig object at 0x748f38c5c650>
+
+    def test_a_stale_active_owner_blocks_and_a_fresh_one_is_queued(rig):
+        gh = rig.gh
+        holder = gh.acquire_render_owner("p0", "r0", "op-dead")
+        threshold = gh.RENDER_OWNER_HEARTBEAT_STALE_SEC
+    
+        def set_heartbeat_age(age):
+            with gh._lifecycle_connection() as conn:
+                conn.execute("UPDATE render_owners SET heartbeat_at=? WHERE owner_id=?",
+                             (time.time() - age, holder["owner_id"]))
+                conn.commit()
+    
+        set_heartbeat_age(threshold + 5)
+        code, body = rig.post("/playtest", rig.payload("op-next", render_wait_timeout_sec=5),
+                              timeout=10)
+        assert code == 409, (code, body)
+        assert body.get("owner_kind") == "active_stale", body
+        assert body.get("owner_id") == holder["owner_id"], body
+        assert body.get("needs_reconciliation") is True, body
+        assert f"threshold {threshold:.0f}s" in body["detail"], body
+        assert "reconcil" in body["detail"], body
+        assert rig.rendered == [] and rig.ops_with_rows() == ["op-dead"]
+    
+        set_heartbeat_age(threshold - 5)
+        code, body = rig.post("/playtest", rig.payload("op-next", render_wait_timeout_sec=0.3),
+                              timeout=10)
+>       assert (code, body.get("error")) == (409, "render owner wait timed out"), (
+            "a holder inside the heartbeat threshold is a live render to queue behind",
+            body)
+E       AssertionError: ('a holder inside the heartbeat threshold is a live render to queue behind', {'error': 'render owner exists', 'owner_kind': 'active', 'owner_id': '9bfa82461667446aa57b995a98f84d14', 'needs_reconciliation': False, ...})
+E       assert (409, 'render owner exists') == (409, 'render...it timed out')
+E         
+E         At index 1 diff: 'render owner exists' != 'render owner wait timed out'
+E         Use -v to get more diff
+
+tests/unit/test_harness_render_queue.py:265: AssertionError
+______ test_a_caller_that_disconnects_while_queued_never_gets_the_render _______
+
+rig = <tests.unit.test_harness_render_queue._Rig object at 0x748f38e36d50>
+
+    def test_a_caller_that_disconnects_while_queued_never_gets_the_render(rig):
+        rig.start_holder()
+        sock = _raw_post(rig.base, "/script", rig.payload("op-ghost"))
+        assert rig.queued.wait(10), "the ghost request never queued"
+        sock.close()
+>       abandoned = rig.waits["op-ghost"]["done"].wait(5)
+                    ^^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'op-ghost'
+
+tests/unit/test_harness_render_queue.py:322: KeyError
+_______ test_the_requests_own_wait_limit_ends_the_wait_without_a_render ________
+
+rig = <tests.unit.test_harness_render_queue._Rig object at 0x748f38e35670>
+
+    def test_the_requests_own_wait_limit_ends_the_wait_without_a_render(rig):
+        holder_id = rig.start_holder()
+        code, body = rig.post("/x11_input_smoke",
+                              rig.payload("op-capped", render_wait_timeout_sec=0.3), timeout=10)
+        rig.release.set()
+        rig.holder[0].join(30)
+        time.sleep(0.2)
+        assert code == 409, (code, body)
+>       assert body["error"] == "render owner wait timed out", body
+E       AssertionError: {'error': 'render owner exists', 'owner_kind': 'active', 'owner_id': '02cd606fa42c4e95a9c1c47529d01586', 'needs_reconciliation': False, ...}
+E       assert 'render owner exists' == 'render owner wait timed out'
+E         
+E         - render owner wait timed out
+E         + render owner exists
+
+tests/unit/test_harness_render_queue.py:344: AssertionError
+_ test_a_caller_that_disconnects_while_the_fence_is_held_never_gets_the_render _
+
+rig = <tests.unit.test_harness_render_queue._Rig object at 0x748f40825b50>
+
+    def test_a_caller_that_disconnects_while_the_fence_is_held_never_gets_the_render(rig):
+        rig.start_holder()
+        sock = _raw_post(rig.base, "/script", rig.payload("op-fenced"))
+        assert rig.queued.wait(10), "the request never queued"
+        fence = _hold_fence(rig.gh)
+        try:
+            time.sleep(0.5)
+            rig.release.set()
+            rig.holder[0].join(30)
+            rig.settled_snapshot()
+            sock.close()
+>           ended_while_fenced = rig.waits["op-fenced"]["done"].wait(3)
+                                 ^^^^^^^^^^^^^^^^^^^^^^
+E           KeyError: 'op-fenced'
+
+tests/unit/test_harness_render_queue.py:396: KeyError
+________ test_the_requests_own_wait_limit_holds_while_the_fence_is_held ________
+
+rig = <tests.unit.test_harness_render_queue._Rig object at 0x748f40870ce0>
+
+    def test_the_requests_own_wait_limit_holds_while_the_fence_is_held(rig):
+        rig.start_holder()
+        t, out = rig.post_in_thread("/script",
+                                    rig.payload("op-capped", render_wait_timeout_sec=0.5))
+        assert rig.queued.wait(10), "the request never queued"
+        fence = _hold_fence(rig.gh)
+        try:
+            rig.release.set()
+            rig.holder[0].join(30)
+            rig.settled_snapshot()
+            t.join(1.5)
+            answered_while_fenced = "code" in out
+        finally:
+            _lift(fence)
+        t.join(15)
+        body = out.get("body") or {}
+        assert [op for _, op in rig.rendered] == ["op-holder"], (
+            "a request rendered past its own render_wait_timeout_sec", out)
+>       assert (out.get("code"), body.get("error")) == (409, "render owner wait timed out"), out
+E       AssertionError: {'code': 409, 'body': {'error': 'render owner exists', 'owner_kind': 'active', 'owner_id': '7d563b5547a744059f81f1a767470527', 'needs_reconciliation': False, ...}}
+E       assert (409, 'render owner exists') == (409, 'render...it timed out')
+E         
+E         At index 1 diff: 'render owner exists' != 'render owner wait timed out'
+E         Use -v to get more diff
+
+tests/unit/test_harness_render_queue.py:429: AssertionError
+_________ test_a_locked_owner_table_does_not_make_a_live_render_stale __________
+
+rig = <tests.unit.test_harness_render_queue._Rig object at 0x748f38b6dc10>
+
+    def test_a_locked_owner_table_does_not_make_a_live_render_stale(rig):
+        gh = rig.gh
+        gh.RENDER_OWNER_HEARTBEAT_INTERVAL_SEC = 0.2
+        gh.RENDER_OWNER_HEARTBEAT_STALE_SEC = 8.0
+        holder_id = rig.start_holder()
+        blocker = sqlite3.connect(gh.LIFECYCLE_DB, timeout=1)
+        blocker.execute("BEGIN EXCLUSIVE")
+        # A request that queues while the table is locked: its first poll loses
+        # sqlite's busy wait, and it must keep waiting rather than fail.
+        during, during_out = rig.post_in_thread(
+            "/script", rig.payload("op-during-lock", render_wait_timeout_sec=8), timeout=20)
+        time.sleep(6.5)            # longer than _lifecycle_connection's timeout=5
+        blocker.rollback()
+        blocker.close()
+        unlocked_at = time.time()
+        answers = []
+        deadline = time.monotonic() + gh.RENDER_OWNER_HEARTBEAT_STALE_SEC + 1
+        while time.monotonic() < deadline:
+            code, body = rig.post("/script", rig.payload(
+                f"op-probe-{len(answers)}", render_wait_timeout_sec=0.5), timeout=15)
+            answers.append((code, body.get("error"), body.get("owner_kind")))
+        beat_after_unlock = rig.row("op-holder")["heartbeat_at"]
+        still_rendering = rig.holder[0].is_alive()
+        during.join(20)
+        rig.release.set()
+        rig.holder[0].join(30)
+        stops = [a for a in answers if a[2] != "active"]
+        assert still_rendering, "the holder render ended early; the probe measured nothing"
+        assert answers and not stops, (
+            "a live render was read as needing reconciliation after its heartbeat "
+            "failed once", stops)
+        assert beat_after_unlock > unlocked_at, "the heartbeat never resumed after the lock"
+>       assert (during_out.get("code"), (during_out.get("body") or {}).get("error")) == (
+            409, "render owner wait timed out"), (
+            "a request that queued while the owner table was locked did not keep waiting",
+            during_out)
+E       AssertionError: ('a request that queued while the owner table was locked did not keep waiting', {'exc': RemoteDisconnected('Remote end closed connection without response')})
+E       assert (None, None) == (409, 'render...it timed out')
+E         
+E         At index 0 diff: None != 409
+E         Use -v to get more diff
+
+tests/unit/test_harness_render_queue.py:524: AssertionError
+----------------------------- Captured stdout call -----------------------------
+[harness] render owner heartbeat failed, retrying: database is locked
+----------------------------- Captured stderr call -----------------------------
+----------------------------------------
+Exception occurred during processing of request from ('127.0.0.1', 58866)
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/socketserver.py", line 697, in process_request_thread
+    self.finish_request(request, client_address)
+  File "/usr/local/lib/python3.12/socketserver.py", line 362, in finish_request
+    self.RequestHandlerClass(request, client_address, self)
+  File "/usr/local/lib/python3.12/socketserver.py", line 766, in __init__
+    self.handle()
+  File "/usr/local/lib/python3.12/http/server.py", line 440, in handle
+    self.handle_one_request()
+  File "/usr/local/lib/python3.12/http/server.py", line 428, in handle_one_request
+    method()
+  File "/home/linxuhao/.AItelier/worktrees-scratch/lockq3-mut-R1/docker/godot/godot_harness.py", line 2736, in do_POST
+    owner = dict(acquire_render_owner(project_id, run_id, operation_id),
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/linxuhao/.AItelier/worktrees-scratch/lockq3-mut-R1/docker/godot/godot_harness.py", line 178, in acquire_render_owner
+    return _acquire_render_owner_under_fence(project_id, run_id, operation_id)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/linxuhao/.AItelier/worktrees-scratch/lockq3-mut-R1/docker/godot/godot_harness.py", line 186, in _acquire_render_owner_under_fence
+    with _lifecycle_connection() as conn:
+         ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/linxuhao/.AItelier/worktrees-scratch/lockq3-mut-R1/docker/godot/godot_harness.py", line 115, in _lifecycle_connection
+    conn.execute("""CREATE TABLE IF NOT EXISTS render_owners (
+sqlite3.OperationalError: database is locked
+----------------------------------------
+_ test_a_queue_wait_that_outlasts_the_callers_timeout_is_not_a_product_failure[live_holder] _
+
+rig = <tests.unit.test_harness_render_queue._Rig object at 0x748f383b1a90>
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_a_queue_wait_that_outlast0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x748f383b0680>
+cause = 'live_holder'
+
+    @pytest.mark.parametrize("cause", ["live_holder", "deployment_fence"])
+    def test_a_queue_wait_that_outlasts_the_callers_timeout_is_not_a_product_failure(
+            rig, tmp_path, monkeypatch, cause):
+        from aitelier.gate_evidence import audit_evidence, release_disposition, report_state
+        from aitelier.tools.focused_check.impl import focused_check
+        from aitelier.tools.godot_playtest_scenario.impl import godot_playtest_scenario
+        from aitelier.tools.godot_vision.impl import godot_vision
+        from aitelier.tools.verify_evidence.impl import verify_evidence
+    
+        compile_impl, pt_impl, skips = _tools_on(rig, monkeypatch)
+        proj = _game_project(tmp_path)
+        fence = None
+        if cause == "live_holder":
+            rig.start_holder()          # held until the test ends: longer than the tool timeout
+        else:
+            fence = _hold_fence(rig.gh)
+        try:
+            # Reader A: godot_playtest, its return and its report.
+            ret_a = pt_impl.godot_playtest(project_root=str(proj), out_dir=str(tmp_path / "a"))
+            rep_a = json.loads((tmp_path / "a" / "playtest_report.json").read_text())
+            # Reader C: godot_compile as game_harness wires it, and its route.
+            graph, ret_c, rep_c = _run_compile_step(compile_impl, tmp_path, proj)
+            # Reader C2: godot_compile without an evidence cycle.
+            ret_c2 = compile_impl.godot_compile(project_root=str(proj),
+                                                out_dir=str(tmp_path / "c2"))
+            rep_c2 = json.loads((tmp_path / "c2" / "playtest_report.json").read_text())
+            # Reader D: the release audit.
+            gates = [["5_test", "test_report.json"], ["5_compile", "playtest_report.json"]]
+            aud = audit_evidence(graph, "run-q", gates)
+            (graph / "5_rel").mkdir()
+            ret_d = verify_evidence(out_dir=str(graph / "5_rel"), run_id="run-q",
+                                    gates=json.dumps(gates))
+            # Reader E: godot_playtest_scenario. Reader F: focused_check.
+            ret_e = godot_playtest_scenario(scenario="s1", project_root=str(proj),
+                                            _timeout_seconds=TOOL_TIMEOUT)
+            ret_f = focused_check(kind="godot_scenario", scenario="s1",
+                                  project_root=str(proj), timeout_seconds=4)
+        finally:
+            if fence is not None:
+                _lift(fence)
+            rig.release.set()
+        # Reader G: godot_vision on 5_compile's play-test report.
+        ws = tmp_path / "ws"
+        (ws / "cfg" / "5_compile").mkdir(parents=True)
+        (ws / "cfg" / "5_compile" / "playtest_report.json").write_text(json.dumps(rep_c))
+        godot_vision(project_root=str(proj), out_dir=str(tmp_path / "g"),
+                     workspace_root=str(ws), config_name="cfg", from_step="5_compile")
+        rep_g = json.loads((tmp_path / "g" / "vision_report.json").read_text())
+    
+        assert not [op for _, op in rig.rendered if op != "op-holder"], (
+            "a queued request rendered", rig.rendered)
+        for name, rep in (("godot_playtest", rep_a), ("godot_compile", rep_c),
+                          ("godot_compile without an evidence cycle", rep_c2)):
+            assert not rep.get("gate_timeout"), (
+                f"{name}: a queue wait was reported as a timed-out play-test", rep)
+>           assert rep.get("skipped_because") == "render_owner_wait_timed_out", (name, rep)
+E           AssertionError: ('godot_playtest', {'passed': True, 'frames': 0, 'errors': [], 'state': {}, ...})
+E           assert 'render_owner_active' == 'render_owner_wait_timed_out'
+E             
+E             - render_owner_wait_timed_out
+E             + render_owner_active
+
+tests/unit/test_harness_render_queue.py:742: AssertionError
+_ test_a_queue_wait_that_outlasts_the_callers_timeout_is_not_a_product_failure[deployment_fence] _
+
+rig = <tests.unit.test_harness_render_queue._Rig object at 0x748f383b2420>
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_a_queue_wait_that_outlast1')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x748f383b3cb0>
+cause = 'deployment_fence'
+
+    @pytest.mark.parametrize("cause", ["live_holder", "deployment_fence"])
+    def test_a_queue_wait_that_outlasts_the_callers_timeout_is_not_a_product_failure(
+            rig, tmp_path, monkeypatch, cause):
+        from aitelier.gate_evidence import audit_evidence, release_disposition, report_state
+        from aitelier.tools.focused_check.impl import focused_check
+        from aitelier.tools.godot_playtest_scenario.impl import godot_playtest_scenario
+        from aitelier.tools.godot_vision.impl import godot_vision
+        from aitelier.tools.verify_evidence.impl import verify_evidence
+    
+        compile_impl, pt_impl, skips = _tools_on(rig, monkeypatch)
+        proj = _game_project(tmp_path)
+        fence = None
+        if cause == "live_holder":
+            rig.start_holder()          # held until the test ends: longer than the tool timeout
+        else:
+            fence = _hold_fence(rig.gh)
+        try:
+            # Reader A: godot_playtest, its return and its report.
+            ret_a = pt_impl.godot_playtest(project_root=str(proj), out_dir=str(tmp_path / "a"))
+            rep_a = json.loads((tmp_path / "a" / "playtest_report.json").read_text())
+            # Reader C: godot_compile as game_harness wires it, and its route.
+            graph, ret_c, rep_c = _run_compile_step(compile_impl, tmp_path, proj)
+            # Reader C2: godot_compile without an evidence cycle.
+            ret_c2 = compile_impl.godot_compile(project_root=str(proj),
+                                                out_dir=str(tmp_path / "c2"))
+            rep_c2 = json.loads((tmp_path / "c2" / "playtest_report.json").read_text())
+            # Reader D: the release audit.
+            gates = [["5_test", "test_report.json"], ["5_compile", "playtest_report.json"]]
+            aud = audit_evidence(graph, "run-q", gates)
+            (graph / "5_rel").mkdir()
+            ret_d = verify_evidence(out_dir=str(graph / "5_rel"), run_id="run-q",
+                                    gates=json.dumps(gates))
+            # Reader E: godot_playtest_scenario. Reader F: focused_check.
+            ret_e = godot_playtest_scenario(scenario="s1", project_root=str(proj),
+                                            _timeout_seconds=TOOL_TIMEOUT)
+            ret_f = focused_check(kind="godot_scenario", scenario="s1",
+                                  project_root=str(proj), timeout_seconds=4)
+        finally:
+            if fence is not None:
+                _lift(fence)
+            rig.release.set()
+        # Reader G: godot_vision on 5_compile's play-test report.
+        ws = tmp_path / "ws"
+        (ws / "cfg" / "5_compile").mkdir(parents=True)
+        (ws / "cfg" / "5_compile" / "playtest_report.json").write_text(json.dumps(rep_c))
+        godot_vision(project_root=str(proj), out_dir=str(tmp_path / "g"),
+                     workspace_root=str(ws), config_name="cfg", from_step="5_compile")
+        rep_g = json.loads((tmp_path / "g" / "vision_report.json").read_text())
+    
+        assert not [op for _, op in rig.rendered if op != "op-holder"], (
+            "a queued request rendered", rig.rendered)
+        for name, rep in (("godot_playtest", rep_a), ("godot_compile", rep_c),
+                          ("godot_compile without an evidence cycle", rep_c2)):
+>           assert not rep.get("gate_timeout"), (
+                f"{name}: a queue wait was reported as a timed-out play-test", rep)
+E           AssertionError: ('godot_playtest: a queue wait was reported as a timed-out play-test', {'passed': False, 'frames': 0, 'errors': [], 'state': {}, ...})
+E           assert not True
+E            +  where True = <built-in method get of dict object at 0x748f3815d840>('gate_timeout')
+E            +    where <built-in method get of dict object at 0x748f3815d840> = {'passed': False, 'frames': 0, 'errors': [], 'state': {}, ...}.get
+
+tests/unit/test_harness_render_queue.py:740: AssertionError
+--------------------------- Captured stdout teardown ---------------------------
+[harness] /playtest d0e5bb97e12b47dea01f026a1c8e2933: not rendered: the caller disconnected before the render started
+[harness] /playtest a2dc1ccd950548449c2f660e92b134f4: not rendered: the caller disconnected before the render started
+[harness] /playtest run-q:godot:409ed2b29f6c40c4b36a82c3a2e6b5cc: not rendered: the caller disconnected before the render started
+[harness] /playtest 5a17a081236547c68860654253dcfb75: not rendered: the caller disconnected before the render started
+[harness] /playtest f2f8b061dace43fcadb0c602676282a3: not rendered: the caller disconnected before the render started
+=============================== warnings summary ===============================
+../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_harness_render_queue.py::test_a_busy_lock_queues_the_request[/playtest]
+FAILED tests/unit/test_harness_render_queue.py::test_a_busy_lock_queues_the_request[/script]
+FAILED tests/unit/test_harness_render_queue.py::test_a_busy_lock_queues_the_request[/x11_input_smoke]
+FAILED tests/unit/test_harness_render_queue.py::test_a_stale_active_owner_blocks_and_a_fresh_one_is_queued
+FAILED tests/unit/test_harness_render_queue.py::test_a_caller_that_disconnects_while_queued_never_gets_the_render
+FAILED tests/unit/test_harness_render_queue.py::test_the_requests_own_wait_limit_ends_the_wait_without_a_render
+FAILED tests/unit/test_harness_render_queue.py::test_a_caller_that_disconnects_while_the_fence_is_held_never_gets_the_render
+FAILED tests/unit/test_harness_render_queue.py::test_the_requests_own_wait_limit_holds_while_the_fence_is_held
+FAILED tests/unit/test_harness_render_queue.py::test_a_locked_owner_table_does_not_make_a_live_render_stale
+FAILED tests/unit/test_harness_render_queue.py::test_a_queue_wait_that_outlasts_the_callers_timeout_is_not_a_product_failure[live_holder]
+FAILED tests/unit/test_harness_render_queue.py::test_a_queue_wait_that_outlasts_the_callers_timeout_is_not_a_product_failure[deployment_fence]
+11 failed, 134 passed, 8 skipped, 1 warning in 48.86s
+# inner_rc=1
+# finished 2026-09-24T12:17:39Z bare_rc=1 ignitions=9126

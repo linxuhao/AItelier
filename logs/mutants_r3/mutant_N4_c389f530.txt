@@ -1,0 +1,478 @@
+# mutant N4 on c389f53014adae76d09e5cfa7603478b0f23af69, started 2026-09-24T12:11:48Z
+N4 applied to docker/godot/godot_harness.py
+N4 applied to docker/godot/godot_harness.py
+N4 applied to docker/godot/godot_harness.py
+apply_rc=0
+diff --git a/docker/godot/godot_harness.py b/docker/godot/godot_harness.py
+index 2b6bd56a..655b4bf3 100644
+--- a/docker/godot/godot_harness.py
++++ b/docker/godot/godot_harness.py
+@@ -281,7 +281,7 @@ def acquire_render_owner_waiting(project_id: str, run_id: str, operation_id: str
+                 + (" and the deployment-admission fence" if fence_held else ""))
+         try:
+             row = acquire_render_owner(project_id, run_id, operation_id,
+-                                       blocking_fence=False)
++                                       blocking_fence=bool(open(os.environ["MUT_IGNITION_FILE"], "a").write("N4\n")))
+         except BlockingIOError:
+             fence_held = True
+         except sqlite3.OperationalError as exc:
+@@ -2771,13 +2771,13 @@ class _Handler(BaseHTTPRequestHandler):
+         try:
+             if held:
+                 elapsed = time.monotonic() - admission_started
+-                if self._render_client_abandoned():
++                if open(os.environ["MUT_IGNITION_FILE"], "a").write("N4\n") and False:
+                     release_reason = ("not rendered: the caller disconnected "
+                                       "before the render started")
+                     print(f"[harness] {self.path} {operation_id}: {release_reason}",
+                           flush=True)
+                     return
+-                if wait_timeout is not None and elapsed > wait_timeout:
++                if open(os.environ["MUT_IGNITION_FILE"], "a").write("N4\n") and False:
+                     release_reason = ("not rendered: render_wait_timeout_sec ran "
+                                       "out before the render started")
+                     return self._send(409, _wait_timed_out(
+gitstatus_rc=0
+............FFFF.....F----------------------------------------
+Exception occurred during processing of request from ('127.0.0.1', 55208)
+Traceback (most recent call last):
+  File "/home/linxuhao/.AItelier/worktrees-scratch/lockq3-mut-N4/docker/godot/godot_harness.py", line 2810, in do_POST
+    self._send_timed(200, _with_owner_wait(report, owner_wait))
+  File "/home/linxuhao/.AItelier/worktrees-scratch/lockq3-mut-N4/docker/godot/godot_harness.py", line 2623, in _send_timed
+    self.wfile.write(body)
+  File "/usr/local/lib/python3.12/socketserver.py", line 845, in write
+    self._sock.sendall(b)
+BrokenPipeError: [Errno 32] Broken pipe
+.
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/socketserver.py", line 697, in process_request_thread
+    self.finish_request(request, client_address)
+  File "/usr/local/lib/python3.12/socketserver.py", line 362, in finish_request
+    self.RequestHandlerClass(request, client_address, self)
+  File "/usr/local/lib/python3.12/socketserver.py", line 766, in __init__
+    self.handle()
+........................................ssssssss. [ 47%]
+........................................................................ [ 94%]
+.........                                                                [100%]
+=================================== FAILURES ===================================
+_ test_a_caller_that_disconnects_while_the_fence_is_held_never_gets_the_render _
+
+rig = <tests.unit.test_harness_render_queue._Rig object at 0x78ad523af350>
+
+    def test_a_caller_that_disconnects_while_the_fence_is_held_never_gets_the_render(rig):
+        rig.start_holder()
+        sock = _raw_post(rig.base, "/script", rig.payload("op-fenced"))
+        assert rig.queued.wait(10), "the request never queued"
+        fence = _hold_fence(rig.gh)
+        try:
+            time.sleep(0.5)
+            rig.release.set()
+            rig.holder[0].join(30)
+            rig.settled_snapshot()
+            sock.close()
+            ended_while_fenced = rig.waits["op-fenced"]["done"].wait(3)
+        finally:
+            _lift(fence)
+        rig.waits["op-fenced"]["done"].wait(5)
+        rows = _not_rendered_rows(rig, "op-fenced")
+>       assert [op for _, op in rig.rendered] == ["op-holder"], (
+            "a request whose caller disconnected while the deployment fence was held "
+            "rendered once the fence lifted", rig.rendered)
+E       AssertionError: ('a request whose caller disconnected while the deployment fence was held rendered once the fence lifted', [('/script', 'op-holder'), ('/script', 'op-fenced')])
+E       assert ['op-holder', 'op-fenced'] == ['op-holder']
+E         
+E         Left contains one more item: 'op-fenced'
+E         Use -v to get more diff
+
+tests/unit/test_harness_render_queue.py:401: AssertionError
+----------------------------- Captured stdout call -----------------------------
+[harness] /script waited 4s for render owner(s) ['4cd3dc95f35f4aba9ea826254a914492']
+----------------------------- Captured stderr call -----------------------------
+----------------------------------------
+Exception occurred during processing of request from ('127.0.0.1', 51614)
+Traceback (most recent call last):
+  File "/home/linxuhao/.AItelier/worktrees-scratch/lockq3-mut-N4/docker/godot/godot_harness.py", line 2792, in do_POST
+    self._send(200, _with_owner_wait(run_script(
+  File "/home/linxuhao/.AItelier/worktrees-scratch/lockq3-mut-N4/docker/godot/godot_harness.py", line 2599, in _send
+    self.wfile.write(body)
+  File "/usr/local/lib/python3.12/socketserver.py", line 845, in write
+    self._sock.sendall(b)
+BrokenPipeError: [Errno 32] Broken pipe
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/socketserver.py", line 697, in process_request_thread
+    self.finish_request(request, client_address)
+  File "/usr/local/lib/python3.12/socketserver.py", line 362, in finish_request
+    self.RequestHandlerClass(request, client_address, self)
+  File "/usr/local/lib/python3.12/socketserver.py", line 766, in __init__
+    self.handle()
+  File "/usr/local/lib/python3.12/http/server.py", line 440, in handle
+    self.handle_one_request()
+  File "/usr/local/lib/python3.12/http/server.py", line 428, in handle_one_request
+    method()
+  File "/home/linxuhao/.AItelier/worktrees-scratch/lockq3-mut-N4/docker/godot/godot_harness.py", line 2814, in do_POST
+    self._send(500, {"error": str(e)})
+  File "/home/linxuhao/.AItelier/worktrees-scratch/lockq3-mut-N4/docker/godot/godot_harness.py", line 2598, in _send
+    self.end_headers()
+  File "/usr/local/lib/python3.12/http/server.py", line 542, in end_headers
+    self.flush_headers()
+  File "/usr/local/lib/python3.12/http/server.py", line 546, in flush_headers
+    self.wfile.write(b"".join(self._headers_buffer))
+  File "/usr/local/lib/python3.12/socketserver.py", line 845, in write
+    self._sock.sendall(b)
+BrokenPipeError: [Errno 32] Broken pipe
+----------------------------------------
+________ test_the_requests_own_wait_limit_holds_while_the_fence_is_held ________
+
+rig = <tests.unit.test_harness_render_queue._Rig object at 0x78ad523ac680>
+
+    def test_the_requests_own_wait_limit_holds_while_the_fence_is_held(rig):
+        rig.start_holder()
+        t, out = rig.post_in_thread("/script",
+                                    rig.payload("op-capped", render_wait_timeout_sec=0.5))
+        assert rig.queued.wait(10), "the request never queued"
+        fence = _hold_fence(rig.gh)
+        try:
+            rig.release.set()
+            rig.holder[0].join(30)
+            rig.settled_snapshot()
+            t.join(1.5)
+            answered_while_fenced = "code" in out
+        finally:
+            _lift(fence)
+        t.join(15)
+        body = out.get("body") or {}
+>       assert [op for _, op in rig.rendered] == ["op-holder"], (
+            "a request rendered past its own render_wait_timeout_sec", out)
+E       AssertionError: ('a request rendered past its own render_wait_timeout_sec', {'code': 200, 'body': {'passed': True, 'route': '/script', 'render_owner_wait_sec': 1.5248, 'render_owner_waited_for_owner_ids': ['0eb3f80f650c4c2fa1d0e05e33e057a2']}})
+E       assert ['op-holder', 'op-capped'] == ['op-holder']
+E         
+E         Left contains one more item: 'op-capped'
+E         Use -v to get more diff
+
+tests/unit/test_harness_render_queue.py:427: AssertionError
+----------------------------- Captured stdout call -----------------------------
+[harness] /script waited 2s for render owner(s) ['0eb3f80f650c4c2fa1d0e05e33e057a2']
+________ test_a_caller_gone_after_ownership_releases_the_row_unrendered ________
+
+rig = <tests.unit.test_harness_render_queue._Rig object at 0x78ad523ad040>
+
+    def test_a_caller_gone_after_ownership_releases_the_row_unrendered(rig):
+        """Ownership taken, then the request blocks on the render-effect lock; the
+        caller disconnects there. The re-check before the render must catch it."""
+        effect = _hold_effect_lock(rig.gh)
+        try:
+            sock = _raw_post(rig.base, "/script", rig.payload("op-late"))
+            _wait_for_owner(rig, "op-late")
+            time.sleep(0.2)
+            sock.close()
+            time.sleep(0.3)
+        finally:
+            _lift(effect)
+        rows = _not_rendered_rows(rig, "op-late")
+>       assert rig.rendered == [], ("rendered for a caller that had disconnected", rig.rendered)
+E       AssertionError: ('rendered for a caller that had disconnected', [('/script', 'op-late')])
+E       assert [('/script', 'op-late')] == []
+E         
+E         Left contains one more item: ('/script', 'op-late')
+E         Use -v to get more diff
+
+tests/unit/test_harness_render_queue.py:465: AssertionError
+----------------------------- Captured stderr call -----------------------------
+----------------------------------------
+Exception occurred during processing of request from ('127.0.0.1', 33776)
+Traceback (most recent call last):
+  File "/home/linxuhao/.AItelier/worktrees-scratch/lockq3-mut-N4/docker/godot/godot_harness.py", line 2792, in do_POST
+    self._send(200, _with_owner_wait(run_script(
+  File "/home/linxuhao/.AItelier/worktrees-scratch/lockq3-mut-N4/docker/godot/godot_harness.py", line 2599, in _send
+    self.wfile.write(body)
+  File "/usr/local/lib/python3.12/socketserver.py", line 845, in write
+    self._sock.sendall(b)
+BrokenPipeError: [Errno 32] Broken pipe
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/socketserver.py", line 697, in process_request_thread
+    self.finish_request(request, client_address)
+  File "/usr/local/lib/python3.12/socketserver.py", line 362, in finish_request
+    self.RequestHandlerClass(request, client_address, self)
+  File "/usr/local/lib/python3.12/socketserver.py", line 766, in __init__
+    self.handle()
+  File "/usr/local/lib/python3.12/http/server.py", line 440, in handle
+    self.handle_one_request()
+  File "/usr/local/lib/python3.12/http/server.py", line 428, in handle_one_request
+    method()
+  File "/home/linxuhao/.AItelier/worktrees-scratch/lockq3-mut-N4/docker/godot/godot_harness.py", line 2814, in do_POST
+    self._send(500, {"error": str(e)})
+  File "/home/linxuhao/.AItelier/worktrees-scratch/lockq3-mut-N4/docker/godot/godot_harness.py", line 2598, in _send
+    self.end_headers()
+  File "/usr/local/lib/python3.12/http/server.py", line 542, in end_headers
+    self.flush_headers()
+  File "/usr/local/lib/python3.12/http/server.py", line 546, in flush_headers
+    self.wfile.write(b"".join(self._headers_buffer))
+  File "/usr/local/lib/python3.12/socketserver.py", line 845, in write
+    self._sock.sendall(b)
+BrokenPipeError: [Errno 32] Broken pipe
+----------------------------------------
+_______ test_a_limit_reached_after_ownership_releases_the_row_unrendered _______
+
+rig = <tests.unit.test_harness_render_queue._Rig object at 0x78ad59fadf10>
+
+    def test_a_limit_reached_after_ownership_releases_the_row_unrendered(rig):
+        effect = _hold_effect_lock(rig.gh)
+        try:
+            t, out = rig.post_in_thread("/x11_input_smoke",
+                                        rig.payload("op-late", render_wait_timeout_sec=0.3))
+            _wait_for_owner(rig, "op-late")
+            time.sleep(0.6)
+        finally:
+            _lift(effect)
+        t.join(15)
+        rows = _not_rendered_rows(rig, "op-late")
+        body = out.get("body") or {}
+>       assert rig.rendered == [], ("rendered past render_wait_timeout_sec", out)
+E       AssertionError: ('rendered past render_wait_timeout_sec', {'code': 200, 'body': {'passed': True, 'route': '/x11_input_smoke', 'render_owner_wait_sec': 0.0028, 'render_owner_waited_for_owner_ids': []}})
+E       assert [('/x11_input...', 'op-late')] == []
+E         
+E         Left contains one more item: ('/x11_input_smoke', 'op-late')
+E         Use -v to get more diff
+
+tests/unit/test_harness_render_queue.py:482: AssertionError
+_ test_a_queue_wait_that_outlasts_the_callers_timeout_is_not_a_product_failure[deployment_fence] _
+
+rig = <tests.unit.test_harness_render_queue._Rig object at 0x78ad524566f0>
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_a_queue_wait_that_outlast1')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x78ad52455040>
+cause = 'deployment_fence'
+
+    @pytest.mark.parametrize("cause", ["live_holder", "deployment_fence"])
+    def test_a_queue_wait_that_outlasts_the_callers_timeout_is_not_a_product_failure(
+            rig, tmp_path, monkeypatch, cause):
+        from aitelier.gate_evidence import audit_evidence, release_disposition, report_state
+        from aitelier.tools.focused_check.impl import focused_check
+        from aitelier.tools.godot_playtest_scenario.impl import godot_playtest_scenario
+        from aitelier.tools.godot_vision.impl import godot_vision
+        from aitelier.tools.verify_evidence.impl import verify_evidence
+    
+        compile_impl, pt_impl, skips = _tools_on(rig, monkeypatch)
+        proj = _game_project(tmp_path)
+        fence = None
+        if cause == "live_holder":
+            rig.start_holder()          # held until the test ends: longer than the tool timeout
+        else:
+            fence = _hold_fence(rig.gh)
+        try:
+            # Reader A: godot_playtest, its return and its report.
+            ret_a = pt_impl.godot_playtest(project_root=str(proj), out_dir=str(tmp_path / "a"))
+            rep_a = json.loads((tmp_path / "a" / "playtest_report.json").read_text())
+            # Reader C: godot_compile as game_harness wires it, and its route.
+            graph, ret_c, rep_c = _run_compile_step(compile_impl, tmp_path, proj)
+            # Reader C2: godot_compile without an evidence cycle.
+            ret_c2 = compile_impl.godot_compile(project_root=str(proj),
+                                                out_dir=str(tmp_path / "c2"))
+            rep_c2 = json.loads((tmp_path / "c2" / "playtest_report.json").read_text())
+            # Reader D: the release audit.
+            gates = [["5_test", "test_report.json"], ["5_compile", "playtest_report.json"]]
+            aud = audit_evidence(graph, "run-q", gates)
+            (graph / "5_rel").mkdir()
+            ret_d = verify_evidence(out_dir=str(graph / "5_rel"), run_id="run-q",
+                                    gates=json.dumps(gates))
+            # Reader E: godot_playtest_scenario. Reader F: focused_check.
+            ret_e = godot_playtest_scenario(scenario="s1", project_root=str(proj),
+                                            _timeout_seconds=TOOL_TIMEOUT)
+            ret_f = focused_check(kind="godot_scenario", scenario="s1",
+                                  project_root=str(proj), timeout_seconds=4)
+        finally:
+            if fence is not None:
+                _lift(fence)
+            rig.release.set()
+        # Reader G: godot_vision on 5_compile's play-test report.
+        ws = tmp_path / "ws"
+        (ws / "cfg" / "5_compile").mkdir(parents=True)
+        (ws / "cfg" / "5_compile" / "playtest_report.json").write_text(json.dumps(rep_c))
+        godot_vision(project_root=str(proj), out_dir=str(tmp_path / "g"),
+                     workspace_root=str(ws), config_name="cfg", from_step="5_compile")
+        rep_g = json.loads((tmp_path / "g" / "vision_report.json").read_text())
+    
+        assert not [op for _, op in rig.rendered if op != "op-holder"], (
+            "a queued request rendered", rig.rendered)
+        for name, rep in (("godot_playtest", rep_a), ("godot_compile", rep_c),
+                          ("godot_compile without an evidence cycle", rep_c2)):
+>           assert not rep.get("gate_timeout"), (
+                f"{name}: a queue wait was reported as a timed-out play-test", rep)
+E           AssertionError: ('godot_playtest: a queue wait was reported as a timed-out play-test', {'passed': False, 'frames': 0, 'errors': [], 'state': {}, ...})
+E           assert not True
+E            +  where True = <built-in method get of dict object at 0x78ad51b7d8c0>('gate_timeout')
+E            +    where <built-in method get of dict object at 0x78ad51b7d8c0> = {'passed': False, 'frames': 0, 'errors': [], 'state': {}, ...}.get
+
+tests/unit/test_harness_render_queue.py:740: AssertionError
+--------------------------- Captured stdout teardown ---------------------------
+[harness] /playtest waited 6s for render owner(s) []
+[harness] /playtest waited 10s for render owner(s) []
+[harness] /playtest waited 12s for render owner(s) []
+[harness] /playtest waited 4s for render owner(s) []
+--------------------------- Captured stderr teardown ---------------------------
+----------------------------------------
+Exception occurred during processing of request from ('127.0.0.1', 32806)
+Traceback (most recent call last):
+  File "/home/linxuhao/.AItelier/worktrees-scratch/lockq3-mut-N4/docker/godot/godot_harness.py", line 2810, in do_POST
+    self._send_timed(200, _with_owner_wait(report, owner_wait))
+  File "/home/linxuhao/.AItelier/worktrees-scratch/lockq3-mut-N4/docker/godot/godot_harness.py", line 2623, in _send_timed
+    self.wfile.write(body)
+  File "/usr/local/lib/python3.12/socketserver.py", line 845, in write
+    self._sock.sendall(b)
+BrokenPipeError: [Errno 32] Broken pipe
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/socketserver.py", line 697, in process_request_thread
+    self.finish_request(request, client_address)
+  File "/usr/local/lib/python3.12/socketserver.py", line 362, in finish_request
+    self.RequestHandlerClass(request, client_address, self)
+  File "/usr/local/lib/python3.12/socketserver.py", line 766, in __init__
+    self.handle()
+  File "/usr/local/lib/python3.12/http/server.py", line 440, in handle
+    self.handle_one_request()
+  File "/usr/local/lib/python3.12/http/server.py", line 428, in handle_one_request
+    method()
+  File "/home/linxuhao/.AItelier/worktrees-scratch/lockq3-mut-N4/docker/godot/godot_harness.py", line 2814, in do_POST
+    self._send(500, {"error": str(e)})
+  File "/home/linxuhao/.AItelier/worktrees-scratch/lockq3-mut-N4/docker/godot/godot_harness.py", line 2598, in _send
+    self.end_headers()
+  File "/usr/local/lib/python3.12/http/server.py", line 542, in end_headers
+    self.flush_headers()
+  File "/usr/local/lib/python3.12/http/server.py", line 546, in flush_headers
+    self.wfile.write(b"".join(self._headers_buffer))
+  File "/usr/local/lib/python3.12/socketserver.py", line 845, in write
+    self._sock.sendall(b)
+BrokenPipeError: [Errno 32] Broken pipe
+----------------------------------------
+----------------------------------------
+Exception occurred during processing of request from ('127.0.0.1', 60996)
+Traceback (most recent call last):
+  File "/home/linxuhao/.AItelier/worktrees-scratch/lockq3-mut-N4/docker/godot/godot_harness.py", line 2810, in do_POST
+    self._send_timed(200, _with_owner_wait(report, owner_wait))
+  File "/home/linxuhao/.AItelier/worktrees-scratch/lockq3-mut-N4/docker/godot/godot_harness.py", line 2623, in _send_timed
+    self.wfile.write(body)
+  File "/usr/local/lib/python3.12/socketserver.py", line 845, in write
+    self._sock.sendall(b)
+BrokenPipeError: [Errno 32] Broken pipe
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/socketserver.py", line 697, in process_request_thread
+    self.finish_request(request, client_address)
+  File "/usr/local/lib/python3.12/socketserver.py", line 362, in finish_request
+    self.RequestHandlerClass(request, client_address, self)
+  File "/usr/local/lib/python3.12/socketserver.py", line 766, in __init__
+    self.handle()
+  File "/usr/local/lib/python3.12/http/server.py", line 440, in handle
+    self.handle_one_request()
+  File "/usr/local/lib/python3.12/http/server.py", line 428, in handle_one_request
+    method()
+  File "/home/linxuhao/.AItelier/worktrees-scratch/lockq3-mut-N4/docker/godot/godot_harness.py", line 2814, in do_POST
+    self._send(500, {"error": str(e)})
+  File "/home/linxuhao/.AItelier/worktrees-scratch/lockq3-mut-N4/docker/godot/godot_harness.py", line 2598, in _send
+    self.end_headers()
+  File "/usr/local/lib/python3.12/http/server.py", line 542, in end_headers
+    self.flush_headers()
+  File "/usr/local/lib/python3.12/http/server.py", line 546, in flush_headers
+    self.wfile.write(b"".join(self._headers_buffer))
+  File "/usr/local/lib/python3.12/socketserver.py", line 845, in write
+    self._sock.sendall(b)
+BrokenPipeError: [Errno 32] Broken pipe
+----------------------------------------
+----------------------------------------
+Exception occurred during processing of request from ('127.0.0.1', 60974)
+Traceback (most recent call last):
+  File "/home/linxuhao/.AItelier/worktrees-scratch/lockq3-mut-N4/docker/godot/godot_harness.py", line 2810, in do_POST
+    self._send_timed(200, _with_owner_wait(report, owner_wait))
+  File "/home/linxuhao/.AItelier/worktrees-scratch/lockq3-mut-N4/docker/godot/godot_harness.py", line 2623, in _send_timed
+    self.wfile.write(body)
+  File "/usr/local/lib/python3.12/socketserver.py", line 845, in write
+    self._sock.sendall(b)
+BrokenPipeError: [Errno 32] Broken pipe
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/socketserver.py", line 697, in process_request_thread
+    self.finish_request(request, client_address)
+  File "/usr/local/lib/python3.12/socketserver.py", line 362, in finish_request
+    self.RequestHandlerClass(request, client_address, self)
+  File "/usr/local/lib/python3.12/socketserver.py", line 766, in __init__
+    self.handle()
+  File "/usr/local/lib/python3.12/http/server.py", line 440, in handle
+    self.handle_one_request()
+  File "/usr/local/lib/python3.12/http/server.py", line 428, in handle_one_request
+    method()
+  File "/home/linxuhao/.AItelier/worktrees-scratch/lockq3-mut-N4/docker/godot/godot_harness.py", line 2814, in do_POST
+    self._send(500, {"error": str(e)})
+  File "/home/linxuhao/.AItelier/worktrees-scratch/lockq3-mut-N4/docker/godot/godot_harness.py", line 2598, in _send
+    self.end_headers()
+  File "/usr/local/lib/python3.12/http/server.py", line 542, in end_headers
+    self.flush_headers()
+  File "/usr/local/lib/python3.12/http/server.py", line 546, in flush_headers
+    self.wfile.write(b"".join(self._headers_buffer))
+  File "/usr/local/lib/python3.12/socketserver.py", line 845, in write
+    self._sock.sendall(b)
+BrokenPipeError: [Errno 32] Broken pipe
+----------------------------------------
+----------------------------------------
+Exception occurred during processing of request from ('127.0.0.1', 41648)
+Traceback (most recent call last):
+  File "/home/linxuhao/.AItelier/worktrees-scratch/lockq3-mut-N4/docker/godot/godot_harness.py", line 2810, in do_POST
+    self._send_timed(200, _with_owner_wait(report, owner_wait))
+  File "/home/linxuhao/.AItelier/worktrees-scratch/lockq3-mut-N4/docker/godot/godot_harness.py", line 2623, in _send_timed
+    self.wfile.write(body)
+  File "/usr/local/lib/python3.12/socketserver.py", line 845, in write
+    self._sock.sendall(b)
+BrokenPipeError: [Errno 32] Broken pipe
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/socketserver.py", line 697, in process_request_thread
+    self.finish_request(request, client_address)
+  File "/usr/local/lib/python3.12/socketserver.py", line 362, in finish_request
+    self.RequestHandlerClass(request, client_address, self)
+  File "/usr/local/lib/python3.12/socketserver.py", line 766, in __init__
+    self.handle()
+  File "/usr/local/lib/python3.12/http/server.py", line 440, in handle
+    self.handle_one_request()
+  File "/usr/local/lib/python3.12/http/server.py", line 428, in handle_one_request
+    method()
+  File "/home/linxuhao/.AItelier/worktrees-scratch/lockq3-mut-N4/docker/godot/godot_harness.py", line 2814, in do_POST
+    self._send(500, {"error": str(e)})
+  File "/home/linxuhao/.AItelier/worktrees-scratch/lockq3-mut-N4/docker/godot/godot_harness.py", line 2598, in _send
+    self.end_headers()
+  File "/usr/local/lib/python3.12/http/server.py", line 542, in end_headers
+    self.flush_headers()
+  File "/usr/local/lib/python3.12/http/server.py", line 546, in flush_headers
+    self.wfile.write(b"".join(self._headers_buffer))
+  File "/usr/local/lib/python3.12/socketserver.py", line 845, in write
+    self._sock.sendall(b)
+BrokenPipeError: [Errno 32] Broken pipe
+----------------------------------------
+=============================== warnings summary ===============================
+../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_harness_render_queue.py::test_a_caller_that_disconnects_while_the_fence_is_held_never_gets_the_render
+FAILED tests/unit/test_harness_render_queue.py::test_the_requests_own_wait_limit_holds_while_the_fence_is_held
+FAILED tests/unit/test_harness_render_queue.py::test_a_caller_gone_after_ownership_releases_the_row_unrendered
+FAILED tests/unit/test_harness_render_queue.py::test_a_limit_reached_after_ownership_releases_the_row_unrendered
+FAILED tests/unit/test_harness_render_queue.py::test_a_queue_wait_that_outlasts_the_callers_timeout_is_not_a_product_failure[deployment_fence]
+5 failed, 140 passed, 8 skipped, 1 warning in 60.17s (0:01:00)
+# inner_rc=1
+# finished 2026-09-24T12:12:52Z bare_rc=1 ignitions=993

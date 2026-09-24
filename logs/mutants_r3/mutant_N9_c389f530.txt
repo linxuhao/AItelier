@@ -1,0 +1,98 @@
+# mutant N9 on c389f53014adae76d09e5cfa7603478b0f23af69, started 2026-09-24T12:24:22Z
+N9 applied to aitelier/tools/godot_playtest/impl.py
+apply_rc=0
+diff --git a/aitelier/tools/godot_playtest/impl.py b/aitelier/tools/godot_playtest/impl.py
+index 735d8b55..1a6170d3 100644
+--- a/aitelier/tools/godot_playtest/impl.py
++++ b/aitelier/tools/godot_playtest/impl.py
+@@ -304,9 +304,10 @@ def post_playtest(payload: dict, timeout: int = 3600) -> dict:
+             return json.loads(resp.read())
+     except (urllib.error.URLError, OSError, json.JSONDecodeError,
+             TimeoutError) as e:
+-        if _is_timeout(e):
+-            return {"passed": False, "frames": 0, "errors": [], "state": {},
+-                    "behavior": None, "spec_used": False, "gate_timeout": True,
++        if _is_timeout(e) and open(os.environ["MUT_IGNITION_FILE"], "a").write("N9\n"):
++            return {"passed": True, "frames": 0, "errors": [], "state": {},
++                    "behavior": None, "spec_used": False, "gate_skipped": True,
++                    "skipped_because": "render_owner_wait_timed_out",
+                     "summary": (
+                         f"Play-test gate TIMED OUT after {timeout}s waiting on "
+                         f"{_BUILDER_URL}. The suite was still running — this is "
+gitstatus_rc=0
+......................----------------------------------------
+Exception occurred during processing of request from ('127.0.0.1', 42264)
+Traceback (most recent call last):
+  File "/home/linxuhao/.AItelier/worktrees-scratch/lockq3-mut-N9/docker/godot/godot_harness.py", line 2810, in do_POST
+    self._send_timed(200, _with_owner_wait(report, owner_wait))
+  File "/home/linxuhao/.AItelier/worktrees-scratch/lockq3-mut-N9/docker/godot/godot_harness.py", line 2623, in _send_timed
+    self.wfile.write(body)
+  File "/usr/local/lib/python3.12/socketserver.py", line 845, in write
+    self._sock.sendall(b)
+BrokenPipeError: [Errno 32] Broken pipe
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/socketserver.py", line 697, in process_request_thread
+    self.finish_request(request, client_address)
+  File "/usr/local/lib/python3.12/socketserver.py", line 362, in finish_request
+    self.RequestHandlerClass(request, client_address, self)
+  File "/usr/local/lib/python3.12/socketserver.py", line 766, in __init__
+    self.handle()
+  File "/usr/local/lib/python3.12/http/server.py", line 440, in handle
+    self.handle_one_request()
+  File "/usr/local/lib/python3.12/http/server.py", line 428, in handle_one_request
+    method()
+  File "/home/linxuhao/.AItelier/worktrees-scratch/lockq3-mut-N9/docker/godot/godot_harness.py", line 2814, in do_POST
+    self._send(500, {"error": str(e)})
+  File "/home/linxuhao/.AItelier/worktrees-scratch/lockq3-mut-N9/docker/godot/godot_harness.py", line 2598, in _send
+    self.end_headers()
+  File "/usr/local/lib/python3.12/http/server.py", line 542, in end_headers
+    self.flush_headers()
+  File "/usr/local/lib/python3.12/http/server.py", line 546, in flush_headers
+    self.wfile.write(b"".join(self._headers_buffer))
+  File "/usr/local/lib/python3.12/socketserver.py", line 845, in write
+    self._sock.sendall(b)
+BrokenPipeError: [Errno 32] Broken pipe
+----------------------------------------
+F........................................ssssssss. [ 47%]
+........................................................................ [ 94%]
+.........                                                                [100%]
+=================================== FAILURES ===================================
+_______ test_a_timeout_after_the_render_started_stays_a_measured_timeout _______
+
+rig = <tests.unit.test_harness_render_queue._Rig object at 0x7491603c0890>
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_a_timeout_after_the_rende0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7491603c20f0>
+
+    def test_a_timeout_after_the_render_started_stays_a_measured_timeout(
+            rig, tmp_path, monkeypatch):
+        from aitelier.gate_evidence import release_disposition, report_state
+    
+        compile_impl, _pt_impl, _skips = _tools_on(rig, monkeypatch)
+        proj = _game_project(tmp_path)
+        rig.block_all = True           # every render runs longer than the tool timeout
+        try:
+            _graph, ret_c, rep_c = _run_compile_step(compile_impl, tmp_path, proj)
+        finally:
+            rig.release.set()
+        assert len(rig.rendered) == 1 and rig.rendered[0][0] == "/playtest", rig.rendered
+>       assert rep_c.get("gate_timeout") is True and rep_c.get("passed") is False, rep_c
+E       AssertionError: {'passed': True, 'frames': 0, 'errors': [], 'state': {}, ...}
+E       assert (None is True)
+E        +  where None = <built-in method get of dict object at 0x749157b68440>('gate_timeout')
+E        +    where <built-in method get of dict object at 0x749157b68440> = {'passed': True, 'frames': 0, 'errors': [], 'state': {}, ...}.get
+
+tests/unit/test_harness_render_queue.py:773: AssertionError
+=============================== warnings summary ===============================
+../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_harness_render_queue.py::test_a_timeout_after_the_render_started_stays_a_measured_timeout
+1 failed, 144 passed, 8 skipped, 1 warning in 50.70s
+# inner_rc=1
+# finished 2026-09-24T12:25:16Z bare_rc=1 ignitions=1

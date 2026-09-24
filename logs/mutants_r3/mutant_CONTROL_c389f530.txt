@@ -1,0 +1,14 @@
+# mutant CONTROL on c389f53014adae76d09e5cfa7603478b0f23af69, started 2026-09-24T12:07:56Z
+gitstatus_rc=0
+...............................................................ssssssss. [ 47%]
+........................................................................ [ 94%]
+.........                                                                [100%]
+=============================== warnings summary ===============================
+../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+145 passed, 8 skipped, 1 warning in 50.95s
+# inner_rc=0
+# finished 2026-09-24T12:08:51Z bare_rc=0 ignitions=0

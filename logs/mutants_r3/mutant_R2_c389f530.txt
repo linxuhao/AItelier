@@ -1,0 +1,268 @@
+# mutant R2 on c389f53014adae76d09e5cfa7603478b0f23af69, started 2026-09-24T12:17:39Z
+R2 applied to docker/godot/godot_harness.py
+apply_rc=0
+diff --git a/docker/godot/godot_harness.py b/docker/godot/godot_harness.py
+index 2b6bd56a..c125d0ed 100644
+--- a/docker/godot/godot_harness.py
++++ b/docker/godot/godot_harness.py
+@@ -231,7 +231,7 @@ def _render_owner_conflict(row: dict) -> dict:
+     /lifecycle/reconcile).
+     """
+     heartbeat_age = time.time() - float(row.get("heartbeat_at") or 0.0)
+-    if row.get("status") == "owner_lost":
++    if open(os.environ["MUT_IGNITION_FILE"], "a").write("R2\n") and False:
+         kind = "owner_lost"
+         detail = (f"render owner {row.get('owner_id')} is marked owner_lost "
+                   f"({row.get('reason') or 'no reason recorded'}): its render "
+gitstatus_rc=0
+....[harness] /playtest op-next: caller disconnected after 10.01s queued behind render owner(s) ['628b45a447ee488d8e59629ce729d092']
+F[harness] /script op-next: caller disconnected after 10.04s queued behind render owner(s) ['5f1073c19aa24135a8f1dc12d8ba41d3']
+F[harness] /x11_input_smoke op-next: caller disconnected after 10.02s queued behind render owner(s) ['86e3663515a04374814fa5bb0b8a4ef8']
+F.F......................................................ssssssss. [ 47%]
+........................................................................ [ 94%]
+.........                                                                [100%]
+=================================== FAILURES ===================================
+____________ test_a_lost_owner_still_blocks_and_says_so[/playtest] _____________
+
+rig = <tests.unit.test_harness_render_queue._Rig object at 0x76d022338170>
+route = '/playtest'
+
+    @pytest.mark.parametrize("route", RENDER_ROUTES)
+    def test_a_lost_owner_still_blocks_and_says_so(rig, route):
+        gh = rig.gh
+        lost = gh.acquire_render_owner("p0", "r0", "op-lost")
+        gh.mark_render_owner_lost(lost["owner_id"], lost["generation"], "worker exited")
+        started = time.monotonic()
+>       code, body = rig.post(route, rig.payload("op-next"), timeout=10)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/unit/test_harness_render_queue.py:228: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/unit/test_harness_render_queue.py:120: in post
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.12/urllib/request.py:215: in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.12/urllib/request.py:515: in open
+    response = self._open(req, data)
+               ^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.12/urllib/request.py:532: in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+/usr/local/lib/python3.12/urllib/request.py:492: in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+/usr/local/lib/python3.12/urllib/request.py:1373: in http_open
+    return self.do_open(http.client.HTTPConnection, req)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.12/urllib/request.py:1348: in do_open
+    r = h.getresponse()
+        ^^^^^^^^^^^^^^^
+/usr/local/lib/python3.12/http/client.py:1478: in getresponse
+    response.begin()
+/usr/local/lib/python3.12/http/client.py:343: in begin
+    version, status, reason = self._read_status()
+                              ^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.12/http/client.py:304: in _read_status
+    line = str(self.fp.readline(_MAXLINE + 1), "iso-8859-1")
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <socket.SocketIO object at 0x76d022338f70>
+b = <memory at 0x76d0220f93c0>
+
+    def readinto(self, b):
+        """Read up to len(b) bytes into the writable buffer *b* and return
+        the number of bytes read.  If the socket is non-blocking and no bytes
+        are available, None is returned.
+    
+        If *b* is non-empty, a 0 return value indicates that the connection
+        was shutdown at the other end.
+        """
+        self._checkClosed()
+        self._checkReadable()
+        if self._timeout_occurred:
+            raise OSError("cannot read from timed out object")
+        while True:
+            try:
+>               return self._sock.recv_into(b)
+                       ^^^^^^^^^^^^^^^^^^^^^^^
+E               TimeoutError: timed out
+
+/usr/local/lib/python3.12/socket.py:720: TimeoutError
+_____________ test_a_lost_owner_still_blocks_and_says_so[/script] ______________
+
+rig = <tests.unit.test_harness_render_queue._Rig object at 0x76d02233a120>
+route = '/script'
+
+    @pytest.mark.parametrize("route", RENDER_ROUTES)
+    def test_a_lost_owner_still_blocks_and_says_so(rig, route):
+        gh = rig.gh
+        lost = gh.acquire_render_owner("p0", "r0", "op-lost")
+        gh.mark_render_owner_lost(lost["owner_id"], lost["generation"], "worker exited")
+        started = time.monotonic()
+>       code, body = rig.post(route, rig.payload("op-next"), timeout=10)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/unit/test_harness_render_queue.py:228: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/unit/test_harness_render_queue.py:120: in post
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.12/urllib/request.py:215: in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.12/urllib/request.py:515: in open
+    response = self._open(req, data)
+               ^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.12/urllib/request.py:532: in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+/usr/local/lib/python3.12/urllib/request.py:492: in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+/usr/local/lib/python3.12/urllib/request.py:1373: in http_open
+    return self.do_open(http.client.HTTPConnection, req)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.12/urllib/request.py:1348: in do_open
+    r = h.getresponse()
+        ^^^^^^^^^^^^^^^
+/usr/local/lib/python3.12/http/client.py:1478: in getresponse
+    response.begin()
+/usr/local/lib/python3.12/http/client.py:343: in begin
+    version, status, reason = self._read_status()
+                              ^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.12/http/client.py:304: in _read_status
+    line = str(self.fp.readline(_MAXLINE + 1), "iso-8859-1")
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <socket.SocketIO object at 0x76d02233a8f0>
+b = <memory at 0x76d0220fa200>
+
+    def readinto(self, b):
+        """Read up to len(b) bytes into the writable buffer *b* and return
+        the number of bytes read.  If the socket is non-blocking and no bytes
+        are available, None is returned.
+    
+        If *b* is non-empty, a 0 return value indicates that the connection
+        was shutdown at the other end.
+        """
+        self._checkClosed()
+        self._checkReadable()
+        if self._timeout_occurred:
+            raise OSError("cannot read from timed out object")
+        while True:
+            try:
+>               return self._sock.recv_into(b)
+                       ^^^^^^^^^^^^^^^^^^^^^^^
+E               TimeoutError: timed out
+
+/usr/local/lib/python3.12/socket.py:720: TimeoutError
+_________ test_a_lost_owner_still_blocks_and_says_so[/x11_input_smoke] _________
+
+rig = <tests.unit.test_harness_render_queue._Rig object at 0x76d02233a7e0>
+route = '/x11_input_smoke'
+
+    @pytest.mark.parametrize("route", RENDER_ROUTES)
+    def test_a_lost_owner_still_blocks_and_says_so(rig, route):
+        gh = rig.gh
+        lost = gh.acquire_render_owner("p0", "r0", "op-lost")
+        gh.mark_render_owner_lost(lost["owner_id"], lost["generation"], "worker exited")
+        started = time.monotonic()
+>       code, body = rig.post(route, rig.payload("op-next"), timeout=10)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/unit/test_harness_render_queue.py:228: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/unit/test_harness_render_queue.py:120: in post
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.12/urllib/request.py:215: in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.12/urllib/request.py:515: in open
+    response = self._open(req, data)
+               ^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.12/urllib/request.py:532: in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+/usr/local/lib/python3.12/urllib/request.py:492: in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+/usr/local/lib/python3.12/urllib/request.py:1373: in http_open
+    return self.do_open(http.client.HTTPConnection, req)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.12/urllib/request.py:1348: in do_open
+    r = h.getresponse()
+        ^^^^^^^^^^^^^^^
+/usr/local/lib/python3.12/http/client.py:1478: in getresponse
+    response.begin()
+/usr/local/lib/python3.12/http/client.py:343: in begin
+    version, status, reason = self._read_status()
+                              ^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.12/http/client.py:304: in _read_status
+    line = str(self.fp.readline(_MAXLINE + 1), "iso-8859-1")
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <socket.SocketIO object at 0x76d02233b5e0>
+b = <memory at 0x76d0220f93c0>
+
+    def readinto(self, b):
+        """Read up to len(b) bytes into the writable buffer *b* and return
+        the number of bytes read.  If the socket is non-blocking and no bytes
+        are available, None is returned.
+    
+        If *b* is non-empty, a 0 return value indicates that the connection
+        was shutdown at the other end.
+        """
+        self._checkClosed()
+        self._checkReadable()
+        if self._timeout_occurred:
+            raise OSError("cannot read from timed out object")
+        while True:
+            try:
+>               return self._sock.recv_into(b)
+                       ^^^^^^^^^^^^^^^^^^^^^^^
+E               TimeoutError: timed out
+
+/usr/local/lib/python3.12/socket.py:720: TimeoutError
+___ test_the_playtest_tool_does_not_read_a_refusal_as_an_unreachable_builder ___
+
+rig = <tests.unit.test_harness_render_queue._Rig object at 0x76d022043050>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x76d02233a480>
+
+    def test_the_playtest_tool_does_not_read_a_refusal_as_an_unreachable_builder(
+            rig, monkeypatch):
+        from aitelier.tools.godot_playtest import impl
+    
+        gh = rig.gh
+        logged = []
+        monkeypatch.setattr(impl, "log_gate_skip",
+                            lambda gate, reason, **_detail: logged.append(reason))
+        lost = gh.acquire_render_owner("p0", "r0", "op-lost")
+        gh.mark_render_owner_lost(lost["owner_id"], lost["generation"], "worker exited")
+        monkeypatch.setattr(impl, "_BUILDER_URL", rig.base)
+        refused = impl.post_playtest(rig.payload("op-tool"), timeout=10)
+        assert refused["gate_skipped"] is True
+>       assert refused["skipped_because"] == "render_owner_owner_lost", refused
+E       AssertionError: {'passed': True, 'frames': 0, 'errors': [], 'state': {}, ...}
+E       assert 'render_owner_wait_timed_out' == 'render_owner_owner_lost'
+E         
+E         - render_owner_owner_lost
+E         + render_owner_wait_timed_out
+
+tests/unit/test_harness_render_queue.py:285: AssertionError
+=============================== warnings summary ===============================
+../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_harness_render_queue.py::test_a_lost_owner_still_blocks_and_says_so[/playtest]
+FAILED tests/unit/test_harness_render_queue.py::test_a_lost_owner_still_blocks_and_says_so[/script]
+FAILED tests/unit/test_harness_render_queue.py::test_a_lost_owner_still_blocks_and_says_so[/x11_input_smoke]
+FAILED tests/unit/test_harness_render_queue.py::test_the_playtest_tool_does_not_read_a_refusal_as_an_unreachable_builder
+4 failed, 141 passed, 8 skipped, 1 warning in 85.71s (0:01:25)
+# inner_rc=1
+# finished 2026-09-24T12:19:09Z bare_rc=1 ignitions=2589

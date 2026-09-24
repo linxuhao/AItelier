@@ -1,0 +1,92 @@
+# mutant M5 on c389f53014adae76d09e5cfa7603478b0f23af69, started 2026-09-24T12:11:42Z
+M5 applied to docker/godot/godot_harness.py
+apply_rc=0
+diff --git a/docker/godot/godot_harness.py b/docker/godot/godot_harness.py
+index 2b6bd56a..b09bfdfb 100644
+--- a/docker/godot/godot_harness.py
++++ b/docker/godot/godot_harness.py
+@@ -2734,7 +2734,7 @@ class _Handler(BaseHTTPRequestHandler):
+             try:
+                 owner = acquire_render_owner_waiting(
+                     project_id, run_id, operation_id, wait_timeout=wait_timeout,
+-                    should_abort=self._render_client_abandoned)
++                    should_abort=(open(os.environ["MUT_IGNITION_FILE"], "a").write("M5\n") and None))
+             except RenderWaitAbandoned as exc:
+                 print(f"[harness] {self.path} {operation_id}: {exc}", flush=True)
+                 return
+gitstatus_rc=0
+.........F..F..................................................ssssssss. [ 47%]
+........................................................................ [ 94%]
+.........                                                                [100%]
+=================================== FAILURES ===================================
+______ test_a_caller_that_disconnects_while_queued_never_gets_the_render _______
+
+rig = <tests.unit.test_harness_render_queue._Rig object at 0x75f429e32e70>
+
+    def test_a_caller_that_disconnects_while_queued_never_gets_the_render(rig):
+        rig.start_holder()
+        sock = _raw_post(rig.base, "/script", rig.payload("op-ghost"))
+        assert rig.queued.wait(10), "the ghost request never queued"
+        sock.close()
+        abandoned = rig.waits["op-ghost"]["done"].wait(5)
+    
+        rig.release.set()
+        rig.holder[0].join(30)
+        rig.waits["op-ghost"]["done"].wait(5)
+        time.sleep(0.2)
+    
+>       assert abandoned, "the queued request kept waiting after its caller disconnected"
+E       AssertionError: the queued request kept waiting after its caller disconnected
+E       assert False
+
+tests/unit/test_harness_render_queue.py:329: AssertionError
+----------------------------- Captured stdout call -----------------------------
+[harness] /script waited 5s for render owner(s) ['7e5423ccd4e64d21a95ff6b5fc7f9057']
+[harness] /script op-ghost: not rendered: the caller disconnected before the render started
+_ test_a_caller_that_disconnects_while_the_fence_is_held_never_gets_the_render _
+
+rig = <tests.unit.test_harness_render_queue._Rig object at 0x75f42a3880e0>
+
+    def test_a_caller_that_disconnects_while_the_fence_is_held_never_gets_the_render(rig):
+        rig.start_holder()
+        sock = _raw_post(rig.base, "/script", rig.payload("op-fenced"))
+        assert rig.queued.wait(10), "the request never queued"
+        fence = _hold_fence(rig.gh)
+        try:
+            time.sleep(0.5)
+            rig.release.set()
+            rig.holder[0].join(30)
+            rig.settled_snapshot()
+            sock.close()
+            ended_while_fenced = rig.waits["op-fenced"]["done"].wait(3)
+        finally:
+            _lift(fence)
+        rig.waits["op-fenced"]["done"].wait(5)
+        rows = _not_rendered_rows(rig, "op-fenced")
+        assert [op for _, op in rig.rendered] == ["op-holder"], (
+            "a request whose caller disconnected while the deployment fence was held "
+            "rendered once the fence lifted", rig.rendered)
+        assert all(status == "released" and reason.startswith("not rendered")
+                   for status, reason in rows), rows
+>       assert ended_while_fenced, (
+            "the queued request did not notice its caller had gone while the "
+            "deployment fence was held")
+E       AssertionError: the queued request did not notice its caller had gone while the deployment fence was held
+E       assert False
+
+tests/unit/test_harness_render_queue.py:406: AssertionError
+----------------------------- Captured stdout call -----------------------------
+[harness] /script waited 4s for render owner(s) ['06e87282adcf4a5fbfcc0e545490317a']
+[harness] /script op-fenced: not rendered: the caller disconnected before the render started
+=============================== warnings summary ===============================
+../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_harness_render_queue.py::test_a_caller_that_disconnects_while_queued_never_gets_the_render
+FAILED tests/unit/test_harness_render_queue.py::test_a_caller_that_disconnects_while_the_fence_is_held_never_gets_the_render
+2 failed, 143 passed, 8 skipped, 1 warning in 58.77s
+# inner_rc=1
+# finished 2026-09-24T12:12:45Z bare_rc=1 ignitions=59

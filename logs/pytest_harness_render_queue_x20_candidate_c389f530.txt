@@ -1,0 +1,23 @@
+# started 2026-09-24T12:15:40Z tree=/home/linxuhao/.AItelier/worktrees-scratch/lockq3 head=c389f53014adae76d09e5cfa7603478b0f23af69 runs=20 args: -rA tests/unit/test_harness_render_queue.py
+run 1 bare_rc=0 23 passed, 1 warning in 49.94s
+run 2 bare_rc=0 23 passed, 1 warning in 49.96s
+run 3 bare_rc=0 23 passed, 1 warning in 50.04s
+run 4 bare_rc=0 23 passed, 1 warning in 49.90s
+run 5 bare_rc=0 23 passed, 1 warning in 49.98s
+run 6 bare_rc=0 23 passed, 1 warning in 49.91s
+run 7 bare_rc=0 23 passed, 1 warning in 49.87s
+run 8 bare_rc=0 23 passed, 1 warning in 49.97s
+run 9 bare_rc=0 23 passed, 1 warning in 49.94s
+run 10 bare_rc=0 23 passed, 1 warning in 49.93s
+run 11 bare_rc=0 23 passed, 1 warning in 49.84s
+run 12 bare_rc=0 23 passed, 1 warning in 49.90s
+run 13 bare_rc=0 23 passed, 1 warning in 50.06s
+run 14 bare_rc=0 23 passed, 1 warning in 49.86s
+run 15 bare_rc=0 23 passed, 1 warning in 49.96s
+run 16 bare_rc=0 23 passed, 1 warning in 49.88s
+run 17 bare_rc=0 23 passed, 1 warning in 49.96s
+run 18 bare_rc=0 23 passed, 1 warning in 49.97s
+run 19 bare_rc=0 23 passed, 1 warning in 49.88s
+run 20 bare_rc=0 23 passed, 1 warning in 49.93s
+runs=20 nonzero=0
+# finished 2026-09-24T12:33:37Z bare_rc=0

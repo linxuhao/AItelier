@@ -1,0 +1,172 @@
+# mutant N7 on c389f53014adae76d09e5cfa7603478b0f23af69, started 2026-09-24T12:14:54Z
+N7 applied to aitelier/tools/godot_playtest/impl.py
+apply_rc=0
+diff --git a/aitelier/tools/godot_playtest/impl.py b/aitelier/tools/godot_playtest/impl.py
+index 735d8b55..ad185062 100644
+--- a/aitelier/tools/godot_playtest/impl.py
++++ b/aitelier/tools/godot_playtest/impl.py
+@@ -316,6 +316,11 @@ def post_playtest(payload: dict, timeout: int = 3600) -> dict:
+                         f"hangs (the sidecar caps each one at 120s, so a whole "
+                         f"suite over the wall means the count grew).")}
+         refusal = _render_owner_refusal(e)
++        if (refusal is not None and refusal.get("error") == "render owner wait timed out"
++                and open(os.environ["MUT_IGNITION_FILE"], "a").write("N7\n")):
++            return {"passed": False, "frames": 0, "errors": [], "state": {},
++                    "behavior": None, "spec_used": False, "gate_timeout": True,
++                    "summary": f"Play-test gate TIMED OUT after {timeout}s"}
+         if refusal is not None:
+             # The sidecar ANSWERED: its render owner needs reconciliation, or
+             # this request's own wait ran out. The gate did not run, so the
+gitstatus_rc=0
+....................FF.........................................ssssssss. [ 47%]
+........................................................................ [ 94%]
+.........                                                                [100%]
+=================================== FAILURES ===================================
+_ test_a_queue_wait_that_outlasts_the_callers_timeout_is_not_a_product_failure[live_holder] _
+
+rig = <tests.unit.test_harness_render_queue._Rig object at 0x7ab2bd10c620>
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_a_queue_wait_that_outlast0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7ab2b572fa70>
+cause = 'live_holder'
+
+    @pytest.mark.parametrize("cause", ["live_holder", "deployment_fence"])
+    def test_a_queue_wait_that_outlasts_the_callers_timeout_is_not_a_product_failure(
+            rig, tmp_path, monkeypatch, cause):
+        from aitelier.gate_evidence import audit_evidence, release_disposition, report_state
+        from aitelier.tools.focused_check.impl import focused_check
+        from aitelier.tools.godot_playtest_scenario.impl import godot_playtest_scenario
+        from aitelier.tools.godot_vision.impl import godot_vision
+        from aitelier.tools.verify_evidence.impl import verify_evidence
+    
+        compile_impl, pt_impl, skips = _tools_on(rig, monkeypatch)
+        proj = _game_project(tmp_path)
+        fence = None
+        if cause == "live_holder":
+            rig.start_holder()          # held until the test ends: longer than the tool timeout
+        else:
+            fence = _hold_fence(rig.gh)
+        try:
+            # Reader A: godot_playtest, its return and its report.
+            ret_a = pt_impl.godot_playtest(project_root=str(proj), out_dir=str(tmp_path / "a"))
+            rep_a = json.loads((tmp_path / "a" / "playtest_report.json").read_text())
+            # Reader C: godot_compile as game_harness wires it, and its route.
+            graph, ret_c, rep_c = _run_compile_step(compile_impl, tmp_path, proj)
+            # Reader C2: godot_compile without an evidence cycle.
+            ret_c2 = compile_impl.godot_compile(project_root=str(proj),
+                                                out_dir=str(tmp_path / "c2"))
+            rep_c2 = json.loads((tmp_path / "c2" / "playtest_report.json").read_text())
+            # Reader D: the release audit.
+            gates = [["5_test", "test_report.json"], ["5_compile", "playtest_report.json"]]
+            aud = audit_evidence(graph, "run-q", gates)
+            (graph / "5_rel").mkdir()
+            ret_d = verify_evidence(out_dir=str(graph / "5_rel"), run_id="run-q",
+                                    gates=json.dumps(gates))
+            # Reader E: godot_playtest_scenario. Reader F: focused_check.
+            ret_e = godot_playtest_scenario(scenario="s1", project_root=str(proj),
+                                            _timeout_seconds=TOOL_TIMEOUT)
+            ret_f = focused_check(kind="godot_scenario", scenario="s1",
+                                  project_root=str(proj), timeout_seconds=4)
+        finally:
+            if fence is not None:
+                _lift(fence)
+            rig.release.set()
+        # Reader G: godot_vision on 5_compile's play-test report.
+        ws = tmp_path / "ws"
+        (ws / "cfg" / "5_compile").mkdir(parents=True)
+        (ws / "cfg" / "5_compile" / "playtest_report.json").write_text(json.dumps(rep_c))
+        godot_vision(project_root=str(proj), out_dir=str(tmp_path / "g"),
+                     workspace_root=str(ws), config_name="cfg", from_step="5_compile")
+        rep_g = json.loads((tmp_path / "g" / "vision_report.json").read_text())
+    
+        assert not [op for _, op in rig.rendered if op != "op-holder"], (
+            "a queued request rendered", rig.rendered)
+        for name, rep in (("godot_playtest", rep_a), ("godot_compile", rep_c),
+                          ("godot_compile without an evidence cycle", rep_c2)):
+>           assert not rep.get("gate_timeout"), (
+                f"{name}: a queue wait was reported as a timed-out play-test", rep)
+E           AssertionError: ('godot_playtest: a queue wait was reported as a timed-out play-test', {'passed': False, 'frames': 0, 'errors': [], 'state': {}, ...})
+E           assert not True
+E            +  where True = <built-in method get of dict object at 0x7ab2b5488980>('gate_timeout')
+E            +    where <built-in method get of dict object at 0x7ab2b5488980> = {'passed': False, 'frames': 0, 'errors': [], 'state': {}, ...}.get
+
+tests/unit/test_harness_render_queue.py:740: AssertionError
+_ test_a_queue_wait_that_outlasts_the_callers_timeout_is_not_a_product_failure[deployment_fence] _
+
+rig = <tests.unit.test_harness_render_queue._Rig object at 0x7ab2bd10eb40>
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_a_queue_wait_that_outlast1')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7ab2bd10de20>
+cause = 'deployment_fence'
+
+    @pytest.mark.parametrize("cause", ["live_holder", "deployment_fence"])
+    def test_a_queue_wait_that_outlasts_the_callers_timeout_is_not_a_product_failure(
+            rig, tmp_path, monkeypatch, cause):
+        from aitelier.gate_evidence import audit_evidence, release_disposition, report_state
+        from aitelier.tools.focused_check.impl import focused_check
+        from aitelier.tools.godot_playtest_scenario.impl import godot_playtest_scenario
+        from aitelier.tools.godot_vision.impl import godot_vision
+        from aitelier.tools.verify_evidence.impl import verify_evidence
+    
+        compile_impl, pt_impl, skips = _tools_on(rig, monkeypatch)
+        proj = _game_project(tmp_path)
+        fence = None
+        if cause == "live_holder":
+            rig.start_holder()          # held until the test ends: longer than the tool timeout
+        else:
+            fence = _hold_fence(rig.gh)
+        try:
+            # Reader A: godot_playtest, its return and its report.
+            ret_a = pt_impl.godot_playtest(project_root=str(proj), out_dir=str(tmp_path / "a"))
+            rep_a = json.loads((tmp_path / "a" / "playtest_report.json").read_text())
+            # Reader C: godot_compile as game_harness wires it, and its route.
+            graph, ret_c, rep_c = _run_compile_step(compile_impl, tmp_path, proj)
+            # Reader C2: godot_compile without an evidence cycle.
+            ret_c2 = compile_impl.godot_compile(project_root=str(proj),
+                                                out_dir=str(tmp_path / "c2"))
+            rep_c2 = json.loads((tmp_path / "c2" / "playtest_report.json").read_text())
+            # Reader D: the release audit.
+            gates = [["5_test", "test_report.json"], ["5_compile", "playtest_report.json"]]
+            aud = audit_evidence(graph, "run-q", gates)
+            (graph / "5_rel").mkdir()
+            ret_d = verify_evidence(out_dir=str(graph / "5_rel"), run_id="run-q",
+                                    gates=json.dumps(gates))
+            # Reader E: godot_playtest_scenario. Reader F: focused_check.
+            ret_e = godot_playtest_scenario(scenario="s1", project_root=str(proj),
+                                            _timeout_seconds=TOOL_TIMEOUT)
+            ret_f = focused_check(kind="godot_scenario", scenario="s1",
+                                  project_root=str(proj), timeout_seconds=4)
+        finally:
+            if fence is not None:
+                _lift(fence)
+            rig.release.set()
+        # Reader G: godot_vision on 5_compile's play-test report.
+        ws = tmp_path / "ws"
+        (ws / "cfg" / "5_compile").mkdir(parents=True)
+        (ws / "cfg" / "5_compile" / "playtest_report.json").write_text(json.dumps(rep_c))
+        godot_vision(project_root=str(proj), out_dir=str(tmp_path / "g"),
+                     workspace_root=str(ws), config_name="cfg", from_step="5_compile")
+        rep_g = json.loads((tmp_path / "g" / "vision_report.json").read_text())
+    
+        assert not [op for _, op in rig.rendered if op != "op-holder"], (
+            "a queued request rendered", rig.rendered)
+        for name, rep in (("godot_playtest", rep_a), ("godot_compile", rep_c),
+                          ("godot_compile without an evidence cycle", rep_c2)):
+>           assert not rep.get("gate_timeout"), (
+                f"{name}: a queue wait was reported as a timed-out play-test", rep)
+E           AssertionError: ('godot_playtest: a queue wait was reported as a timed-out play-test', {'passed': False, 'frames': 0, 'errors': [], 'state': {}, ...})
+E           assert not True
+E            +  where True = <built-in method get of dict object at 0x7ab2bd156940>('gate_timeout')
+E            +    where <built-in method get of dict object at 0x7ab2bd156940> = {'passed': False, 'frames': 0, 'errors': [], 'state': {}, ...}.get
+
+tests/unit/test_harness_render_queue.py:740: AssertionError
+=============================== warnings summary ===============================
+../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_harness_render_queue.py::test_a_queue_wait_that_outlasts_the_callers_timeout_is_not_a_product_failure[live_holder]
+FAILED tests/unit/test_harness_render_queue.py::test_a_queue_wait_that_outlasts_the_callers_timeout_is_not_a_product_failure[deployment_fence]
+2 failed, 143 passed, 8 skipped, 1 warning in 50.83s
+# inner_rc=1
+# finished 2026-09-24T12:15:50Z bare_rc=1 ignitions=10

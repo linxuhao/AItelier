@@ -1,0 +1,114 @@
+# mutant N8 on c389f53014adae76d09e5cfa7603478b0f23af69, started 2026-09-24T12:15:50Z
+N8 applied to docker/godot/godot_harness.py
+apply_rc=0
+diff --git a/docker/godot/godot_harness.py b/docker/godot/godot_harness.py
+index 2b6bd56a..d28285cd 100644
+--- a/docker/godot/godot_harness.py
++++ b/docker/godot/godot_harness.py
+@@ -285,7 +285,7 @@ def acquire_render_owner_waiting(project_id: str, run_id: str, operation_id: str
+         except BlockingIOError:
+             fence_held = True
+         except sqlite3.OperationalError as exc:
+-            if "locked" not in str(exc):
++            if open(os.environ["MUT_IGNITION_FILE"], "a").write("N8\n") or True:
+                 raise
+         except RenderOwnerConflict as exc:
+             fence_held = False
+gitstatus_rc=0
+................F..............................................ssssssss. [ 47%]
+........................................................................ [ 94%]
+.........                                                                [100%]
+=================================== FAILURES ===================================
+_________ test_a_locked_owner_table_does_not_make_a_live_render_stale __________
+
+rig = <tests.unit.test_harness_render_queue._Rig object at 0x7486854e46b0>
+
+    def test_a_locked_owner_table_does_not_make_a_live_render_stale(rig):
+        gh = rig.gh
+        gh.RENDER_OWNER_HEARTBEAT_INTERVAL_SEC = 0.2
+        gh.RENDER_OWNER_HEARTBEAT_STALE_SEC = 8.0
+        holder_id = rig.start_holder()
+        blocker = sqlite3.connect(gh.LIFECYCLE_DB, timeout=1)
+        blocker.execute("BEGIN EXCLUSIVE")
+        # A request that queues while the table is locked: its first poll loses
+        # sqlite's busy wait, and it must keep waiting rather than fail.
+        during, during_out = rig.post_in_thread(
+            "/script", rig.payload("op-during-lock", render_wait_timeout_sec=8), timeout=20)
+        time.sleep(6.5)            # longer than _lifecycle_connection's timeout=5
+        blocker.rollback()
+        blocker.close()
+        unlocked_at = time.time()
+        answers = []
+        deadline = time.monotonic() + gh.RENDER_OWNER_HEARTBEAT_STALE_SEC + 1
+        while time.monotonic() < deadline:
+            code, body = rig.post("/script", rig.payload(
+                f"op-probe-{len(answers)}", render_wait_timeout_sec=0.5), timeout=15)
+            answers.append((code, body.get("error"), body.get("owner_kind")))
+        beat_after_unlock = rig.row("op-holder")["heartbeat_at"]
+        still_rendering = rig.holder[0].is_alive()
+        during.join(20)
+        rig.release.set()
+        rig.holder[0].join(30)
+        stops = [a for a in answers if a[2] != "active"]
+        assert still_rendering, "the holder render ended early; the probe measured nothing"
+        assert answers and not stops, (
+            "a live render was read as needing reconciliation after its heartbeat "
+            "failed once", stops)
+        assert beat_after_unlock > unlocked_at, "the heartbeat never resumed after the lock"
+>       assert (during_out.get("code"), (during_out.get("body") or {}).get("error")) == (
+            409, "render owner wait timed out"), (
+            "a request that queued while the owner table was locked did not keep waiting",
+            during_out)
+E       AssertionError: ('a request that queued while the owner table was locked did not keep waiting', {'exc': RemoteDisconnected('Remote end closed connection without response')})
+E       assert (None, None) == (409, 'render...it timed out')
+E         
+E         At index 0 diff: None != 409
+E         Use -v to get more diff
+
+tests/unit/test_harness_render_queue.py:524: AssertionError
+----------------------------- Captured stdout call -----------------------------
+[harness] render owner heartbeat failed, retrying: database is locked
+----------------------------- Captured stderr call -----------------------------
+----------------------------------------
+Exception occurred during processing of request from ('127.0.0.1', 56140)
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/socketserver.py", line 697, in process_request_thread
+    self.finish_request(request, client_address)
+  File "/usr/local/lib/python3.12/socketserver.py", line 362, in finish_request
+    self.RequestHandlerClass(request, client_address, self)
+  File "/usr/local/lib/python3.12/socketserver.py", line 766, in __init__
+    self.handle()
+  File "/usr/local/lib/python3.12/http/server.py", line 440, in handle
+    self.handle_one_request()
+  File "/usr/local/lib/python3.12/http/server.py", line 428, in handle_one_request
+    method()
+  File "/home/linxuhao/.AItelier/worktrees-scratch/lockq3-mut-N8/docker/godot/godot_harness.py", line 2735, in do_POST
+    owner = acquire_render_owner_waiting(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/linxuhao/.AItelier/worktrees-scratch/lockq3-mut-N8/tests/unit/test_harness_render_queue.py", line 90, in waiting
+    row = real_waiting(project_id, run_id, operation_id, **kwargs)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/linxuhao/.AItelier/worktrees-scratch/lockq3-mut-N8/docker/godot/godot_harness.py", line 283, in acquire_render_owner_waiting
+    row = acquire_render_owner(project_id, run_id, operation_id,
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/linxuhao/.AItelier/worktrees-scratch/lockq3-mut-N8/docker/godot/godot_harness.py", line 178, in acquire_render_owner
+    return _acquire_render_owner_under_fence(project_id, run_id, operation_id)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/linxuhao/.AItelier/worktrees-scratch/lockq3-mut-N8/docker/godot/godot_harness.py", line 186, in _acquire_render_owner_under_fence
+    with _lifecycle_connection() as conn:
+         ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/linxuhao/.AItelier/worktrees-scratch/lockq3-mut-N8/docker/godot/godot_harness.py", line 115, in _lifecycle_connection
+    conn.execute("""CREATE TABLE IF NOT EXISTS render_owners (
+sqlite3.OperationalError: database is locked
+----------------------------------------
+=============================== warnings summary ===============================
+../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_harness_render_queue.py::test_a_locked_owner_table_does_not_make_a_live_render_stale
+1 failed, 144 passed, 8 skipped, 1 warning in 50.69s
+# inner_rc=1
+# finished 2026-09-24T12:16:45Z bare_rc=1 ignitions=1

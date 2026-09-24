@@ -1,0 +1,229 @@
+# mutant R10 on c389f53014adae76d09e5cfa7603478b0f23af69, started 2026-09-24T12:21:12Z
+R10 applied to aitelier/tools/godot_playtest/impl.py
+R10 applied to aitelier/tools/godot_playtest/impl.py
+apply_rc=0
+diff --git a/aitelier/tools/godot_playtest/impl.py b/aitelier/tools/godot_playtest/impl.py
+index 735d8b55..a8e1d03f 100644
+--- a/aitelier/tools/godot_playtest/impl.py
++++ b/aitelier/tools/godot_playtest/impl.py
+@@ -316,7 +316,7 @@ def post_playtest(payload: dict, timeout: int = 3600) -> dict:
+                         f"hangs (the sidecar caps each one at 120s, so a whole "
+                         f"suite over the wall means the count grew).")}
+         refusal = _render_owner_refusal(e)
+-        if refusal is not None:
++        if refusal is not None and open(os.environ["MUT_IGNITION_FILE"], "a").write("R10\n"):
+             # The sidecar ANSWERED: its render owner needs reconciliation, or
+             # this request's own wait ran out. The gate did not run, so the
+             # report keeps the absence shape below (gate_skipped) under its own
+@@ -326,7 +326,7 @@ def post_playtest(payload: dict, timeout: int = 3600) -> dict:
+                        else f"render_owner_{refusal.get('owner_kind')}")
+             log_gate_skip("godot_playtest", because, url=_BUILDER_URL,
+                           owner_id=refusal.get("owner_id"))
+-            return {"passed": True, "frames": 0, "errors": [], "state": {},
++            return {"passed": False, "frames": 0, "errors": [], "state": {},
+                     "behavior": None, "spec_used": False, "gate_skipped": True,
+                     "skipped_because": because, "render_owner_conflict": refusal,
+                     "summary": (
+gitstatus_rc=0
+........F...........FF.........................................ssssssss. [ 47%]
+........................................................................ [ 94%]
+.........                                                                [100%]
+=================================== FAILURES ===================================
+___ test_the_playtest_tool_does_not_read_a_refusal_as_an_unreachable_builder ___
+
+rig = <tests.unit.test_harness_render_queue._Rig object at 0x7ff7603d00e0>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7ff76033b740>
+
+    def test_the_playtest_tool_does_not_read_a_refusal_as_an_unreachable_builder(
+            rig, monkeypatch):
+        from aitelier.tools.godot_playtest import impl
+    
+        gh = rig.gh
+        logged = []
+        monkeypatch.setattr(impl, "log_gate_skip",
+                            lambda gate, reason, **_detail: logged.append(reason))
+        lost = gh.acquire_render_owner("p0", "r0", "op-lost")
+        gh.mark_render_owner_lost(lost["owner_id"], lost["generation"], "worker exited")
+        monkeypatch.setattr(impl, "_BUILDER_URL", rig.base)
+        refused = impl.post_playtest(rig.payload("op-tool"), timeout=10)
+        assert refused["gate_skipped"] is True
+        assert refused["skipped_because"] == "render_owner_owner_lost", refused
+        assert refused["render_owner_conflict"]["owner_id"] == lost["owner_id"]
+        assert lost["owner_id"] in refused["summary"] and "409" in refused["summary"]
+        assert "refused" in refused["summary"], refused["summary"]
+        assert logged == ["render_owner_owner_lost"], logged
+    
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            closed_port = probe.getsockname()[1]
+        monkeypatch.setattr(impl, "_BUILDER_URL", f"http://127.0.0.1:{closed_port}")
+        unreachable = impl.post_playtest(rig.payload("op-tool"), timeout=10)
+        assert unreachable["gate_skipped"] is True
+        assert "skipped_because" not in unreachable and "render_owner_conflict" not in unreachable
+        assert logged == ["render_owner_owner_lost", "godot-builder unreachable"], logged
+>       assert ((refused["passed"], refused["gate_skipped"])
+                == (unreachable["passed"], unreachable["gate_skipped"])), (
+            "a refusal is a gate that did not run: it keeps the tool's absence shape, "
+            "never a failure charged to the build", refused)
+E       AssertionError: ("a refusal is a gate that did not run: it keeps the tool's absence shape, never a failure charged to the build", {'passed': False, 'frames': 0, 'errors': [], 'state': {}, ...})
+E       assert (False, True) == (True, True)
+E         
+E         At index 0 diff: False != True
+E         Use -v to get more diff
+
+tests/unit/test_harness_render_queue.py:299: AssertionError
+_ test_a_queue_wait_that_outlasts_the_callers_timeout_is_not_a_product_failure[live_holder] _
+
+rig = <tests.unit.test_harness_render_queue._Rig object at 0x7ff767d157c0>
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_a_queue_wait_that_outlast0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7ff7602feb10>
+cause = 'live_holder'
+
+    @pytest.mark.parametrize("cause", ["live_holder", "deployment_fence"])
+    def test_a_queue_wait_that_outlasts_the_callers_timeout_is_not_a_product_failure(
+            rig, tmp_path, monkeypatch, cause):
+        from aitelier.gate_evidence import audit_evidence, release_disposition, report_state
+        from aitelier.tools.focused_check.impl import focused_check
+        from aitelier.tools.godot_playtest_scenario.impl import godot_playtest_scenario
+        from aitelier.tools.godot_vision.impl import godot_vision
+        from aitelier.tools.verify_evidence.impl import verify_evidence
+    
+        compile_impl, pt_impl, skips = _tools_on(rig, monkeypatch)
+        proj = _game_project(tmp_path)
+        fence = None
+        if cause == "live_holder":
+            rig.start_holder()          # held until the test ends: longer than the tool timeout
+        else:
+            fence = _hold_fence(rig.gh)
+        try:
+            # Reader A: godot_playtest, its return and its report.
+            ret_a = pt_impl.godot_playtest(project_root=str(proj), out_dir=str(tmp_path / "a"))
+            rep_a = json.loads((tmp_path / "a" / "playtest_report.json").read_text())
+            # Reader C: godot_compile as game_harness wires it, and its route.
+            graph, ret_c, rep_c = _run_compile_step(compile_impl, tmp_path, proj)
+            # Reader C2: godot_compile without an evidence cycle.
+            ret_c2 = compile_impl.godot_compile(project_root=str(proj),
+                                                out_dir=str(tmp_path / "c2"))
+            rep_c2 = json.loads((tmp_path / "c2" / "playtest_report.json").read_text())
+            # Reader D: the release audit.
+            gates = [["5_test", "test_report.json"], ["5_compile", "playtest_report.json"]]
+            aud = audit_evidence(graph, "run-q", gates)
+            (graph / "5_rel").mkdir()
+            ret_d = verify_evidence(out_dir=str(graph / "5_rel"), run_id="run-q",
+                                    gates=json.dumps(gates))
+            # Reader E: godot_playtest_scenario. Reader F: focused_check.
+            ret_e = godot_playtest_scenario(scenario="s1", project_root=str(proj),
+                                            _timeout_seconds=TOOL_TIMEOUT)
+            ret_f = focused_check(kind="godot_scenario", scenario="s1",
+                                  project_root=str(proj), timeout_seconds=4)
+        finally:
+            if fence is not None:
+                _lift(fence)
+            rig.release.set()
+        # Reader G: godot_vision on 5_compile's play-test report.
+        ws = tmp_path / "ws"
+        (ws / "cfg" / "5_compile").mkdir(parents=True)
+        (ws / "cfg" / "5_compile" / "playtest_report.json").write_text(json.dumps(rep_c))
+        godot_vision(project_root=str(proj), out_dir=str(tmp_path / "g"),
+                     workspace_root=str(ws), config_name="cfg", from_step="5_compile")
+        rep_g = json.loads((tmp_path / "g" / "vision_report.json").read_text())
+    
+        assert not [op for _, op in rig.rendered if op != "op-holder"], (
+            "a queued request rendered", rig.rendered)
+        for name, rep in (("godot_playtest", rep_a), ("godot_compile", rep_c),
+                          ("godot_compile without an evidence cycle", rep_c2)):
+            assert not rep.get("gate_timeout"), (
+                f"{name}: a queue wait was reported as a timed-out play-test", rep)
+            assert rep.get("skipped_because") == "render_owner_wait_timed_out", (name, rep)
+            # Reader B: gate_evidence.
+            assert (report_state(dict(rep)), release_disposition(dict(rep))) == (
+                "skipped", "unresolved"), (name, rep)
+>       assert ret_a["passed"] is True, ret_a
+E       AssertionError: {'written': 'playtest_report.json', 'passed': False}
+E       assert False is True
+
+tests/unit/test_harness_render_queue.py:746: AssertionError
+_ test_a_queue_wait_that_outlasts_the_callers_timeout_is_not_a_product_failure[deployment_fence] _
+
+rig = <tests.unit.test_harness_render_queue._Rig object at 0x7ff767d16000>
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_a_queue_wait_that_outlast1')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7ff767d15670>
+cause = 'deployment_fence'
+
+    @pytest.mark.parametrize("cause", ["live_holder", "deployment_fence"])
+    def test_a_queue_wait_that_outlasts_the_callers_timeout_is_not_a_product_failure(
+            rig, tmp_path, monkeypatch, cause):
+        from aitelier.gate_evidence import audit_evidence, release_disposition, report_state
+        from aitelier.tools.focused_check.impl import focused_check
+        from aitelier.tools.godot_playtest_scenario.impl import godot_playtest_scenario
+        from aitelier.tools.godot_vision.impl import godot_vision
+        from aitelier.tools.verify_evidence.impl import verify_evidence
+    
+        compile_impl, pt_impl, skips = _tools_on(rig, monkeypatch)
+        proj = _game_project(tmp_path)
+        fence = None
+        if cause == "live_holder":
+            rig.start_holder()          # held until the test ends: longer than the tool timeout
+        else:
+            fence = _hold_fence(rig.gh)
+        try:
+            # Reader A: godot_playtest, its return and its report.
+            ret_a = pt_impl.godot_playtest(project_root=str(proj), out_dir=str(tmp_path / "a"))
+            rep_a = json.loads((tmp_path / "a" / "playtest_report.json").read_text())
+            # Reader C: godot_compile as game_harness wires it, and its route.
+            graph, ret_c, rep_c = _run_compile_step(compile_impl, tmp_path, proj)
+            # Reader C2: godot_compile without an evidence cycle.
+            ret_c2 = compile_impl.godot_compile(project_root=str(proj),
+                                                out_dir=str(tmp_path / "c2"))
+            rep_c2 = json.loads((tmp_path / "c2" / "playtest_report.json").read_text())
+            # Reader D: the release audit.
+            gates = [["5_test", "test_report.json"], ["5_compile", "playtest_report.json"]]
+            aud = audit_evidence(graph, "run-q", gates)
+            (graph / "5_rel").mkdir()
+            ret_d = verify_evidence(out_dir=str(graph / "5_rel"), run_id="run-q",
+                                    gates=json.dumps(gates))
+            # Reader E: godot_playtest_scenario. Reader F: focused_check.
+            ret_e = godot_playtest_scenario(scenario="s1", project_root=str(proj),
+                                            _timeout_seconds=TOOL_TIMEOUT)
+            ret_f = focused_check(kind="godot_scenario", scenario="s1",
+                                  project_root=str(proj), timeout_seconds=4)
+        finally:
+            if fence is not None:
+                _lift(fence)
+            rig.release.set()
+        # Reader G: godot_vision on 5_compile's play-test report.
+        ws = tmp_path / "ws"
+        (ws / "cfg" / "5_compile").mkdir(parents=True)
+        (ws / "cfg" / "5_compile" / "playtest_report.json").write_text(json.dumps(rep_c))
+        godot_vision(project_root=str(proj), out_dir=str(tmp_path / "g"),
+                     workspace_root=str(ws), config_name="cfg", from_step="5_compile")
+        rep_g = json.loads((tmp_path / "g" / "vision_report.json").read_text())
+    
+        assert not [op for _, op in rig.rendered if op != "op-holder"], (
+            "a queued request rendered", rig.rendered)
+        for name, rep in (("godot_playtest", rep_a), ("godot_compile", rep_c),
+                          ("godot_compile without an evidence cycle", rep_c2)):
+            assert not rep.get("gate_timeout"), (
+                f"{name}: a queue wait was reported as a timed-out play-test", rep)
+            assert rep.get("skipped_because") == "render_owner_wait_timed_out", (name, rep)
+            # Reader B: gate_evidence.
+            assert (report_state(dict(rep)), release_disposition(dict(rep))) == (
+                "skipped", "unresolved"), (name, rep)
+>       assert ret_a["passed"] is True, ret_a
+E       AssertionError: {'written': 'playtest_report.json', 'passed': False}
+E       assert False is True
+
+tests/unit/test_harness_render_queue.py:746: AssertionError
+=============================== warnings summary ===============================
+../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_harness_render_queue.py::test_the_playtest_tool_does_not_read_a_refusal_as_an_unreachable_builder
+FAILED tests/unit/test_harness_render_queue.py::test_a_queue_wait_that_outlasts_the_callers_timeout_is_not_a_product_failure[live_holder]
+FAILED tests/unit/test_harness_render_queue.py::test_a_queue_wait_that_outlasts_the_callers_timeout_is_not_a_product_failure[deployment_fence]
+3 failed, 142 passed, 8 skipped, 1 warning in 50.71s
+# inner_rc=1
+# finished 2026-09-24T12:22:07Z bare_rc=1 ignitions=11

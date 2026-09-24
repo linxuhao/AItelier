@@ -1,0 +1,34 @@
+#!/bin/bash
+# usage: mut3.sh <id>...   one worktree + one throwaway container per mutant, sequential
+CAND=c389f53014adae76d09e5cfa7603478b0f23af69
+T=/home/linxuhao/.AItelier/worktrees-scratch/lockq3-tools
+R=/home/linxuhao/.AItelier/director/reports/lockq-r2-review-20260924
+mkdir -p $T/mut
+for MID in "$@"; do
+  WT=/home/linxuhao/.AItelier/worktrees-scratch/lockq3-mut-$MID
+  LOG=$T/mut/mutant_${MID}_c389f530.txt
+  IGN=$T/mut/ignitions_${MID}_c389f530.txt
+  rm -f "$IGN"; touch "$IGN"; chmod 666 "$IGN"
+  git -C /home/linxuhao/AItelier worktree add -q --detach "$WT" $CAND || { echo "$MID worktree add failed"; continue; }
+  {
+    echo "# mutant $MID on $CAND, started $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    case "$MID" in
+      CONTROL) ;;
+      N*) python3 $T/mutants3.py "$MID" "$WT"; echo "apply_rc=$?" ;;
+      *)  python3 $R/mutants.py "$MID" "$WT"; echo "apply_rc=$?" ;;
+    esac
+    git -C "$WT" diff
+  } > "$LOG" 2>&1
+  TESTS="tests/unit/test_harness_render_queue.py tests/unit/test_godot_lifecycle.py tests/unit/test_harness_render_lock.py tests/unit/test_godot_harness.py tests/unit/test_godot_playtest_spec.py tests/unit/test_gate_skips_are_recorded.py tests/unit/test_godot_playtest_scenario.py tests/unit/test_blind_gate.py tests/unit/test_playtest_blind_run.py tests/unit/test_godot_compile.py"
+  docker run --rm --init --name "lockq3-mut-$MID" -m 3g --network aitelier_default -u 1000:1000 \
+    -e HOME=/home/linxuhao -e PYTHONPATH="$WT" -e PYTHONDONTWRITEBYTECODE=1 \
+    -e SEARXNG_URL=http://linxuhaserver:8888 -e MUT_IGNITION_FILE="$IGN" \
+    -v /home/linxuhao/AItelier:/app -v /home/linxuhao/AItelier:/home/linxuhao/AItelier \
+    -v /home/linxuhao/.AItelier:/home/linxuhao/.AItelier -w "$WT" aitelier:latest \
+    bash -c 'git -C "$PWD" status --short >/dev/null 2>&1; echo "gitstatus_rc=$?"; python -m pytest -p no:cacheprovider -q -rf "$@"; rc=$?; echo "# inner_rc=$rc"; exit $rc' _ $TESTS >> "$LOG" 2>&1
+  RC=$?
+  N=$(wc -l < "$IGN")
+  echo "# finished $(date -u +%Y-%m-%dT%H:%M:%SZ) bare_rc=$RC ignitions=$N" >> "$LOG"
+  git -C /home/linxuhao/AItelier worktree remove --force "$WT"
+  echo "$MID bare_rc=$RC ignitions=$N"
+done

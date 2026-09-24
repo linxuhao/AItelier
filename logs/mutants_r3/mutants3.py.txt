@@ -1,0 +1,81 @@
+"""r3 mutant catalogue (N1-N8). `python3 mutants3.py <id> <tree>` applies one
+mutant by exact match; every anchor must occur exactly once."""
+import sys
+from pathlib import Path
+
+H = "docker/godot/godot_harness.py"
+T = "aitelier/tools/godot_playtest/impl.py"
+
+
+def ign(mid):
+    return f'open(os.environ["MUT_IGNITION_FILE"], "a").write("{mid}\\n")'
+
+
+def n1():  # the waiter blocks on the deployment fence again
+    return [(H, "                                       blocking_fence=False)\n",
+             f"                                       blocking_fence=bool({ign('N1')}))\n")]
+
+
+def n2():  # no disconnect check after ownership
+    return [(H, "                if self._render_client_abandoned():\n",
+             f"                if {ign('N2')} and False:\n")]
+
+
+def n3():  # no limit check after ownership
+    return [(H, "                if wait_timeout is not None and elapsed > wait_timeout:\n",
+             f"                if {ign('N3')} and False:\n")]
+
+
+MUTANTS = {
+    "N1": n1,
+    "N2": n2,
+    "N3": n3,
+    # N4: the r2 admission path (N1+N2+N3 together).
+    "N4": lambda: [(p, o, n.replace('"N1', '"N4').replace('"N2', '"N4').replace('"N3', '"N4'))
+                   for p, o, n in n1() + n2() + n3()],
+    # N5: the heartbeat stops for good after one sqlite failure (the r2 thread).
+    "N5": lambda: [(H, '                print(f"[harness] render owner heartbeat failed, retrying: {exc}",\n'
+                       "                      flush=True)\n",
+                    '                print(f"[harness] render owner heartbeat failed, retrying: {exc}",\n'
+                    "                      flush=True)\n"
+                    f"                {ign('N5')}; return\n")],
+    # N6: the tool declares no queue wait.
+    "N6": lambda: [(T, '    payload.setdefault("render_wait_timeout_sec", round(timeout * RENDER_QUEUE_SHARE, 3))\n',
+                    f"    {ign('N6')}\n")],
+    # N7: a queue that ended is reported as a timed-out play-test.
+    "N7": lambda: [(T, "        if refusal is not None:\n"
+                       "            # The sidecar ANSWERED",
+                    "        if (refusal is not None and refusal.get(\"error\") == \"render owner wait timed out\"\n"
+                    f"                and {ign('N7')}):\n"
+                    "            return {\"passed\": False, \"frames\": 0, \"errors\": [], \"state\": {},\n"
+                    "                    \"behavior\": None, \"spec_used\": False, \"gate_timeout\": True,\n"
+                    "                    \"summary\": f\"Play-test gate TIMED OUT after {timeout}s\"}\n"
+                    "        if refusal is not None:\n"
+                    "            # The sidecar ANSWERED")],
+    # N9: a timeout after the render started is reported as a queue wait (unmeasured).
+    "N9": lambda: [(T, "        if _is_timeout(e):\n"
+                       "            return {\"passed\": False, \"frames\": 0, \"errors\": [], \"state\": {},\n"
+                       "                    \"behavior\": None, \"spec_used\": False, \"gate_timeout\": True,\n",
+                    f"        if _is_timeout(e) and {ign('N9')}:\n"
+                    "            return {\"passed\": True, \"frames\": 0, \"errors\": [], \"state\": {},\n"
+                    "                    \"behavior\": None, \"spec_used\": False, \"gate_skipped\": True,\n"
+                    "                    \"skipped_because\": \"render_owner_wait_timed_out\",\n")],
+    # N8: the waiter gives up on a locked owner table.
+    "N8": lambda: [(H, '            if "locked" not in str(exc):\n                raise\n',
+                    f'            if {ign("N8")} or True:\n                raise\n')],
+}
+
+
+def apply(mid, tree):
+    for rel, old, new in MUTANTS[mid]():
+        p = Path(tree) / rel
+        src = p.read_text(encoding="utf-8")
+        n = src.count(old)
+        if n != 1:
+            sys.exit(f"{mid}: anchor occurs {n} times in {rel}")
+        p.write_text(src.replace(old, new), encoding="utf-8")
+        print(f"{mid} applied to {rel}")
+
+
+if __name__ == "__main__":
+    apply(sys.argv[1], sys.argv[2])

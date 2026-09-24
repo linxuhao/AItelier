@@ -1,0 +1,194 @@
+# mutant R6 on c389f53014adae76d09e5cfa7603478b0f23af69, started 2026-09-24T12:17:12Z
+R6 applied to docker/godot/godot_harness.py
+apply_rc=0
+diff --git a/docker/godot/godot_harness.py b/docker/godot/godot_harness.py
+index 2b6bd56a..c49c5511 100644
+--- a/docker/godot/godot_harness.py
++++ b/docker/godot/godot_harness.py
+@@ -292,7 +292,7 @@ def acquire_render_owner_waiting(project_id: str, run_id: str, operation_id: str
+             if exc.payload["needs_reconciliation"]:
+                 raise
+             if exc.payload["owner_id"] not in waited_for:
+-                waited_for.append(exc.payload["owner_id"])
++                open(os.environ["MUT_IGNITION_FILE"], "a").write("R6\n"); waited_for.append("someone-else")
+         else:
+             row = dict(row)
+             row["waited_sec"] = round(time.monotonic() - started, 4)
+gitstatus_rc=0
+FFF....F..F....................................................ssssssss. [ 47%]
+........................................................................ [ 94%]
+.........                                                                [100%]
+=================================== FAILURES ===================================
+________________ test_a_busy_lock_queues_the_request[/playtest] ________________
+
+rig = <tests.unit.test_harness_render_queue._Rig object at 0x7374bc0b7e60>
+route = '/playtest'
+
+    @pytest.mark.parametrize("route", RENDER_ROUTES)
+    def test_a_busy_lock_queues_the_request(rig, route):
+        holder_id = rig.start_holder()
+        second, out = rig.post_in_thread(route, rig.payload("op-next"))
+        assert rig.queued.wait(10), "the second request never met the live holder"
+        time.sleep(0.3)
+        assert second.is_alive() and "code" not in out, (
+            f"{route} answered while a live holder still rendered: {out!r}")
+        assert ("op-next" not in [op for _, op in rig.rendered]), rig.rendered
+    
+        rig.release.set()
+        second.join(30)
+        rig.holder[0].join(30)
+    
+        assert out.get("code") == 200, (
+            f"{route} behind a live render owner must wait and then run, got {out!r}")
+        assert rig.holder[1].get("code") == 200, rig.holder[1]
+        body = out["body"]
+        assert body["route"] == route
+>       assert body["render_owner_waited_for_owner_ids"] == [holder_id], body
+E       AssertionError: {'passed': True, 'route': '/playtest', 'timing': {'report_serialize_sec': 0.0, 'render_lock_wait_sec': 0.0001, 'render...eone-else', 'someone-else', 'someone-else', 'someone-else', 'someone-else', ...]}, 'render_owner_wait_sec': 0.317, ...}
+E       assert ['someone-els...ne-else', ...] == ['14142ed100b...fb4825e37404']
+E         
+E         At index 0 diff: 'someone-else' != '14142ed100bf4140b6c7fb4825e37404'
+E         Left contains 14 more items, first extra item: 'someone-else'
+E         Use -v to get more diff
+
+tests/unit/test_harness_render_queue.py:194: AssertionError
+_________________ test_a_busy_lock_queues_the_request[/script] _________________
+
+rig = <tests.unit.test_harness_render_queue._Rig object at 0x7374bc0b6c30>
+route = '/script'
+
+    @pytest.mark.parametrize("route", RENDER_ROUTES)
+    def test_a_busy_lock_queues_the_request(rig, route):
+        holder_id = rig.start_holder()
+        second, out = rig.post_in_thread(route, rig.payload("op-next"))
+        assert rig.queued.wait(10), "the second request never met the live holder"
+        time.sleep(0.3)
+        assert second.is_alive() and "code" not in out, (
+            f"{route} answered while a live holder still rendered: {out!r}")
+        assert ("op-next" not in [op for _, op in rig.rendered]), rig.rendered
+    
+        rig.release.set()
+        second.join(30)
+        rig.holder[0].join(30)
+    
+        assert out.get("code") == 200, (
+            f"{route} behind a live render owner must wait and then run, got {out!r}")
+        assert rig.holder[1].get("code") == 200, rig.holder[1]
+        body = out["body"]
+        assert body["route"] == route
+>       assert body["render_owner_waited_for_owner_ids"] == [holder_id], body
+E       AssertionError: {'passed': True, 'route': '/script', 'render_owner_wait_sec': 0.3169, 'render_owner_waited_for_owner_ids': ['someone-else', 'someone-else', 'someone-else', 'someone-else', 'someone-else', 'someone-else', ...]}
+E       assert ['someone-els...ne-else', ...] == ['36fd6941bd6...d920bc98e4bb']
+E         
+E         At index 0 diff: 'someone-else' != '36fd6941bd6c4257a6f1d920bc98e4bb'
+E         Left contains 14 more items, first extra item: 'someone-else'
+E         Use -v to get more diff
+
+tests/unit/test_harness_render_queue.py:194: AssertionError
+____________ test_a_busy_lock_queues_the_request[/x11_input_smoke] _____________
+
+rig = <tests.unit.test_harness_render_queue._Rig object at 0x7374bc084710>
+route = '/x11_input_smoke'
+
+    @pytest.mark.parametrize("route", RENDER_ROUTES)
+    def test_a_busy_lock_queues_the_request(rig, route):
+        holder_id = rig.start_holder()
+        second, out = rig.post_in_thread(route, rig.payload("op-next"))
+        assert rig.queued.wait(10), "the second request never met the live holder"
+        time.sleep(0.3)
+        assert second.is_alive() and "code" not in out, (
+            f"{route} answered while a live holder still rendered: {out!r}")
+        assert ("op-next" not in [op for _, op in rig.rendered]), rig.rendered
+    
+        rig.release.set()
+        second.join(30)
+        rig.holder[0].join(30)
+    
+        assert out.get("code") == 200, (
+            f"{route} behind a live render owner must wait and then run, got {out!r}")
+        assert rig.holder[1].get("code") == 200, rig.holder[1]
+        body = out["body"]
+        assert body["route"] == route
+>       assert body["render_owner_waited_for_owner_ids"] == [holder_id], body
+E       AssertionError: {'passed': True, 'route': '/x11_input_smoke', 'render_owner_wait_sec': 0.3171, 'render_owner_waited_for_owner_ids': ['someone-else', 'someone-else', 'someone-else', 'someone-else', 'someone-else']}
+E       assert ['someone-els...someone-else'] == ['b79499f51f1...5359350d9f11']
+E         
+E         At index 0 diff: 'someone-else' != 'b79499f51f114ee483ec5359350d9f11'
+E         Left contains 4 more items, first extra item: 'someone-else'
+E         Use -v to get more diff
+
+tests/unit/test_harness_render_queue.py:194: AssertionError
+__________ test_a_stale_active_owner_blocks_and_a_fresh_one_is_queued __________
+
+rig = <tests.unit.test_harness_render_queue._Rig object at 0x7374bbcf6cf0>
+
+    def test_a_stale_active_owner_blocks_and_a_fresh_one_is_queued(rig):
+        gh = rig.gh
+        holder = gh.acquire_render_owner("p0", "r0", "op-dead")
+        threshold = gh.RENDER_OWNER_HEARTBEAT_STALE_SEC
+    
+        def set_heartbeat_age(age):
+            with gh._lifecycle_connection() as conn:
+                conn.execute("UPDATE render_owners SET heartbeat_at=? WHERE owner_id=?",
+                             (time.time() - age, holder["owner_id"]))
+                conn.commit()
+    
+        set_heartbeat_age(threshold + 5)
+        code, body = rig.post("/playtest", rig.payload("op-next", render_wait_timeout_sec=5),
+                              timeout=10)
+        assert code == 409, (code, body)
+        assert body.get("owner_kind") == "active_stale", body
+        assert body.get("owner_id") == holder["owner_id"], body
+        assert body.get("needs_reconciliation") is True, body
+        assert f"threshold {threshold:.0f}s" in body["detail"], body
+        assert "reconcil" in body["detail"], body
+        assert rig.rendered == [] and rig.ops_with_rows() == ["op-dead"]
+    
+        set_heartbeat_age(threshold - 5)
+        code, body = rig.post("/playtest", rig.payload("op-next", render_wait_timeout_sec=0.3),
+                              timeout=10)
+        assert (code, body.get("error")) == (409, "render owner wait timed out"), (
+            "a holder inside the heartbeat threshold is a live render to queue behind",
+            body)
+>       assert body["owner_id"] == holder["owner_id"]
+E       AssertionError: assert 'someone-else' == 'f13e43401299...65a667270e94b'
+E         
+E         - f13e434012994343a4765a667270e94b
+E         + someone-else
+
+tests/unit/test_harness_render_queue.py:268: AssertionError
+_______ test_the_requests_own_wait_limit_ends_the_wait_without_a_render ________
+
+rig = <tests.unit.test_harness_render_queue._Rig object at 0x7374bbcf40b0>
+
+    def test_the_requests_own_wait_limit_ends_the_wait_without_a_render(rig):
+        holder_id = rig.start_holder()
+        code, body = rig.post("/x11_input_smoke",
+                              rig.payload("op-capped", render_wait_timeout_sec=0.3), timeout=10)
+        rig.release.set()
+        rig.holder[0].join(30)
+        time.sleep(0.2)
+        assert code == 409, (code, body)
+        assert body["error"] == "render owner wait timed out", body
+>       assert body["owner_id"] == holder_id and body["needs_reconciliation"] is False
+E       AssertionError: assert ('someone-else' == 'c002f5f7f594...db743141cc6de'
+E         
+E         - c002f5f7f594414583bdb743141cc6de
+E         + someone-else)
+
+tests/unit/test_harness_render_queue.py:345: AssertionError
+=============================== warnings summary ===============================
+../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_harness_render_queue.py::test_a_busy_lock_queues_the_request[/playtest]
+FAILED tests/unit/test_harness_render_queue.py::test_a_busy_lock_queues_the_request[/script]
+FAILED tests/unit/test_harness_render_queue.py::test_a_busy_lock_queues_the_request[/x11_input_smoke]
+FAILED tests/unit/test_harness_render_queue.py::test_a_stale_active_owner_blocks_and_a_fresh_one_is_queued
+FAILED tests/unit/test_harness_render_queue.py::test_the_requests_own_wait_limit_ends_the_wait_without_a_render
+5 failed, 140 passed, 8 skipped, 1 warning in 50.84s
+# inner_rc=1
+# finished 2026-09-24T12:18:08Z bare_rc=1 ignitions=902

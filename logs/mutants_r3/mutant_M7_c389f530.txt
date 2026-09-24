@@ -1,0 +1,168 @@
+# mutant M7 on c389f53014adae76d09e5cfa7603478b0f23af69, started 2026-09-24T12:14:26Z
+M7 applied to docker/godot/godot_harness.py
+apply_rc=0
+diff --git a/docker/godot/godot_harness.py b/docker/godot/godot_harness.py
+index 2b6bd56a..2b6193cf 100644
+--- a/docker/godot/godot_harness.py
++++ b/docker/godot/godot_harness.py
+@@ -2748,7 +2748,7 @@ class _Handler(BaseHTTPRequestHandler):
+                 print(f"[harness] {self.path} waited "
+                       f"{owner_wait['render_owner_wait_sec']:.0f}s for render owner(s) "
+                       f"{owner_wait['render_owner_waited_for_owner_ids']}", flush=True)
+-            heartbeat = _start_owner_heartbeat(owner["owner_id"], owner["generation"])
++            heartbeat = open(os.environ["MUT_IGNITION_FILE"], "a").write("M7\n") and None
+             waited = time.time()
+             try:
+                 self._RENDER_LOCK.acquire()
+gitstatus_rc=0
+...F............F.FF...........................................ssssssss. [ 47%]
+........................................................................ [ 94%]
+.........                                                                [100%]
+=================================== FAILURES ===================================
+_________________ test_a_live_render_keeps_its_heartbeat_fresh _________________
+
+rig = <tests.unit.test_harness_render_queue._Rig object at 0x73ef38c34080>
+
+    def test_a_live_render_keeps_its_heartbeat_fresh(rig):
+        """A render longer than the staleness threshold must still read as live."""
+        rig.gh.RENDER_OWNER_HEARTBEAT_INTERVAL_SEC = 0.05
+        rig.start_holder()
+        started = rig.row("op-holder")["started_at"]
+        time.sleep(0.5)
+        beat = rig.row("op-holder")["heartbeat_at"]
+        rig.release.set()
+        rig.holder[0].join(30)
+>       assert beat - started >= 0.3, (
+            f"the holder's heartbeat did not advance during its render "
+            f"(started_at={started}, heartbeat_at={beat})")
+E       AssertionError: the holder's heartbeat did not advance during its render (started_at=1790252072.2070203, heartbeat_at=1790252072.2070203)
+E       assert (1790252072.2070203 - 1790252072.2070203) >= 0.3
+
+tests/unit/test_harness_render_queue.py:215: AssertionError
+_________ test_a_locked_owner_table_does_not_make_a_live_render_stale __________
+
+rig = <tests.unit.test_harness_render_queue._Rig object at 0x73ef407cc500>
+
+    def test_a_locked_owner_table_does_not_make_a_live_render_stale(rig):
+        gh = rig.gh
+        gh.RENDER_OWNER_HEARTBEAT_INTERVAL_SEC = 0.2
+        gh.RENDER_OWNER_HEARTBEAT_STALE_SEC = 8.0
+        holder_id = rig.start_holder()
+        blocker = sqlite3.connect(gh.LIFECYCLE_DB, timeout=1)
+        blocker.execute("BEGIN EXCLUSIVE")
+        # A request that queues while the table is locked: its first poll loses
+        # sqlite's busy wait, and it must keep waiting rather than fail.
+        during, during_out = rig.post_in_thread(
+            "/script", rig.payload("op-during-lock", render_wait_timeout_sec=8), timeout=20)
+        time.sleep(6.5)            # longer than _lifecycle_connection's timeout=5
+        blocker.rollback()
+        blocker.close()
+        unlocked_at = time.time()
+        answers = []
+        deadline = time.monotonic() + gh.RENDER_OWNER_HEARTBEAT_STALE_SEC + 1
+        while time.monotonic() < deadline:
+            code, body = rig.post("/script", rig.payload(
+                f"op-probe-{len(answers)}", render_wait_timeout_sec=0.5), timeout=15)
+            answers.append((code, body.get("error"), body.get("owner_kind")))
+        beat_after_unlock = rig.row("op-holder")["heartbeat_at"]
+        still_rendering = rig.holder[0].is_alive()
+        during.join(20)
+        rig.release.set()
+        rig.holder[0].join(30)
+        stops = [a for a in answers if a[2] != "active"]
+        assert still_rendering, "the holder render ended early; the probe measured nothing"
+>       assert answers and not stops, (
+            "a live render was read as needing reconciliation after its heartbeat "
+            "failed once", stops)
+E       AssertionError: ('a live render was read as needing reconciliation after its heartbeat failed once', [(409, 'render owner exists', 'ac...ts', 'active_stale'), (409, 'render owner exists', 'active_stale'), (409, 'render owner exists', 'active_stale'), ...])
+E       assert ([(409, 'render owner wait timed out', 'active'), (409, 'render owner wait timed out', 'active'), (409, 'render owner e...sts', 'active_stale'), (409, 'render owner exists', 'active_stale'), (409, 'render owner exists', 'active_stale'), ...] and not [(409, 'render owner exists', 'active_stale'), (409, 'render owner exists', 'active_stale'), (409, 'render owner exist...sts', 'active_stale'), (409, 'render owner exists', 'active_stale'), (409, 'render owner exists', 'active_stale'), ...])
+
+tests/unit/test_harness_render_queue.py:520: AssertionError
+____________ test_the_heartbeat_stops_when_the_render_ends[returns] ____________
+
+rig = <tests.unit.test_harness_render_queue._Rig object at 0x73ef34dbb7d0>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x73ef34f43230>
+ending = 'returns'
+
+    @pytest.mark.parametrize("ending", ["returns", "raises"])
+    def test_the_heartbeat_stops_when_the_render_ends(rig, monkeypatch, ending):
+        """With the production interval, a heartbeat left running would sleep on for
+        RENDER_OWNER_HEARTBEAT_INTERVAL_SEC after its render ended."""
+        gh = rig.gh
+        if ending == "raises":
+            entered = threading.Event()
+    
+            def boom(*_a, **_k):
+                entered.set()
+                rig.release.wait(30)
+                raise RuntimeError("render body raised")
+            monkeypatch.setattr(gh, "run_script", boom)
+        before = {t for t in threading.enumerate() if t.name == "render-owner-heartbeat"}
+        t, out = rig.post_in_thread("/script", rig.payload("op-holder"))
+        started = (entered if ending == "raises"
+                   else rig.entered.setdefault("op-holder", threading.Event()))
+        assert started.wait(10)
+        beats = [t2 for t2 in threading.enumerate()
+                 if t2.name == "render-owner-heartbeat" and t2 not in before]
+        rig.release.set()
+        t.join(30)
+        rig.settled_snapshot()
+        for beat in beats:
+            beat.join(2)
+>       assert len(beats) == 1, beats
+E       AssertionError: []
+E       assert 0 == 1
+E        +  where 0 = len([])
+
+tests/unit/test_harness_render_queue.py:600: AssertionError
+____________ test_the_heartbeat_stops_when_the_render_ends[raises] _____________
+
+rig = <tests.unit.test_harness_render_queue._Rig object at 0x73ef34de3140>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x73ef3840dd00>
+ending = 'raises'
+
+    @pytest.mark.parametrize("ending", ["returns", "raises"])
+    def test_the_heartbeat_stops_when_the_render_ends(rig, monkeypatch, ending):
+        """With the production interval, a heartbeat left running would sleep on for
+        RENDER_OWNER_HEARTBEAT_INTERVAL_SEC after its render ended."""
+        gh = rig.gh
+        if ending == "raises":
+            entered = threading.Event()
+    
+            def boom(*_a, **_k):
+                entered.set()
+                rig.release.wait(30)
+                raise RuntimeError("render body raised")
+            monkeypatch.setattr(gh, "run_script", boom)
+        before = {t for t in threading.enumerate() if t.name == "render-owner-heartbeat"}
+        t, out = rig.post_in_thread("/script", rig.payload("op-holder"))
+        started = (entered if ending == "raises"
+                   else rig.entered.setdefault("op-holder", threading.Event()))
+        assert started.wait(10)
+        beats = [t2 for t2 in threading.enumerate()
+                 if t2.name == "render-owner-heartbeat" and t2 not in before]
+        rig.release.set()
+        t.join(30)
+        rig.settled_snapshot()
+        for beat in beats:
+            beat.join(2)
+>       assert len(beats) == 1, beats
+E       AssertionError: []
+E       assert 0 == 1
+E        +  where 0 = len([])
+
+tests/unit/test_harness_render_queue.py:600: AssertionError
+=============================== warnings summary ===============================
+../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_harness_render_queue.py::test_a_live_render_keeps_its_heartbeat_fresh
+FAILED tests/unit/test_harness_render_queue.py::test_a_locked_owner_table_does_not_make_a_live_render_stale
+FAILED tests/unit/test_harness_render_queue.py::test_the_heartbeat_stops_when_the_render_ends[returns]
+FAILED tests/unit/test_harness_render_queue.py::test_the_heartbeat_stops_when_the_render_ends[raises]
+4 failed, 141 passed, 8 skipped, 1 warning in 50.82s
+# inner_rc=1
+# finished 2026-09-24T12:15:21Z bare_rc=1 ignitions=18

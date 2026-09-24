@@ -13,12 +13,17 @@ It does NOT deploy, restart, or touch the novel repository.
 
 ## 1. The eight named mutants, each with a real patch and a killing test
 
-Each row: the patch file is the exact edit; planting it in the real source file
-turns the full `tests/writing_bench` suite red and names the test below; restoring
-returns the bare exit code to 0. Command, environment, bare exit codes and the
-named failing test are recorded in
-`logs/writing-bench-r2-mutations-two-pole-2026-09-24.txt` (planted, red) and
-`logs/writing-bench-r2-restore-green-2026-09-24.txt` (restored, green).
+Each row: the patch file is regenerated from a REAL planted edit — edit the
+file → `git diff` → `git checkout -- <file>`; no hand-written patch text. For
+every patch the recorded cycle on a clean tree is `git apply --check` →
+`git apply` → full `tests/writing_bench` (planted; must be red and name a test)
+→ `git apply -R` → full suite again (restored; must be green), each step logged
+with its bare exit code in `logs/writing-bench-r3-mutation-<ID>-2026-09-24.txt`;
+the clean-tree baseline is `logs/writing-bench-r3-baseline-2026-09-24.txt`. The
+r2 log pair (`logs/writing-bench-r2-mutations-two-pole-2026-09-24.txt`,
+`logs/writing-bench-r2-restore-green-2026-09-24.txt`) is superseded for the
+patch artifacts: the r2 N4b/N4c/N8 patch texts were hand-written and did not
+survive `git apply --check`.
 
 | id | patch | guard the mutant removes | test that goes red |
 |----|-------|--------------------------|--------------------|
@@ -32,8 +37,8 @@ named failing test are recorded in
 | N9 | `final/mutations/N9.patch` | `validate_certificate` requires `cert["complete"] is True` (`aitelier/writing_bench/reading.py:94`) | `test_reviewer_r2_mutation_survivors_killed.py::test_n9_the_certificate_complete_flag_is_required` |
 
 All eight are killed: 8/8 planted runs report bare exit status 1 and name a
-test; 8/8 restores report bare exit status 0. The exact red counts per row are
-in the log.
+test; 8/8 restores report bare exit status 0. The exact counts per row are in
+the per-mutation logs named above.
 
 ### The vacuous M9 block (fixed)
 
@@ -61,7 +66,7 @@ and already hold one call each.
 **① Does session assembly depend on assignment order?** YES. The production
 call site is `begin_observed_review(self)` — `core/dpe_pipeline.py:3346`, one
 argument — so the step id comes from `getattr(engine, "_current_step", None)`
-(`aitelier/writing_bench/adapter.py:345`). `begin_observed_review` accepts a
+(`aitelier/writing_bench/adapter.py:347`). `begin_observed_review` accepts a
 `step_id` argument, but that argument is not passed by the sole production
 caller. The 09-23 note said "the step id is now an explicit argument; … session
 installation no longer depends on field-assignment order"; that was wrong and
@@ -74,9 +79,11 @@ an engine-identity change?** YES. `Bench.accepted` does not consult
 `engine_identity()`; it compares the stage's recorded `engine` against the
 FROZEN manifest (`aitelier/writing_bench/bench.py`, `stage["engine"] ==
 m["engine"]`), so a pending backup still succeeds. `Bench.input` and
-`Bench.promote` DO consult it (`m["engine"] == engine_identity()` /
-`_verify_stage`) and refuse with "policy or implementation changed; start a new
-submission". This is pinned by
+`Bench.promote` DO consult it: the "policy or implementation changed; start a
+new submission" refusal is raised by `Bench.input`
+(`aitelier/writing_bench/bench.py:221`), which `Bench.promote` reaches through
+`_verify_stage` (`bench.py:472`); the require at `bench.py:473` carries the
+different message "stage binding changed". This is pinned by
 `tests/writing_bench/test_review_host_boundary.py::test_already_accepted_backup_survives_code_upgrade_not_new_approval`.
 The 09-23 note said such a chapter "is refused"; that was wrong and is
 corrected.
@@ -99,8 +106,6 @@ corrected. Measured this round at exit status 1 (log in `logs/`).
 - `aitelier/writing_bench/adapter.py` — `begin_observed_review` docstring only;
   it now states that installation depends on `engine._current_step` on the
   production path.
-- `core/dpe_pipeline.py` — comment above the session block only; the executable
-  code is byte-for-byte the 09-23 shipped order.
 - `tests/writing_bench/test_reviewer_r2_mutation_survivors_killed.py` — new, 9
   tests.
 - `tests/writing_bench/test_named_mutation_survivors_killed.py` — the vacuous
@@ -116,7 +121,7 @@ frozen-submission consequence in ② applies unchanged.
 | criterion | verdict | evidence |
 |-----------|---------|----------|
 | `named-mutation-survivors-are-killed` (M3/M9/M11) | PASS | `test_named_mutation_survivors_killed.py`, two-pole in the 09-23 log; the M9 block is now non-vacuous and the M9a/M9b mutants are killed (09-24 log) |
-| `reviewer-r2-mutation-survivors-are-killed` (M9a/M9b/N3/N4b/N4c/N5/N8/N9) | PASS | 8/8 planted red and named, 8/8 restored green — `logs/writing-bench-r2-mutations-two-pole-2026-09-24.txt` |
+| `reviewer-r2-mutation-survivors-are-killed` (M9a/M9b/N3/N4b/N4c/N5/N8/N9) | PASS | 8/8 planted red and named, 8/8 restored green — `logs/writing-bench-r3-mutation-<ID>-2026-09-24.txt` |
 | `delivery-doc-matches-code` | PASS | section 2 above, with code lines and test names |
 | `review-session-installed-on-the-real-step-path` | PASS | `test_observed_session_real_path.py`, reverse pole measured at exit status 1 |
 | `observed-read-coverage`, `review-target-binding`, `frozen-file-submission`, `manual-exact-acceptance`, `grounded-editor-context`, `recoverable-delivery`, `regression-and-independent-review` | not re-measured this round | covered by the 09-23 candidate and its logs; no production behaviour changed here |
@@ -129,5 +134,6 @@ frozen-submission consequence in ② applies unchanged.
 - The certificate proves the material was PRESENTED, not that the model
   understood it. Literary judgement still needs the independent review and the
   director's manual approval.
-- `final/mutations/*.patch` are unified diffs against the base paths; they are
-  evidence of the exact planted edit, not an automatic applier.
+- `final/mutations/*.patch` are unified diffs against the base paths, each one
+  the `git diff` of the planted edit; every one passes `git apply --check` and
+  applies with `git apply` on a clean tree.

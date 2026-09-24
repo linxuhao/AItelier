@@ -44,9 +44,11 @@ M9/M11 mutants, then restored; the two-pole runs are logged below).
 `core/dpe_pipeline.py` and `core/ai_router.py`. This round DID change
 `core/dpe_pipeline.py` and `aitelier/writing_bench/adapter.py`, so the hash and
 therefore a frozen submission's `engine` identity change. What that actually
-refuses, per the code: `Bench.input` (`aitelier/writing_bench/bench.py`, the
-`m["engine"] == engine_identity()` require at the top of the method) and
-`Bench.promote` (via `_verify_stage`, `stage["engine"] == engine_identity()`)
+refuses, per the code: `Bench.input` (`aitelier/writing_bench/bench.py:221`,
+the `m["engine"] == engine_identity()` require) and `Bench.promote` (which
+reaches that same `Bench.input` require through `_verify_stage`
+(`bench.py:471-472`); the `stage["engine"] == engine_identity()` require at
+`bench.py:473` carries the different message "stage binding changed")
 raise "policy or implementation changed; start a new submission" once the hash
 moves. `Bench.accepted` does NOT check `engine_identity`: it only compares the
 stage's recorded `engine` against the FROZEN manifest

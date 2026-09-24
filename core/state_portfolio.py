@@ -151,7 +151,10 @@ class StatePortfolio:
             key(after, "after")
         if repo_path is not None:
             repo_path = str(Path(text(repo_path, "repo_path", 4000)).expanduser().resolve())
-        with self.store.transaction() as conn:
+        # The visibility subquery below is the privacy DECISION, not a record
+        # delivery: a public aggregate must consult it without handing out the
+        # visibility row itself.
+        with self.store._decision() as conn:
             # Visibility is pushed INTO the SQL, BEFORE the page is cut. Filtering
             # after pagination leaked the SHAPE of the page: an unopened project
             # turned a whole page empty and shifted every later cursor, which let
@@ -177,7 +180,9 @@ class StatePortfolio:
             return {"projects": result[:limit], "next_after": result[limit - 1]["project_id"] if len(result) > limit else None}
 
     def overview(self, project_id):
-        with self.store.transaction() as conn:
+        # Line 210 below reads the event watermark: a counter in a private
+        # table, carried by a public aggregate, not a record.
+        with self.store._decision() as conn:
             view = self.store._graph_view(conn, project_id)
             latest = {r["node_key"]: dict(r) for r in conn.execute("SELECT a.* FROM state_attempts a "
                       "JOIN (SELECT node_key,MAX(seq) AS last FROM state_attempts WHERE project_id=? GROUP BY node_key) b "

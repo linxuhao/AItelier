@@ -11,6 +11,7 @@ from core.state_driver_index import (ENTRY_SCHEMA, index_line, MAX_INDEX_LIMIT, 
                                      referenced_addresses)
 from core.state_graph import (StateConflict, StateGraphError, StateNotFound, key, now,
                               text)
+from core.state_privacy import writer_only_read
 
 MAX_SECTION_CHARS = 100000
 MAX_SEARCH_QUERY_CHARS = 500
@@ -125,10 +126,20 @@ def _matches(value: str, query: str) -> bool:
 class StateDriverNotes:
     """One CAS-protected notebook per State project; State remains authoritative."""
 
-    def __init__(self, store, actor: str):
+    def __init__(self, store, actor: str, project_read_trusted: bool = False):
         self.store = store
+        # The trust level of whoever built THIS notebook. `StateService` passes
+        # its own, derived once per request from the raw credential. Any other
+        # constructor that never declared one is UNTRUSTED, so a notebook rebuilt
+        # from an anonymous service's store cannot read private notes by staying
+        # silent. Every writer-only read below is refused from this value, at the
+        # moment the read runs.
+        self.project_read_trusted = bool(project_read_trusted)
         self.actor = text(actor, "authenticated actor", 320)
-        with store.db.get_connection() as conn:
+        # Schema setup is not a read of a private record: it must run for every
+        # caller, including the anonymous one whose reads the connection will
+        # then judge.
+        with store.db.decision_connection() as conn:
             conn.executescript(SCHEMA + ENTRY_SCHEMA)
             conn.commit()
 
@@ -147,6 +158,7 @@ class StateDriverNotes:
                            "director_identity": row["updated_by_director"]},
         }
 
+    @writer_only_read("get_driver_note")
     def get(self, project_id: str) -> dict:
         project_id = key(project_id, "project_id")
         with self.store.transaction() as conn:
@@ -156,6 +168,7 @@ class StateDriverNotes:
             index = self._index_projection(conn, project_id)
         return {**self._result(project_id, row), **index}
 
+    @writer_only_read("driver_note_history")
     def history(self, project_id: str, after_revision: int = 0, limit: int = 100) -> dict:
         project_id = key(project_id, "project_id")
         with self.store.transaction() as conn:
@@ -175,6 +188,7 @@ class StateDriverNotes:
                 "truncated": len(rows) > limit,
                 "next_after_revision": entries[-1]["revision"] if entries else after_revision}
 
+    @writer_only_read("search_driver_note_history")
     def search(self, project_id: str, query: str = "", section: str | None = None,
                actor: str | None = None, director_identity: str | None = None,
                after_revision: int = 0, min_revision: int | None = None,
@@ -247,6 +261,7 @@ class StateDriverNotes:
                 "truncated": len(selected) > limit,
                 "next_after_revision": entries[-1]["revision"] if entries else after_revision}
 
+    @writer_only_read("get_driver_note")
     def update(self, project_id: str, section: str, content: str, expected_revision: int,
                director_identity: str, operation: str = "replace") -> dict:
         project_id = key(project_id, "project_id")
@@ -380,6 +395,7 @@ class StateDriverNotes:
              director_identity, timestamp, timestamp))
         return entry_id
 
+    @writer_only_read("get_driver_note_entry")
     def write_entry(self, project_id: str, assertion: str, body: str, director_identity: str,
                     force: str = "in_force", landed: str = "") -> dict:
         """Write one assertion plus its body and return the address of both."""
@@ -402,6 +418,7 @@ class StateDriverNotes:
                 "director_identity": director_identity})
             return {**entry_detail(row), **projection}
 
+    @writer_only_read("get_driver_note_entry")
     def supersede_entry(self, project_id: str, entry_id: str, assertion: str, body: str,
                         reason: str, director_identity: str, force: str = "in_force",
                         landed: str = "") -> dict:
@@ -439,6 +456,7 @@ class StateDriverNotes:
             return {"superseded": entry_detail(retired), "successor": entry_detail(successor),
                     **projection}
 
+    @writer_only_read("get_driver_note_entry")
     def delist_entry(self, project_id: str, entry_id: str, reason: str,
                      director_identity: str) -> dict:
         """Evict a line from the index without deleting its body.
@@ -478,6 +496,7 @@ class StateDriverNotes:
                 "director_identity": director_identity})
             return {**entry_detail(delisted), **projection}
 
+    @writer_only_read("get_driver_note_entry")
     def get_entry(self, project_id: str, entry_id: str) -> dict:
         """Fetch one body by address. Bodies are never injected; they are fetched."""
         project_id = key(project_id, "project_id")
@@ -486,6 +505,7 @@ class StateDriverNotes:
             self.store._project(conn, project_id)
             return entry_detail(self._entry(conn, project_id, entry_id))
 
+    @writer_only_read("driver_note_index")
     def entry_index(self, project_id: str, include_delisted: bool = False,
                     limit: int = 100) -> dict:
         project_id = key(project_id, "project_id")
@@ -502,6 +522,7 @@ class StateDriverNotes:
                 "entries": [entry_summary(row) for row in rows[:limit]],
                 "truncated": len(rows) > limit, **counts}
 
+    @writer_only_read("check_driver_note_index")
     def check_index(self, project_id: str) -> dict:
         """Run the address check over the whole notebook and report what dangles."""
         project_id = key(project_id, "project_id")

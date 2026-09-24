@@ -8,6 +8,9 @@ from core.state_commands import (READ_REQUESTS, WRITE_REQUESTS, describe, execut
                                                                   is_public_read, ProjectPrivate)
 from starlette.responses import JSONResponse
 from core.state_graph import StateConflict, StateGraphError, StateNotFound
+from contextlib import AsyncExitStack
+from fastapi.dependencies.utils import get_dependant, solve_dependencies
+from api.state_verdict import DECLARATION_ATTR, binding_for, record_judged
 
 
 # Each route declares WHAT it serves, on its own endpoint object: a tuple
@@ -15,7 +18,7 @@ from core.state_graph import StateConflict, StateGraphError, StateNotFound
 # the read action (or None for the action-dispatch families, whose action lives
 # in the URL). This is the enumerable declaration the router guard reads, and
 # the thing the invariant tests walk instead of a hardcoded door list.
-_DECLARATION = "_state_route"
+_DECLARATION = DECLARATION_ATTR
 
 # The `/schema` REST route publishes the shape of every operation, closed
 # families included. The owner has not ruled on opening it, so it stays shut -
@@ -62,30 +65,72 @@ def create_state_router(service_dependency, access_dependency, read_dependency=N
     read_verdict = read_dependency or access_dependency
     router = APIRouter(prefix="/api/state", tags=["state-graph"])
 
-    def _verdict(dependency, request):
-        """Apply an authorization dependency to a request.
+    async def _apply_verdict(request, dependency, ran: list) -> AsyncExitStack:
+        """Apply an authorization dependency to a request BY RUNNING IT THROUGH
+        FASTAPI'S OWN DEPENDENCY MACHINERY, not by calling it here.
 
-        `Depends`-shaped dependencies take the Request; a bare `lambda: None`
-        (an embedder running with the gate off, which tests and
-        `api/state_only` both use) takes nothing. Both shapes appear in this
-        repository, so the call is adapted rather than assumed - the verdict is
-        applied either way, and no path is left unchecked by a TypeError.
+        The guard used to do `dependency(request)` itself. That silently broke for
+        every dependency shape that is not a plain synchronous function - an
+        `async def` coroutine, a `yield` (or `async yield`) dependency, a callable
+        object or a class - because calling such a D returns a coroutine or
+        generator whose body never executes, so a refusal written inside the
+        dependency never ran and the request leaked. The remedy is NOT to branch
+        on `isawaitable`/`isgenerator` of the return value either: that is just
+        another hand-maintained shape list, and the third one bought for the same
+        exemption. Instead FastAPI resolves D exactly as it would for a route's
+        `Depends(D)`, so release and refusal match a normal route for EVERY shape,
+        present or future, with no shape table to keep current.
 
-        An override is honored. The guard stands in for the declared dependency,
-        so `app.dependency_overrides[require_writer]` (which this repository's
-        tests and embeds use to swap a verdict) must keep working; without this
-        a swapped verdict would be silently ignored here and nowhere else.
+        An override is honored: the guard stands in for the declared dependency,
+        so `dependency_overrides[require_writer]` (used by this repository's tests
+        and embeds to swap a verdict) keeps working - a swapped verdict would
+        otherwise be silently ignored here and nowhere else.
+
+        `ran` is the guard's ledger of "a dependency actually EXECUTED": it is
+        appended the moment `solve_dependencies` is entered, so a refusal raised
+        inside the dependency still counts as a ruling, while a branch that never
+        reaches this function (a declaration the reader refuses on its own)
+        records NO judgment and the route reports uncovered.
         """
-        overrides = getattr(getattr(request, "app", None), "dependency_overrides", None)
-        if overrides:
-            replacement = overrides.get(dependency)
-            if replacement is not None:
-                dependency = replacement
-        try:
-            accepts = bool(inspect.signature(dependency).parameters)
-        except (TypeError, ValueError):
-            accepts = True
-        return dependency(request) if accepts else dependency()
+        overrides = getattr(getattr(request, "app", None), "dependency_overrides", None) or {}
+        dependency = overrides.get(dependency, dependency)
+
+        def _parent(v=Depends(dependency)):
+            return v
+
+        # D becomes a real SUB-dependency of a trivial parent: that is the only
+        # way FastAPI executes it (solve_dependencies runs a dependant's
+        # sub-dependencies, not its own `call`).
+        dependant = get_dependant(path=request.url.path, call=_parent, scope="function")
+        ran.append(True)
+        # The stack is created here and returned OPEN: the guard is a yield
+        # dependency, so it closes this AFTER the handler has run — the same
+        # order in which a plain `Depends(D)` route closes D's teardown.
+        stack = AsyncExitStack()
+        solved = await solve_dependencies(
+                request=request, dependant=dependant, body=None,
+                background_tasks=None, response=None,
+                dependency_overrides_provider=request.app,
+                dependency_cache={}, async_exit_stack=stack,
+                embed_body_fields=False)
+        # A released verdict leaves no refusal. A refused one either propagated as
+        # an exception above (handled exactly like a route dependency) or is
+        # recorded on the solved result; reproduce it so the guard denies exactly
+        # as a real `Depends(D)` route would.
+        errors = getattr(solved, "errors", None)
+        if errors:
+            raise errors[0] if isinstance(errors, (list, tuple)) else errors
+        response = getattr(solved, "response", None)
+        status = getattr(solved, "status_code", None)
+        if status is None and response is not None:
+            status = getattr(response, "status_code", None)
+        if status is not None and 400 <= int(status) < 600:
+            headers = getattr(solved, "headers", None)
+            if headers is None and response is not None:
+                headers = getattr(response, "headers", None)
+            raise HTTPException(status_code=int(status),
+                                headers=dict(headers) if headers else None)
+        return stack
 
     def _call(service, action, arguments, *, write=False):
         try:
@@ -103,25 +148,45 @@ def create_state_router(service_dependency, access_dependency, read_dependency=N
         except StateGraphError as exc:
             raise HTTPException(422, str(exc)) from exc
 
-    def _guard_read_action(action, request: Request) -> None:
-        """Refuse a NON-public read before the request body is parsed.
+    async def _guard_read_action(action, route, request: Request, ran: list, add_stack):
+        """Refuse a NON-public read before the request body is parsed, and refuse -
+        unconditionally - a PUBLIC declaration its own handler source contradicts.
 
         `None` (the action could not be resolved) and every name the table does
-        not list - including one added later - are private reads.
+        not list - including one added later - are private reads. A declaration
+        that IS public is then checked against the handler's source: a route that
+        declares a public read and DELIVERS a private one is refused here, before
+        any early approval.
+
+        The mismatch refusal does NOT route through `read_verdict`. An embedder may
+        pass a no-op verdict (api/state_only does, because its bearer middleware
+        already authenticated every request), and routing the mismatch through that
+        no-op would let a forged declaration answer 200 there. A declaration that
+        contradicts its handler is not a visibility question, so it is answered by
+        the guard itself, on every app that builds this router.
+
+        Returns `public-clearance` when the reader approved a public declaration -
+        a decision made WITHOUT running any authorization dependency, which the
+        coverage metric therefore reports as cleared, not judged.
         """
         if action is None or not is_public_read(action):
-            _verdict(read_verdict, request)
+            add_stack(await _apply_verdict(request, read_verdict, ran))
+            return None
+        binding = binding_for(route.endpoint, action, route.path)
+        if not binding.ok:
+            raise HTTPException(403, "state route declaration does not match its handler")
+        return "public-clearance"
 
-    def _guard_director_action(request: Request) -> None:
+    async def _guard_director_action(route, request: Request, ran: list, add_stack) -> None:
         """This path carries both classes. `send_director_message` and the two
         transitions CHANGE state, so they take the WRITE verdict and its wording;
         only `list_director_messages` is a read, and it is private."""
         if request.path_params.get("action") == "list_director_messages":
-            _guard_read_action("list_director_messages", request)
+            await _guard_read_action("list_director_messages", route, request, ran, add_stack)
         else:
-            _verdict(access_dependency, request)
+            add_stack(await _apply_verdict(request, access_dependency, ran))
 
-    def _router_guard(request: Request) -> None:
+    async def _router_guard(request: Request):
         """The one guard, on the ROUTER, so no route can be added without it.
 
         It reads the declaration off the matched endpoint at REQUEST time, which
@@ -129,23 +194,77 @@ def create_state_router(service_dependency, access_dependency, read_dependency=N
         frozen at build time except the declaration of which action a route
         serves. An endpoint that declares nothing is refused - the default here
         is DENY, exactly as it is in the read table.
+
+        There is no stand-down: no attribute, dependency identity or path shape
+        lets a route decline this judgment. Every branch resolves to a verdict
+        applied through FastAPI's own machinery and then RECORDED, so coverage
+        measures the ruling, not the arrival. The verdict is idempotent - a pure
+        function of the request's credential - so judging a request twice yields
+        the status and body of judging it once.
+
+        The guard is a YIELD dependency on purpose. FastAPI runs the second half
+        of a yield dependency AFTER the handler, exactly as it closes the
+        teardown of a plain `Depends(D)` route, so the verdict stack opened here
+        closes at the same point a real route's would - a verdict dependency
+        with a post-`yield` half observes setup -> handler -> teardown, the same
+        order `Depends(D)` gives it.
         """
         route = request.scope.get("route")
-        declaration = getattr(getattr(route, "endpoint", None), _DECLARATION, None)
-        if declaration is None:
-            _verdict(read_verdict, request)
-            return
-        kind, action = declaration
-        if kind == "write":
-            _verdict(access_dependency, request)
-        elif kind == "director":
-            _guard_director_action(request)
-        elif action is None:
-            # Action-dispatch family: the action is in the URL, and a request
-            # that names none is refused like any other unclassified read.
-            _guard_read_action(request.path_params.get("action"), request)
-        else:
-            _guard_read_action(action, request)
+        path = getattr(route, "path", None)
+        app = request.app
+        declaration = getattr(getattr(route, "endpoint", None), DECLARATION_ATTR, None)
+        ruling = "private-verdict"
+        # A ruling is RECORDED only when a decision was actually made: either an
+        # authorization dependency executed (append to `ran`), or the reader
+        # approved a public declaration (public-clearance). Arriving here records
+        # nothing - the arrival-count was the metric that hid the leak.
+        ran: list = []
+        stacks: list = []
+        decision = None
+        try:
+            if declaration is None:
+                stacks.append(await _apply_verdict(request, read_verdict, ran))
+            else:
+                kind, action = declaration
+                if kind == "write":
+                    ruling = "write-verdict"
+                    stacks.append(await _apply_verdict(request, access_dependency, ran))
+                elif kind == "director":
+                    ruling = "director-verdict"
+                    await _guard_director_action(route, request, ran, stacks.append)
+                elif action is None:
+                    # Action-dispatch family: the action lives in the URL and is
+                    # judged here; the declaration binds only because the handler
+                    # hands `execute` the very path parameter this guard judged AND
+                    # returns no private body (checked inside `binding_for`).
+                    ruling = "dispatch-verdict"
+                    decision = await _guard_read_action(
+                        request.path_params.get("action"), route, request, ran,
+                        stacks.append)
+                else:
+                    ruling = "read-verdict"
+                    decision = await _guard_read_action(action, route, request, ran,
+                                                        stacks.append)
+        except BaseException:
+            for stack in stacks:
+                await stack.aclose()
+            if ran:
+                record_judged(app, path, ruling, dep_backed=True)
+            else:
+                record_judged(app, path, "declaration-refused", dep_backed=False)
+            raise
+        if ran:
+            # A dependency executed: the branch ruling is backed by a real
+            # authorization decision, approval or refusal.
+            record_judged(app, path, ruling, dep_backed=True)
+        elif decision:
+            # The reader approved a public declaration: a decision, but one no
+            # dependency made. Recorded as public-clearance, dep_backed False -
+            # coverage reports it as cleared, never as judged.
+            record_judged(app, path, decision, dep_backed=False)
+        yield
+        for stack in stacks:
+            await stack.aclose()
 
     def _declare(endpoint, kind: str, action: str | None = None):
         """Record on the endpoint function WHAT it serves.
@@ -187,7 +306,12 @@ def create_state_router(service_dependency, access_dependency, read_dependency=N
     def projects(repo_path: str | None = None, after: str = "", limit: int = 100, service=Depends(service_dependency)):
         return _call(service, "project_catalog", {"repo_path": repo_path, "after": after, "limit": limit})
 
-    _declare(router.get("/projects")(projects), "read", "list_projects")
+    # The declaration names the action this handler SERVES (`project_catalog`, the
+    # paged catalog), not a sibling public read it resembles: `list_projects` is a
+    # different action with different arguments, and a declaration that named it
+    # would not bind the action this route delivers.
+    _declare(router.get("/projects")(projects), "read", "project_catalog")
+
 
     def graph(project_id: str, service=Depends(service_dependency)):
         return _call(service, "get_graph", {"project_id": project_id})

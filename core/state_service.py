@@ -11,6 +11,7 @@ import json
 import os
 import subprocess
 from pathlib import Path
+from core.state_privacy import writer_only_read
 
 from core.state_graph import StateConflict, StateGraphError, StateGraphStore, canonical, digest, key, text
 from core.state_attempts import StateAttempts, artifact_ref
@@ -68,9 +69,10 @@ class StateService:
                 "a service that never declared its trust level must not come into existence")
         self.project_read_trusted = project_read_trusted
         self.db, self.ws, self.sf, self.registry = db, ws, sf, registry
-        self.store = StateGraphStore(db)
+        self.store = StateGraphStore(db, project_read_trusted=project_read_trusted)
         from core.state_driver_notes import StateDriverNotes
-        self.driver_notes = StateDriverNotes(self.store, actor)
+        self.driver_notes = StateDriverNotes(self.store, actor,
+                                              project_read_trusted=project_read_trusted)
         from core.state_issues import StateIssues
         self.issues = StateIssues(self.store, actor)
         self.attempts = StateAttempts(self.store)
@@ -84,8 +86,10 @@ class StateService:
         from core.state_portfolio import StatePortfolio
         self.portfolio = StatePortfolio(self.store, actor, service=self)
         from core.director_messaging import SQLiteDirectorMessaging
-        self.director_messages = SQLiteDirectorMessaging(self.store, actor)
+        self.director_messages = SQLiteDirectorMessaging(self.store, actor,
+                                                          project_read_trusted=project_read_trusted)
 
+    @writer_only_read("wait_for_state_change")
     async def wait_for_state_change(self, project_id, after=0, node_keys=None, attempt_ids=None,
                                     note_after_revision=None, filter_mode="all", actionable_only=True,
                                     timeout_seconds=30.0, limit=100, return_when_idle=False):
@@ -118,6 +122,7 @@ class StateService:
         """The recorded decision to withdraw a project from anonymous readers."""
         return self.store.set_project_access(project_id, "private", self.actor)
 
+    @writer_only_read("project_visibility")
     def project_visibility(self, project_id):
         """Read back the privacy record: current state, who changed it, when."""
         return self.store.get_project_access(project_id)

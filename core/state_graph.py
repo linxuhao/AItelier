@@ -13,6 +13,8 @@ import re
 from collections import deque
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from core.state_privacy import TrustBoundDatabase, writer_only_read
+from core.state_privacy import writer_only_read
 from typing import Any
 
 KEY = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
@@ -290,10 +292,33 @@ CREATE TABLE IF NOT EXISTS state_project_access (
 
 
 class StateGraphStore:
-    def __init__(self, db):
-        """Use an explicitly supplied DBManager; never resolve a production path."""
-        self.db = db
-        with db.get_connection() as conn:
+    """One database handle over the State DAG tables.
+
+    The trust level of the caller that built this store decides every read of a
+    private table (``state_events``, ``state_project_access``). It must be
+    declared: a store that never declared one is UNTRUSTED, and a store rebuilt
+    from an untrusted service's db cannot become trusted by staying silent.
+    """
+    def __init__(self, db, project_read_trusted: bool = False):
+        """Use an explicitly supplied DBManager; never resolve a production path.
+
+        The handle is WRAPPED in the trust-bound view, so every read connection
+        this store hands out carries the verdict for the tables it touches. A
+        reader written LATER - registered nowhere, decorated by nobody, named in
+        no table - is judged by the connection itself when it reads
+        ``state_driver_notes``. Nothing about the reader is consulted.
+        """
+        # The declared level is THIS store's own, and only an explicit True is
+        # trusted. A store rebuilt from a trusted service's handle does not
+        # inherit that trust: silence is still not trust, so the rebuilt store
+        # reads as untrusted exactly like one constructed with no argument.
+        self.project_read_trusted = bool(project_read_trusted)
+        self.db = TrustBoundDatabase(
+            db.unrestricted if isinstance(db, TrustBoundDatabase) else db,
+            self.project_read_trusted)
+        # Schema setup is not a read of a private record: it runs for every
+        # caller, including the anonymous one whose later reads get judged.
+        with self.db.decision_connection() as conn:
             from core.state_metadata import SCHEMA as METADATA_SCHEMA
             conn.executescript(SCHEMA + METADATA_SCHEMA)
             # Additive: existing rows stay NULL (legacy, exempt from facet rules).
@@ -303,8 +328,36 @@ class StateGraphStore:
             conn.commit()
 
     @contextmanager
+    def _decision(self, *, write: bool = False):
+        """The channel for a privacy DECISION, not a data delivery.
+
+        Deciding whether a project is open must read the visibility row, and a
+        public aggregate carries its event watermark - a counter, never a
+        payload. No record text leaves through here, and the reads that are
+        private ACTIONS (``project_visibility``, ``events``) stay refused by the
+        action verdict on their own methods.
+        """
+        with self.db.decision_connection() as conn:
+            conn.execute("PRAGMA foreign_keys=ON")
+            conn.execute("PRAGMA busy_timeout=5000")
+            conn.execute("BEGIN IMMEDIATE" if write else "BEGIN")
+            try:
+                yield conn
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                raise
+
+    @contextmanager
     def transaction(self, *, write: bool = False):
-        with self.db.get_connection() as conn:
+        # A READ keeps the connection's table verdict ARMED - that is the layer
+        # every private read must pass, whatever wrote the reader and whether or
+        # not any list names it. A WRITE keeps the write machinery's own channel,
+        # because recording an event must read its own watermark and every
+        # transport writer-gates writes first; the write ACTIONS that return
+        # private text carry the same refusal on their own methods.
+        with (self.db.decision_connection() if write
+              else self.db.get_connection()) as conn:
             conn.execute("PRAGMA foreign_keys=ON")
             conn.execute("PRAGMA busy_timeout=5000")
             conn.execute("BEGIN IMMEDIATE" if write else "BEGIN")
@@ -371,14 +424,21 @@ class StateGraphStore:
             self._event(conn, project_id, None, "project_created", {"title": title, "source_project_id": source_project_id})
             return self._project(conn, project_id)
 
-    def list_projects(self, public_only: bool = False) -> list[dict]:
-        """With `public_only`, visibility is part of the SQL itself: the rows an
-        anonymous caller must not know about are excluded BEFORE any caller pages
-        or counts, so a page's size, cursor and emptiness are byte-identical
-        whether or not private projects exist in this database."""
+    def list_projects(self, public_only: bool | None = None) -> list[dict]:
+        """A store that did not DECLARE trust lists only opened projects.
+
+        ``public_only`` defaults to the store's own declared level: silence is
+        not trust, so an undeclared store - the one a rebuilt leaf would hand
+        out - cannot name a project nobody opened. With ``public_only``,
+        visibility is part of the SQL itself: the rows an anonymous caller must
+        not know about are excluded BEFORE any caller pages or counts, so a
+        page's size, cursor and emptiness are byte-identical whether or not
+        private projects exist in this database."""
+        if public_only is None:
+            public_only = not self.project_read_trusted
         where = ("WHERE EXISTS(SELECT 1 FROM state_project_access a "
                  "WHERE a.project_id=p.project_id AND a.visibility='public')") if public_only else ""
-        with self.transaction() as conn:
+        with self._decision() as conn:
             return [dict(r) for r in conn.execute(
                 f"SELECT * FROM state_projects p {where} ORDER BY p.project_id")]
 
@@ -386,6 +446,7 @@ class StateGraphStore:
         with self.transaction() as conn:
             return self._project(conn, project_id)
 
+    @writer_only_read("project_visibility")
     def get_project_access(self, project_id: str) -> dict:
         """Current visibility and the record of who changed it and when.
 
@@ -394,7 +455,7 @@ class StateGraphStore:
         The mechanism decides, so a project created a minute ago is private the
         instant it exists, and `list_projects`/aggregates can ask this to filter.
         """
-        with self.transaction() as conn:
+        with self._decision() as conn:
             self._project(conn, project_id)
             return self._access(conn, project_id)
 
@@ -415,12 +476,12 @@ class StateGraphStore:
         return row["visibility"] if row else "private"
 
     def is_project_public(self, project_id: str) -> bool:
-        with self.transaction() as conn:
+        with self._decision() as conn:
             return self._visibility(conn, project_id) == "public"
 
     def public_project_ids(self) -> set:
         """The set of explicitly-opened projects. No row means private."""
-        with self.transaction() as conn:
+        with self._decision() as conn:
             return {r["project_id"] for r in conn.execute(
                 "SELECT project_id FROM state_project_access WHERE visibility='public'")}
 
@@ -432,7 +493,7 @@ class StateGraphStore:
             raise StateGraphError("visibility must be 'private' or 'public'")
         pid = key(project_id)
         stamp = now()
-        with self.transaction(write=True) as conn:
+        with self._decision(write=True) as conn:
             self._project(conn, pid)
             row = conn.execute("SELECT * FROM state_project_access WHERE project_id=?",
                                (pid,)).fetchone()
@@ -753,6 +814,7 @@ class StateGraphStore:
         return {"nodes": summary, "total": len(ready), "truncated": len(ready) > limit,
                 "ready_action_counts": ready_action_counts(ready)}
 
+    @writer_only_read("events")
     def events(self, project_id: str, after: int = 0, limit: int = 100) -> list[dict]:
         integer(after, "after", 0, 2**63-1)
         integer(limit, "limit", 1, 500)

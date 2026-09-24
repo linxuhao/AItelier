@@ -562,10 +562,11 @@ READ_REQUESTS = {
 # public projects too". It REPLACES the
 # half-sentence in the 2026-09-21 ruling that "keeps the working notes shut";
 # that claim is no longer true of this table. The ruling named the WORKING NOTE
-# only: the director mailbox, the driver guide and the event/long-poll plumbing
-# stay writer-only (below). A note read is still ANDed with project privacy —
-# the note of a project nobody opened is refused exactly like a project that
-# does not exist, because `_refuse_if_project_not_public` runs at `execute`.
+# only: the director mailbox and the event/long-poll plumbing stay writer-only
+# (below); the driver guide is public text (above). A note read is still ANDed
+# with project privacy - the note of a project nobody opened is refused exactly
+# like a project that does not exist, because `_refuse_if_project_not_public`
+# runs at `execute`.
 PUBLIC_READS = frozenset({
     # Projects, graph, node context, frontier.
     "list_projects", "get_graph", "get_node", "search_nodes", "facet_lint",
@@ -579,6 +580,10 @@ PUBLIC_READS = frozenset({
     "design_catalog", "get_design_revision", "search_design_items",
     "design_impact", "get_design_baseline", "get_design_bindings",
     "export_design_markdown", "check_design_markdown",
+    # The driver guide. Its text is `core/state_driver_guide.py` in a PUBLIC
+    # repository, and the MCP prompt and resource already serve it publicly; a
+    # read the transport already publishes is not a private record.
+    "get_driver_guide_section",
     # The driver's working notebook and its revision/entry history, for a project
     # that has been opened (2026-09-22 ruling). Every one of these takes a
     # `project_id`, so the project half of the verdict decides them here exactly
@@ -591,9 +596,9 @@ WRITER_ONLY_READS = frozenset({
     # The director mailbox. The 2026-09-22 ruling named the working notes, not
     # the mailbox, so this stays writer-only.
     "list_director_messages",
-    # The driver guide and the event/long-poll plumbing are NOT on the opened
-    # list, so they stay shut rather than be assumed harmless.
-    "get_driver_guide_section", "events", "wait_for_state_change",
+    # The event/long-poll plumbing is NOT on the opened list, so it stays shut
+    # rather than being assumed harmless.
+    "events", "wait_for_state_change",
     # The privacy record itself: who opened a project and when. Private by
     # default like every unclassified read; the writer verdict reads it back.
     "project_visibility",
@@ -655,12 +660,13 @@ _CATALOG_READS = frozenset({"list_projects", "project_catalog"})
 
 
 def _anonymous(service) -> bool:
-    """True only for a caller the transport has explicitly tagged as unable to
-    read private records (an unauthenticated HTTP visitor). Every other caller —
-    the internal driver, MCP, a writer, and any embedder that did not opt in —
-    defaults to trusted, so this can only ever NARROW an existing read, never
-    widen the public surface."""
-    return getattr(service, "project_read_trusted", True) is False
+    """True unless the caller EXPLICITLY declared itself trusted to read private
+    records. An unauthenticated HTTP visitor is anonymous, and so is any object
+    that never declared a level at all: silence must not be trusted, or a leaf
+    rebuilt from an untrusted store would become readable by staying silent.
+    Trust only comes from an explicit ``project_read_trusted=True`` at a real
+    construction point (the internal driver, MCP, a test fixture)."""
+    return getattr(service, "project_read_trusted", False) is not True
 
 
 def _refuse_if_project_not_public(service, action, args) -> None:
@@ -771,19 +777,39 @@ def execute(service, action: str, arguments: dict, *, allow_write: bool = False)
             from core.director_messaging_protocol import DirectorMessageError
             return DirectorMessageError("invalid_request").as_dict()
         raise StateGraphError("arguments must be an object")
-    # Project privacy is decided HERE, the single chokepoint every transport
-    # shares, and not in the route guard: a route author who forges a declaration
-    # to make the guard stand down still has to call `execute` to obtain any
-    # project body, and that call is refused for an anonymous principal on a
-    # project nobody opened. This does not depend on the action classification
-    # table or on `prefix_verdict_stands_down_for` — those answer "is this ACTION
-    # public", which is ANDed with "is this PROJECT opened" only in this function.
-    # It runs BEFORE argument validation so an anonymous probe of an unopened
-    # project is refused as private, never bounced with a structural error that
-    # itself leaks the project's request shape.
+    # Confidentiality is decided by the ACTION that is being read, at the
+    # moment the private read EXECUTES, and by the PROJECT's own privacy, from
+    # the trust level the transport derived from the raw credential. Neither
+    # decision is taken from a route's or a handler's shape:
+    #
+    # * the ACTION's privacy (`read_visibility`, the one table, where an action
+    #   nobody classified stays private) is judged HERE and in every leaf
+    #   service method a route could reach without calling `execute`
+    #   (`core.state_privacy.writer_only_read`). A route that bypasses `execute`
+    #   is refused by the very same function.
+    # * the PROJECT's privacy (opened or not) is judged HERE from
+    #   `service.project_read_trusted`, which `api.authz.may_read_private`
+    # * the PROJECT's privacy (opened or not) is judged HERE from
+    #   `service.project_read_trusted`, which `api.authz.may_read_private`
+    #   derives from the raw credential once per request; a forged route
+    #   declaration cannot change it.
+    #
+    # Beneath both, the connection itself carries the table verdict: a reader
+    # that reaches a private table without going through `execute` and without
+    # any decoration is refused by the trust-bound handle's authorizer, so no
+    # list of readers - hand-written or derived - has to be complete.
+    #   declaration cannot change it.
+    #
+    # Both run BEFORE argument validation so an anonymous probe is refused as
+    # private, never bounced with a structural error that itself leaks the
+    # project's request shape.
+
     anonymous = _anonymous(service)
     if anonymous and action in READ_REQUESTS:
+        from core import state_privacy
+        state_privacy.refuse_private_read(not anonymous, action)
         _refuse_if_project_not_public(service, action, arguments)
+
     try:
         args = REQUESTS[action].model_validate(arguments).model_dump()
     except ValidationError as exc:

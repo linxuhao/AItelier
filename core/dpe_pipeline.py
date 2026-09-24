@@ -43,6 +43,119 @@ def _repair_json_content(raw: str) -> str | None:
         return None
 
 
+# ── Why did a JSON reply fail to parse? ───────────────────────────────────
+# `_extract_json` returning None has two causes that must never share one
+# answer, because only one of them is the agent's mistake:
+#
+#   (A) NO_JSON    — the model answered in prose. "You MUST respond with ONLY a
+#                    JSON object" is the right correction there; it reformats.
+#   (B) TRUNCATED  — the model DID answer in JSON and the provider cut it off
+#                    mid-structure. That instruction is useless here: the agent
+#                    was already sending JSON, and the most likely effect of
+#                    repeating it is the SAME oversized payload a second time.
+#
+# Live incident (run 340aa512, step_instance 7132, 2026-09-21): turn 15 sent
+# 20,061 characters ending `*** End Patch\n}}"}]`, the unclosed top-level
+# object was read as a formatting mistake, and the round died with zero bytes
+# written. Retained corpus:
+# tests/fixtures/jsonmode_truncation_20260921_trace_7132.jsonl (seq 88, 95).
+JSON_FAILURE_TRUNCATED = "truncated"
+JSON_FAILURE_NO_JSON = "no_json"
+
+
+# A patch payload that approaches the output ceiling is refused BEFORE it is
+# submitted, with instruction to split. The upstream preflight message —
+# "hunks overlap or are out of order; combine them" (trace seq 88) — is what
+# pushed the agent to send the whole file in one call, and that call was cut off
+# (seq 95). Ordered hunks within one call is a requirement; it is not a licence
+# to send the whole file at once. SkillFlow owns that wording, so the host's own
+# lever is this ceiling.
+_APPLY_PATCH_MAX_CHARS = 12000
+
+
+def classify_json_failure(text: str) -> str:
+    """Tell a truncated completion apart from a formatting mistake.
+
+    Counts braces/brackets only OUTSIDE strings, so an `apply_patch` body full
+    of JSON cannot masquerade as nested structure. A reply that opened a
+    structure and never closed it — or that stopped inside an unterminated
+    string — was cut off. A reply with nothing to close was merely not JSON.
+
+    Round brackets are deliberately NOT counted: JSON has none, and a `(` in
+    ordinary prose used to raise a depth that no `)` ever brought back down --
+    the very misfire this classifier exists to prevent (see the retained corpus).
+    """
+    depth = 0
+    in_string = False
+    escaped = False
+    opened = False
+    for ch in text or "":
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch in "{[":
+            depth += 1
+            opened = True
+        elif ch in "}]":
+            depth -= 1
+    if opened and (depth > 0 or in_string):
+        return JSON_FAILURE_TRUNCATED
+    return JSON_FAILURE_NO_JSON
+
+
+def _truncation_feedback(text: str) -> str:
+    """What to tell an agent whose JSON was cut off by the output ceiling.
+
+    It must NOT repeat "respond with ONLY a JSON object" — the agent did. It
+    has to say what happened, how big it was, and that the fix is to split the
+    work across several smaller calls. A truncated patch is never repaired and
+    never applied: guessing where it ended would apply half a change as though
+    it were whole, which is worse than this round failing.
+    """
+    return (
+        f"Your previous response was TRUNCATED: it was cut off by the output "
+        f"ceiling after {len(text or ''):,} characters, in the middle of JSON, "
+        f"so nothing in it was executed and nothing was written. This is not a "
+        f"JSON format mistake — do not reformat and do not resend the same "
+        f"payload, because it would be cut off at the same place. Split the "
+        f"work into several smaller calls and send them one turn at a time, "
+        f"each comfortably under the ceiling: one file, or a few ordered "
+        f"non-overlapping hunks, per apply_patch call, then continue with the "
+        f"next turn. A truncated patch is never applied for you."
+    )
+
+
+def oversized_patch_refusal(params: object) -> dict | None:
+    """Refuse an apply_patch payload too large for one model response."""
+    params = params if isinstance(params, dict) else {}
+    total = sum(len(v) for k, v in params.items()
+                if k in ("patch", "references") and isinstance(v, str))
+    if total <= _APPLY_PATCH_MAX_CHARS:
+        return None
+    return {
+        "error": (
+            f"apply_patch refused before submission: this call carries "
+            f"{total:,} characters of patch/references, above the "
+            f"{_APPLY_PATCH_MAX_CHARS:,}-character ceiling for a single call. "
+            f"Hunks within one call must be ordered and non-overlapping, but "
+            f"that never means the whole file in one call. Split the change "
+            f"into several smaller apply_patch calls on separate turns — one "
+            f"file, or a few hunks of one file, each well under the ceiling. "
+            f"Nothing was written."
+        ),
+        "oversized": True,
+        "chars": total,
+        "limit": _APPLY_PATCH_MAX_CHARS,
+    }
+
+
 class MaxRetriesExceeded(Exception):
     """达到最大重试次数熔断异常"""
     pass
@@ -1281,42 +1394,21 @@ class PipelineEngine:
 
     @staticmethod
     def _detect_truncated_json(text: str) -> bool:
-        """Detect if JSON response was truncated (unmatched braces at depth > 0).
+        """True when this reply was CUT OFF, not merely not-JSON.
 
-        Fix 18: Detect model output truncation and enable recovery strategies.
+        Delegates to `classify_json_failure` so there is one classifier. The
+        old version counted `{` and `}` over the whole reply, including the
+        inside of strings: an `apply_patch` body containing JSON braces made a
+        complete reply look unbalanced, and a truncated reply containing a
+        quoted `}` could look balanced. Both are the same mistake — measuring
+        structure without knowing where the strings are.
+
+        This flag only CLASSIFIES. There is no repair: a truncation is refused
+        and the agent is told to split, because half a patch applied as though
+        it were whole is worse than the round failing (see
+        `classify_json_failure`).
         """
-        depth = 0
-        for ch in text:
-            if ch == '{':
-                depth += 1
-            elif ch == '}':
-                depth -= 1
-        return depth > 0  # Positive depth means unmatched open braces (truncated)
-
-    @staticmethod
-    def _repair_truncated_json(text: str) -> str | None:
-        """Attempt to repair truncated JSON by adding missing closing braces.
-
-        Fix 18: Simple repair strategy for truncated model outputs.
-        """
-        depth = 0
-        for ch in text:
-            if ch == '{':
-                depth += 1
-            elif ch == '}':
-                depth -= 1
-
-        if depth <= 0:
-            return text  # Not truncated or over-closed
-
-        # Add missing closing braces
-        repaired = text.rstrip()
-        # Remove trailing incomplete content (partial strings, etc.)
-        # Find last valid structure point
-        repaired = repaired.rstrip('"').rstrip(',').rstrip()
-        # Add missing braces
-        repaired += '\n' + ('}' * depth)
-        return repaired
+        return classify_json_failure(text) == JSON_FAILURE_TRUNCATED
 
     def _make_feedback_example(self) -> str:
         """Build a step-aware JSON example for feedback messages.
@@ -1861,13 +1953,26 @@ class PipelineEngine:
             # value must not win through the framework's setdefault behavior.
             for identity in ("run_id", "step_id", "project_id", "operation_id", "config_name"):
                 params.pop(identity, None)
-        if tool_name == "apply_patch":
+        elif tool_name == "apply_patch":
             if (getattr(self, "_output_target", "artifact") != "code"
-                    or getattr(self, "_output_fixed", {}) or "apply_patch" not in schemas):
+                    or getattr(self, "_output_fixed", {})
+                    or "apply_patch" not in schemas):
                 return {"error": "apply_patch requires a granted generic code-output step"}
             if not set(params) <= {"patch", "references"} or not params:
                 return {"error": ("apply_patch accepts only patch and/or "
                                   "references")}
+            # upstream cause: SkillFlow's preflight text — "hunks overlap or are
+            # out of order; combine them" (trace seq 88) — is read as "send the
+            # whole file at once", and the next turn's 20,061-character payload
+            # was cut off (seq 95). Ordered, non-overlapping hunks describe ONE
+            # call; they never mean one call must carry the whole file. A payload
+            # that cannot survive the output ceiling is refused here, with
+            # instruction to split, instead of being submitted and truncated.
+            oversized = oversized_patch_refusal(params)
+            if oversized is not None:
+                self._emit("patch_oversized", oversized)
+                self._trace("step", "patch_oversized_refused", oversized)
+                return oversized
         elif "apply_patch" in schemas and tool_name in ("create", "edit", "write", "repo_remove_file"):
             return {"error": "Use the granted apply_patch tool for code Add/Update/Delete operations"}
         review_session = getattr(self, "_writing_review_session", None)
@@ -1876,6 +1981,9 @@ class PipelineEngine:
             blocked = review_session.guard(tool_name, params)
             if blocked is not None:
                 return blocked
+        # Write-scope refusal is checked for EVERY mutator here, before
+        # SkillFlow sees the call, so an unauthorized path is refused with its
+        # own message instead of surfacing as a generic tool failure.
         refusal = self._write_scope_refusal(tool_name, params)
         if refusal is not None:
             return refusal
@@ -2475,26 +2583,28 @@ class PipelineEngine:
 
                 payload = self._extract_json(response, try_multiple=True)
                 if payload is None:
-                    # Fix 18: Detect and repair truncated JSON output
+                    # Two causes, two answers. A truncated completion is NOT a
+                    # formatting mistake, and it is never repaired: closing the
+                    # braces by guesswork would apply half a patch as though it
+                    # were whole. The round is handed BACK to the agent with the
+                    # real reason, so it can split the work and continue in a
+                    # later turn instead of the whole step dying here.
                     if self._detect_truncated_json(response):
-                        self._emit("truncation_detected", {"preview": "JSON appears truncated, attempting repair"})
-                        repaired_text = self._repair_truncated_json(response)
-                        payload = self._extract_json(repaired_text, try_multiple=True)
-                        if payload is not None:
-                            self._emit("truncation_repaired", {"preview": "Successfully repaired truncated JSON"})
-                            # Continue to process payload below
-                            if "files" in payload and isinstance(payload["files"], dict):
-                                for filename, content in payload["files"].items():
-                                    if not filename or not content:
-                                        continue
-                                    safe_content = self._ensure_valid_json_content(filename, str(content))
-                                    self._write_output_file(workspace, project_id, step_id, filename, safe_content)
-                                    written_files.append(filename if self._output_file_target(filename) == "code"
-                                                 else WorkspaceManager._sanitize_filename(filename, safe_content))
-                                self._emit("files_written", {"files": written_files,
-                                            "preview": f"Written {len(written_files)} file(s) (repaired)"})
-                                break
+                        self._emit("truncation_detected", {
+                            "chars": len(response),
+                            "preview": (f"Response truncated at {len(response):,} "
+                                        f"chars; refused, not repaired")})
+                        self._trace("step", "truncation_refused", {
+                            "mode": "json", "role": role, "attempt": attempt,
+                            "turn": tool_turn + 1, "chars": len(response),
+                            "tail": response[-80:]})
+                        self._feedback_exploratory = False
+                        feedback = _truncation_feedback(response)
+                        tool_results.append(feedback)
+                        tool_turn += 1
+                        continue
                     if payload is None:
+
                         # Treat free-text response as a message from the agent.
                         # Stream it via SSE and feed it back as conversation context
                         # so the agent can continue in the next turn.
@@ -2965,6 +3075,34 @@ class PipelineEngine:
                     if _norm:
                         self._emit("payload_normalized", _norm)
                 if payload is None:
+                    # (乙) The model DID answer in JSON and the output was cut off.
+                    # This is a capacity problem, not a formatting one, and the
+                    # "ONLY a JSON object" instruction below is the wrong answer:
+                    # the agent is already sending JSON, and the likeliest effect
+                    # of repeating it is the SAME oversized payload again, which
+                    # truncates at the same place and burns another turn. Tell it
+                    # what happened, how big it was, and to SPLIT the work across
+                    # smaller calls — then hand the round back so it can actually
+                    # do that. Nothing here repairs or applies the truncated
+                    # payload: half a patch applied as though whole is worse than
+                    # this round failing.
+                    if self._detect_truncated_json(response):
+                        self._emit("truncation_detected", {
+                            "chars": len(response),
+                            "preview": (f"Response truncated at {len(response):,} "
+                                        f"chars; refused, not repaired")})
+                        self._trace("step", "truncation_refused", {
+                            "role": role, "attempt": attempt,
+                            "turn": tool_turn + 1, "chars": len(response),
+                            "tail": response[-80:]})
+                        self._feedback_exploratory = False
+                        feedback = _truncation_feedback(response)
+                        self._emit("parse_error", {"error": feedback,
+                                                   "preview": "Truncated response refused"})
+                        tool_turn += 1
+                        continue
+                    # (甲) Prose only — no JSON was ever attempted. Unchanged: the
+                    # reformat instruction is the correct correction here.
                     # Prose fallback: auto-convert non-JSON output to user-visible message
                     message_count += 1
                     if message_count <= MAX_MESSAGES_PER_STEP:
@@ -2978,12 +3116,10 @@ class PipelineEngine:
                     feedback = (
                         "System Error: Failed to parse JSON. "
                         "You MUST respond with ONLY a JSON object like: "
-                        '{\"thoughts\": \"...\", \"actions\": [{\"tool\": \"write\", \"params\": {\"file\": \"path\", \"content\": \"...\"}}]}. '
+                        '{"thoughts": "...", "actions": [{"tool": "write", "params": {"file": "path", "content": "..."}}]}. '
                         "Do NOT add any text before or after the JSON."
                     )
                     self._emit("parse_error", {"error": feedback, "preview": "JSON Parse Error"})
-                    # A break here falls through to successful delivery of any
-                    # earlier media output, silently dropping this malformed turn.
                     raise MaxRetriesExceeded(
                         f"Task {task_id} Step {step_id}: {feedback}")
 

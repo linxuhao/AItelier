@@ -20,7 +20,10 @@ def engine(tmp_path, responses, *, failed_writes=0):
     e.calls, e.events, e.traces, e.prompts = [], [], [], []
     def run(prompt):
         e.prompts.append(prompt)
-        return next(answers)
+        # Once the script is spent, keep returning the malformed reply: a turn
+        # the engine consumes (a refused truncation costs a turn, not the whole
+        # attempt) must not surface as a StopIteration that masks the outcome.
+        return next(answers, INVALID)
     agent = SimpleNamespace(run=run, gateway=SimpleNamespace(litellm_model="stub"))
     e.factory = SimpleNamespace(get_agent=lambda _: agent,
         get_max_retries=lambda _: 3, get_max_tool_turns=lambda _: len(responses))
@@ -72,12 +75,21 @@ def successful_writes():
 
 @pytest.mark.parametrize("prior_media", [False, True])
 def test_malformed_json_cannot_complete_or_replay_media(tmp_path, prior_media):
-    responses = ([response(action("gen_image_asset"))] if prior_media else []) + [INVALID]
+    # A truncated turn now costs a TURN rather than the attempt, so script enough
+    # of them for the budget to run out on its own — which is the point: the
+    # round is handed back and never completes by replaying a write.
+    responses = ([response(action("gen_image_asset"))] if prior_media else []) + [INVALID] * 12
     e = engine(tmp_path, responses)
-    with pytest.raises(MaxRetriesExceeded, match="parse JSON"):
+    # INVALID is a structure that opened and never closed, so it is classified as
+    # a TRUNCATED completion and refused with "split the work" rather than
+    # answered with the formatting instruction. What this test binds is unchanged:
+    # no write is replayed, no step reports done, and the round does not complete.
+    with pytest.raises(MaxRetriesExceeded):
         run(e)
+    assert any(ev == "truncation_refused" for _c, ev, _p in e.traces)
     assert not any(kind == "step_done" for kind, _ in e.events)
-    assert e.traces[-1][2]["text"] == INVALID
+    assert any(payload.get("text") == INVALID
+               for _c, ev, payload in e.traces if ev == "agent_response")
     assert sum(c["tool"] == "gen_image_asset" for c in e.calls) == int(prior_media)
     assert not any(c["tool"] == "create" for c in e.calls)
     if prior_media:

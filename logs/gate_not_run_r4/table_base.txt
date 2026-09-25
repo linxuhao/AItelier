@@ -1,0 +1,228 @@
+note: base = detached worktree ~/.AItelier/worktrees-scratch/gn4-base at 1b40d4845a59de759cb2de32def342048afd236e with one file added, tests/unit/test_repo_gate_outcome_table.py copied from c9e6dd942663ec3b28eb3675916e1574dcec6a29; no tracked file changed (git status: ?? tests/unit/test_repo_gate_outcome_table.py)
+date: 2026-09-25T03:58:04Z
+tree: /home/linxuhao/.AItelier/worktrees-scratch/gn4-base head: 1b40d4845a59de759cb2de32def342048afd236e
+command: python -m pytest -p no:cacheprovider -s -q -rf tests/unit/test_repo_gate_outcome_table.py -k test_the_outcome_of_every_report_shape
+env: docker run --rm --init -m 3g --network aitelier_default -u 1000:1000 HOME=/home/linxuhao PYTHONPATH=/home/linxuhao/.AItelier/worktrees-scratch/gn4-base PYTHONDONTWRITEBYTECODE=1 image aitelier:latest
+throwaway containers (aitelier image, not prod) before launch: 3
+in-container git head: 1b40d4845a59de759cb2de32def342048afd236e status-lines: 1
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gn4-base/aitelier/tools/run_tests/impl.py
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gn4-base/aitelier/gate_admission.py
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gn4-base/core/gate_deferral.py
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gn4-base/core/skillflow_host.py
+IMPORT skillflow /usr/local/lib/python3.12/site-packages/skillflow/__init__.py
+ROW {"row": "clean_refusal", "measured": "unmeasured", "repo_gate_absent": true, "next": "test_gate_absent", "identity_error": false, "returncode": 2, "admission": "not_admitted", "retained_findings": 0, "retained_error": null, "failures": ["repo_gate:run_tests.sh was NOT measured (engine admission: not_admitted; 1 attempt(s)): godot-builder unreachable at htt"]}
+.ROW {"row": "python_red_then_refused", "measured": "measured_fail", "repo_gate_absent": false, "next": "implement", "identity_error": false, "returncode": 2, "admission": "not_admitted", "retained_findings": 1, "retained_error": null, "failures": ["repo_gate:run_tests.sh#python/3d959bcbf887 failed: the python suite exited 1"]}
+.ROW {"row": "compile_red_then_refused", "measured": "measured_fail", "repo_gate_absent": false, "next": "implement", "identity_error": false, "returncode": 2, "admission": "not_admitted", "retained_findings": 1, "retained_error": null, "failures": ["repo_gate:run_tests.sh#compile/7ae4b99f46d6 failed: res://a.gd:3: Parse Error: table"]}
+.ROW {"row": "second_manifest_same_repo", "measured": "unmeasured", "repo_gate_absent": true, "next": "test_gate_absent", "identity_error": false, "returncode": 2, "admission": "not_admitted", "retained_findings": null, "retained_error": null, "failures": ["repo_gate:run_tests.sh was NOT measured (engine admission: not_admitted; 1 attempt(s)): godot-builder unreachable at htt"]}
+FROW {"row": "foreign_unreadable_manifest", "measured": "unmeasured", "repo_gate_absent": true, "next": "test_gate_absent", "identity_error": false, "returncode": 2, "admission": "not_admitted", "retained_findings": null, "retained_error": null, "failures": ["repo_gate:run_tests.sh was NOT measured (engine admission: not_admitted; 1 attempt(s)): godot-builder unreachable at htt"]}
+FROW {"row": "missing_stage_report", "measured": "unmeasured", "repo_gate_absent": true, "next": "test_gate_absent", "identity_error": false, "returncode": 2, "admission": "not_admitted", "retained_findings": null, "retained_error": null, "failures": ["repo_gate:run_tests.sh was NOT measured (engine admission: not_admitted; 1 attempt(s)): godot-builder unreachable at htt"]}
+FROW {"row": "nested_two_levels", "measured": "unmeasured", "repo_gate_absent": true, "next": "test_gate_absent", "identity_error": false, "returncode": 2, "admission": "not_admitted", "retained_findings": null, "retained_error": null, "failures": ["repo_gate:run_tests.sh was NOT measured (engine admission: not_admitted; 1 attempt(s)): godot-builder unreachable at htt"]}
+FROW {"row": "empty_findings_failed_stage", "measured": "unmeasured", "repo_gate_absent": true, "next": "test_gate_absent", "identity_error": false, "returncode": 2, "admission": "not_admitted", "retained_findings": 0, "retained_error": null, "failures": ["repo_gate:run_tests.sh was NOT measured (engine admission: not_admitted; 1 attempt(s)): godot-builder unreachable at htt"]}
+FROW {"row": "foreign_names_repo_gate_wrote_none", "measured": "measured_fail", "repo_gate_absent": false, "next": "implement", "identity_error": false, "returncode": 2, "admission": "not_admitted", "retained_findings": 1, "retained_error": null, "failures": ["repo_gate:run_tests.sh#python/468f5b811b9d failed: other writer: the python suite exited 1"]}
+FROW {"row": "foreign_names_repo_beside_own", "measured": "unmeasured", "repo_gate_absent": true, "next": "test_gate_absent", "identity_error": false, "returncode": 2, "admission": "not_admitted", "retained_findings": null, "retained_error": null, "failures": ["repo_gate:run_tests.sh was NOT measured (engine admission: not_admitted; 1 attempt(s)): godot-builder unreachable at htt"]}
+FROW {"row": "other_repo_reports_beside_green_gate", "measured": "measured_pass", "repo_gate_absent": false, "next": "done", "identity_error": false, "returncode": 0, "admission": "answered", "retained_findings": 0, "retained_error": null, "failures": []}
+.ROW {"row": "declared_absence", "measured": "unmeasured", "repo_gate_absent": true, "next": "test_gate_absent", "identity_error": false, "returncode": 3, "admission": "no_engine_request", "retained_findings": 0, "retained_error": null, "failures": ["repo_gate:run_tests.sh was NOT measured (engine admission: no_engine_request; 1 attempt(s)): AITELIER_REPO_GATE_UNMEASUR"]}
+.ROW {"row": "declared_failed_is_not_an_absence", "measured": "measured_fail", "repo_gate_absent": false, "next": "implement", "identity_error": true, "returncode": 3, "admission": "no_engine_request", "retained_findings": 0, "retained_error": null, "failures": ["repo_gate:run_tests.sh failed (rc=3): AITELIER_REPO_GATE_UNMEASURED={\"state\": \"failed\", \"reason\": \"table\"}"]}
+.ROW {"row": "gate_killed_at_its_timeout", "measured": "unmeasured", "repo_gate_absent": true, "next": "test_gate_absent", "identity_error": false, "returncode": -1, "admission": "no_engine_request", "retained_findings": 0, "retained_error": null, "failures": ["repo_gate:run_tests.sh was NOT measured (engine admission: no_engine_request; 1 attempt(s)): timed out after 3s: bash /t"]}
+.ROW {"row": "exit_2_after_an_answered_request", "measured": "measured_fail", "repo_gate_absent": false, "next": "implement", "identity_error": true, "returncode": 2, "admission": "answered", "retained_findings": 0, "retained_error": null, "failures": ["repo_gate:run_tests.sh failed (rc=2): "]}
+.ROW {"row": "exit_1_after_a_refusal", "measured": "measured_fail", "repo_gate_absent": false, "next": "implement", "identity_error": true, "returncode": 1, "admission": "not_admitted", "retained_findings": 0, "retained_error": null, "failures": ["repo_gate:run_tests.sh failed (rc=1): godot-builder unreachable at http://127.0.0.1:44901: HTTP Error 409: Conflict -- g"]}
+.ROW {"row": "pytest_red_beside_refused_gate", "measured": "unmeasured", "repo_gate_absent": false, "next": "implement", "identity_error": false, "returncode": 2, "admission": "not_admitted", "retained_findings": 0, "retained_error": null, "failures": ["FAILED tests/test_bad.py::test_bad - assert 1 == 2", "repo_gate:run_tests.sh was NOT measured (engine admission: not_admitted; 1 attempt(s)): godot-builder unreachable at htt"]}
+.ROW {"row": "pytest_wall_beside_refused_gate", "measured": "unmeasured", "repo_gate_absent": false, "next": "implement", "identity_error": false, "returncode": 2, "admission": "not_admitted", "retained_findings": 0, "retained_error": null, "failures": ["pytest:timed out after 3s — no results collected, the suite was killed mid-run", "repo_gate:run_tests.sh was NOT measured (engine admission: not_admitted; 1 attempt(s)): godot-builder unreachable at htt"]}
+FROW {"row": "node_runner_unavailable_beside_refused_gate", "measured": "unmeasured", "repo_gate_absent": false, "next": "test_evidence_missing", "identity_error": false, "returncode": 2, "admission": "not_admitted", "retained_findings": 0, "retained_error": null, "failures": ["node gate unavailable: npm not available — node gate skipped (install nodejs+npm in the backend image).", "repo_gate:run_tests.sh was NOT measured (engine admission: not_admitted; 1 attempt(s)): godot-builder unreachable at htt"]}
+.ROW {"row": "pytest_runner_unavailable_beside_refused_gate", "measured": "unmeasured", "repo_gate_absent": true, "next": "test_gate_absent", "identity_error": false, "returncode": 2, "admission": "not_admitted", "retained_findings": 0, "retained_error": null, "failures": ["repo_gate:run_tests.sh was NOT measured (engine admission: not_admitted; 1 attempt(s)): godot-builder unreachable at htt"]}
+FROW {"row": "green_gate", "measured": "measured_pass", "repo_gate_absent": false, "next": "done", "identity_error": false, "returncode": 0, "admission": "answered", "retained_findings": 0, "retained_error": null, "failures": []}
+.ROW {"row": "answered_red", "measured": "measured_fail", "repo_gate_absent": false, "next": "implement", "identity_error": false, "returncode": 1, "admission": "answered", "retained_findings": 2, "retained_error": null, "failures": ["repo_gate:run_tests.sh#script/a6414c8a715c failed: script res://tests/a.gd FAILED", "repo_gate:run_tests.sh#script/bef7e278faf2 failed: script res://tests/b.gd FAILED"]}
+.
+=================================== FAILURES ===================================
+______ test_the_outcome_of_every_report_shape[second_manifest_same_repo] _______
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_the_outcome_of_every_repo3')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7d9ce7c234d0>
+row_id = 'second_manifest_same_repo'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_outcome_of_every_report_shape(tmp_path, monkeypatch, row_id):
+        _mode, _leg, _busy, expected, identity_expected = ROWS[row_id]
+        result, report, observed, identity_error = _drive_row(
+            tmp_path, monkeypatch, row_id)
+>       assert observed == expected, (row_id, observed, expected)
+E       AssertionError: ('second_manifest_same_repo', ('unmeasured', True, 'test_gate_absent'), ('measured_fail', False, 'implement'))
+E       assert ('unmeasured'..._gate_absent') == ('measured_fa..., 'implement')
+E         
+E         At index 0 diff: 'unmeasured' != 'measured_fail'
+E         Use -v to get more diff
+
+tests/unit/test_repo_gate_outcome_table.py:317: AssertionError
+_____ test_the_outcome_of_every_report_shape[foreign_unreadable_manifest] ______
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_the_outcome_of_every_repo4')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7d9ce7c40050>
+row_id = 'foreign_unreadable_manifest'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_outcome_of_every_report_shape(tmp_path, monkeypatch, row_id):
+        _mode, _leg, _busy, expected, identity_expected = ROWS[row_id]
+        result, report, observed, identity_error = _drive_row(
+            tmp_path, monkeypatch, row_id)
+>       assert observed == expected, (row_id, observed, expected)
+E       AssertionError: ('foreign_unreadable_manifest', ('unmeasured', True, 'test_gate_absent'), ('measured_fail', False, 'implement'))
+E       assert ('unmeasured'..._gate_absent') == ('measured_fa..., 'implement')
+E         
+E         At index 0 diff: 'unmeasured' != 'measured_fail'
+E         Use -v to get more diff
+
+tests/unit/test_repo_gate_outcome_table.py:317: AssertionError
+_________ test_the_outcome_of_every_report_shape[missing_stage_report] _________
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_the_outcome_of_every_repo5')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7d9ce7c329c0>
+row_id = 'missing_stage_report'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_outcome_of_every_report_shape(tmp_path, monkeypatch, row_id):
+        _mode, _leg, _busy, expected, identity_expected = ROWS[row_id]
+        result, report, observed, identity_error = _drive_row(
+            tmp_path, monkeypatch, row_id)
+>       assert observed == expected, (row_id, observed, expected)
+E       AssertionError: ('missing_stage_report', ('unmeasured', True, 'test_gate_absent'), ('measured_fail', False, 'implement'))
+E       assert ('unmeasured'..._gate_absent') == ('measured_fa..., 'implement')
+E         
+E         At index 0 diff: 'unmeasured' != 'measured_fail'
+E         Use -v to get more diff
+
+tests/unit/test_repo_gate_outcome_table.py:317: AssertionError
+__________ test_the_outcome_of_every_report_shape[nested_two_levels] ___________
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_the_outcome_of_every_repo6')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7d9ce7c0f620>
+row_id = 'nested_two_levels'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_outcome_of_every_report_shape(tmp_path, monkeypatch, row_id):
+        _mode, _leg, _busy, expected, identity_expected = ROWS[row_id]
+        result, report, observed, identity_error = _drive_row(
+            tmp_path, monkeypatch, row_id)
+>       assert observed == expected, (row_id, observed, expected)
+E       AssertionError: ('nested_two_levels', ('unmeasured', True, 'test_gate_absent'), ('measured_fail', False, 'implement'))
+E       assert ('unmeasured'..._gate_absent') == ('measured_fa..., 'implement')
+E         
+E         At index 0 diff: 'unmeasured' != 'measured_fail'
+E         Use -v to get more diff
+
+tests/unit/test_repo_gate_outcome_table.py:317: AssertionError
+_____ test_the_outcome_of_every_report_shape[empty_findings_failed_stage] ______
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_the_outcome_of_every_repo7')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7d9ce7c43800>
+row_id = 'empty_findings_failed_stage'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_outcome_of_every_report_shape(tmp_path, monkeypatch, row_id):
+        _mode, _leg, _busy, expected, identity_expected = ROWS[row_id]
+        result, report, observed, identity_error = _drive_row(
+            tmp_path, monkeypatch, row_id)
+>       assert observed == expected, (row_id, observed, expected)
+E       AssertionError: ('empty_findings_failed_stage', ('unmeasured', True, 'test_gate_absent'), ('measured_fail', False, 'implement'))
+E       assert ('unmeasured'..._gate_absent') == ('measured_fa..., 'implement')
+E         
+E         At index 0 diff: 'unmeasured' != 'measured_fail'
+E         Use -v to get more diff
+
+tests/unit/test_repo_gate_outcome_table.py:317: AssertionError
+__ test_the_outcome_of_every_report_shape[foreign_names_repo_gate_wrote_none] __
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_the_outcome_of_every_repo8')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7d9ce7c4d3a0>
+row_id = 'foreign_names_repo_gate_wrote_none'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_outcome_of_every_report_shape(tmp_path, monkeypatch, row_id):
+        _mode, _leg, _busy, expected, identity_expected = ROWS[row_id]
+        result, report, observed, identity_error = _drive_row(
+            tmp_path, monkeypatch, row_id)
+>       assert observed == expected, (row_id, observed, expected)
+E       AssertionError: ('foreign_names_repo_gate_wrote_none', ('measured_fail', False, 'implement'), ('unmeasured', True, 'test_gate_absent'))
+E       assert ('measured_fa..., 'implement') == ('unmeasured'..._gate_absent')
+E         
+E         At index 0 diff: 'measured_fail' != 'unmeasured'
+E         Use -v to get more diff
+
+tests/unit/test_repo_gate_outcome_table.py:317: AssertionError
+____ test_the_outcome_of_every_report_shape[foreign_names_repo_beside_own] _____
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_the_outcome_of_every_repo9')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7d9ce7c62540>
+row_id = 'foreign_names_repo_beside_own'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_outcome_of_every_report_shape(tmp_path, monkeypatch, row_id):
+        _mode, _leg, _busy, expected, identity_expected = ROWS[row_id]
+        result, report, observed, identity_error = _drive_row(
+            tmp_path, monkeypatch, row_id)
+        assert observed == expected, (row_id, observed, expected)
+        # The report says the same as the return.
+        assert bool(report.get("repo_gate_absent")) is observed[1]
+        # A part that cannot be read, or a report that is not the gate's, is
+        # stated; it never hides a red (`measured`, above) and never makes one.
+>       assert identity_error is identity_expected, (row_id, identity_error)
+E       AssertionError: ('foreign_names_repo_beside_own', False)
+E       assert False is True
+
+tests/unit/test_repo_gate_outcome_table.py:322: AssertionError
+___ test_the_outcome_of_every_report_shape[pytest_wall_beside_refused_gate] ____
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_the_outcome_of_every_repo17')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7d9ce7996030>
+row_id = 'pytest_wall_beside_refused_gate'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_outcome_of_every_report_shape(tmp_path, monkeypatch, row_id):
+        _mode, _leg, _busy, expected, identity_expected = ROWS[row_id]
+        result, report, observed, identity_error = _drive_row(
+            tmp_path, monkeypatch, row_id)
+>       assert observed == expected, (row_id, observed, expected)
+E       AssertionError: ('pytest_wall_beside_refused_gate', ('unmeasured', False, 'implement'), ('unmeasured', True, 'test_gate_absent'))
+E       assert ('unmeasured'..., 'implement') == ('unmeasured'..._gate_absent')
+E         
+E         At index 1 diff: False != True
+E         Use -v to get more diff
+
+tests/unit/test_repo_gate_outcome_table.py:317: AssertionError
+_ test_the_outcome_of_every_report_shape[pytest_runner_unavailable_beside_refused_gate] _
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_the_outcome_of_every_repo19')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7d9ce79d3980>
+row_id = 'pytest_runner_unavailable_beside_refused_gate'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_outcome_of_every_report_shape(tmp_path, monkeypatch, row_id):
+        _mode, _leg, _busy, expected, identity_expected = ROWS[row_id]
+        result, report, observed, identity_error = _drive_row(
+            tmp_path, monkeypatch, row_id)
+>       assert observed == expected, (row_id, observed, expected)
+E       AssertionError: ('pytest_runner_unavailable_beside_refused_gate', ('unmeasured', True, 'test_gate_absent'), ('unmeasured', False, 'test_evidence_missing'))
+E       assert ('unmeasured'..._gate_absent') == ('unmeasured'...ence_missing')
+E         
+E         At index 1 diff: True != False
+E         Use -v to get more diff
+
+tests/unit/test_repo_gate_outcome_table.py:317: AssertionError
+=============================== warnings summary ===============================
+../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_outcome_of_every_report_shape[second_manifest_same_repo]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_outcome_of_every_report_shape[foreign_unreadable_manifest]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_outcome_of_every_report_shape[missing_stage_report]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_outcome_of_every_report_shape[nested_two_levels]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_outcome_of_every_report_shape[empty_findings_failed_stage]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_outcome_of_every_report_shape[foreign_names_repo_gate_wrote_none]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_outcome_of_every_report_shape[foreign_names_repo_beside_own]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_outcome_of_every_report_shape[pytest_wall_beside_refused_gate]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_outcome_of_every_report_shape[pytest_runner_unavailable_beside_refused_gate]
+9 failed, 13 passed, 2 deselected, 1 warning in 29.86s
+BARE_RC=1
+end: 2026-09-25T03:58:39Z

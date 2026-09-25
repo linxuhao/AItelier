@@ -1,0 +1,19 @@
+command (step of gn4-chain.sh on linxuhaserver, host python3, no container): python3 ~/.AItelier/worktrees-scratch/gn4-probes/plant_r4.py ~/.AItelier/worktrees-scratch/gn4-plant-P4_doc_paraphrase P4_doc_paraphrase > this file; git -C ~/.AItelier/worktrees-scratch/gn4-plant-P4_doc_paraphrase diff >> this file
+tree: detached worktree at c9e6dd942663ec3b28eb3675916e1574dcec6a29
+plant text: the reviewer's P1-P4 from gnr3 probes/mut_apply3.py, sentence text verbatim; the tool.yaml anchor moved in rev 4, so the sentence is inserted after the rev-4 line that ends the same sentence
+exit code of this step: not captured; the PLANT line prints only after the exact-once assert passed, and the diff below is the tree the tests ran on (their BARE_RC is in plant_P4_doc_paraphrase.txt)
+---
+PLANT P4_doc_paraphrase applied to docs/repo-gate-unmeasured-protocol.md
+diff --git a/docs/repo-gate-unmeasured-protocol.md b/docs/repo-gate-unmeasured-protocol.md
+index ccba5e90..519b5883 100644
+--- a/docs/repo-gate-unmeasured-protocol.md
++++ b/docs/repo-gate-unmeasured-protocol.md
+@@ -7,6 +7,8 @@ is **another card** (see "The other card" below).
+ 
+ ## The rule
+ 
++An unmeasured gate is only ever declared by the gate; nothing infers it.
++
+ > `unmeasured` has exactly three sources (the gate's declaration, the harness killing or failing to start the gate, and the relay's record that the engine did not answer the gate's last request together with an exit code other than 0 and 1); none of them applies when the gate's retained report names a failure, and an unmeasured gate is an absence only when nothing else in the report failed [rows: declared_absence, gate_killed_at_its_timeout, clean_refusal, python_red_then_refused, pytest_red_beside_refused_gate, pytest_wall_beside_refused_gate].
+ 
+ "Failed" there means measured red: a pytest killed at its wall measured

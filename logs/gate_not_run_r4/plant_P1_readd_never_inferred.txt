@@ -1,0 +1,97 @@
+date: 2026-09-25T03:58:39Z
+tree: /home/linxuhao/.AItelier/worktrees-scratch/gn4-plant-P1_readd_never_inferred head: c9e6dd942663ec3b28eb3675916e1574dcec6a29
+command: python -m pytest -p no:cacheprovider -q -rf tests/unit/test_repo_gate_outcome_table.py::test_every_routing_sentence_cites_a_row tests/unit/test_repo_gate_outcome_table.py::test_the_doc_routing_table_is_this_table tests/unit/test_tree_level_accounting_witnesses.py tests/unit/test_run_tests_unmeasured_declaration.py
+env: docker run --rm --init -m 3g --network aitelier_default -u 1000:1000 HOME=/home/linxuhao PYTHONPATH=/home/linxuhao/.AItelier/worktrees-scratch/gn4-plant-P1_readd_never_inferred PYTHONDONTWRITEBYTECODE=1 image aitelier:latest
+throwaway containers (aitelier image, not prod) before launch: 3
+in-container git head: c9e6dd942663ec3b28eb3675916e1574dcec6a29 status-lines: 1
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gn4-plant-P1_readd_never_inferred/aitelier/tools/run_tests/impl.py
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gn4-plant-P1_readd_never_inferred/aitelier/gate_admission.py
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gn4-plant-P1_readd_never_inferred/core/gate_deferral.py
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gn4-plant-P1_readd_never_inferred/core/skillflow_host.py
+IMPORT skillflow /usr/local/lib/python3.12/site-packages/skillflow/__init__.py
+F........F...........................................                    [100%]
+=================================== FAILURES ===================================
+___________________ test_every_routing_sentence_cites_a_row ____________________
+
+    def test_every_routing_sentence_cites_a_row():
+        """A sentence that says where a report goes, or what a gate run is worth,
+        names the rows of this table that drive it, as `[row: <id>]` or
+        `[rows: <id>, <id>]` (or, for what the scheduler does with an absence,
+        the drive that measures it: `[test: <file>::<function>]`); every row and
+        test it names exists. A sentence that makes such a claim and cites
+        nothing is not held down by any behaviour, so it fails here, however it
+        is worded."""
+        uncited, unknown = [], []
+        for where, sentence in _routing_statements():
+            if not _ROUTING_WORDS.search(sentence):
+                continue
+            cited = [r.strip() for m in _CITATION.finditer(sentence)
+                     for r in m.group(1).split(",") if r.strip()]
+            tests = _TEST_CITATION.findall(sentence)
+            if not cited and not tests:
+                uncited.append(f"{where}: {sentence[:200]}")
+            unknown += [f"{where}: {r}" for r in cited if r not in ROWS]
+            unknown += [f"{where}: {f}::{n}" for f, n in tests
+                        if not _test_exists(f, n)]
+        assert unknown == [], unknown
+>       assert uncited == [], "\n".join(uncited)
+E       AssertionError: tool.yaml: An absence is DECLARED and never inferred.
+E       assert ['tool.yaml: ...er inferred.'] == []
+E         
+E         Left contains one more item: 'tool.yaml: An absence is DECLARED and never inferred.'
+E         Use -v to get more diff
+
+tests/unit/test_repo_gate_outcome_table.py:425: AssertionError
+____________________ test_N9_the_protocol_text_has_a_reader ____________________
+
+    def test_N9_the_protocol_text_has_a_reader():
+        """N9 deleted five lines of contract text from tool.yaml and the whole
+        suite stayed green, which means nothing read them. This is the reader for
+        the things the text has to keep saying: unmeasured has exactly three
+        sources, an exit code is never one of them by itself, a retained finding
+        overrides all three, an unmeasured gate is an absence only when nothing
+        else failed, and a gate that produced no verdict may not be charged to the
+        implementer. The sentence r2 carried ("DECLARED and never inferred") was
+        false beside the third source, and may not come back.
+    
+        The witness reads the file N9 ACTUALLY deletes: tool.yaml, not docs/.
+        Both files are read with their line breaks folded to single spaces, so a
+        rewrap does not move a phrase out of reach.
+        """
+        raw = _source(_TOOL_YAML)
+        text = " ".join(raw.split())
+        assert "AITELIER_REPO_GATE_UNMEASURED=" in text, (
+            "N9: the declaration line the protocol is built on is gone from tool.yaml")
+        assert "UNMEASURED has exactly three sources" in text, (
+            "N9: tool.yaml no longer states the sources of UNMEASURED")
+        assert "An exit code is never a source by itself" in text, (
+            "N9: tool.yaml no longer says an exit code alone never produces UNMEASURED")
+        assert ("None of the three sources applies when the gate's retained "
+                "report names a failure") in text, (
+            "N9: tool.yaml no longer says a retained finding beats an absence")
+        assert "is an ABSENCE only when nothing else in the report failed" in text, (
+            "N9: tool.yaml no longer says an absence needs every other leg unfailed")
+>       assert "DECLARED and never" not in text and "never inferred" not in text.lower(), (
+            "N9: tool.yaml says UNMEASURED is never inferred, beside a source "
+            "that infers it")
+E       AssertionError: N9: tool.yaml says UNMEASURED is never inferred, beside a source that infers it
+E       assert ('DECLARED and never' not in 'name: run_t...et: artifact'
+E         
+E         'DECLARED and never' is contained here:
+E           bsence is DECLARED and never inferred. UNMEASURED has exactly three sources: that declaration; the harness's own observation that it killed the gate or could not start it (a timeout, a runner error); and the admission relay's record that the engine did not answer the gate's LAST request (refused admission with a 409, unreachable, abandoned or undelivered) together with an exit code other than 0 and 1 [rows: declared_absence, gate_killed_at_its_timeout, clean_refusal]. An exit code is never a source by itself: the game repo's own gate use...
+E         
+E         ...Full output truncated (2 lines hidden), use '-vv' to show)
+
+tests/unit/test_tree_level_accounting_witnesses.py:198: AssertionError
+=============================== warnings summary ===============================
+../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_every_routing_sentence_cites_a_row
+FAILED tests/unit/test_tree_level_accounting_witnesses.py::test_N9_the_protocol_text_has_a_reader
+2 failed, 51 passed, 1 warning in 13.76s
+BARE_RC=1
+end: 2026-09-25T03:58:57Z

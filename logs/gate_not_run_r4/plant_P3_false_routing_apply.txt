@@ -1,0 +1,19 @@
+command (step of gn4-chain.sh on linxuhaserver, host python3, no container): python3 ~/.AItelier/worktrees-scratch/gn4-probes/plant_r4.py ~/.AItelier/worktrees-scratch/gn4-plant-P3_false_routing P3_false_routing > this file; git -C ~/.AItelier/worktrees-scratch/gn4-plant-P3_false_routing diff >> this file
+tree: detached worktree at c9e6dd942663ec3b28eb3675916e1574dcec6a29
+plant text: the reviewer's P1-P4 from gnr3 probes/mut_apply3.py, sentence text verbatim; the tool.yaml anchor moved in rev 4, so the sentence is inserted after the rev-4 line that ends the same sentence
+exit code of this step: not captured; the PLANT line prints only after the exact-once assert passed, and the diff below is the tree the tests ran on (their BARE_RC is in plant_P3_false_routing.txt)
+---
+PLANT P3_false_routing applied to aitelier/tools/run_tests/tool.yaml
+diff --git a/aitelier/tools/run_tests/tool.yaml b/aitelier/tools/run_tests/tool.yaml
+index b0e0d271..e664e17c 100644
+--- a/aitelier/tools/run_tests/tool.yaml
++++ b/aitelier/tools/run_tests/tool.yaml
+@@ -43,6 +43,8 @@ description: >
+   [row: declared_absence].
+   `state` must be one of those three; `failed` / `red` never qualify, so one
+   line cannot turn a red into an absence [row: declared_failed_is_not_an_absence].
++  Every gate that did not run parks
++  at `test_gate_absent`, whatever else failed.
+   UNMEASURED has exactly three sources: that declaration; the harness's own
+   observation that it killed the gate or could not start it (a timeout, a
+   runner error); and the admission relay's record that the engine did not

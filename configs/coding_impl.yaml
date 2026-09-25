@@ -240,8 +240,11 @@ steps:
   # (core/gate_deferral.py); when the wait runs out the run advances, and the
   # ONLY edge out re-runs `test` to re-acquire the verdict. `implement` is not
   # reachable from here. The wall-clock ceiling of one episode ends the run
-  # naming the absence long before this edge's max_loop is spent (100 waits of
-  # the default 300 s is past the 6 h absolute ceiling).
+  # naming the absence. This edge's max_loop counts traversals over the whole
+  # run, so it can be spent first (a wait shorter than ceiling/100, or laps
+  # from several episodes); the scheduler then ends the run with the same
+  # absence sentence before the engine refuses the traversal
+  # (core/gate_deferral.py:absence_laps_spent).
   - id: "test_gate_absent"
     step_type: "gate"
     transitions:

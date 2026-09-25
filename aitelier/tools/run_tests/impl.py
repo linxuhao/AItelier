@@ -44,6 +44,7 @@ from aitelier.gate_evidence import release_disposition
 import sys
 import tempfile
 import time
+import urllib.parse
 from pathlib import Path
 
 
@@ -721,6 +722,10 @@ def _run_repo_gate(repo: Path) -> dict | None:
     result["report_dir"] = str(report_dir)
     result["repo"] = str(repo)
     result["admission"] = admission
+    # How many failures the gate's own retained report names (None when it
+    # kept no readable report for this repository). Read before the outcome:
+    # a finding makes the run `measured_fail` whatever else it reports.
+    result["retained_findings"] = _retained_finding_count(report_dir, repo)
     # ONE word for what this run of the gate is WORTH: `measured_pass`,
     # `measured_fail` or `unmeasured`. It is read by the fold in `run_tests`,
     # re-read by `_acquire_repo_gate`, and lands in every report a reviewer
@@ -749,18 +754,23 @@ _GATE_RE = re.compile(r"^((?:node|repo_gate):\S+)")
 _REPO_GATE_CASE_PREFIX = "AITELIER_REPO_GATE_CASE="
 _REPO_GATE_CASE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$")
 
-# ── UNMEASURED is DECLARED, never inferred ─────────────────────────────────
+# ── UNMEASURED: three sources, and a retained finding overrides all three ──
 #
-# A repository opts in to saying "I did not run" by emitting one whole line:
+# Source 1 is the repository's own statement that it did not run, one whole
+# line of its output:
 #
 #   AITELIER_REPO_GATE_UNMEASURED={"state":"blocked","reason":"..."}
 #
-# `state` must be one of `_REPO_GATE_UNMEASURED_STATES`. Nothing else in a
-# gate's output produces that reading, and in particular an EXIT CODE never
-# can. `2` is NOT "the engine never ran": the game repo's own gate uses it for
-# `incomplete`, which includes contract files the implementer wrote wrong
-# ("no authored scenarios found ... an empty one is not a pass"), and those
-# are MEASURED failures that have to stay visible with a non-empty failures[].
+# `state` must be one of `_REPO_GATE_UNMEASURED_STATES`. The other two
+# sources are the harness killing or failing to start the gate, and the
+# admission relay's record that the engine did not answer the gate's last
+# request together with an exit code other than 0 and 1 (`_repo_gate_outcome`).
+# An exit code alone is never a source. `2` is NOT "the engine never ran": the
+# game repo's own gate uses it for `incomplete`, which includes contract files
+# the implementer wrote wrong ("no authored scenarios found ... an empty one is
+# not a pass"), and those are MEASURED failures that have to stay visible with
+# a non-empty failures[]. And a gate whose retained report names any failure
+# measured that failure, so none of the three sources applies to it.
 _REPO_GATE_UNMEASURED_PREFIX = "AITELIER_REPO_GATE_UNMEASURED="
 _REPO_GATE_UNMEASURED_STATES = frozenset({"unmeasured", "not_run", "blocked"})
 
@@ -833,19 +843,26 @@ def _repo_gate_declares_unmeasured(gate: dict) -> bool:
 def _repo_gate_outcome(gate: dict) -> str:
     """`measured_pass`, `measured_fail` or `unmeasured`, for ONE gate run.
 
-    UNMEASURED has three sources and all are the framework OBSERVING the
-    absence itself: the gate's own declaration, a run this harness killed or
-    could not start (`timed_out` / `runner_error`), and a gate that exited
-    neither 0 nor 1 after the engine did not answer its last request — the
-    admission relay's record of the engine's own reply (`admission.state` in
-    `gate_admission.NOT_RUN_STATES`: refused admission, unreachable, or cut off
-    before its answer was delivered). `returncode` alone is never a source: 0
-    is `measured_pass`, 1 is `measured_fail` whatever the relay saw, and any
-    other code with no engine refusal behind it (a contract error, a crash)
-    stays `measured_fail`. A timeout is the framework's own observation,
-    exactly like the pytest wall whose `skipped_because="pytest_timeout"` this
-    aligns with.
+    The gate's retained report is read FIRST: when it names any failure
+    (`retained_findings` > 0, counted by `_run_repo_gate` from the report the
+    gate kept under its ticket), the run is `measured_fail`, whatever the exit
+    code, the relay record or a declaration say. A gate that measured a red
+    and was then refused on a later request still measured that red.
+
+    Otherwise UNMEASURED has three sources: the gate's own declaration, a run
+    this harness killed or could not start (`timed_out` / `runner_error`), and
+    a gate that exited neither 0 nor 1 after the engine did not answer its last
+    request — the admission relay's record of the engine's own reply
+    (`admission.state` in `gate_admission.NOT_RUN_STATES`: refused admission,
+    unreachable, or cut off before its answer was delivered). `returncode`
+    alone is never a source: 0 is `measured_pass`, 1 is `measured_fail`
+    whatever the relay saw, and any other code with no engine refusal behind
+    it (a contract error, a crash) stays `measured_fail`. A timeout is the
+    framework's own observation, exactly like the pytest wall whose
+    `skipped_because="pytest_timeout"` this aligns with.
     """
+    if gate.get("retained_findings"):
+        return REPO_GATE_MEASURED_FAIL
     if _repo_gate_declares_unmeasured(gate):
         return REPO_GATE_UNMEASURED
     if gate.get("timed_out") is True or gate.get("runner_error") is True:
@@ -907,9 +924,15 @@ def _finding_text(item) -> str:
     return json.dumps(item, ensure_ascii=False, sort_keys=True)
 
 
-def _report_dir_failure_cases(ticket_dir: Path, repo: Path
-                              ) -> tuple[list[dict], str | None] | None:
-    """Failure identities from the structured report a gate retained, or None.
+def _load_json(path: Path):
+    try:
+        return json.loads(path.read_text(encoding="utf-8")), None
+    except (OSError, ValueError) as e:
+        return None, f"repository gate report {path.name} is unreadable: {e}"
+
+
+def _retained_findings(ticket_dir: Path, repo: Path):
+    """Every failure the gate's retained report for `repo` names, unjudged.
 
     The gate writes its report under the ticket directory it was handed as
     GATE_REPORT_DIR: one `manifest.json` whose `stages` name every stage it
@@ -924,19 +947,12 @@ def _report_dir_failure_cases(ticket_dir: Path, repo: Path
     the one whose manifest names `repo`, the repository this gate ran for;
     every other report under the ticket is not read.
 
-    A finding's identity is `<stage>/<first 12 hex of its sha256>`, so the
-    same finding keeps the same key on the next run. None means the gate
-    retained no report for `repo` here and the caller falls back to the
-    output records.
+    Returns None when the gate retained no report for `repo` here, else
+    `(report_dir, findings, error)` where each finding is
+    `(stage, item, stage_report_path_or_None)`.
     """
     if not ticket_dir.is_dir():
         return None
-
-    def load(path: Path):
-        try:
-            return json.loads(path.read_text(encoding="utf-8")), None
-        except (OSError, ValueError) as e:
-            return None, f"repository gate report {path.name} is unreadable: {e}"
 
     def names_repo(manifest) -> bool:
         claimed = manifest.get("repo") if isinstance(manifest, dict) else None
@@ -952,52 +968,216 @@ def _report_dir_failure_cases(ticket_dir: Path, repo: Path
              if p.is_file()]
     owned = []
     for path in paths:
-        manifest, error = load(path)
+        manifest, error = _load_json(path)
         if error:
-            return [], error
+            return ticket_dir, [], error
         if names_repo(manifest):
             owned.append((path, manifest))
     if not owned:
         return None
     if len(owned) > 1:
-        return [], (f"repository gate retained {len(owned)} reports for "
-                    f"{repo} under one ticket ({ticket_dir.name})")
+        return ticket_dir, [], (f"repository gate retained {len(owned)} reports "
+                                f"for {repo} under one ticket ({ticket_dir.name})")
     manifest_path, manifest = owned[0]
     report_dir = manifest_path.parent
     stages = (manifest or {}).get("stages") if isinstance(manifest, dict) else None
     if not isinstance(stages, dict):
-        return [], "repository gate manifest names no stages"
-    records: list[dict] = []
-    seen: set[str] = set()
+        return report_dir, [], "repository gate manifest names no stages"
+    findings: list = []
     for stage, state in stages.items():
+        name = (state or {}).get("report") if isinstance(state, dict) else None
+        stage_path = report_dir / name if isinstance(name, str) and name else None
         findings_path = report_dir / f"{stage}-findings.json"
         if findings_path.is_file():
-            items, error = load(findings_path)
+            items, error = _load_json(findings_path)
             if error:
-                return [], error
+                return report_dir, [], error
             if not isinstance(items, list):
-                return [], f"repository gate {findings_path.name} is not a list"
+                return report_dir, [], (f"repository gate {findings_path.name} "
+                                        f"is not a list")
         else:
-            name = (state or {}).get("report") if isinstance(state, dict) else None
-            stage_report, error = load(report_dir / name) if name else (None, None)
+            stage_report, error = _load_json(stage_path) if stage_path else (None, None)
             if error:
-                return [], error
+                return report_dir, [], error
             if not isinstance(stage_report, dict) or stage_report.get("passed") is not False:
                 continue
             items = stage_report.get("errors") or [
                 stage_report.get("summary") or f"{stage} reported passed=false"]
-        for item in items:
-            text = _finding_text(item)
-            case_id = f"{stage}/{hashlib.sha256(text.encode('utf-8')).hexdigest()[:12]}"
-            if case_id in seen:
+        findings.extend((stage, item, stage_path) for item in items)
+    return report_dir, findings, None
+
+
+def _retained_finding_count(ticket_dir: Path, repo: Path) -> int | None:
+    """How many failures the gate's retained report names; None if unreadable."""
+    found = _retained_findings(ticket_dir, repo)
+    if found is None or found[2] is not None:
+        return None
+    return len(found[1])
+
+
+# A stage report up to this size is parsed whole. A play-test report carries
+# every capture the sidecar took (measured 2026-09-14: 442 MB, 441 MB of it
+# `captures`, 2.1 GB resident to parse), so above this only its trailing
+# top-level members are parsed (`_stage_report_fields`), and only when they
+# fit in STAGE_REPORT_TAIL_MAX (the same report's `behavior` was 630 KB).
+STAGE_REPORT_FULL_PARSE_MAX = 64 * 1024 * 1024
+STAGE_REPORT_TAIL_MAX = 64 * 1024 * 1024
+
+
+def _stage_report_fields(path: Path) -> dict | None:
+    """A stage report's fields, or None when they cannot be read.
+
+    Above `STAGE_REPORT_FULL_PARSE_MAX` the report is parsed from its LAST
+    `"behavior":` member to its end, wrapped in `{`. That text parses as a JSON
+    object only when the member sits at the report's top level: inside a string
+    the quote is escaped, and inside a nested object the suffix carries closing
+    brackets the `{` does not open. So a parse that succeeds read the report's
+    own `behavior` (and whatever top-level members follow it, `summary`
+    included).
+    """
+    import mmap
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return None
+    if size <= STAGE_REPORT_FULL_PARSE_MAX:
+        data, _error = _load_json(path)
+        return data if isinstance(data, dict) else None
+    try:
+        with open(path, "rb") as fh, mmap.mmap(fh.fileno(), 0,
+                                               access=mmap.ACCESS_READ) as m:
+            at = m.rfind(b'"behavior":')
+            if at <= 0 or size - at > STAGE_REPORT_TAIL_MAX:
+                return None
+            tail = m[at:]
+        data = json.loads(b"{" + tail)
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _id_part(value) -> str:
+    """One component of a case id: no whitespace, no `/`, same text -> same part."""
+    return urllib.parse.quote(str(value), safe="._-")
+
+
+def _assert_identities(stage: str, report: dict) -> dict:
+    """`{finding prefix: [case id, ...]}` for every failing assertion row.
+
+    A failing row is written by the gate as
+    `"  <scenario> / <name>: <expr> -> actual <actual>; observed <observed>"`;
+    everything after `-> actual ` is the value the run observed, so the prefix
+    before it, built here from the row's own fields, is what a finding is
+    matched on. The id is scenario, assertion name and frame, all three read
+    from the row: the same assertion evaluated at two frames is two ids, and
+    the observed value is in none of them. Rows are listed in report order,
+    which is the order the gate wrote their findings in.
+    """
+    out: dict = {}
+    behavior = report.get("behavior") if isinstance(report, dict) else None
+    for scenario in (behavior or {}).get("scenarios") or []:
+        if not isinstance(scenario, dict):
+            continue
+        for row in scenario.get("asserts") or []:
+            if not isinstance(row, dict):
                 continue
-            seen.add(case_id)
-            records.append({"case_id": case_id, "status": "failed",
-                            "detail": text[:1000]})
-    if not records:
+            if row.get("passed") is True and not row.get("error"):
+                continue
+            prefix = "  %s / %s: %s -> actual " % (
+                scenario.get("name"), row.get("name"), row.get("expr"))
+            case_id = "%s/%s/%s@%s" % (stage, _id_part(scenario.get("name")),
+                                       _id_part(row.get("name")),
+                                       _id_part(row.get("frame")))
+            out.setdefault(prefix, []).append(case_id)
+    return out
+
+
+def _repeatability_identity(stage: str, text: str) -> str | None:
+    """`repeatability <scenario>: <row> != <row>` -> scenario, name and frame.
+
+    The two rows are the JSON the gate embedded; the first one's `name` and
+    `frame` identify the assertion, and neither observed value is used.
+    """
+    head = "repeatability "
+    if not text.startswith(head):
+        return None
+    split = text.find(": {", len(head))
+    if split < 0:
+        return None
+    try:
+        row, end = json.JSONDecoder().raw_decode(text, split + 2)
+    except ValueError:
+        return None
+    if not isinstance(row, dict) or not text.startswith(" != ", end):
+        return None
+    return "%s/repeatability/%s/%s@%s" % (
+        stage, _id_part(text[len(head):split]), _id_part(row.get("name")),
+        _id_part(row.get("frame")))
+
+
+def _finding_identities(findings) -> list[dict]:
+    """One failure record per finding, with an id that does not change between runs.
+
+    In order of preference, a finding's id is built from:
+      * the failing assertion row it reports (`_assert_identities`),
+      * the assertion row a repeatability mismatch embeds,
+      * its text with the stage report's own `summary` cut off the end,
+      * its whole text.
+    The last two are sha256 prefixes. Two findings that end up with the same
+    id are both kept, the second as `<id>~2`, so no finding is dropped.
+    """
+    reports: dict = {}
+    pending: dict = {}
+    records: list[dict] = []
+    counts: dict = {}
+    for stage, item, stage_path in findings:
+        text = _finding_text(item)
+        case_id = None
+        if isinstance(item, str) and stage_path is not None:
+            if stage_path not in reports:
+                reports[stage_path] = _stage_report_fields(stage_path) or {}
+                pending[stage_path] = _assert_identities(stage, reports[stage_path])
+            if " -> actual " in text:
+                prefix = text[:text.index(" -> actual ") + len(" -> actual ")]
+                queue = pending[stage_path].get(prefix)
+                if queue:
+                    case_id = queue.pop(0)
+            if case_id is None:
+                case_id = _repeatability_identity(stage, text)
+            summary = reports[stage_path].get("summary")
+            if (case_id is None and isinstance(summary, str) and summary
+                    and len(text) > len(summary) and text.endswith(summary)):
+                stem = text[:-len(summary)]
+                case_id = (f"{stage}/summary/"
+                           f"{hashlib.sha256(stem.encode('utf-8')).hexdigest()[:12]}")
+        if case_id is None:
+            case_id = f"{stage}/{hashlib.sha256(text.encode('utf-8')).hexdigest()[:12]}"
+        counts[case_id] = counts.get(case_id, 0) + 1
+        if counts[case_id] > 1:
+            case_id = f"{case_id}~{counts[case_id]}"
+        records.append({"case_id": case_id, "status": "failed",
+                        "detail": text[:1000]})
+    return records
+
+
+def _report_dir_failure_cases(ticket_dir: Path, repo: Path
+                              ) -> tuple[list[dict], str | None] | None:
+    """Failure identities from the structured report a gate retained, or None.
+
+    Reads the findings of `_retained_findings` and names each one with
+    `_finding_identities`. None means the gate retained no report for `repo`
+    here and the caller falls back to the output records.
+    """
+    found = _retained_findings(ticket_dir, repo)
+    if found is None:
+        return None
+    report_dir, findings, error = found
+    if error is not None:
+        return [], error
+    if not findings:
         return [], (f"repository gate report {report_dir.name} names no "
                     f"failure")
-    return records, None
+    return _finding_identities(findings), None
 
 
 def _repo_gate_failure_cases(gate: dict) -> tuple[list[dict], str | None]:
@@ -1640,10 +1820,12 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
                 # red: a gate that produced no verdict decided nothing, so
                 # the run may not be sent back to the implementer for it
                 # (see core/gate_deferral.py). It is a separate key from
-                # `repo_gate_unmeasured` because that one is also set for a
-                # gate that never existed, and only a gate that RAN and
-                # stayed silent is an absence to wait on.
-                report["repo_gate_absent"] = True
+                # `repo_gate_unmeasured`, which says only that this gate
+                # measured nothing. The run is an ABSENCE only when nothing
+                # else in this report failed: next to any other entry in
+                # `failures` (a pytest red, a pytest wall, a node check) the
+                # report goes back to the implementer like any other red.
+                report["repo_gate_absent"] = not report["failures"]
                 report["failures"].append(
                     f"repo_gate:{gate['script']} was NOT measured "
                     f"(engine admission: {report['repo_gate_admission']}; "

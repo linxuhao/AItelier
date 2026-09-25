@@ -607,20 +607,27 @@ def test_an_absence_whose_failures_are_all_known_red_still_does_not_pass(
 # ── N9: the tool's OWN contract text is a witness, on the deleted segment ───
 
 _N9_SEGMENT = (
-    "  A gate that produced NO VERDICT does not loop back to `implement`: its\n"
-    "  absence is stated on the report, with\n"
+    "  A gate that produced NO VERDICT is an ABSENCE only when nothing else in\n"
+    "  the report failed: beside any other entry in `failures[]` (a pytest red,\n"
+    "  a pytest timeout, a node check red, an unavailable node gate) the report\n"
+    "  goes back to `implement` like any other red. An absence does not loop\n"
+    "  back to `implement`: it is stated on the report (with\n"
+    "  `evidence_state: \"not_run\"`), with\n"
     "  `repo_gate_unmeasured: true` and `repo_gate_absent: true` (plus\n"
     "  `repo_gate.measured: \"unmeasured\"` and `repo_gate.attempts`, the number of\n"
     "  runs the reading cost), and `configs/coding_impl.yaml` routes\n")
 
 
 def test_the_tool_doc_names_the_no_verdict_gate_as_absent_not_a_loop():
-    """The `tool.yaml` :52-56 segment is the human-visible contract that a
-    gate with NO verdict does not spend an implement cycle: it states
+    """The `tool.yaml` segment is the human-visible contract that a gate with
+    NO verdict does not spend an implement cycle: it states
     `repo_gate.attempts` and that `configs/coding_impl.yaml` routes the
     absence. N9 deletes exactly this segment. The witness asserts the segment
-    itself — not the neighbouring UNMEASURED-declaration prose at :42-45 that
-    r7 pinned instead."""
+    itself — not the neighbouring UNMEASURED-declaration prose that r7 pinned
+    instead. Since r3 the segment also states when a gate with no verdict is
+    an absence at all (nothing else in the report failed): its r2 opening,
+    "does not loop back to `implement`" for every such gate, was untrue for a
+    report that also carries a measured red."""
     tool_yaml = (Path(rt.__file__).parent / "tool.yaml").read_text(
         encoding="utf-8")
     assert _N9_SEGMENT in tool_yaml, (

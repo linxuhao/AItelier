@@ -7,11 +7,10 @@ is **another card** (see "The other card" below).
 
 ## The rule
 
-> `unmeasured` is **declared**, never inferred.
+> `unmeasured` has exactly three sources (the gate's declaration, the harness killing or failing to start the gate, and the relay's record that the engine did not answer the gate's last request together with an exit code other than 0 and 1); none of them applies when the gate's retained report names a failure, and an unmeasured gate is an absence only when nothing else in the report failed.
 
-The only things that produce `unmeasured` are the three the framework can see
-for itself (the third since r2, 2026-09-24 — see "A gate the engine did not
-admit" below):
+The three sources (the third since r2, 2026-09-24 — see "A gate the engine
+did not admit" below):
 
 1. **The gate's own declaration.** Exactly one whole line, emitted by the gate:
 
@@ -35,10 +34,25 @@ admit" below):
    the relay saw, and any other exit after an answered request stays
    `measured_fail`.
 
-Everything else is measured. `rc=0` is `measured_pass`; **every other exit
-code is `measured_fail`**, including `1`, `2`, `124`, `137`, `255`, `-1` and
-`-9`, unless source 3 applies. No exit code on its own is ever read as an
-absence, and that is the whole point:
+**First premise: a red beats absence** (r3, 2026-09-25). Before any of the
+three sources is read, `_run_repo_gate` counts the failures the gate's own
+retained report names (`repo_gate.retained_findings`: every entry of a
+`<stage>-findings.json`, and the `errors[]` of a stage report that says
+`passed: false`, in the report whose manifest names the repository). One
+finding makes the run `measured_fail`, whatever the exit code, the relay
+record or a declaration say: a gate that measured a red and was then refused
+on a later request still measured that red.
+
+**Second premise: an absence only when nothing else failed.** An `unmeasured`
+gate sets `repo_gate_absent: true` only when `failures[]` holds no other
+entry. A pytest red, a pytest timeout, a node check red, an unavailable node
+gate, an import error or any other entry keeps it `false`, and the run goes
+back to `implement` through the ordinary edge.
+
+Everything else is measured. With no retained finding, `rc=0` is
+`measured_pass`; **every other exit code is `measured_fail`**, including `1`,
+`2`, `124`, `137`, `255`, `-1` and `-9`, unless source 3 applies. No exit code
+on its own is ever read as an absence, and that is the whole point:
 the game repo's `tools/godot_gate.py` reserves `2` for `incomplete`, which
 includes contract files **the implementer wrote wrong** — its own text says
 "no authored scenarios found under ... — an empty one is not a pass". Reading
@@ -271,8 +285,9 @@ record. Two rules, both measured end to end through the REAL tool:
 
 So an absence that finds no baseline is given its own fourth state,
 `unmeasured`, which is in neither `BASELINE_MEASURED` nor the write path.
-Absence is declared at most once per report and is read from the report's own
-`repo_gate_absent` / `repo_gate_unmeasured` flags.
+Absence is stated at most once per report and is read from the report's own
+`repo_gate_absent` flag (`repo_gate_unmeasured` only when a report carries no
+`repo_gate_absent` key at all).
 
 The absence accounting (round 5), in
 `tests/unit/test_gate_deferral_is_accounted.py`:
@@ -352,13 +367,14 @@ request) is written to `<ticket>/admission.json` and to
 |---|---|
 | passed | `passed: true`, `repo_gate.measured: measured_pass` |
 | ran and red | `passed: false`, `repo_gate.measured: measured_fail`, `release_evidence: known_failure`, per-case `new_failures` |
-| not run | `passed: false`, `repo_gate.measured: unmeasured`, `repo_gate_absent: true`, `repo_gate_unmeasured: true`, `repo_gate_admission` / `repo_gate.admission.state` (`not_admitted`, `unreachable`, `abandoned`, `undelivered`), `evidence_state: not_run` when nothing else failed, `release_evidence: unresolved` |
+| not run | `passed: false`, `repo_gate.measured: unmeasured`, `repo_gate_absent: true` (false beside any other failure, r3), `repo_gate_unmeasured: true`, `repo_gate_admission` / `repo_gate.admission.state` (`not_admitted`, `unreachable`, `abandoned`, `undelivered`), `evidence_state: not_run`, `release_evidence: unresolved` |
 
 **Identities.** Each gate run has a ticket (`rt-<UTC>-<8 hex>`) and its own
 `GATE_REPORT_DIR` (`$AITELIER_HOME/gate-reports/<ticket>`). A red gate's
 identities are read from the findings it retained there
-(`_report_dir_failure_cases`), one per finding, keyed
-`<stage>/<sha256[:12]>`, never from the bounded tail. Only the report whose
+(`_report_dir_failure_cases`), one per finding, never from the bounded tail.
+Since r3 each identity is built from report fields that do not change between
+runs (see "Identities that survive a second run" below). Only the report whose
 manifest names the repository the gate ran for is read: the real gate's
 python stage runs the gate's own tests, and they retain reports for their
 fixture repository `/repo` under the same ticket.
@@ -367,7 +383,11 @@ fixture repository `/repo` under the same ticket.
 ledger holds the run for one wait per silent report (keyed by report path and
 mtime), then the tick logs `gate_deferral_reacquire` and advances, which
 re-runs the `test` step alone. The wall-clock ceiling still ends an absence
-that never clears, with the absence sentence.
+that never clears, with the absence sentence. Since r3 the same sentence also
+ends a run whose absence gate has spent its `max_loop` (read from the
+engine's `skillflow_edge_counts`, `core/gate_deferral.py:absence_laps_spent`):
+the edge's count covers the whole run, so a short wait or several episodes can
+spend it before the ceiling.
 
 The tests that hold this down (candidate mutations, one throwaway copy each,
 run against the 12 files of the gate and deferral suites):

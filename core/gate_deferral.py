@@ -268,7 +268,55 @@ def hold_blocks_advance(run_id: str, *, now: float | None = None,
         if absence is not None:
             book.note_absence(run_id, now=now, gate=absence["gate"],
                               report_key=_report_key(path))
+            # No lap left on the absence gate's edge back to `test`: the run
+            # is not advanced into the engine's cycle limit; the scheduler's
+            # tick ends it naming the absence (`observe_run` -> `expired`).
+            if absence_laps_spent(sf, run_id):
+                return True
     return book.deferring(run_id, now=now)
+
+
+#: The loop-external gate an absence parks a run at, and the one step its only
+#: edge leads back to (`configs/coding_impl.yaml`).
+ABSENCE_GATE = "test_gate_absent"
+ABSENCE_GATE_TARGET = "test"
+
+
+def absence_laps_spent(sf, run_id: str) -> bool:
+    """Has this run used every traversal the absence gate's edge allows?
+
+    Read from the engine's own counter: `skillflow_edge_counts` holds one row
+    per run and bounded edge, seeded with the edge's `max_loop` when the run
+    is created and counted up on every traversal, across every episode of
+    the run. The engine refuses the traversal once `count >= max_loop`, so
+    that is the condition here, read only while the run stands AT the absence
+    gate: that is where the next advance traverses the edge. A run already
+    back at `test` has been granted its last lap and runs it. A run with no
+    such row, or an engine that cannot be read, has not spent them.
+    """
+    if sf is None:
+        return False
+    try:
+        node = (sf.get_run(run_id) or {}).get("current_node")
+    except Exception:
+        return False
+    if node != ABSENCE_GATE:
+        return False
+    reader = getattr(sf, "_ro", None) or getattr(sf, "_tx", None)
+    if reader is None:
+        return False
+    try:
+        with reader() as conn:
+            row = conn.execute(
+                "SELECT count, max_loop FROM skillflow_edge_counts "
+                "WHERE run_id = ? AND from_step = ? AND to_step = ?",
+                (run_id, ABSENCE_GATE, ABSENCE_GATE_TARGET)).fetchone()
+    except Exception:
+        return False
+    if row is None:
+        return False
+    count, max_loop = row[0], row[1]
+    return max_loop is not None and count is not None and count >= max_loop
 
 
 def _row_get(row, name, index):
@@ -336,6 +384,11 @@ def read_absence(report_path) -> dict | None:
 
     Only the report's OWN flag counts: a report that says the run was graded
     and the code failed states no absence, whatever else it mentions in prose.
+    `repo_gate_absent` is that flag. A report that carries it as false names a
+    gate that measured nothing next to a failure that WAS measured, and that
+    run goes back to the implementer, so it is not waited on here.
+    `repo_gate_unmeasured` is read only from a report that has no
+    `repo_gate_absent` key at all.
     """
     from pathlib import Path
     if not report_path:
@@ -346,7 +399,9 @@ def read_absence(report_path) -> dict | None:
         return None
     if not isinstance(data, dict):
         return None
-    if not (data.get("repo_gate_absent") or data.get("repo_gate_unmeasured")):
+    absent = (data.get("repo_gate_absent") if "repo_gate_absent" in data
+              else data.get("repo_gate_unmeasured"))
+    if not absent:
         return None
     gate = data.get("repo_gate") or {}
     return {"gate": str(gate.get("script") or "the repository gate")}
@@ -384,5 +439,12 @@ def observe_run(sf, run_id: str, *, now: float | None = None,
         return {"state": "expired", "remaining": 0.0, "gate": episode.gate,
                 "reason": book.terminal_reason(run_id)}
     remaining = book.hold_remaining(run_id, now=moment)
+    if remaining <= 0 and absence_laps_spent(sf, run_id):
+        # The wait is over, and the only edge out of the absence gate has no
+        # lap left: advancing would end the run on the engine's own
+        # "cycle limit exceeded", which names no absence. It ends here instead,
+        # with the same sentence as the wall-clock ceiling.
+        return {"state": "expired", "remaining": 0.0, "gate": episode.gate,
+                "reason": book.terminal_reason(run_id)}
     return {"state": "silent" if remaining > 0 else "due",
             "remaining": remaining, "gate": episode.gate, "reason": ""}

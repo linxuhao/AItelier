@@ -171,21 +171,46 @@ def test_M21b_the_tree_witness_goes_red_on_the_actual_mutation():
 def test_N9_the_protocol_text_has_a_reader():
     """N9 deleted five lines of contract text from tool.yaml and the whole
     suite stayed green, which means nothing read them. This is the reader for
-    the two things the text has to keep saying: an absence is DECLARED and
-    never inferred, and a gate that produced no verdict may not be charged to
-    the implementer.
+    the things the text has to keep saying: unmeasured has exactly three
+    sources, an exit code is never one of them by itself, a retained finding
+    overrides all three, an unmeasured gate is an absence only when nothing
+    else failed, and a gate that produced no verdict may not be charged to the
+    implementer. The sentence r2 carried ("DECLARED and never inferred") was
+    false beside the third source, and may not come back.
 
     The witness reads the file N9 ACTUALLY deletes: tool.yaml, not docs/.
+    Both files are read with their line breaks folded to single spaces, so a
+    rewrap does not move a phrase out of reach.
     """
-    text = _source(_TOOL_YAML)
+    raw = _source(_TOOL_YAML)
+    text = " ".join(raw.split())
     assert "AITELIER_REPO_GATE_UNMEASURED=" in text, (
         "N9: the declaration line the protocol is built on is gone from tool.yaml")
-    assert "no exit code" in text.lower(), (
-        "N9: tool.yaml no longer says UNMEASURED is never an exit code")
-    assert "DECLARED and never" in text, (
-        "N9: tool.yaml no longer declares unmeasured is never inferred")
+    assert "UNMEASURED has exactly three sources" in text, (
+        "N9: tool.yaml no longer states the sources of UNMEASURED")
+    assert "An exit code is never a source by itself" in text, (
+        "N9: tool.yaml no longer says an exit code alone never produces UNMEASURED")
+    assert ("None of the three sources applies when the gate's retained "
+            "report names a failure") in text, (
+        "N9: tool.yaml no longer says a retained finding beats an absence")
+    assert "is an ABSENCE only when nothing else in the report failed" in text, (
+        "N9: tool.yaml no longer says an absence needs every other leg unfailed")
+    assert "DECLARED and never" not in text and "never inferred" not in text.lower(), (
+        "N9: tool.yaml says UNMEASURED is never inferred, beside a source "
+        "that infers it")
     # Also pin the protocol doc so a deletion from either file fires.
-    doc = _source(_PROTOCOL)
+    doc = " ".join(_source(_PROTOCOL).split())
+    assert "`unmeasured` has exactly three sources" in doc, (
+        "N9: the doc's rule no longer names the three sources")
+    assert ("none of them applies when the gate's retained report names a "
+            "failure") in doc, (
+        "N9: the doc's rule no longer says a retained finding beats an absence")
+    assert ("an unmeasured gate is an absence only when nothing else in the "
+            "report failed") in doc, (
+        "N9: the doc's rule no longer says an absence needs every other leg unfailed")
+    assert "never inferred" not in doc.lower(), (
+        "N9: the doc says unmeasured is never inferred, beside a source that "
+        "infers it")
     assert "gate did not run: no verdict was measured" in doc, (
         "N9: the sentence an expired absence ends with is gone")
     assert "never be charged to the implementer" in doc, (

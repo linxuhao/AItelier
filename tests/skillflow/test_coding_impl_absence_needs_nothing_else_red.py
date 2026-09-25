@@ -13,10 +13,17 @@
 #     run out before the default 3 h ceiling, and the run ended on the
 #     engine's "Gate 'test_gate_absent': cycle limit exceeded". It must end on
 #     the absence sentence instead.
+#
+# And one shape the director ruled on (rev 4, 2026-09-25): the round's pytest
+# is killed at its wall and the shared gate is busy. pytest's own summary says
+# "NOTHING was measured", so nothing was measured anywhere: the run waits at
+# the absence gate and spends no implement cycle.
+import gc
 import json
 
 from core import gate_deferral
 from skillflow.output_targets import git
+from skillflow.tool_loader import ToolLoader
 from tests.gate_fixture import GATE_PY, HarnessRig
 from tests.skillflow.test_coding_impl_gate_absence import (
     _SILENT_TAIL, _drive, _gate_calls, _wire)
@@ -64,6 +71,62 @@ def test_pole_4_a_pytest_red_behind_a_busy_gate_goes_back_to_implement(
     assert any("test_bad" in f for f in report["failures"])
 
 
+def _loaded_run_tests(sf):
+    """The `run_tests` function the host's ToolLoader loaded, as the graph runs it."""
+    loaders = [v for v in vars(sf).values() if isinstance(v, ToolLoader)]
+    if not loaders:
+        loaders = [o for o in gc.get_referents(*vars(sf).values())
+                   if isinstance(o, ToolLoader)]
+    assert len(loaders) == 1, (len(loaders), sorted(vars(sf)))
+    fn = loaders[0].load_fn("run_tests")
+    assert fn.__globals__["__file__"].endswith("aitelier/tools/run_tests/impl.py")
+    return fn
+
+
+def test_a_pytest_wall_behind_a_busy_gate_waits_at_the_absence_gate(
+        tmp_path, monkeypatch):
+    rig = HarnessRig(tmp_path / "harness", monkeypatch)
+    monkeypatch.setenv("GODOT_BUILDER_URL", rig.base)
+    monkeypatch.setenv("FIXTURE_GATE_CLIENT_TIMEOUT", "30")
+    monkeypatch.setenv("FIXTURE_GATE_OP", "coding-impl-gate")
+    monkeypatch.setenv("AITELIER_REPO_GATE_RENDER_WAIT_SECONDS", "0.3")
+    counter = tmp_path / "calls.txt"
+    try:
+        sf, run_id = _wire(tmp_path, monkeypatch, episode_max=30, wait=5,
+                           counter=counter, tail=_GATE_TAIL)
+        rig.hold()
+        project = sf._workspace.get_project_code_path("p", run_id=run_id)
+        (project / "tests" / "test_slow.py").write_text(
+            "import time\n\ndef test_slow():\n    time.sleep(30)\n")
+        git(project, "add", "tests/test_slow.py")
+        git(project, "commit", "-qm", "fixture: a suite that outlives the pytest wall")
+        fn = _loaded_run_tests(sf)
+        monkeypatch.setitem(fn.__globals__, "PYTEST_WALL_SECONDS", 2)
+        implement_runs, statuses, outcomes, nodes = _drive(
+            sf, run_id, monkeypatch, ticks=80, clock_step=1)
+        report = json.loads(gate_deferral.find_test_report(sf, run_id).read_text())
+    finally:
+        rig.close()
+    run = sf.get_run(run_id)
+    reason = run.get("error_reason") or ""
+    print("PYTEST_WALL " + json.dumps({
+        "implement_runs": implement_runs, "final_status": run["status"],
+        "error_reason": reason, "gate_calls": _gate_calls(counter),
+        "outcomes": outcomes,
+        "report": {k: report.get(k) for k in (
+            "passed", "timed_out", "skipped_because", "repo_gate_absent",
+            "repo_gate_unmeasured", "evidence_state", "failures")}}, indent=1))
+
+    assert implement_runs == 1, implement_runs
+    assert "test_gate_absent" in nodes, nodes
+    assert run["status"] == "failed", statuses[-3:]
+    assert "cycle limit" not in reason.lower(), reason
+    assert reason.startswith(gate_deferral.ABSENCE_TERMINAL), reason
+    assert report["timed_out"] is True
+    assert report["repo_gate_absent"] is True
+    assert any(f.startswith("pytest:timed out") for f in report["failures"])
+
+
 def test_the_absence_gate_laps_run_out_naming_the_absence(tmp_path, monkeypatch):
     """Wait 60 s, the default 3 h ceiling, a gate that never answers: 100 laps
     of 90 s fit inside the ceiling, so the edge's limit is what ends the run."""
@@ -90,3 +153,5 @@ def test_the_absence_gate_laps_run_out_naming_the_absence(tmp_path, monkeypatch)
     # Every lap the edge allows was used: the first run plus 100 re-runs.
     assert outcomes.count("reacquire") == 100
     assert _gate_calls(counter) == 101
+    # And the sentence counts those gate runs, not the ticks that looked.
+    assert reason.endswith("(run_tests.sh, 101 gate run(s))"), reason

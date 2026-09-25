@@ -7,7 +7,76 @@ is **another card** (see "The other card" below).
 
 ## The rule
 
-> `unmeasured` has exactly three sources (the gate's declaration, the harness killing or failing to start the gate, and the relay's record that the engine did not answer the gate's last request together with an exit code other than 0 and 1); none of them applies when the gate's retained report names a failure, and an unmeasured gate is an absence only when nothing else in the report failed.
+> `unmeasured` has exactly three sources (the gate's declaration, the harness killing or failing to start the gate, and the relay's record that the engine did not answer the gate's last request together with an exit code other than 0 and 1); none of them applies when the gate's retained report names a failure, and an unmeasured gate is an absence only when nothing else in the report failed [rows: declared_absence, gate_killed_at_its_timeout, clean_refusal, python_red_then_refused, pytest_red_beside_refused_gate, pytest_wall_beside_refused_gate].
+
+"Failed" there means measured red: a pytest killed at its wall measured
+nothing, and a report beside one is an absence when the gate is unmeasured
+[row: pytest_wall_beside_refused_gate]. A missing runner is not an absence
+either way: the report goes on to `test_evidence` and ends at
+`test_evidence_missing` [rows: node_runner_unavailable_beside_refused_gate,
+pytest_runner_unavailable_beside_refused_gate]. Every statement below that
+says where a report goes, or what a gate run is worth, ends with the rows of
+`tests/unit/test_repo_gate_outcome_table.py` that drive it, in square
+brackets; a statement about what the scheduler does next names, the same way,
+the drive of the real graph or of the deferral ledger that measures it.
+`test_every_routing_sentence_cites_a_row` fails on a statement that cites
+nothing, and each row asserts `measured`, `repo_gate_absent` and the next node
+of `configs/coding_impl.yaml`.
+
+## Routing, row by row (rev 4, 2026-09-25)
+
+What `tests/unit/test_repo_gate_outcome_table.py::test_the_outcome_of_every_report_shape`
+measures, one row per report shape. `test_the_doc_routing_table_is_this_table`
+fails when this table and `ROWS` disagree.
+
+| row | measured | repo_gate_absent | next | the shape |
+|---|---|---|---|---|
+| `clean_refusal` | `unmeasured` | `true` | `test_gate_absent` | the engine refused the gate's only request; exit 2 |
+| `python_red_then_refused` | `measured_fail` | `false` | `implement` | a python-stage red retained, then a refused `/script`; exit 2 |
+| `compile_red_then_refused` | `measured_fail` | `false` | `implement` | an answered `/compile` red, then a refused `/script`; exit 2 |
+| `second_manifest_same_repo` | `measured_fail` | `false` | `implement` | a python red, plus a second manifest naming the same repository |
+| `foreign_unreadable_manifest` | `measured_fail` | `false` | `implement` | a python red, plus a truncated manifest elsewhere under the ticket |
+| `missing_stage_report` | `measured_fail` | `false` | `implement` | a python red, plus a manifest stage whose report file is missing |
+| `nested_two_levels` | `measured_fail` | `false` | `implement` | a python red retained two directories below the ticket |
+| `empty_findings_failed_stage` | `measured_fail` | `false` | `implement` | `compile.json` says `passed: false`, `compile-findings.json` is `[]` |
+| `foreign_names_repo_gate_wrote_none` | `unmeasured` | `true` | `test_gate_absent` | another writer's report names this repository with a red; the gate wrote none; refused |
+| `foreign_names_repo_beside_own` | `unmeasured` | `true` | `test_gate_absent` | the same, beside the gate's own clean report; refused |
+| `other_repo_reports_beside_green_gate` | `measured_pass` | `false` | `done` | reports for another repository beside a green gate |
+| `declared_absence` | `unmeasured` | `true` | `test_gate_absent` | `AITELIER_REPO_GATE_UNMEASURED={"state": "blocked"}`, exit 3 |
+| `declared_failed_is_not_an_absence` | `measured_fail` | `false` | `implement` | the same line with `"state": "failed"`, exit 3 |
+| `gate_killed_at_its_timeout` | `unmeasured` | `true` | `test_gate_absent` | the harness killed the gate at `REPO_GATE_TIMEOUT` |
+| `exit_2_after_an_answered_request` | `measured_fail` | `false` | `implement` | the engine answered, then the gate exited 2 |
+| `exit_1_after_a_refusal` | `measured_fail` | `false` | `implement` | the engine refused, then the gate exited 1 |
+| `pytest_red_beside_refused_gate` | `unmeasured` | `false` | `implement` | AItelier's pytest red; the gate refused |
+| `pytest_wall_beside_refused_gate` | `unmeasured` | `true` | `test_gate_absent` | AItelier's pytest killed at its wall; the gate refused |
+| `node_runner_unavailable_beside_refused_gate` | `unmeasured` | `false` | `test_evidence_missing` | no npm (`node.skipped`); the gate refused |
+| `pytest_runner_unavailable_beside_refused_gate` | `unmeasured` | `false` | `test_evidence_missing` | no pytest could be provisioned; the gate refused |
+| `green_gate` | `measured_pass` | `false` | `done` | the engine answered green |
+| `answered_red` | `measured_fail` | `false` | `implement` | the engine answered red; exit 1 |
+
+**Reds only accumulate** (rev 4). Every readable part of the gate's own report
+contributes its reds: each entry of a `<stage>-findings.json`, and the
+`errors[]` of a stage report that says `passed: false` even when its findings
+list is empty. A part that cannot be read (a truncated manifest, a stage
+report the manifest names and nobody wrote) and a second report naming the
+same repository each add one entry to `repo_gate.retained_error`, and on a red
+to `failure_identity_error`; none of them removes a red already read
+[rows: second_manifest_same_repo, foreign_unreadable_manifest, missing_stage_report, empty_findings_failed_stage, nested_two_levels].
+
+**The gate's own report is this run's credential, not a name** (rev 4). The
+ticket directory is new and empty when the gate starts, and the gate creates
+its own report directory before it starts anything else. `_run_repo_gate`
+watches the ticket (inotify, `_FirstEntry`) from before the gate starts, and
+the first entry created there is the gate's report; every other writer under
+the ticket was started by the gate later. A report elsewhere under the ticket
+that names this repository is therefore not the gate's: it adds an identity
+error and no red, so it cannot turn a refused gate into `measured_fail`
+[rows: foreign_names_repo_gate_wrote_none, foreign_names_repo_beside_own]. A
+report that names another repository is not read at all
+[row: other_repo_reports_beside_green_gate]. `repo_gate.report_attribution`
+records what was observed; where inotify is not available it says
+`observed: false`, and then every manifest that names this repository is read
+as the gate's.
 
 The three sources (the third since r2, 2026-09-24 — see "A gate the engine
 did not admit" below):
@@ -18,41 +87,59 @@ did not admit" below):
    AITELIER_REPO_GATE_UNMEASURED={"state":"blocked","reason":"..."}
    ```
 
-   `state` must be one of `unmeasured`, `not_run`, `blocked`. `failed` and
-   `red` are **not** in that set and must never be added: a gate that failed
-   measured something, and one line must not be able to turn a red into an
-   absence.
+   `state` must be one of `unmeasured`, `not_run`, `blocked`
+   [row: declared_absence]. `failed` and `red` are **not** in that set and
+   must never be added: a gate that failed measured something, and one line
+   must not be able to turn a red into an absence
+   [row: declared_failed_is_not_an_absence].
 2. **The harness's own observation** that it killed the gate or could not start
    it (`timed_out` / `runner_error`). This is the same shape `run_tests`
    already used for pytest — `skipped_because="pytest_timeout"`, "a timeout is
-   ABSENT evidence, not a red suite". The repo gate now aligns with it.
+   ABSENT evidence, not a red suite" [rows: gate_killed_at_its_timeout,
+   pytest_wall_beside_refused_gate]. The repo gate now aligns with it.
 3. **The admission relay's record of the engine's own answer.** The gate
    reaches the engine only through `aitelier/gate_admission.py`, which records
    what the engine answered to every request. A gate that exits neither `0`
    nor `1` while its LAST engine request was refused admission (409),
-   unreachable, abandoned or undelivered did not run. `1` is a red whatever
-   the relay saw, and any other exit after an answered request stays
-   `measured_fail`.
+   unreachable, abandoned or undelivered did not run [row: clean_refusal].
+   `1` is a red whatever the relay saw, and any other exit after an answered
+   request stays `measured_fail` [rows: exit_1_after_a_refusal,
+   exit_2_after_an_answered_request].
 
-**First premise: a red beats absence** (r3, 2026-09-25). Before any of the
-three sources is read, `_run_repo_gate` counts the failures the gate's own
-retained report names (`repo_gate.retained_findings`: every entry of a
-`<stage>-findings.json`, and the `errors[]` of a stage report that says
-`passed: false`, in the report whose manifest names the repository). One
-finding makes the run `measured_fail`, whatever the exit code, the relay
+**First premise: a red beats absence** (r3, 2026-09-25; rev 4 says which
+report is the gate's own) [rows: python_red_then_refused,
+compile_red_then_refused]. Before any of the three sources is read,
+`_run_repo_gate` counts the failures the gate's own retained report names
+(`repo_gate.retained_findings`, read as "Reds only accumulate" above says).
+One finding makes the run `measured_fail`, whatever the exit code, the relay
 record or a declaration say: a gate that measured a red and was then refused
-on a later request still measured that red.
+on a later request still measured that red [rows: python_red_then_refused,
+compile_red_then_refused, empty_findings_failed_stage].
 
 **Second premise: an absence only when nothing else failed.** An `unmeasured`
-gate sets `repo_gate_absent: true` only when `failures[]` holds no other
-entry. A pytest red, a pytest timeout, a node check red, an unavailable node
-gate, an import error or any other entry keeps it `false`, and the run goes
-back to `implement` through the ordinary edge.
+gate sets `repo_gate_absent: true` only when no other leg of the report
+measured a red and every runner could start [rows: clean_refusal,
+pytest_red_beside_refused_gate, node_runner_unavailable_beside_refused_gate].
+A pytest red, a collection or import error, or a node check red beside it
+sends the report back to `implement` through the ordinary edge
+[row: pytest_red_beside_refused_gate]. A pytest killed at its wall measured
+nothing, so beside a refused gate the report is an absence and waits at
+`test_gate_absent` [row: pytest_wall_beside_refused_gate]. A runner that could
+not start (no npm, no pytest) leaves `repo_gate_absent: false` and
+`infrastructure_unavailable: true`; the `test_evidence` schema requires
+`skipped: false` and `node.skipped: false`, rejects the report, and the run ends at
+`test_evidence_missing` [rows: node_runner_unavailable_beside_refused_gate,
+pytest_runner_unavailable_beside_refused_gate]. What decides is what was
+measured, never how many entries `failures[]` holds.
 
 Everything else is measured. With no retained finding, `rc=0` is
-`measured_pass`; **every other exit code is `measured_fail`**, including `1`,
-`2`, `124`, `137`, `255`, `-1` and `-9`, unless source 3 applies. No exit code
-on its own is ever read as an absence, and that is the whole point:
+`measured_pass` [row: green_gate]; **every other exit code is
+`measured_fail`**, including `1`, `2`, `124`, `137`, `255`, `-1` and `-9`,
+unless source 3 applies [rows: answered_red, exit_2_after_an_answered_request,
+exit_1_after_a_refusal] [test: tests/unit/test_run_tests_unmeasured_declaration.py::test_no_exit_code_alone_is_ever_unmeasured].
+No exit code on its own is ever read as an absence
+[rows: exit_2_after_an_answered_request, exit_1_after_a_refusal], and that is
+the whole point:
 the game repo's `tools/godot_gate.py` reserves `2` for `incomplete`, which
 includes contract files **the implementer wrote wrong** — its own text says
 "no authored scenarios found under ... — an empty one is not a pass". Reading
@@ -78,18 +165,21 @@ fragment: a fragment proves nothing about a line that may have been cut in
 half. `tests/unit/test_run_tests_unmeasured_declaration.py::test_a_declaration_survives_output_far_past_the_retention_bound`
 drives a gate that emits its record first and then 3000 characters of log, and
 asserts both halves — that the retained fragment contains no record, and that
-the run was still read as `unmeasured`.
+the run was still read as `unmeasured`
+[test: tests/unit/test_run_tests_unmeasured_declaration.py::test_a_declaration_survives_output_far_past_the_retention_bound].
 
-## What happens to a declared absence
+## What happens to a declared absence [row: declared_absence]
+
 It is NOT re-acquired inside the step. `REPO_GATE_UNMEASURED_ATTEMPTS` is 1:
 one step invocation makes ONE gate call, and its worst-case hold is the gate's
 own timeout (`REPO_GATE_TIMEOUT`, 5400 s) rather than the 3 x 5400 + 2 x 60 s
 an in-step re-acquisition cost (round 5, measured). Waiting for the gate is the
 SCHEDULER's job (`core/gate_deferral.py`): while the absence is live the run is
 not advanced and spends no implement cycle, and the poller keeps serving every
-other project. Since r2 the hold lasts one wait per silent report; then the run
-advances along the absence gate's only edge, back to `test`, which re-runs the
-gate alone. `repo_gate.attempts` still records how many runs the reading
+other project [test: tests/skillflow/test_coding_impl_busy_gate.py::test_a_busy_gate_never_sends_the_run_back_to_implement]. Since r2 the hold lasts one wait per silent report; then the
+run advances along the absence gate's only edge, back to `test`, which re-runs
+the gate alone
+[test: tests/unit/test_gate_deferral_reads_the_run.py::test_the_host_starts_a_new_wait_from_a_new_silent_report]. `repo_gate.attempts` still records how many runs the reading
 cost. A gate that stayed silent ends the story honestly:
 `repo_gate_unmeasured: true`, `passed: false`, no case list (so nothing of that
 gate's known-red is pruned) and no failure invented out of it.
@@ -97,12 +187,12 @@ gate's known-red is pruned) and no failure invented out of it.
 Why the absence is routed out of the loop: `configs/coding_impl.yaml` keeps
 `max_loop: 3` on `test_outcome -> implement`, but its `test` step matches the
 `repo_gate_absent` FLAG and routes to the loop-external `test_gate_absent`
-gate. Left to the `all_passed: false` edge, a declared absence would spend one
-of the three implement laps on a gate that never spoke, and the run would die
-on `Cycle limit exceeded`. The flag travels on the tool's own RETURN, so the
+gate [rows: clean_refusal, declared_absence]. Left to the `all_passed: false`
+edge, a declared absence would spend one of the three implement laps on a gate
+that never spoke, and the run would die on `Cycle limit exceeded` [test: tests/skillflow/test_coding_impl_busy_gate.py::test_a_busy_gate_never_sends_the_run_back_to_implement]. The flag travels on the tool's own RETURN, so the
 edge needs no file reader at all.
 
-The first contention costs no implement cycle and does not end the run.
+The first contention costs no implement cycle and does not end the run [test: tests/skillflow/test_coding_impl_busy_gate.py::test_a_busy_gate_never_sends_the_run_back_to_implement].
 
 ## The four witnesses
 
@@ -113,14 +203,16 @@ verbatim out of `skillflow_steps.outputs_json` (run
 the **record of an incident**. They are byte-frozen, and they are deliberately
 NOT an input to the classifier: their `rc` and their prose ("409 Conflict —
 gate NOT run") support only one kind of reading — inference from the scene —
-and inference from the scene is the technique this card forbids. Nothing here
+and inference from the scene is the technique this card forbids; what the
+same refusal is read as today comes from the relay's record, not from their
+prose [row: clean_refusal]. Nothing here
 reclassifies them, and none of them carries a declaration, because none of
 them could.
 
 | file | step | what it recorded |
 |---|---|---|
-| `step-6730.outputs.json` | 6730 | `rc=1`, GDScript parse FAILED on two files the round had just written. A real red; one implement cycle well spent. |
-| `step-6769.outputs.json` | 6769 | `rc=2`, python `2630 passed`, compile `OK (364/364)`, play-test never started: `godot-builder unreachable … HTTP Error 409: Conflict — gate NOT run`. |
+| `step-6730.outputs.json` | 6730 | `rc=1`, GDScript parse FAILED on two files the round had just written. A real red; one implement cycle well spent [row: answered_red]. |
+| `step-6769.outputs.json` | 6769 | `rc=2`, python `2630 passed`, compile `OK (364/364)`, play-test never started: `godot-builder unreachable … HTTP Error 409: Conflict — gate NOT run`. With the relay's record this is the `clean_refusal` shape [row: clean_refusal]. |
 | `step-6773.outputs.json` | 6773 | `rc=2`, same shape, `2630 passed`. |
 | `step-6777.outputs.json` | 6777 | `rc=2`, same shape, `2633 passed`. |
 
@@ -134,8 +226,8 @@ Each of the three `rc=2` cycles was a boxed-out resource (the builder answered
 `AITELIER_REPO_GATE_UNMEASURED={"state":"blocked","reason":"godot-builder
 unreachable: 409 Conflict"}` and exited with its own `incomplete` code:
 
-* the tool would **re-acquire** the verdict instead of folding an absence in.
-  Once the builder was free, the play-test verdict would have been folded in —
+* the run would wait at `test_gate_absent` and re-run the gate instead of
+  spending an implement lap [row: declared_absence]. Once the builder was free, the play-test verdict would have been folded in —
   no implementation lap consumed, no change to the code, `implement_runs`
   unchanged;
 * had the resource stayed held through every attempt, the report would say
@@ -152,7 +244,8 @@ Two reasons, in this order:
 1. **The protocol did not exist.** On 2026-09-21 there was no opt-in line for
    "I did not run"; the only channel was the exit code, and the exit code is
    the thing that cannot carry this meaning (`incomplete` includes the
-   author's own broken contract files).
+   author's own broken contract files) [rows: declared_absence,
+   exit_2_after_an_answered_request].
 2. **Even with the protocol, the text would have been eaten.** The tool
    retained `out[-2000:]` and the reader refused truncated output. The four
    witnesses show the shape of the loss: their `new_failures[0]` is 1538
@@ -167,23 +260,25 @@ The game repository's `tools/godot_gate.py` still has to change, and this card
 does not touch it:
 
 * on its genuinely unmeasured paths (the builder unreachable, the render lock
-  held) it must emit the declaration line above, with `state: "blocked"`;
+  held) it must emit the declaration line above, with `state: "blocked"`
+  [row: declared_absence];
 * it must **stop** using exit `2` for contract files the author wrote wrong.
   Until it does, a broken authored contract is a `measured_fail` here,
   because "an empty one is not a pass" is a defect the round is
-  supposed to fix. The `manifest` line (`{0: passed, 1: failed}.get(code,
+  supposed to fix [row: exit_2_after_an_answered_request]
+  [test: tests/unit/test_run_tests_unmeasured_declaration.py::test_a_contract_error_exit_2_is_a_measured_failure_with_failures]. The `manifest` line (`{0: passed, 1: failed}.get(code,
   "incomplete")`) is where that split has to become visible.
 
 This card only makes the protocol fixed, written down (here and in
 `aitelier/tools/run_tests/tool.yaml`) and usable by that card.
 
-## The absence that outlives the wall clock (round 5)
+## The absence that outlives the wall clock (round 5) [test: tests/unit/test_gate_deferral_is_accounted.py::test_an_expired_absence_names_the_absence_and_never_the_code]
 
 The first four rounds stopped at "a gate that never ran is not a failing
 gate". That was half the property. The other half is the ACCOUNT: an absence
 that lasts long enough to outlive the run's wall-clock bound may not be
 recorded as a failure of the code under test — which is what `Cycle limit
-exceeded` does, and what round 4's candidate shipped.
+exceeded` does, and what round 4's candidate shipped [test: tests/unit/test_gate_deferral_is_accounted.py::test_an_expired_absence_names_the_absence_and_never_the_code].
 
 The two rules are not in conflict, because they protect different resources:
 
@@ -193,23 +288,26 @@ The two rules are not in conflict, because they protect different resources:
   may never be charged to the implementer, however long it stays silent.
 
 `core/gate_deferral.py` holds both. While an absence is live and inside its
-ceiling the run is left alone: no advance, no claim, no implement cycle.
+ceiling the run is left alone: no advance, no claim, no implement cycle
+[test: tests/unit/test_gate_deferral_is_accounted.py::test_a_declared_absence_is_silent_inside_its_wait].
 Past the ceiling the run may END, and the sentence it ends with is
 
     gate did not run: no verdict was measured
 
 It names the absence and carries no word that could be read as a code
-failure. There is no third option in which the run ends saying the tests
+failure [test: tests/unit/test_gate_deferral_is_accounted.py::test_an_expired_absence_names_the_absence_and_never_the_code]. There is no third option in which the run ends saying the tests
 failed, because nothing measured a test.
 
 How the two execution points read it:
 
 * `core/scheduler.py` — the tick consults `observe_run` before the NB-1
   runaway valves and returns without spending anything while the episode is
-  live; an expired episode calls `fail_run` with the absence sentence.
+  live; an expired episode calls `fail_run` with the absence sentence
+  [test: tests/unit/test_gate_deferral_execution_points.py::test_the_tick_refuses_to_claim_while_the_gate_is_silent].
 * `AItelierSkillFlow.advance_run` — the tick is not the only driver. The
-  host refuses to advance a run whose gate is silent, because advancing is
-  what routes the absence back into the implement loop.
+  host refuses to advance a run whose gate is silent inside its wait,
+  because advancing is what re-runs the gate
+  [test: tests/unit/test_gate_deferral_is_accounted.py::test_the_host_refuses_to_advance_a_run_whose_gate_is_silent].
 * `core/scheduler.py` `_MAX_CLAIMS_PER_INSTANCE` — its own comment states
   the premise: one instance is re-claimed only when something reset a
   completed row back to `pending`. A deferral does NOT do that: it releases
@@ -224,16 +322,17 @@ Both knobs are bounded: `GATE_DEFERRAL_WAIT_SECONDS` and
 may not be removed — a non-positive value falls back, and each is clamped to
 its own ceiling, so "raise the number" is not a way to delete the bound.
 
-Routing: an honest absence report still writes `test_report.json` and still
-passes the schema, so the graph had to be told about it. The `test` step now
+Routing: an honest absence report still writes `test_report.json`, so the
+graph had to be told about it [row: clean_refusal]. The `test` step now
 carries an edge keyed on `repo_gate_absent` — a flag the tool sets on the
 report and ALSO returns in the step's own flags, so the edge matches it as a
 `{field: repo_gate_absent, value: true}` FLAG with no file reader at all —
 leading to `test_gate_absent`, a loop-EXTERNAL gate that is deliberately absent
-from `end_conditions`. Reaching it parks a still-running run instead of
-completing or failing it, so the absence costs neither an implement lap nor
-the run. Its one transition (r2) is `test_gate_absent -> test`: when the wait
-runs out, the verdict is re-acquired and `implement` stays unreachable.
+from `end_conditions` [rows: clean_refusal, declared_absence]. Reaching it
+parks a still-running run instead of completing or failing it, so the absence
+costs neither an implement lap nor the run [test: tests/skillflow/test_coding_impl_busy_gate.py::test_a_busy_gate_never_sends_the_run_back_to_implement]. Its one transition (r2) is
+`test_gate_absent -> test`: when the wait runs out, the verdict is re-acquired
+and `implement` stays unreachable [test: tests/skillflow/test_coding_impl_busy_gate.py::test_a_busy_gate_never_sends_the_run_back_to_implement].
 
 The edge is a FLAG and not a `from_file` read, and that is a measurement, not
 a preference. `from_file` is resolved against the EVALUATING step's own output
@@ -243,7 +342,7 @@ test_report.json`, the engine recorded `transition file_reader failed`, and
 the edge counted as UNMATCHED. That one placement is the root cause of three
 round-5 verdicts: the absence fell through to `all_passed: false`, spent all
 three implement laps, and the run died on `Cycle limit exceeded` for a gate
-that never spoke. Moving the same `from_file` match onto `test` does not fix
+that never spoke [test: tests/skillflow/test_coding_impl_busy_gate.py::test_a_busy_gate_never_sends_the_run_back_to_implement]. Moving the same `from_file` match onto `test` does not fix
 it either: the engine's `_flags_match` calls `data.get(field)` on whatever the
 file parses to, so a report parsing to a LIST raises
 `AttributeError: 'list' object has no attribute 'get'` and takes the resolver
@@ -268,29 +367,31 @@ The `run_tests` protocol (round 4, carried as a regression guard):
 | M17 add `"failed"`/`"red"` to the state set | `test_run_tests_unmeasured_declaration.py::test_a_declaration_that_says_failed_is_not_an_absence[failed]`; `::test_the_unmeasured_state_set_holds_no_red_word` |
 | ABS let a declared absence seed a baseline or pass relatively | `test_run_tests_unmeasured_declaration.py::test_a_declared_absence_never_seeds_a_baseline_and_never_passes_relative`; `test_tree_level_accounting_witnesses.py::test_ABS_the_absence_branch_is_ahead_of_the_seed_in_the_real_source`; `::test_ABS_the_unmeasured_state_is_not_a_measurement` |
 
-## A declared absence is not a baseline, in either direction (round 6)
+## A declared absence is not a baseline, in either direction (round 6) [test: tests/unit/test_run_tests_unmeasured_declaration.py::test_a_declared_absence_never_seeds_a_baseline_and_never_passes_relative]
 
 `_apply_baseline` is where an absence could be laundered into a measurement,
 because it is the one place that reads `failures[]` and writes a durable
-record. Two rules, both measured end to end through the REAL tool:
+record [test: tests/unit/test_run_tests_unmeasured_declaration.py::test_a_declared_absence_never_seeds_a_baseline_and_never_passes_relative]. Two rules, both measured end to end through the REAL tool:
 
-* an absence may not **SEED** a baseline. The seed is `known = set(keys)`
+* an absence may not **SEED** a baseline [test: tests/unit/test_run_tests_unmeasured_declaration.py::test_a_declared_absence_never_seeds_a_baseline_and_never_passes_relative]. The seed is `known = set(keys)`
   taken from this run's `failures[]`, and an absence's only entry says
-  `repo_gate:run_tests.sh was NOT measured`. Writing that in records a gate
+  `repo_gate:run_tests.sh was NOT measured` [test: tests/unit/test_run_tests_unmeasured_declaration.py::test_a_declared_absence_never_seeds_a_baseline_and_never_passes_relative]. Writing that in records a gate
   that never spoke as the repo's standing known-red — and the NEXT real red
   from that gate is then forgiven by it;
 * an absence may not report `passed_relative: true`, even when a baseline
-  already exists. That field is the claim "this red was already here"; with no
+  already exists [test: tests/unit/test_run_tests_unmeasured_declaration.py::test_a_declared_absence_never_seeds_a_baseline_and_never_passes_relative]. That field is the claim "this red was already here"; with no
   verdict there is no such claim to make.
 
 So an absence that finds no baseline is given its own fourth state,
-`unmeasured`, which is in neither `BASELINE_MEASURED` nor the write path.
-Absence is stated at most once per report and is read from the report's own
-`repo_gate_absent` flag (`repo_gate_unmeasured` only when a report carries no
-`repo_gate_absent` key at all).
+`unmeasured`, which is in neither `BASELINE_MEASURED` nor the write path
+[test: tests/unit/test_run_tests_unmeasured_declaration.py::test_a_declared_absence_never_seeds_a_baseline_and_never_passes_relative]. Absence is stated at most once per report and is read from the report's
+own `repo_gate_absent` flag (`repo_gate_unmeasured` only when a report carries
+no `repo_gate_absent` key at all)
+[test: tests/unit/test_repo_gate_red_beats_absence.py::test_read_absence_follows_repo_gate_absent_when_it_is_there].
 
 The absence accounting (round 5), in
-`tests/unit/test_gate_deferral_is_accounted.py`:
+`tests/unit/test_gate_deferral_is_accounted.py`
+[test: tests/unit/test_gate_deferral_is_accounted.py::test_a_report_that_graded_the_code_states_no_absence]:
 
 | mutation | killed by |
 |---|---|
@@ -309,7 +410,8 @@ UNCHANGED) IS observable, and the r7 claim that it was inert was wrong. It is
 inert only for the echo shape used in r7 (`noise + PREFIX + body`), where the
 fixed slice cuts into the prefix itself. With a header exactly `len(prefix)`
 long and the prefix quoted INSIDE the JSON, `line[len(prefix):]` lands on the
-JSON and a real red is rewritten into an absence.
+JSON and a real red is rewritten into an absence
+[test: tests/unit/test_run_tests_unmeasured_declaration.py::test_the_r4_shaped_witness_flips_under_the_literal_m21].
 `test_the_r4_shaped_witness_flips_under_the_literal_m21` asserts both readings
 of that shape; `test_the_r4_shaped_witness_flips_under_the_literal_m21b` does
 the same on the case channel. Both re-run the REAL reader with the card's
@@ -332,9 +434,10 @@ its red forgiven.
 
 * `evidence/gate-cycle-accounting-20260921/` — not one byte.
 * The game repository's `tools/godot_gate.py` — another card.
-* `max_loop: 3` on `test_outcome → implement` — unchanged in value. Round 5
-  routes the ABSENCE to a loop-external gate instead of reclassifying it, so
-  the bound the four witnesses exhausted still governs every real red. The
+* `max_loop: 3` on `test_outcome → implement` — unchanged in value
+  [row: answered_red]. Round 5 routes the ABSENCE to a loop-external gate
+  instead of reclassifying it, so the bound the four witnesses exhausted still
+  governs every real red [rows: clean_refusal, answered_red]. The
   `test`/`test_evidence` edges did gain one transition each; that is the
   minimum the honest report shape needs, it touches nothing the four witnesses
   read, and it is stated at the edge itself.
@@ -345,7 +448,8 @@ Node `harness.a-gate-that-could-not-run-is-not-a-failing-test`. Three runs
 (`751e9e26`, `attempt-d3d14632`, `f6e21064`) died of `Cycle limit exceeded`
 because a render lock held by someone else made the game gate exit `2`
 (`godot-builder unreachable ... HTTP Error 409: Conflict -- gate NOT run`), and
-`2` was a red. The game gate does not declare, so sources 1 and 2 above never
+`2` was a red; today the relay's record reads that shape as not run
+[row: clean_refusal]. The game gate does not declare, so sources 1 and 2 above never
 fired for it.
 
 **The relay.** `_run_repo_gate` starts an `AdmissionRelay`
@@ -365,9 +469,9 @@ request) is written to `<ticket>/admission.json` and to
 
 | outcome | fields |
 |---|---|
-| passed | `passed: true`, `repo_gate.measured: measured_pass` |
-| ran and red | `passed: false`, `repo_gate.measured: measured_fail`, `release_evidence: known_failure`, per-case `new_failures` |
-| not run | `passed: false`, `repo_gate.measured: unmeasured`, `repo_gate_absent: true` (false beside any other failure, r3), `repo_gate_unmeasured: true`, `repo_gate_admission` / `repo_gate.admission.state` (`not_admitted`, `unreachable`, `abandoned`, `undelivered`), `evidence_state: not_run`, `release_evidence: unresolved` |
+| passed | `passed: true`, `repo_gate.measured: measured_pass` [row: green_gate] |
+| ran and red | `passed: false`, `repo_gate.measured: measured_fail`, `release_evidence: known_failure`, per-case `new_failures` [rows: answered_red, python_red_then_refused] |
+| not run | `passed: false`, `repo_gate.measured: unmeasured`, `repo_gate_absent: true` (`false` beside a measured red or a missing runner, rev 4), `repo_gate_unmeasured: true`, `repo_gate_admission` / `repo_gate.admission.state` (`not_admitted`, `unreachable`, `abandoned`, `undelivered`), `evidence_state: not_run` when `repo_gate_absent` is `true`, `release_evidence: unresolved` [rows: clean_refusal, pytest_red_beside_refused_gate, node_runner_unavailable_beside_refused_gate] |
 
 **Identities.** Each gate run has a ticket (`rt-<UTC>-<8 hex>`) and its own
 `GATE_REPORT_DIR` (`$AITELIER_HOME/gate-reports/<ticket>`). A red gate's
@@ -377,17 +481,23 @@ Since r3 each identity is built from report fields that do not change between
 runs (see "Identities that survive a second run" below). Only the report whose
 manifest names the repository the gate ran for is read: the real gate's
 python stage runs the gate's own tests, and they retain reports for their
-fixture repository `/repo` under the same ticket.
+fixture repository `/repo` under the same ticket. Since rev 4 that report must
+also be the first entry the gate created under the ticket (see "The gate's own
+report is this run's credential" above).
 
-**The loop.** `test_gate_absent -> test` (`max_loop: 100`). The deferral
+**The loop.** `test_gate_absent -> test` (`max_loop: 100`) [test: tests/skillflow/test_coding_impl_absence_needs_nothing_else_red.py::test_the_absence_gate_laps_run_out_naming_the_absence]. The deferral
 ledger holds the run for one wait per silent report (keyed by report path and
 mtime), then the tick logs `gate_deferral_reacquire` and advances, which
 re-runs the `test` step alone. The wall-clock ceiling still ends an absence
-that never clears, with the absence sentence. Since r3 the same sentence also
-ends a run whose absence gate has spent its `max_loop` (read from the
+that never clears, with the absence sentence [test: tests/unit/test_gate_deferral_is_accounted.py::test_an_expired_absence_names_the_absence_and_never_the_code]. Since r3 the same sentence
+also ends a run whose absence gate has spent its `max_loop` (read from the
 engine's `skillflow_edge_counts`, `core/gate_deferral.py:absence_laps_spent`):
 the edge's count covers the whole run, so a short wait or several episodes can
-spend it before the ceiling.
+spend it before the ceiling
+[test: tests/unit/test_gate_deferral_reads_the_run.py::test_spent_laps_end_the_run_naming_the_absence].
+Since rev 4 the sentence ends with the number of gate runs the absence cost,
+`(run_tests.sh, N gate run(s))`: each distinct silent report counts its own
+`repo_gate.attempts` once, however many ticks noted it [test: tests/skillflow/test_coding_impl_absence_needs_nothing_else_red.py::test_the_absence_gate_laps_run_out_naming_the_absence].
 
 The tests that hold this down (candidate mutations, one throwaway copy each,
 run against the 12 files of the gate and deferral suites):
@@ -405,28 +515,40 @@ run against the 12 files of the gate and deferral suites):
 
 ## A red the gate retained, and the rest of the report (r3, 2026-09-25)
 
-Review gnr2 (2026-09-25) found two measured reds recorded as "did not run",
+Review gnr2 (2026-09-25) found two measured reds recorded as "did not run"
+[rows: python_red_then_refused, compile_red_then_refused],
 failure ids that changed between runs of the same failure, a run that could
 end on the engine's "cycle limit exceeded", and a `/script` render with 300 s
 left of the gate's client timeout after a full queue wait.
 
 **A red beats absence.** `_run_repo_gate` reads the gate's retained report
-before the outcome is decided (`_retained_findings`). It reads only the
-manifest that names the repository the gate ran for; two such manifests under
-one ticket are an error, and a count of `None`. For every stage in that
-manifest it takes the stage's `<stage>-findings.json`, or, when there is
-none, the `errors[]` of a stage report that says `passed: false`. The count
-is `repo_gate.retained_findings`, and `_repo_gate_outcome` checks it first.
+before the outcome is decided (`_retained_findings`)
+[rows: python_red_then_refused, compile_red_then_refused]. In r3 it read only
+the manifest that named the repository the gate ran for, and two such
+manifests under one ticket made the count `None`; rev 4 keeps the reds of the
+gate's own report beside that error ("Reds only accumulate" above)
+[row: second_manifest_same_repo]. For every stage in that manifest it takes
+the entries of `<stage>-findings.json`, and, when that list is empty or
+missing, the `errors[]` of a stage report that says `passed: false`
+[row: empty_findings_failed_stage]. The count is
+`repo_gate.retained_findings`, and `_repo_gate_outcome` checks it first.
 Pole 3 is a python-stage red or an answered `/compile` red, then a refused
 `/script` and exit 2: both are `measured_fail`
-(`tests/unit/test_repo_gate_red_beats_absence.py`).
+(`tests/unit/test_repo_gate_red_beats_absence.py`)
+[rows: python_red_then_refused, compile_red_then_refused].
 
-**An absence only when nothing else failed.** `repo_gate_absent` is
-`not failures[]`, read before the gate's own entry is appended. Pole 4 is a
-pytest red beside a refused gate: `repo_gate_absent: false`, the scheduler
-reads no absence (`read_absence` returns `None`), and the run goes back to
-`implement` (`tests/skillflow/test_coding_impl_absence_needs_nothing_else_red.py`).
-The same holds for a pytest killed at its wall. `core/gate_deferral.py:read_absence`
+**An absence only when nothing else failed.** In r3 `repo_gate_absent` was
+`not failures[]`; since rev 4 it is read from what was measured: no measured
+red in another leg and no missing runner [rows: pytest_red_beside_refused_gate,
+pytest_wall_beside_refused_gate, node_runner_unavailable_beside_refused_gate].
+Pole 4 is a pytest red beside a refused gate: `repo_gate_absent: false`, the
+scheduler reads no absence (`read_absence` returns `None`), and the run goes
+back to `implement`
+(`tests/skillflow/test_coding_impl_absence_needs_nothing_else_red.py`)
+[row: pytest_red_beside_refused_gate]. A pytest killed at its wall is not a
+red: beside a refused gate the report is an absence, and on the real graph
+the run waits at `test_gate_absent` and spends no further implement lap
+[row: pytest_wall_beside_refused_gate] [test: tests/skillflow/test_coding_impl_absence_needs_nothing_else_red.py::test_a_pytest_wall_behind_a_busy_gate_waits_at_the_absence_gate]. `core/gate_deferral.py:read_absence`
 reads `repo_gate_absent` when the key is there, and falls back to
 `repo_gate_unmeasured` only for a report written before the key existed.
 
@@ -472,13 +594,15 @@ when `/lifecycle` cannot be read (`admission_observed: false`). A request
 with no `operation_id` gets `relay-<uuid>` so it can be watched. Each request
 record carries `keepalives` and `admitted_after_sec`.
 
-### The absence gate's lap limit
+### The absence gate's lap limit [test: tests/skillflow/test_coding_impl_absence_needs_nothing_else_red.py::test_the_absence_gate_laps_run_out_naming_the_absence]
 
 `test_gate_absent -> test` carries `max_loop: 100`, which the engine counts
-over the whole run (`skillflow_edge_counts`). With a 60 s wait, 100 laps fit
+over the whole run (`skillflow_edge_counts`)
+[test: tests/unit/test_gate_deferral_reads_the_run.py::test_laps_are_read_from_the_engine_counter]. With a 60 s wait, 100 laps fit
 inside the 3 h ceiling. `absence_laps_spent` reads that counter while the run
 stands at `test_gate_absent`; once `count >= max_loop`, `observe_run` returns
-`expired` with the absence sentence and the host hold refuses to advance. A
+`expired` with the absence sentence and the host hold refuses to advance
+[test: tests/unit/test_gate_deferral_reads_the_run.py::test_spent_laps_end_the_run_naming_the_absence]. A
 run standing at `test` has already been granted its last lap and runs it, so
 a run uses all 100 re-acquisitions (101 gate calls) before it ends.
 
@@ -504,3 +628,46 @@ Logs: `logs/gate_not_run_r3/mut_<id>.txt`, `mut_<id>.ignition`.
 | N10 lap check on any node | 584 | 2 | `test_gate_deferral_reads_the_run.py::test_the_last_lap_granted_is_run`; `test_coding_impl_absence_needs_nothing_else_red.py::test_the_absence_gate_laps_run_out_naming_the_absence` |
 | N11 (review R5) the host hold skips the latest report | 460 | 2 | `test_gate_deferral_reads_the_run.py::test_the_host_starts_a_new_wait_from_a_new_silent_report`, `::test_spent_laps_end_the_run_naming_the_absence` |
 | N12 no tail read above 64 MiB | 2 | 1 | `test_repo_gate_identity_is_stable.py::test_a_report_too_large_to_parse_whole_is_read_from_its_tail` |
+
+Rev 4 replaced `test_repo_gate_red_beats_absence.py::test_a_pytest_killed_at_its_wall_beside_a_refused_gate_is_not_an_absence`
+(named in the N2 and N3 rows above) with
+`::test_a_pytest_killed_at_its_wall_beside_a_refused_gate_is_an_absence`, on
+the director's ruling that a pytest killed at its wall measured nothing
+[row: pytest_wall_beside_refused_gate].
+
+## Rev 4: rederived from the report's parts (2026-09-25)
+
+Review gnr3 found reds that were read as not run once an unreadable or a
+second manifest sat beside them, or once they sat two directories down
+[rows: second_manifest_same_repo, foreign_unreadable_manifest,
+missing_stage_report, nested_two_levels]; a stage report that said
+`passed: false` with an empty findings list, read as no red
+[row: empty_findings_failed_stage]; a report another writer left under the
+ticket that turned a refused gate into `measured_fail`
+[row: foreign_names_repo_gate_wrote_none]; a pytest killed at its wall beside
+a refused gate that spent four implement laps and ended on `Cycle limit
+exceeded` [row: pytest_wall_beside_refused_gate]; and two false sentences in
+`tool.yaml`, one of them pinned verbatim by a test. Rev 4 does not add a
+case to the r3 rules; it rederives them from what each part of the report
+measured:
+
+* reds only accumulate per readable part, and an unreadable part adds an
+  identity error without removing a red ("Reds only accumulate" above);
+* the gate's own report is the first entry created under its ticket, as
+  this run observed it; naming the repository is still required of that
+  report, and no longer enough on its own ("The gate's own report is this
+  run's credential" above);
+* absence is decided by what the other legs measured, never by the length of
+  `failures[]` ("Second premise" above) [rows: pytest_red_beside_refused_gate,
+  pytest_wall_beside_refused_gate, node_runner_unavailable_beside_refused_gate];
+* `tests/unit/test_repo_gate_outcome_table.py` drives every shape through the
+  real `run_tests`, walks the transitions of the real
+  `configs/coding_impl.yaml` from the `test` step, and asserts `measured`, `repo_gate_absent` and the next node ("Routing, row by
+  row" above); every routing statement here and in `tool.yaml` names its
+  row, and `test_every_routing_sentence_cites_a_row` fails on one that does
+  not;
+* the terminal sentence counts gate runs, not ledger notes ("The loop"
+  above).
+
+Logs: `logs/gate_not_run_r4/`. Delivery note:
+`final/delivery_notes_gate_not_run_r4.md`.

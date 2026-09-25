@@ -198,11 +198,12 @@ def test_pole_4_a_pytest_red_beside_a_refused_gate_is_not_an_absence(
     assert gate_deferral.read_absence(tmp_path / "out" / "test_report.json") is None
 
 
-def test_a_pytest_killed_at_its_wall_beside_a_refused_gate_is_not_an_absence(
+def test_a_pytest_killed_at_its_wall_beside_a_refused_gate_is_an_absence(
         busy, tmp_path, monkeypatch):
-    """Any other entry in `failures[]` keeps the report out of the absence
-    gate, the pytest wall included: re-running the gate does not unhang a
-    suite."""
+    """A pytest killed at its wall measured nothing ("NOTHING was measured.
+    This is not a test failure"), and neither did the refused gate: nothing in
+    the report was measured red, so the run waits for the gate (director's
+    ruling, rev 4)."""
     repo = tmp_path / "repo"
     (repo / "tests").mkdir(parents=True)
     (repo / "tests" / "test_slow.py").write_text(
@@ -213,9 +214,11 @@ def test_a_pytest_killed_at_its_wall_beside_a_refused_gate_is_not_an_absence(
     result, report = _run(repo, tmp_path / "out")
     assert report["repo_gate"]["measured"] == rt.REPO_GATE_UNMEASURED
     assert any(f.startswith("pytest:timed out") for f in report["failures"])
-    assert report["repo_gate_absent"] is False
-    assert result["repo_gate_absent"] is False
-    assert gate_deferral.read_absence(tmp_path / "out" / "test_report.json") is None
+    assert report["repo_gate_absent"] is True
+    assert result["repo_gate_absent"] is True
+    assert report["evidence_state"] == "not_run"
+    assert gate_deferral.read_absence(tmp_path / "out" / "test_report.json") == {
+        "gate": "run_tests.sh"}
 
 
 def test_a_green_pytest_beside_a_refused_gate_is_an_absence(

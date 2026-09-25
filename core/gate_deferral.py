@@ -107,6 +107,9 @@ class _Episode:
     absences: int = 1
     gate: str = ""
     report_key: tuple | None = None
+    # Gate runs behind the reports this episode has seen: each report is
+    # counted once, however many ticks look at it.
+    gate_runs: int = 1
 
 
 @dataclass
@@ -122,7 +125,8 @@ class DeferralLedger:
     episodes: dict[str, _Episode] = field(default_factory=dict)
 
     def note_absence(self, run_id: str, *, now: float | None = None,
-                     gate: str = "", report_key: tuple | None = None) -> _Episode:
+                     gate: str = "", report_key: tuple | None = None,
+                     gate_runs: int = 1) -> _Episode:
         """Record that `run_id`'s gate produced no verdict this pass.
 
         The episode START is kept across calls: the ceiling measures how long
@@ -133,17 +137,23 @@ class DeferralLedger:
         report again on a later tick does not restart it; once it runs out
         the run is due to re-acquire the verdict (`observe_run` -> `due`). A
         caller that passes no key restarts the wait on every call.
+
+        `gate_runs` is how many runs of the gate the report records
+        (`repo_gate.attempts`); it is added once per report, so the episode
+        counts gate runs and not how often a tick looked.
         """
         moment = time.time() if now is None else now
         episode = self.episodes.get(run_id)
         if episode is None:
             episode = _Episode(started_at=moment, last_absence_at=moment,
-                               gate=gate, report_key=report_key)
+                               gate=gate, report_key=report_key,
+                               gate_runs=gate_runs)
             self.episodes[run_id] = episode
         else:
             if report_key is None or report_key != episode.report_key:
                 episode.last_absence_at = moment
                 episode.report_key = report_key
+                episode.gate_runs += gate_runs
             episode.absences += 1
             if gate:
                 episode.gate = gate
@@ -185,11 +195,14 @@ class DeferralLedger:
         """The sentence an expired absence ends with.
 
         It names the gate when one is known and always names the absence; it
-        never names a code failure, which is the whole point of the card.
+        never names a code failure, which is the whole point of the card. The
+        number is how many times the gate ran without a verdict in this
+        episode (`gate_runs`), not how many ticks looked at the run.
         """
         episode = self.episodes.get(run_id)
         gate = (episode.gate if episode else "") or "the repository gate"
-        return f"{ABSENCE_TERMINAL} ({gate}, {self.episode_count(run_id)} attempt(s))"
+        runs = episode.gate_runs if episode else 0
+        return f"{ABSENCE_TERMINAL} ({gate}, {runs} gate run(s))"
 
     def episode_count(self, run_id: str) -> int:
         episode = self.episodes.get(run_id)
@@ -267,7 +280,8 @@ def hold_blocks_advance(run_id: str, *, now: float | None = None,
         absence = read_absence(path)
         if absence is not None:
             book.note_absence(run_id, now=now, gate=absence["gate"],
-                              report_key=_report_key(path))
+                              report_key=_report_key(path),
+                              gate_runs=_gate_runs(path))
             # No lap left on the absence gate's edge back to `test`: the run
             # is not advanced into the engine's cycle limit; the scheduler's
             # tick ends it naming the absence (`observe_run` -> `expired`).
@@ -379,6 +393,17 @@ def _report_key(report_path) -> tuple | None:
         return None
 
 
+def _gate_runs(report_path) -> int:
+    """How many gate runs a report records (`repo_gate.attempts`, else 1)."""
+    from pathlib import Path
+    try:
+        data = json.loads(Path(report_path).read_text(encoding="utf-8"))
+        attempts = int(((data or {}).get("repo_gate") or {}).get("attempts") or 1)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return 1
+    return max(1, attempts)
+
+
 def read_absence(report_path) -> dict | None:
     """The absence a `test_report.json` states, or None if it states none.
 
@@ -434,7 +459,8 @@ def observe_run(sf, run_id: str, *, now: float | None = None,
         return {"state": "none", "remaining": 0.0, "gate": "", "reason": ""}
     moment = time.time() if now is None else now
     episode = book.note_absence(run_id, now=moment, gate=absence["gate"],
-                                report_key=_report_key(report_path))
+                                report_key=_report_key(report_path),
+                                gate_runs=_gate_runs(report_path))
     if book.expired(run_id, now=moment):
         return {"state": "expired", "remaining": 0.0, "gate": episode.gate,
                 "reason": book.terminal_reason(run_id)}

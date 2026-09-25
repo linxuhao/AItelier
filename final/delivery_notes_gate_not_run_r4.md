@@ -3,10 +3,14 @@
 Node `harness.a-gate-that-could-not-run-is-not-a-failing-test` rev 4, attempt
 `attempt-8a660c02b89c46e784552a03eb6b1c8e`. Branch
 `director/gatenotrun-r4-20260925`, base `1b40d4845a59de759cb2de32def342048afd236e`.
-Code and tests: commit `c9e6dd942663ec3b28eb3675916e1574dcec6a29`. The commit
-that carries this note adds only `logs/gate_not_run_r4/` and this file; the
-whole suite runs on that commit (log outside the tree:
-`~/.AItelier/worktrees-scratch/gn4-logs/suite_<sha>.txt`).
+Code and tests: commit `c9e6dd942663ec3b28eb3675916e1574dcec6a29`; every
+evidence run below was on it. After it, `e8f90c6b` adds only
+`logs/gate_not_run_r4/` and this file, and the next commit makes one
+attribution sentence in `tool.yaml` and in the protocol doc exact (a report
+that is the gate's first entry must still name the repository, and the
+unobserved fallback) and edits this paragraph; no code or test file changes
+after `c9e6dd94`. The whole suite runs on the last commit of the branch (log
+outside the tree: `~/.AItelier/worktrees-scratch/gn4-logs/suite_<sha>.txt`).
 
 Every test run below was in a throwaway `aitelier:latest` container
 (`docker run --rm --init -m 3g`), never more than 4 throwaway containers on the

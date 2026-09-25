@@ -68,7 +68,8 @@ ticket directory is new and empty when the gate starts, and the gate creates
 its own report directory before it starts anything else. `_run_repo_gate`
 watches the ticket (inotify, `_FirstEntry`) from before the gate starts, and
 the first entry created there is the gate's report; every other writer under
-the ticket was started by the gate later. A report elsewhere under the ticket
+the ticket was started by the gate later. That report must still name this
+repository; naming another is an identity error. A report elsewhere under the ticket
 that names this repository is therefore not the gate's: it adds an identity
 error and no red, so it cannot turn a refused gate into `measured_fail`
 [rows: foreign_names_repo_gate_wrote_none, foreign_names_repo_beside_own]. A

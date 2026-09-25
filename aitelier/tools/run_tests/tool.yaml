@@ -68,12 +68,16 @@ description: >
   [rows: second_manifest_same_repo, foreign_unreadable_manifest,
   missing_stage_report].
   Which report is the gate's own is decided by this gate run's own
-  credential, never by the repository a report names: it is the first entry
+  credential, not by the repository a report names: it is the first entry
   the run creates under its ticket, observed (inotify) from before the gate
-  starts, and a report elsewhere under the ticket that names this repository
-  is not the gate's, so another writer cannot turn a refused gate into
-  `measured_fail` [rows: foreign_names_repo_gate_wrote_none,
+  starts, and it must also name this repository (naming another is an
+  identity error). A report elsewhere under the ticket that names this
+  repository is not the gate's, so another writer cannot turn a refused gate
+  into `measured_fail` [rows: foreign_names_repo_gate_wrote_none,
   foreign_names_repo_beside_own, other_repo_reports_beside_green_gate].
+  Where the ticket cannot be watched, `repo_gate.report_attribution` says
+  `observed: false` and every report naming this repository is read as the
+  gate's.
   The declaration is read from the gate's WHOLE output BEFORE the
   2000-byte tail is retained, so it survives a real gate's log.
   The engine is reached through an admission relay

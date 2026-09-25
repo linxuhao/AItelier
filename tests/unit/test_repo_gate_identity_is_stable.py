@@ -53,9 +53,8 @@ def _playtest(observed_a, observed_b, *, summary="Playtest HARD-failed: 2 red"):
     report = {"passed": False, "captures": ["x" * 64],
               "behavior": {"all_passed": False, "scenarios": scenarios},
               "summary": summary}
-    findings = ["hard gate failed: %s" % summary,
-                "errors: " + json.dumps({"kind": "push_error", "msg": "node not found"}),
-                "errors: " + json.dumps({"kind": "push_error", "msg": "node not found"}),
+    same_error = "errors: " + json.dumps({"kind": "push_error", "msg": "node not found"})
+    findings = ["hard gate failed: %s" % summary, same_error, same_error,
                 "scenario 'body_motion_probe' reports passed=False"]
     findings += [_assert_line("body_motion_probe", r) for r in rows[3:]]
     findings += [_assert_line("event_travel", r) for r in rows[:3] if not r["passed"]]

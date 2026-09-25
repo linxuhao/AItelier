@@ -10,8 +10,9 @@ The r3 logs are in `logs/gate_not_run_r3/`. Each log's header names its tree
 (`tree: … head: …`, and `in-container git head … status-lines`) and ends
 with `BARE_RC=`. "base" logs ran on a detached worktree at `aa88cb54`;
 "cand" logs ran on `34a9bee5` (code) or `7cdf6004` (code plus the identity
-probe fix). After `7cdf6004` only the protocol doc, logs and this note
-changed. The whole suite result for the delivered sha is not in the tree: a
+probe fix). After `7cdf6004` the protocol doc, logs and this note changed,
+and one test built the same findings list from a variable instead of two
+identical lines; the mutation logs ran the earlier form of that test. The whole suite result for the delivered sha is not in the tree: a
 log committed after the run would change the sha it names.
 
 ## Commits
@@ -20,7 +21,8 @@ log committed after the run would change the sha it names.
 |---|---|
 | `34a9bee5` | the r3 code, tests, doc rule and evidence scripts |
 | `7cdf6004` | `identity_probe.py`: a local name shadowed a function; count red gates per assertion |
-| last | protocol doc r3 section, r3 logs, the r2 word-diff log replaced by its digest, this note |
+| `194f5bab` | protocol doc r3 section, r3 logs, the r2 word-diff log replaced by its digest, this note |
+| last | `test_repo_gate_identity_is_stable.py`: one findings list written without two identical consecutive lines (the whole suite on `194f5bab` failed `test_no_verbatim_previous_line_dup.py::test_named_test_repeats_are_pinned_and_current` on them); this row |
 
 ## 1. A red beats absence
 

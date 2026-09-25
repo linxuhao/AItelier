@@ -1,0 +1,13 @@
+date: 2026-09-25T00:56:56Z
+tree: /home/linxuhao/.AItelier/worktrees-scratch/gn3-base-aa88 head: aa88cb54293161be92508324d2235f05a618c268
+command: bash /home/linxuhao/.AItelier/worktrees-scratch/gn3-a1loop.sh base /home/linxuhao/.AItelier/worktrees-scratch/gn3-scratchlogs/r3
+env: docker run --rm --init -m 3g --network aitelier_default -u 1000:1000 HOME=/home/linxuhao PYTHONPATH=/home/linxuhao/.AItelier/worktrees-scratch/gn3-base-aa88 PYTHONDONTWRITEBYTECODE=1 image aitelier:latest
+throwaway containers (aitelier image, not prod) before launch: 3
+in-container git head: aa88cb54293161be92508324d2235f05a618c268 status-lines: 0
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gn3-base-aa88/aitelier/tools/run_tests/impl.py
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gn3-base-aa88/aitelier/gate_admission.py
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gn3-base-aa88/core/gate_deferral.py
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gn3-base-aa88/core/skillflow_host.py
+IMPORT skillflow /usr/local/lib/python3.12/site-packages/skillflow/__init__.py
+BARE_RC=0
+end: 2026-09-25T00:57:15Z

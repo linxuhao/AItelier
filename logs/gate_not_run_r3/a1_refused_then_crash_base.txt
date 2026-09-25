@@ -1,0 +1,42 @@
+date: 2026-09-25T00:57:02Z
+tree: /home/linxuhao/.AItelier/worktrees-scratch/gn3-base-aa88 head: aa88cb54293161be92508324d2235f05a618c268 status-lines: 0
+command: python /home/linxuhao/.AItelier/worktrees-scratch/gn3-probes/attack1_hidden_failures.py /home/linxuhao/.AItelier/worktrees-scratch/gn3-base-aa88/tests/gate_fixture.py refused_then_crash
+PROBE {
+ "tree_impl": "/home/linxuhao/.AItelier/worktrees-scratch/gn3-base-aa88/aitelier/tools/run_tests/impl.py",
+ "scenario": "refused_then_crash",
+ "repo_gate.returncode": 1,
+ "repo_gate.measured": "measured_fail",
+ "repo_gate.retained_findings": null,
+ "repo_gate_unmeasured": null,
+ "admission.state": "not_admitted",
+ "admission.requests": [
+  {
+   "route": "/script",
+   "status": 409,
+   "outcome": "not_admitted",
+   "owner_kind": "active",
+   "render_wait_timeout_sec": 1.0,
+   "waited_sec": 1.0202,
+   "wait_timeout_sec": 1.0,
+   "error": "render owner wait timed out",
+   "keepalives": null,
+   "admitted_after_sec": null
+  }
+ ],
+ "repo_gate_absent(return)": false,
+ "repo_gate_absent(report)": null,
+ "evidence_state": null,
+ "passed": false,
+ "release_evidence": "known_failure",
+ "failure_identity_error": "repository gate did not emit per-case identities",
+ "failures": [
+  "repo_gate:run_tests.sh failed (rc=1): 4/repo/gate.py\", line 34, in <module>\n    rep = post(\"/script\", base)\n          ^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/tmpvbnh"
+ ],
+ "new_failures": [
+  "repo_gate:run_tests.sh failed (rc=1): 4/repo/gate.py\", line 34, in <module>\n    rep = post(\"/script\", base)\n          ^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/tmpvbnh"
+ ],
+ "harness_rendered_for": [
+  "op-holder"
+ ]
+}
+BARE_RC=0

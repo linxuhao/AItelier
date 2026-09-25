@@ -1,0 +1,201 @@
+date: 2026-09-25T01:36:28Z
+tree: /home/linxuhao/.AItelier/worktrees-scratch/gn3-mut-N10_laps_on_any_node head: 
+command: bash /home/linxuhao/.AItelier/worktrees-scratch/gn3-mutjob.sh N10_laps_on_any_node /home/linxuhao/.AItelier/worktrees-scratch/gn3-scratchlogs/r3
+env: docker run --rm --init -m 3g --network aitelier_default -u 1000:1000 HOME=/home/linxuhao PYTHONPATH=/home/linxuhao/.AItelier/worktrees-scratch/gn3-mut-N10_laps_on_any_node PYTHONDONTWRITEBYTECODE=1 image aitelier:latest
+throwaway containers (aitelier image, not prod) before launch: 3
+in-container git head: fatal: not a git repository (or any parent up to mount point /home/linxuhao)
+Stopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set). status-lines: 0
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gn3-mut-N10_laps_on_any_node/aitelier/tools/run_tests/impl.py
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gn3-mut-N10_laps_on_any_node/aitelier/gate_admission.py
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gn3-mut-N10_laps_on_any_node/core/gate_deferral.py
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gn3-mut-N10_laps_on_any_node/core/skillflow_host.py
+IMPORT skillflow /usr/local/lib/python3.12/site-packages/skillflow/__init__.py
+............................F........................................... [ 28%]
+........................................................................ [ 56%]
+........................................................................ [ 85%]
+...........................F.........                                    [100%]
+=================================== FAILURES ===================================
+_______________________ test_the_last_lap_granted_is_run _______________________
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_the_last_lap_granted_is_r0')
+
+    def test_the_last_lap_granted_is_run(tmp_path):
+        """The traversal that spends the last lap has already happened when the
+        run stands at `test`: that gate run is due, not ended."""
+        ledger = gate_deferral.DeferralLedger()
+        sf = _Run(tmp_path, laps=100, max_loop=100, node="test")
+        t0 = 1_000_000.0
+        _silent_report(tmp_path, 1_000)
+        gate_deferral.observe_run(sf, "r1", now=t0, ledger=ledger)
+        seen = gate_deferral.observe_run(
+            sf, "r1", now=t0 + gate_deferral.wait_seconds() + 1, ledger=ledger)
+>       assert seen["state"] == "due"
+E       AssertionError: assert 'expired' == 'due'
+E         
+E         - due
+E         + expired
+
+tests/unit/test_gate_deferral_reads_the_run.py:134: AssertionError
+____________ test_the_absence_gate_laps_run_out_naming_the_absence _____________
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_the_absence_gate_laps_run0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x79711d9d4350>
+
+    def test_the_absence_gate_laps_run_out_naming_the_absence(tmp_path, monkeypatch):
+        """Wait 60 s, the default 3 h ceiling, a gate that never answers: 100 laps
+        of 90 s fit inside the ceiling, so the edge's limit is what ends the run."""
+        counter = tmp_path / "calls.txt"
+        sf, run_id = _wire(tmp_path, monkeypatch, episode_max=10800, wait=60,
+                           counter=counter, tail=_SILENT_TAIL)
+        assert gate_deferral.wait_seconds() == 60
+        assert gate_deferral.episode_max_seconds() == 10800
+        implement_runs, statuses, outcomes, nodes = _drive(
+            sf, run_id, monkeypatch, ticks=400, clock_step=30, second_driver=False)
+        run = sf.get_run(run_id)
+        reason = run.get("error_reason") or ""
+        print("LAPS " + json.dumps({
+            "implement_runs": implement_runs, "final_status": run["status"],
+            "error_reason": reason, "gate_calls": _gate_calls(counter),
+            "reacquires": outcomes.count("reacquire"), "ticks": len(outcomes),
+            "last_outcomes": outcomes[-4:]}, indent=1))
+    
+        assert run["status"] == "failed", statuses[-3:]
+        assert implement_runs == 1
+        assert "cycle limit" not in reason.lower()
+        assert reason.startswith(gate_deferral.ABSENCE_TERMINAL), reason
+        assert gate_deferral.absent_terminal_names_no_failure(reason)
+        # Every lap the edge allows was used: the first run plus 100 re-runs.
+        assert outcomes.count("reacquire") == 100
+>       assert _gate_calls(counter) == 101
+E       AssertionError: assert 100 == 101
+E        +  where 100 = _gate_calls(PosixPath('/tmp/pytest-of-unknown/pytest-0/test_the_absence_gate_laps_run0/calls.txt'))
+
+tests/skillflow/test_coding_impl_absence_needs_nothing_else_red.py:92: AssertionError
+----------------------------- Captured stdout call -----------------------------
+LAPS {
+ "implement_runs": 1,
+ "final_status": "failed",
+ "error_reason": "gate did not run: no verdict was measured (run_tests.sh, 501 attempt(s))",
+ "gate_calls": 100,
+ "reacquires": 100,
+ "ticks": 305,
+ "last_outcomes": [
+  "silent",
+  "reacquire",
+  "expired",
+  "terminal:gate did not run: no verdict was measured (run_tests.sh, 501 attempt(s))"
+ ]
+}
+------------------------------ Captured log call -------------------------------
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+=============================== warnings summary ===============================
+../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_gate_deferral_reads_the_run.py::test_the_last_lap_granted_is_run
+FAILED tests/skillflow/test_coding_impl_absence_needs_nothing_else_red.py::test_the_absence_gate_laps_run_out_naming_the_absence
+2 failed, 251 passed, 1 warning in 281.75s (0:04:41)
+BARE_RC=1
+end: 2026-09-25T01:41:16Z

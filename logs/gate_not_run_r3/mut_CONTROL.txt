@@ -1,0 +1,60 @@
+date: 2026-09-25T01:00:29Z
+tree: /home/linxuhao/.AItelier/worktrees-scratch/gn3-mut-CONTROL head: 
+command: bash /home/linxuhao/.AItelier/worktrees-scratch/gn3-mutjob.sh CONTROL /home/linxuhao/.AItelier/worktrees-scratch/gn3-scratchlogs/r3
+env: docker run --rm --init -m 3g --network aitelier_default -u 1000:1000 HOME=/home/linxuhao PYTHONPATH=/home/linxuhao/.AItelier/worktrees-scratch/gn3-mut-CONTROL PYTHONDONTWRITEBYTECODE=1 image aitelier:latest
+throwaway containers (aitelier image, not prod) before launch: 3
+in-container git head: fatal: not a git repository (or any parent up to mount point /home/linxuhao)
+Stopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set). status-lines: 0
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gn3-mut-CONTROL/aitelier/tools/run_tests/impl.py
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gn3-mut-CONTROL/aitelier/gate_admission.py
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gn3-mut-CONTROL/core/gate_deferral.py
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gn3-mut-CONTROL/core/skillflow_host.py
+IMPORT skillflow /usr/local/lib/python3.12/site-packages/skillflow/__init__.py
+........................................................................ [ 28%]
+........................................................................ [ 56%]
+......................................................................Exception occurred during processing of request from ('127.0.0.1', 38050)
+Traceback (most recent call last):
+  File "/home/linxuhao/.AItelier/worktrees-scratch/gn3-mut-CONTROL/docker/godot/godot_harness.py", line 3001, in do_POST
+    self._send_timed(200, _with_owner_wait(report, owner_wait))
+  File "/home/linxuhao/.AItelier/worktrees-scratch/gn3-mut-CONTROL/docker/godot/godot_harness.py", line 2814, in _send_timed
+    self.wfile.write(body)
+  File "/usr/local/lib/python3.12/socketserver.py", line 845, in write
+    self._sock.sendall(b)
+BrokenPipeError: [Errno 32] Broken pipe
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/socketserver.py", line 697, in process_request_thread
+    self.finish_request(request, client_address)
+  File "/usr/local/lib/python3.12/socketserver.py", line 362, in finish_request
+    self.RequestHandlerClass(request, client_address, self)
+  File "/usr/local/lib/python3.12/socketserver.py", line 766, in __init__
+    self.handle()
+  File "/usr/local/lib/python3.12/http/server.py", line 440, in handle
+    self.handle_one_request()
+  File "/usr/local/lib/python3.12/http/server.py", line 428, in handle_one_request
+    method()
+  File "/home/linxuhao/.AItelier/worktrees-scratch/gn3-mut-CONTROL/docker/godot/godot_harness.py", line 3005, in do_POST
+    self._send(500, {"error": str(e)})
+  File "/home/linxuhao/.AItelier/worktrees-scratch/gn3-mut-CONTROL/docker/godot/godot_harness.py", line 2789, in _send
+    self.end_headers()
+  File "/usr/local/lib/python3.12/http/server.py", line 542, in end_headers
+    self.flush_headers()
+  File "/usr/local/lib/python3.12/http/server.py", line 546, in flush_headers
+    self.wfile.write(b"".join(self._headers_buffer))
+  File "/usr/local/lib/python3.12/socketserver.py", line 845, in write
+    self._sock.sendall(b)
+BrokenPipeError: [Errno 32] Broken pipe
+----------------------------------------
+.. [ 85%]
+.....................................                                    [100%]
+=============================== warnings summary ===============================
+../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+253 passed, 1 warning in 290.53s (0:04:50)
+BARE_RC=0
+end: 2026-09-25T01:05:25Z

@@ -1,0 +1,233 @@
+date: 2026-09-25T01:00:37Z
+tree: /home/linxuhao/.AItelier/worktrees-scratch/gn3-mut-N1_findings_first head: 
+command: bash /home/linxuhao/.AItelier/worktrees-scratch/gn3-mutjob.sh N1_findings_first /home/linxuhao/.AItelier/worktrees-scratch/gn3-scratchlogs/r3
+env: docker run --rm --init -m 3g --network aitelier_default -u 1000:1000 HOME=/home/linxuhao PYTHONPATH=/home/linxuhao/.AItelier/worktrees-scratch/gn3-mut-N1_findings_first PYTHONDONTWRITEBYTECODE=1 image aitelier:latest
+throwaway containers (aitelier image, not prod) before launch: 3
+in-container git head: fatal: not a git repository (or any parent up to mount point /home/linxuhao)
+Stopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set). status-lines: 0
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gn3-mut-N1_findings_first/aitelier/tools/run_tests/impl.py
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gn3-mut-N1_findings_first/aitelier/gate_admission.py
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gn3-mut-N1_findings_first/core/gate_deferral.py
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gn3-mut-N1_findings_first/core/skillflow_host.py
+IMPORT skillflow /usr/local/lib/python3.12/site-packages/skillflow/__init__.py
+FF.FFFFFF............................................................... [ 28%]
+........................................................................ [ 56%]
+........................................................................ [ 85%]
+.....................................                                    [100%]
+=================================== FAILURES ===================================
+___ test_pole_3_a_retained_red_then_a_refusal_is_a_measured_red[python_red] ____
+
+busy = <tests.gate_fixture.HarnessRig object at 0x764efb584920>
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_pole_3_a_retained_red_the0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x764efb585d60>
+mode = 'python_red'
+
+    @pytest.mark.parametrize("mode", ["python_red", "compile_red"])
+    def test_pole_3_a_retained_red_then_a_refusal_is_a_measured_red(
+            busy, tmp_path, monkeypatch, mode):
+        if mode == "compile_red":
+            monkeypatch.setattr(busy.gh, "compile_project", lambda _p: {
+                "passed": False, "summary": "1 error",
+                "errors": [{"file": "res://a.gd", "line": 3,
+                            "msg": "Parse Error: probe"}]})
+        repo = _red_then_ask_repo(tmp_path, monkeypatch, mode)
+        result, report = _run(repo, tmp_path / "out")
+        gate = report["repo_gate"]
+    
+        # The facts that made r2 read this as "not run" are all still present.
+        assert gate["returncode"] == 2
+        assert gate["admission"]["state"] == gate_admission.NOT_ADMITTED
+        assert gate["admission"]["requests"][-1]["status"] == 409
+        # And the retained report outranks them.
+        assert gate["retained_findings"] == 1
+>       assert gate["measured"] == rt.REPO_GATE_MEASURED_FAIL
+E       AssertionError: assert 'unmeasured' == 'measured_fail'
+E         
+E         - measured_fail
+E         + unmeasured
+
+tests/unit/test_repo_gate_red_beats_absence.py:125: AssertionError
+___ test_pole_3_a_retained_red_then_a_refusal_is_a_measured_red[compile_red] ___
+
+busy = <tests.gate_fixture.HarnessRig object at 0x764efb2e22d0>
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_pole_3_a_retained_red_the1')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x764efb2e1dc0>
+mode = 'compile_red'
+
+    @pytest.mark.parametrize("mode", ["python_red", "compile_red"])
+    def test_pole_3_a_retained_red_then_a_refusal_is_a_measured_red(
+            busy, tmp_path, monkeypatch, mode):
+        if mode == "compile_red":
+            monkeypatch.setattr(busy.gh, "compile_project", lambda _p: {
+                "passed": False, "summary": "1 error",
+                "errors": [{"file": "res://a.gd", "line": 3,
+                            "msg": "Parse Error: probe"}]})
+        repo = _red_then_ask_repo(tmp_path, monkeypatch, mode)
+        result, report = _run(repo, tmp_path / "out")
+        gate = report["repo_gate"]
+    
+        # The facts that made r2 read this as "not run" are all still present.
+        assert gate["returncode"] == 2
+        assert gate["admission"]["state"] == gate_admission.NOT_ADMITTED
+        assert gate["admission"]["requests"][-1]["status"] == 409
+        # And the retained report outranks them.
+        assert gate["retained_findings"] == 1
+>       assert gate["measured"] == rt.REPO_GATE_MEASURED_FAIL
+E       AssertionError: assert 'unmeasured' == 'measured_fail'
+E         
+E         - measured_fail
+E         + unmeasured
+
+tests/unit/test_repo_gate_red_beats_absence.py:125: AssertionError
+_____ test_a_retained_finding_outranks_every_source_of_unmeasured[source0] _____
+
+source = {'unmeasured_declaration': {'state': 'blocked', 'reason': 'x'}}
+
+    @pytest.mark.parametrize("source", [
+        {"unmeasured_declaration": {"state": "blocked", "reason": "x"}},
+        {"timed_out": True},
+        {"runner_error": True},
+        {"returncode": 2, "admission": {"state": gate_admission.NOT_ADMITTED}},
+        {"returncode": 2, "admission": {"state": gate_admission.UNREACHABLE}},
+        {"returncode": 0},
+    ])
+    def test_a_retained_finding_outranks_every_source_of_unmeasured(source):
+        gate = {"returncode": 2, **source}
+>       assert rt._repo_gate_outcome({**gate, "retained_findings": 1}) == \
+            rt.REPO_GATE_MEASURED_FAIL
+E       AssertionError: assert 'unmeasured' == 'measured_fail'
+E         
+E         - measured_fail
+E         + unmeasured
+
+tests/unit/test_repo_gate_red_beats_absence.py:164: AssertionError
+_____ test_a_retained_finding_outranks_every_source_of_unmeasured[source1] _____
+
+source = {'timed_out': True}
+
+    @pytest.mark.parametrize("source", [
+        {"unmeasured_declaration": {"state": "blocked", "reason": "x"}},
+        {"timed_out": True},
+        {"runner_error": True},
+        {"returncode": 2, "admission": {"state": gate_admission.NOT_ADMITTED}},
+        {"returncode": 2, "admission": {"state": gate_admission.UNREACHABLE}},
+        {"returncode": 0},
+    ])
+    def test_a_retained_finding_outranks_every_source_of_unmeasured(source):
+        gate = {"returncode": 2, **source}
+>       assert rt._repo_gate_outcome({**gate, "retained_findings": 1}) == \
+            rt.REPO_GATE_MEASURED_FAIL
+E       AssertionError: assert 'unmeasured' == 'measured_fail'
+E         
+E         - measured_fail
+E         + unmeasured
+
+tests/unit/test_repo_gate_red_beats_absence.py:164: AssertionError
+_____ test_a_retained_finding_outranks_every_source_of_unmeasured[source2] _____
+
+source = {'runner_error': True}
+
+    @pytest.mark.parametrize("source", [
+        {"unmeasured_declaration": {"state": "blocked", "reason": "x"}},
+        {"timed_out": True},
+        {"runner_error": True},
+        {"returncode": 2, "admission": {"state": gate_admission.NOT_ADMITTED}},
+        {"returncode": 2, "admission": {"state": gate_admission.UNREACHABLE}},
+        {"returncode": 0},
+    ])
+    def test_a_retained_finding_outranks_every_source_of_unmeasured(source):
+        gate = {"returncode": 2, **source}
+>       assert rt._repo_gate_outcome({**gate, "retained_findings": 1}) == \
+            rt.REPO_GATE_MEASURED_FAIL
+E       AssertionError: assert 'unmeasured' == 'measured_fail'
+E         
+E         - measured_fail
+E         + unmeasured
+
+tests/unit/test_repo_gate_red_beats_absence.py:164: AssertionError
+_____ test_a_retained_finding_outranks_every_source_of_unmeasured[source3] _____
+
+source = {'returncode': 2, 'admission': {'state': 'not_admitted'}}
+
+    @pytest.mark.parametrize("source", [
+        {"unmeasured_declaration": {"state": "blocked", "reason": "x"}},
+        {"timed_out": True},
+        {"runner_error": True},
+        {"returncode": 2, "admission": {"state": gate_admission.NOT_ADMITTED}},
+        {"returncode": 2, "admission": {"state": gate_admission.UNREACHABLE}},
+        {"returncode": 0},
+    ])
+    def test_a_retained_finding_outranks_every_source_of_unmeasured(source):
+        gate = {"returncode": 2, **source}
+>       assert rt._repo_gate_outcome({**gate, "retained_findings": 1}) == \
+            rt.REPO_GATE_MEASURED_FAIL
+E       AssertionError: assert 'unmeasured' == 'measured_fail'
+E         
+E         - measured_fail
+E         + unmeasured
+
+tests/unit/test_repo_gate_red_beats_absence.py:164: AssertionError
+_____ test_a_retained_finding_outranks_every_source_of_unmeasured[source4] _____
+
+source = {'returncode': 2, 'admission': {'state': 'unreachable'}}
+
+    @pytest.mark.parametrize("source", [
+        {"unmeasured_declaration": {"state": "blocked", "reason": "x"}},
+        {"timed_out": True},
+        {"runner_error": True},
+        {"returncode": 2, "admission": {"state": gate_admission.NOT_ADMITTED}},
+        {"returncode": 2, "admission": {"state": gate_admission.UNREACHABLE}},
+        {"returncode": 0},
+    ])
+    def test_a_retained_finding_outranks_every_source_of_unmeasured(source):
+        gate = {"returncode": 2, **source}
+>       assert rt._repo_gate_outcome({**gate, "retained_findings": 1}) == \
+            rt.REPO_GATE_MEASURED_FAIL
+E       AssertionError: assert 'unmeasured' == 'measured_fail'
+E         
+E         - measured_fail
+E         + unmeasured
+
+tests/unit/test_repo_gate_red_beats_absence.py:164: AssertionError
+_____ test_a_retained_finding_outranks_every_source_of_unmeasured[source5] _____
+
+source = {'returncode': 0}
+
+    @pytest.mark.parametrize("source", [
+        {"unmeasured_declaration": {"state": "blocked", "reason": "x"}},
+        {"timed_out": True},
+        {"runner_error": True},
+        {"returncode": 2, "admission": {"state": gate_admission.NOT_ADMITTED}},
+        {"returncode": 2, "admission": {"state": gate_admission.UNREACHABLE}},
+        {"returncode": 0},
+    ])
+    def test_a_retained_finding_outranks_every_source_of_unmeasured(source):
+        gate = {"returncode": 2, **source}
+>       assert rt._repo_gate_outcome({**gate, "retained_findings": 1}) == \
+            rt.REPO_GATE_MEASURED_FAIL
+E       AssertionError: assert 'measured_pass' == 'measured_fail'
+E         
+E         - measured_fail
+E         ?          ^ ^^
+E         + measured_pass
+E         ?          ^ ^^
+
+tests/unit/test_repo_gate_red_beats_absence.py:164: AssertionError
+=============================== warnings summary ===============================
+../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_repo_gate_red_beats_absence.py::test_pole_3_a_retained_red_then_a_refusal_is_a_measured_red[python_red]
+FAILED tests/unit/test_repo_gate_red_beats_absence.py::test_pole_3_a_retained_red_then_a_refusal_is_a_measured_red[compile_red]
+FAILED tests/unit/test_repo_gate_red_beats_absence.py::test_a_retained_finding_outranks_every_source_of_unmeasured[source0]
+FAILED tests/unit/test_repo_gate_red_beats_absence.py::test_a_retained_finding_outranks_every_source_of_unmeasured[source1]
+FAILED tests/unit/test_repo_gate_red_beats_absence.py::test_a_retained_finding_outranks_every_source_of_unmeasured[source2]
+FAILED tests/unit/test_repo_gate_red_beats_absence.py::test_a_retained_finding_outranks_every_source_of_unmeasured[source3]
+FAILED tests/unit/test_repo_gate_red_beats_absence.py::test_a_retained_finding_outranks_every_source_of_unmeasured[source4]
+FAILED tests/unit/test_repo_gate_red_beats_absence.py::test_a_retained_finding_outranks_every_source_of_unmeasured[source5]
+8 failed, 245 passed, 1 warning in 288.66s (0:04:48)
+BARE_RC=1
+end: 2026-09-25T01:05:31Z

@@ -1,0 +1,102 @@
+date: 2026-09-25T01:00:21Z
+tree: /home/linxuhao/.AItelier/worktrees-scratch/gatenotrun2 head: 34a9bee523b33ec92e953bab0c726e89c499dc55
+command: python /home/linxuhao/.AItelier/worktrees-scratch/gn3-probes/identity_probe.py /home/linxuhao/.AItelier/worktrees-scratch/gn2-wuxia-copy wuxia-godot-gate-xejan5yo wuxia-godot-gate-4bo8111t wuxia-godot-gate-v7onurjj wuxia-godot-gate-6eskoo9v
+env: docker run --rm --init -m 3g --network aitelier_default -u 1000:1000 HOME=/home/linxuhao PYTHONPATH=/home/linxuhao/.AItelier/worktrees-scratch/gatenotrun2 PYTHONDONTWRITEBYTECODE=1 image aitelier:latest
+throwaway containers (aitelier image, not prod) before launch: 3
+in-container git head: 34a9bee523b33ec92e953bab0c726e89c499dc55 status-lines: 0
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gatenotrun2/aitelier/tools/run_tests/impl.py
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gatenotrun2/aitelier/gate_admission.py
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gatenotrun2/core/gate_deferral.py
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gatenotrun2/core/skillflow_host.py
+IMPORT skillflow /usr/local/lib/python3.12/site-packages/skillflow/__init__.py
+Traceback (most recent call last):
+  File "/home/linxuhao/.AItelier/worktrees-scratch/gn3-probes/identity_probe.py", line 161, in <module>
+    injected = inject(real)
+               ^^^^^^^^^^^^
+  File "/home/linxuhao/.AItelier/worktrees-scratch/gn3-probes/identity_probe.py", line 146, in inject
+impl: /home/linxuhao/.AItelier/worktrees-scratch/gatenotrun2/aitelier/tools/run_tests/impl.py
+gate: /home/linxuhao/.AItelier/worktrees-scratch/gn2-wuxia-copy/tools/godot_gate.py
+wuxia-godot-gate-4bo8111t findings=1 records=1 distinct_ids=1 err=None
+wuxia-godot-gate-5f_471lj findings=2 records=2 distinct_ids=2 err=None
+wuxia-godot-gate-5n99qn4i findings=3 records=3 distinct_ids=3 err=None
+wuxia-godot-gate-5pfr_x4f findings=3 records=3 distinct_ids=3 err=None
+wuxia-godot-gate-6eskoo9v findings=1 records=1 distinct_ids=1 err=None
+wuxia-godot-gate-7bh8i__u findings=3 records=3 distinct_ids=3 err=None
+wuxia-godot-gate-8ylex3xw findings=3 records=3 distinct_ids=3 err=None
+wuxia-godot-gate-9_53_ur5 findings=3 records=3 distinct_ids=3 err=None
+wuxia-godot-gate-9x_rz0i8 findings=3 records=3 distinct_ids=3 err=None
+wuxia-godot-gate-_8t545nv findings=3 records=3 distinct_ids=3 err=None
+wuxia-godot-gate-_huejf_u findings=3 records=3 distinct_ids=3 err=None
+wuxia-godot-gate-adon08cx findings=3 records=3 distinct_ids=3 err=None
+wuxia-godot-gate-ayu382u9 findings=3 records=3 distinct_ids=3 err=None
+wuxia-godot-gate-b1tc548b findings=2 records=2 distinct_ids=2 err=None
+wuxia-godot-gate-csorz0re findings=3 records=3 distinct_ids=3 err=None
+wuxia-godot-gate-dq99_eul findings=3 records=3 distinct_ids=3 err=None
+wuxia-godot-gate-exliflif findings=3 records=3 distinct_ids=3 err=None
+wuxia-godot-gate-fepdf7t9 findings=9 records=9 distinct_ids=9 err=None
+wuxia-godot-gate-fpsg_1i6 findings=4 records=4 distinct_ids=4 err=None
+wuxia-godot-gate-g232imhh findings=3 records=3 distinct_ids=3 err=None
+wuxia-godot-gate-m_hrnotl findings=3 records=3 distinct_ids=3 err=None
+wuxia-godot-gate-mntnp9r3 findings=3 records=3 distinct_ids=3 err=None
+wuxia-godot-gate-nmldpco1 findings=2 records=2 distinct_ids=2 err=None
+wuxia-godot-gate-ns47o858 findings=19 records=19 distinct_ids=19 err=None
+wuxia-godot-gate-oacjvsdx findings=2 records=2 distinct_ids=2 err=None
+wuxia-godot-gate-ody56hb9 findings=3 records=3 distinct_ids=3 err=None
+wuxia-godot-gate-ovnfetx_ findings=19 records=19 distinct_ids=19 err=None
+wuxia-godot-gate-t2bxsrll findings=3 records=3 distinct_ids=3 err=None
+wuxia-godot-gate-t_erp8pi findings=2 records=2 distinct_ids=2 err=None
+wuxia-godot-gate-v7onurjj findings=1 records=1 distinct_ids=1 err=None
+wuxia-godot-gate-xejan5yo findings=6 records=6 distinct_ids=6 err=None
+PART1 red gates=31 findings=124 distinct_ids=124 identity_errors=0 gates_with_records!=findings=0
+PART1 failing assertions (scenario / name: expr) and the ids they got across runs:
+  1 id(s)  basic_attack_free_at_zero_qi / Central_Divine.health: health == max_health - 39
+      playtest/basic_attack_free_at_zero_qi/Central_Divine.health@120
+  1 id(s)  basic_attack_free_at_zero_qi / Player.acted: acted == true
+      playtest/basic_attack_free_at_zero_qi/Player.acted@120
+  1 id(s)  body_motion_probe / MotionProbe.failures: failures == 0
+      playtest/body_motion_probe/MotionProbe.failures@1190
+  1 id(s)  english_settings_to_map_readiness / RosterBodyLabel.text: text.contains("Sword-Testing Cliff readine
+      playtest/english_settings_to_map_readiness/RosterBodyLabel.text@370
+  1 id(s)  event_travel_plan_effects / CultOptionButton0.text: text == "受他这一夜"
+      playtest/event_travel_plan_effects/CultOptionButton0.text@1050
+  1 id(s)  event_travel_plan_effects / CultOptionButton1.text: text == "道谢，自去"
+      playtest/event_travel_plan_effects/CultOptionButton1.text@1050
+  2 id(s)  event_travel_plan_effects / CultivationScreen.chain_state: chain_state == "declined"
+      playtest/event_travel_plan_effects/CultivationScreen.chain_state@1200
+      playtest/event_travel_plan_effects/CultivationScreen.chain_state@1420
+  1 id(s)  event_travel_plan_effects / CultivationScreen.events_seen_count: events_seen_count == 3
+      playtest/event_travel_plan_effects/CultivationScreen.events_seen_count@1550
+  1 id(s)  event_travel_plan_effects / CultivationScreen.month: month == 3
+      playtest/event_travel_plan_effects/CultivationScreen.month@830
+  1 id(s)  event_travel_plan_effects / CultivationScreen.month: month == 4
+      playtest/event_travel_plan_effects/CultivationScreen.month@1200
+  1 id(s)  event_travel_plan_effects / CultivationScreen.month: month == 5
+      playtest/event_travel_plan_effects/CultivationScreen.month@1550
+  3 id(s)  event_travel_plan_effects / CultivationScreen.phase: phase == "CARD_PICK"
+      playtest/event_travel_plan_effects/CultivationScreen.phase@1200
+      playtest/event_travel_plan_effects/CultivationScreen.phase@1550
+      playtest/event_travel_plan_effects/CultivationScreen.phase@830
+  1 id(s)  event_travel_plan_effects / CultivationScreen.phase: phase == "PLAN_RUN"
+      playtest/event_travel_plan_effects/CultivationScreen.phase@1420
+  1 id(s)  health_bar_above_portrait / Central_Divine.portrait_bar_pos: portrait_bar_pos.y > sprite_top + 128.0
+      playtest/health_bar_above_portrait/Central_Divine.portrait_bar_pos@200
+  1 id(s)  health_bar_above_portrait / West_Poison.portrait_bar_pos: portrait_bar_pos.y > sprite_top + 128.0
+      playtest/health_bar_above_portrait/West_Poison.portrait_bar_pos@200
+PART2 wuxia-godot-gate-xejan5yo: findings real=6 injected=6 finding texts changed by the injection=3 identity lists equal=True
+    0 == playtest/8fc2ce2c748a  |  playtest/8fc2ce2c748a
+    1 == playtest/b433f4c11fcd  |  playtest/b433f4c11fcd
+    2 == playtest/body_motion_probe/MotionProbe.failures@1190  |  playtest/body_motion_probe/MotionProbe.failures@1190
+    3 == playtest/d703fa01db9d  |  playtest/d703fa01db9d
+    4 == playtest/health_bar_above_portrait/Central_Divine.portrait_bar_pos@200  |  playtest/health_bar_above_portrait/Central_Divine.portrait_bar_pos@200
+    5 == playtest/health_bar_above_portrait/West_Poison.portrait_bar_pos@200  |  playtest/health_bar_above_portrait/West_Poison.portrait_bar_pos@200
+      text   2 real:       body_motion_probe / MotionProbe.failures: failures == 0 -> actual false; observed 20
+      text   2 injected:   body_motion_probe / MotionProbe.failures: failures == 0 -> actual false; observed 1020
+      text   4 real:       health_bar_above_portrait / Central_Divine.portrait_bar_pos: portrait_bar_pos.y > sprite_top + 128.0 -> actual false; observed "[446.0, 102.0]"
+      text   4 injected:   health_bar_above_portrait / Central_Divine.portrait_bar_pos: portrait_bar_pos.y > sprite_top + 128.0 -> actual false; observed "[446.0, 102.0]_injec
+      text   5 real:       health_bar_above_portrait / West_Poison.portrait_bar_pos: portrait_bar_pos.y > sprite_top + 128.0 -> actual false; observed "[702.0, 166.0]"
+      text   5 injected:   health_bar_above_portrait / West_Poison.portrait_bar_pos: portrait_bar_pos.y > sprite_top + 128.0 -> actual false; observed "[702.0, 166.0]_injected
+    row["observed"] = changed(row.get("observed"))
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: 'int' object is not callable
+BARE_RC=1
+end: 2026-09-25T01:00:22Z

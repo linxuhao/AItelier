@@ -1,0 +1,53 @@
+date: 2026-09-25T01:10:34Z
+tree: /home/linxuhao/.AItelier/worktrees-scratch/gn3-mut-N4_no_assert_rows head: 
+command: bash /home/linxuhao/.AItelier/worktrees-scratch/gn3-mutjob.sh N4_no_assert_rows /home/linxuhao/.AItelier/worktrees-scratch/gn3-scratchlogs/r3
+env: docker run --rm --init -m 3g --network aitelier_default -u 1000:1000 HOME=/home/linxuhao PYTHONPATH=/home/linxuhao/.AItelier/worktrees-scratch/gn3-mut-N4_no_assert_rows PYTHONDONTWRITEBYTECODE=1 image aitelier:latest
+throwaway containers (aitelier image, not prod) before launch: 3
+in-container git head: fatal: not a git repository (or any parent up to mount point /home/linxuhao)
+Stopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set). status-lines: 0
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gn3-mut-N4_no_assert_rows/aitelier/tools/run_tests/impl.py
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gn3-mut-N4_no_assert_rows/aitelier/gate_admission.py
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gn3-mut-N4_no_assert_rows/core/gate_deferral.py
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gn3-mut-N4_no_assert_rows/core/skillflow_host.py
+IMPORT skillflow /usr/local/lib/python3.12/site-packages/skillflow/__init__.py
+..................FF.................................................... [ 28%]
+........................................................................ [ 56%]
+........................................................................ [ 85%]
+.....................................                                    [100%]
+=================================== FAILURES ===================================
+___________ test_different_observed_values_keep_the_same_identities ____________
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_different_observed_values0')
+
+    def test_different_observed_values_keep_the_same_identities(tmp_path):
+        first = _ids(tmp_path / "1", *_playtest(6, 7, summary="Playtest HARD-failed: 2 red"))
+        second = _ids(tmp_path / "2", *_playtest(53, "MENU", summary="Playtest HARD-failed: 5 red"))
+>       assert first == second
+E       AssertionError: assert ['playtest/su...9ce7388', ...] == ['playtest/su...7676599', ...]
+E         
+E         At index 4 diff: 'playtest/27b5dba60123' != 'playtest/4dd9a8a38609'
+E         Use -v to get more diff
+
+tests/unit/test_repo_gate_identity_is_stable.py:102: AssertionError
+____________ test_an_assertion_is_named_by_scenario_name_and_frame _____________
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_an_assertion_is_named_by_0')
+
+    def test_an_assertion_is_named_by_scenario_name_and_frame(tmp_path):
+        ids = _ids(tmp_path, *_playtest("PLAN_RUN", "MENU"))
+>       assert "playtest/event_travel/CultivationScreen.phase@830" in ids
+E       AssertionError: assert 'playtest/event_travel/CultivationScreen.phase@830' in ['playtest/summary/60f0b670abc5', 'playtest/417d8128e0e5', 'playtest/417d8128e0e5~2', 'playtest/b433f4c11fcd', 'playtest/2b3a055646d3', 'playtest/0d2e1d6ad1a2', ...]
+
+tests/unit/test_repo_gate_identity_is_stable.py:110: AssertionError
+=============================== warnings summary ===============================
+../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_repo_gate_identity_is_stable.py::test_different_observed_values_keep_the_same_identities
+FAILED tests/unit/test_repo_gate_identity_is_stable.py::test_an_assertion_is_named_by_scenario_name_and_frame
+2 failed, 251 passed, 1 warning in 280.35s (0:04:40)
+BARE_RC=1
+end: 2026-09-25T01:15:19Z

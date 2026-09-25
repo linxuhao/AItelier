@@ -1,0 +1,59 @@
+date: 2026-09-25T00:57:01Z
+tree: /home/linxuhao/.AItelier/worktrees-scratch/gatenotrun2 head: 34a9bee523b33ec92e953bab0c726e89c499dc55 status-lines: 0
+command: python /home/linxuhao/.AItelier/worktrees-scratch/gn3-probes/attack1_hidden_failures.py /home/linxuhao/.AItelier/worktrees-scratch/gatenotrun2/tests/gate_fixture.py wait_expiry_payload
+PROBE {
+ "tree_impl": "/home/linxuhao/.AItelier/worktrees-scratch/gatenotrun2/aitelier/tools/run_tests/impl.py",
+ "scenario": "wait_expiry_payload",
+ "repo_gate.returncode": 2,
+ "repo_gate.measured": "unmeasured",
+ "repo_gate.retained_findings": 0,
+ "repo_gate_unmeasured": true,
+ "admission.state": "not_admitted",
+ "admission.requests": [
+  {
+   "route": "/script",
+   "status": 409,
+   "outcome": "not_admitted",
+   "owner_kind": "active",
+   "render_wait_timeout_sec": 1.0,
+   "waited_sec": 1.0158,
+   "wait_timeout_sec": 1.0,
+   "error": "render owner wait timed out",
+   "keepalives": 0,
+   "admitted_after_sec": null
+  }
+ ],
+ "repo_gate_absent(return)": true,
+ "repo_gate_absent(report)": true,
+ "evidence_state": "not_run",
+ "passed": false,
+ "release_evidence": "unresolved",
+ "failure_identity_error": null,
+ "failures": [
+  "repo_gate:run_tests.sh was NOT measured (engine admission: not_admitted; 1 attempt(s)): godot-builder unreachable at http://127.0.0.1:41897: HTTP Error 409: Con"
+ ],
+ "new_failures": [
+  "repo_gate:run_tests.sh was NOT measured (engine admission: not_admitted; 1 attempt(s)): godot-builder unreachable at http://127.0.0.1:41897: HTTP Error 409: Con"
+ ],
+ "harness_rendered_for": [
+  "op-holder"
+ ]
+}
+Traceback (most recent call last):
+  File "/home/linxuhao/.AItelier/worktrees-scratch/gn3-probes/attack1_hidden_failures.py", line 94, in <module>
+    with pytest.MonkeyPatch.context() as mp, tempfile.TemporaryDirectory() as tmp:
+                                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/tempfile.py", line 950, in __exit__
+    self.cleanup()
+  File "/usr/local/lib/python3.12/tempfile.py", line 954, in cleanup
+    self._rmtree(self.name, ignore_errors=self._ignore_cleanup_errors)
+  File "/usr/local/lib/python3.12/tempfile.py", line 934, in _rmtree
+    _shutil.rmtree(name, onexc=onexc)
+  File "/usr/local/lib/python3.12/shutil.py", line 759, in rmtree
+    _rmtree_safe_fd(stack, onexc)
+  File "/usr/local/lib/python3.12/shutil.py", line 703, in _rmtree_safe_fd
+    onexc(func, path, err)
+  File "/usr/local/lib/python3.12/shutil.py", line 662, in _rmtree_safe_fd
+    os.rmdir(name, dir_fd=dirfd)
+OSError: [Errno 39] Directory not empty: '/tmp/tmp9_07uytz/harness'
+BARE_RC=1

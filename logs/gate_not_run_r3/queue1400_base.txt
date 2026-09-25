@@ -1,0 +1,79 @@
+date: 2026-09-25T00:56:40Z
+tree: /home/linxuhao/.AItelier/worktrees-scratch/gn3-base-aa88 head: aa88cb54293161be92508324d2235f05a618c268
+command: python /home/linxuhao/.AItelier/worktrees-scratch/gn3-probes/queue_after_1400s.py
+env: docker run --rm --init -m 3g --network aitelier_default -u 1000:1000 HOME=/home/linxuhao PYTHONPATH=/home/linxuhao/.AItelier/worktrees-scratch/gn3-base-aa88 PYTHONDONTWRITEBYTECODE=1 image aitelier:latest
+throwaway containers (aitelier image, not prod) before launch: 1
+in-container git head: aa88cb54293161be92508324d2235f05a618c268 status-lines: 0
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gn3-base-aa88/aitelier/tools/run_tests/impl.py
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gn3-base-aa88/aitelier/gate_admission.py
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gn3-base-aa88/core/gate_deferral.py
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gn3-base-aa88/core/skillflow_host.py
+IMPORT skillflow /usr/local/lib/python3.12/site-packages/skillflow/__init__.py
+----------------------------------------
+Exception occurred during processing of request from ('127.0.0.1', 46902)
+Traceback (most recent call last):
+  File "/home/linxuhao/.AItelier/worktrees-scratch/gn3-base-aa88/docker/godot/godot_harness.py", line 2983, in do_POST
+    self._send(200, _with_owner_wait(run_script(
+  File "/home/linxuhao/.AItelier/worktrees-scratch/gn3-base-aa88/docker/godot/godot_harness.py", line 2790, in _send
+    self.wfile.write(body)
+  File "/usr/local/lib/python3.12/socketserver.py", line 845, in write
+    self._sock.sendall(b)
+BrokenPipeError: [Errno 32] Broken pipe
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/socketserver.py", line 697, in process_request_thread
+    self.finish_request(request, client_address)
+  File "/usr/local/lib/python3.12/socketserver.py", line 362, in finish_request
+    self.RequestHandlerClass(request, client_address, self)
+  File "/usr/local/lib/python3.12/socketserver.py", line 766, in __init__
+    self.handle()
+  File "/usr/local/lib/python3.12/http/server.py", line 440, in handle
+    self.handle_one_request()
+  File "/usr/local/lib/python3.12/http/server.py", line 428, in handle_one_request
+    method()
+  File "/home/linxuhao/.AItelier/worktrees-scratch/gn3-base-aa88/docker/godot/godot_harness.py", line 3005, in do_POST
+    self._send(500, {"error": str(e)})
+  File "/home/linxuhao/.AItelier/worktrees-scratch/gn3-base-aa88/docker/godot/godot_harness.py", line 2789, in _send
+    self.end_headers()
+  File "/usr/local/lib/python3.12/http/server.py", line 542, in end_headers
+    self.flush_headers()
+  File "/usr/local/lib/python3.12/http/server.py", line 546, in flush_headers
+    self.wfile.write(b"".join(self._headers_buffer))
+  File "/usr/local/lib/python3.12/socketserver.py", line 845, in write
+    self._sock.sendall(b)
+BrokenPipeError: [Errno 32] Broken pipe
+----------------------------------------
+tree: /home/linxuhao/.AItelier/worktrees-scratch/gn3-base-aa88/aitelier/tools/run_tests/impl.py
+defaults: render_wait=1500.0 keepalive=absent on this tree
+[harness] /script waited 1400s for render owner(s) ['f0124008ef334b97bf32fea18f2a2074']
+QUEUE1400 {
+ "queue_sec": 1400.0,
+ "render_sec": 450.0,
+ "client_timeout_sec": 1800,
+ "elapsed_sec": 1800.4,
+ "returncode": 2,
+ "measured": "unmeasured",
+ "admission.state": "abandoned",
+ "requests": [
+  {
+   "route": "/script",
+   "status": null,
+   "outcome": null,
+   "render_owner_wait_sec": null,
+   "admission_observed": null,
+   "admitted_after_sec": null,
+   "keepalives": null,
+   "waited_sec": null,
+   "error": null
+  }
+ ],
+ "harness_rendered_for": [
+  "op-holder",
+  "repo"
+ ],
+ "output_tail": "godot-builder unreachable at http://127.0.0.1:43293: timed out -- gate NOT run."
+}
+BARE_RC=0
+end: 2026-09-25T01:26:42Z

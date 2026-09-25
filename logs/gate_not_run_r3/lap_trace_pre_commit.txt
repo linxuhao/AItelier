@@ -1,0 +1,35 @@
+date: 2026-09-25T00:46:42Z
+tree: /home/linxuhao/.AItelier/worktrees-scratch/gatenotrun2 head: aa88cb54293161be92508324d2235f05a618c268
+command: python -m pytest -p no:cacheprovider -q -s /home/linxuhao/.AItelier/worktrees-scratch/gn3-probes/test_lap_trace.py
+env: docker run --rm --init -m 3g --network aitelier_default -u 1000:1000 HOME=/home/linxuhao PYTHONPATH=/home/linxuhao/.AItelier/worktrees-scratch/gatenotrun2 PYTHONDONTWRITEBYTECODE=1 image aitelier:latest
+throwaway containers (aitelier image, not prod) before launch: 1
+in-container git head: aa88cb54293161be92508324d2235f05a618c268 status-lines: 13
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gatenotrun2/aitelier/tools/run_tests/impl.py
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gatenotrun2/aitelier/gate_admission.py
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gatenotrun2/core/gate_deferral.py
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gatenotrun2/core/skillflow_host.py
+IMPORT skillflow /usr/local/lib/python3.12/site-packages/skillflow/__init__.py
+TRACE none ((0, 100), None, 'running', 0)
+TRACE none ((0, 100), 'test', 'running', 0)
+TRACE none ((0, 100), 'test_gate_absent', 'running', 1)
+TRACE silent ((0, 100), 'test_gate_absent', 'running', 1)
+TRACE silent ((0, 100), 'test_gate_absent', 'running', 1)
+TRACE reacquire ((1, 100), 'test_gate_absent', 'running', 2)
+TRACE silent ((1, 100), 'test_gate_absent', 'running', 2)
+TRACE silent ((1, 100), 'test_gate_absent', 'running', 2)
+TRACE ... None
+TRACE silent ((97, 100), 'test_gate_absent', 'running', 98)
+TRACE reacquire ((97, 100), 'test_gate_absent', 'running', 98)
+TRACE silent ((98, 100), 'test_gate_absent', 'running', 99)
+TRACE silent ((98, 100), 'test_gate_absent', 'running', 99)
+TRACE reacquire ((98, 100), 'test_gate_absent', 'running', 99)
+TRACE silent ((99, 100), 'test_gate_absent', 'running', 100)
+TRACE silent ((99, 100), 'test_gate_absent', 'running', 100)
+TRACE reacquire ((99, 100), 'test_gate_absent', 'running', 100)
+TRACE expired ((100, 100), 'test', 'running', 100)
+TRACE terminal:gate did not run: no verdict was measured (run_tests.sh, 501 attempt(s)) ((100, 100), 'test', 'failed', 100)
+END gate did not run: no verdict was measured (run_tests.sh, 501 attempt(s)) 100
+.
+1 passed in 89.70s (0:01:29)
+BARE_RC=0
+end: 2026-09-25T00:48:13Z

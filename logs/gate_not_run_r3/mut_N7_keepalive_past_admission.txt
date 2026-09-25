@@ -1,0 +1,45 @@
+date: 2026-09-25T01:29:32Z
+tree: /home/linxuhao/.AItelier/worktrees-scratch/gn3-mut-N7_keepalive_past_admission head: 
+command: bash /home/linxuhao/.AItelier/worktrees-scratch/gn3-mutjob.sh N7_keepalive_past_admission /home/linxuhao/.AItelier/worktrees-scratch/gn3-scratchlogs/r3
+env: docker run --rm --init -m 3g --network aitelier_default -u 1000:1000 HOME=/home/linxuhao PYTHONPATH=/home/linxuhao/.AItelier/worktrees-scratch/gn3-mut-N7_keepalive_past_admission PYTHONDONTWRITEBYTECODE=1 image aitelier:latest
+throwaway containers (aitelier image, not prod) before launch: 3
+in-container git head: fatal: not a git repository (or any parent up to mount point /home/linxuhao)
+Stopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set). status-lines: 0
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gn3-mut-N7_keepalive_past_admission/aitelier/tools/run_tests/impl.py
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gn3-mut-N7_keepalive_past_admission/aitelier/gate_admission.py
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gn3-mut-N7_keepalive_past_admission/core/gate_deferral.py
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gn3-mut-N7_keepalive_past_admission/core/skillflow_host.py
+IMPORT skillflow /usr/local/lib/python3.12/site-packages/skillflow/__init__.py
+...............................F........................................ [ 28%]
+........................................................................ [ 56%]
+........................................................................ [ 85%]
+.....................................                                    [100%]
+=================================== FAILURES ===================================
+____________ test_the_client_timeout_still_bounds_the_render_itself ____________
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_the_client_timeout_still_0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x751d6df1c080>
+
+    def test_the_client_timeout_still_bounds_the_render_itself(tmp_path, monkeypatch):
+        """Queue 1.5 s, render 3 s, client timeout 2 s: once admitted, the gate's
+        own timeout runs again, and a render longer than it is not waited out."""
+        gate, _elapsed, rig = _queued_gate(tmp_path, monkeypatch, render=3.0,
+                                           queue=1.5, client_timeout=2)
+>       assert gate["returncode"] == 2, gate["output"]
+E       AssertionError: unit suite OK
+E       assert 0 == 2
+
+tests/unit/test_gate_admission_keepalive.py:74: AssertionError
+----------------------------- Captured stdout call -----------------------------
+[harness] /script waited 1s for render owner(s) ['505dc8de5643471fbe0a8ce4da02fcd2']
+=============================== warnings summary ===============================
+../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_gate_admission_keepalive.py::test_the_client_timeout_still_bounds_the_render_itself
+1 failed, 252 passed, 1 warning in 287.01s (0:04:47)
+BARE_RC=1
+end: 2026-09-25T01:34:24Z

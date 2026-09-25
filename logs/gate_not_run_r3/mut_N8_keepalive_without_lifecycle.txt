@@ -1,0 +1,86 @@
+date: 2026-09-25T01:31:56Z
+tree: /home/linxuhao/.AItelier/worktrees-scratch/gn3-mut-N8_keepalive_without_lifecycle head: 
+command: bash /home/linxuhao/.AItelier/worktrees-scratch/gn3-mutjob.sh N8_keepalive_without_lifecycle /home/linxuhao/.AItelier/worktrees-scratch/gn3-scratchlogs/r3
+env: docker run --rm --init -m 3g --network aitelier_default -u 1000:1000 HOME=/home/linxuhao PYTHONPATH=/home/linxuhao/.AItelier/worktrees-scratch/gn3-mut-N8_keepalive_without_lifecycle PYTHONDONTWRITEBYTECODE=1 image aitelier:latest
+throwaway containers (aitelier image, not prod) before launch: 3
+in-container git head: fatal: not a git repository (or any parent up to mount point /home/linxuhao)
+Stopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set). status-lines: 0
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gn3-mut-N8_keepalive_without_lifecycle/aitelier/tools/run_tests/impl.py
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gn3-mut-N8_keepalive_without_lifecycle/aitelier/gate_admission.py
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gn3-mut-N8_keepalive_without_lifecycle/core/gate_deferral.py
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gn3-mut-N8_keepalive_without_lifecycle/core/skillflow_host.py
+IMPORT skillflow /usr/local/lib/python3.12/site-packages/skillflow/__init__.py
+................................F....................................... [ 28%]
+........................................................................ [ 56%]
+........................................................................ [ 85%]
+.....................................                                    [100%]
+=================================== FAILURES ===================================
+_______________ test_no_keepalive_when_admission_cannot_be_seen ________________
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_no_keepalive_when_admissi0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7626e11d0b00>
+
+    def test_no_keepalive_when_admission_cannot_be_seen(tmp_path, monkeypatch):
+        server = ThreadingHTTPServer(("127.0.0.1", 0), _NoLifecycle)
+        server.daemon_threads = True
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        monkeypatch.setenv("GODOT_BUILDER_URL", f"http://127.0.0.1:{server.server_port}")
+        monkeypatch.setenv("FIXTURE_GATE_CLIENT_TIMEOUT", "1")
+        monkeypatch.setenv("AITELIER_REPO_GATE_KEEPALIVE_SECONDS", "0.2")
+        try:
+            gate = rt._run_repo_gate(_repo(tmp_path))
+        finally:
+            server.shutdown()
+            server.server_close()
+>       assert gate["returncode"] == 2
+E       assert 0 == 2
+
+tests/unit/test_gate_admission_keepalive.py:118: AssertionError
+----------------------------- Captured stderr call -----------------------------
+----------------------------------------
+Exception occurred during processing of request from ('127.0.0.1', 57892)
+Traceback (most recent call last):
+  File "/home/linxuhao/.AItelier/worktrees-scratch/gn3-mut-N8_keepalive_without_lifecycle/docker/godot/godot_harness.py", line 2983, in do_POST
+    self._send(200, _with_owner_wait(run_script(
+  File "/home/linxuhao/.AItelier/worktrees-scratch/gn3-mut-N8_keepalive_without_lifecycle/docker/godot/godot_harness.py", line 2790, in _send
+    self.wfile.write(body)
+  File "/usr/local/lib/python3.12/socketserver.py", line 845, in write
+    self._sock.sendall(b)
+BrokenPipeError: [Errno 32] Broken pipe
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/socketserver.py", line 697, in process_request_thread
+    self.finish_request(request, client_address)
+  File "/usr/local/lib/python3.12/socketserver.py", line 362, in finish_request
+    self.RequestHandlerClass(request, client_address, self)
+  File "/usr/local/lib/python3.12/socketserver.py", line 766, in __init__
+    self.handle()
+  File "/usr/local/lib/python3.12/http/server.py", line 440, in handle
+    self.handle_one_request()
+  File "/usr/local/lib/python3.12/http/server.py", line 428, in handle_one_request
+    method()
+  File "/home/linxuhao/.AItelier/worktrees-scratch/gn3-mut-N8_keepalive_without_lifecycle/docker/godot/godot_harness.py", line 3005, in do_POST
+    self._send(500, {"error": str(e)})
+  File "/home/linxuhao/.AItelier/worktrees-scratch/gn3-mut-N8_keepalive_without_lifecycle/docker/godot/godot_harness.py", line 2789, in _send
+    self.end_headers()
+  File "/usr/local/lib/python3.12/http/server.py", line 542, in end_headers
+    self.flush_headers()
+  File "/usr/local/lib/python3.12/http/server.py", line 546, in flush_headers
+    self.wfile.write(b"".join(self._headers_buffer))
+  File "/usr/local/lib/python3.12/socketserver.py", line 845, in write
+    self._sock.sendall(b)
+BrokenPipeError: [Errno 32] Broken pipe
+----------------------------------------
+=============================== warnings summary ===============================
+../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_gate_admission_keepalive.py::test_no_keepalive_when_admission_cannot_be_seen
+1 failed, 252 passed, 1 warning in 304.33s (0:05:04)
+BARE_RC=1
+end: 2026-09-25T01:37:05Z

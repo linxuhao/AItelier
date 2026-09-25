@@ -1,0 +1,17 @@
+date: 2026-09-25T00:57:27Z
+tree: /home/linxuhao/.AItelier/worktrees-scratch/gn3-base-aa88 head: aa88cb54293161be92508324d2235f05a618c268
+command: python -m pytest -p no:cacheprovider -q -s -c pytest.ini --rootdir . /home/linxuhao/.AItelier/worktrees-scratch/gn3-probes/test_lap_limit_at_60s.py
+env: docker run --rm --init -m 3g --network aitelier_default -u 1000:1000 HOME=/home/linxuhao PYTHONPATH=/home/linxuhao/.AItelier/worktrees-scratch/gn3-base-aa88 PYTHONDONTWRITEBYTECODE=1 image aitelier:latest
+throwaway containers (aitelier image, not prod) before launch: 3
+in-container git head: aa88cb54293161be92508324d2235f05a618c268 status-lines: 0
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gn3-base-aa88/aitelier/tools/run_tests/impl.py
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gn3-base-aa88/aitelier/gate_admission.py
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gn3-base-aa88/core/gate_deferral.py
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gn3-base-aa88/core/skillflow_host.py
+IMPORT skillflow /usr/local/lib/python3.12/site-packages/skillflow/__init__.py
+DRIVE {"probe": "laps_wait60_tick_only", "tree": "/home/linxuhao/.AItelier/worktrees-scratch/gn3-base-aa88/core/gate_deferral.py", "wait_seconds": 60.0, "episode_max_seconds": 10800.0, "implement_runs": 1, "final_status": "failed", "final_node": "test_gate_absent", "error_reason": "Gate 'test_gate_absent': cycle limit exceeded", "edge_test_gate_absent_to_test": [100, 100], "gate_calls": 101, "outcome_counts": {"none": 3, "reacquire": 101, "silent": 202}, "last_outcomes": ["reacquire", "silent", "silent", "reacquire"], "ticks": 306, "rendered_for": ["op-holder"]}
+.DRIVE {"probe": "laps_wait60_second_driver", "tree": "/home/linxuhao/.AItelier/worktrees-scratch/gn3-base-aa88/core/gate_deferral.py", "wait_seconds": 60.0, "episode_max_seconds": 10800.0, "implement_runs": 1, "final_status": "failed", "final_node": "test_gate_absent", "error_reason": "Gate 'test_gate_absent': cycle limit exceeded", "edge_test_gate_absent_to_test": [100, 100], "gate_calls": 101, "outcome_counts": {"none": 3, "reacquire": 101, "silent": 202}, "last_outcomes": ["reacquire", "silent", "silent", "reacquire"], "ticks": 306, "rendered_for": ["op-holder"]}
+.
+2 passed in 184.23s (0:03:04)
+BARE_RC=0
+end: 2026-09-25T01:00:33Z

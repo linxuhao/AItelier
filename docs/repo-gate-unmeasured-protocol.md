@@ -402,3 +402,105 @@ run against the 12 files of the gate and deferral suites):
 | hold for the whole episode (drop `hold_remaining > 0`) | `test_coding_impl_busy_gate.py::test_a_busy_gate_never_sends_the_run_back_to_implement`; `test_coding_impl_gate_absence.py::test_the_host_hold_alone_keeps_the_rows_where_the_absence_left_them` |
 | drop `evidence_state = "not_run"` | `test_repo_gate_admission.py::test_pole_1_a_gate_the_engine_did_not_admit_is_not_run[live_render]`, `[owner_lost]` |
 | read every manifest under the ticket | `test_repo_gate_identity_from_report_dir.py::test_reports_the_repositorys_own_tests_retained_are_not_the_gates` |
+
+## A red the gate retained, and the rest of the report (r3, 2026-09-25)
+
+Review gnr2 (2026-09-25) found two measured reds recorded as "did not run",
+failure ids that changed between runs of the same failure, a run that could
+end on the engine's "cycle limit exceeded", and a `/script` render with 300 s
+left of the gate's client timeout after a full queue wait.
+
+**A red beats absence.** `_run_repo_gate` reads the gate's retained report
+before the outcome is decided (`_retained_findings`). It reads only the
+manifest that names the repository the gate ran for; two such manifests under
+one ticket are an error, and a count of `None`. For every stage in that
+manifest it takes the stage's `<stage>-findings.json`, or, when there is
+none, the `errors[]` of a stage report that says `passed: false`. The count
+is `repo_gate.retained_findings`, and `_repo_gate_outcome` checks it first.
+Pole 3 is a python-stage red or an answered `/compile` red, then a refused
+`/script` and exit 2: both are `measured_fail`
+(`tests/unit/test_repo_gate_red_beats_absence.py`).
+
+**An absence only when nothing else failed.** `repo_gate_absent` is
+`not failures[]`, read before the gate's own entry is appended. Pole 4 is a
+pytest red beside a refused gate: `repo_gate_absent: false`, the scheduler
+reads no absence (`read_absence` returns `None`), and the run goes back to
+`implement` (`tests/skillflow/test_coding_impl_absence_needs_nothing_else_red.py`).
+The same holds for a pytest killed at its wall. `core/gate_deferral.py:read_absence`
+reads `repo_gate_absent` when the key is there, and falls back to
+`repo_gate_unmeasured` only for a report written before the key existed.
+
+### Identities that survive a second run
+
+The game gate writes the observed value into a failing assertion's finding
+(`"  <scenario> / <name>: <expr> -> actual <actual>; observed <observed>"`),
+and its summary into `hard gate failed: <summary>`. A hash of that text is a
+new id on every run. Each finding is now named, in this order:
+
+1. a failing assertion: `<stage>/<scenario>/<assertion name>@<frame>`, all
+   three read from the matching row of the stage report
+   (`behavior.scenarios[].asserts[]`). Findings are matched to rows by the
+   text before ` -> actual `, in report order, so the same assertion failing
+   at two frames is two ids;
+2. a repeatability mismatch: `<stage>/repeatability/<scenario>/<name>@<frame>`,
+   from the first row the finding embeds;
+3. a finding that ends with the stage report's `summary`: a sha256 prefix of
+   the text before the summary;
+4. anything else: a sha256 prefix of the whole text.
+
+Two findings with the same id are both kept, the second as `<id>~2`.
+
+A real `playtest.json` reaches 442 MB, 441 MB of it `captures`, and parsing
+it whole took 2.1 GB of memory. Above 64 MiB the report is read from its last
+top-level `"behavior":` member to the end (`_stage_report_fields`); if that
+tail does not parse as the report's own members, no row is read and the ids
+fall back to rule 3 or 4.
+
+### The gate's client timeout counts from admission
+
+The game gate reads each render answer with one socket timeout (`/script`
+1800 s, `/playtest` 3600 s). With the relay's 1500 s queue wait in front of
+it, a `/script` render had 300 s of that timeout left. The relay now sends
+the gate an interim `HTTP/1.1 100 Continue` every
+`AITELIER_REPO_GATE_KEEPALIVE_SECONDS` (default 20) while the request waits
+in the harness queue. Python's `http.client` reads past interim responses,
+and each one restarts the socket timeout. At admission (a new row for the
+request's `operation_id` in the harness's `GET /lifecycle` owner table) one
+more goes, then none, so the render itself is bounded by the gate's own
+timeout, counted from admission. Nothing is sent to an HTTP/1.0 client, or
+when `/lifecycle` cannot be read (`admission_observed: false`). A request
+with no `operation_id` gets `relay-<uuid>` so it can be watched. Each request
+record carries `keepalives` and `admitted_after_sec`.
+
+### The absence gate's lap limit
+
+`test_gate_absent -> test` carries `max_loop: 100`, which the engine counts
+over the whole run (`skillflow_edge_counts`). With a 60 s wait, 100 laps fit
+inside the 3 h ceiling. `absence_laps_spent` reads that counter while the run
+stands at `test_gate_absent`; once `count >= max_loop`, `observe_run` returns
+`expired` with the absence sentence and the host hold refuses to advance. A
+run standing at `test` has already been granted its last lap and runs it, so
+a run uses all 100 re-acquisitions (101 gate calls) before it ends.
+
+### Mutations (r3)
+
+One throwaway copy per mutation (`final/scripts/gate_not_run_r3/mutate.py`),
+each with an ignition probe that counts how often the mutated code ran, run
+against the 18 files of the gate, deferral, admission and identity suites.
+Logs: `logs/gate_not_run_r3/mut_<id>.txt`, `mut_<id>.ignition`.
+
+| mutation | ignition count | red / 253 | killed by |
+|---|---|---|---|
+| CONTROL (no change) | 0 | 0 | none |
+| N1 drop the retained-finding clause in `_repo_gate_outcome` | 266 | 8 | `test_repo_gate_red_beats_absence.py::test_pole_3_a_retained_red_then_a_refusal_is_a_measured_red[python_red]`, `[compile_red]`; `::test_a_retained_finding_outranks_every_source_of_unmeasured[source0]` to `[source5]` |
+| N2 `repo_gate_absent = True` whatever else failed | 198 | 3 | `test_repo_gate_red_beats_absence.py::test_pole_4_a_pytest_red_beside_a_refused_gate_is_not_an_absence`, `::test_a_pytest_killed_at_its_wall_beside_a_refused_gate_is_not_an_absence`; `test_coding_impl_absence_needs_nothing_else_red.py::test_pole_4_a_pytest_red_behind_a_busy_gate_goes_back_to_implement` |
+| N3 `read_absence` reads `repo_gate_unmeasured` (r2) | 984 | 10 | `test_repo_gate_red_beats_absence.py::test_pole_4_a_pytest_red_beside_a_refused_gate_is_not_an_absence`, `::test_a_pytest_killed_at_its_wall_beside_a_refused_gate_is_not_an_absence`, `::test_read_absence_follows_repo_gate_absent_when_it_is_there[flags1-False]`; `test_coding_impl_absence_needs_nothing_else_red.py::test_pole_4_a_pytest_red_behind_a_busy_gate_goes_back_to_implement`; 4 in `test_gate_deferral_is_accounted.py`; 2 in `test_gate_deferral_execution_points.py` |
+| N4 `_assert_identities` returns `{}` | 17 | 2 | `test_repo_gate_identity_is_stable.py::test_different_observed_values_keep_the_same_identities`, `::test_an_assertion_is_named_by_scenario_name_and_frame` |
+| N5 no `~N` suffix for a repeated id | 95 | 2 | `test_repo_gate_identity_is_stable.py::test_an_assertion_is_named_by_scenario_name_and_frame`, `::test_findings_with_identical_text_are_both_kept` |
+| N6 the keepalive writes nothing | 7 | 1 | `test_gate_admission_keepalive.py::test_a_render_after_a_queue_longer_than_the_client_timeout_is_answered` |
+| N7 the keepalive goes on after admission | 16 | 1 | `test_gate_admission_keepalive.py::test_the_client_timeout_still_bounds_the_render_itself` |
+| N8 keepalive with no readable `/lifecycle` | 33 | 1 | `test_gate_admission_keepalive.py::test_no_keepalive_when_admission_cannot_be_seen` |
+| N9 `absence_laps_spent` always `False` | 418 | 3 | `test_gate_deferral_reads_the_run.py::test_spent_laps_end_the_run_naming_the_absence`, `::test_laps_are_read_from_the_engine_counter`; `test_coding_impl_absence_needs_nothing_else_red.py::test_the_absence_gate_laps_run_out_naming_the_absence` |
+| N10 lap check on any node | 584 | 2 | `test_gate_deferral_reads_the_run.py::test_the_last_lap_granted_is_run`; `test_coding_impl_absence_needs_nothing_else_red.py::test_the_absence_gate_laps_run_out_naming_the_absence` |
+| N11 (review R5) the host hold skips the latest report | 460 | 2 | `test_gate_deferral_reads_the_run.py::test_the_host_starts_a_new_wait_from_a_new_silent_report`, `::test_spent_laps_end_the_run_naming_the_absence` |
+| N12 no tail read above 64 MiB | 2 | 1 | `test_repo_gate_identity_is_stable.py::test_a_report_too_large_to_parse_whole_is_read_from_its_tail` |

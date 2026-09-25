@@ -1,0 +1,52 @@
+date: 2026-09-25T01:44:46Z
+tree: /home/linxuhao/.AItelier/worktrees-scratch/gatenotrun2 head: 7cdf60043fead20c79f9204d9ff15c05db79f07b
+command: python /home/linxuhao/.AItelier/worktrees-scratch/gn3-probes/attack1_hidden_failures.py /home/linxuhao/.AItelier/worktrees-scratch/gatenotrun2/tests/gate_fixture.py wait_expiry_payload
+env: docker run --rm --init -m 3g --network aitelier_default -u 1000:1000 HOME=/home/linxuhao PYTHONPATH=/home/linxuhao/.AItelier/worktrees-scratch/gatenotrun2 PYTHONDONTWRITEBYTECODE=1 image aitelier:latest
+throwaway containers (aitelier image, not prod) before launch: 2
+in-container git head: 7cdf60043fead20c79f9204d9ff15c05db79f07b status-lines: 0
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gatenotrun2/aitelier/tools/run_tests/impl.py
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gatenotrun2/aitelier/gate_admission.py
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gatenotrun2/core/gate_deferral.py
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gatenotrun2/core/skillflow_host.py
+IMPORT skillflow /usr/local/lib/python3.12/site-packages/skillflow/__init__.py
+PROBE {
+ "tree_impl": "/home/linxuhao/.AItelier/worktrees-scratch/gatenotrun2/aitelier/tools/run_tests/impl.py",
+ "scenario": "wait_expiry_payload",
+ "repo_gate.returncode": 2,
+ "repo_gate.measured": "unmeasured",
+ "repo_gate.retained_findings": 0,
+ "repo_gate_unmeasured": true,
+ "admission.state": "not_admitted",
+ "admission.requests": [
+  {
+   "route": "/script",
+   "status": 409,
+   "outcome": "not_admitted",
+   "owner_kind": "active",
+   "render_wait_timeout_sec": 1.0,
+   "waited_sec": 1.0105,
+   "wait_timeout_sec": 1.0,
+   "error": "render owner wait timed out",
+   "keepalives": 0,
+   "admitted_after_sec": null
+  }
+ ],
+ "repo_gate_absent(return)": true,
+ "repo_gate_absent(report)": true,
+ "evidence_state": "not_run",
+ "passed": false,
+ "release_evidence": "unresolved",
+ "failure_identity_error": null,
+ "failures": [
+  "repo_gate:run_tests.sh was NOT measured (engine admission: not_admitted; 1 attempt(s)): godot-builder unreachable at http://127.0.0.1:37179: HTTP Error 409: Con"
+ ],
+ "new_failures": [
+  "repo_gate:run_tests.sh was NOT measured (engine admission: not_admitted; 1 attempt(s)): godot-builder unreachable at http://127.0.0.1:37179: HTTP Error 409: Con"
+ ],
+ "harness_rendered_for": [
+  "op-holder"
+ ]
+}
+[harness] render owner release failed: attempt to write a readonly database
+BARE_RC=0
+end: 2026-09-25T01:44:49Z

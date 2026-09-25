@@ -1,0 +1,8 @@
+date: 2026-09-25T19:49:37Z
+command: ps -u 1099 -o pid= | wc -l   (host processes owned by uid 1099; run immediately before inotify_exhausted.txt at 19:49Z, repeated here)
+result before the probe (19:49Z): 0
+result now: 0
+command: getent passwd 1099
+getent RC=2
+command: cat /proc/sys/fs/inotify/max_user_instances
+128

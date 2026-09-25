@@ -1,0 +1,38 @@
+mutant: B7_a_missing_runner_does_not_win  sha: afa808b64de248968c6705128db94248b62de343  copy: /tmp/mut/B7_a_missing_runner_does_not_win  date: 2026-09-25T20:12:27Z
+files: tests/unit/test_repo_gate_outcome_table.py tests/unit/test_repo_gate_identity_from_report_dir.py tests/unit/test_repo_gate_identity_is_stable.py tests/unit/test_repo_gate_red_beats_absence.py tests/unit/test_repo_gate_admission.py tests/unit/test_tree_level_accounting_witnesses.py tests/skillflow/test_coding_impl_absence_needs_nothing_else_red.py
+MUTANT B7_a_missing_runner_does_not_win: applied to aitelier/tools/run_tests/impl.py
+IMPORT /tmp/mut/B7_a_missing_runner_does_not_win/aitelier/tools/run_tests/impl.py
+.............................F.......................................... [ 55%]
+..........................................................               [100%]
+=================================== FAILURES ===================================
+_ test_the_outcome_of_every_report_shape[pytest_runner_unavailable_beside_unattributable_red] _
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x7e561d019dc0>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-7'), _retention_count=3, _retention_policy='all')
+row_id = 'pytest_runner_unavailable_beside_unattributable_red'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_outcome_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        result, report, observed, identity_error = _driven(row_id, tmp_path_factory)
+>       assert observed == (row.measured, row.absent, row.next), (row_id, observed)
+E       AssertionError: ('pytest_runner_unavailable_beside_unattributable_red', ('unattributable', False, 'test_gate_report_unattributable'))
+E       assert ('unattributa...attributable') == ('unattributa...ence_missing')
+E         
+E         At index 2 diff: 'test_gate_report_unattributable' != 'test_evidence_missing'
+E         Use -v to get more diff
+
+tests/unit/test_repo_gate_outcome_table.py:503: AssertionError
+----------------------------- Captured stdout call -----------------------------
+ROW {"row": "pytest_runner_unavailable_beside_unattributable_red", "attribution": "unattributable", "measured": "unattributable", "repo_gate_absent": false, "next": "test_gate_report_unattributable", "identity_error": true, "inotify": "real", "observed": true, "first_entry": ".gate.lock", "why": "the first entry under the ticket, '.gate.lock', is not a directory", "returncode": 2, "admission": "not_admitted", "retained_findings": null, "unattributed_reds": ["gate-9_q_w03b/python.json [python]: the python suite exited 1"], "retained_error": null, "release_evidence": "unresolved", "failures": ["repo_gate:run_tests.sh repository gate report could not be attributed (the first entry under the ticket, '.gate.lock', is not a directory): 1 red(s) under ticke"]}
+=============================== warnings summary ===============================
+../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_outcome_of_every_report_shape[pytest_runner_unavailable_beside_unattributable_red]
+1 failed, 129 passed, 1 warning in 178.48s (0:02:58)
+BARE_RC=1
+IGNITION_BYTES=10
+end: 2026-09-25T20:15:30Z

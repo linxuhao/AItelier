@@ -1,0 +1,115 @@
+mutant: B1_unobserved_falls_back_to_the_name  sha: afa808b64de248968c6705128db94248b62de343  copy: /tmp/mut/B1_unobserved_falls_back_to_the_name  date: 2026-09-25T19:53:33Z
+files: tests/unit/test_repo_gate_outcome_table.py tests/unit/test_repo_gate_identity_from_report_dir.py tests/unit/test_repo_gate_identity_is_stable.py tests/unit/test_repo_gate_red_beats_absence.py tests/unit/test_repo_gate_admission.py tests/unit/test_tree_level_accounting_witnesses.py tests/skillflow/test_coding_impl_absence_needs_nothing_else_red.py
+MUTANT B1_unobserved_falls_back_to_the_name: applied to aitelier/tools/run_tests/impl.py
+IMPORT /tmp/mut/B1_unobserved_falls_back_to_the_name/aitelier/tools/run_tests/impl.py
+..............................FF...............................FFF...... [ 55%]
+..........................................................               [100%]
+=================================== FAILURES ===================================
+_____ test_the_outcome_of_every_report_shape[inotify_unavailable_own_red] ______
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x7ba4d7617fb0>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-1'), _retention_count=3, _retention_policy='all')
+row_id = 'inotify_unavailable_own_red'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_outcome_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        result, report, observed, identity_error = _driven(row_id, tmp_path_factory)
+>       assert observed == (row.measured, row.absent, row.next), (row_id, observed)
+E       AssertionError: ('inotify_unavailable_own_red', ('measured_fail', False, 'implement'))
+E       assert ('measured_fa..., 'implement') == ('unattributa...attributable')
+E         
+E         At index 0 diff: 'measured_fail' != 'unattributable'
+E         Use -v to get more diff
+
+tests/unit/test_repo_gate_outcome_table.py:503: AssertionError
+----------------------------- Captured stdout call -----------------------------
+ROW {"row": "inotify_unavailable_own_red", "attribution": "own", "measured": "measured_fail", "repo_gate_absent": false, "next": "implement", "identity_error": false, "inotify": "inotify_init1 stubbed to EMFILE", "observed": false, "first_entry": null, "why": null, "returncode": 2, "admission": "not_admitted", "retained_findings": 1, "unattributed_reds": null, "retained_error": null, "release_evidence": "known_failure", "failures": ["repo_gate:run_tests.sh#python/3d959bcbf887 failed: the python suite exited 1"]}
+___ test_the_outcome_of_every_report_shape[inotify_unavailable_foreign_red] ____
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x7ba4d7617fb0>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-1'), _retention_count=3, _retention_policy='all')
+row_id = 'inotify_unavailable_foreign_red'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_outcome_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        result, report, observed, identity_error = _driven(row_id, tmp_path_factory)
+>       assert observed == (row.measured, row.absent, row.next), (row_id, observed)
+E       AssertionError: ('inotify_unavailable_foreign_red', ('unmeasured', True, 'test_gate_absent'))
+E       assert ('unmeasured'..._gate_absent') == ('unattributa...attributable')
+E         
+E         At index 0 diff: 'unmeasured' != 'unattributable'
+E         Use -v to get more diff
+
+tests/unit/test_repo_gate_outcome_table.py:503: AssertionError
+----------------------------- Captured stdout call -----------------------------
+ROW {"row": "inotify_unavailable_foreign_red", "attribution": "own", "measured": "unmeasured", "repo_gate_absent": true, "next": "test_gate_absent", "identity_error": true, "inotify": "inotify_init1 stubbed to EMFILE", "observed": false, "first_entry": null, "why": null, "returncode": 2, "admission": "not_admitted", "retained_findings": 0, "unattributed_reds": null, "retained_error": "repository gate retained 2 reports for /tmp/pytest-of-unknown/pytest-1/inotify_unavailable_foreign_red0/repo under one ticket (rt-20260925T195421Z-efdd0cb2); only those in its first entry gate-ixb5r8kk are the gate's", "release_evidence": "unresolved", "failures": ["repo_gate:run_tests.sh was NOT measured (engine admission: not_admitted; 1 attempt(s)): godot-builder unreachable at http://127.0.0.1:43753: HTTP Error 409: Con"]}
+___ test_the_attribution_of_every_report_shape[inotify_unavailable_own_red] ____
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x7ba4d7617fb0>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-1'), _retention_count=3, _retention_policy='all')
+row_id = 'inotify_unavailable_own_red'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_attribution_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        _result, report, _observed, _identity = _driven(row_id, tmp_path_factory)
+        attribution = report["repo_gate"]["report_attribution"]
+>       assert attribution["state"] == row.attribution, (row_id, attribution)
+E       AssertionError: ('inotify_unavailable_own_red', {'state': 'own', 'observed': False, 'reports': {'gate-615c7cdj/manifest.json': 'own'}})
+E       assert 'own' == 'unattributable'
+E         
+E         - unattributable
+E         + own
+
+tests/unit/test_repo_gate_outcome_table.py:528: AssertionError
+_ test_the_attribution_of_every_report_shape[inotify_unavailable_foreign_red] __
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x7ba4d7617fb0>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-1'), _retention_count=3, _retention_policy='all')
+row_id = 'inotify_unavailable_foreign_red'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_attribution_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        _result, report, _observed, _identity = _driven(row_id, tmp_path_factory)
+        attribution = report["repo_gate"]["report_attribution"]
+>       assert attribution["state"] == row.attribution, (row_id, attribution)
+E       AssertionError: ('inotify_unavailable_foreign_red', {'state': 'own', 'observed': False, 'reports': {'gate-ixb5r8kk/manifest.json': 'own', 'other-zb61ss3i/manifest.json': 'not_own'}})
+E       assert 'own' == 'unattributable'
+E         
+E         - unattributable
+E         + own
+
+tests/unit/test_repo_gate_outcome_table.py:528: AssertionError
+____ test_the_attribution_of_every_report_shape[inotify_unavailable_no_red] ____
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x7ba4d7617fb0>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-1'), _retention_count=3, _retention_policy='all')
+row_id = 'inotify_unavailable_no_red'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_attribution_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        _result, report, _observed, _identity = _driven(row_id, tmp_path_factory)
+        attribution = report["repo_gate"]["report_attribution"]
+>       assert attribution["state"] == row.attribution, (row_id, attribution)
+E       AssertionError: ('inotify_unavailable_no_red', {'state': 'own', 'observed': False, 'reports': {'gate-1nw4iiym/manifest.json': 'own'}})
+E       assert 'own' == 'unattributable'
+E         
+E         - unattributable
+E         + own
+
+tests/unit/test_repo_gate_outcome_table.py:528: AssertionError
+=============================== warnings summary ===============================
+../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_outcome_of_every_report_shape[inotify_unavailable_own_red]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_outcome_of_every_report_shape[inotify_unavailable_foreign_red]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_attribution_of_every_report_shape[inotify_unavailable_own_red]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_attribution_of_every_report_shape[inotify_unavailable_foreign_red]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_attribution_of_every_report_shape[inotify_unavailable_no_red]
+5 failed, 125 passed, 1 warning in 180.30s (0:03:00)
+BARE_RC=1
+IGNITION_BYTES=4
+end: 2026-09-25T19:56:37Z

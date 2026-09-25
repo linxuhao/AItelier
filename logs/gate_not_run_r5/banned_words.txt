@@ -1,0 +1,8 @@
+date: 2026-09-25T20:17:29Z
+tree head: afa808b64de248968c6705128db94248b62de343 plus the untracked logs/gate_not_run_r5/ and final/delivery_notes_gate_not_run_r5.md (added with git add -N for the diff)
+patterns: the five phrases of the brief, one per line, in ~/.AItelier/worktrees-scratch/gn5-probes/banned.txt (outside the tree, so this log does not carry them), plus the US spelling of the fourth
+command: git diff 7c8f9e5a | grep -icf banned.txt   (added and deleted lines)
+0
+BARE_RC=1
+command: grep -rilf banned.txt logs final
+BARE_RC=1

@@ -1,0 +1,38 @@
+mutant: B9_findings_without_a_manifest_unread  sha: afa808b64de248968c6705128db94248b62de343  copy: /tmp/mut/B9_findings_without_a_manifest_unread  date: 2026-09-25T19:53:37Z
+files: tests/unit/test_repo_gate_outcome_table.py tests/unit/test_repo_gate_identity_from_report_dir.py tests/unit/test_repo_gate_identity_is_stable.py tests/unit/test_repo_gate_red_beats_absence.py tests/unit/test_repo_gate_admission.py tests/unit/test_tree_level_accounting_witnesses.py tests/skillflow/test_coding_impl_absence_needs_nothing_else_red.py
+MUTANT B9_findings_without_a_manifest_unread: applied to aitelier/tools/run_tests/impl.py
+IMPORT /tmp/mut/B9_findings_without_a_manifest_unread/aitelier/tools/run_tests/impl.py
+...........................F............................................ [ 55%]
+..........................................................               [100%]
+=================================== FAILURES ===================================
+_ test_the_outcome_of_every_report_shape[report_without_manifest_red_refused] __
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x7d84f390e060>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-1'), _retention_count=3, _retention_policy='all')
+row_id = 'report_without_manifest_red_refused'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_outcome_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        result, report, observed, identity_error = _driven(row_id, tmp_path_factory)
+>       assert observed == (row.measured, row.absent, row.next), (row_id, observed)
+E       AssertionError: ('report_without_manifest_red_refused', ('unmeasured', True, 'test_gate_absent'))
+E       assert ('unmeasured'..._gate_absent') == ('unattributa...attributable')
+E         
+E         At index 0 diff: 'unmeasured' != 'unattributable'
+E         Use -v to get more diff
+
+tests/unit/test_repo_gate_outcome_table.py:503: AssertionError
+----------------------------- Captured stdout call -----------------------------
+ROW {"row": "report_without_manifest_red_refused", "attribution": "unattributable", "measured": "unmeasured", "repo_gate_absent": true, "next": "test_gate_absent", "identity_error": false, "inotify": "real", "observed": true, "first_entry": "gate-apyui0ml", "why": "the first entry under the ticket, 'gate-apyui0ml', holds no manifest.json that names /tmp/pytest-of-unknown/pytest-1/report_without_manifest_red_refused0/repo", "returncode": 2, "admission": "not_admitted", "retained_findings": null, "unattributed_reds": null, "retained_error": null, "release_evidence": "unresolved", "failures": ["repo_gate:run_tests.sh was NOT measured (engine admission: not_admitted; 1 attempt(s)): godot-builder unreachable at http://127.0.0.1:44697: HTTP Error 409: Con"]}
+=============================== warnings summary ===============================
+../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_outcome_of_every_report_shape[report_without_manifest_red_refused]
+1 failed, 129 passed, 1 warning in 181.05s (0:03:01)
+BARE_RC=1
+IGNITION_BYTES=1
+end: 2026-09-25T19:56:42Z

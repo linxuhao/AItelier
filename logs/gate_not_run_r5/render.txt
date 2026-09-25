@@ -1,0 +1,14 @@
+date: 2026-09-25T20:17:05Z
+tree: /home/linxuhao/.AItelier/worktrees-scratch/gatenotrun2 host head: afa808b64de248968c6705128db94248b62de343
+host worktree status (porcelain):
+throwaway containers (aitelier image, not prod) before launch: 1
+uid: 1000
+command: python -m tests.unit.test_repo_gate_outcome_table
+in-container git head: afa808b64de248968c6705128db94248b62de343 status-lines: 0
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gatenotrun2/aitelier/tools/run_tests/impl.py
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gatenotrun2/core/gate_deferral.py
+IMPORT skillflow /usr/local/lib/python3.12/site-packages/skillflow/__init__.py ?
+BARE_RC=0
+end: 2026-09-25T20:17:05Z
+command: git diff --exit-code -- docs/repo-gate-unmeasured-protocol.md   (after the render above, on afa808b64de248968c6705128db94248b62de343)
+BARE_RC=0

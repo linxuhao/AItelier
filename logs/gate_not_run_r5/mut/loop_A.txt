@@ -1,0 +1,12 @@
+date: 2026-09-25T19:50:31Z
+tree: /home/linxuhao/.AItelier/worktrees-scratch/gatenotrun2 host head: afa808b64de248968c6705128db94248b62de343
+host worktree status (porcelain):
+throwaway containers (aitelier image, not prod) before launch: 1
+uid: 1000
+command: bash /home/linxuhao/.AItelier/worktrees-scratch/gn5-probes/mut_loop.sh afa808b64de248968c6705128db94248b62de343 /home/linxuhao/.AItelier/worktrees-scratch/gn5-logs/mut CONTROL_ignition_only B1_unobserved_falls_back_to_the_name B2_a_file_first_entry_is_the_report B3_first_dir_without_manifest_takes_the_named_report B4_first_dir_is_always_the_gates B5_unattributed_reds_not_reported B6_outcome_ignores_unattributed_reds B7_a_missing_runner_does_not_win
+in-container git head: afa808b64de248968c6705128db94248b62de343 status-lines: 0
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gatenotrun2/aitelier/tools/run_tests/impl.py
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gatenotrun2/core/gate_deferral.py
+IMPORT skillflow /usr/local/lib/python3.12/site-packages/skillflow/__init__.py ?
+BARE_RC=0
+end: 2026-09-25T20:15:31Z

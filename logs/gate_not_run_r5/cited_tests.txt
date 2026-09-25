@@ -1,0 +1,6 @@
+date: 2026-09-25T20:17:05Z
+tree: /home/linxuhao/.AItelier/worktrees-scratch/gatenotrun2 head: afa808b64de248968c6705128db94248b62de343
+command: python3 logs/gate_not_run_r5/scripts/cited_tests.py .
+FOUND 57
+MISSING test_repo_gate_red_beats_absence.py::test_a_pytest_killed_at_its_wall_beside_a_refused_gate_is_not_an_absence
+BARE_RC=1

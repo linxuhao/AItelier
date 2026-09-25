@@ -1,0 +1,104 @@
+mutant: B12_a_second_report_is_not_an_error  sha: afa808b64de248968c6705128db94248b62de343  copy: /tmp/mut/B12_a_second_report_is_not_an_error  date: 2026-09-25T20:02:56Z
+files: tests/unit/test_repo_gate_outcome_table.py tests/unit/test_repo_gate_identity_from_report_dir.py tests/unit/test_repo_gate_identity_is_stable.py tests/unit/test_repo_gate_red_beats_absence.py tests/unit/test_repo_gate_admission.py tests/unit/test_tree_level_accounting_witnesses.py tests/skillflow/test_coding_impl_absence_needs_nothing_else_red.py
+MUTANT B12_a_second_report_is_not_an_error: applied to aitelier/tools/run_tests/impl.py
+IMPORT /tmp/mut/B12_a_second_report_is_not_an_error/aitelier/tools/run_tests/impl.py
+...F.....F................F............................................. [ 55%]
+....F.....................................................               [100%]
+=================================== FAILURES ===================================
+______ test_the_outcome_of_every_report_shape[second_manifest_same_repo] _______
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x78097444ef00>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-4'), _retention_count=3, _retention_policy='all')
+row_id = 'second_manifest_same_repo'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_outcome_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        result, report, observed, identity_error = _driven(row_id, tmp_path_factory)
+        assert observed == (row.measured, row.absent, row.next), (row_id, observed)
+        # The report says the same as the return.
+        assert bool(report.get("repo_gate_absent")) is observed[1]
+        # A part that cannot be read, a report that is not the gate's, or reds
+        # that belong to no identified report, are stated.
+>       assert identity_error is row.identity_error, (row_id, identity_error)
+E       AssertionError: ('second_manifest_same_repo', False)
+E       assert False is True
+E        +  where True = Row(mode='second_manifest', pre='', leg=None, busy=True, attribution='own', measured='measured_fail', absent=False, ne...ue, shape="a python red, plus a second manifest naming the same repository, created after the gate's report directory").identity_error
+
+tests/unit/test_repo_gate_outcome_table.py:508: AssertionError
+----------------------------- Captured stdout call -----------------------------
+ROW {"row": "second_manifest_same_repo", "attribution": "own", "measured": "measured_fail", "repo_gate_absent": false, "next": "implement", "identity_error": false, "inotify": "real", "observed": true, "first_entry": "gate-xdpqh84s", "why": null, "returncode": 2, "admission": "not_admitted", "retained_findings": 1, "unattributed_reds": null, "retained_error": null, "release_evidence": "known_failure", "failures": ["repo_gate:run_tests.sh#python/3d959bcbf887 failed: the python suite exited 1"]}
+____ test_the_outcome_of_every_report_shape[foreign_names_repo_beside_own] _____
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x78097444ef00>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-4'), _retention_count=3, _retention_policy='all')
+row_id = 'foreign_names_repo_beside_own'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_outcome_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        result, report, observed, identity_error = _driven(row_id, tmp_path_factory)
+        assert observed == (row.measured, row.absent, row.next), (row_id, observed)
+        # The report says the same as the return.
+        assert bool(report.get("repo_gate_absent")) is observed[1]
+        # A part that cannot be read, a report that is not the gate's, or reds
+        # that belong to no identified report, are stated.
+>       assert identity_error is row.identity_error, (row_id, identity_error)
+E       AssertionError: ('foreign_names_repo_beside_own', False)
+E       assert False is True
+E        +  where True = Row(mode='foreign_names_repo_beside_own', pre='', leg=None, busy=True, attribution='own', measured='unmeasured', absent=True, next='test_gate_absent', identity_error=True, shape="the same, beside the gate's own clean report; refused").identity_error
+
+tests/unit/test_repo_gate_outcome_table.py:508: AssertionError
+----------------------------- Captured stdout call -----------------------------
+ROW {"row": "foreign_names_repo_beside_own", "attribution": "own", "measured": "unmeasured", "repo_gate_absent": true, "next": "test_gate_absent", "identity_error": false, "inotify": "real", "observed": true, "first_entry": "gate-kj8dsuyc", "why": null, "returncode": 2, "admission": "not_admitted", "retained_findings": 0, "unattributed_reds": null, "retained_error": null, "release_evidence": "unresolved", "failures": ["repo_gate:run_tests.sh was NOT measured (engine admission: not_admitted; 1 attempt(s)): godot-builder unreachable at http://127.0.0.1:35529: HTTP Error 409: Con"]}
+_ test_the_outcome_of_every_report_shape[first_entry_names_this_repo_clean_refused] _
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x78097444ef00>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-4'), _retention_count=3, _retention_policy='all')
+row_id = 'first_entry_names_this_repo_clean_refused'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_outcome_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        result, report, observed, identity_error = _driven(row_id, tmp_path_factory)
+        assert observed == (row.measured, row.absent, row.next), (row_id, observed)
+        # The report says the same as the return.
+        assert bool(report.get("repo_gate_absent")) is observed[1]
+        # A part that cannot be read, a report that is not the gate's, or reds
+        # that belong to no identified report, are stated.
+>       assert identity_error is row.identity_error, (row_id, identity_error)
+E       AssertionError: ('first_entry_names_this_repo_clean_refused', False)
+E       assert False is True
+E        +  where True = Row(mode='clean', pre='foreign_same', leg=None, busy=True, attribution='own', measured='measured_fail', absent=False, ...hape="a writer that names this repository with a red creates its report before the gate's; the gate is clean; refused").identity_error
+
+tests/unit/test_repo_gate_outcome_table.py:508: AssertionError
+----------------------------- Captured stdout call -----------------------------
+ROW {"row": "first_entry_names_this_repo_clean_refused", "attribution": "own", "measured": "measured_fail", "repo_gate_absent": false, "next": "implement", "identity_error": false, "inotify": "real", "observed": true, "first_entry": "aaa-first-b_gc3fah", "why": null, "returncode": 2, "admission": "not_admitted", "retained_findings": 1, "unattributed_reds": null, "retained_error": null, "release_evidence": "known_failure", "failures": ["repo_gate:run_tests.sh#python/61e63deeb364 failed: first writer: the python suite exited 1"]}
+__________ test_two_reports_for_one_repository_are_an_identity_error ___________
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-4/test_two_reports_for_one_repos0')
+
+    def test_two_reports_for_one_repository_are_an_identity_error(tmp_path):
+        ticket = _ticket(tmp_path, {"stages": {}}, {})
+        second = ticket / "another"
+        second.mkdir()
+        (second / "manifest.json").write_text(json.dumps({"repo": str(REPO)}))
+        cases, error = rt._report_dir_failure_cases(ticket, REPO, FIRST)
+>       assert cases == [] and "2 reports" in error
+E       AssertionError: assert ([] == []
+E         
+E         Use -v to get more diff and '2 reports' in 'repository gate report wuxia-godot-gate-x names no failure')
+
+tests/unit/test_repo_gate_identity_from_report_dir.py:148: AssertionError
+=============================== warnings summary ===============================
+../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_outcome_of_every_report_shape[second_manifest_same_repo]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_outcome_of_every_report_shape[foreign_names_repo_beside_own]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_outcome_of_every_report_shape[first_entry_names_this_repo_clean_refused]
+FAILED tests/unit/test_repo_gate_identity_from_report_dir.py::test_two_reports_for_one_repository_are_an_identity_error
+4 failed, 126 passed, 1 warning in 181.44s (0:03:01)
+BARE_RC=1
+IGNITION_BYTES=82
+end: 2026-09-25T20:06:02Z

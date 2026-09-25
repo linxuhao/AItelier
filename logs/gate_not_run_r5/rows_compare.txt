@@ -1,0 +1,35 @@
+33 candidate rows, 33 base rows
+clean_refusal | own/unmeasured/true/test_gate_absent/false | None/unmeasured/true/test_gate_absent/false | same
+python_red_then_refused | own/measured_fail/false/implement/false | None/measured_fail/false/implement/false | same
+compile_red_then_refused | own/measured_fail/false/implement/false | None/measured_fail/false/implement/false | same
+second_manifest_same_repo | own/measured_fail/false/implement/true | None/measured_fail/false/implement/true | same
+foreign_unreadable_manifest | own/measured_fail/false/implement/true | None/measured_fail/false/implement/true | same
+missing_stage_report | own/measured_fail/false/implement/true | None/measured_fail/false/implement/true | same
+nested_two_levels | own/measured_fail/false/implement/false | None/measured_fail/false/implement/false | same
+empty_findings_failed_stage | own/measured_fail/false/implement/false | None/measured_fail/false/implement/false | same
+foreign_names_repo_gate_wrote_none | unattributable/unattributable/false/test_gate_report_unattributable/true | None/unmeasured/true/test_gate_absent/true | DIFFERS
+foreign_names_repo_beside_own | own/unmeasured/true/test_gate_absent/true | None/unmeasured/true/test_gate_absent/true | same
+other_repo_reports_beside_green_gate | own/measured_pass/false/done/false | None/measured_pass/false/done/false | same
+declared_absence | own/unmeasured/true/test_gate_absent/false | None/unmeasured/true/test_gate_absent/false | same
+declared_failed_is_not_an_absence | own/measured_fail/false/implement/true | None/measured_fail/false/implement/true | same
+gate_killed_at_its_timeout | own/unmeasured/true/test_gate_absent/false | None/unmeasured/true/test_gate_absent/false | same
+exit_2_after_an_answered_request | own/measured_fail/false/implement/true | None/measured_fail/false/implement/true | same
+exit_1_after_a_refusal | own/measured_fail/false/implement/true | None/measured_fail/false/implement/true | same
+pytest_red_beside_refused_gate | own/unmeasured/false/implement/false | None/unmeasured/false/implement/false | same
+pytest_wall_beside_refused_gate | own/unmeasured/true/test_gate_absent/false | None/unmeasured/true/test_gate_absent/false | same
+node_runner_unavailable_beside_refused_gate | own/unmeasured/false/test_evidence_missing/false | None/unmeasured/false/test_evidence_missing/false | same
+pytest_runner_unavailable_beside_refused_gate | own/unmeasured/false/test_evidence_missing/false | None/unmeasured/false/test_evidence_missing/false | same
+green_gate | own/measured_pass/false/done/false | None/measured_pass/false/done/false | same
+answered_red | own/measured_fail/false/implement/false | None/measured_fail/false/implement/false | same
+lockfile_first_red_refused | unattributable/unattributable/false/test_gate_report_unattributable/true | None/unmeasured/true/test_gate_absent/true | DIFFERS
+cachedir_first_red_refused | unattributable/unattributable/false/test_gate_report_unattributable/true | None/unmeasured/true/test_gate_absent/true | DIFFERS
+file_first_red_refused | unattributable/unattributable/false/test_gate_report_unattributable/true | None/measured_fail/false/implement/false | DIFFERS
+first_entry_names_other_repo_red_refused | unattributable/unattributable/false/test_gate_report_unattributable/true | None/unmeasured/true/test_gate_absent/true | DIFFERS
+first_entry_names_this_repo_clean_refused | own/measured_fail/false/implement/true | None/measured_fail/false/implement/true | same
+report_without_manifest_red_refused | unattributable/unattributable/false/test_gate_report_unattributable/true | None/unmeasured/true/test_gate_absent/false | DIFFERS
+lockfile_first_green_gate | unattributable/measured_pass/false/done/false | None/measured_pass/false/done/true | DIFFERS
+pytest_runner_unavailable_beside_unattributable_red | unattributable/unattributable/false/test_evidence_missing/true | None/unmeasured/false/test_evidence_missing/true | DIFFERS
+inotify_unavailable_own_red | unattributable/unattributable/false/test_gate_report_unattributable/true | None/measured_fail/false/implement/false | DIFFERS
+inotify_unavailable_foreign_red | unattributable/unattributable/false/test_gate_report_unattributable/true | None/measured_fail/false/implement/true | DIFFERS
+inotify_unavailable_no_red | unattributable/unmeasured/true/test_gate_absent/false | None/unmeasured/true/test_gate_absent/false | same
+BARE_RC=0

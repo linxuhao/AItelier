@@ -1,0 +1,384 @@
+mutant: B11_the_flag_is_not_returned  sha: afa808b64de248968c6705128db94248b62de343  copy: /tmp/mut/B11_the_flag_is_not_returned  date: 2026-09-25T19:59:48Z
+files: tests/unit/test_repo_gate_outcome_table.py tests/unit/test_repo_gate_identity_from_report_dir.py tests/unit/test_repo_gate_identity_is_stable.py tests/unit/test_repo_gate_red_beats_absence.py tests/unit/test_repo_gate_admission.py tests/unit/test_tree_level_accounting_witnesses.py tests/skillflow/test_coding_impl_absence_needs_nothing_else_red.py
+MUTANT B11_the_flag_is_not_returned: applied to aitelier/tools/run_tests/impl.py
+IMPORT /tmp/mut/B11_the_flag_is_not_returned/aitelier/tools/run_tests/impl.py
+........F.............FFFF.F..FF..................................FFFF.. [ 55%]
+.........................................................F               [100%]
+=================================== FAILURES ===================================
+__ test_the_outcome_of_every_report_shape[foreign_names_repo_gate_wrote_none] __
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x762f35c25790>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-3'), _retention_count=3, _retention_policy='all')
+row_id = 'foreign_names_repo_gate_wrote_none'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_outcome_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        result, report, observed, identity_error = _driven(row_id, tmp_path_factory)
+>       assert observed == (row.measured, row.absent, row.next), (row_id, observed)
+E       AssertionError: ('foreign_names_repo_gate_wrote_none', ('unattributable', False, 'implement'))
+E       assert ('unattributa..., 'implement') == ('unattributa...attributable')
+E         
+E         At index 2 diff: 'implement' != 'test_gate_report_unattributable'
+E         Use -v to get more diff
+
+tests/unit/test_repo_gate_outcome_table.py:503: AssertionError
+----------------------------- Captured stdout call -----------------------------
+ROW {"row": "foreign_names_repo_gate_wrote_none", "attribution": "unattributable", "measured": "unattributable", "repo_gate_absent": false, "next": "implement", "identity_error": true, "inotify": "real", "observed": true, "first_entry": "gate-s38khhuj", "why": "the first entry under the ticket, 'gate-s38khhuj', holds no manifest.json that names /tmp/pytest-of-unknown/pytest-3/foreign_names_repo_gate_wrote_none0/repo", "returncode": 2, "admission": "not_admitted", "retained_findings": null, "unattributed_reds": ["other-6akdqxgj/python.json [python]: other writer: the python suite exited 1"], "retained_error": null, "release_evidence": "unresolved", "failures": ["repo_gate:run_tests.sh repository gate report could not be attributed (the first entry under the ticket, 'gate-s38khhuj', holds no manifest.json that names /tmp"]}
+______ test_the_outcome_of_every_report_shape[lockfile_first_red_refused] ______
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x762f35c25790>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-3'), _retention_count=3, _retention_policy='all')
+row_id = 'lockfile_first_red_refused'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_outcome_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        result, report, observed, identity_error = _driven(row_id, tmp_path_factory)
+>       assert observed == (row.measured, row.absent, row.next), (row_id, observed)
+E       AssertionError: ('lockfile_first_red_refused', ('unattributable', False, 'implement'))
+E       assert ('unattributa..., 'implement') == ('unattributa...attributable')
+E         
+E         At index 2 diff: 'implement' != 'test_gate_report_unattributable'
+E         Use -v to get more diff
+
+tests/unit/test_repo_gate_outcome_table.py:503: AssertionError
+----------------------------- Captured stdout call -----------------------------
+ROW {"row": "lockfile_first_red_refused", "attribution": "unattributable", "measured": "unattributable", "repo_gate_absent": false, "next": "implement", "identity_error": true, "inotify": "real", "observed": true, "first_entry": ".gate.lock", "why": "the first entry under the ticket, '.gate.lock', is not a directory", "returncode": 2, "admission": "not_admitted", "retained_findings": null, "unattributed_reds": ["gate-jzbqtp0n/python.json [python]: the python suite exited 1"], "retained_error": null, "release_evidence": "unresolved", "failures": ["repo_gate:run_tests.sh repository gate report could not be attributed (the first entry under the ticket, '.gate.lock', is not a directory): 1 red(s) under ticke"]}
+______ test_the_outcome_of_every_report_shape[cachedir_first_red_refused] ______
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x762f35c25790>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-3'), _retention_count=3, _retention_policy='all')
+row_id = 'cachedir_first_red_refused'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_outcome_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        result, report, observed, identity_error = _driven(row_id, tmp_path_factory)
+>       assert observed == (row.measured, row.absent, row.next), (row_id, observed)
+E       AssertionError: ('cachedir_first_red_refused', ('unattributable', False, 'implement'))
+E       assert ('unattributa..., 'implement') == ('unattributa...attributable')
+E         
+E         At index 2 diff: 'implement' != 'test_gate_report_unattributable'
+E         Use -v to get more diff
+
+tests/unit/test_repo_gate_outcome_table.py:503: AssertionError
+----------------------------- Captured stdout call -----------------------------
+ROW {"row": "cachedir_first_red_refused", "attribution": "unattributable", "measured": "unattributable", "repo_gate_absent": false, "next": "implement", "identity_error": true, "inotify": "real", "observed": true, "first_entry": "cache", "why": "the first entry under the ticket, 'cache', holds no manifest.json that names /tmp/pytest-of-unknown/pytest-3/cachedir_first_red_refused0/repo", "returncode": 2, "admission": "not_admitted", "retained_findings": null, "unattributed_reds": ["gate-ebgt_fe0/python.json [python]: the python suite exited 1"], "retained_error": null, "release_evidence": "unresolved", "failures": ["repo_gate:run_tests.sh repository gate report could not be attributed (the first entry under the ticket, 'cache', holds no manifest.json that names /tmp/pytest-"]}
+________ test_the_outcome_of_every_report_shape[file_first_red_refused] ________
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x762f35c25790>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-3'), _retention_count=3, _retention_policy='all')
+row_id = 'file_first_red_refused'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_outcome_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        result, report, observed, identity_error = _driven(row_id, tmp_path_factory)
+>       assert observed == (row.measured, row.absent, row.next), (row_id, observed)
+E       AssertionError: ('file_first_red_refused', ('unattributable', False, 'implement'))
+E       assert ('unattributa..., 'implement') == ('unattributa...attributable')
+E         
+E         At index 2 diff: 'implement' != 'test_gate_report_unattributable'
+E         Use -v to get more diff
+
+tests/unit/test_repo_gate_outcome_table.py:503: AssertionError
+----------------------------- Captured stdout call -----------------------------
+ROW {"row": "file_first_red_refused", "attribution": "unattributable", "measured": "unattributable", "repo_gate_absent": false, "next": "implement", "identity_error": true, "inotify": "real", "observed": true, "first_entry": "manifest.json", "why": "the first entry under the ticket, 'manifest.json', is not a directory", "returncode": 2, "admission": "not_admitted", "retained_findings": null, "unattributed_reds": ["python.json [python]: the python suite exited 1"], "retained_error": null, "release_evidence": "unresolved", "failures": ["repo_gate:run_tests.sh repository gate report could not be attributed (the first entry under the ticket, 'manifest.json', is not a directory): 1 red(s) under ti"]}
+_ test_the_outcome_of_every_report_shape[first_entry_names_other_repo_red_refused] _
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x762f35c25790>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-3'), _retention_count=3, _retention_policy='all')
+row_id = 'first_entry_names_other_repo_red_refused'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_outcome_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        result, report, observed, identity_error = _driven(row_id, tmp_path_factory)
+>       assert observed == (row.measured, row.absent, row.next), (row_id, observed)
+E       AssertionError: ('first_entry_names_other_repo_red_refused', ('unattributable', False, 'implement'))
+E       assert ('unattributa..., 'implement') == ('unattributa...attributable')
+E         
+E         At index 2 diff: 'implement' != 'test_gate_report_unattributable'
+E         Use -v to get more diff
+
+tests/unit/test_repo_gate_outcome_table.py:503: AssertionError
+----------------------------- Captured stdout call -----------------------------
+ROW {"row": "first_entry_names_other_repo_red_refused", "attribution": "unattributable", "measured": "unattributable", "repo_gate_absent": false, "next": "implement", "identity_error": true, "inotify": "real", "observed": true, "first_entry": "aaa-first-4khkwe7r", "why": "the first entry under the ticket, 'aaa-first-4khkwe7r', holds no manifest.json that names /tmp/pytest-of-unknown/pytest-3/first_entry_names_other_repo_red_refused0/repo", "returncode": 2, "admission": "not_admitted", "retained_findings": null, "unattributed_reds": ["aaa-first-4khkwe7r/python.json [python]: first writer: the python suite exited 1", "gate-t3dy59x5/python.json [python]: the python suite exited 1"], "retained_error": null, "release_evidence": "unresolved", "failures": ["repo_gate:run_tests.sh repository gate report could not be attributed (the first entry under the ticket, 'aaa-first-4khkwe7r', holds no manifest.json that names"]}
+_ test_the_outcome_of_every_report_shape[report_without_manifest_red_refused] __
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x762f35c25790>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-3'), _retention_count=3, _retention_policy='all')
+row_id = 'report_without_manifest_red_refused'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_outcome_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        result, report, observed, identity_error = _driven(row_id, tmp_path_factory)
+>       assert observed == (row.measured, row.absent, row.next), (row_id, observed)
+E       AssertionError: ('report_without_manifest_red_refused', ('unattributable', False, 'implement'))
+E       assert ('unattributa..., 'implement') == ('unattributa...attributable')
+E         
+E         At index 2 diff: 'implement' != 'test_gate_report_unattributable'
+E         Use -v to get more diff
+
+tests/unit/test_repo_gate_outcome_table.py:503: AssertionError
+----------------------------- Captured stdout call -----------------------------
+ROW {"row": "report_without_manifest_red_refused", "attribution": "unattributable", "measured": "unattributable", "repo_gate_absent": false, "next": "implement", "identity_error": true, "inotify": "real", "observed": true, "first_entry": "gate-6il_7f6n", "why": "the first entry under the ticket, 'gate-6il_7f6n', holds no manifest.json that names /tmp/pytest-of-unknown/pytest-3/report_without_manifest_red_refused0/repo", "returncode": 2, "admission": "not_admitted", "retained_findings": null, "unattributed_reds": ["gate-6il_7f6n/python-findings.json: the python suite exited 1"], "retained_error": null, "release_evidence": "unresolved", "failures": ["repo_gate:run_tests.sh repository gate report could not be attributed (the first entry under the ticket, 'gate-6il_7f6n', holds no manifest.json that names /tmp"]}
+_____ test_the_outcome_of_every_report_shape[inotify_unavailable_own_red] ______
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x762f35c25790>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-3'), _retention_count=3, _retention_policy='all')
+row_id = 'inotify_unavailable_own_red'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_outcome_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        result, report, observed, identity_error = _driven(row_id, tmp_path_factory)
+>       assert observed == (row.measured, row.absent, row.next), (row_id, observed)
+E       AssertionError: ('inotify_unavailable_own_red', ('unattributable', False, 'implement'))
+E       assert ('unattributa..., 'implement') == ('unattributa...attributable')
+E         
+E         At index 2 diff: 'implement' != 'test_gate_report_unattributable'
+E         Use -v to get more diff
+
+tests/unit/test_repo_gate_outcome_table.py:503: AssertionError
+----------------------------- Captured stdout call -----------------------------
+ROW {"row": "inotify_unavailable_own_red", "attribution": "unattributable", "measured": "unattributable", "repo_gate_absent": false, "next": "implement", "identity_error": true, "inotify": "inotify_init1 stubbed to EMFILE", "observed": false, "first_entry": null, "why": "the order of creation under the ticket was not observed: inotify_init1 failed (errno 24: Too many open files)", "returncode": 2, "admission": "not_admitted", "retained_findings": null, "unattributed_reds": ["gate-mf9q1n9x/python.json [python]: the python suite exited 1"], "retained_error": null, "release_evidence": "unresolved", "failures": ["repo_gate:run_tests.sh repository gate report could not be attributed (the order of creation under the ticket was not observed: inotify_init1 failed (errno 24: "]}
+___ test_the_outcome_of_every_report_shape[inotify_unavailable_foreign_red] ____
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x762f35c25790>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-3'), _retention_count=3, _retention_policy='all')
+row_id = 'inotify_unavailable_foreign_red'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_outcome_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        result, report, observed, identity_error = _driven(row_id, tmp_path_factory)
+>       assert observed == (row.measured, row.absent, row.next), (row_id, observed)
+E       AssertionError: ('inotify_unavailable_foreign_red', ('unattributable', False, 'implement'))
+E       assert ('unattributa..., 'implement') == ('unattributa...attributable')
+E         
+E         At index 2 diff: 'implement' != 'test_gate_report_unattributable'
+E         Use -v to get more diff
+
+tests/unit/test_repo_gate_outcome_table.py:503: AssertionError
+----------------------------- Captured stdout call -----------------------------
+ROW {"row": "inotify_unavailable_foreign_red", "attribution": "unattributable", "measured": "unattributable", "repo_gate_absent": false, "next": "implement", "identity_error": true, "inotify": "inotify_init1 stubbed to EMFILE", "observed": false, "first_entry": null, "why": "the order of creation under the ticket was not observed: inotify_init1 failed (errno 24: Too many open files)", "returncode": 2, "admission": "not_admitted", "retained_findings": null, "unattributed_reds": ["other-3xs19hgs/python.json [python]: other writer: the python suite exited 1"], "retained_error": null, "release_evidence": "unresolved", "failures": ["repo_gate:run_tests.sh repository gate report could not be attributed (the order of creation under the ticket was not observed: inotify_init1 failed (errno 24: "]}
+_ test_the_gate_must_create_its_report_directory_first[lockfile_first_red_refused] _
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x762f35c25790>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-3'), _retention_count=3, _retention_policy='all')
+row_id = 'lockfile_first_red_refused'
+
+    @pytest.mark.parametrize("row_id", _BREAKS_THE_REQUIREMENT)
+    def test_the_gate_must_create_its_report_directory_first(tmp_path_factory,
+                                                             row_id):
+        """A gate that creates anything else under its ticket first leaves its
+        report unattributable: its own red is listed, with where it was read,
+        and is neither dropped nor counted as the gate's."""
+        result, report, observed, _identity = _driven(row_id, tmp_path_factory)
+        gate = report["repo_gate"]
+        assert gate["report_attribution"]["state"] == UNATTRIBUTABLE
+        assert gate["retained_findings"] is None
+        own = [r for r in gate["unattributed_reds"]
+               if r.endswith("[python]: the python suite exited 1")]
+        assert len(own) == 1, gate["unattributed_reds"]
+        assert gate["measured"] == UNATTRIBUTABLE
+>       assert observed[2] == TERMINAL
+E       AssertionError: assert 'implement' == 'test_gate_re...nattributable'
+E         
+E         - test_gate_report_unattributable
+E         + implement
+
+tests/unit/test_repo_gate_outcome_table.py:558: AssertionError
+_ test_the_gate_must_create_its_report_directory_first[cachedir_first_red_refused] _
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x762f35c25790>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-3'), _retention_count=3, _retention_policy='all')
+row_id = 'cachedir_first_red_refused'
+
+    @pytest.mark.parametrize("row_id", _BREAKS_THE_REQUIREMENT)
+    def test_the_gate_must_create_its_report_directory_first(tmp_path_factory,
+                                                             row_id):
+        """A gate that creates anything else under its ticket first leaves its
+        report unattributable: its own red is listed, with where it was read,
+        and is neither dropped nor counted as the gate's."""
+        result, report, observed, _identity = _driven(row_id, tmp_path_factory)
+        gate = report["repo_gate"]
+        assert gate["report_attribution"]["state"] == UNATTRIBUTABLE
+        assert gate["retained_findings"] is None
+        own = [r for r in gate["unattributed_reds"]
+               if r.endswith("[python]: the python suite exited 1")]
+        assert len(own) == 1, gate["unattributed_reds"]
+        assert gate["measured"] == UNATTRIBUTABLE
+>       assert observed[2] == TERMINAL
+E       AssertionError: assert 'implement' == 'test_gate_re...nattributable'
+E         
+E         - test_gate_report_unattributable
+E         + implement
+
+tests/unit/test_repo_gate_outcome_table.py:558: AssertionError
+_ test_the_gate_must_create_its_report_directory_first[file_first_red_refused] _
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x762f35c25790>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-3'), _retention_count=3, _retention_policy='all')
+row_id = 'file_first_red_refused'
+
+    @pytest.mark.parametrize("row_id", _BREAKS_THE_REQUIREMENT)
+    def test_the_gate_must_create_its_report_directory_first(tmp_path_factory,
+                                                             row_id):
+        """A gate that creates anything else under its ticket first leaves its
+        report unattributable: its own red is listed, with where it was read,
+        and is neither dropped nor counted as the gate's."""
+        result, report, observed, _identity = _driven(row_id, tmp_path_factory)
+        gate = report["repo_gate"]
+        assert gate["report_attribution"]["state"] == UNATTRIBUTABLE
+        assert gate["retained_findings"] is None
+        own = [r for r in gate["unattributed_reds"]
+               if r.endswith("[python]: the python suite exited 1")]
+        assert len(own) == 1, gate["unattributed_reds"]
+        assert gate["measured"] == UNATTRIBUTABLE
+>       assert observed[2] == TERMINAL
+E       AssertionError: assert 'implement' == 'test_gate_re...nattributable'
+E         
+E         - test_gate_report_unattributable
+E         + implement
+
+tests/unit/test_repo_gate_outcome_table.py:558: AssertionError
+_ test_the_gate_must_create_its_report_directory_first[first_entry_names_other_repo_red_refused] _
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x762f35c25790>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-3'), _retention_count=3, _retention_policy='all')
+row_id = 'first_entry_names_other_repo_red_refused'
+
+    @pytest.mark.parametrize("row_id", _BREAKS_THE_REQUIREMENT)
+    def test_the_gate_must_create_its_report_directory_first(tmp_path_factory,
+                                                             row_id):
+        """A gate that creates anything else under its ticket first leaves its
+        report unattributable: its own red is listed, with where it was read,
+        and is neither dropped nor counted as the gate's."""
+        result, report, observed, _identity = _driven(row_id, tmp_path_factory)
+        gate = report["repo_gate"]
+        assert gate["report_attribution"]["state"] == UNATTRIBUTABLE
+        assert gate["retained_findings"] is None
+        own = [r for r in gate["unattributed_reds"]
+               if r.endswith("[python]: the python suite exited 1")]
+        assert len(own) == 1, gate["unattributed_reds"]
+        assert gate["measured"] == UNATTRIBUTABLE
+>       assert observed[2] == TERMINAL
+E       AssertionError: assert 'implement' == 'test_gate_re...nattributable'
+E         
+E         - test_gate_report_unattributable
+E         + implement
+
+tests/unit/test_repo_gate_outcome_table.py:558: AssertionError
+_________ test_an_unattributable_red_ends_the_run_on_its_own_terminal __________
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-3/test_an_unattributable_red_end0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x762f35bf06e0>
+
+    def test_an_unattributable_red_ends_the_run_on_its_own_terminal(
+            tmp_path, monkeypatch):
+        """Rev 5: the gate creates `.gate.lock` under its ticket before its report
+        directory, retains a python red, and is refused. Its report cannot be
+        attributed, so the run ends at `test_gate_report_unattributable` after
+        one gate call: no implement lap, no wait at the absence gate."""
+        from tests.unit.test_repo_gate_outcome_table import TABLE_GATE
+        rig = HarnessRig(tmp_path / "harness", monkeypatch)
+        monkeypatch.setenv("GODOT_BUILDER_URL", rig.base)
+        monkeypatch.setenv("AITELIER_REPO_GATE_RENDER_WAIT_SECONDS", "0.3")
+        monkeypatch.setenv("TABLE_GATE_MODE", "python_red")
+        monkeypatch.setenv("TABLE_GATE_PRE", "lockfile")
+        counter = tmp_path / "calls.txt"
+        try:
+            sf, run_id = _wire(tmp_path, monkeypatch, episode_max=30, wait=5,
+                               counter=counter,
+                               tail="exec python3 - <<'PYGATE'\n" + TABLE_GATE
+                                    + "\nPYGATE\n")
+            rig.hold()
+            implement_runs, statuses, outcomes, nodes = _drive(
+                sf, run_id, monkeypatch, ticks=40, clock_step=1)
+            report = json.loads(gate_deferral.find_test_report(sf, run_id).read_text())
+        finally:
+            rig.close()
+        run = sf.get_run(run_id)
+        reason = run.get("error_reason") or ""
+        gate = report["repo_gate"]
+        print("UNATTRIBUTABLE " + json.dumps({
+            "implement_runs": implement_runs, "final_status": run["status"],
+            "error_reason": reason, "gate_calls": _gate_calls(counter),
+            "outcomes": outcomes, "last_nodes": nodes[-3:],
+            "report": {k: report.get(k) for k in (
+                "passed", "repo_gate_absent", "repo_gate_unattributable",
+                "evidence_state", "failures")},
+            "report_attribution": gate.get("report_attribution"),
+            "unattributed_reds": gate.get("unattributed_reds")}, indent=1))
+    
+>       assert implement_runs == 1, implement_runs
+E       AssertionError: 4
+E       assert 4 == 1
+
+tests/skillflow/test_coding_impl_absence_needs_nothing_else_red.py:197: AssertionError
+----------------------------- Captured stdout call -----------------------------
+UNATTRIBUTABLE {
+ "implement_runs": 4,
+ "final_status": "failed",
+ "error_reason": "Cycle limit exceeded",
+ "gate_calls": 4,
+ "outcomes": [
+  "none",
+  "none",
+  "none",
+  "none",
+  "none",
+  "none",
+  "none",
+  "none",
+  "none"
+ ],
+ "last_nodes": [
+  null,
+  "test",
+  "test_outcome"
+ ],
+ "report": {
+  "passed": false,
+  "repo_gate_absent": false,
+  "repo_gate_unattributable": true,
+  "evidence_state": "unattributable",
+  "failures": [
+   "repo_gate:run_tests.sh repository gate report could not be attributed (the first entry under the ticket, '.gate.lock', is not a directory): 1 red(s) under ticket rt-20260925T200254Z-92a62cb3: gate-2mq_a6el/python.json [python]: the python suite exited 1"
+  ]
+ },
+ "report_attribution": {
+  "state": "unattributable",
+  "observed": true,
+  "first_entry": ".gate.lock",
+  "first_is_dir": false,
+  "why": "the first entry under the ticket, '.gate.lock', is not a directory",
+  "reports": {
+   "gate-2mq_a6el/manifest.json": "unattributable"
+  }
+ },
+ "unattributed_reds": [
+  "gate-2mq_a6el/python.json [python]: the python suite exited 1"
+ ]
+}
+------------------------------ Captured log call -------------------------------
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1069 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+=============================== warnings summary ===============================
+../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_outcome_of_every_report_shape[foreign_names_repo_gate_wrote_none]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_outcome_of_every_report_shape[lockfile_first_red_refused]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_outcome_of_every_report_shape[cachedir_first_red_refused]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_outcome_of_every_report_shape[file_first_red_refused]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_outcome_of_every_report_shape[first_entry_names_other_repo_red_refused]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_outcome_of_every_report_shape[report_without_manifest_red_refused]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_outcome_of_every_report_shape[inotify_unavailable_own_red]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_outcome_of_every_report_shape[inotify_unavailable_foreign_red]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_gate_must_create_its_report_directory_first[lockfile_first_red_refused]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_gate_must_create_its_report_directory_first[cachedir_first_red_refused]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_gate_must_create_its_report_directory_first[file_first_red_refused]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_gate_must_create_its_report_directory_first[first_entry_names_other_repo_red_refused]
+FAILED tests/skillflow/test_coding_impl_absence_needs_nothing_else_red.py::test_an_unattributable_red_ends_the_run_on_its_own_terminal
+13 failed, 117 passed, 1 warning in 183.84s (0:03:03)
+BARE_RC=1
+IGNITION_BYTES=163
+end: 2026-09-25T20:02:56Z

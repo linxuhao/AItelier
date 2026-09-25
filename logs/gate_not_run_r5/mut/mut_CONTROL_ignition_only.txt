@@ -1,0 +1,16 @@
+mutant: CONTROL_ignition_only  sha: afa808b64de248968c6705128db94248b62de343  copy: /tmp/mut/CONTROL_ignition_only  date: 2026-09-25T19:50:32Z
+files: tests/unit/test_repo_gate_outcome_table.py tests/unit/test_repo_gate_identity_from_report_dir.py tests/unit/test_repo_gate_identity_is_stable.py tests/unit/test_repo_gate_red_beats_absence.py tests/unit/test_repo_gate_admission.py tests/unit/test_tree_level_accounting_witnesses.py tests/skillflow/test_coding_impl_absence_needs_nothing_else_red.py
+MUTANT CONTROL_ignition_only: applied to aitelier/tools/run_tests/impl.py
+IMPORT /tmp/mut/CONTROL_ignition_only/aitelier/tools/run_tests/impl.py
+........................................................................ [ 55%]
+..........................................................               [100%]
+=============================== warnings summary ===============================
+../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+130 passed, 1 warning in 176.52s (0:02:56)
+BARE_RC=0
+IGNITION_BYTES=197
+end: 2026-09-25T19:53:32Z

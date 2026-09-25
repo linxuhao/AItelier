@@ -1,0 +1,867 @@
+date: 2026-09-25T19:49:13Z
+tree: /home/linxuhao/.AItelier/worktrees-scratch/gn5-base host head: 7c8f9e5aeef8c962e5de180ffe6029d959b464a2
+host worktree status (porcelain):
+ M tests/unit/test_repo_gate_outcome_table.py
+throwaway containers (aitelier image, not prod) before launch: 2
+uid: 1000
+command: python -m pytest -p no:cacheprovider -s -q -rf tests/unit/test_repo_gate_outcome_table.py
+in-container git head: 7c8f9e5aeef8c962e5de180ffe6029d959b464a2 status-lines: 1
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gn5-base/aitelier/tools/run_tests/impl.py
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gn5-base/core/gate_deferral.py
+IMPORT skillflow /usr/local/lib/python3.12/site-packages/skillflow/__init__.py ?
+ROW {"row": "clean_refusal", "attribution": null, "measured": "unmeasured", "repo_gate_absent": true, "next": "test_gate_absent", "identity_error": false, "inotify": "real", "observed": true, "first_entry": "gate-_rhcqokv", "why": null, "returncode": 2, "admission": "not_admitted", "retained_findings": 0, "unattributed_reds": null, "retained_error": null, "release_evidence": "unresolved", "failures": ["repo_gate:run_tests.sh was NOT measured (engine admission: not_admitted; 1 attempt(s)): godot-builder unreachable at http://127.0.0.1:38923: HTTP Error 409: Con"]}
+.ROW {"row": "python_red_then_refused", "attribution": null, "measured": "measured_fail", "repo_gate_absent": false, "next": "implement", "identity_error": false, "inotify": "real", "observed": true, "first_entry": "gate-i6gck9y3", "why": null, "returncode": 2, "admission": "not_admitted", "retained_findings": 1, "unattributed_reds": null, "retained_error": null, "release_evidence": "known_failure", "failures": ["repo_gate:run_tests.sh#python/3d959bcbf887 failed: the python suite exited 1"]}
+.ROW {"row": "compile_red_then_refused", "attribution": null, "measured": "measured_fail", "repo_gate_absent": false, "next": "implement", "identity_error": false, "inotify": "real", "observed": true, "first_entry": "gate-7n3ey2qs", "why": null, "returncode": 2, "admission": "not_admitted", "retained_findings": 1, "unattributed_reds": null, "retained_error": null, "release_evidence": "known_failure", "failures": ["repo_gate:run_tests.sh#compile/7ae4b99f46d6 failed: res://a.gd:3: Parse Error: table"]}
+.ROW {"row": "second_manifest_same_repo", "attribution": null, "measured": "measured_fail", "repo_gate_absent": false, "next": "implement", "identity_error": true, "inotify": "real", "observed": true, "first_entry": "gate-w32wlxhs", "why": null, "returncode": 2, "admission": "not_admitted", "retained_findings": 1, "unattributed_reds": null, "retained_error": "repository gate retained 2 reports for /tmp/pytest-of-unknown/pytest-0/second_manifest_same_repo0/repo under one ticket (rt-20260925T194921Z-b6bcdbe8)", "release_evidence": "known_failure", "failures": ["repo_gate:run_tests.sh#python/3d959bcbf887 failed: the python suite exited 1"]}
+.ROW {"row": "foreign_unreadable_manifest", "attribution": null, "measured": "measured_fail", "repo_gate_absent": false, "next": "implement", "identity_error": true, "inotify": "real", "observed": true, "first_entry": "gate-a3gw6adx", "why": null, "returncode": 2, "admission": "not_admitted", "retained_findings": 1, "unattributed_reds": null, "retained_error": "repository gate report manifest.json is unreadable: Unterminated string starting at: line 1 column 29 (char 28)", "release_evidence": "known_failure", "failures": ["repo_gate:run_tests.sh#python/3d959bcbf887 failed: the python suite exited 1"]}
+.ROW {"row": "missing_stage_report", "attribution": null, "measured": "measured_fail", "repo_gate_absent": false, "next": "implement", "identity_error": true, "inotify": "real", "observed": true, "first_entry": "gate-1k0ayotd", "why": null, "returncode": 2, "admission": "not_admitted", "retained_findings": 1, "unattributed_reds": null, "retained_error": "repository gate report compile.json is unreadable: [Errno 2] No such file or directory: '/tmp/pytest-of-unknown/pytest-0/missing_stage_report0/home/gate-reports/rt-20260925T194923Z-11359f04/gate-1k0ayotd/compile.json'", "release_evidence": "known_failure", "failures": ["repo_gate:run_tests.sh#python/3d959bcbf887 failed: the python suite exited 1"]}
+.ROW {"row": "nested_two_levels", "attribution": null, "measured": "measured_fail", "repo_gate_absent": false, "next": "implement", "identity_error": false, "inotify": "real", "observed": true, "first_entry": "outer-uvzna0qi", "why": null, "returncode": 2, "admission": "not_admitted", "retained_findings": 1, "unattributed_reds": null, "retained_error": null, "release_evidence": "known_failure", "failures": ["repo_gate:run_tests.sh#python/3d959bcbf887 failed: the python suite exited 1"]}
+.ROW {"row": "empty_findings_failed_stage", "attribution": null, "measured": "measured_fail", "repo_gate_absent": false, "next": "implement", "identity_error": false, "inotify": "real", "observed": true, "first_entry": "gate-pw_ql8ei", "why": null, "returncode": 2, "admission": "not_admitted", "retained_findings": 1, "unattributed_reds": null, "retained_error": null, "release_evidence": "known_failure", "failures": ["repo_gate:run_tests.sh#compile/7ae4b99f46d6 failed: res://a.gd:3: Parse Error: table"]}
+.ROW {"row": "foreign_names_repo_gate_wrote_none", "attribution": null, "measured": "unmeasured", "repo_gate_absent": true, "next": "test_gate_absent", "identity_error": true, "inotify": "real", "observed": true, "first_entry": "gate-i99ys9f7", "why": null, "returncode": 2, "admission": "not_admitted", "retained_findings": null, "unattributed_reds": null, "retained_error": "report other-t04rfy64/manifest.json names /tmp/pytest-of-unknown/pytest-0/foreign_names_repo_gate_wrote_none0/repo but is not the first entry this gate run created under ticket rt-20260925T194928Z-0aac0d57", "release_evidence": "unresolved", "failures": ["repo_gate:run_tests.sh was NOT measured (engine admission: not_admitted; 1 attempt(s)): godot-builder unreachable at http://127.0.0.1:40427: HTTP Error 409: Con"]}
+FROW {"row": "foreign_names_repo_beside_own", "attribution": null, "measured": "unmeasured", "repo_gate_absent": true, "next": "test_gate_absent", "identity_error": true, "inotify": "real", "observed": true, "first_entry": "gate-s35tb_j6", "why": null, "returncode": 2, "admission": "not_admitted", "retained_findings": 0, "unattributed_reds": null, "retained_error": "repository gate retained 2 reports for /tmp/pytest-of-unknown/pytest-0/foreign_names_repo_beside_own0/repo under one ticket (rt-20260925T194929Z-a74f06bf)", "release_evidence": "unresolved", "failures": ["repo_gate:run_tests.sh was NOT measured (engine admission: not_admitted; 1 attempt(s)): godot-builder unreachable at http://127.0.0.1:41649: HTTP Error 409: Con"]}
+.ROW {"row": "other_repo_reports_beside_green_gate", "attribution": null, "measured": "measured_pass", "repo_gate_absent": false, "next": "done", "identity_error": false, "inotify": "real", "observed": true, "first_entry": "gate-bwbjqtnn", "why": null, "returncode": 0, "admission": "answered", "retained_findings": 0, "unattributed_reds": null, "retained_error": null, "release_evidence": "passed", "failures": []}
+.ROW {"row": "declared_absence", "attribution": null, "measured": "unmeasured", "repo_gate_absent": true, "next": "test_gate_absent", "identity_error": false, "inotify": "real", "observed": true, "first_entry": "gate-lmqbmhiv", "why": null, "returncode": 3, "admission": "no_engine_request", "retained_findings": 0, "unattributed_reds": null, "retained_error": null, "release_evidence": "unresolved", "failures": ["repo_gate:run_tests.sh was NOT measured (engine admission: no_engine_request; 1 attempt(s)): AITELIER_REPO_GATE_UNMEASURED={\"state\": \"blocked\", \"reason\": \"table"]}
+.ROW {"row": "declared_failed_is_not_an_absence", "attribution": null, "measured": "measured_fail", "repo_gate_absent": false, "next": "implement", "identity_error": true, "inotify": "real", "observed": true, "first_entry": "gate-4wa5rwmw", "why": null, "returncode": 3, "admission": "no_engine_request", "retained_findings": 0, "unattributed_reds": null, "retained_error": null, "release_evidence": "known_failure", "failures": ["repo_gate:run_tests.sh failed (rc=3): AITELIER_REPO_GATE_UNMEASURED={\"state\": \"failed\", \"reason\": \"table\"}"]}
+.ROW {"row": "gate_killed_at_its_timeout", "attribution": null, "measured": "unmeasured", "repo_gate_absent": true, "next": "test_gate_absent", "identity_error": false, "inotify": "real", "observed": true, "first_entry": "gate-h430ylln", "why": null, "returncode": -1, "admission": "no_engine_request", "retained_findings": 0, "unattributed_reds": null, "retained_error": null, "release_evidence": "unresolved", "failures": ["repo_gate:run_tests.sh was NOT measured (engine admission: no_engine_request; 1 attempt(s)): timed out after 3s: bash /tmp/pytest-of-unknown/pytest-0/gate_kille"]}
+.ROW {"row": "exit_2_after_an_answered_request", "attribution": null, "measured": "measured_fail", "repo_gate_absent": false, "next": "implement", "identity_error": true, "inotify": "real", "observed": true, "first_entry": "gate-drbfh0ux", "why": null, "returncode": 2, "admission": "answered", "retained_findings": 0, "unattributed_reds": null, "retained_error": null, "release_evidence": "known_failure", "failures": ["repo_gate:run_tests.sh failed (rc=2): "]}
+.ROW {"row": "exit_1_after_a_refusal", "attribution": null, "measured": "measured_fail", "repo_gate_absent": false, "next": "implement", "identity_error": true, "inotify": "real", "observed": true, "first_entry": "gate-2uosrguj", "why": null, "returncode": 1, "admission": "not_admitted", "retained_findings": 0, "unattributed_reds": null, "retained_error": null, "release_evidence": "known_failure", "failures": ["repo_gate:run_tests.sh failed (rc=1): godot-builder unreachable at http://127.0.0.1:46583: HTTP Error 409: Conflict -- gate NOT run."]}
+.ROW {"row": "pytest_red_beside_refused_gate", "attribution": null, "measured": "unmeasured", "repo_gate_absent": false, "next": "implement", "identity_error": false, "inotify": "real", "observed": true, "first_entry": "gate-2c063uo7", "why": null, "returncode": 2, "admission": "not_admitted", "retained_findings": 0, "unattributed_reds": null, "retained_error": null, "release_evidence": "known_failure", "failures": ["FAILED tests/test_bad.py::test_bad - assert 1 == 2", "repo_gate:run_tests.sh was NOT measured (engine admission: not_admitted; 1 attempt(s)): godot-builder unreachable at http://127.0.0.1:45481: HTTP Error 409: Con"]}
+.ROW {"row": "pytest_wall_beside_refused_gate", "attribution": null, "measured": "unmeasured", "repo_gate_absent": true, "next": "test_gate_absent", "identity_error": false, "inotify": "real", "observed": true, "first_entry": "gate-c9n9ok37", "why": null, "returncode": 2, "admission": "not_admitted", "retained_findings": 0, "unattributed_reds": null, "retained_error": null, "release_evidence": "unresolved", "failures": ["pytest:timed out after 3s — no results collected, the suite was killed mid-run", "repo_gate:run_tests.sh was NOT measured (engine admission: not_admitted; 1 attempt(s)): godot-builder unreachable at http://127.0.0.1:42451: HTTP Error 409: Con"]}
+.ROW {"row": "node_runner_unavailable_beside_refused_gate", "attribution": null, "measured": "unmeasured", "repo_gate_absent": false, "next": "test_evidence_missing", "identity_error": false, "inotify": "real", "observed": true, "first_entry": "gate-0y_s8hdm", "why": null, "returncode": 2, "admission": "not_admitted", "retained_findings": 0, "unattributed_reds": null, "retained_error": null, "release_evidence": "unresolved", "failures": ["node gate unavailable: npm not available — node gate skipped (install nodejs+npm in the backend image).", "repo_gate:run_tests.sh was NOT measured (engine admission: not_admitted; 1 attempt(s)): godot-builder unreachable at http://127.0.0.1:34447: HTTP Error 409: Con"]}
+.ROW {"row": "pytest_runner_unavailable_beside_refused_gate", "attribution": null, "measured": "unmeasured", "repo_gate_absent": false, "next": "test_evidence_missing", "identity_error": false, "inotify": "real", "observed": true, "first_entry": "gate-053la5sd", "why": null, "returncode": 2, "admission": "not_admitted", "retained_findings": 0, "unattributed_reds": null, "retained_error": null, "release_evidence": "unresolved", "failures": ["repo_gate:run_tests.sh was NOT measured (engine admission: not_admitted; 1 attempt(s)): godot-builder unreachable at http://127.0.0.1:38331: HTTP Error 409: Con"]}
+.ROW {"row": "green_gate", "attribution": null, "measured": "measured_pass", "repo_gate_absent": false, "next": "done", "identity_error": false, "inotify": "real", "observed": true, "first_entry": "gate-su6fgw3i", "why": null, "returncode": 0, "admission": "answered", "retained_findings": 0, "unattributed_reds": null, "retained_error": null, "release_evidence": "passed", "failures": []}
+.ROW {"row": "answered_red", "attribution": null, "measured": "measured_fail", "repo_gate_absent": false, "next": "implement", "identity_error": false, "inotify": "real", "observed": true, "first_entry": "gate-lpgftk7f", "why": null, "returncode": 1, "admission": "answered", "retained_findings": 2, "unattributed_reds": null, "retained_error": null, "release_evidence": "known_failure", "failures": ["repo_gate:run_tests.sh#script/a6414c8a715c failed: script res://tests/a.gd FAILED", "repo_gate:run_tests.sh#script/bef7e278faf2 failed: script res://tests/b.gd FAILED"]}
+.ROW {"row": "lockfile_first_red_refused", "attribution": null, "measured": "unmeasured", "repo_gate_absent": true, "next": "test_gate_absent", "identity_error": true, "inotify": "real", "observed": true, "first_entry": ".gate.lock", "why": null, "returncode": 2, "admission": "not_admitted", "retained_findings": null, "unattributed_reds": null, "retained_error": "report gate-xz9nwvlm/manifest.json names /tmp/pytest-of-unknown/pytest-0/lockfile_first_red_refused0/repo but is not the first entry this gate run created under ticket rt-20260925T194949Z-a2e125cc", "release_evidence": "unresolved", "failures": ["repo_gate:run_tests.sh was NOT measured (engine admission: not_admitted; 1 attempt(s)): godot-builder unreachable at http://127.0.0.1:37667: HTTP Error 409: Con"]}
+FROW {"row": "cachedir_first_red_refused", "attribution": null, "measured": "unmeasured", "repo_gate_absent": true, "next": "test_gate_absent", "identity_error": true, "inotify": "real", "observed": true, "first_entry": "cache", "why": null, "returncode": 2, "admission": "not_admitted", "retained_findings": null, "unattributed_reds": null, "retained_error": "report gate-_7mro_84/manifest.json names /tmp/pytest-of-unknown/pytest-0/cachedir_first_red_refused0/repo but is not the first entry this gate run created under ticket rt-20260925T194950Z-e7ab14af", "release_evidence": "unresolved", "failures": ["repo_gate:run_tests.sh was NOT measured (engine admission: not_admitted; 1 attempt(s)): godot-builder unreachable at http://127.0.0.1:34451: HTTP Error 409: Con"]}
+FROW {"row": "file_first_red_refused", "attribution": null, "measured": "measured_fail", "repo_gate_absent": false, "next": "implement", "identity_error": false, "inotify": "real", "observed": true, "first_entry": "manifest.json", "why": null, "returncode": 2, "admission": "not_admitted", "retained_findings": 1, "unattributed_reds": null, "retained_error": null, "release_evidence": "known_failure", "failures": ["repo_gate:run_tests.sh#python/3d959bcbf887 failed: the python suite exited 1"]}
+FROW {"row": "first_entry_names_other_repo_red_refused", "attribution": null, "measured": "unmeasured", "repo_gate_absent": true, "next": "test_gate_absent", "identity_error": true, "inotify": "real", "observed": true, "first_entry": "aaa-first-zvdkb_zb", "why": null, "returncode": 2, "admission": "not_admitted", "retained_findings": null, "unattributed_reds": null, "retained_error": "the gate's own report aaa-first-zvdkb_zb/manifest.json names '/tmp/some-other-repo', not /tmp/pytest-of-unknown/pytest-0/first_entry_names_other_repo_red_refused0/repo; report gate-jf11jei0/manifest.json names /tmp/pytest-of-unknown/pytest-0/first_entry_names_other_repo_red_refused0/repo but is not the first entry this gate run created under ticket rt-20260925T194953Z-a8a3bb31", "release_evidence": "unresolved", "failures": ["repo_gate:run_tests.sh was NOT measured (engine admission: not_admitted; 1 attempt(s)): godot-builder unreachable at http://127.0.0.1:35097: HTTP Error 409: Con"]}
+FROW {"row": "first_entry_names_this_repo_clean_refused", "attribution": null, "measured": "measured_fail", "repo_gate_absent": false, "next": "implement", "identity_error": true, "inotify": "real", "observed": true, "first_entry": "aaa-first-_7t3z7bn", "why": null, "returncode": 2, "admission": "not_admitted", "retained_findings": 1, "unattributed_reds": null, "retained_error": "repository gate retained 2 reports for /tmp/pytest-of-unknown/pytest-0/first_entry_names_this_repo_clean_refused0/repo under one ticket (rt-20260925T194954Z-e8e45ddb)", "release_evidence": "known_failure", "failures": ["repo_gate:run_tests.sh#python/61e63deeb364 failed: first writer: the python suite exited 1"]}
+.ROW {"row": "report_without_manifest_red_refused", "attribution": null, "measured": "unmeasured", "repo_gate_absent": true, "next": "test_gate_absent", "identity_error": false, "inotify": "real", "observed": true, "first_entry": "gate-r7g5vdhe", "why": null, "returncode": 2, "admission": "not_admitted", "retained_findings": null, "unattributed_reds": null, "retained_error": null, "release_evidence": "unresolved", "failures": ["repo_gate:run_tests.sh was NOT measured (engine admission: not_admitted; 1 attempt(s)): godot-builder unreachable at http://127.0.0.1:33605: HTTP Error 409: Con"]}
+FROW {"row": "lockfile_first_green_gate", "attribution": null, "measured": "measured_pass", "repo_gate_absent": false, "next": "done", "identity_error": true, "inotify": "real", "observed": true, "first_entry": ".gate.lock", "why": null, "returncode": 0, "admission": "answered", "retained_findings": null, "unattributed_reds": null, "retained_error": "report gate-vgoj4155/manifest.json names /tmp/pytest-of-unknown/pytest-0/lockfile_first_green_gate0/repo but is not the first entry this gate run created under ticket rt-20260925T194957Z-e8e3f77a", "release_evidence": "passed", "failures": []}
+FROW {"row": "pytest_runner_unavailable_beside_unattributable_red", "attribution": null, "measured": "unmeasured", "repo_gate_absent": false, "next": "test_evidence_missing", "identity_error": true, "inotify": "real", "observed": true, "first_entry": ".gate.lock", "why": null, "returncode": 2, "admission": "not_admitted", "retained_findings": null, "unattributed_reds": null, "retained_error": "report gate-0m0bvv6o/manifest.json names /tmp/pytest-of-unknown/pytest-0/pytest_runner_unavailable_beside_unattributable_red0/repo but is not the first entry this gate run created under ticket rt-20260925T194958Z-0b023791", "release_evidence": "unresolved", "failures": ["repo_gate:run_tests.sh was NOT measured (engine admission: not_admitted; 1 attempt(s)): godot-builder unreachable at http://127.0.0.1:46811: HTTP Error 409: Con"]}
+FROW {"row": "inotify_unavailable_own_red", "attribution": null, "measured": "measured_fail", "repo_gate_absent": false, "next": "implement", "identity_error": false, "inotify": "inotify_init1 stubbed to EMFILE", "observed": false, "first_entry": null, "why": null, "returncode": 2, "admission": "not_admitted", "retained_findings": 1, "unattributed_reds": null, "retained_error": null, "release_evidence": "known_failure", "failures": ["repo_gate:run_tests.sh#python/3d959bcbf887 failed: the python suite exited 1"]}
+FROW {"row": "inotify_unavailable_foreign_red", "attribution": null, "measured": "measured_fail", "repo_gate_absent": false, "next": "implement", "identity_error": true, "inotify": "inotify_init1 stubbed to EMFILE", "observed": false, "first_entry": null, "why": null, "returncode": 2, "admission": "not_admitted", "retained_findings": 1, "unattributed_reds": null, "retained_error": "repository gate retained 2 reports for /tmp/pytest-of-unknown/pytest-0/inotify_unavailable_foreign_red0/repo under one ticket (rt-20260925T195000Z-13b083cc)", "release_evidence": "known_failure", "failures": ["repo_gate:run_tests.sh#python/468f5b811b9d failed: other writer: the python suite exited 1"]}
+FROW {"row": "inotify_unavailable_no_red", "attribution": null, "measured": "unmeasured", "repo_gate_absent": true, "next": "test_gate_absent", "identity_error": false, "inotify": "inotify_init1 stubbed to EMFILE", "observed": false, "first_entry": null, "why": null, "returncode": 2, "admission": "not_admitted", "retained_findings": 0, "unattributed_reds": null, "retained_error": null, "release_evidence": "unresolved", "failures": ["repo_gate:run_tests.sh was NOT measured (engine admission: not_admitted; 1 attempt(s)): godot-builder unreachable at http://127.0.0.1:40785: HTTP Error 409: Con"]}
+.FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+=================================== FAILURES ===================================
+__ test_the_outcome_of_every_report_shape[foreign_names_repo_gate_wrote_none] __
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x74b558985430>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-0'), _retention_count=3, _retention_policy='all')
+row_id = 'foreign_names_repo_gate_wrote_none'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_outcome_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        result, report, observed, identity_error = _driven(row_id, tmp_path_factory)
+>       assert observed == (row.measured, row.absent, row.next), (row_id, observed)
+E       AssertionError: ('foreign_names_repo_gate_wrote_none', ('unmeasured', True, 'test_gate_absent'))
+E       assert ('unmeasured'..._gate_absent') == ('unattributa...attributable')
+E         
+E         At index 0 diff: 'unmeasured' != 'unattributable'
+E         Use -v to get more diff
+
+tests/unit/test_repo_gate_outcome_table.py:503: AssertionError
+______ test_the_outcome_of_every_report_shape[lockfile_first_red_refused] ______
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x74b558985430>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-0'), _retention_count=3, _retention_policy='all')
+row_id = 'lockfile_first_red_refused'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_outcome_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        result, report, observed, identity_error = _driven(row_id, tmp_path_factory)
+>       assert observed == (row.measured, row.absent, row.next), (row_id, observed)
+E       AssertionError: ('lockfile_first_red_refused', ('unmeasured', True, 'test_gate_absent'))
+E       assert ('unmeasured'..._gate_absent') == ('unattributa...attributable')
+E         
+E         At index 0 diff: 'unmeasured' != 'unattributable'
+E         Use -v to get more diff
+
+tests/unit/test_repo_gate_outcome_table.py:503: AssertionError
+______ test_the_outcome_of_every_report_shape[cachedir_first_red_refused] ______
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x74b558985430>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-0'), _retention_count=3, _retention_policy='all')
+row_id = 'cachedir_first_red_refused'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_outcome_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        result, report, observed, identity_error = _driven(row_id, tmp_path_factory)
+>       assert observed == (row.measured, row.absent, row.next), (row_id, observed)
+E       AssertionError: ('cachedir_first_red_refused', ('unmeasured', True, 'test_gate_absent'))
+E       assert ('unmeasured'..._gate_absent') == ('unattributa...attributable')
+E         
+E         At index 0 diff: 'unmeasured' != 'unattributable'
+E         Use -v to get more diff
+
+tests/unit/test_repo_gate_outcome_table.py:503: AssertionError
+________ test_the_outcome_of_every_report_shape[file_first_red_refused] ________
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x74b558985430>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-0'), _retention_count=3, _retention_policy='all')
+row_id = 'file_first_red_refused'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_outcome_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        result, report, observed, identity_error = _driven(row_id, tmp_path_factory)
+>       assert observed == (row.measured, row.absent, row.next), (row_id, observed)
+E       AssertionError: ('file_first_red_refused', ('measured_fail', False, 'implement'))
+E       assert ('measured_fa..., 'implement') == ('unattributa...attributable')
+E         
+E         At index 0 diff: 'measured_fail' != 'unattributable'
+E         Use -v to get more diff
+
+tests/unit/test_repo_gate_outcome_table.py:503: AssertionError
+_ test_the_outcome_of_every_report_shape[first_entry_names_other_repo_red_refused] _
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x74b558985430>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-0'), _retention_count=3, _retention_policy='all')
+row_id = 'first_entry_names_other_repo_red_refused'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_outcome_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        result, report, observed, identity_error = _driven(row_id, tmp_path_factory)
+>       assert observed == (row.measured, row.absent, row.next), (row_id, observed)
+E       AssertionError: ('first_entry_names_other_repo_red_refused', ('unmeasured', True, 'test_gate_absent'))
+E       assert ('unmeasured'..._gate_absent') == ('unattributa...attributable')
+E         
+E         At index 0 diff: 'unmeasured' != 'unattributable'
+E         Use -v to get more diff
+
+tests/unit/test_repo_gate_outcome_table.py:503: AssertionError
+_ test_the_outcome_of_every_report_shape[report_without_manifest_red_refused] __
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x74b558985430>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-0'), _retention_count=3, _retention_policy='all')
+row_id = 'report_without_manifest_red_refused'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_outcome_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        result, report, observed, identity_error = _driven(row_id, tmp_path_factory)
+>       assert observed == (row.measured, row.absent, row.next), (row_id, observed)
+E       AssertionError: ('report_without_manifest_red_refused', ('unmeasured', True, 'test_gate_absent'))
+E       assert ('unmeasured'..._gate_absent') == ('unattributa...attributable')
+E         
+E         At index 0 diff: 'unmeasured' != 'unattributable'
+E         Use -v to get more diff
+
+tests/unit/test_repo_gate_outcome_table.py:503: AssertionError
+______ test_the_outcome_of_every_report_shape[lockfile_first_green_gate] _______
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x74b558985430>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-0'), _retention_count=3, _retention_policy='all')
+row_id = 'lockfile_first_green_gate'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_outcome_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        result, report, observed, identity_error = _driven(row_id, tmp_path_factory)
+        assert observed == (row.measured, row.absent, row.next), (row_id, observed)
+        # The report says the same as the return.
+        assert bool(report.get("repo_gate_absent")) is observed[1]
+        # A part that cannot be read, a report that is not the gate's, or reds
+        # that belong to no identified report, are stated.
+>       assert identity_error is row.identity_error, (row_id, identity_error)
+E       AssertionError: ('lockfile_first_green_gate', True)
+E       assert True is False
+E        +  where False = Row(mode='clean', pre='lockfile', leg=None, busy=False, attribution='unattributable', measured='measured_pass', absent...='done', identity_error=False, shape='the gate creates `.gate.lock` first; no red anywhere; the engine answered green').identity_error
+
+tests/unit/test_repo_gate_outcome_table.py:508: AssertionError
+_ test_the_outcome_of_every_report_shape[pytest_runner_unavailable_beside_unattributable_red] _
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x74b558985430>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-0'), _retention_count=3, _retention_policy='all')
+row_id = 'pytest_runner_unavailable_beside_unattributable_red'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_outcome_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        result, report, observed, identity_error = _driven(row_id, tmp_path_factory)
+>       assert observed == (row.measured, row.absent, row.next), (row_id, observed)
+E       AssertionError: ('pytest_runner_unavailable_beside_unattributable_red', ('unmeasured', False, 'test_evidence_missing'))
+E       assert ('unmeasured'...ence_missing') == ('unattributa...ence_missing')
+E         
+E         At index 0 diff: 'unmeasured' != 'unattributable'
+E         Use -v to get more diff
+
+tests/unit/test_repo_gate_outcome_table.py:503: AssertionError
+_____ test_the_outcome_of_every_report_shape[inotify_unavailable_own_red] ______
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x74b558985430>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-0'), _retention_count=3, _retention_policy='all')
+row_id = 'inotify_unavailable_own_red'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_outcome_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        result, report, observed, identity_error = _driven(row_id, tmp_path_factory)
+>       assert observed == (row.measured, row.absent, row.next), (row_id, observed)
+E       AssertionError: ('inotify_unavailable_own_red', ('measured_fail', False, 'implement'))
+E       assert ('measured_fa..., 'implement') == ('unattributa...attributable')
+E         
+E         At index 0 diff: 'measured_fail' != 'unattributable'
+E         Use -v to get more diff
+
+tests/unit/test_repo_gate_outcome_table.py:503: AssertionError
+___ test_the_outcome_of_every_report_shape[inotify_unavailable_foreign_red] ____
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x74b558985430>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-0'), _retention_count=3, _retention_policy='all')
+row_id = 'inotify_unavailable_foreign_red'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_outcome_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        result, report, observed, identity_error = _driven(row_id, tmp_path_factory)
+>       assert observed == (row.measured, row.absent, row.next), (row_id, observed)
+E       AssertionError: ('inotify_unavailable_foreign_red', ('measured_fail', False, 'implement'))
+E       assert ('measured_fa..., 'implement') == ('unattributa...attributable')
+E         
+E         At index 0 diff: 'measured_fail' != 'unattributable'
+E         Use -v to get more diff
+
+tests/unit/test_repo_gate_outcome_table.py:503: AssertionError
+__________ test_the_attribution_of_every_report_shape[clean_refusal] ___________
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x74b558985430>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-0'), _retention_count=3, _retention_policy='all')
+row_id = 'clean_refusal'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_attribution_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        _result, report, _observed, _identity = _driven(row_id, tmp_path_factory)
+        attribution = report["repo_gate"]["report_attribution"]
+>       assert attribution["state"] == row.attribution, (row_id, attribution)
+               ^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'state'
+
+tests/unit/test_repo_gate_outcome_table.py:528: KeyError
+_____ test_the_attribution_of_every_report_shape[python_red_then_refused] ______
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x74b558985430>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-0'), _retention_count=3, _retention_policy='all')
+row_id = 'python_red_then_refused'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_attribution_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        _result, report, _observed, _identity = _driven(row_id, tmp_path_factory)
+        attribution = report["repo_gate"]["report_attribution"]
+>       assert attribution["state"] == row.attribution, (row_id, attribution)
+               ^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'state'
+
+tests/unit/test_repo_gate_outcome_table.py:528: KeyError
+_____ test_the_attribution_of_every_report_shape[compile_red_then_refused] _____
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x74b558985430>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-0'), _retention_count=3, _retention_policy='all')
+row_id = 'compile_red_then_refused'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_attribution_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        _result, report, _observed, _identity = _driven(row_id, tmp_path_factory)
+        attribution = report["repo_gate"]["report_attribution"]
+>       assert attribution["state"] == row.attribution, (row_id, attribution)
+               ^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'state'
+
+tests/unit/test_repo_gate_outcome_table.py:528: KeyError
+____ test_the_attribution_of_every_report_shape[second_manifest_same_repo] _____
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x74b558985430>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-0'), _retention_count=3, _retention_policy='all')
+row_id = 'second_manifest_same_repo'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_attribution_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        _result, report, _observed, _identity = _driven(row_id, tmp_path_factory)
+        attribution = report["repo_gate"]["report_attribution"]
+>       assert attribution["state"] == row.attribution, (row_id, attribution)
+               ^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'state'
+
+tests/unit/test_repo_gate_outcome_table.py:528: KeyError
+___ test_the_attribution_of_every_report_shape[foreign_unreadable_manifest] ____
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x74b558985430>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-0'), _retention_count=3, _retention_policy='all')
+row_id = 'foreign_unreadable_manifest'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_attribution_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        _result, report, _observed, _identity = _driven(row_id, tmp_path_factory)
+        attribution = report["repo_gate"]["report_attribution"]
+>       assert attribution["state"] == row.attribution, (row_id, attribution)
+               ^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'state'
+
+tests/unit/test_repo_gate_outcome_table.py:528: KeyError
+_______ test_the_attribution_of_every_report_shape[missing_stage_report] _______
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x74b558985430>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-0'), _retention_count=3, _retention_policy='all')
+row_id = 'missing_stage_report'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_attribution_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        _result, report, _observed, _identity = _driven(row_id, tmp_path_factory)
+        attribution = report["repo_gate"]["report_attribution"]
+>       assert attribution["state"] == row.attribution, (row_id, attribution)
+               ^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'state'
+
+tests/unit/test_repo_gate_outcome_table.py:528: KeyError
+________ test_the_attribution_of_every_report_shape[nested_two_levels] _________
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x74b558985430>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-0'), _retention_count=3, _retention_policy='all')
+row_id = 'nested_two_levels'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_attribution_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        _result, report, _observed, _identity = _driven(row_id, tmp_path_factory)
+        attribution = report["repo_gate"]["report_attribution"]
+>       assert attribution["state"] == row.attribution, (row_id, attribution)
+               ^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'state'
+
+tests/unit/test_repo_gate_outcome_table.py:528: KeyError
+___ test_the_attribution_of_every_report_shape[empty_findings_failed_stage] ____
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x74b558985430>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-0'), _retention_count=3, _retention_policy='all')
+row_id = 'empty_findings_failed_stage'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_attribution_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        _result, report, _observed, _identity = _driven(row_id, tmp_path_factory)
+        attribution = report["repo_gate"]["report_attribution"]
+>       assert attribution["state"] == row.attribution, (row_id, attribution)
+               ^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'state'
+
+tests/unit/test_repo_gate_outcome_table.py:528: KeyError
+_ test_the_attribution_of_every_report_shape[foreign_names_repo_gate_wrote_none] _
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x74b558985430>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-0'), _retention_count=3, _retention_policy='all')
+row_id = 'foreign_names_repo_gate_wrote_none'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_attribution_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        _result, report, _observed, _identity = _driven(row_id, tmp_path_factory)
+        attribution = report["repo_gate"]["report_attribution"]
+>       assert attribution["state"] == row.attribution, (row_id, attribution)
+               ^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'state'
+
+tests/unit/test_repo_gate_outcome_table.py:528: KeyError
+__ test_the_attribution_of_every_report_shape[foreign_names_repo_beside_own] ___
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x74b558985430>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-0'), _retention_count=3, _retention_policy='all')
+row_id = 'foreign_names_repo_beside_own'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_attribution_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        _result, report, _observed, _identity = _driven(row_id, tmp_path_factory)
+        attribution = report["repo_gate"]["report_attribution"]
+>       assert attribution["state"] == row.attribution, (row_id, attribution)
+               ^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'state'
+
+tests/unit/test_repo_gate_outcome_table.py:528: KeyError
+_ test_the_attribution_of_every_report_shape[other_repo_reports_beside_green_gate] _
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x74b558985430>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-0'), _retention_count=3, _retention_policy='all')
+row_id = 'other_repo_reports_beside_green_gate'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_attribution_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        _result, report, _observed, _identity = _driven(row_id, tmp_path_factory)
+        attribution = report["repo_gate"]["report_attribution"]
+>       assert attribution["state"] == row.attribution, (row_id, attribution)
+               ^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'state'
+
+tests/unit/test_repo_gate_outcome_table.py:528: KeyError
+_________ test_the_attribution_of_every_report_shape[declared_absence] _________
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x74b558985430>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-0'), _retention_count=3, _retention_policy='all')
+row_id = 'declared_absence'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_attribution_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        _result, report, _observed, _identity = _driven(row_id, tmp_path_factory)
+        attribution = report["repo_gate"]["report_attribution"]
+>       assert attribution["state"] == row.attribution, (row_id, attribution)
+               ^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'state'
+
+tests/unit/test_repo_gate_outcome_table.py:528: KeyError
+_ test_the_attribution_of_every_report_shape[declared_failed_is_not_an_absence] _
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x74b558985430>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-0'), _retention_count=3, _retention_policy='all')
+row_id = 'declared_failed_is_not_an_absence'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_attribution_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        _result, report, _observed, _identity = _driven(row_id, tmp_path_factory)
+        attribution = report["repo_gate"]["report_attribution"]
+>       assert attribution["state"] == row.attribution, (row_id, attribution)
+               ^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'state'
+
+tests/unit/test_repo_gate_outcome_table.py:528: KeyError
+____ test_the_attribution_of_every_report_shape[gate_killed_at_its_timeout] ____
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x74b558985430>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-0'), _retention_count=3, _retention_policy='all')
+row_id = 'gate_killed_at_its_timeout'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_attribution_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        _result, report, _observed, _identity = _driven(row_id, tmp_path_factory)
+        attribution = report["repo_gate"]["report_attribution"]
+>       assert attribution["state"] == row.attribution, (row_id, attribution)
+               ^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'state'
+
+tests/unit/test_repo_gate_outcome_table.py:528: KeyError
+_ test_the_attribution_of_every_report_shape[exit_2_after_an_answered_request] _
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x74b558985430>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-0'), _retention_count=3, _retention_policy='all')
+row_id = 'exit_2_after_an_answered_request'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_attribution_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        _result, report, _observed, _identity = _driven(row_id, tmp_path_factory)
+        attribution = report["repo_gate"]["report_attribution"]
+>       assert attribution["state"] == row.attribution, (row_id, attribution)
+               ^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'state'
+
+tests/unit/test_repo_gate_outcome_table.py:528: KeyError
+______ test_the_attribution_of_every_report_shape[exit_1_after_a_refusal] ______
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x74b558985430>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-0'), _retention_count=3, _retention_policy='all')
+row_id = 'exit_1_after_a_refusal'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_attribution_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        _result, report, _observed, _identity = _driven(row_id, tmp_path_factory)
+        attribution = report["repo_gate"]["report_attribution"]
+>       assert attribution["state"] == row.attribution, (row_id, attribution)
+               ^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'state'
+
+tests/unit/test_repo_gate_outcome_table.py:528: KeyError
+__ test_the_attribution_of_every_report_shape[pytest_red_beside_refused_gate] __
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x74b558985430>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-0'), _retention_count=3, _retention_policy='all')
+row_id = 'pytest_red_beside_refused_gate'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_attribution_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        _result, report, _observed, _identity = _driven(row_id, tmp_path_factory)
+        attribution = report["repo_gate"]["report_attribution"]
+>       assert attribution["state"] == row.attribution, (row_id, attribution)
+               ^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'state'
+
+tests/unit/test_repo_gate_outcome_table.py:528: KeyError
+_ test_the_attribution_of_every_report_shape[pytest_wall_beside_refused_gate] __
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x74b558985430>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-0'), _retention_count=3, _retention_policy='all')
+row_id = 'pytest_wall_beside_refused_gate'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_attribution_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        _result, report, _observed, _identity = _driven(row_id, tmp_path_factory)
+        attribution = report["repo_gate"]["report_attribution"]
+>       assert attribution["state"] == row.attribution, (row_id, attribution)
+               ^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'state'
+
+tests/unit/test_repo_gate_outcome_table.py:528: KeyError
+_ test_the_attribution_of_every_report_shape[node_runner_unavailable_beside_refused_gate] _
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x74b558985430>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-0'), _retention_count=3, _retention_policy='all')
+row_id = 'node_runner_unavailable_beside_refused_gate'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_attribution_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        _result, report, _observed, _identity = _driven(row_id, tmp_path_factory)
+        attribution = report["repo_gate"]["report_attribution"]
+>       assert attribution["state"] == row.attribution, (row_id, attribution)
+               ^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'state'
+
+tests/unit/test_repo_gate_outcome_table.py:528: KeyError
+_ test_the_attribution_of_every_report_shape[pytest_runner_unavailable_beside_refused_gate] _
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x74b558985430>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-0'), _retention_count=3, _retention_policy='all')
+row_id = 'pytest_runner_unavailable_beside_refused_gate'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_attribution_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        _result, report, _observed, _identity = _driven(row_id, tmp_path_factory)
+        attribution = report["repo_gate"]["report_attribution"]
+>       assert attribution["state"] == row.attribution, (row_id, attribution)
+               ^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'state'
+
+tests/unit/test_repo_gate_outcome_table.py:528: KeyError
+____________ test_the_attribution_of_every_report_shape[green_gate] ____________
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x74b558985430>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-0'), _retention_count=3, _retention_policy='all')
+row_id = 'green_gate'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_attribution_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        _result, report, _observed, _identity = _driven(row_id, tmp_path_factory)
+        attribution = report["repo_gate"]["report_attribution"]
+>       assert attribution["state"] == row.attribution, (row_id, attribution)
+               ^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'state'
+
+tests/unit/test_repo_gate_outcome_table.py:528: KeyError
+___________ test_the_attribution_of_every_report_shape[answered_red] ___________
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x74b558985430>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-0'), _retention_count=3, _retention_policy='all')
+row_id = 'answered_red'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_attribution_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        _result, report, _observed, _identity = _driven(row_id, tmp_path_factory)
+        attribution = report["repo_gate"]["report_attribution"]
+>       assert attribution["state"] == row.attribution, (row_id, attribution)
+               ^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'state'
+
+tests/unit/test_repo_gate_outcome_table.py:528: KeyError
+____ test_the_attribution_of_every_report_shape[lockfile_first_red_refused] ____
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x74b558985430>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-0'), _retention_count=3, _retention_policy='all')
+row_id = 'lockfile_first_red_refused'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_attribution_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        _result, report, _observed, _identity = _driven(row_id, tmp_path_factory)
+        attribution = report["repo_gate"]["report_attribution"]
+>       assert attribution["state"] == row.attribution, (row_id, attribution)
+               ^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'state'
+
+tests/unit/test_repo_gate_outcome_table.py:528: KeyError
+____ test_the_attribution_of_every_report_shape[cachedir_first_red_refused] ____
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x74b558985430>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-0'), _retention_count=3, _retention_policy='all')
+row_id = 'cachedir_first_red_refused'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_attribution_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        _result, report, _observed, _identity = _driven(row_id, tmp_path_factory)
+        attribution = report["repo_gate"]["report_attribution"]
+>       assert attribution["state"] == row.attribution, (row_id, attribution)
+               ^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'state'
+
+tests/unit/test_repo_gate_outcome_table.py:528: KeyError
+______ test_the_attribution_of_every_report_shape[file_first_red_refused] ______
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x74b558985430>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-0'), _retention_count=3, _retention_policy='all')
+row_id = 'file_first_red_refused'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_attribution_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        _result, report, _observed, _identity = _driven(row_id, tmp_path_factory)
+        attribution = report["repo_gate"]["report_attribution"]
+>       assert attribution["state"] == row.attribution, (row_id, attribution)
+               ^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'state'
+
+tests/unit/test_repo_gate_outcome_table.py:528: KeyError
+_ test_the_attribution_of_every_report_shape[first_entry_names_other_repo_red_refused] _
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x74b558985430>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-0'), _retention_count=3, _retention_policy='all')
+row_id = 'first_entry_names_other_repo_red_refused'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_attribution_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        _result, report, _observed, _identity = _driven(row_id, tmp_path_factory)
+        attribution = report["repo_gate"]["report_attribution"]
+>       assert attribution["state"] == row.attribution, (row_id, attribution)
+               ^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'state'
+
+tests/unit/test_repo_gate_outcome_table.py:528: KeyError
+_ test_the_attribution_of_every_report_shape[first_entry_names_this_repo_clean_refused] _
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x74b558985430>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-0'), _retention_count=3, _retention_policy='all')
+row_id = 'first_entry_names_this_repo_clean_refused'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_attribution_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        _result, report, _observed, _identity = _driven(row_id, tmp_path_factory)
+        attribution = report["repo_gate"]["report_attribution"]
+>       assert attribution["state"] == row.attribution, (row_id, attribution)
+               ^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'state'
+
+tests/unit/test_repo_gate_outcome_table.py:528: KeyError
+_ test_the_attribution_of_every_report_shape[report_without_manifest_red_refused] _
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x74b558985430>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-0'), _retention_count=3, _retention_policy='all')
+row_id = 'report_without_manifest_red_refused'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_attribution_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        _result, report, _observed, _identity = _driven(row_id, tmp_path_factory)
+        attribution = report["repo_gate"]["report_attribution"]
+>       assert attribution["state"] == row.attribution, (row_id, attribution)
+               ^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'state'
+
+tests/unit/test_repo_gate_outcome_table.py:528: KeyError
+____ test_the_attribution_of_every_report_shape[lockfile_first_green_gate] _____
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x74b558985430>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-0'), _retention_count=3, _retention_policy='all')
+row_id = 'lockfile_first_green_gate'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_attribution_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        _result, report, _observed, _identity = _driven(row_id, tmp_path_factory)
+        attribution = report["repo_gate"]["report_attribution"]
+>       assert attribution["state"] == row.attribution, (row_id, attribution)
+               ^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'state'
+
+tests/unit/test_repo_gate_outcome_table.py:528: KeyError
+_ test_the_attribution_of_every_report_shape[pytest_runner_unavailable_beside_unattributable_red] _
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x74b558985430>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-0'), _retention_count=3, _retention_policy='all')
+row_id = 'pytest_runner_unavailable_beside_unattributable_red'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_attribution_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        _result, report, _observed, _identity = _driven(row_id, tmp_path_factory)
+        attribution = report["repo_gate"]["report_attribution"]
+>       assert attribution["state"] == row.attribution, (row_id, attribution)
+               ^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'state'
+
+tests/unit/test_repo_gate_outcome_table.py:528: KeyError
+___ test_the_attribution_of_every_report_shape[inotify_unavailable_own_red] ____
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x74b558985430>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-0'), _retention_count=3, _retention_policy='all')
+row_id = 'inotify_unavailable_own_red'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_attribution_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        _result, report, _observed, _identity = _driven(row_id, tmp_path_factory)
+        attribution = report["repo_gate"]["report_attribution"]
+>       assert attribution["state"] == row.attribution, (row_id, attribution)
+               ^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'state'
+
+tests/unit/test_repo_gate_outcome_table.py:528: KeyError
+_ test_the_attribution_of_every_report_shape[inotify_unavailable_foreign_red] __
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x74b558985430>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-0'), _retention_count=3, _retention_policy='all')
+row_id = 'inotify_unavailable_foreign_red'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_attribution_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        _result, report, _observed, _identity = _driven(row_id, tmp_path_factory)
+        attribution = report["repo_gate"]["report_attribution"]
+>       assert attribution["state"] == row.attribution, (row_id, attribution)
+               ^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'state'
+
+tests/unit/test_repo_gate_outcome_table.py:528: KeyError
+____ test_the_attribution_of_every_report_shape[inotify_unavailable_no_red] ____
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x74b558985430>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-0'), _retention_count=3, _retention_policy='all')
+row_id = 'inotify_unavailable_no_red'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_attribution_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        _result, report, _observed, _identity = _driven(row_id, tmp_path_factory)
+        attribution = report["repo_gate"]["report_attribution"]
+>       assert attribution["state"] == row.attribution, (row_id, attribution)
+               ^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'state'
+
+tests/unit/test_repo_gate_outcome_table.py:528: KeyError
+_ test_the_gate_must_create_its_report_directory_first[lockfile_first_red_refused] _
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x74b558985430>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-0'), _retention_count=3, _retention_policy='all')
+row_id = 'lockfile_first_red_refused'
+
+    @pytest.mark.parametrize("row_id", _BREAKS_THE_REQUIREMENT)
+    def test_the_gate_must_create_its_report_directory_first(tmp_path_factory,
+                                                             row_id):
+        """A gate that creates anything else under its ticket first leaves its
+        report unattributable: its own red is listed, with where it was read,
+        and is neither dropped nor counted as the gate's."""
+        result, report, observed, _identity = _driven(row_id, tmp_path_factory)
+        gate = report["repo_gate"]
+>       assert gate["report_attribution"]["state"] == UNATTRIBUTABLE
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'state'
+
+tests/unit/test_repo_gate_outcome_table.py:552: KeyError
+_ test_the_gate_must_create_its_report_directory_first[cachedir_first_red_refused] _
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x74b558985430>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-0'), _retention_count=3, _retention_policy='all')
+row_id = 'cachedir_first_red_refused'
+
+    @pytest.mark.parametrize("row_id", _BREAKS_THE_REQUIREMENT)
+    def test_the_gate_must_create_its_report_directory_first(tmp_path_factory,
+                                                             row_id):
+        """A gate that creates anything else under its ticket first leaves its
+        report unattributable: its own red is listed, with where it was read,
+        and is neither dropped nor counted as the gate's."""
+        result, report, observed, _identity = _driven(row_id, tmp_path_factory)
+        gate = report["repo_gate"]
+>       assert gate["report_attribution"]["state"] == UNATTRIBUTABLE
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'state'
+
+tests/unit/test_repo_gate_outcome_table.py:552: KeyError
+_ test_the_gate_must_create_its_report_directory_first[file_first_red_refused] _
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x74b558985430>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-0'), _retention_count=3, _retention_policy='all')
+row_id = 'file_first_red_refused'
+
+    @pytest.mark.parametrize("row_id", _BREAKS_THE_REQUIREMENT)
+    def test_the_gate_must_create_its_report_directory_first(tmp_path_factory,
+                                                             row_id):
+        """A gate that creates anything else under its ticket first leaves its
+        report unattributable: its own red is listed, with where it was read,
+        and is neither dropped nor counted as the gate's."""
+        result, report, observed, _identity = _driven(row_id, tmp_path_factory)
+        gate = report["repo_gate"]
+>       assert gate["report_attribution"]["state"] == UNATTRIBUTABLE
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'state'
+
+tests/unit/test_repo_gate_outcome_table.py:552: KeyError
+_ test_the_gate_must_create_its_report_directory_first[first_entry_names_other_repo_red_refused] _
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x74b558985430>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-0'), _retention_count=3, _retention_policy='all')
+row_id = 'first_entry_names_other_repo_red_refused'
+
+    @pytest.mark.parametrize("row_id", _BREAKS_THE_REQUIREMENT)
+    def test_the_gate_must_create_its_report_directory_first(tmp_path_factory,
+                                                             row_id):
+        """A gate that creates anything else under its ticket first leaves its
+        report unattributable: its own red is listed, with where it was read,
+        and is neither dropped nor counted as the gate's."""
+        result, report, observed, _identity = _driven(row_id, tmp_path_factory)
+        gate = report["repo_gate"]
+>       assert gate["report_attribution"]["state"] == UNATTRIBUTABLE
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'state'
+
+tests/unit/test_repo_gate_outcome_table.py:552: KeyError
+_______________ test_the_doc_routing_table_is_rendered_from_rows _______________
+
+    def test_the_doc_routing_table_is_rendered_from_rows():
+        """The doc's routing table, between its two markers, is byte for byte
+        what `render_routing_table` makes of `ROWS`."""
+        assert all("|" not in row.shape and "\n" not in row.shape
+                   for row in ROWS.values())
+        doc = _PROTOCOL.read_bytes().decode("utf-8")
+>       assert _doc_table(doc).encode("utf-8") == render_routing_table().encode("utf-8")
+               ^^^^^^^^^^^^^^^
+
+tests/unit/test_repo_gate_outcome_table.py:599: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+text = '# A gate that never ran is not a failing gate — the declaration protocol\n\n2026-09-21. This is the protocol card. It... ("The loop"\n  above).\n\nLogs: `logs/gate_not_run_r4/`. Delivery note:\n`final/delivery_notes_gate_not_run_r4.md`.\n'
+
+    def _doc_table(text: str) -> str:
+>       assert text.count(TABLE_BEGIN) == 1 and text.count(TABLE_END) == 1
+E       assert (0 == 1)
+E        +  where 0 = <built-in method count of str object at 0x63e1d020dc90>('<!-- routing table: rendered from ROWS in tests/unit/test_repo_gate_outcome_table.py by render_routing_table(); edit ROWS and run `python -m tests.unit.test_repo_gate_outcome_table` -->')
+E        +    where <built-in method count of str object at 0x63e1d020dc90> = '# A gate that never ran is not a failing gate — the declaration protocol\n\n2026-09-21. This is the protocol card. It... ("The loop"\n  above).\n\nLogs: `logs/gate_not_run_r4/`. Delivery note:\n`final/delivery_notes_gate_not_run_r4.md`.\n'.count
+
+tests/unit/test_repo_gate_outcome_table.py:587: AssertionError
+=============================== warnings summary ===============================
+../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_outcome_of_every_report_shape[foreign_names_repo_gate_wrote_none]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_outcome_of_every_report_shape[lockfile_first_red_refused]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_outcome_of_every_report_shape[cachedir_first_red_refused]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_outcome_of_every_report_shape[file_first_red_refused]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_outcome_of_every_report_shape[first_entry_names_other_repo_red_refused]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_outcome_of_every_report_shape[report_without_manifest_red_refused]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_outcome_of_every_report_shape[lockfile_first_green_gate]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_outcome_of_every_report_shape[pytest_runner_unavailable_beside_unattributable_red]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_outcome_of_every_report_shape[inotify_unavailable_own_red]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_outcome_of_every_report_shape[inotify_unavailable_foreign_red]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_attribution_of_every_report_shape[clean_refusal]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_attribution_of_every_report_shape[python_red_then_refused]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_attribution_of_every_report_shape[compile_red_then_refused]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_attribution_of_every_report_shape[second_manifest_same_repo]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_attribution_of_every_report_shape[foreign_unreadable_manifest]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_attribution_of_every_report_shape[missing_stage_report]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_attribution_of_every_report_shape[nested_two_levels]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_attribution_of_every_report_shape[empty_findings_failed_stage]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_attribution_of_every_report_shape[foreign_names_repo_gate_wrote_none]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_attribution_of_every_report_shape[foreign_names_repo_beside_own]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_attribution_of_every_report_shape[other_repo_reports_beside_green_gate]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_attribution_of_every_report_shape[declared_absence]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_attribution_of_every_report_shape[declared_failed_is_not_an_absence]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_attribution_of_every_report_shape[gate_killed_at_its_timeout]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_attribution_of_every_report_shape[exit_2_after_an_answered_request]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_attribution_of_every_report_shape[exit_1_after_a_refusal]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_attribution_of_every_report_shape[pytest_red_beside_refused_gate]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_attribution_of_every_report_shape[pytest_wall_beside_refused_gate]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_attribution_of_every_report_shape[node_runner_unavailable_beside_refused_gate]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_attribution_of_every_report_shape[pytest_runner_unavailable_beside_refused_gate]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_attribution_of_every_report_shape[green_gate]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_attribution_of_every_report_shape[answered_red]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_attribution_of_every_report_shape[lockfile_first_red_refused]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_attribution_of_every_report_shape[cachedir_first_red_refused]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_attribution_of_every_report_shape[file_first_red_refused]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_attribution_of_every_report_shape[first_entry_names_other_repo_red_refused]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_attribution_of_every_report_shape[first_entry_names_this_repo_clean_refused]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_attribution_of_every_report_shape[report_without_manifest_red_refused]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_attribution_of_every_report_shape[lockfile_first_green_gate]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_attribution_of_every_report_shape[pytest_runner_unavailable_beside_unattributable_red]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_attribution_of_every_report_shape[inotify_unavailable_own_red]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_attribution_of_every_report_shape[inotify_unavailable_foreign_red]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_attribution_of_every_report_shape[inotify_unavailable_no_red]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_gate_must_create_its_report_directory_first[lockfile_first_red_refused]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_gate_must_create_its_report_directory_first[cachedir_first_red_refused]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_gate_must_create_its_report_directory_first[file_first_red_refused]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_gate_must_create_its_report_directory_first[first_entry_names_other_repo_red_refused]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_doc_routing_table_is_rendered_from_rows
+48 failed, 23 passed, 1 warning in 45.26s
+BARE_RC=1
+end: 2026-09-25T19:50:03Z

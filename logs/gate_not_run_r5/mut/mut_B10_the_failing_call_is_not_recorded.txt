@@ -1,0 +1,75 @@
+mutant: B10_the_failing_call_is_not_recorded  sha: afa808b64de248968c6705128db94248b62de343  copy: /tmp/mut/B10_the_failing_call_is_not_recorded  date: 2026-09-25T19:56:42Z
+files: tests/unit/test_repo_gate_outcome_table.py tests/unit/test_repo_gate_identity_from_report_dir.py tests/unit/test_repo_gate_identity_is_stable.py tests/unit/test_repo_gate_red_beats_absence.py tests/unit/test_repo_gate_admission.py tests/unit/test_tree_level_accounting_witnesses.py tests/skillflow/test_coding_impl_absence_needs_nothing_else_red.py
+MUTANT B10_the_failing_call_is_not_recorded: applied to aitelier/tools/run_tests/impl.py
+IMPORT /tmp/mut/B10_the_failing_call_is_not_recorded/aitelier/tools/run_tests/impl.py
+...............................................................FFF...... [ 55%]
+..........................................................               [100%]
+=================================== FAILURES ===================================
+___ test_the_attribution_of_every_report_shape[inotify_unavailable_own_red] ____
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x767b1d80a0c0>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-2'), _retention_count=3, _retention_policy='all')
+row_id = 'inotify_unavailable_own_red'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_attribution_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        _result, report, _observed, _identity = _driven(row_id, tmp_path_factory)
+        attribution = report["repo_gate"]["report_attribution"]
+        assert attribution["state"] == row.attribution, (row_id, attribution)
+        if row.leg == "inotify_unavailable":
+            assert attribution["observed"] is False, attribution
+>           assert "inotify_init1 failed (errno 24" in attribution["why"], attribution
+E           AssertionError: {'state': 'unattributable', 'observed': False, 'why': 'the order of creation under the ticket was not observed', 'reports': {'gate-pj10t0xr/manifest.json': 'unattributable'}}
+E           assert 'inotify_init1 failed (errno 24' in 'the order of creation under the ticket was not observed'
+
+tests/unit/test_repo_gate_outcome_table.py:531: AssertionError
+_ test_the_attribution_of_every_report_shape[inotify_unavailable_foreign_red] __
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x767b1d80a0c0>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-2'), _retention_count=3, _retention_policy='all')
+row_id = 'inotify_unavailable_foreign_red'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_attribution_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        _result, report, _observed, _identity = _driven(row_id, tmp_path_factory)
+        attribution = report["repo_gate"]["report_attribution"]
+        assert attribution["state"] == row.attribution, (row_id, attribution)
+        if row.leg == "inotify_unavailable":
+            assert attribution["observed"] is False, attribution
+>           assert "inotify_init1 failed (errno 24" in attribution["why"], attribution
+E           AssertionError: {'state': 'unattributable', 'observed': False, 'why': 'the order of creation under the ticket was not observed', 'reports': {'gate-fx5h3r3t/manifest.json': 'unattributable', 'other-tmjnqyt2/manifest.json': 'unattributable'}}
+E           assert 'inotify_init1 failed (errno 24' in 'the order of creation under the ticket was not observed'
+
+tests/unit/test_repo_gate_outcome_table.py:531: AssertionError
+____ test_the_attribution_of_every_report_shape[inotify_unavailable_no_red] ____
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x767b1d80a0c0>, _basetemp=PosixPath('/tmp/pytest-of-unknown/pytest-2'), _retention_count=3, _retention_policy='all')
+row_id = 'inotify_unavailable_no_red'
+
+    @pytest.mark.parametrize("row_id", list(ROWS))
+    def test_the_attribution_of_every_report_shape(tmp_path_factory, row_id):
+        row = ROWS[row_id]
+        _result, report, _observed, _identity = _driven(row_id, tmp_path_factory)
+        attribution = report["repo_gate"]["report_attribution"]
+        assert attribution["state"] == row.attribution, (row_id, attribution)
+        if row.leg == "inotify_unavailable":
+            assert attribution["observed"] is False, attribution
+>           assert "inotify_init1 failed (errno 24" in attribution["why"], attribution
+E           AssertionError: {'state': 'unattributable', 'observed': False, 'why': 'the order of creation under the ticket was not observed', 'reports': {'gate-fg9tdntc/manifest.json': 'unattributable'}}
+E           assert 'inotify_init1 failed (errno 24' in 'the order of creation under the ticket was not observed'
+
+tests/unit/test_repo_gate_outcome_table.py:531: AssertionError
+=============================== warnings summary ===============================
+../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_attribution_of_every_report_shape[inotify_unavailable_own_red]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_attribution_of_every_report_shape[inotify_unavailable_foreign_red]
+FAILED tests/unit/test_repo_gate_outcome_table.py::test_the_attribution_of_every_report_shape[inotify_unavailable_no_red]
+3 failed, 127 passed, 1 warning in 181.84s (0:03:01)
+BARE_RC=1
+IGNITION_BYTES=3
+end: 2026-09-25T19:59:48Z

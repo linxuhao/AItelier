@@ -1,0 +1,25 @@
+date: 2026-09-25T19:49:15Z
+tree: /home/linxuhao/.AItelier/worktrees-scratch/gatenotrun2 host head: afa808b64de248968c6705128db94248b62de343
+host worktree status (porcelain):
+throwaway containers (aitelier image, not prod) before launch: 3
+uid: 1099
+command: python /home/linxuhao/.AItelier/worktrees-scratch/gn5-probes/exhaust.py python -m pytest -p no:cacheprovider -s -q -rf tests/unit/test_repo_gate_outcome_table.py -k inotify_unavailable
+in-container git head: afa808b64de248968c6705128db94248b62de343 status-lines: 0
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gatenotrun2/aitelier/tools/run_tests/impl.py
+IMPORT /home/linxuhao/.AItelier/worktrees-scratch/gatenotrun2/core/gate_deferral.py
+IMPORT skillflow /usr/local/lib/python3.12/site-packages/skillflow/__init__.py ?
+EXHAUSTED uid=1099 inotify instances held by this probe=128 errno=24 (Too many open files) max_user_instances=128
+ROW {"row": "inotify_unavailable_own_red", "attribution": "unattributable", "measured": "unattributable", "repo_gate_absent": false, "next": "test_gate_report_unattributable", "identity_error": true, "inotify": "exhausted by the caller", "observed": false, "first_entry": null, "why": "the order of creation under the ticket was not observed: inotify_init1 failed (errno 24: Too many open files)", "returncode": 2, "admission": "not_admitted", "retained_findings": null, "unattributed_reds": ["gate-ve81wvo2/python.json [python]: the python suite exited 1"], "retained_error": null, "release_evidence": "unresolved", "failures": ["repo_gate:run_tests.sh repository gate report could not be attributed (the order of creation under the ticket was not observed: inotify_init1 failed (errno 24: "]}
+.ROW {"row": "inotify_unavailable_foreign_red", "attribution": "unattributable", "measured": "unattributable", "repo_gate_absent": false, "next": "test_gate_report_unattributable", "identity_error": true, "inotify": "exhausted by the caller", "observed": false, "first_entry": null, "why": "the order of creation under the ticket was not observed: inotify_init1 failed (errno 24: Too many open files)", "returncode": 2, "admission": "not_admitted", "retained_findings": null, "unattributed_reds": ["other-n2lhsa5d/python.json [python]: other writer: the python suite exited 1"], "retained_error": null, "release_evidence": "unresolved", "failures": ["repo_gate:run_tests.sh repository gate report could not be attributed (the order of creation under the ticket was not observed: inotify_init1 failed (errno 24: "]}
+.ROW {"row": "inotify_unavailable_no_red", "attribution": "unattributable", "measured": "unmeasured", "repo_gate_absent": true, "next": "test_gate_absent", "identity_error": false, "inotify": "exhausted by the caller", "observed": false, "first_entry": null, "why": "the order of creation under the ticket was not observed: inotify_init1 failed (errno 24: Too many open files)", "returncode": 2, "admission": "not_admitted", "retained_findings": null, "unattributed_reds": null, "retained_error": null, "release_evidence": "unresolved", "failures": ["repo_gate:run_tests.sh was NOT measured (engine admission: not_admitted; 1 attempt(s)): godot-builder unreachable at http://127.0.0.1:39493: HTTP Error 409: Con"]}
+....
+=============================== warnings summary ===============================
+../../../../../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+6 passed, 65 deselected, 1 warning in 3.44s
+RELEASED 128 instances; command rc=0
+BARE_RC=0
+end: 2026-09-25T19:49:24Z

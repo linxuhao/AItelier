@@ -60,6 +60,7 @@ def ticket_for(src: Path, dst_root: Path, *, files: dict | None = None) -> Path:
 
 # ── part 1 ────────────────────────────────────────────────────────────────
 by_assert = collections.defaultdict(set)
+runs_of = collections.defaultdict(set)
 gates = total_findings = total_ids = errors = short = 0
 for d in sorted(glob.glob(str(root / "wuxia-godot-gate-*"))):
     try:
@@ -85,12 +86,14 @@ for d in sorted(glob.glob(str(root / "wuxia-godot-gate-*"))):
           f"err={err!r}")
     for r in recs or []:
         if " -> actual " in r["detail"]:
-            by_assert[r["detail"].split(" -> actual ")[0].strip()].add(r["case_id"])
+            key = r["detail"].split(" -> actual ")[0].strip()
+            by_assert[key].add(r["case_id"])
+            runs_of[key].add(os.path.basename(d))
 print(f"PART1 red gates={gates} findings={total_findings} distinct_ids={total_ids} "
       f"identity_errors={errors} gates_with_records!=findings={short}")
 print("PART1 failing assertions (scenario / name: expr) and the ids they got across runs:")
 for key, ids in sorted(by_assert.items()):
-    print(f"  {len(ids)} id(s)  {key[:100]}")
+    print(f"  {len(ids)} id(s) over {len(runs_of[key])} red gate(s)  {key[:100]}")
     for i in sorted(ids):
         print(f"      {i}")
 
@@ -170,11 +173,11 @@ for name in sys.argv[2:]:
         assert len(recs) == len(findings)
         lists.append((findings, [r["case_id"] for r in recs]))
     (f1, ids1), (f2, ids2) = lists
-    changed = sum(1 for a, b in zip(f1, f2) if a != b)
+    n_changed = sum(1 for a, b in zip(f1, f2) if a != b)
     same = ids1 == ids2
     all_equal &= same and len(ids1) == len(f1) == len(f2)
     print(f"PART2 {name}: findings real={len(f1)} injected={len(f2)} "
-          f"finding texts changed by the injection={changed} identity lists equal={same}")
+          f"finding texts changed by the injection={n_changed} identity lists equal={same}")
     for i, (a, b) in enumerate(zip(ids1, ids2)):
         print(f"  {i:3d} {'==' if a == b else '!='} {a}  |  {b}")
     for i, (a, b) in enumerate(zip(f1, f2)):

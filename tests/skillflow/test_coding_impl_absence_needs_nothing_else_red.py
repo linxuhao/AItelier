@@ -155,3 +155,54 @@ def test_the_absence_gate_laps_run_out_naming_the_absence(tmp_path, monkeypatch)
     assert _gate_calls(counter) == 101
     # And the sentence counts those gate runs, not the ticks that looked.
     assert reason.endswith("(run_tests.sh, 101 gate run(s))"), reason
+
+
+def test_an_unattributable_red_ends_the_run_on_its_own_terminal(
+        tmp_path, monkeypatch):
+    """Rev 5: the gate creates `.gate.lock` under its ticket before its report
+    directory, retains a python red, and is refused. Its report cannot be
+    attributed, so the run ends at `test_gate_report_unattributable` after
+    one gate call: no implement lap, no wait at the absence gate."""
+    from tests.unit.test_repo_gate_outcome_table import TABLE_GATE
+    rig = HarnessRig(tmp_path / "harness", monkeypatch)
+    monkeypatch.setenv("GODOT_BUILDER_URL", rig.base)
+    monkeypatch.setenv("AITELIER_REPO_GATE_RENDER_WAIT_SECONDS", "0.3")
+    monkeypatch.setenv("TABLE_GATE_MODE", "python_red")
+    monkeypatch.setenv("TABLE_GATE_PRE", "lockfile")
+    counter = tmp_path / "calls.txt"
+    try:
+        sf, run_id = _wire(tmp_path, monkeypatch, episode_max=30, wait=5,
+                           counter=counter,
+                           tail="exec python3 - <<'PYGATE'\n" + TABLE_GATE
+                                + "\nPYGATE\n")
+        rig.hold()
+        implement_runs, statuses, outcomes, nodes = _drive(
+            sf, run_id, monkeypatch, ticks=40, clock_step=1)
+        report = json.loads(gate_deferral.find_test_report(sf, run_id).read_text())
+    finally:
+        rig.close()
+    run = sf.get_run(run_id)
+    reason = run.get("error_reason") or ""
+    gate = report["repo_gate"]
+    print("UNATTRIBUTABLE " + json.dumps({
+        "implement_runs": implement_runs, "final_status": run["status"],
+        "error_reason": reason, "gate_calls": _gate_calls(counter),
+        "outcomes": outcomes, "last_nodes": nodes[-3:],
+        "report": {k: report.get(k) for k in (
+            "passed", "repo_gate_absent", "repo_gate_unattributable",
+            "evidence_state", "failures")},
+        "report_attribution": gate.get("report_attribution"),
+        "unattributed_reds": gate.get("unattributed_reds")}, indent=1))
+
+    assert implement_runs == 1, implement_runs
+    assert run["status"] == "failed", statuses[-3:]
+    assert "test_gate_report_unattributable" in reason, reason
+    assert "cycle limit" not in reason.lower(), reason
+    assert "test_gate_absent" not in nodes, nodes
+    assert "silent" not in outcomes and "expired" not in outcomes, outcomes
+    assert _gate_calls(counter) == 1
+    assert report["repo_gate_unattributable"] is True
+    assert report["repo_gate_absent"] is False
+    assert gate["report_attribution"]["state"] == "unattributable"
+    assert [r for r in gate["unattributed_reds"]
+            if r.endswith("[python]: the python suite exited 1")]

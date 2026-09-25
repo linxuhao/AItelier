@@ -667,37 +667,46 @@ _IN_ISDIR = 0x40000000
 _INOTIFY_EVENT = struct.Struct("iIII")
 
 
+def _errno_text(call: str, number: int) -> str:
+    return f"{call} failed (errno {number}: {os.strerror(number)})"
+
+
 class _FirstEntry:
     """The first entry created directly inside one directory, in kernel order.
 
     This is how a gate run's report is told from every other report under
-    its ticket. The ticket directory is new and empty when the gate starts,
-    and the gate creates its own report directory before it starts anything
-    else (`tools/godot_gate.py:run_gate` calls `mkdtemp` before any stage),
-    so every other writer under the ticket is a process the gate started
-    later: its python stage's tests inherit GATE_REPORT_DIR. The kernel
-    reports creations in the order they happened (inotify), so the first
-    entry is the gate's, whatever any report says about itself.
+    its ticket. The ticket directory is new and empty when the gate starts.
+    The gate protocol REQUIRES the gate to create its own report directory
+    under GATE_REPORT_DIR before it creates anything else there
+    (`docs/repo-gate-unmeasured-protocol.md`, "Which report is the gate's").
+    The kernel reports creations in the order they happened (inotify), so
+    this records which entry came first; `_retained_findings` decides from it
+    whether the gate's report can be attributed at all.
 
-    `read()` is None when the order could not be observed (no inotify on this
-    platform, or the watch could not be added); otherwise
+    `read()` is None when the order could not be observed, and `failure` then
+    says why (the failing call and its errno); otherwise
     `{"name": <entry or None>, "is_dir": bool}`.
     """
 
     def __init__(self, directory: Path):
         self._fd = None
+        self.failure: str | None = None
         try:
             libc = ctypes.CDLL(None, use_errno=True)
             fd = libc.inotify_init1(os.O_NONBLOCK | os.O_CLOEXEC)
             if fd < 0:
+                self.failure = _errno_text("inotify_init1", ctypes.get_errno())
                 return
             if libc.inotify_add_watch(fd, os.fsencode(str(directory)),
                                       _IN_CREATE | _IN_MOVED_TO) < 0:
+                self.failure = _errno_text("inotify_add_watch",
+                                           ctypes.get_errno())
                 os.close(fd)
                 return
             self._fd = fd
-        except (OSError, AttributeError):
+        except (OSError, AttributeError) as e:
             self._fd = None
+            self.failure = f"inotify unavailable ({type(e).__name__}: {e})"
 
     def read(self) -> dict | None:
         if self._fd is None:
@@ -711,7 +720,8 @@ class _FirstEntry:
                 data += chunk
         except BlockingIOError:
             pass
-        except OSError:
+        except OSError as e:
+            self.failure = f"reading the inotify events failed ({e})"
             return None
         offset = 0
         while offset + _INOTIFY_EVENT.size <= len(data):
@@ -775,8 +785,8 @@ def _run_repo_gate(repo: Path) -> dict | None:
                 "output": f"repository gate not started: admission relay "
                           f"unavailable ({type(e).__name__}: {e})",
                 "measured": REPO_GATE_UNMEASURED}
-    # Watched from before the gate starts: the first entry the gate run
-    # creates under its ticket is the gate's own report (`_FirstEntry`).
+    # Watched from before the gate starts: which entry the gate run created
+    # first under its ticket (`_FirstEntry`).
     first_entry = _FirstEntry(report_dir)
     try:
         result = _run_node_cmd(
@@ -799,23 +809,34 @@ def _run_repo_gate(repo: Path) -> dict | None:
     result["report_dir"] = str(report_dir)
     result["repo"] = str(repo)
     result["admission"] = admission
-    # Which report under the ticket is this gate run's: `observed` false means
-    # the creation order could not be watched, and then a report's own claim
-    # to name this repository is all there is to go on.
-    result["report_attribution"] = (
-        {"observed": False} if first is None
-        else {"observed": True, "first_entry": first["name"],
-              "first_is_dir": first["is_dir"]})
-    # How many failures the gate's own retained report names (None when it
-    # kept no report for this repository). Read before the outcome: a finding
-    # makes the run `measured_fail` whatever else it reports. A part of the
-    # ticket that cannot be read, or a second report for this repository, is
-    # `retained_error`; it never lowers the count.
+    # Which report under the ticket is this gate run's (`_retained_findings`):
+    # `state` is `own` when the gate's report was identified, and
+    # `unattributable` otherwise, with `why`.
     retained = _retained_findings(report_dir, repo, first)
-    result["retained_findings"] = (len(retained.findings)
-                                   if retained is not None and retained.owned
+    attribution = {"state": retained.attribution,
+                   "observed": first is not None}
+    if first is not None:
+        attribution.update(first_entry=first["name"],
+                           first_is_dir=first["is_dir"])
+    if retained.why:
+        attribution["why"] = (f"{retained.why}: {first_entry.failure}"
+                              if first is None and first_entry.failure
+                              else retained.why)
+    if retained.reports:
+        attribution["reports"] = retained.reports
+    result["report_attribution"] = attribution
+    # How many failures the gate's own retained report names (None when its
+    # report was not identified). Read before the outcome: a finding makes
+    # the run `measured_fail` whatever else it reports. A part of the ticket
+    # that cannot be read, or a second report for this repository, is
+    # `retained_error`; it never lowers the count.
+    result["retained_findings"] = (len(retained.findings) if retained.owned
                                    else None)
-    if retained is not None and retained.error:
+    # Every red under a ticket whose gate report could not be attributed,
+    # each with the file it was read from.
+    if retained.attribution == ATTRIBUTION_UNATTRIBUTABLE and retained.unattributed:
+        result["unattributed_reds"] = retained.unattributed
+    if retained.error:
         result["retained_error"] = retained.error
     # ONE word for what this run of the gate is WORTH: `measured_pass`,
     # `measured_fail` or `unmeasured`. It is read by the fold in `run_tests`,
@@ -868,6 +889,15 @@ _REPO_GATE_UNMEASURED_STATES = frozenset({"unmeasured", "not_run", "blocked"})
 REPO_GATE_MEASURED_PASS = "measured_pass"
 REPO_GATE_MEASURED_FAIL = "measured_fail"
 REPO_GATE_UNMEASURED = "unmeasured"
+# The ticket holds a red and the gate's own report could not be identified,
+# so nobody can say whose red it is (`_retained_findings`).
+REPO_GATE_UNATTRIBUTABLE = "unattributable"
+
+# What a report under the ticket is, as `_retained_findings` classifies it:
+# the gate's own, provably another writer's, or neither provable.
+ATTRIBUTION_OWN = "own"
+ATTRIBUTION_NOT_OWN = "not_own"
+ATTRIBUTION_UNATTRIBUTABLE = "unattributable"
 
 # How many times ONE step invocation may run the repository gate.
 #
@@ -932,9 +962,14 @@ def _repo_gate_declares_unmeasured(gate: dict) -> bool:
 
 
 def _repo_gate_outcome(gate: dict) -> str:
-    """`measured_pass`, `measured_fail` or `unmeasured`, for ONE gate run.
+    """`measured_pass`, `measured_fail`, `unmeasured` or `unattributable`,
+    for ONE gate run.
 
-    The gate's retained report is read FIRST: when it names any failure
+    A ticket whose gate report could not be attributed and that holds any red
+    (`unattributed_reds`) is `unattributable`, whatever else the run says.
+    With no red there, the rules below apply as they do to any gate.
+
+    The gate's retained report is read next: when it names any failure
     (`retained_findings` > 0, counted by `_run_repo_gate` from the report the
     gate kept under its ticket), the run is `measured_fail`, whatever the exit
     code, the relay record or a declaration say. A gate that measured a red
@@ -952,6 +987,8 @@ def _repo_gate_outcome(gate: dict) -> str:
     framework's own observation, exactly like the pytest wall whose
     `skipped_because="pytest_timeout"` this aligns with.
     """
+    if gate.get("unattributed_reds"):
+        return REPO_GATE_UNATTRIBUTABLE
     if gate.get("retained_findings"):
         return REPO_GATE_MEASURED_FAIL
     if _repo_gate_declares_unmeasured(gate):
@@ -1028,10 +1065,56 @@ class _Retained(NamedTuple):
     findings: list
     error: str | None
     owned: bool
+    attribution: str
+    why: str | None
+    unattributed: list
+    reports: dict
 
 
-def _retained_findings(ticket_dir: Path, repo: Path, first: dict | None = None
-                       ) -> _Retained | None:
+def _stage_findings(manifest_path: Path, manifest: dict, ticket_dir: Path
+                    ) -> tuple[list, list[str]]:
+    """Every red one manifest's stages name, and the parts that could not be read.
+
+    Each stage contributes every entry of its `<stage>-findings.json`, and,
+    when that list is empty or missing, the `errors[]` (else the `summary`) of
+    its stage report when that report says `passed: false`. Each finding is
+    `(stage, item, stage_report_path_or_None)`.
+    """
+    report_dir = manifest_path.parent
+    stages = manifest.get("stages")
+    if not isinstance(stages, dict):
+        return [], [f"repository gate manifest "
+                    f"{manifest_path.relative_to(ticket_dir)} names no stages"]
+    findings: list = []
+    errors: list[str] = []
+    for stage, state in stages.items():
+        name = (state or {}).get("report") if isinstance(state, dict) else None
+        stage_path = report_dir / name if isinstance(name, str) and name else None
+        items: list = []
+        findings_path = report_dir / f"{stage}-findings.json"
+        if findings_path.is_file():
+            listed, error = _load_json(findings_path)
+            if error:
+                errors.append(error)
+            elif not isinstance(listed, list):
+                errors.append(f"repository gate {findings_path.name} "
+                              f"is not a list")
+            else:
+                items = listed
+        if not items and stage_path is not None:
+            verdict, error = _stage_verdict(stage_path)
+            if error:
+                errors.append(error)
+            elif verdict is not None and verdict.get("passed") is False:
+                items = verdict.get("errors") or [
+                    verdict.get("summary")
+                    or f"{stage} reported passed=false"]
+        findings.extend((stage, item, stage_path) for item in items)
+    return findings, errors
+
+
+def _retained_findings(ticket_dir: Path, repo: Path, first: dict | None
+                       ) -> _Retained:
     """Every failure the gate's retained report for `repo` names, unjudged.
 
     The gate writes its report under the ticket directory it was handed as
@@ -1039,118 +1122,122 @@ def _retained_findings(ticket_dir: Path, repo: Path, first: dict | None = None
     ran, a `<stage>.json` per stage, and a `<stage>-findings.json` list for the
     stages it judges itself (tools/godot_gate.py in the game repository).
 
-    WHICH report is the gate's is decided by this gate run's own credential,
-    never by what a report says about itself: `first` is the first entry the
-    run created under its ticket (`_FirstEntry`), and the gate's report is the
-    manifest (or manifests) in that entry. Every other writer under the ticket
-    was started later by the gate (its python stage runs the repository's
-    tests, which inherit GATE_REPORT_DIR). A report the gate owns must also
-    name `repo`; one that names another repository is not read. With
-    `first=None` the order was not observed, and every manifest that names
-    `repo` is read.
+    WHICH report is the gate's is decided by this gate run's own observation,
+    never by what a report says about itself. `first` is the first entry the
+    run created under its ticket (`_FirstEntry`; None when the order could not
+    be observed). Every report under the ticket is one of three things:
 
-    Reds only accumulate. Each readable part of the gate's report contributes
-    its own: every entry of a `<stage>-findings.json`, and, when that list is
-    empty or missing, the `errors[]` (else the `summary`) of a stage report
-    that says `passed: false`. A part that cannot be read, a second report
-    that names `repo`, or a report that names `repo` and is not the gate's,
-    adds to `error` and takes away nothing already read.
+      * `own`: the ticket's first entry is a directory, and a `manifest.json`
+        inside it names `repo`. That is the gate's report.
+      * `not_own`: the gate's report was identified, and this report is not
+        it.
+      * `unattributable`: everything else. The order was not observed, the
+        first entry is not a directory, nothing was created, or the first
+        entry holds no manifest that names `repo`. Then no report under the
+        ticket is known to be the gate's, and none is known not to be.
 
-    Returns None when the ticket holds nothing for `repo` and nothing
-    unreadable; otherwise `_Retained(report_dir, findings, error, owned)`,
-    where each finding is `(stage, item, stage_report_path_or_None)` and
-    `owned` says whether the gate's own report was found.
+    With the gate's report identified, reds only accumulate: each readable
+    part of it contributes its own (`_stage_findings`). A part that cannot be
+    read, a second report that names `repo`, or a manifest inside the gate's
+    entry that names another repository adds to `error` and takes away
+    nothing already read.
+
+    With no report identified, `findings` is empty and `unattributed` lists
+    every red anywhere under the ticket (every readable manifest's stages,
+    and every non-empty `*-findings.json` no readable manifest covers), each
+    as `"<path under the ticket>: <finding>"`. A red is neither dropped nor
+    counted as the gate's.
     """
+    reports: dict = {}
     if not ticket_dir.is_dir():
-        return None
+        return _Retained(ticket_dir, [], None, False,
+                         ATTRIBUTION_UNATTRIBUTABLE,
+                         "the ticket directory does not exist", [], reports)
 
-    def claim(manifest):
+    def names_repo(manifest) -> bool:
         claimed = manifest.get("repo") if isinstance(manifest, dict) else None
-        return claimed if isinstance(claimed, str) and claimed else None
-
-    def names_repo(claimed) -> bool:
-        if claimed is None:
+        if not isinstance(claimed, str) or not claimed:
             return False
         try:
             return Path(claimed).resolve() == Path(repo).resolve()
         except (OSError, RuntimeError):
             return False
 
-    def is_the_gates(path: Path) -> bool:
-        name = first.get("name")
-        if name is None:
-            return False
-        if not first.get("is_dir"):
-            # The gate wrote its report straight into the ticket.
-            return path.parent == ticket_dir
-        own = ticket_dir / name
-        return own in path.parents
-
     errors: list[str] = []
-    owned: list = []
-    naming_repo: list[Path] = []
+    manifests: list = []
     for path in sorted(p for p in ticket_dir.rglob("manifest.json") if p.is_file()):
         manifest, error = _load_json(path)
         if error:
             errors.append(error)
             continue
-        claimed = claim(manifest)
-        if names_repo(claimed):
-            naming_repo.append(path)
-        if first is None:
-            if names_repo(claimed):
+        manifests.append((path, manifest))
+    naming_repo = [path for path, manifest in manifests if names_repo(manifest)]
+
+    own_dir, why = None, None
+    if first is None:
+        why = "the order of creation under the ticket was not observed"
+    elif first.get("name") is None:
+        why = "the gate run created nothing under its ticket"
+    elif not first.get("is_dir"):
+        why = (f"the first entry under the ticket, {first['name']!r}, "
+               f"is not a directory")
+    else:
+        candidate = ticket_dir / first["name"]
+        if any(candidate in path.parents for path in naming_repo):
+            own_dir = candidate
+        else:
+            why = (f"the first entry under the ticket, {first['name']!r}, "
+                   f"holds no manifest.json that names {repo}")
+
+    if own_dir is None:
+        unattributed: list[str] = []
+        covered = set()
+        for path, manifest in manifests:
+            reports[str(path.relative_to(ticket_dir))] = ATTRIBUTION_UNATTRIBUTABLE
+            covered.add(path.parent)
+            found, part_errors = _stage_findings(path, manifest, ticket_dir)
+            errors += part_errors
+            unattributed += [
+                f"{(stage_path or path).relative_to(ticket_dir)} "
+                f"[{stage}]: {_finding_text(item)}"
+                for stage, item, stage_path in found]
+        for path in sorted(p for p in ticket_dir.rglob("*-findings.json")
+                           if p.is_file() and p.parent not in covered):
+            listed, error = _load_json(path)
+            if error:
+                errors.append(error)
+            elif isinstance(listed, list):
+                unattributed += [f"{path.relative_to(ticket_dir)}: "
+                                 f"{_finding_text(item)}" for item in listed]
+        return _Retained(ticket_dir, [], "; ".join(errors) or None, False,
+                         ATTRIBUTION_UNATTRIBUTABLE, why, unattributed, reports)
+
+    owned: list = []
+    for path, manifest in manifests:
+        key = str(path.relative_to(ticket_dir))
+        if own_dir in path.parents:
+            if names_repo(manifest):
                 owned.append((path, manifest))
-        elif is_the_gates(path):
-            if names_repo(claimed):
-                owned.append((path, manifest))
+                reports[key] = ATTRIBUTION_OWN
             else:
-                errors.append(f"the gate's own report "
-                              f"{path.relative_to(ticket_dir)} names "
-                              f"{claimed!r}, not {repo}")
+                reports[key] = ATTRIBUTION_NOT_OWN
+                errors.append(f"the gate's own report entry {own_dir.name} "
+                              f"holds {key}, which names "
+                              f"{manifest.get('repo')!r}, not {repo}")
+        else:
+            reports[key] = ATTRIBUTION_NOT_OWN
     if len(naming_repo) > 1:
         errors.append(f"repository gate retained {len(naming_repo)} reports "
-                      f"for {repo} under one ticket ({ticket_dir.name})")
-    elif first is not None and naming_repo and not owned:
-        errors.append(f"report {naming_repo[0].relative_to(ticket_dir)} names "
-                      f"{repo} but is not the first entry this gate run "
-                      f"created under ticket {ticket_dir.name}")
+                      f"for {repo} under one ticket ({ticket_dir.name}); only "
+                      f"those in its first entry {own_dir.name} are the gate's")
 
     findings: list = []
     for manifest_path, manifest in owned:
-        report_dir = manifest_path.parent
-        stages = manifest.get("stages")
-        if not isinstance(stages, dict):
-            errors.append(f"repository gate manifest "
-                          f"{manifest_path.relative_to(ticket_dir)} names no stages")
-            continue
-        for stage, state in stages.items():
-            name = (state or {}).get("report") if isinstance(state, dict) else None
-            stage_path = report_dir / name if isinstance(name, str) and name else None
-            items: list = []
-            findings_path = report_dir / f"{stage}-findings.json"
-            if findings_path.is_file():
-                listed, error = _load_json(findings_path)
-                if error:
-                    errors.append(error)
-                elif not isinstance(listed, list):
-                    errors.append(f"repository gate {findings_path.name} "
-                                  f"is not a list")
-                else:
-                    items = listed
-            if not items and stage_path is not None:
-                verdict, error = _stage_verdict(stage_path)
-                if error:
-                    errors.append(error)
-                elif verdict is not None and verdict.get("passed") is False:
-                    items = verdict.get("errors") or [
-                        verdict.get("summary")
-                        or f"{stage} reported passed=false"]
-            findings.extend((stage, item, stage_path) for item in items)
-
-    if not owned and not errors:
-        return None
-    label = owned[0][0].parent if owned else ticket_dir
-    return _Retained(label, findings, "; ".join(errors) or None, bool(owned))
+        found, part_errors = _stage_findings(manifest_path, manifest, ticket_dir)
+        findings += found
+        errors += part_errors
+    return _Retained(owned[0][0].parent, findings, "; ".join(errors) or None,
+                     True, ATTRIBUTION_OWN, None, [], reports)
 
 
 # A stage report up to this size is parsed whole. A play-test report carries
@@ -1360,17 +1447,18 @@ def _finding_identities(findings) -> list[dict]:
 
 
 def _report_dir_failure_cases(ticket_dir: Path, repo: Path,
-                              first: dict | None = None
+                              first: dict | None
                               ) -> tuple[list[dict], str | None] | None:
     """Failure identities from the structured report a gate retained, or None.
 
     Reads the findings of `_retained_findings` and names each one with
-    `_finding_identities`. None means the ticket holds nothing for `repo` and
-    the caller falls back to the output records. An error comes back BESIDE
-    the identities that were read, never instead of them.
+    `_finding_identities`. None means the gate's own report was not
+    identified under the ticket and the caller falls back to the output
+    records. An error comes back BESIDE the identities that were read, never
+    instead of them.
     """
     found = _retained_findings(ticket_dir, repo, first)
-    if found is None:
+    if not found.owned:
         return None
     cases = _finding_identities(found.findings) if found.findings else []
     error = found.error
@@ -2017,7 +2105,33 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
             # The engine's reply to the gate's last request, as the admission
             # relay recorded it (`answered`, `not_admitted`, `unreachable`, ...).
             report["repo_gate_admission"] = (gate.get("admission") or {}).get("state")
-            if outcome == REPO_GATE_UNMEASURED:
+            if outcome == REPO_GATE_UNATTRIBUTABLE:
+                # Reds under the ticket, and no report there is provably the
+                # gate's: they are neither this code's reds nor an absence.
+                # `repo_gate_unattributable` ends the run on its own terminal
+                # (`configs/coding_impl.yaml`), except beside a missing runner,
+                # which ends it at `test_evidence_missing` as always.
+                reds = gate["unattributed_reds"]
+                why = (gate.get("report_attribution") or {}).get("why") or ""
+                executed.repo_gate_cases = None
+                report["passed"] = False
+                report["repo_gate_absent"] = False
+                report["repo_gate_unattributable"] = not report.get(
+                    "infrastructure_unavailable")
+                if report["repo_gate_unattributable"]:
+                    report["evidence_state"] = "unattributable"
+                sentence = (f"repository gate report could not be attributed "
+                            f"({why}): {len(reds)} red(s) under ticket "
+                            f"{gate.get('ticket')}")
+                # The reds' identities belong to no known report, so they may
+                # neither seed nor prune a baseline (`_apply_baseline`).
+                gate["failure_identity_error"] = sentence
+                report["failure_identity_error"] = sentence
+                listed = "; ".join(reds[:20])
+                more = f"; and {len(reds) - 20} more" if len(reds) > 20 else ""
+                report["failures"].append(
+                    f"repo_gate:{gate['script']} {sentence}: {listed}{more}")
+            elif outcome == REPO_GATE_UNMEASURED:
                 # The run is an ABSENCE only when nothing else in this report
                 # was MEASURED red and no runner is missing:
                 #   * a measured red (a pytest red, a collection error, an
@@ -2148,6 +2262,9 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
             # malformed one. `configs/coding_impl.yaml` routes on this flag;
             # core/gate_deferral.py reads the FILE for the reason.
             "repo_gate_absent": bool(report.get("repo_gate_absent")),
+            # The same, for a ticket whose reds belong to no identified report.
+            "repo_gate_unattributable": bool(
+                report.get("repo_gate_unattributable")),
             "passed_relative": report["passed_relative"],
             # Carried in the RETURN, not only the report, because the terminal
             # failure reason is assembled from what the run left behind: a loop

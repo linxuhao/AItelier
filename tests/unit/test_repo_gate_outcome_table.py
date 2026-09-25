@@ -2,31 +2,34 @@
 
 Every row runs the REAL `run_tests` against a gate subprocess that talks to
 the REAL harness admission code (`tests/gate_fixture.py:HarnessRig`), and
-reads three things off what it wrote:
+reads off what it wrote:
 
-  * `measured`  -- `repo_gate.measured` in `test_report.json`;
-  * `absent`    -- `repo_gate_absent`, on the tool's RETURN and in the report;
-  * `next`      -- the node `configs/coding_impl.yaml` routes that report to,
-                   computed from the graph's own transitions and schemas
-                   (`_next_node`), starting at the `test` step.
+  * `attribution` -- `repo_gate.report_attribution.state`: `own` when the
+                     gate's report was identified under its ticket,
+                     `unattributable` when it was not;
+  * `measured`    -- `repo_gate.measured` in `test_report.json`;
+  * `absent`      -- `repo_gate_absent`, on the tool's RETURN and in the report;
+  * `next`        -- the node `configs/coding_impl.yaml` routes that report to,
+                     computed from the graph's own transitions and schemas
+                     (`_next_node`), starting at the `test` step;
+  * `identity_error` -- whether `repo_gate.retained_error` or
+                     `failure_identity_error` is set.
 
-The rows are the shapes review gnr3 (2026-09-25) built to turn a readable red
-into `not_run` or a foreign report into `measured_fail`, the two r2 poles, the
-director's two rulings (a pytest wall is not a measured failure; a missing
-node runner ends at `test_evidence_missing`), and the plain passes and reds.
-
-`ROWS` is also what `docs/repo-gate-unmeasured-protocol.md` and
-`aitelier/tools/run_tests/tool.yaml` cite: every routing sentence there names
-the row that drives it (`test_every_routing_sentence_cites_a_row`), and the
-doc's routing table must say what this table measures
-(`test_the_doc_routing_table_is_this_table`).
+`ROWS` is the only statement of where a report goes. The routing table in
+`docs/repo-gate-unmeasured-protocol.md` is rendered from it
+(`render_routing_table`) and must be byte-identical to that rendering
+(`test_the_doc_routing_table_is_rendered_from_rows`). After editing `ROWS`,
+rewrite the doc's table with `python -m tests.unit.test_repo_gate_outcome_table`.
 """
 from __future__ import annotations
 
-import ast
+import ctypes
+import errno
 import json
-import re
+import os
+import sys
 from pathlib import Path
+from typing import NamedTuple
 
 import jsonschema
 import pytest
@@ -37,21 +40,49 @@ from tests.gate_fixture import RUN_TESTS_SH, HarnessRig, red_report
 
 _ROOT = Path(__file__).resolve().parents[2]
 _GRAPH = _ROOT / "configs" / "coding_impl.yaml"
-_TOOL_YAML = _ROOT / "aitelier" / "tools" / "run_tests" / "tool.yaml"
 _PROTOCOL = _ROOT / "docs" / "repo-gate-unmeasured-protocol.md"
 
 # A gate with the game gate's report layout (`tools/godot_gate.py`): it
-# creates its own report directory under $GATE_REPORT_DIR before anything
-# else, retains `manifest.json` + `<stage>.json` + `<stage>-findings.json`
-# there, and exits 2 when the engine does not answer (`... gate NOT run.`).
-# `TABLE_GATE_MODE` picks what it retains before its /script request.
+# creates its own report directory under $GATE_REPORT_DIR, retains
+# `manifest.json` + `<stage>.json` + `<stage>-findings.json` there, and exits
+# 2 when the engine does not answer (`... gate NOT run.`).
+# `TABLE_GATE_MODE` picks what it retains before its /script request, and
+# `TABLE_GATE_PRE` what it creates under $GATE_REPORT_DIR BEFORE its report
+# directory (the protocol requires nothing to come before it):
+#   lockfile      a file `.gate.lock`
+#   cachedir      a directory `cache`
+#   file_first    no report directory at all: the report goes straight into
+#                 $GATE_REPORT_DIR
+#   foreign_same  a directory whose manifest names this repository with a red
+#   foreign_other a directory whose manifest names another repository with a red
 TABLE_GATE = r'''
 import json, os, sys, tempfile, urllib.error, urllib.request
 mode = os.environ["TABLE_GATE_MODE"]
+pre = os.environ.get("TABLE_GATE_PRE", "")
 builder = os.environ.get("GODOT_BUILDER_URL", "http://godot-builder:8080")
 parent = os.environ.get("GATE_REPORT_DIR") or tempfile.gettempdir()
 os.makedirs(parent, exist_ok=True)
-if mode == "nested":
+def pre_writer(repo_claim):
+    f = tempfile.mkdtemp(prefix="aaa-first-", dir=parent)
+    for name, v in (("python.json", {"returncode": 1}),
+                    ("python-findings.json", ["first writer: the python suite exited 1"]),
+                    ("manifest.json", {"repo": repo_claim, "status": "failed", "exit_code": 1,
+                                       "stages": {"python": {"status": "finished",
+                                                             "report": "python.json"}}})):
+        with open(os.path.join(f, name), "w") as fh:
+            json.dump(v, fh)
+if pre == "lockfile":
+    with open(os.path.join(parent, ".gate.lock"), "w") as fh:
+        fh.write("pid\n")
+elif pre == "cachedir":
+    os.makedirs(os.path.join(parent, "cache"), exist_ok=True)
+elif pre == "foreign_same":
+    pre_writer(os.getcwd())
+elif pre == "foreign_other":
+    pre_writer("/tmp/some-other-repo")
+if pre == "file_first":
+    d = parent
+elif mode == "nested":
     d = tempfile.mkdtemp(prefix="gate-", dir=tempfile.mkdtemp(prefix="outer-", dir=parent))
 else:
     d = tempfile.mkdtemp(prefix="gate-", dir=parent)
@@ -66,7 +97,7 @@ def post(path, payload):
     with urllib.request.urlopen(req, timeout=30) as r:
         return json.loads(r.read())
 def save_manifest():
-    if mode != "foreign_names_repo_gate_wrote_none":
+    if mode not in ("foreign_names_repo_gate_wrote_none", "findings_no_manifest"):
         write("manifest.json", manifest)
 def finish(code):
     manifest.update(exit_code=code, status={0: "passed", 1: "failed"}.get(code, "incomplete"))
@@ -93,7 +124,7 @@ if mode == "sleep":
 base = {"project_dir": cwd, "project_id": "table", "run_id": "table",
         "scripts": ["res://t.gd"], "timeout": 60}
 if mode in ("python_red", "second_manifest", "foreign_unreadable",
-            "missing_stage_report", "nested"):
+            "missing_stage_report", "nested", "findings_no_manifest"):
     write("python.json", {"returncode": 1})
     write("python-findings.json", ["the python suite exited 1"])
     manifest["stages"]["python"] = {"status": "finished", "report": "python.json"}
@@ -135,70 +166,172 @@ finish(1 if found else 0)
 '''
 
 UNMEASURED, FAIL, PASS = "unmeasured", "measured_fail", "measured_pass"
+UNATTRIBUTABLE = "unattributable"
+OWN = "own"
+TERMINAL = "test_gate_report_unattributable"
 
-# row id -> (gate mode, AItelier-side leg, engine busy?, expected
-#            (measured, absent, next node), identity error expected?)
+
+class Row(NamedTuple):
+    mode: str            # TABLE_GATE_MODE
+    pre: str             # TABLE_GATE_PRE ("" = the report directory comes first)
+    leg: str | None      # what else the run meets (AItelier side, or the engine)
+    busy: bool           # the engine is held by another owner
+    attribution: str
+    measured: str
+    absent: bool
+    next: str
+    identity_error: bool
+    shape: str           # one line for the rendered table
+
+
 ROWS = {
     # the r2 poles, and the clean refusal both are measured against
-    "clean_refusal": ("clean", None, True,
-                      (UNMEASURED, True, "test_gate_absent"), False),
-    "python_red_then_refused": ("python_red", None, True,
-                                (FAIL, False, "implement"), False),
-    "compile_red_then_refused": ("compile_red", None, True,
-                                 (FAIL, False, "implement"), False),
+    "clean_refusal": Row(
+        "clean", "", None, True, OWN, UNMEASURED, True, "test_gate_absent", False,
+        "the engine refused the gate's only request; exit 2"),
+    "python_red_then_refused": Row(
+        "python_red", "", None, True, OWN, FAIL, False, "implement", False,
+        "a python-stage red retained, then a refused `/script`; exit 2"),
+    "compile_red_then_refused": Row(
+        "compile_red", "", None, True, OWN, FAIL, False, "implement", False,
+        "an answered `/compile` red, then a refused `/script`; exit 2"),
     # review gnr3 point 1: a readable red beside a part that is not readable
-    "second_manifest_same_repo": ("second_manifest", None, True,
-                                  (FAIL, False, "implement"), True),
-    "foreign_unreadable_manifest": ("foreign_unreadable", None, True,
-                                    (FAIL, False, "implement"), True),
-    "missing_stage_report": ("missing_stage_report", None, True,
-                             (FAIL, False, "implement"), True),
-    "nested_two_levels": ("nested", None, True,
-                          (FAIL, False, "implement"), False),
-    "empty_findings_failed_stage": ("empty_findings_failed_stage", None, True,
-                                    (FAIL, False, "implement"), False),
-    # review gnr3 point 1, inverse: another writer names this repository
-    "foreign_names_repo_gate_wrote_none": (
-        "foreign_names_repo_gate_wrote_none", None, True,
-        (UNMEASURED, True, "test_gate_absent"), True),
-    "foreign_names_repo_beside_own": (
-        "foreign_names_repo_beside_own", None, True,
-        (UNMEASURED, True, "test_gate_absent"), True),
-    "other_repo_reports_beside_green_gate": (
-        "other_repo_reports", None, False, (PASS, False, "done"), False),
+    "second_manifest_same_repo": Row(
+        "second_manifest", "", None, True, OWN, FAIL, False, "implement", True,
+        "a python red, plus a second manifest naming the same repository, "
+        "created after the gate's report directory"),
+    "foreign_unreadable_manifest": Row(
+        "foreign_unreadable", "", None, True, OWN, FAIL, False, "implement", True,
+        "a python red, plus a truncated manifest elsewhere under the ticket"),
+    "missing_stage_report": Row(
+        "missing_stage_report", "", None, True, OWN, FAIL, False, "implement", True,
+        "a python red, plus a manifest stage whose report file is missing"),
+    "nested_two_levels": Row(
+        "nested", "", None, True, OWN, FAIL, False, "implement", False,
+        "a python red retained two directories below the ticket"),
+    "empty_findings_failed_stage": Row(
+        "empty_findings_failed_stage", "", None, True, OWN, FAIL, False,
+        "implement", False,
+        "`compile.json` says `passed: false`, `compile-findings.json` is `[]`"),
+    # another writer names this repository
+    "foreign_names_repo_gate_wrote_none": Row(
+        "foreign_names_repo_gate_wrote_none", "", None, True, UNATTRIBUTABLE,
+        UNATTRIBUTABLE, False, TERMINAL, True,
+        "another writer's report names this repository with a red; the gate's "
+        "first entry holds no manifest; refused"),
+    "foreign_names_repo_beside_own": Row(
+        "foreign_names_repo_beside_own", "", None, True, OWN, UNMEASURED, True,
+        "test_gate_absent", True,
+        "the same, beside the gate's own clean report; refused"),
+    "other_repo_reports_beside_green_gate": Row(
+        "other_repo_reports", "", None, False, OWN, PASS, False, "done", False,
+        "reports for another repository beside a green gate"),
     # the sources of `unmeasured`, and what does not qualify
-    "declared_absence": ("declared", None, False,
-                         (UNMEASURED, True, "test_gate_absent"), False),
-    "declared_failed_is_not_an_absence": (
-        "declared_failed", None, False, (FAIL, False, "implement"), True),
-    "gate_killed_at_its_timeout": ("sleep", "gate_timeout", False,
-                                   (UNMEASURED, True, "test_gate_absent"),
-                                   False),
-    "exit_2_after_an_answered_request": (
-        "exit2_after_answer", None, False, (FAIL, False, "implement"), True),
-    "exit_1_after_a_refusal": ("exit1_after_refusal", None, True,
-                               (FAIL, False, "implement"), True),
+    "declared_absence": Row(
+        "declared", "", None, False, OWN, UNMEASURED, True, "test_gate_absent",
+        False, '`AITELIER_REPO_GATE_UNMEASURED={"state": "blocked"}`, exit 3'),
+    "declared_failed_is_not_an_absence": Row(
+        "declared_failed", "", None, False, OWN, FAIL, False, "implement", True,
+        'the same line with `"state": "failed"`, exit 3'),
+    "gate_killed_at_its_timeout": Row(
+        "sleep", "", "gate_timeout", False, OWN, UNMEASURED, True,
+        "test_gate_absent", False,
+        "the harness killed the gate at `REPO_GATE_TIMEOUT`"),
+    "exit_2_after_an_answered_request": Row(
+        "exit2_after_answer", "", None, False, OWN, FAIL, False, "implement", True,
+        "the engine answered, then the gate exited 2"),
+    "exit_1_after_a_refusal": Row(
+        "exit1_after_refusal", "", None, True, OWN, FAIL, False, "implement", True,
+        "the engine refused, then the gate exited 1"),
     # the rest of the report beside a refused gate (r3 pole 4, the rulings)
-    "pytest_red_beside_refused_gate": ("clean", "pytest_red", True,
-                                       (UNMEASURED, False, "implement"), False),
-    "pytest_wall_beside_refused_gate": ("clean", "pytest_wall", True,
-                                        (UNMEASURED, True, "test_gate_absent"),
-                                        False),
-    "node_runner_unavailable_beside_refused_gate": (
-        "clean", "node_unavailable", True,
-        (UNMEASURED, False, "test_evidence_missing"), False),
-    "pytest_runner_unavailable_beside_refused_gate": (
-        "clean", "pytest_unavailable", True,
-        (UNMEASURED, False, "test_evidence_missing"), False),
+    "pytest_red_beside_refused_gate": Row(
+        "clean", "", "pytest_red", True, OWN, UNMEASURED, False, "implement", False,
+        "AItelier's pytest red; the gate refused"),
+    "pytest_wall_beside_refused_gate": Row(
+        "clean", "", "pytest_wall", True, OWN, UNMEASURED, True,
+        "test_gate_absent", False,
+        "AItelier's pytest killed at its wall; the gate refused (director "
+        "ruling rev 4: a pytest killed at its wall measured nothing)"),
+    "node_runner_unavailable_beside_refused_gate": Row(
+        "clean", "", "node_unavailable", True, OWN, UNMEASURED, False,
+        "test_evidence_missing", False,
+        "no npm (`node.skipped`); the gate refused (director ruling rev 5: a "
+        "missing runner, npm or pytest, ends at `test_evidence_missing`)"),
+    "pytest_runner_unavailable_beside_refused_gate": Row(
+        "clean", "", "pytest_unavailable", True, OWN, UNMEASURED, False,
+        "test_evidence_missing", False,
+        "no pytest could be provisioned; the gate refused (the same ruling)"),
     # the gate answered
-    "green_gate": ("clean", None, False, (PASS, False, "done"), False),
-    "answered_red": ("clean", "script_red", False,
-                     (FAIL, False, "implement"), False),
+    "green_gate": Row(
+        "clean", "", None, False, OWN, PASS, False, "done", False,
+        "the engine answered green"),
+    "answered_red": Row(
+        "clean", "", "script_red", False, OWN, FAIL, False, "implement", False,
+        "the engine answered red; exit 1"),
+    # rev 5: the gate's first entry is not its report directory
+    "lockfile_first_red_refused": Row(
+        "python_red", "lockfile", None, True, UNATTRIBUTABLE, UNATTRIBUTABLE,
+        False, TERMINAL, True,
+        "the gate creates `.gate.lock` first, then its report with a python "
+        "red; refused"),
+    "cachedir_first_red_refused": Row(
+        "python_red", "cachedir", None, True, UNATTRIBUTABLE, UNATTRIBUTABLE,
+        False, TERMINAL, True,
+        "the gate creates a `cache` directory first, then its report with a "
+        "python red; refused"),
+    "file_first_red_refused": Row(
+        "python_red", "file_first", None, True, UNATTRIBUTABLE, UNATTRIBUTABLE,
+        False, TERMINAL, True,
+        "the gate writes `manifest.json` and its python red straight into the "
+        "ticket; refused"),
+    "first_entry_names_other_repo_red_refused": Row(
+        "python_red", "foreign_other", None, True, UNATTRIBUTABLE,
+        UNATTRIBUTABLE, False, TERMINAL, True,
+        "a writer that names another repository creates its report before the "
+        "gate's; the gate retains a python red; refused"),
+    "first_entry_names_this_repo_clean_refused": Row(
+        "clean", "foreign_same", None, True, OWN, FAIL, False, "implement", True,
+        "a writer that names this repository with a red creates its report "
+        "before the gate's; the gate is clean; refused"),
+    "report_without_manifest_red_refused": Row(
+        "findings_no_manifest", "", None, True, UNATTRIBUTABLE, UNATTRIBUTABLE,
+        False, TERMINAL, True,
+        "the gate's report directory holds a python red and no "
+        "`manifest.json`; refused"),
+    "lockfile_first_green_gate": Row(
+        "clean", "lockfile", None, False, UNATTRIBUTABLE, PASS, False, "done",
+        False, "the gate creates `.gate.lock` first; no red anywhere; the "
+        "engine answered green"),
+    "pytest_runner_unavailable_beside_unattributable_red": Row(
+        "python_red", "lockfile", "pytest_unavailable", True, UNATTRIBUTABLE,
+        UNATTRIBUTABLE, False, "test_evidence_missing", True,
+        "no pytest could be provisioned, beside the `lockfile_first` red "
+        "(director ruling rev 5)"),
+    # rev 5: the order of creation could not be observed (`inotify_init1`
+    # fails with EMFILE, as when the uid's inotify instances are all taken)
+    "inotify_unavailable_own_red": Row(
+        "python_red", "", "inotify_unavailable", True, UNATTRIBUTABLE,
+        UNATTRIBUTABLE, False, TERMINAL, True,
+        "`inotify_init1` fails; the gate's own python red; refused"),
+    "inotify_unavailable_foreign_red": Row(
+        "foreign_names_repo_beside_own", "", "inotify_unavailable", True,
+        UNATTRIBUTABLE, UNATTRIBUTABLE, False, TERMINAL, True,
+        "`inotify_init1` fails; another writer's red naming this repository, "
+        "beside the gate's clean report; refused"),
+    "inotify_unavailable_no_red": Row(
+        "clean", "", "inotify_unavailable", True, UNATTRIBUTABLE, UNMEASURED,
+        True, "test_gate_absent", False,
+        "`inotify_init1` fails; no red anywhere; refused"),
 }
 
 NODE_SKIPPED = {"passed": True, "skipped": True, "dir": ".", "checks": {},
                 "summary": "npm not available — node gate skipped "
                            "(install nodejs+npm in the backend image)."}
+
+# Set by a caller that has itself used up this uid's inotify instances
+# (`fs.inotify.max_user_instances`): the `inotify_unavailable` rows then run
+# with the real libc, and `inotify_init1` fails for real.
+REAL_EXHAUSTION_ENV = "AITELIER_TABLE_INOTIFY_EXHAUSTED"
 
 
 def _pytest_unavailable(_repo, report):
@@ -209,6 +342,33 @@ def _pytest_unavailable(_repo, report):
                   summary="pytest unavailable and could not be provisioned "
                           "after 3 attempts (table) — test gate skipped.")
     return None, None
+
+
+class _LibcWithoutInotify:
+    """libc as `ctypes.CDLL(None)` returns it, except `inotify_init1`, which
+    fails the way the kernel fails it once the uid's inotify instances are
+    all taken: it returns -1 with errno EMFILE. Only the system call is
+    replaced; `_FirstEntry` runs unchanged."""
+
+    def __init__(self, lib):
+        self._lib = lib
+
+    def __getattr__(self, name):
+        return getattr(self._lib, name)
+
+    def inotify_init1(self, _flags):
+        ctypes.set_errno(errno.EMFILE)
+        return -1
+
+
+def _without_inotify(monkeypatch) -> None:
+    real = ctypes.CDLL
+
+    def cdll(name, *args, **kwargs):
+        lib = real(name, *args, **kwargs)
+        return _LibcWithoutInotify(lib) if name is None else lib
+
+    monkeypatch.setattr(rt.ctypes, "CDLL", cdll)
 
 
 def _next_node(result: dict, report: dict) -> str:
@@ -248,43 +408,51 @@ def _next_node(result: dict, report: dict) -> str:
 
 
 def _drive_row(tmp_path, monkeypatch, row_id):
-    mode, leg, busy, _expected, _identity = ROWS[row_id]
+    row = ROWS[row_id]
     monkeypatch.setenv("AITELIER_HOME", str(tmp_path / "home"))
     monkeypatch.setenv("AITELIER_REPO_GATE_RENDER_WAIT_SECONDS", "0.3")
-    monkeypatch.setenv("TABLE_GATE_MODE", mode)
+    monkeypatch.setenv("TABLE_GATE_MODE", row.mode)
+    monkeypatch.setenv("TABLE_GATE_PRE", row.pre)
+    inotify = "real"
+    if row.leg == "inotify_unavailable":
+        if os.environ.get(REAL_EXHAUSTION_ENV) == "1":
+            inotify = "exhausted by the caller"
+        else:
+            _without_inotify(monkeypatch)
+            inotify = "inotify_init1 stubbed to EMFILE"
     rig = HarnessRig(tmp_path / "harness", monkeypatch)
     monkeypatch.setenv("GODOT_BUILDER_URL", rig.base)
     try:
-        if mode == "compile_red":
+        if row.mode == "compile_red":
             monkeypatch.setattr(rig.gh, "compile_project", lambda _p, **_k: {
                 "passed": False, "summary": "1 error",
                 "errors": [{"file": "res://a.gd", "line": 3,
                             "msg": "Parse Error: table"}]})
-        if leg == "script_red":
+        if row.leg == "script_red":
             rig.script_report = red_report()
         repo = tmp_path / "repo"
         (repo / "tests").mkdir(parents=True)
         (repo / "tests" / "test_ok.py").write_text(
             "def test_ok():\n    assert True\n")
-        if leg == "pytest_red":
+        if row.leg == "pytest_red":
             (repo / "tests" / "test_bad.py").write_text(
                 "def test_bad():\n    assert 1 == 2\n")
-        if leg == "pytest_wall":
+        if row.leg == "pytest_wall":
             (repo / "tests" / "test_slow.py").write_text(
                 "import time\n\ndef test_slow():\n    time.sleep(60)\n")
             monkeypatch.setattr(rt, "PYTEST_WALL_SECONDS", 3)
-        if leg == "node_unavailable":
+        if row.leg == "node_unavailable":
             monkeypatch.setattr(rt, "_run_node_checks",
                                 lambda _repo: dict(NODE_SKIPPED))
-        if leg == "gate_timeout":
+        if row.leg == "gate_timeout":
             monkeypatch.setattr(rt, "REPO_GATE_TIMEOUT", 3)
-        if leg == "pytest_unavailable":
+        if row.leg == "pytest_unavailable":
             monkeypatch.setattr(rt, "_resolve_pytest_python", _pytest_unavailable)
         (repo / "gate.py").write_text(TABLE_GATE)
         script = repo / "run_tests.sh"
         script.write_text(RUN_TESTS_SH)
         script.chmod(0o755)
-        if busy:
+        if row.busy:
             rig.hold()
         out = tmp_path / "out"
         result = rt.run_tests(project_root=str(repo), out_dir=str(out))
@@ -292,149 +460,152 @@ def _drive_row(tmp_path, monkeypatch, row_id):
     finally:
         rig.close()
     gate = report.get("repo_gate") or {}
+    attribution = gate.get("report_attribution") or {}
     observed = (gate.get("measured"),
                 bool(result.get("repo_gate_absent")),
                 _next_node(result, report))
     identity_error = bool(gate.get("retained_error")
                           or report.get("failure_identity_error"))
     print("ROW " + json.dumps({
-        "row": row_id, "measured": observed[0], "repo_gate_absent": observed[1],
+        "row": row_id, "attribution": attribution.get("state"),
+        "measured": observed[0], "repo_gate_absent": observed[1],
         "next": observed[2], "identity_error": identity_error,
+        "inotify": inotify, "observed": attribution.get("observed"),
+        "first_entry": attribution.get("first_entry"),
+        "why": attribution.get("why"),
         "returncode": gate.get("returncode"),
         "admission": (gate.get("admission") or {}).get("state"),
         "retained_findings": gate.get("retained_findings"),
+        "unattributed_reds": gate.get("unattributed_reds"),
         "retained_error": gate.get("retained_error"),
-        "failures": [f[:120] for f in report.get("failures") or []]},
+        "release_evidence": result.get("release_evidence"),
+        "failures": [f[:160] for f in report.get("failures") or []]},
         ensure_ascii=False))
     return result, report, observed, identity_error
 
 
+_DRIVEN: dict = {}
+
+
+def _driven(row_id, tmp_path_factory):
+    """Each row is driven once per session, whichever test asks first."""
+    if row_id not in _DRIVEN:
+        with pytest.MonkeyPatch.context() as mp:
+            _DRIVEN[row_id] = _drive_row(tmp_path_factory.mktemp(row_id), mp,
+                                         row_id)
+    return _DRIVEN[row_id]
+
+
 @pytest.mark.parametrize("row_id", list(ROWS))
-def test_the_outcome_of_every_report_shape(tmp_path, monkeypatch, row_id):
-    _mode, _leg, _busy, expected, identity_expected = ROWS[row_id]
-    result, report, observed, identity_error = _drive_row(
-        tmp_path, monkeypatch, row_id)
-    assert observed == expected, (row_id, observed, expected)
+def test_the_outcome_of_every_report_shape(tmp_path_factory, row_id):
+    row = ROWS[row_id]
+    result, report, observed, identity_error = _driven(row_id, tmp_path_factory)
+    assert observed == (row.measured, row.absent, row.next), (row_id, observed)
     # The report says the same as the return.
     assert bool(report.get("repo_gate_absent")) is observed[1]
-    # A part that cannot be read, or a report that is not the gate's, is
-    # stated; it never hides a red (`measured`, above) and never makes one.
-    assert identity_error is identity_expected, (row_id, identity_error)
-    if report["repo_gate"].get("retained_findings"):
+    # A part that cannot be read, a report that is not the gate's, or reds
+    # that belong to no identified report, are stated.
+    assert identity_error is row.identity_error, (row_id, identity_error)
+    gate = report["repo_gate"]
+    if gate.get("retained_findings"):
         # The reds the gate's report names are listed one by one, whatever
         # else was on the ticket.
         listed = [f for f in report["failures"]
                   if f.startswith("repo_gate:run_tests.sh#")]
-        assert len(listed) == report["repo_gate"]["retained_findings"], listed
+        assert len(listed) == gate["retained_findings"], listed
+    if row.measured == UNATTRIBUTABLE:
+        assert gate["retained_findings"] is None
+        assert gate["unattributed_reds"], gate
+        assert report["repo_gate_unattributable"] is (row.next == TERMINAL)
+        assert result["release_evidence"] == "unresolved"
 
 
-# ── the documents cite the rows ────────────────────────────────────────────
-
-# Words that make a sentence a statement about where a report goes or what a
-# gate run is worth: the graph's route targets and the outcome values.
-_ROUTING_WORDS = re.compile(
-    r"\b(implement|test_gate_absent|test_evidence_missing|measured_fail|"
-    r"measured_pass|unmeasured|absences?|absent|not_run|did not run|not run)\b",
-    re.IGNORECASE)
-_CITATION = re.compile(r"\[rows?: ([a-z0-9_, ]+)\]")
-# A statement about what the SCHEDULER does with an absence is driven by a
-# drive of the real graph, not by a row: `[test: <file>::<function>]`.
-_TEST_CITATION = re.compile(r"\[test: ([\w/.]+\.py)::(\w+)\]")
-
-
-def _test_exists(path: str, name: str) -> bool:
-    source = _ROOT / path
-    if not source.is_file():
-        return False
-    tree = ast.parse(source.read_text(encoding="utf-8"))
-    return any(isinstance(node, ast.FunctionDef) and node.name == name
-               for node in ast.walk(tree))
+@pytest.mark.parametrize("row_id", list(ROWS))
+def test_the_attribution_of_every_report_shape(tmp_path_factory, row_id):
+    row = ROWS[row_id]
+    _result, report, _observed, _identity = _driven(row_id, tmp_path_factory)
+    attribution = report["repo_gate"]["report_attribution"]
+    assert attribution["state"] == row.attribution, (row_id, attribution)
+    if row.leg == "inotify_unavailable":
+        assert attribution["observed"] is False, attribution
+        assert "inotify_init1 failed (errno 24" in attribution["why"], attribution
+    else:
+        assert attribution["observed"] is True, attribution
 
 
-def _tool_description() -> str:
-    return yaml.safe_load(_TOOL_YAML.read_text(encoding="utf-8"))["description"]
+# The protocol requires the gate to create its own report directory under
+# GATE_REPORT_DIR before it creates anything else there. These rows break it.
+_BREAKS_THE_REQUIREMENT = ("lockfile_first_red_refused",
+                           "cachedir_first_red_refused",
+                           "file_first_red_refused",
+                           "first_entry_names_other_repo_red_refused")
 
 
-def _statements(markdown: str) -> list[str]:
-    """Every sentence and every table row of a markdown text.
-
-    Fenced and indented code blocks are quotations, not statements, and are
-    left out. A table row is one statement. The rows of a table whose first
-    header cell is `mutation` record an edit and the test that fails under
-    it; they are left out too.
-    """
-    out: list[str] = []
-    prose: list[str] = []
-    fenced = False
-    header = None
-    for line in markdown.splitlines():
-        if line.strip().startswith("```"):
-            fenced = not fenced
-            continue
-        if fenced or line.startswith("    "):
-            continue
-        if line.startswith("|"):
-            cells = [c.strip() for c in line.strip().strip("|").split("|")]
-            if header is None:
-                header = cells[0].lower()
-                continue
-            if set("".join(cells)) <= set("-: "):
-                continue
-            if header != "mutation":
-                out.append(" ".join(line.split()))
-            continue
-        header = None
-        prose.append(line)
-    for paragraph in re.split(r"\n\s*\n", "\n".join(prose)):
-        text = " ".join(paragraph.split())
-        out.extend(s for s in re.split(r"(?<=[.;!?])\s+(?=[A-Z`*(>\"0-9\[])",
-                                       text) if s)
-    return out
+@pytest.mark.parametrize("row_id", _BREAKS_THE_REQUIREMENT)
+def test_the_gate_must_create_its_report_directory_first(tmp_path_factory,
+                                                         row_id):
+    """A gate that creates anything else under its ticket first leaves its
+    report unattributable: its own red is listed, with where it was read,
+    and is neither dropped nor counted as the gate's."""
+    result, report, observed, _identity = _driven(row_id, tmp_path_factory)
+    gate = report["repo_gate"]
+    assert gate["report_attribution"]["state"] == UNATTRIBUTABLE
+    assert gate["retained_findings"] is None
+    own = [r for r in gate["unattributed_reds"]
+           if r.endswith("[python]: the python suite exited 1")]
+    assert len(own) == 1, gate["unattributed_reds"]
+    assert gate["measured"] == UNATTRIBUTABLE
+    assert observed[2] == TERMINAL
+    assert any(own[0] in f for f in report["failures"]), report["failures"]
 
 
-def _routing_statements() -> list[tuple[str, str]]:
-    """Every statement of tool.yaml's description and of the protocol doc,
-    except the doc's routing-table rows (`test_the_doc_routing_table_is_this_table`
-    checks those against the table itself)."""
-    doc = _statements(_PROTOCOL.read_text(encoding="utf-8"))
-    return ([("tool.yaml", s) for s in _statements(_tool_description())]
-            + [(_PROTOCOL.name, s) for s in doc if not _DOC_ROW.match(s)])
+# ── the doc's routing table is rendered from ROWS ──────────────────────────
+
+TABLE_BEGIN = ("<!-- routing table: rendered from ROWS in "
+               "tests/unit/test_repo_gate_outcome_table.py by "
+               "render_routing_table(); edit ROWS and run "
+               "`python -m tests.unit.test_repo_gate_outcome_table` -->")
+TABLE_END = "<!-- routing table: end -->"
+_HEADER = ("| row | attribution | measured | repo_gate_absent | next "
+           "| identity error | the shape |")
 
 
-def test_every_routing_sentence_cites_a_row():
-    """A sentence that says where a report goes, or what a gate run is worth,
-    names the rows of this table that drive it, as `[row: <id>]` or
-    `[rows: <id>, <id>]` (or, for what the scheduler does with an absence,
-    the drive that measures it: `[test: <file>::<function>]`); every row and
-    test it names exists. A sentence that makes such a claim and cites
-    nothing is not held down by any behaviour, so it fails here, however it
-    is worded."""
-    uncited, unknown = [], []
-    for where, sentence in _routing_statements():
-        if not _ROUTING_WORDS.search(sentence):
-            continue
-        cited = [r.strip() for m in _CITATION.finditer(sentence)
-                 for r in m.group(1).split(",") if r.strip()]
-        tests = _TEST_CITATION.findall(sentence)
-        if not cited and not tests:
-            uncited.append(f"{where}: {sentence[:200]}")
-        unknown += [f"{where}: {r}" for r in cited if r not in ROWS]
-        unknown += [f"{where}: {f}::{n}" for f, n in tests
-                    if not _test_exists(f, n)]
-    assert unknown == [], unknown
-    assert uncited == [], "\n".join(uncited)
+def render_routing_table(rows: dict | None = None) -> str:
+    """The routing table as the doc carries it, markers included."""
+    rows = ROWS if rows is None else rows
+    lines = [TABLE_BEGIN, "", _HEADER, "|---|---|---|---|---|---|---|"]
+    for row_id, row in rows.items():
+        lines.append(
+            f"| `{row_id}` | `{row.attribution}` | `{row.measured}` "
+            f"| `{str(row.absent).lower()}` | `{row.next}` "
+            f"| `{str(row.identity_error).lower()}` | {row.shape} |")
+    lines += ["", TABLE_END]
+    return "\n".join(lines) + "\n"
 
 
-_DOC_ROW = re.compile(r"^\| `([a-z0-9_]+)` \| `(\w+)` \| `(true|false)` \| "
-                      r"`(\w+)` \|")
+def _doc_table(text: str) -> str:
+    assert text.count(TABLE_BEGIN) == 1 and text.count(TABLE_END) == 1
+    begin = text.index(TABLE_BEGIN)
+    end = text.index(TABLE_END) + len(TABLE_END) + 1
+    return text[begin:end]
 
 
-def test_the_doc_routing_table_is_this_table():
-    """The doc's "Routing, row by row" table lists every row of `ROWS` with the
-    values the row asserts, and nothing else."""
-    doc_rows = {}
-    for line in _PROTOCOL.read_text(encoding="utf-8").splitlines():
-        m = _DOC_ROW.match(line)
-        if m:
-            doc_rows[m.group(1)] = (m.group(2), m.group(3) == "true", m.group(4))
-    assert doc_rows == {row: spec[3] for row, spec in ROWS.items()}
+def test_the_doc_routing_table_is_rendered_from_rows():
+    """The doc's routing table, between its two markers, is byte for byte
+    what `render_routing_table` makes of `ROWS`."""
+    assert all("|" not in row.shape and "\n" not in row.shape
+               for row in ROWS.values())
+    doc = _PROTOCOL.read_bytes().decode("utf-8")
+    assert _doc_table(doc).encode("utf-8") == render_routing_table().encode("utf-8")
+
+
+def write_routing_table() -> None:
+    doc = _PROTOCOL.read_text(encoding="utf-8")
+    old = _doc_table(doc)
+    _PROTOCOL.write_text(doc.replace(old, render_routing_table()),
+                         encoding="utf-8")
+
+
+if __name__ == "__main__":
+    write_routing_table()
+    sys.exit(0)

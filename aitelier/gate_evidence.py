@@ -16,6 +16,9 @@ _PENDING_STATUSES = {"pending", "queued", "running", "in_progress", "in-progress
 _INFRA_STATUSES = {"infrastructure_unavailable", "infrastructure-unavailable",
                    "infra_unavailable", "runner_unavailable"}
 _KNOWN_FAILURE_STATES = {"failed", "known_failure"}
+# A red whose report could not be attributed to the gate run (run_tests
+# `repo_gate.report_attribution`): not a confirmed product failure.
+_UNATTRIBUTABLE_STATUSES = {"unattributable"}
 # `passed_relative: true` is a CLAIM that the failures were already in the repo.
 # It is only readable beside a `baseline_state` that says a baseline was
 # actually taken or read — see `run_tests.impl.BASELINE_MEASURED`. Any other
@@ -126,6 +129,8 @@ def report_state(report: dict) -> str:
         return "infrastructure_unavailable"
     if report.get("blind") is True or report.get("blind_builder") is True:
         return "blind"
+    if status in _UNATTRIBUTABLE_STATUSES:
+        return "unattributable"
     markers = [name for name in _SKIP_MARKERS if report.get(name)]
     unrun = (report.get("unrun") is True or report.get("ran") is False
              or report.get("executed") is False or status in _UNRUN_STATUSES)

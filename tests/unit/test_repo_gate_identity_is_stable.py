@@ -83,7 +83,8 @@ def _ticket(root, report, findings, *, raw_report=None):
 
 def _ids(root, report, findings, **kw):
     cases, error = rt._report_dir_failure_cases(
-        _ticket(root, report, findings, **kw), REPO)
+        _ticket(root, report, findings, **kw), REPO,
+        {"name": "wuxia-godot-gate-x", "is_dir": True})
     assert error is None, error
     assert len(cases) == len(findings)
     return [c["case_id"] for c in cases]

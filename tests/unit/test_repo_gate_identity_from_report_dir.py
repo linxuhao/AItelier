@@ -79,6 +79,9 @@ def test_the_identities_do_not_depend_on_the_retained_tail(rig, tmp_path, monkey
 
 
 REPO = Path("/work/repo")
+# The first entry the gate run created under its ticket, as `_run_repo_gate`
+# observes it: the gate's own report directory.
+FIRST = {"name": "wuxia-godot-gate-x", "is_dir": True}
 
 
 def _ticket(tmp_path, manifest, files):
@@ -101,7 +104,7 @@ def test_a_stage_report_without_findings_contributes_its_errors(tmp_path):
         "compile.json": {"passed": False, "errors": [
             {"file": "res://a.gd", "line": 3, "msg": "Parse Error"},
             {"file": "res://b.gd", "line": 9, "msg": "Identifier not declared"}]}})
-    cases, error = rt._report_dir_failure_cases(ticket, REPO)
+    cases, error = rt._report_dir_failure_cases(ticket, REPO, FIRST)
     assert error is None
     assert [c["detail"] for c in cases] == ["res://a.gd:3: Parse Error",
                                            "res://b.gd:9: Identifier not declared"]
@@ -112,7 +115,7 @@ def test_a_red_gate_whose_report_names_nothing_is_an_identity_error(tmp_path):
     """Never a pass-on-absence: a red gate with an empty report is unreadable."""
     ticket = _ticket(tmp_path, {"stages": {"python": {"report": "python.json"}}},
                      {"python.json": {"returncode": 1}, "python-findings.json": []})
-    cases, error = rt._report_dir_failure_cases(ticket, REPO)
+    cases, error = rt._report_dir_failure_cases(ticket, REPO, FIRST)
     assert cases == [] and error
 
 
@@ -130,10 +133,10 @@ def test_reports_the_repositorys_own_tests_retained_are_not_the_gates(tmp_path):
         (foreign / "manifest.json").write_text(json.dumps(
             {"repo": "/repo", "stages": {"script": {"report": "script.json"}}}))
         (foreign / "script-findings.json").write_text(json.dumps(["foreign red"]))
-    cases, error = rt._report_dir_failure_cases(ticket, REPO)
+    cases, error = rt._report_dir_failure_cases(ticket, REPO, FIRST)
     assert error is None
     assert [c["detail"] for c in cases] == ["the python suite exited 1"]
-    assert rt._report_dir_failure_cases(ticket, Path("/elsewhere")) is None
+    assert rt._report_dir_failure_cases(ticket, Path("/elsewhere"), FIRST) is None
 
 
 def test_two_reports_for_one_repository_are_an_identity_error(tmp_path):
@@ -141,7 +144,7 @@ def test_two_reports_for_one_repository_are_an_identity_error(tmp_path):
     second = ticket / "another"
     second.mkdir()
     (second / "manifest.json").write_text(json.dumps({"repo": str(REPO)}))
-    cases, error = rt._report_dir_failure_cases(ticket, REPO)
+    cases, error = rt._report_dir_failure_cases(ticket, REPO, FIRST)
     assert cases == [] and "2 reports" in error
 
 

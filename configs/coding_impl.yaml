@@ -49,6 +49,9 @@ end_conditions:
     - type: node_reached
       node: "test_evidence_missing"
       result: "failed"
+    - type: node_reached
+      node: "test_gate_report_unattributable"
+      result: "failed"
 
 steps:
   - id: "implement"
@@ -169,6 +172,11 @@ steps:
       # cycle is charged for it. The scheduler bounds how long that may last
       # and, past the ceiling, ends the run NAMING the absence
       # (core/gate_deferral.py).
+      # Reds under the gate's ticket, and no report there is provably the
+      # gate's (`run_tests` sets `repo_gate_unattributable`): the run ends on
+      # its own terminal instead of charging the implementer or waiting.
+      - to: "test_gate_report_unattributable"
+        match: { field: "repo_gate_unattributable", value: true }
       - to: "test_gate_absent"
         match: { field: "repo_gate_absent", value: true }
       - to: "test_evidence"
@@ -228,6 +236,15 @@ steps:
         max_loop: 3
 
   - id: "test_evidence_missing"
+    step_type: "gate"
+    transitions:
+      - to: null
+
+  # Terminal: the repository gate's ticket held reds and its own report
+  # could not be identified among them (see `run_tests`,
+  # `repo_gate.report_attribution`). The reds and where each was read are in
+  # `test_report.json`.
+  - id: "test_gate_report_unattributable"
     step_type: "gate"
     transitions:
       - to: null

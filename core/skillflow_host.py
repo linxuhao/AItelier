@@ -502,7 +502,7 @@ class AItelierSkillFlow(SkillFlow):
         # routes the absence back into the implement loop. Deleting this check
         # reintroduces exactly that, so it is guarded by its own test.
         from core import gate_deferral
-        if gate_deferral.hold_blocks_advance(run_id):
+        if gate_deferral.hold_blocks_advance(run_id, sf=self):
             return None
         return super().advance_run(run_id)
 

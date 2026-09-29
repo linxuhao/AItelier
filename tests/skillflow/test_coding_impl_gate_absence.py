@@ -144,8 +144,9 @@ def _drive(sf, run_id, monkeypatch, *, ticks, clock_step, second_driver=True):
       executed, by either driver;
     * `statuses` — the run's status before each tick, then its final status;
     * `outcomes` — what each tick decided, read off the tick's OWN `tick_log`
-      line: `silent` for `gate_deferral_hold`, `expired` followed by
-      `terminal:<reason>` for `gate_absence_terminal`, `none` otherwise;
+      line: `silent` for `gate_deferral_hold`, `reacquire` for
+      `gate_deferral_reacquire`, `expired` followed by `terminal:<reason>`
+      for `gate_absence_terminal`, `none` otherwise;
     * `nodes` — the run's `current_node` after each tick.
 
     What is replaced, and why each is not the hold:
@@ -220,6 +221,8 @@ def _drive(sf, run_id, monkeypatch, *, ticks, clock_step, second_driver=True):
             detail = dict(logged[before:])["gate_absence_terminal"]
             outcomes.append("expired")
             outcomes.append("terminal:" + str(detail.get("reason") or ""))
+        elif "gate_deferral_reacquire" in said:
+            outcomes.append("reacquire")
         else:
             outcomes.append("none")
         nodes.append(sf.get_run(run_id).get("current_node"))
@@ -481,7 +484,9 @@ def test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them(
     own. With both holds in series, a break in one is covered by the other; so
     here the host's `hold_blocks_advance` answers False (the host hold is out)
     and the tick is the only driver. The tick's own `silent` return must then
-    keep the run parked at `test_gate_absent` with the rows untouched.
+    keep the run parked at `test_gate_absent` with the rows untouched, and
+    each wait that runs out (`reacquire`) must re-run the gate step exactly
+    once — one gate call per re-acquisition, never an implement cycle.
     """
     counter = tmp_path / "calls.txt"
     sf, run_id = _wire(tmp_path, monkeypatch, episode_max=100000, wait=1,
@@ -493,7 +498,11 @@ def test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them(
     _assert_test_row_untouched(sf, run_id)
     assert implement_runs == 1, implement_runs
     assert statuses[-1] == "running", statuses
-    assert outcomes.count("silent") >= 10, outcomes
+    first = outcomes.index("silent")
+    assert set(outcomes[first:]) == {"silent", "reacquire"}, outcomes
+    assert outcomes.count("silent") >= 8, outcomes
+    assert _gate_calls(counter) == 1 + outcomes.count("reacquire"), (
+        _gate_calls(counter), outcomes)
 
 
 def test_the_host_hold_alone_keeps_the_rows_where_the_absence_left_them(
@@ -502,7 +511,9 @@ def test_the_host_hold_alone_keeps_the_rows_where_the_absence_left_them(
     The tick is handed a `none` answer, so its early return is out, while the
     REAL `observe_run` still records the episode in the ledger the host reads.
     Every tick then walks on into `advance_run`, and the host's refusal alone
-    must keep the run parked at `test_gate_absent` with the rows untouched.
+    must keep the run parked at `test_gate_absent` with the rows untouched
+    while the wait runs, and let it through only to re-run the gate step once
+    per wait that ran out (`due`).
     """
     counter = tmp_path / "calls.txt"
     sf, run_id = _wire(tmp_path, monkeypatch, episode_max=100000, wait=1,
@@ -520,4 +531,8 @@ def test_the_host_hold_alone_keeps_the_rows_where_the_absence_left_them(
     _assert_test_row_untouched(sf, run_id)
     assert implement_runs == 1, implement_runs
     assert statuses[-1] == "running", statuses
-    assert seen.count("silent") >= 10, seen
+    first = seen.index("silent")
+    assert set(seen[first:]) == {"silent", "due"}, seen
+    assert seen.count("silent") >= 8, seen
+    assert _gate_calls(counter) == 1 + seen[first:].count("due"), (
+        _gate_calls(counter), seen)

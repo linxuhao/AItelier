@@ -11,7 +11,7 @@ description: >
   `stateful` capability injects, under a per-repository subdirectory of it (one
   config runs against many repos). DECLARE `capability: stateful` on the step:
   without it no baseline is taken, `baseline_state` reports "unavailable" and
-  `passed_relative` can never be true — an unmeasured baseline is not an empty
+  `passed_relative` can never be true — a baseline nobody took is not an empty
   one, and a report that said otherwise released a red run past the hold. It is
   seeded on the first run that finds none, and afterwards only shrinks, and only
   for a key this run can PROVE it executed (pytest's junit record of the tests
@@ -20,9 +20,8 @@ description: >
   install/build/test checks) is present when the repo holds a node project and
   a failing check also flips `passed`. `repo_gate` is present when the repo
   ships an executable `run_tests.sh` at its root — that script IS the repo's
-  own declared gate (a Godot game's engine gate, say) and a failure flips
-  `passed` too. A failing repository gate can participate in known-red only by
-  emitting one complete line per failed case as
+  own declared gate (a Godot game's engine gate, say). A repository gate that
+  keeps no report can name its failed cases with one complete line each:
   `AITELIER_REPO_GATE_CASE={"case_id":"stable/id","status":"failed","detail":"..."}`.
   Missing, duplicate, malformed, ambiguous, or truncated case identities make
   `passed_relative` false and do not seed or change the baseline. pytest alone
@@ -38,38 +37,28 @@ description: >
   at all the gate records a distinct, non-passing infrastructure_unavailable
   outcome. Reports are artifacts, not source files; a code
   agent can read its report with read(source="self", path="test_report.json").
-  A gate that did NOT run opts in separately, with one whole line:
+  The repository gate's protocol: the gate is handed GATE_REPORT_DIR (a new,
+  empty ticket directory of its own), and the first thing it has to create
+  there is a directory holding its report — a
+  `manifest.json` naming the repository it ran for, a `<stage>.json` per
+  stage, a `<stage>-findings.json` list per judged stage. Failure identities
+  are read from that report, never from its stdout, and are built from report
+  fields that do not change between runs (a failing assertion is its
+  scenario, name and frame, never its observed value). A gate that knows it
+  did not run can say so with one whole line of output:
   `AITELIER_REPO_GATE_UNMEASURED={"state":"unmeasured|not_run|blocked","reason":"..."}`.
-  `state` must be one of those three; `failed` / `red` never qualify, so one
-  line cannot turn a red into an absence. UNMEASURED is DECLARED and never
-  inferred: no exit code produces it (the game repo's own gate uses 2 for
-  `incomplete`, which includes contract files the implementer wrote wrong —
-  "no authored scenarios found ... an empty one is not a pass" — and those are
-  MEASURED failures with a non-empty `failures[]`), and a timeout is the
-  harness's own observation of the absence. The declaration is read from the
-  gate's WHOLE output BEFORE the 2000-byte tail is retained, so it survives a
-  real gate's log.
-  A gate that produced NO VERDICT does not loop back to `implement`: its
-  absence is stated on the report, with
-  `repo_gate_unmeasured: true` and `repo_gate_absent: true` (plus
-  `repo_gate.measured: "unmeasured"` and `repo_gate.attempts`, the number of
-  runs the reading cost), and `configs/coding_impl.yaml` routes
-  `repo_gate_absent` to the loop-external `test_gate_absent` gate. The edge is
-  a FLAG match on this tool's own RETURN (`repo_gate_absent` is in the result
-  dict, which the engine merges into the step's flags), NOT a `from_file`
-  read: `from_file` resolves against the evaluating step's own output dir, so
-  on the `test_evidence` validator (which writes nothing) the reader raised
-  `FileNotFoundError` and the edge could never match, and moving it onto
-  `test` still crashes the resolver on a report that parses to a list.
-  Waiting for the gate and bounding how long a run
-  may spend absent is the SCHEDULER's job (`core/gate_deferral.py`), not this
-  step's: while an absence is live the run is not advanced and spends no
-  implement cycle, and past the episode's wall-clock ceiling the run ends with
-  `gate did not run: no verdict was measured` — never with a message that
-  blames the code. ONE step makes ONE gate run (`REPO_GATE_UNMEASURED_ATTEMPTS
-  = 1`): the re-acquisition that used to happen in-step held the scheduler for
-  3 x 5400 s + 2 x 60 s, so the waiting is the poller's instead. Only a
-  `measured_pass` licenses pruning that gate's known-red cases.
+  The engine is reached through an admission relay
+  (`aitelier/gate_admission.py`): the gate's `GODOT_BUILDER_URL` points at it,
+  it asks the harness render queue to hold the request for up to
+  `AITELIER_REPO_GATE_RENDER_WAIT_SECONDS` (default 1500) behind a live owner,
+  it keeps the gate's socket alive with interim `100 Continue` responses until
+  the harness admits the request, and it records what the engine said to every
+  request (`repo_gate.admission.state` names the fate of the last one).
+  `repo_gate.report_attribution` says whether the gate's report was identified
+  under the ticket (`own`) or not (`unattributable`, with `why`).
+  Where a report goes and what a repository gate run is worth: the routing
+  table in `docs/repo-gate-unmeasured-protocol.md`, rendered from `ROWS` in
+  `tests/unit/test_repo_gate_outcome_table.py`.
 parameters:
   project_root:
     type: string

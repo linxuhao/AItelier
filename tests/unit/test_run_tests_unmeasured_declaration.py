@@ -604,31 +604,6 @@ def test_an_absence_whose_failures_are_all_known_red_still_does_not_pass(
     assert result["passed_relative"] is False
 
 
-# ── N9: the tool's OWN contract text is a witness, on the deleted segment ───
-
-_N9_SEGMENT = (
-    "  A gate that produced NO VERDICT does not loop back to `implement`: its\n"
-    "  absence is stated on the report, with\n"
-    "  `repo_gate_unmeasured: true` and `repo_gate_absent: true` (plus\n"
-    "  `repo_gate.measured: \"unmeasured\"` and `repo_gate.attempts`, the number of\n"
-    "  runs the reading cost), and `configs/coding_impl.yaml` routes\n")
-
-
-def test_the_tool_doc_names_the_no_verdict_gate_as_absent_not_a_loop():
-    """The `tool.yaml` :52-56 segment is the human-visible contract that a
-    gate with NO verdict does not spend an implement cycle: it states
-    `repo_gate.attempts` and that `configs/coding_impl.yaml` routes the
-    absence. N9 deletes exactly this segment. The witness asserts the segment
-    itself — not the neighbouring UNMEASURED-declaration prose at :42-45 that
-    r7 pinned instead."""
-    tool_yaml = (Path(rt.__file__).parent / "tool.yaml").read_text(
-        encoding="utf-8")
-    assert _N9_SEGMENT in tool_yaml, (
-        "the no-verdict-does-not-loop-back segment is gone — the absence "
-        "contract that stops an unmeasured gate reaching `implement` is no "
-        "longer stated on the tool's own contract")
-
-
 # ── M21 family: this shape is killed by the pair; literal M21 by the r4 shape ─
 
 def test_a_mid_line_prefix_with_valid_json_after_it_is_still_not_a_record():

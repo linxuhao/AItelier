@@ -398,9 +398,18 @@ def test_reference_mode_is_accepted_and_scope_checked_by_the_host(
     cite = _cite(sf, rid, claim, "allowed/mine.py")
     assert cite["citable"] is True and cite["start_line"] == 1
 
+    reference = {"file": "allowed/mine.py", "sha": cite["sha"],
+                 "from_line": 1, "from_col": 8, "to_line": 1,
+                 "to_col": 9, "new_text": "41"}
+    preview = e._exec_tool({"tool": "apply_patch", "params": {
+        "references": [reference]}})
+    assert preview.get("applied") is False, preview
+    assert (root / "allowed" / "mine.py").read_text() == "value = 1\nother = 2\n"
+    (span,) = preview["spans"]
+    assert span["text"] == "1"
+    assert span["keeps_before"] == "value = " and span["keeps_after"] == ""
     ok = e._exec_tool({"tool": "apply_patch", "params": {"references": [
-        {"file": "allowed/mine.py", "sha": cite["sha"], "from_line": 1,
-         "from_col": 8, "to_line": 1, "to_col": 9, "new_text": "41"}]}})
+        {**reference, "sha": span["sha"]}]}})
     assert ok.get("applied") is True, ok
     assert (root / "allowed" / "mine.py").read_text() == "value = 41\nother = 2\n"
 

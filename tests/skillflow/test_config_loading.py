@@ -112,6 +112,8 @@ class TestV2ConfigLoading:
             # report. tests/unit/test_tree_level_accounting_witnesses.py asserts
             # that same position against the config, so the two agree.
             ("test_evidence_missing", {"_error": True}),
+            ("test_gate_report_unattributable",
+             {"field": "repo_gate_unattributable", "value": True}),
             ("test_gate_absent", {"field": "repo_gate_absent", "value": True}),
             ("test_evidence", {"written": "test_report.json"}),
             ("test_evidence_missing", None),
@@ -148,8 +150,10 @@ class TestV2ConfigLoading:
         assert [(c.type, c.node, c.result) for c in conditions] == [
             ("node_reached", "done", "completed"),
             ("node_reached", "test_evidence_missing", "failed"),
+            ("node_reached", "test_gate_report_unattributable", "failed"),
         ]
-        for terminal in ("done", "test_evidence_missing"):
+        for terminal in ("done", "test_evidence_missing",
+                         "test_gate_report_unattributable"):
             node = next(s for s in graph.steps if s.id == terminal)
             assert node.step_type == "gate"
             assert [t.to for t in node.transitions] == [None]

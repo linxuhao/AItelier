@@ -39,7 +39,7 @@ end_conditions:
     # would then fire and complete the run as SUCCESS *before the retried test
     # even runs*, reporting green on unverified code (the exact failure we are
     # fixing). `done` is a gate (no completed step row), so `require_completed`
-    # is intentionally omitted.
+    # is omitted.
     # The never-passes loop is bounded by `max_loop: 3` on test_outcome → implement
     # below (enforced on tool-step edges since skillflow-py 1.5.2): once the edge
     # is exhausted the run fails with CycleLimitExceeded.
@@ -48,6 +48,9 @@ end_conditions:
       result: "completed"
     - type: node_reached
       node: "test_evidence_missing"
+      result: "failed"
+    - type: node_reached
+      node: "test_gate_report_unattributable"
       result: "failed"
 
 steps:
@@ -169,6 +172,11 @@ steps:
       # cycle is charged for it. The scheduler bounds how long that may last
       # and, past the ceiling, ends the run NAMING the absence
       # (core/gate_deferral.py).
+      # Reds under the gate's ticket, and no report there is provably the
+      # gate's (`run_tests` sets `repo_gate_unattributable`): the run ends on
+      # its own terminal instead of charging the implementer or waiting.
+      - to: "test_gate_report_unattributable"
+        match: { field: "repo_gate_unattributable", value: true }
       - to: "test_gate_absent"
         match: { field: "repo_gate_absent", value: true }
       - to: "test_evidence"
@@ -232,14 +240,33 @@ steps:
     transitions:
       - to: null
 
-  # Loop-EXTERNAL terminal-by-silence gate. Reached only by a `test` report
-  # that says the repository gate produced no verdict; it is deliberately NOT
-  # in `end_conditions`, so reaching it does not complete or fail the run — it
-  # parks a still-running run while the scheduler accounts for the absence.
-  - id: "test_gate_absent"
+  # Terminal: the repository gate's ticket held reds and its own report
+  # could not be identified among them (see `run_tests`,
+  # `repo_gate.report_attribution`). The reds and where each was read are in
+  # `test_report.json`.
+  - id: "test_gate_report_unattributable"
     step_type: "gate"
     transitions:
       - to: null
+
+  # Loop-EXTERNAL gate for a gate step that produced no verdict. Reached only
+  # by a `test` report that says the repository gate did not run; it is NOT in
+  # `end_conditions`, so reaching it neither completes nor fails the run — it
+  # parks a still-running run while the scheduler accounts for the absence.
+  # The scheduler holds the run here for one wait per silent report
+  # (core/gate_deferral.py); when the wait runs out the run advances, and the
+  # ONLY edge out re-runs `test` to re-acquire the verdict. `implement` is not
+  # reachable from here. The wall-clock ceiling of one episode ends the run
+  # naming the absence. This edge's max_loop counts traversals over the whole
+  # run, so it can be spent first (a wait shorter than ceiling/100, or laps
+  # from several episodes); the scheduler then ends the run with the same
+  # absence sentence before the engine refuses the traversal
+  # (core/gate_deferral.py:absence_laps_spent).
+  - id: "test_gate_absent"
+    step_type: "gate"
+    transitions:
+      - to: "test"
+        max_loop: 100
 
   # Terminal no-op gate: reached only after the tests pass. Its sole purpose is
   # to be the loop-external node the end-condition fires on (see end_conditions).

@@ -171,21 +171,55 @@ def test_M21b_the_tree_witness_goes_red_on_the_actual_mutation():
 def test_N9_the_protocol_text_has_a_reader():
     """N9 deleted five lines of contract text from tool.yaml and the whole
     suite stayed green, which means nothing read them. This is the reader for
-    the two things the text has to keep saying: an absence is DECLARED and
-    never inferred, and a gate that produced no verdict may not be charged to
-    the implementer.
+    the things the protocol has to keep saying: unmeasured has exactly three
+    sources, an exit code is never one of them by itself, a retained finding
+    overrides all three, an unmeasured gate is an absence only when nothing
+    else failed, and a gate that produced no verdict may not be charged to the
+    implementer. The sentence r2 carried ("DECLARED and never inferred") was
+    false beside the third source, and may not come back.
 
-    The witness reads the file N9 ACTUALLY deletes: tool.yaml, not docs/.
+    Since rev 5 the routing lives in one place, the doc's routing table,
+    rendered from `ROWS` (`test_repo_gate_outcome_table.py`), and tool.yaml
+    points at it. So the routing half is read off that table: deleting the
+    table, or a row that carries one of these properties, fires here. The
+    declaration line and the pointer are read off tool.yaml. Both files are
+    read with their line breaks folded to single spaces.
     """
-    text = _source(_TOOL_YAML)
+    raw = _source(_TOOL_YAML)
+    text = " ".join(raw.split())
     assert "AITELIER_REPO_GATE_UNMEASURED=" in text, (
         "N9: the declaration line the protocol is built on is gone from tool.yaml")
-    assert "no exit code" in text.lower(), (
-        "N9: tool.yaml no longer says UNMEASURED is never an exit code")
-    assert "DECLARED and never" in text, (
-        "N9: tool.yaml no longer declares unmeasured is never inferred")
-    # Also pin the protocol doc so a deletion from either file fires.
-    doc = _source(_PROTOCOL)
+    assert ("the routing table in `docs/repo-gate-unmeasured-protocol.md`, "
+            "rendered from `ROWS` in `tests/unit/test_repo_gate_outcome_table.py`"
+            ) in text, "N9: tool.yaml no longer points at the routing table"
+    assert "DECLARED and never" not in text and "never inferred" not in text.lower(), (
+        "N9: tool.yaml says UNMEASURED is never inferred, beside a source "
+        "that infers it")
+    table = {}
+    for line in _source(_PROTOCOL).splitlines():
+        cells = [c.strip().strip("`") for c in line.strip().strip("|").split("|")]
+        if line.startswith("| `") and len(cells) == 7:
+            table[cells[0]] = tuple(cells[1:6])
+    want = {
+        # the three sources of `unmeasured`
+        "declared_absence": ("own", "unmeasured", "true", "test_gate_absent", "false"),
+        "gate_killed_at_its_timeout": ("own", "unmeasured", "true", "test_gate_absent", "false"),
+        "clean_refusal": ("own", "unmeasured", "true", "test_gate_absent", "false"),
+        # an exit code is never a source by itself
+        "exit_1_after_a_refusal": ("own", "measured_fail", "false", "implement", "true"),
+        "exit_2_after_an_answered_request": ("own", "measured_fail", "false", "implement", "true"),
+        # a retained finding overrides all three
+        "python_red_then_refused": ("own", "measured_fail", "false", "implement", "false"),
+        # an absence only when nothing else failed
+        "pytest_red_beside_refused_gate": ("own", "unmeasured", "false", "implement", "false"),
+    }
+    missing = {row: (table.get(row), cells) for row, cells in want.items()
+               if table.get(row) != cells}
+    assert missing == {}, f"N9: the doc's routing table no longer says: {missing}"
+    doc = " ".join(_source(_PROTOCOL).split())
+    assert "never inferred" not in doc.lower(), (
+        "N9: the doc says unmeasured is never inferred, beside a source that "
+        "infers it")
     assert "gate did not run: no verdict was measured" in doc, (
         "N9: the sentence an expired absence ends with is gone")
     assert "never be charged to the implementer" in doc, (

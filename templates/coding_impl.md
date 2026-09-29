@@ -44,13 +44,18 @@ unchanged full gate. If a required runtime probe reports unavailable or times
 out, report that limitation rather than calling it a pass.
 
 ## Writing code with `apply_patch(patch, references)`
-To edit an existing file, cite it instead of copying it. Every `read` returns a
-`citation` for the window it served; pass its `sha` with the range you are
-replacing and only the new text — `{"file", "sha", "from_line", "from_col",
-"to_line", "to_col", "new_text"}` — in `references`. Lines are 1-based inside
-that window, columns 0-based, `to_col` exclusive; `(L,0)..(M,len(line M))`
-replaces whole lines. Any order: one snapshot, engine-applied, non-overlapping.
-Changing one word cites one line.
+To edit an existing file, cite it instead of copying it. A citable `read`
+returns a `citation`; send `{file, sha, new_text}` in `references` to replace
+exactly that window. To narrow it, use the absolute 1-based file line numbers
+the read printed: `from_line` and `to_line`, with no columns for whole lines.
+The read pagination input is 0-based; citation lines are 1-based file lines.
+For a cut inside a line, supply 0-based character columns (`to_col` exclusive).
+The first call writes nothing and returns `spans` showing the covered text and
+what remains. Check it, then resend with the span sha; correct unwanted
+columns before writing. Ranges in a batch share one snapshot and cannot overlap.
+A point inserts; a multiline column-0 insertion into a nonempty line must end
+with a newline. Inspect the disk-read `echo` after an applied edit: it shows
+absolute resulting file lines and is also kept in the run trace.
 
 Use `patch` for Add/Delete File operations and diff-shaped edits: bare `@@`
 headers, exact unique context against the ORIGINAL file for that call, ranges
@@ -58,10 +63,12 @@ read with `raw=true` so line-number prefixes never enter patch context. Add
 refuses existing paths; Delete takes no body. Later calls see prior uncommitted
 changes. Do not send whole-file shortcuts.
 
-All operations are checked before publication. A stale or ambiguous hunk, or a
-cited window whose text has changed, leaves the batch unchanged; the remedy is
-to reread that range and cite its new `sha`, never to retype the original or
-widen the copied context. On an I/O failure with `partial`, inspect `written`/`deleted`
+All operations are checked before publication. A stale or ambiguous hunk, an
+unissued sha, or a cited range the journal cannot safely translate leaves the
+batch unchanged; reread that range and cite its new sha. This run own edits
+elsewhere may translate a citation;
+content changes outside its history refuse a framed citation and require a reread. After
+refusal, reread and cite the new sha. On an I/O failure with `partial`, inspect `written`/`deleted`
 and reread affected paths before repairing the remainder; never replay the batch.
 An applied patch changes the uncommitted worktree, but is not validation or review.
 At `finish_step` the engine validates the candidate, commits only this step's

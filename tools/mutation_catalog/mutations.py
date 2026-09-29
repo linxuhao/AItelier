@@ -514,7 +514,7 @@ MUTATIONS = {
                      "`Cycle limit exceeded`.",
         "edits": [{
             "file": GD,
-            "anchor": "        return f\"{ABSENCE_TERMINAL} ({gate}, {self.episode_count(run_id)} attempt(s))\"\n",
+            "anchor": "        return f\"{ABSENCE_TERMINAL} ({gate}, {runs} gate run(s))\"\n",
             "replacement": "        return (\"Cycle limit exceeded: the code \"\n                \"regressed and gate did not run: no verdict was measured\")\n",
         }],
         "targeted": [EXEC_POINTS, ACCOUNTED],

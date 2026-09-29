@@ -105,8 +105,19 @@ def digest(identity):
 
 
 def load_for_agent(step, sf):
-    """Read only this run's declared seed basenames, before agent/tool setup."""
-    identity = step.run_context.get("_review_input_bundle")
+    return _load(sf, step.token.run_id, step.run_context, step.step_id, "agent")
+
+
+def guard_run_inputs(sf, run_id, phase):
+    """Fence host claim/advance before framework context or inline tools."""
+    run = sf.get_run(run_id)
+    if run is not None:
+        _load(sf, run_id, json.loads(run["context_json"]), "", phase)
+
+
+def _load(sf, run_id, run_context, step_id, phase):
+    """Read only this run's declared seed basenames, before any tools."""
+    identity = run_context.get("_review_input_bundle")
     if identity is None:
         return {}
     # Identity originated in preflight; reconstruct its strict shape before
@@ -114,8 +125,8 @@ def load_for_agent(step, sf):
     args = {"producer": identity.get("producer"), "items": [
         dict(item, content_base64=None) for item in identity.get("items", [])]}
     manifest(args)
-    project_id = step.run_context["project_id"]
-    config_name = step.run_context["_review_input_config"]
+    project_id = run_context["project_id"]
+    config_name = run_context["_review_input_config"]
     if any(not isinstance(v, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", v)
            or v in {".", ".."} for v in (project_id, config_name)):
         raise StateConflict("review input location has an invalid project or config identity")
@@ -132,11 +143,11 @@ def load_for_agent(step, sf):
             observed["error"] = str(exc)
         actual["items"].append(observed)
     report = {"required": identity, "actual": actual, "passed": actual == identity,
-              "manifest_sha256": digest(identity)}
-    sf.trace(step.token.run_id, "step", "review_inputs_admitted" if report["passed"] else "review_inputs_refused",
-             report, step_id=step.step_id, project_id=step.run_context["project_id"])
+              "manifest_sha256": digest(identity), "phase": phase}
+    event = ("review_inputs_admitted" if phase == "agent" else "review_inputs_checked") if report["passed"] else "review_inputs_refused"
+    sf.trace(run_id, "step", event, report, step_id=step_id, project_id=run_context["project_id"])
     if not report["passed"]:
-        exc = StateConflict("required review input refused before agent execution")
+        exc = StateConflict("required review input refused before agent or framework execution")
         exc.report = report
         raise exc
     return context

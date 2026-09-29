@@ -493,6 +493,8 @@ class AItelierSkillFlow(SkillFlow):
         return True
 
     def advance_run(self, run_id: str):
+        from core.review_input_bundle import guard_run_inputs
+        guard_run_inputs(self, run_id, "advance")
         if self._operation_blocks_reentry(run_id, "advance_before_reclaim"):
             return None
         # The other execution point for the same rule. `core/scheduler.py`'s
@@ -507,6 +509,8 @@ class AItelierSkillFlow(SkillFlow):
         return super().advance_run(run_id)
 
     def claim_next_step(self, run_id: str):
+        from core.review_input_bundle import guard_run_inputs
+        guard_run_inputs(self, run_id, "claim")
         if self._operation_blocks_reentry(run_id, "claim_before_admission"):
             return None
         return super().claim_next_step(run_id)

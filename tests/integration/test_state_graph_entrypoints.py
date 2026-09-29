@@ -31,7 +31,7 @@ def spec(name, deps=None):
 
 
 @pytest.fixture
-def live(tmp_path, monkeypatch):
+def live(tmp_path, monkeypatch, request):
     import api.dependencies as deps
     import core.scheduler as scheduler
     from api import state_graph_routers as routes
@@ -49,7 +49,9 @@ def live(tmp_path, monkeypatch):
         "GIT_AUTHOR_EMAIL": "test@localhost", "GIT_COMMITTER_EMAIL": "test@localhost"})
     db = DBManager(str(tmp_path / "state.sqlite"))
     ws = WorkspaceManager(str(tmp_path / "ws"), str(tmp_path / "projects"))
-    sf = SkillFlow(str(tmp_path / "skillflow.sqlite"), workspace_base=str(tmp_path / "ws"),
+    from core.skillflow_host import AItelierSkillFlow
+    runtime = AItelierSkillFlow if getattr(request, "param", None) == "host" else SkillFlow
+    sf = runtime(str(tmp_path / "skillflow.sqlite"), workspace_base=str(tmp_path / "ws"),
                    projects_base=str(tmp_path / "projects"))
     registry = ConfigRegistry()
     for name, mode in [("state_fixture", "none"), ("state_code_fixture", "code")]:
@@ -1366,6 +1368,7 @@ def _review_bundle(project_id="game"):
     return _required("review-inputs", "review_input_bundle", manifest(arguments), **arguments), contents
 
 
+@pytest.mark.parametrize("live", ["host"], indirect=True)
 @pytest.mark.parametrize("workflow", ["state_fixture", "investigate"])
 async def test_review_bundle_survives_deleted_producer_before_first_agent_call(live, monkeypatch, workflow):
     import shutil
@@ -1553,3 +1556,33 @@ def test_bounded_review_inputs_reach_prompt_without_line_clipping():
     text = "x\n" * (MAX_CONTEXT_LINES + 1)
     assert len(text.encode()) < 16384
     assert PromptAssembler._clip_context_entry("[review input prose.md] sha256=" + "1" * 64, text) == text
+
+
+@pytest.mark.parametrize("live", ["host"], indirect=True)
+@pytest.mark.parametrize("entrypoint", ["advance_run", "claim_next_step"])
+@pytest.mark.parametrize("failure", ["missing", "unreadable", "wrong-hash"])
+def test_review_host_admission_refuses_before_framework_claim_or_cost_tools(live, monkeypatch, entrypoint, failure):
+    from core.seed_publication import seed_dir
+    from core.review_input_bundle import PREFIX
+    check, _ = _review_bundle()
+    attempt = live.service.start_attempt("game", "a", 1, "state_fixture", "host-" + entrypoint + failure,
+        frozen_prerequisites=_frozen(check))
+    path = seed_dir(live.sf, attempt["execution_project_id"], attempt["workflow"]) / (PREFIX + "prose.md")
+    if failure == "missing":
+        path.unlink()
+    elif failure == "unreadable":
+        path.unlink()
+        path.mkdir()
+    else:
+        path.chmod(0o644)
+        path.write_text("wrong bytes\n")
+        path.chmod(0o444)
+    calls = []
+    monkeypatch.setattr(SkillFlow, entrypoint, lambda *a, **k: calls.append(1))
+    with pytest.raises(StateConflict, match="before agent or framework") as refusal:
+        getattr(live.sf, entrypoint)(attempt["run_id"])
+    assert not calls, "framework context resolution or inline cost tools ran before refusal"
+    report = refusal.value.report
+    assert report["passed"] is False and report["required"] == check["expected"]
+    assert report["actual"]["items"][0]["sha256"] != check["expected"]["items"][0]["sha256"]
+    assert report["phase"] == ("advance" if entrypoint == "advance_run" else "claim")

@@ -267,6 +267,8 @@ def test_the_host_refuses_to_advance_before_reaching_the_framework(
                         lambda self, run_id, trigger: False)
 
     host = AItelierSkillFlow.__new__(AItelierSkillFlow)
+    # This isolated deferral fence has no persisted run or review-input bundle.
+    monkeypatch.setattr(host, "get_run", lambda run_id: None)
     ledger = gd.DeferralLedger()
     monkeypatch.setattr(gd, "LEDGER", ledger)
 

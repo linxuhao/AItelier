@@ -164,7 +164,7 @@ class StateAttempts:
 
     def _reserve(self, project_id, node_key, expected_revision, workflow, request_key, instruction, *,
                  external=None, continue_from=None, relay_digest=None,
-                 frozen_prerequisites=None, base_sha=None, relay_handoff=None):
+                 frozen_prerequisites=None, base_sha=None, relay_handoff=None, preflight=None):
         """Common atomic ownership/pin guard for every execution adapter."""
         key(request_key, "request key")
         integer(expected_revision, "expected_revision", 1)
@@ -233,6 +233,18 @@ class StateAttempts:
             if design is not None:
                 ctx["design_context"] = design
                 ctx["binding_snapshot_hash"] = digest(design)
+            if preflight is not None:
+                # Validate the same uniqueness guards before importing any
+                # artifact. The write transaction closes the validation race.
+                if conn.execute("SELECT 1 FROM state_attempts WHERE project_id=? AND node_key=? "
+                    "AND status IN ('reserved','launching','running','paused','unknown') LIMIT 1",
+                    (project_id, node_key)).fetchone():
+                    raise StateConflict("node has an active attempt")
+                if external and conn.execute("SELECT 1 FROM state_attempts WHERE project_id=? AND node_key=? "
+                    "AND harness=? AND external_id=? LIMIT 1",
+                    (project_id, node_key, external["harness"], external["external_id"])).fetchone():
+                    raise StateConflict("external execution identity was already registered")
+                preflight()
             uid = uuid.uuid4().hex
             aid = "attempt-" + uid
             execution = None if external else "sg-" + uid

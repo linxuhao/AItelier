@@ -84,18 +84,22 @@ out.write_text(json.dumps(payload,sort_keys=True,indent=2)+'\\n')
     return target, sha(target)
 
 
-def adjudicate(state, node, candidate, report, report_sha):
+def adjudicate(state, node, candidate, report, report_sha, repo):
     attempts = StateAttempts(StateGraphStore(state, project_read_trusted=True))
     external = ExternalAttempts(attempts, "fixture-controller")
     attempt = external.register("delivery", node, 1, "product-cycle",
                                 f"worker-{node}", f"request-{node}")
     worker_report = report.with_name(f"{node}-candidate.json")
+    bundle = report.with_name(f"{node}-candidate.bundle")
+    assert git(repo, "rev-parse", "HEAD") == candidate
+    git(repo, "bundle", "create", str(bundle), "HEAD")
     # The terminal envelope a real external harness writes: an explicit
     # terminal status, the settled/usable declaration State requires before it
     # retains the bytes, and the artifact the observation is about.
     worker_report.write_text(json.dumps({
         "status": "candidate", "settled": True, "usable": True,
-        "artifact": candidate, "producer": f"worker-{node}"}) + "\n")
+        "artifact": candidate, "producer": f"worker-{node}",
+        "git_bundle": {"path": str(bundle), "sha256": sha(bundle)}}) + "\n")
     observed = external.observe(
         attempt["attempt_id"], f"candidate-{node}", 0, attempt["context_hash"],
         "candidate", str(worker_report), sha(worker_report), quiescent=True,
@@ -363,7 +367,7 @@ async def test_real_product_delivery_cycle(tmp_path, monkeypatch):
     ])
     report_a, report_a_sha = independent_report(
         reports, "a-independent", a, test_a_log)
-    receipt_a = adjudicate(state, "a", candidate_a, report_a, report_a_sha)
+    receipt_a = adjudicate(state, "a", candidate_a, report_a, report_a_sha, a)
     assert receipt_a["artifact_ref"] == candidate_a
     git(source, "merge", "--ff-only", candidate_a)
     assert git(source, "rev-parse", "HEAD") == candidate_a
@@ -424,7 +428,7 @@ async def test_real_product_delivery_cycle(tmp_path, monkeypatch):
     candidate_b = git(b, "rev-parse", "HEAD")
     report_b, report_b_sha = independent_report(
         reports, "b-independent", b, test_b_log)
-    receipt_b = adjudicate(state, "b", candidate_b, report_b, report_b_sha)
+    receipt_b = adjudicate(state, "b", candidate_b, report_b, report_b_sha, b)
     assert receipt_b["artifact_ref"] == candidate_b
     git(source, "merge", "--ff-only", candidate_b)
     assert git(source, "rev-parse", "HEAD") == candidate_b

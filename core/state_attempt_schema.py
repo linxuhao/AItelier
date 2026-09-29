@@ -33,6 +33,17 @@ CREATE TABLE {name} (
 """
 
 EXTRA_SCHEMA = """
+CREATE TABLE IF NOT EXISTS state_git_artifacts (
+    commit_sha TEXT PRIMARY KEY, tree_sha TEXT NOT NULL,
+    bundle_sha256 TEXT NOT NULL, retained_ref TEXT NOT NULL,
+    bundle_bytes BLOB NOT NULL, created_at TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS state_git_artifacts_no_update
+BEFORE UPDATE ON state_git_artifacts
+BEGIN SELECT RAISE(ABORT,'recoverable Git artifacts are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS state_git_artifacts_no_delete
+BEFORE DELETE ON state_git_artifacts
+BEGIN SELECT RAISE(ABORT,'recoverable Git artifacts are retained'); END;
 CREATE UNIQUE INDEX IF NOT EXISTS state_attempt_external_identity
 ON state_attempts(project_id,node_key,harness,external_id) WHERE execution_kind='external';
 CREATE TRIGGER IF NOT EXISTS state_attempt_executor_immutable

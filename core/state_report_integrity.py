@@ -15,7 +15,7 @@ from core import datadir
 from core.state_graph import StateConflict
 
 
-def _read_regular_nofollow(path: Path) -> bytes:
+def _read_regular_nofollow(path: Path, *, max_bytes: int | None = None) -> bytes:
     """Read one stable regular-file object without following its final name."""
     try:
         parent = path.parent.resolve(strict=True)
@@ -34,11 +34,17 @@ def _read_regular_nofollow(path: Path) -> bytes:
             before = os.fstat(fd)
             if not stat.S_ISREG(before.st_mode):
                 raise StateConflict("local report must be a regular file")
+            if max_bytes is not None and before.st_size > max_bytes:
+                raise StateConflict("local artifact exceeds size limit")
             chunks = []
+            size = 0
             while True:
                 chunk = os.read(fd, 1024 * 1024)
                 if not chunk:
                     break
+                size += len(chunk)
+                if max_bytes is not None and size > max_bytes:
+                    raise StateConflict("local artifact exceeds size limit")
                 chunks.append(chunk)
             after = os.fstat(fd)
             if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
@@ -222,7 +228,8 @@ def _unlink_entry(directory: int, name: str,
             raise StateConflict("persistent report cleanup could not be durably synced") from exc
 
 
-def retain_report(report_ref: str, report_sha256: str, *, completed: bool) -> tuple[str, bytes]:
+def retain_report(report_ref: str, report_sha256: str, *, completed: bool,
+                  max_bytes: int | None = None) -> tuple[str, bytes]:
     parsed = urlparse(report_ref)
     if parsed.scheme:
         if parsed.scheme != "file" or parsed.netloc not in {"", "localhost"}:
@@ -233,7 +240,7 @@ def retain_report(report_ref: str, report_sha256: str, *, completed: bool) -> tu
         report_path = Path(report_ref)
     if not report_path.is_absolute():
         raise StateConflict("report must use an absolute locally inspectable path")
-    report_bytes = _read_regular_nofollow(report_path)
+    report_bytes = _read_regular_nofollow(report_path, max_bytes=max_bytes)
     if not report_bytes:
         raise StateConflict("local report is empty/interrupted and cannot become evidence")
     if hashlib.sha256(report_bytes).hexdigest() != report_sha256:

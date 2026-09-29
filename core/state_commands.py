@@ -353,6 +353,7 @@ class StartExternalAttempt(Node):
     external_id: str
     request_key: str
     instruction: str = ""
+    base_sha: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
 
 
 class DispositionFailedAttempt(Attempt):

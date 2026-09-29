@@ -219,10 +219,48 @@ class StateService:
         return out
 
     def start_external_attempt(self, project_id, node_key, expected_revision, harness, external_id,
-                               request_key, instruction=""):
+                               request_key, instruction="", base_sha=None):
         """Register external execution scope; never compose or dispatch a workflow."""
-        return self.external.register(project_id, node_key, expected_revision, harness, external_id,
-                                      request_key, instruction)
+        preflight_failure = []
+        def preflight():
+            try:
+                self._materialize_external_base(project_id, node_key, base_sha, record_failure=False)
+            except StateConflict as exc:
+                preflight_failure.append(str(exc))
+                raise
+        try:
+            return self.external.register(project_id, node_key, expected_revision, harness, external_id,
+                request_key, instruction, base_sha=base_sha, preflight=preflight if base_sha else None)
+        except StateConflict:
+            if preflight_failure:
+                self._record_artifact_refusal(project_id, node_key, base_sha, preflight_failure[0])
+            raise
+
+    def _record_artifact_refusal(self, project_id, node_key, base_sha, actual):
+        with self.store.transaction(write=True) as conn:
+            self.store._node(conn, project_id, node_key)
+            self.store._event(conn, project_id, node_key, "artifact_preflight_failed",
+                {"expected": base_sha, "actual": actual, "passed": False})
+
+    def _materialize_external_base(self, project_id, node_key, base_sha, *, record_failure=True,
+                                   candidate_only=False):
+        """Refuse an unavailable exact candidate before ownership or launch writes."""
+        from core.state_git_artifacts import materialize_candidate
+        from core.run_isolation import validate_base_sha
+        validate_base_sha(base_sha)
+        try:
+            source = self._source(project_id)
+            identity = materialize_candidate(self.store, base_sha, source)
+            if identity is None and not candidate_only:
+                actual = self._git(source, "rev-parse", "--verify", base_sha + "^{commit}") if source else None
+                if actual != base_sha:
+                    raise StateConflict(f"expected Git artifact {base_sha}; actual {actual}")
+            return identity
+        except StateConflict as exc:
+            exc.artifact_identity_refusal = True
+            if record_failure:
+                self._record_artifact_refusal(project_id, node_key, base_sha, str(exc))
+            raise
 
     def request_attempt_base(self, attempt_id, base_sha):
         """Choose the commit for an unlaunched SkillFlow attempt's worktree."""
@@ -235,6 +273,8 @@ class StateService:
             raise StateConflict(
                 "attempt is past the dispatch window; a base can be chosen only while status=reserved "
                 f"with no run (status={attempt['status']}, run_id={attempt['run_id']!r})")
+        self._materialize_external_base(attempt["project_id"], attempt["node_key"], base_sha,
+                                         candidate_only=True)
         from core import run_isolation
         from skillflow.exceptions import IsolationUnavailable
         try:
@@ -310,8 +350,17 @@ class StateService:
                     "note": "Launch outcome is unknown. No duplicate run was started; retain and inspect the execution project."}
         if attempt["status"] != "reserved":
             return attempt
-        if attempt["context"].get("base_sha"):
-            self.request_attempt_base(aid, attempt["context"]["base_sha"])
+        from core import run_isolation
+        base_sha = attempt["context"].get("base_sha") or (
+            run_isolation.requested_base(self.db, attempt["execution_project_id"]) or {}).get("base_sha")
+        if base_sha:
+            try:
+                self.request_attempt_base(aid, base_sha)
+            except StateConflict as exc:
+                if not getattr(exc, "artifact_identity_refusal", False):
+                    raise
+                return self.attempts.record_preflight(aid,
+                    {"passed": False, "expected": base_sha, "actual": str(exc)}, str(exc))
         attempt = self.attempts.pin_host_contract(aid, {
             "source_repo": source, "seed_file": manifest.seed_file, "output_step": manifest.output_step,
             "scheduler_owned": bool(manifest.scheduler_owned), "repo_mode": manifest.repo_mode})
@@ -718,6 +767,11 @@ class StateService:
         attempt = self.attempts.get(attempt_id)
         if attempt["status"] == "failed" and attempt["execution_kind"] == "skillflow":
             return self._with_refusals({**attempt, "relay_inventory": self._relay_inventory(attempt)})
+        if attempt["execution_kind"] == "external" and attempt["artifact_kind"] == "git-sha1":
+            with self.store.transaction() as conn:
+                artifact = conn.execute("SELECT commit_sha,tree_sha,bundle_sha256,retained_ref "
+                    "FROM state_git_artifacts WHERE commit_sha=?", (attempt["artifact_ref"],)).fetchone()
+            attempt["git_artifact"] = dict(artifact) if artifact else None
         return self._with_refusals(attempt)
 
     def _with_refusals(self, envelope):

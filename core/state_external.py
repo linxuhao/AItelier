@@ -22,7 +22,7 @@ class ExternalAttempts:
         self.actor = text(actor, 'authenticated reporter', 300)
 
     def register(self, project_id, node_key, expected_revision, harness, external_id,
-                 request_key, instruction=''):
+                 request_key, instruction='', base_sha=None, preflight=None):
         identity = {'harness': key(harness, 'harness'),
                     'external_id': text(external_id, 'external execution identity', 500),
                     'reporting_actor': self.actor}
@@ -30,7 +30,7 @@ class ExternalAttempts:
         with dq.operation_admission_fence():
             return self.attempts._reserve(
                 project_id, node_key, expected_revision, None, request_key,
-                instruction, external=identity)
+                instruction, external=identity, base_sha=base_sha, preflight=preflight)
 
     def register_relay_handoff(self, project_id, node_key, expected_revision,
                                harness, external_id, request_key, instruction,
@@ -89,8 +89,20 @@ class ExternalAttempts:
             if context_hash != digest(json.loads(owner['context_json'])):
                 raise StateConflict('report describes a different frozen goal/contract/dependency context')
             prior_observation = conn.execute(
-                'SELECT 1 FROM state_external_observations WHERE attempt_id=? AND observation_id=?',
+                'SELECT * FROM state_external_observations WHERE attempt_id=? AND observation_id=?',
                 (attempt_id, observation_id)).fetchone()
+            if prior_observation:
+                # A retry binds the accepted retained report identity, not the
+                # producer pathname which cleanup may already have removed.
+                retry = {'attempt_id':attempt_id, 'observation_id':observation_id,
+                    'expected_version':expected_version, 'context_hash':context_hash,
+                    'status':status, 'report_ref':prior_observation['report_ref'],
+                    'report_sha256':report_sha256, 'quiescent':quiescent,
+                    'artifact':artifact, 'artifact_kind':artifact_kind,
+                    'detail':detail, 'actor':self.actor}
+                if digest(retry) != prior_observation['payload_hash']:
+                    raise StateConflict('observation ID was already used with a different payload; append a new correction')
+                return {**_public(owner), 'observation':dict(prior_observation), 'idempotent':True}
             if not prior_observation and owner['observation_version'] != expected_version:
                 raise StateConflict('external observation version changed; reload before appending')
             if owner['status'] in {'failed','superseded'}:
@@ -108,10 +120,14 @@ class ExternalAttempts:
         if terminal:
             report_ref, report_bytes = self._terminal_report(report_ref, report_sha256)
             validate_external_semantics(report_bytes, status, artifact)
+        git_artifact = None
         if status == 'candidate':
             size = {'git-sha1': 40, 'sha256': 64}.get(artifact_kind) if isinstance(artifact_kind,str) else None
             if size is None or not isinstance(artifact,str) or not re.fullmatch('[0-9a-f]{'+str(size)+'}', artifact):
                 raise StateGraphError('candidate requires an exact artifact digest and explicit git-sha1 or sha256 kind')
+            if artifact_kind == 'git-sha1':
+                from core.state_git_artifacts import retain_candidate
+                git_artifact = retain_candidate(report_bytes, artifact)
         elif artifact is not None or artifact_kind is not None:
             raise StateGraphError('only a candidate report may declare the immutable artifact')
         payload = {'attempt_id':attempt_id, 'observation_id':observation_id, 'expected_version':expected_version,
@@ -155,6 +171,9 @@ class ExternalAttempts:
             version = expected_version + 1
             if report_bytes is not None:
                 store_report_blob(conn, report_ref, report_sha256, report_bytes)
+            if git_artifact is not None:
+                from core.state_git_artifacts import store_candidate
+                store_candidate(conn, git_artifact)
             conn.execute('INSERT INTO state_external_observations(attempt_id,observation_id,version,status,resulting_status,'
                          'quiescent,artifact_ref,artifact_kind,report_ref,report_sha256,actor,detail,payload_hash,context_hash,created_at) '
                          'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',

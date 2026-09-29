@@ -1350,3 +1350,206 @@ def test_successor_restores_owner_cursor_and_pending_checkpoint_without_duplicat
     with pytest.raises(StateConflict):
         successor.verify_node("game", "a", 1, checkpoint["attempt_id"])
     assert live.sf.get_run(checkpoint["run_id"])["status"] == "paused"
+
+
+def _review_bundle(project_id="game"):
+    import base64
+    from core.review_input_bundle import manifest
+    producer = {"project_id": project_id, "attempt_id": "external-producer-1", "artifact": "a" * 40}
+    contents = {"prose.md": "Candidate rationale: café\n", "ledger.json": '{"accepted": false}\n',
+                "manifest.json": '{"candidate": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}\n'}
+    arguments = {"producer": producer, "items": [
+        {"name": name, "reference": "candidate://producer-1/" + name,
+         "sha256": hashlib.sha256(content.encode()).hexdigest(), "size": len(content.encode()),
+         "content_base64": base64.b64encode(content.encode()).decode()}
+        for name, content in contents.items()]}
+    return _required("review-inputs", "review_input_bundle", manifest(arguments), **arguments), contents
+
+
+@pytest.mark.parametrize("workflow", ["state_fixture", "investigate"])
+async def test_review_bundle_survives_deleted_producer_before_first_agent_call(live, monkeypatch, workflow):
+    import shutil
+    from aitelier.runner import AgentStepRunner
+    from core.review_input_bundle import PREFIX
+    from core.seed_publication import seed_dir
+    from core.dpe_pipeline import PipelineEngine
+    if workflow == "investigate":
+        live.sf.register_agent_config("investigator", tools=["read_file"])
+        live.sf.register_graph(PipelineGraph.from_yaml(Path(__file__).parents[2] / "configs/investigate.yaml"))
+        live.registry.register_one(live.sf, "investigate", hint_overrides={
+            "scheduler_owned": True, "repo_mode": "none", "seed_file": "task.md", "output_step": "investigate"})
+    check, contents = _review_bundle()
+    producer = live.tmp / "producer-workspace"
+    producer.mkdir()
+    for name, text in contents.items():
+        (producer / name).write_text(text)
+    # The portable descriptor was declared before the workspace disappeared.
+    shutil.rmtree(producer)
+    attempt = live.service.start_attempt("game", "a", 1, workflow, "review-bundle",
+        frozen_prerequisites=_frozen(check))
+    assert attempt["status"] == "running"
+    seed = seed_dir(live.sf, attempt["execution_project_id"], attempt["workflow"])
+    for name, text in contents.items():
+        path = seed / (PREFIX + name)
+        assert path.read_bytes() == text.encode()
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == check["arguments"]["items"][list(contents).index(name)]["sha256"]
+        assert path.stat().st_mode & 0o222 == 0
+    seed_name = "task.md" if workflow == "investigate" else "plan.md"
+    assert str(producer) not in (seed / seed_name).read_text()
+    assert "content_base64" not in (seed / seed_name).read_text()
+    live.sf.advance_run(attempt["run_id"])
+    step = live.sf.claim_next_step(attempt["run_id"])
+    assert step is not None
+    seen = []
+    def model_boundary(*args, **kwargs):
+        seen.append(kwargs["resolved_context"])
+        return {"outputs": {"result": "independent review"}}
+    monkeypatch.setattr(PipelineEngine, "run_step", model_boundary)
+    await AgentStepRunner(live.db, live.ws).execute(step)
+    assert len(seen) == 1
+    for name, text in contents.items():
+        keys = [k for k in seen[0] if k.startswith("[review input " + name + "]")]
+        assert len(keys) == 1 and seen[0][keys[0]].encode() == text.encode()
+        assert hashlib.sha256(seen[0][keys[0]].encode()).hexdigest() == check["arguments"]["items"][list(contents).index(name)]["sha256"]
+    retained = live.service.attempts.get(attempt["attempt_id"])["context"]["frozen_prerequisites"]
+    assert retained == _frozen(check)
+    from core.review_input_bundle import digest
+    rows = live.sf._conn.execute(
+        "SELECT payload_json FROM skillflow_trace WHERE run_id=? AND event='review_inputs_admitted'",
+        (attempt["run_id"],)).fetchall()
+    assert len(rows) == 1
+    receipt = json.loads(rows[0][0])
+    assert receipt["passed"] is True
+    assert receipt["required"] == receipt["actual"] == check["expected"]
+    assert receipt["manifest_sha256"] == digest(check["expected"])
+
+
+@pytest.mark.parametrize("failure", ["missing", "unreadable", "wrong-hash"])
+def test_review_bundle_refusal_precedes_launch_and_every_agent_side_effect(live, monkeypatch, failure):
+    import core.run_launcher as launcher
+    import core.run_isolation as isolation
+    from aitelier.runner import AgentStepRunner
+    check, _ = _review_bundle()
+    item = check["arguments"]["items"][0]
+    if failure == "missing":
+        item["content_base64"] = None
+    elif failure == "unreadable":
+        item["content_base64"] = "not-base64!"
+    else:
+        item["sha256"] = "0" * 64
+        check["expected"]["items"][0]["sha256"] = "0" * 64
+    calls = []
+    for obj, name in [(launcher, "start_config_run"), (live.sf, "claim_next_step"),
+                      (AgentStepRunner, "execute"), (isolation, "request_base"),
+                      (live.service.attempts, "claim_launch"), (live.sf, "capability_identity")]:
+        monkeypatch.setattr(obj, name, lambda *a, **k: calls.append(1))
+    attempt = live.service.start_attempt("game", "a", 1, "state_fixture", "refusal-" + failure,
+        frozen_prerequisites=_frozen(check, _required("later-cost-tool", "runtime_capability", None, name="late")))
+    assert attempt["status"] == "failed" and attempt["run_id"] is None and not calls
+    assert live.sf.list_runs(project_id=attempt["execution_project_id"]) == []
+    event = [e for e in live.service.store.events("game")
+             if e["event_type"] == "attempt_preflight_failed"][-1]
+    receipt = event["payload"]["report"]["checks"][0]
+    assert receipt["required"] == check["expected"] and receipt["passed"] is False
+    actual = receipt["actual"]["items"][0]
+    assert actual["reference"] == item["reference"]
+    assert actual["sha256"] != item["sha256"]
+    if failure != "wrong-hash":
+        assert actual["sha256"] is None and actual["error"]
+
+
+@pytest.mark.parametrize("failure", ["missing", "unreadable", "wrong-hash", "symlink", "directory-link"])
+async def test_review_run_input_tampering_refuses_before_workspace_or_model(live, monkeypatch, failure):
+    from aitelier.runner import AgentStepRunner
+    from core.seed_publication import seed_dir
+    from core.review_input_bundle import PREFIX
+    check, _ = _review_bundle()
+    attempt = live.service.start_attempt("game", "a", 1, "state_fixture", "tampered-" + failure,
+        frozen_prerequisites=_frozen(check))
+    seed = seed_dir(live.sf, attempt["execution_project_id"], attempt["workflow"])
+    path = seed / (PREFIX + "prose.md")
+    if failure == "missing":
+        path.unlink()
+    elif failure == "unreadable":
+        path.unlink()
+        path.mkdir()
+    elif failure == "wrong-hash":
+        path.chmod(0o644)
+        path.write_text("tampered\n")
+        path.chmod(0o444)
+    elif failure == "symlink":
+        path.unlink()
+        path.symlink_to(live.tmp / "unrelated-host-private.txt")
+    else:
+        displaced = seed.with_name("displaced")
+        seed.rename(displaced)
+        seed.symlink_to(displaced, target_is_directory=True)
+    live.sf.advance_run(attempt["run_id"])
+    step = live.sf.claim_next_step(attempt["run_id"])
+    assert step is not None
+    calls = []
+    monkeypatch.setattr(live.ws, "setup_workspace", lambda *a, **k: calls.append(1))
+    with pytest.raises(StateConflict, match="before agent") as refusal:
+        await AgentStepRunner(live.db, live.ws).execute(step)
+    assert not calls
+    report = refusal.value.report
+    assert report["required"] == check["expected"] and report["passed"] is False
+    assert report["actual"]["items"][0]["sha256"] != check["expected"]["items"][0]["sha256"]
+
+
+@pytest.mark.parametrize("invalid", ["host-path", "cross-project", "traversal", "count", "item-size", "total-size", "extra-field"])
+def test_review_bundle_does_not_expand_host_or_project_read_scope(live, invalid):
+    check, _ = _review_bundle()
+    args = check["arguments"]
+    if invalid == "host-path":
+        args["items"][0]["reference"] = "/private/producer/prose.md"
+    elif invalid == "cross-project":
+        args["producer"]["project_id"] = "other-private-project"
+        check["expected"]["producer"]["project_id"] = "other-private-project"
+    elif invalid == "traversal":
+        args["items"][0]["name"] = "../private.txt"
+    elif invalid == "count":
+        args["items"] *= 6
+    elif invalid == "item-size":
+        args["items"][0]["size"] = 16385
+    elif invalid == "total-size":
+        for item in args["items"]:
+            item["size"] = 16384
+    else:
+        args["items"][0]["path"] = "/private/arbitrary-host-file"
+    attempt = live.service.start_attempt("game", "a", 1, "state_fixture", "invalid-" + invalid,
+        frozen_prerequisites=_frozen(check))
+    assert attempt["status"] == "failed" and attempt["run_id"] is None
+    assert live.sf.list_runs(project_id=attempt["execution_project_id"]) == []
+
+
+def test_review_bundle_poller_adoption_preserves_frozen_identity(live, monkeypatch):
+    import core.scheduler as scheduler
+    import core.run_launcher as launcher
+    import core.seed_publication as seeds
+    monkeypatch.setattr(scheduler, "db", live.db)
+    monkeypatch.setattr(scheduler, "get_skillflow", lambda: live.sf)
+    check, _ = _review_bundle()
+    original = launcher.publish_seeds
+    adopted = []
+    def publish_and_adopt(directory, files, **kwargs):
+        result = original(directory, files, **kwargs)
+        # Interleave the real scheduler after publication, before the real
+        # launcher's get_or_create_run. Adoption must carry the same pin.
+        adopted.append(scheduler._get_or_create_skillflow_run(directory.parent.parent.name))
+        return result
+    monkeypatch.setattr(launcher, "publish_seeds", publish_and_adopt)
+    attempt = live.service.start_attempt("game", "a", 1, "state_fixture", "poller-adoption",
+        frozen_prerequisites=_frozen(check))
+    assert adopted == [attempt["run_id"]] and attempt["status"] == "running"
+    live.sf.advance_run(attempt["run_id"])
+    claim = live.sf.claim_next_step(attempt["run_id"])
+    assert claim.run_context["_review_input_bundle"] == check["expected"]
+    assert claim.run_context["_review_input_config"] == "state_fixture"
+
+
+def test_bounded_review_inputs_reach_prompt_without_line_clipping():
+    from core.prompt_assembler import PromptAssembler, MAX_CONTEXT_LINES
+    text = "x\n" * (MAX_CONTEXT_LINES + 1)
+    assert len(text.encode()) < 16384
+    assert PromptAssembler._clip_context_entry("[review input prose.md] sha256=" + "1" * 64, text) == text

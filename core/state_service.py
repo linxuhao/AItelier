@@ -364,13 +364,23 @@ class StateService:
         attempt = self.attempts.pin_host_contract(aid, {
             "source_repo": source, "seed_file": manifest.seed_file, "output_step": manifest.output_step,
             "scheduler_owned": bool(manifest.scheduler_owned), "repo_mode": manifest.repo_mode})
+        review_inputs = []
         prerequisites = attempt["context"].get("frozen_prerequisites")
         if prerequisites is not None:
             trace = []
             try:
                 from core.frozen_attempt import materialize
                 report = materialize(prerequisites, source=source, sf=self.sf,
-                                     trace=trace.append)
+                                     trace=trace.append, review_inputs=review_inputs)
+                if len(review_inputs) > 1:
+                    raise StateConflict("an attempt may declare exactly one review input bundle")
+                if review_inputs:
+                    from core.seed_publication import reads_own_seed
+                    if not reads_own_seed(self.sf._get_resolver(attempt["workflow"]).graph,
+                                          attempt["workflow"], manifest.seed_file):
+                        raise StateConflict("review input workflows must read their published seed")
+                if review_inputs and review_inputs[0][0]["producer"]["project_id"] != attempt["project_id"]:
+                    raise StateConflict("review input producer must belong to this State project")
                 # A successful source identity check must also pin the future
                 # worktree. Comparing HEAD and then launching from a moving HEAD
                 # would leave a time-of-check/time-of-use gap.
@@ -413,10 +423,19 @@ class StateService:
                                 "node workflow or prepare its prerequisites through the standard producer: " + canonical(missing))
         if not self.attempts.claim_launch(aid):
             return self.attempts.get(aid)
-        seed = state_seed_text(attempt["context"], dependency_receipts, bool(relay))
+        # Do not duplicate portable base64 bytes in the model's goal seed.
+        seed_context = dict(attempt["context"])
+        if review_inputs:
+            seed_context["frozen_prerequisites"] = {"version": 1, "checks": [
+                {**c, "arguments": review_inputs[0][0]} if c["probe"] == "review_input_bundle" else c
+                for c in prerequisites["checks"]]}
+        seed = state_seed_text(seed_context, dependency_receipts, bool(relay))
+        review_context = ({"_review_input_bundle": review_inputs[0][0],
+                           "_review_input_config": attempt["workflow"]} if review_inputs else {})
         try:
             result = start_config_run(self.db, self.ws, attempt["workflow"], attempt["execution_project_id"],
-                                      seed_text=seed, name=f"State {attempt['project_id']}/{attempt['node_key']}",
+                                      seed_text=seed, seed_inputs=review_inputs[0][1] if review_inputs else None,
+                                      review_input_context=review_context, name=f"State {attempt['project_id']}/{attempt['node_key']}",
                                       owner_email=self.actor, repo_type="existing" if source else "none", repo_path=source)
         except Exception as exc:
             return self.attempts.launch_uncertain(aid, f"launcher raised {type(exc).__name__}; recover by execution_project_id")

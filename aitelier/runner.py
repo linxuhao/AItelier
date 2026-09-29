@@ -57,6 +57,11 @@ class AgentStepRunner:
 
         Called OUTSIDE any skillflow transaction.
         """
+        review_context = {}
+        if step.run_context.get("_review_input_bundle") is not None:
+            from api.dependencies import get_skillflow
+            from core.review_input_bundle import load_for_agent
+            review_context = load_for_agent(step, get_skillflow())
         if step.inputs.get("_legacy_code_staging"):
             from skillflow.exceptions import IsolationUnavailable
             raise IsolationUnavailable(
@@ -115,6 +120,8 @@ class AgentStepRunner:
         # high-salience [Previous Feedback — MUST FIX] section sat unused. Pass
         # the explicit field so the host can render it as an instruction.
         resolved_context = step.inputs.get("_resolved_context")
+        if review_context:
+            resolved_context = {**(resolved_context or {}), **review_context}
         required_context = [
             source for source in (step.step_config.get("context") or [])
             if isinstance(source, dict) and source.get("required") is True

@@ -122,7 +122,8 @@ def _published_files(directory: Path) -> dict[str, str] | None:
         return None
 
 
-def publish_seeds(directory: Path, files: dict[str, str]) -> str:
+def publish_seeds(directory: Path, files: dict[str, str], *,
+                  review_input_bundle: dict | None = None) -> str:
     """Publish *files* as the seed of this (project, config). Returns its id.
 
     IMMUTABLE. Publishing the same content again is a no-op that returns the
@@ -135,7 +136,8 @@ def publish_seeds(directory: Path, files: dict[str, str]) -> str:
 
     existing = _published_files(directory)
     if existing is not None:
-        if existing == files:
+        stored_bundle = json.loads((directory / MARKER).read_text()).get("review_input_bundle")
+        if existing == files and stored_bundle == review_input_bundle:
             return published_generation(directory) or ""
         raise SeedAlreadyPublished(
             f"{directory} already publishes {sorted(existing)}; refusing to "
@@ -155,9 +157,14 @@ def publish_seeds(directory: Path, files: dict[str, str]) -> str:
     staging.mkdir(parents=True)
     for name, content in files.items():
         _atomic_write(staging / name, content)
+    if review_input_bundle:
+        from core.review_input_bundle import PREFIX
+        for item in review_input_bundle["items"]:
+            (staging / (PREFIX + item["name"])).chmod(0o444)
     generation = uuid.uuid4().hex
     _atomic_write(staging / MARKER, json.dumps(
-        {"generation": generation, "files": sorted(files), "count": len(files)},
+        {"generation": generation, "files": sorted(files), "count": len(files),
+         **({"review_input_bundle": review_input_bundle} if review_input_bundle else {})},
         ensure_ascii=False, indent=1))
 
     if directory.exists():
@@ -176,7 +183,9 @@ def publish_seeds(directory: Path, files: dict[str, str]) -> str:
         # damaged nothing; decide the same way a sequential caller would.
         shutil.rmtree(staging, ignore_errors=True)
         winner = _published_files(directory)
-        if winner is not None and winner == files:
+        winner_bundle = (json.loads((directory / MARKER).read_text()).get("review_input_bundle")
+                         if winner is not None else None)
+        if winner is not None and winner == files and winner_bundle == review_input_bundle:
             return published_generation(directory) or ""
         raise SeedAlreadyPublished(
             f"{directory} was published concurrently with different content; "
@@ -281,3 +290,19 @@ def reads_own_seed(graph, config_name: str, seed_file: str) -> bool:
                     and source.get("output") == seed_file):
                 return True
     return False
+
+
+def review_seed_context(directory: Path, config_name: str) -> dict:
+    """Carry seed-bound admission metadata into runs created by the poller."""
+    marker = Path(directory) / MARKER
+    if not marker.exists():
+        return {}
+    identity = json.loads(marker.read_text()).get("review_input_bundle")
+    if identity is None:
+        return {}
+    from core.review_input_bundle import manifest
+    arguments = {"producer": identity.get("producer"), "items": [
+        dict(item, content_base64=None) for item in identity.get("items", [])]}
+    if manifest(arguments) != identity:
+        raise ValueError("invalid published review input identity")
+    return {"_review_input_bundle": identity, "_review_input_config": config_name}

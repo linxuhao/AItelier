@@ -90,6 +90,7 @@ def missing_cross_config_inputs(sf, config_name: str, project_id: str) -> list[d
 def start_config_run(db, ws, config_name: str, project_id: str, *,
                      seed_text: str | None = None,
                      seed_inputs: dict | None = None,
+                     review_input_context: dict | None = None,
                      name: str | None = None,
                      owner_email: str = "cli@local",
                      priority: int = 0,
@@ -316,7 +317,9 @@ def start_config_run(db, ws, config_name: str, project_id: str, *,
         # drive, which is a worse failure than the one being fixed. Before means
         # the worst case is a fully-seeded project the poller picks up itself.
         try:
-            publish_seeds(seed_dir(sf, project_id, config_name), files)
+            publish_seeds(seed_dir(sf, project_id, config_name), files,
+                          **({"review_input_bundle": review_input_context["_review_input_bundle"]}
+                             if review_input_context else {}))
         except SeedAlreadyPublished as e:
             # Published seed content is immutable, so this launch is asking for
             # something the system will not do: replace the seed a live or past
@@ -327,7 +330,10 @@ def start_config_run(db, ws, config_name: str, project_id: str, *,
             return {"status": "error", "project_id": project_id,
                     "config_name": config_name, "message": str(e)}
 
-    run_id = sf.get_or_create_run(config_name, project_id, {"project_id": project_id})
+    from core.seed_publication import review_seed_context
+    review_input_context = review_seed_context(seed_dir(sf, project_id, config_name), config_name)
+    run_id = sf.get_or_create_run(config_name, project_id,
+                                 {"project_id": project_id, **(review_input_context or {})})
     # Past every launch refusal and before this run can execute.
     _reconcile_repo_type()
 

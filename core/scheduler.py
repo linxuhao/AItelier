@@ -588,9 +588,16 @@ def _get_or_create_skillflow_run(project_id: str) -> str | None:
                      seed=_seed_file, reason=_why)
             return None
 
+    from core.seed_publication import review_seed_context, seed_dir
+    try:
+        review_context = review_seed_context(seed_dir(sf, project_id, config_name), config_name)
+    except (OSError, ValueError) as exc:
+        tick_log(project_id, "review_input_refused", reason=str(exc))
+        return None
     run_id = sf.get_or_create_run(config_name, project_id, {
         "project_id": project_id,
         "brief": project.get("brief", ""),
+        **review_context,
     })
 
     # Decide and provision what this run works in, BEFORE it can claim a step.

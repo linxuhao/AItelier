@@ -220,7 +220,6 @@ def test_unreliable_repo_gate_identity_never_seeds_or_changes_baseline(tmp_path)
         "duplicate": [_gate_record("A", "one"), _gate_record("A", "two")],
         "malformed": ["AITELIER_REPO_GATE_CASE={not json"],
         "ambiguous": [_gate_record("A", "detail", id="B")],
-        "truncated": ["x" * 2100, _gate_record("A", "tail")],
     }
     for name, lines in variants.items():
         _write_repo_gate(repo, *lines)
@@ -229,6 +228,21 @@ def test_unreliable_repo_gate_identity_never_seeds_or_changes_baseline(tmp_path)
         assert report["new_failures"], name
         assert "failure_identity_error" in report["repo_gate"], name
         assert _baseline_path(state, repo).read_bytes() == before, name
+
+
+def test_complete_capture_keeps_identity_when_display_tail_is_truncated(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    state = tmp_path / "state"
+    _write_repo_gate(repo, _gate_record("A", "known"))
+    _run_repo(repo, tmp_path / "out-seed", state)
+    before = _baseline_path(state, repo).read_bytes()
+    _write_repo_gate(repo, _gate_record("A", "early"), "x" * 2100)
+    report = _run_repo(repo, tmp_path / "out-long", state)
+    assert report["repo_gate"]["output_truncated"]
+    assert report["passed_relative"] is True
+    assert "failure_identity_error" not in report["repo_gate"]
+    assert _baseline_path(state, repo).read_bytes() == before
 
 
 # ── no-state-dir is not an empty baseline ───────────────────────────────────

@@ -7,11 +7,26 @@ upstream `@zvec/zvec-grep` 0.2.2 release and includes the same standard-library
 and worker lock admit one writer; the legacy worktree discovery scanner is
 not started. Each batch handles at most 32 recorded run demands and then one
 new immediate project checkout. Project discovery excludes symlinks and run
-roots. Existing project indexes continue to be served and watched by zvec.
+roots. A validated project with no index is excluded from automatic demand
+only when its root has no write permission bits and the worker's effective UID
+cannot write it. This recognizes immutable source snapshots without altering
+their source or Git metadata. An access failure alone does not prove exclusion.
+Existing project indexes continue to be served and watched by zvec.
 
 Project baseline indexing has a durable `project-owner.json` marker. Failed
 or interrupted work stays unknown until the same root passes upstream
-`zg status --check-ready`. Existing indexes are not rebuilt. Run requests,
+`zg status --check-ready`. One bounded exception applies to an already failed,
+validated immutable root with no index: the real serial worker, holding its
+lifetime lock, deployment admission fence and operation lock, first measures
+native daemon queued/running jobs and shutdown state. Only a complete, quiet
+inventory permits the terminal `excluded` outcome. It retains the prior failed
+marker, earliest failure, explicit exclusion reason, effective UID and root-mode
+proof. Active, malformed, symlink and unavailable owners remain blocking; a
+failed or unknown daemon probe leaves the marker unchanged. Exclusion never
+claims readiness. When discovery next owns a writable project, the excluded
+owner is retained in `excluded_owners` history. The observer validates terminal
+evidence and continues to measure actual operation locks and live daemon jobs.
+Existing indexes are not rebuilt. Run requests,
 readiness, errors, generation fencing, release and restart reconciliation
 use the existing `indexes` ledger. The worker does not create an empty ledger;
 a real host prepare demand creates it. Terminal historical trees without a

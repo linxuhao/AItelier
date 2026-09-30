@@ -1227,12 +1227,9 @@ def _semantic_worker_errors(directory: Path) -> list[str]:
             if marker.is_symlink():
                 raise ValueError("project owner marker is a symlink")
             owner = json.loads(marker.read_text())
-            if (type(owner) is not dict or owner.get("status") not in {"idle", "active", "error"}
-                    or not _nonempty_string(owner.get("root"))
-                    or not Path(owner["root"]).is_absolute()
-                    or not _nonnegative_number(owner.get("updated_at"))):
-                raise ValueError("project operation owner is malformed")
-            if owner.get("status") != "idle":
+            from core.semantic_index_control import validate_project_owner
+            validate_project_owner(owner)
+            if owner["status"] not in {"idle", "excluded"}:
                 errors.append(f"semantic project operation is active or unknown: {owner}")
         except (OSError, ValueError, TypeError) as exc:
             errors.append(f"semantic project owner measurement failed: {exc}")

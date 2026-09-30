@@ -1,7 +1,7 @@
 """Host-owned index demand and the sidecar's serial, generation-fenced worker.
 
 This module uses only the standard library so the same implementation runs in
-AItelier and in its zvec sidecar. It never discovers work by scanning checkouts.
+AItelier and in its zvec sidecar. Only immediate projects are auto-discovered.
 The ledger contains one small row per retained run, not index data. A fixed lock
 shard set bounds lock-file growth; a hash collision delays work, never mixes roots.
 """
@@ -54,6 +54,70 @@ def project_root(root: Path, projects: Path, worktrees: Path) -> Path:
     return root
 
 
+def immutable_project(root: Path) -> bool:
+    """Positive exclusion only: no index, no write bits, and worker cannot write.
+
+    An ACL/access failure alone is not evidence of an immutable snapshot.
+    Existing indexes remain available; missing or redirected roots stay unknown.
+    """
+    return (not (root / ".zvec-grep").exists()
+            and root.stat().st_mode & 0o222 == 0
+            and not os.access(root, os.W_OK, effective_ids=True))
+
+
+def quiet_daemon(status: dict) -> bool:
+    return (type(status) is dict
+            and all(type(status.get(key)) is int and status[key] == 0
+                    for key in ("queued_jobs", "running_jobs"))
+            and status.get("shutting_down") is False)
+
+
+def validate_project_owner(owner: dict) -> None:
+    """Shared worker/observer schema; excluded is a terminal non-work outcome."""
+    def identity(row):
+        return (type(row) is dict and type(row.get("root")) is str
+                and bool(row["root"]) and Path(row["root"]).is_absolute()
+                and type(row.get("updated_at")) in (int, float)
+                and math.isfinite(row["updated_at"]) and row["updated_at"] >= 0
+                and type(row.get("error")) is str)
+    if (not identity(owner) or owner.get("status") not in {"idle", "active", "error", "excluded"}
+            or type(owner.get("excluded_owners", [])) is not list):
+        raise ValueError("project operation owner is malformed")
+    first = owner.get("first_failure")
+    if first is not None and (not identity(first) or first.get("status") != "error"
+                              or first["root"] != owner["root"] or not first["error"]):
+        raise ValueError("project first failure is malformed")
+    if owner["status"] == "excluded":
+        settlement = owner.get("settlement")
+        if type(settlement) is not dict:
+            raise ValueError("excluded project owner has no settlement evidence")
+        failure, proof = settlement.get("failure"), settlement.get("proof")
+        if (settlement.get("reason") != "immutable-root-without-index"
+                or not identity(failure) or failure.get("status") != "error"
+                or failure["root"] != owner["root"] or not failure["error"]
+                or owner["error"] != failure["error"] or first is None
+                or owner["updated_at"] < failure["updated_at"]
+                or not quiet_daemon(settlement.get("daemon"))
+                or type(proof) is not dict or proof.get("cache_absent") is not True
+                or proof.get("effective_write_access") is not False
+                or type(proof.get("uid")) is not int or proof["uid"] < 0
+                or type(proof.get("root_mode")) is not int
+                or proof["root_mode"] < 0 or proof["root_mode"] & 0o222):
+            raise ValueError("excluded project owner settlement is malformed")
+
+
+@contextmanager
+def deployment_admission(directory: Path):
+    fence = directory.parent / "godot-control" / "deployment-admission.lock"
+    fence.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd = os.open(fence, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        yield
+    finally:
+        os.close(fd)
+
+
 def _failure_error(directory: Path, exc: BaseException) -> str:
     """Keep complete client output private; diagnostic I/O never hides its failure."""
     if not isinstance(exc, (subprocess.CalledProcessError, subprocess.TimeoutExpired)):
@@ -88,37 +152,79 @@ def _failure_error(directory: Path, exc: BaseException) -> str:
     return prefix + (cause or "no client output")[:max(0, 500-len(prefix)-len(locator))] + locator
 
 
-def index_project_once(directory: Path, projects: Path, worktrees: Path, *,
-                       execute=None, timeout=600, embedding="local/potion-code-16m-v2"):
-    """Retain baselines; discover one new project, never historical run trees.
+def index_project_once(directory: Path, projects: Path, worktrees: Path, **kwargs):
+    """One-shot serial owner, with the same fences as the resident worker."""
+    with service_lock(directory, "worker.lock"), deployment_admission(directory):
+        with service_lock(directory, "operation.lock"):
+            return _index_project_once(directory, projects, worktrees, **kwargs)
 
-    An interrupted/failed daemon operation remains visible until that SAME
-    root is positively ready. No next project can erase an unknown owner.
-    """
+
+def _index_project_once(directory: Path, projects: Path, worktrees: Path, *,
+                        execute=None, timeout=600, embedding="local/potion-code-16m-v2"):
+    """Caller owns lifetime, deployment admission and operation locks."""
     execute = execute or IndexControl._execute
     marker = directory / "project-owner.json"
     if marker.is_symlink():
         raise ValueError("project owner marker must not be a symlink")
     prior = json.loads(marker.read_text()) if marker.exists() else None
-    if prior and prior["status"] != "idle":
+    if prior is not None:
+        validate_project_owner(prior)
+    history = prior.get("excluded_owners", []) if prior else []
+    root = None
+    if prior and prior["status"] not in {"idle", "excluded"}:
         root = project_root(Path(prior["root"]), projects, worktrees)
+        if immutable_project(root):
+            if prior["status"] != "error" or not prior["error"]:
+                raise ValueError("immutable project operation is still unknown")
+            # A client timeout may leave actual daemon work. Do not replace its
+            # error until the installed administration client proves no jobs.
+            result = subprocess.run(["node", "/usr/local/lib/zvec-grep-status.mjs"],
+                                    check=True, capture_output=True, text=True, timeout=15)
+            status = json.loads(result.stdout)
+            if not quiet_daemon(status):
+                raise ValueError("semantic daemon operations are active or unknown")
+            if not immutable_project(project_root(root, projects, worktrees)):
+                raise ValueError("immutable project exclusion changed during measurement")
+            settlement = {"reason": "immutable-root-without-index", "failure": prior,
+                          "daemon": status, "proof": {"uid": os.geteuid(),
+                          "root_mode": root.stat().st_mode & 0o777,
+                          "cache_absent": True, "effective_write_access": False}}
+        else:
+            settlement = None
     else:
-        root = None
+        settlement = None
         if projects.is_dir() and not projects.is_symlink():
             for candidate in sorted(projects.iterdir()):
                 if candidate.is_symlink() or (candidate / ".zvec-grep").exists():
                     continue
                 try:
-                    root = project_root(candidate, projects, worktrees)
+                    candidate = project_root(candidate, projects, worktrees)
+                    if immutable_project(candidate):
+                        continue
+                    root = candidate
                     break
                 except ValueError:
                     continue
         if root is None:
             return
+        if prior and prior["status"] == "excluded":
+            history = [*history, {k: v for k, v in prior.items() if k != "excluded_owners"}]
 
     def record(status, error=""):
         value = {"root": str(root), "status": status, "error": error,
                  "updated_at": time.time()}
+        if history:
+            value["excluded_owners"] = history
+        if prior and prior["root"] == str(root):
+            first = prior.get("first_failure")
+            if first is None and prior["status"] == "error":
+                first = {k: prior[k] for k in ("root", "status", "error", "updated_at")}
+            if first is not None:
+                value["first_failure"] = first
+        if status == "error" and "first_failure" not in value:
+            value["first_failure"] = {k: value[k] for k in ("root", "status", "error", "updated_at")}
+        if status == "excluded":
+            value["settlement"] = settlement
         with tempfile.NamedTemporaryFile(mode="w", dir=directory, delete=False) as stream:
             stream.write(json.dumps(value) + "\n")
             stream.flush()
@@ -131,6 +237,9 @@ def index_project_once(directory: Path, projects: Path, worktrees: Path, *,
         finally:
             os.close(fd)
 
+    if settlement is not None:
+        record("excluded", prior["error"])
+        return
     record("active")
     try:
         # A partial index after interruption must be checked, never skipped.
@@ -412,27 +521,21 @@ def main():
     # separate durable marker because they retain their baseline after indexing.
     with service_lock(directory, "worker.lock"):
         while True:
-            fence = directory.parent / "godot-control" / "deployment-admission.lock"
-            fence.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            fd = os.open(fence, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
             try:
-                fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
-                with service_lock(directory, "operation.lock"):
+                with deployment_admission(directory), service_lock(directory, "operation.lock"):
                     if (directory / "control.sqlite3").exists():
                         control = IndexControl(directory, args.worktrees_root, initialize=False)
                         for result in control.process_once(timeout=timeout, embedding=embedding):
                             print(f"[zg-lifecycle] {result}", flush=True)
                     if args.projects_root:
                         try:
-                            index_project_once(directory, Path(args.projects_root),
+                            _index_project_once(directory, Path(args.projects_root),
                                                Path(args.worktrees_root), timeout=timeout,
                                                embedding=embedding)
                         except Exception as exc:
                             print(f"[zg-project] retained for repair: {exc}", flush=True)
             except BlockingIOError:
                 pass  # cutover or another actual operation owns the boundary
-            finally:
-                os.close(fd)
             if args.once:
                 return
             time.sleep(1)

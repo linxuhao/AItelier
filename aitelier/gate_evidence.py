@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 from uuid import uuid4
+from aitelier.gate_coverage import publication_scope_refusal
 
 CYCLE_FIELD = "evidence_cycle_id"
 RUN_FIELD = "run_id"
@@ -118,6 +119,8 @@ def stamp_file(path: Path, *, run_id: str, out_dir: str,
 
 def report_state(report: dict) -> str:
     """Return one release state without collapsing distinct non-pass outcomes."""
+    if report.get("purpose") == "provisional_round_feedback":
+        return "partial"
     raw_passed = report.get("passed", report.get("all_passed"))
     if raw_passed is not True and raw_passed is not False:
         return "unreadable"
@@ -159,11 +162,16 @@ def release_disposition(report: dict) -> str:
     unreadable, UNATTRIBUTED (a relative pass with no baseline behind it), or
     blocked by infrastructure needs verification instead.
     """
+    if report.get("purpose") == "provisional_round_feedback":
+        return "unresolved"
     state = str(report.get("upstream_state") or report_state(report))
     if (not report.get("upstream_state")
             and report.get("skipped_because") == "upstream_failed"):
         state = "failed"
     if state == "passed":
+        if "repo_gate" in report or "gate_coverage" in report:
+            if publication_scope_refusal(report.get("gate_coverage")):
+                return "unresolved"
         return "passed"
     if state in _KNOWN_FAILURE_STATES:
         return "known_failure"
@@ -251,6 +259,7 @@ def audit_evidence(graph_dir: Path, run_id: str, gates: list) -> dict:
         "pending_gates": [],
         "blind_gates": [],
         "infrastructure_unavailable_gates": [],
+        "incomplete_coverage_gates": [],
         "gates_audited": [],
     }
     if not gates:
@@ -287,6 +296,8 @@ def audit_evidence(graph_dir: Path, run_id: str, gates: list) -> dict:
             "failed": "failed_gates", "known_failure": "known_failures",
             "pending": "pending_gates", "blind": "blind_gates",
             "infrastructure_unavailable": "infrastructure_unavailable_gates",
+            "coverage_incomplete": "incomplete_coverage_gates",
+            "partial": "incomplete_coverage_gates",
         }.get(entry["state"], "failed_gates")
         verdict[bucket].append(entry)
 
@@ -296,6 +307,7 @@ def audit_evidence(graph_dir: Path, run_id: str, gates: list) -> dict:
             ("infrastructure_unavailable", "infrastructure_unavailable_gates"),
             ("blind", "blind_gates"), ("pending", "pending_gates"),
             ("known_failure", "known_failures"), ("failed", "failed_gates"),
+            ("coverage_incomplete", "incomplete_coverage_gates"),
             ("skipped", "skipped_gates"),
         ):
             if verdict[bucket]:
@@ -333,6 +345,18 @@ def _audit_one(graph_dir: Path, step_id: str, filename: str, run_id: str,
         return entry
 
     state = report_state(report)
+    if report.get("purpose") == "provisional_round_feedback":
+        entry["purpose"] = report["purpose"]
+        entry["selected_state"] = report.get("selected_state")
+    if "repo_gate" in report or "gate_coverage" in report:
+        entry["gate_coverage"] = report.get("gate_coverage")
+        coverage_error = publication_scope_refusal(entry["gate_coverage"])
+        if coverage_error:
+            entry["gate_coverage_error"] = coverage_error
+            if state == "passed":
+                entry.update(state="coverage_incomplete", passed=False,
+                             skipped_because="coverage_incomplete", summary=coverage_error)
+                return entry
     if state == "unreadable":
         raw_passed = report.get("passed", report.get("all_passed", False))
         entry.update(state="unreadable", passed=False,

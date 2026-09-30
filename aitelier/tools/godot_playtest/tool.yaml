@@ -35,6 +35,33 @@ parameters:
     type: string
     description: "Owning project; auto-injected by the host and overwritten if supplied by the agent. Used only for the commit owner identity of the report this gate writes — it reaches no gate threshold."
     required: false
+  purpose:
+    type: string
+    description: "Optional provisional_round_feedback for coding diagnostics only. Its report always has passed=false/full_test_passed=false; final acceptance still requires the full gate."
+    required: false
+  base_sha:
+    type: string
+    description: "Exact diff base for provisional feedback; the target is the clean current HEAD."
+    required: false
+  sentinel_scenarios:
+    type: array
+    items: {type: string}
+    description: "Explicit project historical diagnostic sentinels; required for provisional feedback."
+    required: false
+  mandatory_scenarios:
+    type: array
+    items: {type: string}
+    description: "Explicit project mandatory scenarios; required for provisional feedback."
+    required: false
+  feedback_scenarios:
+    type: array
+    items: {type: string}
+    description: "Optional explicit source-bound diagnostic request, added to direct consumers and policy. Omitted scenes remain UNKNOWN even after selected_pass."
+    required: false
+  feedback_timeout:
+    type: integer
+    description: "Provisional HTTP timeout in seconds, including bounded render queue wait; default 600. This is not proof that a queued operation has settled."
+    required: false
 
 # Its result carries passed/error, so a graph step running it MUST route the
 # failure branch — read by forge_registry_check (fallible_tools_unrouted).

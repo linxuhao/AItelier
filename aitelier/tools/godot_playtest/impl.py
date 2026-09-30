@@ -387,6 +387,31 @@ def godot_playtest(*, project_root: str = "", out_dir: str = "",
     frames, errors[], state, spec_used, spec_source, summary} for the reviewer.
     """
     repo = Path(project_root or workspace_root).resolve()
+    if kwargs.get("purpose") not in (None, "", "full_acceptance", "provisional_round_feedback"):
+        raise ValueError("unknown playtest purpose")
+    if kwargs.get("purpose") == "provisional_round_feedback":
+        from aitelier.round_feedback import expand_feedback_spec, feedback_plan, run_feedback, PURPOSE
+        target = Path(out_dir) if out_dir else repo.parent / (repo.name + "-feedback")
+        try:
+            spec, info = read_spec(repo)
+            if not spec or info["errors"]:
+                raise ValueError("strict feedback contract missing/unreadable: " + str(info["errors"]))
+            spec = expand_feedback_spec(spec)
+            scope = feedback_plan(repo, kwargs.get("base_sha", ""), "HEAD", spec, info["source"],
+                                  kwargs.get("sentinel_scenarios", []), kwargs.get("mandatory_scenarios", []),
+                                  kwargs.get("feedback_scenarios", []))
+        except Exception as exc:
+            target.mkdir(parents=True, exist_ok=True)
+            report = {"purpose": PURPOSE, "passed": False, "full_test_passed": False,
+                      "release_disposition": "unresolved", "evidence_state": "partial",
+                      "selected_state": "unavailable", "gate_coverage": None,
+                      "errors": [type(exc).__name__ + ": " + str(exc)]}
+            path = target / "playtest_report.json"
+            path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+            return {"written": str(path), **report}
+        return run_feedback(repo, target, scope, spec, _owner_identity(
+            repo, project_id=project_id, run_id=run_id, step_id=step_id, operation_id=operation_id),
+            lambda payload: post_playtest(payload, timeout=int(kwargs.get("feedback_timeout", 600))))
     report = {"passed": True, "frames": 0, "errors": [], "state": {},
               "behavior": None, "spec_used": False, "summary": ""}
     info: dict = {"source": "", "errors": [], "notes": []}

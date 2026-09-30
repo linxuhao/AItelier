@@ -43,6 +43,7 @@ from aitelier import gate_admission
 # step that never produced a verdict for a reason that has nothing to do with
 # the code under test — the exact shape this card exists to remove.
 from aitelier.gate_evidence import release_disposition
+from aitelier.gate_coverage import validate_coverage
 import sys
 import tempfile
 import time
@@ -861,6 +862,12 @@ def _run_repo_gate(repo: Path) -> dict | None:
     if retained.reports:
         attribution["reports"] = retained.reports
     result["report_attribution"] = attribution
+    # Read coverage from the attributed structured report, never the bounded
+    # log tail. A legacy/missing marker cannot silently become a full gate.
+    coverage, coverage_error = _retained_coverage(retained)
+    result["gate_coverage"] = coverage
+    if coverage_error:
+        result["gate_coverage_error"] = coverage_error
     # How many failures the gate's own retained report names (None when its
     # report was not identified). Read before the outcome: a finding makes
     # the run `measured_fail` whatever else it reports. A part of the ticket
@@ -1027,6 +1034,8 @@ def _repo_gate_outcome(gate: dict) -> str:
         return REPO_GATE_UNATTRIBUTABLE
     if gate.get("retained_findings"):
         return REPO_GATE_MEASURED_FAIL
+    if gate.get("gate_coverage_error"):
+        return REPO_GATE_UNMEASURED
     if _repo_gate_declares_unmeasured(gate):
         return REPO_GATE_UNMEASURED
     if gate.get("timed_out") is True or gate.get("runner_error") is True:
@@ -1105,6 +1114,23 @@ class _Retained(NamedTuple):
     why: str | None
     unattributed: list
     reports: dict
+
+
+def _retained_coverage(retained: _Retained) -> tuple[dict | None, str | None]:
+    if not retained.owned:
+        return None, "coverage unavailable: gate report was not attributed"
+    manifest, error = _load_json(retained.report_dir / "manifest.json")
+    if error or not isinstance(manifest, dict):
+        return None, error or "coverage unavailable: manifest is not an object"
+    coverage = manifest.get("gate_coverage")
+    if manifest.get("purpose") == "provisional_round_feedback":
+        if isinstance(coverage, dict):
+            coverage = dict(coverage, purpose="provisional_round_feedback")
+        return coverage, "provisional feedback is not full test evidence"
+    if isinstance(coverage, dict) and coverage.get("purpose") == "provisional_round_feedback":
+        return coverage, "provisional feedback is not full test evidence"
+    error = validate_coverage(coverage)
+    return coverage if isinstance(coverage, dict) else None, error
 
 
 def _stage_findings(manifest_path: Path, manifest: dict, ticket_dir: Path
@@ -2139,6 +2165,12 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
         gate = _acquire_repo_gate(repo)
         if gate is not None:
             report["repo_gate"] = gate
+            report["gate_coverage"] = gate.get("gate_coverage")
+            if isinstance(report["gate_coverage"], dict) and report["gate_coverage"].get("purpose") == "provisional_round_feedback":
+                report["purpose"] = "provisional_round_feedback"
+                report["full_test_passed"] = False
+            if gate.get("gate_coverage_error"):
+                report["gate_coverage_error"] = gate["gate_coverage_error"]
             outcome = gate["measured"]
             # The engine's reply to the gate's last request, as the admission
             # relay recorded it (`answered`, `not_admitted`, `unreachable`, ...).
@@ -2219,7 +2251,14 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
                 # pruned. A gate that did not run at all (no run_tests.sh,
                 # `repo_gate: false`) leaves this None and its keys stay
                 # known-red.
-                executed.repo_gate_cases = set()
+                coverage = gate.get("gate_coverage")
+                # The baseline currently has gate-level execution authority,
+                # not scenario-level authority. Keep every old gate red after
+                # a subset or unknown scope; absence is not a repair.
+                executed.repo_gate_cases = (set() if isinstance(coverage, dict)
+                    and not validate_coverage(coverage)
+                    and coverage["coverage"] == "full"
+                    and coverage.get("purpose") != "provisional_round_feedback" else None)
             else:
                 report["passed"] = False
                 cases, identity_error = _repo_gate_failure_cases(gate)
@@ -2245,7 +2284,11 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
                             f"(rc={gate['returncode']}): "
                             f"{_gate_feedback(gate)}")
                 else:
-                    executed.repo_gate_cases = {c["case_id"] for c in cases}
+                    coverage = gate.get("gate_coverage")
+                    executed.repo_gate_cases = ({c["case_id"] for c in cases}
+                        if isinstance(coverage, dict) and not validate_coverage(coverage)
+                        and coverage["coverage"] == "full"
+                        and coverage.get("purpose") != "provisional_round_feedback" else None)
 
 
     # Known-red baseline: `new_failures[]` + `passed_relative` + the
@@ -2288,6 +2331,10 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
         json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
     return {"written": "test_report.json", "passed": report["passed"],
             "release_evidence": release_disposition(report),
+            "purpose": report.get("purpose"),
+            "full_test_passed": False if report.get("purpose") == "provisional_round_feedback" else report.get("full_test_passed"),
+            "gate_coverage": report.get("gate_coverage"),
+            "gate_coverage_error": report.get("gate_coverage_error"),
             # The routing flag ITSELF, on the RETURN and not only in the file.
             # A `from_file` match must be evaluated by a step that owns the file
             # AND whose content parses to an OBJECT: measured, a report parsing

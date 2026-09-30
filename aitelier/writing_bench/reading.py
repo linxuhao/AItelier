@@ -252,7 +252,18 @@ class ReviewSession:
         if tool not in ("create_verdict", "write_verdict"):
             return None
         try:
-            raw = params if "review_key" in params else params.get("content", params.get("initialContent"))
+            # Match the schema writer: wrapper content wins over field arguments.
+            raw = params.get("content")
+            if raw is None or raw == "":
+                raw = params.get("initialContent")
+            if raw is None:
+                # The writer strips extra top-level field arguments. Refuse
+                # before issuing a certificate for bytes it will not persist.
+                fields = {"review_key", "reviewed_chapters", "passed", "read_complete", "feedback", "findings"}
+                extras = set(params) - fields
+                require(not extras, "unexpected review field argument(s): " + ", ".join(sorted(extras))
+                        + "; remove them or put the complete JSON in content/initialContent")
+                raw = params
             report = decode(raw.encode()) if isinstance(raw, str) else raw
             require(isinstance(report, dict), "complete JSON review required")
             # Honest rejection is always allowed; it cannot reach positive gates.

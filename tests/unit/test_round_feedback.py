@@ -157,3 +157,50 @@ def test_all_selected_provisional_feedback_keeps_old_full_gate_red(world, tmp_pa
     assert result['release_evidence'] == 'unresolved'
     audit = ge.audit_evidence(tmp_path / 'graph', 'provisional-fixture', [('test', 'test_report.json')])
     assert not audit['passed'] and audit['gates_audited'][0]['purpose'] == rf.PURPOSE
+
+
+@pytest.mark.parametrize("retry", ["bad_base", "missing_spec", "truncated_spec", "success", "malformed_prior"])
+def test_tool_retry_preserves_first_report_scope_and_raw_artifacts(world, monkeypatch, retry):
+    repo, base, _, spec, scope, out = world
+    chosen, _ = pt.select_scenarios(spec, scope["selected_scenarios"])
+    reply = raw(chosen)
+    reply["behavior"]["scenarios"][0]["asserts"][0]["passed"] = False
+    first = rf.run_feedback(repo, out, scope, spec, {"operation_id": "first-negative"}, lambda _: reply)
+    assert first["selected_state"] == "selected_fail" and first["gate_coverage"] == scope
+    (out / "round_feedback.log").write_text("first raw command/RC log\n")
+    if retry == "malformed_prior":
+        (out / "playtest_report.json").write_bytes(b'{"gate_coverage": truncated')
+    before = {path.name: path.read_bytes() for path in out.iterdir() if path.is_file()}
+    reads = []
+    def read(_):
+        reads.append(True)
+        if retry == "missing_spec":
+            return None, {"source": "", "errors": ["missing"]}
+        if retry == "truncated_spec":
+            return {"scenarios": []}, {"source": "playtest/", "errors": []}
+        return spec, {"source": "playtest/", "errors": []}
+    monkeypatch.setattr(pt, "read_spec", read)
+    monkeypatch.setattr(pt, "post_playtest", lambda *a, **k: pytest.fail("retry must not contact transport"))
+    with pytest.raises(ValueError, match="first attempt"):
+        pt.godot_playtest(project_root=str(repo), out_dir=str(out), purpose=rf.PURPOSE,
+                          base_sha="invalid-ref" if retry == "bad_base" else base,
+                          sentinel_scenarios=["b"], mandatory_scenarios=["c"])
+    assert reads == []
+    assert {path.name: path.read_bytes() for path in out.iterdir() if path.is_file()} == before
+
+
+@pytest.mark.parametrize("artifact", ["round_feedback_request.json", "round_feedback_raw.json", "playtest_report.json"])
+def test_incomplete_first_attempt_artifact_blocks_both_entry_points(world, monkeypatch, artifact):
+    repo, base, _, spec, scope, out = world
+    out.mkdir()
+    path = out / artifact
+    path.write_bytes(b"first interrupted attempt; do not parse or overwrite")
+    before = path.read_bytes()
+    monkeypatch.setattr(pt, "read_spec", lambda _: pytest.fail("guard must precede planning"))
+    monkeypatch.setattr(pt, "post_playtest", lambda *a, **k: pytest.fail("must not contact transport"))
+    with pytest.raises(ValueError, match="first attempt"):
+        pt.godot_playtest(project_root=str(repo), out_dir=str(out), purpose=rf.PURPOSE,
+                          base_sha=base, sentinel_scenarios=["b"], mandatory_scenarios=["c"])
+    with pytest.raises(ValueError, match="first attempt"):
+        rf.run_feedback(repo, out, scope, spec, {}, lambda _: pytest.fail("must not run"))
+    assert path.read_bytes() == before and sorted(p.name for p in out.iterdir()) == [artifact]

@@ -390,8 +390,9 @@ def godot_playtest(*, project_root: str = "", out_dir: str = "",
     if kwargs.get("purpose") not in (None, "", "full_acceptance", "provisional_round_feedback"):
         raise ValueError("unknown playtest purpose")
     if kwargs.get("purpose") == "provisional_round_feedback":
-        from aitelier.round_feedback import expand_feedback_spec, feedback_plan, run_feedback, PURPOSE
+        from aitelier.round_feedback import expand_feedback_spec, feedback_plan, run_feedback, require_new_feedback_output, PURPOSE
         target = Path(out_dir) if out_dir else repo.parent / (repo.name + "-feedback")
+        require_new_feedback_output(target)
         try:
             spec, info = read_spec(repo)
             if not spec or info["errors"]:

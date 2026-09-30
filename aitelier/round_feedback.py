@@ -163,10 +163,20 @@ def verify_feedback(raw, spec):
     return errors
 
 
+
+def require_new_feedback_output(out_dir):
+    """Refuse a retry before planning or writing any provisional artifact."""
+    target = Path(out_dir)
+    if any((target / name).exists() for name in (
+            "playtest_report.json", "round_feedback_raw.json", "round_feedback_request.json")):
+        raise ValueError("feedback report artifacts already exist; retain the first attempt")
+
+
 def run_feedback(repo, out_dir, scope, full_spec, owner, transport, verifier=verify_feedback):
     """Retain the first raw reply before classification; no acceptance boolean."""
     from aitelier.tools.godot_playtest.impl import select_scenarios
     target = Path(out_dir)
+    require_new_feedback_output(target)
     target.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
     report = {"purpose": PURPOSE, "passed": False, "full_test_passed": False,
@@ -175,8 +185,6 @@ def run_feedback(repo, out_dir, scope, full_spec, owner, transport, verifier=ver
               "gate_coverage": scope, "owner_identity": owner,
               "started_at": datetime.now(timezone.utc).isoformat(), "errors": []}
     raw_path = target / "round_feedback_raw.json"
-    if raw_path.exists() or (target / "playtest_report.json").exists():
-        raise ValueError("feedback report artifacts already exist; retain the first attempt")
     try:
         from docker.godot import godot_harness
         report["harness_binding"] = {"normalizer_source_sha256": hashlib.sha256(

@@ -24,7 +24,12 @@ marker, earliest failure, explicit exclusion reason, effective UID and root-mode
 proof. Active, malformed, symlink and unavailable owners remain blocking; a
 failed or unknown daemon probe leaves the marker unchanged. Exclusion never
 claims readiness. When discovery next owns a writable project, the excluded
-owner is retained in `excluded_owners` history. The observer validates terminal
+owner is retained in `excluded_owners` history. Terminal owners' earliest
+failures also stay in `failure_history` when discovery advances to another root,
+including errors recovered through a real readiness check. Each retained failure
+keeps its original root, reason and timestamp; it does not become current demand.
+Every existing owner marker is validated, including JSON null, before discovery.
+The observer validates terminal
 evidence and continues to measure actual operation locks and live daemon jobs.
 Existing indexes are not rebuilt. Run requests,
 readiness, errors, generation fencing, release and restart reconciliation

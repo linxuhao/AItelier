@@ -81,8 +81,12 @@ def validate_project_owner(owner: dict) -> None:
                 and math.isfinite(row["updated_at"]) and row["updated_at"] >= 0
                 and type(row.get("error")) is str)
     if (not identity(owner) or owner.get("status") not in {"idle", "active", "error", "excluded"}
-            or type(owner.get("excluded_owners", [])) is not list):
+            or type(owner.get("excluded_owners", [])) is not list
+            or type(owner.get("failure_history", [])) is not list):
         raise ValueError("project operation owner is malformed")
+    for failure in owner.get("failure_history", []):
+        if not identity(failure) or failure.get("status") != "error" or not failure["error"]:
+            raise ValueError("project failure history is malformed")
     first = owner.get("first_failure")
     if first is not None and (not identity(first) or first.get("status") != "error"
                               or first["root"] != owner["root"] or not first["error"]):
@@ -166,10 +170,13 @@ def _index_project_once(directory: Path, projects: Path, worktrees: Path, *,
     marker = directory / "project-owner.json"
     if marker.is_symlink():
         raise ValueError("project owner marker must not be a symlink")
-    prior = json.loads(marker.read_text()) if marker.exists() else None
-    if prior is not None:
+    if marker.exists():
+        prior = json.loads(marker.read_text())
         validate_project_owner(prior)
+    else:
+        prior = None
     history = prior.get("excluded_owners", []) if prior else []
+    failures = prior.get("failure_history", []) if prior else []
     root = None
     if prior and prior["status"] not in {"idle", "excluded"}:
         root = project_root(Path(prior["root"]), projects, worktrees)
@@ -209,12 +216,17 @@ def _index_project_once(directory: Path, projects: Path, worktrees: Path, *,
             return
         if prior and prior["status"] == "excluded":
             history = [*history, {k: v for k, v in prior.items() if k != "excluded_owners"}]
+        if prior and prior["root"] != str(root) and prior.get("first_failure"):
+            if prior["first_failure"] not in failures:
+                failures = [*failures, prior["first_failure"]]
 
     def record(status, error=""):
         value = {"root": str(root), "status": status, "error": error,
                  "updated_at": time.time()}
         if history:
             value["excluded_owners"] = history
+        if failures:
+            value["failure_history"] = failures
         if prior and prior["root"] == str(root):
             first = prior.get("first_failure")
             if first is None and prior["status"] == "error":

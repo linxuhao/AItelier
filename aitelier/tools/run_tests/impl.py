@@ -554,23 +554,37 @@ def _find_node_project(repo: Path) -> Path | None:
     return candidates[0] if candidates else None
 
 
-# How much of a command's output `_run_node_cmd` retains. Nothing that
-# identifies a failure is read from this tail: a repository gate's failure
-# identities come from the structured report directory it retains
-# (`_report_dir_failure_cases`), so this bound may be any size.
+# Keep routine output bounded. Diagnostics and explicit case records are read
+# from the complete capture before this tail is applied; structured retained
+# reports still take precedence for repository gate attribution.
 OUTPUT_TAIL_CHARS = 2000
+
+
+def _failure_context(out: str) -> tuple[str, bool]:
+    """Readable diagnostics, never evidence of case identity or measurement."""
+    lines = out.splitlines()
+    selected = set()
+    for i, line in enumerate(lines):
+        if re.match(r"^\s*(?:SCRIPT ERROR:|ERROR:|push_error\b|FAILED\b|FAIL\b)", line):
+            selected.update(range(max(0, i - 2), min(len(lines), i + 13)))
+    text = "\n".join(lines[i] for i in sorted(selected))
+    return text[:6000], len(text) > 6000
+
+
+def _gate_feedback(gate: dict) -> str:
+    context = gate.get("failure_context", "")
+    note = "\n[diagnostic context truncated; read output_ref]" if gate.get("failure_context_truncated") else ""
+    return (context + note) if context else str(gate.get("output", ""))[-1500:]
 
 
 def _run_node_cmd(pkg_dir: Path, args: list[str], timeout: int,
                   env_overrides: dict | None = None) -> dict:
     """Run one npm command in its own process group; kill the tree on timeout.
 
-    `output` is a bounded TAIL, and `output_truncated` says so. The one thing
-    NOT read from that tail is a gate's own declaration record: the whole text
-    is scanned BEFORE the bound is applied, because a real gate's log (a
-    GDScript compile plus a play-through) runs to tens of kilobytes, and a
-    declaration that is only readable while the run stays short is not
-    readable at all. `timed_out` / `runner_error` are the framework OBSERVING
+    `output` is a bounded tail. Diagnostics, case records and declarations
+    are scanned from the complete capture; a repository gate also retains
+    that capture under its existing ticket with a hash. `timed_out` and
+    `runner_error` are the framework OBSERVING
     that nothing was measured — never inferred from `returncode`.
     """
     proc = None
@@ -587,11 +601,33 @@ def _run_node_cmd(pkg_dir: Path, args: list[str], timeout: int,
         )
         stdout, stderr = proc.communicate(timeout=timeout)
         out = ((stdout or "") + "\n" + (stderr or "")).strip()
-        return {"passed": proc.returncode == 0,
-                "returncode": proc.returncode,
-                "output": out[-OUTPUT_TAIL_CHARS:],
-                "output_truncated": len(out) > OUTPUT_TAIL_CHARS,
-                "unmeasured_declaration": _unmeasured_declaration(out)}
+        context, context_truncated = _failure_context(out)
+        result = {"passed": proc.returncode == 0,
+                  "returncode": proc.returncode,
+                  "output": out[-OUTPUT_TAIL_CHARS:],
+                  "output_truncated": len(out) > OUTPUT_TAIL_CHARS,
+                  "failure_context": context,
+                  "failure_context_truncated": context_truncated,
+                  "unmeasured_declaration": _unmeasured_declaration(out)}
+        # Scan the complete capture while it exists. Prose diagnostics never
+        # become case identities; only the gate's explicit protocol does.
+        cases, error = _repo_gate_failure_cases({"output": out})
+        if len(cases) > 20:
+            cases, error = [], "repository gate emitted more than 20 failed cases; read output_ref"
+        result["captured_failure_cases"] = {"cases": cases, "error": error}
+        directory = (env_overrides or {}).get("GATE_REPORT_DIR")
+        if directory:
+            try:
+                raw = ((stdout or "") + "\n" + (stderr or "")).encode("utf-8")
+                path = Path(directory) / "command-output.txt"
+                with path.open("xb") as stream:
+                    stream.write(raw)
+                result["output_ref"] = {"path": str(path),
+                                        "sha256": hashlib.sha256(raw).hexdigest(),
+                                        "format": "stdout + newline + stderr"}
+            except OSError as e:
+                result["output_retention_error"] = str(e)
+        return result
     except subprocess.TimeoutExpired:
         _kill_group(proc)
         return {"passed": False, "returncode": -1, "timed_out": True,
@@ -1490,10 +1526,9 @@ def _repo_gate_failure_cases(gate: dict) -> tuple[list[dict], str | None]:
     `_report_dir_failure_cases`) is read from that report and nothing else,
     whatever the length of its output.
 
-    Otherwise the retained command output is bounded, so any truncation makes
-    the set incomplete and unusable.  One malformed or duplicate record
-    likewise invalidates the whole set instead of mixing reliable and
-    script-wide keys.
+    Otherwise use explicit case records scanned from the complete capture.
+    Legacy tail-only results are unusable when truncated. One malformed or
+    duplicate record invalidates the set; diagnostic prose never supplies ids.
     """
     if gate.get("report_dir") and gate.get("repo"):
         from_report = _report_dir_failure_cases(Path(gate["report_dir"]),
@@ -1501,6 +1536,9 @@ def _repo_gate_failure_cases(gate: dict) -> tuple[list[dict], str | None]:
                                                 _gate_first_entry(gate))
         if from_report is not None:
             return from_report
+    captured = gate.get("captured_failure_cases")
+    if captured is not None:
+        return captured["cases"], captured["error"]
     if gate.get("output_truncated"):
         return [], "repository gate output was truncated"
     records: list[dict] = []
@@ -1857,7 +1895,7 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
                 stamp_report(report, run_id=run_id, out_dir=str(target_dir),
                              cycle_from=evidence_cycle_from)
             (target_dir / "test_report.json").write_text(
-                json.dumps(report, indent=2), encoding="utf-8")
+                json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
             return {"written": "test_report.json", "passed": False,
                     "passed_relative": False, "new_failures": [],
                     "baseline_state": "unavailable", "baseline_known": 0,
@@ -2174,7 +2212,7 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
                     f"repo_gate:{gate['script']} was NOT measured "
                     f"(engine admission: {report['repo_gate_admission']}; "
                     f"{gate.get('attempts', 1)} attempt(s)): "
-                    f"{gate['output'][-1500:]}")
+                    f"{_gate_feedback(gate)}")
             elif outcome == REPO_GATE_MEASURED_PASS:
                 # The gate ran and reported nothing failed: every case it
                 # knows about passed, so a known-red case of its own may be
@@ -2205,7 +2243,7 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
                         report["failures"].append(
                             f"repo_gate:{gate['script']} failed "
                             f"(rc={gate['returncode']}): "
-                            f"{gate['output'][-1500:]}")
+                            f"{_gate_feedback(gate)}")
                 else:
                     executed.repo_gate_cases = {c["case_id"] for c in cases}
 
@@ -2247,7 +2285,7 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
                      start_cycle=evidence_cycle_start,
                      cycle_from=evidence_cycle_from)
     (target_dir / "test_report.json").write_text(
-        json.dumps(report, indent=2), encoding="utf-8")
+        json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
     return {"written": "test_report.json", "passed": report["passed"],
             "release_evidence": release_disposition(report),
             # The routing flag ITSELF, on the RETURN and not only in the file.

@@ -54,6 +54,40 @@ def project_root(root: Path, projects: Path, worktrees: Path) -> Path:
     return root
 
 
+def _failure_error(directory: Path, exc: BaseException) -> str:
+    """Keep complete client output private; diagnostic I/O never hides its failure."""
+    if not isinstance(exc, (subprocess.CalledProcessError, subprocess.TimeoutExpired)):
+        return f"{type(exc).__name__}: {exc}"[:500]
+    parts = (exc.output, getattr(exc, "stderr", None))
+    raw = b"".join(p.encode("utf-8") if isinstance(p, str) else p
+                   for p in parts if p is not None)
+    cause = " ".join(raw[-2048:].decode("utf-8", errors="replace").split())[-180:]
+    status = (f"exit={exc.returncode}" if isinstance(exc, subprocess.CalledProcessError)
+              else f"timeout={exc.timeout}s")
+    prefix = f"{type(exc).__name__} {status}: "
+    try:
+        if directory.resolve() != directory.absolute() or directory.is_symlink():
+            raise ValueError("diagnostic directory must not redirect")
+        with tempfile.NamedTemporaryFile(dir=directory, prefix="command-", suffix=".raw",
+                                         delete=False) as stream:
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+            path = Path(stream.name)
+        fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        locator = f" raw={path} sha256={hashlib.sha256(raw).hexdigest()}"
+        # Very long control paths still locate the file beside the owner ledger.
+        if len(prefix) + len(locator) > 320:
+            locator = f" raw={path.name} sha256={hashlib.sha256(raw).hexdigest()}"
+    except Exception as diagnostic_exc:  # preserve the original provider failure
+        locator = f" raw unavailable: {type(diagnostic_exc).__name__}"
+    return prefix + (cause or "no client output")[:max(0, 500-len(prefix)-len(locator))] + locator
+
+
 def index_project_once(directory: Path, projects: Path, worktrees: Path, *,
                        execute=None, timeout=600, embedding="local/potion-code-16m-v2"):
     """Retain baselines; discover one new project, never historical run trees.
@@ -109,7 +143,7 @@ def index_project_once(directory: Path, projects: Path, worktrees: Path, *,
                 timeout=timeout)
         record("idle")
     except BaseException as exc:
-        record("error", f"{type(exc).__name__}: {exc}"[:500])
+        record("error", _failure_error(directory, exc))
         raise
 
 
@@ -319,7 +353,7 @@ class IndexControl:
                 # subprocess.TimeoutExpired and follows the unknown/error path.
                 results.append({"run_id": rid, "outcome": "busy", "error": str(exc)})
             except Exception as exc:  # noqa: BLE001 -- retain/degrade on unknown provider or I/O failures
-                error = f"{type(exc).__name__}: {exc}"[:500]
+                error = _failure_error(self.directory, exc)
                 self._finish(job, "error", error, retry_seconds)
                 results.append({"run_id": rid, "outcome": "error", "error": error})
         return results
@@ -350,9 +384,8 @@ class IndexControl:
     def _execute(command: list[str], *, timeout: float):
         # Timeout ends this client, not necessarily the daemon operation. Only
         # a successful subsequent server-mode drop can establish release.
-        with open(os.devnull, "w") as null:
-            subprocess.run(command, check=True, timeout=timeout, stdout=null,
-                           stderr=subprocess.STDOUT)
+        subprocess.run(command, check=True, timeout=timeout, stdout=subprocess.PIPE,
+                       stderr=subprocess.STDOUT)
 
 
 def _stop_worker(*_):

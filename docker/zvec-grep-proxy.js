@@ -6,6 +6,9 @@
 const http = require("http");
 const UP = { host: "127.0.0.1", port: 7999 };
 http.createServer((req, res) => {
+  if ((req.url || "").split("?")[0].replace(/\/+$/, "") !== "/mcp") {
+    res.writeHead(403); res.end("administration is loopback only"); return;
+  }
   const headers = { ...req.headers, host: `${UP.host}:${UP.port}` };
   const up = http.request({ ...UP, path: req.url, method: req.method, headers }, (r) => {
     res.writeHead(r.statusCode, r.headers);

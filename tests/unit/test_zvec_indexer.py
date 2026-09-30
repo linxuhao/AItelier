@@ -5,9 +5,6 @@ import os
 from pathlib import Path
 import subprocess
 
-ENTRYPOINT = Path(__file__).parents[2] / "docker" / "zvec-grep-entrypoint.sh"
-
-
 def _run(*args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         args, cwd=cwd, check=True, text=True, capture_output=True,
@@ -31,7 +28,7 @@ def _stub_zg(bin_dir: Path) -> Path:
         "#!/bin/sh\n"
         "printf '%s\\n' \"$*\" >> \"$ZG_TEST_LOG\"\n"
         "[ \"${ZG_TEST_FAIL:-0}\" = 1 ] && { echo forced failure >&2; exit 7; }\n"
-        "mkdir -p \"$2/.zvec-grep\"\n"
+        "[ \"$1\" = index ] && mkdir -p \"$2/.zvec-grep\"\n"
         "echo indexed\n"
     )
     zg.chmod(0o755)
@@ -39,111 +36,58 @@ def _stub_zg(bin_dir: Path) -> Path:
 
 
 def _index(projects: Path, worktrees: Path, bin_dir: Path, **extra: str):
-    env = os.environ.copy()
-    env.update({
-        "AITELIER_PROJECTS_DIR": str(projects),
-        "AITELIER_WORKTREES_DIR": str(worktrees),
-        "AITELIER_ZG_INDEXER_LIB_ONLY": "1",
-        "ZG_TEST_LOG": str(bin_dir / "zg.log"),
-        "PATH": f"{bin_dir}:{env['PATH']}",
-        **extra,
-    })
-    return subprocess.run(
-        ["sh", "-c", f'. "{ENTRYPOINT}"; index_new_repos'],
-        text=True, capture_output=True, env=env, check=True,
-    )
+    from core.semantic_index_control import index_project_once
+    directory = bin_dir / 'control'
+    directory.mkdir(exist_ok=True)
+    env = {**os.environ, "ZG_TEST_LOG": str(bin_dir / 'zg.log'),
+           "PATH": f"{bin_dir}:{os.environ['PATH']}", **extra}
+    def execute(command, *, timeout):
+        return subprocess.run(command, check=True, capture_output=True,
+                              text=True, timeout=timeout, env=env)
+    return index_project_once(directory, projects, worktrees, execute=execute)
 
 
-def test_indexes_project_and_linked_worktree_without_dirtying_git(tmp_path):
-    projects = tmp_path / "projects"
-    worktrees = tmp_path / "worktrees"
-    source = projects / "source"
-    linked = worktrees / "run-1"
-    _git_repo(source)
-    worktrees.mkdir()
-    _run("git", "worktree", "add", "-qb", "run-1", str(linked), cwd=source)
-    (worktrees / "not-a-repo").mkdir()
-    outside = tmp_path / "outside"
-    _git_repo(outside)
-    (worktrees / "symlink-out").symlink_to(outside, target_is_directory=True)
-
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    log = _stub_zg(bin_dir)
-    result = _index(projects, worktrees, bin_dir)
-
-    assert result.stderr == ""
+def test_indexes_project_without_dirtying_git_and_preserves_linked_worktree(tmp_path):
+    projects, worktrees = tmp_path / 'projects', tmp_path / 'worktrees'
+    source = projects / 'source'; linked = worktrees / 'run-1'
+    _git_repo(source); worktrees.mkdir()
+    _run('git', 'worktree', 'add', '-qb', 'run-1', str(linked), cwd=source)
+    outside = tmp_path / 'outside'; _git_repo(outside)
+    (projects / 'redirect').symlink_to(outside, target_is_directory=True)
+    bin_dir = tmp_path / 'bin'; bin_dir.mkdir(); log = _stub_zg(bin_dir)
+    _index(projects, worktrees, bin_dir)
     calls = log.read_text().splitlines()
-    assert [line.split()[1] for line in calls] == [str(linked), str(source)]
-    assert all("--hidden --glob !**/.zvec-grep/**" in line for line in calls)
-    assert (source / ".zvec-grep").is_dir()
-    assert (linked / ".zvec-grep").is_dir()
-    assert not (outside / ".zvec-grep").exists()
-    assert _run("git", "status", "--porcelain", cwd=source).stdout == ""
-    assert _run("git", "status", "--porcelain", cwd=linked).stdout == ""
-
-    # Existing indexes are not launched twice.
+    assert [line.split()[1] for line in calls] == [str(source), str(source)]
+    assert '--hidden --glob !**/.zvec-grep/**' in calls[0]
+    assert _run('git', 'status', '--porcelain', cwd=source).stdout == ''
+    assert _run('git', 'status', '--porcelain', cwd=linked).stdout == ''
+    assert not (linked / '.zvec-grep').exists()
+    assert not (outside / '.zvec-grep').exists()
     _index(projects, worktrees, bin_dir)
     assert len(log.read_text().splitlines()) == 2
 
-    # Lifecycle ownership stays with git/run-isolation: the indexer issues no
-    # cross-worktree drop/delete, and Git can remove an indexed clean worktree.
-    _run("git", "worktree", "remove", str(linked), cwd=source)
-    assert not linked.exists()
+
+def test_project_backlog_is_bounded_to_one_and_does_not_scan_run_history(tmp_path):
+    projects, worktrees = tmp_path / 'projects', tmp_path / 'worktrees'
+    for i in range(3): _git_repo(projects / f'project-{i}')
+    _git_repo(worktrees / 'historic')
+    bin_dir = tmp_path / 'bin'; bin_dir.mkdir(); log = _stub_zg(bin_dir)
+    for i in range(3):
+        _index(projects, worktrees, bin_dir)
+        assert len(log.read_text().splitlines()) == (i + 1) * 2
+    assert not (worktrees / 'historic/.zvec-grep').exists()
+
+
+def test_failed_project_index_is_visible_and_repaired_without_success_marker(tmp_path):
+    import json
+    import pytest
+    projects, worktrees = tmp_path / 'projects', tmp_path / 'worktrees'
+    root = projects / 'failure'; _git_repo(root)
+    bin_dir = tmp_path / 'bin'; bin_dir.mkdir(); _stub_zg(bin_dir)
+    with pytest.raises(subprocess.CalledProcessError):
+        _index(projects, worktrees, bin_dir, ZG_TEST_FAIL='1')
+    marker = bin_dir / 'control/project-owner.json'
+    assert json.loads(marker.read_text())['status'] == 'error'
+    assert not (root / '.zvec-grep').exists()
     _index(projects, worktrees, bin_dir)
-    assert source.exists()
-    assert len(log.read_text().splitlines()) == 2
-
-
-def test_backlogs_prioritize_new_worktrees_without_starving_projects(tmp_path):
-    projects = tmp_path / "projects"
-    worktrees = tmp_path / "worktrees"
-    projects.mkdir()
-    worktrees.mkdir()
-
-    for i in range(8):
-        _git_repo(projects / f"project-{i:02d}")
-
-    source = tmp_path / "source"
-    _git_repo(source)
-    for i in range(9):
-        linked = worktrees / f"run-{i:02d}"
-        _run("git", "worktree", "add", "-qb", f"run-{i:02d}", str(linked), cwd=source)
-        os.utime(linked, (1_800_000_000 + i, 1_800_000_000 + i))
-
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    log = _stub_zg(bin_dir)
-    _index(projects, worktrees, bin_dir)
-
-    indexed = [Path(line.split()[1]).name for line in log.read_text().splitlines()]
-    assert indexed[:5] == [
-        "run-08", "run-07", "run-06", "run-05", "project-00",
-    ]
-    assert indexed[5:10] == [
-        "run-04", "run-03", "run-02", "run-01", "project-01",
-    ]
-    assert indexed[10:13] == ["run-00", "project-02", "project-03"]
-    assert sorted(indexed) == sorted(
-        [f"run-{i:02d}" for i in range(9)]
-        + [f"project-{i:02d}" for i in range(8)]
-    )
-
-
-def test_failed_index_is_reported_and_retried_without_success_marker(tmp_path):
-    projects = tmp_path / "projects"
-    worktrees = tmp_path / "worktrees"
-    repo = worktrees / "run-fail"
-    _git_repo(repo)
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    log = _stub_zg(bin_dir)
-
-    first = _index(projects, worktrees, bin_dir, ZG_TEST_FAIL="1")
-    assert "forced failure" in first.stderr
-    assert "index failed; will retry" in first.stderr
-    assert not (repo / ".zvec-grep").exists()
-
-    second = _index(projects, worktrees, bin_dir, ZG_TEST_FAIL="1")
-    assert [line.split()[1] for line in log.read_text().splitlines()] == [str(repo), str(repo)]
-    assert "index failed; will retry" in second.stderr
+    assert json.loads(marker.read_text())['status'] == 'idle'

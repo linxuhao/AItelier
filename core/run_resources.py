@@ -83,8 +83,14 @@ def reconcile(db, sf, run_id: str | None = None) -> dict:
             if row is None:
                 raise ValueError(reason)
             validate_checkout(rec, datadir.worktrees_dir())
-            if enabled():
-                control().request(rec, "released")
+            # Activation adopts active runs, not every historical index. A
+            # terminal tree predating the ledger stays untouched until an
+            # explicit owner demand has been recorded for it.
+            if enabled() and (datadir.semantic_index_control_dir() / "control.sqlite3").is_file():
+                ctl = IndexControl(datadir.semantic_index_control_dir(),
+                                   datadir.worktrees_dir(), initialize=False)
+                if ctl.get(rid) is not None:
+                    ctl.request(rec, "released")
             # Terminal ownership is not an assertion of discard or integration.
             with db.get_connection() as conn:
                 conn.execute("""UPDATE run_isolation SET

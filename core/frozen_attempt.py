@@ -72,16 +72,24 @@ def _available_runtime_capability(identity, arguments: dict):
     return require_available_capability_identity(identity, arguments["name"])
 
 
-def materialize(spec: dict, *, source: str | None, sf, trace) -> dict:
+def materialize(spec: dict, *, source: str | None, sf, trace, review_inputs=None) -> dict:
     """Verify one frozen State-attempt descriptor without mutation."""
     try:
         from skillflow.prerequisites import materialize_frozen_prerequisites
     except ImportError as exc:
         raise StateConflict(
             "installed SkillFlow lacks frozen prerequisite materialization") from exc
+    from core.review_input_bundle import decode, require_identity
+    def review_bundle(arguments):
+        identity, files = decode(arguments)
+        if review_inputs is not None:
+            review_inputs.append((identity, files))
+        return identity
     return materialize_frozen_prerequisites(spec, {
         "source_head": _source_head(source),
+        "review_input_bundle": review_bundle,
         "sha256_file": _sha256_file,
         "runtime_capability": _runtime_capability(sf),
-    }, validators={"runtime_capability": _available_runtime_capability},
+    }, validators={"runtime_capability": _available_runtime_capability,
+                    "review_input_bundle": require_identity},
        trace=trace)

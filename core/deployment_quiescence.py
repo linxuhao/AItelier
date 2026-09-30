@@ -1052,6 +1052,64 @@ def _resident_service_identity(command: str) -> bool:
     return False
 
 
+def _measurement_subject(line: str) -> str:
+    """Scan launched code rather than corroborated argument data.
+
+    Readable /proc argv must match the ps observation. Python module/script
+    identity and tail's input paths have a bounded launch grammar. Inline code,
+    unsupported launchers and unreadable/changed observations keep the full
+    scan. Container membership or uid never grants an exemption.
+    """
+    fields = line.strip().split(None, 2)
+    if len(fields) != 3 or not all(field.isdecimal() for field in fields[:2]):
+        return line
+    proc = PROC_ROOT / fields[0]
+    try:
+        raw = (proc / "cmdline").read_bytes()
+        if not raw.endswith(b"\0"):
+            return line
+        words = [word.decode("utf-8") for word in raw[:-1].split(b"\0")]
+        comm = (proc / "comm").read_text().strip()
+    except (OSError, UnicodeError):
+        return line
+    if not words or " ".join(words) != fields[2] or "--long-gate" in fields[2]:
+        return line
+    name = Path(words[0]).name.lower()
+    if name == "tail" and comm == "tail":
+        return words[0]  # GNU tail reads paths; it does not launch their names.
+    if re.fullmatch(r"python(?:[23](?:\.\d+)?)?", name) and comm.lower().startswith("python"):
+        index = 1
+        while (index < len(words)
+               and words[index] in {"-u", "-B", "-E", "-I", "-O", "-OO", "-s", "-S"}):
+            index += 1
+        if (index + 1 < len(words) and words[index] == "-m"
+                and not words[index + 1].startswith("-")):
+            return " ".join((words[0], words[index + 1]))
+        if (index < len(words) and not words[index].startswith("-")
+                and words[index].endswith(".py")):
+            return " ".join((words[0], words[index]))
+        return line
+    # A direct native executable may carry serialized settings, never code
+    # identity. Do not apply this to opaque interpreter/shell launch modes.
+    if name in {"sh", "bash", "dash", "zsh", "env", "node", "nodejs",
+                "perl", "ruby", "timeout", "nice", "xargs"}:
+        return line
+    try:
+        if str((proc / "exe").readlink()) != words[0]:
+            return line
+    except OSError:
+        return line
+    scanned = []
+    for word in words:
+        try:
+            structured = json.loads(word)
+        except (ValueError, TypeError):
+            structured = None
+        if not isinstance(structured, (dict, list)):
+            scanned.append(word)
+    return " ".join(scanned)
+
+
 def external_owners(*, runner: Callable[[list[str]], subprocess.CompletedProcess]
                     = _run_command,
                     registered_external_owners: list[dict] | None = None
@@ -1088,34 +1146,35 @@ def external_owners(*, runner: Callable[[list[str]], subprocess.CompletedProcess
                    "godot --", "godot --headless", "xvfb-run")
         for line in (processes.stdout or "").splitlines():
             lowered = line.lower()
+            subject = _measurement_subject(line).lower()
             measurement_name = bool(re.search(
                 r"(?:^|[^a-z0-9])(measurement|evaluation|evaluator|eval(?:[_-]?job)?|"
                 r"benchmark|playtest|judge|grader|grading|scor(?:e|ing)|"
                 r"assessment|assessor|rater|review|quality[_-]?check|"
                 r"metrics?|"
                 r"[a-z0-9]+[_-](?:worker|job)|[a-z0-9]+(?:worker|job))"
-                r"(?:[^a-z0-9]|$)", lowered)) or "--long-gate" in lowered
+                r"(?:[^a-z0-9]|$)", subject)) or "--long-gate" in lowered
+            command = line.strip()
+            matched = next((row for row in registered_external_owners
+                            if row.get("status") in {"active", "paused", "unknown"}
+                            and isinstance(row.get("external_id"), str)
+                            and _command_has_identity(command, row["external_id"])), None)
             # These are already enumerated shared services or kernel
             # threads, not an unknown evaluator worker whose ownership
             # needs State admission.
             unknown_measurement = (measurement_name
                                    and not _kernel_thread(line)
                                    and not _resident_service_identity(line))
-            if any(needle in lowered for needle in needles) or unknown_measurement:
-                command = line.strip()
-                active = any(token in lowered for token in (
+            if any(needle in subject for needle in needles) or unknown_measurement or matched:
+                active = any(token in subject for token in (
                     "godot --", "godot --headless", "xvfb-run",
-                    "playtest", "render", "x11_input_smoke", "run_script")) or unknown_measurement
-                matched = next((row for row in registered_external_owners
-                                if row.get("status") in {"active", "paused", "unknown"}
-                                and isinstance(row.get("external_id"), str)
-                                and _command_has_identity(command, row["external_id"])), None)
+                    "playtest", "render", "x11_input_smoke", "run_script")) or unknown_measurement or bool(matched)
                 ownership = "registered" if matched else "unregistered"
                 owners.append({"kind": "process", "command": command,
                                "active": active,
-                               "resource": ("external_measurement" if unknown_measurement
+                               "resource": ("external_measurement" if unknown_measurement or matched
                                             else "render" if active else ""),
-                               **({"ownership": ownership} if unknown_measurement else {}),
+                               **({"ownership": ownership} if unknown_measurement or matched else {}),
                                **({"attempt_id": matched["attempt_id"]}
                                   if matched and matched.get("attempt_id") else {})})
                 if unknown_measurement:
@@ -1142,9 +1201,42 @@ def _sidecar_rows(path: Path | None) -> tuple[list[dict], list[str]]:
             rows = [dict(row) for row in conn.execute(
                 "SELECT run_id,root,source,desired,revision,done_revision,"
                 "outcome,error,activity_at FROM indexes ORDER BY run_id")]
-        return rows, []
+        return rows, _semantic_worker_errors(path.parent)
     except (OSError, sqlite3.Error) as exc:
         return [], [f"sidecar ledger measurement failed: {type(exc).__name__}: {exc}"]
+
+
+def _semantic_worker_errors(directory: Path) -> list[str]:
+    """Observe project operations and in-flight control work without writing."""
+    errors = []
+    operation = directory / "operation.lock"
+    if operation.exists() or operation.is_symlink():
+        try:
+            fd = os.open(operation, os.O_RDONLY | os.O_NOFOLLOW)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            finally:
+                os.close(fd)
+        except BlockingIOError:
+            errors.append("semantic indexing operation is active")
+        except OSError as exc:
+            errors.append(f"semantic operation ownership is unknown: {exc}")
+    marker = directory / "project-owner.json"
+    if marker.exists() or marker.is_symlink():
+        try:
+            if marker.is_symlink():
+                raise ValueError("project owner marker is a symlink")
+            owner = json.loads(marker.read_text())
+            if (type(owner) is not dict or owner.get("status") not in {"idle", "active", "error"}
+                    or not _nonempty_string(owner.get("root"))
+                    or not Path(owner["root"]).is_absolute()
+                    or not _nonnegative_number(owner.get("updated_at"))):
+                raise ValueError("project operation owner is malformed")
+            if owner.get("status") != "idle":
+                errors.append(f"semantic project operation is active or unknown: {owner}")
+        except (OSError, ValueError, TypeError) as exc:
+            errors.append(f"semantic project owner measurement failed: {exc}")
+    return errors
 
 
 def _godot_rows(path: Path | None) -> tuple[list[dict], list[str]]:
@@ -1312,6 +1404,28 @@ def measure(*, skillflow, db=None, sidecar_db: Path | str | None = None,
         except Exception as exc:  # noqa: BLE001
             external = []
             errors.append(f"external owner measurement failed: {type(exc).__name__}: {exc}")
+
+    # Daemon watchers can submit jobs outside the control client's lifetime.
+    # The real installed upstream administration client measures those jobs;
+    # feature flags do not suppress an already-running service observation.
+    if sidecar_db is not None and (Path(sidecar_db).parent / "operation.lock").exists():
+        for owner in external:
+            if owner.get("kind") != "docker" or owner.get("service") != "zvec-grep":
+                continue
+            try:
+                result = command_runner(["docker", "exec", owner["name"], "node",
+                                         "/usr/local/lib/zvec-grep-status.mjs"])
+                if result.returncode:
+                    raise ValueError((result.stderr or "daemon status failed")[:500])
+                status = json.loads(result.stdout)
+                if (not _nonnegative_int(status.get("queued_jobs"))
+                        or not _nonnegative_int(status.get("running_jobs"))
+                        or type(status.get("shutting_down")) is not bool):
+                    raise ValueError("incomplete daemon operation inventory")
+                if status["queued_jobs"] or status["running_jobs"] or status["shutting_down"]:
+                    errors.append(f"semantic daemon operations are active: {status}")
+            except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError) as exc:
+                errors.append(f"semantic daemon ownership is unknown: {exc}")
 
     godot_db = None
     if sidecar_db is not None:

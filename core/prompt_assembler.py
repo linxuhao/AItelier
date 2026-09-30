@@ -1023,6 +1023,12 @@ class PromptAssembler:
         heard of. The manifest is charged against the same budget, so the entry
         stays bounded.
         """
+        # Review bundle entries are already bounded and rehashed by host
+        # admission. Clipping one would invalidate its declared byte identity.
+        if label.startswith("[review input "):
+            from core.review_input_bundle import MAX_ITEM_BYTES
+            if len(content.encode("utf-8")) <= MAX_ITEM_BYTES:
+                return content
         lines = content.splitlines()
         if len(lines) <= MAX_CONTEXT_LINES:
             return content

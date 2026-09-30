@@ -10,17 +10,107 @@ from __future__ import annotations
 import argparse
 import fcntl
 import hashlib
+import json
 import math
 import os
 import re
 import signal
 import sqlite3
 import subprocess
+import tempfile
 import time
 from contextlib import contextmanager
 from pathlib import Path
 
 _RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
+
+
+@contextmanager
+def service_lock(directory: Path, name: str):
+    """Short operation lock or lifetime worker lock; never remove live locks."""
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if directory.is_symlink():
+        raise ValueError("control directory must not be a symlink")
+    fd = os.open(directory / name, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield
+    finally:
+        os.close(fd)
+
+
+def project_root(root: Path, projects: Path, worktrees: Path) -> Path:
+    """Only an immediate, nonsymlink project checkout can be auto-indexed."""
+    if (not root.is_absolute() or root.parent != projects or root.resolve() != root
+            or projects.resolve() != projects or root.is_relative_to(worktrees)
+            or not (root / ".git").exists()):
+        raise ValueError("not an owned project root")
+    result = git(root, "rev-parse", "--show-toplevel")
+    if result.returncode or result.stdout.strip() != str(root):
+        raise ValueError("project checkout ownership is unavailable")
+    cache = root / ".zvec-grep"
+    if cache.is_symlink() or (cache.exists() and not cache.is_dir()):
+        raise ValueError("project index storage is not an owned directory")
+    return root
+
+
+def index_project_once(directory: Path, projects: Path, worktrees: Path, *,
+                       execute=None, timeout=600, embedding="local/potion-code-16m-v2"):
+    """Retain baselines; discover one new project, never historical run trees.
+
+    An interrupted/failed daemon operation remains visible until that SAME
+    root is positively ready. No next project can erase an unknown owner.
+    """
+    execute = execute or IndexControl._execute
+    marker = directory / "project-owner.json"
+    if marker.is_symlink():
+        raise ValueError("project owner marker must not be a symlink")
+    prior = json.loads(marker.read_text()) if marker.exists() else None
+    if prior and prior["status"] != "idle":
+        root = project_root(Path(prior["root"]), projects, worktrees)
+    else:
+        root = None
+        if projects.is_dir() and not projects.is_symlink():
+            for candidate in sorted(projects.iterdir()):
+                if candidate.is_symlink() or (candidate / ".zvec-grep").exists():
+                    continue
+                try:
+                    root = project_root(candidate, projects, worktrees)
+                    break
+                except ValueError:
+                    continue
+        if root is None:
+            return
+
+    def record(status, error=""):
+        value = {"root": str(root), "status": status, "error": error,
+                 "updated_at": time.time()}
+        with tempfile.NamedTemporaryFile(mode="w", dir=directory, delete=False) as stream:
+            stream.write(json.dumps(value) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+            temporary = stream.name
+        os.replace(temporary, marker)
+        fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+    record("active")
+    try:
+        # A partial index after interruption must be checked, never skipped.
+        if not (root / ".zvec-grep").exists():
+            IndexControl._exclude_storage(root)
+            execute(["zg", "index", str(root), "--embedding", embedding,
+                     "--mode", "server", "--hidden", "--glob", "!**/.zvec-grep/**"],
+                    timeout=timeout)
+        execute(["zg", "status", str(root), "--check-ready", "--mode", "server"],
+                timeout=timeout)
+        record("idle")
+    except BaseException as exc:
+        record("error", f"{type(exc).__name__}: {exc}"[:500])
+        raise
 
 
 def git(root: Path | str, *args: str) -> subprocess.CompletedProcess:
@@ -72,7 +162,7 @@ def validate_checkout(rec: dict, managed_root: Path) -> Path:
 
 
 class IndexControl:
-    def __init__(self, directory: Path | str, managed_root: Path | str):
+    def __init__(self, directory: Path | str, managed_root: Path | str, *, initialize=True):
         self.directory = Path(directory)
         self.managed_root = Path(managed_root)
         self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -81,6 +171,12 @@ class IndexControl:
         self.database = self.directory / "control.sqlite3"
         if self.database.is_symlink():
             raise ValueError("control database must not be a symlink")
+        if not initialize:
+            if not self.database.is_file():
+                raise FileNotFoundError("owner demand has not created a control ledger")
+            with self.connection() as conn:
+                conn.execute("SELECT run_id,desired,revision FROM indexes LIMIT 1")
+            return
         with self.connection() as conn:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("""CREATE TABLE IF NOT EXISTS indexes (
@@ -270,19 +366,43 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--control-dir", required=True)
     parser.add_argument("--worktrees-root", required=True)
+    parser.add_argument("--projects-root")
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
-    control = IndexControl(args.control_dir, args.worktrees_root)
+    directory = Path(args.control_dir)
     timeout = float(os.environ.get("AITELIER_ZVEC_COMMAND_TIMEOUT_SECONDS", "600"))
     if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("command timeout must be positive and finite")
-    while True:
-        for result in control.process_once(timeout=timeout, embedding=os.environ.get(
-                "ZVEC_GREP_EMBEDDING", "local/potion-code-16m-v2")):
-            print(f"[zg-lifecycle] {result}", flush=True)
-        if args.once:
-            return
-        time.sleep(1)
+    embedding = os.environ.get("ZVEC_GREP_EMBEDDING", "local/potion-code-16m-v2")
+    # A worker never manufactures an empty ledger to make a guard look quiet.
+    # Only host owner demand creates indexes rows. Project operations have a
+    # separate durable marker because they retain their baseline after indexing.
+    with service_lock(directory, "worker.lock"):
+        while True:
+            fence = directory.parent / "godot-control" / "deployment-admission.lock"
+            fence.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            fd = os.open(fence, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                with service_lock(directory, "operation.lock"):
+                    if (directory / "control.sqlite3").exists():
+                        control = IndexControl(directory, args.worktrees_root, initialize=False)
+                        for result in control.process_once(timeout=timeout, embedding=embedding):
+                            print(f"[zg-lifecycle] {result}", flush=True)
+                    if args.projects_root:
+                        try:
+                            index_project_once(directory, Path(args.projects_root),
+                                               Path(args.worktrees_root), timeout=timeout,
+                                               embedding=embedding)
+                        except Exception as exc:
+                            print(f"[zg-project] retained for repair: {exc}", flush=True)
+            except BlockingIOError:
+                pass  # cutover or another actual operation owns the boundary
+            finally:
+                os.close(fd)
+            if args.once:
+                return
+            time.sleep(1)
 
 
 if __name__ == "__main__":

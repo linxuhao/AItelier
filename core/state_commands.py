@@ -315,7 +315,7 @@ class ListAttempts(Node):
 
 class FrozenPrerequisiteCheck(Request):
     id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
-    probe: Literal["source_head", "sha256_file", "runtime_capability"]
+    probe: Literal["source_head", "sha256_file", "runtime_capability", "review_input_bundle"]
     arguments: dict
     expected: Any
 
@@ -353,6 +353,7 @@ class StartExternalAttempt(Node):
     external_id: str
     request_key: str
     instruction: str = ""
+    base_sha: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
 
 
 class DispositionFailedAttempt(Attempt):

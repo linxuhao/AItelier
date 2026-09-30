@@ -74,6 +74,8 @@ services:
       # path here for a license-free parse-check + headless play-test. Non-game
       # (Python/web) projects never call it.
       GODOT_BUILDER_URL: "http://godot-builder:8080"
+      AITELIER_HOME: "${HOME}/.AItelier"
+      AITELIER_ZVEC_LIFECYCLE: "1"
       ZVEC_GREP_SERVER_URL: "http://zvec-grep:7998/mcp"
       # The readability gate (godot_vision) shows the frames the play-test
       # already rendered to a vision model and fails when the game is
@@ -180,23 +182,21 @@ services:
   # the private network only (not on `edge`). Index a repo once:
   # The MCP surface is the AGENT toolset (search only): index/drop/status are
   # not reachable from inside aitelier, even by an agent with bash. The
-  # entrypoint's serial indexer loop (docker/zvec-grep-entrypoint.sh) indexes
-  # every repo under ~/.AItelier/projects/* and each run-owned linked worktree
-  # under ~/.AItelier/worktrees/*. Backlogs run in 4 newest-worktrees : 1
-  # project batches and rescan between batches, so projects still progress
-  # while a new run does not wait behind the startup inventory. It excludes
-  # `.zvec-grep/`
-  # through Git metadata before indexing. Index data stays inside the owning
-  # checkout; worktree removal owns cleanup and the sidecar never recursively
-  # deletes or drops a disappeared worktree. A repo elsewhere (repo_type
-  # existing with a repo_path outside both roots) is indexed by hand:
-  #   docker exec aitelier-zg zg index <abs repo path> --embedding local/potion-code-16m-v2 --mode server
+  # A single locked worker consumes run owner demand from the shared control
+  # directory and indexes one new project root between bounded run batches.
+  # It never scans historical run worktrees. Existing project/root indexes are
+  # retained; the host reconciles only recorded active runs and owned releases.
+  # See docs/semantic-index-activation.md for the guarded migration.
   zvec-grep:
     build:
       context: .
       dockerfile: docker/zvec-grep.Dockerfile
     image: aitelier-zg:latest
     container_name: aitelier-zg
+    environment:
+      AITELIER_HOME: "${HOME}/.AItelier"
+      AITELIER_PROJECTS_DIR: "${HOME}/.AItelier/projects"
+      AITELIER_WORKTREES_DIR: "${HOME}/.AItelier/worktrees"
     user: "${AITELIER_UID:-1000}:${AITELIER_GID:-1000}"
     # Own network namespace on the private network: aitelier reaches it as
     # http://zvec-grep:7998/mcp (ZVEC_GREP_SERVER_URL; zvec-grep-proxy.js fronts

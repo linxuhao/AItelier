@@ -35,6 +35,7 @@ import jsonschema
 import pytest
 import yaml
 
+from aitelier.gate_coverage import full_coverage
 from aitelier.tools.run_tests import impl as rt
 from tests.gate_fixture import RUN_TESTS_SH, HarnessRig, red_report
 
@@ -87,7 +88,7 @@ elif mode == "nested":
 else:
     d = tempfile.mkdtemp(prefix="gate-", dir=parent)
 cwd = os.getcwd()
-manifest = {"repo": cwd, "status": "incomplete", "stages": {}}
+manifest = {"repo": cwd, "status": "incomplete", "stages": {}, "gate_coverage": __FULL_COVERAGE__}
 def write(name, v, where=None):
     with open(os.path.join(where or d, name), "w") as fh:
         json.dump(v, fh, indent=2)
@@ -164,6 +165,11 @@ if mode == "exit2_after_answer":
     finish(2)
 finish(1 if found else 0)
 '''
+
+# The positive fixture declares its complete synthetic contract. Missing and
+# provisional markers are exercised separately by the early-contract tests.
+TABLE_GATE = TABLE_GATE.replace("__FULL_COVERAGE__",
+    repr(full_coverage("a" * 40, {"scenarios": [{"name": "t"}]})))
 
 UNMEASURED, FAIL, PASS = "unmeasured", "measured_fail", "measured_pass"
 UNATTRIBUTABLE = "unattributable"

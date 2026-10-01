@@ -1172,6 +1172,13 @@ def _stage_findings(manifest_path: Path, manifest: dict, ticket_dir: Path
                     verdict.get("summary")
                     or f"{stage} reported passed=false"]
         findings.extend((stage, item, stage_path) for item in items)
+    # Authored-contract validation can fail before the first stage and before
+    # coverage exists. Its explicit manifest red is still a retained finding;
+    # attribution is decided by the caller, exactly as for stage findings.
+    if (not findings and manifest.get("status") == "failed"
+            and manifest.get("outcome") == REPO_GATE_MEASURED_FAIL):
+        findings.append(("manifest", "repository gate reported measured_fail "
+                         "in its failed manifest", manifest_path))
     return findings, errors
 
 

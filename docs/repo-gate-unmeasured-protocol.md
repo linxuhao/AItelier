@@ -85,7 +85,12 @@ gate run alone (its **ticket**, `$AITELIER_HOME/gate-reports/rt-<UTC>-<8 hex>`).
    names the repository the gate ran for and whose `stages` name every stage
    it ran (`{"<stage>": {"report": "<stage>.json"}}`), a `<stage>.json` per
    stage, and a `<stage>-findings.json` list for the stages it judges itself.
-   Reds are read from there, never from the gate's stdout.
+   Reds are read from there, never from the gate's stdout. If no stage finding
+   exists, a manifest with `status: "failed"` and `outcome: "measured_fail"`
+   contributes one manifest failure. This preserves an authored-contract
+   failure before any stage or coverage marker can be created. It uses the
+   same ownership rules as stage findings; missing coverage still blocks
+   green evidence.
 3. **The declaration**, for a gate that knows it did not run: one whole line
    of its output,
 

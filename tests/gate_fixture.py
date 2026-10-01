@@ -23,6 +23,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from aitelier.gate_coverage import full_coverage
+
 HARNESS = Path(__file__).resolve().parents[1] / "docker" / "godot" / "godot_harness.py"
 HOLDER = "op-holder"
 
@@ -37,7 +39,7 @@ op = os.environ.get("FIXTURE_GATE_OP") or os.path.basename(os.getcwd())
 parent = os.environ.get("GATE_REPORT_DIR") or tempfile.gettempdir()
 os.makedirs(parent, exist_ok=True)
 directory = tempfile.mkdtemp(prefix="fixture-gate-", dir=parent)
-manifest = {"repo": os.getcwd(), "status": "incomplete", "stages": {}}
+manifest = {"repo": os.getcwd(), "status": "incomplete", "stages": {}, "gate_coverage": __FULL_COVERAGE__}
 
 def write(name, value):
     with open(os.path.join(directory, name), "w", encoding="utf-8") as fh:
@@ -81,6 +83,11 @@ write("script-findings.json", findings)
 print("unit suite %s" % ("FAILED" if findings else "OK"))
 finish(1 if findings else 0)
 '''
+
+# The positive fixture declares its complete synthetic contract. Missing and
+# provisional markers are exercised separately by the early-contract tests.
+GATE_PY = GATE_PY.replace("__FULL_COVERAGE__",
+    repr(full_coverage("a" * 40, {"scenarios": [{"name": "a"}, {"name": "b"}]})))
 
 RUN_TESTS_SH = "#!/bin/sh\ncd \"$(dirname \"$0\")\"\nexec python3 gate.py\n"
 

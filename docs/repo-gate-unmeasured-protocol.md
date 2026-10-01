@@ -55,7 +55,7 @@ asserts every column but the last.
 | `first_entry_names_other_repo_red_refused` | `unattributable` | `unattributable` | `false` | `test_gate_report_unattributable` | `true` | a writer that names another repository creates its report before the gate's; the gate retains a python red; refused |
 | `first_entry_names_this_repo_clean_refused` | `own` | `measured_fail` | `false` | `implement` | `true` | a writer that names this repository with a red creates its report before the gate's; the gate is clean; refused |
 | `report_without_manifest_red_refused` | `unattributable` | `unattributable` | `false` | `test_gate_report_unattributable` | `true` | the gate's report directory holds a python red and no `manifest.json`; refused |
-| `lockfile_first_green_gate` | `unattributable` | `measured_pass` | `false` | `done` | `false` | the gate creates `.gate.lock` first; no red anywhere; the engine answered green |
+| `lockfile_first_green_gate` | `unattributable` | `unmeasured` | `true` | `test_gate_absent` | `false` | the gate creates `.gate.lock` first; no red anywhere; its green coverage cannot be attributed |
 | `pytest_runner_unavailable_beside_unattributable_red` | `unattributable` | `unattributable` | `false` | `test_evidence_missing` | `true` | no pytest could be provisioned, beside the `lockfile_first` red (director ruling rev 5) |
 | `inotify_unavailable_own_red` | `unattributable` | `unattributable` | `false` | `test_gate_report_unattributable` | `true` | `inotify_init1` fails; the gate's own python red; refused |
 | `inotify_unavailable_foreign_red` | `unattributable` | `unattributable` | `false` | `test_gate_report_unattributable` | `true` | `inotify_init1` fails; another writer's red naming this repository, beside the gate's clean report; refused |

@@ -305,9 +305,9 @@ ROWS = {
         "the gate's report directory holds a python red and no "
         "`manifest.json`; refused"),
     "lockfile_first_green_gate": Row(
-        "clean", "lockfile", None, False, UNATTRIBUTABLE, PASS, False, "done",
-        False, "the gate creates `.gate.lock` first; no red anywhere; the "
-        "engine answered green"),
+        "clean", "lockfile", None, False, UNATTRIBUTABLE, UNMEASURED, True,
+        "test_gate_absent", False, "the gate creates `.gate.lock` first; no red "
+        "anywhere; its green coverage cannot be attributed"),
     "pytest_runner_unavailable_beside_unattributable_red": Row(
         "python_red", "lockfile", "pytest_unavailable", True, UNATTRIBUTABLE,
         UNATTRIBUTABLE, False, "test_evidence_missing", True,

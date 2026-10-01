@@ -13,6 +13,8 @@ capability injects, so it survives across runs of the config.
 import json
 from pathlib import Path
 
+from tests.gate_fixture import write_full_case_gate
+
 from aitelier.tools.run_tests.impl import (BASELINE_FILE, Executed,
                                            _apply_baseline, _baseline_dir,
                                            _failure_key)
@@ -143,12 +145,16 @@ def _gate_record(case_id, detail, **extra):
     return "AITELIER_REPO_GATE_CASE=" + json.dumps(value)
 
 
-def _write_repo_gate(repo, *lines):
+def _write_raw_repo_gate(repo, *lines):
     script = repo / "run_tests.sh"
     body = "#!/bin/sh\n" + "\n".join(
         "printf '%s\\n' " + repr(line) for line in lines) + "\nexit 1\n"
     script.write_text(body)
     script.chmod(0o755)
+
+
+def _write_repo_gate(repo, *lines):
+    write_full_case_gate(repo, lines)
 
 
 def _run_repo(repo, out, state):
@@ -174,8 +180,8 @@ def test_real_repo_gate_a_then_a_plus_b_exposes_b_and_keeps_detail_stable(tmp_pa
     second = _run_repo(repo, tmp_path / "out-ab", state)
     assert second["passed_relative"] is False
     assert len(second["new_failures"]) == 1
-    assert "#B failed: new case" in second["new_failures"][0]
-    assert second["baseline_failures"] == ["repo_gate:run_tests.sh#A"]
+    assert "#playtest/B/check@0 failed:   B / check: ok == true -> actual False; observed new case" in second["new_failures"][0]
+    assert second["baseline_failures"] == ["repo_gate:run_tests.sh#playtest/A/check@0"]
 
 
 def test_real_repo_gate_fixed_then_rebroken_case_becomes_new(tmp_path):
@@ -187,11 +193,11 @@ def test_real_repo_gate_fixed_then_rebroken_case_becomes_new(tmp_path):
     _write_repo_gate(repo, _gate_record("A", "a remains"))
     _run_repo(repo, tmp_path / "out-fixed", state)
     assert json.loads(_baseline_path(state, repo).read_text())["failures"] == [
-        "repo_gate:run_tests.sh#A"]
+        "repo_gate:run_tests.sh#playtest/A/check@0"]
     _write_repo_gate(repo, _gate_record("A", "a"), _gate_record("B", "back"))
     again = _run_repo(repo, tmp_path / "out-again", state)
     assert len(again["new_failures"]) == 1
-    assert "#B failed: back" in again["new_failures"][0]
+    assert "#playtest/B/check@0 failed:   B / check: ok == true -> actual False; observed back" in again["new_failures"][0]
 
 
 def test_repo_gate_without_state_dir_stays_strict(tmp_path):
@@ -204,7 +210,7 @@ def test_repo_gate_without_state_dir_stays_strict(tmp_path):
     report = json.loads((out / "test_report.json").read_text())
     assert result["passed_relative"] is False
     assert report["new_failures"] == [
-        "repo_gate:run_tests.sh#A failed: a"]
+        "repo_gate:run_tests.sh#playtest/A/check@0 failed:   A / check: ok == true -> actual False; observed a"]
 
 
 def test_unreliable_repo_gate_identity_never_seeds_or_changes_baseline(tmp_path):
@@ -222,11 +228,13 @@ def test_unreliable_repo_gate_identity_never_seeds_or_changes_baseline(tmp_path)
         "ambiguous": [_gate_record("A", "detail", id="B")],
     }
     for name, lines in variants.items():
-        _write_repo_gate(repo, *lines)
+        _write_raw_repo_gate(repo, *lines)
         report = _run_repo(repo, tmp_path / ("out-" + name), state)
         assert report["passed_relative"] is False, name
         assert report["new_failures"], name
-        assert "failure_identity_error" in report["repo_gate"], name
+        assert report["repo_gate"]["measured"] == "unmeasured", name
+        from aitelier.tools.run_tests import impl as rt
+        assert rt._repo_gate_failure_cases(report["repo_gate"])[1], name
         assert _baseline_path(state, repo).read_bytes() == before, name
 
 

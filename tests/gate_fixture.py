@@ -194,3 +194,57 @@ class HarnessRig:
         self.release.set()
         self.server.shutdown()
         self.server.server_close()
+
+
+def write_full_case_gate(repo: Path, lines, exit_code=1, *, early_red=False):
+    """Complete synthetic A/B contract, retained by a real gate subprocess.
+
+    Log-only refusal fixtures must use their original shell writer instead.
+    These positive fixtures bind coverage to their actual generic source commit.
+    """
+    import subprocess
+    import sys
+    contract = {"scenarios": [{"name": "A"}, {"name": "B"}]}
+    records = [json.loads(line.split("=", 1)[1]) for line in lines
+               if line.startswith("AITELIER_REPO_GATE_CASE=")]
+    assert all(row.get("case_id") in ("A", "B") and row.get("status") == "failed"
+               and isinstance(row.get("detail"), str) for row in records)
+    assert len({row["case_id"] for row in records}) == len(records)
+    source = repo / "fixture_contract.json"
+    source.write_text(json.dumps(contract))
+    def git(*args):
+        return subprocess.run(["git", "-C", str(repo), *args], check=True,
+                              capture_output=True, text=True).stdout.strip()
+    if not (repo / ".git").exists():
+        git("init", "-q")
+        git("config", "user.name", "Generic Gate Fixture")
+        git("config", "user.email", "fixture@example.invalid")
+        git("add", "fixture_contract.json")
+        git("commit", "-qm", "complete generic A/B contract")
+    scope = full_coverage(git("rev-parse", "HEAD"), contract)
+    by_name = {row["case_id"]: row["detail"] for row in records}
+    report = {"passed": exit_code == 0, "behavior": {"scenarios": [
+        {"name": name, "asserts": [{"name": "check", "expr": "ok == true",
+         "frame": 0, "passed": name not in by_name}]} for name in ("A", "B")]}}
+    findings = [f"  {name} / check: ok == true -> actual False; observed {detail}"
+                for name, detail in by_name.items()]
+    if exit_code and not findings:
+        report["errors"] = list(lines)
+    manifest = {"status": "failed" if exit_code else "passed", "exit_code": exit_code,
+                "stages": {} if early_red else {"playtest": {"report": "playtest.json"}}}
+    if early_red:
+        manifest["outcome"] = "measured_fail"
+    else:
+        manifest["gate_coverage"] = scope
+    body = ("import json, os, tempfile\nfrom pathlib import Path\n"
+            "directory = Path(tempfile.mkdtemp(prefix='case-gate-', dir=os.environ['GATE_REPORT_DIR']))\n"
+            f"manifest = {manifest!r}\nmanifest['repo'] = str(Path.cwd())\n"
+            "(directory / 'manifest.json').write_text(json.dumps(manifest))\n"
+            f"(directory / 'playtest.json').write_text(json.dumps({report!r}))\n"
+            f"(directory / 'playtest-findings.json').write_text(json.dumps({findings!r}))\n"
+            f"for line in {list(lines)!r}: print(line, flush=True)\n"
+            f"raise SystemExit({exit_code})\n")
+    (repo / "fixture_gate").write_text(body)
+    script = repo / "run_tests.sh"
+    script.write_text(f"#!/bin/sh\nexec {sys.executable} fixture_gate\n")
+    script.chmod(0o755)

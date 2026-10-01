@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from aitelier.tools.run_tests import impl as rt
+from tests.gate_fixture import write_full_case_gate
 
 DECLARED = ('AITELIER_REPO_GATE_UNMEASURED='
             '{"state":"blocked","reason":"godot-builder unreachable: '
@@ -30,7 +31,7 @@ def _case(case_id, detail):
         {"case_id": case_id, "status": "failed", "detail": detail})
 
 
-def _write_gate(repo, *lines, exit_code=1):
+def _write_raw_gate(repo, *lines, exit_code=1):
     script = repo / "run_tests.sh"
     body = "#!/bin/sh\n" + "\n".join(
         "printf '%s\\n' " + repr(line) for line in lines) + \
@@ -39,14 +40,21 @@ def _write_gate(repo, *lines, exit_code=1):
     script.chmod(0o755)
 
 
-def _repo_with_gate(tmp_path, *lines, exit_code=1, green_pytest=True):
+def _write_gate(repo, *lines, exit_code=1, early_red=False):
+    if any(line.startswith(rt._REPO_GATE_UNMEASURED_PREFIX) for line in lines):
+        _write_raw_gate(repo, *lines, exit_code=exit_code)
+    else:
+        write_full_case_gate(repo, lines, exit_code, early_red=early_red)
+
+
+def _repo_with_gate(tmp_path, *lines, exit_code=1, green_pytest=True, early_red=False):
     repo = tmp_path / "repo"
     repo.mkdir()
     if green_pytest:
         (repo / "tests").mkdir()
         (repo / "tests" / "test_ok.py").write_text(
             "def test_ok():\n    assert True\n")
-    _write_gate(repo, *lines, exit_code=exit_code)
+    _write_gate(repo, *lines, exit_code=exit_code, early_red=early_red)
     return repo
 
 
@@ -85,7 +93,7 @@ def test_a_contract_error_exit_2_is_a_measured_failure_with_failures(tmp_path):
         tmp_path,
         "CONTRACT ERROR: no authored scenarios found under tests/play, "
         "an empty one is not a pass.",
-        exit_code=2)
+        exit_code=2, early_red=True)
     out = tmp_path / "out"
     result = rt.run_tests(project_root=str(repo), out_dir=str(out))
     report = _report(out)
@@ -464,7 +472,7 @@ def test_an_unmeasured_repo_gate_may_not_prune_its_known_red(tmp_path,
                  state_dir=str(state))
     baseline = _baseline_file(state, repo)
     assert json.loads(baseline.read_text())["failures"] == [
-        "repo_gate:run_tests.sh#A"]
+        "repo_gate:run_tests.sh#playtest/A/check@0"]
 
     _write_gate(repo, DECLARED, exit_code=3)
     out = tmp_path / "out-2"
@@ -474,8 +482,8 @@ def test_an_unmeasured_repo_gate_may_not_prune_its_known_red(tmp_path,
 
     assert report["repo_gate"]["measured"] == rt.REPO_GATE_UNMEASURED
     assert json.loads(baseline.read_text())["failures"] == [
-        "repo_gate:run_tests.sh#A"]
-    assert "repo_gate:run_tests.sh#A" in report["baseline_kept_unproven"]
+        "repo_gate:run_tests.sh#playtest/A/check@0"]
+    assert "repo_gate:run_tests.sh#playtest/A/check@0" in report["baseline_kept_unproven"]
 
 
 def test_a_repo_gate_that_measured_green_may_prune_its_known_red(tmp_path):
@@ -488,7 +496,7 @@ def test_a_repo_gate_that_measured_green_may_prune_its_known_red(tmp_path):
                  state_dir=str(state))
     baseline = _baseline_file(state, repo)
     assert json.loads(baseline.read_text())["failures"] == [
-        "repo_gate:run_tests.sh#A"]
+        "repo_gate:run_tests.sh#playtest/A/check@0"]
 
     _write_gate(repo, "gate OK", exit_code=0)
     out = tmp_path / "out-2"
@@ -558,7 +566,7 @@ def test_a_real_red_still_enters_the_baseline_and_the_absence_after_it_does_not_
     assert report["baseline_state"] == "seeded"
     assert report["passed_relative"] is True
     assert json.loads(baseline.read_text())["failures"] == [
-        "repo_gate:run_tests.sh#A"]
+        "repo_gate:run_tests.sh#playtest/A/check@0"]
     before = baseline.read_bytes()
 
     # ...and now the SAME gate declares an absence. The known red it seeded has
@@ -572,7 +580,7 @@ def test_a_real_red_still_enters_the_baseline_and_the_absence_after_it_does_not_
     assert report["passed_relative"] is False
     assert baseline.read_bytes() == before, (
         "an absence changed a baseline it did not measure")
-    assert "repo_gate:run_tests.sh#A" in report["baseline_kept_unproven"]
+    assert "repo_gate:run_tests.sh#playtest/A/check@0" in report["baseline_kept_unproven"]
 
 
 def test_an_absence_whose_failures_are_all_known_red_still_does_not_pass(

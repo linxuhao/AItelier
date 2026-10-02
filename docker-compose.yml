@@ -27,6 +27,9 @@ services:
     # run is killed/times out the git children get reparented to PID 1, and a
     # bare uvicorn PID 1 never wait()s on them → zombie pile-up → PID exhaustion.
     init: true
+    # Override older images' unbounded CMD when using the live source mount.
+    # Keep the 5s request drain in sync with Dockerfile and server --no-docker.
+    command: ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "4444", "--timeout-graceful-shutdown", "5"]
     # File descriptors. The default soft limit of 1024 is not a budget the app
     # controls: skillflow keeps ONE cached sqlite connection per project trace
     # DB (skillflow/core.py:_get_trace_conn) and never evicts it, and each one

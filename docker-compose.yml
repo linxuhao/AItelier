@@ -188,10 +188,13 @@ services:
   # retained; the host reconciles only recorded active runs and owned releases.
   # See docs/semantic-index-activation.md for the guarded migration.
   zvec-grep:
-    build:
-      context: .
-      dockerfile: docker/zvec-grep.Dockerfile
-    image: aitelier-zg:latest
+    # The accepted semantic worker image (fbe0 worker over upstream @zvec/zvec-grep
+    # 0.2.2), built offline. Pinned by digest and deliberately WITHOUT a build
+    # stanza: `up --build` (the CLI uses it when dependencies change) cannot swap
+    # in a canonical-source build whose worker differs, and pull_policy never
+    # makes a missing local image fail closed instead of pulling another one.
+    image: semantic-namespace-fbe0-8a431b32@sha256:0922fbfc3970b3274531e5e5e939a9b46f3a20c824e20356409f2028debb58a6
+    pull_policy: never
     container_name: aitelier-zg
     environment:
       AITELIER_HOME: "${HOME}/.AItelier"
@@ -209,6 +212,10 @@ services:
     networks:
       - default
     volumes:
+      # Linked runs created by the backend record /app/.git/worktrees/<run>.
+      # Expose that same source checkout, read-only, for exact Git validation.
+      # Never substitute a different checkout or rewrite the recorded source.
+      - .:/app:ro
       - ${HOME}/.AItelier:${HOME}/.AItelier
     restart: unless-stopped
     # sh is PID 1 in the entrypoint; it traps TERM and forwards it to zg so

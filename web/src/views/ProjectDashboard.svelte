@@ -1,7 +1,7 @@
 <script lang="ts">
   import { authStore } from '../stores/auth';
   import { stateProjects } from '../lib/api';
-  import type { StateProjectRow } from '../lib/stateGraph';
+  import { isArchived, type StateProjectRow } from '../lib/stateGraph';
   import { st } from '../lib/stateI18n.svelte';
   import { nt, readLastProject, rememberProject } from '../lib/navigation.svelte';
   import StateProject from './StateProject.svelte';
@@ -18,7 +18,7 @@
     if(!permitted) return;
     stateProjects().then(result=>{
       if(version!==generation)return;
-      projects=result.projects;
+      projects=result.projects.filter(p=>!isArchived(p));   // archived ones stay reachable from "All projects"
       const prior=readLastProject();
       selected=projects.some(p=>p.project_id===prior)?prior:(projects[0]?.project_id??'');
     }).catch(e=>{if(version===generation)error=String(e.message??e);})

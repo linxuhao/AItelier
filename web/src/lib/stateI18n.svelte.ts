@@ -69,6 +69,7 @@ const en: Record<string, string> = {
   noIssues: 'No issues.', contradicts: 'Open defect on an accepted goal', reportedBy: 'Reported by', issueSource: 'Source',
   resolution: 'Resolution', showIssue: 'Details', hideIssue: 'Hide',
   kind_defect: 'Defect', kind_gap: 'Gap', kind_handoff: 'Hand-off', kind_question: 'Question',
+  showArchived: 'Show archived', archivedHidden: 'Archived (hidden)',
 };
 const zh: Record<string, string> = {
   summaryWrongProject:"汇总属于其他项目，已拒绝显示",
@@ -128,6 +129,7 @@ const zh: Record<string, string> = {
   noIssues:'暂无 issue。', contradicts:'已验收目标上存在未关闭缺陷', reportedBy:'报告者', issueSource:'来源',
   resolution:'分拣结论', showIssue:'详情', hideIssue:'收起',
   kind_defect:'缺陷', kind_gap:'缺口', kind_handoff:'转交', kind_question:'问题',
+  showArchived:'显示已归档', archivedHidden:'已归档（已隐藏）',
 };
 const fr: Record<string, string> = {
   summaryWrongProject:"Le résumé appartient à un autre projet",
@@ -191,6 +193,7 @@ const fr: Record<string, string> = {
   noIssues:'Aucun ticket.', contradicts:'Défaut ouvert sur un objectif accepté', reportedBy:'Signalé par', issueSource:'Source',
   resolution:'Résolution', showIssue:'Détails', hideIssue:'Masquer',
   kind_defect:'Défaut', kind_gap:'Lacune', kind_handoff:'Transfert', kind_question:'Question',
+  showArchived:'Afficher les archivés', archivedHidden:'Archivés (masqués)',
 };
 export function st(key: string): string {
   const table = lang.startsWith('zh') ? zh : lang === 'fr' ? fr : en;

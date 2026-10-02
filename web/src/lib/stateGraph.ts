@@ -8,6 +8,8 @@ export interface StateProjectRow {
   project_id: string; title: string; source_project_id: string | null;
   node_count: number; verified_count: number; source: SourceBinding; policy: DispatchPolicy;
 }
+/** An archived project keeps all its records but is hidden from project pickers and lists by default. */
+export const isArchived = (p: StateProjectRow): boolean => p.policy?.dispatch === 'archive';
 export interface StateAttempt {
   seq: number; attempt_id: string; project_id: string; node_key: string; node_revision: number;
   workflow: string | null; execution_project_id: string | null; run_id: string | null; status: string;

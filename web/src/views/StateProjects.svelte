@@ -1,16 +1,18 @@
 <script lang="ts">
   import { authStore } from '../stores/auth';
   import { stateProjects } from '../lib/api';
-  import { stateProjectHref, type StateProjectRow } from '../lib/stateGraph';
+  import { isArchived, stateProjectHref, type StateProjectRow } from '../lib/stateGraph';
   import { st } from '../lib/stateI18n.svelte';
   const { params = {} }: {params?: {repoPath?: string}} = $props();
   let rows = $state<StateProjectRow[]>([]), error = $state(''), loading = $state(false);
-  let query = $state(''), next = $state<string | null>(null), retry = $state(0);
+  let query = $state(''), next = $state<string | null>(null), retry = $state(0), showArchived = $state(false);
   let generation = 0;
   // The project catalog is a public read; only the write affordances need
   // `canWrite`.
   const canRead = $derived($authStore.permissionResolved);
-  const filtered = $derived(rows.filter(p => (p.title + ' ' + p.project_id).toLocaleLowerCase().includes(query.toLocaleLowerCase())));
+  const visible = $derived(showArchived ? rows : rows.filter(p => !isArchived(p)));
+  const archivedHidden = $derived(rows.length - visible.length);
+  const filtered = $derived(visible.filter(p => (p.title + ' ' + p.project_id).toLocaleLowerCase().includes(query.toLocaleLowerCase())));
   $effect(() => {
     const permitted = canRead, repo = params.repoPath; void retry;
     const version = ++generation;
@@ -40,6 +42,7 @@
   {#if !canRead}<p role="status">{st('private')}</p>
   {:else}
     <label>{st('search')}<input type="search" bind:value={query} placeholder={st('search')} /></label>
+    <label class="archived-toggle"><input type="checkbox" bind:checked={showArchived} /> {st('showArchived')}{#if archivedHidden} · {st('archivedHidden')}: {archivedHidden}{/if}</label>
     {#if params.repoPath}<p><code>{params.repoPath}</code></p>{/if}
     {#if error}<div role="alert"><p>{error}</p><button class="outline" onclick={() => retry++}>{st('retry')}</button></div>{/if}
     {#if loading && !rows.length}<p aria-live="polite">{st('loading')}</p>
@@ -56,7 +59,7 @@
         </a>
       {/each}
     </div>
-    {#if rows.length && !filtered.length}<p>{st('noMatch')}</p>{/if}
+    {#if visible.length && !filtered.length}<p>{st('noMatch')}</p>{/if}
     {#if next}<button class="outline" disabled={loading} onclick={more}>{st('more')}</button>{/if}
   {/if}
 </section>
@@ -67,6 +70,7 @@
   .eyebrow { letter-spacing:.12em; font-size:.65rem; color:var(--pico-muted-color,#64748b); }
   header > a { font-size:.8rem; }
   label { max-width:420px; font-size:.8rem; display:block; } input { padding:.55rem; font-size:.85rem; }
+  .archived-toggle { margin:.5rem 0 1rem; } .archived-toggle input { padding:0; }
   .project-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(min(100%,310px),1fr)); gap:1rem; }
   .project-card { display:block; border:1px solid var(--pico-muted-border-color,#dbe3ec); border-radius:12px; padding:1.05rem; background:var(--pico-card-background-color,#fff); color:inherit; text-decoration:none; }
   .project-card:hover,.project-card:focus { border-color:var(--pico-primary,#0066cc); }

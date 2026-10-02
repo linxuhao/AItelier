@@ -2847,7 +2847,8 @@ def server(
         "git commits will be authored with THIS shell's git identity, not the "
         "image's. Set user.name/user.email deliberately if that matters.")
     import uvicorn
-    uvicorn.run("api.main:app", host=host, port=port, reload=False)
+    uvicorn.run("api.main:app", host=host, port=port, reload=False,
+                timeout_graceful_shutdown=5)
 
 
 # --- Entry point logic ---

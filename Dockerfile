@@ -66,4 +66,6 @@ ENV GIT_AUTHOR_NAME="AItelier" \
 EXPOSE 4444
 
 # Bind 0.0.0.0 so the port is reachable from the host / a Cloudflare tunnel.
-CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "4444"]
+# Long-lived SSE/MCP requests must drain before application lifespan cleanup.
+# Allow 5s for requests, then Uvicorn cancels them and runs normal cleanup.
+CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "4444", "--timeout-graceful-shutdown", "5"]

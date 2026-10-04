@@ -224,3 +224,67 @@ def test_truncated_then_malformed_then_corrected_preserves_split_feedback(tmp_pa
     assert "split" in e.prompts[1].lower()
     assert e.prompts[2] == CORRECTION
     assert [c["tool"] for c in e.calls] == ["create", "create"]
+
+
+def _engine_with_prior_effect(tmp_path, responses, *, prior):
+    before = ([response(action("state_change"))] if prior == "effect" else
+              [response(action("gen_image_asset"))] if prior == "media" else [])
+    e = engine(tmp_path, before + responses, failed_writes=1)
+    e._tool_schemas["state_change"] = {}
+    execute = e._exec_tool
+    def with_owned_effect(call):
+        if call["tool"] == "state_change":
+            e.calls.append(call)
+            (tmp_path / "state.effect").write_bytes(b"durable-once")
+            return {"state_written": "owned durable mock"}
+        return execute(call)
+    e._exec_tool = with_owned_effect
+    return e
+
+
+def _failed_create():
+    return response(action("create", file="blocked.txt", content="never lands"))
+
+
+def _assert_prior_effect_retained(e, tmp_path, prior):
+    assert sum(c["tool"] == "state_change" for c in e.calls) == int(prior == "effect")
+    assert sum(c["tool"] == "gen_image_asset" for c in e.calls) == int(prior == "media")
+    if prior == "effect":
+        assert (tmp_path / "state.effect").read_bytes() == b"durable-once"
+    elif prior == "media":
+        assert (tmp_path / PNG).read_bytes() == b"retained candidate bytes"
+
+
+@pytest.mark.parametrize("prior", ["effect", "none", "media"])
+@pytest.mark.parametrize("control", ["ask_more_turns", "finish_step", "end_step"])
+def test_every_completion_control_respects_pending_write_failure(tmp_path, prior, control):
+    e = _engine_with_prior_effect(tmp_path,
+        [_failed_create(), EXTRA_BRACE, response(action(control, turns=2))], prior=prior)
+    error = None
+    result = None
+    try:
+        result = run(e)
+    except MaxRetriesExceeded as exc:
+        error = str(exc)
+    print(json.dumps({"prior": prior, "control": control, "result": result,
+        "error": error, "calls": e.calls, "prompts": e.prompts,
+        "events": e.events, "traces": e.traces}, sort_keys=True))
+    assert result is not True, "unresolved write was masked by completion control"
+    assert error and "retained first write failure" in error
+    assert not any(k == "step_done" for k, _ in e.events)
+    assert not (tmp_path / "blocked.txt").exists()
+    assert not any(c["tool"] == "read" for c in e.calls)  # malformed read refused
+    _assert_prior_effect_retained(e, tmp_path, prior)
+
+
+@pytest.mark.parametrize("prior", ["effect", "none", "media"])
+def test_more_turn_control_preserves_pending_failure_until_successful_repair(tmp_path, prior):
+    e = _engine_with_prior_effect(tmp_path, [_failed_create(), EXTRA_BRACE,
+        response(action("ask_more_turns", turns=2)), successful_writes()], prior=prior)
+    assert run(e) is True
+    assert len(e.prompts) == 4 + int(prior != "none")
+    assert "retained first write failure" in e.prompts[-1]
+    assert (tmp_path / "final/delivery.md").read_text() == "candidate"
+    assert not (tmp_path / "blocked.txt").exists()
+    assert [c["tool"] for c in e.calls].count("create") == 3
+    _assert_prior_effect_retained(e, tmp_path, prior)

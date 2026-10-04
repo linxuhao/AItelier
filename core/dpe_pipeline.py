@@ -3270,14 +3270,17 @@ class PipelineEngine:
                 # write. Counting only files made that look like a no-op: the engine
                 # performed the change, then spent the rest of the budget before
                 # failing for "no file writes produced".
-                if _control_calls and effects and not written_files:
+                # A control-only turn may leave room for a genuine write repair;
+                # it cannot complete while an earlier delivery write is unresolved.
+                if (_control_calls and effects and not written_files
+                        and not pending_write_failure):
                     self._emit("step_done", {
                         "step_id": step_id, "files": [], "effects": effects,
                         "preview": f"No file written; {len(effects)} state change(s)",
                     })
                     return True
 
-                if not tool_calls and not written_files:
+                if not tool_calls and not written_files and not pending_write_failure:
                     self._emit("step_done", {
                         "step_id": step_id, "files": [],
                         "preview": "No change needed (no writes)",

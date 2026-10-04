@@ -3003,6 +3003,15 @@ class PipelineEngine:
 
         def write_keys(action):
             name, params = action.get("tool", ""), action.get("params", {})
+            for prefix in self._SLOT_MUTATOR_PREFIXES:
+                if name.startswith(prefix):
+                    # Use the executor's fixed-slot shorthand/glob resolution.
+                    # This identifies repair; write authority is unchanged.
+                    from skillflow.write_tools import resolve_write_target
+                    target = resolve_write_target(
+                        name[len(prefix):], getattr(self, "_output_fixed", {}), params)
+                    if isinstance(target, str) and target:
+                        return {path_key(target)}
             try:
                 paths = mutation_paths(name, params, getattr(self, "_output_fixed", {}))
             except (ValueError, UnicodeError):

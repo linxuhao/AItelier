@@ -59,6 +59,10 @@ def test_mcp_driver_onboarding_surfaces_are_discoverable_and_consistent(tmp_path
         assert "never promotes" in artifact_help
         assert "exactly once per criterion" in artifact_help
         assert "only pass or fail" in verdict_help
+        report_help = evidence_schema["arguments"]["properties"]["report_ref"]["description"]
+        assert "status=completed" in report_help
+        assert "status=candidate" in report_help
+        assert "criterion_id, artifact and verdict" in report_help
         assert "attempt artifact remains unset" in STATE_DRIVER_GUIDE
         assert "verify_node refuses" in STATE_DRIVER_GUIDE
         operation = client.get("/openapi.json", headers={
@@ -269,3 +273,25 @@ def test_project_scoped_note_cas_race_reloads_before_submit_and_redacts_identity
     assert all(entry["actor"] == "Authorization: Bearer [REDACTED]" for entry in search["entries"])
     assert all("synthetic-" not in entry["director_identity"] for entry in search["entries"])
     assert first.driver_notes.search("project-b", query="handoff")["entries"] == []
+
+
+def test_documented_criterion_envelope_matches_real_validators():
+    """Exercise the guide's JSON, including the external/evidence status distinction."""
+    import pytest
+    from core.state_graph import StateConflict
+    from core.state_report_integrity import (
+        _structured_terminal, validate_evidence_semantics, validate_external_semantics)
+
+    section = GUIDE_SECTIONS["handle-changes-without-inventing-acceptance"]["text"]
+    report = section.split("```json\n", 1)[1].split("\n```", 1)[0].encode()
+    envelope = _structured_terminal(report)
+    criterion, artifact, verdict = (
+        envelope["criterion_id"], envelope["artifact"], envelope["verdict"])
+    validate_evidence_semantics(report, criterion, verdict, artifact)
+    validate_external_semantics(report, "candidate", artifact)
+
+    candidate = json.dumps({**envelope, "status": "candidate"}).encode()
+    _structured_terminal(candidate)
+    with pytest.raises(StateConflict, match="evidence report status is not completed"):
+        validate_evidence_semantics(candidate, criterion, verdict, artifact)
+    validate_external_semantics(candidate, "candidate", artifact)

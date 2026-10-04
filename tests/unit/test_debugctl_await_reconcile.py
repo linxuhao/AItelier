@@ -86,6 +86,8 @@ class _Json:
         return False
 
     def read(self):
+        if isinstance(self._payload, bytes):
+            return self._payload
         return json.dumps(self._payload).encode()
 
 
@@ -433,3 +435,103 @@ def test_a_timeout_after_a_verified_running_status_says_so(monkeypatch, capsys):
     assert "TIMEOUT" in out
     assert "NOT VERIFIED" not in out
     assert "running" in out
+
+
+# Definitive absence differs from an unavailable observation.
+
+def _lookup_error(code, run_id=RUN):
+    from urllib.error import HTTPError
+    return HTTPError(f"http://localhost:4444/api/runs/{run_id}", code,
+                     "lookup error", {}, None)
+
+
+@pytest.mark.parametrize("run_id", [RUN, RUN[:8], "previously-accepted-handle"])
+@pytest.mark.parametrize("follow", [False, True])
+def test_a_definitively_missing_run_exits_at_first_reconciliation(
+        monkeypatch, capsys, run_id, follow):
+    # The requested hour remains real CLI input. A bounded synthetic clock
+    # advances to that deadline only if the old implementation keeps waiting,
+    # so RED reproduces TIMEOUT without consuming an hour.
+    order = _install(monkeypatch, lines=[PRESENCE],
+                     run_row=_lookup_error(404, run_id))
+    ticks = iter(range(0, 10000, 1000))
+    monkeypatch.setattr(debugctl.time, "time", lambda: next(ticks))
+    import urllib.request
+    installed = urllib.request.urlopen
+    requested = []
+
+    def exact_lookup(url, timeout=None):
+        if "/api/runs/" in url:
+            requested.append(url)
+        return installed(url, timeout=timeout)
+
+    monkeypatch.setattr(urllib.request, "urlopen", exact_lookup)
+    started = time.monotonic()
+    code = _run_await(_args(run=run_id, timeout=3600, follow=follow))
+    captured = capsys.readouterr()
+    output = captured.out + captured.err
+    assert code == 3, output
+    assert "RUN NOT FOUND" in output and run_id in output and PID in output
+    assert "HTTP 404" in output and "missing or invalid" in output
+    assert "TIMEOUT" not in output
+    assert not any(word in output for word in ("COMPLETED", "FAILED", "CANCELLED"))
+    assert order == ["stream-open", "stream-line", "status-read"]
+    assert requested == [f"http://localhost:4444/api/runs/{run_id}"]
+    assert time.monotonic() - started < 1
+
+
+@pytest.mark.parametrize("response", [
+    OSError("connection refused"), TimeoutError("timed out"),
+    _lookup_error(401), _lookup_error(500), _lookup_error(503),
+    _lookup_error(404, OTHER_RUN), b"{malformed JSON",
+    [], "completed", {"detail": "Run not found"},
+    _row("completed", run_id=OTHER_RUN),
+    _row("completed", project_id="foreign-project"),
+])
+def test_a_nondefinitive_lookup_keeps_following_exact_events(
+        monkeypatch, capsys, response):
+    order = _install(monkeypatch,
+                     lines=[PRESENCE, _checkpoint(), _completed()],
+                     run_row=response)
+    code = _run_await(_args(timeout=3600, follow=True))
+    output = capsys.readouterr().out
+    assert code == 0, output
+    assert "STATUS UNKNOWN" in output or "STATUS IGNORED" in output
+    assert "RUN NOT FOUND" not in output and "FAILED" not in output
+    assert output.index("CHECKPOINT") < output.index("COMPLETED")
+    assert order.count("status-read") == 1
+
+
+def test_a_missing_run_on_reconnect_stops_without_fabricating_an_ending(
+        monkeypatch, capsys):
+    order = _install(monkeypatch,
+                     streams=[[PRESENCE, TimeoutError("quiet socket")], [PRESENCE]],
+                     run_rows=[_row("running"), _lookup_error(404)])
+    code = _run_await(_args(timeout=3600, follow=True))
+    captured = capsys.readouterr()
+    output = captured.out + captured.err
+    assert code == 3, output
+    assert "RUN NOT FOUND" in output
+    assert "COMPLETED" not in output and "FAILED" not in output
+    assert order.count("stream-open") == 2
+    assert order.count("status-read") == 2
+
+
+@pytest.mark.parametrize("response", [
+    OSError("connection refused"), TimeoutError("timed out"),
+    _lookup_error(500), _lookup_error(503),
+    _lookup_error(404, OTHER_RUN), b"{malformed JSON",
+])
+def test_a_nondefinitive_lookup_reaches_deadline_without_claiming_absence(
+        monkeypatch, capsys, response):
+    order = _install(monkeypatch, lines=[PRESENCE], run_row=response)
+    ticks = iter(range(0, 10000, 1000))
+    monkeypatch.setattr(debugctl.time, "time", lambda: next(ticks))
+    code = _run_await(_args(timeout=3600, follow=True))
+    captured = capsys.readouterr()
+    output = captured.out + captured.err
+    assert code == 2, output
+    assert "STATUS UNKNOWN" in output and "TIMEOUT" in output
+    assert "NOT VERIFIED" in output and "RUN NOT FOUND" not in output
+    assert "COMPLETED" not in output and "FAILED" not in output
+    assert order.count("status-read") == 2

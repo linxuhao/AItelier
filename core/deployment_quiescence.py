@@ -980,8 +980,14 @@ def _append_event(path: Path, event: dict) -> dict:
 
 
 def _run_command(command: list[str]) -> subprocess.CompletedProcess:
-    return subprocess.run(command, capture_output=True, text=True, timeout=10,
-                          check=False)
+    try:
+        return subprocess.run(command, capture_output=True, text=True, timeout=10,
+                              check=False)
+    except FileNotFoundError as exc:
+        # Missing inventory binaries use the existing nonzero-command diagnostic
+        # path, so the independent inventory can still be observed.
+        return subprocess.CompletedProcess(command, 127, stdout="",
+                                           stderr=f"FileNotFoundError: {exc}")
 
 
 def _command_has_identity(command: str, external_id: str) -> bool:

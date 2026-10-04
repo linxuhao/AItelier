@@ -2996,6 +2996,36 @@ class PipelineEngine:
         code_path = self._get_code_path(workspace, project_id)
         self._code_path = code_path  # for _exec_tool delegation
 
+        from core.write_scope import mutation_paths
+
+        def path_key(path):
+            return ("path", Path(path).as_posix())
+
+        def write_keys(action):
+            name, params = action.get("tool", ""), action.get("params", {})
+            try:
+                paths = mutation_paths(name, params, getattr(self, "_output_fixed", {}))
+            except (ValueError, UnicodeError):
+                paths = []
+            keys = {path_key(path) for path in paths if isinstance(path, str) and path}
+            if keys:
+                return keys
+            for prefix in self._SLOT_MUTATOR_PREFIXES:
+                if name.startswith(prefix):
+                    return {("slot", name[len(prefix):])}
+            # Without a target receipt, only the same invocation can prove repair.
+            return {("call", _repeat_call_key(name, params))}
+
+        def write_failed(value):
+            if isinstance(value, list):
+                return any(write_failed(item) for item in value)
+            if not isinstance(value, dict):
+                return False
+            return ("error" in value or value.get("success") is False
+                    or value.get("ok") is False
+                    or _is_failed_tool_result(json.dumps(value, ensure_ascii=False))
+                    or any(write_failed(value.get(key)) for key in ("result", "results")))
+
         feedback = ""
         rejection_history = []
         cached_exploration = []
@@ -3021,6 +3051,7 @@ class PipelineEngine:
             tool_results = []
             written_files = []
             pending_write_failure = ""
+            pending_write_failures = {}
             effects: list[str] = []   # non-file output: see _effect_name
 
             # C2: Re-inject previously passed files so agent only fixes failing ones
@@ -3212,8 +3243,6 @@ class PipelineEngine:
                                               "preview": f"Executed {len(tool_calls)} tool call(s)"})
 
                 if write_calls:
-                    landed_this_turn = 0
-                    patch_failed = False
                     for action in write_calls:
                         result = self._exec_tool(action)
                         names = self._written_names(result)
@@ -3221,32 +3250,46 @@ class PipelineEngine:
                         effect = self._effect_name(result)
                         if effect:
                             effects.append(effect)
-                        if "error" in result:
-                            tool_results.append("Write error: " + json.dumps(result, ensure_ascii=False))
-                            patch_failed |= action.get("tool") == "apply_patch"
+                        targets = write_keys(action)
+                        receipts = set(names)
+                        for field in ("deleted", "removed"):
+                            value = result.get(field, [])
+                            receipts.update([value] if isinstance(value, str) else
+                                            [name for name in value if isinstance(name, str)]
+                                            if isinstance(value, (list, tuple)) else [])
+                        completed = {path_key(name) for name in receipts}
+                        if write_failed(result) or not (names or effect):
+                            entry = "Write error: " + json.dumps(result, ensure_ascii=False)
+                            tool_results.append(entry)
+                            # Strict patch publication is atomic per file. Its
+                            # explicit partial receipts are completed operations;
+                            # repairing the remaining paths must not replay them.
+                            if (action.get("tool") == "apply_patch"
+                                    and result.get("phase") == "publish"
+                                    and result.get("partial") is True):
+                                for target in completed:
+                                    pending_write_failures.pop(target, None)
+                                targets = targets - completed or targets
+                            for target in targets:
+                                pending_write_failures.setdefault(target, entry)
                             continue
-                        landed_this_turn += len(names) or bool(effect)
+                        # A different successful file is not repair. Require both
+                        # the requested target and its error-free effect receipt.
+                        for target in targets:
+                            if target in completed or target[0] != "path":
+                                pending_write_failures.pop(target, None)
 
-                    # Only stop when a write actually LANDED. `break` used to fire
-                    # unconditionally, so a turn whose every write errored ended the
-                    # loop with the reason captured in `tool_results` and never
-                    # shown to anyone. Live example: on a fix-loop step's second
-                    # visit, `create` returned "'tests/test_tools.py' already exists
-                    # — use 'edit'" (the file was in the repo from the first pass,
-                    # though this step's staging was empty). The agent was never
-                    # given the turn in which it could have switched to `edit`; the
-                    # step reported writing nothing and failed validation.
-                    if not landed_this_turn or patch_failed:
+                    pending_write_failure = (
+                        "Unresolved write failures:\n"
+                        + "\n".join(dict.fromkeys(pending_write_failures.values()))
+                        if pending_write_failures else "")
+                    if pending_write_failure:
                         self._feedback_exploratory = False
-                        feedback = ("Every write in your last response failed:\n"
-                                    + "\n".join(tool_results[-len(write_calls):]))
-                        pending_write_failure = feedback
+                        feedback = pending_write_failure
                         self._emit("write_failed", {
                             "error": feedback,
-                            "preview": f"All {len(write_calls)} write(s) failed"})
-                        tool_turn += 1
+                            "preview": f"{len(pending_write_failures)} write target(s) unresolved"})
                         continue
-                    pending_write_failure = ""
                     self._emit("files_written", {"files": written_files,
                                                  "preview": f"Written {len(written_files)} file(s)"})
                     break

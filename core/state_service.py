@@ -557,7 +557,7 @@ class StateService:
             pass
         return {
             "remaining_delivery": remaining,
-            "remaining_delivery_trace": self._failure_trace_ref(latest_budget),
+            "remaining_delivery_trace": self._failure_trace_ref(latest_budget, include_payload=True),
             "original_first_failure": {
                 "attempt_id": original["attempt_id"] if original else None,
                 "run_id": first_run_id,

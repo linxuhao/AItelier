@@ -205,7 +205,8 @@ def test_effect_fence_survives_crash_before_tool_result_delta(tmp_path):
     resumed = engine._hydrate_resume_observations(
         PipelineEngine._rebuild_from_deltas(rows, 10))
     assert [m["role"] for m in resumed["messages"]] == ["system", "user"]
-    assert resumed["completed_effect_calls"] == {call_key: result}
+    assert resumed["completed_effect_calls"][call_key] == result
+    assert resumed["recovery_turn"]["assistant"]["tool_calls"][0]["id"] == "c1"
     assert resumed["written_files"] == ["a.py"]
 
 

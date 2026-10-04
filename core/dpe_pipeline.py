@@ -14,6 +14,7 @@ import threading
 import re
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Optional
 from core.agents import AgentFactory
 from core.workspace_manager import WorkspaceManager, DPE_GRAPH_NAME
@@ -973,6 +974,13 @@ def _progress_signature(tool_name: str, params: dict, result: dict) -> str | Non
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _native_effect_invocation(segment: int, assistant_index: int,
+                              call_index: int, call_key: str) -> str:
+    """Retained batch position; provider call IDs are not recovery identity."""
+    identity = json.dumps([segment, assistant_index, call_index, call_key])
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+
 # Argument names an agent may never set on a tool call: the host injects them.
 _AGENT_RESERVED_ARGS = ("project_root", "workspace_root", "step_dir", "out_dir",
                         "output_dir", "output_target", "step_tmp_dir")
@@ -1079,7 +1087,8 @@ class PipelineEngine:
     def _hydrate_resume_observations(self, resume: dict) -> dict:
         seen: set[int] = set()
         for group in (resume.get("messages") or [],
-                      resume.get("recall_messages") or []):
+                      resume.get("recall_messages") or [],
+                      (resume.get("recovery_turn") or {}).get("tool_results") or []):
             for message in group:
                 if not isinstance(message, dict) or id(message) in seen:
                     continue
@@ -1091,27 +1100,72 @@ class PipelineEngine:
         effects = resume.setdefault("completed_effect_calls", {})
         for call_key, ref in refs.items():
             effects[call_key] = self._read_native_observation(ref)
-        durable_effects, durable_written = self._load_native_effects()
+        durable_effects, _, legacy_keys = self._load_native_effects()
         effects.update(durable_effects)
-        if durable_written:
-            resume["written_files"] = list(dict.fromkeys(
-                list(resume.get("written_files") or []) + durable_written))
+        legacy_keys.update(resume.get("legacy_effect_keys") or [])
+        # Historical argument lookups are not durable legacy invocation fences.
+        # Legacy argument-only fences remain readable, but cannot prove which
+        # repeated invocation applied. Refuse that ambiguity before any tool.
+        recovery = resume.get("recovery_turn")
+        if recovery:
+            keys = []
+            for call in recovery["assistant"].get("tool_calls") or []:
+                fn = call.get("function") or {}
+                try:
+                    params = json.loads(fn.get("arguments") or "{}")
+                except json.JSONDecodeError:
+                    params = {}
+                keys.append(_repeat_call_key(fn.get("name") or "", params))
+            for i, call_key in enumerate(keys):
+                invocation = _native_effect_invocation(
+                    resume["segment"], recovery["index"], i, call_key)
+                if invocation not in effects and call_key in legacy_keys:
+                    if (call_key in (resume.get("confirmed_effect_keys") or [])
+                            or keys.count(call_key) > 1):
+                        raise NativeSideEffectsRetained(
+                            "legacy native fence is ambiguous for a new invocation")
+                    effects[invocation] = effects[call_key]
+            # Replay the retained batch's mutation inventory in request order.
+            # An older write fence must not resurrect a subsequently deleted
+            # path in the list whose existence is checked before recovery.
+            written = list(resume.get("written_files") or [])
+            for i, call_key in enumerate(keys):
+                invocation = _native_effect_invocation(
+                    resume["segment"], recovery["index"], i, call_key)
+                result_text = effects.get(invocation)
+                if result_text is None:
+                    continue
+                result = json.loads(result_text)
+                if not isinstance(result, dict):
+                    raise NativeObservationUnavailable("retained native result is not an object")
+                written.extend(self._written_names(result))
+                removed = result.get("deleted") or result.get("removed") or []
+                removed = [removed] if isinstance(removed, str) else removed
+                if isinstance(removed, list):
+                    written = [name for name in written if name not in removed]
+            resume["written_files"] = list(dict.fromkeys(written))
         return resume
 
     def _persist_native_effect(self, call_key: str, result: str,
-                               written_files: list[str], effect: str) -> str:
+                               written_files: list[str], effect: str,
+                               *, invocation_key: str | None = None) -> str:
         """Fsync one mutation fence before execution can advance."""
         root = self._effect_fence_dir
         if root is None or not re.fullmatch(r"[0-9a-f]{64}", call_key):
             raise NativeObservationUnavailable(
                 "native effect-fence store was not initialized")
         result_ref = self._persist_native_observation(result)
-        payload = json.dumps({
+        record = {
             "call_key": call_key, "result_ref": result_ref,
             "written_files": written_files, "effect": effect,
-        }, ensure_ascii=False, sort_keys=True)
+        }
+        if invocation_key is not None:
+            if not re.fullmatch(r"[0-9a-f]{64}", invocation_key):
+                raise NativeObservationUnavailable("invalid native invocation identity")
+            record["invocation_key"] = invocation_key
+        payload = json.dumps(record, ensure_ascii=False, sort_keys=True)
         root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        target = root / f"{call_key}.json"
+        target = root / f"{invocation_key or call_key}.json"
         if target.exists():
             if target.read_text(encoding="utf-8") != payload:
                 raise NativeObservationUnavailable(
@@ -1140,19 +1194,25 @@ class PipelineEngine:
                 pass
         return result_ref
 
-    def _load_native_effects(self) -> tuple[dict[str, str], list[str]]:
+    def _load_native_effects(self) -> tuple[dict[str, str], list[str], set[str]]:
         root = self._effect_fence_dir
         effects: dict[str, str] = {}
         written: list[str] = []
+        legacy_keys: set[str] = set()
         if root is None or not root.exists():
-            return effects, written
+            return effects, written, legacy_keys
         for path in sorted(root.glob("*.json")):
             try:
                 payload = json.loads(path.read_text(encoding="utf-8"))
                 call_key = payload["call_key"]
-                if path.stem != call_key or not re.fullmatch(r"[0-9a-f]{64}", call_key):
-                    raise ValueError("call key mismatch")
-                effects[call_key] = self._read_native_observation(
+                invocation_key = payload.get("invocation_key") or call_key
+                if (path.stem != invocation_key
+                        or not re.fullmatch(r"[0-9a-f]{64}", call_key)
+                        or not re.fullmatch(r"[0-9a-f]{64}", invocation_key)):
+                    raise ValueError("call/invocation key mismatch")
+                if not payload.get("invocation_key"):
+                    legacy_keys.add(call_key)
+                effects[invocation_key] = self._read_native_observation(
                     payload["result_ref"])
                 names = payload.get("written_files") or []
                 if isinstance(names, list):
@@ -1161,7 +1221,7 @@ class PipelineEngine:
                     json.JSONDecodeError) as exc:
                 raise NativeObservationUnavailable(
                     f"native effect fence {path} is unreadable") from exc
-        return effects, written
+        return effects, written, legacy_keys
 
     # Delivered three times unchanged: a recovering agent essentially never sees
     # this, and every one of the twelve harness defects did.
@@ -1482,20 +1542,24 @@ class PipelineEngine:
         turns, the files written so far, and the turn budget as it stood
         (base + every grant the trace shows). A trailing INCOMPLETE turn — an
         assistant message whose tool calls do not all have their tool result
-        traced — is dropped: the host cannot tell which of those tools ran,
-        so the model re-decides from the last complete turn.
+        traced — is separated from the complete prefix. Recovery settles its
+        exact retained calls with durable mutation fences before asking the
+        provider again; confirmed historical calls are new invocation boundaries.
         """
         # A context handoff restarts message indices at zero. Key by segment so
         # an older segment cannot mask the successor on reclaim; older tool
         # observations are retained separately for recall and side-effect audit.
         by_position: dict[tuple[int, int], dict] = {}
         fenced_effects: dict[str, str] = {}
+        legacy_effect_keys: set[str] = set()
         effect_result_refs: dict[str, str] = {}
         fenced_written: list[str] = []
         for event, payload in rows:
             if event == "side_effect_completed" and isinstance(payload, dict):
-                key = payload.get("call_key")
+                key = payload.get("invocation_key") or payload.get("call_key")
                 if isinstance(key, str) and key:
+                    if not payload.get("invocation_key"):
+                        legacy_effect_keys.add(key)
                     fenced_effects[key] = str(payload.get("result_json") or
                                                '{"status":"completed"}')
                     ref = payload.get("result_ref")
@@ -1536,13 +1600,25 @@ class PipelineEngine:
                     if key[0] == latest_segment]
         all_messages = [by_position[key] for key in sorted(by_position)]
         dropped = 0
+        recovery_turn = None
         # trailing incomplete turn
         last_a = max((i for i, m in enumerate(messages) if m["role"] == "assistant"), default=-1)
         if last_a >= 0:
             calls = messages[last_a].get("tool_calls") or []
-            got = sum(1 for m in messages[last_a + 1:] if m["role"] == "tool")
+            call_ids = {c.get("id") for c in calls if isinstance(c, dict)}
+            got = len({m.get("tool_call_id") for m in messages[last_a + 1:]
+                       if m["role"] == "tool" and m.get("tool_call_id") in call_ids})
             if not calls or got < len(calls):
                 dropped = len(messages) - last_a
+                # Settle this exact requested batch before another provider
+                # call. Do not ask a model to guess which mutations ran.
+                recovery_turn = {
+                    "assistant": messages[last_a],
+                    "index": sorted(key[1] for key in by_position
+                                    if key[0] == latest_segment)[last_a],
+                    "tool_results": [m for m in messages[last_a + 1:]
+                                     if m.get("role") == "tool"],
+                } if calls else None
                 messages = messages[:last_a]
         all_messages = [by_position[key] for key in sorted(by_position)
                         if key[0] < latest_segment] + messages
@@ -1577,6 +1653,7 @@ class PipelineEngine:
                          for m in all_messages if m.get("role") == "tool"
                          and m.get("tool_call_id")}
         completed_effect_calls: dict[str, str] = dict(fenced_effects)
+        confirmed_effect_keys: set[str] = set()
         first_write_turn: int | None = None
         reads_searches = 0
         tool_failures = 0
@@ -1618,6 +1695,7 @@ class PipelineEngine:
                 if mutated:
                     if first_write_turn is None:
                         first_write_turn = assistant_turn
+                    confirmed_effect_keys.add(_repeat_call_key(tool_name, params))
                     completed_effect_calls.setdefault(_repeat_call_key(
                         tool_name, params), result_text)
 
@@ -1628,6 +1706,9 @@ class PipelineEngine:
                 "recall_messages": [m for m in all_messages
                                     if m.get("role") == "tool"],
                 "completed_effect_calls": completed_effect_calls,
+                "confirmed_effect_keys": sorted(confirmed_effect_keys),
+                "legacy_effect_keys": sorted(legacy_effect_keys),
+                "recovery_turn": recovery_turn,
                 "effect_result_refs": effect_result_refs,
                 "first_write_turn": first_write_turn,
                 "reads_searches": reads_searches,
@@ -1653,21 +1734,29 @@ class PipelineEngine:
                 "SELECT event, payload_json FROM skillflow_trace "
                 "WHERE step_instance_id = ? ORDER BY seq", (iid,))
             rows = [(e, json.loads(pj or "{}")) for e, pj in cur.fetchall()]
-        except Exception:
+        except Exception as exc:
+            effects, _, _ = self._load_native_effects()
+            if effects:
+                raise NativeSideEffectsRetained(
+                    "retained native conversation is unreadable; refusing fresh replay") from exc
             return None
         try:
             rebuilt = self._rebuild_from_deltas(rows, max_turns)
             if not rebuilt:
-                effects, _ = self._load_native_effects()
+                effects, _, _ = self._load_native_effects()
                 if effects:
                     raise NativeSideEffectsRetained(
                         "native side effects are retained but the conversation "
                         "trace is unavailable; refusing fresh replay")
                 return None
             return self._hydrate_resume_observations(rebuilt)
-        except NativeObservationUnavailable:
+        except (NativeObservationUnavailable, NativeSideEffectsRetained):
             raise
-        except Exception:
+        except Exception as exc:
+            effects, _, _ = self._load_native_effects()
+            if effects:
+                raise NativeSideEffectsRetained(
+                    "retained native conversation is unreadable; refusing fresh replay") from exc
             return None
 
     def _trace_prompt_deltas(self, messages: list, turn: int) -> None:
@@ -3525,8 +3614,12 @@ class PipelineEngine:
         if resume:
             missing = [f for f in resume["written_files"]
                        if not self._output_file_path(workspace, project_id, step_id, f).exists()]
+            if missing and resume.get("completed_effect_calls"):
+                raise NativeSideEffectsRetained(
+                    "retained native mutation output is missing; refusing fresh replay")
             if (missing or (resume["turns"] < 1
-                            and not resume.get("completed_effect_calls"))):
+                            and not resume.get("completed_effect_calls")
+                            and not resume.get("recovery_turn"))):
                 self._trace("step", "resume_refused", {
                     "step_id": step_id, "turns": resume["turns"],
                     "missing_staged_files": missing[:20]})
@@ -3703,11 +3796,14 @@ class PipelineEngine:
         resolved_ctx = self._drop_context_value(resolved_ctx, self._validation_error)
 
         _resumed = dict(resume) if resume else {}
-        # Exact successful mutation calls survive every recovery boundary in
-        # this invocation, including an ordinary native retry. Their effects
-        # remain in staging/state even when the conversational attempt changes.
+        # Fences belong to retained batch positions. Confirmed historical
+        # effects cannot suppress new business calls with identical arguments.
         effect_replays: dict[str, str] = dict(
             _resumed.get("completed_effect_calls") or {})
+        recovery_turn = _resumed.get("recovery_turn")
+        recovery_notice = None
+        if effect_replays:
+            self._native_side_effects_committed = True
         first_write_turn: int | None = _resumed.get("first_write_turn")
         reads_searches = int(_resumed.get("reads_searches") or 0)
         tool_failures = int(_resumed.get("tool_failures") or 0)
@@ -3774,17 +3870,26 @@ class PipelineEngine:
                         f"here — do not re-read or redo what is above. If your "
                         f"last tool calls are missing their results, they were "
                         f"lost in the restart: re-issue only those.")
+                if recovery_turn:
+                    lead = (
+                        "[Resumed after a host restart] The retained incomplete "
+                        "tool batch has now been settled without re-executing "
+                        "fenced mutations. Continue from its results; new tool "
+                        "calls are new operations, not retries of that batch.")
                 resume_notice = {
                     "role": "user",
                     "content": lead + self._validation_error_block(
                         self._validation_error),
                 }
-                messages.append(resume_notice)
+                if recovery_turn:
+                    recovery_notice = resume_notice
+                else:
+                    messages.append(resume_notice)
                 # Legacy traces predate the separate full-observation recall
                 # stream. In that case `_native_messages` is a copy of
                 # `messages`; retain this newly appended rejection/restart
                 # instruction in both stores.
-                if self._native_messages is not messages:
+                if self._native_messages is not messages and not recovery_turn:
                     self._native_messages.append(dict(resume_notice))
                 resume = None    # a retry attempt must not re-enter this branch
             elif attempt == 1:
@@ -4026,7 +4131,7 @@ class PipelineEngine:
                     cap_at_start=output_cap_at_start,
                     escalations_used=output_escalations_used,
                 )
-                if (implementation_progress_enabled and _should_intervene_early(
+                if (not recovery_turn and implementation_progress_enabled and _should_intervene_early(
                         turn=turn_count, max_turns=max_turns,
                         writable=bool(write_tool_names),
                         written_files=(written_files if first_write_turn is None
@@ -4083,7 +4188,7 @@ class PipelineEngine:
                 # approval. Announce the remaining budget once, early enough to
                 # act on, so "finish what you owe" is a decision the agent can
                 # make instead of a cliff it walks off.
-                if self._should_warn_low_budget(remaining, current_max_turns):
+                if not recovery_turn and self._should_warn_low_budget(remaining, current_max_turns):
                     messages.append({
                         "role": "user",
                         "content": self._low_budget_message(
@@ -4096,7 +4201,7 @@ class PipelineEngine:
                     })
                 if remaining > 1:
                     tool_choice = "auto"
-                elif not written_files and write_tool_names:
+                elif not recovery_turn and not written_files and write_tool_names:
                     # Final turn and the step still has no output. Exploration-
                     # heavy models (e.g. deepseek) burn the whole budget on
                     # read/search tools and reach the last turn with nothing
@@ -4126,72 +4231,86 @@ class PipelineEngine:
                 })
                 t0 = time.time()
 
-                try:
-                    self._trace_prompt_deltas(messages, turn_count + 1)
-                    model_messages, projection = _project_native_messages(messages)
-                    boundary = _context_boundary(agent.gateway, model_messages,
-                                                 native_tools)
-                    if boundary["unknown"] and not context_budget_unknown_reported:
-                        context_budget_unknown_reported = True
-                        self._trace("prompt", "context_budget_unknown", {
-                            "attempt": attempt, "turn": turn_count + 1,
-                            **boundary,
-                        })
-                    if boundary["handoff"]:
-                        old_segment = self._context_segment
-                        messages = _context_handoff_messages(
-                            messages, segment=old_segment,
-                            written_files=written_files)
-                        self._context_segment += 1
-                        self._delta_traced = 0
-                        last_reasoning = ""
-                        self._trace("prompt", "context_handoff", {
-                            "attempt": attempt, "turn": turn_count + 1,
-                            "from_segment": old_segment,
-                            "to_segment": self._context_segment,
-                            **boundary,
-                        })
+                recovering_batch = recovery_turn
+                if recovering_batch:
+                    retained = recovering_batch["assistant"]
+                    result = SimpleNamespace(
+                        text=retained.get("content") or "",
+                        reasoning_content=retained.get("reasoning_content") or "",
+                        tool_calls=retained["tool_calls"], truncated=False)
+                    recovery_turn = None
+                    self._trace("step", "native_batch_recovery", {
+                        "segment": self._context_segment,
+                        "assistant_index": recovering_batch["index"],
+                        "tool_calls": len(result.tool_calls), "provider_called": False,
+                    })
+                else:
+                    try:
                         self._trace_prompt_deltas(messages, turn_count + 1)
                         model_messages, projection = _project_native_messages(messages)
-                        after = _context_boundary(agent.gateway, model_messages,
-                                                  native_tools)
-                        if after["handoff"]:
-                            raise NativeTurnBudgetExhausted(
-                                f"Step {step_id}: context handoff still exceeds "
-                                f"active endpoint budget ({after['estimated_prompt_tokens']} "
-                                f"+ {after['output_reserve']} >= {after['limit']}); "
-                                "stopping explicitly without another provider call")
-                    if projection["compacted_tool_results"]:
-                        self._trace("prompt", "prompt_projection", {
-                            "attempt": attempt, "turn": turn_count + 1,
-                            **projection,
-                        })
-                    result = agent.turn(
-                        messages=model_messages, tools=native_tools,
-                        tool_choice=tool_choice,
-                    )
-                except Exception as e:
-                    # A SPENT QUOTA is not feedback for the agent — it is an
-                    # infrastructure condition, and the only correct response is
-                    # to stop asking. Swallowing it here is what defeated the
-                    # scheduler's quota hold: every DPE role is
-                    # native_tool_calling, so every LLM call arrives at this
-                    # handler, the RateLimitError became prose, `feedback` was
-                    # overwritten three lines later by the "No output produced"
-                    # message, and the loop re-called the spent endpoint once
-                    # per attempt until MaxRetriesExceeded — which the scheduler
-                    # catches BEFORE its quota check, and which carries none of
-                    # the provider's reset-time prose. A byte-for-byte replay of
-                    # the 2026-08-26 outage the hold was written to stop.
-                    #
-                    # With routing in place this only fires once EVERY candidate
-                    # for the model is spent, so it is genuinely the last resort.
-                    from core.llm_quota import is_quota_exhausted
-                    if is_quota_exhausted(e):
-                        raise
-                    self._emit("native_error", {"error": str(e)[:200]})
-                    feedback = f"Native tool calling error: {e}. Response truncated."
-                    break
+                        boundary = _context_boundary(agent.gateway, model_messages,
+                                                     native_tools)
+                        if boundary["unknown"] and not context_budget_unknown_reported:
+                            context_budget_unknown_reported = True
+                            self._trace("prompt", "context_budget_unknown", {
+                                "attempt": attempt, "turn": turn_count + 1,
+                                **boundary,
+                            })
+                        if boundary["handoff"]:
+                            old_segment = self._context_segment
+                            messages = _context_handoff_messages(
+                                messages, segment=old_segment,
+                                written_files=written_files)
+                            self._context_segment += 1
+                            self._delta_traced = 0
+                            last_reasoning = ""
+                            self._trace("prompt", "context_handoff", {
+                                "attempt": attempt, "turn": turn_count + 1,
+                                "from_segment": old_segment,
+                                "to_segment": self._context_segment,
+                                **boundary,
+                            })
+                            self._trace_prompt_deltas(messages, turn_count + 1)
+                            model_messages, projection = _project_native_messages(messages)
+                            after = _context_boundary(agent.gateway, model_messages,
+                                                      native_tools)
+                            if after["handoff"]:
+                                raise NativeTurnBudgetExhausted(
+                                    f"Step {step_id}: context handoff still exceeds "
+                                    f"active endpoint budget ({after['estimated_prompt_tokens']} "
+                                    f"+ {after['output_reserve']} >= {after['limit']}); "
+                                    "stopping explicitly without another provider call")
+                        if projection["compacted_tool_results"]:
+                            self._trace("prompt", "prompt_projection", {
+                                "attempt": attempt, "turn": turn_count + 1,
+                                **projection,
+                            })
+                        result = agent.turn(
+                            messages=model_messages, tools=native_tools,
+                            tool_choice=tool_choice,
+                        )
+                    except Exception as e:
+                        # A SPENT QUOTA is not feedback for the agent — it is an
+                        # infrastructure condition, and the only correct response is
+                        # to stop asking. Swallowing it here is what defeated the
+                        # scheduler's quota hold: every DPE role is
+                        # native_tool_calling, so every LLM call arrives at this
+                        # handler, the RateLimitError became prose, `feedback` was
+                        # overwritten three lines later by the "No output produced"
+                        # message, and the loop re-called the spent endpoint once
+                        # per attempt until MaxRetriesExceeded — which the scheduler
+                        # catches BEFORE its quota check, and which carries none of
+                        # the provider's reset-time prose. A byte-for-byte replay of
+                        # the 2026-08-26 outage the hold was written to stop.
+                        #
+                        # With routing in place this only fires once EVERY candidate
+                        # for the model is spent, so it is genuinely the last resort.
+                        from core.llm_quota import is_quota_exhausted
+                        if is_quota_exhausted(e):
+                            raise
+                        self._emit("native_error", {"error": str(e)[:200]})
+                        feedback = f"Native tool calling error: {e}. Response truncated."
+                        break
 
                 elapsed = time.time() - t0
                 self._emit("agent_response", {
@@ -4203,7 +4322,7 @@ class PipelineEngine:
 
                 # Phase 0 cache telemetry: record per-turn token + prompt-cache
                 # usage so a run's cache hit-ratio can be aggregated from traces.
-                usage = getattr(agent.gateway, "last_usage", {}) or {}
+                usage = {} if recovering_batch else (getattr(agent.gateway, "last_usage", {}) or {})
                 outbound = getattr(agent.gateway, "last_outbound", {}) or {}
                 # The cap this turn actually ran under: escalation happens
                 # further down, so reading it here attributes the spend to the
@@ -4235,7 +4354,7 @@ class PipelineEngine:
                 # Record trace — store the full response (free text + every
                 # tool call with untruncated args + reasoning) so the trace is
                 # a faithful copy of what the model produced, not a lossy digest.
-                self._trace("response", "agent_response", {
+                self._trace("response", "recovered_agent_response" if recovering_batch else "agent_response", {
                     "attempt": attempt, "turn": turn_count + 1,
                     "text": result.text or "",
                     "reasoning_content": result.reasoning_content or "",
@@ -4483,7 +4602,16 @@ class PipelineEngine:
                 called_finish = False
                 ask_more_extra = 0
                 ask_more_reason = ""
-                for tc in result.tool_calls:
+                assistant_index = len(messages) - 1
+                recovered_results = {}
+                if recovering_batch:
+                    if assistant_index != recovering_batch["index"]:
+                        raise NativeSideEffectsRetained("retained native batch position is ambiguous")
+                    recovered_results = {m["tool_call_id"]: m for m in recovering_batch["tool_results"]}
+                    ids = [tc["id"] for tc in result.tool_calls]
+                    if len(ids) != len(set(ids)):
+                        raise NativeSideEffectsRetained("retained native batch call IDs are ambiguous")
+                for call_index, tc in enumerate(result.tool_calls):
                     fn = tc["function"]
                     tool_name = fn["name"]
                     if tool_name == "finish_step" and relay_acknowledged:
@@ -4512,7 +4640,10 @@ class PipelineEngine:
                                   if tool_name in _REPEATABLE_READ_TOOLS else "")
                     repeated = repeat_index.get(repeat_key) if repeat_key else None
                     effect_key = _repeat_call_key(tool_name, params)
-                    replayed_effect = effect_replays.get(effect_key)
+                    invocation_key = _native_effect_invocation(
+                        self._context_segment, assistant_index, call_index, effect_key)
+                    replayed_effect = effect_replays.get(invocation_key)
+                    observed_result = recovered_results.get(tc["id"])
                     host_policy_refusal = False
                     if not relay_acknowledged and tool_name != "acknowledge_relay":
                         host_policy_refusal = True
@@ -4543,19 +4674,31 @@ class PipelineEngine:
                                 ),
                             })
                         self._note_phase("tool_done", tool_name)
+                    elif observed_result is not None:
+                        tool_result = json.loads(observed_result["content"])
+                        self._note_phase("tool_done", tool_name)
+                        self._trace("step", "native_tool_result_recovered", {
+                            "tool": tool_name, "invocation_key": invocation_key,
+                            "executed_now": False, "already_observed": True})
                     elif replayed_effect is not None:
                         try:
                             tool_result = json.loads(replayed_effect)
-                        except (json.JSONDecodeError, TypeError):
-                            tool_result = {"status": "completed"}
+                        except (json.JSONDecodeError, TypeError) as exc:
+                            raise NativeObservationUnavailable(
+                                "retained native mutation result is not valid JSON") from exc
+                        if not isinstance(tool_result, dict):
+                            raise NativeObservationUnavailable(
+                                "retained native mutation result is not an object")
                         tool_result = dict(tool_result)
-                        tool_result["replayed_side_effect"] = False
+                        tool_result["replayed_side_effect"] = True
+                        tool_result["executed_now"] = False
                         tool_result["note"] = (
-                            "This exact successful state-changing call already "
-                            "ran before recovery and was not executed again.")
+                            "This retained invocation already applied its effect; "
+                            "recovery did not execute the tool body again.")
                         self._note_phase("tool_done", tool_name)
                         self._trace("step", "side_effect_replay_refused", {
-                            "tool": tool_name, "call_key": effect_key})
+                            "tool": tool_name, "call_key": effect_key,
+                            "invocation_key": invocation_key, "executed_now": False})
                     elif (relay_progress and tool_name in _REPOSITORY_READ_TOOLS
                           and not written_files and reads_searches > relay_read_limit):
                         host_policy_refusal = True
@@ -4601,33 +4744,38 @@ class PipelineEngine:
                         finally:
                             self._note_phase("tool_done", tool_name)
                     if tool_name == "ask_more_turns":
-                        # _exec_tool answers "granted" unconditionally; the
-                        # provider must never read a false grant, so fail closed
-                        # until the loop proves this request earns one.
-                        tool_result = {"status": "denied", "turns": 0}
-                        # A repeated request
-                        # after a grant must be backed by a novel successful
-                        # tool outcome, not more copies of the same failure.
-                        made_progress = (
-                            turn_grants == 0
-                            or len(progress_signatures) > progress_at_last_grant
-                        )
-                        ask_more_extra, turn_grants, grant_msg = _grant_turns(
-                            turn_grants, ask_more_extra,
-                            made_progress=made_progress)
-                        if ask_more_extra:
-                            progress_at_last_grant = len(progress_signatures)
-                        tool_result.update({
-                            "status": "granted" if ask_more_extra else "denied",
-                            "turns": ask_more_extra, "note": grant_msg,
-                        })
+                        if observed_result is not None:
+                            ask_more_extra = (int(tool_result.get("turns") or 0)
+                                              if tool_result.get("status") == "granted" else 0)
+                            turn_grants += bool(ask_more_extra)
+                        else:
+                            # _exec_tool answers "granted" unconditionally; the
+                            # provider must never read a false grant, so fail closed
+                            # until the loop proves this request earns one.
+                            tool_result = {"status": "denied", "turns": 0}
+                            # A repeated request
+                            # after a grant must be backed by a novel successful
+                            # tool outcome, not more copies of the same failure.
+                            made_progress = (
+                                turn_grants == 0
+                                or len(progress_signatures) > progress_at_last_grant
+                            )
+                            ask_more_extra, turn_grants, grant_msg = _grant_turns(
+                                turn_grants, ask_more_extra,
+                                made_progress=made_progress)
+                            if ask_more_extra:
+                                progress_at_last_grant = len(progress_signatures)
+                            tool_result.update({
+                                "status": "granted" if ask_more_extra else "denied",
+                                "turns": ask_more_extra, "note": grant_msg,
+                            })
                         expansion_requests.append({
                             "turn": turn_count + 1,
                             "asked": int(params.get("turns", 3) or 3),
                             "granted": ask_more_extra,
                             "reason": ask_more_reason,
                         })
-                    else:
+                    elif observed_result is None and replayed_effect is None:
                         progress = _progress_signature(tool_name, params, tool_result)
                         if progress:
                             progress_signatures.add(progress)
@@ -4647,19 +4795,43 @@ class PipelineEngine:
                     mutated = bool(wf or effect or artifact_changed)
                     if mutated:
                         self._native_side_effects_committed = True
-                        if replayed_effect is None:
-                            effect_replays[effect_key] = result_str
+                        if replayed_effect is None and observed_result is None:
+                            tool_result["replayed_side_effect"] = False
+                            tool_result["executed_now"] = True
+                            result_str = json.dumps(tool_result, ensure_ascii=False)
+                            effect_replays[invocation_key] = result_str
                             result_ref = self._persist_native_effect(
-                                effect_key, result_str, names, effect)
+                                effect_key, result_str, names, effect,
+                                invocation_key=invocation_key)
                             self._trace("step", "side_effect_completed", {
                                 "tool": tool_name,
                                 "call_key": effect_key,
+                                "invocation_key": invocation_key,
                                 "result_ref": result_ref,
                                 "result_json": (result_str if len(result_str) <= 8192
                                                 else ""),
                                 "written_files": names,
                                 "effect": effect,
                             })
+
+                    failed_required_action = (
+                        _is_failed_tool_result(result_str)
+                        and (tool_name not in _REPOSITORY_READ_TOOLS | {"ask_more_turns"}
+                             or tool_name not in self._tool_schemas or mutated))
+                    if (recovering_batch and observed_result is None
+                            and (host_policy_refusal or failed_required_action)):
+                        # Claimed reads and budget requests may finish with an
+                        # error/denial; failed required actions remain unsettled.
+                        # Keep it pending rather than tracing a completed result
+                        # that a later retained finish_step could mask.
+                        result_ref = self._persist_native_observation(result_str)
+                        self._trace("step", "native_recovery_action_unsettled", {
+                            "tool": tool_name, "invocation_key": invocation_key,
+                            "result_ref": result_ref, "host_policy_refusal": host_policy_refusal,
+                        })
+                        raise NativeSideEffectsRetained(
+                            f"retained native action {tool_name} failed or was refused; "
+                            "recovery remains incomplete")
 
                     tool_message = {
                         "role": "tool",
@@ -4702,6 +4874,10 @@ class PipelineEngine:
 
 
                 self._trace_prompt_deltas(messages, turn_count + 1)
+                if recovering_batch and recovery_notice:
+                    messages.append(recovery_notice)
+                    self._native_messages.append(dict(recovery_notice))
+                    recovery_notice = None
 
                 # Apply ask_more_turns budget extension after all tool calls
                 # in this turn have been processed.

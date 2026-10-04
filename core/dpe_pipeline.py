@@ -4809,9 +4809,14 @@ class PipelineEngine:
                                 "effect": effect,
                             })
 
+                    failed_required_action = (
+                        _is_failed_tool_result(result_str)
+                        and (tool_name not in _REPOSITORY_READ_TOOLS | {"ask_more_turns"}
+                             or tool_name not in self._tool_schemas))
                     if (recovering_batch and observed_result is None
-                            and (host_policy_refusal or _is_failed_tool_result(result_str))):
-                        # A refusal/failure does not settle this retained action.
+                            and (host_policy_refusal or failed_required_action)):
+                        # Claimed reads and budget requests may finish with an
+                        # error/denial; failed required actions remain unsettled.
                         # Keep it pending rather than tracing a completed result
                         # that a later retained finish_step could mask.
                         result_ref = self._persist_native_observation(result_str)

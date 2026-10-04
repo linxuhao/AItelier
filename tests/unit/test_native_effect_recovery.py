@@ -229,9 +229,12 @@ def test_recovery_keeps_withdrawn_tool_ownership_guard(tmp_path, monkeypatch):
         receipts.extend(json.loads(m['content']) for m in messages if m.get('role') == 'tool' and m.get('name') == 'remove_owned')
         return response('finish_step', summary='refused withdrawn tool')
     restored, ws2 = host(sf, rid, claim, root, after)
-    assert execute(restored, ws2, rid, claim)
+    with pytest.raises(NativeSideEffectsRetained, match='recovery remains incomplete'):
+        execute(restored, ws2, rid, claim)
     assert executions == [('state', 'A')] and (root / 'baseline.py').exists()
-    assert 'not granted' in receipts[0]['error']
+    assert receipts == []  # No provider may turn the unfinished refusal into success.
+    unsettled = [p for event, p in traces(sf, rid) if event == 'native_recovery_action_unsettled']
+    assert 'not granted' in restored._read_native_observation(unsettled[0]['result_ref'])
     sf._conn.close()
 
 

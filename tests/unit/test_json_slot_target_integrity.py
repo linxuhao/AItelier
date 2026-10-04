@@ -87,7 +87,7 @@ def test_official_slot_edit_error_requires_matching_id(tmp_path, kind, same):
     assert json.loads((tmp_path / "docs/a.json").read_text())["value"] == (1 if same else 0)
     assert (tmp_path / "docs/b.json").exists() == (not same)
     if not same:
-        assert error and "ABSENT" in error
+        assert error and "old_str" in error and "docs/a.json" in error
         assert sum(c["params"].get("id") == "b" for c in e.calls) == 1
         assert not any(kind == "step_done" for kind, _ in e.events)
 

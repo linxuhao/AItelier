@@ -494,3 +494,60 @@ def test_modern_history_does_not_mask_unexecuted_identical_batch(tmp_path, monke
     assert effects[0]['invocation_key'] != effects[2]['invocation_key']
     assert json.loads(effects[2]['result_json'])['executed_now'] is True
     sf._conn.close()
+
+
+@pytest.mark.parametrize('damage', ['unreadable-trace', 'withdrawn-authority', 'pending-failure'])
+def test_unsettled_recovery_cannot_accept_finish_and_can_later_repair(tmp_path, monkeypatch, damage):
+    import sqlite3
+    sf, rid, claim, root = patch_fixture(tmp_path, monkeypatch)
+    def add(name):
+        return response('apply_patch', patch=f'*** Begin Patch\n*** Add File: {name}\n+OWNED = 1\n*** End Patch')
+    pending = (response('apply_patch', patch='*** Begin Patch\n*** Update File: C.py\n@@\n-OWNED = 0\n+OWNED = 1\n*** End Patch')
+               if damage == 'pending-failure' else add('C.py'))
+    e, ws = host(sf, rid, claim, root, lambda *a, **kw: batch(
+        add('A.py'), add('B.py'), pending, response('finish_step', summary='all three owed')))
+    persist, fences = e._persist_native_effect, []
+    def crash(*args, **kwargs):
+        result = persist(*args, **kwargs)
+        fences.append(args[0])
+        if len(fences) == 2:
+            raise HostCrash('B fsynced before result delta')
+        return result
+    e._persist_native_effect = crash
+    with pytest.raises(HostCrash):
+        execute(e, ws, rid, claim)
+    original_bytes = {p.name: p.read_bytes() for p in e._effect_fence_dir.glob('*.json')}
+    assert (root / 'A.py').exists() and (root / 'B.py').exists()
+    assert not (root / 'C.py').exists()
+    schemas = dict(claim.inputs['_tool_schemas'])
+    trace_reader = sf._get_trace_conn
+    if damage == 'withdrawn-authority':
+        claim.inputs['_tool_schemas'].pop('apply_patch')
+    elif damage == 'unreadable-trace':
+        def unavailable(_):
+            raise sqlite3.OperationalError('owned trace read unavailable')
+        monkeypatch.setattr(sf, '_get_trace_conn', unavailable)
+    provider_calls = []
+    def next_provider(*args, **kwargs):
+        provider_calls.append(1)
+        return response('finish_step', summary='must not mask incomplete C')
+    restored, ws2 = host(sf, rid, claim, root, next_provider)
+    with pytest.raises(NativeSideEffectsRetained):
+        execute(restored, ws2, rid, claim)
+    monkeypatch.setattr(sf, '_get_trace_conn', trace_reader)
+    assert provider_calls == [] and not (root / 'C.py').exists()
+    assert {p.name: p.read_bytes() for p in e._effect_fence_dir.glob('*.json')} == original_bytes
+    assert not any(event == 'step_done' for event, _ in traces(sf, rid))
+    # Repair the actual unavailable evidence/grant/precondition, then settle the
+    # same retained batch. The failed action was not marked as already observed.
+    claim.inputs['_tool_schemas'] = schemas
+    if damage == 'pending-failure':
+        (root / 'C.py').write_text('OWNED = 0\n')
+    repaired, ws3 = host(sf, rid, claim, root, next_provider)
+    assert execute(repaired, ws3, rid, claim)
+    assert provider_calls == [] and (root / 'C.py').read_text() == 'OWNED = 1\n'
+    for name, content in original_bytes.items():
+        assert (e._effect_fence_dir / name).read_bytes() == content
+    completed = [p for event, p in traces(sf, rid) if event == 'side_effect_completed']
+    assert len(completed) == 2  # A traced; B crashed before its fence trace; C is current.
+    sf._conn.close()

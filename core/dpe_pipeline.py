@@ -1734,7 +1734,11 @@ class PipelineEngine:
                 "SELECT event, payload_json FROM skillflow_trace "
                 "WHERE step_instance_id = ? ORDER BY seq", (iid,))
             rows = [(e, json.loads(pj or "{}")) for e, pj in cur.fetchall()]
-        except Exception:
+        except Exception as exc:
+            effects, _, _ = self._load_native_effects()
+            if effects:
+                raise NativeSideEffectsRetained(
+                    "retained native conversation is unreadable; refusing fresh replay") from exc
             return None
         try:
             rebuilt = self._rebuild_from_deltas(rows, max_turns)
@@ -1748,7 +1752,11 @@ class PipelineEngine:
             return self._hydrate_resume_observations(rebuilt)
         except (NativeObservationUnavailable, NativeSideEffectsRetained):
             raise
-        except Exception:
+        except Exception as exc:
+            effects, _, _ = self._load_native_effects()
+            if effects:
+                raise NativeSideEffectsRetained(
+                    "retained native conversation is unreadable; refusing fresh replay") from exc
             return None
 
     def _trace_prompt_deltas(self, messages: list, turn: int) -> None:
@@ -4800,6 +4808,20 @@ class PipelineEngine:
                                 "written_files": names,
                                 "effect": effect,
                             })
+
+                    if (recovering_batch and observed_result is None
+                            and (host_policy_refusal or _is_failed_tool_result(result_str))):
+                        # A refusal/failure does not settle this retained action.
+                        # Keep it pending rather than tracing a completed result
+                        # that a later retained finish_step could mask.
+                        result_ref = self._persist_native_observation(result_str)
+                        self._trace("step", "native_recovery_action_unsettled", {
+                            "tool": tool_name, "invocation_key": invocation_key,
+                            "result_ref": result_ref, "host_policy_refusal": host_policy_refusal,
+                        })
+                        raise NativeSideEffectsRetained(
+                            f"retained native action {tool_name} failed or was refused; "
+                            "recovery remains incomplete")
 
                     tool_message = {
                         "role": "tool",

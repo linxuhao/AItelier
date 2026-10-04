@@ -3267,7 +3267,7 @@ class PipelineEngine:
                             if (action.get("tool") == "apply_patch"
                                     and result.get("phase") == "publish"
                                     and result.get("partial") is True):
-                                for target in completed:
+                                for target in targets & completed:
                                     pending_write_failures.pop(target, None)
                                 targets = targets - completed or targets
                             for target in targets:

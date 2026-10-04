@@ -189,3 +189,30 @@ def test_real_patch_partial_publication_requires_only_failed_target_repair(
     if not repair:
         assert error and "owned b.py publication failed" in error
         assert not any(kind == "step_done" for kind, _ in e.events)
+
+def test_unrequested_partial_patch_receipt_cannot_clear_required_failure(tmp_path):
+    patch = "*** Begin Patch\n*** Add File: other.py\n+OTHER = 1\n*** End Patch\n"
+    e = engine(tmp_path, [EXTRA_BRACE, response(edit("required.py")),
+        response(action("apply_patch", patch=patch)),
+        response(action("apply_patch", patch=patch)), response(action("finish_step"))])
+    e._tool_schemas["apply_patch"] = {}
+    number = [0]
+
+    def execute(call):
+        e.calls.append(call)
+        number[0] += 1
+        if number[0] == 1:
+            return {"error": "original required.py failure"}
+        if number[0] == 2:
+            return {"error": "other.py publication failed", "phase": "publish",
+                    "partial": True, "written": ["required.py"]}
+        (tmp_path / "other.py").write_text("OTHER = 1\n")
+        return {"written": ["other.py"], "applied": True}
+
+    e._exec_tool = execute
+    value, error = attempt(e)
+    assert value is not True
+    assert error and "original required.py failure" in error
+    assert not (tmp_path / "required.py").exists()
+    assert (tmp_path / "other.py").read_text() == "OTHER = 1\n"
+    assert not any(kind == "step_done" for kind, _ in e.events)

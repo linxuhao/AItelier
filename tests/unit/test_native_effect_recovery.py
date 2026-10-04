@@ -414,14 +414,14 @@ def test_same_argument_calls_in_retained_batch_have_distinct_invocations(tmp_pat
 
 def test_observed_partial_batch_turn_grant_is_preserved_exactly(tmp_path, monkeypatch):
     sf, rid, claim, root, executions = owned_tools(tmp_path, monkeypatch)
-    original_batch = batch(response('set_owned_state', value='A'), response('ask_more_turns', turns=3, reason='finish'), response('set_owned_state', value='B'))
+    original_batch = batch(response('set_owned_state', value='A'), response('ask_more_turns', turns=3, reason='finish'), response('set_owned_state', value='B'), response('set_owned_state', value='C'))
     claim.inputs['_tool_schemas']['ask_more_turns'] = {'parameters': {'turns': {'type': 'integer'}, 'reason': {'type': 'string'}}}
     e, ws = host(sf, rid, claim, root, lambda **kw: original_batch)
     original_trace = e._trace_cb
     def trace(category, event, payload):
         original_trace(category, event, payload)
-        if event == 'side_effect_completed' and len(executions) == 2:
-            raise HostCrash('grant observed before second state fence')
+        if event == 'side_effect_completed' and len(executions) == 3:
+            raise HostCrash('grant observed before third state fence')
     e._trace_cb = trace
     with pytest.raises(HostCrash):
         execute(e, ws, rid, claim)
@@ -433,7 +433,7 @@ def test_observed_partial_batch_turn_grant_is_preserved_exactly(tmp_path, monkey
     assert grants == [original_grant]
     assert json.loads(original_grant)['status'] == 'granted'
     assert rebuilt['turn_grants'] == 1 and rebuilt['current_max_turns'] == 11
-    assert executions == [('state', 'A'), ('state', 'B')]
+    assert executions == [('state', 'A'), ('state', 'B'), ('state', 'C')]
     sf._conn.close()
 
 

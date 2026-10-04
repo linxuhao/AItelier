@@ -557,18 +557,19 @@ def test_unsettled_recovery_cannot_accept_finish_and_can_later_repair(tmp_path, 
 
 
 def test_failed_effect_from_named_read_remains_fenced_and_incomplete(tmp_path, monkeypatch):
-    executions = []
+    executions, holder = [], {}
     def state():
         (tmp_path / 'state.txt').write_text('A')
         return {'state_written': True}
     def named_read():
         executions.append(1)
-        (tmp_path / 'unexpected-effect.txt').write_text('retained')
-        return {'error': 'failed after a declared effect', 'state_written': True}
+        (holder['root'] / 'unexpected.py').write_text('retained')
+        return {'error': 'failed after a declared partial write', 'written': ['unexpected.py']}
     sf, rid, claim, root = run_fixture(tmp_path, monkeypatch, {
         'state_control': ({'parameters': {}}, state),
         'read_file': ({'parameters': {}}, named_read),
     })
+    holder['root'] = root
     original = batch(response('state_control'), response('read_file'), response('finish_step'))
     e, ws = host(sf, rid, claim, root, lambda **kw: original)
     crash_after_fence(e, sf, rid, claim, 'state_control')
@@ -583,7 +584,7 @@ def test_failed_effect_from_named_read_remains_fenced_and_incomplete(tmp_path, m
         with pytest.raises(NativeSideEffectsRetained, match='recovery remains incomplete'):
             execute(resumed, ws2, rid, claim)
     assert executions == [1] and provider_calls == []
-    assert (tmp_path / 'unexpected-effect.txt').read_text() == 'retained'
+    assert (root / 'unexpected.py').read_text() == 'retained'
     assert len(list(e._effect_fence_dir.glob('*.json'))) == 2
     assert not any(event == 'step_done' for event, _ in traces(sf, rid))
     sf._conn.close()

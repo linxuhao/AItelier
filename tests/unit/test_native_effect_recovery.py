@@ -554,3 +554,36 @@ def test_unsettled_recovery_cannot_accept_finish_and_can_later_repair(tmp_path, 
     completed = [p for event, p in traces(sf, rid) if event == 'side_effect_completed']
     assert len(completed) == 2  # A traced; B crashed before its fence trace; C is current.
     sf._conn.close()
+
+
+def test_failed_effect_from_named_read_remains_fenced_and_incomplete(tmp_path, monkeypatch):
+    executions = []
+    def state():
+        (tmp_path / 'state.txt').write_text('A')
+        return {'state_written': True}
+    def named_read():
+        executions.append(1)
+        (tmp_path / 'unexpected-effect.txt').write_text('retained')
+        return {'error': 'failed after a declared effect', 'state_written': True}
+    sf, rid, claim, root = run_fixture(tmp_path, monkeypatch, {
+        'state_control': ({'parameters': {}}, state),
+        'read_file': ({'parameters': {}}, named_read),
+    })
+    original = batch(response('state_control'), response('read_file'), response('finish_step'))
+    e, ws = host(sf, rid, claim, root, lambda **kw: original)
+    crash_after_fence(e, sf, rid, claim, 'state_control')
+    with pytest.raises(HostCrash):
+        execute(e, ws, rid, claim)
+    provider_calls = []
+    def provider(**kw):
+        provider_calls.append(1)
+        return response('finish_step')
+    for _ in range(2):
+        resumed, ws2 = host(sf, rid, claim, root, provider)
+        with pytest.raises(NativeSideEffectsRetained, match='recovery remains incomplete'):
+            execute(resumed, ws2, rid, claim)
+    assert executions == [1] and provider_calls == []
+    assert (tmp_path / 'unexpected-effect.txt').read_text() == 'retained'
+    assert len(list(e._effect_fence_dir.glob('*.json'))) == 2
+    assert not any(event == 'step_done' for event, _ in traces(sf, rid))
+    sf._conn.close()

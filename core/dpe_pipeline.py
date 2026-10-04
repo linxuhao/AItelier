@@ -4812,7 +4812,7 @@ class PipelineEngine:
                     failed_required_action = (
                         _is_failed_tool_result(result_str)
                         and (tool_name not in _REPOSITORY_READ_TOOLS | {"ask_more_turns"}
-                             or tool_name not in self._tool_schemas))
+                             or tool_name not in self._tool_schemas or mutated))
                     if (recovering_batch and observed_result is None
                             and (host_policy_refusal or failed_required_action)):
                         # Claimed reads and budget requests may finish with an

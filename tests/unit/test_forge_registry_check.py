@@ -19,8 +19,18 @@ forge_registry_check = _mod.forge_registry_check
 def _stub_live_tools(monkeypatch):
     # The reviewer-reads-maker check is pure graph analysis; stub the live
     # registry so the test needs no running app.
-    monkeypatch.setattr(_mod, "_live_tools",
-                        lambda: {"web_search", "write", "draft_commit", "run_tests"})
+    from types import SimpleNamespace
+    from skillflow.tool_loader import ToolLoader
+    import api.dependencies
+    names = {"web_search", "write", "draft_commit", "run_tests", "file_exists",
+             "test_write", "check_things"}
+    loader = ToolLoader()
+    for name in names:
+        loader.register_dynamic_tool(name, {"name": name, "parameters": {},
+                                            "x-fallible": name == "run_tests"}, None)
+    monkeypatch.setattr(_mod, "_live_tools", lambda: names)
+    monkeypatch.setattr(api.dependencies, "get_skillflow", lambda: SimpleNamespace(
+        _tool_loader=loader, capabilities=lambda: []))
 
 
 def _write(tmp_path, graph):

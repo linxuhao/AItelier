@@ -216,3 +216,27 @@ def test_unrequested_partial_patch_receipt_cannot_clear_required_failure(tmp_pat
     assert not (tmp_path / "required.py").exists()
     assert (tmp_path / "other.py").read_text() == "OTHER = 1\n"
     assert not any(kind == "step_done" for kind, _ in e.events)
+
+@pytest.mark.parametrize("repair_both", [False, True])
+def test_refused_invalid_hunk_targets_still_need_individual_repair(tmp_path, repair_both):
+    patch = "*** Begin Patch\n*** Add File: a.py\nbad hunk\n*** Add File: b.py\nbad hunk\n*** End Patch\n"
+    repairs = [create("a.py")] + ([create("b.py")] if repair_both else [])
+    e = owned_engine(tmp_path, [EXTRA_BRACE, response(action("apply_patch", patch=patch)),
+        response(*repairs), response(action("finish_step"))], [])
+    e._tool_schemas["apply_patch"] = {}
+    original = e._exec_tool
+
+    def execute(call):
+        if call["tool"] == "apply_patch":
+            e.calls.append(call)
+            return {"error": "owned malformed hunk refused"}
+        return original(call)
+
+    e._exec_tool = execute
+    value, error = attempt(e)
+    assert (value is True) == repair_both
+    assert (tmp_path / "a.py").read_text() == "VALUE = 1\n"
+    assert (tmp_path / "b.py").exists() == repair_both
+    if not repair_both:
+        assert error and "owned malformed hunk refused" in error
+        assert not any(kind == "step_done" for kind, _ in e.events)

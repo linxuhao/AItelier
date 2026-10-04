@@ -3007,6 +3007,13 @@ class PipelineEngine:
                 paths = mutation_paths(name, params, getattr(self, "_output_fixed", {}))
             except (ValueError, UnicodeError):
                 paths = []
+                # A refused malformed/oversized hunk still names its delivery
+                # targets. Headers identify repair obligations, not authority.
+                if (name == "apply_patch" and not params.get("references")
+                        and isinstance(params.get("patch"), str)):
+                    paths = re.findall(
+                        r"^\*\*\* (?:Add|Update|Delete) File: (.+)$",
+                        params["patch"], flags=re.MULTILINE)
             keys = {path_key(path) for path in paths if isinstance(path, str) and path}
             if keys:
                 return keys

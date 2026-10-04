@@ -38,13 +38,20 @@ def _interpolate(value: str, variables: dict) -> str:
 
 
 def _read_env_file(text: str) -> dict:
+    """Read plain NAME=value lines; refuse unsupported env-file syntax."""
     values = {}
-    for line in text.splitlines():
+    for line_number, line in enumerate(text.splitlines(), start=1):
         line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
+        if not line or line.startswith("#"):
             continue
-        key, _, value = line.partition("=")
-        values[key.strip()] = value.strip()
+        key, separator, value = line.partition("=")
+        key = key.strip()
+        if not separator or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) is None:
+            raise ValueError(
+                f"Unsupported env-file syntax on line {line_number}; expected "
+                "NAME=value with a plain variable name (export prefixes are not supported)."
+            )
+        values[key] = value.strip()
     return values
 
 
@@ -112,3 +119,71 @@ async def test_fastmcp_host_matching_accepts_ports_and_rejects_host_spoofing(mon
         rejected = await security.validate_request(_Request(host), is_post=True)
         assert rejected is not None
         assert rejected.status_code == 421
+
+
+@pytest.mark.parametrize("line", [
+    "export AITELIER_MCP_ALLOWED_HOSTS=operator.example,operator.example:*",
+    "AITELIER_MCP_ALLOWED_HOSTS",
+    "not an assignment",
+    "=operator.example",
+    "1INVALID=operator.example",
+])
+def test_unsupported_env_line_cannot_select_the_compose_default(monkeypatch, line):
+    parser = _read_env_file
+    # The normal consumer synthesizes plain assignments. Inject raw syntax here
+    # to exercise its real interpolation path without broadening the helper.
+    monkeypatch.setitem(
+        _compose_environment.__globals__, "_read_env_file",
+        lambda synthetic: parser(f"# comment\n\n{line}\n"),
+    )
+    with pytest.raises(ValueError, match=r"line 3; expected NAME=value"):
+        _compose_environment()
+
+
+def test_supported_env_assignments_keep_whitespace_comments_and_empty_values():
+    assert _read_env_file(
+        "  # comment\n\n  NAME_2 = operator.example  \n EMPTY= \n EQUATION=a=b\n"
+    ) == {"NAME_2": "operator.example", "EMPTY": "", "EQUATION": "a=b"}
+
+
+@pytest.mark.parametrize("text, expression, expected", [
+    ("", "${VALUE:-fallback}", "fallback"),
+    ("", "${VALUE-fallback}", "fallback"),
+    ("VALUE=", "${VALUE:-fallback}", "fallback"),
+    ("VALUE=", "${VALUE-fallback}", ""),
+    ("VALUE=", "${VALUE}", ""),
+    (" VALUE = operator.example ", "${VALUE:-fallback}", "operator.example"),
+    ("VALUE=operator.example", "${VALUE-fallback}", "operator.example"),
+    ("VALUE=operator.example", "${VALUE}", "operator.example"),
+])
+def test_supported_env_input_preserves_unset_and_empty_default_semantics(
+    text, expression, expected,
+):
+    assert _interpolate(expression, _read_env_file(text)) == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text, accepted_host, rejected_host", [
+    ("# comment\n\n", "aitelier.linxuhao.app:443", "operator.example:443"),
+    ("AITELIER_MCP_ALLOWED_HOSTS=", "aitelier.linxuhao.app:443", "operator.example:443"),
+    ("# comment\n AITELIER_MCP_ALLOWED_HOSTS = operator.example,operator.example:* \n",
+     "operator.example:443", "aitelier.linxuhao.app:443"),
+])
+async def test_supported_raw_env_input_reaches_actual_host_security(
+    monkeypatch, text, accepted_host, rejected_host,
+):
+    parser = _read_env_file
+    monkeypatch.setitem(
+        _compose_environment.__globals__, "_read_env_file",
+        lambda synthetic: parser(text),
+    )
+    environment = _compose_environment()
+    monkeypatch.setenv("AITELIER_MCP_ALLOWED_HOSTS", environment["AITELIER_MCP_ALLOWED_HOSTS"])
+    security = TransportSecurityMiddleware(TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=mcp_router._allowed_hosts(),
+        allowed_origins=[],
+    ))
+    assert await security.validate_request(_Request(accepted_host), is_post=True) is None
+    rejected = await security.validate_request(_Request(rejected_host), is_post=True)
+    assert rejected is not None and rejected.status_code == 421

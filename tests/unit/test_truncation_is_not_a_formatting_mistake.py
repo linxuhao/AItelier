@@ -402,9 +402,9 @@ class TestATruncationDoesNotEndTheRound:
         seen = json.dumps([d for k, d in e.events])
         assert "split" in seen.lower()
 
-    def test_pure_prose_behaviour_is_unchanged(self, tmp_path):
+    def test_pure_prose_keeps_formatting_instruction_and_bounded_failure(self, tmp_path):
         """(甲) keeps its own, different instruction — the reformat one."""
-        e = _engine(tmp_path, ["I reviewed the plan; no edits are needed."])
+        e = _engine(tmp_path, ["I reviewed the plan; no edits are needed."] * 2)
         with pytest.raises(MaxRetriesExceeded, match="parse JSON"):
             _run(e)
         errors = [d["error"] for k, d in e.events if k == "parse_error"]
@@ -412,20 +412,19 @@ class TestATruncationDoesNotEndTheRound:
         assert not any(k == "truncation_detected" for k, _ in e.events)
 
 
-def test_paren_prose_behaviour_is_unchanged_end_to_end(tmp_path):
+def test_paren_prose_keeps_formatting_instruction_end_to_end(tmp_path):
     """Extreme (2), restored: a paren-bearing reply is (甲), not a cut.
 
     The candidate told such a reply it had been 'TRUNCATED ... after 67
-    characters' — nothing truncated it; it merely contained a '('. The base
-    behaviour (raise MaxRetriesExceeded with the reformat instruction) must
-    hold even when the prose carries a round bracket. At least one prose
+    characters' — nothing truncated it; it merely contained a '('. The bounded
+    failure must retain the reformat instruction and correct classification even when the prose carries a round bracket. At least one prose
     test in this file MUST use a parenthesis, or the mirror-image regression
     is invisible to the suite.
     """
     prose = ("I reviewed the plan (no edits needed); nothing further "
              "is required this turn.")
     assert "(" in prose and len(prose) < _APPLY_PATCH_MAX_CHARS
-    e = _engine(tmp_path, [prose])
+    e = _engine(tmp_path, [prose] * 2)
     with pytest.raises(MaxRetriesExceeded, match="parse JSON"):
         _run(e)
     errors = [d["error"] for k, d in e.events if k == "parse_error"]

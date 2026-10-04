@@ -14,7 +14,7 @@ def action(tool, **params):
 def response(*actions):
     return json.dumps({"actions": actions})
 
-def engine(tmp_path, responses, *, failed_writes=0):
+def engine(tmp_path, responses, *, failed_writes=0, max_turns=None, max_retries=3):
     e = object.__new__(PipelineEngine)
     answers = iter(responses)
     e.calls, e.events, e.traces, e.prompts = [], [], [], []
@@ -26,7 +26,8 @@ def engine(tmp_path, responses, *, failed_writes=0):
         return next(answers, INVALID)
     agent = SimpleNamespace(run=run, gateway=SimpleNamespace(litellm_model="stub"))
     e.factory = SimpleNamespace(get_agent=lambda _: agent,
-        get_max_retries=lambda _: 3, get_max_tool_turns=lambda _: len(responses))
+        get_max_retries=lambda _: max_retries,
+        get_max_tool_turns=lambda _: len(responses) if max_turns is None else max_turns)
     e.assembler = SimpleNamespace(assemble=lambda *a, **k: str(a[3]))
     e._agent_role = lambda _: "green"
     e._get_project_path = lambda *a: tmp_path
@@ -136,3 +137,90 @@ def test_more_turn_control_after_media_does_not_finish_delivery(tmp_path):
     assert run(e) is True
     assert len(e.prompts) == 3
     assert (tmp_path / "final/delivery.md").exists()
+
+# Recorded reply has an extra closing brace INSIDE actions, not a truncated tail.
+EXTRA_BRACE = (Path(__file__).parent / "fixtures/malformed_json_extra_brace_20260926.txt").read_text()
+PROSE = "I reviewed the plan (no edits needed)."
+CORRECTION = (
+    "System Error: Failed to parse JSON. "
+    "You MUST respond with ONLY a JSON object like: "
+    '{"thoughts": "...", "actions": [{"tool": "write", "params": {"file": "path", "content": "..."}}]}. '
+    "Do NOT add any text before or after the JSON."
+)
+
+@pytest.mark.parametrize("malformed", [EXTRA_BRACE, PROSE], ids=["reported-extra-brace", "non-json"])
+def test_malformed_gets_exact_correction_and_corrected_write(tmp_path, malformed):
+    assert PipelineEngine._extract_json(malformed) is None
+    assert not PipelineEngine._detect_truncated_json(malformed)
+    e = engine(tmp_path, [malformed, successful_writes()])
+    assert run(e) is True
+    assert len(e.prompts) == 2
+    assert e.prompts[1] == CORRECTION
+    assert [c["tool"] for c in e.calls] == ["create", "create"]
+    assert not any(k == "agent_message" for k, _ in e.events)
+    assert [p["text"] for _c, ev, p in e.traces if ev == "agent_response"] == [malformed, successful_writes()]
+    assert (tmp_path / "final/delivery.md").read_text() == "candidate"
+
+@pytest.mark.parametrize("prior", ["none", "media", "effect"])
+@pytest.mark.parametrize("parse_limit", [2, 3, 4])
+def test_consecutive_malformed_bound_retains_reason_without_replay(tmp_path, prior, parse_limit):
+    before = [] if prior == "none" else [response(action("gen_image_asset"))]
+    e = engine(tmp_path, before + [EXTRA_BRACE] * 8, max_retries=parse_limit)
+    if prior == "effect":
+        def effect(call):
+            e.calls.append(call)
+            return {"effect": "durable-change"}
+        e._exec_tool = effect
+    with pytest.raises(MaxRetriesExceeded, match="Failed to parse JSON"):
+        run(e)
+    assert len(e.prompts) == len(before) + parse_limit
+    assert len(e.calls) == len(before)
+    assert not any(k == "step_done" for k, _ in e.events)
+    if prior == "media":
+        assert (tmp_path / PNG).read_bytes() == b"retained candidate bytes"
+
+def test_valid_payload_resets_consecutive_parse_failure_count(tmp_path):
+    e = engine(tmp_path, [EXTRA_BRACE, PROSE, response(action("read", path="source.txt")),
+        PROSE, EXTRA_BRACE, successful_writes()])
+    assert run(e) is True
+    assert len(e.prompts) == 6
+    assert [c["tool"] for c in e.calls] == ["read", "create", "create"]
+
+@pytest.mark.parametrize("prior_media", [False, True])
+def test_parse_recovery_stays_inside_existing_turn_budget(tmp_path, prior_media):
+    before = [response(action("gen_image_asset"))] if prior_media else []
+    e = engine(tmp_path, before + [PROSE, successful_writes()], max_turns=len(before) + 1)
+    with pytest.raises(MaxRetriesExceeded, match="Failed to parse JSON"):
+        run(e)
+    assert len(e.prompts) == len(before) + 1
+    assert [c["tool"] for c in e.calls] == (["gen_image_asset"] if prior_media else [])
+    assert not (tmp_path / "final/delivery.md").exists()
+    assert not any(k == "step_done" for k, _ in e.events)
+
+def test_malformed_partial_write_is_not_applied(tmp_path):
+    malformed = response(action("create", file="partial.txt", content="must not land"))[:-2] + "}}]}"
+    assert PipelineEngine._extract_json(malformed) is None
+    assert not PipelineEngine._detect_truncated_json(malformed)
+    e = engine(tmp_path, [malformed, successful_writes()])
+    assert run(e) is True
+    assert not (tmp_path / "partial.txt").exists()
+    assert [c["params"]["file"] for c in e.calls] == ["final/manifest.json", "final/delivery.md"]
+
+@pytest.mark.parametrize("after", ["finish", "bound", "budget"])
+def test_parse_recovery_cannot_mask_unresolved_write_failure(tmp_path, after):
+    tail = ([PROSE, response(action("finish_step"))] if after == "finish"
+            else [PROSE] * 3 if after == "bound" else [PROSE])
+    e = engine(tmp_path, [response(action("gen_image_asset")), successful_writes()] + tail,
+               failed_writes=2)
+    with pytest.raises(MaxRetriesExceeded, match="retained first write failure"):
+        run(e)
+    assert sum(c["tool"] == "gen_image_asset" for c in e.calls) == 1
+    assert not any(k == "step_done" for k, _ in e.events)
+
+def test_truncated_then_malformed_then_corrected_preserves_split_feedback(tmp_path):
+    e = engine(tmp_path, [INVALID, EXTRA_BRACE, successful_writes()])
+    assert run(e) is True
+    assert "TRUNCATED" in e.prompts[1].upper()
+    assert "split" in e.prompts[1].lower()
+    assert e.prompts[2] == CORRECTION
+    assert [c["tool"] for c in e.calls] == ["create", "create"]

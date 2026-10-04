@@ -403,8 +403,13 @@ class Evidence(Attempt):
         "A terminal quiescent failed external attempt may retain criterion evidence "
         "against one shared artifact, exactly once per criterion, but this never promotes "
         "the attempt or permits verification."))
-    report_ref: str
-    report_sha256: str
+    report_ref: str = Field(description=(
+        "Absolute local path (or file:// URL) to a structured JSON criterion report. "
+        "Require status=completed, settled=true and usable=true; status=candidate is "
+        "valid for an external candidate observation but refused for criterion evidence. "
+        "Include the exact criterion_id, artifact and verdict matching this evidence row. "
+        "Completed describes the scoped check, not node acceptance; State retains immutable bytes."))
+    report_sha256: str = Field(description="SHA-256 of the exact report_ref bytes.")
     detail: str = ""
 
 

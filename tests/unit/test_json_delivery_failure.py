@@ -169,7 +169,7 @@ def test_consecutive_malformed_bound_retains_reason_without_replay(tmp_path, pri
     if prior == "effect":
         def effect(call):
             e.calls.append(call)
-            return {"effect": "durable-change"}
+            return {"state_written": "durable-change"}
         e._exec_tool = effect
     with pytest.raises(MaxRetriesExceeded, match="Failed to parse JSON"):
         run(e)

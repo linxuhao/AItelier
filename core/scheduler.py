@@ -613,14 +613,54 @@ def _get_or_create_skillflow_run(project_id: str) -> str | None:
             db, run_id=run_id, project_id=project_id, config_name=config_name,
             repo_mode=_repo_mode_of(config_name))
     except Exception as e:
-        tick_log(project_id, "isolation_failed", run=run_id[:8],
-                 reason=f"{type(e).__name__}: {e}"[:300])
+        reason = f"Isolation failed before launch: {type(e).__name__}: {e}"
+        # A pending run is not selected by the poller. Leave an explicit
+        # terminal owner so State can reconcile and the director can choose a
+        # corrected NEW attempt; never retry or fall back to the shared tree.
+        try:
+            _fail_unstarted_isolation_run(sf, run_id, project_id, config_name, reason)
+        except Exception:
+            logging.getLogger("aitelier.scheduler").warning(
+                "could not settle isolation failure for run %s", run_id, exc_info=True)
+        tick_log(project_id, "isolation_failed", run=run_id[:8], reason=reason[:300])
         return None
 
     run = sf.get_run(run_id)
     if run and run["status"] == "pending":
         sf.start_run(run_id)
     return run_id
+
+
+def _fail_unstarted_isolation_run(sf, run_id: str, project_id: str,
+                                  config_name: str, reason: str) -> bool:
+    """Settle only this launch's untouched run; retain on uncertain ownership.
+
+    The host has one controller. Its SkillFlow lock prevents a same-instance
+    start/admission between observation and failure; it is not a cross-process
+    lock. Existing running work must never be cancelled by a launch refusal.
+    """
+    with sf._lock:
+        run = sf.get_run(run_id)
+        if (not run or run.get("project_id") != project_id
+                or run.get("graph_name") != config_name
+                or run.get("status") != "pending" or run.get("started_at")
+                or run.get("cancel_requested_at")):
+            return False
+        steps = sf.get_steps(run_id)
+        if not steps or any(s.get("status") != "pending" or s.get("claim_epoch")
+                            or s.get("claimed_at") or s.get("claimed_by")
+                            or s.get("retry_count") or s.get("completed_at")
+                            for s in steps):
+            return False
+        audit = sf.audit_operation_owners(run_id)
+        if (not isinstance(audit, dict) or audit.get("lost") != []
+                or audit.get("unknown") != [] or type(audit.get("alive")) is not int
+                or audit["alive"] != 0):
+            return False
+        if sf.get_run(run_id) != run:
+            return False
+        result = sf.fail_run(run_id, reason)
+        return result.get("outcome") == "stopped"
 
 
 def _reconcile_lease(project_id: str, run_id: str) -> None:

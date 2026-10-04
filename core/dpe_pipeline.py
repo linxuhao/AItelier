@@ -3003,6 +3003,7 @@ class PipelineEngine:
         self._current_step = step_id
         self._step_start = time.time()
         max_retries = self.factory.get_max_retries(step_id)
+        consecutive_parse_failures = 0
         previously_passed_files = {}  # filename -> content from successful previous attempt
         message_count = 0
         MAX_MESSAGES_PER_STEP = 3
@@ -3101,17 +3102,9 @@ class PipelineEngine:
                                                    "preview": "Truncated response refused"})
                         tool_turn += 1
                         continue
-                    # (甲) Prose only — no JSON was ever attempted. Unchanged: the
-                    # reformat instruction is the correct correction here.
-                    # Prose fallback: auto-convert non-JSON output to user-visible message
-                    message_count += 1
-                    if message_count <= MAX_MESSAGES_PER_STEP:
-                        self._emit("agent_message", {
-                            "content": response[:500],
-                            "level": "info",
-                            "auto_converted": True,
-                            "preview": f"[auto] {response[:200]}"
-                        })
+                    # Malformed JSON or prose: refuse all effects, but let the
+                    # next budgeted turn receive the formatting correction.
+                    consecutive_parse_failures += 1
                     self._feedback_exploratory = False
                     feedback = (
                         "System Error: Failed to parse JSON. "
@@ -3120,9 +3113,13 @@ class PipelineEngine:
                         "Do NOT add any text before or after the JSON."
                     )
                     self._emit("parse_error", {"error": feedback, "preview": "JSON Parse Error"})
-                    raise MaxRetriesExceeded(
-                        f"Task {task_id} Step {step_id}: {feedback}")
+                    if consecutive_parse_failures >= max_retries:
+                        raise MaxRetriesExceeded(
+                            f"Task {task_id} Step {step_id}: {feedback}"
+                            + (f"\n{pending_write_failure}" if pending_write_failure else ""))
+                    continue
 
+                consecutive_parse_failures = 0
                 if isinstance(payload, list):
                     payload = {"thoughts": "", "actions": payload}
 
@@ -3273,14 +3270,17 @@ class PipelineEngine:
                 # write. Counting only files made that look like a no-op: the engine
                 # performed the change, then spent the rest of the budget before
                 # failing for "no file writes produced".
-                if _control_calls and effects and not written_files:
+                # A control-only turn may leave room for a genuine write repair;
+                # it cannot complete while an earlier delivery write is unresolved.
+                if (_control_calls and effects and not written_files
+                        and not pending_write_failure):
                     self._emit("step_done", {
                         "step_id": step_id, "files": [], "effects": effects,
                         "preview": f"No file written; {len(effects)} state change(s)",
                     })
                     return True
 
-                if not tool_calls and not written_files:
+                if not tool_calls and not written_files and not pending_write_failure:
                     self._emit("step_done", {
                         "step_id": step_id, "files": [],
                         "preview": "No change needed (no writes)",
@@ -3295,6 +3295,11 @@ class PipelineEngine:
                     # when the remaining delivery writes never succeeded.
                     raise MaxRetriesExceeded(
                         f"Task {task_id} Step {step_id}: {pending_write_failure}")
+                if consecutive_parse_failures:
+                    # A correction needs a remaining turn in this attempt; do
+                    # not restart and replay prior media just to obtain one.
+                    raise MaxRetriesExceeded(
+                        f"Task {task_id} Step {step_id}: {feedback}")
                 if not written_files and not effects:
                     self._emit("no_files_written", {"max_turns": max_turns})
                     raise MaxRetriesExceeded(

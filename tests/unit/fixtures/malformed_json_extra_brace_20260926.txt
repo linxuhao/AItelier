@@ -1,0 +1,1 @@
+{"thoughts": "...", "actions": [{"tool": "read", "params": {"path": "scripts/ui/hud.gd", "raw": true, "start_line": 0, "end_line": 125}}}]}

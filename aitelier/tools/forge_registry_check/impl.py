@@ -52,6 +52,14 @@ RULES: tuple[Rule, ...] = (
          "Every `tool_name` must already be in the live registry. Tools you asked "
          "for in the tool plan were built before emit; anything else is invented "
          "and rewinds the run."),
+    Rule("tool_schema_loadable",
+         "Every referenced registry tool must have a loadable mapping schema, "
+         "not merely a catalog entry. This includes tool steps, context tools, "
+         "role tools and validation tools. Quote YAML descriptions containing "
+         "': ' and rebuild an unloadable tool before emitting its graph; the "
+         "unknown_tool repair route revisits the tool plan. Unreferenced broken "
+         "tools do not block an unrelated graph, and this check never imports "
+         "or executes tool implementations."),
     Rule("role_defined",
          "Every `agent_config` must have a top-level entry in role_table.yaml, "
          "keyed by the exact role name the step uses. Do not nest the table under "
@@ -272,6 +280,56 @@ def _live_tools() -> set[str]:
         return set()
 
 
+def _tool_schema_loadable(steps: list, rt, live_tools: set[str]) -> list[str]:
+    """Check only referenced schemas with the runtime loader, never tool bodies."""
+    referenced = set()
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        if step.get("step_type") == "tool" and step.get("tool_name"):
+            referenced.add(step["tool_name"])
+        for context in step.get("context") or []:
+            source = context.get("source") if isinstance(context, dict) else None
+            if isinstance(source, dict) and source.get("tool"):
+                referenced.add(source["tool"])
+        validation = step.get("validation") or []
+        if isinstance(validation, list):
+            for spec in validation:
+                if isinstance(spec, dict) and spec.get("tool"):
+                    referenced.add(spec["tool"])
+    if isinstance(rt, dict):
+        for cfg in rt.values():
+            if not isinstance(cfg, dict) or not isinstance(cfg.get("tools"), list):
+                continue
+            referenced.update(t for t in cfg["tools"]
+                              if isinstance(t, str) and t in live_tools
+                              and t not in _INJECTED_WRITE_TOOLS)
+    if not referenced:
+        return []
+    try:
+        from api.dependencies import get_skillflow
+        loader = get_skillflow()._tool_loader
+    except Exception as exc:
+        return [f"referenced tool schemas cannot be checked: {type(exc).__name__}: {exc}. "
+                "Restore the tool registry before re-emitting."]
+    violations = []
+    for name in sorted(referenced):
+        if name not in live_tools:
+            violations.append(f"referenced tool '{name}' not in live registry "
+                              "— revisit the tool plan and build it before re-emitting")
+            continue
+        try:
+            schema = loader.load_schema(name)
+            if not isinstance(schema, dict):
+                raise ValueError(f"tool.yaml must contain a mapping, got {type(schema).__name__}")
+        except Exception as exc:
+            violations.append(
+                f"referenced tool '{name}' schema failed to load: "
+                f"{type(exc).__name__}: {exc}. Rebuild or repair its tool.yaml "
+                "before re-emitting; a catalog entry alone is not usable.")
+    return violations
+
+
 def _loop_bodies(graph: dict) -> dict:
     """Map each loop node id → set of its body step ids, using SKILLFLOW'S OWN
     topology (graph.loop_body_map, reach-back semantics: a body node must be
@@ -342,7 +400,7 @@ def _fallible_names(live_tools: set[str]) -> set[str]:
             if (loader.load_schema(t) or {}).get(_FALLIBLE_SCHEMA_KEY) is True:
                 names.add(t)
         except Exception:
-            continue          # unresolvable name — the tool_exists rule reports it
+            continue          # referenced failures are reported by tool_schema_loadable
     return names
 
 
@@ -1214,6 +1272,8 @@ def forge_registry_check(graph_path: str = "", role_table: str = "",
                 else:
                     violations.extend(_deliverable_before(term, steps, by_id))
 
+    schema_violations = _tool_schema_loadable(steps, rt, live_tools)
+    violations.extend(schema_violations)
     violations.extend(_role_tools_unknown(rt, live_tools))
     violations.extend(_role_model_known(rt))
     violations.extend(_capability_known(graph, steps))
@@ -1247,11 +1307,12 @@ def forge_registry_check(graph_path: str = "", role_table: str = "",
         error = f"{error}\n(note: {role_note})"
 
     # Failure CLASS drives where the run goes back to. An unknown tool means the
-    # plan is wrong and tools must be (re)built — that is worth a rewind. Everything
+    # plan is wrong and tools must be (re)built — that is worth a rewind.
+    # A listed but unloadable schema needs that same tool repair route. Everything
     # else is a defect in the emitted files themselves, repairable in place; sending
     # those back to the architect re-runs the whole planning chain and throws away a
     # graph that was already reviewed and accepted.
-    failure_class = ("unknown_tool" if unknown_tools
+    failure_class = ("unknown_tool" if unknown_tools or schema_violations
                      else ("" if passed else "emit_fixable"))
     write_gate_report(out_dir, "forge_registry_check", passed, error)
     return {"passed": passed, "error": error, "violations": violations,

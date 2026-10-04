@@ -5,8 +5,8 @@ test never fails the run); the outcome is captured in ``test_report.json`` so th
 verifier-review step can fold test failures into its change requests and loop
 back to the planner (the goal-loop).
 
-Runner resolution: prefer pytest in the current interpreter; if it is missing
-(the Docker backend ships no test deps), provision a throwaway venv with
+Runner resolution: prefer pytest + pytest-asyncio in the current interpreter;
+if either is missing, provision a throwaway venv with
 ``--system-site-packages`` (so it inherits whatever IS installed) and install
 the test toolchain — pytest + pytest-asyncio (REQUIRED by ``asyncio_mode=auto``
 configs; without it every async test errors out) + pytest-timeout — plus the
@@ -481,8 +481,9 @@ def _resolve_pytest_python(repo: Path, report: dict) -> tuple[str | None, str | 
     runner is unavailable and the caller should SKIP (report is updated in place
     with the skip outcome).
     """
-    # 1. pytest already importable in the running interpreter → use it directly.
-    if importlib.util.find_spec("pytest") is not None:
+    # 1. Use the running interpreter only with the required async toolchain.
+    if (importlib.util.find_spec("pytest") is not None
+            and importlib.util.find_spec("pytest_asyncio") is not None):
         return sys.executable, None
 
     # 2. Provision a throwaway venv that inherits system site-packages (so we
@@ -534,7 +535,7 @@ def _resolve_pytest_python(repo: Path, report: dict) -> tuple[str | None, str | 
     report.update(
         passed=False, skipped=True, infrastructure_unavailable=True,
         evidence_state="infrastructure_unavailable", returncode=0,
-        summary=(f"pytest unavailable and could not be provisioned after "
+        summary=(f"pytest toolchain unavailable and could not be provisioned after "
                  f"{attempts} attempts ({type(last_err).__name__}: "
                  f"{str(last_err)[:200]}) — test gate skipped."),
     )

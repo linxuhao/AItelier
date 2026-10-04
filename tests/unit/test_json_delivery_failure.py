@@ -280,11 +280,12 @@ def test_every_completion_control_respects_pending_write_failure(tmp_path, prior
 @pytest.mark.parametrize("prior", ["effect", "none", "media"])
 def test_more_turn_control_preserves_pending_failure_until_successful_repair(tmp_path, prior):
     e = _engine_with_prior_effect(tmp_path, [_failed_create(), EXTRA_BRACE,
-        response(action("ask_more_turns", turns=2)), successful_writes()], prior=prior)
+        response(action("ask_more_turns", turns=2)),
+        response(action("edit", file="blocked.txt", content="repaired"))], prior=prior)
     assert run(e) is True
     assert len(e.prompts) == 4 + int(prior != "none")
     assert "retained first write failure" in e.prompts[-1]
-    assert (tmp_path / "final/delivery.md").read_text() == "candidate"
-    assert not (tmp_path / "blocked.txt").exists()
-    assert [c["tool"] for c in e.calls].count("create") == 3
+    assert (tmp_path / "blocked.txt").read_text() == "repaired"
+    assert [c["tool"] for c in e.calls].count("create") == 1
+    assert [c["tool"] for c in e.calls].count("edit") == 1
     _assert_prior_effect_retained(e, tmp_path, prior)

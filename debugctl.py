@@ -341,24 +341,30 @@ def _run_id_for_project(conn, pid: str):
 # api/mcp_router.py's `_SETTLED_STATUSES` minus the pause, for the same reason
 # `wait_for_run` distinguishes them.
 _RUN_TERMINAL_STATUSES = frozenset({"completed", "failed"})
+_RUN_NOT_FOUND = object()
 
 
 def _run_snapshot(base_url: str, run_id: str, timeout: float = 10.0):
     """ONE bounded read of a single run's row. Never a loop, never a poll.
 
-    Returns the decoded run dict, or None when the state could not be
-    established (server unreachable, 404, malformed body). None means UNKNOWN
+    Returns the decoded run body, _RUN_NOT_FOUND for an exact lookup HTTP 404,
+    or None when state could not be established (unreachable, other HTTP error,
+    malformed body). Absence is a handle error, never a run outcome. None means
+    UNKNOWN
     and must never be reported as an outcome: "I could not read the status" and
     "the run is still going" are different facts, and only the second one
     justifies continuing to wait in silence.
     """
     import json as _json
     import urllib.request
+    import urllib.error
     url = f"{base_url.rstrip('/')}/api/runs/{run_id}"
     try:
         with urllib.request.urlopen(url, timeout=timeout) as r:
             body = r.read().decode("utf-8", "replace")
         return _json.loads(body)
+    except urllib.error.HTTPError as e:
+        return _RUN_NOT_FOUND if e.code == 404 and e.url == url else None
     except Exception:
         return None
 
@@ -417,7 +423,7 @@ def cmd_await(args):
     since it would not exit there anyway.
 
     Exits 0 on a checkpoint, 0 on completion, 1 on run failure or cancellation,
-    2 on timeout —
+    2 on timeout, 3 on a definitively missing/invalid --run handle —
     so a caller can `debugctl.py await <pid> && do-the-next-thing`, and an agent
     can run it in the background and be woken by its exit.
 
@@ -468,6 +474,11 @@ def cmd_await(args):
         if not args.run:
             return
         run = _run_snapshot(args.url, args.run)
+        if run is _RUN_NOT_FOUND:
+            print(f"RUN NOT FOUND at {when}: run {args.run} of project {pid} "
+                  f"is missing or invalid (HTTP 404); check the exact --run handle",
+                  file=sys.stderr, flush=True)
+            sys.exit(3)
         # A body that PARSED is not necessarily a run. A JSON list or scalar
         # reaching `.get` was an AttributeError — a traceback and exit 1, the
         # code that means THE RUN FAILED. A shape we do not recognise is

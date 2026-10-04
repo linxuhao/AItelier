@@ -455,3 +455,42 @@ def test_missing_retained_mutation_output_never_starts_fresh_replay(tmp_path, mo
     assert provider_calls == [] and not (root / 'retained.py').exists()
     assert {p.name: p.read_bytes() for p in e._effect_fence_dir.glob('*.json')} == original_bytes
     sf._conn.close()
+
+
+def test_modern_history_does_not_mask_unexecuted_identical_batch(tmp_path, monkeypatch):
+    sf, rid, claim, root = patch_fixture(tmp_path, monkeypatch)
+    delete = '*** Begin Patch\n*** Delete File: baseline.py\n*** End Patch'
+    add = '*** Begin Patch\n*** Add File: baseline.py\n+recreated = True\n*** End Patch'
+    before_calls = []
+    def before(messages, **kwargs):
+        before_calls.append(1)
+        return response('apply_patch', patch=add if len(before_calls) == 2 else delete)
+    e, ws = host(sf, rid, claim, root, before)
+    original_trace = e._trace_cb
+    headers = []
+    def trace(category, event, payload):
+        original_trace(category, event, payload)
+        if event == 'prompt_delta' and payload.get('role') == 'assistant':
+            headers.append(1)
+            if len(headers) == 3:
+                raise HostCrash('new identical invocation header retained before body')
+    e._trace_cb = trace
+    with pytest.raises(HostCrash):
+        execute(e, ws, rid, claim)
+    assert (root / 'baseline.py').read_text() == 'recreated = True\n'
+    original_bytes = {p.name: p.read_bytes() for p in e._effect_fence_dir.glob('*.json')}
+    assert len(original_bytes) == 2 and all(json.loads(b)['invocation_key'] for b in original_bytes.values())
+    provider_states = []
+    def after(messages, **kwargs):
+        provider_states.append((root / 'baseline.py').exists())
+        return response('finish_step', summary='current unexecuted delete settled')
+    restored, ws2 = host(sf, rid, claim, root, after)
+    assert execute(restored, ws2, rid, claim)
+    assert provider_states == [False] and not (root / 'baseline.py').exists()
+    for name, raw in original_bytes.items():
+        assert (e._effect_fence_dir / name).read_bytes() == raw
+    effects = [p for name, p in traces(sf, rid) if name == 'side_effect_completed' and p['tool'] == 'apply_patch']
+    assert len(effects) == 3 and effects[0]['call_key'] == effects[2]['call_key']
+    assert effects[0]['invocation_key'] != effects[2]['invocation_key']
+    assert json.loads(effects[2]['result_json'])['executed_now'] is True
+    sf._conn.close()

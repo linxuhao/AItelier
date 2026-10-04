@@ -1100,8 +1100,10 @@ class PipelineEngine:
         effects = resume.setdefault("completed_effect_calls", {})
         for call_key, ref in refs.items():
             effects[call_key] = self._read_native_observation(ref)
-        durable_effects, _ = self._load_native_effects()
+        durable_effects, _, legacy_keys = self._load_native_effects()
         effects.update(durable_effects)
+        legacy_keys.update(resume.get("legacy_effect_keys") or [])
+        # Historical argument lookups are not durable legacy invocation fences.
         # Legacy argument-only fences remain readable, but cannot prove which
         # repeated invocation applied. Refuse that ambiguity before any tool.
         recovery = resume.get("recovery_turn")
@@ -1117,7 +1119,7 @@ class PipelineEngine:
             for i, call_key in enumerate(keys):
                 invocation = _native_effect_invocation(
                     resume["segment"], recovery["index"], i, call_key)
-                if invocation not in effects and call_key in effects:
+                if invocation not in effects and call_key in legacy_keys:
                     if (call_key in (resume.get("confirmed_effect_keys") or [])
                             or keys.count(call_key) > 1):
                         raise NativeSideEffectsRetained(
@@ -1192,12 +1194,13 @@ class PipelineEngine:
                 pass
         return result_ref
 
-    def _load_native_effects(self) -> tuple[dict[str, str], list[str]]:
+    def _load_native_effects(self) -> tuple[dict[str, str], list[str], set[str]]:
         root = self._effect_fence_dir
         effects: dict[str, str] = {}
         written: list[str] = []
+        legacy_keys: set[str] = set()
         if root is None or not root.exists():
-            return effects, written
+            return effects, written, legacy_keys
         for path in sorted(root.glob("*.json")):
             try:
                 payload = json.loads(path.read_text(encoding="utf-8"))
@@ -1207,6 +1210,8 @@ class PipelineEngine:
                         or not re.fullmatch(r"[0-9a-f]{64}", call_key)
                         or not re.fullmatch(r"[0-9a-f]{64}", invocation_key)):
                     raise ValueError("call/invocation key mismatch")
+                if not payload.get("invocation_key"):
+                    legacy_keys.add(call_key)
                 effects[invocation_key] = self._read_native_observation(
                     payload["result_ref"])
                 names = payload.get("written_files") or []
@@ -1216,7 +1221,7 @@ class PipelineEngine:
                     json.JSONDecodeError) as exc:
                 raise NativeObservationUnavailable(
                     f"native effect fence {path} is unreadable") from exc
-        return effects, written
+        return effects, written, legacy_keys
 
     # Delivered three times unchanged: a recovering agent essentially never sees
     # this, and every one of the twelve harness defects did.
@@ -1546,12 +1551,15 @@ class PipelineEngine:
         # observations are retained separately for recall and side-effect audit.
         by_position: dict[tuple[int, int], dict] = {}
         fenced_effects: dict[str, str] = {}
+        legacy_effect_keys: set[str] = set()
         effect_result_refs: dict[str, str] = {}
         fenced_written: list[str] = []
         for event, payload in rows:
             if event == "side_effect_completed" and isinstance(payload, dict):
                 key = payload.get("invocation_key") or payload.get("call_key")
                 if isinstance(key, str) and key:
+                    if not payload.get("invocation_key"):
+                        legacy_effect_keys.add(key)
                     fenced_effects[key] = str(payload.get("result_json") or
                                                '{"status":"completed"}')
                     ref = payload.get("result_ref")
@@ -1699,6 +1707,7 @@ class PipelineEngine:
                                     if m.get("role") == "tool"],
                 "completed_effect_calls": completed_effect_calls,
                 "confirmed_effect_keys": sorted(confirmed_effect_keys),
+                "legacy_effect_keys": sorted(legacy_effect_keys),
                 "recovery_turn": recovery_turn,
                 "effect_result_refs": effect_result_refs,
                 "first_write_turn": first_write_turn,
@@ -1730,7 +1739,7 @@ class PipelineEngine:
         try:
             rebuilt = self._rebuild_from_deltas(rows, max_turns)
             if not rebuilt:
-                effects, _ = self._load_native_effects()
+                effects, _, _ = self._load_native_effects()
                 if effects:
                     raise NativeSideEffectsRetained(
                         "native side effects are retained but the conversation "

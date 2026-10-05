@@ -63,8 +63,21 @@ def test_layout_describes_current_code_and_artifact_destinations():
 @pytest.mark.asyncio
 async def test_legacy_code_claim_is_refused_before_any_workspace_or_agent_work():
     from aitelier.runner import AgentStepRunner
+    from skillflow.core import ClaimedStep, ClaimToken
     from skillflow.exceptions import IsolationUnavailable
-    claim = SimpleNamespace(inputs={"_legacy_code_staging": True})
+    claim = ClaimedStep(
+        token=ClaimToken(
+            step_id="legacy-refusal-test",
+            run_id="legacy-refusal-run",
+            step_instance_id=1,
+            version=1,
+            claimed_at=0.0,
+        ),
+        step_id="legacy-refusal-test",
+        step_config={},
+        run_context={"project_id": "legacy-refusal-test"},
+        inputs={"_legacy_code_staging": True},
+    )
     runner = AgentStepRunner(db_manager=None, workspace_manager=None)
     with pytest.raises(IsolationUnavailable, match="pinned to a legacy code-staging graph"):
         await runner.execute(claim)

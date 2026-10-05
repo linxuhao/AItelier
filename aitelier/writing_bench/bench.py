@@ -176,7 +176,9 @@ class Bench:
                     size = ns.char_count(payload[f"chapters/ch{n:04d}/prose.md"].decode())
                     require(pacing.get("min_chars_per_chapter", 2000) <= size <= pacing.get("max_chars_per_chapter", 8000),
                             "chapter length outside declared bounds")
-                context, sources = assemble(view, files, mode, numbers, request.get("context_paths", []), self.policy.max_context_bytes)
+                mentions = "\n".join([brief.decode(), *(payload[f"chapters/ch{n:04d}/prose.md"].decode() for n in numbers)])
+                context, sources = assemble(view, files, mode, numbers, request.get("context_paths", []),
+                                            self.policy.max_context_bytes, mentions)
                 payload["baseline_context.md"] = context.encode()
                 payload["context_manifest.json"] = encode(sources)
                 payload["director_intent.md"] = brief

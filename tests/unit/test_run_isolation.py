@@ -54,6 +54,21 @@ def home(tmp_path, monkeypatch):
     return h
 
 
+
+@pytest.fixture(autouse=True)
+def _default_zvec_lifecycle(monkeypatch):
+    """Pin the deployment's DEFAULT native-index lifecycle for this module.
+
+    `run_resources.enabled()` is opt-in (`AITELIER_ZVEC_LIFECYCLE=1`, default
+    "0"). These tests are about the isolation/worktree policy, not the native
+    index; when the surrounding host exports the lifecycle flag the reaper's
+    unrelated "native index release is not settled" guard would retain every
+    tree and make the worktree-policy assertions environment-dependent. The
+    default is restored explicitly, and the zvec guard has its own tests.
+    """
+    monkeypatch.setenv("AITELIER_ZVEC_LIFECYCLE", "0")
+
+
 def _project(db, pid, repo_path, repo_type="existing"):
     db.ensure_project(pid, name=pid, repo_type=repo_type,
                       repo_path=str(repo_path) if repo_path else None)
@@ -455,7 +470,6 @@ def test_reaper_removes_after_local_main_contains_the_run_branch(db, home, tmp_p
                    capture_output=True, text=True)
     report = ri.reap_released_worktrees(
         db, _ReapSF({"run-reap-merged": {"status": "completed"}}))
-
     assert not wt.exists()
     assert [x["run_id"] for x in report["removed"]] == ["run-reap-merged"]
     final = ri.record(db, "run-reap-merged")
@@ -567,3 +581,207 @@ def test_a_read_snapshot_cannot_honour_a_requested_base(db, home, tmp_path):
     with pytest.raises(IsolationUnavailable, match="read snapshot"):
         ri.ensure_for_run(db, run_id="run-review", project_id="p-review",
                           config_name="code_review", repo_mode="none")
+
+
+# ── concurrent provisioning of ONE run (iss-6721ec6a2b774b6b) ──────
+#
+# The launch API and the poller both call `ensure_for_run` for the same run
+# before starting it. Both used to read "no record", then both ran
+# `git worktree add -b codex/run/<id>`; the loser died with
+# `fatal: a branch named 'codex/run/<id>' already exists` and the run failed
+# before any worker started. These regressions drive two REAL callers through
+# REAL git and the REAL isolation DB, and require one tree, one durable
+# record and no error.
+
+
+def test_two_concurrent_callers_provision_exactly_one_tree(db, home, tmp_path):
+    import threading
+
+    src = tmp_path / "src"
+    base = _init_repo(src)
+    _project(db, "pcc", src)
+
+    barrier = threading.Barrier(2)
+    results, errors = {}, {}
+
+    def worker(name):
+        try:
+            barrier.wait(timeout=10)
+            results[name] = ri.ensure_for_run(
+                db, run_id="run-cc", project_id="pcc",
+                config_name="dpe_default_v2", repo_mode="code")
+        except BaseException as e:  # noqa: BLE001 - captured for the assertion
+            errors[name] = e
+
+    threads = [threading.Thread(target=worker, args=(n,)) for n in ("a", "b")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+
+    assert not errors, f"a concurrent caller failed: {errors!r}"
+    assert set(results) == {"a", "b"}
+    a, b = results["a"], results["b"]
+    assert a["mode"] == ri.MODE_WORKTREE
+    # Both callers resolve the SAME exact record — one tree, one branch, one
+    # base — never two provisions racing to different answers.
+    assert a["worktree_path"] == b["worktree_path"]
+    assert a["branch"] == b["branch"] == "codex/run/run-cc"
+    assert a["base_sha"] == b["base_sha"] == base
+    # The durable record agrees, and there is exactly one of it.
+    rec = ri.record(db, "run-cc")
+    assert rec["worktree_path"] == a["worktree_path"]
+    assert rec["base_sha"] == base
+    # Exactly one linked worktree exists (plus the source checkout itself).
+    assert len(_git(src, "worktree", "list").splitlines()) == 2
+    assert Path(a["worktree_path"]).is_dir()
+    assert ri.resolve_for_resolver(db, "run-cc") == a["worktree_path"]
+
+
+def test_concurrent_repoless_provisioning_writes_one_consistent_record(
+        db, home, tmp_path):
+    import threading
+
+    _project(db, "pnn", None, repo_type="none")
+    barrier = threading.Barrier(2)
+    results, errors = {}, {}
+
+    def worker(name):
+        try:
+            barrier.wait(timeout=10)
+            results[name] = ri.ensure_for_run(
+                db, run_id="run-nn", project_id="pnn",
+                config_name="pipeline_forge", repo_mode="none")
+        except BaseException as e:  # noqa: BLE001
+            errors[name] = e
+
+    threads = [threading.Thread(target=worker, args=(n,)) for n in ("a", "b")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+
+    assert not errors, f"a concurrent caller failed: {errors!r}"
+    assert results["a"]["mode"] == results["b"]["mode"] == ri.MODE_NONE
+    assert ri.resolve_for_resolver(db, "run-nn") is False
+
+
+def test_an_unfinished_claim_refuses_resolution_instead_of_guessing(
+        db, home, tmp_path):
+    """A placeholder is not a decision: resolution must refuse it, not fall back
+    to the shared checkout and not adopt any directory that may exist."""
+
+    with db.get_connection() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO run_isolation "
+            "(run_id, project_id, config_name, mode, created_at) "
+            "VALUES (?, ?, ?, ?, datetime('now'))",
+            ("run-pending", "p-pending", "dpe_default_v2", ri.MODE_PROVISIONING))
+        conn.commit()
+    with pytest.raises(IsolationUnavailable, match="unfinished isolation claim"):
+        ri.resolve_for_resolver(db, "run-pending")
+
+
+def test_a_failed_provision_leaves_no_placeholder_behind(db, home, tmp_path):
+    """If provisioning raises, the claim is removed so the next caller sees an
+    honest "no decision" and can retry — never a half-written record."""
+    _project(db, "pfail", None, repo_type="none")
+    with pytest.raises(IsolationUnavailable, match="has no"):
+        ri.ensure_for_run(db, run_id="run-pfail", project_id="pfail",
+                          config_name="dpe_default_v2", repo_mode="code")
+    assert ri.record(db, "run-pfail") is None
+
+
+def test_repeated_sequential_calls_do_not_reprovision(db, home, tmp_path):
+    """Healthy repeated provisioning is a no-op returning the same record."""
+    src = tmp_path / "src"
+    _init_repo(src)
+    _project(db, "pseq", src)
+    first = ri.ensure_for_run(db, run_id="run-seq", project_id="pseq",
+                              config_name="dpe_default_v2", repo_mode="code")
+    for _ in range(3):
+        again = ri.ensure_for_run(db, run_id="run-seq", project_id="pseq",
+                                  config_name="dpe_default_v2", repo_mode="code")
+        assert again["worktree_path"] == first["worktree_path"]
+    assert len(_git(src, "worktree", "list").splitlines()) == 2
+
+
+
+def test_a_placeholder_does_not_collide_with_a_foreign_directory(db, home, tmp_path):
+    """Concurrency must not weaken fail-closed: a directory at the conventional
+    path with no record is still refused rather than adopted."""
+    src = tmp_path / "src"
+    _init_repo(src)
+    _project(db, "pfor", src)
+    (datadir.worktrees_dir() / "run-for").mkdir(parents=True)
+    with pytest.raises(IsolationUnavailable, match="refusing to adopt"):
+        ri.ensure_for_run(db, run_id="run-for", project_id="pfor",
+                          config_name="dpe_default_v2", repo_mode="code")
+    assert ri.record(db, "run-for") is None
+
+
+def test_concurrent_callers_share_one_requested_base(db, home, tmp_path):
+    """A relayed attempt is provisioned once, at the requested base, by whichever
+    of the concurrent callers wins — and the loser returns that same record."""
+    import threading
+
+    src = tmp_path / "src"
+    head = _init_repo(src)
+    _project(db, "p-failed-cc", src)
+    failed = ri.ensure_for_run(db, run_id="run-failed-cc",
+                               project_id="p-failed-cc",
+                               config_name="coding_impl", repo_mode="code")
+    wt = Path(failed["worktree_path"])
+    (wt / "draft.txt").write_text("half done\n")
+    subprocess.run(["git", "add", "-A"], cwd=wt, check=True)
+    subprocess.run(["git", "commit", "-qm", "half done"], cwd=wt, check=True)
+    relay_base = _git(wt, "rev-parse", "HEAD")
+    assert relay_base != head
+
+    _project(db, "p-relay-cc", src)
+    ri.request_base(db, "p-relay-cc", relay_base, note="relay of attempt-cc")
+
+    barrier = threading.Barrier(2)
+    results, errors = {}, {}
+
+    def worker(name):
+        try:
+            barrier.wait(timeout=10)
+            results[name] = ri.ensure_for_run(
+                db, run_id="run-relay-cc", project_id="p-relay-cc",
+                config_name="coding_impl", repo_mode="code")
+        except BaseException as e:  # noqa: BLE001
+            errors[name] = e
+
+    threads = [threading.Thread(target=worker, args=(n,)) for n in ("a", "b")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+
+    assert not errors, f"a concurrent relay caller failed: {errors!r}"
+    a, b = results["a"], results["b"]
+    assert a["base_sha"] == b["base_sha"] == relay_base
+    assert a["worktree_path"] == b["worktree_path"]
+    assert (Path(a["worktree_path"]) / "draft.txt").read_text() == "half done\n"
+    assert _git(src, "rev-parse", "HEAD") == head
+    # The relay run got exactly ONE worktree (the failed attempt's is separate).
+    lines = _git(src, "worktree", "list").splitlines()
+    assert len([l for l in lines if "run-relay-cc" in l]) == 1
+
+
+def test_a_lost_claim_is_eventually_published_not_guessed(db, home, tmp_path):
+    """While a claim is in flight resolution refuses; once the winner publishes,
+    the SAME caller's next ensure returns the real record rather than a guess."""
+    with db.get_connection() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO run_isolation "
+            "(run_id, project_id, config_name, mode, created_at) "
+            "VALUES (?, ?, ?, ?, datetime('now'))",
+            ("run-inflight", "p-inflight", "dpe_default_v2", ri.MODE_PROVISIONING))
+        conn.commit()
+    assert ri.is_disposable(db, "run-inflight", run_status="failed",
+                            admitted_ops=0) == (
+        False, "isolation is still being provisioned; there is no tree "
+               "decision to dispose of")
+

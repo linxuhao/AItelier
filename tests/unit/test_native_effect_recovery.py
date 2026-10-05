@@ -523,13 +523,13 @@ def test_unsettled_recovery_cannot_accept_finish_and_can_later_repair(tmp_path, 
     assert (root / 'A.py').exists() and (root / 'B.py').exists()
     assert not (root / 'C.py').exists()
     schemas = dict(claim.inputs['_tool_schemas'])
-    trace_reader = sf._get_trace_conn
+    trace_reader = sf.trace_connection
     if damage == 'withdrawn-authority':
         claim.inputs['_tool_schemas'].pop('apply_patch')
     elif damage == 'unreadable-trace':
         def unavailable(_):
             raise sqlite3.OperationalError('owned trace read unavailable')
-        monkeypatch.setattr(sf, '_get_trace_conn', unavailable)
+        monkeypatch.setattr(sf, 'trace_connection', unavailable)
     provider_calls = []
     def next_provider(*args, **kwargs):
         provider_calls.append(1)
@@ -537,7 +537,7 @@ def test_unsettled_recovery_cannot_accept_finish_and_can_later_repair(tmp_path, 
     restored, ws2 = host(sf, rid, claim, root, next_provider)
     with pytest.raises(NativeSideEffectsRetained):
         execute(restored, ws2, rid, claim)
-    monkeypatch.setattr(sf, '_get_trace_conn', trace_reader)
+    monkeypatch.setattr(sf, 'trace_connection', trace_reader)
     assert provider_calls == [] and not (root / 'C.py').exists()
     assert {p.name: p.read_bytes() for p in e._effect_fence_dir.glob('*.json')} == original_bytes
     assert not any(event == 'step_done' for event, _ in traces(sf, rid))

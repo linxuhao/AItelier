@@ -250,20 +250,21 @@ def test_recovery_trace_failure_retries_then_deduplicates_durably(
     import core.skillflow_host as host
     monkeypatch.setattr(identity, "owner_is_dead", lambda owner: False)
     monkeypatch.setattr(host, "owner_is_dead", lambda owner: False)
-    trace_conn = sf._get_trace_conn("p")
-    trace_conn.execute(
-        "CREATE TRIGGER fail_recovery_trace BEFORE INSERT ON skillflow_trace "
-        "WHEN NEW.event = 'operation_recovery_decision' "
-        "BEGIN SELECT RAISE(ABORT, 'injected durable write failure'); END")
-    trace_conn.commit()
+    with sf.trace_connection("p") as trace_conn:
+        trace_conn.execute(
+            "CREATE TRIGGER fail_recovery_trace BEFORE INSERT ON skillflow_trace "
+            "WHEN NEW.event = 'operation_recovery_decision' "
+            "BEGIN SELECT RAISE(ABORT, 'injected durable write failure'); END")
+        trace_conn.commit()
     sf.reconcile_active_operations(run_id, trigger="retryable_trace")
     assert sf.trace_query(
         run_id,
         "SELECT 1 FROM skillflow_trace "
         "WHERE run_id=? AND event='operation_recovery_decision'", (run_id,)) == []
 
-    trace_conn.execute("DROP TRIGGER fail_recovery_trace")
-    trace_conn.commit()
+    with sf.trace_connection("p") as trace_conn:
+        trace_conn.execute("DROP TRIGGER fail_recovery_trace")
+        trace_conn.commit()
     sf.reconcile_active_operations(run_id, trigger="retryable_trace")
     sf.reconcile_active_operations(run_id, trigger="retryable_trace")
     traces = sf.trace_query(

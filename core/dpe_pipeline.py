@@ -1728,12 +1728,11 @@ class PipelineEngine:
         try:
             from api.dependencies import get_skillflow
             sf = get_skillflow()
-            conn = sf._get_trace_conn(project_id) if project_id else None
-            conn = conn or sf._conn
-            cur = conn.execute(
-                "SELECT event, payload_json FROM skillflow_trace "
-                "WHERE step_instance_id = ? ORDER BY seq", (iid,))
-            rows = [(e, json.loads(pj or "{}")) for e, pj in cur.fetchall()]
+            with sf.trace_connection(project_id) as conn:
+                cur = conn.execute(
+                    "SELECT event, payload_json FROM skillflow_trace "
+                    "WHERE step_instance_id = ? ORDER BY seq", (iid,))
+                rows = [(e, json.loads(pj or "{}")) for e, pj in cur.fetchall()]
         except Exception as exc:
             effects, _, _ = self._load_native_effects()
             if effects:

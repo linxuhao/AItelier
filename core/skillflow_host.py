@@ -334,12 +334,10 @@ class AItelierSkillFlow(SkillFlow):
         if not run_id or not self._trace_enabled:
             return False
         project_id = self._get_project_id(run_id)
-        trace_conn = self._get_trace_conn(project_id) if project_id else None
-        target = trace_conn or self._conn
         clean = {key: self._clip(value) for key, value in payload.items()}
         serialized = self._serialize(clean)
         try:
-            with self._lock:
+            with self.trace_connection(project_id) as target:
                 target.execute("BEGIN IMMEDIATE;")
                 try:
                     target.execute(

@@ -30,8 +30,15 @@ it across its re-read, decision and `git worktree add`, every other caller
 blocks and then re-reads that ONE durable record, and the OS releases the lock
 if the holder dies. There is no provisional database row to strand a run behind
 and no bounded deadline that false-fails a healthy but slow winner — the loser
-never creates a second tree, which is what once made a launch die with
-`fatal: a branch named ... already exists` before any worker started.
+never creates a second tree.
+
+That kernel capability is MANDATORY, not best effort. Where no advisory lock is
+available (a host without `fcntl.flock`) `ensure_for_run` raises
+`IsolationUnavailable` before it decides, writes a record or touches git: an
+unlocked provisioner could race a peer into two trees on one branch, so the only
+safe answer is to refuse. The branch-collision hazard this lock closes is a
+CONTROLLED race the regressions reproduce; the actual root cause of the historic
+D7A incident is UNKNOWN and is not asserted here.
 
 
 
@@ -473,10 +480,12 @@ def ensure_for_run(db, *, run_id: str, project_id: str, config_name: str,
     not by a provisional database row: the winner holds the lock across its
     re-read, its decision and `git worktree add`, and a loser blocks on the lock
     and then re-reads, returning that ONE durable record. The controlled race
-    this closes is the one that once made a launch die with `fatal: a branch
-    named ... already exists` before any worker started; because the OS releases
-    the lock when its holder dies, a crashed provisioner cannot strand the run
-    behind a placeholder nobody owns.
+    this closes is the one a launch can still lose when two callers both read
+    "no record" and both run `git worktree add -b`, so one dies with `fatal: a
+    branch named ... already exists`; because the OS releases the lock when its
+    holder dies, a crashed provisioner cannot strand the run behind a
+    placeholder nobody owns. The actual cause of the historic D7A incident is
+    UNKNOWN; only this controlled race is reproduced and asserted.
     """
     _require_usable_run_id(run_id)
     with _run_provision_lock(run_id):
@@ -609,6 +618,12 @@ def _run_provision_lock(run_id: str):
     is released by the OS when the holder exits, so a crash is self-healing,
     and a loser simply blocks until the winner publishes and then re-reads.
 
+    The kernel lock is a MANDATORY capability, not best effort. On a host
+    without `fcntl.flock` this raises `IsolationUnavailable` BEFORE creating
+    the lock directory, opening the lock file or deciding anything: an
+    unlocked provisioner could race a peer into two trees on one branch, and
+    refusing is the only answer that cannot corrupt the durable record.
+
     It is held across the re-read, the decision and `git worktree add`, which is
     why the SQLite transactions inside stay short and no `BEGIN IMMEDIATE` is
     ever held across git I/O. The lock file is opened `O_NOFOLLOW` and is never
@@ -616,12 +631,16 @@ def _run_provision_lock(run_id: str):
     different locks.
     """
     root = datadir.isolation_locks_dir()
-    root.mkdir(parents=True, exist_ok=True)
-    path = _lock_path(run_id)
     try:
         import fcntl
-    except ImportError:            # non-POSIX: best effort, as elsewhere
-        fcntl = None
+    except ImportError as e:
+        raise IsolationUnavailable(
+            f"run {run_id} cannot be provisioned: this host provides no POSIX "
+            f"kernel advisory lock (fcntl.flock), and provisioning without one "
+            f"would let two callers create the same branch and worktree. "
+            f"Refusing before any provisioning effect.") from e
+    root.mkdir(parents=True, exist_ok=True)
+    path = _lock_path(run_id)
     try:
         fd = os.open(path, os.O_CREAT | os.O_RDWR
                      | getattr(os, "O_NOFOLLOW", 0), 0o600)
@@ -631,13 +650,11 @@ def _run_provision_lock(run_id: str):
             f"({e.strerror or e}); refusing to provision without it") from e
 
     try:
-        if fcntl is not None:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+        fcntl.flock(fd, fcntl.LOCK_EX)
         yield
     finally:
         try:
-            if fcntl is not None:
-                fcntl.flock(fd, fcntl.LOCK_UN)
+            fcntl.flock(fd, fcntl.LOCK_UN)
         finally:
             os.close(fd)
 

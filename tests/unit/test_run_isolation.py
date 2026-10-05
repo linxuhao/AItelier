@@ -749,6 +749,43 @@ def test_a_delayed_winner_does_not_false_fail_the_blocked_caller(
     assert len(_git(src, "worktree", "list").splitlines()) == 2
 
 
+def test_missing_kernel_lock_capability_fails_closed(db, home, tmp_path,
+                                                     monkeypatch):
+    """Without a kernel advisory lock provisioning must REFUSE, not proceed
+    unprotected.
+
+    Two callers both reading "no record" would otherwise create the same
+    branch; the capability is therefore mandatory, and the refusal must land
+    BEFORE any provisioning effect — no worktree directory, no branch, no
+    durable record. The capability is removed at its source (the `fcntl`
+    import) the way a non-POSIX host presents it.
+    """
+    import builtins
+
+    real_import = builtins.__import__
+
+    def no_fcntl(name, *args, **kwargs):
+        if name == "fcntl":
+            raise ImportError("No module named 'fcntl'")
+        return real_import(name, *args, **kwargs)
+
+    src = tmp_path / "src"
+    _init_repo(src)
+    _project(db, "pnoflock", src)
+    monkeypatch.setattr(builtins, "__import__", no_fcntl)
+
+    with pytest.raises(IsolationUnavailable, match="advisory lock"):
+        ri.ensure_for_run(db, run_id="run-noflock", project_id="pnoflock",
+                          config_name="dpe_default_v2", repo_mode="code")
+
+    # The refusal precedes every effect: no durable record, no worktree
+    # directory, no run branch, and nothing added to the source checkout.
+    assert ri.record(db, "run-noflock") is None
+    assert not (datadir.worktrees_dir() / "run-noflock").exists()
+    assert _git(src, "branch", "--list", "codex/run/run-noflock") == ""
+    assert len(_git(src, "worktree", "list").splitlines()) == 1
+
+
 def test_a_foreign_caller_cannot_be_handed_another_projects_tree(
         db, home, tmp_path):
     """A record belongs to the run's own project/config; a foreign caller is

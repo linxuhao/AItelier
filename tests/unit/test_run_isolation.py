@@ -666,20 +666,112 @@ def test_concurrent_repoless_provisioning_writes_one_consistent_record(
     assert ri.resolve_for_resolver(db, "run-nn") is False
 
 
-def test_an_unfinished_claim_refuses_resolution_instead_of_guessing(
+def test_a_crashed_provisioner_releases_its_lock_without_stranding_the_run(
         db, home, tmp_path):
-    """A placeholder is not a decision: resolution must refuse it, not fall back
-    to the shared checkout and not adopt any directory that may exist."""
+    """A provisioner that dies mid-provision must not strand the run.
 
-    with db.get_connection() as conn:
-        conn.execute(
-            "INSERT OR REPLACE INTO run_isolation "
-            "(run_id, project_id, config_name, mode, created_at) "
-            "VALUES (?, ?, ?, ?, datetime('now'))",
-            ("run-pending", "p-pending", "dpe_default_v2", ri.MODE_PROVISIONING))
-        conn.commit()
-    with pytest.raises(IsolationUnavailable, match="unfinished isolation claim"):
-        ri.resolve_for_resolver(db, "run-pending")
+    The lock is a KERNEL advisory lock, so the OS drops it when the holder
+    exits — there is no provisional database row an operator would have to
+    clear, and no bounded deadline that a healthy winner could outlive. The
+    next caller simply takes the freed lock and provisions.
+    """
+    import sys
+
+    src = tmp_path / "src"
+    _init_repo(src)
+    _project(db, "pcrash", src)
+    lock = ri._lock_path("run-crash")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    child = (
+        "import fcntl, os, sys, time\n"
+        "fd = os.open(sys.argv[1], os.O_CREAT | os.O_RDWR, 0o600)\n"
+        "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+        "print('locked', flush=True)\n"
+        "time.sleep(60)\n")
+    proc = subprocess.Popen([sys.executable, "-c", child, str(lock)],
+                            stdout=subprocess.PIPE, text=True)
+    try:
+        assert proc.stdout.readline().strip() == "locked"
+    finally:
+        proc.kill()
+        proc.wait(timeout=10)
+
+    rec = ri.ensure_for_run(db, run_id="run-crash", project_id="pcrash",
+                            config_name="dpe_default_v2", repo_mode="code")
+    assert rec["mode"] == ri.MODE_WORKTREE
+    assert ri.record(db, "run-crash")["worktree_path"] == rec["worktree_path"]
+
+
+def test_a_delayed_winner_does_not_false_fail_the_blocked_caller(
+        db, home, tmp_path, monkeypatch):
+    """A slow (but healthy) provisioner must not turn the loser into a failure.
+
+    The loser BLOCKS on the kernel lock and re-reads; there is no fixed wait
+    after which the scheduler terminalises a run whose winner is merely slow.
+    Both real callers end on the same exact record.
+    """
+    import threading
+
+    src = tmp_path / "src"
+    base = _init_repo(src)
+    _project(db, "pdelay", src)
+    real = ri._provision_tree
+    import time as _time
+
+    def delayed(*args, **kwargs):
+        _time.sleep(0.5)                    # winner is slow, not dead
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(ri, "_provision_tree", delayed)
+
+    barrier = threading.Barrier(2)
+    results, errors = {}, {}
+
+    def worker(name):
+        try:
+            barrier.wait(timeout=10)
+            results[name] = ri.ensure_for_run(
+                db, run_id="run-delay", project_id="pdelay",
+                config_name="dpe_default_v2", repo_mode="code")
+        except BaseException as e:  # noqa: BLE001
+            errors[name] = e
+
+    threads = [threading.Thread(target=worker, args=(n,)) for n in ("a", "b")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+
+    assert not errors, f"a caller false-failed a slow winner: {errors!r}"
+    a, b = results["a"], results["b"]
+    assert a["worktree_path"] == b["worktree_path"]
+    assert a["base_sha"] == b["base_sha"] == base
+    assert len(_git(src, "worktree", "list").splitlines()) == 2
+
+
+def test_a_foreign_caller_cannot_be_handed_another_projects_tree(
+        db, home, tmp_path):
+    """A record belongs to the run's own project/config; a foreign caller is
+    refused rather than handed a tree that is not its own — while the owner's
+    healthy idempotent resume still gets the same record."""
+    src = tmp_path / "src"
+    _init_repo(src)
+    _project(db, "pf-a", src)
+    _project(db, "pf-b", src)
+    rec = ri.ensure_for_run(db, run_id="run-f", project_id="pf-a",
+                            config_name="dpe_default_v2", repo_mode="code")
+
+    with pytest.raises(IsolationUnavailable, match="belongs to the run's own project"):
+        ri.ensure_for_run(db, run_id="run-f", project_id="pf-b",
+                          config_name="dpe_default_v2", repo_mode="code")
+    with pytest.raises(IsolationUnavailable):
+        ri.ensure_for_run(db, run_id="run-f", project_id="pf-a",
+                          config_name="code_review", repo_mode="code")
+
+    again = ri.ensure_for_run(db, run_id="run-f", project_id="pf-a",
+                              config_name="dpe_default_v2", repo_mode="code")
+    assert again["worktree_path"] == rec["worktree_path"]
+
 
 
 def test_a_failed_provision_leaves_no_placeholder_behind(db, home, tmp_path):
@@ -770,18 +862,20 @@ def test_concurrent_callers_share_one_requested_base(db, home, tmp_path):
     assert len([l for l in lines if "run-relay-cc" in l]) == 1
 
 
-def test_a_lost_claim_is_eventually_published_not_guessed(db, home, tmp_path):
-    """While a claim is in flight resolution refuses; once the winner publishes,
-    the SAME caller's next ensure returns the real record rather than a guess."""
+def test_an_unknown_isolation_mode_refuses_rather_than_guessing(
+        db, home, tmp_path):
+    """A mode this deployment does not decide (e.g. a legacy provisional row)
+    is refused — resolution never substitutes the shared checkout for it."""
     with db.get_connection() as conn:
         conn.execute(
             "INSERT OR REPLACE INTO run_isolation "
             "(run_id, project_id, config_name, mode, created_at) "
             "VALUES (?, ?, ?, ?, datetime('now'))",
-            ("run-inflight", "p-inflight", "dpe_default_v2", ri.MODE_PROVISIONING))
+            ("run-inflight", "p-inflight", "dpe_default_v2", "provisioning"))
         conn.commit()
-    assert ri.is_disposable(db, "run-inflight", run_status="failed",
-                            admitted_ops=0) == (
-        False, "isolation is still being provisioned; there is no tree "
-               "decision to dispose of")
+    with pytest.raises(IsolationUnavailable, match="does not decide"):
+        ri.resolve_for_resolver(db, "run-inflight")
+    disposable, why = ri.is_disposable(db, "run-inflight", run_status="failed",
+                                      admitted_ops=0)
+    assert disposable is False and "not a decision" in why
 

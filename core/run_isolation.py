@@ -24,13 +24,15 @@ This module is where that promise becomes a record:
 
 
 More than one caller legitimately reaches `ensure_for_run` for one run at once
-(the launch API and the poller both provision before starting). So the decision
-is made under a claim: a provisional `provisioning` row inserted with
-`BEGIN IMMEDIATE` elects exactly one provisioner, every other caller waits for
-and returns that ONE durable record, and a claim that fails is removed rather
-than left as a half-written decision. The loser never creates a second tree —
-which is what once made a launch die with `fatal: a branch named ... already
-exists` before any worker started.
+(the launch API and the poller both provision before starting). Provisioning is
+therefore serialised by a KERNEL advisory lock keyed by run id: the winner holds
+it across its re-read, decision and `git worktree add`, every other caller
+blocks and then re-reads that ONE durable record, and the OS releases the lock
+if the holder dies. There is no provisional database row to strand a run behind
+and no bounded deadline that false-fails a healthy but slow winner — the loser
+never creates a second tree, which is what once made a launch die with
+`fatal: a branch named ... already exists` before any worker started.
+
 
 
 Worktree deletion is deliberately conservative. `is_disposable` is the pure
@@ -47,7 +49,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
-import time
+
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -58,18 +60,7 @@ MODE_WORKTREE = "worktree"
 MODE_DIRECT = "direct"
 MODE_NONE = "none"
 MODE_READ_SNAPSHOT = "read_snapshot"
-# A provisional row, inserted under `BEGIN IMMEDIATE` by `_claim_provision` so
-# that concurrent callers for ONE run elect a single provisioner. It is not a
-# decision: it carries no worktree and is replaced by the real record the
-# moment provisioning finishes (or removed by `_abandon_provision` if it
-# raises). Resolution refuses it rather than guessing at a tree.
-MODE_PROVISIONING = "provisioning"
 
-# How long a caller that lost the provisioning claim waits for the winner to
-# publish the record before refusing. Bounded: the wait is only ever for the
-# record, never for permission to create a second tree.
-_PROVISION_WAIT_S = 10.0
-_PROVISION_POLL_S = 0.05
 
 BRANCH_PREFIX = "codex/run/"
 
@@ -477,71 +468,63 @@ def ensure_for_run(db, *, run_id: str, project_id: str, config_name: str,
 
     More than one caller legitimately reaches here for one run at the same
     time: the launch API (`start_config_run`) and the poller both provision
-    before starting, and on a resume a third caller can join. Exactly one of
-    them is allowed to decide and create the tree; every other caller waits for
-    and returns that ONE durable record. Without this the loser re-ran
-    `git worktree add -b codex/run/<id>` against a branch the winner had just
-    created and failed the launch with `fatal: a branch named ... already
-    exists` — a run that died before any worker started.
+    before starting, and on a resume a third caller can join. Provisioning is
+    therefore serialised by a per-run KERNEL advisory lock (`_run_provision_lock`),
+    not by a provisional database row: the winner holds the lock across its
+    re-read, its decision and `git worktree add`, and a loser blocks on the lock
+    and then re-reads, returning that ONE durable record. The controlled race
+    this closes is the one that once made a launch die with `fatal: a branch
+    named ... already exists` before any worker started; because the OS releases
+    the lock when its holder dies, a crashed provisioner cannot strand the run
+    behind a placeholder nobody owns.
     """
     _require_usable_run_id(run_id)
-    # One bounded retry: the first pass either wins the claim, observes the
-    # winner's record, or loses to a claim that is abandoned between our read
-    # and our insert; only then is a second attempt both necessary and safe.
-    for _ in range(2):
+    with _run_provision_lock(run_id):
         existing = record(db, run_id)
-        if existing and existing["mode"] != MODE_PROVISIONING:
-            return _resume_existing(db, existing, run_id, config_name)
-        if existing is None and _claim_provision(db, run_id, project_id,
-                                                config_name):
-            try:
-                return _provision_for_run(
-                    db, run_id=run_id, project_id=project_id,
-                    config_name=config_name, repo_mode=repo_mode,
-                    requested_mode=requested_mode)
-            except BaseException:
-                # Fail closed AND leave no misleading placeholder behind: the
-                # next resolution of this run must see "no decision", not a
-                # half-written one. The decision itself is never invented here.
-                _abandon_provision(db, run_id)
-                raise
-        existing = _await_provision(db, run_id)
-        if existing is None:
-            # The claim was abandoned between our read and our insert (a rare
-            # interleaving that only happens after a failed provision). One
-            # retry is safe: there is no record now, so claiming again decides
-            # nothing already decided.
-            continue
-        if existing["mode"] == MODE_PROVISIONING:
-            # The winner is still going after the bounded wait. Refuse rather
-            # than race it into a second tree; a retry would wait again for a
-            # holder that may never publish.
-            break
-        return _resume_existing(db, existing, run_id, config_name)
-    raise IsolationUnavailable(
-        f"run {run_id} is still being provisioned by another caller after "
-        f"{_PROVISION_WAIT_S:g}s; refusing to create a second tree for it. If "
-        f"that caller is gone, an operator clears the placeholder with "
-        f"run_isolation._abandon_provision(db, {run_id!r}).")
+        if existing is not None:
+            return _resume_existing(db, existing, run_id, project_id,
+                                    config_name)
+        return _provision_for_run(
+            db, run_id=run_id, project_id=project_id,
+            config_name=config_name, repo_mode=repo_mode,
+            requested_mode=requested_mode)
 
 
 
-def _resume_existing(db, existing: dict, run_id: str, config_name: str) -> dict:
-    """Return the one decision already made for this run, re-asserting a lease.
+
+def _resume_existing(db, existing: dict, run_id: str, project_id: str,
+                     config_name: str) -> dict:
+    """Return the one decision already made for this run.
 
     A restart that lost the row would otherwise leave a running direct run
     unprotected, so the lease is taken again here — idempotent, because the
     holder is the same run.
+
+    The record is only handed back to a caller asking for THE SAME RUN'S
+    project and config. A different project or config that happens to name this
+    run id is a foreign caller, and handing it another project's tree is the
+    shared-checkout hazard in a new shape: it is refused, while the owner's
+    healthy idempotent resume still returns the same record.
     """
+    if (existing["project_id"] != project_id
+            or existing["config_name"] != config_name):
+        raise IsolationUnavailable(
+            f"run {run_id} is isolated for project {existing['project_id']!r} "
+            f"config {existing['config_name']!r}; a caller for project "
+            f"{project_id!r} config {config_name!r} cannot be handed that "
+            f"tree. A run's isolation record belongs to the run's own project "
+            f"and config.")
     if existing["mode"] == MODE_DIRECT and existing["source_repo"]:
         _acquire_lease(db, canonical_checkout(existing["source_repo"]),
                        run_id, config_name)
     return existing
 
 
+
 def _provision_for_run(db, *, run_id, project_id, config_name, repo_mode,
                        requested_mode) -> dict:
-    """The decision body, run by the single caller that won the claim."""
+    """The decision body, run by the single caller that holds the lock."""
+
     source = _source_repo_for(db, project_id)
     owns_repo = (repo_mode or "code") != "none"
 
@@ -602,78 +585,62 @@ def _provision_for_run(db, *, run_id, project_id, config_name, repo_mode,
                            mode=MODE_WORKTREE)
 
 
-def _claim_provision(db, run_id: str, project_id: str, config_name: str) -> bool:
-    """Become the single provisioner for `run_id`, or learn somebody else is.
+# ── the per-run provisioning lock ────────────────────────────────────
 
-    The claim is a placeholder row in `run_isolation` inserted under
-    `BEGIN IMMEDIATE`, so the read ("is there a decision already?") and the
-    write ("I am deciding") are one atomic step against the database file and
-    not two steps a second caller can interleave. The placeholder carries no
-    worktree and is replaced by the real record when provisioning finishes;
-    `_abandon_provision` removes it if provisioning raises.
+def _lock_path(run_id: str):
+    """The stable, shared-home path of ONE run's provisioning lock.
 
-    This is the same mutex shape `_acquire_lease` uses, for the same reason:
-    two callers that both read "no record" and then both act is exactly the
-    duplicate provisioning this exists to stop.
+    Stable across the caller processes that provision a run (the launch API,
+    the poller and a resume), because they all resolve it through `datadir`:
+    one host, one mount, one inode, therefore one kernel lock. Keyed by run id,
+    so distinct runs still provision in parallel.
     """
-    with db.get_connection() as conn:
-        conn.execute("PRAGMA busy_timeout=10000")
-        conn.execute("BEGIN IMMEDIATE")
+    return datadir.isolation_locks_dir() / f"{run_id}.lock"
+
+
+@contextmanager
+def _run_provision_lock(run_id: str):
+    """Serialise provisioning of ONE run with a kernel advisory lock.
+
+    Why a lock and not a provisional database row: a row written by a
+    provisioner that then died has no owner a kernel will clean up, so a slow
+    or dead writer can either false-fail a healthy winner or strand the run
+    behind a claim only an operator can clear. An `flock` on an open descriptor
+    is released by the OS when the holder exits, so a crash is self-healing,
+    and a loser simply blocks until the winner publishes and then re-reads.
+
+    It is held across the re-read, the decision and `git worktree add`, which is
+    why the SQLite transactions inside stay short and no `BEGIN IMMEDIATE` is
+    ever held across git I/O. The lock file is opened `O_NOFOLLOW` and is never
+    unlinked or re-created — replacing the inode would hand two callers two
+    different locks.
+    """
+    root = datadir.isolation_locks_dir()
+    root.mkdir(parents=True, exist_ok=True)
+    path = _lock_path(run_id)
+    try:
+        import fcntl
+    except ImportError:            # non-POSIX: best effort, as elsewhere
+        fcntl = None
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_RDWR
+                     | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    except OSError as e:
+        raise IsolationUnavailable(
+            f"cannot open the provisioning lock for run {run_id} at {path} "
+            f"({e.strerror or e}); refusing to provision without it") from e
+
+    try:
+        if fcntl is not None:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
         try:
-            row = conn.execute(
-                "SELECT 1 FROM run_isolation WHERE run_id = ?",
-                (run_id,)).fetchone()
-            if row is not None:
-                conn.rollback()
-                return False
-            conn.execute(
-                "INSERT INTO run_isolation (run_id, project_id, config_name, "
-                "mode, created_at) VALUES (?, ?, ?, ?, datetime('now'))",
-                (run_id, project_id, config_name, MODE_PROVISIONING))
-            conn.commit()
-            return True
-        except BaseException:
-            conn.rollback()
-            raise
+            if fcntl is not None:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
 
-
-def _abandon_provision(db, run_id: str) -> None:
-    """Drop this run's placeholder after a failed provisioning — not a record.
-
-    `WHERE mode = 'provisioning'` is what makes this safe to call on the way
-    out of any failure: if the failure happened AFTER the real record was
-    written (there is none today, but a later edit could add one) the decision
-    survives and only an unfinished placeholder is removed.
-
-    It touches NO git state. A directory a half-finished `git worktree add`
-    left behind is deliberately not deleted: its provenance is exactly the
-    thing the next caller must not guess at, and this module never resets or
-    adopts a path it did not complete.
-    """
-    with db.get_connection() as conn:
-        conn.execute("DELETE FROM run_isolation WHERE run_id = ? AND mode = ?",
-                     (run_id, MODE_PROVISIONING))
-        conn.commit()
-
-
-def _await_provision(db, run_id: str) -> dict | None:
-    """Wait, bounded, for the provisioner to publish the real record.
-
-    Bounded on purpose: the answer to "somebody else is mid-provision" is to
-    return their record, never to start a second tree of our own. If the holder
-    is slow past the deadline we refuse rather than race it — a wrong second
-    worktree costs a source checkout's integrity, a refusal costs a retry.
-    Returns the placeholder unchanged when the deadline passes without a
-    decision, so the caller can refuse with an honest reason.
-    """
-    deadline = time.monotonic() + _PROVISION_WAIT_S
-    while True:
-        existing = record(db, run_id)
-        if existing is None or existing["mode"] != MODE_PROVISIONING:
-            return existing
-        if time.monotonic() >= deadline:
-            return existing
-        time.sleep(_PROVISION_POLL_S)
 
 
 def _bootstrap_source(db, project_id: str, source: str) -> str:
@@ -824,11 +791,12 @@ def resolve_for_resolver(db, run_id: str,
         return False
     if mode == MODE_DIRECT:
         return None
-    if mode == MODE_PROVISIONING:
+    if mode not in (MODE_WORKTREE, MODE_DIRECT, MODE_NONE, MODE_READ_SNAPSHOT):
         raise IsolationUnavailable(
-            f"run {run_id} has an unfinished isolation claim: provisioning was "
-            f"started for it and did not publish a decision. Refusing to "
-            f"substitute the shared checkout; inspect or clear the placeholder.")
+            f"run {run_id} has an isolation mode {mode!r} this deployment does "
+            f"not decide; refusing to substitute the shared checkout rather "
+            f"than guess at a tree.")
+
     path = Path(rec["worktree_path"] or "")
     if not rec["worktree_path"] or not _is_worktree_of(path, rec["source_repo"]):
         raise IsolationUnavailable(
@@ -1136,9 +1104,11 @@ def is_disposable(db, run_id: str, *, run_status: str, admitted_ops: int,
     rec = record(db, run_id)
     if rec is None:
         return False, f"no isolation record for run {run_id}"
-    if rec["mode"] == MODE_PROVISIONING:
-        return False, ("isolation is still being provisioned; there is no tree "
-                       "decision to dispose of")
+    if rec["mode"] not in (MODE_WORKTREE, MODE_DIRECT, MODE_NONE,
+                           MODE_READ_SNAPSHOT):
+        return False, (f"isolation mode {rec['mode']!r} is not a decision this "
+                       f"deployment makes; there is no tree to dispose of")
+
     if not rec["worktree_path"]:
         return True, "this run owns no tree"
     if run_status not in ("completed", "failed"):

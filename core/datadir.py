@@ -52,6 +52,19 @@ def worktrees_dir() -> Path:
     return aitelier_home() / "worktrees"
 
 
+def isolation_locks_dir() -> Path:
+    """Per-run provisioning lock files (kernel advisory locks).
+
+    Under the shared data root so every caller process that provisions one run
+    (the launch API, the poller, a resume) resolves the SAME absolute path, and
+    therefore the same lock inode, on host and in the container. Separate from
+    the worktrees it guards: it must outlive any single run's tree and must
+    never be created inside a checkout.
+    """
+    return aitelier_home() / "isolation-locks"
+
+
+
 def configs_dir() -> Path:
     return aitelier_home() / "configs"
 

@@ -12,6 +12,7 @@ import json
 import re
 import sqlite3
 import uuid
+import unicodedata
 
 from core.state_graph import (StateConflict, StateGraphError, StateGraphStore,
                               StateNotFound, canonical, digest, integer, key, now, text)
@@ -40,6 +41,7 @@ CREATE TABLE IF NOT EXISTS state_evidence (
     verdict TEXT NOT NULL CHECK(verdict IN ('pass','fail','skip')),
     artifact_ref TEXT NOT NULL, report_ref TEXT NOT NULL, report_sha256 TEXT NOT NULL,
     reviewer TEXT NOT NULL, detail TEXT NOT NULL, payload_hash TEXT NOT NULL, created_at TEXT NOT NULL,
+    director_identity TEXT,
     FOREIGN KEY(attempt_id) REFERENCES state_attempts(attempt_id)
 );
 CREATE TABLE IF NOT EXISTS state_acceptances (
@@ -66,6 +68,16 @@ def artifact_ref(value: str) -> str:
     if not isinstance(value, str) or not SHA.fullmatch(value):
         raise StateGraphError("artifact_ref must be an exact lowercase Git SHA or SHA-256 digest")
     return value
+
+
+def evidence_director_identity(value: str | None) -> str | None:
+    """Validate self-declared attribution; it never authenticates the reviewer."""
+    if value is None:
+        return None
+    if (not isinstance(value, str) or not value.strip() or len(value) > 320
+            or any(unicodedata.category(char) in {"Cc", "Cf", "Cs"} for char in value)):
+        raise StateGraphError("director_identity must be nonempty text of at most 320 characters without controls")
+    return value.strip()
 
 
 def _public(row: dict) -> dict:
@@ -614,8 +626,10 @@ class StateAttempts:
 
     def record_evidence(self, attempt_id: str, evidence_id: str, criterion_id: str, verdict: str,
                         artifact: str, report_ref: str, report_sha256: str, reviewer: str,
-                        detail: str = "", *, report_bytes: bytes | None = None) -> dict:
+                        detail: str = "", *, report_bytes: bytes | None = None,
+                        director_identity: str | None = None) -> dict:
         """Append a scoped verifier attestation, never infer it from agent prose."""
+        director_identity = evidence_director_identity(director_identity)
         key(evidence_id, "evidence id")
         key(criterion_id, "criterion id")
         artifact_ref(artifact)
@@ -629,6 +643,9 @@ class StateAttempts:
             raise StateGraphError("evidence detail must be bounded text")
         payload = {"attempt_id": attempt_id, "criterion_id": criterion_id, "verdict": verdict, "artifact_ref": artifact,
                    "report_ref": report_ref, "report_sha256": report_sha256, "reviewer": reviewer, "detail": detail}
+        # Keep legacy hashes stable when optional attribution is absent.
+        if director_identity is not None:
+            payload["director_identity"] = director_identity
         payload_hash = digest(payload)
         with self.store.transaction(write=True) as conn:
             attempt = self._attempt(conn, attempt_id)
@@ -673,15 +690,15 @@ class StateAttempts:
             if criterion_id not in checks:
                 raise StateGraphError("evidence criterion is not in the pinned acceptance contract")
             conn.execute("INSERT INTO state_evidence(evidence_id,attempt_id,criterion_id,kind,verdict,artifact_ref,"
-                         "report_ref,report_sha256,reviewer,detail,payload_hash,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                         "report_ref,report_sha256,reviewer,detail,payload_hash,created_at,director_identity) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                          (evidence_id, attempt_id, criterion_id, checks[criterion_id]["kind"], verdict, artifact,
-                          report_ref, report_sha256, reviewer, detail, payload_hash, now()))
+                          report_ref, report_sha256, reviewer, detail, payload_hash, now(), director_identity))
             node = self.store._node(conn, attempt["project_id"], attempt["node_key"])
             if node["verified_receipt"] and not failed_external:
                 affected = self.store._invalidate(conn, attempt["project_id"], attempt["node_key"])
                 self.store._event(conn, attempt["project_id"], attempt["node_key"], "acceptance_invalidated",
                                   {"reason": "new evidence supersedes an accepted observation", "invalidated": affected})
-            self.store._event(conn, attempt["project_id"], attempt["node_key"], "evidence_recorded", payload | {"evidence_id": evidence_id})
+            self.store._event(conn, attempt["project_id"], attempt["node_key"], "evidence_recorded", payload | {"evidence_id": evidence_id, "actor": reviewer})
             return dict(conn.execute("SELECT * FROM state_evidence WHERE evidence_id=?", (evidence_id,)).fetchone())
 
     def verify(self, project_id: str, node_key: str, expected_revision: int,

@@ -50,7 +50,17 @@ def feedback_plan(repo, base, head, spec, source, sentinels, mandatory, requeste
         for scenario in spec["scenarios"]:
             name = scenario["name"]
             authored_name = name.removesuffix("__repeatability")
-            scene = str(scenario.get("scene", spec.get("scene", ""))).removeprefix("res://")
+            scene = scenario.get("scene", spec.get("scene"))
+            root_errors = []
+            # Match select_scope: literal res://, exact HEAD membership, no
+            # path alias normalization. A new scene need not exist at base.
+            if not isinstance(scene, str) or not scene.startswith("res://"):
+                root_errors = [f"scenario has no literal scene root: {name}"]
+                scene = ""
+            else:
+                scene = scene[6:]
+                if revision == head and scene not in files:
+                    root_errors = [f"scenario root is missing: {scene}"]
             direct = {scene} | {r[6:] for r in _RESOURCE.findall(texts.get(scene, ""))}
             hits = direct & set(changed)
             # This is the strict split reader's basename/name contract, not a
@@ -61,8 +71,12 @@ def feedback_plan(repo, base, head, spec, source, sentinels, mandatory, requeste
                 witnesses.setdefault(name, set()).update(hits)
             closure = _closure(edges, {scene} | autoload)
             reasons = {k: opaque[k] for k in sorted(closure & set(opaque))}
+            if root_errors:
+                reasons[scene or "<scene-root>"] = root_errors
             if reasons:
-                uncertainty[name] = reasons
+                retained = uncertainty.setdefault(name, {})
+                for path, values in reasons.items():
+                    retained[path] = sorted(set(retained.get(path, ())) | set(values))
     direct_files = set().union(*witnesses.values()) if witnesses else set()
     unmapped = sorted(set(changed) - direct_files)
     broad = bool(shared or "project.godot" in changed or "playtest/_common.yaml" in changed

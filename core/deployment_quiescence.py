@@ -1058,6 +1058,106 @@ def _resident_service_identity(command: str) -> bool:
     return False
 
 
+def _readonly_native(proc: Path, words: list[str], comm: str) -> bool:
+    """Prove bounded native readers; argv names alone grant no exemption."""
+    name = Path(words[0]).name
+    if name not in {"rg", "head"} or comm != name:
+        return False
+    try:
+        executable = str((proc / "exe").readlink())
+        cwd = (proc / "cwd").readlink()
+    except OSError:
+        return False
+    if executable != "/usr/bin/" + name or not cwd.is_absolute():
+        return False
+    # ripgrep preprocessors execute programs; they are not read-only search.
+    return not any(word == "--pre" or word.startswith("--pre=")
+                   or word == "--pre-glob" or word.startswith("--pre-glob=")
+                   for word in words[1:])
+
+
+def _readonly_waiting_shell(proc: Path, words: list[str], comm: str, ppid: str) -> bool:
+    """Recognize a waiting search wrapper only with independent child proof.
+
+    Shells, sources and eval are normally opaque. This narrow grammar covers
+    the observed Claude snapshot setup (already completed before the wait),
+    a reader-only eval body and its final cwd receipt. Every current child
+    must independently be a native reader; absent/racing identities fail closed.
+    """
+    if len(words) != 3 or words[:2] != ["/bin/bash", "-c"] or comm != "bash":
+        return False
+    prefix = (r"source /home/[^ /]+/\.claude/shell-snapshots/snapshot-bash-[a-zA-Z0-9-]+\.sh "
+              r"2>/dev/null \|\| true && shopt -u extglob 2>/dev/null \|\| true && "
+              r"\{ \\builtin unalias -- 'unsetenv'; \\builtin unset -f -- 'unsetenv'; "
+              r"\} >/dev/null 2>&1 \|\| true && eval ")
+    match = re.match(prefix, words[2])
+    if match is None:
+        return False
+    try:
+        suffix = shlex.split(words[2][match.end():])
+        if len(suffix) != 6 or suffix[1:5] != ["&&", "pwd", "-P", ">|"]:
+            return False
+        if not re.fullmatch(r"/tmp/claude-[a-zA-Z0-9-]+-cwd", suffix[-1]):
+            return False
+        payload = suffix[0]
+        if any(char in payload for char in ("`", "$", "\n", "\r", ">", "&")):
+            return False
+        lexer = shlex.shlex(payload, posix=True, punctuation_chars="|;<>(){}")
+        lexer.whitespace_split = True
+        commands, current = [], []
+        for token in lexer:
+            if token in {"|", ";"}:
+                if not current:
+                    return False
+                commands.append(current)
+                current = []
+            elif token and all(char in "|;<>(){}" for char in token):
+                # shlex groups punctuation runs: || is shell control, not data.
+                return False
+            else:
+                current.append(token)
+        if not current:
+            return False
+        commands.append(current)
+        if not commands or any(cmd[0] not in {"rg", "head", "tail"} for cmd in commands):
+            return False
+        if any(any(arg == "--pre" or arg.startswith("--pre=")
+                   or arg.startswith("--pre-glob") for arg in cmd[1:]) for cmd in commands):
+            return False
+        if (proc / "exe").readlink() != Path("/usr/bin/bash"):
+            return False
+        if not (proc / "cwd").readlink().is_absolute():
+            return False
+        if (proc / "wchan").read_text().strip() != "do_wait":
+            return False
+        parent_stat = (proc / "stat").read_text()
+        parent_fields = parent_stat.rsplit(")", 1)[1].split()
+        if (len(parent_fields) < 20 or parent_fields[1] != ppid
+                or not parent_fields[19].isdecimal()):
+            return False
+        children = (proc / "task" / proc.name / "children").read_text().split()
+        if not children or len(children) > 8 or any(not child.isdecimal() for child in children):
+            return False
+        for child in children:
+            entry = PROC_ROOT / child
+            raw = (entry / "cmdline").read_bytes()
+            if not raw.endswith(b"\0"):
+                return False
+            argv = [word.decode("utf-8") for word in raw[:-1].split(b"\0")]
+            if not argv or not _readonly_native(entry, argv, (entry / "comm").read_text().strip()):
+                return False
+            stat_fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
+            if (len(stat_fields) < 20 or not stat_fields[19].isdecimal()
+                    or stat_fields[1] != proc.name or argv not in commands
+                    or (entry / "cwd").readlink() != (proc / "cwd").readlink()):
+                return False
+        return ((proc / "cmdline").read_bytes() == b"\0".join(word.encode() for word in words) + b"\0"
+                and (proc / "stat").read_text() == parent_stat
+                and (proc / "task" / proc.name / "children").read_text().split() == children)
+    except (OSError, ValueError, UnicodeError, IndexError):
+        return False
+
+
 def _measurement_subject(line: str) -> str:
     """Scan launched code rather than corroborated argument data.
 
@@ -1078,9 +1178,11 @@ def _measurement_subject(line: str) -> str:
         comm = (proc / "comm").read_text().strip()
     except (OSError, UnicodeError):
         return line
-    if not words or " ".join(words) != fields[2] or "--long-gate" in fields[2]:
+    if not words or " ".join(words).rstrip() != fields[2] or "--long-gate" in fields[2]:
         return line
     name = Path(words[0]).name.lower()
+    if _readonly_native(proc, words, comm) or _readonly_waiting_shell(proc, words, comm, fields[1]):
+        return words[0]
     if name == "tail" and comm == "tail":
         return words[0]  # GNU tail reads paths; it does not launch their names.
     if re.fullmatch(r"python(?:[23](?:\.\d+)?)?", name) and comm.lower().startswith("python"):

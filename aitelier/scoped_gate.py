@@ -49,6 +49,21 @@ def _graph(files, texts):
     classes, uncertain = {}, {}
     def unknown(path, reason):
         uncertain.setdefault(path, []).append(reason)
+    # A nested project and an ignored directory do not contribute global
+    # classes to the selected parent project. Keep the complete Git snapshot
+    # for change accounting, and keep excluded targets explicitly opaque.
+    # The selected root stays included. Snapshot entries are verified blobs,
+    # so a directory named like a marker cannot hide its parent's scripts.
+    boundaries = {Path(path).parent for path in files
+                  if Path(path).name in {"project.godot", ".gdignore"}
+                  and Path(path).parent != Path(".")}
+    excluded = {path for path in files
+                if boundaries.intersection(Path(path).parents)}
+    excluded_classes = {name for path in excluded
+                        for name in _CLASS.findall(texts.get(path, ""))}
+    for path in sorted(excluded):
+        unknown(path, "resource is outside the parent project namespace")
+    texts = {path: text for path, text in texts.items() if path not in excluded}
     for path, text in texts.items():
         if re.search(r"\b(?:FileAccess|DirAccess)\b", text):
             unknown(path, "file/directory API dependencies are not resolved")
@@ -74,6 +89,9 @@ def _graph(files, texts):
             if not literal:
                 unknown(path, "dynamic or unsupported resource call")
         refs.update(classes[n] for n in _TOKEN.findall(text) if n in classes)
+        outside = set(_TOKEN.findall(text)) & (excluded_classes - classes.keys())
+        if outside:
+            unknown(path, f"class names outside the parent project namespace: {sorted(outside)}")
         edges[path] = refs
     autoload = set()
     section = ""

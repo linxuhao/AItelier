@@ -62,3 +62,9 @@ The combined candidate supplies the service integration described in
 [semantic index activation](semantic-index-activation.md). The historical
 missing-ledger observation above is not a claim about the combined source
 or a claim that production has been activated.
+
+The waiting snapshot wrapper exemption accepts only reader commands separated
+by single pipeline or sequence separators. Grouped punctuation such as `||`,
+conditional or background controls, redirections, substitutions and incomplete
+pipelines remain opaque, even when the currently waiting child is a reader.
+A reader child cannot prove that a later conditional runtime command is safe.

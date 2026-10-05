@@ -14,7 +14,7 @@ from pathlib import Path
 from core.state_privacy import writer_only_read
 
 from core.state_graph import StateConflict, StateGraphError, StateGraphStore, canonical, digest, key, text
-from core.state_attempts import StateAttempts, artifact_ref
+from core.state_attempts import StateAttempts, artifact_ref, evidence_director_identity
 
 
 
@@ -948,14 +948,16 @@ class StateService:
             observed = self.attempts.reconcile(attempt_id, self.sf, artifact)
         return self._with_refusals(observed)
 
-    def record_evidence(self, attempt_id, evidence_id, criterion_id, verdict, artifact, report_ref, report_sha256, detail=""):
+    def record_evidence(self, attempt_id, evidence_id, criterion_id, verdict, artifact, report_ref, report_sha256, detail="",
+                        director_identity=None):
+        director_identity = evidence_director_identity(director_identity)
         self.reconcile_attempt(attempt_id)
         from core.state_report_integrity import retain_report, validate_evidence_semantics
         report_ref, report_bytes = retain_report(report_ref, report_sha256, completed=True)
         validate_evidence_semantics(report_bytes, criterion_id, verdict, artifact)
         return self.attempts.record_evidence(attempt_id, evidence_id, criterion_id, verdict, artifact,
                                              report_ref, report_sha256, self.actor, detail,
-                                             report_bytes=report_bytes)
+                                             report_bytes=report_bytes, director_identity=director_identity)
 
     def verify_node(self, project_id, node_key, expected_revision, attempt_id):
         self.reconcile_attempt(attempt_id)

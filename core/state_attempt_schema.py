@@ -144,6 +144,9 @@ def initialize(db, existing_schema: str) -> None:
             # schema and triggers, indexes and explicit legacy compatibility.
             for statement in _statements(existing_schema):
                 conn.execute(statement)
+            evidence_cols = {r['name'] for r in conn.execute('PRAGMA table_info(state_evidence)')}
+            if 'director_identity' not in evidence_cols:
+                conn.execute("ALTER TABLE state_evidence ADD COLUMN director_identity TEXT")
             receipt_cols = {r['name'] for r in conn.execute('PRAGMA table_info(state_acceptances)')}
             if 'provenance_json' not in receipt_cols:
                 conn.execute("ALTER TABLE state_acceptances ADD COLUMN provenance_json TEXT NOT NULL DEFAULT '{}'")

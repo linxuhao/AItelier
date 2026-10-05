@@ -167,6 +167,19 @@ a report reference, a SHA-256 of the report, an exact artifact identity and a
 latest-attempt identity and completeness. It does not execute an arbitrary
 command contained in the report or infer a pass from model prose.
 
+Evidence records retain the authenticated service actor as `reviewer`; new
+`evidence_recorded` events also expose the same value as `actor`. The optional
+`director_identity` command field identifies a self-declared recording director
+when several directors share credentials. It is stored separately and never
+changes authorization, reviewer provenance, report bytes, or review independence.
+It must be nonempty text of at most 320 characters without control characters;
+malformed values refuse before reconciliation or report retention. Omission or
+null preserves legacy evidence hashes and duplicate behavior. Historical events
+are unchanged: use their `reviewer` when `actor` is absent and treat an absent
+identity as unknown. Consumers can compare an explicitly supplied identity for
+own-versus-other views, while retaining other directors' events in the result.
+
+
 This version does not cryptographically establish that a remote verifier told
 the truth, fetch arbitrary report URLs, or run every test from an uploaded JSON
 file. Keep verifier credentials controlled, use real test/review reports, and

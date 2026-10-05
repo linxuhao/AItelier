@@ -411,6 +411,15 @@ class Evidence(Attempt):
         "Completed describes the scoped check, not node acceptance; State retains immutable bytes."))
     report_sha256: str = Field(description="SHA-256 of the exact report_ref bytes.")
     detail: str = ""
+    director_identity: str | None = Field(default=None, min_length=1, max_length=320,
+        description="Optional self-declared recording director, separate from authenticated actor/reviewer. "
+                    "Omission preserves legacy evidence and idempotency; this never grants authority.")
+
+    @model_validator(mode="after")
+    def attribution(self):
+        from core.state_attempts import evidence_director_identity
+        self.director_identity = evidence_director_identity(self.director_identity)
+        return self
 
 
 class Verify(Node):

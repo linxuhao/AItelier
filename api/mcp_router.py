@@ -1709,6 +1709,44 @@ def _register_lifecycle_tools(tool):
     agent editing a graph without the schema is guessing.
     """
 
+    @tool("observe_deployment_quiescence", "write",
+          "Explicit management observation using the already initialized live "
+          "SkillFlow and DB. Owner audits may record observed-lost ownership; "
+          "this is a WRITE action. Returns every measured blocker/error category "
+          "with a redacted transport projection and the ORIGINAL inventory digest. "
+          "The projection is not an authorization input. Never initializes a runtime "
+          "or authorizes, reconciles, clears owners, or deploys.")
+    def observe_deployment_quiescence() -> dict:
+        import sys
+
+        # Importing this composition root creates DB/workspace objects. Only
+        # inspect a module already present in the live process; never get_skillflow().
+        dependencies = sys.modules.get("api.dependencies")
+        sf = getattr(dependencies, "_skillflow_instance", None)
+        db = getattr(dependencies, "db_instance", None)
+        if sf is None or db is None:
+            return {"error": "observation_unavailable",
+                    "reason": "already initialized SkillFlow and DB are required"}
+
+        from core import datadir, deployment_quiescence
+        try:
+            observation = deployment_quiescence.measure(
+                skillflow=sf, db=db,
+                sidecar_db=datadir.semantic_index_control_dir() / "control.sqlite3")
+        except Exception as exc:
+            # Unhandled failures are unavailable, never a fabricated quiet inventory.
+            return {"error": "observation_unavailable",
+                    "reason": "measurement failed", "exception_type": type(exc).__name__}
+        return {"status": "observed",
+                "original_observation_digest": observation["digest"],
+                "observation": _quiescence_transport_projection(observation),
+                "transport_projection": {
+                    "digest_scope": "original_unprojected_observation",
+                    "authorization_input": False,
+                    "omitted_fields": ["command", "detail", "error"],
+                    "error_details": "category retained; text after ': ' omitted",
+                    "text_redaction": "existing State text redaction"}}
+
     @tool("generate_pipeline", "write",
           "Generate a NEW pipeline from a plain-language description by running "
           "AItelier's grounded generator (pipeline_forge): it surveys the real tool "
@@ -1961,6 +1999,30 @@ def _register_lifecycle_tools(tool):
 _STEP_FILE_CAP = 20000
 # One named file, at ten times the cap. A step is many files; a file is one.
 _ONE_FILE_CAP = 200000
+
+
+def _quiescence_transport_projection(observation: dict) -> dict:
+    """Keep inventory shape and decisions while withholding command/free text.
+
+    The original digest belongs to the producer's unprojected observation,
+    not these redacted bytes. Every blocker row and error entry remains present.
+    """
+    from core.state_driver_notes import _redact
+
+    def project(value, field=""):
+        if isinstance(value, dict):
+            return {key: project(child, key) for key, child in value.items()}
+        if isinstance(value, list):
+            return [project(child, field) for child in value]
+        if isinstance(value, str):
+            if field in {"command", "detail", "error"} and value:
+                return "[REDACTED DETAIL]"
+            if field in {"errors", "reason"} and ": " in value:
+                value = value.partition(": ")[0] + ": [REDACTED DETAIL]"
+            return _redact(value)
+        return value
+
+    return project({key: value for key, value in observation.items() if key != "digest"})
 
 
 def _runs_sharing_step_dir(sf, row: dict) -> list[dict]:

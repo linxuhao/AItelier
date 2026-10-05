@@ -58,8 +58,13 @@ async def test_uninitialized_observation_never_imports_or_initializes(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("owner_reason", [
+    "123 1 evaluator --session private-session",
+    "123 1 evaluator --session private-session: owner lost",
+    "owner lost: 123 1 evaluator --session private-session",
+])
 async def test_normal_measure_preserves_mixed_blockers_errors_and_original_digest(
-        monkeypatch, observation_tool, tmp_path):
+        monkeypatch, observation_tool, tmp_path, owner_reason):
     command = "123 1 evaluator --session private-session password=private-password"
     sf = Mock()
     sf.list_runs.return_value = [
@@ -92,7 +97,13 @@ async def test_normal_measure_preserves_mixed_blockers_errors_and_original_diges
                "done_revision": 1, "activity_at": 1.0, "error": command}
     monkeypatch.setattr(dq, "_sidecar_rows", lambda path: ([sidecar], [
         "semantic project operation is active or unknown: " + command]))
-    godot = {"owner_id": "render-one", "status": "owner_lost", "generation": 1}
+    # Exact render_owners ledger columns, including its arbitrary request reason.
+    godot = {"owner_id": "render-one", "resource": "render",
+             "project_id": "project-one", "run_id": "run-live",
+             "operation_id": "operation-one", "generation": 1,
+             "status": "owner_lost", "actor": "writer-one",
+             "started_at": 1.0, "heartbeat_at": 2.0, "ended_at": None,
+             "reason": owner_reason}
     monkeypatch.setattr(dq, "_godot_rows", lambda path: ([godot], []))
 
     def runner(args):
@@ -128,7 +139,11 @@ async def test_normal_measure_preserves_mixed_blockers_errors_and_original_diges
     assert raw["runs"][0]["audit"]["unknown"] == ["native:" + command]
     assert projected["runs"][0]["active_operations"] == 3
     assert projected["registered_external_owners"][0]["attempt_id"] == "attempt-live"
-    assert projected["godot_render_owners"][0] == godot
+    projected_godot = {**godot, "reason": "[REDACTED DETAIL]"}
+    assert projected["godot_render_owners"][0] == projected_godot
+    assert projected["blockers"]["godot_render_owners"] == [projected_godot]
+    assert raw["godot_render_owners"] == raw["blockers"]["godot_render_owners"] == [godot]
+    assert godot["reason"] == owner_reason
     assert len(raw["errors"]) >= 4
     assert len(projected["errors"]) == len(raw["errors"])
     for original, transported in zip(raw["errors"], projected["errors"]):
@@ -138,13 +153,27 @@ async def test_normal_measure_preserves_mixed_blockers_errors_and_original_diges
     assert "digest" not in projected
     assert result["transport_projection"]["digest_scope"] == "original_unprojected_observation"
     assert result["transport_projection"]["authorization_input"] is False
+    assert "reason" in result["transport_projection"]["omitted_fields"]
+    assert "free text omitted" in result["transport_projection"]["reason_details"]
     serialized = json.dumps(result)
     assert command not in serialized
+    assert owner_reason not in serialized
     assert "private-session" not in serialized
     assert "private-password" not in serialized
     db_probe.assert_called_once_with(db)
     assert sf.audit_operation_owners.call_count == 2
     lazy.assert_not_called()
+
+
+def test_projection_preserves_known_semantic_blocker_reason():
+    reason = "blocker inventory is malformed"
+    raw = {"blockers": {"measurement_failure": [{"reason": reason}]},
+           "errors": [reason], "quiescent": False, "digest": "original-digest"}
+    original = copy.deepcopy(raw)
+    projected = mcp_router._quiescence_transport_projection(raw)
+    assert projected == {"blockers": {"measurement_failure": [{"reason": reason}]},
+                         "errors": [reason], "quiescent": False}
+    assert raw == original
 
 
 @pytest.mark.asyncio

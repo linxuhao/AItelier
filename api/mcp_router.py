@@ -1743,9 +1743,10 @@ def _register_lifecycle_tools(tool):
                 "transport_projection": {
                     "digest_scope": "original_unprojected_observation",
                     "authorization_input": False,
-                    "omitted_fields": ["command", "detail", "error"],
+                    "omitted_fields": ["command", "detail", "error", "reason"],
                     "audit_owner_details": "lost/unknown retain kind and count; details omitted",
                     "error_details": "category retained; text after ': ' omitted",
+                    "reason_details": "free text omitted; known semantic blocker reasons retained",
                     "text_redaction": "existing State text redaction"}}
 
     @tool("generate_pipeline", "write",
@@ -2020,7 +2021,10 @@ def _quiescence_transport_projection(observation: dict) -> dict:
                 return "[REDACTED DETAIL]"
             if field in {"lost", "unknown"} and ":" in value:
                 value = value.partition(":")[0] + ":[REDACTED DETAIL]"
-            if field in {"errors", "reason"} and ": " in value:
+            # Ledger reasons are caller-supplied; even a colon prefix can be argv.
+            if field == "reason" and value and value != "blocker inventory is malformed":
+                return "[REDACTED DETAIL]"
+            if field == "errors" and ": " in value:
                 value = value.partition(": ")[0] + ": [REDACTED DETAIL]"
             return _redact(value)
         return value

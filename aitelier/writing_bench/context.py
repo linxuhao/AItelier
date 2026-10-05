@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import json
 from pathlib import Path
 import re
 import yaml
@@ -20,11 +21,19 @@ def _last(value: dict) -> int:
     return max((n for n in marks if type(n) is int), default=0)
 
 
+def _preview(field: object) -> str:
+    if field in (None, "", []):
+        return ""
+    text = " ".join(str(field).split())
+    return text if len(text) <= 60 else text[:60] + "…"
+
+
 def _line(*fields: object) -> str:
-    def clip(field: object) -> str:
-        text = " ".join(str(field).split())
-        return text if len(text) <= 60 else text[:60] + "…"
-    return "- " + " | ".join(clip(f) for f in fields if f not in (None, "", []))
+    def single_line(field: object) -> str:
+        text = str(field)
+        # Identity and read addresses are exact; quote line breaks reversibly.
+        return json.dumps(text, ensure_ascii=False) if "\n" in text or "\r" in text else text
+    return "- " + " | ".join(single_line(f) for f in fields if f not in (None, "", []))
 
 
 def _named(key: str, mentions: str) -> bool:
@@ -69,8 +78,9 @@ def assemble(view: Path, files: dict[str, bytes], mode: str, chapters: list[int]
             if not last or last >= start or any(_named(str(n), mentions) for n in [card["name"], *aliases]):
                 add(name, "人物当前状态", card)
                 continue
-            directory.append(_line(card["name"], "别称 " + "、".join(map(str, aliases)) if aliases else "",
-                                   card.get("status"), card.get("location") or card.get("位置"),
+            directory.append(_line(card["name"], _preview("别称 " + "、".join(map(str, aliases))) if aliases else "",
+                                   _preview(card.get("status")),
+                                   _preview(card.get("location") or card.get("位置")),
                                    f"末次出场第{last}章", "全文 " + name))
             sources.append({"path": name, "sha256": sha(files[name]), "bytes": len(files[name]),
                             "representation": "index_line"})
@@ -97,7 +107,7 @@ def assemble(view: Path, files: dict[str, bytes], mode: str, chapters: list[int]
                 note = value
                 if isinstance(value, dict):
                     note = value.get("note") if isinstance(value.get("note"), str) else "字段 " + "、".join(map(str, list(value)[:8]))
-                index.append(_line(group + "/" + key, f"末次变更第{last}章", note))
+                index.append(_line(group + "/" + key, f"末次变更第{last}章", _preview(note)))
                 del entries[key]
     add("novel/bible/world.yaml", "世界与资源当前状态", world)
     if index:

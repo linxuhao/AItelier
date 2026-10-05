@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 
+import pytest
 import yaml
 
 from aitelier import novel_state as ns
@@ -93,3 +95,50 @@ def test_film_title_in_brackets_counts_as_named(tmp_path):
              "setting_log": [{"chapter": 2, "name": "《旧片》任务", "changes": {}}]}
     _, text, _, _ = build(tmp_path, [], world, mentions="回到旧片的车站。")
     assert "旧条件" in text and "## 世界条目目录" not in text
+
+
+@pytest.mark.parametrize("name", [
+    "LongCanonicalCharacterNameForDirectoryPointer",
+    "CanonicalCharacter" * 5,
+    "Long  Canonical Character Name With Preserved Spaces" * 2,
+])
+def test_directory_pointer_reads_exact_long_canonical_card(tmp_path, name):
+    view, text, manifest, reps = build(tmp_path, [
+        card(name, 1, location="远方\n" + "住处" * 50, 秘密="仅全文可见的状态")
+    ])
+    line = next(line for line in text.splitlines() if line.startswith("- " + name + " | "))
+    pointer = line.rsplit(" | 全文 ", 1)[1]
+    assert pointer == CARD(name) and reps[pointer] == "index_line"
+    assert "仅全文可见的状态" not in text
+    assert "…" in line and len(line.split(" | ")[2]) <= 61
+    page = read_frozen(view, manifest, pointer)
+    raw = (view / pointer).read_bytes()
+    assert page["path"] == pointer and page["complete"]
+    assert page["text"].encode() == raw and "仅全文可见的状态" in page["text"]
+    assert page["sha256"] == manifest["catalog"][pointer]["sha256"]
+
+
+def test_directory_retains_long_world_key_and_only_clips_preview(tmp_path):
+    key = "Long  Canonical World Entry With Preserved Spaces" * 2
+    note = "简介\n" + "旧事" * 50
+    world = {"settings": {key: {"note": note, "秘密": "世界全文状态"}},
+             "setting_log": [{"name": key, "chapter": 1}]}
+    view, text, manifest, _ = build(tmp_path, [], world)
+    line = next(line for line in text.splitlines() if line.startswith("- settings/" + key + " | "))
+    preview = line.rsplit(" | ", 1)[1]
+    assert preview.startswith("简介 ") and preview.endswith("…") and len(preview) <= 61
+    assert "世界全文状态" not in text
+    page = read_frozen(view, manifest, "novel/bible/world.yaml")
+    assert page["complete"] and yaml.safe_load(page["text"])["settings"][key]["note"] == note
+
+
+def test_multiline_identity_remains_reversible_on_one_directory_line(tmp_path):
+    name = "Archived\nCanonical" + "Name" * 20
+    view, text, manifest, _ = build(tmp_path, [card(name, 1, 秘密="完整状态")])
+    line = next(line for line in text.splitlines() if line.startswith("- " + json.dumps(name)))
+    fields = line.removeprefix("- ").split(" | ")
+    assert json.loads(fields[0]) == name
+    pointer = json.loads(fields[-1]).removeprefix("全文 ")
+    assert pointer == CARD(name)
+    page = read_frozen(view, manifest, pointer)
+    assert page["complete"] and "完整状态" in page["text"]

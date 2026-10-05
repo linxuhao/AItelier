@@ -1744,6 +1744,7 @@ def _register_lifecycle_tools(tool):
                     "digest_scope": "original_unprojected_observation",
                     "authorization_input": False,
                     "omitted_fields": ["command", "detail", "error"],
+                    "audit_owner_details": "lost/unknown retain kind and count; details omitted",
                     "error_details": "category retained; text after ': ' omitted",
                     "text_redaction": "existing State text redaction"}}
 
@@ -2017,6 +2018,8 @@ def _quiescence_transport_projection(observation: dict) -> dict:
         if isinstance(value, str):
             if field in {"command", "detail", "error"} and value:
                 return "[REDACTED DETAIL]"
+            if field in {"lost", "unknown"} and ":" in value:
+                value = value.partition(":")[0] + ":[REDACTED DETAIL]"
             if field in {"errors", "reason"} and ": " in value:
                 value = value.partition(": ")[0] + ": [REDACTED DETAIL]"
             return _redact(value)

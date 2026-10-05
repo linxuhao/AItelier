@@ -69,7 +69,8 @@ async def test_normal_measure_preserves_mixed_blockers_errors_and_original_diges
 
     def audit(run_id):
         if run_id == "run-live":
-            return {"lost": ["atomic-lost"], "unknown": ["native-unknown"], "alive": 1}
+            return {"lost": ["atomic:" + command], "unknown": ["native:" + command],
+                    "alive": 1}
         raise RuntimeError(command)
 
     sf.audit_operation_owners.side_effect = audit
@@ -121,7 +122,10 @@ async def test_normal_measure_preserves_mixed_blockers_errors_and_original_diges
     assert {name: len(rows) for name, rows in projected["blockers"].items()} == {
         name: len(rows) for name, rows in raw["blockers"].items()}
     assert projected["runs"][0]["audit"] == {
-        "lost": ["atomic-lost"], "unknown": ["native-unknown"], "alive": 1}
+        "lost": ["atomic:[REDACTED DETAIL]"],
+        "unknown": ["native:[REDACTED DETAIL]"], "alive": 1}
+    assert raw["runs"][0]["audit"]["lost"] == ["atomic:" + command]
+    assert raw["runs"][0]["audit"]["unknown"] == ["native:" + command]
     assert projected["runs"][0]["active_operations"] == 3
     assert projected["registered_external_owners"][0]["attempt_id"] == "attempt-live"
     assert projected["godot_render_owners"][0] == godot

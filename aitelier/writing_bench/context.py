@@ -32,7 +32,7 @@ def _line(*fields: object) -> str:
     def single_line(field: object) -> str:
         text = str(field)
         # Identity and read addresses are exact; quote line breaks reversibly.
-        return json.dumps(text, ensure_ascii=False) if "\n" in text or "\r" in text else text
+        return json.dumps(text) if "".join(text.splitlines()) != text else text
     return "- " + " | ".join(single_line(f) for f in fields if f not in (None, "", []))
 
 

@@ -47,6 +47,8 @@ aitelier "build me a todo app"
 aitelier server
 
 # Tests
+# Only in a throwaway container (docker run --rm ... aitelier:latest, network none,
+# 2 CPU/2 GiB, <=4 at once), never in the production aitelier container (OOM 2026-09-23)
 pytest tests/unit -v        # ~700 unit tests
 pytest tests/ -v            # full suite: ~985 unit+integration tests
 pytest tests/ -m network    # opt-in live tests (SearXNG / PyPI / httpbin), may flake

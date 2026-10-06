@@ -15,7 +15,7 @@ from core.state_privacy import writer_only_read
 
 from core.state_graph import StateConflict, StateGraphError, StateGraphStore, canonical, digest, key, text
 from core.state_attempts import StateAttempts, artifact_ref, evidence_director_identity
-from skillflow.exceptions import IsolationUnavailable
+
 
 
 
@@ -945,8 +945,14 @@ class StateService:
             # fresh attempt: the retained commits and staged files, by step.
             return self._with_refusals({**observed, "relay_inventory": self._relay_inventory(observed)})
         if observed["status"] == "candidate" and not observed["artifact_ref"]:
+            # The workflow SDK's precise isolation exception is imported only on
+            # this workflow-artifact reconciliation path, which already needs the
+            # SDK. The pure-State surface keeps no module-level workflow import,
+            # and this branch never catches a generic Exception as success.
+            from skillflow.exceptions import IsolationUnavailable
             try:
                 artifact = self._artifact(observed)
+
             except StateConflict as exc:
                 return self._with_refusals({**observed, "artifact_pending": True, "note": str(exc)})
             except IsolationUnavailable as exc:

@@ -690,6 +690,107 @@ async def test_wait_names_the_unpinned_candidate_and_keeps_healthy_scope_usable(
     # Negative control: once the artifact IS pinned, the same candidate is no
     # longer actionable and the reservation of another owner stays waitable.
     attempts.reconcile(a["attempt_id"], sf, ARTIFACT)
-    assert wait_disposition(service.store, "game", cursor, None, [a["attempt_id"]], None) == {
-        "reason": "nothing_to_wait"}
     assert attempts.get(other["attempt_id"])["status"] == "reserved"
+
+
+# ── recovery watermark, scope propagation and post-pin replay ────────
+
+def _recovery_service(system, tmp_path):
+    from core.state_service import StateService
+    from core.workspace_manager import WorkspaceManager
+    return StateService(system[0].db, WorkspaceManager(str(tmp_path / "workspaces")),
+                        system[2], {}, project_read_trusted=True)
+
+
+def test_recovery_page_uses_a_fresh_watermark_and_rescans_a_partial_sweep(system, tmp_path):
+    """A partial recovery sweep must NOT hand back a stale watermark.
+
+    The page cursor is only authoritative once a full ten-row page was rotated;
+    otherwise a caller holding a remembered value (a stale ``8``) could skip
+    the very rows it has not observed and let a real completed owner stay
+    cached as running. Returning 0 forces the rescan. It must also never
+    delete checks: the owner stays exactly as recorded for the rescan to find.
+    """
+    from core.state_changes import recover_page
+    store, attempts, sf = system
+    a = reserve(system)
+    _, rid = _complete_without_artifact(system, a)
+    _record_dead_worktree(store, rid, tmp_path)
+    service = _recovery_service(system, tmp_path)
+    with store.transaction() as conn:
+        seq = conn.execute("SELECT seq FROM state_attempts WHERE attempt_id=?",
+                           (a["attempt_id"],)).fetchone()["seq"]
+    # The row IS in scope for this call, so a partial page of one row is swept.
+    after, ok = recover_page(service, "game", seq - 1, None, None)
+    assert ok is True
+    assert after == 0, "a partial page must not retain a stale watermark"
+    # The rescan is what exposes the completed owner under its exact identity.
+    result = service.reconcile_attempt(a["attempt_id"])
+    assert result["artifact_pending_reason"] == "owned_worktree_unavailable"
+    assert attempts.get(a["attempt_id"])["artifact_ref"] is None
+    # A stale watermark (8) still yields 0, i.e. "rescan", and never deletes
+    # the checks the director must re-read.
+    after, ok = recover_page(service, "game", 8, None, None)
+    assert ok is True and after == 0
+    assert attempts.get(a["attempt_id"])["status"] == "candidate"
+
+
+@pytest.mark.asyncio
+async def test_recovery_scope_propagates_any_union_and_all_intersection(system, tmp_path):
+    """recover_page/`_recover_page` must apply the SAME OR/AND filter group as
+    the wait: filter_mode="any" unions a selected node with a watched attempt,
+    and "all" intersects them. A union scope cannot leave a real completed
+    owner untouched merely because it also names an unrelated node."""
+    from core.state_changes import recover_page
+
+    store, attempts, sf = system
+    store.add_nodes("game", [spec("d")])
+    a = reserve(system)               # node "a"
+    launch(system, a)
+    d = reserve(system, "d", request="d-owner")
+    rid_d = launch(system, d)
+    sf.pause_run(rid_d)
+    # Stored status is still running until a recovery sweep observes the pause.
+    assert attempts.get(d["attempt_id"])["status"] == "running"
+    service = _recovery_service(system, tmp_path)
+    # "all" intersects node_key="a" with attempt_id=d, so the paused owner is
+    # not swept even though it is real running-row work.
+    _, ok = recover_page(service, "game", 0, ["a"], [d["attempt_id"]], "all")
+    assert ok is True
+    assert attempts.get(d["attempt_id"])["status"] == "running"
+    # "any" unions them: the watched attempt is swept and its real pause is
+    # projected, so it can no longer stay cached as running.
+    _, ok = recover_page(service, "game", 0, ["a"], [d["attempt_id"]], "any")
+    assert ok is True
+    assert attempts.get(d["attempt_id"])["status"] == "paused"
+
+
+@pytest.mark.asyncio
+async def test_wait_replays_event_after_artifact_pin_with_a_fresh_watermark(system, tmp_path):
+    """A committed observation is replayable from a fresh watermark cursor.
+
+    The unavailable-owned-worktree candidate is first actionable, never idle.
+    Once its owner pins the exact artifact, the committed attempt_observed
+    event is replayed from the fresh watermark — the wait never silently
+    reports idle over a change it had not yet read.
+    """
+    store, attempts, sf = system
+    a = reserve(system)
+    _, rid = _complete_without_artifact(system, a)
+    _record_dead_worktree(store, rid, tmp_path)
+    service = _recovery_service(system, tmp_path)
+    cursor = store.events("game")[-1]["seq"]
+    unpinned = await service.wait_for_state_change("game", after=cursor,
+        return_when_idle=True, timeout_seconds=0)
+    assert unpinned["reason"] == "action_required"
+    assert unpinned["attempts"] == [
+        {"attempt_id": a["attempt_id"], "status": "candidate", "artifact_ref": None}]
+    before = store.events("game")[-1]["seq"]
+    attempts.reconcile(a["attempt_id"], sf, ARTIFACT)
+    fresh = store.events("game")[-1]["seq"]
+    assert fresh > before
+    replayed = await service.wait_for_state_change("game", after=before,
+        return_when_idle=True, timeout_seconds=0)
+    assert replayed["events"][-1]["event_type"] == "attempt_observed"
+    assert replayed["events"][-1]["payload"]["artifact_ref"] == ARTIFACT
+

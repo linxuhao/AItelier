@@ -1,7 +1,7 @@
 """Index-mode director notebook: short assertions listed, bodies fetched by address.
 
 A notebook that can only grow is a cliff, not a brake. The wuxia-myth permanent
-section reached 99,730 of 100,000 characters because the only documented way for
+section reached 99,730 of 100,000 characters because the only written-down way for
 a ruling to expire was "replaced in place by a newer one" and nothing executed
 that sentence. Entries therefore have two retirement channels and neither one
 deletes a body:

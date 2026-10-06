@@ -103,6 +103,14 @@ class SetNodeFacet(Node):
     facet: str
 
 
+class SetNodePriority(Node):
+    priority: int
+    expected_priority: int
+    reason: str
+    director_identity: str | None = None
+
+
+
 class Frontier(Project):
     limit: int = 30
 
@@ -640,6 +648,7 @@ WRITE_REQUESTS = {
     "create_project": CreateProject, "add_nodes": AddNodes, "revise_node": ReviseNode,
     "open_project": OpenProject, "close_project": CloseProject,
     "split_node": SplitNode, "supersede_node": SupersedeNode, "set_node_facet": SetNodeFacet,
+    "set_node_priority": SetNodePriority,
     "start_attempt": StartAttempt, "request_attempt_base": RequestAttemptBase,
     "recover_attempt": Attempt, "reconcile_attempt": Attempt,
     "disposition_failed_attempt": DispositionFailedAttempt,
@@ -750,6 +759,7 @@ def _handlers(service) -> dict:
         "project_visibility": service.project_visibility,
         "revise_node": service.store.revise_node, "split_node": service.store.split_node,
         "supersede_node": service.store.supersede_node, "set_node_facet": service.store.set_node_facet,
+        "set_node_priority": service.set_node_priority,
         "start_attempt": service.start_attempt,
         "request_attempt_base": service.request_attempt_base,
         "recover_attempt": service.recover_attempt, "reconcile_attempt": service.reconcile_attempt,

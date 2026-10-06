@@ -1031,6 +1031,7 @@ class StateService:
 
     def add_reference(self, project_id, node_key, reference_id, kind, ref, label, provenance_actor,
                       artifact_ref=None, report_sha256=None, protect=False):
+
         status = "historical"
         if kind == "run":
             key(ref, "run id")
@@ -1042,6 +1043,21 @@ class StateService:
             protect = protect or status not in {"completed", "failed"}
         return self.portfolio.add_reference(project_id, node_key, reference_id, kind, ref, label,
                     provenance_actor, status, artifact_ref, report_sha256, protect)
+
+
+    def set_node_priority(self, project_id, node_key, priority, expected_priority, reason,
+                          director_identity=None):
+        """Director-only scheduling change; never an acceptance write.
+
+        The authenticated transport actor is the authority; ``director_identity``
+        is validated self-declared provenance only. The store applies the
+        compare-and-swap and writes the audit event.
+        """
+        from core.state_attempts import evidence_director_identity
+        director_identity = evidence_director_identity(director_identity)
+        return self.store.set_node_priority(project_id, node_key, priority, expected_priority, reason,
+                                            actor=self.actor, director_identity=director_identity)
+
 
     def refresh_project(self, project_id, after=0, limit=20):
         from core.state_graph import integer

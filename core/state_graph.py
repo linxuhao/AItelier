@@ -624,8 +624,47 @@ class StateGraphStore:
                         {"facet": own, "previous": previous, "revision": node["revision"]})
             return {"key": node_key, "facet": own, "previous": previous, "changed": True}
 
+    def set_node_priority(self, project_id: str, node_key: str, priority: int, expected_priority: int,
+                          reason: str, actor: str | None = None,
+                          director_identity: str | None = None) -> dict:
+        """Change ONLY scheduling priority, under a compare-and-swap on the current value.
+
+        ``priority`` orders the selection surfaces (frontier, overview); it is
+        not part of a node's acceptance contract. The write is a CAS: a stale
+        ``expected_priority`` refuses with nothing written, and re-setting the
+        current value is a no-op that obeys the CAS but emits no change event.
+        A real change updates ``priority`` and ``updated_at`` only and appends
+        one ``node_priority_set`` event. Identity, revision, contract hash,
+        status, dependencies, acceptance, evidence, receipts and every running
+        attempt are untouched; a SUPERSEDED node stays superseded and is never
+        resurrected by a scheduling change.
+        """
+        priority = integer(priority, "priority", -100000, 100000)
+        expected = integer(expected_priority, "expected_priority", -100000, 100000)
+        reason = text(reason, "priority reason", 4000)
+        with self.transaction(write=True) as conn:
+            node = self._node(conn, project_id, node_key)
+            current = node["priority"]
+            if current != expected:
+                raise StateConflict("node priority changed; reload before reprioritizing")
+            if current == priority:
+                return {"key": node_key, "priority": priority, "previous": current,
+                        "revision": node["revision"], "changed": False}
+            conn.execute("UPDATE state_nodes SET priority=?,updated_at=? WHERE project_id=? AND node_key=?",
+                         (priority, now(), project_id, node_key))
+            payload = {"previous": current, "current": priority, "revision": node["revision"],
+                       "reason": reason}
+            if actor is not None:
+                payload["actor"] = actor
+            if director_identity is not None:
+                payload["director_identity"] = director_identity
+            self._event(conn, project_id, node_key, "node_priority_set", payload)
+            return {"key": node_key, "priority": priority, "previous": current,
+                    "revision": node["revision"], "changed": True}
+
     def facet_lint(self, project_id: str) -> dict:
         """The same rules, read-only, over the whole project including legacy nodes."""
+
         with self.transaction() as conn:
             self._project(conn, project_id)
             nodes, graph = self._graph(conn, project_id)

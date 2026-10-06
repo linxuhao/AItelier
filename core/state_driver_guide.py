@@ -126,7 +126,12 @@ Every node you create carries `facet`: design | contract | test | content | inte
 Add/revise/split/hold/supersede goals with expected revisions and reasons. Do not weaken a criterion to hide failure. After a contract change, reread the frozen context and dispatch a new attempt only when dependencies permit. External reports cannot replace a workflow-backed attempt's completion. One external job covering multiple goals needs a separately scoped attempt per goal.
 Maintain the compact notebook and reference State events and exact reports without duplicating their histories. Notify the user for meaningful completion, failure, blockers or required decisions; coalesce routine progress. A wait, refresh, completed run or private commit never authorizes publication or deployment.
 
+## Priority: scheduling metadata, not acceptance
+`priority` is an integer in [-100000, 100000], default 0, that orders the frontier and overview selection surfaces (higher first). It is SCHEDULING metadata only. `set_node_priority` (project_id, node_key, priority, expected_priority, reason, director_identity?) is a compare-and-swap on the node's CURRENT priority: a stale `expected_priority` refuses and writes nothing, and re-setting the current value is a no-op that emits no event. A real change updates `priority` and `updated_at` only and appends one `node_priority_set` event with previous/current, reason and actor. It never changes node identity, revision, contract_hash, status, dependencies, acceptance, evidence, receipts or any running attempt, and never substitutes for revise_node or verify_node.
+
+
 ## Transport examples
+
 Codex, Claude, an AItelier workflow, CI, or an external harness may carry authenticated protocol calls or execution observations. They are examples only: none owns State, supplies authority through its name, or changes the protocol contract.
 """
 

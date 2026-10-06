@@ -18,3 +18,365 @@ The repository documentation below describes AItelier itself.
 
 ---
 
+# Output destinations (current contract)
+
+`output.target` is `artifact` (default) or `code`, independent of `output.mode`.
+Code agents write into their run worktree using repo-relative paths. Reads,
+searches and tests use the current contents of that worktree.
+Artifacts include plans, task cards, reviews, reports and `code_changes.json`
+receipts. Fixed slots declare their destinations individually: README uses code;
+a verification report uses artifact. The required artifact set is validated
+before publication, with unchanged files preserved when carry_forward is enabled.
+Validation failure retains the candidate for repair and blocks delivery. Code
+review determines acceptance. See `docs/output-target-migration.md` for deployment.
+
+# AItelier repository guide
+
+This guidance applies to any coding agent (Claude Code, Codex) working in this repository.
+Under Developpement, no backward compatbility is needed.
+
+## Project Overview
+
+AItelier is a multi-agent AI system that plans, architects, implements, and verifies software projects. Green (Maker) and Red (Checker) agents execute SkillFlow graph nodes and consume resolved context from prior steps. Code outputs use the current run worktree; reads, searches and tests operate on its current files. Artifacts use per-step output folders and are published after validation.
+
+An artifact revision publishes the complete required set. With `carry_forward`, unchanged artifacts are preserved. Loop-body artifacts are scoped to the current item; in-loop readers receive that item and aggregators receive all items (`scope: all` makes this explicit). Artifact history versions published outputs at the workspace root; use `get_skillflow().step_output_versions(pid, config, step)` and `git show <sha>:<config>/<step>/<file>` to recover a version. Code candidates have path-scoped commits and artifact change receipts; review determines acceptance.
+
+**Pipeline execution is handled by [Skillflow](https://github.com/linxuhao/skillflow)** — a config-agnostic graph executor (PyPI: `skillflow-py`). AItelier is the host application: UI, DB, workspace management, LLM provider config, and pipeline-specific templates/tools.
+
+## Build & Run
+
+```bash
+# Install AItelier with the exact-pinned reviewed public engine
+pip install -e .
+
+# Run CLI
+aitelier
+aitelier "build me a todo app"
+aitelier server
+
+# Tests
+# Only in a throwaway container (docker run --rm ... aitelier:latest, network none,
+# 2 CPU/2 GiB, <=4 at once), never in the production aitelier container (OOM 2026-09-23)
+pytest tests/unit -v        # ~700 unit tests
+pytest tests/ -v            # full suite: ~985 unit+integration tests
+pytest tests/ -m network    # opt-in live tests (SearXNG / PyPI / httpbin), may flake
+
+# Web SPA front-end unit tests (Vitest + jsdom) — separate toolchain, not run by pytest
+cd web && npm install && npm test   # tests web/__tests__/ pure logic + component tests
+```
+
+Test config: `pytest.ini` (testpaths=tests, asyncio_mode=auto, `addopts = -m "not network"`). Suites live in `tests/{unit,integration,e2e,skillflow}`; network-dependent tests are marked `network` and deselected by default. Fixtures in `tests/conftest.py` provide isolated SQLite DB and FastAPI TestClient. The web SPA's Svelte components and utility modules are unit-tested under `web/__tests__/` and `web/src/__tests__/` (Vitest+jsdom); the full DPE pipeline runs end-to-end offline with mocked agents in `tests/integration/test_full_pipeline_real_runner.py`.
+
+### Docker deployment & secrets
+
+The backend + web UI run in Docker (`Dockerfile`, `docker-compose.yml`). The CLI auto-manages it: `cli/server.py:ensure_server_running` reuses the container if it is up, otherwise runs `docker compose up -d aitelier`. Docker is mandatory — there is **no host-process fallback** (running uvicorn on the host would make DPE git commits use the host developer's `~/.gitconfig` identity instead of the image's `AItelier` identity).
+
+```bash
+docker compose up -d            # build (first run) + start; the CLI does this for you
+docker compose logs -f          # tail
+```
+
+- **Path-consistency:** host `~/.AItelier` is bind-mounted at the **same absolute path** inside the container, and `HOME` is set to the host home, so `Path.home()/.AItelier` and DB-stored absolute paths resolve identically on host (CLI) and in the container (server). Runs as host uid/gid so files keep host ownership.
+- **External access:** the container binds `0.0.0.0`, published as `127.0.0.1:4444` (loopback-only — the public path is a Cloudflare tunnel reaching `aitelier:4444` over the shared `edge` network). `AITELIER_ALLOW_EXTERNAL=1` disables the app-level localhost guard (requests arrive from the bridge/tunnel, never 127.0.0.1).
+- **Reader/writer auth** (`api/main.py:write_gate`): reads (GET) are open; mutating requests require an allowlisted **Cloudflare Access JWT** (`core/cf_access.py`, verified against `AITELIER_CF_TEAM_DOMAIN` + `AITELIER_CF_AUD`, email ∈ `AITELIER_WRITERS`) **or** the CLI's `AITELIER_ADMIN_TOKEN` (`X-AItelier-Admin-Token` header, honored only off-tunnel). The frontend read-only mode (`/api/me` → `can_write`) is UX only — the server gate is the control. Gate is inactive unless `AITELIER_CF_AUD` is set (local dev).
+- **API-key secret:** every LLM key (`ARK_API_KEY` is the shipped primary, `DEEPSEEK_API_KEY` the failover — see `model_routes.json`) is a **secret file** in `~/.aitelier-secrets/` (host dir overridable via `AITELIER_SECRETS_DIR` — compose's mount source follows it), whole-dir-mounted read-only at `/run/aitelier-secrets` (no per-key compose enumeration — any key name your provider tables declare resolves as soon as the file exists), NOT an env var, so test/build subprocesses that inherit `os.environ` don't receive it. `core/ai_router.py:_read_secret` resolves `/run/secrets/<name>` (legacy fallback) → `$AITELIER_SECRETS_DIR/<name>` (the mount) → `os.getenv`. Keep secrets out of `.env`/git (chmod 600).
+- **Git auth (clone/push/PR):** the host's `~/.ssh` / `~/.git-credentials` are **not** mounted into the container, so private-repo clone broke after containerization. Fixed with the same secret-file model: a **fine-grained GitHub PAT** at `~/.aitelier-secrets/GITHUB_TOKEN` (reaches the container via the whole-dir mount; the helper's path comes from `AITELIER_GITHUB_TOKEN_FILE`). `docker/git-credential-helper.sh` (wired via `GIT_CONFIG_*` in compose) feeds it to **github.com HTTPS remotes only** for clone/push; `core/git_ops.py:create_github_pr` reads the same secret for PR creation. An empty token file = "no credentials" (public clone still works). Chosen over bind-mounting `~/.git-credentials` because the container runs LLM-generated code — a scoped, revocable PAT has a far smaller blast radius than the host's whole credential store.
+- **SkillFlow output-target migration:** this checkout exact-pins the reviewed
+  public `skillflow-py==1.5.73` release from PyPI. Docker and local installs use
+  `pip install -e .`; the runtime checks the engine supports the explicit target
+  contract before starting. Rebuild the image to change the installed engine;
+  restart alone does not replace it. Ship a later engine change by publishing and
+  verifying a new SkillFlow release, bumping the exact `skillflow-py==` pin in
+  `pyproject.toml`, then running `docker compose build aitelier && up -d`. A
+  `pip install` inside the running container lives in the writable layer and is
+  lost on the next recreation.
+
+
+Env reference lives in `.env.example`.
+
+## Architecture
+
+### Repo Separation
+
+```
+~/stepflow/  (or ~/skillflow/)  # Independent library (config-agnostic framework) — PyPI: skillflow-py
+# Editable install (pip install -e <path>) — changes are live immediately (host only, NOT the container)
+├── src/skillflow/
+│   ├── core.py, graph.py, workspace.py, tool_loader.py, docs.py, ...
+│   │                        # docs.py backs the native skillflow_docs_* tools:
+│   │                        # search/read skillflow's own docs + schema source (>=1.5.22)
+│   ├── tools/               # 17 native tools (read_file, write, pytest, repo_apply,
+│   │                        # skillflow_docs_{list,search,read}, ...)
+│   └── plugins/             # linter, addon_converter, skill_converter (DEPRECATED,
+│                            # not registered — replaced by AItelier's pipeline_forge),
+│                            # skill_runner (runner mode: SkillTool + RunnerService + skillflow-mcp)
+└── {run,convert}_cli.py     # skillflow-run / -convert / -lint / -mcp console scripts
+
+~/AItelier/                  # Host application
+├── configs/                 # Skillflow graph configs (dpe_default.yaml, meta_conversation.yaml)
+├── agent_configs/           # LLM agent configs by role name (model, template, tools)
+├── templates/               # LLM prompt templates (*.md)
+├── aitelier/tools/          # ~27 AItelier custom tools: DPE web tools (web_search, web_fetch,
+│                            # run_tests, user_stories_present); pipeline_forge (forge_palette,
+│                            # register_tool, forge_registry_check, forge_dryrun_smoke); novel
+│                            # (scaffold_bible, apply_state, continuity_check, state_probe, …);
+│                            # game harness (godot/unity _compile/_playtest); restage, repo_delete, …
+├── core/                    # Business logic (agents, scheduler, AI router, DB, workspace)
+├── api/                     # CLI backend (FastAPI, localhost-only)
+├── web_api/                 # Web GUI backend (multi-tenant, Cloudflare Access)
+├── cli/                     # Typer CLI with Rich TUI dashboard
+└── models/                  # Pydantic V2 data schemas
+```
+
+### Pipeline Flow
+
+```
+1. Meta Conversation (configs/meta_conversation.yaml)
+   intent_detect → gather (Q&A loop, checkpoint) → finalize → project_brief.md + step1_goals.json
+
+2. DPE Pipeline (configs/dpe_default.yaml)
+   git_sync_pre → Researcher (1) → 1_review → Architect (2) → 2_review
+   → PM (3) → 3_review → task_loop
+   → [per task] t_plan → t_plan_review → t_impl (code worktree output)
+   → t_impl_review
+   → 5_test (tool) → 5_evidence → Delivery README (5_readme)
+   → candidate snapshot → Final Verifier (5, report-only) → candidate integrity
+   → 5_knowledge (tool) → 5_review → git_push_post (tool; push-or-skip, never fails the run) → done
+   (node "1" uses agent_config `researcher` + template step1_5_researcher.md — the "1_5"
+    naming survives only in the filename, not the graph node id)
+
+3. Pipeline generation (configs/pipeline_forge.yaml) — a grounded, self-provisioning generator
+   that replaces skillflow's built-in `skill_converter` (deprecated: it was ReAct-shaped, ungrounded
+   + lint-only, and hallucinated tools — see design/pipeline_forge.md).
+   survey(ground in the live tool registry) → architect(graph shape + missing tools) → tool_plan
+   → tool_loop(BUILD + register each missing tool in-graph) → emit_graph(graph + roles + templates)
+   → 3-part gate: skillflow_lint → forge_registry_check → forge_dryrun_smoke → explain(checkpoint) → done
+   Driven by the butler's `generate_pipeline(description=<user request>[, edit_target=gen_<slug>])`
+   tool (edit_target seeds the existing pipeline as a baseline for a surgical change). scheduler_owned,
+   so the poller drives it. On completion the host BRIDGES it into a runnable config
+   (`core/pipeline_registry.py:register_forge_pipeline`): namespaced `gen_<slug>`, persisted to
+   `~/.AItelier/configs/` (+ `<slug>.roles.json` for the real role prompts; gitignored, boot-scanned),
+   live-registered, manifest via `ConfigRegistry.register_one`. Missing tools persist to
+   `~/.AItelier/tools/` (boot-scanned). NOTE: the 3 gates verify STRUCTURE, not runtime behavior —
+   the CODING-mode `drive_pipeline` tool test-drives the generated pipeline context-isolated and the
+   agent fixes it (edit gen_<slug>.yaml/.roles.json → drive again). See design/pipeline_forge.md.
+
+4. Butler CODING MODE (user-toggled per session: SPA toggle / `mode` field; sessions.mode column)
+   The butler becomes an interactive coding agent (templates/coding_mode.md): direct repo tools
+   (edit_file with read-before-edit guard, create_file, bash with secret-scrubbed env,
+   web_search/web_fetch) + full-transcript persistence (chat_history.message_json; resume after
+   budget_exhausted at coding_max_tool_turns or page refresh) + condenser (compacter agent
+   summarizes past compact_at_tokens with a compaction_through watermark).
+   Non-trivial changes go through the PLAN-GATED runner (configs/coding_task.yaml, driven via
+   skillflow 1.5.0 RunnerService — the same core skillflow-mcp serves to external agents):
+   runner_start → plan → ENGINE-ENFORCED checkpoint (implement not released until user approves)
+   → runner_approve/reject → implement with own tools → runner_submit. skillflow_tool proxies the
+   step's write_*/read_*/native tools; host tool names are bounced with a redirect error.
+   Post-change review: start_config_run(config_name="code_review", seed_text=<task + verbatim
+   git diff>) — butler-driven (scheduler_owned: false), verdict returns synchronously in outputs.
+```
+
+### Existing-repo support
+
+A "fix a bug / add a feature" request on an existing codebase becomes a **new project** with `repo_type="existing"` + `repo_path`. The DPE pipeline uses `output.target: code` to write directly into the run worktree and records candidate commits via skillflow's `code_path_resolver` (wired in `api/dependencies.py:_existing_repo_code_path`).
+
+### Web UI
+
+AItelier includes a single-page web frontend generated by AItelier itself (dogfooding).
+It lives in `web/` and is served by the CLI API server.
+
+```bash
+# Start the API server (serves both API + web UI)
+aitelier server
+
+# Or start the server directly
+uvicorn api.main:app --host 127.0.0.1 --port 4444
+
+# Access the Web UI
+#   Dashboard:    http://localhost:4444/
+#   Chat:         http://localhost:4444/#/chat
+#   Project view: http://localhost:4444/#/projects/<project_id>
+
+# Start both Web API (multi-tenant, for real web deployment) and CLI API
+AITELIER_MODE=demo uvicorn web_api.main:app --host 127.0.0.1 --port 8888
+```
+
+**Architecture:**
+```
+web/
+├── index.html              # Svelte SPA entry (Vite)
+├── package.json            # npm deps (Svelte 5, Vite, Pico CSS, Vitest)
+├── vite.config.js          # Vite + Svelte plugin config
+├── svelte.config.js        # Svelte compiler options
+├── eslint.config.js        # ESLint + eslint-plugin-svelte
+├── vitest.config.js        # Vitest + jsdom config
+├── dist/                   # Vite build output (gitignored)
+│   ├── index.html          # Compiled SPA entry
+│   └── assets/             # Hashed JS/CSS bundles
+├── src/
+│   ├── main.js             # SPA mount point
+│   ├── app.css             # Global styles (Pico CSS import)
+│   ├── App.svelte          # Root component + router
+│   ├── lib/                # Utility modules
+│   │   ├── api.ts          # Typed fetch wrapper
+│   │   ├── sse.ts          # EventSource manager
+│   │   ├── markdown.ts     # Markdown + DOMPurify
+│   │   └── format.ts       # Formatting helpers
+│   ├── stores/             # Svelte stores (auth, connection, project, ...)
+│   └── views/              # Svelte view components
+└── __tests__/              # Vitest tests (pure logic + component)
+```
+
+**Key behaviors:**
+- SPA with hash routing (`#/`, `#/projects/{id}`, `#/chat`)
+- Dashboard polls `GET /api/projects` every 10s (paused during form input)
+- SSE stream provides live pipeline events → notification sidebar
+- Checkpoint modal auto-detects stale state and self-dismisses
+- All API calls are same-origin (no CORS needed)
+
+### Key Modules
+
+| Module | Role |
+|--------|------|
+| `core/agents.py` | `AgentFactory` — reads `agent_configs/`, creates DPEAgent with model+template; model `host`/`default` → `AITELIER_HOST_AGENT_MODEL` |
+| `core/prompt_assembler.py` | Assembles system/user prompts from templates + step context |
+| `core/scheduler.py` | Polls skillflow: claim → execute → confirm → advance |
+| `core/dpe_pipeline.py` | Legacy PipelineEngine (being phased out in favor of skillflow runner) |
+| `core/workspace_manager.py` | Physical directory jail, Git operations, step staging→final directory lifecycle |
+| `core/db_manager.py` | SQLite persistence (projects, tasks, settings, users) |
+| `core/ai_router.py` | `AIGateway` — LiteLLM wrapper; binds ONE concrete endpoint at a time (`_bind`), resolving an internal model name through `core/model_routes.py` and failing over to the next candidate on an endpoint error (`_complete_prebuilt`). Transport is STREAMING internally (`_call_llm`: chunks re-assembled via `stream_chunk_builder` into the exact non-streaming response — verified live on ark/qwen/opencodego; `AITELIER_LLM_STREAM=0` reverts) so the optional `on_progress` hook can tick `{chars, elapsed, served_by}` every ~3s: chunk arrival is the only signal that distinguishes a long completion from the 2026-08-27 trickle-hang class. Phases: `llm_start` (dispatch → first chunk, i.e. queue+prefill), `llm`, `llm_done`, plus `tool`/`tool_done` around agent-invoked native tools (engine) AND around inline tool NODES (`core/scheduler.py:_advance_recording_crashes` peeks `current_node` before each `advance_run` — one inline tool per call — so minutes-long gate tools show "running tool" instead of blank). Ticks flow runner→`api/sse_manager.py:push_global_event` (in-memory `__global__` SSE, deliberately NOT NotificationBus/outbox) → `llm_progress` line on the SPA project page + trace live footer; they also land in `core/llm_liveness.py` so the scheduler's hung-step warning can say WHICH it sees — "long generation" (chars growing) or "no generation" (no chunk for N min). The cap is per-COMPLETION, never per-step: a 30-min multi-turn step is untouched as long as no single call exceeds it |
+| `core/model_routes.py` | Internal model name → ordered `provider/model` candidates (`model_routes.json`); a bare name that is not a route is rejected, a concrete one passes through |
+| `core/meta_agent.py` | Autonomous CLI/WebGUI butler, DUAL-MODE (`sessions.mode`): butler = orchestration/inspection (drives meta_conversation, DPE & pipeline_forge runs via the scheduler poller; run-completion relay — but NOT the `generate_pipeline` tool itself, which is coding-mode only); coding = interactive coding agent (edit_file/create_file/bash/web tools, `generate_pipeline` + `drive_pipeline` for the generate→test-drive→fix loop, runner_* + skillflow_tool over skillflow RunnerService, transcript persistence + condenser + budget pause) |
+| `core/pipeline_registry.py` | Bridge that makes a generated pipeline runnable: `register_forge_pipeline` (pipeline_forge: graph + role_table + templates → namespaced `gen_<slug>` + roles with real prompts + `<slug>.roles.json`), namespaced roles, persist to `~/.AItelier/configs/`, live-register, boot-scan (`load_generated_configs`), `reload_generated_pipeline` for edits; update overwrites in place. `archive_generated_pipeline(…, purge=)` retires one — needed because `ConfigRegistry.build` enumerates `sf.list_graphs()` (skillflow's own table), so deleting the YAML alone leaves a runnable zombie; archive moves the files aside + records the name in `~/.AItelier/configs/_archived/archived.json`, which `build` and the boot scan both consult, while keeping the graph row so existing runs stay readable (`purge=true` deletes it) |
+| `core/suggestions.py` | Lessons about a CONFIG, made durable. A review verdict, a failed drive, a replay that finds a regression — each is a finding about the pipeline, and each used to die inside the run that produced it. The one writer, holding the rule that needs code rather than a docstring: a suggestion is recorded against the config's **base version** and reported `stale_base` once the config moves on (a prompt to re-read it, not to drop it — applying an old-base suggestion to latest without re-reading is how a fix lands on the wrong thing), and `applied` must name the version carrying the fix or the status is unfalsifiable. Addon targets resolve through the overlay's alias (`game_harness` → `dpe_game`), since that is the name the engine versions. Butler tools: `suggest_pipeline_change` / `list_pipeline_suggestions` (butler-visible — they touch no config, repo or run, and "this pipeline keeps doing X" is noticed while inspecting, not while editing) and `resolve_pipeline_suggestion` (coding-mode: `applied` asserts a config was changed) |
+| `core/event_bus.py` | In-process pub/sub for pipeline events |
+| `api/dependencies.py` | FastAPI DI: SkillFlow, ToolLoader (scans `aitelier/tools/` + `~/.AItelier/tools/` for generated tools), AgentConfigs singletons; registers `addon_converter` (deprecates + drops `skill_converter`); boot-scans `~/.AItelier/configs/` for `gen_*` pipelines; `register_pipeline_from_run` dispatch (pipeline_forge vs skill_converter); `code_path_resolver` for existing repos |
+| `aitelier/runner.py` | `AItelierStepRunner` — bridges skillflow StepRunner protocol to PipelineEngine |
+| `cli/tui/dashboard.py` | Rich TUI with project list, chat, checkpoint review |
+
+### Configuration Files
+
+- **`configs/dpe_default.yaml`** — v2 skillflow graph: steps, transitions, gates, tools, checkpoints
+- **`configs/meta_conversation.yaml`** — Meta conversation graph (3 steps: intent_detect → gather → finalize)
+- **`configs/coding_task.yaml`** — Plan-gated coding runner graph (plan checkpoint → implement), butler-driven via RunnerService
+- **`configs/code_review.yaml`** — One-shot diff review (butler-driven, `scheduler_owned: false`; verdict returns synchronously)
+- **`x-aitelier: repo_mode`** (per-config, default `code`) — does a run of this config produce/modify code in a git repo? `none` gives a repo-less workspace (no `repo_path`, no throwaway `projects/<id>/.git`) and lists the run in the dashboard's non-code section. DECLARED, never inferred from what a config *registers* — conflating the two axes is what gave `drive_pipeline` test-drives a fake empty repo. Generated `gen_*` pipelines DERIVE it from their graph (`core/pipeline_registry.py:derive_repo_mode`: git-touching tools / `validation.tool` / `from: repository` / role tool lists — read-only tools don't count, since skillflow's code-path resolution is lazy); the derivation is asymmetric on purpose — any signal ⇒ `code`, because a wrong `none` is a hard runtime failure while a wrong `code` only costs an unused repo
+- **Config content versions + run pinning (skillflow ≥1.5.56)** — `skillflow_graphs` is INSERT OR REPLACE'd, so every re-registration destroyed the content it replaced, and a run stored only `graph_name`. An edit landing mid-run therefore retargeted that run's REMAINING steps (its finished steps validated against one set of rules, its next ones against another, silently), and an edit after a run finished made its trace describe a graph that no longer existed. The old `version` column did not help: bumped blindly on every registration, and hosts re-register every config on every boot, it counted process restarts — every graph in the live deployment sat at **312** with identical `updated_at`. `skillflow_graph_versions` is the history: append-only, one row per distinct CONTENT, keyed by a sha256 of the canonical (`sort_keys`) form. `register_graph` mints a version only when the content actually changes (so a boot scan is a no-op and the number means edits) and returns it; `create_run` pins **the version whose digest matches the graph it built the step rows from**, never merely "the latest row" — `register_graph` publishes to `_graphs` before its transaction, so those two can disagree and pinning the wrong one puts a run's rows and its resolver on different graphs. Every run-scoped resolver lookup goes through the pin. `repin_run(run_id, version=None)` is how a run in flight adopts an edit — that was a real recovery action (a node added mid-flight unwedged a live run) and pinning would otherwise have removed it, so it stays, as a deliberate recorded operation rather than a side effect of any edit anywhere. Legacy rows keep NULL and resolve by name; `is_latest` is None for them rather than claiming a version they never had. Host surface: `pipeline_versions` (history + what changed at each version, reported in `core/baseline.py:diff`'s vocabulary), `config_edit` → the version its edit produced, `drive_pipeline` → the version it exercised, and a baseline records `graph_version` so a replay says "these differ between v3 and v5". All of it `getattr`-guarded: the container tracks PyPI while the host runs an editable checkout, so the engine can be older than the caller
+- **`skillflow_steps.release_count` + `release_claim` (skillflow ≥1.5.56)** — a claim handed back because its EXECUTOR went away, not because the step failed. `fail_step(retryable=True)` was the wrong tool for that: it spends `retry_count`, the budget a genuine failure needs, and its error blames the step for what the client did. A cancellation NEVER touches `retry_count` and never ends a run: charging it — in any form — meant a step quietly lost its resilience to real failures and then died on the next genuine one, destroying the staged output this exists to protect (the motivating case is a driver that vanished while a FINISHED step waited to be confirmed). Two shapes of that were shipped and reverted before the charging itself was recognised as the mistake. `release_count` is monotonic, cleared nowhere, and IS the record; every third release logs a warning saying the budget is deliberately not charged. There is deliberately no cap — a repeatedly-killed driver does keep re-running the step at full LLM cost, which is the accepted price. Counted in a COLUMN, not in `inputs_json` — a re-claim rebuilds that dict from freshly resolved context and preserves only `_error`/`_validation_error`/`_feedback`, which is also why the reaper's `_stale_recovery_count` **cannot actually count across reclaims** (unfixed; fixing it changes when that safety net fires)
+- **Four loops hold a claim across an await** — `run_driver._step`, `meta_agent._run_meta_until_checkpoint`, `meta_agent._run_pipeline_until_checkpoint`, `scheduler._run_skillflow_tick` — and every one must call `core/run_driver.py:release_claim_on_cancel` in its `except asyncio.CancelledError`. `CancelledError` is a BaseException, so the `except Exception` these loops use for step failures cannot see it, and a cancelled driver leaves the step `claimed` with nothing recorded; the reaper will not reclaim it because the owner PROCESS (the server) is alive. One scheduler shutdown cancels every in-flight tick at once — `poll_and_execute`'s ticks are detached tasks, so apscheduler's own job cancellation no longer reaches them and `_cancel_detached_ticks` (an `EVENT_SCHEDULER_SHUTDOWN` listener) cancels them instead — so without the release a single shutdown strands EVERY in-flight claim. `tests/unit/test_poller_does_not_starve_later_projects.py` shuts a real scheduler down over real claims and asserts each goes back to `pending` with `retry_count` untouched. Bound by `tests/unit/test_every_step_driver_handles_cancellation.py`, which asserts the release CALL, not merely that a handler exists: the first version of that test checked only the handler and stayed green when the release was deleted from all three loops it covered, while missing the fourth entirely
+- **`capability:` (per-step) + the capability registry (skillflow ≥1.5.25)** — a step declares `capability: <keyword>` and the FRAMEWORK provisions its toolset + injected context, so neither the pipeline author nor the agent picks a tool's write folder or its tools (least privilege). Registered in `api/dependencies.py` through `core/capability_registry.py` (the one writer, holding the invariants) via `sf.register_capability(name, tools=, context_provider=, briefing=, owner=)`; injected at ALL FOUR tool-invocation paths (agent toolset@claim, tool-node kwargs, agent-invoked kwargs, and `{source:{tool:X}}` context-source tools). A capability is declared per STEP (`capability: "name"`) or per TASK CARD (`capability: {from_item: "capabilities", card: "3/tasks/$current_task.json"}`), and a graph's top-level `capabilities:` list is what it OFFERS — the bound on what a card may grant (definitions are global, offers are per graph; see `design/declarable_capabilities.md`). Three capabilities: **`stateful`** → hands the tool a durable, per-config, **MOUNTED** `state_dir` = `~/.AItelier/pipeline_state/<config>/` (skillflow `WorkspaceManager.state_dir`; survives across runs AND container recreation — replaces a generated tool hardcoding an un-mounted `~/.aitelier`); **`tool_creation`** → grants `write`/`run_tests`/`register_tool`/`register_capability` (used by pipeline_forge's `t_tool_impl` so the tool-build step can author + register a tool; NO `pytest` — it resolves its `file` against the CODE REPOSITORY while the step's files are in staging, so it can never reach them, and its guard is a NATIVE skillflow tool's, i.e. it ships in the wheel PyPI serves, not here: 1.5.46 in the container has none, so a `repo_mode: none` run's `project_root=""` made its root `/app`. A capability may not grant a native root-resolving tool — `tests/unit/test_a_capability_grant_survives_the_deployed_engine.py`); **`game_assets`** → `gen_image_asset`/`gen_audio_asset` plus the asset discipline as its briefing, offered by the `game_harness` addon and declared per task card by the PM (they used to ride every DPE implementer: 55% of that step's tool schemas, 0 calls in 6,996). Advertised to forge makers in the `forge_palette` cheatsheet + `forge_architect`/`forge_emit`/`forge_tool_impl` templates. **Durable tool DATA lives in `~/.AItelier/pipeline_state/<config>/`** (distinct from generated tool CODE in `~/.AItelier/tools/` and per-run staging in `~/.AItelier/workspaces/<pid>/`).
+- **`agent_configs/dpe_default.yaml`** — Agent configs by role: model, template, tools list, thinking settings
+- **`agent_configs/meta_conversation.yaml`** — Meta conversation agent configs + meta_agent (incl. `coding_max_tool_turns`, `compact_at_tokens`) + `compacter` (condenser)
+- **`agent_configs/coding_task.yaml`** — Runner-step roles whose `system_prompt` IS the per-step prompt (the butler does the work, no LLM spawned)
+- **`llm_providers.json` / `model_routes.json`** — LLM provider registry (base URLs, key env var NAMES) and the internal-model routing table. Both are **gitignored deployment config**, shipped as `*.example.json`: which vendors an operator holds accounts with is not repo content, and committing one answer made the repo read as if it only ran on those vendors. `core/model_routes.py:config_or_example` resolves `<name>.json` → `<name>.example.json`, so a clean checkout still starts (a tested contract — `tests/unit/test_clean_checkout_starts.py`) rather than failing to make a point about configurability. `_`-prefixed keys in either file are comments and are skipped by every reader
+- **`core/model_registry.py` + `/api/models` + the MCP model tools** — the ONE place the two tables are mutated, so the invariants live there rather than in each caller: a route may only name a REGISTERED provider (an unregistered one reaches litellm as a bare `provider/model` it cannot place — a client-side BadRequestError, deliberately not a failover error); a model anything references cannot be deleted and neither can a provider a route still names; and the whole table is loaded via `ModelRoutes` BEFORE anything is written. Writes land on the REAL file even when only the example existed, and are atomic (`os.replace`) + drop the route cache. **Keys are never written here** — the API records which key NAME a provider reads; the key itself stays a secret file, which is what keeps credentials off the API surface. REST (`api/model_routers.py`, gated by the non-safe-method middleware) and MCP (`_register_model_tools`, each mutation declared `write` so `_authorize` gates it — the HTTP middleware cannot, since every MCP call is a POST to one path) both call the same functions; a test pins that neither grows a private path
+- **`model_routes.json`** — MODEL → ordered list of ENDPOINTS. Three levels, named so no two share a word: a **provider** is a host (`ark`), an **endpoint** is one place to call (`ark/deepseek-v4-flash`), a **model** is an ordered list of endpoints (`flash`) and is what `agent_configs` name. `agent_configs` name internal models (`flash`, `pro`, `glm`); nothing below `AIGateway._bind` knows an internal name exists, so every provider quirk (the DSML content-leak parser, Anthropic `cache_control`, DeepSeek's `reasoning_effort`-via-`extra_body`) keys off the CONCRETE provider exactly as before. The gateway binds the first candidate and moves to the next only on an **endpoint** error — dead key, spent token plan, 429, 5xx, dropped connection. `ContextWindowExceededError` / `BadRequestError` are deliberately NOT failed over: every candidate rejects them identically, so walking the list turns one clear error into N and burns the quota being conserved. **Sticky within a step, optionally rotating between steps** — one gateway serves one step, so all of that step's turns hit one endpoint; a route may opt into the dict form `{"rotate": [...], "fallback": [...]}`, where each `resolve(rotate=True)` (= each gateway = each STEP) advances the pool head by one so consecutive steps start on different subscription plans (each plan has its own 5h/weekly window — sticky-first left the other plans' windows to expire unused), while `fallback` (pay-as-you-go) never rotates forward. Per-CALL rotation stays wrong: provider prefix caches are per-provider and the workload measures 26:1 prefill:decode at an 89.4% hit rate, so alternating per call converts cached input into full-price input and costs more than a second token plan saves (spread quota per RUN, not per call). It also composes with the quota park in `core/scheduler.py`: the park only fires once the whole candidate list is spent. A **spent window** (`is_quota_exhausted`, keyed on the message — burst throttling and an exhausted plan are both `RateLimitError` and only the prose says which) parks that ONE endpoint until `quota_reset_at` says it reopens, so later steps skip it instead of re-paying the same doomed call each time; the cooldown is keyed on the concrete `provider/model` (too narrow costs one wasted call per model per window, too broad silently retires every model behind one key), capped at 6h, in-process, and degrades to "try it anyway" when every candidate is parked so a mis-parsed timestamp can't brick the system. Every turn's traced usage row carries `served_by` (+ `model_route` / `failed_over_from` when routing was involved) — without it, post-failover tokens are indistinguishable from ones the preferred endpoint served and a run's spend can't be attributed to a plan. A bare name that is not a route RAISES (naming the table) rather than passing through to a `LLM Provider NOT provided` from litellm. `core/external_deps.py` derives `required_llm_keys()` from the FIRST candidate of each route and `failover_llm_keys()` from the rest — the second key is recommended, never required, so it can't gate startup. A provider entry is a `(base_url, key name)` pair, NOT a vendor, so an **API-key pool** (several token plans on the same vendor) needs no code: register the vendor twice under different names with different `api_key_env` and list both as consecutive candidates — the cooldown keys on `provider/model`, so the two plans park independently. See docs/external-dependencies.md
+- **`vision` route (the Godot readability judge)** — `aitelier/tools/godot_vision` used to pick its judge from three private env vars (`GODOT_VISION_URL` / `_MODEL` / `_FALLBACK_*`), which made the one step that chooses a model by hand the one step invisible in `model_routes.json`. It now resolves the internal model `vision` (localqwen → qwen plan → DeepSeek pay-as-you-go) through the same two tables every agent step uses; the panel is read once per run for the report header, and WHICH candidate answers is the gateway's. Only transport failure falls through — a judge that answers 200 with a wrong answer is never second-guessed, or the gate would silently swap models to paper over a real regression. `vision_report.json` gains `route` / `judges` / `served_by` alongside the existing `backend` (`primary`/`fallback`/`mixed`). **The frame-batching budget deliberately does NOT follow the candidate** (`GODOT_VISION_CONTEXT_TOKENS` stays fixed): sizing batches to whichever judge answered would make the batch layout — and so which frames are compared against each other — depend on an infra accident. The gate calls through **`AIGateway`** like every agent step (one sticky gateway per run, `enable_thinking=False`), so route resolution, failover, the spent-window park and `served_by` are the gateway's, not the tool's — `GODOT_VISION_{TIMEOUT,FALLBACK,FALLBACK_MAX_TOKENS,NO_THINK}` are gone with the hand-rolled HTTP that needed them
+- **`AITELIER_HOST_AGENT_MODEL`** (env) — single model that skillflow `host`/`default` agents resolve to (default: the internal name `flash`, so host roles get the same failover); used by generated pipelines' host roles (pipeline_forge's own agents are real named roles)
+- **Generated pipelines pick a MODEL now, not just `host`** — before internal names the forge emitted `model: "host"` for every role, because the only alternative was inventing a `provider/model` for an endpoint the deployment may not have. `forge_palette` now renders a **Models** section from the live route table (name + what each is for), `templates/forge_emit.md` tells the emitter to choose per role and default to `flash`, and `forge_registry_check`'s `role_model_known` rule rejects anything outside the table (or `host`) at emit — otherwise an invented name fails at the generated pipeline's first LLM call, long after the step that could have caught it
+- **`configs/pipeline_forge.yaml` + `agent_configs/pipeline_forge.yaml`** — the grounded, self-provisioning pipeline generator (replaces `skill_converter`); backs `generate_pipeline` (coding-mode only, so verification via `drive_pipeline` is always in reach). New tools `aitelier/tools/{forge_palette,register_tool,forge_registry_check,forge_dryrun_smoke}` + `aitelier/stub_runner.py`; templates `templates/forge_*.md`
+- **`skillflow_docs_{list,search,read}`** — NATIVE skillflow tools (skillflow >=1.5.22, backed by `skillflow.docs`) that search/read skillflow's own docs + authoritative schema source (graph.py/core.py). The forge maker agents + coding mode use them to design/edit graphs against the real spec (line-numbered read couples with search hits). Not AItelier tools — the earlier AItelier bridge was removed once 1.5.22 shipped.
+- **`skill_converter`** — skillflow's built-in skill→pipeline converter, now DEPRECATED and no longer registered (see `api/dependencies.py`); superseded by `pipeline_forge`
+- **`templates/`** — Markdown prompt templates (step1_5_researcher.md, task_implementer.md, ...)
+- **`aitelier/tools/`** — ~27 AItelier custom tool dirs. DPE web tools: `web_search` (→ SearXNG), `web_fetch`, `run_tests`, `user_stories_present`. Plus the pipeline_forge, novel (scaffold_bible/apply_state/…), game-harness (godot/unity), and repo-op (restage/repo_delete) families
+
+### Debug Tool (`debugctl.py`)
+
+Drive the system headless — an agent or reviewer can launch the TUI, send a build request, send keys to approve checkpoints, and inspect workspace/diff/log as the pipeline runs end-to-end, no human needed:
+
+```bash
+python3 debugctl.py start              # Launch CLI in tmux
+python3 debugctl.py capture            # Read TUI as text
+python3 debugctl.py cmd "build me a todo app"  # Send + Enter
+python3 debugctl.py key Enter          # Press a key
+python3 debugctl.py stop               # Kill session
+python3 debugctl.py watch <project_id> # Watch workspace changes
+python3 debugctl.py inspect <project_id>  # Tree + diff + log
+python3 debugctl.py await <project_id> # BLOCK until a checkpoint / terminal state
+```
+
+**Never poll for a checkpoint.** The server already pushes one:
+`GET /api/events/stream` carries a `checkpoint_paused` event
+(`{step_id, label, next_node, project_id}`) the moment a run pauses, plus the
+terminal events. `debugctl.py await <pid>` blocks on that stream and exits the
+instant it fires — 0 on a checkpoint or completion, 1 on failure, 2 on timeout.
+So `await <pid> && <next step>` chains, and an agent can run it in the
+background and be woken by its exit instead of sleeping in a loop. It matches
+the terminal events as well as the checkpoint on purpose: a watcher that greps
+only for the happy path stays silent through a failure, and silence looks
+exactly like "still running".
+
+### Scheduler tick log (`~/.AItelier/logs/scheduler_ticks.log`)
+
+The poller **starts** a tick for every free active project, up to
+`AITELIER_MAX_CONCURRENT_PROJECTS` ticks in flight at once, and returns without
+waiting for them (`get_active_projects(limit=…)`, ordered `updated_at ASC`; each
+tick is its own asyncio task in `_detached_ticks`). The next poll re-reads the
+active list, so a project dispatched while another project sits in a 26-minute
+repo gate is picked up on the next interval. It used to `asyncio.gather` the
+batch it picked, and with apscheduler's `max_instances=1` the whole poller then
+waited for the slowest tick: every later tick was `tick_skipped` and a project
+activated meanwhile got no tick at all (`iss-ce5d36fce9534128`, 5 of 7 rounds
+with zero lines for 23 minutes). See `poll_and_execute`'s own docstring, which is
+the authority here.
+
+What still serializes: the SAME project (its per-project lock is taken at
+dispatch and held until its tick's task is done) and the CAP (a free project
+over it logs `at_capacity`; a long step costs one slot of the cap, not the
+poller). Outside the poller, the Godot engine render lock serializes engine
+gates. Scheduler shutdown cancels every in-flight tick, and each hands its claim
+back (see "Four loops hold a claim across an await").
+
+Two consequences worth knowing before you read the log. A project that cannot
+advance (a zombie stuck `awaiting_brief`, say) is still picked every tick and
+still logs — measured 2026-09-20: one such project had burned 13,894 ticks — but
+its instant `no_run` frees its slot at once, so it is noise, not a blockage. And
+`outcome=locked` means a step for that project IS executing: it is health, not a
+stall. **Never read tick counts as progress** — read `runs.status` /
+`current_project_step`. The tick has eight ways to return and most used to be
+silent: a stuck project looked exactly like an idle one.
+
+`core/scheduler.py:tick_log(project, outcome, **detail)` writes one line per tick
+to its own rotating file (5MB × 3, on the mounted `~/.AItelier` so it survives
+container recreation — the container log does not). Outcome tokens are short and
+stable, so the log greps cleanly:
+
+| outcome | meaning |
+|---|---|
+| `idle` | no active project (coalesced to one heartbeat/min) |
+| `locked` | a tick for this project is already in flight (coalesced per project to one heartbeat/min — every poll sees it while its step runs) |
+| `at_capacity` | the project is free but `AITELIER_MAX_CONCURRENT_PROJECTS` ticks are already in flight; carries `in_flight` and `cap` (coalesced per project/min). This, not the gate, is what a queued project waits on |
+| `tick_error` | a tick raised. From a detached tick it carries the project; `project=(scheduler)` is an apscheduler job error |
+| `tick_skipped` | apscheduler skipped a poll because the previous one had not returned (`max_instances=1`). The poll returns once it has dispatched, so a run of these now means the poll itself is stuck, not that a step is long |
+| `run_start_failed` | `_get_or_create_skillflow_run` raised |
+| `active_claim` | a step is still executing, OR the run is wedged on a stranded admission. `_has_active_claim` queries `skillflow_active_ops` BEFORE it looks at any claimed step, so one orphaned admission row holds the run forever while every tick prints this same word — health and a permanent stall are spelled identically here. A container restart strands the admissions its old process owned: the engine notices (`owner_lost_at` is set) and deliberately does NOT clear them, because it cannot see a child it never spawned and will not infer "effects ended" from "pid died". Before believing this outcome, dump `skillflow_active_ops` and check `owner_lost_at`. Settle a stranded row with the evidence-bearing `SkillFlow.release_operation(op_id, evidence=...)` (the reference goes FIRST — only 2000 chars are kept) after proving the effects are quiescent, never by deleting the row. Measured 2026-09-22: 39 min, 470 ticks, `iss-40dc57963a8245fc` |
+| `terminal` | run paused/completed/failed |
+| `claim_failed` | `claim_next_step` raised — carries the reason |
+| `no_claim` | nothing claimable at `node` |
+| `executed` | step ran; carries step id, confirmed, elapsed |
+| `reclaimed` | the 30s supervisor reaped a silent claim back to pending |
+| `no_run` | `_get_or_create_skillflow_run` returned None — no run to advance |
+| `awaiting_brief` | held deliberately: `meta_state=drafting`, or a cross-config input is still missing (carries which) |
+| `quota_hold` | a quota wall is being served out; not claiming, because claiming a step we cannot execute is what spends the retry budget |
+| `quota_exhausted` | the step hit the wall mid-execution; parked and released, exactly one retry spent |
+| `claim_terminal` | `RequiredContextMissing` — not retryable, the run was failed |
+| `wedged` | `advance_run` had nothing to say while the run is still RUNNING. NOT an ending and NOT a stall by itself: the tick falls through to the claim phase, so a claimable step un-wedges the run on the same tick and one lone `wedged` line is self-healing. It is only a symptom when a following `no_claim`/`claim_failed` repeats with it |
+
+```bash
+grep 'outcome=claim_failed' ~/.AItelier/logs/scheduler_ticks.log   # why a run is stuck
+grep 'project=<id>' ~/.AItelier/logs/scheduler_ticks.log           # one project's history
+```
+
+Idle ticks coalesce because ~17k lines/day of "nothing to do" would evict the
+informative lines from the rotation window; every tick that picks a project is
+logged in full. Logging can never break a tick (NullHandler fallback, errors
+swallowed).
+
+This exists because a `dpe_default` run started without its `meta_conversation`
+predecessor sat at `running:1` for 47 minutes: `claim_next_step` raised
+`RequiredContextMissing: … no content: finalize` on every tick and a bare
+`except Exception: return` threw it away each time.
+
+### Tech Stack
+
+Python 3.12, Skillflow (graph executor), FastAPI, Pydantic V2, SQLite (WAL), APScheduler, LiteLLM, Typer, Rich, httpx.

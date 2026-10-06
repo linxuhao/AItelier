@@ -534,7 +534,7 @@ def test_search_entries_is_a_case_insensitive_literal_over_assertion_and_body(se
     assert hits["entries"][0]["matched_in"] == ["assertion"]
     assert hits["entries"][1]["matched_in"] == ["body"]
     assert hits["truncated"] is False
-    assert hits["next_after"] == entry_id_of(wuxia["address"])
+    assert hits["next_after"] is None  # last page: nothing to continue from
     assert set(hits["entries"][0]) == {
         "address", "entry_id", "force", "lifecycle", "superseded_by", "listing",
         "assertion", "matched_in", "excerpt"}

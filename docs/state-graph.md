@@ -291,7 +291,7 @@ returns `address`, `entry_id`, `force`, `lifecycle`, `superseded_by`, `listing`,
 `assertion`, `matched_in` (`assertion` and/or `body`) and a bounded, redacted
 `excerpt` of the body when the body matched, otherwise of the assertion. Hits are
 ordered by `(created_at, entry_id)`; creation time is immutable, so `after` is a
-stable cursor. The page carries `truncated` and `next_after`. It has the same
+stable cursor. The page carries `truncated` and `next_after` (null on the last page). It has the same
 visibility as `driver_note_index`.
 
 An index line carries the assertion AND its status, not a topic: `[in force]` or

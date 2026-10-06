@@ -536,9 +536,9 @@ class StateDriverNotes:
             "excerpt": _excerpt(row["body"] if "body" in matched_in else row["assertion"],
                                 query, excerpt_chars),
         } for row, matched_in in selected[:limit]]
-        return {"project_id": project_id, "entries": entries,
-                "truncated": len(selected) > limit,
-                "next_after": entries[-1]["entry_id"] if entries else after}
+        truncated = len(selected) > limit
+        return {"project_id": project_id, "entries": entries, "truncated": truncated,
+                "next_after": entries[-1]["entry_id"] if truncated else None}
 
     @writer_only_read("check_driver_note_index")
     def check_index(self, project_id: str) -> dict:

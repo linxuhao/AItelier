@@ -196,11 +196,22 @@ def wait_disposition(store, project_id, cursor, node_keys, attempt_ids,
             joiner = " OR " if filter_mode == "any" else " AND "
             clauses.append("(" + joiner.join(filters) + ")")
             args.extend(filter_args)
-        rows = conn.execute("SELECT attempt_id,status FROM state_attempts WHERE " +
+        rows = conn.execute("SELECT attempt_id,status,artifact_ref FROM state_attempts WHERE " +
                             " AND ".join(clauses), args).fetchall()
-        paused = [dict(row) for row in rows if row["status"] == "paused"]
+        paused = [{"attempt_id": row["attempt_id"], "status": row["status"]}
+                  for row in rows if row["status"] == "paused"]
         if paused:
             return {"reason": "action_required", "attempts": paused}
+        # A completed workflow whose candidate artifact was never pinned (its
+        # owned worktree is unavailable) is actionable, not idle work: expose
+        # its exact identity and keep the artifact unset. It is never read as
+        # verified, and it never silently clears the wait.
+        unpinned = [{"attempt_id": row["attempt_id"], "status": row["status"],
+                     "artifact_ref": None}
+                    for row in rows
+                    if row["status"] == "candidate" and row["artifact_ref"] is None]
+        if unpinned:
+            return {"reason": "action_required", "attempts": unpinned}
         # An allowlist of terminal states fails conservatively for unknown or
         # future statuses. Reservations and external registrations count as work.
         if any(row["status"] not in {"candidate", "failed", "superseded"} for row in rows):

@@ -15,6 +15,7 @@ from core.state_privacy import writer_only_read
 
 from core.state_graph import StateConflict, StateGraphError, StateGraphStore, canonical, digest, key, text
 from core.state_attempts import StateAttempts, artifact_ref, evidence_director_identity
+from skillflow.exceptions import IsolationUnavailable
 
 
 
@@ -948,6 +949,30 @@ class StateService:
                 artifact = self._artifact(observed)
             except StateConflict as exc:
                 return self._with_refusals({**observed, "artifact_pending": True, "note": str(exc)})
+            except IsolationUnavailable as exc:
+                # The run's OWN isolated tree cannot be observed, so its
+                # candidate artifact cannot be pinned. This is a specific,
+                # recoverable artifact-pending condition — not a generic
+                # recovery failure and not a programming error. Ownership,
+                # refusal and candidate state are unchanged: the artifact stays
+                # unset, nothing is verified, and no idle clearance follows.
+                # The exact attempt identity is exposed so a director can act.
+                return self._with_refusals({
+                    **observed,
+                    "artifact_pending": True,
+                    "artifact_ref": None,
+                    "artifact_pending_reason": "owned_worktree_unavailable",
+                    "note": str(exc),
+                    "action_required": {
+                        "reason": "candidate_artifact_unavailable",
+                        "attempt_id": attempt_id,
+                        "attempt_status": observed["status"],
+                        "node_key": observed.get("node_key"),
+                        "run_id": observed.get("run_id"),
+                        "artifact_ref": None,
+                        "detail": str(exc),
+                    },
+                })
             observed = self.attempts.reconcile(attempt_id, self.sf, artifact)
         return self._with_refusals(observed)
 

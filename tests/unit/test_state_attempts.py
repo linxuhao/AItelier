@@ -596,3 +596,100 @@ def test_pin_relay_freezes_the_inventory_before_dispatch(system):
         attempts.pin_relay(b["attempt_id"], {**relay, "base_sha": "c" * 40})
     with pytest.raises(StateConflict, match="not reserved with continue_from"):
         attempts.pin_relay(a["attempt_id"], relay)
+
+
+# ── candidate artifact whose owned worktree is unavailable ───────────
+
+def _complete_without_artifact(system, attempt):
+    """Drive a real run to completion and observe it WITHOUT pinning an
+    artifact, so the attempt is a candidate with artifact_ref NULL."""
+    _, attempts, sf = system
+    rid = attempt.get("run_id") or launch(system, attempt)
+    sf.advance_run(rid)
+    claimed = sf.claim_next_step(rid)
+    assert claimed is not None, "fixture must execute a real step"
+    sf.confirm_step(claimed.token, StepResult(outputs={"implementation": "candidate"}))
+    sf.advance_run(rid)
+    assert sf.get_run(rid)["status"] == "completed"
+    return attempts.reconcile(attempt["attempt_id"], sf), rid
+
+
+def _record_dead_worktree(store, rid, tmp_path):
+    """An isolation record whose owned worktree no longer exists: exactly the
+    shape resolve_for_resolver refuses by raising IsolationUnavailable."""
+    from core import run_isolation as ri
+    ri._write_record(store.db, run_id=rid, project_id="game", config_name="feature",
+                     mode=ri.MODE_WORKTREE, source_repo=str(tmp_path / "src"),
+                     worktree_path=str(tmp_path / "gone"), branch=None,
+                     base_sha=None, note=None)
+
+
+def test_unavailable_owned_worktree_is_a_named_artifact_pending_not_a_conflict(system, tmp_path):
+    from core.state_service import StateService
+    from core.workspace_manager import WorkspaceManager
+    store, attempts, sf = system
+    a = reserve(system)
+    observed, rid = _complete_without_artifact(system, a)
+    assert observed["status"] == "candidate"
+    _record_dead_worktree(store, rid, tmp_path)
+    service = StateService(store.db, WorkspaceManager(str(tmp_path / "workspaces")), sf, {},
+                           project_read_trusted=True)
+    result = service.reconcile_attempt(a["attempt_id"])
+    assert result["status"] == "candidate"
+    assert result["artifact_pending"] is True
+    assert result["artifact_ref"] is None
+    assert result["artifact_pending_reason"] == "owned_worktree_unavailable"
+    required = result["action_required"]
+    assert required["reason"] == "candidate_artifact_unavailable"
+    assert required["attempt_id"] == a["attempt_id"]
+    assert required["attempt_status"] == "candidate"
+    assert required["artifact_ref"] is None
+    assert required["run_id"] == rid
+    # Ownership and candidate state are unchanged; nothing is auto-verified.
+    with store.transaction() as conn:
+        row = conn.execute("SELECT status,artifact_ref FROM state_attempts WHERE attempt_id=?",
+                           (a["attempt_id"],)).fetchone()
+    assert row["status"] == "candidate" and row["artifact_ref"] is None
+    # A second reconcile is the same named condition, not a new effect.
+    again = service.reconcile_attempt(a["attempt_id"])
+    assert again["artifact_pending_reason"] == "owned_worktree_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_wait_names_the_unpinned_candidate_and_keeps_healthy_scope_usable(system, tmp_path):
+    from core.state_changes import wait_disposition
+    from core.state_service import StateService
+    from core.workspace_manager import WorkspaceManager
+    store, attempts, sf = system
+    a = reserve(system)
+    _, rid = _complete_without_artifact(system, a)
+    _record_dead_worktree(store, rid, tmp_path)
+    other = reserve(system, request="other-owner")
+    service = StateService(store.db, WorkspaceManager(str(tmp_path / "workspaces")), sf, {},
+                           project_read_trusted=True)
+    cursor = store.events("game")[-1]["seq"]
+    result = await service.wait_for_state_change("game", after=cursor,
+        return_when_idle=True, timeout_seconds=.2)
+    # The completed workflow with the unavailable owned worktree is exposed
+    # under its exact identity, with the artifact still unset — never as idle.
+    assert result["timed_out"] is False
+    assert result["reason"] == "action_required"
+    assert result["attempts"] == [
+        {"attempt_id": a["attempt_id"], "status": "candidate", "artifact_ref": None}]
+    # A scoped wait still surfaces the same named condition, and an unrelated
+    # scope stays usable with its own cursor and empty disposition.
+    assert wait_disposition(service.store, "game", cursor, None, [a["attempt_id"]], None) == {
+        "reason": "action_required",
+        "attempts": [{"attempt_id": a["attempt_id"], "status": "candidate", "artifact_ref": None}]}
+    assert wait_disposition(service.store, "game", cursor, None, ["nope"], None) == {
+        "reason": "nothing_to_wait"}
+    empty = await service.wait_for_state_change("game", after=cursor,
+        attempt_ids=["nope"], timeout_seconds=0, return_when_idle=True)
+    assert empty == {"events": [], "next_after": cursor, "timed_out": False,
+                     "reason": "nothing_to_wait"}
+    # Negative control: once the artifact IS pinned, the same candidate is no
+    # longer actionable and the reservation of another owner stays waitable.
+    attempts.reconcile(a["attempt_id"], sf, ARTIFACT)
+    assert wait_disposition(service.store, "game", cursor, None, [a["attempt_id"]], None) == {
+        "reason": "nothing_to_wait"}
+    assert attempts.get(other["attempt_id"])["status"] == "reserved"

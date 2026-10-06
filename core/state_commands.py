@@ -211,10 +211,29 @@ class DriverNoteEntry(Project):
                           description="The 12-hex address suffix returned by write_driver_note_entry.")
 
 
-class DriverNoteIndex(Project):
+class GetDriverNote(Project):
+    include_superseded: bool = Field(
+        default=False, description=(
+            "Include superseded entries (with superseded_by). By default the index holds only "
+            "current entries; superseded_count reports how many it hides."))
     include_delisted: bool = Field(
         default=False, description="Include entries evicted from the index; their bodies stay readable.")
+
+
+class DriverNoteIndex(GetDriverNote):
     limit: int = Field(default=100, ge=1, le=MAX_INDEX_LIMIT)
+
+
+class SearchDriverNoteEntries(GetDriverNote):
+    query: str = Field(default="", max_length=500, description=(
+        "Unicode case-insensitive literal text matched against each entry's assertion AND "
+        "body; empty lists every entry the filters admit."))
+    after: str | None = Field(default=None, min_length=12, max_length=12, description=(
+        "Exclusive stable cursor: the entry_id returned as next_after. Results are ordered "
+        "by (created_at, entry_id) ascending."))
+    limit: int = Field(default=20, ge=1, le=100, description="Maximum hits returned per page.")
+    excerpt_chars: int = Field(default=320, ge=64, le=1000,
+                               description="Maximum characters in each redacted excerpt.")
 
 
 class WriteDriverNoteEntry(Project):
@@ -225,9 +244,15 @@ class WriteDriverNoteEntry(Project):
     body: str = Field(min_length=1, max_length=MAX_ENTRY_BODY_CHARS, description=(
         "The narrative, fetched by address with get_driver_note_entry. Never injected."))
     director_identity: str = Field(min_length=1, max_length=320)
-    force: Literal["in_force", "informational"] = Field(default="in_force", description=(
-        "in_force: reading this line can still change a decision, so it may only leave the "
-        "index through supersede. informational: it cannot, so it may be delisted."))
+    # A plain string so that "informational" reaches the core refusal and its
+    # verbatim message instead of a generic enum validation error. The schema
+    # advertises in_force only.
+    force: str = Field(default="in_force", max_length=32, json_schema_extra={"enum": ["in_force"]},
+                       description=(
+        "Always in_force: an entry is a rule; reading it can still change a decision, so it "
+        "leaves the index only through supersede. force=\"informational\" is refused (owner "
+        "ruling 2026-10-06): in-flight state goes to the State DAG (attempts, node hold, "
+        "issues, node priority), not the notebook."))
     landed: str = Field(default="", max_length=MAX_LANDED_CHARS, description=(
         "Landed status, e.g. 'three places VERIFIED'. Landed is NOT expired: a landed rule "
         "stays in force."))
@@ -553,9 +578,10 @@ READ_REQUESTS = {
     "export_design_markdown": DesignBaseline, "check_design_markdown": CheckDesignMarkdown,
     "list_projects": Empty, "get_graph": Project, "get_node": Node, "search_nodes": SearchNodes, "facet_lint": Project,
     "frontier": Frontier, "events": Events, "wait_for_state_change": WaitForStateChange,
-    "get_driver_note": DriverNote, "driver_note_history": DriverNoteHistory,
+    "get_driver_note": GetDriverNote, "driver_note_history": DriverNoteHistory,
     "search_driver_note_history": SearchDriverNoteHistory, "get_attempt": Attempt,
     "driver_note_index": DriverNoteIndex, "get_driver_note_entry": DriverNoteEntry,
+    "search_driver_note_entries": SearchDriverNoteEntries,
     "check_driver_note_index": DriverNote, "get_driver_guide_section": DriverGuideSection,
     "list_attempts": ListAttempts, "evidence": Attempt,
     "project_catalog": ProjectCatalog, "project_overview": Project,
@@ -610,6 +636,7 @@ PUBLIC_READS = frozenset({
     # refusal is byte-identical to a project that does not exist.
     "get_driver_note", "driver_note_history", "search_driver_note_history",
     "get_driver_note_entry", "check_driver_note_index", "driver_note_index",
+    "search_driver_note_entries",
 })
 WRITER_ONLY_READS = frozenset({
     # The director mailbox. The 2026-09-22 ruling named the working notes, not
@@ -748,6 +775,7 @@ def _handlers(service) -> dict:
         "get_driver_note": service.driver_notes.get, "driver_note_history": service.driver_notes.history,
         "search_driver_note_history": service.driver_notes.search,
         "driver_note_index": service.driver_notes.entry_index,
+        "search_driver_note_entries": service.driver_notes.search_entries,
         "get_driver_note_entry": service.driver_notes.get_entry,
         "check_driver_note_index": service.driver_notes.check_index,
         "get_driver_guide_section": _driver_guide_section,

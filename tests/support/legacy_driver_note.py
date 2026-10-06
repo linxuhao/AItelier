@@ -1,4 +1,5 @@
-"""Plant driver-note SECTION rows the way the retired update_driver_note wrote them.
+"""Plant driver-note rows the way retired writers wrote them: SECTION rows of the
+retired update_driver_note, and force='informational' ENTRY rows.
 
 The free-text sections were closed on 2026-10-06 (node driver.note-has-no-free-text):
 no production code path writes them any more, but live databases still hold them
@@ -9,6 +10,8 @@ retired writer produced. The timestamp comes from ``core.state_driver_notes.now`
 a test that monkeypatches it still controls the clock.
 """
 from __future__ import annotations
+
+import uuid
 
 from core import state_driver_notes
 
@@ -41,3 +44,20 @@ def seed_section(service, project_id: str, section: str, content: str,
             "revision": revision, "section": section, "operation": operation,
             "actor": actor, "director_identity": director_identity})
     return revision
+
+
+def seed_informational_entry(service, project_id: str, assertion: str, body: str,
+                             director_identity: str = "seeder") -> str:
+    """Plant one ENTRY with force='informational' the way it was written before the
+    owner ruling of 2026-10-06 closed that force. Live databases still hold such
+    rows; they must stay readable, supersedable and delistable. Returns entry_id."""
+    entry_id = uuid.uuid4().hex[:12]
+    timestamp = state_driver_notes.now()
+    with service.store.transaction(write=True) as conn:
+        conn.execute(
+            "INSERT INTO state_driver_note_entries(project_id,entry_id,assertion,body,force,"
+            "landed,listing,superseded_by,supersede_reason,delist_reason,actor,director_identity,"
+            "created_at,updated_at) VALUES(?,?,?,?,'informational','','listed',NULL,'','',?,?,?,?)",
+            (project_id, entry_id, assertion, body, service.driver_notes.actor,
+             director_identity, timestamp, timestamp))
+    return entry_id

@@ -36,7 +36,15 @@ MAX_REASON_CHARS = 500
 MAX_LANDED_CHARS = 120
 MAX_INDEX_LIMIT = 500
 
-FORCE_VALUES = ("in_force", "informational")
+# The stored column still admits "informational" (ENTRY_SCHEMA): rows written
+# before the owner ruling of 2026-10-06 stay in the database and stay readable.
+# A write accepts only "in_force" (force_value below).
+INFORMATIONAL_CLOSED = (
+    "force=\"informational\" is closed: driver note entries are rules only (owner ruling "
+    "2026-10-06). In-flight state does not go into the notebook; record it in the State DAG "
+    "instead: attempts (start_external_attempt / report_external_attempt, or start_attempt), "
+    "node hold (set_node_hold), issues (report_issue) and node priority (set_node_priority). "
+    "Write a rule with force=\"in_force\" or omit force.")
 LISTING_VALUES = ("listed", "delisted")
 
 ENTRY_ID = re.compile(r"[0-9a-f]{12}")
@@ -132,8 +140,11 @@ def landed_text(value: str) -> str:
 
 
 def force_value(value: str) -> str:
-    if value not in FORCE_VALUES:
-        raise StateGraphError("force must be in_force or informational")
+    """Only rules are written. An informational write is refused, never coerced."""
+    if value == "informational":
+        raise StateGraphError(INFORMATIONAL_CLOSED)
+    if value != "in_force":
+        raise StateGraphError("force must be in_force")
     return value
 
 

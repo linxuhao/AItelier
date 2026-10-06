@@ -51,9 +51,12 @@ Agents can load the MCP prompt `state_graph_driver`, the resource
 `aitelier://state/driver-guide`, or `driver_guide` from `state_graph_help`.
 Each State project also has a driver notebook made only of entries:
 `write_driver_note_entry` / `supersede_driver_note_entry` /
-`delist_driver_note_entry` write it (in-flight state is an informational entry,
-superseded when it changes and delisted when it lands), `get_driver_note` returns
-the entry index, and bounded/redacted `search_driver_note_history` plus
+`delist_driver_note_entry` write it (every entry is a rule; in-flight state goes
+to the State DAG - attempts, node holds, issues, node priority - and
+`force="informational"` is refused), `get_driver_note` returns the index of
+current entries (`include_superseded=true` adds retired ones),
+`search_driver_note_entries` searches entry assertions and bodies, and
+bounded/redacted `search_driver_note_history` plus
 `driver_note_history` keep the retired free-text sections readable, so different
 directors manage projects in parallel without sharing notes or event cursors. `wait_for_state_change` keeps its
 single-project compatibility defaults and adds `filter_mode="any"` for OR-style

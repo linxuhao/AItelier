@@ -323,8 +323,11 @@ def create_state_router(service_dependency, access_dependency, read_dependency=N
 
     _declare(router.get("/projects/{project_id}/frontier")(frontier), "read", "frontier")
 
-    def driver_note(project_id: str, service=Depends(service_dependency)):
-        return _call(service, "get_driver_note", {"project_id": project_id})
+    def driver_note(project_id: str, include_superseded: bool = False,
+                    include_delisted: bool = False, service=Depends(service_dependency)):
+        return _call(service, "get_driver_note", {
+            "project_id": project_id, "include_superseded": include_superseded,
+            "include_delisted": include_delisted})
 
     _declare(router.get("/projects/{project_id}/driver-note")(driver_note),
              "read", "get_driver_note")

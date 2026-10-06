@@ -56,10 +56,10 @@ BEGIN SELECT RAISE(ABORT,'driver note revisions are append-only'); END;
 # driver_note_history and search_driver_note_history, and no row is dropped.
 FREE_TEXT_CLOSED = (
     "update_driver_note is closed: the director notebook has no free-text sections "
-    "(owner ruling 2026-10-06). Use write_driver_note_entry instead. In-flight state is an "
-    "entry with force=\"informational\": write it, supersede_driver_note_entry when it "
-    "changes, delist_driver_note_entry when it lands. Past section text stays readable via "
-    "driver_note_history and search_driver_note_history.")
+    "(owner ruling 2026-10-06). Write a rule with write_driver_note_entry instead. In-flight "
+    "state does not go into the notebook: it lives in the State DAG (attempts, node hold, "
+    "issues, node priority). Past section text stays readable via driver_note_history and "
+    "search_driver_note_history.")
 NOTE_AFTER_REVISION_RETIRED = (
     "note_after_revision is retired: the driver notebook revision no longer advances "
     "(owner ruling 2026-10-06, entries only), so a wait on it could never wake. Wait on "
@@ -157,14 +157,16 @@ class StateDriverNotes:
             initialize(store.db)
 
     @writer_only_read("get_driver_note")
-    def get(self, project_id: str) -> dict:
+    def get(self, project_id: str, include_superseded: bool = False,
+            include_delisted: bool = False) -> dict:
         """The entry index, its counts and the revision; never section text."""
         project_id = key(project_id, "project_id")
         with self.store.transaction(notebook=project_id) as conn:
             self.store._project(conn, project_id)
             row = conn.execute("SELECT revision FROM state_driver_notes WHERE project_id=?",
                                (project_id,)).fetchone()
-            index = self._index_projection(conn, project_id)
+            index = self._index_projection(conn, project_id, include_superseded,
+                                           include_delisted)
         return {"project_id": project_id, "revision": row["revision"] if row else 0, **index}
 
     @writer_only_read("driver_note_history")
@@ -297,30 +299,45 @@ class StateDriverNotes:
 
     @staticmethod
     def _counts(conn, project_id: str) -> dict:
+        # superseded_count is project-wide (listed or delisted), like the other
+        # counts: the default index hides superseded entries, and this is the
+        # number it hides, so a short index cannot hide how much it left out.
         row = conn.execute(
             "SELECT COUNT(*) AS total, "
-            "SUM(listing='listed') AS listed, SUM(listing='delisted') AS delisted "
+            "SUM(listing='listed') AS listed, SUM(listing='delisted') AS delisted, "
+            "SUM(superseded_by IS NOT NULL) AS superseded "
             "FROM state_driver_note_entries WHERE project_id=?", (project_id,)).fetchone()
         return {"entry_count": row["total"] or 0, "listed_count": row["listed"] or 0,
-                "delisted_count": row["delisted"] or 0}
+                "delisted_count": row["delisted"] or 0,
+                "superseded_count": row["superseded"] or 0}
+
+    @staticmethod
+    def _visible(include_superseded: bool, include_delisted: bool) -> str:
+        """The SQL filter shared by every index read: current and listed by default."""
+        clause = "" if include_delisted else " AND listing='listed'"
+        if not include_superseded:
+            clause += " AND superseded_by IS NULL"
+        return clause
 
     @classmethod
-    def _index_projection(cls, conn, project_id: str) -> dict:
+    def _index_projection(cls, conn, project_id: str, include_superseded: bool = False,
+                          include_delisted: bool = False) -> dict:
         """The part of the notebook that is cheap enough to inject everywhere.
 
         Bodies are NOT here; each line carries the address that fetches its body.
-        delisted_count is here so a short index can never hide how much left it.
+        By default only current, listed entries are here; delisted_count and
+        superseded_count say how many lines the default leaves out.
         """
         rows = conn.execute(
-            "SELECT * FROM state_driver_note_entries WHERE project_id=? AND listing='listed' "
-            "ORDER BY created_at, entry_id", (project_id,)).fetchall()
+            "SELECT * FROM state_driver_note_entries WHERE project_id=?"
+            + cls._visible(include_superseded, include_delisted)
+            + " ORDER BY created_at, entry_id", (project_id,)).fetchall()
         counts = cls._counts(conn, project_id)
-        # force and lifecycle travel with each line so an injector that must cut
-        # the index can keep in-flight (informational) lines and drop superseded
-        # tombstones first, instead of cutting the newest lines off the end.
         return {"index": [{"address": address_of(project_id, row["entry_id"]),
                            "index_line": index_line(row), "force": row["force"],
-                           "lifecycle": "superseded" if row["superseded_by"] else "current"}
+                           "lifecycle": "superseded" if row["superseded_by"] else "current",
+                           "superseded_by": (address_of(project_id, row["superseded_by"])
+                                             if row["superseded_by"] else None)}
                           for row in rows], **counts}
 
     def _write_entry(self, conn, project_id, assertion, body, director_identity,
@@ -451,11 +468,11 @@ class StateDriverNotes:
 
     @writer_only_read("driver_note_index")
     def entry_index(self, project_id: str, include_delisted: bool = False,
-                    limit: int = 100) -> dict:
+                    limit: int = 100, include_superseded: bool = False) -> dict:
         project_id = key(project_id, "project_id")
         if type(limit) is not int or not 1 <= limit <= MAX_INDEX_LIMIT:
             raise StateGraphError(f"limit must be an integer between 1 and {MAX_INDEX_LIMIT}")
-        clause = "" if include_delisted else " AND listing='listed'"
+        clause = self._visible(include_superseded, include_delisted)
         with self.store.transaction(notebook=project_id) as conn:
             self.store._project(conn, project_id)
             rows = conn.execute(
@@ -465,6 +482,63 @@ class StateDriverNotes:
         return {"project_id": project_id,
                 "entries": [entry_summary(row) for row in rows[:limit]],
                 "truncated": len(rows) > limit, **counts}
+
+    @writer_only_read("search_driver_note_entries")
+    def search_entries(self, project_id: str, query: str = "", limit: int = 20,
+                       after: str | None = None, excerpt_chars: int = 320,
+                       include_superseded: bool = False,
+                       include_delisted: bool = False) -> dict:
+        """Search entry assertions and bodies; stable (created_at, entry_id) order.
+
+        Matching is the same Unicode case-insensitive literal test as
+        search_driver_note_history. ``after`` is the entry_id of the last hit of
+        the previous page; created_at is immutable, so the cursor never moves.
+        """
+        project_id = key(project_id, "project_id")
+        if not isinstance(query, str) or len(query) > MAX_SEARCH_QUERY_CHARS:
+            raise StateGraphError(
+                f"query must be text of at most {MAX_SEARCH_QUERY_CHARS} characters")
+        if type(limit) is not int or not 1 <= limit <= MAX_SEARCH_LIMIT:
+            raise StateGraphError(f"limit must be an integer between 1 and {MAX_SEARCH_LIMIT}")
+        if type(excerpt_chars) is not int or not 64 <= excerpt_chars <= MAX_EXCERPT_CHARS:
+            raise StateGraphError(
+                f"excerpt_chars must be an integer between 64 and {MAX_EXCERPT_CHARS}")
+        if after is not None:
+            after = entry_id_value(after)
+        clause = self._visible(include_superseded, include_delisted)
+        selected = []
+        with self.store.transaction(notebook=project_id) as conn:
+            self.store._project(conn, project_id)
+            args: list[object] = [project_id]
+            if after is not None:
+                cursor = self._entry(conn, project_id, after)
+                clause += " AND (created_at>? OR (created_at=? AND entry_id>?))"
+                args += [cursor["created_at"], cursor["created_at"], after]
+            rows = conn.execute(
+                "SELECT * FROM state_driver_note_entries WHERE project_id=?" + clause +
+                " ORDER BY created_at, entry_id", args)
+            for row in rows:
+                matched_in = [field for field in ("assertion", "body")
+                              if _matches(row[field], query)]
+                if not matched_in:
+                    continue
+                selected.append((row, matched_in))
+                if len(selected) > limit:
+                    break
+        entries = [{
+            "address": address_of(project_id, row["entry_id"]), "entry_id": row["entry_id"],
+            "force": row["force"],
+            "lifecycle": "superseded" if row["superseded_by"] else "current",
+            "superseded_by": (address_of(project_id, row["superseded_by"])
+                              if row["superseded_by"] else None),
+            "listing": row["listing"], "assertion": row["assertion"],
+            "matched_in": matched_in,
+            "excerpt": _excerpt(row["body"] if "body" in matched_in else row["assertion"],
+                                query, excerpt_chars),
+        } for row, matched_in in selected[:limit]]
+        return {"project_id": project_id, "entries": entries,
+                "truncated": len(selected) > limit,
+                "next_after": entries[-1]["entry_id"] if entries else after}
 
     @writer_only_read("check_driver_note_index")
     def check_index(self, project_id: str) -> dict:

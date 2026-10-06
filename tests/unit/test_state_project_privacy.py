@@ -513,7 +513,9 @@ class TestTheWorkingNoteReadsAcrossThreeProjectStates:
 
     NOTE_READS = ("get_driver_note", "driver_note_history",
                   "search_driver_note_history", "get_driver_note_entry",
-                  "check_driver_note_index", "driver_note_index")
+                  "check_driver_note_index", "driver_note_index",
+                  # Added 2026-10-06 with the same classification as driver_note_index.
+                  "search_driver_note_entries")
     OPENED_SECRET = "OPENED-NOTE-BODY-4711"
     PRIVATE_SECRET = "UNOPENED-NOTE-BODY-9999"
 

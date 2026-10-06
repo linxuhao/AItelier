@@ -211,7 +211,7 @@ MCP domain errors use `isError: true`. State-data MCP reads require writer
 authorization even though other legacy metadata reads may be public.
 
 Read actions include `get_driver_note`, `driver_note_index`,
-`get_driver_note_entry`, `check_driver_note_index`, `get_driver_guide_section`,
+`search_driver_note_entries`, `get_driver_note_entry`, `check_driver_note_index`, `get_driver_guide_section`,
 `driver_note_history`, `search_driver_note_history`, `list_director_messages`,
 `list_projects`,
 `get_graph`, `get_node`, `frontier`, `events`, `wait_for_state_change`,
@@ -245,11 +245,18 @@ Each State project owns one notebook made only of entries (owner ruling
 text they held is not deleted: `driver_note_history` and
 `search_driver_note_history` still read every committed section revision.
 
-In-flight state (run IDs, worker/worktree ownership, wait cursors, next actions)
-is an entry written with `force="informational"`. When it changes,
-`supersede_driver_note_entry` writes its successor; when it has landed,
-`delist_driver_note_entry` takes it off the index. Every entry write records the
-authenticated actor plus a caller-supplied director identity.
+Every entry is a rule (owner ruling 2026-10-06). In-flight state does not go
+into the notebook: `write_driver_note_entry` and `supersede_driver_note_entry`
+refuse `force="informational"` (HTTP 422 on REST, an MCP error) with a message
+that points at the State DAG, and nothing is coerced to `in_force`. Record
+in-flight state where State already owns it: run IDs, worker/worktree ownership
+and status on the attempt (`start_external_attempt` / `report_external_attempt`,
+or `start_attempt`); a node that must not be dispatched with `set_node_hold`;
+hand-offs, blockers and questions with `report_issue`; queue order with
+`set_node_priority`. Informational rows written before the ruling stay in the
+database and stay readable, and may be superseded by an `in_force` successor or
+delisted. Every entry write records the authenticated actor plus a
+caller-supplied director identity.
 
 #### Index mode: the notebook lists assertions and stores bodies by address
 
@@ -262,9 +269,30 @@ executed that sentence; the next write would simply have failed.
 returns an address (`note://<project_id>/<12 hex>`). The assertion is capped at
 200 characters and over-cap writes are REFUSED - never truncated, never accepted
 and failed later on read. `get_driver_note` returns the index (one line and one
-address per listed entry) plus `entry_count`, `listed_count`, `delisted_count` and
-`revision`; bodies are never part of that payload and are fetched with
-`get_driver_note_entry`.
+address per current, listed entry) plus `entry_count`, `listed_count`,
+`delisted_count`, `superseded_count` and `revision`; bodies are never part of that
+payload and are fetched with `get_driver_note_entry`.
+
+`get_driver_note` and `driver_note_index` hide superseded entries by default.
+`include_superseded=true` adds them (each carries `superseded_by`);
+`include_delisted=true` adds delisted ones. The counts are project-wide and do not
+depend on the flags: `superseded_count` is the number of superseded entries the
+default hides, `delisted_count` the number evicted from the index.
+`driver_note_index` applies `limit` after the filter, so `truncated` means more
+entries match the same filter.
+
+`search_driver_note_entries` searches entries rather than retired section text.
+Arguments: `project_id`, `query` (Unicode case-insensitive literal, at most 500
+characters, matched against the assertion AND the body; empty lists every entry
+the filters admit), `limit` (1-100, default 20), `after` (the `next_after` entry
+id of the previous page), `excerpt_chars` (64-1000, default 320),
+`include_superseded` and `include_delisted` (both default false). Each hit
+returns `address`, `entry_id`, `force`, `lifecycle`, `superseded_by`, `listing`,
+`assertion`, `matched_in` (`assertion` and/or `body`) and a bounded, redacted
+`excerpt` of the body when the body matched, otherwise of the assertion. Hits are
+ordered by `(created_at, entry_id)`; creation time is immutable, so `after` is a
+stable cursor. The page carries `truncated` and `next_after`. It has the same
+visibility as `driver_note_index`.
 
 An index line carries the assertion AND its status, not a topic: `[in force]` or
 `[superseded -> <address>]`, plus an optional `[landed: ...]` marker. Landed and
@@ -280,7 +308,9 @@ Two retirement channels, and neither deletes a body:
   entry, the body still resolves at its address, and `delisted_count` reports how
   many entries left, so a short index cannot hide how much was evicted. The call
   is REFUSED while the stored entry is `force=in_force` and unsuperseded; there
-  is no override argument.
+  is no override argument. Since every new entry is `in_force`, what can be
+  delisted is a superseded tombstone or an informational row written before the
+  2026-10-06 ruling.
 
 Database triggers block deleting an entry and block changing a stored assertion,
 body or creation time, so retiring is provably not rewriting.
@@ -436,7 +466,8 @@ nodes, the acceptance criteria, attempts, evidence, issues, design records, the
 frontier, and — since the owner's ruling of 2026-09-22 ("let's open up the
 working note for public projects too") — the driver's working notes
 (`get_driver_note`, `driver_note_history`, `search_driver_note_history`,
-`get_driver_note_entry`, `check_driver_note_index`, `driver_note_index`). The
+`get_driver_note_entry`, `check_driver_note_index`, `driver_note_index`,
+`search_driver_note_entries`). The
 director mailbox (`list_director_messages`), the driver guide and the
 event/long-poll plumbing stay writer-only.
 

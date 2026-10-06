@@ -33,7 +33,9 @@ from tests.unit.test_every_private_table_reader_is_judged_at_the_read import (
 
 NOTEBOOK_TABLES = C.NOTEBOOK_TABLES
 NOTE_READS = ("get_driver_note", "driver_note_history", "search_driver_note_history",
-              "get_driver_note_entry", "check_driver_note_index", "driver_note_index")
+              "get_driver_note_entry", "check_driver_note_index", "driver_note_index",
+              # Added 2026-10-06 with the same classification as driver_note_index.
+              "search_driver_note_entries")
 COUNTS_ONLY = {"check_driver_note_index"}
 MISSING = "canary-nobody-created-this"
 SHUT_ENTRY = "c0ffee0c0ffe"   # the entry id tests/support/state_canaries.py plants

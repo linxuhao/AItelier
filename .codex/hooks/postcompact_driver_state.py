@@ -25,14 +25,11 @@ PROJECT_ID = "aitelier"
 # so the ceiling rises while the payload does not.
 MAX_CONTEXT_CHARS = 20_000
 MAX_ENTRY_INDEX_CHARS = 10_000  # 7_000 dropped a line on first run; the budget must
-# not be the reason an assertion goes missing. It reports omissions per group rather
-# than hiding them, and the outer MAX_CONTEXT_CHARS still bounds the whole payload.
-# Render order; over the cap lines are dropped from the LAST group first. The index
-# arrives oldest-first, so cutting its end dropped exactly the newest lines: every
-# in-flight entry and every supersede successor.
-ENTRY_INDEX_GROUPS = (("in_flight", "in flight (informational)"),
-                      ("in_force", "in force"),
-                      ("superseded", "superseded (tombstones)"))
+# not be the reason an assertion goes missing. It reports omissions rather than
+# hiding them, and the outer MAX_CONTEXT_CHARS still bounds the whole payload.
+# The index arrives oldest-first, so cutting its end would drop exactly the newest
+# lines (every supersede successor); over the cap the OLDEST line goes first.
+ENTRY_INDEX_LABEL = "current entries"
 MAX_STANDING_CONTEXT_CHARS = 3_000
 MAX_INPUT_CHARS = 65_536
 REQUEST_TIMEOUT_SECONDS = 4.0
@@ -324,48 +321,38 @@ def _guide_sections(guide: str, limit: int = 4_000) -> str:
 def _entry_index(note: dict[str, Any], limit: int = MAX_ENTRY_INDEX_CHARS) -> str:
     """Render the driver note's ENTRY INDEX: one assertion per line, with its status.
 
-    Since 2026-10-06 the index is the whole notebook: the free-text sections are
-    closed and get_driver_note no longer returns them, so in-flight state arrives
-    here as informational entries. Bodies stay behind get_driver_note_entry and
-    are never injected.
+    Since 2026-10-06 the index is the whole notebook and every entry is a rule:
+    the free-text sections are closed, informational entries are refused, and
+    in-flight state lives in the State DAG. get_driver_note lists only current,
+    listed entries by default; a superseded line that still arrives is skipped.
+    Bodies stay behind get_driver_note_entry and are never injected.
 
-    Lines render in priority order: current informational entries (in-flight
-    state), then current in-force entries, then superseded tombstones. Over the
-    cap the OLDEST line of the lowest-priority nonempty group is dropped first,
-    and every group header states how many of its lines were omitted.
+    Over the cap the OLDEST line is dropped first, and the header states how many
+    lines were omitted.
     """
     index = note.get("index")
     if not isinstance(index, list) or not index:
         return "- none listed (driver_note_index returned no entries)"
-    groups: dict[str, list[str]] = {name: [] for name, _ in ENTRY_INDEX_GROUPS}
+    lines: list[str] = []
     for item in index:
-        if not isinstance(item, dict):
+        if not isinstance(item, dict) or item.get("lifecycle") == "superseded":
             continue
         entry_id = str(item.get("address", "")).rsplit("/", 1)[-1] or "?"
         line = str(item.get("index_line", "")).replace("\n", " ").strip()
         if not line:
             continue
-        if item.get("lifecycle") == "superseded":
-            group = "superseded"
-        else:
-            group = "in_flight" if item.get("force") == "informational" else "in_force"
-        groups[group].append(f"- {entry_id} {line}")
-    if not any(groups.values()):
-        return "- none listed (entries present but carried no index_line)"
-    omitted = {name: 0 for name, _ in ENTRY_INDEX_GROUPS}
+        lines.append(f"- {entry_id} {line}")
+    if not lines:
+        return "- none listed (entries present but carried no current index_line)"
+    omitted = 0
     while True:
-        parts: list[str] = []
-        for name, label in ENTRY_INDEX_GROUPS:
-            if groups[name] or omitted[name]:
-                parts.append(f"### {label}: shown={len(groups[name])} "
-                             f"omitted_entry_index_lines={omitted[name]}")
-                parts.extend(groups[name])
-        rendered = _redact("\n".join(parts))
-        victim = next((name for name, _ in reversed(ENTRY_INDEX_GROUPS) if groups[name]), None)
-        if len(rendered) <= limit or victim is None:
+        rendered = _redact("\n".join([
+            f"### {ENTRY_INDEX_LABEL}: shown={len(lines)} omitted_entry_index_lines={omitted}",
+            *lines]))
+        if len(rendered) <= limit or not lines:
             return rendered
-        groups[victim].pop(0)
-        omitted[victim] += 1
+        lines.pop(0)
+        omitted += 1
 
 
 def _codex_config() -> dict[str, Any]:
@@ -602,11 +589,12 @@ driver_note_revision={note.get('revision', 'unknown')}
 state_event_cursor={overview.get('event_seq', 'unknown')}
 state_driver_guide_sha256={_sha256(guide)} chars={len(guide)} source={help_payload.get('driver_resource', 'state_graph_help')}
 
-## Current driver note ENTRY INDEX (assertions and in-flight state; bodies fetched by address)
+## Current driver note ENTRY INDEX (current rules; bodies fetched by address)
 Each line is an assertion WITH its status. A line that contradicts what you are about
-to do wins until you have re-measured it. Fetch a body with
+to do wins until you have re-measured it. In-flight state is not here: read it from
+the State DAG (attempts, node holds, issues, priorities). Fetch a body with
 state_graph_read(action="get_driver_note_entry", arguments={{"project_id":"{PROJECT_ID}","entry_id":"<12-hex>"}}).
-entry_count={note.get('entry_count', 'unknown')} listed={note.get('listed_count', 'unknown')} delisted={note.get('delisted_count', 'unknown')}
+entry_count={note.get('entry_count', 'unknown')} listed={note.get('listed_count', 'unknown')} delisted={note.get('delisted_count', 'unknown')} superseded={note.get('superseded_count', 'unknown')}
 {_entry_index(note)}
 
 ## Current State snapshot (bounded)

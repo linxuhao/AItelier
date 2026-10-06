@@ -46,6 +46,8 @@ from tests.support.legacy_driver_note import seed_section
 OPENED_NOTE_READS = {
     "get_driver_note", "driver_note_history", "search_driver_note_history",
     "get_driver_note_entry", "check_driver_note_index", "driver_note_index",
+    # Added 2026-10-06 with the same classification as driver_note_index.
+    "search_driver_note_entries",
 }
 # What the ruling did NOT name, so it stays only-for-a-writer. The director
 # mailbox is here because the ruling named the note, not the mailbox.
@@ -122,8 +124,7 @@ def gated(tmp_path, monkeypatch):
         {"id": "c", "kind": "test", "description": "Check"}]}])
     seed_section(service, "p", "permanent", "IN-FLIGHT RUN ID 4711 SECRET", "director")
     service.driver_notes.write_entry("p", "IN-FLIGHT RUN ID 4711 SECRET",
-                                     "IN-FLIGHT RUN ID 4711 SECRET", "director",
-                                     force="informational")
+                                     "IN-FLIGHT RUN ID 4711 SECRET", "director")
     service.driver_notes.write_entry("p", "The withheld reason is SECRET-BODY",
                                      "Entry body SECRET-BODY", "director")
     app = FastAPI()

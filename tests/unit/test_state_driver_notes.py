@@ -22,7 +22,7 @@ def services(tmp_path):
 
 
 NOTE_KEYS = {"project_id", "revision", "index", "entry_count", "listed_count",
-             "delisted_count"}
+             "delisted_count", "superseded_count"}
 
 
 def test_legacy_sections_stay_readable_as_project_scoped_history_only(services):
@@ -49,8 +49,7 @@ def test_get_driver_note_returns_the_index_and_never_section_text(services):
     seed_section(service, "aitelier", "permanent", "PERMANENT-CANARY-5f1", "lead")
     seed_section(service, "aitelier", "temporary", "TEMPORARY-CANARY-5f1", "lead")
     written = service.driver_notes.write_entry(
-        "aitelier", "run r-17 is in flight", "owner, worktree, cursor", "lead",
-        force="informational")
+        "aitelier", "release r-17 needs two reviewers", "owner ruling", "lead")
     for note in (service.driver_notes.get("aitelier"),
                  execute(service, "get_driver_note", {"project_id": "aitelier"})):
         assert set(note) == NOTE_KEYS
@@ -58,7 +57,7 @@ def test_get_driver_note_returns_the_index_and_never_section_text(services):
         assert "CANARY-5f1" not in serialized
         assert note["revision"] == 2
         assert [item["address"] for item in note["index"]] == [written["address"]]
-        assert note["index"][0]["index_line"].startswith("run r-17 is in flight")
+        assert note["index"][0]["index_line"].startswith("release r-17 needs two reviewers")
         assert (note["entry_count"], note["listed_count"], note["delisted_count"]) == (1, 1, 0)
     # The text is not gone: history still reads it.
     assert "PERMANENT-CANARY-5f1" in json.dumps(service.driver_notes.history("aitelier"))
@@ -93,22 +92,24 @@ def test_update_driver_note_is_refused_with_the_entry_instruction(services, allo
 def test_entry_writes_still_succeed_through_execute(services):
     service, _ = services
     written = execute(service, "write_driver_note_entry", {
-        "project_id": "aitelier", "assertion": "run r-1 in flight", "body": "owner lead",
-        "director_identity": "lead", "force": "informational"}, allow_write=True)
+        "project_id": "aitelier", "assertion": "release needs one reviewer",
+        "body": "owner lead", "director_identity": "lead"}, allow_write=True)
     entry_id = written["address"].rsplit("/", 1)[-1]
     successor = execute(service, "supersede_driver_note_entry", {
-        "project_id": "aitelier", "entry_id": entry_id, "assertion": "run r-1 paused",
-        "body": "owner lead; checkpoint c-2", "reason": "state changed",
-        "director_identity": "lead", "force": "informational"}, allow_write=True)
-    successor_id = successor["successor"]["address"].rsplit("/", 1)[-1]
+        "project_id": "aitelier", "entry_id": entry_id,
+        "assertion": "release needs two reviewers", "body": "owner lead; ruling r-2",
+        "reason": "owner raised the bar", "director_identity": "lead",
+        "force": "in_force"}, allow_write=True)
+    # The superseded tombstone can no longer change a decision, so it may be delisted.
     delisted = execute(service, "delist_driver_note_entry", {
-        "project_id": "aitelier", "entry_id": successor_id, "reason": "landed",
+        "project_id": "aitelier", "entry_id": entry_id, "reason": "successor carries it",
         "director_identity": "lead"}, allow_write=True)
     assert delisted["listing"] == "delisted"
     note = execute(service, "get_driver_note", {"project_id": "aitelier"})
-    assert [item["address"] for item in note["index"]] == [written["address"]]
-    assert "[superseded -> " in note["index"][0]["index_line"]
-    assert (note["entry_count"], note["listed_count"], note["delisted_count"]) == (2, 1, 1)
+    assert [item["address"] for item in note["index"]] == [successor["successor"]["address"]]
+    assert "[in force]" in note["index"][0]["index_line"]
+    assert (note["entry_count"], note["listed_count"], note["delisted_count"],
+            note["superseded_count"]) == (2, 1, 1, 1)
 
 
 def test_search_is_project_scoped_filterable_redacted_and_stably_paginated(services, monkeypatch):

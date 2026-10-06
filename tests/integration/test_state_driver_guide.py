@@ -149,6 +149,7 @@ def test_mcp_wait_returns_external_completion_and_remains_private(tmp_path):
 
 
 def test_mcp_driver_notes_refuse_free_text_and_serve_entries_and_history(tmp_path):
+    from core.state_driver_index import INFORMATIONAL_CLOSED
     from core.state_driver_notes import FREE_TEXT_CLOSED
     from tests.support.legacy_driver_note import seed_section
 
@@ -185,13 +186,28 @@ def test_mcp_driver_notes_refuse_free_text_and_serve_entries_and_history(tmp_pat
                                    headers=headers)
         assert rest_refused.status_code == 422
         assert rest_refused.json()["detail"] == FREE_TEXT_CLOSED
-        # Entries are the write path.
+        # An informational entry is refused verbatim on MCP and REST alike.
+        informational = {"project_id": "aitelier", "assertion": "release handoff in flight",
+                         "body": "owner aitelier-director",
+                         "director_identity": "aitelier-director", "force": "informational"}
+        refused = rpc("state_graph_write", "write_driver_note_entry", informational).json()["result"]
+        assert refused["isError"] is True
+        assert refused["content"][0]["text"] == (
+            "Error executing tool state_graph_write: " + INFORMATIONAL_CLOSED)
+        rest_refused = client.post("/api/state/commands/write_driver_note_entry",
+                                   json=informational, headers=headers)
+        assert rest_refused.status_code == 422
+        assert rest_refused.json()["detail"] == INFORMATIONAL_CLOSED
+        # Rules are the write path.
         entry = result(rpc("state_graph_write", "write_driver_note_entry", {
-            "project_id": "aitelier", "assertion": "release handoff in flight",
-            "body": "owner aitelier-director", "director_identity": "aitelier-director",
-            "force": "informational"}))
+            **informational, "assertion": "release handoff needs two reviewers",
+            "force": "in_force"}))
         note = result(rpc("state_graph_read", "get_driver_note", {"project_id": "aitelier"}))
         assert [item["address"] for item in note["index"]] == [entry["address"]]
+        rest_supersede = client.post("/api/state/commands/supersede_driver_note_entry", json={
+            **informational, "entry_id": entry["entry_id"], "reason": "x"}, headers=headers)
+        assert rest_supersede.status_code == 422
+        assert rest_supersede.json()["detail"] == INFORMATIONAL_CLOSED
         assert "permanent" not in note and "temporary" not in note
         assert result(rpc("state_graph_read", "get_driver_note",
                           {"project_id": "wuxia-myth"}))["index"] == []
@@ -235,6 +251,31 @@ def test_mcp_driver_notes_refuse_free_text_and_serve_entries_and_history(tmp_pat
         foreign = client.get("/api/state/projects/wuxia-myth/driver-note", headers=headers)
         assert foreign.status_code == 200 and foreign.json()["revision"] == 0
 
+        # Entry search and the superseded filter, on MCP and REST alike.
+        successor = result(rpc("state_graph_write", "supersede_driver_note_entry", {
+            "project_id": "aitelier", "entry_id": entry["entry_id"],
+            "assertion": "release handoff needs three reviewers", "body": "ruling",
+            "reason": "raised", "director_identity": "aitelier-director"}))["successor"]
+        search = {"project_id": "aitelier", "query": "REVIEWERS"}
+        mcp_hits = result(rpc("state_graph_read", "search_driver_note_entries", search))
+        assert [hit["address"] for hit in mcp_hits["entries"]] == [successor["address"]]
+        rest_hits = client.post("/api/state/query/search_driver_note_entries", json=search,
+                                headers=headers)
+        assert rest_hits.status_code == 200 and rest_hits.json() == mcp_hits
+        wide = result(rpc("state_graph_read", "search_driver_note_entries",
+                          {**search, "include_superseded": True}))
+        assert [hit["address"] for hit in wide["entries"]] == [
+            entry["address"], successor["address"]]
+        current = client.get("/api/state/projects/aitelier/driver-note", headers=headers).json()
+        assert [item["address"] for item in current["index"]] == [successor["address"]]
+        assert current["superseded_count"] == 1
+        widened = client.get("/api/state/projects/aitelier/driver-note",
+                             params={"include_superseded": "true"}, headers=headers).json()
+        assert [item["address"] for item in widened["index"]] == [
+            entry["address"], successor["address"]]
+        assert widened["index"][0]["superseded_by"] == successor["address"]
+        assert schema["operations"]["search_driver_note_entries"]["mutates"] is False
+
 
 def test_project_scoped_entry_supersede_race_has_one_winner_and_the_loser_reloads(tmp_path):
     """Two isolated directors race to supersede one entry; the loser reloads and retries."""
@@ -249,21 +290,22 @@ def test_project_scoped_entry_supersede_race_has_one_winner_and_the_loser_reload
     first.create_project("project-a", "Project A")
     first.create_project("project-b", "Project B")
     shared = first.driver_notes.write_entry(
-        "project-a", "run r-1 in flight", "owner first", "first", force="informational")
+        "project-a", "release needs one reviewer", "owner first", "first")
     shared_id = shared["address"].rsplit("/", 1)[1]
 
     def submit(service, director_identity, assertion):
         try:
             return ("won", service.driver_notes.supersede_entry(
-                "project-a", shared_id, assertion, "handoff body", "state changed",
-                director_identity, force="informational"))
+                "project-a", shared_id, assertion, "ruling body", "ruling changed",
+                director_identity))
         except StateConflict as exc:
             return ("lost", str(exc))
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         outcomes = list(pool.map(
             lambda args: submit(*args),
-            ((first, "first", "run r-1 paused"), (second, "second", "run r-1 failed")),
+            ((first, "first", "release needs two reviewers"),
+             (second, "second", "release needs three reviewers")),
         ))
     assert sorted(kind for kind, _ in outcomes) == ["lost", "won"]
     winner = next(value for kind, value in outcomes if kind == "won")
@@ -271,11 +313,11 @@ def test_project_scoped_entry_supersede_race_has_one_winner_and_the_loser_reload
     assert winner["successor"]["address"] in refusal
     # The loser reloads the index and supersedes the successor it names.
     current = second.driver_notes.get("project-a")
-    assert [item["address"] for item in current["index"]] == [
-        shared["address"], winner["successor"]["address"]]
+    assert [item["address"] for item in current["index"]] == [winner["successor"]["address"]]
+    assert current["superseded_count"] == 1
     retried = second.driver_notes.supersede_entry(
-        "project-a", winner["successor"]["entry_id"], "run r-1 reloaded", "body",
-        "reloaded", "second", force="informational")
+        "project-a", winner["successor"]["entry_id"], "release needs four reviewers", "body",
+        "reloaded", "second")
     assert retried["entry_count"] == 3 and retried["superseded"]["lifecycle"] == "superseded"
     assert first.driver_notes.get("project-b")["entry_count"] == 0
 

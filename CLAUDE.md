@@ -14,7 +14,8 @@ review determines acceptance. See `docs/output-target-migration.md` for deployme
 
 Who directs 武虾传奇, which agent implements what, and what may be started or
 published is NOT recorded here. It lives in the State DAG: the `wuxia-myth`
-driver note (`get_driver_note`) for what is in flight, and the node acceptance
+attempts, node holds, issues and priorities for what is in flight, its driver
+note (`get_driver_note`) for the standing rulings, and the node acceptance
 criteria for what counts as done. Read those, not this file.
 
 A previous edition of this section named the director by hand and went stale

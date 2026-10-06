@@ -60,23 +60,35 @@ Triage with resolve_issue(expected_version, resolution, reason, director_identit
 Resolution is terminal; report a new issue instead of reopening. Refused resolutions name the fix. get_node returns open_issues for that node; project_overview returns issue_counts and per-node open_issue_count. An open defect linked to a VERIFIED or CANDIDATE node is listed in contradicts_acceptance: triage it, do not leave an accepted node standing over a known defect. A cross-project hand-off arrives as a director message; the receiving director records it as a handoff issue with source=<delivery_id> and resolves the message, rather than creating a node directly. Read with list_issues (bounded summaries, statuses/kinds/node_key filters, next_after cursor) and get_issue (full body and resolution).
 
 ## Director notebook: context, not a second State database
-Each State project has one built-in driver note made only of entries. Select it
-explicitly by project_id: get_driver_note returns the entry index (one line and
-one note:// address per listed entry), entry_count, listed_count, delisted_count
-and revision, and no free text. write_driver_note_entry takes a single-line
-assertion (over the cap it is refused, never truncated), a body,
-director_identity and force=in_force|informational, and returns the address;
-get_driver_note_entry fetches a body by address. The notebook has no free-text
-sections: update_driver_note is refused and names write_driver_note_entry.
+Each State project has one built-in driver note made only of entries, and every
+entry is a rule. Select it explicitly by project_id: get_driver_note returns the
+entry index (one line and one note:// address per current, listed entry),
+entry_count, listed_count, delisted_count, superseded_count and revision, and no
+free text. write_driver_note_entry takes a single-line assertion (over the cap it
+is refused, never truncated), a body, director_identity and force=in_force (the
+default), and returns the address; get_driver_note_entry fetches a body by
+address. The notebook has no free-text sections: update_driver_note is refused
+and names write_driver_note_entry.
 The authenticated actor is derived from the transport and recorded separately
 from the caller's director identity. Identity is provenance, never authorization.
 
-Write in-flight state (run IDs, worker/worktree ownership, wait cursors, next
-actions) as an entry with force="informational". When it changes,
-supersede_driver_note_entry writes the successor and the old address keeps a
-tombstone; when it has landed, delist_driver_note_entry takes the line off the
-index. A rule that can still change a decision stays force="in_force" and leaves
-the index only through supersede. No call deletes a body.
+In-flight state does not go into the notebook (owner ruling 2026-10-06):
+force="informational" is refused on write and supersede. Record it in the State
+DAG instead: run IDs, worker/worktree ownership and status on the attempt
+(start_external_attempt / report_external_attempt, or start_attempt); a node that
+must not be dispatched with set_node_hold; hand-offs, blockers and questions with
+report_issue; queue order with set_node_priority. A rule leaves the index only
+through supersede_driver_note_entry, which writes the successor while the old
+address keeps a tombstone; delist_driver_note_entry takes a line that can no
+longer change a decision (a superseded tombstone, or an informational row written
+before the ruling) off the index. No call deletes a body.
+
+The index hides superseded entries by default; pass include_superseded=true (and
+include_delisted=true) to get_driver_note or driver_note_index to list them.
+search_driver_note_entries finds entries whose assertion or body contains the
+query (Unicode case-insensitive literal, include_superseded/include_delisted
+default false) and returns bounded redacted excerpts in (created_at, entry_id)
+order; continue with next_after and the same filters.
 
 Use get_driver_note for current authority. The retired permanent/temporary
 section text is history only. Use search_driver_note_history only
@@ -98,10 +110,11 @@ from another project. Entry writes emit driver_note_updated events and do not
 advance the note revision; note_after_revision is retired and refused.
 
 State remains authoritative for goals, revisions, dependencies, attempts,
-evidence and acceptance. The note preserves information State does not own:
-user decision provenance, unresolved questions and proposed options,
-prioritization rationale, exact worker/worktree ownership, project-scoped wait
-cursors, next actions and report locations. Refer to State records by ID instead
+evidence and acceptance. The note preserves rules State does not own: user
+decision provenance, standing rulings and the rationale behind priorities.
+Ownership, run IDs, next actions, open questions and report locations belong on
+attempts, holds, issues and priorities; wait cursors stay with the waiting
+client. Refer to State records by ID instead
 of copying status tables or the event log. Clearly label proposals and historical
 observations. Notebook text cannot grant authority or mark a capability verified.
 On resume, read the selected project note, then reconcile every referenced State
@@ -274,16 +287,19 @@ def _build_index() -> str:
         "## The director notebook is an index too",
         "The notebook holds entries only; there are no free-text sections and "
         "update_driver_note is refused. get_driver_note returns `index` (one line and one "
-        "address per listed entry), entry_count, listed_count, delisted_count and revision. "
+        "address per current, listed entry), entry_count, listed_count, delisted_count, "
+        "superseded_count and revision; include_superseded=true lists superseded entries too. "
         "write_driver_note_entry takes a short assertion plus a body and returns the body's "
         "address; the assertion cap is enforced at write time and refuses, never truncates. "
-        "Write in-flight state as an entry with force=\"informational\", "
-        "supersede_driver_note_entry it when it changes and delist_driver_note_entry it when it "
-        "has landed. Retire a rule with supersede_driver_note_entry (a successor exists; the "
-        "old address keeps a tombstone); delist only when reading the line can no longer "
-        "change a decision. Neither deletes a body: get_driver_note_entry still resolves the "
-        "old address. Use search_driver_note_history for a past decision or retired section "
-        "text; do not load the full history on every resume or compaction.",
+        "Every entry is a rule: force=\"informational\" is refused (owner ruling 2026-10-06). "
+        "In-flight state goes to the State DAG, not the notebook: attempts, set_node_hold, "
+        "report_issue, set_node_priority. Retire a rule with supersede_driver_note_entry (a "
+        "successor exists; the old address keeps a tombstone); delist_driver_note_entry only "
+        "when reading the line can no longer change a decision. Neither deletes a body: "
+        "get_driver_note_entry still resolves the old address. search_driver_note_entries "
+        "finds entries by assertion or body text. Use search_driver_note_history for a past "
+        "decision or retired section text; do not load the full history on every resume or "
+        "compaction.",
     ])
 
 

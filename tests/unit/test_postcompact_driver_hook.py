@@ -68,7 +68,7 @@ DO_NOT_INCLUDE_UNSELECTED_GUIDE_SECTION
             assert args["arguments"] == {"project_id": "aitelier"}
             lines = StateStub.lines or [
                 f"rule revision {StateStub.revision} [in force]",
-                "fresh in-flight; Authorization: Bearer forbidden-secret [informational]"]
+                "fresh rule; Authorization: Bearer forbidden-secret [in force]"]
             index = StateStub.items or [
                 {"address": f"note://aitelier/{n:012x}", "index_line": line}
                 for n, line in enumerate(lines)]
@@ -677,44 +677,48 @@ def test_hook_injects_the_entry_index_and_never_section_text(tmp_path, state_ser
     assert "entry_count=2 listed=2 delisted=0" in context
 
 
-def test_live_sized_index_keeps_every_in_flight_entry_and_reports_omissions(
+def test_live_sized_index_renders_only_current_entries_and_reports_omissions(
         tmp_path, state_server):
-    """A live-sized index (well over the cap, oldest-first, in-flight entries
-    written LAST) must keep every current informational line. Cutting from the
-    end would drop exactly those."""
+    """A live-sized index (well over the cap, oldest-first) keeps the NEWEST
+    current lines, says how many older ones it omitted, and never renders a
+    superseded tombstone or an informational group: the notebook holds rules
+    only and in-flight state lives in the State DAG (owner ruling 2026-10-06)."""
     module = load_hook_module()
+    assert not hasattr(module, "ENTRY_INDEX_GROUPS")
 
-    def item(n, force, lifecycle, text):
+    def item(n, lifecycle, text):
         line = f"{text} {n:03d} " + "x" * 120
         line += (" [superseded -> note://aitelier/ffffffffffff]" if lifecycle == "superseded"
-                 else " [in force]" if force == "in_force" else " [informational]")
+                 else " [in force]")
         return {"address": f"note://aitelier/{n:012x}", "index_line": line,
-                "force": force, "lifecycle": lifecycle}
+                "force": "in_force", "lifecycle": lifecycle}
 
-    items = [item(n, "in_force", "current", "rule") for n in range(200)]
-    items += [item(200 + n, "in_force", "superseded", "old rule") for n in range(35)]
-    items += [item(235 + n, "informational", "current", "IN-FLIGHT run") for n in range(15)]
-    assert len(items) == 250
+    items = [item(n, "current", "rule") for n in range(200)]
+    items += [item(200 + n, "superseded", "OLD-TOMBSTONE") for n in range(35)]
+    items += [item(235 + n, "current", "NEWEST rule") for n in range(15)]
     assert sum(len(i["index_line"]) for i in items) > 3 * module.MAX_ENTRY_INDEX_CHARS
 
     rendered = module._entry_index({"index": items})
     assert len(rendered) <= module.MAX_ENTRY_INDEX_CHARS
+    assert "OLD-TOMBSTONE" not in rendered and "superseded ->" not in rendered
+    assert "informational" not in rendered and "in flight" not in rendered
     for entry in items[235:]:
         assert entry["index_line"] in rendered
-    assert "### in flight (informational): shown=15 omitted_entry_index_lines=0" in rendered
-    assert "### superseded (tombstones): shown=0 omitted_entry_index_lines=35" in rendered
-    in_force = next(line for line in rendered.splitlines() if line.startswith("### in force"))
-    shown = int(in_force.split("shown=")[1].split()[0])
-    omitted = int(in_force.split("omitted_entry_index_lines=")[1])
-    assert shown > 0 and omitted > 0 and shown + omitted == 200
-    # In-flight lines render first, before any rule.
-    assert rendered.index("IN-FLIGHT run 235") < rendered.index("rule ")
+    header = rendered.splitlines()[0]
+    assert header.startswith("### current entries: shown=")
+    shown = int(header.split("shown=")[1].split()[0])
+    omitted = int(header.split("omitted_entry_index_lines=")[1])
+    assert shown > 0 and omitted > 0 and shown + omitted == 215
+    # The oldest lines are the ones omitted.
+    assert items[0]["index_line"] not in rendered
 
     StateStub.items = items
     context = invoke(tmp_path, state_server)["hookSpecificOutput"]["additionalContext"]
     for entry in items[235:]:
         assert entry["index_line"] in context
-    assert "omitted_entry_index_lines=35" in context
+    assert "OLD-TOMBSTONE" not in context
+    assert f"omitted_entry_index_lines={omitted}" in context
+    assert "State DAG (attempts, node holds, issues, priorities)" in context
 
 
 def test_in_flight_entry_in_the_middle_of_the_index_retains_exact_identity_tuple(

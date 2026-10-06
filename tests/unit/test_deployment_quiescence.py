@@ -185,7 +185,11 @@ def test_measurement_is_cross_project_and_includes_external_sidecar_owners(tmp_p
                           external_probe=active_probe)
 
     assert observed["projects"] == ["project-a", "project-b"]
-    assert {r["run_id"] for r in observed["blockers"]["active_runs"]} == {"run-a", "run-b"}
+    # run-b is paused with nothing admitted and no owned process: a restart
+    # resumes it from its trace, so since 2026-10-06 it is recorded as
+    # resumable rather than as a blocker (deployment.the-gate-measures-work-not-its-own-shell).
+    assert {r["run_id"] for r in observed["blockers"]["active_runs"]} == {"run-a"}
+    assert {r["run_id"]: r["resumable"] for r in observed["runs"]} == {"run-a": False, "run-b": True}
     assert len(observed["blockers"]["checkout_leases"]) == 2
     assert observed["blockers"]["checkout_leases"][0]["run_id"] == "run-a"
     assert observed["blockers"]["sidecar_owners"][0]["run_id"] == "run-a"

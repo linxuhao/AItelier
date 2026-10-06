@@ -72,6 +72,18 @@ SIDECAR_OUTCOMES = frozenset({"pending", "ready", "released", "error"})
 EXTERNAL_OWNER_STATUSES = frozenset({"active", "paused", "unknown", "settled"})
 EXTERNAL_OWNER_KINDS = frozenset({"docker", "process"})
 GODOT_OWNER_STATUSES = frozenset({"active", "owner_lost", "reconciled", "released"})
+# Names that read as a measurement. A bare `eval` is deliberately absent: every
+# command Claude Code runs is `bash -c "source <snapshot> && eval '<command>'"`,
+# and on 2026-10-06 (journal event c5cfa3fea34847818d4cf99503cceed1) the gate
+# flagged its own invoking shell twice on that one builtin word. `eval_job`,
+# `evaluation` and `evaluator` still match.
+MEASUREMENT_NAME_PATTERN = re.compile(
+    r"(?:^|[^a-z0-9])(measurement|evaluation|evaluator|eval[_-]?job|"
+    r"benchmark|playtest|judge|grader|grading|scor(?:e|ing)|"
+    r"assessment|assessor|rater|review|quality[_-]?check|"
+    r"metrics?|"
+    r"[a-z0-9]+[_-](?:worker|job)|[a-z0-9]+(?:worker|job))"
+    r"(?:[^a-z0-9]|$)")
 UNKNOWN_PROCESS_ERROR_PREFIX = (
     "unregistered external measurement process has unknown ownership: ")
 BLOCKER_IDENTITY_FIELDS = {
@@ -206,7 +218,8 @@ def _normalized_owner_blockers(*, runs: list[dict], sidecar_owners: list[dict],
     """Project measured owner inventories through the producer's blocker rules."""
     return {
         "active_runs": [row for row in runs
-                        if row.get("status") in BLOCKING_STATUSES],
+                        if row.get("status") in BLOCKING_STATUSES
+                        and row.get("resumable") is not True],
         "active_operations": [row for row in runs
                               if isinstance(row.get("active_operations"), int)
                               and row["active_operations"] > 0],
@@ -1218,6 +1231,25 @@ def _measurement_subject(line: str) -> str:
     return " ".join(scanned)
 
 
+def measurer_pids() -> set[str]:
+    """This process and its ancestors, as pids: the gate's own invocation.
+
+    The shell that launched the gate is not a bystander the gate can judge;
+    it is the gate. Walked through PROC_ROOT so tests can fake the chain; an
+    unreadable link ends the walk, and the set then holds whatever was proven.
+    """
+    pids: set[str] = set()
+    pid = str(os.getpid())
+    while pid and pid not in pids and pid != "0":
+        pids.add(pid)
+        try:
+            stat = (PROC_ROOT / pid / "stat").read_text()
+            pid = stat[stat.rindex(")") + 2:].split()[1]
+        except (OSError, ValueError, IndexError):
+            break
+    return pids
+
+
 def external_owners(*, runner: Callable[[list[str]], subprocess.CompletedProcess]
                     = _run_command,
                     registered_external_owners: list[dict] | None = None
@@ -1252,16 +1284,15 @@ def external_owners(*, runner: Callable[[list[str]], subprocess.CompletedProcess
     if processes.returncode == 0:
         needles = ("godot-builder", "zvec-grep", "skillflow", "aitelier",
                    "godot --", "godot --headless", "xvfb-run")
+        own = measurer_pids()
         for line in (processes.stdout or "").splitlines():
+            fields = line.split(None, 1)
+            if fields and fields[0] in own:
+                continue
             lowered = line.lower()
             subject = _measurement_subject(line).lower()
-            measurement_name = bool(re.search(
-                r"(?:^|[^a-z0-9])(measurement|evaluation|evaluator|eval(?:[_-]?job)?|"
-                r"benchmark|playtest|judge|grader|grading|scor(?:e|ing)|"
-                r"assessment|assessor|rater|review|quality[_-]?check|"
-                r"metrics?|"
-                r"[a-z0-9]+[_-](?:worker|job)|[a-z0-9]+(?:worker|job))"
-                r"(?:[^a-z0-9]|$)", subject)) or "--long-gate" in lowered
+            measurement_name = (bool(MEASUREMENT_NAME_PATTERN.search(subject))
+                                or "--long-gate" in lowered)
             command = line.strip()
             matched = next((row for row in registered_external_owners
                             if row.get("status") in {"active", "paused", "unknown"}
@@ -1489,6 +1520,14 @@ def measure(*, skillflow, db=None, sidecar_db: Path | str | None = None,
             lost, unknown, alive = [], [], 0
         row["audit"] = audit
         row["active_operations"] = len(lost) + len(unknown) + alive
+        # A run whose step holds no admitted operation and owns no live, lost
+        # or unknown process is rebuilt from its trace after a restart
+        # (core/dpe_pipeline.py, "RESUME AFTER A HOST RESTART"); it is work
+        # in progress, not work a restart would destroy. Recorded on the row
+        # and in the journal; a run with any owned process still blocks.
+        row["resumable"] = (status in BLOCKING_STATUSES
+                            and row["active_operations"] == 0
+                            and "error" not in audit)
         runs.append(row)
 
     leases, admissions, registered_external, db_errors = _db_rows(db)
@@ -1655,6 +1694,11 @@ def _validate_owner_inventories(observation: dict) -> str | None:
             return f"{prefix} audit.alive must be a nonnegative integer"
         if row["active_operations"] != len(lost) + len(unknown) + alive:
             return f"{prefix} active_operations contradicts its audit"
+        if "resumable" in row and row["resumable"] is not (
+                row["status"] in BLOCKING_STATUSES
+                and row["active_operations"] == 0
+                and "error" not in audit):
+            return f"{prefix} resumable contradicts its status and audit"
 
     for index, row in enumerate(inventories["sidecar_owners"]):
         prefix = f"sidecar_owners row {index}"
@@ -1791,6 +1835,14 @@ def _validate_observation(observation: Any) -> str | None:
     return None
 
 
+def _resumable_runs(observation: Any) -> list[dict]:
+    """The runs a restart would resume rather than destroy, for the journal."""
+    runs = observation.get("runs") if isinstance(observation, dict) else None
+    return [{"run_id": row.get("run_id"), "project_id": row.get("project_id"),
+             "status": row.get("status")}
+            for row in (runs or []) if isinstance(row, dict) and row.get("resumable") is True]
+
+
 def _classify_blockers(observation: dict) -> tuple[dict, list[dict]]:
     """Separate authoritative owners from heuristic process-name matches."""
     blockers = observation.get("blockers")
@@ -1900,6 +1952,7 @@ def authorize(action: str, observation: dict, *, journal: Path | str | None = No
                                        "replayed": False,
                                        "inventory_digest": observation_value["digest"],
                                        "blockers": observation_value["blockers"],
+                                       "resumable_runs": _resumable_runs(observation_value),
                                        "errors": observation_value["errors"]})
             _persist_journal(path, state)
             return {"allowed": True, "replayed": False, "event": event}
@@ -1922,6 +1975,7 @@ def authorize(action: str, observation: dict, *, journal: Path | str | None = No
                                                      else authoritative)},
                                        "inventory_digest": observation_value["digest"],
                                        "blockers": observation_value["blockers"],
+                                       "resumable_runs": _resumable_runs(observation_value),
                                        "errors": observation_value["errors"]})
             _persist_journal(path, state)
             return {"allowed": True, "replayed": False, "event": event}
@@ -1930,6 +1984,7 @@ def authorize(action: str, observation: dict, *, journal: Path | str | None = No
                                    "replayed": False, "reason": reason,
                                    "inventory_digest": observation_value.get("digest"),
                                    "blockers": observation_value.get("blockers"),
+                                   "resumable_runs": _resumable_runs(observation_value),
                                    "errors": observation_value.get("errors")})
         _persist_journal(path, state)
     raise DeploymentBlocked(

@@ -572,6 +572,9 @@ def _validated_registration(config_name: str, yaml_text: str,
     if not isinstance(data, dict):
         raise ValueError("generated pipeline YAML is not a mapping")
     data["name"] = config_name
+    if roles is not None:
+        # Reload/boot must bind the same per-config role as initial registration.
+        _namespace_agents(data, config_name)
     from core.release_gate_migration import release_gate_ownership_error
     ownership_error = release_gate_ownership_error(data, roles, sf=sf)
     if ownership_error:

@@ -2014,8 +2014,6 @@ class PipelineEngine:
                 "returned_chars": len(res.get("content", "")),
                 "matches": res.get("matches"), "error": res.get("error")})
             return res
-        from api.dependencies import get_skillflow
-        sf = get_skillflow()
         # The roots are the HOST's to inject, never the agent's to choose.
         # skillflow's call site does `kwargs.setdefault("project_root", …)`, so
         # an agent that passes `project_root` in its arguments would win over
@@ -2035,6 +2033,8 @@ class PipelineEngine:
                 f"Tool '{tool_name}' is not granted to this step. "
                 "Available tools: " + (", ".join(sorted(schemas)) or "(none)")
             )}
+        from api.dependencies import get_skillflow
+        sf = get_skillflow()
         if tool_name in ("focused_check", "novel_bench_read"):
             # Its result is evidence about THIS implement attempt. SkillFlow
             # injects these identities after this boundary; an agent-provided

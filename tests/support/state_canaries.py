@@ -95,7 +95,19 @@ def _plan():
             (c("state_director_idempotency"), OPEN, c("state_director_idempotency"),
              '{"canary": "%s"}' % c("state_director_idempotency"),
              '{"canary": "%s"}' % c("state_director_idempotency"))),
+        # A retained candidate's bundle_bytes ARE the private Git bytes that
+        # reconstruct it. The canary is written as the commit key AND as the
+        # blob, so a raw read (or an armed read without the column projection)
+        # carries it; the projection filters this row out because no opened
+        # project's attempt references the canary commit.
+        "state_git_artifacts": (
+            "INSERT INTO state_git_artifacts(commit_sha,tree_sha,bundle_sha256,"
+            "retained_ref,bundle_bytes,created_at) VALUES(?,?,?,?,?,?)",
+            (c("state_git_artifacts"), c("state_git_artifacts") + "-tree",
+             c("state_git_artifacts") + "-sha256", "refs/vault/canary",
+             c("state_git_artifacts").encode(), now)),
     }
+
 
 
 def seed(db) -> None:

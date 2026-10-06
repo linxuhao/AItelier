@@ -32,7 +32,17 @@ import os
 from pathlib import Path
 
 import yaml
-from skillflow import PipelineGraph
+
+
+def _pipeline_graph():
+    """The workflow SDK's PipelineGraph, imported only when a graph is really
+    parsed. This module is imported on the pure-State surface too, where the
+    workflow SDK may be absent: a module-level SDK import would make merely
+    importing this bridge fail on a State-only host. Callers reach the class
+    through here so the dependency is incurred at the parse, not at import."""
+    from skillflow import PipelineGraph
+    return PipelineGraph
+
 
 GEN_PREFIX = "gen_"
 # Generated graphs reference invented agent role names; we namespace them per-config
@@ -579,7 +589,7 @@ def _validated_registration(config_name: str, yaml_text: str,
     ownership_error = release_gate_ownership_error(data, roles, sf=sf)
     if ownership_error:
         raise ValueError(ownership_error)
-    graph = PipelineGraph._from_dict(data)
+    graph = _pipeline_graph()._from_dict(data)
     # Derive the hints BEFORE registering. `_gen_hints` reads the graph's shape and
     # can raise on a malformed one (a generated `validation:` written as a mapping
     # did exactly that); deriving afterwards left the graph live with the caller
@@ -791,7 +801,7 @@ def register_forge_pipeline(sf, registry, run_id: str, name: str) -> dict:
     # a config that runs, has no `.roles.json`, and therefore drops every real
     # prompt for the generic host fallback. Deriving first makes the failure clean.
     try:
-        graph = PipelineGraph._from_dict(yaml.safe_load(yaml_text))
+        graph = _pipeline_graph()._from_dict(yaml.safe_load(yaml_text))
         hints = _gen_hints(graph, roles, config_name)
     except Exception as e:
         return {"error": f"emitted pipeline failed validation: {e}"}

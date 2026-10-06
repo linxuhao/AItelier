@@ -333,12 +333,15 @@ class StateDriverNotes:
             + cls._visible(include_superseded, include_delisted)
             + " ORDER BY created_at, entry_id", (project_id,)).fetchall()
         counts = cls._counts(conn, project_id)
-        return {"index": [{"address": address_of(project_id, row["entry_id"]),
+        # Counts come BEFORE the list and every item carries its position i, so a
+        # reader whose copy was truncated can tell how many lines it did not see.
+        return {**counts, "index_count": len(rows),
+                "index": [{"i": i, "address": address_of(project_id, row["entry_id"]),
                            "index_line": index_line(row), "force": row["force"],
                            "lifecycle": "superseded" if row["superseded_by"] else "current",
                            "superseded_by": (address_of(project_id, row["superseded_by"])
                                              if row["superseded_by"] else None)}
-                          for row in rows], **counts}
+                          for i, row in enumerate(rows)]}
 
     def _write_entry(self, conn, project_id, assertion, body, director_identity,
                      force, landed, timestamp) -> str:
@@ -474,9 +477,10 @@ class StateDriverNotes:
                 "SELECT * FROM state_driver_note_entries WHERE project_id=?" + clause +
                 " ORDER BY created_at, entry_id LIMIT ?", (project_id, limit + 1)).fetchall()
             counts = self._counts(conn, project_id)
-        return {"project_id": project_id,
-                "entries": [entry_summary(row) for row in rows[:limit]],
-                "truncated": len(rows) > limit, **counts}
+        return {"project_id": project_id, **counts,
+                "index_count": len(rows[:limit]), "truncated": len(rows) > limit,
+                "entries": [{"i": i, **entry_summary(row)}
+                            for i, row in enumerate(rows[:limit])]}
 
     @writer_only_read("search_driver_note_entries")
     def search_entries(self, project_id: str, query: str = "", limit: int = 20,

@@ -328,26 +328,29 @@ def _entry_index(note: dict[str, Any], limit: int = MAX_ENTRY_INDEX_CHARS) -> st
     Bodies stay behind get_driver_note_entry and are never injected.
 
     Over the cap the OLDEST line is dropped first, and the header states how many
-    lines were omitted.
+    lines were omitted. The header comes first and every line carries its position
+    [i] of 0..total-1, so a reader of a truncated copy can see what it is missing.
     """
     index = note.get("index")
     if not isinstance(index, list) or not index:
         return "- none listed (driver_note_index returned no entries)"
+    current = [item for item in index if isinstance(item, dict)
+               and item.get("lifecycle") != "superseded"
+               and str(item.get("index_line", "")).strip()]
+    if not current:
+        return "- none listed (entries present but carried no current index_line)"
+    total = len(current)
     lines: list[str] = []
-    for item in index:
-        if not isinstance(item, dict) or item.get("lifecycle") == "superseded":
-            continue
+    for i, item in enumerate(current):
         entry_id = str(item.get("address", "")).rsplit("/", 1)[-1] or "?"
         line = str(item.get("index_line", "")).replace("\n", " ").strip()
-        if not line:
-            continue
-        lines.append(f"- {entry_id} {line}")
-    if not lines:
-        return "- none listed (entries present but carried no current index_line)"
+        lines.append(f"- [{i}] {entry_id} {line}")
     omitted = 0
     while True:
         rendered = _redact("\n".join([
-            f"### {ENTRY_INDEX_LABEL}: shown={len(lines)} omitted_entry_index_lines={omitted}",
+            f"### {ENTRY_INDEX_LABEL}: total={total} shown={len(lines)} "
+            f"omitted_entry_index_lines={omitted}"
+            + (f" (oldest [0]..[{omitted - 1}] dropped)" if omitted else ""),
             *lines]))
         if len(rendered) <= limit or not lines:
             return rendered

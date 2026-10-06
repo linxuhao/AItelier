@@ -280,6 +280,9 @@ depend on the flags: `superseded_count` is the number of superseded entries the
 default hides, `delisted_count` the number evicted from the index.
 `driver_note_index` applies `limit` after the filter, so `truncated` means more
 entries match the same filter.
+Both responses put the counts and `index_count` (lines in this list) BEFORE the
+list, and every line carries its position `i` (0-based), so a reader holding a
+truncated copy can see how many lines it did not get.
 
 `search_driver_note_entries` searches entries rather than retired section text.
 Arguments: `project_id`, `query` (Unicode case-insensitive literal, at most 500

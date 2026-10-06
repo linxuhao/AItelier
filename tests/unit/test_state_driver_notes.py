@@ -21,7 +21,7 @@ def services(tmp_path):
     return first, StateService(StateDatabase(db_path), actor="bob@example.test", project_read_trusted=True)
 
 
-NOTE_KEYS = {"project_id", "revision", "index", "entry_count", "listed_count",
+NOTE_KEYS = {"project_id", "revision", "index", "index_count", "entry_count", "listed_count",
              "delisted_count", "superseded_count"}
 
 

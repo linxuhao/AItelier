@@ -684,3 +684,22 @@ def test_search_entries_has_the_same_authorization_as_the_index(tmp_path):
     index = execute(opened, "driver_note_index", {"project_id": "p"})
     found = execute(opened, "search_driver_note_entries", {"project_id": "p", "query": "canary"})
     assert [e["address"] for e in found["entries"]] == [e["address"] for e in index["entries"]]
+
+
+def test_the_index_states_its_size_first_and_numbers_every_line(service):
+    """A reader of a truncated copy must see the count before the list and the
+    position of each line, so a missing tail is noticeable (owner 2026-10-06)."""
+    notes = service.driver_notes
+    for n in range(3):
+        notes.write_entry("aitelier", f"numbered rule {n}", "body", "d")
+    note = notes.get("aitelier")
+    keys = list(note)
+    assert keys.index("index_count") < keys.index("index")
+    assert keys.index("entry_count") < keys.index("index")
+    assert note["index_count"] == 3
+    assert [item["i"] for item in note["index"]] == [0, 1, 2]
+    listed = notes.entry_index("aitelier", limit=2)
+    keys = list(listed)
+    assert keys.index("index_count") < keys.index("entries")
+    assert listed["index_count"] == 2 and listed["truncated"] is True
+    assert [item["i"] for item in listed["entries"]] == [0, 1]

@@ -705,12 +705,15 @@ def test_live_sized_index_renders_only_current_entries_and_reports_omissions(
     for entry in items[235:]:
         assert entry["index_line"] in rendered
     header = rendered.splitlines()[0]
-    assert header.startswith("### current entries: shown=")
+    assert header.startswith("### current entries: total=215 shown=")
     shown = int(header.split("shown=")[1].split()[0])
-    omitted = int(header.split("omitted_entry_index_lines=")[1])
+    omitted = int(header.split("omitted_entry_index_lines=")[1].split()[0])
     assert shown > 0 and omitted > 0 and shown + omitted == 215
-    # The oldest lines are the ones omitted.
+    assert f"(oldest [0]..[{omitted - 1}] dropped)" in header
+    # The oldest lines are the ones omitted; every kept line carries its position.
     assert items[0]["index_line"] not in rendered
+    assert rendered.splitlines()[1].startswith(f"- [{omitted}] ")
+    assert rendered.splitlines()[-1].startswith("- [214] ")
 
     StateStub.items = items
     context = invoke(tmp_path, state_server)["hookSpecificOutput"]["additionalContext"]

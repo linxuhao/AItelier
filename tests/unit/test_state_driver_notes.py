@@ -6,7 +6,7 @@ import pytest
 from core.state_commands import (DRIVER_TOOL_DEFINITIONS, READ_REQUESTS, WRITE_REQUESTS,
                                  describe, execute)
 from core.state_database import StateDatabase
-from core.state_driver_notes import FREE_TEXT_CLOSED
+from core.state_driver_notes import FREE_TEXT_CLOSED, NOTE_AFTER_REVISION_RETIRED
 from core.state_graph import StateGraphError
 from core.state_service import StateService
 from tests.support.legacy_driver_note import seed_section
@@ -197,8 +197,8 @@ def test_search_redacts_slack_tokens_and_identity_metadata(services):
 
 
 @pytest.mark.asyncio
-async def test_note_wait_is_project_scoped_and_wakes_from_any_selected_source(services):
-    a, b = services
+async def test_any_filter_wakes_from_any_selected_source(services):
+    a, _ = services
     a.store.add_nodes("aitelier", [
         {"key": "selected", "goal": "Selected", "acceptance": [
             {"id": "check", "kind": "test", "description": "check"}]},
@@ -208,22 +208,6 @@ async def test_note_wait_is_project_scoped_and_wakes_from_any_selected_source(se
     attempt = a.external.register(
         "aitelier", "other", 1, "test", "worker", "request")
     cursor = a.store.events("aitelier")[-1]["seq"]
-
-    note_wait = asyncio.create_task(a.wait_for_state_change(
-        "aitelier", after=cursor, note_after_revision=0,
-        return_when_idle=True, timeout_seconds=1))
-    await asyncio.sleep(.02)
-    project_cursor = a.store.events("aitelier")[-1]["seq"]
-    seed_section(b, "wuxia-myth", "temporary", "foreign", "wuxia-director")
-    assert a.store.events("aitelier")[-1]["seq"] == project_cursor
-    await asyncio.sleep(.05)
-    assert not note_wait.done()
-    seed_section(a, "aitelier", "temporary", "local", "aitelier-director")
-    changed = await asyncio.wait_for(note_wait, 1)
-    assert changed["events"][0]["event_type"] == "driver_note_updated"
-    assert changed["events"][0]["project_id"] == "aitelier"
-
-    cursor = changed["next_after"]
     a.external.observe(attempt["attempt_id"], "paused", 0, attempt["context_hash"],
         "paused", "private/report", "a" * 64)
     any_result = await a.wait_for_state_change(
@@ -232,28 +216,30 @@ async def test_note_wait_is_project_scoped_and_wakes_from_any_selected_source(se
     assert any_result["events"][0]["payload"]["attempt_id"] == attempt["attempt_id"]
     consumed = a.store.events("aitelier")[-1]["seq"]
     snapshot = await a.wait_for_state_change(
-        "aitelier", after=consumed, note_after_revision=1,
-        attempt_ids=[attempt["attempt_id"]], filter_mode="any",
+        "aitelier", after=consumed, attempt_ids=[attempt["attempt_id"]], filter_mode="any",
         return_when_idle=True, timeout_seconds=0)
     assert snapshot["reason"] == "action_required"
     assert snapshot["attempts"][0]["attempt_id"] == attempt["attempt_id"]
 
 
 @pytest.mark.asyncio
-async def test_note_revision_is_a_live_condition_but_plain_idle_stays_fast(services):
+@pytest.mark.parametrize("revision", [0, 1])
+async def test_note_after_revision_is_refused_loudly_and_plain_idle_stays_fast(services, revision):
     service, _ = services
     cursor = service.store.events("aitelier")[-1]["seq"]
     idle = await service.wait_for_state_change(
         "aitelier", after=cursor, return_when_idle=True, timeout_seconds=900)
     assert idle["reason"] == "nothing_to_wait" and not idle["timed_out"]
-
-    pending = await service.wait_for_state_change(
-        "aitelier", after=cursor, note_after_revision=0,
-        return_when_idle=True, timeout_seconds=.02)
-    assert pending["timed_out"] and "reason" not in pending
-    seed_section(service, "aitelier", "permanent", "ready", "aitelier-director")
-    already = await service.wait_for_state_change(
-        "aitelier", after=service.store.events("aitelier")[-1]["seq"],
-        note_after_revision=0, return_when_idle=True, timeout_seconds=0)
-    assert already["reason"] == "driver_note_changed"
-    assert already["note_revision"] == 1
+    # A wait that could never wake is refused at once, never left to hang until
+    # its timeout. asyncio.wait_for turns a regression into a fast failure.
+    with pytest.raises(StateGraphError) as direct:
+        await asyncio.wait_for(service.wait_for_state_change(
+            "aitelier", after=cursor, note_after_revision=revision,
+            return_when_idle=True, timeout_seconds=900), 2)
+    assert str(direct.value) == NOTE_AFTER_REVISION_RETIRED
+    with pytest.raises(StateGraphError) as typed:
+        await asyncio.wait_for(execute(service, "wait_for_state_change", {
+            "project_id": "aitelier", "after": cursor, "note_after_revision": revision,
+            "return_when_idle": True, "timeout_seconds": 900}), 2)
+    assert str(typed.value) == NOTE_AFTER_REVISION_RETIRED
+    assert "no longer advances" in NOTE_AFTER_REVISION_RETIRED

@@ -294,10 +294,10 @@ could not run.
 The note is context, not another source of goal truth. State nodes, attempts,
 evidence and acceptance remain authoritative. Project IDs isolate note contents,
 revisions and wait events, so separate directors may manage separate projects.
-A wait can subscribe with `note_after_revision`; `filter_mode="any"` wakes when
-any selected node, attempt or note condition changes. Entry writes emit
-`driver_note_updated` events but do not advance the note revision, so
-`note_after_revision` does not wake on them. The default
+`filter_mode="any"` wakes a wait when any selected node or attempt changes.
+`note_after_revision` is retired: entry writes emit `driver_note_updated` events
+and do not advance the note revision, so a wait given it is refused with an
+explicit error instead of hanging. The default
 `filter_mode="all"` preserves the earlier combined-filter behavior.
 
 ### Example: create and decompose a project

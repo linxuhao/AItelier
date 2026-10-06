@@ -56,8 +56,9 @@ superseded when it changes and delisted when it lands), `get_driver_note` return
 the entry index, and bounded/redacted `search_driver_note_history` plus
 `driver_note_history` keep the retired free-text sections readable, so different
 directors manage projects in parallel without sharing notes or event cursors. `wait_for_state_change` keeps its
-single-project compatibility defaults and adds `filter_mode="any"` plus
-`note_after_revision` for OR-style handoff waits.
+single-project compatibility defaults and adds `filter_mode="any"` for OR-style
+waits; `note_after_revision` is retired and refused, because the notebook
+revision no longer advances.
 See the [agent driver guide](docs/state-agent-driver.md) for external evidence,
 cursor scope, ownership and handoff rules.
 

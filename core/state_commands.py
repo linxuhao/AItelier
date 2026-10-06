@@ -125,7 +125,10 @@ class WaitForStateChange(Project):
     after: int = Field(default=0, ge=0, le=2**63-1)
     node_keys: list[str] | None = Field(default=None, min_length=1, max_length=100)
     attempt_ids: list[str] | None = Field(default=None, min_length=1, max_length=100)
-    note_after_revision: int | None = Field(default=None, ge=0, le=2**63-1)
+    note_after_revision: int | None = Field(
+        default=None, ge=0, le=2**63-1,
+        description="Retired 2026-10-06: the notebook revision no longer advances; any value "
+                    "is refused with an explicit error.")
     filter_mode: Literal["all", "any"] = "all"
     actionable_only: bool = True
     return_when_idle: bool = False

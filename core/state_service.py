@@ -100,6 +100,9 @@ class StateService:
                                     note_after_revision=None, filter_mode="all", actionable_only=True,
                                     timeout_seconds=30.0, limit=100, return_when_idle=False):
         from core.state_changes import wait_for_state_change
+        if note_after_revision is not None:
+            from core.state_driver_notes import NOTE_AFTER_REVISION_RETIRED
+            raise StateGraphError(NOTE_AFTER_REVISION_RETIRED)
         return await wait_for_state_change(
             self, project_id, after, node_keys, attempt_ids, note_after_revision,
             filter_mode, actionable_only, timeout_seconds, limit, return_when_idle)

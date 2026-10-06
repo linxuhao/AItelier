@@ -28,6 +28,7 @@ class StateStub(BaseHTTPRequestHandler):
     requests = []
     lines = None  # index_line strings; get_driver_note carries no section text
     extra = None  # fields an older server would still have sent
+    items = None  # full index items (address, index_line, force, lifecycle)
     guide = None
     nodes = None
     standing = None
@@ -68,11 +69,12 @@ DO_NOT_INCLUDE_UNSELECTED_GUIDE_SECTION
             lines = StateStub.lines or [
                 f"rule revision {StateStub.revision} [in force]",
                 "fresh in-flight; Authorization: Bearer forbidden-secret [informational]"]
+            index = StateStub.items or [
+                {"address": f"note://aitelier/{n:012x}", "index_line": line}
+                for n, line in enumerate(lines)]
             result = {
-                "project_id": "aitelier", "revision": StateStub.revision,
-                "index": [{"address": f"note://aitelier/{n:012x}", "index_line": line}
-                          for n, line in enumerate(lines)],
-                "entry_count": len(lines), "listed_count": len(lines), "delisted_count": 0,
+                "project_id": "aitelier", "revision": StateStub.revision, "index": index,
+                "entry_count": len(index), "listed_count": len(index), "delisted_count": 0,
                 **(StateStub.extra or {}),
             }
         elif args["action"] == "project_overview":
@@ -107,7 +109,7 @@ DO_NOT_INCLUDE_UNSELECTED_GUIDE_SECTION
 def state_server():
     StateStub.revision = 1
     StateStub.requests = []
-    StateStub.lines = StateStub.extra = StateStub.guide = StateStub.nodes = None
+    StateStub.lines = StateStub.extra = StateStub.items = StateStub.guide = StateStub.nodes = None
     StateStub.standing = None
     server = ThreadingHTTPServer(("127.0.0.1", 0), StateStub)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -673,6 +675,46 @@ def test_hook_injects_the_entry_index_and_never_section_text(tmp_path, state_ser
     assert "SECTION-CANARY" not in context
     assert "rule revision 1 [in force]" in context
     assert "entry_count=2 listed=2 delisted=0" in context
+
+
+def test_live_sized_index_keeps_every_in_flight_entry_and_reports_omissions(
+        tmp_path, state_server):
+    """A live-sized index (well over the cap, oldest-first, in-flight entries
+    written LAST) must keep every current informational line. Cutting from the
+    end would drop exactly those."""
+    module = load_hook_module()
+
+    def item(n, force, lifecycle, text):
+        line = f"{text} {n:03d} " + "x" * 120
+        line += (" [superseded -> note://aitelier/ffffffffffff]" if lifecycle == "superseded"
+                 else " [in force]" if force == "in_force" else " [informational]")
+        return {"address": f"note://aitelier/{n:012x}", "index_line": line,
+                "force": force, "lifecycle": lifecycle}
+
+    items = [item(n, "in_force", "current", "rule") for n in range(200)]
+    items += [item(200 + n, "in_force", "superseded", "old rule") for n in range(35)]
+    items += [item(235 + n, "informational", "current", "IN-FLIGHT run") for n in range(15)]
+    assert len(items) == 250
+    assert sum(len(i["index_line"]) for i in items) > 3 * module.MAX_ENTRY_INDEX_CHARS
+
+    rendered = module._entry_index({"index": items})
+    assert len(rendered) <= module.MAX_ENTRY_INDEX_CHARS
+    for entry in items[235:]:
+        assert entry["index_line"] in rendered
+    assert "### in flight (informational): shown=15 omitted_entry_index_lines=0" in rendered
+    assert "### superseded (tombstones): shown=0 omitted_entry_index_lines=35" in rendered
+    in_force = next(line for line in rendered.splitlines() if line.startswith("### in force"))
+    shown = int(in_force.split("shown=")[1].split()[0])
+    omitted = int(in_force.split("omitted_entry_index_lines=")[1])
+    assert shown > 0 and omitted > 0 and shown + omitted == 200
+    # In-flight lines render first, before any rule.
+    assert rendered.index("IN-FLIGHT run 235") < rendered.index("rule ")
+
+    StateStub.items = items
+    context = invoke(tmp_path, state_server)["hookSpecificOutput"]["additionalContext"]
+    for entry in items[235:]:
+        assert entry["index_line"] in context
+    assert "omitted_entry_index_lines=35" in context
 
 
 def test_in_flight_entry_in_the_middle_of_the_index_retains_exact_identity_tuple(

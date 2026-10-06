@@ -60,6 +60,11 @@ FREE_TEXT_CLOSED = (
     "entry with force=\"informational\": write it, supersede_driver_note_entry when it "
     "changes, delist_driver_note_entry when it lands. Past section text stays readable via "
     "driver_note_history and search_driver_note_history.")
+NOTE_AFTER_REVISION_RETIRED = (
+    "note_after_revision is retired: the driver notebook revision no longer advances "
+    "(owner ruling 2026-10-06, entries only), so a wait on it could never wake. Wait on "
+    "director messages, or on the project's driver_note_updated events that every entry "
+    "write, supersede and delist emits, instead.")
 
 
 def _instant(value: str, label: str) -> datetime:
@@ -310,8 +315,13 @@ class StateDriverNotes:
             "SELECT * FROM state_driver_note_entries WHERE project_id=? AND listing='listed' "
             "ORDER BY created_at, entry_id", (project_id,)).fetchall()
         counts = cls._counts(conn, project_id)
+        # force and lifecycle travel with each line so an injector that must cut
+        # the index can keep in-flight (informational) lines and drop superseded
+        # tombstones first, instead of cutting the newest lines off the end.
         return {"index": [{"address": address_of(project_id, row["entry_id"]),
-                           "index_line": index_line(row)} for row in rows], **counts}
+                           "index_line": index_line(row), "force": row["force"],
+                           "lifecycle": "superseded" if row["superseded_by"] else "current"}
+                          for row in rows], **counts}
 
     def _write_entry(self, conn, project_id, assertion, body, director_identity,
                      force, landed, timestamp) -> str:

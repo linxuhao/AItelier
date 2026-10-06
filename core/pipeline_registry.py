@@ -562,8 +562,8 @@ def _commit_registration(sf, registry, config_name: str, graph, hints,
         if persist is not None:
             persist()
 
-    # Small unit-test doubles intentionally implement only the documented host
-    # calls. Real SkillFlow owns the registries and SQLite state snapshotted here.
+    # Small unit-test doubles implement only the host calls their tests exercise.
+    # Real SkillFlow owns the registries and SQLite state snapshotted here.
     if not all(hasattr(sf, attr) for attr in (
             "_lock", "_conn", "_graphs", "_resolvers", "agent_registry")):
         publish()

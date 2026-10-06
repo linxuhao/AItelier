@@ -13,7 +13,6 @@ from core.state_graph import (StateConflict, StateGraphError, StateNotFound, key
                               text)
 from core.state_privacy import UntrustedDatabase, writer_only_read
 
-MAX_SECTION_CHARS = 100000
 MAX_SEARCH_QUERY_CHARS = 500
 MAX_SEARCH_LIMIT = 100
 MAX_EXCERPT_CHARS = 1000
@@ -51,11 +50,16 @@ BEGIN SELECT RAISE(ABORT,'driver note revisions are append-only'); END;
 """
 
 
-def note_text(value: str) -> str:
-    if not isinstance(value, str) or len(value) > MAX_SECTION_CHARS:
-        raise StateGraphError(
-            f"driver note section must be text of at most {MAX_SECTION_CHARS} characters")
-    return value
+# Owner ruling 2026-10-06 (node driver.note-has-no-free-text): the notebook holds
+# ONLY entries. The permanent/temporary sections are closed to writes and are no
+# longer part of get_driver_note; their past text stays readable through
+# driver_note_history and search_driver_note_history, and no row is dropped.
+FREE_TEXT_CLOSED = (
+    "update_driver_note is closed: the director notebook has no free-text sections "
+    "(owner ruling 2026-10-06). Use write_driver_note_entry instead. In-flight state is an "
+    "entry with force=\"informational\": write it, supersede_driver_note_entry when it "
+    "changes, delist_driver_note_entry when it lands. Past section text stays readable via "
+    "driver_note_history and search_driver_note_history.")
 
 
 def _instant(value: str, label: str) -> datetime:
@@ -147,30 +151,16 @@ class StateDriverNotes:
         if not isinstance(store.db, UntrustedDatabase):
             initialize(store.db)
 
-    @staticmethod
-    def _result(project_id: str, row) -> dict:
-        if row is None:
-            return {"project_id": project_id, "revision": 0, "permanent": "",
-                    "temporary": "", "updated_at": None, "updated_by": None}
-        return {
-            "project_id": project_id,
-            "revision": row["revision"],
-            "permanent": row["permanent_text"],
-            "temporary": row["temporary_text"],
-            "updated_at": row["updated_at"],
-            "updated_by": {"actor": row["updated_by_actor"],
-                           "director_identity": row["updated_by_director"]},
-        }
-
     @writer_only_read("get_driver_note")
     def get(self, project_id: str) -> dict:
+        """The entry index, its counts and the revision; never section text."""
         project_id = key(project_id, "project_id")
         with self.store.transaction(notebook=project_id) as conn:
             self.store._project(conn, project_id)
-            row = conn.execute("SELECT * FROM state_driver_notes WHERE project_id=?",
+            row = conn.execute("SELECT revision FROM state_driver_notes WHERE project_id=?",
                                (project_id,)).fetchone()
             index = self._index_projection(conn, project_id)
-        return {**self._result(project_id, row), **index}
+        return {"project_id": project_id, "revision": row["revision"] if row else 0, **index}
 
     @writer_only_read("driver_note_history")
     def history(self, project_id: str, after_revision: int = 0, limit: int = 100) -> dict:
@@ -265,66 +255,6 @@ class StateDriverNotes:
                 "truncated": len(selected) > limit,
                 "next_after_revision": entries[-1]["revision"] if entries else after_revision}
 
-    @writer_only_read("get_driver_note")
-    def update(self, project_id: str, section: str, content: str, expected_revision: int,
-               director_identity: str, operation: str = "replace") -> dict:
-        project_id = key(project_id, "project_id")
-        if section not in {"permanent", "temporary"}:
-            raise StateGraphError("section must be permanent or temporary")
-        if operation not in {"replace", "append"}:
-            raise StateGraphError("operation must be replace or append")
-        content = note_text(content)
-        director_identity = text(director_identity, "director_identity", 320)
-        timestamp = now()
-        with self.store.transaction(write=True) as conn:
-            self.store._project(conn, project_id)
-            row = conn.execute("SELECT * FROM state_driver_notes WHERE project_id=?",
-                               (project_id,)).fetchone()
-            current = row["revision"] if row else 0
-            if current != expected_revision:
-                raise StateConflict(
-                    f"driver note revision conflict: expected {expected_revision}, current {current}; "
-                    "read the project note and retry with its revision")
-            permanent = row["permanent_text"] if row else ""
-            temporary = row["temporary_text"] if row else ""
-            previous = permanent if section == "permanent" else temporary
-            changed = content if operation == "replace" else previous + content
-            # Validate the resulting section inside the transaction and before
-            # any note, revision, or event write.
-            changed = note_text(changed)
-            dangling = self._unresolved(conn, project_id, [(f"section:{section}", changed)])
-            if dangling:
-                raise StateGraphError(
-                    "driver note section references addresses that do not resolve: "
-                    + "; ".join(f"{item['address']} ({item['reason']})" for item in dangling))
-            if section == "permanent":
-                permanent = changed
-            else:
-                temporary = changed
-            revision = current + 1
-            if row:
-                conn.execute(
-                    "UPDATE state_driver_notes SET revision=?,permanent_text=?,temporary_text=?,"
-                    "updated_by_actor=?,updated_by_director=?,updated_at=? WHERE project_id=?",
-                    (revision, permanent, temporary, self.actor, director_identity, timestamp, project_id))
-            else:
-                conn.execute(
-                    "INSERT INTO state_driver_notes(project_id,revision,permanent_text,temporary_text,"
-                    "updated_by_actor,updated_by_director,updated_at) VALUES(?,?,?,?,?,?,?)",
-                    (project_id, revision, permanent, temporary, self.actor, director_identity, timestamp))
-            conn.execute("INSERT INTO state_driver_note_revisions VALUES(?,?,?,?,?,?,?,?,?)",
-                (project_id, revision, permanent, temporary, self.actor, director_identity,
-                 operation, section, timestamp))
-            self.store._event(conn, project_id, None, "driver_note_updated", {
-                "revision": revision, "section": section, "operation": operation,
-                "actor": self.actor, "director_identity": director_identity})
-        return {
-            "project_id": project_id, "revision": revision,
-            "permanent": permanent, "temporary": temporary,
-            "updated_at": timestamp,
-            "updated_by": {"actor": self.actor, "director_identity": director_identity},
-        }
-
     # ---- index mode: short assertions on the index, bodies fetched by address ----
 
     @staticmethod
@@ -332,8 +262,8 @@ class StateDriverNotes:
         """Every note:// address in ``sources`` that does not resolve to a body.
 
         This is the check that bites. It is not a comment and not a snapshot of
-        today's data: it runs on every section write, on every entry write and
-        on demand, and it reports the exact dangling addresses.
+        today's data: it runs on every entry write and on demand, and it reports
+        the exact dangling addresses.
         """
         dangling = []
         for label, value in sources:

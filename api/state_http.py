@@ -5,7 +5,8 @@ from typing import Annotated, Literal
 from anyio import to_thread
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from core.state_commands import (READ_REQUESTS, WRITE_REQUESTS, describe, execute,
-                                                                  is_public_read, ProjectPrivate)
+                                                                  is_public_read, ProjectPrivate,
+                                                                  RETIRED_ACTIONS)
 from starlette.responses import JSONResponse
 from core.state_graph import StateConflict, StateGraphError, StateNotFound
 from contextlib import AsyncExitStack
@@ -417,7 +418,7 @@ def create_state_router(service_dependency, access_dependency, read_dependency=N
     _declare(router.post("/query/{action}")(query), "read", None)
 
     def command(action: str, arguments: dict, service=Depends(service_dependency)):
-        if action not in WRITE_REQUESTS:
+        if action not in WRITE_REQUESTS and action not in RETIRED_ACTIONS:
             raise HTTPException(422, "unknown state command")
         return _call(service, action, arguments, write=True)
 

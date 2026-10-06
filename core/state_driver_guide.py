@@ -60,14 +60,26 @@ Triage with resolve_issue(expected_version, resolution, reason, director_identit
 Resolution is terminal; report a new issue instead of reopening. Refused resolutions name the fix. get_node returns open_issues for that node; project_overview returns issue_counts and per-node open_issue_count. An open defect linked to a VERIFIED or CANDIDATE node is listed in contradicts_acceptance: triage it, do not leave an accepted node standing over a known defect. A cross-project hand-off arrives as a director message; the receiving director records it as a handoff issue with source=<delivery_id> and resolves the message, rather than creating a node directly. Read with list_issues (bounded summaries, statuses/kinds/node_key filters, next_after cursor) and get_issue (full body and resolution).
 
 ## Director notebook: context, not a second State database
-Each State project has one built-in driver note. Select it explicitly by project_id:
-get_driver_note reads the permanent/temporary sections and current revision;
-driver_note_history reads append-only revisions; update_driver_note writes one
-section with expected_revision, director_identity and operation=replace|append.
+Each State project has one built-in driver note made only of entries. Select it
+explicitly by project_id: get_driver_note returns the entry index (one line and
+one note:// address per listed entry), entry_count, listed_count, delisted_count
+and revision, and no free text. write_driver_note_entry takes a single-line
+assertion (over the cap it is refused, never truncated), a body,
+director_identity and force=in_force|informational, and returns the address;
+get_driver_note_entry fetches a body by address. The notebook has no free-text
+sections: update_driver_note is refused and names write_driver_note_entry.
 The authenticated actor is derived from the transport and recorded separately
 from the caller's director identity. Identity is provenance, never authorization.
 
-Use get_driver_note for current authority. Use search_driver_note_history only
+Write in-flight state (run IDs, worker/worktree ownership, wait cursors, next
+actions) as an entry with force="informational". When it changes,
+supersede_driver_note_entry writes the successor and the old address keeps a
+tombstone; when it has landed, delist_driver_note_entry takes the line off the
+index. A rule that can still change a decision stays force="in_force" and leaves
+the index only through supersede. No call deletes a body.
+
+Use get_driver_note for current authority. The retired permanent/temporary
+section text is history only. Use search_driver_note_history only
 when a past decision, handoff, owner or phrase is needed: it searches the section
 changed by each revision, supports Unicode case-insensitive literal text plus section, actor,
 director_identity, revision and timezone-aware time bounds, and returns redacted
@@ -75,15 +87,15 @@ excerpts and identity metadata in ascending revision order. Continue with next_a
 same filters; an empty query browses filtered revisions, while no matches returns
 an empty page. Fetch full snapshots with driver_note_history only after selecting
 specific revisions. Do not load the full history on every resume or compaction.
-Both permanent and temporary resulting sections are capped at 100000 characters;
-replace or append beyond that cap fails without a revision, history row or event.
 
 The note is isolated by project_id. Directors handling two different projects
-read, write and wait on different notes, revisions and event
-streams. A same-revision race has one winner; the loser must read the current
-note and retry intentionally. Never reuse a revision or cursor from another
-project. To wait for a handoff, use note_after_revision; combine it with other
-filters using filter_mode="any" when any watched source should wake the call.
+read, write and wait on different notes, entries and event
+streams. Every State write that takes expected_revision is compare-and-swap.
+A same-revision race has one winner; the loser must read the current
+record and retry deliberately. Superseding an entry that was already superseded
+is refused and names its successor. Never reuse a revision, address or cursor
+from another project. Entry writes emit driver_note_updated events but do not
+advance the note revision, so note_after_revision does not wake on them.
 
 State remains authoritative for goals, revisions, dependencies, attempts,
 evidence and acceptance. The note preserves information State does not own:
@@ -260,15 +272,18 @@ def _build_index() -> str:
         *listing,
         "",
         "## The director notebook is an index too",
-        "get_driver_note returns the permanent/temporary sections PLUS `index` (one line and "
-        "one address per listed entry) and `delisted_count`. write_driver_note_entry takes a "
-        "short assertion plus a body and returns the body's address; the assertion cap is "
-        "enforced at write time and refuses, never truncates. Retire an assertion with "
-        "supersede_driver_note_entry (a successor exists; the old address keeps a tombstone) or "
-        "delist_driver_note_entry (no successor, and only when reading the line can no longer "
-        "change a decision). Neither deletes a body: get_driver_note_entry still resolves the "
-        "old address. Use search_driver_note_history for a past decision; do not load the full "
-        "history on every resume or compaction.",
+        "The notebook holds entries only; there are no free-text sections and "
+        "update_driver_note is refused. get_driver_note returns `index` (one line and one "
+        "address per listed entry), entry_count, listed_count, delisted_count and revision. "
+        "write_driver_note_entry takes a short assertion plus a body and returns the body's "
+        "address; the assertion cap is enforced at write time and refuses, never truncates. "
+        "Write in-flight state as an entry with force=\"informational\", "
+        "supersede_driver_note_entry it when it changes and delist_driver_note_entry it when it "
+        "has landed. Retire a rule with supersede_driver_note_entry (a successor exists; the "
+        "old address keeps a tombstone); delist only when reading the line can no longer "
+        "change a decision. Neither deletes a body: get_driver_note_entry still resolves the "
+        "old address. Use search_driver_note_history for a past decision or retired section "
+        "text; do not load the full history on every resume or compaction.",
     ])
 
 

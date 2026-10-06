@@ -706,7 +706,9 @@ export function stateAttempts(projectId: string, after = 0): Promise<{attempts: 
  *  (owner's ruling of 2026-09-22: let's open up the working note for public
  *  projects too). For a project nobody opened the server answers 403, and that
  *  refusal is the server's, not this client's. */
-export function stateDriverNote(projectId: string): Promise<{ project_id: string; revision: number; updated_at: string; permanent: string; temporary: string }> {
+export type DriverNote = { project_id: string; revision: number; index: { address: string; index_line: string }[];
+  entry_count: number; listed_count: number; delisted_count: number };
+export function stateDriverNote(projectId: string): Promise<DriverNote> {
   return _get('/api/state/projects/' + encodeURIComponent(projectId) + '/driver-note');
 }
 export function stateAttemptDetail(attemptId: string): Promise<import('./stateGraph').AttemptDetail> {

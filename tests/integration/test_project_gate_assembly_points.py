@@ -39,6 +39,7 @@ from core.state_commands import execute
 from core.state_database import StateDatabase
 from core.state_service import StateService
 from core.workspace_manager import WorkspaceManager
+from tests.support.legacy_driver_note import seed_section
 
 PRIVATE_PID = "assembly-private"
 OPEN_PID = "assembly-open"
@@ -62,7 +63,8 @@ def _arm(monkeypatch):
 def _seed(service):
     for pid, secret in ((PRIVATE_PID, PRIVATE_SECRET), (OPEN_PID, OPEN_SECRET)):
         service.create_project(pid, pid)
-        service.driver_notes.update(pid, "permanent", secret, 0, "director")
+        seed_section(service, pid, "permanent", secret, "director")
+        service.driver_notes.write_entry(pid, secret, secret, "director")
     service.open_project(OPEN_PID)
 
 

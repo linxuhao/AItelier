@@ -28,6 +28,7 @@ import sqlite3
 from datetime import datetime, timezone
 
 from core.state_privacy import PRIVATE_STATE_TABLES
+from tests.support.legacy_driver_note import seed_section
 
 OPEN = "canary-open"          # opened by a writer
 SHUT = "canary-shut"          # never opened
@@ -107,9 +108,9 @@ def seed(db) -> None:
         writer.create_project(pid, pid)
     writer.store.add_nodes(OPEN, [{"key": "a", "goal": "public goal", "acceptance": [
         {"id": "c", "kind": "test", "description": "public criterion"}]}])
-    writer.driver_notes.update(OPEN, "permanent", OPEN_NOTE, 0, "seeder")
+    seed_section(writer, OPEN, "permanent", OPEN_NOTE, "seeder")
     writer.driver_notes.write_entry(OPEN, OPEN_NOTE + " assertion", OPEN_NOTE + " body", "seeder")
-    writer.driver_notes.update(SHUT, "permanent", "shut notebook", 0, "seeder")
+    seed_section(writer, SHUT, "permanent", "shut notebook", "seeder")
     writer.director_messages.send_director_message(
         SENDER, "seeder", "canary-rk-1", "natural subject", "natural body",
         target_project_id=OPEN)

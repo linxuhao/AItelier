@@ -148,7 +148,10 @@ def test_mcp_wait_returns_external_completion_and_remains_private(tmp_path):
         assert invalid["isError"] is True
 
 
-def test_mcp_driver_notes_are_authorized_project_scoped_and_cas_protected(tmp_path):
+def test_mcp_driver_notes_refuse_free_text_and_serve_entries_and_history(tmp_path):
+    from core.state_driver_notes import FREE_TEXT_CLOSED
+    from tests.support.legacy_driver_note import seed_section
+
     app = create_app(str(tmp_path / "notes.sqlite"), "x" * 40)
     with TestClient(app) as client:
         headers = {"Authorization": "Bearer " + "x" * 40,
@@ -173,19 +176,34 @@ def test_mcp_driver_notes_are_authorized_project_scoped_and_cas_protected(tmp_pa
                  "director_identity": "aitelier-director", "operation": "replace"}
         assert rpc("state_graph_write", "update_driver_note", write,
                    authorized=False).status_code == 401
-        note = result(rpc("state_graph_write", "update_driver_note", write))
-        assert note["revision"] == 1 and note["temporary"] == "release handoff"
+        # The retired free-text write is refused loudly on MCP and REST alike.
+        refused = rpc("state_graph_write", "update_driver_note", write).json()["result"]
+        assert refused["isError"] is True
+        assert refused["content"][0]["text"] == (
+            "Error executing tool state_graph_write: " + FREE_TEXT_CLOSED)
+        rest_refused = client.post("/api/state/commands/update_driver_note", json=write,
+                                   headers=headers)
+        assert rest_refused.status_code == 422
+        assert rest_refused.json()["detail"] == FREE_TEXT_CLOSED
+        # Entries are the write path.
+        entry = result(rpc("state_graph_write", "write_driver_note_entry", {
+            "project_id": "aitelier", "assertion": "release handoff in flight",
+            "body": "owner aitelier-director", "director_identity": "aitelier-director",
+            "force": "informational"}))
+        note = result(rpc("state_graph_read", "get_driver_note", {"project_id": "aitelier"}))
+        assert [item["address"] for item in note["index"]] == [entry["address"]]
+        assert "permanent" not in note and "temporary" not in note
         assert result(rpc("state_graph_read", "get_driver_note",
-                          {"project_id": "wuxia-myth"}))["revision"] == 0
-        conflict = rpc("state_graph_write", "update_driver_note", write).json()["result"]
-        assert conflict["isError"] is True
-        assert "current 1" in conflict["content"][0]["text"]
+                          {"project_id": "wuxia-myth"}))["index"] == []
+
+        # Retired section text from before the closure stays searchable history.
+        service = app.state.state_service
+        seed_section(service, "aitelier", "temporary", "release handoff", "aitelier-director")
         history = result(rpc("state_graph_read", "driver_note_history",
                              {"project_id": "aitelier"}))
         assert history["entries"][0]["director_identity"] == "aitelier-director"
-        result(rpc("state_graph_write", "update_driver_note", {
-            **write, "content": " release access_token=synthetic-secret", "expected_revision": 1,
-            "operation": "append"}))
+        seed_section(service, "aitelier", "temporary", " release access_token=synthetic-secret",
+                     "aitelier-director", "append")
         search_args = {"project_id": "aitelier", "query": "release",
                        "section": "temporary", "actor": history["entries"][0]["actor"],
                        "director_identity": "aitelier-director", "after_revision": 0,
@@ -206,73 +224,60 @@ def test_mcp_driver_notes_are_authorized_project_scoped_and_cas_protected(tmp_pa
             "project_id": "aitelier", "query": "does-not-exist"}))
         assert empty["entries"] == [] and empty["next_after_revision"] == 0
         schema = client.get("/api/state/schema", headers=headers).json()
+        assert "update_driver_note" not in schema["operations"]
         rest_schema = schema["operations"]["search_driver_note_history"]
         assert rest_schema["mutates"] is False
         assert rest_schema["arguments"]["properties"]["excerpt_chars"]["maximum"] == 1000
         rest = client.get("/api/state/projects/aitelier/driver-note", headers=headers)
         assert rest.status_code == 200
-        assert rest.json()["temporary"].startswith("release handoff release")
+        assert "release access_token" not in rest.text and "temporary" not in rest.json()
+        assert rest.json()["revision"] == 2 and rest.json()["entry_count"] == 1
         foreign = client.get("/api/state/projects/wuxia-myth/driver-note", headers=headers)
         assert foreign.status_code == 200 and foreign.json()["revision"] == 0
 
 
-def test_project_scoped_note_cas_race_reloads_before_submit_and_redacts_identity(tmp_path):
-    """Two isolated directors must lose/reload/submit against one revision."""
+def test_project_scoped_entry_supersede_race_has_one_winner_and_the_loser_reloads(tmp_path):
+    """Two isolated directors race to supersede one entry; the loser reloads and retries."""
     from concurrent.futures import ThreadPoolExecutor
     from core.state_database import StateDatabase
     from core.state_service import StateService
     from core.state_graph import StateConflict
 
     db = StateDatabase(str(tmp_path / "handoff.sqlite"))
-    first = StateService(db, actor="Authorization: Bearer synthetic-first", project_read_trusted=True)
-    second = StateService(db, actor="Authorization: Bearer synthetic-second", project_read_trusted=True)
+    first = StateService(db, actor="director-first", project_read_trusted=True)
+    second = StateService(db, actor="director-second", project_read_trusted=True)
     first.create_project("project-a", "Project A")
     first.create_project("project-b", "Project B")
-    for service in (first, second):
-        # Construction on the same isolated DB is intentional: this models
-        # two successors sharing State while project facts remain scoped.
-        assert service.driver_notes.get("project-a")["revision"] == 0
-    payload = {
-        "section": "temporary",
-        "expected_revision": 0,
-        "operation": "replace",
-    }
+    shared = first.driver_notes.write_entry(
+        "project-a", "run r-1 in flight", "owner first", "first", force="informational")
+    shared_id = shared["address"].rsplit("/", 1)[1]
 
-    def submit(service, director_identity, content):
+    def submit(service, director_identity, assertion):
         try:
-            return ("won", service.driver_notes.update(
-                "project-a", content=content, director_identity=director_identity, **payload))
-        except StateConflict:
-            current = service.driver_notes.get("project-a")
-            return ("lost", current)
+            return ("won", service.driver_notes.supersede_entry(
+                "project-a", shared_id, assertion, "handoff body", "state changed",
+                director_identity, force="informational"))
+        except StateConflict as exc:
+            return ("lost", str(exc))
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         outcomes = list(pool.map(
             lambda args: submit(*args),
-            ((first, "director_secret=synthetic-first", "first handoff"),
-             (second, "director_secret=synthetic-second", "second handoff")),
+            ((first, "first", "run r-1 paused"), (second, "second", "run r-1 failed")),
         ))
-    assert {outcome[0] for outcome in outcomes} == {"won", "lost"}
+    assert sorted(kind for kind, _ in outcomes) == ["lost", "won"]
     winner = next(value for kind, value in outcomes if kind == "won")
-    loser_read = next(value for kind, value in outcomes if kind == "lost")
-    assert loser_read["revision"] == winner["revision"] == 1
-    deliberate = second if outcomes[1][0] == "lost" else first
-    committed = deliberate.driver_notes.update(
-        "project-a", section="temporary", content="reloaded handoff",
-        expected_revision=loser_read["revision"],
-        director_identity="director_secret=synthetic-retry", operation="append")
-    assert committed["revision"] == 2
-
-    assert first.driver_notes.get("project-b")["revision"] == 0
-    search = first.driver_notes.search(
-        "project-a", query="handoff", excerpt_chars=64)
-    assert search["entries"]
-    serialized = json.dumps(search, ensure_ascii=False)
-    assert "synthetic-first" not in serialized
-    assert "secret-first" not in serialized
-    assert all(entry["actor"] == "Authorization: Bearer [REDACTED]" for entry in search["entries"])
-    assert all("synthetic-" not in entry["director_identity"] for entry in search["entries"])
-    assert first.driver_notes.search("project-b", query="handoff")["entries"] == []
+    refusal = next(value for kind, value in outcomes if kind == "lost")
+    assert winner["successor"]["address"] in refusal
+    # The loser reloads the index and supersedes the successor it names.
+    current = second.driver_notes.get("project-a")
+    assert [item["address"] for item in current["index"]] == [
+        shared["address"], winner["successor"]["address"]]
+    retried = second.driver_notes.supersede_entry(
+        "project-a", winner["successor"]["entry_id"], "run r-1 reloaded", "body",
+        "reloaded", "second", force="informational")
+    assert retried["entry_count"] == 3 and retried["superseded"]["lifecycle"] == "superseded"
+    assert first.driver_notes.get("project-b")["entry_count"] == 0
 
 
 def test_documented_criterion_envelope_matches_real_validators():

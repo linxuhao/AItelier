@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from api.state_only import create_app
 from api.state_http import create_state_router
 from api import authz
+from tests.support.legacy_driver_note import seed_section
 
 TOKEN='isolated-design-flow-'+('x'*48)
 HEADERS={'Authorization':'Bearer '+TOKEN,'Accept':'application/json, text/event-stream'}
@@ -81,7 +82,8 @@ def test_shared_app_reads_the_design_and_keeps_the_mailbox_writer_only(tmp_path,
     service=standalone.state.state_service;service.create_project('p','Private')
     service.design.create_revision(**item('private'))
     service.design.create_baseline('p','b1',[{'design_id':'private','revision':1}])
-    service.driver_notes.update('p','permanent','NOTEBOOK BODY MUST NOT LEAK',0,'director')
+    seed_section(service,'p','permanent','NOTEBOOK BODY MUST NOT LEAK','director')
+    service.driver_notes.write_entry('p','NOTEBOOK BODY MUST NOT LEAK','NOTEBOOK BODY MUST NOT LEAK','director')
     app=FastAPI();app.include_router(create_state_router(lambda:service,authz.require_writer))
 
     monkeypatch.setattr(authz,'gate_enabled',lambda:True)

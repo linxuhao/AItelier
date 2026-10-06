@@ -39,6 +39,7 @@ from core.state_commands import (PUBLIC_READS, READ_REQUESTS, WRITER_ONLY_READS,
 import core.state_commands as state_commands
 from core.state_database import StateDatabase
 from core.state_service import StateService
+from tests.support.legacy_driver_note import seed_section
 
 # The owner's ruling of 2026-09-22 opened the working notes for an OPENED
 # project, by name. These six note reads are public now.
@@ -119,8 +120,10 @@ def gated(tmp_path, monkeypatch):
     service.create_project("p", "P")
     service.store.add_nodes("p", [{"key": "a", "goal": "A", "acceptance": [
         {"id": "c", "kind": "test", "description": "Check"}]}])
-    service.driver_notes.update("p", "permanent", "IN-FLIGHT RUN ID 4711 SECRET",
-                                0, "director")
+    seed_section(service, "p", "permanent", "IN-FLIGHT RUN ID 4711 SECRET", "director")
+    service.driver_notes.write_entry("p", "IN-FLIGHT RUN ID 4711 SECRET",
+                                     "IN-FLIGHT RUN ID 4711 SECRET", "director",
+                                     force="informational")
     service.driver_notes.write_entry("p", "The withheld reason is SECRET-BODY",
                                      "Entry body SECRET-BODY", "director")
     app = FastAPI()

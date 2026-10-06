@@ -15,6 +15,7 @@ from core.state_database import StateDatabase
 from core.state_driver_index import MAX_ASSERTION_CHARS
 from core.state_graph import StateConflict, StateGraphError, StateNotFound
 from core.state_service import StateService
+from tests.support.legacy_driver_note import seed_section
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CHECK_SCRIPT = REPO_ROOT / "scripts" / "check_driver_note_index.py"
@@ -206,19 +207,19 @@ def test_the_index_line_carries_the_assertion_and_its_status(service):
 def test_a_dangling_address_is_refused_at_write_time(service):
     notes = service.driver_notes
     good = notes.write_entry("aitelier", "keep the gate", "body", "d")
-    # Positive polarity: a section citing a real address is accepted.
-    ok = notes.update("aitelier", "permanent", f"see {good['address']}", 0, "d")
-    assert ok["revision"] == 1
-    # Negative polarity: a section citing an address with no body is refused.
+    # Positive polarity: an entry citing a real address is accepted.
+    ok = notes.write_entry("aitelier", "cites the gate", f"see {good['address']}", "d")
+    assert ok["entry_count"] == 2
+    # Negative polarity: an entry citing an address with no body is refused.
     with pytest.raises(StateGraphError) as refusal:
-        notes.update("aitelier", "permanent", "see note://aitelier/000000000000", 1, "d")
+        notes.write_entry("aitelier", "dangles", "see note://aitelier/000000000000", "d")
     assert "do not resolve" in str(refusal.value)
     assert "note://aitelier/000000000000" in str(refusal.value)
-    assert notes.get("aitelier")["revision"] == 1
+    assert notes.get("aitelier")["entry_count"] == 2
     # An address that leaves this project's notebook is refused too.
     with pytest.raises(StateGraphError) as foreign:
-        notes.update("aitelier", "permanent",
-                     f"see note://wuxia-myth/{entry_id_of(good['address'])}", 1, "d")
+        notes.write_entry("aitelier", "leaves",
+                          f"see note://wuxia-myth/{entry_id_of(good['address'])}", "d")
     assert "leaves this project" in str(foreign.value)
 
 
@@ -279,14 +280,15 @@ def test_the_check_script_exits_nonzero_on_a_dangling_address(service):
 
 def test_existing_prose_notes_stay_readable_and_start_with_an_empty_index(service):
     notes = service.driver_notes
-    notes.update("aitelier", "permanent", "legacy permanent rules", 0, "d")
-    notes.update("wuxia-myth", "temporary", "legacy temporary handoff", 0, "d")
+    seed_section(service, "aitelier", "permanent", "legacy permanent rules", "d")
+    seed_section(service, "wuxia-myth", "temporary", "legacy temporary handoff", "d")
     aitelier = notes.get("aitelier")
-    assert aitelier["permanent"] == "legacy permanent rules"
+    assert "legacy permanent rules" not in json.dumps(aitelier)
     assert aitelier["index"] == [] and aitelier["delisted_count"] == 0
-    assert aitelier["entry_count"] == 0
-    assert notes.get("wuxia-myth")["temporary"] == "legacy temporary handoff"
+    assert aitelier["entry_count"] == 0 and aitelier["revision"] == 1
+    assert "legacy temporary handoff" not in json.dumps(notes.get("wuxia-myth"))
     assert notes.history("aitelier")["entries"][0]["permanent"] == "legacy permanent rules"
+    assert notes.history("wuxia-myth")["entries"][0]["temporary"] == "legacy temporary handoff"
     # Entries are project-scoped exactly like the sections.
     written = notes.write_entry("aitelier", "aitelier only", "body", "d")
     assert notes.entry_index("wuxia-myth")["entries"] == []
@@ -313,6 +315,21 @@ def test_the_guide_index_keeps_the_biting_rules_and_addresses_the_rest():
         guide_section("guide://not-a-section")
     with pytest.raises(KeyError):
         guide_section("not-an-address")
+
+
+def test_both_guide_variants_describe_an_entries_only_notebook():
+    """Neither the full guide nor its index may describe writable sections."""
+    from core.state_driver_guide import GUIDE_SECTIONS, STATE_DRIVER_GUIDE_INDEX
+    notebook = GUIDE_SECTIONS["director-notebook-context-not-a-second-state-dat"]["text"]
+    index = STATE_DRIVER_GUIDE_INDEX.split("## The director notebook is an index too", 1)[1]
+    for text in (notebook, index):
+        assert "update_driver_note writes" not in text
+        assert "returns the permanent/temporary sections" not in text
+        assert "reads the permanent/temporary sections" not in text
+        assert "update_driver_note is refused" in text
+        for step in ('force="informational"', "supersede_driver_note_entry",
+                     "delist_driver_note_entry"):
+            assert step in text, step
 
 
 def test_a_deleted_biting_rule_breaks_the_index_build_instead_of_emptying_it():

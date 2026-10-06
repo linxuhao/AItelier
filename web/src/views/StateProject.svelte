@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { rememberProject, nt } from '../lib/navigation.svelte';
   import { authStore } from '../stores/auth';
-  import { stateOverview, stateAttempts, stateRefreshProject, stateDriverNote } from '../lib/api';
+  import { stateOverview, stateAttempts, stateRefreshProject, stateDriverNote, type DriverNote } from '../lib/api';
   import { attemptLabel, exactRunHref, stateReadyActionCounts, type StateOverview, type StateAttempt } from '../lib/stateGraph';
   import { st } from '../lib/stateI18n.svelte';
   import StateGraph from './StateGraph.svelte';
@@ -29,7 +29,7 @@
   const canRead = $derived($authStore.permissionResolved);
   const canWrite = $derived($authStore.canWrite);
   let denied = $state(false);
-  let note = $state<{ revision: number; updated_at: string; permanent: string; temporary: string } | null>(null);
+  let note = $state<DriverNote | null>(null);
   let noteError = $state(''), noteGeneration = 0;
   const readyActions = $derived(data ? stateReadyActionCounts(data.nodes, data.ready_action_counts) : { candidate_review: 0, new_attempt: 0 });
   $effect(() => {
@@ -138,9 +138,9 @@
         {#if noteError}<p role="alert">{noteError}</p>
         {:else if !note}<p aria-live="polite">{st('loading')}</p>
         {:else}
-          <p class="note-meta">{st('revision')} r{note.revision} · {note.updated_at}</p>
+          <p class="note-meta">{st('revision')} r{note.revision} · {note.listed_count}/{note.entry_count}</p>
           <details><summary>{st('detail')}</summary>
-            <p class="note-text">{note.permanent}</p><p class="note-text">{note.temporary}</p></details>
+            {#each note.index as item (item.address)}<p class="note-text">{item.index_line} · {item.address}</p>{/each}</details>
         {/if}
       </section>
       {#if tab === 'graph'}

@@ -22,6 +22,7 @@ from core.db_manager import DBManager
 from core.state_graph import StateConflict, StateGraphError
 from core.state_service import SEED_HEADING, StateService
 from core.workspace_manager import WorkspaceManager
+from tests.support.legacy_driver_note import seed_section
 
 
 def spec(name, deps=None):
@@ -1165,7 +1166,8 @@ def test_mcp_external_token_reads_private_state_it_can_write(live, client, monke
     from api import mcp_router
     from api import authz
 
-    live.service.driver_notes.update("game", "permanent", "PRIVATE-MCP-NOTE", 0, "test")
+    seed_section(live.service, "game", "permanent", "PRIVATE-MCP-NOTE", "test")
+    live.service.driver_notes.write_entry("game", "PRIVATE-MCP-NOTE", "PRIVATE-MCP-NOTE", "test")
     monkeypatch.setattr(mcp_router, "_EXTERNAL_TOKEN", "external-test-token")
     monkeypatch.setattr(client.app.state, "_test_mode", False)
     from api import main as main_module

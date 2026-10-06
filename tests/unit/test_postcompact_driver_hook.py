@@ -26,8 +26,8 @@ def load_hook_module():
 class StateStub(BaseHTTPRequestHandler):
     revision = 1
     requests = []
-    permanent = None
-    temporary = None
+    lines = None  # index_line strings; get_driver_note carries no section text
+    extra = None  # fields an older server would still have sent
     guide = None
     nodes = None
     standing = None
@@ -65,11 +65,15 @@ DO_NOT_INCLUDE_UNSELECTED_GUIDE_SECTION
             }
         elif args["action"] == "get_driver_note":
             assert args["arguments"] == {"project_id": "aitelier"}
+            lines = StateStub.lines or [
+                f"rule revision {StateStub.revision} [in force]",
+                "fresh in-flight; Authorization: Bearer forbidden-secret [informational]"]
             result = {
                 "project_id": "aitelier", "revision": StateStub.revision,
-                "permanent": StateStub.permanent or f"permanent revision {StateStub.revision}",
-                "temporary": StateStub.temporary or "fresh temporary; Authorization: Bearer forbidden-secret",
-                "updated_at": "2026-09-12T00:00:00Z",
+                "index": [{"address": f"note://aitelier/{n:012x}", "index_line": line}
+                          for n, line in enumerate(lines)],
+                "entry_count": len(lines), "listed_count": len(lines), "delisted_count": 0,
+                **(StateStub.extra or {}),
             }
         elif args["action"] == "project_overview":
             assert args == {"action": "project_overview", "arguments": {"project_id": "aitelier"}}
@@ -103,7 +107,7 @@ DO_NOT_INCLUDE_UNSELECTED_GUIDE_SECTION
 def state_server():
     StateStub.revision = 1
     StateStub.requests = []
-    StateStub.permanent = StateStub.temporary = StateStub.guide = StateStub.nodes = None
+    StateStub.lines = StateStub.extra = StateStub.guide = StateStub.nodes = None
     StateStub.standing = None
     server = ThreadingHTTPServer(("127.0.0.1", 0), StateStub)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -226,7 +230,7 @@ def test_next_hook_invocation_reads_new_note_revision_without_cache(tmp_path, st
     second = invoke(tmp_path, state_server, session_id="session-b")["hookSpecificOutput"]["additionalContext"]
     assert "driver_note_revision=1" in first
     assert "driver_note_revision=2" in second
-    assert "permanent revision 2" in second
+    assert "rule revision 2" in second
     assert first != second
     assert len(StateStub.requests) == 8
 
@@ -471,7 +475,7 @@ def test_recorded_postcompact_then_user_prompt_order_injects_fresh_context(tmp_p
     assert follow_up["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
     context = follow_up["hookSpecificOutput"]["additionalContext"]
     assert "driver_note_revision=2" in context
-    assert "permanent revision 2" in context
+    assert "rule revision 2" in context
 
     # The marker is consumed after the supported model-context event.
     assert invoke(tmp_path, state_server, event="UserPromptSubmit") == {"continue": True}
@@ -576,12 +580,12 @@ def test_credentials_are_redacted_and_frontier_retains_only_active_or_actionable
         "synthetic-password", "synthetic-passphrase", "synthetic-private", "synthetic-credential",
         "synthetic-basic", "synthetic-url-password", "SYNTHETICPEMBODY",
     ]
-    StateStub.permanent = (
-        'password="synthetic-password" passwd=synthetic-password pwd: synthetic-password\n'
-        "passphrase='synthetic-passphrase' private_key=synthetic-private credential: synthetic-credential\n"
-        "Authorization: Basic synthetic-basic https://director:synthetic-url-password@example.invalid\n"
-        "-----BEGIN OPENSSH PRIVATE KEY-----\nSYNTHETICPEMBODY\n-----END OPENSSH PRIVATE KEY-----"
-    )
+    StateStub.lines = [
+        'password="synthetic-password" passwd=synthetic-password pwd: synthetic-password',
+        "passphrase='synthetic-passphrase' private_key=synthetic-private credential: synthetic-credential",
+        "Authorization: Basic synthetic-basic https://director:synthetic-url-password@example.invalid",
+        "-----BEGIN OPENSSH PRIVATE KEY-----", "SYNTHETICPEMBODY", "-----END OPENSSH PRIVATE KEY-----",
+    ]
     StateStub.guide = """# State DAG director protocol
 client_secret=synthetic-credential
 ## Resume safely
@@ -613,8 +617,8 @@ passphrase=synthetic-passphrase
 
 
 def test_bounded_multilingual_context_is_complete_with_spilling_disabled(tmp_path, state_server):
-    StateStub.permanent = "永久导演笔记 START — current ownership — 结束 END"
-    StateStub.temporary = "临时状态 START — next action / 下一步 — 尾部 END"
+    StateStub.lines = ["永久导演笔记 START — current ownership — 结束 END",
+                       "临时状态 START — next action / 下一步 — 尾部 END"]
     StateStub.guide = """# State DAG director protocol
 协议开头 GUIDE-START
 ## Resume safely
@@ -662,12 +666,22 @@ Use search_driver_note_history for bounded recovery. Do not load driver_note_his
     assert len(context) <= 12_000
 
 
-def test_middle_of_long_note_retains_exact_active_identity_tuple(tmp_path, state_server):
+def test_hook_injects_the_entry_index_and_never_section_text(tmp_path, state_server):
+    StateStub.extra = {"permanent": "PERMANENT-SECTION-CANARY",
+                       "temporary": "TEMPORARY-SECTION-CANARY"}
+    context = invoke(tmp_path, state_server)["hookSpecificOutput"]["additionalContext"]
+    assert "SECTION-CANARY" not in context
+    assert "rule revision 1 [in force]" in context
+    assert "entry_count=2 listed=2 delisted=0" in context
+
+
+def test_in_flight_entry_in_the_middle_of_the_index_retains_exact_identity_tuple(
+        tmp_path, state_server):
     identity = (
         "owner=director-live attempt_id=attempt-live-9 run_id=run-live-9 "
         "checkpoint=review checkpoint_id=checkpoint-live-9"
     )
-    StateStub.temporary = "A" * 5_000 + "\n" + identity + "\n" + "B" * 5_000
+    StateStub.lines = ["A" * 190] * 10 + [identity] + ["B" * 190] * 10
 
     context = invoke(
         tmp_path, state_server, event="SessionStart", source="startup",
@@ -705,10 +719,10 @@ def test_exact_compact_event_pair_retains_middle_of_huge_history_paragraph(tmp_p
 
 
 def test_context_retains_active_run_checkpoint_attempt_and_candidate_without_mutation(tmp_path, state_server):
-    StateStub.temporary = (
+    StateStub.lines = [
         "Keep checkpoint checkpoint-pending-7 pending for run run-live-7; "
         "owner remains director-a."
-    )
+    ]
     StateStub.nodes = [
         {"node_key": "running-node", "status": "OPEN", "readiness": "in_progress", "next_action": None,
          "latest_attempt": {"attempt_id": "attempt-live-7", "run_id": "run-live-7", "status": "running",
@@ -718,7 +732,7 @@ def test_context_retains_active_run_checkpoint_attempt_and_candidate_without_mut
          "next_action": "candidate_review", "latest_attempt": {
              "attempt_id": "attempt-candidate-8", "artifact_ref": "candidate-sha-8", "status": "candidate"}},
     ]
-    before = deepcopy((StateStub.temporary, StateStub.nodes, StateStub.revision))
+    before = deepcopy((StateStub.lines, StateStub.nodes, StateStub.revision))
 
     output = invoke(tmp_path, state_server, event="PostCompact")
     context = output["systemMessage"]
@@ -726,7 +740,7 @@ def test_context_retains_active_run_checkpoint_attempt_and_candidate_without_mut
     assert "attempt_id=attempt-live-7 run_id=run-live-7 attempt_status=running" in context
     assert "owner=director-a checkpoint=review checkpoint_id=checkpoint-pending-7" in context
     assert "attempt_id=attempt-candidate-8 artifact_ref=candidate-sha-8" in context
-    assert (StateStub.temporary, StateStub.nodes, StateStub.revision) == before
+    assert (StateStub.lines, StateStub.nodes, StateStub.revision) == before
     assert {request["params"]["name"] for request in StateStub.requests} == {
         "state_graph_read", "state_graph_help",
     }

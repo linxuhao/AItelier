@@ -13,6 +13,7 @@ from starlette.exceptions import HTTPException
 from core.state_driver_guide import guide_section
 from core.state_driver_index import (MAX_ASSERTION_CHARS, MAX_ENTRY_BODY_CHARS,
                                      MAX_INDEX_LIMIT, MAX_LANDED_CHARS, MAX_REASON_CHARS)
+from core.state_driver_notes import FREE_TEXT_CLOSED
 from core.state_graph import StateGraphError
 
 # A read the caller is not entitled to make about a project, raised from
@@ -200,14 +201,6 @@ class SearchDriverNoteHistory(Project):
                        description="Maximum entries returned per page, ordered by revision ascending.")
     excerpt_chars: int = Field(default=320, ge=64, le=1000,
                                description="Maximum characters in each redacted excerpt.")
-
-
-class UpdateDriverNote(Project):
-    section: Literal["permanent", "temporary"]
-    content: str = Field(max_length=100000)
-    expected_revision: int = Field(ge=0, le=2**63-1)
-    director_identity: str = Field(min_length=1, max_length=320)
-    operation: Literal["replace", "append"] = "replace"
 
 
 class DriverNoteEntry(Project):
@@ -657,7 +650,6 @@ WRITE_REQUESTS = {
     "bind_source": BindSource, "set_dispatch": DispatchPolicy, "set_node_hold": NodeHold,
     "add_reference": HistoricalReference, "refresh_project": RefreshProject,
     "start_external_attempt": StartExternalAttempt, "report_external_attempt": ExternalObservation,
-    "update_driver_note": UpdateDriverNote,
     "write_driver_note_entry": WriteDriverNoteEntry,
     "supersede_driver_note_entry": SupersedeDriverNoteEntry,
     "delist_driver_note_entry": DelistDriverNoteEntry,
@@ -667,6 +659,10 @@ WRITE_REQUESTS = {
     "report_issue": ReportIssue, "link_issue": LinkIssue, "resolve_issue": ResolveIssue,
 }
 REQUESTS = READ_REQUESTS | WRITE_REQUESTS
+# Actions that no longer exist but are refused LOUDLY, with the error naming what
+# to call instead, rather than answered "unknown action". Not in REQUESTS, so no
+# schema, enum or handler advertises them.
+RETIRED_ACTIONS = {"update_driver_note": FREE_TEXT_CLOSED}
 
 
 def describe() -> dict:
@@ -775,7 +771,6 @@ def _handlers(service) -> dict:
         "set_node_hold": service.set_node_hold, "add_reference": service.add_reference,
         "refresh_project": service.refresh_project,
         "start_external_attempt": service.start_external_attempt, "report_external_attempt": service.report_external_attempt,
-        "update_driver_note": service.driver_notes.update,
         "write_driver_note_entry": service.driver_notes.write_entry,
         "supersede_driver_note_entry": service.driver_notes.supersede_entry,
         "delist_driver_note_entry": service.driver_notes.delist_entry,
@@ -790,6 +785,8 @@ def _handlers(service) -> dict:
 
 
 def execute(service, action: str, arguments: dict, *, allow_write: bool = False):
+    if isinstance(action, str) and action in RETIRED_ACTIONS:
+        raise StateGraphError(RETIRED_ACTIONS[action])
     if not isinstance(action, str) or action not in REQUESTS:
         raise StateGraphError("unknown state graph action; use state_graph_help")
     if action in WRITE_REQUESTS and not allow_write:

@@ -226,8 +226,9 @@ Write actions: `create_project`, `add_nodes`, `revise_node`, `split_node`,
 `supersede_node`, `start_attempt`, `start_external_attempt`, `report_external_attempt`,
 `recover_attempt`, `reconcile_attempt`,
 `retire_reservation`, `record_evidence`, `verify_node`, `import_tasks`, and
-`update_driver_note`, `write_driver_note_entry`,
-`supersede_driver_note_entry`, and `delist_driver_note_entry`.
+`write_driver_note_entry`, `supersede_driver_note_entry`, and
+`delist_driver_note_entry`. `update_driver_note` is retired: it is refused on
+every transport with an error that names `write_driver_note_entry`.
 
 The MCP prompt `state_graph_driver` describes the intended loop. Workflow
 completion is observed by the driver using `reconcile_attempt`; this version
@@ -237,16 +238,22 @@ SkillFlow executor; only execution and acceptance operations require it.
 
 ### Project-scoped driver notes
 
-Each State project owns one two-section note. `permanent` holds durable operating
-context and decision references; `temporary` holds current handoff details.
-`update_driver_note` addresses one project and section, records the authenticated
-actor plus a caller-supplied director identity, and uses `expected_revision` as
-a compare-and-swap guard. Concurrent writes from the same revision cannot silently
-overwrite each other. `driver_note_history` retains every committed revision.
+Each State project owns one notebook made only of entries (owner ruling
+2026-10-06). The two free-text sections it used to have, `permanent` and
+`temporary`, are closed: `update_driver_note` is refused with an error that names
+`write_driver_note_entry`, and `get_driver_note` returns no section text. The
+text they held is not deleted: `driver_note_history` and
+`search_driver_note_history` still read every committed section revision.
+
+In-flight state (run IDs, worker/worktree ownership, wait cursors, next actions)
+is an entry written with `force="informational"`. When it changes,
+`supersede_driver_note_entry` writes its successor; when it has landed,
+`delist_driver_note_entry` takes it off the index. Every entry write records the
+authenticated actor plus a caller-supplied director identity.
 
 #### Index mode: the notebook lists assertions and stores bodies by address
 
-A notebook that can only grow is a cliff, not a brake. One project's `permanent`
+A notebook that can only grow is a cliff, not a brake. One project's former `permanent`
 section reached 99,730 of its 100,000-character limit because the only described
 way for a ruling to expire was "replaced in place by a newer one" and nothing
 executed that sentence; the next write would simply have failed.
@@ -255,8 +262,9 @@ executed that sentence; the next write would simply have failed.
 returns an address (`note://<project_id>/<12 hex>`). The assertion is capped at
 200 characters and over-cap writes are REFUSED - never truncated, never accepted
 and failed later on read. `get_driver_note` returns the index (one line and one
-address per listed entry) plus `delisted_count`; bodies are never part of that
-payload and are fetched with `get_driver_note_entry`.
+address per listed entry) plus `entry_count`, `listed_count`, `delisted_count` and
+`revision`; bodies are never part of that payload and are fetched with
+`get_driver_note_entry`.
 
 An index line carries the assertion AND its status, not a topic: `[in force]` or
 `[superseded -> <address>]`, plus an optional `[landed: ...]` marker. Landed and
@@ -277,8 +285,8 @@ Two retirement channels, and neither deletes a body:
 Database triggers block deleting an entry and block changing a stored assertion,
 body or creation time, so retiring is provably not rewriting.
 
-Every `note://` address in a section or a body must resolve.
-`check_driver_note_index` reports dangling addresses, section writes citing one
+Every `note://` address in an entry (and in retired section text) must resolve.
+`check_driver_note_index` reports dangling addresses, entry writes citing one
 are refused, and `scripts/check_driver_note_index.py <state.sqlite> [project...]`
 exits 1 when any address dangles, 0 when none do and 2 when the check itself
 could not run.
@@ -287,7 +295,9 @@ The note is context, not another source of goal truth. State nodes, attempts,
 evidence and acceptance remain authoritative. Project IDs isolate note contents,
 revisions and wait events, so separate directors may manage separate projects.
 A wait can subscribe with `note_after_revision`; `filter_mode="any"` wakes when
-any selected node, attempt or note condition changes. The default
+any selected node, attempt or note condition changes. Entry writes emit
+`driver_note_updated` events but do not advance the note revision, so
+`note_after_revision` does not wake on them. The default
 `filter_mode="all"` preserves the earlier combined-filter behavior.
 
 ### Example: create and decompose a project

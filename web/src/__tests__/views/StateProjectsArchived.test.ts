@@ -21,7 +21,7 @@ beforeEach(()=>{
   api.stateOverview.mockImplementation(async(id:string)=>({...overview(),project:{...overview().project,project_id:id,title:id}}));
   api.stateRunSummary.mockImplementation(async(id:string)=>({...runSummary(),project_id:id}));
   api.stateNode.mockImplementation(async(_p,k)=>detail(k));api.stateAttempts.mockResolvedValue({attempts:[],next_after:null});
-  api.stateDriverNote.mockResolvedValue({project_id:'live',revision:1,updated_at:'2026-09-21T00:00:00Z',permanent:'P',temporary:'T'});
+  api.stateDriverNote.mockResolvedValue({project_id:'live',revision:1,index:[],entry_count:0,listed_count:0,delisted_count:0});
 });
 afterEach(()=>{cleanup();vi.unstubAllGlobals();});
 

@@ -34,6 +34,7 @@ from core.state_graph import StateGraphStore
 from core.state_portfolio import StatePortfolio
 from core.state_service import StateService
 from tests.support.state_author_surface import seed_private_mail
+from tests.support.legacy_driver_note import seed_section
 
 REPO = Path(__file__).resolve().parents[2]
 ADMIN = {"X-AItelier-Admin-Token": "off-tunnel-admin"}
@@ -64,7 +65,8 @@ def _seed(service, pid, title, secret):
     service.create_project(pid, title)
     service.store.add_nodes(pid, [{"key": "a", "goal": secret + " GOAL", "acceptance": [
         {"id": "c", "kind": "test", "description": secret}]}])
-    service.driver_notes.update(pid, "permanent", secret + " NOTEBOOK", 0, "director")
+    seed_section(service, pid, "permanent", secret + " NOTEBOOK", "director")
+    service.driver_notes.write_entry(pid, secret + " NOTEBOOK", secret + " NOTEBOOK", "director")
 
 
 def _normalize(body, *tmp_dirs):

@@ -41,6 +41,7 @@ from core.state_database import StateDatabase
 from core.state_service import StateService
 from core.workspace_manager import WorkspaceManager
 from tests.support.state_author_surface import seed_private_mail
+from tests.support.legacy_driver_note import seed_section
 
 PRIVATE_PID = "verdict-private"
 OPEN_PID = "verdict-open"
@@ -78,7 +79,8 @@ def _seed(service):
     # notebook stays private and backs the driver-note route tests.
     for pid, secret in ((PRIVATE_PID, PRIVATE_SECRET), (OPEN_PID, OPEN_SECRET)):
         service.create_project(pid, pid)
-        service.driver_notes.update(pid, "permanent", secret, 0, "director")
+        seed_section(service, pid, "permanent", secret, "director")
+        service.driver_notes.write_entry(pid, secret, secret, "director")
         seed_private_mail(service, pid, secret)
     service.open_project(OPEN_PID)
 

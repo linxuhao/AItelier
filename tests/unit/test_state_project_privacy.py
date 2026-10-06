@@ -24,6 +24,7 @@ from api.state_http import apply_project_privacy, create_state_router
 from core.state_commands import READ_REQUESTS, execute, is_public_read
 from core.state_database import StateDatabase
 from core.state_service import StateService
+from tests.support.legacy_driver_note import seed_section
 
 _DECL = "_state_route"
 ADMIN = {"X-AItelier-Admin-Token": "off-tunnel-admin"}
@@ -56,7 +57,8 @@ def _seed(service, pid, title, goal, secret):
     service.create_project(pid, title)
     service.store.add_nodes(pid, [{"key": "a", "goal": goal, "acceptance": [
         {"id": "c", "kind": "test", "description": secret}]}])
-    service.driver_notes.update(pid, "permanent", secret + " NOTEBOOK", 0, "director")
+    seed_section(service, pid, "permanent", secret + " NOTEBOOK", "director")
+    service.driver_notes.write_entry(pid, secret + " NOTEBOOK", secret + " NOTEBOOK", "director")
     service.issues.report(pid, request_key="rk", kind="gap", title=secret + " ISSUE",
                           body=secret + " ISSUE BODY", director_identity="director")
 
@@ -156,7 +158,6 @@ class TestNoExistingWriteOpensAProject:
         assert not service.store.is_project_public("p")
         service.store.revise_node("p", "a", expected_revision=1, reason="x", goal="A2")
         assert not service.store.is_project_public("p")
-        service.driver_notes.update("p", "permanent", "note", 0, "director")
         service.driver_notes.write_entry("p", "assertion", "body", "director")
         assert not service.store.is_project_public("p")
         service.issues.report("p", request_key="rk", kind="gap", title="t", body="b",

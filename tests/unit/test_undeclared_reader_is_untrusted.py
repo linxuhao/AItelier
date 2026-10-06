@@ -27,6 +27,7 @@ from core.state_driver_notes import StateDriverNotes
 from core.state_graph import StateGraphStore
 from core.state_service import StateService
 from tests.support.state_author_surface import seed_private_mail
+from tests.support.legacy_driver_note import seed_section
 
 REPO = Path(__file__).resolve().parents[2]
 PROJECT = "undeclared-reader"
@@ -109,13 +110,15 @@ def _trusted(tmp_path, name="undeclared.sqlite"):
     service = StateService(StateDatabase(str(tmp_path / name)), actor="seeder",
                            project_read_trusted=True)
     service.create_project(PROJECT, PROJECT)
-    service.driver_notes.update(PROJECT, "permanent", SECRET, 0, "director")
+    seed_section(service, PROJECT, "permanent", SECRET, "director")
+    service.driver_notes.write_entry(PROJECT, SECRET, SECRET, "director")
     seed_private_mail(service, PROJECT, SECRET)
     # PROJECT is OPEN: its notebook is public (owner ruling 2026-09-22) and its
     # mailbox stays writer-only, so a delivered mailbox would be a real leak,
     # not the project gate doing its job. UNOPENED's notebook stays private.
     service.create_project(UNOPENED, UNOPENED)
-    service.driver_notes.update(UNOPENED, "permanent", SECRET, 0, "director")
+    seed_section(service, UNOPENED, "permanent", SECRET, "director")
+    service.driver_notes.write_entry(UNOPENED, SECRET, SECRET, "director")
     service.open_project(PROJECT)
     return service
 
@@ -131,7 +134,7 @@ def test_a_notebook_rebuilt_without_a_declaration_delivers_no_unopened_note(tmp_
     anonymous = _anonymous(_trusted(tmp_path))
     notebook = StateDriverNotes(anonymous.store, "anonymous-rebuilder")
     assert notebook.project_read_trusted is False
-    assert SECRET in notebook.get(PROJECT)["permanent"]
+    assert SECRET in repr(notebook.get(PROJECT)["index"])
     unopened = notebook.get(UNOPENED)
     print("REBUILT_NOTEBOOK_UNOPENED =", unopened)
     assert SECRET not in repr(unopened)
@@ -167,7 +170,7 @@ def test_rebuilding_from_an_untrusted_store_stays_untrusted(tmp_path):
 
 def test_explicitly_declared_readers_still_read(tmp_path):
     service = _trusted(tmp_path)
-    assert SECRET in service.driver_notes.get(PROJECT)["permanent"]
+    assert SECRET in repr(service.driver_notes.get(PROJECT)["index"])
     assert service.store.events(PROJECT)
     assert isinstance(service.director_messages.list_director_messages(PROJECT), dict)
 

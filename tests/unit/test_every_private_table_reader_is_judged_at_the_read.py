@@ -398,8 +398,6 @@ def _reviewed_paths(svc):
         "wait_for_state_change": lambda: _run(svc.wait_for_state_change(
             C.OPEN, timeout_seconds=0, actionable_only=False)),
         "wait_disposition": lambda: wait_disposition(svc.store, C.OPEN, 0, None, None, 0),
-        "update_return": lambda: svc.driver_notes.update(
-            C.OPEN, "permanent", "anonymous write", 1, "anonymous"),
         "write_entry_return": lambda: svc.driver_notes.write_entry(
             C.OPEN, "anonymous assertion", "anonymous body", "anonymous"),
         "closure_list_director_messages": lambda: _closure_body(
@@ -431,7 +429,7 @@ def _reviewed_outcome(call):
 
 # A private ACTION's body must REFUSE; a notebook body on an unopened project
 # must answer without any canary (the notebook is public only when opened).
-_MUST_REFUSE = {"scan", "wait_for_state_change", "update_return", "write_entry_return",
+_MUST_REFUSE = {"scan", "wait_for_state_change", "write_entry_return",
                 "closure_list_director_messages", "closure_events",
                 "closure_get_project_access", "closure_project_visibility",
                 "closure_wait_for_state_change"}

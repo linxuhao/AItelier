@@ -25,7 +25,7 @@ beforeEach(()=>{
   api.stateOverview.mockImplementation(async(id:string)=>({...overview(),project:{...overview().project,project_id:id,title:id==='game'?'武虾传奇':id}}));
   api.stateRunSummary.mockImplementation(async(id:string)=>({...runSummary(),project_id:id}));
   api.stateNode.mockImplementation(async(_p,k)=>detail(k));api.stateAttempts.mockResolvedValue({attempts:[],next_after:null});
-  api.stateDriverNote.mockResolvedValue({project_id:'game',revision:1,updated_at:'2026-09-21T00:00:00Z',permanent:'P',temporary:'T'});
+  api.stateDriverNote.mockResolvedValue({project_id:'game',revision:1,index:[],entry_count:0,listed_count:0,delisted_count:0});
   api.runHistory.mockResolvedValue({runs:[run()],total:1,next_offset:null});
   api.listPipelines.mockResolvedValue({pipelines:[{config_name:'gen_report',label:'Generated report',origin:'generated',step_count:1,state_files:[{name:'notes.md',size:20}]}]});
   api.pipelineGraph.mockResolvedValue({begin:'work',steps:[{id:'work',type:'agent',transitions:[]}]});

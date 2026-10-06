@@ -25,7 +25,7 @@ beforeEach(() => {
   api.stateRunSummary.mockImplementation(async(id:string)=>({...runSummary(),project_id:id}));
   api.stateNode.mockImplementation(async (_p,key) => detail(key));
   api.stateAttempts.mockResolvedValue({attempts:[attempt()], next_after:null});
-  api.stateDriverNote.mockResolvedValue({project_id:'game',revision:4,updated_at:'2026-09-21T00:00:00Z',permanent:'Permanent note',temporary:'Temporary note'});
+  api.stateDriverNote.mockResolvedValue({project_id:'game',revision:4,index:[{address:'note://game/0123456789ab',index_line:'Index line [in force]'}],entry_count:1,listed_count:1,delisted_count:0});
   api.stateAttemptDetail.mockResolvedValue({attempt: {...attempt(), context:{}}, evidence:[], receipts:[], evidence_truncated:false});
   api.stateProjects.mockResolvedValue({projects:[], next_after:null});
   api.stateRunOwners.mockResolvedValue({links:[]});

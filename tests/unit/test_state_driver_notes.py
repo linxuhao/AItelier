@@ -1,13 +1,15 @@
 import asyncio
-import concurrent.futures
 import json
-import threading
 
 import pytest
 
+from core.state_commands import (DRIVER_TOOL_DEFINITIONS, READ_REQUESTS, WRITE_REQUESTS,
+                                 describe, execute)
 from core.state_database import StateDatabase
-from core.state_graph import StateConflict, StateGraphError
+from core.state_driver_notes import FREE_TEXT_CLOSED
+from core.state_graph import StateGraphError
 from core.state_service import StateService
+from tests.support.legacy_driver_note import seed_section
 
 
 @pytest.fixture
@@ -19,32 +21,94 @@ def services(tmp_path):
     return first, StateService(StateDatabase(db_path), actor="bob@example.test", project_read_trusted=True)
 
 
-def test_project_scoped_sections_history_and_provenance(services):
-    alice, bob = services
-    a = alice.driver_notes.update(
-        "aitelier", "permanent", "release rules", 0, "aitelier-director")
-    w = bob.driver_notes.update(
-        "wuxia-myth", "temporary", "combat batch", 0, "wuxia-director")
-    assert a["revision"] == w["revision"] == 1
-    assert a["permanent"] == "release rules" and a["temporary"] == ""
-    assert w["temporary"] == "combat batch" and w["permanent"] == ""
-    assert a["updated_by"] == {
-        "actor": "alice@example.test", "director_identity": "aitelier-director"}
-    assert w["updated_by"] == {
-        "actor": "bob@example.test", "director_identity": "wuxia-director"}
+NOTE_KEYS = {"project_id", "revision", "index", "entry_count", "listed_count",
+             "delisted_count"}
 
-    appended = alice.driver_notes.update(
-        "aitelier", "temporary", "one", 1, "aitelier-director", "append")
-    appended = bob.driver_notes.update(
-        "aitelier", "temporary", " + two", 2, "relief-director", "append")
-    assert appended["temporary"] == "one + two"
+
+def test_legacy_sections_stay_readable_as_project_scoped_history_only(services):
+    alice, bob = services
+    seed_section(alice, "aitelier", "permanent", "release rules", "aitelier-director")
+    seed_section(bob, "wuxia-myth", "temporary", "combat batch", "wuxia-director")
+    seed_section(alice, "aitelier", "temporary", "one", "aitelier-director", "append")
+    seed_section(bob, "aitelier", "temporary", " + two", "relief-director", "append")
     history = alice.driver_notes.history("aitelier")
     assert [entry["revision"] for entry in history["entries"]] == [1, 2, 3]
     assert history["entries"][-1]["actor"] == "bob@example.test"
+    assert history["entries"][-1]["temporary"] == "one + two"
+    assert history["entries"][-1]["permanent"] == "release rules"
     assert alice.driver_notes.history("wuxia-myth")["entries"][0]["temporary"] == "combat batch"
     reopened = StateService(StateDatabase(alice.db.db_path), actor="handoff@example.test",
                             project_read_trusted=True)
-    assert reopened.driver_notes.get("aitelier")["temporary"] == "one + two"
+    current = reopened.driver_notes.get("aitelier")
+    assert set(current) == NOTE_KEYS and current["revision"] == 3
+
+
+def test_get_driver_note_returns_the_index_and_never_section_text(services):
+    """Goes red the moment any section text reappears in the get_driver_note payload."""
+    service, _ = services
+    seed_section(service, "aitelier", "permanent", "PERMANENT-CANARY-5f1", "lead")
+    seed_section(service, "aitelier", "temporary", "TEMPORARY-CANARY-5f1", "lead")
+    written = service.driver_notes.write_entry(
+        "aitelier", "run r-17 is in flight", "owner, worktree, cursor", "lead",
+        force="informational")
+    for note in (service.driver_notes.get("aitelier"),
+                 execute(service, "get_driver_note", {"project_id": "aitelier"})):
+        assert set(note) == NOTE_KEYS
+        serialized = json.dumps(note)
+        assert "CANARY-5f1" not in serialized
+        assert note["revision"] == 2
+        assert [item["address"] for item in note["index"]] == [written["address"]]
+        assert note["index"][0]["index_line"].startswith("run r-17 is in flight")
+        assert (note["entry_count"], note["listed_count"], note["delisted_count"]) == (1, 1, 0)
+    # The text is not gone: history still reads it.
+    assert "PERMANENT-CANARY-5f1" in json.dumps(service.driver_notes.history("aitelier"))
+    assert service.driver_notes.search("aitelier", "TEMPORARY-CANARY")["entries"]
+
+
+@pytest.mark.parametrize("allow_write", [True, False])
+def test_update_driver_note_is_refused_with_the_entry_instruction(services, allow_write):
+    service, _ = services
+    events = len(service.store.events("aitelier"))
+    with pytest.raises(StateGraphError) as refused:
+        execute(service, "update_driver_note", {
+            "project_id": "aitelier", "section": "temporary", "content": "free text",
+            "expected_revision": 0, "director_identity": "lead", "operation": "replace"},
+            allow_write=allow_write)
+    assert str(refused.value) == FREE_TEXT_CLOSED
+    assert "write_driver_note_entry" in str(refused.value)
+    # Refused, not silently accepted and not truncated: nothing was written.
+    assert service.driver_notes.get("aitelier")["revision"] == 0
+    assert service.driver_notes.history("aitelier")["entries"] == []
+    assert len(service.store.events("aitelier")) == events
+    # No surface advertises it and no in-process writer survives.
+    assert "update_driver_note" not in WRITE_REQUESTS
+    assert "update_driver_note" not in READ_REQUESTS
+    assert "update_driver_note" not in describe()["operations"]
+    enums = [tool["function"]["parameters"]["properties"]["action"]["enum"]
+             for tool in DRIVER_TOOL_DEFINITIONS if tool["function"]["parameters"]["properties"]]
+    assert all("update_driver_note" not in enum for enum in enums)
+    assert not hasattr(service.driver_notes, "update")
+
+
+def test_entry_writes_still_succeed_through_execute(services):
+    service, _ = services
+    written = execute(service, "write_driver_note_entry", {
+        "project_id": "aitelier", "assertion": "run r-1 in flight", "body": "owner lead",
+        "director_identity": "lead", "force": "informational"}, allow_write=True)
+    entry_id = written["address"].rsplit("/", 1)[-1]
+    successor = execute(service, "supersede_driver_note_entry", {
+        "project_id": "aitelier", "entry_id": entry_id, "assertion": "run r-1 paused",
+        "body": "owner lead; checkpoint c-2", "reason": "state changed",
+        "director_identity": "lead", "force": "informational"}, allow_write=True)
+    successor_id = successor["successor"]["address"].rsplit("/", 1)[-1]
+    delisted = execute(service, "delist_driver_note_entry", {
+        "project_id": "aitelier", "entry_id": successor_id, "reason": "landed",
+        "director_identity": "lead"}, allow_write=True)
+    assert delisted["listing"] == "delisted"
+    note = execute(service, "get_driver_note", {"project_id": "aitelier"})
+    assert [item["address"] for item in note["index"]] == [written["address"]]
+    assert "[superseded -> " in note["index"][0]["index_line"]
+    assert (note["entry_count"], note["listed_count"], note["delisted_count"]) == (2, 1, 1)
 
 
 def test_search_is_project_scoped_filterable_redacted_and_stably_paginated(services, monkeypatch):
@@ -56,13 +120,11 @@ def test_search_is_project_scoped_filterable_redacted_and_stably_paginated(servi
         "2026-09-12T13:00:00.000000+00:00",
     ])
     monkeypatch.setattr("core.state_driver_notes.now", lambda: next(timestamps))
-    alice.driver_notes.update("aitelier", "permanent", "release alpha", 0, "lead")
-    bob.driver_notes.update(
-        "aitelier", "temporary",
-        "handoff target password=synthetic-password " + "x" * 120,
-        1, "relief")
-    alice.driver_notes.update("aitelier", "temporary", " target beta", 2, "lead", "append")
-    bob.driver_notes.update("wuxia-myth", "temporary", "target beta foreign", 0, "relief")
+    seed_section(alice, "aitelier", "permanent", "release alpha", "lead")
+    seed_section(bob, "aitelier", "temporary",
+                 "handoff target password=synthetic-password " + "x" * 120, "relief")
+    seed_section(alice, "aitelier", "temporary", " target beta", "lead", "append")
+    seed_section(bob, "wuxia-myth", "temporary", "target beta foreign", "relief")
 
     filtered = alice.driver_notes.search(
         "aitelier", "beta", section="temporary", actor="alice@example.test",
@@ -98,8 +160,8 @@ def test_search_compares_time_instants_and_unicode_casefold(services, monkeypatc
         "2026-09-12T12:00:00.000001+00:00",
     ])
     monkeypatch.setattr("core.state_driver_notes.now", lambda: next(timestamps))
-    service.driver_notes.update("aitelier", "permanent", "Decision ÄPFEL", 0, "lead")
-    service.driver_notes.update("aitelier", "temporary", "one microsecond later", 1, "lead")
+    seed_section(service, "aitelier", "permanent", "Decision ÄPFEL", "lead")
+    seed_section(service, "aitelier", "temporary", "one microsecond later", "lead")
 
     assert [row["revision"] for row in service.driver_notes.search(
         "aitelier", "äpfel")["entries"]] == [1]
@@ -121,10 +183,9 @@ def test_search_redacts_slack_tokens_and_identity_metadata(services):
     writer = StateService(StateDatabase(service.db.db_path), actor=secret_actor,
                           project_read_trusted=True)
     slack_token = "".join(("xo", "xb-1234567890-abcdefghijklmnop"))
-    writer.driver_notes.update(
-        "aitelier", "temporary",
-        f"handoff {slack_token} password=synthetic-password",
-        0, "api_key=director-secret")
+    seed_section(writer, "aitelier", "temporary",
+                 f"handoff {slack_token} password=synthetic-password",
+                 "api_key=director-secret")
     result = writer.driver_notes.search("aitelier", "handoff", excerpt_chars=1000)
     serialized = json.dumps(result)
     assert secret_actor not in serialized
@@ -133,56 +194,6 @@ def test_search_redacts_slack_tokens_and_identity_metadata(services):
     assert "synthetic-password" not in serialized
     assert result["entries"][0]["actor"] == "[REDACTED]"
     assert result["entries"][0]["director_identity"] == "api_key=[REDACTED]"
-
-
-@pytest.mark.parametrize("section", ["permanent", "temporary"])
-def test_resulting_section_limit_failure_is_atomic(services, section):
-    service, _ = services
-    service.driver_notes.update("aitelier", section, "x" * 99999, 0, "lead")
-    event_count = len(service.store.events("aitelier"))
-    with pytest.raises(StateGraphError, match="at most 100000"):
-        service.driver_notes.update("aitelier", section, "yz", 1, "lead", "append")
-    assert service.driver_notes.get("aitelier")["revision"] == 1
-    assert len(service.driver_notes.history("aitelier")["entries"]) == 1
-    assert len(service.store.events("aitelier")) == event_count
-
-
-def test_replace_over_section_limit_creates_no_note_history_or_event(services):
-    service, _ = services
-    event_count = len(service.store.events("aitelier"))
-    with pytest.raises(StateGraphError, match="at most 100000"):
-        service.driver_notes.update("aitelier", "permanent", "x" * 100001, 0, "lead")
-    assert service.driver_notes.get("aitelier")["revision"] == 0
-    assert service.driver_notes.history("aitelier")["entries"] == []
-    assert len(service.store.events("aitelier")) == event_count
-
-
-def test_compare_and_swap_rejects_one_concurrent_writer_without_lost_update(services):
-    alice, bob = services
-    barrier = threading.Barrier(2)
-
-    def update(service, value, identity):
-        barrier.wait()
-        try:
-            return ("ok", service.driver_notes.update(
-                "aitelier", "temporary", value, 0, identity))
-        except StateConflict as exc:
-            return ("conflict", str(exc))
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-        results = [
-            future.result() for future in [
-                pool.submit(update, alice, "alice", "director-a"),
-                pool.submit(update, bob, "bob", "director-b"),
-            ]
-        ]
-    assert sorted(result[0] for result in results) == ["conflict", "ok"]
-    conflict = next(result[1] for result in results if result[0] == "conflict")
-    assert "expected 0, current 1" in conflict
-    current = alice.driver_notes.get("aitelier")
-    assert current["revision"] == 1
-    assert current["temporary"] in {"alice", "bob"}
-    assert len(alice.driver_notes.history("aitelier")["entries"]) == 1
 
 
 @pytest.mark.asyncio
@@ -203,11 +214,11 @@ async def test_note_wait_is_project_scoped_and_wakes_from_any_selected_source(se
         return_when_idle=True, timeout_seconds=1))
     await asyncio.sleep(.02)
     project_cursor = a.store.events("aitelier")[-1]["seq"]
-    b.driver_notes.update("wuxia-myth", "temporary", "foreign", 0, "wuxia-director")
+    seed_section(b, "wuxia-myth", "temporary", "foreign", "wuxia-director")
     assert a.store.events("aitelier")[-1]["seq"] == project_cursor
     await asyncio.sleep(.05)
     assert not note_wait.done()
-    a.driver_notes.update("aitelier", "temporary", "local", 0, "aitelier-director")
+    seed_section(a, "aitelier", "temporary", "local", "aitelier-director")
     changed = await asyncio.wait_for(note_wait, 1)
     assert changed["events"][0]["event_type"] == "driver_note_updated"
     assert changed["events"][0]["project_id"] == "aitelier"
@@ -240,8 +251,7 @@ async def test_note_revision_is_a_live_condition_but_plain_idle_stays_fast(servi
         "aitelier", after=cursor, note_after_revision=0,
         return_when_idle=True, timeout_seconds=.02)
     assert pending["timed_out"] and "reason" not in pending
-    service.driver_notes.update(
-        "aitelier", "permanent", "ready", 0, "aitelier-director")
+    seed_section(service, "aitelier", "permanent", "ready", "aitelier-director")
     already = await service.wait_for_state_change(
         "aitelier", after=service.store.events("aitelier")[-1]["seq"],
         note_after_revision=0, return_when_idle=True, timeout_seconds=0)

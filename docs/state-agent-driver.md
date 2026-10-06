@@ -17,7 +17,7 @@ State owns product goals, versioned acceptance contracts, dependencies and evide
 Call state_graph_read(action="wait_for_state_change", arguments={"project_id": "YOUR_PROJECT", "after": YOUR_CURSOR, "timeout_seconds": 900, "return_when_idle": true}). These are illustrative placeholders, not real project IDs/cursors. Optional node_keys/attempt_ids narrow the wait; actionable_only defaults true. Node filters include upstream dependency changes and project-wide events. The compatibility default filter_mode="all" intersects node_keys and attempt_ids. Set filter_mode="any" when any watched node, attempt, or note revision should wake the wait (OR semantics). note_after_revision subscribes to a project-scoped driver note revision. Read exact limits and schema from state_graph_help.
 Director waits set return_when_idle=true: unread matching events return first. With no nonterminal attempt in scope and no note_after_revision subscription, reason=nothing_to_wait returns immediately (timed_out=false); stop the client wait loop and choose ready work or hand off. A pending note revision remains waitable. Paused attempts return reason=action_required with attempt IDs/statuses; inspect their checkpoints instead of waiting again. These are scoped State snapshots, not remote quiescence attestations or goal completion. Reservations, running and unknown attempts remain waitable. The default false preserves subscriptions for future work even when currently idle. Zero timeout still replays events and evaluates the opt-in idle disposition before returning a timeout.
 Prefer a single 10–15 minute wait (600–900 seconds) over repeated minute-long calls when the client supports it. Configure the MCP client request timeout above the requested wait, with transport margin (for example, 960 seconds for a 900-second wait), using Codex tool_timeout_sec or dsh toolCallTimeoutMs (milliseconds), and check any proxy timeout too. Verify the effective timeout on the live connection: editing a client config does not prove that an existing session loaded it. Reload that client MCP connection when supported, then measure a wait longer than the previously observed cutoff. For short-timeout clients the compatibility default remains 30 seconds; prefer a persistent client-side waiter over repeated model-driven short calls. wait_for_run likewise accepts long waits (up to 3600 seconds), with a 45-second compatibility default. Do not loop over brief waits merely to produce status messages.
-Codex connection caveat (observed 2026-09-08): MCP calls may be cut off at 300 seconds (300,000 ms, NOT 300 ms), even when tool_timeout_sec=960 is present on disk. This is an observed effective connection limit, not a documented universal Codex maximum. If a longer wait is needed and a refreshed MCP connection has not been verified beyond that cutoff, use an authorized direct HTTP client for POST /api/state/query/wait_for_state_change instead of repeatedly retrying the capped MCP call. Request 600–900 seconds with a client timeout above it (for example 960 seconds); keep the cursor, filters and return_when_idle=true. A direct HTTP wait of 320.15 seconds was verified; 900 seconds is configured support, not a measured result. Keep empty-timeout renewal inside that client process.
+Codex connection caveat (observed 2026-09-08): MCP calls may be cut off at 300 seconds (300,000 ms, NOT 300 ms), even when tool_timeout_sec=960 is present on disk. This is an observed effective connection limit, not a published universal Codex maximum. If a longer wait is needed and a refreshed MCP connection has not been verified beyond that cutoff, use an authorized direct HTTP client for POST /api/state/query/wait_for_state_change instead of repeatedly retrying the capped MCP call. Request 600–900 seconds with a client timeout above it (for example 960 seconds); keep the cursor, filters and return_when_idle=true. A direct HTTP wait of 320.15 seconds was verified; 900 seconds is configured support, not a measured result. Keep empty-timeout renewal inside that client process.
 Persist next_after from each response, including timeouts. Events are durable; already-recorded matching changes return immediately. Reuse the same filter scope with its cursor. If widening scope, use that scope's earlier cursor or reconcile its current snapshot so previously filtered events are not silently missed. Process returned events before advancing your durable handoff cursor.
 A timed_out response means no matching change during that wait, NOT failure, termination, cancellation, or free ownership. Do not restart workers or send unchanged-status messages. Continue the bounded wait when appropriate; user interruption may cancel the wait without cancelling the job. Do useful independent work while waiting if the client supports yielding.
 Keep the wait loop in the tool/client process: on an ordinary empty timeout, reuse next_after and the same filters and wait again without a new model turn or status message. Return control for matching events, user cancellation, or a real transport/authentication error; preserve the last cursor on errors. Retain and await an existing background handle instead of starting duplicate listeners. A Codex goal keeps the overall objective alive across turns; do not end empty turns just to let goal continuation poll again. Goals and event waits are complementary, not interchangeable. Where MCP calls remain capped, an authorized persistent HTTP client can use POST /api/state/query/wait_for_state_change with the same arguments and sufficient request timeout; this preserves the server's cursor and authorization contract. Do not embed credentials in arguments or logs.
@@ -38,19 +38,27 @@ For positive director waits, workflow recovery precedes idle/checkpoint decision
 Report defects, gaps, cross-project hand-offs and questions with report_issue, not add_nodes; issues never change node status/readiness and are never dispatched. resolve_issue names what took the issue: absorbed (node revision after the report), promoted (node created after the report), duplicate (issue or existing node) or rejected. Open defects on VERIFIED/CANDIDATE nodes appear in contradicts_acceptance. Full protocol: state_graph_help driver_guide.
 
 ## Director notebook: context, not a second State database
-Each State project has one built-in driver note. Select it explicitly by project_id:
-get_driver_note reads the permanent/temporary sections and current revision;
-driver_note_history reads append-only revisions; update_driver_note writes one
-section with expected_revision, director_identity and operation=replace|append.
+Each State project has one built-in driver note made only of entries. Select it
+explicitly by project_id: get_driver_note returns the entry index (one line and
+one note:// address per listed entry), entry_count, listed_count, delisted_count
+and revision, and no free text. write_driver_note_entry writes one short
+assertion plus a body and returns its address. The notebook has no free-text
+sections: update_driver_note is refused and names write_driver_note_entry; the
+retired permanent/temporary text stays readable via driver_note_history and
+search_driver_note_history.
 The authenticated actor is derived from the transport and recorded separately
 from the caller's director identity. Identity is provenance, never authorization.
 
+Write in-flight state (run IDs, worker/worktree ownership, wait cursors, next
+actions) as an entry with force="informational"; supersede_driver_note_entry it
+when it changes and delist_driver_note_entry it when it has landed.
+
 The note is isolated by project_id. A director handling aitelier and another
-handling wuxia-myth read, write and wait on different notes, revisions and event
+handling wuxia-myth read, write and wait on different notes, entries and event
 streams. A same-revision race has one winner; the loser must read the current
-note and retry intentionally. Never reuse a revision or cursor from another
-project. To wait for a handoff, use note_after_revision; combine it with other
-filters using filter_mode="any" when any watched source should wake the call.
+record and retry deliberately. Never reuse a revision, address or cursor from
+another project. Entry writes emit driver_note_updated events but do not advance
+the note revision, so note_after_revision does not wake on them.
 
 State remains authoritative for goals, revisions, dependencies, attempts,
 evidence and acceptance. The note preserves information State does not own:

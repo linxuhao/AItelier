@@ -49,11 +49,13 @@ A timeout does not stop a worker, and completion never verifies a goal.
 
 Agents can load the MCP prompt `state_graph_driver`, the resource
 `aitelier://state/driver-guide`, or `driver_guide` from `state_graph_help`.
-Each State project also has a revisioned `permanent`/`temporary` driver note:
-`get_driver_note`, bounded/redacted `search_driver_note_history`,
-`driver_note_history`, and CAS-protected
-`update_driver_note` let different directors manage projects in parallel without
-sharing note revisions or event cursors. `wait_for_state_change` keeps its
+Each State project also has a driver notebook made only of entries:
+`write_driver_note_entry` / `supersede_driver_note_entry` /
+`delist_driver_note_entry` write it (in-flight state is an informational entry,
+superseded when it changes and delisted when it lands), `get_driver_note` returns
+the entry index, and bounded/redacted `search_driver_note_history` plus
+`driver_note_history` keep the retired free-text sections readable, so different
+directors manage projects in parallel without sharing notes or event cursors. `wait_for_state_change` keeps its
 single-project compatibility defaults and adds `filter_mode="any"` plus
 `note_after_revision` for OR-style handoff waits.
 See the [agent driver guide](docs/state-agent-driver.md) for external evidence,
@@ -286,7 +288,7 @@ It rotates (5MB × 3) and lives on the mounted volume, so it survives container
 recreation. One line per tick; outcomes are `idle`, `locked`, `run_start_failed`,
 `active_claim`, `terminal`, `claim_failed`, `no_claim`, `executed`.
 
-State lives in host `~/.AItelier` (bind-mounted). The port is published on loopback only; expose it publicly via a **Cloudflare tunnel**. With Cloudflare Access in front, **reads are open to any logged-in user and writes are restricted to an allowlist** — set `AITELIER_CF_TEAM_DOMAIN`, `AITELIER_CF_AUD`, and `AITELIER_WRITERS` in `.env` (all documented in `.env.example`). The CLI authenticates to its own container with `AITELIER_ADMIN_TOKEN`.
+State lives in host `~/.AItelier` (bind-mounted). The port is published on loopback only; expose it publicly via a **Cloudflare tunnel**. With Cloudflare Access in front, **reads are open to any logged-in user and writes are restricted to an allowlist** — set `AITELIER_CF_TEAM_DOMAIN`, `AITELIER_CF_AUD`, and `AITELIER_WRITERS` in `.env` (all listed in `.env.example`). The CLI authenticates to its own container with `AITELIER_ADMIN_TOKEN`.
 
 ## Use AItelier from another agent (MCP)
 

@@ -318,10 +318,10 @@ def _guide_sections(guide: str, limit: int = 4_000) -> str:
 def _entry_index(note: dict[str, Any], limit: int = MAX_ENTRY_INDEX_CHARS) -> str:
     """Render the driver note's ENTRY INDEX: one assertion per line, with its status.
 
-    This is the section that carries durable content now. Before index mode the
-    [permanent] section held it; a hook that re-injects only the sections
-    therefore re-injects a pointer and nothing it points at. Bodies stay behind
-    get_driver_note_entry and are never injected.
+    Since 2026-10-06 the index is the whole notebook: the free-text sections are
+    closed and get_driver_note no longer returns them, so in-flight state arrives
+    here as informational entries. Bodies stay behind get_driver_note_entry and
+    are never injected.
     """
     index = note.get("index")
     if not isinstance(index, list) or not index:
@@ -346,18 +346,6 @@ def _entry_index(note: dict[str, Any], limit: int = MAX_ENTRY_INDEX_CHARS) -> st
             return rendered
         lines.pop()
         omitted += 1
-
-
-def _identity_anchors(permanent: str, temporary: str, limit: int = 1_200) -> str:
-    """Retain labeled handoff identities even when note bodies are truncated."""
-    excerpts: list[str] = []
-    for label, text in (("permanent", permanent), ("temporary", temporary)):
-        for key_name in ("owner=", "attempt_id=", "run_id=", "checkpoint=", "checkpoint_id="):
-            excerpt = _centered_excerpt(text, key_name)
-            tagged = f"- {label}: {excerpt}" if excerpt else ""
-            if tagged and tagged not in excerpts:
-                excerpts.append(tagged)
-    return _bounded_section("\n".join(excerpts) or "- none labeled in current note", limit)
 
 
 def _codex_config() -> dict[str, Any]:
@@ -587,24 +575,14 @@ def build_context() -> str:
         standing = _active_standing_projection(standing_envelope)
     except Exception:
         return _recovery_context()
-    permanent = str(note.get("permanent", ""))
-    temporary = str(note.get("temporary", ""))
     guide = str(help_payload.get("driver_guide", ""))
     context = f"""# AItelier director bootstrap after compaction
 project_id={PROJECT_ID} (fixed project isolation)
-driver_note_revision={note.get('revision', 'unknown')} updated_at={note.get('updated_at', 'unknown')}
-driver_note_permanent_sha256={_sha256(permanent)} chars={len(permanent)}
-driver_note_temporary_sha256={_sha256(temporary)} chars={len(temporary)}
+driver_note_revision={note.get('revision', 'unknown')}
 state_event_cursor={overview.get('event_seq', 'unknown')}
 state_driver_guide_sha256={_sha256(guide)} chars={len(guide)} source={help_payload.get('driver_resource', 'state_graph_help')}
 
-## Current permanent director note (bounded)
-{_bounded_section(permanent, 3_000)}
-
-## Current temporary director note (bounded)
-{_bounded_section(temporary, 3_000)}
-
-## Current driver note ENTRY INDEX (durable assertions; bodies fetched by address)
+## Current driver note ENTRY INDEX (assertions and in-flight state; bodies fetched by address)
 Each line is an assertion WITH its status. A line that contradicts what you are about
 to do wins until you have re-measured it. Fetch a body with
 state_graph_read(action="get_driver_note_entry", arguments={{"project_id":"{PROJECT_ID}","entry_id":"<12-hex>"}}).
@@ -617,10 +595,7 @@ entry_count={note.get('entry_count', 'unknown')} listed={note.get('listed_count'
 ## Stable State driver guidance selected from the live MCP response
 {_guide_sections(guide)}
 
-This is a bounded resume aid, not the full DAG, note history, trace, or evidence. Reconcile exact State records before dispatch, acceptance, push, or deployment.
-
-## Exact labeled owner/run/attempt/checkpoint anchors retained from the current note
-{_identity_anchors(permanent, temporary)}"""
+This is a bounded resume aid, not the full DAG, note history, trace, or evidence. Reconcile exact State records before dispatch, acceptance, push, or deployment."""
     standing_section = "\n\n## Active standing director guidance (bounded, read-only)\n" + (
         standing or "- none")
     return (_bounded_section(context, MAX_CONTEXT_CHARS - len(standing_section))

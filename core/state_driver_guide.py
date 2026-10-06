@@ -77,11 +77,11 @@ force="informational" is refused on write and supersede. Record it in the State
 DAG instead: run IDs, worker/worktree ownership and status on the attempt
 (start_external_attempt / report_external_attempt, or start_attempt); a node that
 must not be dispatched with set_node_hold; hand-offs, blockers and questions with
-report_issue; queue order with set_node_priority. A rule leaves the index only
-through supersede_driver_note_entry, which writes the successor while the old
-address keeps a tombstone; delist_driver_note_entry takes a line that can no
-longer change a decision (a superseded tombstone, or an informational row written
-before the ruling) off the index. No call deletes a body.
+report_issue; queue order with set_node_priority. A rule that is replaced leaves
+the index through supersede_driver_note_entry, which writes the successor while
+the old address keeps a tombstone; an obsolete rule with no successor (its
+mechanism is gone, or it was merged into another entry - name that address in
+the reason) leaves through delist_driver_note_entry. No call deletes a body.
 
 The index hides superseded entries by default; pass include_superseded=true (and
 include_delisted=true) to get_driver_note or driver_note_index to list them.

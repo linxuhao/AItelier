@@ -306,11 +306,9 @@ Two retirement channels, and neither deletes a body:
 * `delist_driver_note_entry` - no successor. The entry leaves the index because
   reading it can no longer change a decision. The reason is stored with the
   entry, the body still resolves at its address, and `delisted_count` reports how
-  many entries left, so a short index cannot hide how much was evicted. The call
-  is REFUSED while the stored entry is `force=in_force` and unsuperseded; there
-  is no override argument. Since every new entry is `in_force`, what can be
-  delisted is a superseded tombstone or an informational row written before the
-  2026-10-06 ruling.
+  many entries left, so a short index cannot hide how much was evicted. Use it
+  for an obsolete rule (its mechanism is gone, or it was merged into another
+  entry - name that address in the reason) and for superseded tombstones.
 
 Database triggers block deleting an entry and block changing a stored assertion,
 body or creation time, so retiring is provably not rewriting.

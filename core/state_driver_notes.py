@@ -422,9 +422,10 @@ class StateDriverNotes:
                      director_identity: str) -> dict:
         """Evict a line from the index without deleting its body.
 
-        Refused while the entry can still change a decision. Both halves of that
-        test are read from the stored row, never from a caller-supplied flag:
-        there is no force override on this call.
+        Every entry is a rule, so this is how an obsolete rule with no successor
+        leaves the index (owner ruling 2026-10-06, node driver.note-rules-pruned):
+        the reason is stored, the body still resolves at its address and
+        delisted_count reports the eviction.
         """
         project_id = key(project_id, "project_id")
         entry_id = entry_id_value(entry_id)
@@ -438,12 +439,6 @@ class StateDriverNotes:
                 raise StateConflict(
                     f"{address_of(project_id, entry_id)} is already delisted; its body stays "
                     "readable at that address")
-            still_binding = row["force"] == "in_force" and row["superseded_by"] is None
-            if still_binding:
-                raise StateGraphError(
-                    f"{address_of(project_id, entry_id)} is still in force: reading it can still "
-                    "change a decision, so it may not be delisted. Retire it with "
-                    "supersede_driver_note_entry, which names the successor that replaces it.")
             conn.execute(
                 "UPDATE state_driver_note_entries SET listing='delisted',delist_reason=?,"
                 "updated_at=? WHERE project_id=? AND entry_id=?",

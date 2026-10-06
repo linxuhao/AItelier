@@ -2,7 +2,7 @@
 
 Reading "all present" off today's data is a snapshot, not a guard. Each test here
 therefore also builds the failing case: an over-cap assertion, a dangling
-address, a delist of a rule that is still in force, an attempt to rewrite a body.
+address, a second delist of the same entry, an attempt to rewrite a body.
 """
 import json
 import subprocess
@@ -152,35 +152,31 @@ def test_delist_evicts_from_the_index_keeps_the_body_and_counts_it(service):
     assert listed_with["delisted_count"] == 1
 
 
-def test_delist_is_refused_while_the_line_can_still_change_a_decision(service):
+def test_an_obsolete_rule_or_a_tombstone_can_be_delisted_and_its_body_stays(service):
     notes = service.driver_notes
+    # A rule with no successor (its mechanism is gone) leaves the index by delist.
+    obsolete = notes.write_entry(
+        "aitelier", "Keep the temporary section under fifty lines",
+        "Section rule.", "director-a")
+    obsolete_id = entry_id_of(obsolete["address"])
+    gone = notes.delist_entry("aitelier", obsolete_id,
+                              "sections closed 2026-10-06; nothing to bound", "director-a")
+    assert gone["listing"] == "delisted"
+    assert notes.get_entry("aitelier", obsolete_id)["body"] == "Section rule."
+    assert notes.get("aitelier")["index"] == []
+    assert notes.get("aitelier")["delisted_count"] == 1
+
+    # A rule replaced by a successor is superseded, and its tombstone may be delisted.
     binding = notes.write_entry(
         "aitelier", "Never reduce travel money below three places",
         "Owner ruling.", "director-a", landed="three places VERIFIED")
     entry_id = entry_id_of(binding["address"])
-    # Landed is not expired: the rule is landed AND still in force.
-    assert "[landed: three places VERIFIED]" in binding["index_line"]
-    assert "[in force]" in binding["index_line"]
-
-    with pytest.raises(StateGraphError) as refusal:
-        notes.delist_entry("aitelier", entry_id, "looks done", "director-a")
-    assert "still in force" in str(refusal.value)
-    assert "supersede_driver_note_entry" in str(refusal.value)
-    assert notes.get("aitelier")["delisted_count"] == 0
-    assert len(notes.get("aitelier")["index"]) == 1
-
-    # There is no force override on delist: the refusal is read from the stored
-    # row, so a caller cannot argue its way past it with an argument.
-    with pytest.raises(TypeError):
-        notes.delist_entry("aitelier", entry_id, "looks done", "director-a", force="informational")
-
-    # The supported route out is supersede, and then the tombstone may be delisted.
     notes.supersede_entry("aitelier", entry_id, "Never reduce travel money below four places",
                           "Owner raised the floor.", "owner raised the floor", "director-b")
     evicted = notes.delist_entry("aitelier", entry_id, "the successor carries the rule",
                                  "director-b")
     assert evicted["listing"] == "delisted"
-    assert notes.get("aitelier")["delisted_count"] == 1
+    assert notes.get("aitelier")["delisted_count"] == 2
     assert notes.get_entry("aitelier", entry_id)["body"] == "Owner ruling."
     with pytest.raises(StateConflict) as again:
         notes.delist_entry("aitelier", entry_id, "twice", "director-b")

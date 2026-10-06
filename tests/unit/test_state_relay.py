@@ -211,3 +211,138 @@ def test_start_attempt_exposes_continue_from_on_the_typed_surface():
     assert "relay_digest" in describe()["operations"]["start_attempt"]["arguments"]["properties"]
     assert StartAttempt(project_id="g", node_key="a", expected_revision=1, workflow="w",
                         request_key="r").continue_from is None
+
+
+# ── chosen-base dependency ancestry ───────────────────────────────────
+#
+# Before a fresh workflow launches on an explicitly selected immutable base,
+# dependency admission must check the commit the new worktree will ACTUALLY
+# start from - the selected/materialized base - not the shared repository HEAD.
+# HEAD need not contain the accepted dependency at all, and the old reference
+# silently checked a tree the run would never build on.
+
+
+def _commit_file(repo, name, text):
+    (repo / name).write_text(text)
+    subprocess.run(["git", "add", name], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", name], cwd=repo, check=True)
+    return _git(repo, "rev-parse", "HEAD")
+
+
+def _accept_dependency(world, artifact):
+    """Persist a real acceptance receipt binding node 'a' to `artifact`: the
+    commit whose ancestry a dependent launch must prove reachable."""
+    store, db, attempts = world["store"], world["db"], world["attempts"]
+    a = attempts.reserve("game", "a", 1, "feature", "dep-a")
+    node = store.get_node("game", "a")
+    with db.get_connection() as conn:
+        conn.execute("UPDATE state_attempts SET status='candidate',artifact_ref=? WHERE attempt_id=?",
+                     (artifact, a["attempt_id"]))
+        conn.execute(
+            "INSERT INTO state_acceptances(receipt_id,project_id,node_key,node_revision,attempt_id,"
+            "artifact_ref,contract_hash,dependency_snapshot,evidence_ids,reviewer,created_at,provenance_json) "
+            "VALUES('receipt-a','game','a',1,?,?,?,'{}','[\"e\"]','fixture-reviewer','2026-10-06T00:00:00Z','{}')",
+            (a["attempt_id"], artifact, node["contract_hash"]))
+        conn.execute("UPDATE state_nodes SET status='VERIFIED',verified_receipt='receipt-a' "
+                     "WHERE project_id='game' AND node_key='a'")
+        conn.commit()
+
+
+def _dependent(world):
+    world["store"].add_nodes("game", [{
+        "key": "b", "goal": "Deliver b", "dependencies": ["a"], "acceptance": [
+            {"id": "behaviour", "kind": "test", "description": "Behaviour validated"}]}])
+
+
+def _manifest():
+    from types import SimpleNamespace
+    return SimpleNamespace(seed_file="seed.md", output_step="implementation",
+                           scheduler_owned=True, repo_mode="code")
+
+
+def _capture_launcher(monkeypatch):
+    import core.run_launcher as launcher
+    calls = []
+    def recorder(*args, **kwargs):
+        calls.append((args, kwargs))
+        return {"status": "error", "message": "captured after dependency admission"}
+    monkeypatch.setattr(launcher, "start_config_run", recorder)
+    return calls
+
+
+def test_fresh_attempt_admits_dependency_in_selected_base_when_head_lacks_it(world, monkeypatch):
+    """The discriminating positive: the chosen base contains the dependency
+    commit and HEAD does not. The old HEAD reference refused this launch; the
+    admission must now check the tree the worktree is actually pinned to."""
+    src = world["src"]
+    dep = _commit_file(src, "dep.txt", "dependency\n")
+    subprocess.run(["git", "reset", "--hard", world["head"]], cwd=src, check=True)
+    assert _git(src, "rev-parse", "HEAD") == world["head"]
+    with pytest.raises(subprocess.CalledProcessError):
+        subprocess.run(["git", "merge-base", "--is-ancestor", dep, "HEAD"], cwd=src, check=True)
+    _accept_dependency(world, dep)
+    _dependent(world)
+    attempt = world["attempts"].reserve("game", "b", 1, "feature", "selected-base-present", base_sha=dep)
+    calls = _capture_launcher(monkeypatch)
+
+    launched = world["service"]._launch_or_recover(attempt, _manifest(), str(src))
+
+    assert calls, "the launcher was reached: the dependency is in the selected base"
+    assert launched["status"] == "unknown"
+    assert ri.requested_base(world["db"], attempt["execution_project_id"])["base_sha"] == dep
+
+
+def test_fresh_attempt_refuses_dependency_missing_from_selected_base_even_when_head_has_it(world, monkeypatch):
+    """The fail-closed inverse: HEAD contains the dependency commit, the chosen
+    base does not. The old HEAD reference admitted this launch against a tree
+    the run would never build on; the selected base must be refused."""
+    src = world["src"]
+    dep = _commit_file(src, "dep.txt", "dependency\n")
+    assert _git(src, "rev-parse", "HEAD") == dep, "HEAD must contain the dependency"
+    _accept_dependency(world, dep)
+    _dependent(world)
+    attempt = world["attempts"].reserve("game", "b", 1, "feature", "selected-base-missing", base_sha=world["head"])
+    calls = _capture_launcher(monkeypatch)
+
+    with pytest.raises(StateConflict, match="not in the source; integrate it before launching"):
+        world["service"]._launch_or_recover(attempt, _manifest(), str(src))
+    assert not calls, "no run may be dispatched when the selected base misses the dependency"
+
+
+def test_fresh_attempt_without_base_still_checks_head(world, monkeypatch):
+    """The no-base path is preserved: with no chosen or materialized base the
+    admission falls back to HEAD and admits the dependency it contains."""
+    src = world["src"]
+    dep = _commit_file(src, "dep.txt", "dependency\n")
+    _accept_dependency(world, dep)
+    _dependent(world)
+    attempt = world["attempts"].reserve("game", "b", 1, "feature", "no-base")
+    calls = _capture_launcher(monkeypatch)
+
+    world["service"]._launch_or_recover(attempt, _manifest(), str(src))
+
+    assert calls, "the no-base path must still admit a dependency HEAD contains"
+
+
+def test_relay_base_takes_precedence_over_any_selected_base(world):
+    """A relay continues on the failed branch head, never on a fresh selected
+    base, even if the context still carries one."""
+    service = world["service"]
+    selected, relay_base = "a" * 40, "b" * 40
+    attempt = {"context": {"base_sha": selected}, "execution_project_id": "sg-x"}
+    assert service._dependency_ref(attempt, {"base_sha": relay_base}) == relay_base
+    assert service._dependency_ref({"context": {}, "execution_project_id": "sg-x"}, None) == "HEAD"
+    assert service._dependency_ref(attempt, None) == selected
+
+
+def test_missing_receipt_and_invalid_base_still_refuse(world):
+    """Exact fail-closed guards stay: a dependency whose acceptance receipt is
+    missing has no ancestry to trust, and an explicitly selected base must be
+    an exact 40-hex commit."""
+    from core.state_graph import StateGraphError
+    with pytest.raises(StateConflict, match="no acceptance receipt"):
+        world["service"]._dependency_context(
+            {"dependencies": {"a": {"status": "VERIFIED", "verified_receipt": "missing"}}},
+            str(world["src"]))
+    with pytest.raises(StateGraphError):
+        world["service"].start_attempt("game", "b", 1, "feature", "bad-base", base_sha="not-a-sha")

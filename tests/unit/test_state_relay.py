@@ -46,7 +46,15 @@ def world(tmp_path, monkeypatch):
     store.add_nodes("game", [{"key": "a", "goal": "Implement a", "dependencies": [], "acceptance": [
         {"id": "behaviour", "kind": "test", "description": "Behaviour validated"}]}])
     attempts = StateAttempts(store)
-    sf = SkillFlow(str(tmp_path / "sf.db"))
+    # A real SkillFlow 1.5.82, initialized with an owned tmp workspace so
+    # `sf._workspace` is a real WorkspaceManager: the launch path reaches
+    # run_launcher.missing_cross_config_inputs, which resolves the project's
+    # context root through `sf._workspace.get_project_path(project_id)`. Built
+    # without workspace_base that attribute is None and the check dies before
+    # any dependency admission. projects_base is pinned too (optional) so the
+    # SkillFlow resolver never falls back to a non-tmp location.
+    sf = SkillFlow(str(tmp_path / "sf.db"), workspace_base=str(tmp_path / "workspaces"),
+                   projects_base=str(tmp_path / "projects"))
     sf.register_graph(PipelineGraph(name="feature", begin="implementation", steps=[StepNode(id="implementation")]))
     ws = WorkspaceManager(str(tmp_path / "workspaces"))
     src = tmp_path / "src"

@@ -139,11 +139,22 @@ def rollback_task(
     return {"success": True, "project_id": row["project_id"], "restored_hash": req.commit_hash}
 
 
-@router.get("/{task_id}/stream")
+@router.get("/{task_id}/stream", dependencies=[Depends(require_reader)])
 async def stream_task_logs(task_id: str):
-    """
-    Server-Sent Events (SSE) 端点。
-    前端通过 EventSource 连接此端点，单向接收沙盒内命令执行的实时日志。
+    """SSE stream of ONE task's raw execution-log body.
+
+    These are the same bytes that GET /api/tasks/{task_id} carries in
+    ``last_error``: a writer gets them, every other identity has them stripped.
+    Streaming them is a private execution READ, so this route carries the SAME
+    require_reader verdict as every other private execution read -- it is not an
+    anonymous door.
+
+    The channel key is caller-supplied, so ``GET /api/tasks/__global__/stream``
+    aliased the cross-project progress fan-out and reached its raw, unprojected
+    event body with no credential. The guard covers that alias too: the
+    public progress surface is GET /api/events/stream, and this route is not a
+    second door to it for anyone who may not read a private
+    record.
     """
     return StreamingResponse(
         stream_manager.event_generator(task_id),

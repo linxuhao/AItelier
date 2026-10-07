@@ -314,7 +314,12 @@ class APIClient:
 
         def _sse_consumer():
             async def _consume():
-                async with httpx.AsyncClient(base_url=base_url) as client:
+                # The task-log stream is a private execution read now, so this
+                # reader must present the same admin token every other call
+                # does -- without it the guard refuses and the CLI's log tail
+                # goes silently empty.
+                async with httpx.AsyncClient(base_url=base_url,
+                                             headers=_auth_headers()) as client:
                     async with client.stream(
                         "GET", f"/api/tasks/{task_id}/stream"
                     ) as resp:

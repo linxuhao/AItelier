@@ -11,7 +11,8 @@ from core.db_manager import DBManager
 from core.workspace_manager import WorkspaceManager
 from api.dependencies import get_db_manager, get_workspace_manager, owner_filter, check_write_owner, check_read_owner
 from api.auth import CurrentUser, get_optional_user, creator_email
-from api.authz import require_reader
+from api.authz import require_reader, execution_progress
+
 from api.sse_manager import stream_manager
 
 # A step id is a graph node name — letters, digits, underscore, dash, dot as a
@@ -86,7 +87,12 @@ def list_tasks(
     db: DBManager = Depends(get_db_manager)
 ):
     """分页获取任务列表"""
-    return db.list_tasks(limit, offset, owner_email=owner_filter(user, request))
+    # Same private-body boundary as GET /api/tasks/{id}: an identity that may
+    # not read private records gets the public progress projection only —
+    # TaskResponse still carries last_error, which is a private execution body.
+    rows = db.list_tasks(limit, offset, owner_email=owner_filter(user, request))
+    return [execution_progress(request, dict(row)) for row in rows]
+
 
 @router.get("/{task_id}", response_model=TaskResponse)
 def get_task(
@@ -102,7 +108,12 @@ def get_task(
             raise HTTPException(status_code=404, detail="Task not found")
         task = dict(row)
     check_read_owner(user, request, task)
+    # A private task's last_error is raw execution body. Trusted writer/admin
+    # (may_read_private) gets the complete row unchanged; every other identity
+    # gets the public status/progress fields only.
+    task = execution_progress(request, task)
     return task
+
 
 @router.post("/{task_id}/rollback")
 def rollback_task(

@@ -313,7 +313,12 @@ def list_project_tasks(
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     check_read_owner(user, request, project)
-    return db.list_tasks_by_project(project_id, owner_email=owner_filter(user, request))
+    # SELECT * here exposed the full private task prompt (execution body) to
+    # any identity that could list a project's tasks. Trusted writer/admin
+    # keeps the complete rows; everyone else gets the public progress fields.
+    rows = db.list_tasks_by_project(project_id, owner_email=owner_filter(user, request))
+    return [execution_progress(request, dict(row)) for row in rows]
+
 
 
 @router.get("/{project_id}/workspace/tree", dependencies=[Depends(require_reader)])

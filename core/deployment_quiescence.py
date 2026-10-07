@@ -1231,6 +1231,44 @@ def _measurement_subject(line: str) -> str:
     return " ".join(scanned)
 
 
+def _native_program(line: str) -> str | None:
+    """The program a verified native executable runs, else None.
+
+    An evaluator's name is a property of the code it launches. A native
+    binary's arguments are data — flags, settings, and for an agent CLI a whole
+    system prompt — so "review" or "judge" there names nothing that runs.
+    Measured 2026-10-07: each open Claude Code desktop session (ccd-cli, ~52 KB
+    of argv) matched MEASUREMENT_NAME_PATTERN on its prompt text and blocked
+    every audited override. Verified the way _measurement_subject verifies a
+    native launch: /proc argv matches the ps line and the exe link is argv[0].
+    A binary replaced on disk while running reads '<path> (deleted)'; that
+    path is still what was launched. Interpreters, shells and wrappers are
+    never native here — their arguments ARE the launched code.
+    """
+    fields = line.strip().split(None, 2)
+    if len(fields) != 3 or not all(field.isdecimal() for field in fields[:2]):
+        return None
+    proc = PROC_ROOT / fields[0]
+    try:
+        raw = (proc / "cmdline").read_bytes()
+        exe = str((proc / "exe").readlink())
+        if not raw.endswith(b"\0"):
+            return None
+        words = [word.decode("utf-8") for word in raw[:-1].split(b"\0")]
+    except (OSError, UnicodeError):
+        return None
+    if not words or " ".join(words).rstrip() != fields[2]:
+        return None
+    name = Path(words[0]).name.lower()
+    if (name in {"sh", "bash", "dash", "zsh", "env", "node", "nodejs", "perl",
+                 "ruby", "timeout", "nice", "xargs"}
+            or re.fullmatch(r"python(?:[23](?:\.\d+)?)?", name)):
+        return None
+    if exe.removesuffix(" (deleted)") != words[0]:
+        return None
+    return words[0]
+
+
 def measurer_pids() -> set[str]:
     """This process and its ancestors, as pids: the gate's own invocation.
 
@@ -1291,7 +1329,8 @@ def external_owners(*, runner: Callable[[list[str]], subprocess.CompletedProcess
                 continue
             lowered = line.lower()
             subject = _measurement_subject(line).lower()
-            measurement_name = (bool(MEASUREMENT_NAME_PATTERN.search(subject))
+            named = (_native_program(line) or subject).lower()
+            measurement_name = (bool(MEASUREMENT_NAME_PATTERN.search(named))
                                 or "--long-gate" in lowered)
             command = line.strip()
             matched = next((row for row in registered_external_owners

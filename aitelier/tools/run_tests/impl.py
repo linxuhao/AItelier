@@ -2113,12 +2113,7 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
         except Exception as e:  # never raise — the step must not fail
             report.update(passed=False, summary=f"Error running pytest: {e}")
         finally:
-            # Belt-and-suspenders: even on the success path pytest may leave
-            # stray children — take the group down before cleaning up.
-            if proc is not None:
-                shutil.rmtree(junit_dir, ignore_errors=True)
-            if venv_dir:
-                shutil.rmtree(venv_dir, ignore_errors=True)
+            shutil.rmtree(junit_dir, ignore_errors=True)
 
         # A package that doesn't import fails the gate whatever pytest said
         # (it can still exit 0 — e.g. when the broken module is only reached

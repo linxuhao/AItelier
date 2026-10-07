@@ -182,7 +182,7 @@ def _retain_bridge_result(name, result, observations):
         prefix.with_suffix(".rc").write_text(str(result["returncode"]) + "\n")
 
 
-_WIRE_CLIENT = """
+_WIRE_CLIENT = r"""
 import os,socket,time,json,urllib.parse
 url=urllib.parse.urlsplit(os.environ['GODOT_BUILDER_URL']);s=socket.create_connection((url.hostname,url.port));s.settimeout(.2)
 s.sendall(b'POST /script HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\n{}')

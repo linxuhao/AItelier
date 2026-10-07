@@ -244,14 +244,21 @@ async def lifespan(app: FastAPI):
     # the parent — its only job is `session_manager.run()`, so without this every
     # POST /mcp fails on an uninitialised task group. Mounting alone looks like it
     # worked (routes resolve, the config is right) right up until the first call.
-    async with _mcp_endpoint.open().session_manager.run():
+    try:
+        async with _mcp_endpoint.open().session_manager.run():
+            try:
+                yield
+            finally:
+                _mcp_endpoint.close()
+    finally:
+        # Stop admission and settle owned maintenance on every lifespan exit.
         try:
-            yield
+            if hasattr(app.state, "scheduler") and app.state.scheduler:
+                app.state.scheduler.shutdown(wait=True)
         finally:
-            _mcp_endpoint.close()
-    # Shutdown
-    if hasattr(app.state, "scheduler") and app.state.scheduler:
-        app.state.scheduler.shutdown(wait=True)
+            import sys
+            from core.scheduler import settle_scheduler_maintenance
+            await settle_scheduler_maintenance(exit_error=sys.exception())
 
 
 _mcp_endpoint = MCPEndpoint()

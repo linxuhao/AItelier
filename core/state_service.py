@@ -6,9 +6,11 @@ persisted execution-project identity, never by starting an uncorrelated run.
 """
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 from core.state_privacy import writer_only_read
@@ -16,6 +18,80 @@ from core.state_privacy import writer_only_read
 from core.state_graph import StateConflict, StateGraphError, StateGraphStore, canonical, digest, key, text
 from core.state_attempts import StateAttempts, artifact_ref, evidence_director_identity
 
+
+# One path component an ``id`` fragment may contribute verbatim: non-empty, no
+# separator, and not "." (a "." or empty fragment is a shape of its own below,
+# because Path drops it as a component).
+_ID_FRAGMENT = r"(?:[^/.][^/]*|\.[^/]+)"
+_ID_PIECES = {"\x00": _ID_FRAGMENT, "\x02": _ID_FRAGMENT,
+              "\x01": _ID_FRAGMENT + r"(?:/" + _ID_FRAGMENT + r")*"}
+
+
+def _writer_published(raw: str):
+    """The step-relative path the SDK writer publishes for target ``raw``: it
+    writes ``Path(output_dir) / raw``, and Path drops empty and "." components.
+    None when ``raw`` would leave the step directory as an absolute path."""
+    from pathlib import PurePosixPath
+    path = PurePosixPath(raw)
+    return None if path.is_absolute() or not path.parts else str(path)
+
+
+@functools.lru_cache(maxsize=256)
+def _writer_shapes(pattern: str):
+    """Every distinct way one ``id`` can publish under ``pattern``, as regexes.
+
+    The SDK writer (``skillflow.write_tools.resolve_write_target`` ->
+    ``execute_write``) replaces EVERY ``*`` with the SAME ``id`` and writes the
+    result through ``Path``, which drops empty and "." components. Split ``id``
+    on "/": a middle component stands alone at every occurrence (dropped the
+    same everywhere, so WLOG absent or canonical: piece \x01), while the first
+    and last fuse with the neighbouring literal text and are therefore either
+    "", ".", or a fragment that is never dropped (pieces \x00, \x02). With each
+    shape substituted, Path normalisation is exact on the placeholders; the
+    first occurrence of a piece captures it and later ones must repeat it."""
+    ends = ("", ".", "\x00")
+    ids = list(ends) + [c0 + "/" + mid + ck for c0 in ends for ck in (e.replace("\x00", "\x02") for e in ends)
+                        for mid in ("", "\x01/")]
+    shapes = []
+    for ident in ids:
+        published = _writer_published(pattern.replace("*", ident))
+        if published is None:
+            continue
+        expr, seen = "", set()
+        for char in published:
+            if char in _ID_PIECES:
+                name = "p" + str(ord(char))
+                expr += f"(?P={name})" if char in seen else f"(?P<{name}>{_ID_PIECES[char]})"
+                seen.add(char)
+            else:
+                expr += re.escape(char)
+        shapes.append((ident, re.compile(expr)))
+    return shapes
+
+
+def _writer_declares(filename: str, pattern: object) -> bool:
+    """Whether the real SDK write tool can publish EXACTLY ``filename`` for a
+    declared ``pattern``. ``filename`` is the step-relative path the relay
+    inventory found on disk, so it is compared with what the writer PUBLISHES
+    (``pattern.replace("*", id)`` through ``Path``), not with its raw target:
+    ``deep/*-*.md`` with id ``./x`` targets ``deep/./x-./x.md`` and publishes
+    ``deep/x-./x.md``; an id may contain "/" or a newline. ``?``, ``[`` and
+    ``]`` are literal in that grammar, and every ``*`` is the same id, so
+    ``deep/*?.md`` never admits ``deep/unadopted.md`` and ``deep/*-*.md``
+    never admits ``deep/different-other.md``. A candidate id recovered from a
+    shape is confirmed by running the writer's own substitution and
+    normalisation forward, so an undeclared file is never admitted."""
+    if not isinstance(pattern, str):
+        return False
+    if "*" not in pattern:
+        return filename == _writer_published(pattern)
+    for ident, expr in _writer_shapes(pattern):
+        found = expr.fullmatch(filename)
+        if found:
+            ident = "".join(found.group("p" + str(ord(c))) if c in _ID_PIECES else c for c in ident)
+            if _writer_published(pattern.replace("*", ident)) == filename:
+                return True
+    return False
 
 
 
@@ -506,6 +582,7 @@ class StateService:
             return None
         commits = [line.split(" ", 1) for line in log.splitlines() if line]
         staged = {}
+        published = {}
         pid = attempt["execution_project_id"]
         try:
             config_dir = self.ws._get_secure_path(pid) / attempt["workflow"]
@@ -518,6 +595,35 @@ class StateService:
                 manifest = self.ws.relay_manifest(tmp)
                 if manifest:
                     staged[tmp.name[:-4]] = manifest
+            # Fresh relay runs rewalk the graph. Give each artifact step its
+            # prior published bytes as input, rather than only its unfinished
+            # draft; a prose instruction cannot make another workspace readable.
+            from skillflow.output_targets import target_for
+            from skillflow.write_tools import _get_pattern
+            graph = self.sf._get_resolver_for_run(attempt["run_id"]).graph
+            for node in graph.steps:
+                directory = config_dir / node.id
+                if not directory.is_dir() or directory.is_symlink():
+                    continue
+                files = {}
+                for filename, sha in self.ws.relay_manifest(directory).items():
+                    # Only declared artifact outputs belong to this step. Do
+                    # not carry old version siblings or unrelated project files.
+                    for slot in (node.output_fixed or {}):
+                        pattern = _get_pattern(slot, node.output_fixed)
+                        declared = _writer_declares(filename, pattern)
+                        if declared and target_for(node, slot) == "artifact":
+                            path = directory / filename
+                            if path.suffix.lower() not in {".md", ".json", ".txt", ".yaml", ".yml"}:
+                                raise StateConflict(f"unsupported published relay input: {node.id}/{filename}")
+                            try:
+                                path.read_text(encoding="utf-8")
+                            except (UnicodeError, OSError) as e:
+                                raise StateConflict(f"unreadable UTF-8 relay input: {node.id}/{filename}") from e
+                            files[filename] = sha
+                            break
+                if files:
+                    published[node.id] = files
         from core.code_relay import inventory as code_inventory
         code = {"files": {}, "steps": {}, "unowned": []}
         code_error = ""
@@ -529,9 +635,10 @@ class StateService:
                 code_error = str(exc)
         result = {"run_id": attempt["run_id"], "branch": rec["branch"], "base_sha": rec["base_sha"],
                 "head_sha": head, "commits": [{"sha": c[0], "subject": c[1] if len(c) > 1 else ""} for c in commits],
-                "mainline_ahead_by": behind, "staged_files": staged,
+                "mainline_ahead_by": behind, "staged_files": staged, "published_files": published,
                 "code_changes": code, "code_error": code_error,
-                "digest": digest({"head_sha": head, "staged_files": staged, "code_changes": code}),
+                "digest": digest({"head_sha": head, "staged_files": staged,
+                                  "published_files": published, "code_changes": code}),
                 "error": attempt.get("error")}
         result.update(self._relay_failure_metadata(attempt))
         return result
@@ -748,7 +855,6 @@ class StateService:
         # into a new direct-code attempt and then silently ignored by its runner.
         from skillflow.output_targets import target_for
         from skillflow.write_tools import _get_pattern
-        from pathlib import PurePath
         # by-name-ok: creation-time relay admission; the new attempt has no run/pin yet.
         current_graph = getattr(self.sf, "_graphs", {}).get(attempt["workflow"])
         current_nodes = {n.id: n for n in getattr(current_graph, "steps", [])}
@@ -757,7 +863,7 @@ class StateService:
             for filename in files:
                 target = target_for(node)
                 for slot in (getattr(node, "output_fixed", {}) or {}):
-                    if PurePath(filename).match(_get_pattern(slot, node.output_fixed)):
+                    if _writer_declares(filename, _get_pattern(slot, node.output_fixed)):
                         target = target_for(node, slot)
                         break
                 if target == "code":
@@ -786,6 +892,18 @@ class StateService:
                                    note=f"relay of {prior['attempt_id']} (run {prior['run_id']}); code remains unvalidated")
         parked = {}
         prior_config = self.ws._get_secure_path(prior["execution_project_id"]) / prior["workflow"]
+        for step, manifest in inventory["published_files"].items():
+            if step in inventory["staged_files"]:
+                # A newer unfinished revision has the existing recovery semantics.
+                continue
+            try:
+                copied = self.ws.stage_relay_draft(prior_config / step, attempt["execution_project_id"],
+                                                   step, attempt["workflow"], manifest=manifest)
+            except RelayDraftChanged as e:
+                raise StateConflict(f"published relay input changed while being copied ({e}); "
+                                    "read relay_inventory again") from e
+            if copied:
+                parked[step] = copied
         for step, manifest in inventory["staged_files"].items():
             try:
                 copied = self.ws.stage_relay_draft(prior_config / f"{step}.tmp", attempt["execution_project_id"],
@@ -799,6 +917,7 @@ class StateService:
                 "base_sha": base, "commits": inventory["commits"],
                 "code_changes": code, "code_recovery_validated": False,
                 "mainline_ahead_by": inventory["mainline_ahead_by"], "staged_files": parked,
+                "published_files": inventory["published_files"],
                 "digest": inventory["digest"], "error": inventory["error"]}
 
     # An attempt in one of these states has stopped producing work, so what it
@@ -967,10 +1086,40 @@ class StateService:
             # fresh attempt: the retained commits and staged files, by step.
             return self._with_refusals({**observed, "relay_inventory": self._relay_inventory(observed)})
         if observed["status"] == "candidate" and not observed["artifact_ref"]:
+            # The workflow SDK's precise isolation exception is imported only on
+            # this workflow-artifact reconciliation path, which already needs the
+            # SDK. The pure-State surface keeps no module-level workflow import,
+            # and this branch never catches a generic Exception as success.
+            from skillflow.exceptions import IsolationUnavailable
             try:
                 artifact = self._artifact(observed)
+
             except StateConflict as exc:
                 return self._with_refusals({**observed, "artifact_pending": True, "note": str(exc)})
+            except IsolationUnavailable as exc:
+                # The run's OWN isolated tree cannot be observed, so its
+                # candidate artifact cannot be pinned. This is a specific,
+                # recoverable artifact-pending condition — not a generic
+                # recovery failure and not a programming error. Ownership,
+                # refusal and candidate state are unchanged: the artifact stays
+                # unset, nothing is verified, and no idle clearance follows.
+                # The exact attempt identity is exposed so a director can act.
+                return self._with_refusals({
+                    **observed,
+                    "artifact_pending": True,
+                    "artifact_ref": None,
+                    "artifact_pending_reason": "owned_worktree_unavailable",
+                    "note": str(exc),
+                    "action_required": {
+                        "reason": "candidate_artifact_unavailable",
+                        "attempt_id": attempt_id,
+                        "attempt_status": observed["status"],
+                        "node_key": observed.get("node_key"),
+                        "run_id": observed.get("run_id"),
+                        "artifact_ref": None,
+                        "detail": str(exc),
+                    },
+                })
             observed = self.attempts.reconcile(attempt_id, self.sf, artifact)
         return self._with_refusals(observed)
 

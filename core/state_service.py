@@ -19,6 +19,7 @@ from core.state_attempts import StateAttempts, artifact_ref, evidence_director_i
 
 
 
+
 SEED_HEADING = "# State goal attempt"
 
 
@@ -967,10 +968,40 @@ class StateService:
             # fresh attempt: the retained commits and staged files, by step.
             return self._with_refusals({**observed, "relay_inventory": self._relay_inventory(observed)})
         if observed["status"] == "candidate" and not observed["artifact_ref"]:
+            # The workflow SDK's precise isolation exception is imported only on
+            # this workflow-artifact reconciliation path, which already needs the
+            # SDK. The pure-State surface keeps no module-level workflow import,
+            # and this branch never catches a generic Exception as success.
+            from skillflow.exceptions import IsolationUnavailable
             try:
                 artifact = self._artifact(observed)
+
             except StateConflict as exc:
                 return self._with_refusals({**observed, "artifact_pending": True, "note": str(exc)})
+            except IsolationUnavailable as exc:
+                # The run's OWN isolated tree cannot be observed, so its
+                # candidate artifact cannot be pinned. This is a specific,
+                # recoverable artifact-pending condition — not a generic
+                # recovery failure and not a programming error. Ownership,
+                # refusal and candidate state are unchanged: the artifact stays
+                # unset, nothing is verified, and no idle clearance follows.
+                # The exact attempt identity is exposed so a director can act.
+                return self._with_refusals({
+                    **observed,
+                    "artifact_pending": True,
+                    "artifact_ref": None,
+                    "artifact_pending_reason": "owned_worktree_unavailable",
+                    "note": str(exc),
+                    "action_required": {
+                        "reason": "candidate_artifact_unavailable",
+                        "attempt_id": attempt_id,
+                        "attempt_status": observed["status"],
+                        "node_key": observed.get("node_key"),
+                        "run_id": observed.get("run_id"),
+                        "artifact_ref": None,
+                        "detail": str(exc),
+                    },
+                })
             observed = self.attempts.reconcile(attempt_id, self.sf, artifact)
         return self._with_refusals(observed)
 

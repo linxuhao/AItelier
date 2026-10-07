@@ -67,7 +67,7 @@ release requirements still apply. Focused tests exercise the actual producer
 and authorization functions with real source commits and synthetic stage
 responses. They do not establish native gate or publication acceptance.
 
-Existing gate producers without this payload are intentionally incompatible
+Existing gate producers without this payload are incompatible
 with clean coverage evidence. Integrate the producer, private publication
 consumer and platform changes in one reviewed batch; no service is changed by
 this candidate. Current tree context measurements and runtime timing pairs are

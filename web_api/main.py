@@ -53,6 +53,8 @@ async def lifespan(app: FastAPI):
     else:
         app.state.scheduler_manager.shutdown_all()
         app.state._reaper.shutdown(wait=False)
+    from core.scheduler import settle_scheduler_maintenance
+    await settle_scheduler_maintenance()
 
 
 app = FastAPI(

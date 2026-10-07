@@ -2672,6 +2672,53 @@ def _sweep_ended_leases() -> None:
                  reason=(item.get("reason") or "")[:200])
 
 
+# One process-wide maintenance operation shared by every scheduler entry.
+# Keep its Future owned until the executor has actually finished; cancelling
+# an awaiting poll must not free the slot while Git/reconciliation still runs.
+_lease_sweep_future: asyncio.Future | None = None
+
+
+async def _await_lease_sweep(future: asyncio.Future) -> None:
+    global _lease_sweep_future
+    cancelled = False
+    try:
+        while not future.done():
+            try:
+                await asyncio.shield(future)
+            except asyncio.CancelledError:
+                cancelled = True
+            except Exception:
+                break
+        try:
+            future.result()
+        except Exception:
+            if not cancelled:
+                raise
+            logging.getLogger("aitelier.scheduler").error(
+                "lease sweep failed while poll was cancelled", exc_info=True)
+        if cancelled:
+            raise asyncio.CancelledError
+    finally:
+        if future.done() and _lease_sweep_future is future:
+            _lease_sweep_future = None
+
+
+async def _sweep_ended_leases_async() -> None:
+    global _lease_sweep_future
+    if _lease_sweep_future is None:
+        _lease_sweep_future = asyncio.get_running_loop().run_in_executor(
+            None, _sweep_ended_leases)
+    await _await_lease_sweep(_lease_sweep_future)
+
+
+async def settle_scheduler_maintenance() -> None:
+    """After scheduler shutdown, drain its owned work before lifespan exits."""
+    # AsyncIOScheduler.shutdown queues its actual shutdown onto the loop.
+    await asyncio.sleep(0)
+    if _lease_sweep_future is not None:
+        await _await_lease_sweep(_lease_sweep_future)
+
+
 async def poll_and_execute():
     """Start a tick for every free project the cap allows, then RETURN.
 
@@ -2707,7 +2754,7 @@ async def poll_and_execute():
     """
     loop = asyncio.get_running_loop()
 
-    _sweep_ended_leases()
+    await _sweep_ended_leases_async()
 
     # Every in-flight project may be among the rows, so ask for enough to still
     # find a full cap's worth of free ones behind them.
@@ -2792,7 +2839,7 @@ async def poll_and_execute_demo():
     import asyncio
     loop = asyncio.get_running_loop()
 
-    _sweep_ended_leases()
+    await _sweep_ended_leases_async()
 
     project = db.get_next_active_project(fifo=True)
     if not project:
@@ -2805,7 +2852,7 @@ async def poll_and_execute_owner(owner_email: str):
     import asyncio
     loop = asyncio.get_running_loop()
 
-    _sweep_ended_leases()
+    await _sweep_ended_leases_async()
 
     project = db.get_next_active_project(owner_email=owner_email)
     if not project:

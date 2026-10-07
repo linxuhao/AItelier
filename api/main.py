@@ -252,6 +252,8 @@ async def lifespan(app: FastAPI):
     # Shutdown
     if hasattr(app.state, "scheduler") and app.state.scheduler:
         app.state.scheduler.shutdown(wait=True)
+    from core.scheduler import settle_scheduler_maintenance
+    await settle_scheduler_maintenance()
 
 
 _mcp_endpoint = MCPEndpoint()

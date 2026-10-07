@@ -191,10 +191,28 @@ def test_generate_sets_last_usage():
 
 # ── Phase 5: explicit-provider cache breakpoint ────────────────────────
 def test_cache_control_points_anthropic():
-    """Anthropic-family models get a system-message cache breakpoint."""
+    """Anthropic-family models get a system breakpoint and a last-message
+    breakpoint, so a growing conversation is read back from the cache."""
     gw = AIGateway("anthropic/claude-sonnet-4-6")
     pts = gw._cache_control_points()
-    assert pts == [{"location": "message", "role": "system"}]
+    assert pts == [{"location": "message", "role": "system"},
+                   {"location": "message", "index": -1}]
+
+
+def test_build_kwargs_carries_last_message_breakpoint_for_anthropic():
+    gw = AIGateway("anthropic/claude-haiku-5-5")
+    kwargs = gw._build_kwargs([{"role": "system", "content": "s"},
+                               {"role": "user", "content": "hi"}])
+    assert {"location": "message", "index": -1} in kwargs["cache_control_injection_points"]
+
+
+def test_failover_off_anthropic_drops_both_breakpoints():
+    gw = AIGateway("anthropic/claude-haiku-5-5")
+    kwargs = gw._build_kwargs([{"role": "user", "content": "hi"}])
+    assert "cache_control_injection_points" in kwargs
+    gw._bind("deepseek/deepseek-v4-flash")
+    gw._apply_binding(kwargs)
+    assert "cache_control_injection_points" not in kwargs
 
 
 def test_cache_control_points_deepseek_none():

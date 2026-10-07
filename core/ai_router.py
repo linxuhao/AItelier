@@ -656,16 +656,21 @@ class AIGateway:
         """Return LiteLLM cache_control_injection_points for explicit-cache
         providers (Anthropic family), else None.
 
-        Marks the system message as the breakpoint so everything up to and
-        including it (tools + system) is cached. DeepSeek/Minimax/OpenAI use
-        automatic prefix caching and are deliberately excluded — sending them
-        a cache_control field is at best ignored and at worst rejected.
+        Marks the system message (tools + system) and the LAST message. The
+        system point alone caches only the fixed head: in an agent loop the
+        history after it grows every turn and was re-billed at full input
+        price each time. The last-message point writes the whole conversation
+        to the cache, and the next turn — the same messages plus one more —
+        reads it back. DeepSeek/Minimax/OpenAI use automatic prefix caching and
+        are deliberately excluded — sending them a cache_control field is at
+        best ignored and at worst rejected.
         """
         model = (self.litellm_model or "").lower()
         is_anthropic = self.provider == "anthropic" or "claude" in model or "anthropic" in model
         if not is_anthropic:
             return None
-        return [{"location": "message", "role": "system"}]
+        return [{"location": "message", "role": "system"},
+                {"location": "message", "index": -1}]
 
     def escalate_output_cap(self) -> int | None:
         """Double this gateway's output cap, clamped to OUTPUT_CAP_CEILING.

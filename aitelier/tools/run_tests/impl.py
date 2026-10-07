@@ -822,7 +822,9 @@ def _run_repo_gate(repo: Path, *, run_id: str = "") -> dict | None:
         relay = gate_admission.AdmissionRelay(
             upstream, render_wait_sec=gate_admission.render_wait_seconds(),
             upstream_timeout=REPO_GATE_TIMEOUT)
-        relay_socket = str(report_dir / ".relay.sock")
+        relay_path = gate_admission.relay_socket_path(datadir.aitelier_home(), run_id, ticket)
+        gate_admission.relay_socket_namespace(datadir.aitelier_home(), create=True)
+        relay_socket = str(relay_path)
         relay_url = relay.start(unix_socket=relay_socket)
     except (OSError, ValueError) as e:
         return {"passed": False, "returncode": -1, "runner_error": True,
@@ -840,8 +842,7 @@ def _run_repo_gate(repo: Path, *, run_id: str = "") -> dict | None:
                            "GATE_REPORT_DIR": str(report_dir),
                            "AITELIER_GATE_RELAY_SOCKET": relay_socket}, run_id=run_id)
     finally:
-        relay.stop()
-        Path(relay_socket).unlink(missing_ok=True)
+        relay.stop()  # removes only the socket inode this relay actually bound
         first = first_entry.read()
         first_entry.close()
     admission = gate_admission.admission_summary(relay.snapshot())

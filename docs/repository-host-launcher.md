@@ -47,9 +47,19 @@ Caller-supplied repository/root/image fields cannot create new ownership.
 Normal report tickets live at gate-reports/SHA256(run_id)/ticket. Only one direct
 ticket directory under that run root may be writable; source-directory overlap,
 ancestor/child source mounts, foreign-run tickets and report aliases/symlinks are
-refused. report_dir must be that same ticket. A relay must be a real Unix socket
-inside that ticket. The backend creates its usual per-ticket admission relay;
-Godot admission/queue rules are unchanged. Unknown request fields are refused.
+refused. report_dir must be that same ticket. Only the relay moves to the short
+shared filesystem namespace aitelier_home/r (owner UID, mode0700). Its filename
+is the complete independently defined BLAKE2s-128 identifier of [run_id,ticket]
+plus .s; the full SHA256 report/run namespace is never clipped or changed. The
+backend and host use the same pure mapping, so a foreign run/ticket socket is
+refused even in that private namespace. The real socket is mode0600 and mounted
+read-only at the SAME absolute path in the netnone child. The existing identical
+HOME/.AItelier mount makes that namespace visible to backend and host; neither
+backend-only /tmp nor abstract Unix sockets provide that cross-namespace path.
+A genuinely too-long operator home yields a typed non-pass before bind, never a
+silent fallback. Existing listeners are never replaced; cleanup removes only
+the exact bound socket inode/ctime. Godot admission/queue rules are unchanged.
+Unknown request fields are refused.
 
 The host alone takes the existing four kernel-lock CPU slots from
 aitelier_home/cpu-test-slots for socket requests. A backend client does not hold

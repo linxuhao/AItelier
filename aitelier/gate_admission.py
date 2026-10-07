@@ -34,10 +34,13 @@ unchanged; what happens next is the scheduler's business
 """
 from __future__ import annotations
 
+import hashlib
 import http.client
 import json
 import os
 import socket
+import stat
+from pathlib import Path
 import threading
 import time
 import urllib.parse
@@ -112,6 +115,33 @@ def keepalive_seconds() -> float:
     return KEEPALIVE_SECONDS
 
 
+def relay_socket_path(home: Path, run_id: str, ticket: str) -> Path:
+    """A separate compact socket identifier over the COMPLETE owner tuple.
+
+    Report paths retain their full SHA256 run namespace. This BLAKE2s-128
+    digest is its own full identifier, never a clipped report/run hash.
+    Both backend and host compute it; no registry or caller-selected mount.
+    """
+    owner = json.dumps([run_id, ticket], ensure_ascii=False, separators=(",", ":")).encode()
+    name = hashlib.blake2s(owner, digest_size=16).hexdigest() + ".s"
+    path = Path(home).resolve() / "r" / name
+    if len(os.fsencode(path)) >= 108:
+        raise ValueError("owned relay path exceeds Linux AF_UNIX's 107-byte filesystem budget")
+    return path
+
+
+def relay_socket_namespace(home: Path, *, create: bool = False) -> Path:
+    """Require the shared private namespace, without following an alias."""
+    root = Path(home).resolve() / "r"
+    if create:
+        root.mkdir(mode=0o700, exist_ok=True)
+    info = root.lstat()
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid()
+            or stat.S_IMODE(info.st_mode) & 0o077):
+        raise PermissionError("relay namespace must be an owned private directory, not an alias")
+    return root
+
+
 class AdmissionRelay:
     """Forward the gate's engine requests and record how each was answered.
 
@@ -138,6 +168,7 @@ class AdmissionRelay:
         self._in_flight: set = set()
         self._stopping = False
         self._server = None
+        self._unix_socket_identity = None
 
     # ── lifecycle ──────────────────────────────────────────────────────────
 
@@ -157,9 +188,21 @@ class AdmissionRelay:
                 pass
 
         if unix_socket:
+            path = Path(unix_socket)
+            if len(os.fsencode(path)) >= 108:
+                raise ValueError("admission relay exceeds Linux AF_UNIX's 107-byte path budget")
+            if os.path.lexists(path):
+                raise ValueError("admission relay socket already exists; never overwrite a listener")
+            info = path.parent.lstat()
+            if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid()
+                    or stat.S_IMODE(info.st_mode) & 0o077):
+                raise PermissionError("admission relay requires an owned private parent")
             class UnixHTTPServer(ThreadingMixIn, UnixStreamServer):
                 pass
             self._server = UnixHTTPServer(unix_socket, _Handler)
+            os.chmod(path, 0o600)
+            info = path.lstat()
+            self._unix_socket_identity = (path, info.st_dev, info.st_ino, info.st_ctime_ns)
         else:
             self._server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
         self._server.daemon_threads = True
@@ -180,6 +223,15 @@ class AdmissionRelay:
         if self._server is not None:
             self._server.shutdown()
             self._server.server_close()
+        if self._unix_socket_identity is not None:
+            path, device, inode, created = self._unix_socket_identity
+            try:
+                info = path.lstat()
+                if (info.st_dev, info.st_ino, info.st_ctime_ns) == (device, inode, created) and stat.S_ISSOCK(info.st_mode):
+                    path.unlink()
+            except FileNotFoundError:
+                pass
+            self._unix_socket_identity = None
         for conn in conns:
             sock = getattr(conn, "sock", None)
             try:

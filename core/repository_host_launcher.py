@@ -148,9 +148,19 @@ def validate_request(cfg: dict, request: dict) -> dict:
     if relay_socket:
         if not writable or not isinstance(relay_socket, str):
             raise LaunchRefused("relay requires the run-owned report ticket")
-        relay = _resolve_inside(relay_socket, writable, "owned relay socket")
-        if relay.parent != Path(writable[0]) or relay != Path(relay_socket).absolute() or not stat.S_ISSOCK(relay.stat().st_mode):
-            raise LaunchRefused("relay must be a real socket in this report ticket")
+        from aitelier.gate_admission import relay_socket_path, relay_socket_namespace
+        try:
+            root = relay_socket_namespace(Path(cfg["aitelier_home"]))
+            expected = relay_socket_path(Path(cfg["aitelier_home"]), request["run_id"],
+                                         Path(writable[0]).name)
+        except (OSError, ValueError) as exc:
+            raise LaunchRefused("owned relay namespace/path is unavailable") from exc
+        relay = _resolve_inside(relay_socket, [str(root)], "owned relay socket")
+        info = relay.lstat()
+        if (relay != expected or relay != Path(relay_socket).absolute()
+                or not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid()
+                or stat.S_IMODE(info.st_mode) != 0o600):
+            raise LaunchRefused("relay must match the exact owned run/ticket socket")
         relay_socket = str(relay)
     raw_args = request.get("args")
     if not isinstance(raw_args, list) or not raw_args:

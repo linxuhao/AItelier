@@ -74,6 +74,7 @@ def test_actual_container_entry_captures_real_pytest_and_junit(tmp_path, failing
     junit = tmp_path / "junit.xml"
     result = entry.run({"repo":str(repo), "timeout":10,
                         "args":[sys.executable,"-m","pytest","tests","-q","-s","-p","no:cacheprovider",f"--junitxml={junit}","-o","junit_family=xunit1"]})
+    _retain_bridge_result("pytest-fail" if failing else "pytest-pass", result, {"junit_ids": sorted(candidate._junit_node_ids(junit))})
     assert result["returncode"] == (1 if failing else 0), result
     assert result["timed_out"] is False
     assert "fixture-stdout" in result["stdout"]
@@ -156,3 +157,126 @@ def test_actual_unix_bridge_preserves_existing_admission_observation(tmp_path):
     finally:
         relay.stop();upstream.shutdown();upstream.server_close()
         Path(socket_path).unlink(missing_ok=True)
+
+
+@pytest.fixture
+def bridge_entry():
+    baseline = os.environ.get("REPOSITORY_INTERIM_BASELINE")
+    if not baseline:
+        return entry
+    spec = importlib.util.spec_from_file_location("baseline_entry", baseline)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _retain_bridge_result(name, result, observations):
+    directory = os.environ.get("REPOSITORY_INTERIM_REPORTS")
+    if directory:
+        path = Path(directory)
+        label = "baseline" if os.environ.get("REPOSITORY_INTERIM_BASELINE") else "candidate"
+        prefix = path / (label + "-" + name)
+        prefix.with_suffix(".json").write_text(json.dumps({"child": result, "observations": observations}, indent=2))
+        prefix.with_suffix(".stdout").write_text(result["stdout"])
+        prefix.with_suffix(".stderr").write_text(result["stderr"])
+        prefix.with_suffix(".rc").write_text(str(result["returncode"]) + "\n")
+
+
+_WIRE_CLIENT = """
+import os,socket,time,json,urllib.parse
+url=urllib.parse.urlsplit(os.environ['GODOT_BUILDER_URL']);s=socket.create_connection((url.hostname,url.port));s.settimeout(.2)
+s.sendall(b'POST /script HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\n{}')
+started=time.monotonic();chunks=[]
+try:
+ while True:
+  chunk=s.recv(65536)
+  if not chunk:break
+  chunks.append({'elapsed':time.monotonic()-started,'wire':chunk.decode('iso-8859-1')})
+finally:
+ print(json.dumps(chunks),flush=True);s.close()
+"""
+
+
+def test_bridge_preserves_admission_keepalives(bridge_entry, tmp_path):
+    import threading
+    import time
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from aitelier.gate_admission import AdmissionRelay
+    class Upstream(BaseHTTPRequestHandler):
+        def do_GET(self):
+            body=b'{"owners":[]}'
+            self.send_response(200);self.send_header("Content-Length",str(len(body)));self.end_headers();self.wfile.write(body)
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            time.sleep(.6)
+            body=b'{"control":true}'
+            self.send_response(200);self.send_header("Content-Length",str(len(body)));self.end_headers();self.wfile.write(body)
+        def log_message(self,*args):
+            pass
+    upstream=ThreadingHTTPServer(("127.0.0.1",0),Upstream)
+    threading.Thread(target=upstream.serve_forever,daemon=True).start()
+    relay=AdmissionRelay(f"http://127.0.0.1:{upstream.server_port}",render_wait_sec=2,upstream_timeout=3,keepalive_sec=.04)
+    socket_path=str(Path(tempfile.mkdtemp(prefix="interim-relay-"))/"r.sock")
+    relay.start(unix_socket=socket_path)
+    try:
+        result=bridge_entry.run({"repo":str(tmp_path),"timeout":3,"args":[sys.executable,"-c",_WIRE_CLIENT],"relay_socket":socket_path})
+        time.sleep(.65)
+        records=relay.snapshot()
+        _retain_bridge_result("interim",result,records)
+        assert result["returncode"]==0,result
+        chunks=json.loads(result["stdout"])
+        wire="".join(c["wire"] for c in chunks)
+        assert wire.count("HTTP/1.1 100 Continue") == records[0]["keepalives"] > 0
+        assert '200 OK' in wire and wire.endswith('{"control":true}')
+        assert chunks[0]["elapsed"] < .2
+    finally:
+        relay.stop();upstream.shutdown();upstream.server_close();Path(socket_path).unlink(missing_ok=True)
+
+
+@pytest.mark.parametrize("disconnect",[False,True])
+def test_bridge_streams_final_and_closes_abandoned_request(bridge_entry,tmp_path,disconnect):
+    import socket
+    import threading
+    import time
+    from socketserver import StreamRequestHandler,ThreadingUnixStreamServer
+    observations={}
+    done=threading.Event()
+    class Upstream(StreamRequestHandler):
+        def handle(self):
+            while self.rfile.readline().strip():
+                pass
+            self.rfile.read(2)
+            started=time.monotonic()
+            if disconnect:
+                self.request.settimeout(.8)
+                try: observations["client_eof"] = self.request.recv(1) == b""
+                except socket.timeout: observations["client_eof"] = False
+                observations["closed_after_sec"] = time.monotonic()-started
+            else:
+                self.wfile.write(b'HTTP/1.0 201 Created\r\nContent-Length: 4\r\nX-Control: retained\r\n\r\n');self.wfile.flush()
+                try:
+                    for byte in b'abcd':
+                        time.sleep(.1);self.wfile.write(bytes([byte]));self.wfile.flush()
+                except BrokenPipeError:
+                    observations["broken_pipe"] = True
+            done.set()
+    socket_path=str(Path(tempfile.mkdtemp(prefix="stream-relay-"))/"r.sock")
+    upstream=ThreadingUnixStreamServer(socket_path,Upstream);upstream.daemon_threads=True
+    threading.Thread(target=upstream.serve_forever,daemon=True).start()
+    client=_WIRE_CLIENT
+    if disconnect:
+        client="import socket,os,urllib.parse,time;u=urllib.parse.urlsplit(os.environ['GODOT_BUILDER_URL']);s=socket.create_connection((u.hostname,u.port));s.sendall(b'POST /script HTTP/1.1\\r\\nHost: localhost\\r\\nContent-Length: 2\\r\\n\\r\\n{}');time.sleep(.05);s.close();print('client-left')"
+    try:
+        result=bridge_entry.run({"repo":str(tmp_path),"timeout":3,"args":[sys.executable,"-c",client],"relay_socket":socket_path})
+        assert done.wait(2)
+        _retain_bridge_result("disconnect" if disconnect else "body",result,observations)
+        assert result["returncode"] == 0,result
+        if disconnect:
+            assert observations["client_eof"] is True,observations
+            assert observations["closed_after_sec"] < .3,observations
+        else:
+            chunks=json.loads(result["stdout"]);wire="".join(c["wire"] for c in chunks)
+            assert '201 Created' in wire and 'X-Control: retained' in wire and wire.endswith('abcd')
+            assert chunks[0]["elapsed"] < .2
+    finally:
+        upstream.shutdown();upstream.server_close();Path(socket_path).unlink(missing_ok=True)

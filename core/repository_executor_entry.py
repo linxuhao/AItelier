@@ -1,9 +1,9 @@
 """Container entry: capture actual command results, with no backend environment."""
-import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import importlib.util
 import json
 import os
+import select
 import signal
 import socket
 import subprocess
@@ -20,27 +20,33 @@ def run(payload):
         env["GATE_REPORT_DIR"] = payload["report_dir"]
     relay = None
     if payload.get("relay_socket"):
-        class Connection(http.client.HTTPConnection):
-            def connect(self):
-                self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                self.sock.settimeout(payload["timeout"])
-                self.sock.connect(payload["relay_socket"])
         class Handler(BaseHTTPRequestHandler):
             def forward(self):
-                connection = Connection("localhost")
-                try:
+                # Admission sends interim HTTP responses while queued. Parsing
+                # them through HTTPConnection would swallow those keepalives,
+                # and reading a complete body would reset the gate's timeout.
+                # Forward the existing HTTP wire, including each interim reply.
+                self.close_connection = True
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as upstream:
+                    upstream.settimeout(payload["timeout"])
+                    upstream.connect(payload["relay_socket"])
                     length = int(self.headers.get("Content-Length", "0"))
-                    connection.request(self.command, self.path, self.rfile.read(length),
-                                       dict(self.headers))
-                    reply = connection.getresponse()
-                    body = reply.read()
-                    self.send_response(reply.status)
-                    self.send_header("Content-Type", reply.getheader("Content-Type", "application/json"))
-                    self.send_header("Content-Length", str(len(body)))
-                    self.end_headers()
-                    self.wfile.write(body)
-                finally:
-                    connection.close()
+                    request = (f"{self.command} {self.path} {self.request_version}\r\n"
+                               + "".join(f"{key}: {value}\r\n" for key, value in self.headers.items()) + "\r\n")
+                    upstream.sendall(request.encode("iso-8859-1") + self.rfile.read(length))
+                    while True:
+                        ready, _, _ = select.select([upstream, self.connection], [], [],
+                                                    payload["timeout"])
+                        if not ready:
+                            raise TimeoutError("admission relay response timed out")
+                        # A caller that left cannot own a queued response. Close
+                        # the Unix request promptly, rather than keep buffering.
+                        if self.connection in ready:
+                            return
+                        chunk = upstream.recv(65536)
+                        if not chunk:
+                            return
+                        self.connection.sendall(chunk)
             do_GET = do_POST = forward
             def log_message(self, *_args):
                 pass

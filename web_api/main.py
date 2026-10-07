@@ -45,16 +45,22 @@ async def lifespan(app: FastAPI):
         app.state._reaper = reaper
         print(f"Web API started in NORMAL mode (per-user schedulers).")
 
-    yield
-
-    # Shutdown
-    if mode == "demo":
-        app.state.scheduler.shutdown(wait=False)
-    else:
-        app.state.scheduler_manager.shutdown_all()
-        app.state._reaper.shutdown(wait=False)
-    from core.scheduler import settle_scheduler_maintenance
-    await settle_scheduler_maintenance()
+    try:
+        yield
+    finally:
+        # Stop admission and settle owned maintenance on every lifespan exit.
+        try:
+            if mode == "demo":
+                app.state.scheduler.shutdown(wait=False)
+            else:
+                try:
+                    app.state.scheduler_manager.shutdown_all()
+                finally:
+                    app.state._reaper.shutdown(wait=False)
+        finally:
+            import sys
+            from core.scheduler import settle_scheduler_maintenance
+            await settle_scheduler_maintenance(exit_error=sys.exception())
 
 
 app = FastAPI(

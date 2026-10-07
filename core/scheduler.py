@@ -2678,9 +2678,8 @@ def _sweep_ended_leases() -> None:
 _lease_sweep_future: asyncio.Future | None = None
 
 
-async def _await_lease_sweep(future: asyncio.Future) -> None:
+async def _await_lease_sweep(future: asyncio.Future, *, cancelled: bool = False) -> None:
     global _lease_sweep_future
-    cancelled = False
     try:
         while not future.done():
             try:
@@ -2711,12 +2710,30 @@ async def _sweep_ended_leases_async() -> None:
     await _await_lease_sweep(_lease_sweep_future)
 
 
-async def settle_scheduler_maintenance() -> None:
+async def settle_scheduler_maintenance(*, exit_error: BaseException | None = None) -> None:
     """After scheduler shutdown, drain its owned work before lifespan exits."""
     # AsyncIOScheduler.shutdown queues its actual shutdown onto the loop.
-    await asyncio.sleep(0)
-    if _lease_sweep_future is not None:
-        await _await_lease_sweep(_lease_sweep_future)
+    # Cancellation at this first yield must still reach the owned worker drain.
+    cancelled = False
+    try:
+        await asyncio.sleep(0)
+    except asyncio.CancelledError:
+        cancelled = True
+    try:
+        if _lease_sweep_future is not None:
+            await _await_lease_sweep(_lease_sweep_future, cancelled=cancelled)
+        elif cancelled:
+            raise asyncio.CancelledError
+    except asyncio.CancelledError:
+        if not isinstance(exit_error, asyncio.CancelledError):
+            raise
+        # The lifespan's original cancellation propagates from its finally.
+    except Exception:
+        if exit_error is None:
+            raise
+        # Preserve the original lifespan error without discarding worker failure.
+        logging.getLogger("aitelier.scheduler").error(
+            "lease sweep failed during lifespan exit", exc_info=True)
 
 
 async def poll_and_execute():

@@ -2,7 +2,7 @@
 # Admin-only REST endpoints (protected by require_writer).
 
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from api.authz import require_writer
 from api.dependencies import get_db_manager
@@ -35,3 +35,29 @@ def delete_logged_user(
     if not deleted:
         raise HTTPException(status_code=404, detail=f"User not found: {email}")
     return {"ok": True, "email": email}
+
+
+@router.post("/deployment-runtime-observation", dependencies=[Depends(require_writer)])
+def deployment_runtime_observation(request: Request):
+    """Original runtime facts for the existing off-tunnel host CLI authority.
+
+    This owner audit can record observed-lost accounting. It never starts a
+    runtime, clears ownership, or grants deployment authorization.
+    """
+    import sys
+    import hmac
+    from api import authz
+    if (authz.is_via_cloudflare(request) or not authz.ADMIN_TOKEN
+            or not hmac.compare_digest(request.headers.get("X-AItelier-Admin-Token", ""),
+                                       authz.ADMIN_TOKEN)):
+        raise HTTPException(403, "Original runtime observation requires the local CLI admin authority")
+    dependencies = sys.modules.get("api.dependencies")
+    sf = getattr(dependencies, "_skillflow_instance", None)
+    db = getattr(dependencies, "db_instance", None)
+    if sf is None or db is None:
+        raise HTTPException(503, "Already initialized live SkillFlow and DB are required")
+    from core import deployment_quiescence as dq
+    try:
+        return dq.runtime_observation(skillflow=sf, db=db)
+    except Exception as exc:
+        raise HTTPException(503, f"Live runtime observation unavailable: {type(exc).__name__}") from exc

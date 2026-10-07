@@ -325,18 +325,43 @@ def _compose_up():
     _warn_if_edge_network_is_alone()
 
 
-def _require_deployment_clearance(action: str) -> dict:
+def _live_runtime_observation(base_url: str) -> dict:
+    """Fetch initialized live facts and bind them to the backend this CLI operates."""
+    from urllib.parse import urlsplit
+    from cli.client import _auth_headers
+    from core import deployment_quiescence as dq
+    url = urlsplit(base_url)
+    if url.scheme != "http" or url.hostname not in {"localhost", "127.0.0.1", "::1"}:
+        raise ValueError("Host deployment observation requires the local backend URL")
+    with httpx.Client(base_url=base_url, timeout=15, headers=_auth_headers()) as client:
+        response = client.post("/api/admin/deployment-runtime-observation")
+        response.raise_for_status()
+        facts = dq._validated_runtime_facts(response.json())
+    container = _compose("ps", "-q", _COMPOSE_SERVICE)
+    if container.returncode or not re.fullmatch(r"[0-9a-f]{12,64}", container.stdout.strip()):
+        raise ValueError("Live backend container identity is unavailable")
+    identity = subprocess.run(["docker", "inspect", "--format", "{{.State.Pid}}",
+                               container.stdout.strip()], capture_output=True, text=True, timeout=10)
+    if identity.returncode or not identity.stdout.strip().isdigit() or int(identity.stdout.strip()) < 1:
+        raise ValueError("Live backend PID identity is unavailable")
+    actual = {field: os.readlink(f"/proc/{identity.stdout.strip()}/ns/{namespace}")
+              for field, namespace in (("pid_namespace", "pid"), ("mount_namespace", "mnt"))}
+    if any(facts["runtime_identity"][field] != value for field, value in actual.items()):
+        raise ValueError("Runtime observation does not belong to the operated backend")
+    return facts
+
+
+def _require_deployment_clearance(action: str, *, base_url: str = _DEFAULT_URL) -> dict:
     """Measure every project and external owner before changing the backend."""
-    from api.dependencies import get_db_manager, get_skillflow
     from core import datadir
     from core import deployment_quiescence as dq
 
     fence = dq.acquire_cutover_fence()
     try:
         try:
+            facts = _live_runtime_observation(base_url)
             observation = dq.measure(
-                skillflow=get_skillflow(),
-                db=get_db_manager(),
+                runtime_facts=facts,
                 sidecar_db=datadir.semantic_index_control_dir() / "control.sqlite3",
             )
         except Exception as exc:  # noqa: BLE001 -- unavailable measurement blocks and persists
@@ -379,7 +404,7 @@ def _ensure_docker_backend(base_url: str, max_wait: int) -> bool:
     # A stopped or unhealthy container is a redeploy boundary.  The gate is
     # deliberately after Docker availability checks and before compose changes
     # anything, so an unreadable runtime inventory cannot turn into a replay.
-    clearance = _require_deployment_clearance("redeploy")
+    clearance = _require_deployment_clearance("redeploy", base_url=base_url)
     try:
         _compose_up()
         if not _wait_healthy(client, max_wait):
@@ -418,7 +443,7 @@ def ensure_server_running(base_url: str, max_wait: int = 120) -> bool:
 def restart_server(base_url: str = _DEFAULT_URL, max_wait: int = 120) -> bool:
     """Restart the Docker backend."""
     _require_docker()
-    clearance = _require_deployment_clearance("restart")
+    clearance = _require_deployment_clearance("restart", base_url=base_url)
     try:
         restarted = _compose("restart", _COMPOSE_SERVICE)
         if restarted.returncode != 0:

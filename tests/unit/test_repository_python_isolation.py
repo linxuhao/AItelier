@@ -195,7 +195,45 @@ try:
 finally:
  print(json.dumps(chunks),flush=True);s.close()
 """
+_HALFCLOSE_BEFORE_CLIENT = r"""
+import os,socket,time,json,urllib.parse
+url=urllib.parse.urlsplit(os.environ['GODOT_BUILDER_URL']);s=socket.create_connection((url.hostname,url.port));s.settimeout(.2)
+s.sendall(b'POST /script HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\n{}')
+s.shutdown(socket.SHUT_WR)
+started=time.monotonic();chunks=[]
+try:
+ while True:
+  chunk=s.recv(65536)
+  if not chunk:break
+  chunks.append({'elapsed':time.monotonic()-started,'wire':chunk.decode('iso-8859-1')})
+finally:
+ print(json.dumps(chunks),flush=True);s.close()
+"""
 
+
+_HALFCLOSE_AFTER_CLIENT = r"""
+import os,socket,time,json,urllib.parse
+url=urllib.parse.urlsplit(os.environ['GODOT_BUILDER_URL']);s=socket.create_connection((url.hostname,url.port));s.settimeout(.2)
+s.sendall(b'POST /script HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\n{}')
+started=time.monotonic();chunks=[];half_closed=False
+try:
+ while True:
+  chunk=s.recv(65536)
+  if not chunk:break
+  chunks.append({'elapsed':time.monotonic()-started,'wire':chunk.decode('iso-8859-1')})
+  if not half_closed and b'\r\n\r\n' in b''.join(c['wire'].encode('iso-8859-1') for c in chunks):
+   s.shutdown(socket.SHUT_WR);half_closed=True
+finally:
+ print(json.dumps(chunks),flush=True);s.close()
+"""
+
+
+_FULLCLOSE_CLIENT = r"""
+import os,socket,time,urllib.parse
+url=urllib.parse.urlsplit(os.environ['GODOT_BUILDER_URL']);s=socket.create_connection((url.hostname,url.port))
+s.sendall(b'POST /script HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\n{}')
+time.sleep(.05);s.close();print('client-left')
+"""
 
 def test_bridge_preserves_admission_keepalives(bridge_entry, tmp_path):
     import threading
@@ -235,7 +273,6 @@ def test_bridge_preserves_admission_keepalives(bridge_entry, tmp_path):
 
 @pytest.mark.parametrize("disconnect",[False,True])
 def test_bridge_streams_final_and_closes_abandoned_request(bridge_entry,tmp_path,disconnect):
-    import socket
     import threading
     import time
     from socketserver import StreamRequestHandler,ThreadingUnixStreamServer
@@ -246,12 +283,20 @@ def test_bridge_streams_final_and_closes_abandoned_request(bridge_entry,tmp_path
             while self.rfile.readline().strip():
                 pass
             self.rfile.read(2)
-            started=time.monotonic()
             if disconnect:
-                self.request.settimeout(.8)
-                try: observations["client_eof"] = self.request.recv(1) == b""
-                except socket.timeout: observations["client_eof"] = False
-                observations["closed_after_sec"] = time.monotonic()-started
+                # The peer closed both directions, so a client-bound write
+                # must eventually fail. That write error (plus the prompt
+                # Unix-request close it triggers) is the observable signal,
+                # not the bare read EOF that a supported write half-close
+                # also produces.
+                time.sleep(.2)
+                started=time.monotonic()
+                try:
+                    for piece in (b'HTTP/1.0 201 Created\r\nContent-Length: 4\r\n\r\n',b'abcd',b' ',b' ',b' ',b' ',b' ',b' ',b' ',b' ',b' ',b' '):
+                        self.wfile.write(piece);self.wfile.flush();time.sleep(.03)
+                except (BrokenPipeError,ConnectionResetError):
+                    observations["write_failed"]=True
+                observations["closed_after_sec"]=time.monotonic()-started
             else:
                 self.wfile.write(b'HTTP/1.0 201 Created\r\nContent-Length: 4\r\nX-Control: retained\r\n\r\n');self.wfile.flush()
                 try:
@@ -263,20 +308,65 @@ def test_bridge_streams_final_and_closes_abandoned_request(bridge_entry,tmp_path
     socket_path=str(Path(tempfile.mkdtemp(prefix="stream-relay-"))/"r.sock")
     upstream=ThreadingUnixStreamServer(socket_path,Upstream);upstream.daemon_threads=True
     threading.Thread(target=upstream.serve_forever,daemon=True).start()
-    client=_WIRE_CLIENT
-    if disconnect:
-        client="import socket,os,urllib.parse,time;u=urllib.parse.urlsplit(os.environ['GODOT_BUILDER_URL']);s=socket.create_connection((u.hostname,u.port));s.sendall(b'POST /script HTTP/1.1\\r\\nHost: localhost\\r\\nContent-Length: 2\\r\\n\\r\\n{}');time.sleep(.05);s.close();print('client-left')"
+    client=_FULLCLOSE_CLIENT if disconnect else _WIRE_CLIENT
     try:
         result=bridge_entry.run({"repo":str(tmp_path),"timeout":3,"args":[sys.executable,"-c",client],"relay_socket":socket_path})
         assert done.wait(2)
         _retain_bridge_result("disconnect" if disconnect else "body",result,observations)
         assert result["returncode"] == 0,result
         if disconnect:
-            assert observations["client_eof"] is True,observations
-            assert observations["closed_after_sec"] < .3,observations
+            # A readable client socket / read EOF is NOT abandonment proof;
+            # only the failed client-bound write is. The request is dropped
+            # on that write error, well inside the bounded timeout, and the
+            # finite cleanup is asserted rather than an impossible instant
+            # EOF signal.
+            assert observations.get("write_failed") is True,observations
+            assert observations["closed_after_sec"] < 1.0,observations
         else:
             chunks=json.loads(result["stdout"]);wire="".join(c["wire"] for c in chunks)
             assert '201 Created' in wire and 'X-Control: retained' in wire and wire.endswith('abcd')
             assert chunks[0]["elapsed"] < .2
     finally:
         upstream.shutdown();upstream.server_close();Path(socket_path).unlink(missing_ok=True)
+
+
+@pytest.mark.parametrize("halfclose_after_headers",[False,True])
+def test_bridge_keeps_forwarding_after_client_write_halfclose(bridge_entry,tmp_path,halfclose_after_headers):
+    import threading
+    import time
+    from socketserver import StreamRequestHandler,ThreadingUnixStreamServer
+    observations={}
+    done=threading.Event()
+    class Upstream(StreamRequestHandler):
+        def handle(self):
+            while self.rfile.readline().strip():
+                pass
+            self.rfile.read(2)
+            if not halfclose_after_headers:
+                time.sleep(.2)
+            self.wfile.write(b'HTTP/1.0 201 Created\r\nContent-Length: 8\r\nX-Control: retained\r\n\r\n');self.wfile.flush()
+            try:
+                for byte in b'complete':
+                    time.sleep(.06);self.wfile.write(bytes([byte]));self.wfile.flush()
+            except BrokenPipeError:
+                observations["broken_pipe"]=True
+            done.set()
+    socket_path=str(Path(tempfile.mkdtemp(prefix="halfclose-relay-"))/"r.sock")
+    upstream=ThreadingUnixStreamServer(socket_path,Upstream);upstream.daemon_threads=True
+    threading.Thread(target=upstream.serve_forever,daemon=True).start()
+    client=_HALFCLOSE_AFTER_CLIENT if halfclose_after_headers else _HALFCLOSE_BEFORE_CLIENT
+    try:
+        result=bridge_entry.run({"repo":str(tmp_path),"timeout":3,"args":[sys.executable,"-c",client],"relay_socket":socket_path})
+        assert done.wait(2)
+        _retain_bridge_result("halfclose-after" if halfclose_after_headers else "halfclose-before",result,observations)
+        assert result["returncode"] == 0,result
+        # A supported write half-close (RFC 9112 9.6) must not be mistaken
+        # for abandonment, so the upstream never sees a broken pipe and the
+        # client still receives the complete, correct response body.
+        assert observations.get("broken_pipe") is not True,observations
+        chunks=json.loads(result["stdout"]);wire="".join(c["wire"] for c in chunks)
+        assert '201 Created' in wire and 'X-Control: retained' in wire,wire
+        assert wire.endswith('complete'),wire
+    finally:
+        upstream.shutdown();upstream.server_close();Path(socket_path).unlink(missing_ok=True)
+

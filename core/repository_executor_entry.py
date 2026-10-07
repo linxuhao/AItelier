@@ -34,19 +34,31 @@ def run(payload):
                     request = (f"{self.command} {self.path} {self.request_version}\r\n"
                                + "".join(f"{key}: {value}\r\n" for key, value in self.headers.items()) + "\r\n")
                     upstream.sendall(request.encode("iso-8859-1") + self.rfile.read(length))
+                    # A TCP read EOF alone cannot distinguish a full client
+                    # close from a supported write half-close (RFC 9112 9.6).
+                    # A readable / EOF client socket therefore must NOT be read
+                    # as an abandoned request: keep forwarding the queued
+                    # response and end only on an actual client-bound write
+                    # failure, upstream EOF, or the bounded upstream timeout.
+                    client_write_open = True
                     while True:
-                        ready, _, _ = select.select([upstream, self.connection], [], [],
-                                                    payload["timeout"])
+                        watch = [upstream, self.connection] if client_write_open else [upstream]
+                        ready, _, _ = select.select(watch, [], [], payload["timeout"])
                         if not ready:
                             raise TimeoutError("admission relay response timed out")
-                        # A caller that left cannot own a queued response. Close
-                        # the Unix request promptly, rather than keep buffering.
-                        if self.connection in ready:
-                            return
+                        if client_write_open and self.connection in ready:
+                            client_write_open = False
+                            continue
                         chunk = upstream.recv(65536)
                         if not chunk:
                             return
-                        self.connection.sendall(chunk)
+                        try:
+                            self.connection.sendall(chunk)
+                        except OSError:
+                            # A real write failure means the client is gone,
+                            # unlike a supported write half-close.
+                            return
+
             do_GET = do_POST = forward
             def log_message(self, *_args):
                 pass

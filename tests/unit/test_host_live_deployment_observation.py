@@ -163,5 +163,14 @@ def test_original_accepted_cli_guard_calls_composition_getter(live,monkeypatch,t
     def forbidden():
         calls.append('composition-getter');raise AssertionError('would initialize second runtime')
     monkeypatch.setattr(dependencies,'get_skillflow',forbidden);monkeypatch.setenv('AITELIER_HOME',str(tmp_path/'old-home'))
-    with pytest.raises(RuntimeError,match='measurement could not start'):namespace['_require_deployment_clearance']('restart')
+    # Refusal surfaces the accepted contract summary, not the pre-image guess.
+    with pytest.raises(RuntimeError,match=r'refusing restart.*aborted/unusable'):namespace['_require_deployment_clearance']('restart')
+    # The old composition getter was actually invoked once (hazard proven) and refused with no second runtime.
     assert calls==['composition-getter']
+    # The refusal is durable evidence: aborted/unusable with the underlying measurement cause retained, not silent.
+    journal=json.loads(dq.evidence_path().read_text(encoding='utf-8'))
+    event=journal['events'][-1]
+    assert event['status']=='aborted' and event['usable'] is False and event['replayed'] is False
+    assert any('measurement could not start' in error for error in event['errors'])
+    assert event['inventory_digest']
+

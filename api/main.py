@@ -524,15 +524,21 @@ async def stream_global_events(request: Request):
         async def _refuse():
             yield ": at capacity\n\n"
         return StreamingResponse(_refuse(), media_type="text/event-stream")
-    who = None
+    who, read_private = None, False
     try:
         from starlette.concurrency import run_in_threadpool
         from api.auth import creator_email
-        who = await run_in_threadpool(creator_email, request)
+        from api.authz import may_read_private
+        def subscriber_identity():
+            # Presence attribution is not private-read authority: a verified
+            # nonwriter still receives only the public progress projection.
+            return creator_email(request), may_read_private(request)
+        who, read_private = await run_in_threadpool(subscriber_identity)
     except Exception:
-        pass
+        pass  # Identity failure never grants private stream contents.
     return StreamingResponse(
-        stream_manager.event_generator("__global__", who=who),
+        stream_manager.event_generator("__global__", who=who,
+                                       read_private=read_private),
         media_type="text/event-stream",
     )
 

@@ -34,7 +34,7 @@ from core.workspace_manager import WorkspaceManager
 from api.dependencies import get_db_manager, get_workspace_manager, owner_filter, check_write_owner, check_read_owner, enrich_project_status
 from api import _read_cache
 from api.auth import CurrentUser, get_optional_user, creator_email
-from api.authz import require_writer, request_can_write
+from api.authz import require_writer, require_reader, request_can_write, execution_progress
 
 router = APIRouter(prefix="/api/projects", tags=["Projects"])
 
@@ -202,9 +202,10 @@ def list_projects(
     onto one wait instead of N.
     """
     owner = owner_filter(user, request)
-    return _read_cache.cached(("projects", owner), lambda: _add_task_summaries(
+    rows = _read_cache.cached(("projects", owner), lambda: _add_task_summaries(
         [enrich_project_status(p) or p
          for p in db.list_projects_with_stats(owner_email=owner)]))
+    return [execution_progress(request, row) for row in rows]
 
 
 @router.post("", response_model=ProjectResponse, status_code=201)
@@ -277,7 +278,7 @@ def get_project(
     for p in all_projects:
         if p["project_id"] == project_id:
             p = enrich_project_status(p) or p
-            return _add_task_summary(p)
+            return execution_progress(request, _add_task_summary(p))
     raise HTTPException(status_code=404, detail="Project not found")
 
 
@@ -312,10 +313,15 @@ def list_project_tasks(
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     check_read_owner(user, request, project)
-    return db.list_tasks_by_project(project_id, owner_email=owner_filter(user, request))
+    # SELECT * here exposed the full private task prompt (execution body) to
+    # any identity that could list a project's tasks. Trusted writer/admin
+    # keeps the complete rows; everyone else gets the public progress fields.
+    rows = db.list_tasks_by_project(project_id, owner_email=owner_filter(user, request))
+    return [execution_progress(request, dict(row)) for row in rows]
 
 
-@router.get("/{project_id}/workspace/tree")
+
+@router.get("/{project_id}/workspace/tree", dependencies=[Depends(require_reader)])
 def workspace_tree(
     project_id: str,
     request: Request,
@@ -407,7 +413,7 @@ def workspace_tree(
             "truncated": truncated}
 
 
-@router.get("/{project_id}/workspace/file")
+@router.get("/{project_id}/workspace/file", dependencies=[Depends(require_reader)])
 def workspace_file(
     project_id: str,
     request: Request,
@@ -475,7 +481,7 @@ def workspace_file(
     }
 
 
-@router.get("/{project_id}/workspace/raw")
+@router.get("/{project_id}/workspace/raw", dependencies=[Depends(require_reader)])
 def workspace_raw(
     project_id: str,
     request: Request,

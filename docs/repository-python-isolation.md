@@ -25,8 +25,14 @@ backend: its interpreter is not the tested image.
 
 Deployment is separate: the current production backend has no Docker execution
 facility and therefore refuses these commands after this source is installed.
-A supported trusted host launch transport must be provided before live acceptance;
-this change does not install one or mount a Docker daemon into production. Do not
-mount backend secrets or a daemon socket into the test container. Test-image
+One AUTHORIZED product launch surface now exists for it: when the backend sets
+`AITELIER_HOST_LAUNCHER_SOCKET`, `repository_executor.execute` sends a validated
+launch request over that 0600 local Unix socket to the operator-owned host
+launcher service (`core/repository_host_launcher`), which alone builds and runs
+the bounded Docker argv from operator configuration (allowed roots, reviewed
+immutable test image, trusted entry) and still refuses on any failure with no
+in-backend fallback. See `docs/repository-host-launcher.md`; activation and
+compose/systemd wiring remain an operator, root-read action.
+Do not mount backend secrets or a daemon socket into the test container. Test-image
 project dependencies must be supplied in a reviewed image before launch: network
 none deliberately prevents automatic dependency provisioning during tests.

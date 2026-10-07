@@ -1,4 +1,13 @@
-"""Trusted Docker transport; repository commands never fall back to the host."""
+"""Trusted bounded CPU transport for repository commands.
+
+When ``AITELIER_HOST_LAUNCHER_SOCKET`` is set, the bounded Docker launch is
+performed by the operator-enabled host launcher service
+(``core.repository_host_launcher``) over that 0600 local Unix socket — the
+backend itself holds neither the Docker CLI nor the Docker socket, and a
+host-launcher failure is an honest non-pass with no local fallback.
+Otherwise (host-local operator runs), the direct Docker adapter below is
+used. Repository commands never fall back to the host Python.
+"""
 from __future__ import annotations
 from contextlib import contextmanager
 import fcntl
@@ -8,6 +17,8 @@ from pathlib import Path
 import shutil
 import subprocess
 import uuid
+
+HOST_LAUNCHER_ENV = "AITELIER_HOST_LAUNCHER_SOCKET"
 
 class IsolationUnavailable(RuntimeError):
     pass
@@ -35,7 +46,59 @@ def _slot():
 
 def execute(*args, **kwargs):
     with _slot():
+        socket_path = os.environ.get(HOST_LAUNCHER_ENV, "")
+        if socket_path:
+            return _launch_via_host(socket_path, *args, **kwargs)
         return _execute(*args, **kwargs)
+
+
+def _launch_via_host(socket_path: str, repo: Path, args: list[str], timeout: int, *,
+                     writable_dirs=(), relay_socket: str = "", import_module: str = "",
+                     pytest_timeout: bool = False, report_dir: str = ""):
+    """Send one validated launch request to the trusted host launcher.
+
+    No in-backend Docker or pytest fallback: any failure is reported as
+    ``IsolationUnavailable`` so callers record an honest non-pass.
+    """
+    from core.repository_host_launcher import MAX_REQUEST_BYTES
+    request = {"op": "launch", "repo": str(repo), "args": args, "timeout": timeout,
+               "writable_dirs": [str(d) for d in writable_dirs],
+               "relay_socket": relay_socket, "import_module": import_module,
+               "pytest_timeout": pytest_timeout, "report_dir": report_dir}
+    payload = (json.dumps(request) + "\n").encode()
+    if len(payload) > MAX_REQUEST_BYTES:
+        raise IsolationUnavailable("launch request exceeds host launcher limit")
+    import socket as _socket
+    try:
+        with _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM) as client:
+            client.settimeout(timeout + 60)
+            client.connect(socket_path)
+            client.sendall(payload)
+            chunks = []
+            while b"\n" not in (chunks[-1] if chunks else b""):
+                chunk = client.recv(65536)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            raw = b"".join(chunks).split(b"\n")[0]
+    except OSError as exc:
+        raise IsolationUnavailable(
+            f"host CPU launcher unavailable at {socket_path}: {exc}") from exc
+    try:
+        response = json.loads(raw)
+    except ValueError as exc:
+        raise IsolationUnavailable("host CPU launcher returned no result") from exc
+    if not response.get("ok"):
+        raise IsolationUnavailable(f"host CPU launcher refused: {response.get('error', 'unknown')}")
+    result = response["result"]
+    if result.get("timed_out"):
+        raise subprocess.TimeoutExpired(args, timeout,
+                                        result.get("stdout"), result.get("stderr"))
+    completed = subprocess.CompletedProcess(args, result["returncode"],
+                                            result["stdout"], result["stderr"])
+    completed.import_error = result.get("import_error", "")
+    return completed
+
 
 
 def _execute(repo: Path, args: list[str], timeout: int, *,

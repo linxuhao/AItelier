@@ -1550,7 +1550,9 @@ def _validated_runtime_facts(facts: dict) -> dict:
     fields = {"schema_version", "observed_at", "runtime_identity", "runs",
               "checkout_leases", "write_admissions", "registered_external_owners",
               "errors", "digest"}
-    if type(facts) is not dict or set(facts) != fields or facts["schema_version"] != 1:
+    if (type(facts) is not dict or set(facts) != fields
+            or type(facts["schema_version"]) is not int
+            or facts["schema_version"] != 1):
         raise ValueError("incompatible original runtime observation")
     if facts["digest"] != _observation_digest(facts):
         raise ValueError("runtime observation digest mismatch (projection is not original facts)")

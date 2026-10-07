@@ -1784,8 +1784,13 @@ def test_server_redeploy_gate_runs_before_compose(monkeypatch):
     monkeypatch.setattr(server.httpx, "Client", Client)
     monkeypatch.setattr(server, "_container_running", lambda: False)
     monkeypatch.setattr(server, "_find_server_pid", lambda port: None)
-    monkeypatch.setattr(server, "_require_deployment_clearance",
-                        lambda action: events.append(("gate", action)) or {})
+
+    def gate(action, *, base_url):
+        assert base_url == "http://localhost:4444"
+        events.append(("gate", action))
+        return {}
+
+    monkeypatch.setattr(server, "_require_deployment_clearance", gate)
     monkeypatch.setattr(server, "_compose_up", lambda: events.append(("compose",)))
     monkeypatch.setattr(server, "_wait_healthy", lambda client, max_wait: True)
     assert server._ensure_docker_backend("http://localhost:4444", 1) is True
@@ -1804,8 +1809,13 @@ def test_server_redeploy_never_kills_a_listener_before_gate(monkeypatch):
     monkeypatch.setattr(server, "_find_server_pid", lambda port: 4242)
     monkeypatch.setattr(server.os, "kill",
                         lambda *args: events.append(("kill", *args)))
-    monkeypatch.setattr(server, "_require_deployment_clearance",
-                        lambda action: events.append(("gate", action)) or {})
+
+    def gate(action, *, base_url):
+        assert base_url == "http://localhost:4444"
+        events.append(("gate", action))
+        return {}
+
+    monkeypatch.setattr(server, "_require_deployment_clearance", gate)
     monkeypatch.setattr(server, "_compose_up", lambda: events.append(("compose",)))
     monkeypatch.setattr(server, "_wait_healthy", lambda client, max_wait: True)
     assert server._ensure_docker_backend("http://localhost:4444", 1) is True
@@ -1823,8 +1833,13 @@ def test_server_restart_gate_runs_before_restart(monkeypatch):
 
     monkeypatch.setattr(server.httpx, "Client", Client)
     monkeypatch.setattr(server, "_require_docker", lambda: events.append(("docker",)))
-    monkeypatch.setattr(server, "_require_deployment_clearance",
-                        lambda action: events.append(("gate", action)) or {})
+
+    def gate(action, *, base_url):
+        assert base_url == "http://localhost:4444"
+        events.append(("gate", action))
+        return {}
+
+    monkeypatch.setattr(server, "_require_deployment_clearance", gate)
     monkeypatch.setattr(server, "_compose",
                         lambda *args, **kwargs: (
                             events.append(("compose", *args))
@@ -1870,7 +1885,11 @@ def test_restart_exit_137_is_aborted_even_if_old_health_still_answers(tmp_path, 
 
     events = []
     monkeypatch.setattr(server, "_require_docker", lambda: None)
-    monkeypatch.setattr(server, "_require_deployment_clearance", lambda _a: {"event": {"event_id": "gate"}})
+    def gate(_action, *, base_url):
+        assert base_url == "http://localhost:4444"
+        return {"event": {"event_id": "gate"}}
+
+    monkeypatch.setattr(server, "_require_deployment_clearance", gate)
     monkeypatch.setattr(server, "_compose", lambda *_a: SimpleNamespace(returncode=137))
     monkeypatch.setattr(server, "_wait_healthy", lambda *_a: True)
     monkeypatch.setattr(server, "_finish_deployment",
@@ -1896,3 +1915,38 @@ def test_cutover_fence_blocks_new_operation_admission(tmp_path, monkeypatch):
     dq.release_cutover_fence(cutover)
     worker.join(timeout=2)
     assert entered.is_set()
+
+
+def _valid_runtime_facts() -> dict:
+    facts = {
+        "schema_version": 1,
+        "observed_at": dq._now(),
+        "runtime_identity": {
+            "pid": 1,
+            "pid_namespace": os.readlink("/proc/self/ns/pid"),
+            "mount_namespace": os.readlink("/proc/self/ns/mnt"),
+            "boot_id": open("/proc/sys/kernel/random/boot_id").read().strip(),
+        },
+        "runs": [], "checkout_leases": [], "write_admissions": [],
+        "registered_external_owners": [], "errors": [],
+    }
+    facts["digest"] = dq._observation_digest(facts)
+    return facts
+
+
+@pytest.mark.parametrize("bad_schema_version", [True, "1", 1.0, None])
+def test_runtime_facts_schema_version_must_be_exact_int(bad_schema_version, monkeypatch):
+    facts = _valid_runtime_facts()
+    facts["schema_version"] = bad_schema_version
+    # A malformed type must be refused before any host domain probe runs.
+    monkeypatch.setattr(dq, "external_owners",
+                        lambda **kwargs: pytest.fail("host probe ran on malformed facts"))
+    with pytest.raises(ValueError, match="incompatible original runtime observation"):
+        dq._validated_runtime_facts(facts)
+    with pytest.raises(ValueError, match="incompatible original runtime observation"):
+        dq.measure(runtime_facts=facts)
+
+
+def test_runtime_facts_exact_int_schema_version_is_accepted():
+    facts = _valid_runtime_facts()
+    assert dq._validated_runtime_facts(facts) == facts

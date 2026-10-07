@@ -201,8 +201,11 @@ class StateService:
     def _dependency_context(self, attempt, source, ref="HEAD"):
         """Pass accepted contracts/artifact references, not an entire project log.
 
-        `ref` is the commit this attempt will actually build on: HEAD for a
-        fresh attempt, the failed attempt's branch head for a relay."""
+        `ref` is the commit this attempt will actually build on. The caller
+        chooses it with `_dependency_ref`: the failed attempt's branch head for
+        a relay, otherwise the selected/materialized base, or HEAD when the
+        attempt pinned no base."""
+
         out = {}
         with self.store.transaction() as conn:
             for dep, pin in attempt["dependencies"].items():
@@ -220,6 +223,26 @@ class StateService:
                     except StateConflict as exc:
                         raise StateConflict("accepted dependency commit is not in the source; integrate it before launching") from exc
         return out
+
+    def _dependency_ref(self, attempt, relay):
+        """The commit a fresh attempt's accepted dependencies must be reachable
+        from. A relay continues on its failed branch head; otherwise an explicit
+        base the director chose (or one materialized for this attempt) is the
+        tree this worktree will actually start from — never the shared HEAD,
+        which is not necessarily the tree a fresh run builds on. Only an attempt
+        with no chosen base falls back to HEAD, preserving the no-base path.
+
+        A dependency is useful only when it is an ancestor of the commit the new
+        worktree starts on, so the reference here must match that start point.
+        """
+        if relay is not None:
+            return relay["base_sha"]
+        chosen = attempt["context"].get("base_sha")
+        if chosen:
+            return chosen
+        from core import run_isolation
+        requested = run_isolation.requested_base(self.db, attempt["execution_project_id"])
+        return requested["base_sha"] if requested else "HEAD"
 
     def start_external_attempt(self, project_id, node_key, expected_revision, harness, external_id,
                                request_key, instruction="", base_sha=None):
@@ -418,7 +441,7 @@ class StateService:
                 self.attempts.retire_reservation(aid, f"relay refused: {e}")
                 raise StateConflict(f"{e}; this reservation was retired, start a new attempt") from e
             attempt = self.attempts.pin_relay(aid, relay)
-        dependency_receipts = self._dependency_context(attempt, source, ref=relay["base_sha"] if relay else "HEAD")
+        dependency_receipts = self._dependency_context(attempt, source, ref=self._dependency_ref(attempt, relay))
         from core.run_launcher import missing_cross_config_inputs, start_config_run
         missing = missing_cross_config_inputs(self.sf, attempt["workflow"], attempt["execution_project_id"])
         if missing:

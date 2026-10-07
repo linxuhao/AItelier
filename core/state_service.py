@@ -522,7 +522,7 @@ class StateService:
             # Fresh relay runs rewalk the graph. Give each artifact step its
             # prior published bytes as input, rather than only its unfinished
             # draft; a prose instruction cannot make another workspace readable.
-            from pathlib import PurePath
+            from fnmatch import fnmatchcase
             from skillflow.output_targets import target_for
             from skillflow.write_tools import _get_pattern
             graph = self.sf._get_resolver_for_run(attempt["run_id"]).graph
@@ -535,8 +535,10 @@ class StateService:
                     # Only declared artifact outputs belong to this step. Do
                     # not carry old version siblings or unrelated project files.
                     for slot in (node.output_fixed or {}):
-                        if (PurePath(filename).match(_get_pattern(slot, node.output_fixed))
-                                and target_for(node, slot) == "artifact"):
+                        pattern = _get_pattern(slot, node.output_fixed)
+                        declared = (filename == pattern or
+                                    ("*" in pattern and fnmatchcase(filename, pattern)))
+                        if declared and target_for(node, slot) == "artifact":
                             path = directory / filename
                             if path.suffix.lower() not in {".md", ".json", ".txt", ".yaml", ".yml"}:
                                 raise StateConflict(f"unsupported published relay input: {node.id}/{filename}")

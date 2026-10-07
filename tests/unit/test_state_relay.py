@@ -54,7 +54,9 @@ def world(tmp_path, monkeypatch):
     # any dependency admission. projects_base is pinned too (optional) so the
     # SkillFlow resolver never falls back to a non-tmp location.
     sf = SkillFlow(str(tmp_path / "sf.db"), workspace_base=str(tmp_path / "workspaces"),
-                   projects_base=str(tmp_path / "projects"))
+                   projects_base=str(tmp_path / "projects"),
+                   code_path_resolver=lambda project_id, run_id=None:
+                       ri.resolve_for_resolver(db, run_id) if run_id else str(tmp_path / "src"))
     sf.register_graph(PipelineGraph(name="feature", begin="implementation", steps=[StepNode(id="implementation")]))
     ws = WorkspaceManager(str(tmp_path / "workspaces"))
     src = tmp_path / "src"
@@ -358,12 +360,12 @@ def test_missing_receipt_and_invalid_base_still_refuse(world):
 
 # Published artifacts must be reachable inputs on a fresh graph rewalk, while
 # the original run, approval records and failed draft remain owned by that run.
-def _failed_with_published_architecture(world, revision=1):
+def _failed_with_published_architecture(world, revision=1, design_pattern="approved_design.md", design_id="one"):
     from skillflow.core import StepResult
     sf,ws,db,attempts=world['sf'],world['ws'],world['db'],world['attempts']
     sf.register_graph(PipelineGraph(name='feature',begin='architecture',steps=[
         StepNode(id='architecture',checkpoint=True,output_fixed={
-            'design':{'file':'approved_design.md','target':'artifact'},
+            'design':{'file':design_pattern,'target':'artifact'},
             'linter':{'file':'linter_manifest.json','target':'code'}},
             transitions=[Transition(to='implementation',match={'from':'checkpoint','value':'approved'})]),
         StepNode(id='implementation')]))
@@ -375,9 +377,14 @@ def _failed_with_published_architecture(world, revision=1):
     sf.advance_run(rid);claimed=sf.claim_next_step(rid)
     assert claimed.step_id=='architecture'
     out=ws._get_secure_path(pid)/'feature'/'architecture';out.mkdir(parents=True)
-    design=out/'approved_design.md';design.write_text('owner approved revision'+str(revision)+': real consumer UI, journal budget, growth receipt\n')
+    from skillflow.write_tools import execute_write
+    fixed=sf._get_resolver_for_run(rid).graph.steps[0].output_fixed
+    written=execute_write('design',fixed,{'id':design_id,'content':
+        'owner approved revision'+str(revision)+': real consumer UI, journal budget, growth receipt\n'},str(out))
+    assert 'error' not in written
+    design=out/written['written']
     (out/'linter_manifest.json').write_text('{}')
-    sf.confirm_step(claimed.token,StepResult(outputs={'design':'approved_design.md'},flags={}))
+    sf.confirm_step(claimed.token,StepResult(outputs={'design':written['written']},flags={}))
     sf.advance_run(rid);assert sf.get_run(rid)['status']=='paused'
     sf.approve_checkpoint(rid);sf.advance_run(rid)
     ws.write_draft(pid,'implementation','unfinished.md','pending correction\n',graph_name='feature')
@@ -426,3 +433,49 @@ def test_relay_published_identity_refuses_stale_and_adopts_new_owner_revision(wo
     assert (ws._draft_dir(c['execution_project_id'],'architecture','feature')/'approved_design.md').read_bytes()==new_design.read_bytes()
 
 
+
+
+
+@pytest.mark.parametrize('pattern,ident',[
+    ('approved_design.md','ignored'),
+    ('docs/approved_design.md','ignored'),
+    ('docs/literal[1]?.md','ignored'),
+    ('docs/*.md','planned'),
+    ('docs/*.md','nested/planned'),
+])
+def test_relay_declared_complete_paths_match_real_writer_not_basename_collisions(world,pattern,ident):
+    a,design=_failed_with_published_architecture(world,design_pattern=pattern,design_id=ident)
+    directory=world['ws']._get_secure_path(a['execution_project_id'])/'feature'/'architecture'
+    relative=design.relative_to(directory).as_posix()
+    collision=directory/'unrelated'/relative
+    collision.parent.mkdir(parents=True,exist_ok=True);collision.write_text('UNADOPTED BASENAME COLLISION\n')
+    (directory/'approved_design.v1.md').write_text('OLD VERSION SIBLING\n')
+    inv=world['service'].get_attempt(a['attempt_id'])['relay_inventory']
+    assert inv['published_files']['architecture']=={relative:_sha(design.read_text())}
+    b=world['attempts'].reserve('game','a',1,'feature','declared-path-relay',continue_from=a['attempt_id'],relay_digest=inv['digest'])
+    world['service']._prepare_relay(b,str(world['src']))
+    assert world['ws'].seed_relay_draft(b['execution_project_id'],'architecture','feature')==[relative]
+    assert (world['ws']._draft_dir(b['execution_project_id'],'architecture','feature')/relative).read_bytes()==design.read_bytes()
+
+
+def test_relay_actual_sdk_reader_prefers_retained_input_over_conflicting_owned_rewalk(world):
+    from skillflow.read_tools import make_read_tool_fns
+    a,design=_failed_with_published_architecture(world)
+    before=design.read_bytes();inv=world['service'].get_attempt(a['attempt_id'])['relay_inventory']
+    b=world['attempts'].reserve('game','a',1,'feature','reader-rewalk',continue_from=a['attempt_id'],relay_digest=inv['digest'])
+    world['service']._prepare_relay(b,str(world['src']))
+    pid=b['execution_project_id'];rid=world['sf'].create_run('feature',project_id=pid)
+    world['db'].ensure_project(pid,name=pid,repo_type='existing',repo_path=str(world['src']))
+    record=ri.ensure_for_run(world['db'],run_id=rid,project_id=pid,config_name='feature',repo_mode='code')
+    root=ri.resolve_for_resolver(world['db'],rid)
+    assert root==record['worktree_path']
+    (Path(root)/'approved_design.md').write_text('CONFLICTING EVIDENCE-ONLY REWALK: abandon consumer UI and growth receipt\n')
+    ws=world['ws'];ws.clean_draft_dir(pid,'architecture','feature');ws.seed_relay_draft(pid,'architecture','feature')
+    reader=make_read_tool_fns([{'source_type':'repository','mode':'tool'}],
+        workspace_root=str(ws._get_secure_path(pid)),current_config='feature',code_root=str(root),
+        step_tmp_dir=str(ws._draft_dir(pid,'architecture','feature')),
+        step_dir=str(ws.get_final_path(pid,'architecture','feature')),run_id=rid)['read']
+    result=reader('approved_design.md',raw=True)
+    assert result['source']=='staging' and result['content'].encode()==before
+    assert 'CONFLICTING' not in result['content'] and design.read_bytes()==before
+    assert world['sf'].get_run(a['run_id'])['status']=='failed'

@@ -92,7 +92,10 @@ def _resolve_inside(path: str, roots: list[str], what: str) -> Path:
     except (OSError, ValueError) as exc:
         raise LaunchRefused(f"{what} does not resolve: {path}") from exc
     for root in roots:
-        root_path = Path(root).resolve(strict=True)
+        try:
+            root_path = Path(root).resolve(strict=True)
+        except (OSError, ValueError):
+            continue  # unavailable roots grant no authority; refusal stays typed
         if resolved == root_path or root_path in resolved.parents:
             return resolved
     raise LaunchRefused(f"{what} escapes the operator-allowed roots: {path}")
@@ -266,8 +269,13 @@ def _run_docker(cfg: dict, fields: dict, conn: socket.socket | None = None) -> d
         return result
     finally:
         try:
-            subprocess.run(["docker", "rm", "-f", name], stdout=subprocess.DEVNULL,
-                           stderr=subprocess.DEVNULL, timeout=10)
+            active = proc is not None and proc.poll() is None
+            removed = subprocess.run(["docker", "rm", "-f", name], stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.DEVNULL, timeout=10)
+            if active and removed.returncode != 0:
+                raise LaunchRefused("owned container cleanup could not be confirmed")
+            # A successfully completed --rm invocation removed itself. A live
+            # cancelled invocation must instead have a successful owned rm.
         finally:
             if proc is not None and proc.poll() is None:
                 proc.kill()

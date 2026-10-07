@@ -1,0 +1,158 @@
+"""Bounded transport regressions, run only in an admitted disposable CPU job."""
+import importlib.util
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+
+import pytest
+from core import repository_executor as executor
+from core import repository_executor_entry as entry
+from aitelier.tools.run_tests import impl as candidate
+
+@pytest.fixture
+def rt():
+    baseline = os.environ.get("REPOSITORY_ISOLATION_BASELINE")
+    if not baseline:
+        return candidate
+    spec = importlib.util.spec_from_file_location("baseline_run_tests", baseline)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _fixture(tmp_path, body="assert True"):
+    repo = tmp_path / "repo"
+    (repo / "tests").mkdir(parents=True)
+    (repo / "tests/test_fixture.py").write_text("def test_fixture():\n    " + body + "\n")
+    return repo
+
+
+def test_missing_facility_never_runs_local_pytest(rt, tmp_path, monkeypatch):
+    marker = tmp_path / "unsafe-local-test"
+    repo = _fixture(tmp_path, f"open({str(marker)!r}, 'w').write('ran')")
+    monkeypatch.setattr(executor.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(candidate.datadir, "aitelier_home", lambda: tmp_path / "control")
+    result = rt.run_tests(project_root=str(repo), out_dir=str(tmp_path / "out"), repo_gate=False)
+    report = json.loads((tmp_path / "out/test_report.json").read_text())
+    assert result["passed"] is False, report
+    assert report["infrastructure_unavailable"] is True
+    assert report["skipped_because"] == "cpu_executor_unavailable"
+    assert report["returncode"] == -1
+    assert not marker.exists(), "authored pytest ran without the isolated facility"
+
+
+def test_authored_godot_python_leg_is_not_a_backend_child(rt, tmp_path, monkeypatch):
+    marker = tmp_path / "unsafe-authored-test"
+    repo = _fixture(tmp_path, f"open({str(marker)!r}, 'w').write('ran')")
+    source = os.environ["REVIEW_AUTHORED_GODOT_GATE"]
+    # Real shipped run_python_suite, with no compile/render request.
+    driver = ("import importlib.util,json,pathlib; "
+              f"s=importlib.util.spec_from_file_location('authored', {source!r}); "
+              "m=importlib.util.module_from_spec(s);s.loader.exec_module(m); "
+              "r=m.run_python_suite(pathlib.Path.cwd());print(json.dumps(r)); "
+              "raise SystemExit(r['returncode'])")
+    script = repo / "run_tests.sh"
+    script.write_text("#!/bin/sh\npython3 -c " + __import__('shlex').quote(driver) + "\n")
+    script.chmod(0o755)
+    monkeypatch.setattr(executor.shutil, "which", lambda _name: None)
+    control = Path(tempfile.mkdtemp(prefix="cpu-isolation-control-"))
+    monkeypatch.setattr(candidate.datadir, "aitelier_home", lambda: control)
+    result = rt._run_repo_gate(repo)
+    assert result["passed"] is False, result
+    assert result["runner_error"] is True
+    assert "Docker CPU execution facility" in result["output"]
+    assert result["measured"] == candidate.REPO_GATE_UNMEASURED
+    assert not marker.exists(), "authored gate launched pytest locally"
+
+
+@pytest.mark.parametrize("failing", [False, True])
+def test_actual_container_entry_captures_real_pytest_and_junit(tmp_path, failing):
+    repo = _fixture(tmp_path, "print('fixture-stdout'); __import__('sys').stderr.write('fixture-stderr\\n'); assert " + str(not failing))
+    junit = tmp_path / "junit.xml"
+    result = entry.run({"repo":str(repo), "timeout":10,
+                        "args":[sys.executable,"-m","pytest","tests","-q","-s","-p","no:cacheprovider",f"--junitxml={junit}","-o","junit_family=xunit1"]})
+    assert result["returncode"] == (1 if failing else 0), result
+    assert result["timed_out"] is False
+    assert "fixture-stdout" in result["stdout"]
+    assert "fixture-stderr" in result["stderr"]
+    assert candidate._junit_node_ids(junit) == {"tests/test_fixture.py::test_fixture"}
+
+
+def test_actual_entry_timeout_captures_partial_and_reaps_owned_child(tmp_path):
+    pid_file = tmp_path / "child.pid"
+    code = f"import os,time;open({str(pid_file)!r},'w').write(str(os.getpid()));print('partial',flush=True);time.sleep(20)"
+    result = entry.run({"repo":str(tmp_path),"timeout":0.2,"args":[sys.executable,"-c",code]})
+    assert result["timed_out"] and result["returncode"] != 0
+    assert "partial" in result["stdout"]
+    with pytest.raises(ProcessLookupError):
+        os.kill(int(pid_file.read_text()),0)
+
+
+@pytest.mark.parametrize("failure", [subprocess.TimeoutExpired(["docker"],1), KeyboardInterrupt()])
+def test_adapter_timeout_cancel_cleanup_is_name_scoped(monkeypatch, tmp_path, failure):
+    calls=[]
+    class Client:
+        def communicate(self, timeout):
+            raise failure
+        def poll(self):
+            return None
+        def kill(self):
+            calls.append(["client-kill"])
+        def wait(self, timeout):
+            return 0
+    monkeypatch.setattr(executor.shutil,"which",lambda _name:"/trusted/docker")
+    monkeypatch.setattr(executor.subprocess,"Popen",lambda command,**kwargs:(calls.append(command) or Client()))
+    monkeypatch.setattr(executor.subprocess,"run",lambda command,**kwargs:calls.append(command))
+    with pytest.raises(type(failure)):
+        executor._execute(tmp_path,["python3","-m","pytest"],1)
+    launch,remove=calls[:2]
+    name=launch[launch.index("--name")+1]
+    assert name.startswith("aitelier-cpu-")
+    assert remove == ["/trusted/docker","rm","-f",name]
+    for flag,value in [("--network","none"),("--cpus","2"),("--memory","2g"),("--pids-limit","512")]:
+        assert launch[launch.index(flag)+1] == value
+    assert "--rm" in launch and "--init" in launch
+    assert not any('docker.sock' in value or '/run/aitelier-secrets' in value for value in launch)
+
+
+def test_run_tests_timeout_has_no_success_exit_code(tmp_path, monkeypatch):
+    repo = _fixture(tmp_path)
+    monkeypatch.setattr(candidate.datadir, "aitelier_home", lambda: tmp_path / "control")
+    def timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired(["python3","-m","pytest"], 1, "partial-out", "partial-err")
+    monkeypatch.setattr(executor,"execute",timeout)
+    candidate.run_tests(project_root=str(repo),out_dir=str(tmp_path/"out"),repo_gate=False)
+    report=json.loads((tmp_path/"out/test_report.json").read_text())
+    assert report["passed"] is False and report["timed_out"]
+    assert report["returncode"] is None
+    assert report["stdout"]=="partial-out" and report["stderr"]=="partial-err"
+    assert report["skipped_because"]=="pytest_timeout"
+
+
+def test_actual_unix_bridge_preserves_existing_admission_observation(tmp_path):
+    import threading
+    from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
+    from aitelier.gate_admission import AdmissionRelay
+    class Upstream(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200);self.end_headers();self.wfile.write(b'{"fixture":"echo"}')
+        def log_message(self,*_args):
+            pass
+    upstream=ThreadingHTTPServer(("127.0.0.1",0),Upstream)
+    threading.Thread(target=upstream.serve_forever,daemon=True).start()
+    relay=AdmissionRelay(f"http://127.0.0.1:{upstream.server_port}",render_wait_sec=3,upstream_timeout=5)
+    socket_path=str(Path(tempfile.mkdtemp(prefix="cpu-relay-"))/"a.sock")
+    relay.start(unix_socket=socket_path)
+    try:
+        command=[sys.executable,"-c","import os,urllib.request;print(urllib.request.urlopen(os.environ['GODOT_BUILDER_URL']+'/health').read().decode())"]
+        result=entry.run({"repo":str(tmp_path),"timeout":5,"args":command,"relay_socket":socket_path})
+        assert result["returncode"]==0 and '"fixture":"echo"' in result["stdout"],result
+        records=relay.snapshot()
+        assert len(records)==1 and records[0]["route"]=="/health"
+        assert records[0]["status"]==200 and records[0]["outcome"]=="answered"
+    finally:
+        relay.stop();upstream.shutdown();upstream.server_close()
+        Path(socket_path).unlink(missing_ok=True)

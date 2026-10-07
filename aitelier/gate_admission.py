@@ -43,6 +43,7 @@ import time
 import urllib.parse
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from socketserver import ThreadingMixIn, UnixStreamServer
 
 # The harness routes that take the globally exclusive render lock
 # (docker/godot/godot_harness.py:_Handler._RENDER_ROUTES).
@@ -140,7 +141,7 @@ class AdmissionRelay:
 
     # ── lifecycle ──────────────────────────────────────────────────────────
 
-    def start(self) -> str:
+    def start(self, unix_socket: str = "") -> str:
         relay = self
 
         class _Handler(BaseHTTPRequestHandler):
@@ -155,11 +156,16 @@ class AdmissionRelay:
             def log_message(self, *_args):
                 pass
 
-        self._server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+        if unix_socket:
+            class UnixHTTPServer(ThreadingMixIn, UnixStreamServer):
+                pass
+            self._server = UnixHTTPServer(unix_socket, _Handler)
+        else:
+            self._server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
         self._server.daemon_threads = True
         threading.Thread(target=self._server.serve_forever,
                          name="gate-admission-relay", daemon=True).start()
-        return f"http://127.0.0.1:{self._server.server_port}"
+        return "" if unix_socket else f"http://127.0.0.1:{self._server.server_port}"
 
     def stop(self) -> None:
         """Stop serving and cut any request the gate left in flight.

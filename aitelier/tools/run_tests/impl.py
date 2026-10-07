@@ -5,16 +5,10 @@ test never fails the run); the outcome is captured in ``test_report.json`` so th
 verifier-review step can fold test failures into its change requests and loop
 back to the planner (the goal-loop).
 
-Runner resolution: prefer pytest + pytest-asyncio in the current interpreter;
-if either is missing, provision a throwaway venv with
-``--system-site-packages`` (so it inherits whatever IS installed) and install
-the test toolchain — pytest + pytest-asyncio (REQUIRED by ``asyncio_mode=auto``
-configs; without it every async test errors out) + pytest-timeout — plus the
-project's declared dependencies (``requirements.txt``, or an editable install
-that reads ``pyproject.toml``/``setup.py``, INCLUDING its declared test extras).
-If the runner cannot be provisioned at all (e.g. no network), the gate records
-``infrastructure_unavailable``. It remains distinct from a test failure and is
-non-passing because missing evidence cannot release a tree.
+Repository Python executes only through the trusted disposable CPU Docker
+adapter. The reviewed test image supplies pytest, plugins and project dependencies;
+there is no backend interpreter/venv fallback or live dependency installation.
+Missing execution facility is explicit non-passing infrastructure evidence.
 
 Three outcomes, not two: pass, fail, and NO EVIDENCE. "pytest collected nothing"
 (exit 5) is the third, and it is not a pass — see the returncode handling in
@@ -34,6 +28,7 @@ import struct
 import subprocess
 
 from core import datadir, env_scrub
+from core import repository_executor
 from aitelier import gate_admission
 # Module-level, NOT function-local. This name is used on EVERY path out of
 # `run_tests` (the return dict's `release_evidence`), so an import that lives
@@ -597,15 +592,25 @@ def _run_node_cmd(pkg_dir: Path, args: list[str], timeout: int,
     env = env_scrub.scrubbed_env()
     env.update(env_overrides or {})
     try:
-        proc = subprocess.Popen(
-            args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-            cwd=str(pkg_dir), start_new_session=True, env=env,
-        )
-        stdout, stderr = proc.communicate(timeout=timeout)
+        if (env_overrides or {}).get("GATE_REPORT_DIR"):
+            done = repository_executor.execute(
+                pkg_dir, args, timeout,
+                writable_dirs=[Path(env_overrides["GATE_REPORT_DIR"])],
+                relay_socket=env_overrides.get("AITELIER_GATE_RELAY_SOCKET", ""),
+                report_dir=env_overrides["GATE_REPORT_DIR"])
+            stdout, stderr = done.stdout, done.stderr
+            returncode = done.returncode
+        else:
+            proc = subprocess.Popen(
+                args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                cwd=str(pkg_dir), start_new_session=True, env=env,
+            )
+            stdout, stderr = proc.communicate(timeout=timeout)
+            returncode = proc.returncode
         out = ((stdout or "") + "\n" + (stderr or "")).strip()
         context, context_truncated = _failure_context(out)
-        result = {"passed": proc.returncode == 0,
-                  "returncode": proc.returncode,
+        result = {"passed": returncode == 0,
+                  "returncode": returncode,
                   "output": out[-OUTPUT_TAIL_CHARS:],
                   "output_truncated": len(out) > OUTPUT_TAIL_CHARS,
                   "failure_context": context,
@@ -816,7 +821,8 @@ def _run_repo_gate(repo: Path) -> dict | None:
         relay = gate_admission.AdmissionRelay(
             upstream, render_wait_sec=gate_admission.render_wait_seconds(),
             upstream_timeout=REPO_GATE_TIMEOUT)
-        relay_url = relay.start()
+        relay_socket = str(report_dir.parent / (".relay-" + os.urandom(4).hex() + ".sock"))
+        relay_url = relay.start(unix_socket=relay_socket)
     except (OSError, ValueError) as e:
         return {"passed": False, "returncode": -1, "runner_error": True,
                 "script": REPO_GATE_SCRIPT, "ticket": ticket,
@@ -830,9 +836,11 @@ def _run_repo_gate(repo: Path) -> dict | None:
         result = _run_node_cmd(
             repo, ["bash", str(script)], REPO_GATE_TIMEOUT,
             env_overrides={"GODOT_BUILDER_URL": relay_url,
-                           "GATE_REPORT_DIR": str(report_dir)})
+                           "GATE_REPORT_DIR": str(report_dir),
+                           "AITELIER_GATE_RELAY_SOCKET": relay_socket})
     finally:
         relay.stop()
+        Path(relay_socket).unlink(missing_ok=True)
         first = first_entry.read()
         first_entry.close()
     admission = gate_admission.admission_summary(relay.snapshot())
@@ -1983,162 +1991,142 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
     elif not repo.exists():
         report.update(passed=False, summary=f"Project root not found: {repo}")
     else:
-        py, venv_dir = _resolve_pytest_python(repo, report)
-        if py is None:
-            pass  # runner unavailable → report already marked skipped/passed
-        else:
-            # Isolate: do NOT inherit PYTHONPATH from the host process — it may
-            # point to AItelier's own source tree, causing pytest to discover
-            # AItelier's tests instead of the project's.  Only the project root
-            # belongs on the path.
-            # Scrubbed, not raw. This runs LLM-authored pytest; passing the
-            # server's whole environment handed it AITELIER_ADMIN_TOKEN and
-            # every provider key, and whatever it printed went into
-            # test_report.json (a public step output) and the reviewer's prompt.
-            env = env_scrub.scrubbed_env(PYTHONPATH=_pythonpath_for(repo))
-            # Cheapest possible check, and the one that would have caught two
-            # failed drives on the same task: does the delivered package import?
-            import_error = _import_smoke_error(py, repo, env)
-            if import_error:
-                report["import_error"] = import_error
-            # start_new_session=True → pytest leads its own process group so we
-            # can SIGKILL the whole tree (incl. git subprocesses it spawns) on
-            # timeout or any error; otherwise those grandchildren leak as zombies.
-            proc = None
-            # Junit XML is how this gate learns which tests PASSED: `-q` prints
-            # only failures, and "not in the failure list" is exactly the
-            # not-run/not-collected confusion `Executed` exists to remove. It
-            # is written OUTSIDE the repo so it can never be committed by a
-            # later `repo_apply`.
-            junit_dir = tempfile.mkdtemp(prefix="run_tests_junit_")
-            junit_path = Path(junit_dir) / "junit.xml"
-            try:
-                # --rootdir forces pytest root to the project repo so it doesn't
-                # walk up and find AItelier's pytest.ini (whose testpaths=tests
-                # would cause discovery of AItelier's own test suite).
-                # --continue-on-collection-errors: without it a single
-                # unimportable module INTERRUPTS the session, so the report is
-                # one traceback and zero test results even when the other 1600
-                # tests would have run and passed. With it, every module is
-                # imported (all import defects reported in one pass) and the
-                # tests that do collect still run, so the reviewer sees the
-                # whole picture instead of the first thing that broke.
-                proc = subprocess.Popen(
-                    [py, "-m", "pytest", str(repo), "-q", "--tb=short",
-                     "-p", "no:cacheprovider", "--continue-on-collection-errors",
-                     "--rootdir", str(repo),
-                     f"--junitxml={junit_path}", "-o", "junit_family=xunit1",
-                     *_pytest_timeout_args(py)],
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                    cwd=str(repo), env=env, start_new_session=True,
-                )
-                # Outer wall: this runs on the scheduler loop-thread (under the
-                # per-project tick lock), so a true hang must not block forever.
-                # It is a HANG detector, not a speed limit — see
-                # PYTEST_WALL_SECONDS for what happened when it was both.
-                stdout, stderr = proc.communicate(
-                    timeout=PYTEST_WALL_SECONDS)
-                out = ((stdout or "") + "\n" + (stderr or "")).strip()
-                report["returncode"] = proc.returncode
-                # 0 and 1 are the two outcomes in which pytest ran a session to
-                # the end. 2 (usage/internal), 3 (interrupted), 4 (usage) and 5
-                # (nothing collected) all mean the suite was not exercised, and
-                # a baseline key must not be pruned off one of them.
-                executed = Executed(
-                    node_ids=_junit_node_ids(junit_path),
-                    pytest_complete=proc.returncode in (0, 1))
-                # pytest: 0=all passed, 1=failures, 5=NOTHING COLLECTED.
-                # 5 is a third outcome — no evidence — and it used to be routed
-                # forward as a pass: on the `autopep8` benchmark task the
-                # implementer never delivered the test directory, the gate found
-                # nothing, said `passed: true`, 5_review passed on that basis and
-                # a 0.128-scoring repo shipped as `completed`. A gate that
-                # checked nothing has not passed; it is only "not applicable"
-                # when the repo holds no Python code at all (a node or Godot
-                # project, gated by its own section below).
-                report["passed"] = proc.returncode == 0
-                if proc.returncode == 5:
-                    report["no_tests_collected"] = True
-                    report["passed"] = not _has_python_sources(repo)
-                collection_errors = _collection_errors(out)[:50]
-                report["collection_errors"] = collection_errors
-                failed_lines = [ln.strip() for ln in out.splitlines()
-                                if ln.startswith("FAILED") or " FAILED " in ln][:50]
-                report["failures"] = collection_errors + failed_lines
-                if proc.returncode == 5 and not report["passed"]:
-                    report["failures"].append(
-                        "No tests were collected — the gate verified NOTHING.")
-                    report["summary"] = (
-                        "No tests were collected, so nothing about this project "
-                        "was verified. This is NOT a pass: the suite is missing "
-                        "(or unreachable by pytest). Deliver tests under `tests/` "
-                        "covering the MVP goals and re-run.")
-                elif proc.returncode == 5:
-                    report["summary"] = ("No tests were collected (no Python "
-                                         "sources — pytest not applicable).")
-                else:
-                    report["summary"] = out[-3000:]
-                # Collection errors go ABOVE the tail, and in full. They are the
-                # defects that make every OTHER result meaningless (an
-                # unimportable module contributes zero passing tests), and they
-                # are printed first — so the tail slice is exactly what drops
-                # them. Kept together so one fix pass can address all of them
-                # instead of one per goal-loop lap.
-                if collection_errors:
-                    report["summary"] = (
-                        f"{len(collection_errors)} module(s) could not be imported. "
-                        "Every test in them counts as failed; fix ALL of these, not "
-                        "just the first:\n  "
-                        + "\n  ".join(collection_errors)
-                        + "\n\n" + report["summary"])
-                # Lead with the install failure when there was one. An
-                # unimportable package produces a ModuleNotFoundError whose real
-                # cause is the failed editable install, and a reader given only
-                # the symptom rewrites packaging metadata that was never wrong.
-                report["summary"] = _explain_missing_names(
-                    py, _lead_with_install_error(report))
-            except subprocess.TimeoutExpired:
-                _kill_group(proc)
-                # A timeout is ABSENT evidence, not a red suite. `passed=False`
-                # alone is indistinguishable from "ran and failed", and with an
-                # empty failures[] plus a baseline diff of nothing it classified
-                # as `known_failure` / `passed_relative: true` — a verdict about
-                # tests that never ran. `skipped_because` routes it through
-                # gate_evidence.report_state -> "skipped" -> "unresolved", which
-                # is the state that means "go and verify", and the failures entry
-                # keeps the reason readable to the agent that has to act on it.
-                report.update(
-                    passed=False, timed_out=True,
-                    skipped_because="pytest_timeout",
-                    pytest_wall_seconds=PYTEST_WALL_SECONDS,
-                    summary=(
-                        f"pytest did not finish within {PYTEST_WALL_SECONDS}s and was "
-                        "killed, so NOTHING was measured. This is not a test failure: "
-                        "no test result exists either way. Either the suite needs "
-                        "longer than this harness allows, or it hangs."))
+        py = "python3"
+        # Junit XML is how this gate learns which tests PASSED: `-q` prints
+        # only failures, and "not in the failure list" is exactly the
+        # not-run/not-collected confusion `Executed` exists to remove. It
+        # is written OUTSIDE the repo so it can never be committed by a
+        # later `repo_apply`.
+        junit_root = datadir.aitelier_home() / "gate-reports"
+        junit_root.mkdir(parents=True, exist_ok=True)
+        junit_dir = tempfile.mkdtemp(prefix="run_tests_junit_", dir=junit_root)
+        junit_path = Path(junit_dir) / "junit.xml"
+        try:
+            # --rootdir forces pytest root to the project repo so it doesn't
+            # walk up and find AItelier's pytest.ini (whose testpaths=tests
+            # would cause discovery of AItelier's own test suite).
+            # --continue-on-collection-errors: without it a single
+            # unimportable module INTERRUPTS the session, so the report is
+            # one traceback and zero test results even when the other 1600
+            # tests would have run and passed. With it, every module is
+            # imported (all import defects reported in one pass) and the
+            # tests that do collect still run, so the reviewer sees the
+            # whole picture instead of the first thing that broke.
+            done = repository_executor.execute(
+                repo, [py, "-m", "pytest", str(repo), "-q", "--tb=short",
+                       "-p", "no:cacheprovider", "--continue-on-collection-errors",
+                       "--rootdir", str(repo), f"--junitxml={junit_path}",
+                       "-o", "junit_family=xunit1"],
+                PYTEST_WALL_SECONDS, writable_dirs=[Path(junit_dir)],
+                import_module=_package_module(repo) or "", pytest_timeout=True)
+            stdout, stderr = done.stdout, done.stderr
+            if done.import_error:
+                report["import_error"] = done.import_error
+            out = ((stdout or "") + "\n" + (stderr or "")).strip()
+            report["stdout"], report["stderr"] = stdout or "", stderr or ""
+            report["returncode"] = done.returncode
+            # 0 and 1 are the two outcomes in which pytest ran a session to
+            # the end. 2 (usage/internal), 3 (interrupted), 4 (usage) and 5
+            # (nothing collected) all mean the suite was not exercised, and
+            # a baseline key must not be pruned off one of them.
+            executed = Executed(
+                node_ids=_junit_node_ids(junit_path),
+                pytest_complete=done.returncode in (0, 1))
+            # pytest: 0=all passed, 1=failures, 5=NOTHING COLLECTED.
+            # 5 is a third outcome — no evidence — and it used to be routed
+            # forward as a pass: on the `autopep8` benchmark task the
+            # implementer never delivered the test directory, the gate found
+            # nothing, said `passed: true`, 5_review passed on that basis and
+            # a 0.128-scoring repo shipped as `completed`. A gate that
+            # checked nothing has not passed; it is only "not applicable"
+            # when the repo holds no Python code at all (a node or Godot
+            # project, gated by its own section below).
+            report["passed"] = done.returncode == 0
+            if done.returncode == 5:
+                report["no_tests_collected"] = True
+                report["passed"] = not _has_python_sources(repo)
+            collection_errors = _collection_errors(out)[:50]
+            report["collection_errors"] = collection_errors
+            failed_lines = [ln.strip() for ln in out.splitlines()
+                            if ln.startswith("FAILED") or " FAILED " in ln][:50]
+            report["failures"] = collection_errors + failed_lines
+            if done.returncode == 5 and not report["passed"]:
                 report["failures"].append(
-                    f"pytest:timed out after {PYTEST_WALL_SECONDS}s — no results "
-                    "collected, the suite was killed mid-run")
-                unmeasured_entries.append(report["failures"][-1])
-            except Exception as e:  # never raise — the step must not fail
-                _kill_group(proc)
-                report.update(passed=False, summary=f"Error running pytest: {e}")
-            finally:
-                # Belt-and-suspenders: even on the success path pytest may leave
-                # stray children — take the group down before cleaning up.
-                if proc is not None:
-                    _kill_group(proc)
+                    "No tests were collected — the gate verified NOTHING.")
+                report["summary"] = (
+                    "No tests were collected, so nothing about this project "
+                    "was verified. This is NOT a pass: the suite is missing "
+                    "(or unreachable by pytest). Deliver tests under `tests/` "
+                    "covering the MVP goals and re-run.")
+            elif done.returncode == 5:
+                report["summary"] = ("No tests were collected (no Python "
+                                     "sources — pytest not applicable).")
+            else:
+                report["summary"] = out[-3000:]
+            # Collection errors go ABOVE the tail, and in full. They are the
+            # defects that make every OTHER result meaningless (an
+            # unimportable module contributes zero passing tests), and they
+            # are printed first — so the tail slice is exactly what drops
+            # them. Kept together so one fix pass can address all of them
+            # instead of one per goal-loop lap.
+            if collection_errors:
+                report["summary"] = (
+                    f"{len(collection_errors)} module(s) could not be imported. "
+                    "Every test in them counts as failed; fix ALL of these, not "
+                    "just the first:\n  "
+                    + "\n  ".join(collection_errors)
+                    + "\n\n" + report["summary"])
+            # Lead with the install failure when there was one. An
+            # unimportable package produces a ModuleNotFoundError whose real
+            # cause is the failed editable install, and a reader given only
+            # the symptom rewrites packaging metadata that was never wrong.
+            report["summary"] = _lead_with_install_error(report)
+        except repository_executor.IsolationUnavailable as e:
+            report.update(passed=False, returncode=-1, skipped=True, infrastructure_unavailable=True,
+                          skipped_because="cpu_executor_unavailable", summary=str(e))
+            report["failures"].append("pytest:isolated CPU executor unavailable — no measurement")
+            unmeasured_entries.append(report["failures"][-1])
+        except subprocess.TimeoutExpired as e:
+            # A timeout is ABSENT evidence, not a red suite. `passed=False`
+            # alone is indistinguishable from "ran and failed", and with an
+            # empty failures[] plus a baseline diff of nothing it classified
+            # as `known_failure` / `passed_relative: true` — a verdict about
+            # tests that never ran. `skipped_because` routes it through
+            # gate_evidence.report_state -> "skipped" -> "unresolved", which
+            # is the state that means "go and verify", and the failures entry
+            # keeps the reason readable to the agent that has to act on it.
+            report.update(
+                passed=False, returncode=None, timed_out=True,
+                stdout=e.stdout.decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or ""),
+                stderr=e.stderr.decode(errors="replace") if isinstance(e.stderr, bytes) else (e.stderr or ""),
+                skipped_because="pytest_timeout",
+                pytest_wall_seconds=PYTEST_WALL_SECONDS,
+                summary=(
+                    f"pytest did not finish within {PYTEST_WALL_SECONDS}s and was "
+                    "killed, so NOTHING was measured. This is not a test failure: "
+                    "no test result exists either way. Either the suite needs "
+                    "longer than this harness allows, or it hangs."))
+            report["failures"].append(
+                f"pytest:timed out after {PYTEST_WALL_SECONDS}s — no results "
+                "collected, the suite was killed mid-run")
+            unmeasured_entries.append(report["failures"][-1])
+        except Exception as e:  # never raise — the step must not fail
+            report.update(passed=False, summary=f"Error running pytest: {e}")
+        finally:
+            # Belt-and-suspenders: even on the success path pytest may leave
+            # stray children — take the group down before cleaning up.
+            if proc is not None:
                 shutil.rmtree(junit_dir, ignore_errors=True)
-                if venv_dir:
-                    shutil.rmtree(venv_dir, ignore_errors=True)
+            if venv_dir:
+                shutil.rmtree(venv_dir, ignore_errors=True)
 
-            # A package that doesn't import fails the gate whatever pytest said
-            # (it can still exit 0 — e.g. when the broken module is only reached
-            # by a conftest that pytest never got to).
-            if report.get("import_error"):
-                report["passed"] = False
-                report["failures"].insert(0, report["import_error"])
-                report["summary"] = _lead_with_import_error(report)
+        # A package that doesn't import fails the gate whatever pytest said
+        # (it can still exit 0 — e.g. when the broken module is only reached
+        # by a conftest that pytest never got to).
+        if report.get("import_error"):
+            report["passed"] = False
+            report["failures"].insert(0, report["import_error"])
+            report["summary"] = _lead_with_import_error(report)
 
     # Node gate (npm install/build/test) — folded into the same report so
     # 5_review loops frontend breakage back through the goal-loop exactly

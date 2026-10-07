@@ -244,14 +244,21 @@ async def lifespan(app: FastAPI):
     # the parent — its only job is `session_manager.run()`, so without this every
     # POST /mcp fails on an uninitialised task group. Mounting alone looks like it
     # worked (routes resolve, the config is right) right up until the first call.
-    async with _mcp_endpoint.open().session_manager.run():
+    try:
+        async with _mcp_endpoint.open().session_manager.run():
+            try:
+                yield
+            finally:
+                _mcp_endpoint.close()
+    finally:
+        # Stop admission and settle owned maintenance on every lifespan exit.
         try:
-            yield
+            if hasattr(app.state, "scheduler") and app.state.scheduler:
+                app.state.scheduler.shutdown(wait=True)
         finally:
-            _mcp_endpoint.close()
-    # Shutdown
-    if hasattr(app.state, "scheduler") and app.state.scheduler:
-        app.state.scheduler.shutdown(wait=True)
+            import sys
+            from core.scheduler import settle_scheduler_maintenance
+            await settle_scheduler_maintenance(exit_error=sys.exception())
 
 
 _mcp_endpoint = MCPEndpoint()
@@ -517,15 +524,21 @@ async def stream_global_events(request: Request):
         async def _refuse():
             yield ": at capacity\n\n"
         return StreamingResponse(_refuse(), media_type="text/event-stream")
-    who = None
+    who, read_private = None, False
     try:
         from starlette.concurrency import run_in_threadpool
         from api.auth import creator_email
-        who = await run_in_threadpool(creator_email, request)
+        from api.authz import may_read_private
+        def subscriber_identity():
+            # Presence attribution is not private-read authority: a verified
+            # nonwriter still receives only the public progress projection.
+            return creator_email(request), may_read_private(request)
+        who, read_private = await run_in_threadpool(subscriber_identity)
     except Exception:
-        pass
+        pass  # Identity failure never grants private stream contents.
     return StreamingResponse(
-        stream_manager.event_generator("__global__", who=who),
+        stream_manager.event_generator("__global__", who=who,
+                                       read_private=read_private),
         media_type="text/event-stream",
     )
 

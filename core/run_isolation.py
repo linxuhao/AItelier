@@ -166,7 +166,7 @@ def record(db, run_id: str) -> dict | None:
 def retained(db) -> list[dict]:
     """Every tree this module has made and not been told to forget.
 
-    Report-only, by design: it is the whole of retention management here.
+    Report-only: it is the whole of retention management here.
     """
     with db.get_connection() as conn:
         return [dict(r) for r in conn.execute(
@@ -669,7 +669,7 @@ def _bootstrap_source(db, project_id: str, source: str) -> str:
     repository stays a refusal, which is the correct answer for a project that
     was told the repository already exists).
 
-    Best effort by design: a failure here is not the decision. It leaves the
+    Best effort: a failure here is not the decision. It leaves the
     source exactly as it was and the caller fails closed on the next line.
     """
     try:
@@ -999,7 +999,7 @@ def _remove_run_worktree(rec: dict) -> tuple[bool, str]:
     """Remove exactly the recorded run worktree through the owning repository.
 
     Refuses direct/no-tree records and any path outside AItelier's worktree root.
-    Branches/commits are intentionally preserved; only the checkout is removed.
+    Branches/commits are preserved; only the checkout is removed.
     """
     if rec.get("mode") != MODE_WORKTREE or not rec.get("worktree_path"):
         return False, "run does not own a disposable worktree"

@@ -121,10 +121,11 @@ async def wait_for_state_change(service, project_id, after=0, node_keys=None, at
                 if remaining > 0:
                     try:
                         recovery_after, recovery_ok = await asyncio.wait_for(asyncio.to_thread(
-                            recover_page, service, project_id, recovery_after, node_keys, attempt_ids),
-                            timeout=remaining)
+                            recover_page, service, project_id, recovery_after, node_keys,
+                            attempt_ids, filter_mode), timeout=remaining)
                     except asyncio.TimeoutError:
                         return {"events": [], "next_after": cursor, "timed_out": True}
+
             if args.return_when_idle and not recovery_ok:
                 # Recovery failures cannot authorize a decision from cached state.
                 # Preserve actionable events committed by other rows in the page.
@@ -196,11 +197,22 @@ def wait_disposition(store, project_id, cursor, node_keys, attempt_ids,
             joiner = " OR " if filter_mode == "any" else " AND "
             clauses.append("(" + joiner.join(filters) + ")")
             args.extend(filter_args)
-        rows = conn.execute("SELECT attempt_id,status FROM state_attempts WHERE " +
+        rows = conn.execute("SELECT attempt_id,status,artifact_ref FROM state_attempts WHERE " +
                             " AND ".join(clauses), args).fetchall()
-        paused = [dict(row) for row in rows if row["status"] == "paused"]
+        paused = [{"attempt_id": row["attempt_id"], "status": row["status"]}
+                  for row in rows if row["status"] == "paused"]
         if paused:
             return {"reason": "action_required", "attempts": paused}
+        # A completed workflow whose candidate artifact was never pinned (its
+        # owned worktree is unavailable) is actionable, not idle work: expose
+        # its exact identity and keep the artifact unset. It is never read as
+        # verified, and it never silently clears the wait.
+        unpinned = [{"attempt_id": row["attempt_id"], "status": row["status"],
+                     "artifact_ref": None}
+                    for row in rows
+                    if row["status"] == "candidate" and row["artifact_ref"] is None]
+        if unpinned:
+            return {"reason": "action_required", "attempts": unpinned}
         # An allowlist of terminal states fails conservatively for unknown or
         # future statuses. Reservations and external registrations count as work.
         if any(row["status"] not in {"candidate", "failed", "superseded"} for row in rows):
@@ -238,35 +250,44 @@ def reconcile_workflow_project(db, ws, sf, project_id):
 _recovering = set()
 
 
-def recover_page(service, project_id, after, node_keys, attempt_ids):
+def recover_page(service, project_id, after, node_keys, attempt_ids, filter_mode="all"):
     identity = str(service.db.db_path)
     with _lock:
         if identity in _recovering:
             return after, False
         _recovering.add(identity)
     try:
-        return _recover_page(service, project_id, after, node_keys, attempt_ids)
+        return _recover_page(service, project_id, after, node_keys, attempt_ids, filter_mode)
     finally:
         with _lock:
             _recovering.discard(identity)
 
 
-def _recover_page(service, project_id, after, node_keys, attempt_ids):
+def _recover_page(service, project_id, after, node_keys, attempt_ids, filter_mode="all"):
     with service.store.transaction() as conn:
         service.store._project(conn, project_id)
         clauses = ["project_id=?", "seq>?", "run_id IS NOT NULL", "execution_kind='skillflow'",
                    "(status IN ('running','paused','unknown') OR (status='candidate' AND artifact_ref IS NULL))"]
         args = [project_id, after]
+        # Node and attempt scopes form ONE OR/AND filter group, exactly as the
+        # matching wait filters them. Without this a union scope required the
+        # node and attempt filters to intersect, so a selected completed owner
+        # could stay cached as running and merely time out.
+        filters, filter_args = [], []
         if node_keys is not None:
             marks = ",".join("?" for _ in node_keys)
-            clauses.append("node_key IN (WITH RECURSIVE relevant(k) AS ("
+            filters.append("node_key IN (WITH RECURSIVE relevant(k) AS ("
                 "SELECT node_key FROM state_nodes WHERE project_id=? AND node_key IN (" + marks + ") "
                 "UNION SELECT d.dependency_key FROM state_dependencies d JOIN relevant r ON d.node_key=r.k "
                 "WHERE d.project_id=?) SELECT k FROM relevant)")
-            args.extend([project_id, *node_keys, project_id])
+            filter_args.extend([project_id, *node_keys, project_id])
         if attempt_ids is not None:
-            clauses.append("attempt_id IN (" + ",".join("?" for _ in attempt_ids) + ")")
-            args.extend(attempt_ids)
+            filters.append("attempt_id IN (" + ",".join("?" for _ in attempt_ids) + ")")
+            filter_args.extend(attempt_ids)
+        if filters:
+            joiner = " OR " if filter_mode == "any" else " AND "
+            clauses.append("(" + joiner.join(filters) + ")")
+            args.extend(filter_args)
         rows = conn.execute("SELECT seq,attempt_id FROM state_attempts WHERE " +
                             " AND ".join(clauses) + " ORDER BY seq LIMIT 10", args).fetchall()
     recovered = True
@@ -278,3 +299,4 @@ def _recover_page(service, project_id, after, node_keys, attempt_ids):
             logging.getLogger(__name__).exception("State wait recovery failed for %s", row["attempt_id"])
             recovered = False
     return (rows[-1]["seq"] if len(rows) == 10 else 0), recovered
+

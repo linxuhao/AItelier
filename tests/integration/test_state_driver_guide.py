@@ -322,7 +322,7 @@ def test_project_scoped_entry_supersede_race_has_one_winner_and_the_loser_reload
     assert first.driver_notes.get("project-b")["entry_count"] == 0
 
 
-def test_documented_criterion_envelope_matches_real_validators():
+def test_criterion_envelope_matches_real_validators():
     """Exercise the guide's JSON, including the external/evidence status distinction."""
     import pytest
     from core.state_graph import StateConflict

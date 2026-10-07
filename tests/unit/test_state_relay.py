@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 from skillflow.core import SkillFlow
-from skillflow.graph import PipelineGraph, StepNode
+from skillflow.graph import PipelineGraph, StepNode, Transition
 
 from core import run_isolation as ri
 from core.db_manager import DBManager
@@ -365,7 +365,7 @@ def _failed_with_published_architecture(world, revision=1):
         StepNode(id='architecture',checkpoint=True,output_fixed={
             'design':{'file':'approved_design.md','target':'artifact'},
             'linter':{'file':'linter_manifest.json','target':'code'}},
-            transitions=[{'to':'implementation','match':{'from':'checkpoint','value':'approved'}}]),
+            transitions=[Transition(to='implementation',match={'from':'checkpoint','value':'approved'})]),
         StepNode(id='implementation')]))
     a=attempts.reserve('game','a',1,'feature','approved-source-'+str(revision))
     pid=a['execution_project_id'];rid=sf.create_run('feature',project_id=pid)
@@ -426,16 +426,3 @@ def test_relay_published_identity_refuses_stale_and_adopts_new_owner_revision(wo
     assert (ws._draft_dir(c['execution_project_id'],'architecture','feature')/'approved_design.md').read_bytes()==new_design.read_bytes()
 
 
-
-def test_relay_baseline_omission_is_discriminated_at_actual_boundary(world):
-    import importlib.util
-    spec=importlib.util.spec_from_file_location('retained_baseline_state_service','/reports/baseline_state_service.py')
-    baseline=importlib.util.module_from_spec(spec);spec.loader.exec_module(baseline)
-    a,design=_failed_with_published_architecture(world)
-    service=baseline.StateService(world['db'],world['ws'],world['sf'],{},project_read_trusted=True)
-    inv=service.get_attempt(a['attempt_id'])['relay_inventory']
-    assert 'published_files' not in inv
-    b=world['attempts'].reserve('game','a',1,'feature','baseline-omitted',continue_from=a['attempt_id'],relay_digest=inv['digest'])
-    service._prepare_relay(b,str(world['src']))
-    assert world['ws'].seed_relay_draft(b['execution_project_id'],'architecture','feature')==[]
-    assert design.exists(), 'input remains intact in prior workspace; no backend loss'

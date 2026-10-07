@@ -358,7 +358,7 @@ def test_missing_receipt_and_invalid_base_still_refuse(world):
 
 # Published artifacts must be reachable inputs on a fresh graph rewalk, while
 # the original run, approval records and failed draft remain owned by that run.
-def _failed_with_published_architecture(world):
+def _failed_with_published_architecture(world, revision=1):
     from skillflow.core import StepResult
     sf,ws,db,attempts=world['sf'],world['ws'],world['db'],world['attempts']
     sf.register_graph(PipelineGraph(name='feature',begin='architecture',steps=[
@@ -367,7 +367,7 @@ def _failed_with_published_architecture(world):
             'linter':{'file':'linter_manifest.json','target':'code'}},
             transitions=[{'to':'implementation','match':{'from':'checkpoint','value':'approved'}}]),
         StepNode(id='implementation')]))
-    a=attempts.reserve('game','a',1,'feature','approved-source')
+    a=attempts.reserve('game','a',1,'feature','approved-source-'+str(revision))
     pid=a['execution_project_id'];rid=sf.create_run('feature',project_id=pid)
     sf.start_run(rid);attempts.bind_run(a['attempt_id'],rid,sf)
     db.ensure_project(pid,name=pid,repo_type='existing',repo_path=str(world['src']))
@@ -375,7 +375,7 @@ def _failed_with_published_architecture(world):
     sf.advance_run(rid);claimed=sf.claim_next_step(rid)
     assert claimed.step_id=='architecture'
     out=ws._get_secure_path(pid)/'feature'/'architecture';out.mkdir(parents=True)
-    design=out/'approved_design.md';design.write_text('owner approved: real consumer UI, journal budget, growth receipt\n')
+    design=out/'approved_design.md';design.write_text('owner approved revision'+str(revision)+': real consumer UI, journal budget, growth receipt\n')
     (out/'linter_manifest.json').write_text('{}')
     sf.confirm_step(claimed.token,StepResult(outputs={'design':'approved_design.md'},flags={}))
     sf.advance_run(rid);assert sf.get_run(rid)['status']=='paused'
@@ -416,9 +416,26 @@ def test_relay_published_identity_refuses_stale_and_adopts_new_owner_revision(wo
     with pytest.raises(StateConflict,match='changed since it was read'):
         service._prepare_relay(b,str(world['src']))
     assert not ws._relay_dir(b['execution_project_id'],'architecture','feature').exists()
-    fresh=service.get_attempt(a['attempt_id'])['relay_inventory']
+    attempts.retire_reservation(b['attempt_id'],'stale approved input refused')
+    a2,new_design=_failed_with_published_architecture(world,revision=2)
+    fresh=service.get_attempt(a2['attempt_id'])['relay_inventory']
     assert fresh['digest']!=inv['digest']
-    c=attempts.reserve('game','a',1,'feature','new-approved-input',continue_from=a['attempt_id'],relay_digest=fresh['digest'])
+    c=attempts.reserve('game','a',1,'feature','new-approved-input',continue_from=a2['attempt_id'],relay_digest=fresh['digest'])
     service._prepare_relay(c,str(world['src']))
     ws.seed_relay_draft(c['execution_project_id'],'architecture','feature')
-    assert (ws._draft_dir(c['execution_project_id'],'architecture','feature')/'approved_design.md').read_bytes()==design.read_bytes()
+    assert (ws._draft_dir(c['execution_project_id'],'architecture','feature')/'approved_design.md').read_bytes()==new_design.read_bytes()
+
+
+
+def test_relay_baseline_omission_is_discriminated_at_actual_boundary(world):
+    import importlib.util
+    spec=importlib.util.spec_from_file_location('retained_baseline_state_service','/reports/baseline_state_service.py')
+    baseline=importlib.util.module_from_spec(spec);spec.loader.exec_module(baseline)
+    a,design=_failed_with_published_architecture(world)
+    service=baseline.StateService(world['db'],world['ws'],world['sf'],{},project_read_trusted=True)
+    inv=service.get_attempt(a['attempt_id'])['relay_inventory']
+    assert 'published_files' not in inv
+    b=world['attempts'].reserve('game','a',1,'feature','baseline-omitted',continue_from=a['attempt_id'],relay_digest=inv['digest'])
+    service._prepare_relay(b,str(world['src']))
+    assert world['ws'].seed_relay_draft(b['execution_project_id'],'architecture','feature')==[]
+    assert design.exists(), 'input remains intact in prior workspace; no backend loss'

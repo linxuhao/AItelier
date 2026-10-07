@@ -532,13 +532,20 @@ class StateService:
                     continue
                 files = {}
                 for filename, sha in self.ws.relay_manifest(directory).items():
-                    target = target_for(node)
+                    # Only declared artifact outputs belong to this step. Do
+                    # not carry old version siblings or unrelated project files.
                     for slot in (node.output_fixed or {}):
-                        if PurePath(filename).match(_get_pattern(slot, node.output_fixed)):
-                            target = target_for(node, slot)
+                        if (PurePath(filename).match(_get_pattern(slot, node.output_fixed))
+                                and target_for(node, slot) == "artifact"):
+                            path = directory / filename
+                            if path.suffix.lower() not in {".md", ".json", ".txt", ".yaml", ".yml"}:
+                                raise StateConflict(f"unsupported published relay input: {node.id}/{filename}")
+                            try:
+                                path.read_text(encoding="utf-8")
+                            except (UnicodeError, OSError) as e:
+                                raise StateConflict(f"unreadable UTF-8 relay input: {node.id}/{filename}") from e
+                            files[filename] = sha
                             break
-                    if target == "artifact":
-                        files[filename] = sha
                 if files:
                     published[node.id] = files
         from core.code_relay import inventory as code_inventory

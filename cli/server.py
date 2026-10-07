@@ -337,8 +337,10 @@ def _live_runtime_observation(base_url: str) -> dict:
         response = client.post("/api/admin/deployment-runtime-observation")
         response.raise_for_status()
         facts = dq._validated_runtime_facts(response.json())
-    container = _compose("ps", "-q", _COMPOSE_SERVICE)
-    if container.returncode or not re.fullmatch(r"[0-9a-f]{12,64}", container.stdout.strip()):
+    container = _compose("ps", "-q", _COMPOSE_SERVICE,
+                         capture_output=True, text=True, timeout=15)
+    if (container.returncode or not isinstance(container.stdout, str)
+            or not re.fullmatch(r"[0-9a-f]{12,64}", container.stdout.strip())):
         raise ValueError("Live backend container identity is unavailable")
     identity = subprocess.run(["docker", "inspect", "--format", "{{.State.Pid}}",
                                container.stdout.strip()], capture_output=True, text=True, timeout=10)

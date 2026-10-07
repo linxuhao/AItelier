@@ -110,7 +110,7 @@ def wire_client(live):
 
 def bind_host_backend(live,monkeypatch,mismatch=False):
     monkeypatch.setattr(server.httpx,'Client',wire_client(live))
-    monkeypatch.setattr(server,'_compose',lambda *args:SimpleNamespace(returncode=0,stdout='a'*64+'\n',stderr=''))
+    monkeypatch.setattr(server,'_compose',lambda *args,**kwargs:SimpleNamespace(returncode=0,stdout='a'*64+'\n',stderr=''))
     monkeypatch.setattr(server.subprocess,'run',lambda *args,**kwargs:SimpleNamespace(returncode=0,stdout=str(os.getpid())+'\n',stderr=''))
     if mismatch:
         real=os.readlink

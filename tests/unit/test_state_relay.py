@@ -458,6 +458,32 @@ def test_relay_declared_complete_paths_match_real_writer_not_basename_collisions
     assert (world['ws']._draft_dir(b['execution_project_id'],'architecture','feature')/relative).read_bytes()==design.read_bytes()
 
 
+@pytest.mark.parametrize('pattern,ident,decoy',[
+    ('deep/*[1]?.md','nested/id','deep/id1x.md'),
+    ('deep/*?.md','id','deep/unadopted.md'),
+    ('deep/*-*.md','sameid','deep/different-other.md'),
+])
+def test_relay_declared_pattern_matches_the_real_writer_grammar(world,pattern,ident,decoy):
+    """The writer replaces EVERY '*' with the SAME id and keeps '?', '[...]'
+    literal. The old fnmatch/PurePath matcher read '?'/'[...]' as wildcards and
+    let each '*' capture a different value, so it both omitted the real emitted
+    name and admitted names the writer can never produce. The decoy written here
+    is exactly such a name; it must stay unadopted."""
+    a,design=_failed_with_published_architecture(world,design_pattern=pattern,design_id=ident)
+    directory=world['ws']._get_secure_path(a['execution_project_id'])/'feature'/'architecture'
+    relative=design.relative_to(directory).as_posix()
+    decoy_path=directory/decoy
+    decoy_path.parent.mkdir(parents=True,exist_ok=True)
+    decoy_path.write_text('A NAME THE WRITER CANNOT EMIT\n')
+    inv=world['service'].get_attempt(a['attempt_id'])['relay_inventory']
+    assert inv['published_files']['architecture']=={relative:_sha(design.read_text())}
+    b=world['attempts'].reserve('game','a',1,'feature','writer-grammar-relay',continue_from=a['attempt_id'],relay_digest=inv['digest'])
+    world['service']._prepare_relay(b,str(world['src']))
+    seeded=world['ws'].seed_relay_draft(b['execution_project_id'],'architecture','feature')
+    assert seeded==[relative],'only the writer-emitted name is relayed'
+    assert (world['ws']._draft_dir(b['execution_project_id'],'architecture','feature')/relative).read_bytes()==design.read_bytes()
+
+
 def test_relay_actual_sdk_reader_prefers_retained_input_over_conflicting_owned_rewalk(world):
     from skillflow.read_tools import make_read_tool_fns
     a,design=_failed_with_published_architecture(world)

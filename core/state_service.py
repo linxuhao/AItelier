@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 from core.state_privacy import writer_only_read
@@ -17,6 +18,30 @@ from core.state_graph import StateConflict, StateGraphError, StateGraphStore, ca
 from core.state_attempts import StateAttempts, artifact_ref, evidence_director_identity
 
 
+def _writer_declares(filename: str, pattern: object) -> bool:
+    """Whether the real write tool can emit EXACTLY ``filename`` for a declared
+
+    ``pattern``. The generated write tool derives the concrete name by replacing
+    EVERY ``*`` in the declared pattern with the SAME ``id`` argument; ``?``,
+    ``[`` and ``]`` carry no meaning in that grammar and stay literal in what it
+    emits. A generic glob/path matcher does not reproduce this: it reads ``?``
+    and ``[...]`` as wildcards (so the real ``deep/*[1]?.md`` ->
+    ``deep/nested/id[1]?.md`` output is omitted, while ``deep/*?.md`` wrongly
+    admits ``deep/unadopted.md``) and lets each ``*`` capture a different value
+    (so ``deep/*-*.md`` wrongly admits ``deep/different-other.md`` instead of the
+    writer's ``deep/sameid-sameid.md``). This matcher requires every ``*`` to
+    capture ONE shared value, with everything else literal, so a basename
+    collision, an extra nested path or a private sibling is never admitted."""
+    if not isinstance(pattern, str):
+        return False
+    if "*" not in pattern:
+        return filename == pattern
+    segments = pattern.split("*")
+    expr = re.escape(segments[0])
+    for index, segment in enumerate(segments[1:], start=1):
+        expr += "(?P<capture>.*)" if index == 1 else "(?P=capture)"
+        expr += re.escape(segment)
+    return re.fullmatch(expr, filename) is not None
 
 
 SEED_HEADING = "# State goal attempt"
@@ -522,7 +547,6 @@ class StateService:
             # Fresh relay runs rewalk the graph. Give each artifact step its
             # prior published bytes as input, rather than only its unfinished
             # draft; a prose instruction cannot make another workspace readable.
-            from fnmatch import fnmatchcase
             from skillflow.output_targets import target_for
             from skillflow.write_tools import _get_pattern
             graph = self.sf._get_resolver_for_run(attempt["run_id"]).graph
@@ -536,8 +560,7 @@ class StateService:
                     # not carry old version siblings or unrelated project files.
                     for slot in (node.output_fixed or {}):
                         pattern = _get_pattern(slot, node.output_fixed)
-                        declared = (filename == pattern or
-                                    ("*" in pattern and fnmatchcase(filename, pattern)))
+                        declared = _writer_declares(filename, pattern)
                         if declared and target_for(node, slot) == "artifact":
                             path = directory / filename
                             if path.suffix.lower() not in {".md", ".json", ".txt", ".yaml", ".yml"}:
@@ -781,7 +804,6 @@ class StateService:
         # into a new direct-code attempt and then silently ignored by its runner.
         from skillflow.output_targets import target_for
         from skillflow.write_tools import _get_pattern
-        from pathlib import PurePath
         # by-name-ok: creation-time relay admission; the new attempt has no run/pin yet.
         current_graph = getattr(self.sf, "_graphs", {}).get(attempt["workflow"])
         current_nodes = {n.id: n for n in getattr(current_graph, "steps", [])}
@@ -790,7 +812,7 @@ class StateService:
             for filename in files:
                 target = target_for(node)
                 for slot in (getattr(node, "output_fixed", {}) or {}):
-                    if PurePath(filename).match(_get_pattern(slot, node.output_fixed)):
+                    if _writer_declares(filename, _get_pattern(slot, node.output_fixed)):
                         target = target_for(node, slot)
                         break
                 if target == "code":

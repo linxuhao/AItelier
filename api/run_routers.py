@@ -11,6 +11,7 @@ from api.dependencies import (
     get_workspace_manager, enrich_project_status,
 )
 from api.auth import CurrentUser, get_optional_user, creator_email
+from api.authz import require_reader, execution_progress
 from core.db_manager import DBManager
 from core.workspace_manager import WorkspaceManager
 from api._cache_stats import compute_cache_stats_per_step, compute_cache_stats_batch, merge_stats
@@ -143,7 +144,7 @@ def list_all_runs(
         rows = [r for r in rows if (r.get("config_name") or "dpe_default_v2") == config_name]
     if status:
         rows = [r for r in rows if (r.get("status") or "").split(":")[0] == status]
-    return {"runs": rows}
+    return {"runs": [execution_progress(request, row) for row in rows]}
 
 
 def _list_all_runs_uncached(owner, db, registry):
@@ -252,7 +253,8 @@ def list_project_runs(
     for r in enriched:
         r["cache_stats"] = batch_stats.get(r["id"])
 
-    return {"project_id": project_id, "runs": enriched}
+    return {"project_id": project_id,
+            "runs": [execution_progress(request, row) for row in enriched]}
 
 
 # ── Helpers ────────────────────────────────────────────────────────────
@@ -273,7 +275,7 @@ def _resolve_run(run_id: str) -> dict | None:
 
 # ── Single run detail ─────────────────────────────────────────────────
 
-@router.get("/runs/{run_id}")
+@router.get("/runs/{run_id}", dependencies=[Depends(require_reader)])
 def get_run_detail(
     run_id: str,
     user: CurrentUser | None = Depends(get_optional_user),
@@ -361,7 +363,7 @@ def get_run_detail(
 
 # ── Execution trace ───────────────────────────────────────────────────
 
-@router.get("/runs/{run_id}/trace")
+@router.get("/runs/{run_id}/trace", dependencies=[Depends(require_reader)])
 def get_run_trace(
     run_id: str,
     step_instance_id: Optional[int] = Query(None, description="Filter by step instance ID (int)"),
@@ -441,7 +443,8 @@ def _run_to_project_id(run_id: str) -> str:
     return run["project_id"]
 
 
-@router.get("/runs/{run_id}/checkpoint", response_model=CheckpointResponse)
+@router.get("/runs/{run_id}/checkpoint", response_model=CheckpointResponse,
+            dependencies=[Depends(require_reader)])
 def get_run_checkpoint(
     run_id: str,
     request: Request,

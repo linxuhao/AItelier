@@ -22,8 +22,10 @@
      it was armed that holds only that part: the visibility of opened projects
      (``state_project_access``), the event watermark of opened projects
      (``state_events``), the provenance rows of opened projects' runs
-     (``run_isolation``), and - only when a notebook read asks for one
-     project's notebook - that project's notebook rows if and only if the
+     (``run_isolation``), the identity of retained candidate Git artifacts
+     referenced by opened projects' runs, with ``bundle_bytes`` replaced by
+     NULL (``state_git_artifacts``), and - only when a notebook read asks for
+     one project's notebook - that project's notebook rows if and only if the
      project is opened. Columns outside that part are refused;
    * every other table, every write, every schema change, ATTACH and every
      pragma except ``foreign_keys``/``busy_timeout`` are refused (default deny).
@@ -65,6 +67,12 @@ PRIVATE_STATE_TABLES = frozenset({
     "state_events", "state_project_access",
     "state_director_messages", "state_director_deliveries",
     "state_director_inbox_sequences", "state_director_idempotency",
+    # A retained candidate's ``bundle_bytes`` are the exact private Git bytes
+    # that would reconstruct the candidate. The commit/tree identity is public
+    # (an opened project's attempt names it); the bytes must never be read
+    # through an untrusted connection, so this table is classified here and the
+    # identity is projected with ``bundle_bytes`` replaced by NULL below.
+    "state_git_artifacts",
 })
 
 PUBLIC_STATE_TABLES = frozenset({
@@ -218,6 +226,17 @@ PROJECTIONS = {
     "run_isolation": (
         "SELECT * FROM main.run_isolation WHERE run_id IN (SELECT run_id FROM "
         f"main.state_attempts WHERE project_id IN ({_OPENED}))",
+        None),
+    # The identity of retained candidate Git artifacts referenced by opened
+    # projects' attempts is readable; ``bundle_bytes`` is NOT. The projection
+    # replaces the private bytes with NULL, so a public read of an artifact's
+    # commit/tree/sha256 can never deliver the candidate bytes. The filter keeps
+    # unopened projects' artifact rows out of an untrusted connection entirely.
+    "state_git_artifacts": (
+        "SELECT commit_sha, tree_sha, bundle_sha256, retained_ref, "
+        "NULL AS bundle_bytes, NULL AS created_at FROM main.state_git_artifacts "
+        "WHERE commit_sha IN (SELECT artifact_ref FROM main.state_attempts "
+        f"WHERE project_id IN ({_OPENED}))",
         None),
 }
 

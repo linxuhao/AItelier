@@ -64,7 +64,7 @@ def test_real_failed_base_reconciles_and_explicit_new_attempt_launches(launch_wo
     pid = a["execution_project_id"]
     # Reproduce the historical registration status through the host API.
     w.db.update_project(pid, status="pending")
-    ri.request_base(w.db, pid, "f" * 40, "intentionally unavailable source commit")
+    ri.request_base(w.db, pid, "f" * 40, "unavailable source commit")
     assert w.scheduler._get_or_create_skillflow_run(pid) is None
     run = w.sf._conn.execute("SELECT * FROM skillflow_runs WHERE project_id=?", (pid,)).fetchone()
     rid = run["id"]

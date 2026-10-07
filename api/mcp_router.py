@@ -63,7 +63,9 @@ from core.tool_guards import (bad_config_name, bad_tool_name,
 # registry, or in the run table.
 _TOOL_KIND: dict[str, str] = {}
 # State goals/evidence may contain private product plans: reads require a writer.
-_PRIVATE_READ_TOOLS = frozenset({"state_graph_read"})
+_PRIVATE_READ_TOOLS = frozenset({
+    "state_graph_read", "trace_list", "trace_search", "trace_read", "get_step_output",
+})
 _DIRECTOR_ACTIONS = frozenset({
     "send_director_message", "list_director_messages",
     "acknowledge_director_message", "resolve_director_message",
@@ -340,7 +342,7 @@ def build_mcp() -> FastMCP:
     _register_read_tools(tool)
     _register_bundle_tools(tool)
     _register_edit_tools(tool)
-    _register_run_tools(tool)
+    _register_run_tools(tool, mcp)
     _register_wait_tool(tool)
     _register_trace_tools(tool)
     _register_lifecycle_tools(tool)
@@ -1190,7 +1192,7 @@ _EITHER = ("Accepts a run_id OR a project_id; a project id takes that project's 
            "NEWEST run and the answer echoes which one it used.")
 
 
-def _register_run_tools(tool):
+def _register_run_tools(tool, mcp=None):
 
     @tool("run_pipeline", "write",
           "Start a run and return its run_id immediately. NOTE THE DEFAULT: "
@@ -1416,6 +1418,13 @@ def _register_run_tools(tool):
         row, resolved = resolve_run_ref(sf, run_id)
         if not row:
             return {"error": f"no run '{run_id}'"}
+        request = _request_from(mcp.get_context()) if mcp is not None else None
+        if request is None or not _mcp_may_read_private(request):
+            # Progress is public; output bodies and raw failures may contain source.
+            return {"run_id": row["id"], "project_id": row.get("project_id"),
+                    "config": row.get("graph_name"), "status": row.get("status"),
+                    "steps": [{"step": s["step_id"], "status": s["status"]}
+                              for s in sf.get_steps(row["id"])]}
         out = summarise_run(sf, get_workspace_manager(), get_config_registry(),
                             row["id"])
         if resolved:

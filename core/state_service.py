@@ -506,6 +506,7 @@ class StateService:
             return None
         commits = [line.split(" ", 1) for line in log.splitlines() if line]
         staged = {}
+        published = {}
         pid = attempt["execution_project_id"]
         try:
             config_dir = self.ws._get_secure_path(pid) / attempt["workflow"]
@@ -518,6 +519,28 @@ class StateService:
                 manifest = self.ws.relay_manifest(tmp)
                 if manifest:
                     staged[tmp.name[:-4]] = manifest
+            # Fresh relay runs rewalk the graph. Give each artifact step its
+            # prior published bytes as input, rather than only its unfinished
+            # draft; a prose instruction cannot make another workspace readable.
+            from pathlib import PurePath
+            from skillflow.output_targets import target_for
+            from skillflow.write_tools import _get_pattern
+            graph = self.sf._get_resolver_for_run(attempt["run_id"]).graph
+            for node in graph.steps:
+                directory = config_dir / node.id
+                if not directory.is_dir() or directory.is_symlink():
+                    continue
+                files = {}
+                for filename, sha in self.ws.relay_manifest(directory).items():
+                    target = target_for(node)
+                    for slot in (node.output_fixed or {}):
+                        if PurePath(filename).match(_get_pattern(slot, node.output_fixed)):
+                            target = target_for(node, slot)
+                            break
+                    if target == "artifact":
+                        files[filename] = sha
+                if files:
+                    published[node.id] = files
         from core.code_relay import inventory as code_inventory
         code = {"files": {}, "steps": {}, "unowned": []}
         code_error = ""
@@ -529,9 +552,10 @@ class StateService:
                 code_error = str(exc)
         result = {"run_id": attempt["run_id"], "branch": rec["branch"], "base_sha": rec["base_sha"],
                 "head_sha": head, "commits": [{"sha": c[0], "subject": c[1] if len(c) > 1 else ""} for c in commits],
-                "mainline_ahead_by": behind, "staged_files": staged,
+                "mainline_ahead_by": behind, "staged_files": staged, "published_files": published,
                 "code_changes": code, "code_error": code_error,
-                "digest": digest({"head_sha": head, "staged_files": staged, "code_changes": code}),
+                "digest": digest({"head_sha": head, "staged_files": staged,
+                                  "published_files": published, "code_changes": code}),
                 "error": attempt.get("error")}
         result.update(self._relay_failure_metadata(attempt))
         return result
@@ -786,6 +810,18 @@ class StateService:
                                    note=f"relay of {prior['attempt_id']} (run {prior['run_id']}); code remains unvalidated")
         parked = {}
         prior_config = self.ws._get_secure_path(prior["execution_project_id"]) / prior["workflow"]
+        for step, manifest in inventory["published_files"].items():
+            if step in inventory["staged_files"]:
+                # A newer unfinished revision has the existing recovery semantics.
+                continue
+            try:
+                copied = self.ws.stage_relay_draft(prior_config / step, attempt["execution_project_id"],
+                                                   step, attempt["workflow"], manifest=manifest)
+            except RelayDraftChanged as e:
+                raise StateConflict(f"published relay input changed while being copied ({e}); "
+                                    "read relay_inventory again") from e
+            if copied:
+                parked[step] = copied
         for step, manifest in inventory["staged_files"].items():
             try:
                 copied = self.ws.stage_relay_draft(prior_config / f"{step}.tmp", attempt["execution_project_id"],
@@ -799,6 +835,7 @@ class StateService:
                 "base_sha": base, "commits": inventory["commits"],
                 "code_changes": code, "code_recovery_validated": False,
                 "mainline_ahead_by": inventory["mainline_ahead_by"], "staged_files": parked,
+                "published_files": inventory["published_files"],
                 "digest": inventory["digest"], "error": inventory["error"]}
 
     # An attempt in one of these states has stopped producing work, so what it

@@ -354,3 +354,71 @@ def test_missing_receipt_and_invalid_base_still_refuse(world):
             str(world["src"]))
     with pytest.raises(StateGraphError):
         world["service"].start_attempt("game", "b", 1, "feature", "bad-base", base_sha="not-a-sha")
+
+
+# Published artifacts must be reachable inputs on a fresh graph rewalk, while
+# the original run, approval records and failed draft remain owned by that run.
+def _failed_with_published_architecture(world):
+    from skillflow.core import StepResult
+    sf,ws,db,attempts=world['sf'],world['ws'],world['db'],world['attempts']
+    sf.register_graph(PipelineGraph(name='feature',begin='architecture',steps=[
+        StepNode(id='architecture',checkpoint=True,output_fixed={
+            'design':{'file':'approved_design.md','target':'artifact'},
+            'linter':{'file':'linter_manifest.json','target':'code'}},
+            transitions=[{'to':'implementation','match':{'from':'checkpoint','value':'approved'}}]),
+        StepNode(id='implementation')]))
+    a=attempts.reserve('game','a',1,'feature','approved-source')
+    pid=a['execution_project_id'];rid=sf.create_run('feature',project_id=pid)
+    sf.start_run(rid);attempts.bind_run(a['attempt_id'],rid,sf)
+    db.ensure_project(pid,name=pid,repo_type='existing',repo_path=str(world['src']))
+    ri.ensure_for_run(db,run_id=rid,project_id=pid,config_name='feature',repo_mode='code')
+    sf.advance_run(rid);claimed=sf.claim_next_step(rid)
+    assert claimed.step_id=='architecture'
+    out=ws._get_secure_path(pid)/'feature'/'architecture';out.mkdir(parents=True)
+    design=out/'approved_design.md';design.write_text('owner approved: real consumer UI, journal budget, growth receipt\n')
+    (out/'linter_manifest.json').write_text('{}')
+    sf.confirm_step(claimed.token,StepResult(outputs={'design':'approved_design.md'},flags={}))
+    sf.advance_run(rid);assert sf.get_run(rid)['status']=='paused'
+    sf.approve_checkpoint(rid);sf.advance_run(rid)
+    ws.write_draft(pid,'implementation','unfinished.md','pending correction\n',graph_name='feature')
+    sf.fail_run(rid,'Step implementation: native turn budget exhausted (32/32)')
+    a=attempts.reconcile(a['attempt_id'],sf)
+    return a,design
+
+
+def test_relay_published_input_reaches_rewalk_with_checkpoints_preserved(world):
+    a,design=_failed_with_published_architecture(world)
+    before=design.read_bytes();service=world['service'];attempts=world['attempts'];ws=world['ws']
+    inv=service.get_attempt(a['attempt_id'])['relay_inventory']
+    assert inv['published_files']['architecture']=={'approved_design.md':_sha(before.decode())}
+    b=attempts.reserve('game','a',1,'feature','published-relay',
+        instruction='Keep adopted UI; a conflicting evidence-only rewalk is not an owner revision',
+        continue_from=a['attempt_id'],relay_digest=inv['digest'])
+    relay=service._prepare_relay(b,str(world['src']))
+    pid=b['execution_project_id']
+    assert relay['published_files']['architecture']==inv['published_files']['architecture']
+    assert ws.seed_relay_draft(pid,'architecture','feature')==['approved_design.md']
+    target=ws._draft_dir(pid,'architecture','feature')/'approved_design.md'
+    assert target.read_bytes()==before
+    assert design.read_bytes()==before
+    assert ws.seed_relay_draft(pid,'architecture','feature')==[]
+    assert world['sf']._get_resolver_for_run(a['run_id']).graph.steps[0].checkpoint is True
+    assert world['sf'].get_run(a['run_id'])['status']=='failed'
+    assert 'linter_manifest.json' not in inv['published_files']['architecture']
+
+
+def test_relay_published_identity_refuses_stale_and_adopts_new_owner_revision(world):
+    a,design=_failed_with_published_architecture(world)
+    service=world['service'];attempts=world['attempts'];ws=world['ws']
+    inv=service.get_attempt(a['attempt_id'])['relay_inventory']
+    b=attempts.reserve('game','a',1,'feature','stale-input',continue_from=a['attempt_id'],relay_digest=inv['digest'])
+    design.write_text('owner approved revision2: new consumer UI\n')
+    with pytest.raises(StateConflict,match='changed since it was read'):
+        service._prepare_relay(b,str(world['src']))
+    assert not ws._relay_dir(b['execution_project_id'],'architecture','feature').exists()
+    fresh=service.get_attempt(a['attempt_id'])['relay_inventory']
+    assert fresh['digest']!=inv['digest']
+    c=attempts.reserve('game','a',1,'feature','new-approved-input',continue_from=a['attempt_id'],relay_digest=fresh['digest'])
+    service._prepare_relay(c,str(world['src']))
+    ws.seed_relay_draft(c['execution_project_id'],'architecture','feature')
+    assert (ws._draft_dir(c['execution_project_id'],'architecture','feature')/'approved_design.md').read_bytes()==design.read_bytes()

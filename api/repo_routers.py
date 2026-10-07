@@ -2,7 +2,8 @@
 # REST endpoints for repository grouping — groups projects by repo_path.
 
 import os
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
+from api.authz import require_reader, may_read_private, execution_progress
 from api.dependencies import get_db_manager, enrich_project_status
 from api import _read_cache
 from core.db_manager import DBManager
@@ -133,7 +134,7 @@ def _build_repo_groups(db: DBManager, repo_path: str | None = None) -> list[dict
 
 
 @router.get("")
-def list_repos(db: DBManager = Depends(get_db_manager)):
+def list_repos(request: Request, db: DBManager = Depends(get_db_manager)):
     """List all repository groups (distinct repo_path values).
 
     Deliberately NOT `async`. There is not one await in the whole call: it walks
@@ -151,10 +152,15 @@ def list_repos(db: DBManager = Depends(get_db_manager)):
     for this every 10s and the answer is identical for all of them, so it was
     being recomputed once per tab per tick on a single-core process.
     """
-    return _read_cache.cached(("repos", None), lambda: _build_repo_groups(db))
+    groups = _read_cache.cached(("repos", None), lambda: _build_repo_groups(db))
+    if may_read_private(request):
+        return groups
+    return [{"project_count": group["project_count"], "last_activity": group["last_activity"],
+             "projects": [execution_progress(request, row) for row in group["projects"]]}
+            for group in groups]
 
 
-@router.get("/{repo_path:path}")
+@router.get("/{repo_path:path}", dependencies=[Depends(require_reader)])
 def get_repo(repo_path: str, db: DBManager = Depends(get_db_manager)):
     """Get a single repository group by its filesystem path.
 

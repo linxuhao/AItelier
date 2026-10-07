@@ -179,3 +179,17 @@ def may_read_private(request: Request) -> bool:
     if not gate_enabled():
         return True
     return write_denial_reason(request) is None
+
+
+def execution_progress(request: Request, row: dict) -> dict:
+    """Keep public progress separate from private source/context metadata."""
+    if may_read_private(request):
+        return row
+    fields = {"id", "project_id", "name", "status", "config_name", "config_label",
+              "created_at", "updated_at", "started_at", "completed_at", "priority",
+              "current_project_step", "current_node", "latest_status", "latest_step",
+              "last_update", "task_count", "completed_count", "running_count",
+              "failed_count", "pending_count", "task_summary", "cache_stats",
+              "has_task_loop", "is_authoring", "repo_less", "step_count",
+              "completed_steps", "failed_steps", "active_step"}
+    return {key: value for key, value in row.items() if key in fields}

@@ -11,6 +11,7 @@ from core.db_manager import DBManager
 from core.workspace_manager import WorkspaceManager
 from api.dependencies import get_db_manager, get_workspace_manager, owner_filter, check_write_owner, check_read_owner
 from api.auth import CurrentUser, get_optional_user, creator_email
+from api.authz import require_reader
 from api.sse_manager import stream_manager
 
 # A step id is a graph node name — letters, digits, underscore, dash, dot as a
@@ -139,7 +140,7 @@ async def stream_task_logs(task_id: str):
     )
 
 
-@router.get("/{task_id}/steps/{step_id}/output")
+@router.get("/{task_id}/steps/{step_id}/output", dependencies=[Depends(require_reader)])
 def get_step_output(
     task_id: int,
     step_id: str,

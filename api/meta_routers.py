@@ -23,6 +23,7 @@ from core.interaction_meta import (
 )
 from api.dependencies import get_db_manager, get_workspace_manager, get_skillflow, check_write_owner, check_read_owner
 from api.auth import CurrentUser, get_optional_user, creator_email
+from api.authz import require_reader
 from api.sse_manager import stream_manager
 
 logger = logging.getLogger(__name__)
@@ -749,7 +750,8 @@ def _get_checkpoint_info(project_id: str,
     return step_id, label, run_id, graph_name, instance
 
 
-@router.get("/{project_id}/checkpoint", response_model=CheckpointResponse)
+@router.get("/{project_id}/checkpoint", response_model=CheckpointResponse,
+            dependencies=[Depends(require_reader)])
 def get_pending_checkpoint(
     project_id: str,
     request: Request,

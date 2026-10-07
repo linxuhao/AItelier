@@ -202,6 +202,14 @@ def reset_endpoint_cooldowns() -> None:
     _ENDPOINT_COOLDOWN.clear()
 
 
+def _is_spent_credit(err) -> bool:
+    """Anthropic's out-of-credit answer: HTTP 400 'Your credit balance is too
+    low to access the Anthropic API'. Matched on the prose because the class
+    (BadRequestError) is shared with every genuinely malformed request."""
+    return (isinstance(err, litellm.exceptions.BadRequestError)
+            and "credit balance is too low" in str(err).lower())
+
+
 def _endpoint_available(name: str) -> bool:
     import time as _t
     return _ENDPOINT_COOLDOWN.get(name, 0.0) <= _t.time()
@@ -211,8 +219,11 @@ def _note_endpoint_spent(name: str, err) -> float:
     """Park ONE endpoint until the provider says its window reopens."""
     import time as _t
     reset = quota_reset_at(err)
+    # Spent credit names no reset instant and does not come back on its own
+    # (a new grant or a top-up does), so it gets the longest hold we allow.
+    hold = _COOLDOWN_MAX_S if _is_spent_credit(err) else _COOLDOWN_FALLBACK_S
     until = (reset.timestamp() if reset is not None
-             else _t.time() + _COOLDOWN_FALLBACK_S)
+             else _t.time() + hold)
     # A past instant means the window already reopened — nothing to park.
     until = min(until, _t.time() + _COOLDOWN_MAX_S)
     if until <= _t.time():
@@ -913,6 +924,18 @@ class AIGateway:
                 self._apply_binding(kwargs)
                 continue
             except Exception as e:
+                # Anthropic reports spent credit as a 400, not a 429 — a fact
+                # about the ENDPOINT dressed as a request error. The plan credit
+                # the anthropic provider runs on is a monthly grant with an
+                # expiry, so this is certain to happen to every rotate pool
+                # Claude sits in; without this every step rotated onto it dies.
+                if _is_spent_credit(e):
+                    if not self._failover(e):
+                        exc = self._explain_auth(e)
+                        exc._aitelier_candidates = list(self._candidates)
+                        raise exc from e
+                    self._apply_binding(kwargs)
+                    continue
                 # Request-shaped failure (bad params, unsupported args): every
                 # candidate would reject it identically.
                 #
@@ -990,7 +1013,7 @@ class AIGateway:
             if self._burst_hits < _BURST_TOLERANCE:
                 raise exc
         held = ""
-        if is_quota_exhausted(exc):
+        if is_quota_exhausted(exc) or _is_spent_credit(exc):
             import time as _t
             until = _note_endpoint_spent(failed, exc)
             if until:
@@ -1136,6 +1159,34 @@ class AIGateway:
         else:
             kwargs.pop("extra_headers", None)
 
+    def _binding_effort(self) -> str | None:
+        """The effort to declare for the bound endpoint.
+
+        The route table may state the effort FOR THIS ENDPOINT, and it wins
+        over the role's: the role names one string for an internal model that
+        now spans endpoints whose vocabularies do not overlap. DeepSeek takes
+        low/high/max; Qwen3.8's chat template takes low/medium/xhigh and RAISES
+        on anything else — `max` comes back a 500 ("Unexpected reasoning effort
+        max"), measured on localqwen/qwen3. Resolved at bind time rather than
+        at construction because a failover rebinds mid-step, and the new
+        endpoint may want a different string for the same intent.
+        """
+        from core.model_routes import get_routes
+        effort = self.thinking_effort
+        try:
+            per_endpoint = get_routes(self._routes_path).effort_for(
+                self.internal_model or "", self.active_model or "")
+        except (RuntimeError, OSError, ValueError):
+            # An unreadable or malformed TABLE must not break the call — the
+            # role's value stands and the request still goes out. Deliberately
+            # NOT `except Exception`: the first draft of this caught
+            # everything, and the local import of get_routes lives in
+            # __init__, so line 948 raised NameError on every call and the
+            # swallow turned it into "the route never declares an effort". The
+            # tests failed with no error to read.
+            per_endpoint = None
+        return per_endpoint or effort
+
     def _apply_binding(self, kwargs: dict) -> dict:
         """(Re)write the keys that depend on WHICH endpoint is bound.
 
@@ -1150,7 +1201,7 @@ class AIGateway:
         self._apply_session_headers(kwargs)
         kwargs["model"] = self.litellm_model
         for k in ("api_base", "api_key", "cache_control_injection_points",
-                  "reasoning_effort", "extra_body"):
+                  "reasoning_effort", "extra_body", "thinking"):
             kwargs.pop(k, None)
         if self.api_base:
             kwargs["api_base"] = self.api_base
@@ -1165,6 +1216,25 @@ class AIGateway:
         if points:
             kwargs["cache_control_injection_points"] = points
 
+        # Native Anthropic speaks neither dialect below. litellm forwards
+        # `extra_body` to it as a literal body field, answered with a 400
+        # ("extra_body: Extra inputs are not permitted"), and Claude 5.5 also
+        # refuses thinking.type=enabled. Its own form is thinking.type=adaptive
+        # + output_config.effort, which litellm (1.104) emits from a top-level
+        # `reasoning_effort`. Measured 2026-10-07 on claude-haiku-5-5: low /
+        # medium / high / xhigh / max accepted, `disabled` honoured.
+        if (self.litellm_model or "").startswith("anthropic/"):
+            if self.enable_thinking:
+                kwargs.pop("temperature", None)
+                effort = self._binding_effort()
+                if effort:
+                    kwargs["reasoning_effort"] = effort
+                else:
+                    kwargs["thinking"] = {"type": "adaptive"}
+            else:
+                kwargs["thinking"] = {"type": "disabled"}
+            return kwargs
+
         # Thinking mode: inject reasoning params, remove incompatible temperature
         if self.enable_thinking:
             kwargs.pop("temperature", None)
@@ -1173,31 +1243,7 @@ class AIGateway:
                 extra_body["reasoning_split"] = True
             else:
                 extra_body["thinking"] = {"type": "enabled"}
-            # The route table may state the effort FOR THIS ENDPOINT, and it
-            # wins over the role's: the role names one string for an internal
-            # model that now spans endpoints whose vocabularies do not overlap.
-            # DeepSeek takes low/high/max; Qwen3.8's chat template takes
-            # low/medium/xhigh and RAISES on anything else — `max` comes back a
-            # 500 ("Unexpected reasoning effort max"), measured on
-            # localqwen/qwen3. Resolved HERE rather than at construction because
-            # a failover rebinds mid-step, and the new endpoint may want a
-            # different string for the same intent.
-            from core.model_routes import get_routes
-            effort = self.thinking_effort
-            try:
-                per_endpoint = get_routes(self._routes_path).effort_for(
-                    self.internal_model or "", self.active_model or "")
-            except (RuntimeError, OSError, ValueError):
-                # An unreadable or malformed TABLE must not break the call —
-                # the role's value stands and the request still goes out.
-                # Deliberately NOT `except Exception`: the first draft of this
-                # caught everything, and the local import of get_routes lives
-                # in __init__, so line 948 raised NameError on every call and
-                # the swallow turned it into "the route never declares an
-                # effort". The tests failed with no error to read.
-                per_endpoint = None
-            if per_endpoint:
-                effort = per_endpoint
+            effort = self._binding_effort()
             if effort:
                 # ALWAYS through extra_body, never as a top-level param.
                 #

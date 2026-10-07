@@ -1,35 +1,28 @@
-"""Trusted host-side CPU container launcher for repository test gates.
+"""Operator-owned host CPU launcher, reached only by the trusted backend UID.
 
-The production backend must not hold the Docker CLI or Docker socket. This
-module is the only supported *product* launch surface: an operator-enabled
-host service that owns the single Docker invocation for repository test
-gates, reached by the backend over a least-privilege local Unix socket
-(filesystem mode 0600).
-
-Every request is validated against operator-owned configuration before any
-Docker argv is built:
-
-- ``repo`` must canonically resolve (``realpath``) inside one of the
-  configured ``allowed_roots``; symlink escapes are refused.
-- ``writable_dirs`` / ``report_dir`` / ``relay_socket`` must resolve inside
-  the repo or a configured ``report_roots`` entry — no arbitrary mounts.
-- ``image`` is never taken from the request; the reviewed, immutable test
-  image and the trusted executor entry come from host configuration only.
-- repository command forms are allow-listed: pytest runs, the import-smoke
-  probe, and the authored gate script. No daemon flags, no raw Docker argv,
-  no shell metacharacters.
-
-Cleanup touches only the UUID-named container this invocation created.
+Requests name an existing run. The host reads its run_isolation record from
+operator-configured existing State storage (read-only, no runtime/schema init)
+and permits only that exact repository plus that run's report tickets. Socket
+permissions/UID trust the backend, not arbitrary untrusted same-UID programs;
+repository containers receive neither the launcher nor Docker socket.
 """
 from __future__ import annotations
+from contextlib import closing
 
+import hashlib
 import json
 import os
 from pathlib import Path
+import re
+import selectors
 import shutil
+import sqlite3
+import stat
 import socket
 import subprocess
 import threading
+import time
+from urllib.parse import quote
 import uuid
 
 
@@ -41,28 +34,62 @@ class LaunchRefused(ValueError):
 
 
 def load_config(path: Path) -> dict:
-    """Load and shape-check the operator-owned host launcher configuration."""
+    """Operator inputs only; a mutable image tag cannot be a reviewed pin."""
     cfg = json.loads(Path(path).read_text())
-    for key in ("allowed_roots", "report_roots", "test_image", "executor_entry"):
-        if key not in cfg:
-            raise LaunchRefused(f"host launcher config missing {key!r}")
-    if not isinstance(cfg["allowed_roots"], list) or not cfg["allowed_roots"]:
-        raise LaunchRefused("allowed_roots must be a non-empty list")
-    if not isinstance(cfg["report_roots"], list):
-        raise LaunchRefused("report_roots must be a list")
-    image = str(cfg["test_image"])
-    if not image or any(c in image for c in " \t\n;|&`$"):
-        raise LaunchRefused("test_image must be a single reviewed image reference")
-    uids = cfg.get("allowed_uids", [])
-    if not isinstance(uids, list) or any(not isinstance(u, int) for u in uids):
-        raise LaunchRefused("allowed_uids must be a list of integers")
+    _validate_config(cfg)
     return cfg
 
 
+def _validate_config(cfg: dict) -> None:
+    if not isinstance(cfg, dict):
+        raise LaunchRefused("host config must be an object")
+    roots = cfg.get("allowed_roots")
+    if not isinstance(roots, list) or not roots or any(
+            not isinstance(p, str) or not Path(p).is_absolute() for p in roots):
+        raise LaunchRefused("allowed_roots must name absolute operator roots")
+    image = cfg.get("test_image")
+    if not isinstance(image, str) or not re.fullmatch(
+            r"(?:[A-Za-z0-9._:/-]+@)?sha256:[0-9a-f]{64}", image):
+        raise LaunchRefused("test_image must be an immutable sha256 digest")
+    for key in ("executor_entry", "state_db", "aitelier_home"):
+        value = cfg.get(key)
+        if not isinstance(value, str) or not Path(value).is_absolute() or not Path(value).exists():
+            raise LaunchRefused(f"host config requires existing absolute {key}")
+    if not Path(cfg["executor_entry"]).is_file() or not Path(cfg["state_db"]).is_file():
+        raise LaunchRefused("executor_entry/state_db must be regular files")
+    if not Path(cfg["aitelier_home"]).is_dir():
+        raise LaunchRefused("aitelier_home must be a directory")
+    uids = cfg.get("allowed_uids")
+    if not isinstance(uids, list) or not uids or any(type(u) is not int or u < 0 for u in uids):
+        raise LaunchRefused("allowed_uids must explicitly name trusted backend UIDs")
+
+
+def _run_binding(cfg: dict, run_id: str) -> tuple[Path, Path, str]:
+    if not isinstance(run_id, str) or not run_id:
+        raise LaunchRefused("existing normal run_id is required")
+    uri = "file:" + quote(str(Path(cfg["state_db"]).resolve()), safe="/") + "?mode=ro"
+    try:
+        with closing(sqlite3.connect(uri, uri=True)) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute("SELECT mode,worktree_path,source_repo,project_id "
+                               "FROM run_isolation WHERE run_id=?", (run_id,)).fetchone()
+    except sqlite3.Error as exc:
+        raise LaunchRefused("existing run ownership could not be read") from exc
+    if row is None or row["mode"] not in {"worktree", "direct", "read_snapshot"}:
+        raise LaunchRefused("run has no supported existing repository ownership")
+    source = row["source_repo"] if row["mode"] == "direct" else row["worktree_path"]
+    repo = _resolve_inside(source or "", cfg["allowed_roots"], "owned repository")
+    report_root = (Path(cfg["aitelier_home"]).resolve() / "gate-reports" /
+                   hashlib.sha256(run_id.encode()).hexdigest())
+    return repo, report_root, row["project_id"]
+
+
 def _resolve_inside(path: str, roots: list[str], what: str) -> Path:
+    if not isinstance(path, str) or not path:
+        raise LaunchRefused(f"{what} must be an existing path")
     try:
         resolved = Path(path).resolve(strict=True)
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         raise LaunchRefused(f"{what} does not resolve: {path}") from exc
     for root in roots:
         root_path = Path(root).resolve(strict=True)
@@ -84,52 +111,59 @@ def _check_token(token: str) -> str:
 
 
 def validate_request(cfg: dict, request: dict) -> dict:
-    """Validate a launch request against host policy; return normalized fields."""
+    """Use existing run ownership, never broad roots as write authority."""
+    _validate_config(cfg)
     if not isinstance(request, dict) or request.get("op") != "launch":
         raise LaunchRefused("unsupported operation")
-    repo = _resolve_inside(str(request.get("repo", "")), cfg["allowed_roots"], "repo")
-    if not repo.is_dir():
-        raise LaunchRefused("repo is not a directory")
-
-    report_roots = list(cfg["report_roots"])
+    allowed = {"op", "repo", "run_id", "args", "timeout", "writable_dirs",
+               "report_dir", "relay_socket", "import_module", "pytest_timeout"}
+    if set(request) - allowed:
+        raise LaunchRefused("unsupported request fields; mounts/image come from host policy")
+    owned_repo, report_root, project_id = _run_binding(cfg, request.get("run_id"))
+    repo = _resolve_inside(request.get("repo", ""), cfg["allowed_roots"], "repo")
+    if repo != owned_repo or not repo.is_dir():
+        raise LaunchRefused("repo does not match the existing run's owned repository")
+    directories = request.get("writable_dirs", [])
+    if not isinstance(directories, list) or len(directories) > 1:
+        raise LaunchRefused("only one owned report ticket may be writable")
     writable = []
-    for directory in request.get("writable_dirs") or ():
-        writable.append(str(_resolve_inside(str(directory),
-                                           cfg["allowed_roots"] + report_roots,
-                                           "writable_dir")))
-
-    report_dir = ""
-    if request.get("report_dir"):
-        report_dir = str(_resolve_inside(str(request["report_dir"]),
-                                        cfg["allowed_roots"] + report_roots,
-                                        "report_dir"))
-
-    relay_socket = ""
-    if request.get("relay_socket"):
-        relay = _resolve_inside(str(request["relay_socket"]),
-                                cfg["allowed_roots"] + report_roots,
-                                "relay_socket")
-        if not relay.exists():
-            raise LaunchRefused("relay_socket must already exist (created by the backend)")
+    for directory in directories:
+        if not isinstance(directory, str):
+            raise LaunchRefused("writable_dir must be a path")
+        path = _resolve_inside(directory, [str(report_root)], "owned report ticket")
+        if path == report_root or path.parent != report_root or not path.is_dir():
+            raise LaunchRefused("writable_dir must be one direct run-owned report ticket")
+        if path == repo or path in repo.parents or repo in path.parents:
+            raise LaunchRefused("a writable mount must not overlap the read-only repository")
+        if path != Path(directory).absolute():
+            raise LaunchRefused("report ticket aliases/symlinks are refused")
+        writable.append(str(path))
+    report_dir = request.get("report_dir", "")
+    if not isinstance(report_dir, str) or report_dir and report_dir not in writable:
+        raise LaunchRefused("report_dir must be the one run-owned writable ticket")
+    relay_socket = request.get("relay_socket", "")
+    if relay_socket:
+        if not writable or not isinstance(relay_socket, str):
+            raise LaunchRefused("relay requires the run-owned report ticket")
+        relay = _resolve_inside(relay_socket, writable, "owned relay socket")
+        if relay.parent != Path(writable[0]) or relay != Path(relay_socket).absolute() or not stat.S_ISSOCK(relay.stat().st_mode):
+            raise LaunchRefused("relay must be a real socket in this report ticket")
         relay_socket = str(relay)
-
     raw_args = request.get("args")
     if not isinstance(raw_args, list) or not raw_args:
         raise LaunchRefused("args must be a non-empty list")
     args = [_check_token(a) for a in raw_args]
     _validate_command_form(repo, args, request)
-
-    try:
-        timeout = int(request.get("timeout", 0))
-    except (TypeError, ValueError) as exc:
-        raise LaunchRefused("timeout must be an integer") from exc
-    if not 1 <= timeout <= 7200:
-        raise LaunchRefused("timeout out of range")
+    timeout = request.get("timeout")
+    if type(timeout) is not int or not 1 <= timeout <= 7200:
+        raise LaunchRefused("timeout must be an integer within 1..7200")
+    module = request.get("import_module", "")
+    if not isinstance(module, str) or module and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*", module):
+        raise LaunchRefused("import_module must be a dotted module name")
     return {"repo": str(repo), "args": args, "timeout": timeout,
             "writable_dirs": writable, "relay_socket": relay_socket,
-            "import_module": str(request.get("import_module", "")),
-            "pytest_timeout": bool(request.get("pytest_timeout", False)),
-            "report_dir": report_dir}
+            "import_module": module, "pytest_timeout": request.get("pytest_timeout") is True,
+            "report_dir": report_dir, "run_id": request["run_id"], "project_id": project_id}
 
 
 def _validate_command_form(repo: Path, args: list[str], request: dict) -> None:
@@ -155,6 +189,7 @@ def _validate_command_form(repo: Path, args: list[str], request: dict) -> None:
 
 def docker_command(cfg: dict, fields: dict, name: str) -> list[str]:
     """Build the one and only Docker argv the host service will run."""
+    _validate_config(cfg)
     docker = shutil.which("docker")
     if not docker:
         raise LaunchRefused("Docker execution facility is unavailable on the host")
@@ -164,6 +199,8 @@ def docker_command(cfg: dict, fields: dict, name: str) -> list[str]:
                "--cpus", "2", "--memory", "2g", "--pids-limit", "512",
                "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
                "--user", f"{os.getuid()}:{os.getgid()}", "--name", name,
+               "--label", "aitelier.run_id=" + fields["run_id"],
+               "--label", "aitelier.project_id=" + fields["project_id"],
                "-v", f"{repo}:{repo}:ro", "-v", f"{entry}:/executor.py:ro",
                "-w", repo]
     for directory in fields["writable_dirs"]:
@@ -180,25 +217,54 @@ def docker_command(cfg: dict, fields: dict, name: str) -> list[str]:
     return command
 
 
-def _run_docker(cfg: dict, fields: dict) -> dict:
+def _run_docker(cfg: dict, fields: dict, conn: socket.socket | None = None) -> dict:
     name = "aitelier-cpu-" + uuid.uuid4().hex
     command = docker_command(cfg, fields, name)
     proc = None
     try:
         proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                text=True, start_new_session=True)
-        try:
-            stdout, stderr = proc.communicate(timeout=fields["timeout"] + 15)
-        except subprocess.TimeoutExpired:
-            raise LaunchRefused("host launcher timed out waiting for the container")
+                                start_new_session=True)
+        output = {"stdout": bytearray(), "stderr": bytearray()}
+        deadline = time.monotonic() + fields["timeout"] + 15
+        with selectors.DefaultSelector() as selector:
+            selector.register(proc.stdout, selectors.EVENT_READ, "stdout")
+            selector.register(proc.stderr, selectors.EVENT_READ, "stderr")
+            if conn is not None:
+                selector.register(conn, selectors.EVENT_READ, "client")
+            pipes = 2
+            while pipes:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise LaunchRefused("host launcher timed out waiting for the container")
+                ready = selector.select(remaining)
+                if not ready:
+                    raise LaunchRefused("host launcher timed out waiting for the container")
+                for key, _ in ready:
+                    if key.data == "client":
+                        # Protocol is one complete request followed by a reply;
+                        # EOF/write-half-close is cancellation, not a second RPC.
+                        if not conn.recv(1, socket.MSG_PEEK):
+                            raise LaunchRefused("client disconnected during owned execution")
+                        raise LaunchRefused("unexpected data after launch request")
+                    chunk = os.read(key.fileobj.fileno(), 65536)
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        pipes -= 1
+                    else:
+                        output[key.data].extend(chunk)
+        proc.wait(timeout=max(.1, deadline - time.monotonic()))
+        stderr = output["stderr"].decode(errors="replace")
         if proc.returncode != 0:
             raise LaunchRefused(f"isolated container exited {proc.returncode}: {stderr[-2000:]}")
         try:
-            return json.loads(stdout)
+            result = json.loads(output["stdout"])
         except ValueError as exc:
             raise LaunchRefused("isolated executor returned no result") from exc
+        if not isinstance(result, dict) or type(result.get("returncode")) is not int or not all(
+                isinstance(result.get(k), str) for k in ("stdout", "stderr")):
+            raise LaunchRefused("isolated executor returned a malformed result")
+        return result
     finally:
-        # Only this invocation's UUID-named container is touched; peers survive.
         try:
             subprocess.run(["docker", "rm", "-f", name], stdout=subprocess.DEVNULL,
                            stderr=subprocess.DEVNULL, timeout=10)
@@ -206,9 +272,12 @@ def _run_docker(cfg: dict, fields: dict) -> dict:
             if proc is not None and proc.poll() is None:
                 proc.kill()
                 proc.wait(timeout=10)
+            if proc is not None:
+                proc.stdout.close()
+                proc.stderr.close()
 
 
-def handle_request(cfg: dict, raw: bytes) -> dict:
+def handle_request(cfg: dict, raw: bytes, conn: socket.socket | None = None) -> dict:
     """Validate and execute one request; return the JSON response object."""
     if len(raw) > MAX_REQUEST_BYTES:
         return {"ok": False, "error": "request too large"}
@@ -216,10 +285,12 @@ def handle_request(cfg: dict, raw: bytes) -> dict:
         request = json.loads(raw)
     except ValueError:
         return {"ok": False, "error": "request is not valid JSON"}
+    from core.repository_executor import _slot, IsolationUnavailable
     try:
         fields = validate_request(cfg, request)
-        result = _run_docker(cfg, fields)
-    except LaunchRefused as exc:
+        with _slot(Path(cfg["aitelier_home"]) / "cpu-test-slots"):
+            result = _run_docker(cfg, fields, conn)
+    except (LaunchRefused, IsolationUnavailable, OSError, subprocess.TimeoutExpired) as exc:
         return {"ok": False, "error": str(exc)}
     return {"ok": True, "result": result}
 
@@ -227,11 +298,11 @@ def handle_request(cfg: dict, raw: bytes) -> dict:
 def _serve_connection(conn: socket.socket, cfg: dict, lock: threading.Semaphore) -> None:
     try:
         peer = _peer_uid(conn)
-        if cfg.get("allowed_uids") and peer not in cfg["allowed_uids"]:
+        if peer not in cfg["allowed_uids"]:
             conn.sendall(json.dumps(
                 {"ok": False, "error": f"peer uid {peer} not operator-allowed"}).encode() + b"\n")
             return
-        conn.settimeout(7200 + 60)
+        conn.settimeout(10)
         chunks = []
         while True:
             chunk = conn.recv(65536)
@@ -240,8 +311,7 @@ def _serve_connection(conn: socket.socket, cfg: dict, lock: threading.Semaphore)
             chunks.append(chunk)
             if b"\n" in chunk or sum(len(c) for c in chunks) > MAX_REQUEST_BYTES:
                 break
-        with lock:
-            response = handle_request(cfg, b"".join(chunks).split(b"\n")[0])
+        response = handle_request(cfg, b"".join(chunks).split(b"\n")[0], conn)
         conn.sendall(json.dumps(response).encode() + b"\n")
     except OSError:
         # Client disconnect before the reply: the container cleanup in
@@ -257,7 +327,7 @@ def _peer_uid(conn: socket.socket) -> int:
     creds = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, size)
     if len(creds) != size:
         return -1
-    return struct.unpack("3i", creds)[0]
+    return struct.unpack("3i", creds)[1]
 
 
 def serve(socket_path: Path, config_path: Path) -> None:  # pragma: no cover - operator entry
@@ -265,19 +335,26 @@ def serve(socket_path: Path, config_path: Path) -> None:  # pragma: no cover - o
     cfg = load_config(config_path)
     socket_path = Path(socket_path)
     socket_path.parent.mkdir(parents=True, exist_ok=True)
-    if socket_path.exists():
-        socket_path.unlink()
+    if socket_path.exists() or socket_path.is_symlink():
+        raise LaunchRefused("launcher socket already exists; never replace a live listener")
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
         server.bind(str(socket_path))
         # Least-privilege exposure: owner-only connect, regardless of umask.
         os.chmod(socket_path, 0o600)
         server.listen(16)
-        lock = threading.Semaphore(4)  # global bound of four CPU test containers
+        lock = threading.BoundedSemaphore(4)  # bounds request threads, not global CPU ownership
         while True:
             conn, _ = server.accept()
-            threading.Thread(target=_serve_connection, args=(conn, cfg, lock),
-                             daemon=True).start()
+            if not lock.acquire(blocking=False):
+                conn.close()  # bounded admission; never accumulate waiting threads
+                continue
+            def owned(connection=conn):
+                try:
+                    _serve_connection(connection, cfg, lock)
+                finally:
+                    lock.release()
+            threading.Thread(target=owned, daemon=True).start()
     finally:
         server.close()
 

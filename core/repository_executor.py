@@ -25,9 +25,9 @@ class IsolationUnavailable(RuntimeError):
 
 
 @contextmanager
-def _slot():
+def _slot(root=None):
     from core import datadir
-    root = datadir.aitelier_home() / "cpu-test-slots"
+    root = Path(root) if root is not None else datadir.aitelier_home() / "cpu-test-slots"
     root.mkdir(parents=True, exist_ok=True)
     for number in range(4):
         stream = (root / str(number)).open("a")
@@ -45,16 +45,16 @@ def _slot():
 
 
 def execute(*args, **kwargs):
+    socket_path = os.environ.get(HOST_LAUNCHER_ENV, "")
+    if socket_path:
+        return _launch_via_host(socket_path, *args, **kwargs)
     with _slot():
-        socket_path = os.environ.get(HOST_LAUNCHER_ENV, "")
-        if socket_path:
-            return _launch_via_host(socket_path, *args, **kwargs)
         return _execute(*args, **kwargs)
 
 
 def _launch_via_host(socket_path: str, repo: Path, args: list[str], timeout: int, *,
                      writable_dirs=(), relay_socket: str = "", import_module: str = "",
-                     pytest_timeout: bool = False, report_dir: str = ""):
+                     pytest_timeout: bool = False, report_dir: str = "", run_id: str = ""):
     """Send one validated launch request to the trusted host launcher.
 
     No in-backend Docker or pytest fallback: any failure is reported as
@@ -64,7 +64,7 @@ def _launch_via_host(socket_path: str, repo: Path, args: list[str], timeout: int
     request = {"op": "launch", "repo": str(repo), "args": args, "timeout": timeout,
                "writable_dirs": [str(d) for d in writable_dirs],
                "relay_socket": relay_socket, "import_module": import_module,
-               "pytest_timeout": pytest_timeout, "report_dir": report_dir}
+               "pytest_timeout": pytest_timeout, "report_dir": report_dir, "run_id": run_id}
     payload = (json.dumps(request) + "\n").encode()
     if len(payload) > MAX_REQUEST_BYTES:
         raise IsolationUnavailable("launch request exceeds host launcher limit")
@@ -88,9 +88,14 @@ def _launch_via_host(socket_path: str, repo: Path, args: list[str], timeout: int
         response = json.loads(raw)
     except ValueError as exc:
         raise IsolationUnavailable("host CPU launcher returned no result") from exc
+    if not isinstance(response, dict):
+        raise IsolationUnavailable("host CPU launcher returned a malformed response")
     if not response.get("ok"):
         raise IsolationUnavailable(f"host CPU launcher refused: {response.get('error', 'unknown')}")
-    result = response["result"]
+    result = response.get("result")
+    if not isinstance(result, dict) or type(result.get("returncode")) is not int or not all(
+            isinstance(result.get(k), str) for k in ("stdout", "stderr")):
+        raise IsolationUnavailable("host CPU launcher returned a malformed result")
     if result.get("timed_out"):
         raise subprocess.TimeoutExpired(args, timeout,
                                         result.get("stdout"), result.get("stderr"))
@@ -103,7 +108,7 @@ def _launch_via_host(socket_path: str, repo: Path, args: list[str], timeout: int
 
 def _execute(repo: Path, args: list[str], timeout: int, *,
             writable_dirs=(), relay_socket: str = "", import_module: str = "",
-            pytest_timeout: bool = False, report_dir: str = "") -> subprocess.CompletedProcess:
+            pytest_timeout: bool = False, report_dir: str = "", run_id: str = "") -> subprocess.CompletedProcess:
     docker = shutil.which("docker")
     if not docker:
         raise IsolationUnavailable("Docker CPU execution facility is unavailable; local execution refused")

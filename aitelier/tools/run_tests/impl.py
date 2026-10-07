@@ -575,7 +575,7 @@ def _gate_feedback(gate: dict) -> str:
 
 
 def _run_node_cmd(pkg_dir: Path, args: list[str], timeout: int,
-                  env_overrides: dict | None = None) -> dict:
+                  env_overrides: dict | None = None, *, run_id: str = "") -> dict:
     """Run one npm command in its own process group; kill the tree on timeout.
 
     `output` is a bounded tail. Diagnostics, case records and declarations
@@ -597,7 +597,7 @@ def _run_node_cmd(pkg_dir: Path, args: list[str], timeout: int,
                 pkg_dir, args, timeout,
                 writable_dirs=[Path(env_overrides["GATE_REPORT_DIR"])],
                 relay_socket=env_overrides.get("AITELIER_GATE_RELAY_SOCKET", ""),
-                report_dir=env_overrides["GATE_REPORT_DIR"])
+                report_dir=env_overrides["GATE_REPORT_DIR"], run_id=run_id)
             stdout, stderr = done.stdout, done.stderr
             returncode = done.returncode
         else:
@@ -782,7 +782,7 @@ class _FirstEntry:
             self._fd = None
 
 
-def _run_repo_gate(repo: Path) -> dict | None:
+def _run_repo_gate(repo: Path, *, run_id: str = "") -> dict | None:
     """The repo's OWN gate script, when it declares one.
 
     pytest is not every repo's gate. A Godot game, a Rust workspace, anything
@@ -811,7 +811,8 @@ def _run_repo_gate(repo: Path) -> dict | None:
     # from them (`_report_dir_failure_cases`), never from the bounded tail.
     ticket = "rt-%s-%s" % (time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()),
                            os.urandom(4).hex())
-    report_dir = datadir.aitelier_home() / "gate-reports" / ticket
+    report_dir = (datadir.aitelier_home() / "gate-reports" /
+                  hashlib.sha256(run_id.encode()).hexdigest() / ticket)
     # Every engine request the gate makes goes through the admission relay,
     # which queues render requests in the harness's render queue and records
     # the engine's own answer to each (aitelier/gate_admission.py).
@@ -821,7 +822,7 @@ def _run_repo_gate(repo: Path) -> dict | None:
         relay = gate_admission.AdmissionRelay(
             upstream, render_wait_sec=gate_admission.render_wait_seconds(),
             upstream_timeout=REPO_GATE_TIMEOUT)
-        relay_socket = str(report_dir.parent / (".relay-" + os.urandom(4).hex() + ".sock"))
+        relay_socket = str(report_dir / ".relay.sock")
         relay_url = relay.start(unix_socket=relay_socket)
     except (OSError, ValueError) as e:
         return {"passed": False, "returncode": -1, "runner_error": True,
@@ -837,7 +838,7 @@ def _run_repo_gate(repo: Path) -> dict | None:
             repo, ["bash", str(script)], REPO_GATE_TIMEOUT,
             env_overrides={"GODOT_BUILDER_URL": relay_url,
                            "GATE_REPORT_DIR": str(report_dir),
-                           "AITELIER_GATE_RELAY_SOCKET": relay_socket})
+                           "AITELIER_GATE_RELAY_SOCKET": relay_socket}, run_id=run_id)
     finally:
         relay.stop()
         Path(relay_socket).unlink(missing_ok=True)
@@ -1074,7 +1075,7 @@ def _retry_delay_seconds() -> float:
     return REPO_GATE_RETRY_DELAY_SECONDS
 
 
-def _acquire_repo_gate(repo: Path, run_gate=None, sleep=None) -> dict | None:
+def _acquire_repo_gate(repo: Path, run_gate=None, sleep=None, *, run_id: str = "") -> dict | None:
     """Run the repo gate, RE-ACQUIRING the verdict while it is unmeasured.
 
     A gate that did not run has decided nothing, so it may not spend the
@@ -1083,7 +1084,7 @@ def _acquire_repo_gate(repo: Path, run_gate=None, sleep=None) -> dict | None:
     stays on the returned dict so a reviewer can see that the reading cost two
     runs rather than one.
     """
-    run_gate = _run_repo_gate if run_gate is None else run_gate
+    run_gate = (lambda root: _run_repo_gate(root, run_id=run_id)) if run_gate is None else run_gate
     sleep = time.sleep if sleep is None else sleep
     gate = run_gate(repo)
     attempts = 1
@@ -1997,7 +1998,8 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
         # not-run/not-collected confusion `Executed` exists to remove. It
         # is written OUTSIDE the repo so it can never be committed by a
         # later `repo_apply`.
-        junit_root = datadir.aitelier_home() / "gate-reports"
+        junit_root = (datadir.aitelier_home() / "gate-reports" /
+                      hashlib.sha256(run_id.encode()).hexdigest())
         junit_root.mkdir(parents=True, exist_ok=True)
         junit_dir = tempfile.mkdtemp(prefix="run_tests_junit_", dir=junit_root)
         junit_path = Path(junit_dir) / "junit.xml"
@@ -2018,7 +2020,7 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
                        "--rootdir", str(repo), f"--junitxml={junit_path}",
                        "-o", "junit_family=xunit1"],
                 PYTEST_WALL_SECONDS, writable_dirs=[Path(junit_dir)],
-                import_module=_package_module(repo) or "", pytest_timeout=True)
+                import_module=_package_module(repo) or "", pytest_timeout=True, run_id=run_id)
             stdout, stderr = done.stdout, done.stderr
             if done.import_error:
                 report["import_error"] = done.import_error
@@ -2153,7 +2155,7 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
     # gate of its own (dpe_game's 5_compile). Everywhere else the default
     # stands: a green pytest over a product pytest cannot compile is not a pass.
     if repo_gate and repo is not None and repo.exists():
-        gate = _acquire_repo_gate(repo)
+        gate = _acquire_repo_gate(repo, run_id=run_id)
         if gate is not None:
             report["repo_gate"] = gate
             report["gate_coverage"] = gate.get("gate_coverage")

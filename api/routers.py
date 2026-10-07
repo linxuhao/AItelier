@@ -157,7 +157,7 @@ async def stream_task_logs(task_id: str):
     record.
     """
     return StreamingResponse(
-        stream_manager.event_generator(task_id),
+        stream_manager.event_generator(task_id, read_private=True),
         media_type="text/event-stream"
     )
 

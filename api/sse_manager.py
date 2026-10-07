@@ -4,6 +4,7 @@ import asyncio
 import time
 import json
 import logging
+import re
 from typing import Dict, AsyncGenerator, Set
 
 
@@ -29,6 +30,65 @@ _BUFFER_CHANNEL_MAX = 64
 # event rate is ~0.4/s, so fan-out at this ceiling is a few hundred put_nowait
 # per second — nothing. It is a backstop against bulk-opening, not a quota.
 _MAX_CONNECTIONS = 512
+
+
+# Public progress is a finite scalar schema, not "everything except error".
+# Publishers may carry arbitrary private bodies, including future event types;
+# only a reader authorized for private records receives those original bytes.
+_PROGRESS_EVENTS = frozenset({
+    "presence", "run_created", "run_started", "run_completed", "run_failed",
+    "pipeline_started", "project_completed", "project_failed", "step_claimed",
+    "step_start", "step_completed", "step_end", "step_done", "step_timeout",
+    "step_failed", "step_pending", "checkpoint_reached", "checkpoint_paused",
+    "checkpoint_resolved", "checkpoint_approved", "checkpoint_rejected",
+    "step_checkpoint_rejected", "agent_notification", "llm_progress",
+})
+_PROGRESS_IDS = frozenset({
+    "project_id", "run_id", "_run_id", "step_id", "_step_id", "step",
+    "graph_name", "_task_id",
+})
+_PROGRESS_NUMBERS = frozenset({
+    "_ts", "chars", "elapsed", "total", "authenticated", "anonymous",
+    "retry_count", "attempt", "completed_steps", "step_count",
+})
+_PROGRESS_ENUMS = {
+    "status": frozenset({"pending", "running", "claimed", "paused", "completed",
+                         "failed", "cancelled", "unknown", "reserved", "done"}),
+    "phase": frozenset({"llm_start", "llm", "llm_done", "tool", "tool_done"}),
+    "action": frozenset({"approved", "rejected"}),
+}
+_PROGRESS_ID = re.compile(r"[A-Za-z0-9_.-]{1,200}\Z")
+
+
+def public_global_message(message: str) -> str | None:
+    """Project at consumption, so replay/live readers share no redacted state.
+
+    Unknown text, keys and nested values are private by default. Even a known
+    public field must have its declared scalar shape; a dictionary smuggled
+    through status/chars/project_id never becomes a public body.
+    """
+    try:
+        event = json.loads(message)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(event, dict):
+        return None
+    kind = event.get("type")
+    public = {"type": kind if isinstance(kind, str) and kind in _PROGRESS_EVENTS
+              else "execution_progress"}
+    for key, value in event.items():
+        if key in _PROGRESS_IDS and isinstance(value, str) and _PROGRESS_ID.fullmatch(value):
+            public[key] = value
+        elif key == "_task_id" and type(value) is int and value >= 0:
+            public[key] = value
+        elif key in _PROGRESS_NUMBERS and type(value) in (int, float) and 0 <= value <= 1e18:
+            public[key] = value
+        elif key in _PROGRESS_ENUMS and isinstance(value, str) and value in _PROGRESS_ENUMS[key]:
+            public[key] = value
+        elif key == "timestamp" and isinstance(value, str) and re.fullmatch(
+                r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", value):
+            public[key] = value
+    return json.dumps(public)
 
 
 class StreamManager:
@@ -171,7 +231,8 @@ class StreamManager:
         return self._connection_count() >= _MAX_CONNECTIONS
 
     async def event_generator(self, task_id: str,
-                              who: str | None = None) -> AsyncGenerator[str, None]:
+                              who: str | None = None, *,
+                              read_private: bool = False) -> AsyncGenerator[str, None]:
         """Subscribe to the broadcast channel with a private queue.
 
         Any messages buffered before the first consumer connects are
@@ -220,6 +281,10 @@ class StreamManager:
                     continue
                 if message == "__END__":
                     break
+                if task_id == "__global__" and not read_private:
+                    message = public_global_message(message)
+                    if message is None:
+                        continue
                 payload = {"log": message}
                 yield f"data: {json.dumps(payload)}\n\n"
         finally:

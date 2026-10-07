@@ -42,7 +42,7 @@ PROC_ROOT = Path("/proc")
 OBSERVATION_FIELDS = frozenset({
     "schema_version", "observed_at", "projects", "runs", "resumable_runs",
     "sidecar_owners", "godot_render_owners", "external_owners",
-    "registered_external_owners", "blockers", "errors", "quiescent", "digest",
+    "registered_external_owners", "blockers", "errors", "quiescent", "digest", "provenance",
 })
 CLEARANCE_EVENT_BINDING_FIELDS = (
     "event_id", "action", "status", "pending", "inventory_digest",
@@ -1458,11 +1458,7 @@ def _db_rows(db) -> tuple[list[dict], list[dict], list[dict], list[str]]:
     return leases, admissions, external_registry, errors
 
 
-def measure(*, skillflow, db=None, sidecar_db: Path | str | None = None,
-            external_probe: Callable[[], list[dict]] | None = None,
-            command_runner: Callable[[list[str]], subprocess.CompletedProcess]
-            = _run_command) -> dict:
-    """Take one cross-project read-only observation from real runtime owners."""
+def _runtime_inventory(skillflow, db):
     runs: list[dict] = []
     errors: list[str] = []
     try:
@@ -1532,6 +1528,71 @@ def measure(*, skillflow, db=None, sidecar_db: Path | str | None = None,
 
     leases, admissions, registered_external, db_errors = _db_rows(db)
     errors.extend(db_errors)
+    return runs, leases, admissions, registered_external, errors
+
+
+def runtime_observation(*, skillflow, db) -> dict:
+    """Original live runtime facts; only its owning, initialized process calls this."""
+    runs, leases, admissions, registered, errors = _runtime_inventory(skillflow, db)
+    result = {"schema_version": 1, "observed_at": _now(),
+              "runtime_identity": {"pid": os.getpid(),
+                  "pid_namespace": os.readlink("/proc/self/ns/pid"),
+                  "mount_namespace": os.readlink("/proc/self/ns/mnt"),
+                  "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip()},
+              "runs": runs, "checkout_leases": leases, "write_admissions": admissions,
+              "registered_external_owners": registered, "errors": errors}
+    result["digest"] = _observation_digest(result)
+    return result
+
+
+def _validated_runtime_facts(facts: dict) -> dict:
+    facts = _plain_json_snapshot(facts)
+    fields = {"schema_version", "observed_at", "runtime_identity", "runs",
+              "checkout_leases", "write_admissions", "registered_external_owners",
+              "errors", "digest"}
+    if (type(facts) is not dict or set(facts) != fields
+            or type(facts["schema_version"]) is not int
+            or facts["schema_version"] != 1):
+        raise ValueError("incompatible original runtime observation")
+    if facts["digest"] != _observation_digest(facts):
+        raise ValueError("runtime observation digest mismatch (projection is not original facts)")
+    observed = datetime.fromisoformat(facts["observed_at"])
+    age = (datetime.now(UTC) - observed).total_seconds()
+    if not -2 <= age <= 30:
+        raise ValueError("runtime observation is stale or from a future clock")
+    identity = facts["runtime_identity"]
+    if (type(identity) is not dict
+            or set(identity) != {"pid", "pid_namespace", "mount_namespace", "boot_id"}
+            or type(identity["pid"]) is not int or identity["pid"] < 1
+            or not re.fullmatch(r"pid:\[\d+\]", str(identity["pid_namespace"]))
+            or not re.fullmatch(r"mnt:\[\d+\]", str(identity["mount_namespace"]))):
+        raise ValueError("runtime observation identity is malformed")
+    if identity["boot_id"] != Path("/proc/sys/kernel/random/boot_id").read_text().strip():
+        raise ValueError("runtime observation belongs to a different host boot")
+    for field in ("checkout_leases", "write_admissions", "registered_external_owners", "runs"):
+        if type(facts[field]) is not list or any(type(row) is not dict for row in facts[field]):
+            raise ValueError(f"runtime observation {field} is malformed")
+    if type(facts["errors"]) is not list or any(type(error) is not str for error in facts["errors"]):
+        raise ValueError("runtime observation errors are malformed")
+    probe = {"runs": facts["runs"], "registered_external_owners": facts["registered_external_owners"],
+             "sidecar_owners": [], "godot_render_owners": [], "external_owners": []}
+    error = _validate_owner_inventories(probe)
+    if error:
+        raise ValueError(f"runtime observation owner inventory is malformed: {error}")
+    return facts
+
+
+def measure(*, skillflow=None, db=None, runtime_facts: dict | None = None, sidecar_db: Path | str | None = None,
+            external_probe: Callable[[], list[dict]] | None = None,
+            command_runner: Callable[[list[str]], subprocess.CompletedProcess]
+            = _run_command) -> dict:
+    """Take one cross-project observation; explicit owner audits may record observed-lost facts."""
+    if runtime_facts is None:
+        runs, leases, admissions, registered_external, errors = _runtime_inventory(skillflow, db)
+    else:
+        facts = _validated_runtime_facts(runtime_facts)
+        runs, leases, admissions = facts["runs"], facts["checkout_leases"], facts["write_admissions"]
+        registered_external, errors = facts["registered_external_owners"], list(facts["errors"])
     sidecar_rows, sidecar_errors = _sidecar_rows(
         Path(sidecar_db) if sidecar_db is not None else None)
     errors.extend(sidecar_errors)
@@ -1623,6 +1684,15 @@ def measure(*, skillflow, db=None, sidecar_db: Path | str | None = None,
     if inventory_error is not None:
         errors.append(f"owner inventory measurement was malformed: {inventory_error}")
     observation["quiescent"] = not errors and not any(blockers.values())
+    if runtime_facts is not None:
+        # Recheck freshness after the host domain probes; never authorize an old snapshot.
+        _validated_runtime_facts(facts)
+        observation["provenance"] = {"runtime_digest": facts["digest"],
+            "runtime_observed_at": facts["observed_at"],
+            "runtime_identity": facts["runtime_identity"],
+            "host_pid_namespace": os.readlink("/proc/self/ns/pid"),
+            "host_mount_namespace": os.readlink("/proc/self/ns/mnt"),
+            "domain": "live-runtime-and-operator-host"}
     observation["digest"] = _observation_digest(observation)
     return observation
 

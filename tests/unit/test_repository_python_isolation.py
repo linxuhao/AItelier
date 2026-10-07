@@ -197,7 +197,7 @@ finally:
 """
 _HALFCLOSE_BEFORE_CLIENT = r"""
 import os,socket,time,json,urllib.parse
-url=urllib.parse.urlsplit(os.environ['GODOT_BUILDER_URL']);s=socket.create_connection((url.hostname,url.port));s.settimeout(.2)
+url=urllib.parse.urlsplit(os.environ['GODOT_BUILDER_URL']);s=socket.create_connection((url.hostname,url.port));s.settimeout(2.0)  # receive budget (.2s raced the server's intentional .2s pre-response delay)
 s.sendall(b'POST /script HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\n{}')
 s.shutdown(socket.SHUT_WR)
 started=time.monotonic();chunks=[]

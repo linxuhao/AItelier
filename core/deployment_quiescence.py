@@ -40,9 +40,9 @@ DEPLOY_ACTIONS = frozenset({"rebuild", "redeploy", "restart"})
 OBSERVATION_SCHEMA_VERSION = 1
 PROC_ROOT = Path("/proc")
 OBSERVATION_FIELDS = frozenset({
-    "schema_version", "observed_at", "projects", "runs", "sidecar_owners",
-    "godot_render_owners", "external_owners", "registered_external_owners",
-    "blockers", "errors", "quiescent", "digest",
+    "schema_version", "observed_at", "projects", "runs", "resumable_runs",
+    "sidecar_owners", "godot_render_owners", "external_owners",
+    "registered_external_owners", "blockers", "errors", "quiescent", "digest",
 })
 CLEARANCE_EVENT_BINDING_FIELDS = (
     "event_id", "action", "status", "pending", "inventory_digest",
@@ -1611,6 +1611,7 @@ def measure(*, skillflow, db=None, sidecar_db: Path | str | None = None,
             | {r["project_id"] for r in registered_external
                if isinstance(r.get("project_id"), str)}),
         "runs": runs,
+        "resumable_runs": _resumable_run_rows(runs),
         "sidecar_owners": sidecar_rows,
         "godot_render_owners": godot_rows,
         "external_owners": external,
@@ -1631,6 +1632,7 @@ def failed_observation(reason: str) -> dict:
     observation = {
         "schema_version": OBSERVATION_SCHEMA_VERSION,
         "observed_at": _now(), "projects": [], "runs": [],
+        "resumable_runs": [],
         "sidecar_owners": [], "godot_render_owners": [],
         "external_owners": [], "registered_external_owners": [],
         "blockers": {"measurement_failure": [{"reason": str(reason)[:500]}]},
@@ -1778,6 +1780,14 @@ def _validate_observation(observation: Any) -> str | None:
     inventory_error = _validate_owner_inventories(observation)
     if inventory_error is not None:
         return inventory_error
+    # The literal resumable projection is public observation output, but it is
+    # never an authorization input: a forged top-level flag that disagrees with
+    # the per-run derived rows is refused here, and blocking is still derived
+    # from runs' status/active_operations rather than from this list.
+    if "resumable_runs" in observation:
+        if observation["resumable_runs"] != _resumable_run_rows(observation.get("runs")):
+            return ("resumable_runs contradicts the resumable projections of runs"
+                    " (never trust a forged top-level flag)")
     blockers = observation.get("blockers")
     if type(blockers) is not dict:
         return "blockers must be an object (plain dict required)"
@@ -1838,9 +1848,15 @@ def _validate_observation(observation: Any) -> str | None:
 def _resumable_runs(observation: Any) -> list[dict]:
     """The runs a restart would resume rather than destroy, for the journal."""
     runs = observation.get("runs") if isinstance(observation, dict) else None
+    return _resumable_run_rows(runs)
+
+
+def _resumable_run_rows(runs: Any) -> list[dict]:
+    """Exact derived projection of the resumable rows in a measured inventory."""
     return [{"run_id": row.get("run_id"), "project_id": row.get("project_id"),
              "status": row.get("status")}
-            for row in (runs or []) if isinstance(row, dict) and row.get("resumable") is True]
+            for row in (runs if isinstance(runs, list) else [])
+            if isinstance(row, dict) and row.get("resumable") is True]
 
 
 def _classify_blockers(observation: dict) -> tuple[dict, list[dict]]:

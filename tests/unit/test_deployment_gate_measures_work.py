@@ -41,15 +41,19 @@ def _stat(root, pid, ppid, comm="bash"):
 def test_the_gate_does_not_measure_its_own_shell(tmp_path, monkeypatch):
     root = tmp_path / "proc"
     me = os.getpid()
-    _stat(root, me, 777, comm="python3")
-    _stat(root, 777, 778)
-    _stat(root, 778, 1)
+    # Independently derived parent chain: this process -> 777 -> 778 -> init(1) -> 0.
+    # pid 1 is the legitimate init ancestor of the invocation, not a bystander.
+    chain = [(me, 777, "python3"), (777, 778, "bash"),
+             (778, 1, "bash"), (1, 0, "init")]
+    for pid, ppid, comm in chain:
+        _stat(root, pid, ppid, comm=comm)
     monkeypatch.setattr(dq, "PROC_ROOT", root)
-    assert dq.measurer_pids() == {str(me), "777", "778"}
+    expected_own = {str(pid) for pid, _, _ in chain}
+    assert dq.measurer_pids() == expected_own
     wrapper = "/bin/bash -c source snap.sh && eval 'python -m evaluator_worker'"
     owners, errors = dq.external_owners(runner=_probe(
         f"{me} 777 {wrapper}", f"777 778 {wrapper}", f"778 1 {wrapper}",
-        f"4321 1 {wrapper}"))
+        f"1 0 {wrapper}", f"4321 1 {wrapper}"))
     # Byte-identical argv on an unrelated pid is still an unknown evaluator.
     assert [o["command"].split()[0] for o in owners] == ["4321"]
     assert owners[0]["ownership"] == "unregistered" and owners[0]["active"] is True
@@ -134,6 +138,9 @@ def _measure(sf):
 def test_a_running_run_with_nothing_admitted_is_resumable_and_does_not_block():
     obs = _measure(_SkillFlow())
     assert obs["runs"][0]["resumable"] is True
+    # The literal public projection names exactly the runs a restart resumes.
+    assert obs["resumable_runs"] == [
+        {"run_id": "run-1", "project_id": "sg-1", "status": "running"}]
     assert obs["blockers"]["active_runs"] == []
     assert obs["blockers"]["active_operations"] == []
     assert obs["errors"] == [] and obs["quiescent"] is True
@@ -148,6 +155,7 @@ def test_a_running_run_with_nothing_admitted_is_resumable_and_does_not_block():
 def test_a_run_that_owns_a_process_still_blocks(sf):
     obs = _measure(sf)
     assert obs["runs"][0]["resumable"] is False
+    assert obs["resumable_runs"] == []
     assert [r["run_id"] for r in obs["blockers"]["active_runs"]] == ["run-1"]
     assert obs["quiescent"] is False
     assert dq._validate_observation(obs) is None
@@ -174,6 +182,18 @@ def test_a_forged_resumable_flag_is_refused_by_validation():
     obs["quiescent"] = True
     obs["digest"] = dq._observation_digest(obs)
     assert "resumable contradicts" in dq._validate_observation(obs)
+
+
+def test_a_forged_top_level_resumable_runs_projection_is_refused():
+    """observation.resumable_runs is public output but never an authorization
+    input: forging the list so a genuinely blocked run looks resumable fails."""
+    obs = _measure(_SkillFlow(audit={"alive": 1, "lost": [], "unknown": []}))
+    assert obs["resumable_runs"] == []
+    obs["resumable_runs"] = [
+        {"run_id": "run-1", "project_id": "sg-1", "status": "running"}]
+    obs["digest"] = dq._observation_digest(obs)
+    reason = dq._validate_observation(obs)
+    assert reason is not None and "resumable_runs contradicts" in reason
 
 
 def test_the_journal_records_which_runs_the_restart_will_resume(tmp_path):

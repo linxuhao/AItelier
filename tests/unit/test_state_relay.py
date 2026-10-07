@@ -462,13 +462,17 @@ def test_relay_declared_complete_paths_match_real_writer_not_basename_collisions
     ('deep/*[1]?.md','nested/id','deep/id1x.md'),
     ('deep/*?.md','id','deep/unadopted.md'),
     ('deep/*-*.md','sameid','deep/different-other.md'),
+    ('deep/*-*.md','line\nbreak','deep/line\nbreak-other.md'),
+    ('deep/*-*.md','./x','deep/x-./y.md'),
 ])
 def test_relay_declared_pattern_matches_the_real_writer_grammar(world,pattern,ident,decoy):
     """The writer replaces EVERY '*' with the SAME id and keeps '?', '[...]'
     literal. The old fnmatch/PurePath matcher read '?'/'[...]' as wildcards and
     let each '*' capture a different value, so it both omitted the real emitted
     name and admitted names the writer can never produce. The decoy written here
-    is exactly such a name; it must stay unadopted."""
+    is exactly such a name; it must stay unadopted. The id may hold a newline
+    or a "./" that Path drops where it forms a component: the inventory sees the
+    PUBLISHED path (deep/x-./x.md), not the raw target (deep/./x-./x.md)."""
     a,design=_failed_with_published_architecture(world,design_pattern=pattern,design_id=ident)
     directory=world['ws']._get_secure_path(a['execution_project_id'])/'feature'/'architecture'
     relative=design.relative_to(directory).as_posix()
@@ -482,6 +486,33 @@ def test_relay_declared_pattern_matches_the_real_writer_grammar(world,pattern,id
     seeded=world['ws'].seed_relay_draft(b['execution_project_id'],'architecture','feature')
     assert seeded==[relative],'only the writer-emitted name is relayed'
     assert (world['ws']._draft_dir(b['execution_project_id'],'architecture','feature')/relative).read_bytes()==design.read_bytes()
+
+
+@pytest.mark.parametrize('pattern',['root/*.md','root/*-*.md','root/*[1]?.md','root/**.md',
+                                     'root/*/again/*.md','*.md','docs/literal[1]?.md'])
+def test_relay_matcher_admits_every_path_the_actual_sdk_writer_publishes(tmp_path,pattern):
+    """Differential against the installed SDK writer itself, not a re-statement
+    of its grammar: whatever execute_write publishes on disk is declared."""
+    from skillflow.write_tools import execute_write
+    from core.state_service import _writer_declares
+    for n,ident in enumerate(['plain','nested/id','x-y','β[2]?','line\nbreak','./x','./y/.','x/.','a//b','.hidden','..x']):
+        out=tmp_path/str(n)
+        written=execute_write('slot',{'slot':{'file':pattern,'target':'artifact'}},{'id':ident,'content':'SDK\n'},str(out))
+        assert 'error' not in written
+        published=(out/written['written']).relative_to(out).as_posix()
+        assert (out/published).is_file() and _writer_declares(published,pattern),(pattern,ident,published)
+
+
+@pytest.mark.parametrize('pattern,filename',[
+    ('deep/*?.md','deep/unadopted.md'),('deep/*[1]?.md','deep/id1x.md'),
+    ('deep/*-*.md','deep/different-other.md'),('deep/*-*.md','deep/x-./y.md'),
+    ('deep/*-*.md','deep/x-.x.md'),('deep/*-*.md','deep/line\nbreak-other.md'),
+    ('root/*/again/*.md','root/a/again/b.md'),('docs/*.md','unrelated/docs/planned.md'),
+    ('docs/*.md','docs/planned.txt'),('approved_design.md','unrelated/approved_design.md'),
+])
+def test_relay_matcher_refuses_paths_no_single_writer_id_publishes(pattern,filename):
+    from core.state_service import _writer_declares
+    assert not _writer_declares(filename,pattern)
 
 
 def test_relay_actual_sdk_reader_prefers_retained_input_over_conflicting_owned_rewalk(world):

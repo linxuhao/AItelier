@@ -6,6 +6,7 @@ persisted execution-project identity, never by starting an uncorrelated run.
 """
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import os
@@ -18,30 +19,79 @@ from core.state_graph import StateConflict, StateGraphError, StateGraphStore, ca
 from core.state_attempts import StateAttempts, artifact_ref, evidence_director_identity
 
 
-def _writer_declares(filename: str, pattern: object) -> bool:
-    """Whether the real write tool can emit EXACTLY ``filename`` for a declared
+# One path component an ``id`` fragment may contribute verbatim: non-empty, no
+# separator, and not "." (a "." or empty fragment is a shape of its own below,
+# because Path drops it as a component).
+_ID_FRAGMENT = r"(?:[^/.][^/]*|\.[^/]+)"
+_ID_PIECES = {"\x00": _ID_FRAGMENT, "\x02": _ID_FRAGMENT,
+              "\x01": _ID_FRAGMENT + r"(?:/" + _ID_FRAGMENT + r")*"}
 
-    ``pattern``. The generated write tool derives the concrete name by replacing
-    EVERY ``*`` in the declared pattern with the SAME ``id`` argument; ``?``,
-    ``[`` and ``]`` carry no meaning in that grammar and stay literal in what it
-    emits. A generic glob/path matcher does not reproduce this: it reads ``?``
-    and ``[...]`` as wildcards (so the real ``deep/*[1]?.md`` ->
-    ``deep/nested/id[1]?.md`` output is omitted, while ``deep/*?.md`` wrongly
-    admits ``deep/unadopted.md``) and lets each ``*`` capture a different value
-    (so ``deep/*-*.md`` wrongly admits ``deep/different-other.md`` instead of the
-    writer's ``deep/sameid-sameid.md``). This matcher requires every ``*`` to
-    capture ONE shared value, with everything else literal, so a basename
-    collision, an extra nested path or a private sibling is never admitted."""
+
+def _writer_published(raw: str):
+    """The step-relative path the SDK writer publishes for target ``raw``: it
+    writes ``Path(output_dir) / raw``, and Path drops empty and "." components.
+    None when ``raw`` would leave the step directory as an absolute path."""
+    from pathlib import PurePosixPath
+    path = PurePosixPath(raw)
+    return None if path.is_absolute() or not path.parts else str(path)
+
+
+@functools.lru_cache(maxsize=256)
+def _writer_shapes(pattern: str):
+    """Every distinct way one ``id`` can publish under ``pattern``, as regexes.
+
+    The SDK writer (``skillflow.write_tools.resolve_write_target`` ->
+    ``execute_write``) replaces EVERY ``*`` with the SAME ``id`` and writes the
+    result through ``Path``, which drops empty and "." components. Split ``id``
+    on "/": a middle component stands alone at every occurrence (dropped the
+    same everywhere, so WLOG absent or canonical: piece \x01), while the first
+    and last fuse with the neighbouring literal text and are therefore either
+    "", ".", or a fragment that is never dropped (pieces \x00, \x02). With each
+    shape substituted, Path normalisation is exact on the placeholders; the
+    first occurrence of a piece captures it and later ones must repeat it."""
+    ends = ("", ".", "\x00")
+    ids = list(ends) + [c0 + "/" + mid + ck for c0 in ends for ck in (e.replace("\x00", "\x02") for e in ends)
+                        for mid in ("", "\x01/")]
+    shapes = []
+    for ident in ids:
+        published = _writer_published(pattern.replace("*", ident))
+        if published is None:
+            continue
+        expr, seen = "", set()
+        for char in published:
+            if char in _ID_PIECES:
+                name = "p" + str(ord(char))
+                expr += f"(?P={name})" if char in seen else f"(?P<{name}>{_ID_PIECES[char]})"
+                seen.add(char)
+            else:
+                expr += re.escape(char)
+        shapes.append((ident, re.compile(expr)))
+    return shapes
+
+
+def _writer_declares(filename: str, pattern: object) -> bool:
+    """Whether the real SDK write tool can publish EXACTLY ``filename`` for a
+    declared ``pattern``. ``filename`` is the step-relative path the relay
+    inventory found on disk, so it is compared with what the writer PUBLISHES
+    (``pattern.replace("*", id)`` through ``Path``), not with its raw target:
+    ``deep/*-*.md`` with id ``./x`` targets ``deep/./x-./x.md`` and publishes
+    ``deep/x-./x.md``; an id may contain "/" or a newline. ``?``, ``[`` and
+    ``]`` are literal in that grammar, and every ``*`` is the same id, so
+    ``deep/*?.md`` never admits ``deep/unadopted.md`` and ``deep/*-*.md``
+    never admits ``deep/different-other.md``. A candidate id recovered from a
+    shape is confirmed by running the writer's own substitution and
+    normalisation forward, so an undeclared file is never admitted."""
     if not isinstance(pattern, str):
         return False
     if "*" not in pattern:
-        return filename == pattern
-    segments = pattern.split("*")
-    expr = re.escape(segments[0])
-    for index, segment in enumerate(segments[1:], start=1):
-        expr += "(?P<capture>.*)" if index == 1 else "(?P=capture)"
-        expr += re.escape(segment)
-    return re.fullmatch(expr, filename) is not None
+        return filename == _writer_published(pattern)
+    for ident, expr in _writer_shapes(pattern):
+        found = expr.fullmatch(filename)
+        if found:
+            ident = "".join(found.group("p" + str(ord(c))) if c in _ID_PIECES else c for c in ident)
+            if _writer_published(pattern.replace("*", ident)) == filename:
+                return True
+    return False
 
 
 SEED_HEADING = "# State goal attempt"

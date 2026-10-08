@@ -22,12 +22,49 @@ Two capabilities, exposed over HTTP and CLI:
                 * PNGs of real rendered frames, base64'd home over HTTP — the
                   thing that makes an agent actually SEE the game.
 
+  script   -> run each discovered `extends SceneTree` entry point under tests/
+              with `-s`, one throwaway $HOME each. Headless by default. An
+              explicit {"render": true} request runs the SAME admitted entry
+              points — the default discovery or an explicitly named selection —
+              through _run(render=True) (Xvfb + software GL) so a suite can
+              assert on real pixels. An explicitly named selection is validated
+              against the project's REAL admitted `extends SceneTree` entries
+              (types, relative paths, existence, SceneTree) before owner
+              admission, project copy, import or any engine/output work, and a
+              rendered request with no real project is refused, never answered
+              with a green render. Every render still passes the unchanged
+              render owner / effect-lock / admission / client-abort / release
+              fences.
+
+OWNED INVOCATION EVIDENCE. /script and /playtest both accept an optional,
+ bounded {"retain": {"files": [...], "patterns": [...]}} request. `files` are
+ literal relative user:// JSON/PNG paths; `patterns` are narrow relative path
+ patterns for artifacts whose directory or name the invocation derives at run
+ time (for example "monthly-journey-actual-*/runtime.json"). A pattern must
+ start with a literal first-directory prefix, may wildcard only within one path
+ component (`*`/`?`, never `**` or a root-wide `*`), keeps a fixed component
+ depth, and may never select the saves/profile subtrees. Before the throwaway
+ $HOME is removed, only the DECLARED (literal or pattern-matched) JSON/PNG
+ artifacts that this invocation actually generated under user:// are copied —
+ together with the full, untruncated raw stdout/stderr of every pass — into a
+ server-chosen, unique directory under the durable godot-control state root
+ (the owner ledger's own mount). An explicit request with an empty `files` list
+ ({"retain": {"files": []}}) is a raw-only request: it retains the full streams
+ and no artifacts, while an OMITTED `retain` key changes nothing. The caller
+ cannot choose the destination, overwrite a previous invocation, reach a
+ foreign absolute/traversal/symlink/hardlink path, or get a silent green when a
+ declared artifact (or a pattern that matched nothing) is missing or a limit is
+ hit: the invocation writes a manifest.json beside the files with each retained
+ path, size, SHA256 and its project/run/operation/invocation correlation.
+
+
 The gate_skipped fail-open->observable contract is enforced on the *tool* side
 (aitelier/tools/godot_compile), not here; this service just reports facts.
 """
 from __future__ import annotations
 
 import base64
+import hashlib
 import fcntl
 import json
 import os
@@ -36,6 +73,7 @@ import select
 import shutil
 import socket
 import sqlite3
+import stat
 import subprocess
 import sys
 import tempfile
@@ -107,28 +145,35 @@ RENDER_OWNER_HEARTBEAT_STALE_SEC = 120.0
 RENDER_OWNER_WAIT_POLL_SEC = 0.25
 
 
-def _lifecycle_connection() -> sqlite3.Connection:
+@contextmanager
+def _lifecycle_connection():
+    """Keep transaction semantics and close the owned connection on every exit."""
     path = Path(LIFECYCLE_DB)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     conn = sqlite3.connect(path, timeout=5)
-    conn.row_factory = sqlite3.Row
-    conn.execute("""CREATE TABLE IF NOT EXISTS render_owners (
-        owner_id TEXT PRIMARY KEY,
-        resource TEXT NOT NULL,
-        project_id TEXT NOT NULL,
-        run_id TEXT NOT NULL,
-        operation_id TEXT NOT NULL,
-        generation INTEGER NOT NULL,
-        status TEXT NOT NULL,
-        actor TEXT NOT NULL,
-        started_at REAL NOT NULL,
-        heartbeat_at REAL NOT NULL,
-        ended_at REAL,
-        reason TEXT,
-        UNIQUE(resource, generation)
-    )""")
-    conn.commit()
-    return conn
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("""CREATE TABLE IF NOT EXISTS render_owners (
+            owner_id TEXT PRIMARY KEY,
+            resource TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            operation_id TEXT NOT NULL,
+            generation INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            started_at REAL NOT NULL,
+            heartbeat_at REAL NOT NULL,
+            ended_at REAL,
+            reason TEXT,
+            UNIQUE(resource, generation)
+        )""")
+        conn.commit()
+        # Preserve SQLite commit/rollback at scope exit, then release the FD.
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 @contextmanager
@@ -658,13 +703,112 @@ def _run(args: list[str], timeout: int, extra_env: dict | None = None,
 
 
 # ── compile gate ───────────────────────────────────────────────────────────
-def _copy_project(proj: Path) -> Path:
+def _raise_walk_error(error: OSError) -> None:
+    raise error
+
+
+def _boundary_file(path: Path) -> bool:
+    return not path.is_symlink() and path.is_file()
+
+
+def _excluded_roots(proj: Path) -> list:
+    """Directories under `proj` that are NOT part of the parent project.
+
+    Two boundary kinds, both derived from the real filesystem — never from a
+    hard-coded name like `contracts/`:
+      * a nested directory holding its own project.godot is a CHILD PROJECT:
+        Godot would resolve its `res://` paths under the PARENT's namespace
+        (its `preload("res://fake.gd")` accidentally reads the parent root,
+        and its `class_name`s collide with the parent's global class list),
+        so it must not be staged into the parent's import or parse passes;
+      * a directory holding a regular .gdignore uses Godot's exclusion marker.
+
+    Returns [{"path": <posix relpath>, "reason": str}, ...]. The top of the
+    tree is never excluded, symlinks are never followed (a link out of the
+    project is not a project boundary we can vouch for). Missing or invalid
+    marker files leave the subtree included. An unreadable directory raises
+    rather than returning an incomplete inventory.
+    """
+    excluded = []
+    for dirpath, dirnames, filenames in os.walk(
+            proj, followlinks=False, onerror=_raise_walk_error):
+        here = Path(dirpath)
+        rel = here.relative_to(proj).as_posix()
+        if here != proj:
+            if here.is_symlink():
+                dirnames[:] = []
+                continue
+            if "project.godot" in filenames and _boundary_file(here / "project.godot"):
+                excluded.append({"path": rel,
+                                 "reason": "nested project (own project.godot)"})
+                dirnames[:] = []
+                continue
+            if ".gdignore" in filenames and _boundary_file(here / ".gdignore"):
+                excluded.append({"path": rel, "reason": ".gdignore"})
+                dirnames[:] = []
+                continue
+        dirnames[:] = sorted(d for d in dirnames
+                             if d not in (".godot", ".git") and not (here / d).is_symlink())
+    excluded.sort(key=lambda e: e["path"])
+    return excluded
+
+
+def _under_excluded(p: Path, proj: Path, excluded: list) -> bool:
+    rel = p.relative_to(proj).as_posix()
+    return any(rel == e["path"] or rel.startswith(e["path"] + "/")
+               for e in excluded)
+
+
+def _parent_scripts(proj: Path, excluded: list) -> list[Path]:
+    scripts = []
+    for dirpath, dirnames, filenames in os.walk(
+            proj, followlinks=False, onerror=_raise_walk_error):
+        here = Path(dirpath)
+        dirnames[:] = sorted(d for d in dirnames
+                             if d not in (".godot", ".git")
+                             and not (here / d).is_symlink()
+                             and not _under_excluded(here / d, proj, excluded))
+        scripts.extend(here / name for name in sorted(filenames)
+                       if name.endswith(".gd") and _boundary_file(here / name))
+    return scripts
+
+
+def _copy_project(proj: Path, *, excluded: list | None = None) -> Path:
     """Copy a project to a writable temp dir. `--import` and play-test runs write
     a `.godot/` cache, but the sidecar mounts the workspace read-only, so we never
-    touch the source. Caller must rmtree the returned dir's parent."""
+    touch the source. Caller must rmtree the returned dir's parent.
+
+    Child-project roots and .gdignore subtrees stay on disk in the copy (their
+    bytes are the user's), but each nested CHILD PROJECT root gets a .gdignore
+    written into the COPY so the parent engine never imports or resolves it:
+    the child is a project of its own, not a folder of the parent's res://
+    namespace. A .gdignore the user already wrote is copied as-is and needs no
+    marker. Child contract projects require separate validation under their own
+    project root. Symlinks are omitted from the copy; the parent's own regular
+    root .gdignore file is omitted so it cannot hide the parent from import (a
+    directory of that name is parent source and is copied)."""
+    config = proj / "project.godot"
+    if config.is_symlink() or (config.exists() and not config.is_file()):
+        raise ValueError("project.godot must be a regular non-symlink file")
     work = Path(tempfile.mkdtemp(prefix="godot_"))
     dst = work / "proj"
-    shutil.copytree(proj, dst, ignore=shutil.ignore_patterns(".godot", ".git"))
+
+    def ignore(directory, names):
+        here = Path(directory)
+        return [name for name in names
+                if name in (".godot", ".git") or (here / name).is_symlink()
+                or (here == proj and name == ".gdignore" and _boundary_file(here / name))]
+
+    try:
+        shutil.copytree(proj, dst, ignore=ignore)
+        for e in _excluded_roots(proj) if excluded is None else excluded:
+            if e["reason"].startswith("nested project"):
+                marker = dst / e["path"] / ".gdignore"
+                if not marker.is_file():
+                    marker.write_text("", encoding="utf-8")
+    except BaseException:
+        shutil.rmtree(work, ignore_errors=True)
+        raise
     return dst
 
 
@@ -687,12 +831,17 @@ func _walk(dir_path: String, out: Array) -> void:
 	var d := DirAccess.open(dir_path)
 	if d == null:
 		return
+	d.include_hidden = true
 	d.list_dir_begin()
 	var n := d.get_next()
 	while n != "":
+		if d.is_link(n):
+			n = d.get_next()
+			continue
 		if d.current_is_dir():
-			if not n.begins_with("."):
-				_walk(dir_path.path_join(n), out)
+			var sub := dir_path.path_join(n)
+			if n != ".godot" and n != ".git" and not FileAccess.file_exists(sub.path_join(".gdignore")) and not FileAccess.file_exists(sub.path_join("project.godot")):
+				_walk(sub, out)
 		elif n.ends_with(".gd"):
 			out.append(dir_path.path_join(n))
 		n = d.get_next()
@@ -749,6 +898,13 @@ def _parse_every_script(dst: Path, timeout: int) -> tuple[str, int]:
 
 def compile_project(project_dir: str, timeout: int = 120) -> dict:
     proj = Path(project_dir)
+    config = proj / "project.godot"
+    if config.is_symlink() or (config.exists() and not config.is_file()):
+        return {"passed": False, "returncode": -1, "file_count": 0,
+                "errors": [{"kind": "boundary", "file": "project.godot", "line": None,
+                            "msg": "Parent project.godot must be a regular non-symlink file."}],
+                "warning_count": 0, "excluded_child_roots": [],
+                "summary": "Invalid parent project boundary; validation did not run."}
     if not (proj / "project.godot").is_file():
         # `no_project` is the machine-readable half of this answer, and the
         # caller needs it: "I cannot see a project here" is a PASS when the repo
@@ -758,8 +914,14 @@ def compile_project(project_dir: str, timeout: int = 120) -> dict:
         return {"passed": True, "returncode": 0, "file_count": 0,
                 "errors": [], "warning_count": 0, "no_project": True,
                 "summary": "No Godot project (project.godot absent) — nothing to compile."}
-    gd_files = [p for p in proj.rglob("*.gd") if ".godot/" not in str(p)]
-    dst = _copy_project(proj)
+    # Boundaries come from the filesystem, once, and gate BOTH the count and
+    # the engine passes (staging marks nested child projects; the GDScript walk
+    # honors .gdignore). Excluded child roots are REPORTED, never silent: a
+    # whole-repository pass that quietly swallowed a nested project would vouch
+    # for scripts it never looked at.
+    excluded = _excluded_roots(proj)
+    gd_files = _parent_scripts(proj, excluded)
+    dst = _copy_project(proj, excluded=excluded)
     try:
         # TWO passes, and the second one is the authoritative diagnosis. Godot
         # imports resources and parses scripts in the SAME pass, so on a cold
@@ -772,10 +934,12 @@ def compile_project(project_dir: str, timeout: int = 120) -> dict:
         _run(["--path", str(dst), "--import"], timeout=timeout)
         cp = _run(["--path", str(dst), "--import"], timeout=timeout)
     except subprocess.TimeoutExpired:
+        shutil.rmtree(dst.parent, ignore_errors=True)
         return {"passed": False, "returncode": -1, "file_count": len(gd_files),
                 "errors": [{"kind": "timeout", "msg": f"Import timed out after {timeout}s",
                             "file": None, "line": None}],
-                "warning_count": 0, "summary": "Godot import timed out."}
+                "warning_count": 0, "summary": "Godot import timed out.",
+                "excluded_child_roots": excluded}
     all_stderr, loaded_ok = _parse_every_script(dst, timeout)
     # The explicit pass contributes CAUSES only. Its `load` failures are not
     # trustworthy: `--script` runs a bare SceneTree with NO autoloads, so every
@@ -815,9 +979,13 @@ def compile_project(project_dir: str, timeout: int = 120) -> dict:
                else "GDScript parse FAILED — %d parse error(s), %d dependent "
                     "load failure(s). Fix the parse errors; the load failures "
                     "are their fallout." % (n_parse, len(errs) - n_parse))
+    if excluded:
+        summary += " Excluded non-parent roots (outside this parent validation): " + "; ".join(
+                       "%s (%s)" % (e["path"], e["reason"]) for e in excluded)
     shutil.rmtree(dst.parent, ignore_errors=True)
     return {"passed": passed, "returncode": cp.returncode, "file_count": len(gd_files),
-            "errors": errs, "warning_count": 0, "summary": summary}
+            "errors": errs, "warning_count": 0, "summary": summary,
+            "excluded_child_roots": excluded}
 
 
 # ── playtest gate ──────────────────────────────────────────────────────────
@@ -875,6 +1043,7 @@ var _game_usec := 0.0
 var _frame_load_usec := 0
 var _watch := []         # [{node, attr}] whose frame-0 value a delta assert needs
 var _baselines := {}     # "node|attr" -> frame-0 value
+var _baseline_missing := []  # "node|attr" the frame-0 walk could not read at all
 func _ready() -> void:
     # Keep ticking even when the game calls get_tree().paused = true — otherwise
     # the probe freezes with the game and can neither un-pause nor assert, so a
@@ -1200,9 +1369,14 @@ func _eval_assert(a: Dictionary) -> void:
     var node_name = str(a.get("node", ""))
     var expr_str = str(a.get("expr", ""))
     var res := {"name": str(a.get("name", expr_str)), "node": node_name,
-        "expr": expr_str, "passed": false, "actual": null, "error": "", "frame": _frame}
+        "expr": expr_str, "passed": false, "actual": null, "error": "", "frame": _frame,
+        "measurement": "ok"}
     var target := _resolve(node_name)
     if target == null:
+        # A target that never resolved is the AUTHOR's spec error, reported as
+        # such. It stays an advisory behaviour failure (the existing contract);
+        # it is not an incomplete measurement of a value that was there.
+        res["measurement"] = ""
         res["error"] = "node not found: " + node_name
         if _is_path(node_name):
             res["error"] = "path does not resolve: " + node_name
@@ -1214,7 +1388,10 @@ func _eval_assert(a: Dictionary) -> void:
         return
     var expr := Expression.new()
     if expr.parse(expr_str) != OK:
+        # A comparison that could not be parsed never observed anything: an
+        # INCOMPLETE measurement, not a false one.
         res["error"] = "parse error: " + expr.get_error_text()
+        res["measurement"] = "incomplete"
         _results.append(res)
         return
     # Evaluate against the node as base instance (so "velocity.y < 0" resolves the
@@ -1223,47 +1400,148 @@ func _eval_assert(a: Dictionary) -> void:
     var val = expr.execute([], target, false)
     if expr.has_execute_failed():
         res["error"] = "execute failed: " + expr.get_error_text()
+        res["measurement"] = "incomplete"
         _results.append(res)
         return
+    var vt := typeof(val)
     res["actual"] = _jsonable(val)
-    res["passed"] = bool(val)
+    # Observation and truth are separate: `actual` is the value the expression
+    # produced, `passed` is whether it holds. Truth is decided ONLY for the
+    # supported kinds -- Boolean as-is, a non-empty String, a number, and null.
+    # Any other kind has no assertion truth of its own, and feeding it through
+    # bool() would let an unsupported value pass vacuously; it is an INCOMPLETE
+    # observation instead. A String observation is a value like any other -- it
+    # is never fed through bool(String) to decide truth.
+    var supported := (vt == TYPE_BOOL or vt == TYPE_STRING or vt == TYPE_INT
+        or vt == TYPE_FLOAT or vt == TYPE_NIL)
+    if supported:
+        res["passed"] = _truthy(val)
+    else:
+        res["measurement"] = "incomplete"
+        res["error"] = "unsupported observation type %d cannot decide assertion truth" % vt
     # A FAILING comparison reports `false` and nothing else — which says the
     # assert did not hold, but not what was there instead. Read the asserted
     # attribute back and record it, so the report can say "turns_taken == 1
-    # failed, it was 3" rather than "failed".
-    # jinyong-usable 2026-08-23: a whole task card was spent re-timing sample
-    # frames, derived from a tween budget read out of the source, because the
-    # report could not say what current_round actually was at the frame it
-    # sampled. The re-timed frames failed too. The probe had the number the
-    # entire time and threw it away.
-    if not res["passed"] and a.has("attr"):
-        res["observed"] = _jsonable(_read_attr(target, str(a["attr"])))
+    # failed, it was 3" rather than "failed". The read is retained for BOTH
+    # polarities; a read that did not happen is reported as a read error rather
+    # than smuggled in as a null observation.
+    if a.has("attr"):
+        var obs := _read_attr(target, str(a["attr"]))
+        if obs["ok"]:
+            res["observed"] = obs["value"]
+        else:
+            res["observed"] = null
+            res["observed_error"] = obs["error"]
+            res["measurement"] = "incomplete"
+            if res["error"] == "":
+                res["error"] = "observed read failed: " + obs["error"]
     _results.append(res)
+
 func _capture_baselines() -> void:
     for w in _watch:
+        var key := str(w["node"]) + "|" + str(w["attr"])
         var t := _resolve(str(w["node"]))
-        if t != null:
-            _baselines[str(w["node"]) + "|" + str(w["attr"])] = _read_attr(t, str(w["attr"]))
-func _read_attr(target: Object, attr: String):
-    # Same Expression machinery the assertions use, so "velocity.y" reads as
-    # naturally as "grid_pos".
+        if t == null:
+            # ABSENT, not null: this key never got a frame-0 reading, so a
+            # later delta against it is an incomplete measurement, not a
+            # comparison against a legitimately captured null value.
+            _baseline_missing.append(key)
+            continue
+        # A FAILED frame-0 read (parse/execute error, unsupported value) is not
+        # a captured null: only an ok read becomes a baseline. Anything else is
+        # recorded as MISSING, so a later `changed` assert cannot compare
+        # against a fabricated null and pass vacuously.
+        var r := _read_attr(t, str(w["attr"]))
+        if r["ok"]:
+            _baselines[key] = r["value"]
+        else:
+            _baseline_missing.append(key)
+## The raw Godot types a probe read may OBSERVE. Anything else (Object, Color,
+## Dictionary, Array, RID, ...) has no JSONable observation of its own and is a
+## tagged read failure -- never str(v). This is checked on the RAW value before
+## any conversion, because `_jsonable` keeps a str(v) catch-all for the public
+## dumps and would otherwise stringify an unsupported baseline.
+func _is_observable(v) -> bool:
+    match typeof(v):
+        TYPE_NIL, TYPE_BOOL, TYPE_INT, TYPE_FLOAT, TYPE_STRING, TYPE_VECTOR2, TYPE_VECTOR3:
+            return true
+        _:
+            return false
+
+func _read_attr(target: Object, attr: String) -> Dictionary:
+    # A tagged read: a legitimate null value and a FAILED read are DIFFERENT
+    # facts, and the caller must be able to tell them apart. Returning a bare
+    # null for a parse/execute failure collapsed both onto "the attribute was
+    # null", so a delta could silently compare against the wrong thing.
+    #   {"ok": true,  "value": <jsonable>}
+    #   {"ok": false, "error": "<why the read did not happen>"}
+    if attr == "":
+        return {"ok": false, "error": "empty attribute path"}
     var e := Expression.new()
     if e.parse(attr) != OK:
-        return null
+        return {"ok": false, "error": "read parse error: " + e.get_error_text()}
     var v = e.execute([], target, false)
     if e.has_execute_failed():
-        return null
-    return _jsonable(v)
+        return {"ok": false, "error": "read execute failed: " + e.get_error_text()}
+    # Gate on the RAW type BEFORE converting. `_jsonable` still has its str(v)
+    # catch-all for the public dumps, so converting first would turn an
+    # unsupported value (Color, Dictionary, Array, Object, ...) into a String and
+    # let it through: a frame-0 baseline would be that string and a later read
+    # would stringify identically, so an `unchanged` delta passed vacuously. An
+    # unsupported value has no observation of its own, so both an attribute read
+    # and a frame-0 baseline refuse it.
+    if not _is_observable(v):
+        return {"ok": false, "error": "attribute is not a supported observable type (%d)" % typeof(v)}
+    return {"ok": true, "value": _jsonable(v)}
+
 func _eval_delta(a: Dictionary, target: Node, res: Dictionary) -> void:
     var attr := str(a.get("attr", ""))
     var mode := str(a.get("mode", "changed"))
     var key := str(a.get("node", "")) + "|" + attr
-    var cur = _read_attr(target, attr)
-    var base = _baselines.get(key, null)
     res["expr"] = attr + " " + mode + " since frame 0"
+    var cur_read := _read_attr(target, attr)
+    if not cur_read["ok"]:
+        # The CURRENT read did not happen (parse/execute failure, or no
+        # JSONable value). That is an incomplete measurement, never a
+        # comparison: the delta has no current side to compare.
+        res["error"] = "delta read failed for %s on %s: %s" % [attr, str(a.get("node", "")), cur_read["error"]]
+        res["measurement"] = "incomplete"
+        res["actual"] = {"baseline": null, "current": null,
+                         "current_error": cur_read["error"]}
+        res["passed"] = false
+        _results.append(res)
+        return
+    var cur = cur_read["value"]
+    if not _baselines.has(key):
+        # No frame-0 baseline was ever captured for this attribute (its node
+        # did not resolve at frame 0, or its frame-0 read failed). A missing
+        # baseline is an INCOMPLETE measurement, not a comparison that happens
+        # to have null on one side: `changed` against a fabricated null would
+        # pass vacuously. A legitimately captured null value keeps flowing
+        # through below.
+        res["error"] = ("missing frame-0 baseline for %s on %s -- the node was not resolvable at frame 0, or its frame-0 read failed"
+                        % [attr, str(a.get("node", ""))])
+        res["measurement"] = "incomplete"
+        res["actual"] = {"baseline": null, "current": cur, "baseline_missing": true}
+        res["passed"] = false
+        _results.append(res)
+        return
+    var base = _baselines.get(key, null)
     res["actual"] = {"baseline": base, "current": cur}
     res["passed"] = (cur != base) if mode == "changed" else (cur == base)
     _results.append(res)
+
+func _truthy(v) -> bool:
+    # Assertion truth is decided ONLY from a value that has a truth of its own:
+    # a Boolean as-is, a non-empty String, and bool() for the rest (numbers,
+    # null, objects). A String observation rides in `actual` untouched either
+    # way -- this only decides the assert.
+    var t := typeof(v)
+    if t == TYPE_BOOL:
+        return v
+    if t == TYPE_STRING:
+        return v != ""
+    return bool(v)
 func _resolve(name: String) -> Node:
     if name == "":
         return get_tree().current_scene
@@ -1291,6 +1569,8 @@ func _refuse_path(kind: String, name: String, spec: String) -> void:
     _spec_errors.append("frame %d: %s target %s is a path and does not resolve in the scene tree (spec: %s)" % [_frame, kind, name, spec])
 func _jsonable(v):
     match typeof(v):
+        TYPE_NIL:
+            return null
         TYPE_VECTOR2:
             return [v.x, v.y]
         TYPE_VECTOR3:
@@ -1299,6 +1579,7 @@ func _jsonable(v):
             return v
         _:
             return str(v)
+
 func _exit_tree() -> void:
     _finish()  # fallback if the game quit itself before the frame budget
 func _finish() -> void:
@@ -1308,6 +1589,30 @@ func _finish() -> void:
     _t_step_end_usec = Time.get_ticks_usec()
     var out := {"frames": _frame, "asserts": _results, "nodes": {}, "captures": _captures,
         "spec_errors": _spec_errors}
+    # Completeness accounting: a report that lost a scheduled assertion, or
+    # that never reached its frame budget, must not be readable as a shorter
+    # but successful measurement. `complete` is false whenever the game quit
+    # (or died) before the frame budget was spent; `asserts_missing` is the
+    # scheduled assertions that produced no result row at all.
+    var scheduled := 0
+    var omitted := 0
+    for e in _timeline:
+        var a = e.get("assert", [])
+        if typeof(a) == TYPE_ARRAY:
+            scheduled += a.size()
+            if int(e.get("at", -1)) >= _frame:
+                omitted += a.size()
+    out["scheduled_asserts"] = scheduled
+    out["asserts_omitted"] = omitted
+    out["asserts_missing"] = max(0, scheduled - _results.size())
+    out["complete"] = _frame >= _max
+    out["baseline_missing"] = _baseline_missing
+    var incomplete_count := 0
+    for r in _results:
+        if str(r.get("measurement", "")) == "incomplete":
+            incomplete_count += 1
+    out["asserts_incomplete"] = incomplete_count
+
     var t_walk := Time.get_ticks_usec()
     _walk(get_tree().get_root(), out["nodes"])
     var walk_usec := Time.get_ticks_usec() - t_walk
@@ -1436,23 +1741,37 @@ def _capture_frames(total: int, timeline: list | None = None,
 
 
 def _probe_once(args: list[str], env: dict, state_path: Path, timeout: int,
-                render: bool, timing: dict | None = None) -> tuple[dict, list, bool]:
+                render: bool, timing: dict | None = None,
+                raw: list | None = None,
+                raw_label: str | None = None) -> tuple[dict, list, bool]:
     if state_path.exists():
         state_path.unlink()
     t_proc = time.monotonic()
     try:
         cp = _run(args, timeout=timeout, extra_env=env, render=render)
-        stderr, timed_out = cp.stderr, False
+        stdout, stderr = cp.stdout, cp.stderr
+        returncode, timed_out = cp.returncode, False
     except subprocess.TimeoutExpired as e:
-        stderr = e.stderr.decode() if isinstance(e.stderr, bytes) else (e.stderr or "")
-        timed_out = True
+        # TimeoutExpired carries both streams as bytes; when a caller asked for
+        # the raw log the killed run's own account must survive the kill.
+        def _s(v):
+            return v.decode(errors="replace") if isinstance(v, bytes) else (v or "")
+        stdout, stderr = _s(e.stdout), _s(e.stderr)
+        returncode, timed_out = 124, True
     except FileNotFoundError as e:
         # Render mode shells out to xvfb-run; if the image lacks it there is no
         # run at all. The caller's headless retry is what keeps the gate alive.
         if not render:
             raise
-        stderr, timed_out = str(e), False
+        stdout, stderr = "", str(e)
+        returncode, timed_out = 127, False
     proc_sec = time.monotonic() - t_proc
+    if raw is not None:
+        # The label is the pass identity the manifest carries for this raw
+        # stream (import / scenario:<name> / control:<scene>@<frames> / the
+        # script's own name), so per-pass grouping survives the copy.
+        raw.append({"label": raw_label, "stdout": stdout, "stderr": stderr,
+                    "returncode": returncode, "timed_out": timed_out})
     errs = [e for e in _parse_errors(stderr) if e["kind"] in ("runtime", "push_error", "parse", "load")]
     # A deferred call that never ran, or an atlas blit the engine refused, is a
     # runtime error of the game's own making — it just has no res:// frame. It
@@ -1504,10 +1823,13 @@ def _run_probe(dst: Path, state_path: Path, frames: int, timeout: int,
                extra: dict, scene: str = "",
                capture_at: list[int] | None = None,
                timing: dict | None = None,
-               render: bool = True) -> tuple[dict, list, bool]:
+               render: bool = True,
+               raw: list | None = None,
+               raw_label: str | None = None) -> tuple[dict, list, bool]:
     """One probe run. Returns (probe_report, errors, timed_out) — the captures
     ride inside probe_report, because callers (and the unit tests that fake this)
-    depend on the 3-tuple."""
+    depend on the 3-tuple. When `raw` is given, each pass's full untruncated
+    stdout/stderr is appended to it for the invocation's owned evidence."""
     args = ["--path", str(dst)]
     if PLAYTEST_FIXED_FPS > 0:
         # Ahead of the scene argument: this is an engine flag, not a scene.
@@ -1527,7 +1849,8 @@ def _run_probe(dst: Path, state_path: Path, frames: int, timeout: int,
         env["AITELIER_PROBE_CAPTURE"] = str(cap_dir)
         env["AITELIER_PROBE_CAPTURE_AT"] = ",".join(str(f) for f in capture_at)
     probe, errs, timed_out = _probe_once(args, env, state_path, timeout, render,
-                                        timing=timing)
+                                        timing=timing, raw=raw,
+                                        raw_label=raw_label)
     if render and not probe:
         # A broken X/GL setup must degrade to yesterday's behaviour, not take the
         # whole playtest gate down: retry once, headless, with capture off.
@@ -1537,7 +1860,8 @@ def _run_probe(dst: Path, state_path: Path, frames: int, timeout: int,
         if timing is not None:
             timing["headless_retry"] = True
         probe, errs, timed_out = _probe_once(args, env, state_path, timeout, False,
-                                             timing=timing)
+                                             timing=timing, raw=raw,
+                                             raw_label=raw_label)
     if probe:
         # Report which mode actually produced this, so a silent fallback to the
         # pixel-blind path is visible rather than looking like "no captures".
@@ -1548,17 +1872,85 @@ def _run_probe(dst: Path, state_path: Path, frames: int, timeout: int,
     return probe, errs, timed_out
 
 
+class _InvocationLogs(list):
+    """Raw streams plus the caller's exact owned HOME/pass-label registries.
+
+    This remains a list for existing helper/probe callers. Only invocation
+    retention callers transfer HOME cleanup ownership through these registries.
+    """
+    def __init__(self, homes: list, labels: list):
+        super().__init__()
+        self.homes = homes
+        self.labels = labels
+
+
 def _playtest_legacy(dst: Path, frames: int, input_action: str, timeout: int,
                      ledger: dict | None = None,
-                     cap_limit: int | None = None) -> dict:
-    """The old canned smoke test: run the main scene auto-pressing one action,
-    snapshot the end state. HARD-fails only on crash / didn't-run."""
+                     cap_limit: int | None = None,
+                     retain: list | None = None,
+                     retain_errors: list | None = None,
+                     retain_patterns: list | None = None,
+                     retain_requested: bool = False,
+                     corr: dict | None = None,
+                     raw_logs: list | None = None,
+                     user_dir_name: str | None = None) -> dict:
+    """Canned smoke test with owned user:// retention and total cleanup."""
+    home = Path(tempfile.mkdtemp(prefix="godot_home_"))
+    raw_logs = raw_logs if raw_logs is not None else []
+    homes, labels = [home], [{"scenario": "(legacy smoke test)"}]
+    if isinstance(raw_logs, _InvocationLogs):
+        homes, labels = raw_logs.homes, raw_logs.labels
+        homes.append(home)
+        labels.append({"scenario": "(legacy smoke test)"})
+    try:
+        return _playtest_legacy_inner(
+            dst, frames, input_action, timeout, ledger=ledger, cap_limit=cap_limit,
+            retain=retain, retain_errors=retain_errors, corr=corr,
+            retain_patterns=retain_patterns, retain_requested=retain_requested,
+            raw_logs=raw_logs, user_dir_name=user_dir_name, home=home)
+    except BaseException as exc:
+        if retain or retain_errors or retain_patterns or retain_requested:
+            try:
+                _retain_copy(retain, homes, raw_logs,
+                             {**dict(corr or {}), "mode": "render"},
+                             extra_errors=list(retain_errors or [])
+                             + ["unexpected smoke error: %r" % exc],
+                             pass_labels=labels, user_dir_name=user_dir_name,
+                             patterns=retain_patterns, requested=True)
+            except Exception:
+                pass
+        raise
+    finally:
+        for h in homes:
+            shutil.rmtree(h, ignore_errors=True)
+
+
+def _playtest_legacy_inner(dst: Path, frames: int, input_action: str, timeout: int,
+                     ledger: dict | None = None,
+                     cap_limit: int | None = None,
+                     retain: list | None = None,
+                     retain_errors: list | None = None,
+                     retain_patterns: list | None = None,
+                     retain_requested: bool = False,
+                     corr: dict | None = None,
+                     raw_logs: list | None = None,
+                     user_dir_name: str | None = None,
+                     home: Path | None = None) -> dict:
+    """Run the canned smoke test in its registered disposable HOME."""
     state_path = dst.parent / "probe_state.json"
+    raw_logs = raw_logs if raw_logs is not None else []
     t_legacy: dict = {}
     t_legacy_start = time.monotonic()
+    # `raw` is passed only when a retention request needs the full streams; the
+    # existing probe fakes (and the plain path) keep the exact signature when no
+    # evidence was asked for.
+    legacy_kwargs = ({"raw": raw_logs, "raw_label": "(legacy smoke test)"}
+                     if (retain or retain_errors or retain_patterns
+                         or retain_requested) else {})
     probe, errs, timed_out = _run_probe(
-        dst, state_path, frames, timeout, {"AITELIER_PROBE_INPUT": input_action},
-        capture_at=_capture_frames(frames, limit=cap_limit), timing=t_legacy)
+        dst, state_path, frames, timeout, {"AITELIER_PROBE_INPUT": input_action, **_home_env(str(home))},
+        capture_at=_capture_frames(frames, limit=cap_limit), timing=t_legacy,
+        **legacy_kwargs)
     if ledger is not None:
         t_legacy["frames_stepped"] = (probe.get("timing") or {}).get(
             "frames_stepped", probe.get("frames", 0))
@@ -1574,12 +1966,28 @@ def _playtest_legacy(dst: Path, frames: int, input_action: str, timeout: int,
         summary = "Playtest ran %d frames cleanly, no runtime errors." % probe.get("frames", frames)
     else:
         summary = "Playtest surfaced %d runtime error(s)." % len(errs)
-    return {"passed": passed, "frames": probe.get("frames", frames), "errors": errs,
-            "native_debt": debt,
-            "state": probe.get("nodes", {}), "behavior": None,
-            "captures": probe.get("captures", []),
-            "render_mode": probe.get("render_mode", "headless"),
-            "spec_used": False, "summary": summary}
+    report = {"passed": passed, "frames": probe.get("frames", frames), "errors": errs,
+              "native_debt": debt,
+              "state": probe.get("nodes", {}), "behavior": None,
+              "captures": probe.get("captures", []),
+              "render_mode": probe.get("render_mode", "headless"),
+              "spec_used": False, "summary": summary}
+    if retain or retain_errors or retain_patterns or retain_requested:
+        retention = _retain_copy(retain, raw_logs.homes if isinstance(raw_logs, _InvocationLogs) else [home], raw_logs,
+                                 {**dict(corr or {}), "mode": report["render_mode"]},
+                                 extra_errors=retain_errors,
+                                 pass_labels=raw_logs.labels if isinstance(raw_logs, _InvocationLogs) else [{"scenario": "(legacy smoke test)"}],
+                                 user_dir_name=user_dir_name,
+                                 patterns=retain_patterns,
+                                 requested=bool(retain or retain_errors
+                                                or retain_patterns or retain_requested))
+        report["retention"] = retention
+        if not retention["ok"]:
+            report["passed"] = False
+            report["summary"] = summary + (
+                "  Invocation evidence NOT fully retained; manifest: %s."
+                % retention["manifest"])
+    return report
 
 
 _CMP_OPS = ("==", "!=", "<=", ">=", "<", ">", " and ", " or ", " in ", " not ")
@@ -1979,7 +2387,70 @@ def determined_game_time_findings(rows: list, fixed_fps: int,
 
 def _playtest_spec(dst: Path, spec: dict, frames: int, timeout: int,
                    ledger: dict | None = None,
-                   cap_limit: int | None = None) -> dict:
+                   cap_limit: int | None = None,
+                   retain: list | None = None,
+                   retain_errors: list | None = None,
+                   retain_patterns: list | None = None,
+                   retain_requested: bool = False,
+                   corr: dict | None = None,
+                   raw_logs: list | None = None,
+                   user_dir_name: str | None = None) -> dict:
+    """Authored-spec playtest with a TOTAL owned-home cleanup guarantee.
+
+    Every scenario/control throwaway HOME is REGISTERED the moment it is
+    created (never after its pass), and the finally below removes every
+    registered home on success, failure, timeout AND an unexpected exception —
+    but only after a truthful bounded retention attempt has written its
+    manifest when the request declared retention. The original error is always
+    re-raised unchanged, never replaced by a green or hidden behind a
+    retention error."""
+    scen_homes = raw_logs.homes if isinstance(raw_logs, _InvocationLogs) else []
+    scen_labels = raw_logs.labels if isinstance(raw_logs, _InvocationLogs) else []
+    retention_cell: dict = {}
+    try:
+        return _playtest_spec_inner(
+            dst, spec, frames, timeout, ledger=ledger, cap_limit=cap_limit,
+            retain=retain, retain_errors=retain_errors, corr=corr,
+            retain_patterns=retain_patterns, retain_requested=retain_requested,
+            raw_logs=raw_logs, user_dir_name=user_dir_name,
+            scen_homes=scen_homes, scen_labels=scen_labels,
+            retention_cell=retention_cell)
+    except BaseException as exc:
+        if ((retain or retain_errors or retain_patterns or retain_requested)
+                and "value" not in retention_cell):
+            # An error nobody predicted must not erase the generated evidence:
+            # attempt the same bounded retention (the manifest records the
+            # unexpected error), then re-raise the ORIGINAL failure.
+            try:
+                retention_cell["value"] = _retain_copy(
+                    retain, scen_homes, list(raw_logs or []),
+                    {**dict(corr or {}), "mode": "headless"},
+                    extra_errors=list(retain_errors or [])
+                    + ["unexpected error before retention: %r" % exc],
+                    pass_labels=scen_labels, user_dir_name=user_dir_name,
+                    patterns=retain_patterns, requested=True)
+            except Exception:
+                pass
+        raise
+    finally:
+        # Owned roots only: exactly the homes this invocation registered.
+        for h in scen_homes:
+            shutil.rmtree(h, ignore_errors=True)
+
+
+def _playtest_spec_inner(dst: Path, spec: dict, frames: int, timeout: int,
+                         ledger: dict | None = None,
+                         cap_limit: int | None = None,
+                         retain: list | None = None,
+                         retain_errors: list | None = None,
+                         retain_patterns: list | None = None,
+                         retain_requested: bool = False,
+                         corr: dict | None = None,
+                         raw_logs: list | None = None,
+                         user_dir_name: str | None = None,
+                         scen_homes: list | None = None,
+                         scen_labels: list | None = None,
+                         retention_cell: dict | None = None) -> dict:
     """Authored-spec playtest: run ONE isolated headless pass per scenario, driving
     its input timeline and evaluating its Expression assertions against live nodes.
 
@@ -1998,6 +2469,13 @@ def _playtest_spec(dst: Path, spec: dict, frames: int, timeout: int,
     elif "scenarios" not in spec:
         spec_errors.append("spec has no `scenarios` key (top-level keys: %s). No "
                            "scenario was run." % ", ".join(sorted(str(k) for k in spec)))
+    # corr is OPTIONAL in the signature and MUST stay so: internal/CLI callers
+    # pass None. Normalise it to the empty mapping once, here, so every
+    # `{**corr, ...}` expansion below works without each call site re-deciding.
+    # The HTTP handler always passes the server-mandated correlation mapping,
+    # which survives this copy unchanged — the mandatory correlation is a
+    # server property, not a reason to crash a None caller.
+    corr = dict(corr or {})
     header_errors = _key_type_errors("spec", spec, _SPEC_KEY_TYPES)
     spec_errors.extend(m + " No scenario was run." for m in header_errors)
     scene = str(spec.get("scene", "") or "")
@@ -2013,6 +2491,11 @@ def _playtest_spec(dst: Path, spec: dict, frames: int, timeout: int,
     scen_nodes: list[dict] = []
     scen_frames: list[int] = []
     scen_scenes: list[str] = []
+    # Every scenario's (and control's) throwaway $HOME, kept until the owned
+    # retention below has copied the declared artifacts out of them.
+    scen_homes = scen_homes if scen_homes is not None else []
+    scen_labels = scen_labels if scen_labels is not None else []
+    raw_logs = raw_logs if raw_logs is not None else []
     ran_any = crashed = False
     last_state: dict = {}
     render_mode = "headless"
@@ -2095,17 +2578,32 @@ def _playtest_spec(dst: Path, spec: dict, frames: int, timeout: int,
         # with baseline true / current true — the frame-0 baseline had a save
         # left over from an earlier scenario. Order-dependence, not chance.
         sc_home = tempfile.mkdtemp(prefix="godot_home_")
+        scen_homes.append(Path(sc_home))
+        # Registered the moment it exists; the label carries the pass identity
+        # the manifest rows report (and marks this home a scenario, not a
+        # control, for retention).
+        scen_labels.append({"scenario": name})
+        # Only a retention request needs the full raw streams, and the existing
+        # probe fakes (and the plain path) keep their exact signature when none
+        # is asked for.
+        sc_kwargs = ({"raw": raw_logs, "raw_label": "scenario:%s" % name}
+                     if (retain or retain_errors or retain_patterns
+                         or retain_requested) else {})
         t_scenario: dict = {}
         t_scen_start = time.monotonic()
         try:
             probe, errs, timed_out = _run_probe(
                 dst, state_path, sframes, timeout,
-                {"AITELIER_PROBE_SPEC": str(spec_path), "HOME": sc_home},
+                {"AITELIER_PROBE_SPEC": str(spec_path), **_home_env(sc_home)},
                 scene=sc_scene,
                 capture_at=_capture_frames(sframes, timeline, limit=cap_limit),
-                timing=t_scenario)
+                timing=t_scenario, **sc_kwargs)
         finally:
-            shutil.rmtree(sc_home, ignore_errors=True)
+            # When this invocation declared retention the home must outlive the
+            # run so its artifacts can be copied out below; otherwise it goes at
+            # once, exactly as before. Either way nothing survives the call.
+            if not (retain or retain_errors or retain_patterns or retain_requested):
+                shutil.rmtree(sc_home, ignore_errors=True)
         t_scenario["frames_stepped"] = (probe.get("timing") or {}).get(
             "frames_stepped", probe.get("frames", 0))
         scen_timing.append(_scenario_ledger(
@@ -2120,10 +2618,62 @@ def _playtest_spec(dst: Path, spec: dict, frames: int, timeout: int,
         all_errors.extend({**e, "scenario": name} for e in errs)
         all_debt.extend({**e, "scenario": name} for e in debt)
         asserts = probe.get("asserts", [])
-        scen_passed = ran and not errs and bool(asserts) and all(a.get("passed") for a in asserts)
+        # A reported assertion can still be an INCOMPLETE measurement: a read
+        # that did not happen (parse/execute failure, unsupported value type),
+        # a delta with no frame-0 baseline, or an observation that could not be
+        # recorded. Such rows carry measurement == "incomplete" (or, from an
+        # older probe shape, actual.baseline_missing). A merely FALSE comparison
+        # is NOT incomplete -- it was measured, and stays advisory.
+        incomplete = [
+            a for a in asserts
+            if a.get("measurement") == "incomplete"
+            or (isinstance(a.get("actual"), dict)
+                and a["actual"].get("baseline_missing"))]
+        # Completeness accounting: the normalised timeline is the set of
+        # assertions the author SCHEDULED; the probe report is what actually
+        # came back. A scheduled assertion with no result row (crash, early
+        # quit, dropped frame budget) is an incomplete measurement, never a
+        # shorter successful one, and a probe that reports it never reached
+        # its frame budget is the same. Reports from an older probe shape
+        # without `complete` are judged only on whether every scheduled
+        # assertion arrived.
+        expected_asserts = sum(len(e.get("assert") or []) for e in timeline)
+        missing_asserts = max(0, expected_asserts - len(asserts))
+        frame_budget_reached = bool(
+            probe.get("complete", len(asserts) >= expected_asserts))
+        complete = frame_budget_reached and not incomplete and not missing_asserts
+        if not complete:
+            why = []
+            if not frame_budget_reached:
+                why.append("probe did not reach its frame budget")
+            if missing_asserts:
+                why.append("%d scheduled assertion(s) produced no result row"
+                           % missing_asserts)
+            if incomplete:
+                why.append("%d reported assertion(s) could not be observed (%s)"
+                           % (len(incomplete),
+                              "; ".join(str(a.get("error") or a.get("name", "?"))
+                                        for a in incomplete[:3])))
+            spec_errors.append(
+                "scenario %r: incomplete measurement -- %s; %d of %d scheduled "
+                "assertions reported. The scenario did not produce a complete "
+                "result, so it cannot count as a passing or advisory outcome."
+                % (name, "; ".join(why) or "incomplete", len(asserts),
+                   expected_asserts))
+        scen_passed = (ran and not errs and complete and not missing_asserts
+                       and not incomplete
+                       and bool(asserts) and all(a.get("passed") for a in asserts))
+
         scen_results.append({"name": name, "ran": ran, "errors": errs,
                              "native_debt": debt,
                              "asserts": asserts, "passed": scen_passed,
+                             # Measurement-completeness rows: what was scheduled
+                             # vs what the probe actually reported.
+                             "expected_asserts": expected_asserts,
+                             "asserts_missing": missing_asserts,
+                             "complete": complete,
+                             "incomplete_asserts": len(incomplete),
+
                              # "Did this scenario drive ANY input?" -- derived
                              # from the normalised entries themselves: after
                              # _normalize_timeline every key is either the
@@ -2173,16 +2723,23 @@ def _playtest_spec(dst: Path, spec: dict, frames: int, timeout: int,
                 # A control that boots into a save an earlier control left is
                 # not the no-input baseline this comparison claims to be.
                 ctrl_home = tempfile.mkdtemp(prefix="godot_home_")
+                ctrl_label = "control:%s@%d" % (scen_scenes[i] or "(main)", n)
+                scen_homes.append(Path(ctrl_home))
+                scen_labels.append({"control": ctrl_label})
                 t_ctrl: dict = {}
                 t_ctrl_start = time.monotonic()
                 try:
+                    ctrl_kwargs = ({"raw": raw_logs, "raw_label": ctrl_label}
+                                   if (retain or retain_errors or retain_patterns
+                                       or retain_requested) else {})
                     ctrl, _e, _t = _run_probe(dst, state_path, n, timeout,
                                               {"AITELIER_PROBE_SPEC": str(spec_path),
-                                               "HOME": ctrl_home},
+                                               **_home_env(ctrl_home)},
                                               scene=scen_scenes[i], timing=t_ctrl,
-                                              render=False)
+                                              render=False, **ctrl_kwargs)
                 finally:
-                    shutil.rmtree(ctrl_home, ignore_errors=True)
+                    if not (retain or retain_errors or retain_patterns or retain_requested):
+                        shutil.rmtree(ctrl_home, ignore_errors=True)
                 ctrl_timing.append(_scenario_ledger(
                     "control:%s@%d" % (scen_scenes[i] or "(main)", n),
                     scen_scenes[i], time.monotonic() - t_ctrl_start, t_ctrl))
@@ -2223,15 +2780,47 @@ def _playtest_spec(dst: Path, spec: dict, frames: int, timeout: int,
     else:
         summary = ("Playtest ran clean but %d/%d scenario(s) failed assertions (advisory)."
                    % (n_fail, len(scen_results)))
+    # Owned invocation evidence: copy the declared user:// artifacts out of the
+    # scenario/control homes while they are still on disk, then remove every one
+    # of them. A retained artifact that never appeared or was refused makes the
+    # HARD verdict False, so a partial retention is never a silent green.
+    retention = None
+    if retain or retain_errors or retain_patterns or retain_requested:
+        retention = _retain_copy(retain, scen_homes, raw_logs,
+                                 {**corr, "mode": render_mode},
+                                 extra_errors=retain_errors,
+                                 pass_labels=scen_labels,
+                                 user_dir_name=user_dir_name,
+                                 patterns=retain_patterns,
+                                 requested=bool(retain or retain_errors
+                                                or retain_patterns or retain_requested))
+        retention_cell["value"] = retention
+        if not retention["ok"]:
+            hard_passed = False
+            why = []
+            if retention["refused"]:
+                why.append("refused: %s" % "; ".join(retention["refused"]))
+            if retention["missing"]:
+                why.append("declared but missing: %s" % ", ".join(retention["missing"]))
+            if retention["limit_hit"]:
+                why.append("retention limit hit: %s" % retention["limit_hit"])
+            summary += ("  Invocation evidence NOT fully retained (%s); manifest: %s."
+                        % (" | ".join(why), retention["manifest"]))
+    # The homes are removed by the _playtest_spec wrapper's finally — on a
+    # pass, a failure, a timeout or an unexpected error — after retention has
+    # copied what the call declared.
     if ledger is not None:
         ledger["scenarios"] = scen_timing
         ledger["controls"] = ctrl_timing
-    return {"passed": hard_passed, "frames": default_frames, "errors": all_errors,
-            "native_debt": all_debt,
-            "state": last_state, "spec_used": True, "spec_errors": spec_errors,
-            "captures": captures, "render_mode": render_mode,
-            "behavior": {"all_passed": behavior_passed, "scenarios": scen_results},
-            "summary": summary}
+    report = {"passed": hard_passed, "frames": default_frames, "errors": all_errors,
+              "native_debt": all_debt,
+              "state": last_state, "spec_used": True, "spec_errors": spec_errors,
+              "captures": captures, "render_mode": render_mode,
+              "behavior": {"all_passed": behavior_passed, "scenarios": scen_results},
+              "summary": summary}
+    if retention is not None:
+        report["retention"] = retention
+    return report
 
 
 def _assemble_ledger(ledger: dict, started_at: str, t_start: float,
@@ -2302,55 +2891,125 @@ def _assemble_ledger(ledger: dict, started_at: str, t_start: float,
 
 
 def playtest_project(project_dir: str, frames: int = DEFAULT_PLAYTEST_FRAMES,
-                     input_action: str = "ui_accept", spec: dict | None = None,
-                     timeout: int = 120, captures: int | None = None) -> dict:
+                     input_action: str = "ui_accept",
+                     spec: dict | None = None, timeout: int = 120,
+                     captures: int | None = None,
+                     retain: list | None = None,
+                     retain_errors: list | None = None,
+                     retain_patterns: list | None = None,
+                     retain_requested: bool = False,
+                     corr: dict | None = None) -> dict:
     proj = Path(project_dir)
     if not (proj / "project.godot").is_file():
         return {"passed": True, "frames": 0, "errors": [], "state": {},
                 "behavior": None, "spec_used": False, "no_project": True,
                 "summary": "No Godot project — playtest skipped."}
+    # The real Godot user:// root name for THIS project — retention searches
+    # the invocation-owned app_userdata/<name> (or custom user dir), never a
+    # guessed HOME root and never the whole HOME.
+    user_dir_name = _project_user_dir_name(proj)
     t_start = time.monotonic()
     started_at = datetime.now(timezone.utc).isoformat()
     t_copy = time.monotonic()
     dst = _copy_project(proj)
     copy_sec = time.monotonic() - t_copy
     ledger: dict = {}
+    homes, labels = [], []
+    want_raw = bool(retain or retain_errors or retain_patterns or retain_requested)
+    raw_logs = _InvocationLogs(homes, labels) if want_raw else []
     try:
         _inject_probe(dst)
         t_import = time.monotonic()
-        _import_resources(dst, timeout)
+        try:
+            if want_raw:
+                _import_resources(dst, timeout, raw_logs=raw_logs)
+            else:
+                _import_resources(dst, timeout)
+        except BaseException as exc:
+            if want_raw:
+                try:
+                    _retain_copy(retain, homes, raw_logs, dict(corr or {}),
+                                 extra_errors=list(retain_errors or [])
+                                 + ["unexpected import error: %r" % exc],
+                                 pass_labels=labels, user_dir_name=user_dir_name,
+                                 patterns=retain_patterns, requested=True)
+                except Exception:
+                    pass
+            raise
         import_sec = time.monotonic() - t_import
         # Any spec with keys is read as a spec (and refused there if it has
         # no scenario list); only a request with no spec runs the smoke test.
         if spec:
             result = _playtest_spec(dst, spec, frames, timeout, ledger=ledger,
-                                    cap_limit=captures)
+                                    cap_limit=captures, retain=retain,
+                                    retain_errors=retain_errors, corr=corr,
+                                    retain_patterns=retain_patterns,
+                                    retain_requested=retain_requested,
+                                    raw_logs=raw_logs,
+                                    user_dir_name=user_dir_name)
         else:
             result = _playtest_legacy(dst, frames, input_action, timeout,
-                                      ledger=ledger, cap_limit=captures)
+                                      ledger=ledger, cap_limit=captures,
+                                      retain=retain, retain_errors=retain_errors,
+                                      retain_patterns=retain_patterns,
+                                      retain_requested=retain_requested,
+                                      corr=corr, raw_logs=raw_logs,
+                                      user_dir_name=user_dir_name)
         if isinstance(result, dict):
             result["timing"] = _assemble_ledger(ledger, started_at, t_start,
                                                 copy_sec, import_sec)
         return result
     finally:
+        for h in homes:
+            shutil.rmtree(h, ignore_errors=True)
         shutil.rmtree(dst.parent, ignore_errors=True)
 
 
-def _import_resources(dst: Path, timeout: int) -> None:
-    """Build the import cache before running the scene.
+def _home_env(home: str) -> dict:
+    """Keep Godot's user data and config inside this pass's disposable HOME."""
+    return {"HOME": home, "XDG_DATA_HOME": str(Path(home) / ".local/share"),
+            "XDG_CONFIG_HOME": str(Path(home) / ".config"),
+            "XDG_CACHE_HOME": str(Path(home) / ".cache")}
 
-    `_copy_project` strips `.godot/`, and Godot resolves a texture or a sound
-    through that cache — an un-imported PNG makes `ExtResource("bgtex")` resolve
-    to nothing, so the Sprite2D draws NOTHING and the run still exits cleanly
-    with zero errors. A game whose art had been replaced by real files therefore
-    play-tested as a flat grey screen and passed. The compile gate already
-    imports, but on its own temp copy, which it then deletes; this path needs its
-    own. Best-effort: a project with no importable resources (the primitives-only
-    case this harness was written for) is unaffected either way."""
+
+def _import_resources(dst: Path, timeout: int,
+                      raw_logs: list | None = None) -> None:
+    """Build this copy's import cache with isolated HOME/XDG and full raw logs.
+
+    Import remains best-effort for timeouts, as before. Unexpected errors keep
+    their original exception. Retention invocations register this HOME with
+    the caller before any effect and keep it until outer retention/cleanup;
+    direct helper calls and default requests clean it locally on every outcome.
+    """
+    home = tempfile.mkdtemp(prefix="godot_import_home_")
+    caller_owned = isinstance(raw_logs, _InvocationLogs)
     try:
-        _run(["--path", str(dst), "--import"], timeout=timeout)
-    except subprocess.TimeoutExpired:
-        pass
+        if caller_owned:
+            raw_logs.homes.append(Path(home))
+            raw_logs.labels.append({"import": "resources"})
+        try:
+            cp = _run(["--path", str(dst), "--import"], timeout=timeout,
+                      extra_env=_home_env(home))
+            if raw_logs is not None:
+                raw_logs.append({"label": "import", "stdout": cp.stdout,
+                                 "stderr": cp.stderr, "returncode": cp.returncode,
+                                 "timed_out": False})
+        except subprocess.TimeoutExpired as e:
+            if raw_logs is not None:
+                def _s(v):
+                    return v.decode(errors="replace") if isinstance(v, bytes) else (v or "")
+                raw_logs.append({"label": "import", "stdout": _s(e.stdout),
+                                 "stderr": _s(e.stderr) + "\nimport timed out",
+                                 "returncode": 124, "timed_out": True})
+        except BaseException as exc:
+            if raw_logs is not None:
+                raw_logs.append({"label": "import", "stdout": "",
+                                 "stderr": "unexpected import error: %r" % exc,
+                                 "returncode": None, "timed_out": False})
+            raise
+    finally:
+        if not caller_owned:
+            shutil.rmtree(home, ignore_errors=True)
 
 
 # A single-file --check-only run has no project.godot, so it cannot see
@@ -2467,6 +3126,744 @@ def _discover_entry_points(proj: Path) -> list:
     return found
 
 
+# ── owned invocation evidence (generated user:// artifacts that survive HOME) ─
+#
+# WHY THIS EXISTS. Every run gets a throwaway $HOME and that HOME is deleted the
+# moment the run ends — which is correct for isolation and fatal for a gate meant
+# to produce AUDITABLE pixels and durable reports. A /script render that draws a
+# PNG into user:// and a /playtest that writes save_1.json both lose the evidence
+# to their own cleanup. This is the bounded, server-owned way to keep it.
+#
+# THE CONTRACT the caller may state (and only this):
+#
+#   "retain": {"files": ["reports/summary.json", "frames/f2.png"]}
+#
+# Each entry is a RELATIVE user:// path under the invocation's throwaway HOME.
+# A leading "user://" / "res://" is stripped; anything absolute, containing a
+# ".." segment, resolving outside that HOME, or reached through a symlink or a
+# hard link is REFUSED (listed in `retention.refused`) and never copied. The
+# caller names WHAT to keep. It never names WHERE: the destination is a unique
+# server-chosen directory under the durable godot-control state root, so one
+# invocation can neither choose a foreign path nor overwrite a previous one.
+#
+# The destination holds each retained artifact under its declared relative path,
+# plus `raw/<n>-<label>.stdout.log` / `.stderr.log` with the FULL untruncated
+# streams (the response keeps excerpts for compatibility; the raw logs do not
+# truncate), plus `manifest.json`: one row per retained file and raw log with
+# path, size, SHA256, source, the user:// path it came from, and the
+# project/run/operation/invocation correlation the request carried. A declared
+# artifact that is not there is a truthfully recorded `missing`, and a missing
+# artifact or an exceeded limit makes the invocation say so — never a silent
+# green. On a pass, fail, timeout or an unexpected error the owned state
+# directory is still written, and only the invocation's own temps are removed.
+
+# The whole-gate sizing these defaults must be raised to (server-side env, no
+# new quota framework): a normal 69-script gate emits >= 140 raw streams (69
+# entry points + 1 import pass, each with stdout+stderr), and a normal
+# 221-scenario playtest emits >= 442 raw streams before any on-demand captures
+# or input-dead control passes. GODOT_RETAIN_MAX_FILES must be set at least that
+# high (with headroom) or the retention limit is a truthful HARD failure, never
+# a silent truncation.
+_RETAIN_MAX_FILES = int(os.environ.get("GODOT_RETAIN_MAX_FILES", "64"))
+_RETAIN_MAX_BYTES = int(os.environ.get("GODOT_RETAIN_MAX_BYTES", str(64 * 1024 * 1024)))
+_RETAIN_ALLOWED_SUFFIXES = (".json", ".png")
+# Dynamic-name selection (see `patterns` below): a bounded selector count and a
+# bounded directory-entry search budget so a hostile pattern cannot walk a wide
+# tree. Both are server-configured, like the file/byte budgets above.
+_RETAIN_MAX_PATTERNS = int(os.environ.get("GODOT_RETAIN_MAX_PATTERNS", "16"))
+_RETAIN_MAX_SEARCH_ENTRIES = int(os.environ.get(
+    "GODOT_RETAIN_MAX_SEARCH_ENTRIES", "4096"))
+# Subtree names a pattern may never select: the game's saved games and player
+# profiles are not invocation-generated evidence and stay out of scope.
+_RETAIN_EXCLUDED_DIRS = ("saves", "saved_games", "profile", "profiles")
+
+
+def _retain_root() -> Path:
+    """The durable, server-owned state root the owner ledger already uses.
+
+    It is the `godot-control` directory's parent (the mounted
+    /var/lib/aitelier-godot), so a retained artifact lives on the volume that
+    survives the container and the request, beside the render-owner ledger that
+    a deployment observer already reads."""
+    override = os.environ.get("GODOT_EVIDENCE_ROOT")
+    if override:
+        return Path(override)
+    return Path(LIFECYCLE_DB).parent
+
+
+def _retain_declared(req: dict) -> tuple[list, list]:
+    """Normalise the request's `retain` block into (files, errors).
+
+    Shape errors are returned, never raised: a malformed retention request must
+    not cost the caller its whole report. `files` is the declared literal list
+    exactly as authored (still possibly hostile); _retain_copy validates each
+    entry. The `patterns` selector is normalised by _retain_selectors and its
+    syntax checked by _retain_patterns."""
+    raw = (req or {}).get("retain")
+    if raw is None:
+        return [], []
+    if not isinstance(raw, dict):
+        return [], ["retain must be a mapping with a `files` list"]
+    unknown = sorted(str(k) for k in raw if k not in ("files", "patterns"))
+    if unknown:
+        return [], ["retain has unknown key(s) %s - allowed: files, patterns"
+                    % ", ".join(unknown)]
+    files = raw.get("files")
+    if files is None:
+        return [], []
+    if not isinstance(files, list) or not all(isinstance(f, str) for f in files):
+        return [], ["retain.files must be a list of relative path strings"]
+    return files, []
+
+
+def _retain_relpaths(declared: list) -> tuple[list, list]:
+    """(accepted relative paths, refusals) — SYNTACTIC validation, no I/O.
+
+    A leading "user://" / "res://" is stripped. Anything absolute, with a
+    ".." segment, empty after normalisation, a duplicate, a saves/saved_games/
+    profile/profiles subtree, or not ending in a permitted suffix is refused
+    here, BEFORE any home is touched, so a hostile declaration can never reach
+    a filesystem call. Containment and symlink checks need the home and happen
+    in _retain_copy.
+    """
+    accepted, refused, seen = [], [], set()
+    for raw in declared:
+        text = str(raw).strip()
+        rel = text.replace("\\", "/")
+        for prefix in ("user://", "res://"):
+            if rel.startswith(prefix):
+                rel = rel[len(prefix):]
+        parts = [p for p in rel.split("/") if p not in ("", ".")]
+        if not parts or ".." in parts or os.path.isabs(text):
+            refused.append("%s: not a relative user:// path" % raw)
+            continue
+        rel = "/".join(parts)
+        if any(p.lower() in _RETAIN_EXCLUDED_DIRS for p in parts):
+            refused.append("%s: saves/profile subtrees may not be selected" % raw)
+            continue
+        if rel in seen:
+            continue
+        if not rel.endswith(_RETAIN_ALLOWED_SUFFIXES):
+            refused.append("%s: only %s artifacts may be retained"
+                           % (raw, ", ".join(_RETAIN_ALLOWED_SUFFIXES)))
+            continue
+        seen.add(rel)
+        accepted.append(rel)
+    return accepted, refused
+
+
+def _retain_selectors(req: dict) -> tuple[list, list]:
+    """Normalise the request's `retain.patterns` selector into (patterns, errors).
+
+    Shape only: a non-list (or one holding non-strings) is an error returned to
+    the caller before any effect. Pattern SYNTAX is checked by _retain_patterns."""
+    raw = (req or {}).get("retain")
+    if not isinstance(raw, dict):
+        return [], []
+    patterns = raw.get("patterns")
+    if patterns is None:
+        return [], []
+    if not isinstance(patterns, list) or not all(isinstance(p, str) for p in patterns):
+        return [], ["retain.patterns must be a list of relative path patterns"]
+    return list(patterns), []
+
+
+def _retain_requested(req: dict) -> bool:
+    """True when the caller EXPLICITLY asked for retention (even with no files).
+
+    {"retain": {"files": []}} and the explicit empty mapping {"retain": {}} are
+    raw-only requests: they retain the full streams. An omitted/non-mapping
+    `retain` leaves the historic behaviour —
+    no retention at all — unchanged."""
+    raw = (req or {}).get("retain")
+    return isinstance(raw, dict)
+
+
+def _retain_component_regex(component: str):
+    """One path component glob: `*`/`?` match WITHIN the component, never `/`."""
+    return re.compile("".join(
+        "[^/]*" if ch == "*" else "[^/]" if ch == "?" else re.escape(ch)
+        for ch in component))
+
+
+def _retain_patterns(declared: list) -> tuple[list, list]:
+    """(accepted patterns, refusals) — SYNTACTIC validation, no I/O.
+
+    A pattern is a relative user:// path whose FIRST component starts with a
+    non-empty literal prefix (so it can never be a root-wide match), whose
+    wildcards (`*`/`?`) stay inside a single component, and which names at least
+    a directory and then a file. `**`, absolute paths, `..` traversal, a bad
+    suffix, a saves/profile head and anything past the bounded pattern count are
+    refused BEFORE any home is touched."""
+    accepted, refused, seen = [], [], set()
+    for raw in declared:
+        if len(accepted) >= _RETAIN_MAX_PATTERNS:
+            refused.append("%s: more than %d retention patterns are not accepted"
+                           % (raw, _RETAIN_MAX_PATTERNS))
+            continue
+        text = str(raw).strip()
+        rel = text.replace("\\", "/")
+        for prefix in ("user://", "res://"):
+            if rel.startswith(prefix):
+                rel = rel[len(prefix):]
+        parts = rel.split("/")
+        if not parts or not all(parts) or ".." in parts or os.path.isabs(text):
+            refused.append("%s: not a relative user:// pattern" % raw)
+            continue
+        if "**" in rel:
+            refused.append("%s: a recursive '**' wildcard is not allowed" % raw)
+            continue
+        if len(parts) < 2:
+            refused.append("%s: a pattern must name a directory and then a file"
+                           % raw)
+            continue
+        head = parts[0]
+        literal_prefix = head.split("*")[0].split("?")[0]
+        if not literal_prefix:
+            refused.append("%s: the first directory component must start with a "
+                           "literal prefix (no root-wide match)" % raw)
+            continue
+        if head in _RETAIN_EXCLUDED_DIRS or literal_prefix.lower() in _RETAIN_EXCLUDED_DIRS:
+            refused.append("%s: saves/profile subtrees may not be selected" % raw)
+            continue
+        if not rel.endswith(_RETAIN_ALLOWED_SUFFIXES):
+            refused.append("%s: only %s artifacts may be retained"
+                           % (raw, ", ".join(_RETAIN_ALLOWED_SUFFIXES)))
+            continue
+        if rel in seen:
+            continue
+        seen.add(rel)
+        accepted.append(rel)
+    return accepted, refused
+
+
+def _retain_walk_pattern(root_fd: int, pattern: str, budget: dict) -> tuple[list, list]:
+    """Resolve one accepted pattern under an opened, alias-free user root.
+
+    Enumerates exactly the pattern's fixed component depth through pinned,
+    no-follow descriptors; every matched name is opened without following
+    aliases (a symlink, FIFO or non-regular match is refused, never followed)
+    and matches are returned sorted and de-duplicated. `budget` is the shared
+    bounded directory-entry search budget, so a hostile pattern cannot walk a
+    wide tree."""
+    comps = pattern.split("/")
+    matches: list = []
+    refused: list = []
+    # Transfer each selected descriptor to _retain_copy on success. Keeping
+    # the inode live until consumption prevents unlink/recreate from recycling
+    # its numeric identity. A failed walk still owns and closes every pin.
+    selected = budget["selected"] = {}
+
+
+    def walk(fd: int, idx: int, chosen: list) -> None:
+        comp = comps[idx]
+        last = idx == len(comps) - 1
+        regex = _retain_component_regex(comp)
+        try:
+            scanner = os.scandir(fd)
+        except OSError as exc:
+            refused.append("%s: %s" % ("/".join(chosen) or pattern, exc))
+            return
+        names: list = []
+        # Enumerate lazily and count EACH entry against the declared search
+        # budget before it is collected and sorted: a wide directory must cost
+        # at most the budget, never one allocation of every foreign name in it.
+        with scanner:
+            for entry in scanner:
+                budget["entries"] += 1
+                if budget["entries"] > _RETAIN_MAX_SEARCH_ENTRIES:
+                    raise OSError(
+                        "retention pattern search exceeded %d directory entries"
+                        % _RETAIN_MAX_SEARCH_ENTRIES)
+                names.append(entry.name)
+        names.sort()
+        for name in names:
+            if name in ("", ".", "..") or "/" in name or not regex.fullmatch(name):
+                continue
+            # Excluded subtrees are matched case-insensitively at EVERY
+            # traversal depth, consistently with the literal-path check, and
+            # BEFORE the name is opened: a wildcard pattern must not traverse
+            # "Saves"/"Profiles" any more than "saves"/"profiles".
+            if name.lower() in _RETAIN_EXCLUDED_DIRS:
+                continue  # saves/profile subtrees stay out of scope
+            rel = "/".join(chosen + [name])
+            flags = os.O_RDONLY | os.O_NOFOLLOW
+            flags |= os.O_NONBLOCK if last else os.O_DIRECTORY
+            child_fd = None
+            try:
+                child_fd = os.open(name, flags, dir_fd=fd)
+            except OSError as exc:
+                refused.append("%s: %s" % (rel, exc))
+                continue
+            try:
+                if last:
+                    fst = os.fstat(child_fd)
+                    if not stat.S_ISREG(fst.st_mode):
+                        refused.append("%s: not a regular generated artifact" % rel)
+                        continue
+                    if len(matches) >= _RETAIN_MAX_FILES:
+                        raise OSError("retention pattern matched more than %d "
+                                      "files" % _RETAIN_MAX_FILES)
+                    selected[rel] = child_fd
+                    child_fd = None  # ownership transfers through selected
+                    matches.append(rel)
+
+                else:
+                    walk(child_fd, idx + 1, chosen + [name])
+            finally:
+                if child_fd is not None:
+                    os.close(child_fd)
+
+    try:
+        walk(root_fd, 0, [])
+    except BaseException:
+        for fd in selected.values():
+            os.close(fd)
+        budget.pop("selected", None)
+        raise
+    return sorted(dict.fromkeys(matches)), refused
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _project_user_dir_name(proj: Path) -> str:
+    """Read Godot's typed application user-directory settings.
+
+    A custom directory is marked by its relative .local/share path so it
+    cannot be confused with app_userdata/<project name> by retention.
+    """
+    try:
+        text = (proj / "project.godot").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    section = re.search(r"(?ms)^\[application\]\s*$(.*?)(?=^\[|\Z)", text)
+    text = section.group(1) if section else text
+    custom = re.search(r"(?m)^config/use_custom_user_dir\s*=\s*(true|false)\s*$", text)
+    key = "config/custom_user_dir_name" if custom and custom.group(1) == "true" else "config/name"
+    name = re.search(r"(?m)^" + re.escape(key) + r'\s*=\s*("(?:[^"\\]|\\.)*")\s*$', text)
+    try:
+        value = json.loads(name.group(1)) if name else ""
+    except ValueError:
+        value = ""
+    if not value and custom and custom.group(1) == "true":
+        name = re.search(r'(?m)^config/name\s*=\s*("(?:[^"\\]|\\.)*")\s*$', text)
+        try:
+            value = json.loads(name.group(1)) if name else ""
+        except ValueError:
+            value = ""
+    # Project metadata is never authority to select an absolute/alias root.
+    if (not value or value.startswith(("/", "\\")) or ":" in value
+            or any(x in ("", ".", "..") for x in value.replace("\\", "/").split("/"))):
+        return ""
+    if custom and custom.group(1) == "true":
+        return ".local/share/" + value
+    return value
+
+
+def _user_data_roots(home: Path, user_dir_name: str | None) -> list:
+    """Only roots physically below this invocation's HOME are eligible."""
+    if not user_dir_name:
+        return [home]  # explicit helper fixtures with HOME-root user://
+    if user_dir_name.startswith(".local/share/"):
+        return [home / user_dir_name]
+    parts = user_dir_name.replace("\\", "/").split("/")
+    if (os.path.isabs(user_dir_name) or ":" in user_dir_name
+            or any(x in ("", ".", "..") for x in parts)):
+        return []
+    return [home / ".local/share/godot/app_userdata" / user_dir_name,
+            home]  # older callers' explicitly HOME-root generated files
+
+
+def _evidence_dir(path: Path, create: bool = False, parent_fd: int | None = None) -> int:
+    """Open every directory component without aliases; return a pinned fd."""
+    if parent_fd is None:
+        path = Path(os.path.abspath(path))
+        fd = os.open(path.anchor, os.O_RDONLY | os.O_DIRECTORY)
+        parts = path.parts[1:]
+    else:
+        fd = os.dup(parent_fd)
+        parts = path.parts
+    nxt = None
+    try:
+        for part in parts:
+            if part in ("", ".", ".."):
+                raise OSError("invalid evidence directory component")
+            if create:
+                try:
+                    os.mkdir(part, 0o700, dir_fd=fd)
+                except FileExistsError:
+                    pass
+            before = os.stat(part, dir_fd=fd, follow_symlinks=False)
+            nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            after = os.fstat(nxt)
+            if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+                raise OSError("evidence directory changed during open")
+            old_fd = fd
+            fd, nxt = nxt, None
+            os.close(old_fd)
+        return fd
+    except BaseException:
+        if nxt is not None:
+            os.close(nxt)
+        os.close(fd)
+        raise
+
+
+class _EvidenceFile:
+    """This copy's diagnostic path and pinned source/destination descriptor."""
+    def __init__(self, path, read_fd=None, parent_fd=None):
+        self.path = Path(path)
+        self.read_fd = read_fd
+        self.parent_fd = parent_fd
+
+    @property
+    def parent(self):
+        return self.path.parent
+
+    @property
+    def name(self):
+        return self.path.name
+
+    def __fspath__(self):
+        return os.fspath(self.path)
+
+
+def _safe_copy_file(src: Path, dst: Path) -> int:
+    """Copy from a pinned regular single-link inode to an exclusive owned file."""
+    fd = os.dup(src.read_fd)
+    try:
+        fst = os.fstat(fd)
+        if not stat.S_ISREG(fst.st_mode) or fst.st_nlink != 1:
+            raise OSError("not a regular, single-link generated artifact")
+        dfd = os.open(dst.name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                      0o600, dir_fd=dst.parent_fd)
+        try:
+            with os.fdopen(fd, "rb") as inp, os.fdopen(dfd, "wb") as out:
+                fd = None
+                copied = 0
+                while chunk := inp.read(1024 * 1024):
+                    copied += len(chunk)
+                    if copied > fst.st_size:
+                        raise OSError("generated artifact grew during copy")
+                    out.write(chunk)
+                if copied != fst.st_size or os.fstat(inp.fileno()).st_nlink != 1:
+                    raise OSError("generated artifact changed during copy")
+        except BaseException:
+            os.unlink(dst.name, dir_fd=dst.parent_fd)
+            raise
+        return fst.st_size
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+
+def _retain_new_invocation_dir(base: Path) -> tuple[Path, str, int]:
+    """Allocate exclusively through pinned no-follow destination ancestors."""
+    evidence = base / "evidence"
+    fd = _evidence_dir(evidence, create=True)
+    try:
+        for _ in range(8):
+            inv = uuid.uuid4().hex
+            try:
+                os.mkdir(inv, 0o700, dir_fd=fd)
+                root_fd = os.open(inv, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                return evidence / inv, inv, root_fd
+            except FileExistsError:
+                continue
+        raise OSError("could not allocate a unique retention invocation directory")
+    finally:
+        os.close(fd)
+
+
+def _evidence_bytes(root_fd: int, rel: str, body: bytes | None = None) -> tuple[int, str]:
+    """Read/hash or exclusively write one file beneath the pinned invocation."""
+    path = Path(rel)
+    fd = _evidence_dir(path.parent, create=body is not None, parent_fd=root_fd) if str(path.parent) != "." else os.dup(root_fd)
+    try:
+        flags = os.O_RDONLY if body is None else os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        out = os.open(path.name, flags | os.O_NOFOLLOW, 0o600, dir_fd=fd)
+        with os.fdopen(out, "rb" if body is None else "wb") as fh:
+            if body is None:
+                data = fh.read()
+            else:
+                fh.write(body)
+                data = body
+        return len(data), hashlib.sha256(data).hexdigest()
+    finally:
+        os.close(fd)
+
+
+def _retain_take(cand: Path, home: Path, rel: str, pi: int, label: dict,
+                 root: Path, root_fd: int, used_paths: set, files: list,
+                 raws: list, refused: list, state: dict,
+                 expected: tuple | None = None) -> str:
+
+    """Copy one declared/pattern-matched rel out of one pass's user root.
+
+    All source and destination ancestry is opened without following aliases;
+    the validated source inode and destination parent stay pinned through copy,
+    hashing and manifest row. Returns 'taken' | 'absent' | 'replaced' | 'error'
+    | 'limit'. When `expected` is given (the identity of a still-live pattern
+    discovery descriptor), the object under `cand.name` must BE that object: a
+    different inode is 'replaced', a hard failure with no retry or path fallback.
+
+    """
+    source_fd = parent_fd = dest_fd = None
+    try:
+        home_fd = _evidence_dir(Path(home))
+        try:
+            parent_fd = (_evidence_dir(cand.parent.relative_to(home), parent_fd=home_fd)
+                         if cand.parent != Path(home) else os.dup(home_fd))
+        finally:
+            os.close(home_fd)
+        before = os.stat(cand.name, dir_fd=parent_fd, follow_symlinks=False)
+        source_fd = os.open(cand.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                            dir_fd=parent_fd)
+        st = os.fstat(source_fd)
+        if expected is not None and (st.st_dev, st.st_ino) != expected:
+            # The discovery walk SELECTED a DIFFERENT object under this exact
+            # name. Copying the replacement would launder a swapped artifact
+            # into the invocation's evidence, so the selected identity is
+            # enforced here and the caller records a hard failure. There is no
+            # fresh-stat retry and no path fallback: the SELECTED object is
+            # simply no longer deliverable.
+            return "replaced"
+        if (not stat.S_ISREG(st.st_mode) or st.st_nlink != 1
+                or (before.st_dev, before.st_ino) != (st.st_dev, st.st_ino)):
+            raise OSError("not an unchanged regular single-link generated artifact")
+
+        if len(files) + len(raws) >= _RETAIN_MAX_FILES:
+            state["limit_hit"] = "file_count"
+            return "limit"
+        if state["total"] + st.st_size > _RETAIN_MAX_BYTES:
+            state["limit_hit"] = "total_bytes"
+            return "limit"
+        dst_rel = rel
+        if rel in used_paths:
+            safe = re.sub(r"[^A-Za-z0-9._-]", "_",
+                          str(sorted(label.values())[0]) if label else "pass")
+            dst_rel = "%02d-%s/%s" % (pi, safe, rel)
+        dest_path = root / dst_rel
+        dest_fd = (_evidence_dir(Path(dst_rel).parent, create=True, parent_fd=root_fd)
+                   if str(Path(dst_rel).parent) != "." else os.dup(root_fd))
+        copied = _safe_copy_file(_EvidenceFile(cand, read_fd=source_fd),
+                                 _EvidenceFile(dest_path, parent_fd=dest_fd))
+        size, digest = _evidence_bytes(root_fd, dst_rel)
+        # A file growing during copy cannot silently exceed the agreed byte
+        # quota or claim its old size.
+        if size != copied or state["total"] + size > _RETAIN_MAX_BYTES:
+            os.unlink(dest_path.name, dir_fd=dest_fd)
+            refused.append("%s: changed size during copy" % rel)
+            return "error"
+        state["total"] += size
+        used_paths.add(dst_rel)
+        files.append({"path": dst_rel, "source": "user://",
+                      "user_path": "user://" + rel, "size": size,
+                      "sha256": digest, "pass": pi, **label})
+        return "taken"
+    except FileNotFoundError:
+        return "absent"
+    except OSError as exc:
+        refused.append("%s: %s" % (rel, exc))
+        return "error"
+    finally:
+        for fd in (source_fd, parent_fd, dest_fd):
+            if fd is not None:
+                os.close(fd)
+
+
+def _open_user_root(home: Path, base: Path) -> int:
+    """Open an already-validated user root through pinned no-follow ancestors."""
+    home_fd = _evidence_dir(Path(home))
+    try:
+        if base == Path(home):
+            return os.dup(home_fd)
+        return _evidence_dir(base.relative_to(home), parent_fd=home_fd)
+    finally:
+        os.close(home_fd)
+
+
+def _retain_copy(declared: list, homes: list, raw_logs: list, corr: dict,
+                 extra_errors: list | None = None,
+                 pass_labels: list | None = None,
+                 user_dir_name: str | None = None,
+                 patterns: list | None = None,
+                 requested: bool = False) -> dict:
+    """Retain every matching pass and complete raw streams within one budget.
+
+    ``declared`` are literal relative JSON/PNG paths; ``patterns`` are the
+    bounded dynamic-name selectors (see _retain_patterns). ``requested`` marks an
+    EXPLICIT retention request so an empty selector still allocates the owned
+    destination and writes a raw-only manifest. All source and destination
+    ancestry is opened without following aliases; the validated source inode and
+    destination parent remain pinned through copying, hashing and manifest
+    writing. Refusal leaves foreign state alone.
+
+    Two truthful outcomes are pinned here. A pattern that SELECTED a regular
+    artifact, but whose artifact then vanished (or changed inode) before the
+    pinned copy could open it, is a hard failure: the selected rel is named in
+    ``missing``, exactly like a literal, and is never folded back into the
+    "this pattern matched nothing" outcome; there is no retry, reopen or path
+    fallback. A pattern matched by NO entry under any user root stays missing.
+    If the owned destination itself cannot be allocated, no raw row is
+    reported — a fabricated manifest row pointing at bytes that were never
+    written would be a false green — while the allocation failure in
+    ``refused`` already makes ``ok`` False.
+    """
+    declared = list(declared or [])
+    pattern_strs = list(patterns or [])
+    rels, refused = _retain_relpaths(declared)
+    pats, pat_refused = _retain_patterns(pattern_strs)
+    refused = list(extra_errors or []) + refused + pat_refused
+    labels = list(pass_labels or [])
+    files, raws, missing = [], [], []
+    root = inv = root_fd = None
+    state = {"total": 0, "limit_hit": None}
+    if rels or pats or raw_logs or requested or refused:
+        try:
+            root, inv, root_fd = _retain_new_invocation_dir(_retain_root())
+        except OSError as exc:
+            refused.append("retention destination: %s" % exc)
+    used_paths = set()
+    # A (pass index, selected rel) is taken at most once: a literal and a
+    # pattern that select the SAME artifact of the SAME pass must not both copy
+    # it (a duplicate row and a double byte count), while the same rel from
+    # DISTINCT passes stays distinct evidence.
+    taken: set = set()
+    entry_budget = {"entries": 0}
+    try:
+        if root_fd is not None:
+            for rel in rels:
+                hits = 0
+                for pi, h in enumerate(homes or []):
+                    if state["limit_hit"]:
+                        break
+                    if (pi, rel) in taken:
+                        hits += 1
+                        continue
+                    label = labels[pi] if pi < len(labels) else {}
+                    for base in _user_data_roots(Path(h), user_dir_name):
+                        status = _retain_take(base / rel, Path(h), rel, pi, label,
+                                              root, root_fd, used_paths, files,
+                                              raws, refused, state)
+                        if status == "absent":
+                            continue
+                        hits += 1
+                        if status == "taken":
+                            taken.add((pi, rel))
+                        break  # only alternate roots for THIS pass
+                if hits == 0:
+                    missing.append(rel)
+            for pat in pats:
+                selected = False
+                for pi, h in enumerate(homes or []):
+                    if state["limit_hit"]:
+                        break
+                    label = labels[pi] if pi < len(labels) else {}
+                    for base in _user_data_roots(Path(h), user_dir_name):
+                        try:
+                            base_fd = _open_user_root(Path(h), base)
+                        except (OSError, ValueError):
+                            continue
+                        selected_here = {}
+                        try:
+                            try:
+                                matches, walk_refused = _retain_walk_pattern(
+                                    base_fd, pat, entry_budget)
+                                selected_here = entry_budget.pop("selected", {})
+                            except OSError as exc:
+                                refused.append("%s: %s" % (pat, exc))
+                                break
+                            refused.extend(walk_refused)
+                            for rel in matches:
+                                selected = True
+                                if (pi, rel) in taken:
+                                    continue
+                                # Identity comes from the live discovery pin,
+                                # never a fresh name or an expired inode number.
+                                pin = os.fstat(selected_here[rel])
+                                status = _retain_take(base / rel, Path(h), rel, pi, label,
+                                                      root, root_fd, used_paths, files,
+                                                      raws, refused, state,
+                                                      expected=(pin.st_dev, pin.st_ino))
+                                if status == "taken":
+                                    taken.add((pi, rel))
+                                elif status in ("absent", "replaced"):
+                                    if rel not in missing:
+                                        missing.append(rel)
+                                if state["limit_hit"]:
+                                    break
+                        finally:
+                            # Includes duplicate, quota, missing/replaced and
+                            # copy-error exits, or failure just after discovery.
+                            for fd in selected_here.values():
+                                os.close(fd)
+                            for fd in entry_budget.pop("selected", {}).values():
+                                os.close(fd)
+                            os.close(base_fd)
+                        if state["limit_hit"]:
+                            break
+                if (not selected and not state["limit_hit"]
+                        and pat not in missing):
+                    missing.append(pat)
+            for n, log in enumerate(raw_logs or []):
+                label = re.sub(r"[^A-Za-z0-9._-]", "_", str(log.get("label", "pass%d" % n)))
+                for stream in ("stdout", "stderr"):
+                    if state["limit_hit"]:
+                        break
+                    if len(files) + len(raws) >= _RETAIN_MAX_FILES:
+                        state["limit_hit"] = "file_count"
+                        break
+                    body = str(log.get(stream, "")).encode("utf-8", errors="replace")
+                    if state["total"] + len(body) > _RETAIN_MAX_BYTES:
+                        state["limit_hit"] = "total_bytes"
+                        break
+                    name = "raw/%d-%s.%s.log" % (n, label, stream)
+                    try:
+                        size, digest = _evidence_bytes(root_fd, name, body)
+                    except OSError as exc:
+                        refused.append("raw %s: %s" % (name, exc))
+                        break
+                    state["total"] += size
+                    row = {"path": name, "source": "raw_%s" % stream, "size": size,
+                           "sha256": digest, "pass": n, "label": log.get("label", "pass%d" % n)}
+                    row.update({k: log[k] for k in ("returncode", "timed_out") if k in log})
+                    raws.append(row)
+        limit_hit = state["limit_hit"]
+        ok = not refused and not missing and limit_hit is None
+        manifest = {"schema": "godot-invocation-evidence/1", "invocation_id": inv,
+                    "retained_dir": str(root) if root is not None else "",
+                    "generated_at": datetime.now(timezone.utc).isoformat(),
+                    **{k: corr.get(k) for k in ("project_id", "run_id", "operation_id", "owner_id", "generation", "mode")},
+                    "declared": declared, "patterns": pattern_strs, "files": files,
+                    "raw_logs": raws, "refused": refused, "missing": missing,
+                    "limit_hit": limit_hit, "ok": ok}
+        manifest_path = ""
+        if root_fd is not None:
+            try:
+                _evidence_bytes(root_fd, "manifest.json", json.dumps(manifest, indent=2).encode("utf-8"))
+                manifest_path = str(root / "manifest.json")
+            except OSError as exc:
+                refused.append("retention manifest: %s" % exc)
+                ok = False
+        return {"ok": ok, "invocation_id": inv,
+                "retained_dir": str(root) if root is not None else "",
+                "files": files, "raw_logs": raws, "refused": refused,
+                "missing": missing, "limit_hit": limit_hit, "manifest": manifest_path}
+    finally:
+        if root_fd is not None:
+            os.close(root_fd)
+
+
+
+
 def _script_log_excerpt(text: str) -> str:
     """Keep the first diagnostic and final summary within the 4000-char budget."""
     if len(text) <= 4000:
@@ -2477,8 +3874,62 @@ def _script_log_excerpt(text: str) -> str:
     return text[:head] + marker + text[-(remaining - head):]
 
 
-def run_script(project_dir: str, scripts: list, timeout: int = 600) -> dict:
-    """Run ``godot --headless --path <proj> -s <res://...>`` for each script.
+def _validate_script_selection(project_dir: str, scripts: list,
+                               render: bool) -> list:
+    """Refuse an unsupported /script selection BEFORE anything happens.
+
+    Runs before render-owner admission, the project copy, the import pass, any
+    engine run and any output write, so an invalid request changes nothing on
+    this box. Each named entry must be a relative `res://` path naming one of
+    the project's ACTUAL admitted `extends SceneTree` entry points (the same
+    discovery the default runs use). A rendered request with no real project
+    is refused here too — it can never be answered with a green render; a
+    headless request with an omitted selection keeps the full default
+    discovery untouched.
+    """
+    errors: list = []
+    requested: list = []
+    if scripts is not None and not isinstance(scripts, list):
+        return ["scripts must be a list of relative res:// entry paths or null"]
+    for raw in scripts or []:
+        if not isinstance(raw, str) or not raw.strip():
+            errors.append("%r: a script entry must be a relative res:// path to "
+                          "an admitted `extends SceneTree` test file" % (raw,))
+            continue
+        rel = raw.strip()
+        if rel.startswith("res://"):
+            rel = rel[len("res://"):]
+        parts = [p for p in rel.replace("\\", "/").split("/") if p not in ("", ".")]
+        if not parts or ".." in parts or os.path.isabs(raw.strip()):
+            errors.append("%s: not a relative res:// path inside the project" % raw)
+            continue
+        requested.append("res://" + "/".join(parts))
+    if errors:
+        return errors
+    proj = Path(project_dir or "")
+    if not (proj / "project.godot").is_file():
+        if render:
+            errors.append("render=true requires a real Godot project — there is "
+                          "no project.godot at %s" % (proj or "."))
+        return errors
+    if not requested:
+        return errors  # default discovery (headless or rendered) is preserved
+    admitted = set(_discover_entry_points(proj))
+    for entry in requested:
+        if entry not in admitted:
+            errors.append("%s: not an admitted `extends SceneTree` entry point "
+                          "under tests/ (discovered: %s)"
+                          % (entry, ", ".join(sorted(admitted)) or "none"))
+    return errors
+
+
+def run_script(project_dir: str, scripts: list, timeout: int = 600,
+               render: bool = False, retain: list | None = None,
+               retain_errors: list | None = None,
+               retain_patterns: list | None = None,
+               retain_requested: bool = False,
+               corr: dict | None = None) -> dict:
+    """Run ``godot --path <proj> -s <res://...>`` for each script.
 
     The GDScript unit suite is the project's fastest, most targeted feedback,
     and it was DEAD: ``run_tests.sh`` shells out to a bare ``godot``, and there
@@ -2487,22 +3938,115 @@ def run_script(project_dir: str, scripts: list, timeout: int = 600) -> dict:
     on it, and the PM planned a repair the implementer could not possibly make:
     no amount of PATH resolution finds a binary that is not in the filesystem.
     Give the suite the same HTTP route /compile and /playtest already use.
+
+    ``render=True`` (the caller's validated opt-in) runs each admitted entry
+    point through ``_run(render=True)`` — Xvfb plus software GL — so a suite
+    can render real pixels. The entries are the default discovery or an
+    explicitly validated selection; headless (default) and render runs are
+    otherwise identical, and the render owner / effect-lock / admission /
+    client-abort / release fences are enforced by the HTTP route for both.
+    A render failure is reported as a failure — it is never retried headless
+    into a silent green.
+
+    ``retain`` is the request's declared relative user:// artifacts and
+    ``retain_patterns`` its bounded dynamic-name selectors; each entry point's
+    throwaway HOME is copied from before it is removed. A refused or missing
+    declaration (or a pattern that matched nothing) makes `passed` False — never
+    a silent green for evidence the caller asked for and did not get. An explicit
+    request with neither files nor patterns (``retain_requested``) still retains
+    the full raw streams. An explicit retention request on a valid project whose
+    discovery found NO admitted entry still allocates its owned destination and
+    writes a bounded manifest (a zero-pass raw-only success, or a hard failure
+    naming a declaration no pass can satisfy); the omitted-``retain`` no-entry
+    case keeps the historic skip. On ANY exit path — pass, failure, timeout or an
+    error nobody predicted — every owned HOME is removed in the outer finally,
+    after a truthful retention attempt has written its manifest; the original
+    error is never replaced by a green.
     """
     proj = Path(project_dir)
+    retain = list(retain or [])
+    retain_patterns = list(retain_patterns or [])
+    corr = dict(corr or {})
+    retain_errors = list(retain_errors or [])
+    want_raw = bool(retain or retain_patterns or retain_errors or retain_requested)
+    homes: list = []
+    pass_labels: list = []
+    raw_logs = _InvocationLogs(homes, pass_labels) if want_raw else []
+    retention_cell: dict = {}
+    render_mode = "render" if render else "headless"
     if not (proj / "project.godot").is_file():
-        return {"passed": True, "no_project": True, "results": [],
-                "summary": "No project.godot -- not a Godot project; script gate skipped."}
+        # A plain headless request stays the pre-existing skip it always was;
+        # an opt-in render with no project must never read as a green render.
+        return {"passed": not render, "no_project": True, "results": [],
+                "render_mode": render_mode, "render_requested": bool(render),
+                "summary": ("render=true requires a real Godot project — no "
+                            "project.godot here." if render else
+                            "No project.godot -- not a Godot project; script gate skipped.")}
     scripts = list(scripts or []) or _discover_entry_points(proj)
     if not scripts:
-        return {"passed": True, "results": [], "discovered": [],
-                "summary": "No `extends SceneTree` entry point under tests/."}
+        # Opt-in render with nothing admitted must not be answered by the
+        # pixel-blind path: there is no render to do, so this is a HARD failure
+        # rather than a silent headless pass. A plain (headless) request with no
+        # admitted entry point stays the pre-existing skip it always was.
+        if not want_raw:
+            return {"passed": not render, "results": [], "discovered": [],
+                    "render_mode": render_mode, "render_requested": bool(render),
+                    "summary": ("No admitted `extends SceneTree` entry point under tests/ "
+                                "-- a rendered /script has nothing to render.") if render
+                               else "No `extends SceneTree` entry point under tests/."}
+        # An EXPLICIT retention request does not get to skip silently just
+        # because discovery found nothing: the caller asked for evidence, so the
+        # owned destination is allocated and a bounded, truthful manifest is
+        # written (raw-only, zero passes). An empty valid project is therefore an
+        # explicit raw-only success; a declaration no pass can satisfy is a
+        # truthful hard failure. Omitted retention keeps the historic skip above.
+        retention = _retain_copy(retain, [], raw_logs,
+                                 {**corr, "mode": render_mode},
+                                 extra_errors=retain_errors,
+                                 pass_labels=pass_labels,
+                                 user_dir_name=_project_user_dir_name(proj),
+                                 patterns=retain_patterns, requested=True)
+        if render:
+            passed = False
+            summary = ("No admitted `extends SceneTree` entry point under tests/ "
+                       "-- a rendered /script has nothing to render.")
+        else:
+            passed = bool(retention["ok"])
+            if retention["ok"]:
+                summary = ("No admitted `extends SceneTree` entry point under tests/; "
+                           "the explicit retention request wrote a bounded raw-only "
+                           "manifest at %s." % retention["manifest"])
+            else:
+                why = []
+                if retention["refused"]:
+                    why.append("refused: %s" % "; ".join(retention["refused"]))
+                if retention["missing"]:
+                    why.append("declared but missing: %s"
+                               % ", ".join(retention["missing"]))
+                if retention["limit_hit"]:
+                    why.append("retention limit hit: %s" % retention["limit_hit"])
+                summary = ("No admitted `extends SceneTree` entry point under tests/, "
+                           "and the explicit retention request could not be fully "
+                           "satisfied (%s)." % " | ".join(why))
+        return {"passed": passed, "results": [], "discovered": [],
+                "render_mode": render_mode, "render_requested": bool(render),
+                "retention": retention, "summary": summary}
 
+    # The real Godot user:// root name for THIS project — retention searches
+    # the invocation-owned app_userdata/<name> (or custom user dir), never a
+    # guessed HOME root and never the whole HOME.
+    user_dir_name = _project_user_dir_name(proj)
     dst = _copy_project(proj)
     try:
         # The suite loads scenes and resources exactly like the game does, so it
         # needs the same import cache the play-test builds.
-        _import_resources(dst, timeout=min(timeout, 300))
+        if want_raw:
+            _import_resources(dst, timeout=min(timeout, 300), raw_logs=raw_logs)
+        else:
+            _import_resources(dst, timeout=min(timeout, 300))
         results = []
+        # A rendered run names the SAME admitted entries as the headless one; the
+        # mode is reported per invocation, never inferred from the output.
         for rel in scripts:
             # ── EVERY ENTRY POINT GETS ITS OWN user:// ────────────────────
             # Godot derives user:// from $HOME, and $HOME was the container's,
@@ -2513,9 +4057,13 @@ def run_script(project_dir: str, scripts: list, timeout: int = 600) -> dict:
             # into. Same order-dependence the play-test fixed per scenario
             # above; the fix is the same, one throwaway HOME per invocation.
             sc_home = tempfile.mkdtemp(prefix="godot_home_")
+            homes.append(Path(sc_home))
+            # Registered the moment it exists; the label carries the pass
+            # identity the manifest rows and raw logs report.
+            pass_labels.append({"script": rel})
             try:
                 cp = _run(["--path", str(dst), "-s", rel], timeout=timeout,
-                          extra_env={"HOME": sc_home})
+                          extra_env=_home_env(sc_home), render=render)
                 rc, out, err = cp.returncode, cp.stdout, cp.stderr
             except subprocess.TimeoutExpired as e:
                 # TimeoutExpired CARRIES the output produced before the kill —
@@ -2533,10 +4081,22 @@ def run_script(project_dir: str, scripts: list, timeout: int = 600) -> dict:
                 rc = 124
                 out = _s(e.stdout)
                 err = (_s(e.stderr) + "\ntimed out after %ss" % timeout).lstrip()
-            finally:
-                # Pass, fail, timeout or an error nobody predicted: the home
-                # goes, or the "throwaway" one accumulates in the sidecar.
-                shutil.rmtree(sc_home, ignore_errors=True)
+            except Exception as exc:
+                # An error nobody predicted (a missing Xvfb, a harness bug)
+                # must not take the pass's evidence down with it: the pass is
+                # recorded, retention still runs in the handler below, and the
+                # ORIGINAL error is re-raised — never a green, never a silent
+                # headless retry.
+                raw_logs.append({"label": Path(str(rel)).name, "stdout": "",
+                                 "stderr": "unexpected engine/harness error: %r"
+                                           % exc,
+                                 "returncode": None, "timed_out": False})
+                raise
+            # The home is NOT removed here: retention copies its declared
+            # artifacts below, and only then are all the homes cleaned up. The
+            # full streams are kept for the manifest regardless of truncation.
+            raw_logs.append({"label": Path(str(rel)).name, "stdout": out,
+                             "stderr": err, "returncode": rc, "timed_out": rc == 124})
             # rc and the FAIL marker are what the SUITE says about itself.
             # They are silent about what the ENGINE said: test_encounter exited
             # 0, printed PASS, and left a deferred call that never ran in its
@@ -2555,7 +4115,25 @@ def run_script(project_dir: str, scripts: list, timeout: int = 600) -> dict:
                             "errors": _parse_errors(err),
                             "native_errors": natives,
                             "native_blocking": sorted({e["native_class"] for e in blocking})})
+        # Retention runs while the entry points' homes are still on disk: a
+        # declared relative path is taken from whichever owned user-data root
+        # holds it, and the full raw streams recorded above go into the
+        # manifest. Copying now is what lets the cleanup below be total.
+        retention = None
+
+        if want_raw:
+            retention = _retain_copy(retain, homes,
+                                     raw_logs, {**corr, "mode": render_mode},
+                                     extra_errors=retain_errors,
+                                     pass_labels=pass_labels,
+                                     user_dir_name=user_dir_name,
+                                     patterns=retain_patterns,
+                                     requested=bool(retain or retain_patterns
+                                                   or retain_errors or retain_requested))
+        retention_cell["value"] = retention
         ok = all(r["passed"] for r in results)
+        if retention is not None and not retention["ok"]:
+            ok = False
         bad = [r["script"] for r in results if not r["passed"]]
         summary = ("%d script(s) ran, all passed." % len(results) if ok
                    else "%d/%d script(s) failed: %s"
@@ -2571,9 +4149,44 @@ def run_script(project_dir: str, scripts: list, timeout: int = 600) -> dict:
             summary += ("  Native engine errors recorded, NOT gating (reviewed "
                         "debt, not proof of intent): %s (see native_errors[])."
                         % ", ".join(debt))
-        return {"passed": ok, "results": results, "discovered": scripts,
-                "summary": summary}
+        if retention is not None and not retention["ok"]:
+            why = []
+            if retention["refused"]:
+                why.append("refused: %s" % "; ".join(retention["refused"]))
+            if retention["missing"]:
+                why.append("declared but missing: %s" % ", ".join(retention["missing"]))
+            if retention["limit_hit"]:
+                why.append("retention limit hit: %s" % retention["limit_hit"])
+            summary += ("  Invocation evidence NOT fully retained (%s); manifest: %s."
+                        % (" | ".join(why), retention["manifest"]))
+        report = {"passed": ok, "results": results, "discovered": scripts,
+                  "render_mode": render_mode, "render_requested": bool(render),
+                  "summary": summary}
+        if retention is not None:
+            report["retention"] = retention
+        return report
+    except Exception as exc:
+        if want_raw and "value" not in retention_cell:
+            # Unexpected error before the normal retention point: attempt the
+            # same bounded retention (the manifest records the unexpected
+            # error) so the generated evidence survives the cleanup below,
+            # then re-raise the ORIGINAL failure.
+            try:
+                retention_cell["value"] = _retain_copy(
+                    retain, homes, raw_logs, {**corr, "mode": render_mode},
+                    extra_errors=retain_errors
+                    + ["unexpected error before retention: %r" % exc],
+                    pass_labels=pass_labels, user_dir_name=user_dir_name,
+                    patterns=retain_patterns, requested=True)
+            except Exception:
+                pass
+        raise
     finally:
+        # Pass, fail, timeout or an error nobody predicted: every throwaway home
+        # goes, or the "throwaway" ones accumulate in the sidecar. Retention has
+        # already copied what the call declared.
+        for h in homes:
+            shutil.rmtree(h, ignore_errors=True)
         shutil.rmtree(dst.parent, ignore_errors=True)
 
 
@@ -2873,6 +4486,34 @@ class _Handler(BaseHTTPRequestHandler):
             req = json.loads(self.rfile.read(n) or b"{}")
         except json.JSONDecodeError:
             return self._send(400, {"error": "bad json"})
+        # Owned-evidence and render flags are validated BEFORE any copy, import,
+        # admission or effect work, so a request that asks for something invalid
+        # changes nothing on this box. `render` must be a real boolean and the
+        # retention declaration must have a valid shape; both refusals name what
+        # is wrong and neither starts a render owner.
+        if self.path in ("/script", "/playtest"):
+            render_flag = req.get("render", False)
+            if not isinstance(render_flag, bool):
+                return self._send(400, {"error": "render must be true or false"})
+            retain_files, retain_errors = _retain_declared(req)
+            retain_patterns, pattern_errors = _retain_selectors(req)
+            retain_errors = list(retain_errors) + list(pattern_errors)
+            if not retain_errors and retain_files:
+                # The LITERAL declaration is semantically validated here too,
+                # BEFORE any owner admission, copy, import or run — the same
+                # pre-effect fence the pattern selectors already get. A bad
+                # literal returns 400 and changes nothing on this box.
+                _, literal_errors = _retain_relpaths(retain_files)
+                retain_errors = list(literal_errors)
+            if not retain_errors and retain_patterns:
+                _, pattern_errors = _retain_patterns(retain_patterns)
+                retain_errors = list(pattern_errors)
+            if retain_errors:
+                return self._send(400, {"error": "; ".join(retain_errors)})
+            retain_requested = _retain_requested(req)
+        else:
+            render_flag, retain_files, retain_patterns = False, [], []
+            retain_errors, retain_requested = [], False
         if self.path == "/lifecycle/owner-lost":
             try:
                 row = mark_render_owner_lost(
@@ -2889,6 +4530,16 @@ class _Handler(BaseHTTPRequestHandler):
             except (KeyError, TypeError, ValueError, RuntimeError) as exc:
                 return self._send(409, {"error": str(exc)})
         proj = req.get("project_dir", "")
+        if self.path == "/script":
+            # The render flag and retention shape are already validated; the
+            # script SELECTION is validated here too, against the project's
+            # real admitted SceneTree entries, BEFORE the owner/admission work
+            # below — so an invalid entry creates no owner row, copies
+            # nothing, imports nothing, runs nothing and writes nothing.
+            selection_errors = _validate_script_selection(
+                proj, req.get("scripts"), render_flag)
+            if selection_errors:
+                return self._send(400, {"error": "; ".join(selection_errors)})
         # Queue behind any render in flight: a request that finds a live render
         # owner waits for it to release, then owns the render. The wait has no
         # harness timeout; it ends when the caller disconnects (its own HTTP
@@ -2911,8 +4562,14 @@ class _Handler(BaseHTTPRequestHandler):
         wait_timeout = None
         release_reason = "completed"
         if held:
-            project_id = req.get("project_id") or Path(proj).name or "unknown-project"
-            run_id = req.get("run_id") or os.environ.get("AITELIER_RUN_ID") or "unknown-run"
+            # One server-resolved identity for admission AND correlation: the
+            # request carries it, the X-AItelier-Operation header carries it,
+            # or the server mints it — and the retained manifest binds to
+            # exactly what was admitted, never req.get(None).
+            project_id = (req.get("project_id") or Path(proj).name
+                          or "unknown-project")
+            run_id = (req.get("run_id") or os.environ.get("AITELIER_RUN_ID")
+                      or "unknown-run")
             operation_id = (req.get("operation_id")
                             or self.headers.get("X-AItelier-Operation")
                             or uuid.uuid4().hex)
@@ -2980,21 +4637,50 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send(200, check_gdscript(
                     req.get("files") or [], timeout=req.get("timeout", 120)))
             elif self.path == "/script":
+                # The SERVER-RESOLVED identity — the same project/run/operation
+                # the owner row was admitted under, plus the acquired owner id
+                # and generation — is the correlation every retained manifest
+                corr = {"project_id": project_id, "run_id": run_id,
+                        "operation_id": operation_id,
+                        "owner_id": owner.get("owner_id") if owner else None,
+                        "generation": owner.get("generation") if owner else None}
+                # Only the kwargs the request actually used are passed, so the
+                # existing render-body stubs (`run_script(proj, scripts,
+                # timeout=...)`) keep working for a plain request.
+                script_kwargs = {}
+                if render_flag:
+                    script_kwargs["render"] = True
+                if retain_files or retain_patterns or retain_errors or retain_requested:
+                    script_kwargs.update(retain=retain_files,
+                                         retain_patterns=retain_patterns,
+                                         retain_requested=retain_requested,
+                                         retain_errors=retain_errors, corr=corr)
                 self._send(200, _with_owner_wait(run_script(
                     proj, req.get("scripts") or [],
-                    timeout=req.get("timeout", 600)), owner_wait))
+                    timeout=req.get("timeout", 600), **script_kwargs), owner_wait))
             elif self.path == "/x11_input_smoke":
                 self._send(200, _with_owner_wait(x11_input_smoke(
                     proj, timeout=int(req.get("timeout", 180))), owner_wait))
             elif self.path == "/playtest":
+                corr = {"project_id": project_id, "run_id": run_id,
+                        "operation_id": operation_id,
+                        "owner_id": owner.get("owner_id") if owner else None,
+                        "generation": owner.get("generation") if owner else None}
+                playtest_kwargs = {}
+                if retain_files or retain_patterns or retain_errors or retain_requested:
+                    playtest_kwargs.update(retain=retain_files,
+                                           retain_patterns=retain_patterns,
+                                           retain_requested=retain_requested,
+                                           retain_errors=retain_errors, corr=corr)
                 report = playtest_project(
                     proj, frames=req.get("frames", DEFAULT_PLAYTEST_FRAMES),
                     input_action=req.get("input_action", "ui_accept"),
+                    timeout=req.get("timeout", 120),
                     spec=req.get("spec"),
                     # On-demand re-photography of a red scenario: the gate runs
                     # with 0 captures, a reviewer re-runs that one scenario with
                     # {"captures": 4} and gets the PNGs back.
-                    captures=req.get("captures"))
+                    captures=req.get("captures"), **playtest_kwargs)
                 if isinstance(report.get("timing"), dict):
                     report["timing"]["render_lock_wait_sec"] = round(lock_wait, 4)
                     report["timing"].update(owner_wait)

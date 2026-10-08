@@ -1204,9 +1204,15 @@ def _register_run_tools(tool, mcp=None):
           "person is meant to look. Runs are LONG so this never blocks: use "
           "wait_for_run, then get_run_summary to see what happened. `seed_text` is "
           "the input; list_pipelines' input_hint says what each pipeline expects. "
-          "`against_project` runs it against an existing project's repo.")
+          "`against_project` runs it against an existing project's repo. For an "
+          "exact butler-driven readonly review also supply `against_run` (the completed producer "
+          "run, not a project alias) and `against_commit` (its immutable 40-hex "
+          "State candidate). Producers without that retained declaration cannot "
+          "use exact binding. A missing/conflicting identity refuses before execution; "
+          "omitting both keeps the legacy source-HEAD snapshot.")
     def run_pipeline(config: ConfigName, seed_text: str = "", name: str = "",
-                     against_project: str = "", checkpoints: str = "auto") -> dict:
+                     against_project: str = "", checkpoints: str = "auto",
+                     against_run: str = "", against_commit: str = "") -> dict:
         from api.dependencies import (db_instance, get_config_registry,
                                       get_workspace_manager)
         from core.run_launcher import generate_run_id, start_config_run
@@ -1221,6 +1227,9 @@ def _register_run_tools(tool, mcp=None):
             avail = ", ".join(sorted(m.config_name
                                      for m in get_config_registry().list()))
             return {"error": f"unknown pipeline '{config}'. Available: {avail}"}
+        exact_review = against_run != "" or against_commit != ""
+        if exact_review and not (against_project and against_run and against_commit):
+            return {"error": "an exact review requires against_project, against_run and against_commit"}
         ws = get_workspace_manager()
         repo_type, repo_path = "new", None
         if against_project:
@@ -1228,7 +1237,7 @@ def _register_run_tools(tool, mcp=None):
             if not proj:
                 return {"error": f"against_project '{against_project}' not found"}
             repo_path = proj.get("repo_path")
-            if not repo_path:
+            if not repo_path and not exact_review:
                 try:
                     # `str(None)` is the truthy relative path "None"; a project
                     # that declares no repository must fall to the error below.
@@ -1243,7 +1252,11 @@ def _register_run_tools(tool, mcp=None):
         result = start_config_run(db_instance, ws, config, pid,
                                   seed_text=seed_text or None,
                                   name=name or config, repo_type=repo_type,
-                                  repo_path=repo_path)
+                                  repo_path=repo_path,
+                                  **({"against_project": against_project,
+                                      "against_run": against_run,
+                                      "against_commit": against_commit}
+                                     if exact_review else {}))
         if result.get("status") == "error":
             return {"error": result.get("message")}
         run_id = result.get("run_id")
@@ -1257,6 +1270,8 @@ def _register_run_tools(tool, mcp=None):
                       auto_approve=(checkpoints == "auto"))
         return {"run_id": run_id, "project_id": pid, "config": config,
                 "scheduler_owned": owned, "checkpoints": checkpoints,
+                **({"review_candidate": result["review_candidate"]}
+                   if "review_candidate" in result else {}),
                 "note": ("Started. wait_for_run(run_id), then get_run_summary(run_id). "
                          + ("Checkpoints are being answered automatically."
                             if checkpoints == "auto" else

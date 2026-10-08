@@ -693,8 +693,8 @@ class WorkspaceManager:
             # disagree about one run, and this one feeds the prompt and the
             # host tool path while that one feeds the engine.
             from core import run_isolation
-            from api.dependencies import get_db_manager as _gdb
-            answer = run_isolation.resolve_for_resolver(_gdb(), run_id)
+            from api.dependencies import get_db_manager as _gdb, get_skillflow as _gsf
+            answer = run_isolation.resolve_for_resolver(_gdb(), run_id, sf=_gsf())
             if answer is False:
                 return None
             if answer:

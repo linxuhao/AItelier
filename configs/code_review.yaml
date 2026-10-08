@@ -37,7 +37,10 @@ x-aitelier:
     Add against_project=<project_id> to ALSO hand the reviewer the codebase:
     it can then check whether callers were updated and whether a test covers
     the change, neither of which a diff can show. Without it the review is
-    diff-only and says so in its feedback.
+    diff-only and says so in its feedback. For an exact readonly candidate,
+    pair against_project with against_run=<completed producer run> and
+    against_commit=<its immutable State candidate SHA>; an unpinned call
+    keeps its legacy source-HEAD snapshot.
 
 begin: "review"
 

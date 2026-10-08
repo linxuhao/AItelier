@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "attempt_id": "attempt-6d141377d90643c3833fb43dcd8dc7ca",
+  "context_hash": "633fbf15d4a25bb7d9ffa023f16347e1e3b945f5820d4aeff34d78b4e46bb4ed",
+  "current_base_source_sha": "1b0cc43db45f18bdffdf9a3f3f63f168cb290534",
+  "reviewed_ordering_source_sha": "61149714441d525c8f829d75f859b663076bb7df",
+  "current_activation_receipt": "receipt-3cb783988c4c4122897a975df173c628",
+  "ordering_source_receipt": "receipt-d6d1aa44c67549238b96ed056e951e22",
+  "sdk_dependency": "official skillflow-py==1.5.85; unchanged current host pin",
+  "functional_composition": "Automatic merge, no manual business-code changes. Exact611 Bench plus only existing typed refusal import/raise from1b0; adapter and graph exact611; storage/pin/ns/dpe/router exact1b0.",
+  "test_contract_adaptation": "Replace old stage-after-review and escaping/repeated generic BenchError expectations with failed-once ledger_ready before any review, original typed reason, unchanged frozen/canonical bytes and admission cleanup.",
+  "author_baseline": "5 failed,134 passed; raw first red preserved. Failures are obsolete exception/phase expectations, not waived semantic properties.",
+  "author_checks": "139 existing tests passed after adaptation; two normal ledger_ready transient-I/O/cancellation controls passed separately. No SOURCE acceptance claimed.",
+  "old_failure_history": "Original de7/12b failures and counters are retained by director; not overwritten or represented as passing.",
+  "known_limit": "Legacy managed-file deletion FileNotFoundError remains outside this composition scope; no claim to repair it.",
+  "adoption_boundary": "SOURCE only. engine_identity remains unchanged as a function and hashes writing_bench Python, novel_state, dpe_pipeline and ai_router. Existing freezes reject any changed engine identity. No live adoption, retro-repin, original-run/input handling, or novel-controller coordination was performed by this worker.",
+  "files": {
+    "aitelier/writing_bench/bench.py": "82b85c00c48c76fc1fcbe3406fe392ce0c773eeaa08f4425481e9583286abeca",
+    "aitelier/writing_bench/storage.py": "8cfab819ee90f1c9e9920ea8082c8b2d23742f43cb96b2c85175ad47a35f7f60",
+    "aitelier/writing_bench/adapter.py": "7189d0a77e773984e7754b55eeeba04a78622917813ab519a3755a5be9300715",
+    "configs/novel_writing_bench_v2.yaml": "78fba96043afe29e734f7eb36648e6850a895a19e10294730cc7979076360db4",
+    "aitelier/novel_state.py": "fbdc7ae521ee7b9875f4d4675d8ff470c3675f6379117a91034e0cf48cff334c",
+    "core/dpe_pipeline.py": "bb5ba0f014d670c79ffdf7cb042853e3b166a714c2bf342181d2588d629df246",
+    "core/ai_router.py": "77dc94f529738e9b59c04ab108a465479d2129981b249c1e127a437db91e54dd",
+    "pyproject.toml": "2386ea58fda21d76c89be1a533db035d62986fe22aa80fbd22498fd29192b874"
+  }
+}

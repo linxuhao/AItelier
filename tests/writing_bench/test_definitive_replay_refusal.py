@@ -15,7 +15,7 @@ from test_bench import bench, request
 from test_workflow import Session
 
 
-def test_actual_workflow_stage_refuses_dead_character_journal_once(tmp_path, monkeypatch, bench):
+def test_actual_workflow_refuses_dead_character_journal_once_before_review(tmp_path, monkeypatch, bench):
     repo = bench.policy.repo
     for n, changes in [(1, {'status': 'dead'}), (2, {'power_level': 2})]:
         chapter = ns.chapter_dir(repo, n)
@@ -57,23 +57,23 @@ def test_actual_workflow_stage_refuses_dead_character_journal_once(tmp_path, mon
         assert reasons[0].startswith('full replay refused: ')
         assert session.sf.get_run(run)['error_reason'] == reasons[0]
         steps = session.sf.get_steps(run, include_payloads=True)
-        stage = next(s for s in steps if s['step_id'] == 'stage')
-        assert stage['status'] == 'failed' and stage['last_error'] == reasons[0]
-        assert all(s['status'] == 'pending' for s in steps if s['step_id'] in ('promote', 'backup'))
-        assert session.agent_calls == ['literary_review', 'ledger_audit']
+        refused = next(s for s in steps if s['step_id'] == 'ledger_ready')
+        assert refused['status'] == 'failed' and refused['last_error'] == reasons[0]
+        assert all(s['status'] == 'pending' for s in steps if s['step_id'] in ('literary_review', 'ledger_audit', 'stage', 'promote', 'backup'))
+        assert session.agent_calls == []
         assert session.backup_calls == []
         assert git(repo, 'rev-parse', 'HEAD') == baseline
         assert git(repo, 'status', '--porcelain') == ''
         assert not any(Path(p).exists() for p in calls)
         assert not list((bench.root / 'scratch').glob('candidate-*'))
         assert 'candidate-' not in git(repo, 'worktree', 'list', '--porcelain')
-        for name in ('stage.json', 'accepted.json', 'completed.json'):
+        for name in ('candidate_replay.json', 'literary.json', 'audit.json', 'stage.json', 'accepted.json', 'completed.json'):
             assert not (bench.work(run) / name).exists()
         with lock(bench.root / '.delivery.lock'):
             pass
         with session.sf._ro() as conn:
             assert conn.execute('SELECT COUNT(*) FROM skillflow_active_ops WHERE run_id=?', (run,)).fetchone()[0] == 0
-            assert conn.execute('SELECT COUNT(*) FROM skillflow_edge_counts WHERE run_id=? AND from_step=?', (run, 'stage')).fetchone()[0] == 0
+            assert conn.execute('SELECT COUNT(*) FROM skillflow_edge_counts WHERE run_id=? AND from_step=?', (run, 'ledger_ready')).fetchone()[0] == 0
         print(json.dumps({'sdk_source': skillflow.__file__, 'host_source': ns.__file__,
                           'refusal_calls': len(calls), 'reason': reasons[0], 'run': run}, ensure_ascii=False))
     finally:

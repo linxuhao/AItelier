@@ -102,7 +102,8 @@ def test_n3_a_certificate_from_another_run_is_refused(tmp_path, monkeypatch, ben
 
     session = Session(tmp_path, monkeypatch, bench)
     run = session.start(request(bench))
-    session.sf.advance_run(run)
+    session.sf.advance_run(run)  # prepare
+    session.sf.advance_run(run)  # ledger_ready: replay, then release literary review
     claim = session.sf.claim_next_step(run)
     assert claim.step_id == "literary_review"
     identity, materials = bench.review_materials(run, "literary")

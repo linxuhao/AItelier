@@ -85,9 +85,11 @@ def staged(bench, req=None, run="run1", extracted=None):
     req = req or request(bench)
     bench.freeze(req, run, RULES, CONTRACTS)
     _, manifest = bench.input(run)
+    # Workflow order: every ledger known, complete candidate replayed, then review.
+    ledgers = bench.ledgers(run, extracted)
+    bench.replay_candidate(run)
     value, proof = observed_verdict(bench, run)
     bench.literary(run, value, proof=proof)
-    ledgers = bench.ledgers(run, extracted)
     value, proof = observed_verdict(bench, run, "ledger")
     return bench.stage(run, value, proof=proof)
 

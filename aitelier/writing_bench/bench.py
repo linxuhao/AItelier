@@ -235,7 +235,7 @@ class Bench:
         path, m = self.input(run_id)
         key = (m["literary_key"] if phase == "literary" else
                self._json(self.work(run_id), "ledgers.json")["review_key"])
-        source = "step:prepare" if phase == "literary" else "step:ledger_ready"
+        source = "step:ledger_ready" if phase == "literary" else "step:literary_check"
         targets = [{"chapter": c["chapter"], "title": c["title"],
                     "prose_sha256": m["files"][f"chapters/ch{c['chapter']:04d}/prose.md"]}
                    for c in m["chapters"]]
@@ -369,6 +369,76 @@ class Bench:
             require(not git(wt, "diff", "--name-only", revision, "--", *MANAGED), "accepted replay drift")
             require(not git(wt, "ls-files", "--others", "--exclude-standard"), "untracked replay state")
 
+    def replay_candidate(self, run_id: str) -> dict:
+        """Replay the complete candidate before any review is released.
+
+        Runs once every chapter's ledger is known: supplied by the author or
+        returned by the extractor (``ledgers.json``). A supplied ledger for a
+        later chapter is only decidable together with the ledger that replaces
+        an earlier missing chapter, so nothing is decided from guessed or old
+        accepted journals. The candidate is built by the same code ``stage``
+        uses, on a disposable checkout; a refusal here is the refusal ``stage``
+        would make, but before literary or ledger review work is spent.
+        """
+        path, m = self.input(run_id)
+        self.verify_baseline(path, m)
+        ledgers = self._json(self.work(run_id), "ledgers.json")
+        require(ledgers["review_key"] == sha(encode({"literary_key": m["literary_key"],
+                "ledgers": ledgers["ledgers"], "contract": m["contracts"]["ledger"]})), "ledger input changed")
+        clean_head(self.policy.repo, self.policy.branch, m["base"])
+        require(git(self.policy.repo, "rev-parse", "novel-genesis") == self.policy.genesis, "genesis drift")
+        genesis_files = git_files(self.policy.repo, self.policy.genesis)
+        self._replay_guard(m["base"], genesis_files)
+        with checkout(self.policy.repo, m["base"], self.root / "scratch") as wt:
+            index, changed = self._build_candidate(wt, path, m, ledgers, genesis_files)
+            files = {name: sha(read_file(wt, name)) for name in changed}
+        receipt = {"version": 2, "run_id": run_id, "base": m["base"], "review_key": ledgers["review_key"],
+                   "ledger_sources": {str(c["chapter"]): "author" if c["provided_ledger"] else "extractor"
+                                      for c in m["chapters"]},
+                   "files": files, "replay_exact": True,
+                   "counters": {k: index[k] for k in ("chapters_written", "last_chapter", "next_chapter")}}
+        immutable(self.work(run_id) / "candidate_replay.json", encode(receipt))
+        return receipt
+
+    def replayed(self, run_id: str) -> dict:
+        """The passed complete-candidate replay that review material is released for."""
+        require((self.work(run_id) / "candidate_replay.json").exists(),
+                "complete candidate replay has not passed; review not released")
+        receipt = self._json(self.work(run_id), "candidate_replay.json")
+        require(receipt["review_key"] == self._json(self.work(run_id), "ledgers.json")["review_key"],
+                "replayed candidate does not match ledgers")
+        return receipt
+
+    def _build_candidate(self, wt: Path, path: Path, m: dict, ledgers: dict,
+                         genesis_files: dict[str, bytes]) -> tuple[dict, list[str]]:
+        before = ns.written_chapters(wt)
+        self._write_candidate_chapters(wt, path, m, ledgers)
+        index = self._reset_replay(wt, genesis_files)
+        expected = before + [m["chapters"][0]["chapter"]] if m["mode"] == "new" else before
+        require(ns.written_chapters(wt) == expected, "chapter inventory changed unexpectedly")
+        git(wt, "add", "--", "novel")
+        changed = git(wt, "diff", "--cached", "--name-only").splitlines()
+        allowed_chapters = {f"novel/chapters/ch{c['chapter']:04d}/{f}" for c in m["chapters"]
+                            for f in ("prose.md", "summary.md", "events.yaml")}
+        require(changed and all(name in allowed_chapters or any(name == rel or name.startswith(rel + "/")
+                for rel in MANAGED) for name in changed), "unexpected candidate file changes")
+        return index, changed
+
+    def _write_candidate_chapters(self, wt: Path, path: Path, m: dict, ledgers: dict) -> None:
+        """Write each proposed chapter's prose, summary and journal into the
+        isolated candidate, replacing any historic bytes for a revision."""
+        for ch in m["chapters"]:
+            n = ch["chapter"]
+            e = ledgers["ledgers"][str(n)]
+            target = ns.chapter_dir(wt, n)
+            require(target.is_dir() if m["mode"] == "revision" else not target.exists(), "target chapter conflict")
+            target.mkdir(parents=True, exist_ok=True)
+            raw = read_file(path, f"chapters/ch{n:04d}/prose.md")
+            (target / "prose.md").write_bytes(raw)
+            (target / "summary.md").write_text(f"# 第{n}章：{ch['title']}\n\n" + e["summary"] + "\n", encoding="utf-8")
+            ns.dump_yaml(target / "events.yaml", {"chapter": n, "title": ch["title"],
+                          "word_count": ns.char_count(raw.decode()), **{k: e[k] for k in LISTS}})
+
     def stage(self, run_id: str, audit: dict, *, proof: dict | None = None) -> dict:
         with lock(self.root / ".delivery.lock"):
             path, m = self.input(run_id)
@@ -397,27 +467,9 @@ class Bench:
             genesis_files = git_files(self.policy.repo, self.policy.genesis)
             self._replay_guard(m["base"], genesis_files)
             with checkout(self.policy.repo, m["base"], self.root / "scratch") as wt:
-                before = ns.written_chapters(wt)
-                for ch in m["chapters"]:
-                    n = ch["chapter"]
-                    e = ledgers["ledgers"][str(n)]
-                    target = ns.chapter_dir(wt, n)
-                    require(target.is_dir() if m["mode"] == "revision" else not target.exists(), "target chapter conflict")
-                    target.mkdir(parents=True, exist_ok=True)
-                    raw = read_file(path, f"chapters/ch{n:04d}/prose.md")
-                    (target / "prose.md").write_bytes(raw)
-                    (target / "summary.md").write_text(f"# 第{n}章：{ch['title']}\n\n" + e["summary"] + "\n", encoding="utf-8")
-                    ns.dump_yaml(target / "events.yaml", {"chapter": n, "title": ch["title"],
-                                  "word_count": ns.char_count(raw.decode()), **{k: e[k] for k in LISTS}})
-                index = self._reset_replay(wt, genesis_files)
-                expected = before + [m["chapters"][0]["chapter"]] if m["mode"] == "new" else before
-                require(ns.written_chapters(wt) == expected, "chapter inventory changed unexpectedly")
-                git(wt, "add", "--", "novel")
-                changed = git(wt, "diff", "--cached", "--name-only").splitlines()
-                allowed_chapters = {f"novel/chapters/ch{c['chapter']:04d}/{f}" for c in m["chapters"]
-                                    for f in ("prose.md", "summary.md", "events.yaml")}
-                require(changed and all(name in allowed_chapters or any(name == rel or name.startswith(rel + "/")
-                        for rel in MANAGED) for name in changed), "unexpected candidate file changes")
+                index, changed = self._build_candidate(wt, path, m, ledgers, genesis_files)
+                hashes = {name: sha(read_file(wt, name)) for name in changed}
+                require(hashes == self.replayed(run_id)["files"], "staged candidate differs from the replayed candidate")
                 tree = git(wt, "write-tree")
                 ref = "refs/writing-bench/" + identifier(run_id)
                 refs = git(self.policy.repo, "for-each-ref", "--format=%(objectname)", ref).splitlines()
@@ -430,7 +482,6 @@ class Bench:
                         "commit", "-m", "Novel writing bench: " + m["submission_id"])
                     commit = git(wt, "rev-parse", "HEAD")
                     git(self.policy.repo, "update-ref", ref, commit, "0" * 40)
-                hashes = {name: sha(read_file(wt, name)) for name in changed}
                 summaries = {str(c["chapter"]): {"preview": index["chapters"][c["chapter"]]["summary"],
                               "complete_ref": f"novel/chapters/ch{c['chapter']:04d}/summary.md",
                               "sha256": sha(read_file(wt, f"novel/chapters/ch{c['chapter']:04d}/summary.md"))}

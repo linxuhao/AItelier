@@ -157,6 +157,22 @@ journal history from `novel-genesis`, constructs an isolated candidate, checks
 permitted file changes and repeats the exact-commit replay guard. No live novel
 file changes during this work.
 
+The same candidate is first built and replayed once every chapter's ledger is
+known, before any review is released. The order is `prepare` (freeze; hand the
+extractor only the frozen prose) → `extract_ledger` (only for missing ledgers)
+→ `ledger_ready` (complete candidate replay, then literary review material) →
+`literary_review` → `literary_check` (then ledger audit material) →
+`ledger_audit` → `stage`. A supplied ledger that moves an already-dead character
+or otherwise breaks the journal refuses at `ledger_ready`: with every ledger
+supplied no model step has run, otherwise only the extractor has. A supplied
+later chapter is judged together with the ACTUAL extracted ledger of an earlier
+revised chapter, never with that chapter's old accepted journal or a guess: the
+replacement may remove an old death, or record a return, and so make the later
+chapter valid. `candidate_replay.json` records each chapter's ledger source
+(`author` or `extractor`), the candidate file hashes and counters; review
+material is published only for a run with this receipt, and `stage` refuses a
+candidate whose files differ from it. The stage guard above still runs in full.
+
 The stage exposes complete submitted prose, both independent reports, the exact
 ledger, `semantic_changes.json` (current before/after state without recopying all
 history), the full `candidate.patch`, and an approval manifest containing the

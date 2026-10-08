@@ -233,15 +233,18 @@ def novel_bench(*, operation: str, workspace_root: str = "", run_id: str = "",
             return {"backup_only": True}
         bench.freeze(request, run_id, host.rulings(bench.policy.project_id), host.review_contracts(conf))
         path, m = bench.input(run_id)
-        immutable(out / "editor_packet.md", bench.editorial_packet(run_id).encode())
-        publish_review_materials(bench, run_id, "literary", out)
+        # Review is released by ledger_ready, after the complete candidate
+        # replays. Here only the extractor receives the frozen prose it needs.
         missing = [c["chapter"] for c in m["chapters"] if not c["provided_ledger"]]
-        immutable(out / "extraction_request.json", encode({"extract_chapters": missing,
-                  "format": "one JSON object keyed by decimal chapter number, each value a complete ledger"}))
-        reuse = bool(request.get("reuse_literary_from"))
-        if reuse:
-            bench.literary(run_id)
-        return {"backup_only": False, "reuse_literary": reuse}
+        if missing:
+            _, materials = bench.review_materials(run_id, "literary")
+            immutable(out / "current_prose.md", next(x for x in materials if x.path == "current_prose.md").text.encode())
+            immutable(out / "extraction_request.json", encode({"extract_chapters": missing,
+                      "base_commit": m["base"], "chapters": [{k: c[k] for k in ("chapter", "title")} for c in m["chapters"]],
+                      "format": "one JSON object keyed by decimal chapter number, each value a complete ledger",
+                      "instruction": "先读current_prose.md；冻结前情以novel_bench_read(path='review/review_context.md')"
+                                     "或冻结基线路径读取。"}))
+        return {"backup_only": False, "needs_extraction": bool(missing)}
     if operation == "rejected":
         result = {"status": "changes_requested", "accepted": False,
                   "next_action": "Revise author files and submit a new ID; no automatic rewrite or acceptance."}
@@ -252,16 +255,23 @@ def novel_bench(*, operation: str, workspace_root: str = "", run_id: str = "",
         proof = host.observed_review(bench, run_id, "literary", report) if report is not None else None
         receipt = bench.literary(run_id, report, proof=proof)
         immutable(out / "literary_receipt.json", encode(receipt))
-        _, m = bench.input(run_id)
-        return {"needs_extraction": any(not c["provided_ledger"] for c in m["chapters"])}
+        immutable(out / "audit_packet.md", bench.audit_packet(run_id).encode())
+        publish_review_materials(bench, run_id, "ledger", out)
+        return {"review_key": bench.replayed(run_id)["review_key"]}
     if operation == "ledger_ready":
         _, m = bench.input(run_id)
         missing = any(not c["provided_ledger"] for c in m["chapters"])
         extracted = decode(read_file(cfg, "extract_ledger/ledgers.json")) if missing else None
-        ledger = bench.ledgers(run_id, extracted)
-        immutable(out / "audit_packet.md", bench.audit_packet(run_id).encode())
-        publish_review_materials(bench, run_id, "ledger", out)
-        return {"review_key": ledger["review_key"]}
+        bench.ledgers(run_id, extracted)
+        # Every ledger is now known: replay the complete candidate first, and
+        # release literary review only for a candidate that replayed.
+        immutable(out / "candidate_replay.json", encode(bench.replay_candidate(run_id)))
+        immutable(out / "editor_packet.md", bench.editorial_packet(run_id).encode())
+        publish_review_materials(bench, run_id, "literary", out)
+        reuse = bool(request.get("reuse_literary_from"))
+        if reuse:
+            bench.literary(run_id)
+        return {"reuse_literary": reuse}
     if operation == "stage":
         _current_inputs(bench, host, conf, run_id)
         report = decode(read_file(cfg, "ledger_audit/review.json"))
@@ -328,6 +338,7 @@ def novel_bench_read(*, path: str, start: int = 0, length: int = 12000,
 
 
 def publish_review_materials(bench: Bench, run_id: str, phase: str, out: Path) -> None:
+    bench.replayed(run_id)
     _, materials = bench.review_materials(run_id, phase)
     immutable(out / "review_request.json", bench.review_request(run_id, phase))
     for material in materials:

@@ -503,9 +503,9 @@ async def test_rescheduling_keeps_exactly_one_shutdown_listener(env, monkeypatch
     calls = []
     real = sc._cancel_detached_ticks
 
-    def counting(event=None):
-        calls.append(event)
-        return real(event)
+    def counting(event=None, **kwargs):
+        calls.append((event, kwargs))
+        return real(event, **kwargs)
     monkeypatch.setattr(sc, "_cancel_detached_ticks", counting)
 
     settings = {"scheduler_type": "interval", "scheduler_interval": INTERVAL_S}
@@ -519,7 +519,8 @@ async def test_rescheduling_keeps_exactly_one_shutdown_listener(env, monkeypatch
         polls = [j for j in sched.get_jobs() if j.func is sc.poll_and_execute]
         assert len(polls) == 1, polls
         # apscheduler 3.x keeps listeners as (callback, mask) in `_listeners`.
-        attached = [cb for cb, _mask in sched._listeners if cb is counting]
+        attached = [cb for cb, _mask in sched._listeners
+                    if getattr(cb, "func", cb) is counting]
     finally:
         # AsyncIOScheduler runs its shutdown (and so dispatches the event) on
         # the loop, via call_soon_threadsafe: yield until it has.

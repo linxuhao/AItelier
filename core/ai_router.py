@@ -951,7 +951,8 @@ class AIGateway:
                 # dead, the same trade the vision gate made for itself before
                 # the gateway took this over. Once per gateway, and only for a
                 # role that asked for thinking off.
-                if self._suppress_thinking and not self.enable_thinking:
+                if (self._suppress_thinking and not self.enable_thinking
+                        and "extra_body" in kwargs):
                     self._suppress_thinking = False
                     print(f"[ai_router] {self.active_model} rejected the "
                           f"thinking-off keys ({type(e).__name__}); retrying "
@@ -1224,6 +1225,18 @@ class AIGateway:
         # `reasoning_effort`. Measured 2026-10-07 on claude-haiku-5-5: low /
         # medium / high / xhigh / max accepted, `disabled` honoured.
         if (self.litellm_model or "").startswith("anthropic/"):
+            model = self.litellm_model.split("/", 1)[1]
+            if model in {"claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"}:
+                # 5.5 removed sampling, including when thinking is disabled.
+                kwargs.pop("temperature", None)
+                # LiteLLM 1.104 can fetch a catalog whose exact Haiku entry
+                # predates release and silently drop output_config.effort.
+                # Register only documented capabilities; preserve its pricing.
+                litellm.register_model({model: {
+                    "litellm_provider": "anthropic",
+                    "supports_adaptive_thinking": True,
+                    "supports_output_config": True,
+                }})
             if self.enable_thinking:
                 kwargs.pop("temperature", None)
                 effort = self._binding_effort()
@@ -1234,6 +1247,11 @@ class AIGateway:
             else:
                 kwargs["thinking"] = {"type": "disabled"}
             return kwargs
+
+        # A disabled-thinking failover away from 5.5 restores the configured
+        # sampling value that its previous binding could not accept.
+        if not self.enable_thinking:
+            kwargs.setdefault("temperature", self.temperature)
 
         # Thinking mode: inject reasoning params, remove incompatible temperature
         if self.enable_thinking:

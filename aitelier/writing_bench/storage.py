@@ -18,6 +18,8 @@ import subprocess
 import tempfile
 from typing import Iterator
 
+from skillflow import ToolExecutionRefused
+
 FILE_LIMIT = 2_000_000
 TREE_LIMIT = 40_000_000
 FILE_COUNT_LIMIT = 10_000
@@ -25,6 +27,10 @@ FILE_COUNT_LIMIT = 10_000
 
 class BenchError(ValueError):
     """A refused operation with no implied approval or retry permission."""
+
+
+class BenchReplayRefused(BenchError, ToolExecutionRefused):
+    """Full replay found deterministic warnings/drift in the supplied journal."""
 
 
 def require(condition: bool, message: str) -> None:

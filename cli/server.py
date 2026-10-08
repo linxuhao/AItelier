@@ -12,6 +12,7 @@ import re
 import subprocess
 import time
 from pathlib import Path
+from typing import Callable
 
 # Load .env so the CLI process picks up config (AITELIER_PORT, admin token, …).
 # The container receives .env separately via compose `env_file`.
@@ -353,7 +354,9 @@ def _live_runtime_observation(base_url: str) -> dict:
     return facts
 
 
-def _require_deployment_clearance(action: str, *, base_url: str = _DEFAULT_URL) -> dict:
+def _require_deployment_clearance(
+        action: str, *, base_url: str = _DEFAULT_URL,
+        override_decision: Callable[[str, dict], dict | None] | None = None) -> dict:
     """Measure every project and external owner before changing the backend."""
     from core import datadir
     from core import deployment_quiescence as dq
@@ -370,7 +373,19 @@ def _require_deployment_clearance(action: str, *, base_url: str = _DEFAULT_URL) 
             observation = dq.failed_observation(
                 f"deployment quiescence measurement could not start: "
                 f"{type(exc).__name__}: {exc}")
-        override = dq.load_override(os.environ.get("AITELIER_DEPLOY_OVERRIDE_FILE"))
+        override_file = os.environ.get("AITELIER_DEPLOY_OVERRIDE_FILE")
+        override = dq.load_override(override_file)
+        if override_decision is not None and observation.get("quiescent") is not True:
+            if override_file:
+                # A fresh decision must never rescue a stale pre-bound file.
+                override = {"_invalid_override": "choose a file override or a fresh operator decision"}
+            else:
+                # The decision sees the exact measurement under the same fence.
+                # A private snapshot prevents it from rewriting measured facts.
+                try:
+                    override = override_decision(action, dq._plain_json_snapshot(observation))
+                except Exception as exc:
+                    override = {"_invalid_override": f"operator decision failed: {type(exc).__name__}: {exc}"}
         clearance = dq.authorize(action, observation, override=override)
         clearance["_cutover_fence"] = fence
         return clearance
@@ -442,10 +457,14 @@ def ensure_server_running(base_url: str, max_wait: int = 120) -> bool:
     return _ensure_docker_backend(base_url, max_wait)
 
 
-def restart_server(base_url: str = _DEFAULT_URL, max_wait: int = 120) -> bool:
+def restart_server(
+        base_url: str = _DEFAULT_URL, max_wait: int = 120, *,
+        override_decision: Callable[[str, dict], dict | None] | None = None) -> bool:
     """Restart the Docker backend."""
     _require_docker()
-    clearance = _require_deployment_clearance("restart", base_url=base_url)
+    clearance = _require_deployment_clearance("restart", base_url=base_url,
+                                               **({"override_decision": override_decision}
+                                                  if override_decision is not None else {}))
     try:
         restarted = _compose("restart", _COMPOSE_SERVICE)
         if restarted.returncode != 0:
@@ -503,7 +522,8 @@ def _godot_health(cid: str) -> dict:
 def recreate_godot_builder(*, override_file: str, binding_file: str,
                            expected_cid: str, expected_pid: int,
                            expected_image: str, target_image: str, report_file: str,
-                           base_url: str = _DEFAULT_URL) -> dict:
+                           base_url: str = _DEFAULT_URL,
+                           override_decision: Callable[[str, dict], dict | None] | None = None) -> dict:
     """Narrow initialized-runtime redeploy: quota/source binding, Godot only."""
     import hashlib
     import json
@@ -532,7 +552,9 @@ def recreate_godot_builder(*, override_file: str, binding_file: str,
     if not report.is_absolute() or report.exists() or not report.parent.is_dir():
         raise ValueError("a new absolute owned report path is required")
     _require_docker()
-    clearance = _require_deployment_clearance("redeploy", base_url=base_url)
+    clearance = _require_deployment_clearance("redeploy", base_url=base_url,
+                                               **({"override_decision": override_decision}
+                                                  if override_decision is not None else {}))
     receipt = {"service": "godot-builder", "override_sha256": override_sha,
                "binding_sha256": binding_sha, "source": binding,
                "expected_before": expected, "target_image": target_image}

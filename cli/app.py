@@ -2813,6 +2813,41 @@ def rollback(
         raise typer.Exit(1)
 
 
+def _acknowledge_deployment(action: str, observation: dict) -> dict | None:
+    """An explicit human decision against the held, freshly measured inventory."""
+    import hashlib
+    from core import deployment_quiescence as dq
+
+    def fingerprint(value):
+        return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
+
+    blockers = observation.get("blockers", {})
+    if sum(len(rows) for rows in blockers.values()) > 32 or len(observation.get("errors", [])) > 32:
+        raise ValueError("inventory exceeds interactive display bound; use a scoped operator callback")
+    identities = {}
+    for kind, rows in blockers.items():
+        identities[kind] = [{**{key: str(row[key])[:240]
+                               for key in dq.BLOCKER_IDENTITY_FIELDS.get(kind, ())
+                               if key in row and key not in {"command", "reason"}},
+                             "row_sha256": fingerprint(row)} for row in rows]
+    errors = [{"kind": "unknown_process" if error.startswith(dq.UNKNOWN_PROCESS_ERROR_PREFIX)
+               else "measurement_error", "sha256": fingerprint(error)}
+              for error in observation.get("errors", [])]
+    typer.echo(json.dumps({"action": action, "observed_at": observation.get("observed_at"),
+                          "digest": observation.get("digest"), "provenance": observation.get("provenance"),
+                          "blockers": identities, "errors": errors}, indent=2))
+    actor = typer.prompt("Operator identity")
+    reason = typer.prompt("Reason for overriding this inventory")
+    ticket = typer.prompt("Authorization reference")
+    expires_at = typer.prompt("Expiry (ISO-8601 with timezone)")
+    acknowledge_unknown = typer.confirm("Explicitly acknowledge unknown measurement errors/processes?", default=False)
+    if not typer.confirm("Authorize this action for the displayed inventory?", default=False):
+        return None
+    return {"action": action, "actor": actor, "reason": reason, "ticket": ticket,
+            "expires_at": expires_at, "acknowledge_unknown": acknowledge_unknown,
+            "inventory_digest": observation["digest"]}
+
+
 @app.command()
 def recreate_godot(
     override_file: str = typer.Option(..., "--quota-override"),
@@ -2823,13 +2858,17 @@ def recreate_godot(
     target_image: str = typer.Option(..., "--image"),
     report_file: str = typer.Option(..., "--report"),
     server_url: str = typer.Option(_DEFAULT_URL, "--url"),
+    acknowledge_deployment: bool = typer.Option(
+        False, "--acknowledge-deployment", help="Decide an audited override against the fresh held inventory."),
 ):
     """Recreate only Godot with frozen Source and the owned finite quotas."""
     from cli.server import recreate_godot_builder
     recreate_godot_builder(override_file=override_file, binding_file=binding_file,
                           expected_cid=expected_cid, expected_pid=expected_pid,
                           expected_image=expected_image, target_image=target_image, report_file=report_file,
-                          base_url=server_url)
+                          base_url=server_url,
+                          **({"override_decision": _acknowledge_deployment}
+                             if acknowledge_deployment else {}))
     console.print(f"[green]Godot-only recreation completed; evidence: {report_file}[/green]")
 
 

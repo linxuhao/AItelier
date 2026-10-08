@@ -26,3 +26,23 @@ A stopped/uninitialized/unreachable backend cannot provide live runtime facts:
 its normal guard refuses explicitly rather than constructing a substitute and
 calling it quiet. This change is SOURCE only until independently reviewed and
 installed; it does not perform a restart or alter production configuration.
+
+A pre-bound `AITELIER_DEPLOY_OVERRIDE_FILE` still needs the exact fresh digest
+consumed by the guard; a file from an earlier observation refuses even when the
+only change is its observation time. For a human decision made at that boundary,
+`aitelier recreate-godot --acknowledge-deployment` displays the fresh digest,
+runtime provenance, blockers and errors while the existing cutover fence is held.
+The operator supplies identity, reason, authorization reference and expiry,
+separately acknowledges unknown facts if intended, then confirms that inventory.
+Declining, invalid metadata, conflicting file/decision inputs and authoritative
+owners combined with unknown-only acknowledgement refuse through the existing
+journal. No acknowledgement is inferred from the command flag itself.
+
+Headless Python callers can pass `override_decision(action, observation)` to
+`restart_server` or `recreate_godot_builder`. The callback must inspect the fresh
+owner identities/blockers against the operator's authorized scope before
+returning an ordinary audited override with that snapshot's digest, or `None` to
+decline. It receives a private snapshot; the same original measurement is consumed
+by existing `authorize`, effect and `finalize` without another hidden measurement.
+The callback does not modify facts or release owners; backend defaults, Godot
+Source/CID/image and configuration rechecks, and quota bounds remain unchanged.

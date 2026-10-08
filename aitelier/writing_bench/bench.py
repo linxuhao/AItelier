@@ -368,6 +368,49 @@ class Bench:
             require(not git(wt, "diff", "--name-only", revision, "--", *MANAGED), "accepted replay drift")
             require(not git(wt, "ls-files", "--others", "--exclude-standard"), "untracked replay state")
 
+    def replay_provided(self, run_id: str) -> dict:
+        """Refuse deterministic semantic replay errors in a supplied ledger
+        before literary or ledger review work is spent.
+
+        A complete author-supplied ledger can be replayed now: the exact same
+        isolated candidate and full-history guard used at ``stage`` runs over a
+        disposable checkout, so a ledger that touches an already-dead character
+        or otherwise breaks the accepted journal refuses here. Extractor output
+        does not exist yet and is never guessed, so any chapter still missing a
+        ledger returns a deferred receipt and the unchanged later ``stage``
+        guard remains the only replay for it.
+        """
+        path, m = self.input(run_id)
+        missing = [c["chapter"] for c in m["chapters"] if not c["provided_ledger"]]
+        if missing:
+            return {"early_replay": "deferred", "missing_chapters": missing}
+        self.verify_baseline(path, m)
+        ledgers = self.ledgers(run_id)
+        clean_head(self.policy.repo, self.policy.branch, m["base"])
+        require(git(self.policy.repo, "rev-parse", "novel-genesis") == self.policy.genesis, "genesis drift")
+        genesis_files = git_files(self.policy.repo, self.policy.genesis)
+        self._replay_guard(m["base"], genesis_files)
+        with checkout(self.policy.repo, m["base"], self.root / "scratch") as wt:
+            self._write_candidate_chapters(wt, path, m, ledgers)
+            index = self._reset_replay(wt, genesis_files)
+        return {"early_replay": "passed", "review_key": ledgers["review_key"],
+                "counters": {k: index[k] for k in ("chapters_written", "last_chapter", "next_chapter")}}
+
+    def _write_candidate_chapters(self, wt: Path, path: Path, m: dict, ledgers: dict) -> None:
+        """Write each proposed chapter's prose, summary and journal into the
+        isolated candidate, replacing any historic bytes for a revision."""
+        for ch in m["chapters"]:
+            n = ch["chapter"]
+            e = ledgers["ledgers"][str(n)]
+            target = ns.chapter_dir(wt, n)
+            require(target.is_dir() if m["mode"] == "revision" else not target.exists(), "target chapter conflict")
+            target.mkdir(parents=True, exist_ok=True)
+            raw = read_file(path, f"chapters/ch{n:04d}/prose.md")
+            (target / "prose.md").write_bytes(raw)
+            (target / "summary.md").write_text(f"# 第{n}章：{ch['title']}\n\n" + e["summary"] + "\n", encoding="utf-8")
+            ns.dump_yaml(target / "events.yaml", {"chapter": n, "title": ch["title"],
+                          "word_count": ns.char_count(raw.decode()), **{k: e[k] for k in LISTS}})
+
     def stage(self, run_id: str, audit: dict, *, proof: dict | None = None) -> dict:
         with lock(self.root / ".delivery.lock"):
             path, m = self.input(run_id)
@@ -397,17 +440,7 @@ class Bench:
             self._replay_guard(m["base"], genesis_files)
             with checkout(self.policy.repo, m["base"], self.root / "scratch") as wt:
                 before = ns.written_chapters(wt)
-                for ch in m["chapters"]:
-                    n = ch["chapter"]
-                    e = ledgers["ledgers"][str(n)]
-                    target = ns.chapter_dir(wt, n)
-                    require(target.is_dir() if m["mode"] == "revision" else not target.exists(), "target chapter conflict")
-                    target.mkdir(parents=True, exist_ok=True)
-                    raw = read_file(path, f"chapters/ch{n:04d}/prose.md")
-                    (target / "prose.md").write_bytes(raw)
-                    (target / "summary.md").write_text(f"# 第{n}章：{ch['title']}\n\n" + e["summary"] + "\n", encoding="utf-8")
-                    ns.dump_yaml(target / "events.yaml", {"chapter": n, "title": ch["title"],
-                                  "word_count": ns.char_count(raw.decode()), **{k: e[k] for k in LISTS}})
+                self._write_candidate_chapters(wt, path, m, ledgers)
                 index = self._reset_replay(wt, genesis_files)
                 expected = before + [m["chapters"][0]["chapter"]] if m["mode"] == "new" else before
                 require(ns.written_chapters(wt) == expected, "chapter inventory changed unexpectedly")

@@ -157,6 +157,15 @@ journal history from `novel-genesis`, constructs an isolated candidate, checks
 permitted file changes and repeats the exact-commit replay guard. No live novel
 file changes during this work.
 
+A complete author-supplied ledger is replayed this same way once already, at
+`prepare`, on a disposable owned candidate before any literary or ledger review
+material is published: a supplied ledger that changes an already-dead character
+or otherwise breaks the accepted journal refuses there, before review calls are
+spent. The observed result is recorded in `early_replay.json`. When any chapter
+still needs the extractor, `prepare` records a deferred early replay because the
+extractor output does not exist yet and is never guessed; the unchanged `stage`
+guard above remains the only replay for it.
+
 The stage exposes complete submitted prose, both independent reports, the exact
 ledger, `semantic_changes.json` (current before/after state without recopying all
 history), the full `candidate.patch`, and an approval manifest containing the

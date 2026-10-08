@@ -233,6 +233,8 @@ def novel_bench(*, operation: str, workspace_root: str = "", run_id: str = "",
             return {"backup_only": True}
         bench.freeze(request, run_id, host.rulings(bench.policy.project_id), host.review_contracts(conf))
         path, m = bench.input(run_id)
+        early = bench.replay_provided(run_id)
+        immutable(out / "early_replay.json", encode(early))
         immutable(out / "editor_packet.md", bench.editorial_packet(run_id).encode())
         publish_review_materials(bench, run_id, "literary", out)
         missing = [c["chapter"] for c in m["chapters"] if not c["provided_ledger"]]

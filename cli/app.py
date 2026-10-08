@@ -2820,6 +2820,7 @@ def recreate_godot(
     expected_cid: str = typer.Option(..., "--expected-cid"),
     expected_pid: int = typer.Option(..., "--expected-pid"),
     expected_image: str = typer.Option(..., "--expected-image"),
+    target_image: str = typer.Option(..., "--image"),
     report_file: str = typer.Option(..., "--report"),
     server_url: str = typer.Option(_DEFAULT_URL, "--url"),
 ):
@@ -2827,7 +2828,7 @@ def recreate_godot(
     from cli.server import recreate_godot_builder
     recreate_godot_builder(override_file=override_file, binding_file=binding_file,
                           expected_cid=expected_cid, expected_pid=expected_pid,
-                          expected_image=expected_image, report_file=report_file,
+                          expected_image=expected_image, target_image=target_image, report_file=report_file,
                           base_url=server_url)
     console.print(f"[green]Godot-only recreation completed; evidence: {report_file}[/green]")
 

@@ -30,15 +30,18 @@ normal stage exits retain their existing meaning. No absent-path skip is used.
 
 `aitelier recreate-godot` is a closed operation on the existing initialized
 runtime. It accepts `--quota-override`, `--source-binding`, exact old
-`--expected-cid`, `--expected-pid`, `--expected-image`, and a new absolute
+`--expected-cid`, `--expected-pid`, `--expected-image`, an explicit built
+immutable target `--image`, and a new absolute
 `--report` path. The override may contain only godot-builder's four values:
 4096 files, 536870912 bytes, 16 patterns and 4096 search entries. It acquires the
 existing deployment fence, calls the initialized admin observation through the
 normal local authenticated client, measures all owners, and authorizes the
 existing redeploy journal action. Refusals preserve foreign owners.
 
-Only the derived Godot service override is applied: the old immutable Godot
-image, those quotas and the frozen Python harness readonly at `/srv`. The
+The operator first builds and independently checks the normal Godot image from
+the accepted Source. Only the derived Godot service override is applied: that
+explicit immutable image and those quotas. The baked `/srv/godot_harness.py`
+must match the frozen Source; no compatibility overlay shadows it. The
 command is `up -d --no-deps --force-recreate --no-build godot-builder`.
 The source, owned override and exact old process are rechecked under the fence;
 the new CID/image, loaded harness hash and effective numeric quotas are checked

@@ -3,6 +3,7 @@ import importlib
 import io
 import json
 import subprocess
+import shutil
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -22,7 +23,7 @@ QUOTAS = {"GODOT_RETAIN_MAX_FILES": "4096", "GODOT_RETAIN_MAX_BYTES": "536870912
 @pytest.fixture
 def bound(tmp_path, monkeypatch):
     fixture = tmp_path / "fixture-source"
-    subprocess.run(["git", "clone", "--quiet", "--no-hardlinks", str(SOURCE), str(fixture)], check=True)
+    subprocess.run(["git", "clone", "--quiet", "--shared", "--no-hardlinks", str(SOURCE), str(fixture)], check=True)
     manifest = tmp_path / "binding.json"
     binding = {"source": str(SOURCE), "head": gb.git(SOURCE, "rev-parse", "HEAD"),
                "tree": gb.git(SOURCE, "rev-parse", "HEAD^{tree}"), "image": "sha256:" + "a" * 64,
@@ -38,7 +39,8 @@ def bound(tmp_path, monkeypatch):
         return io.BytesIO(json.dumps(value).encode())
 
     monkeypatch.setattr(gb.urllib.request, "urlopen", health)
-    return manifest, binding, fixture
+    yield manifest, binding, fixture
+    shutil.rmtree(fixture)
 
 
 def test_capture_measures_actual_imports_and_both_coordinates(bound):
@@ -92,6 +94,58 @@ def test_missing_engine_identity_refuses_before_stage(bound, tmp_path, monkeypat
     assert json.loads(report.read_text())["raw_exit"] is None
 
 
+@pytest.mark.parametrize("change_sidecar", [False, True])
+def test_normal_launcher_real_snapshot_exit_and_sidecar_poison(
+        bound, tmp_path, monkeypatch, change_sidecar):
+    manifest, binding, _ = bound
+    bins, game, reports = (tmp_path / name for name in ("bin", "game", "reports"))
+    for path in (bins, game, reports):
+        path.mkdir()
+    subprocess.run(["sh", str(SOURCE / "tools/install_gate_run.sh"), str(bins)], check=True)
+    assert gb.digest(bins / "gate_run.sh") == gb.digest(SOURCE / "tools/gate_run.sh")
+    # Only this owned script copy redirects the snapshot fixture directory.
+    launcher = bins / "gate_run.sh"
+    launcher.write_text(launcher.read_text().replace(
+        'SNAPROOT="/home/linxuhao/.AItelier/gate-snapshots"', f'SNAPROOT="{tmp_path / "snapshots"}"'))
+    subprocess.run(["git", "init", "--quiet", str(game)], check=True)
+    (game / "run_tests.sh").write_text("#!/bin/sh\nexit 23\n")
+    subprocess.run(["git", "-C", str(game), "add", "run_tests.sh"], check=True)
+    subprocess.run(["git", "-C", str(game), "-c", "user.name=fixture", "-c",
+                    "user.email=fixture@localhost", "commit", "-qm", "fixture"], check=True)
+    head = gb.git(game, "rev-parse", "HEAD")
+    calls = tmp_path / "docker-calls.jsonl"
+    fake = bins / "docker"
+    fake.write_text(f'''#!/usr/local/bin/python3
+import json,sys
+from pathlib import Path
+args=sys.argv[1:]
+calls=Path({str(calls)!r})
+prior=calls.read_text().splitlines() if calls.exists() else []
+with calls.open('a') as f: f.write(json.dumps(args)+'\\n')
+if args[0]=='inspect':
+ print(('d' if {change_sidecar!r} and prior else 'b')*64+' sha256:'+'c'*64+' 123 started running')
+else:
+ assert args[0]=='run' and '--rm' in args
+ assert args[args.index('-w')+1] != {str(game)!r}
+ assert {binding['image']!r} in args
+ assert {str(SOURCE) + ':/app:ro'!r} in args
+ assert {str(SOURCE) + ':/home/linxuhao/AItelier:ro'!r} in args
+ assert args[-4:-1]==['/app/tools/gate_binding.py','run',{str(manifest)!r}]
+ Path(args[-1]).write_text(json.dumps({{'identity':'unchanged','raw_exit':23}}))
+ sys.exit(23)
+''')
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bins) + ":" + __import__("os").environ["PATH"])
+    result = subprocess.run([str(launcher), str(game), str(reports), "owned"], capture_output=True, text=True)
+    assert result.returncode == (69 if change_sidecar else 23), result.stderr
+    assert (reports / "owned.gate.head").read_text().strip() == head
+    exit_value = (reports / "owned.gate.exit").read_text().strip()
+    assert exit_value.startswith("poisoned-platform") if change_sidecar else exit_value == "23"
+    assert gb.git(game, "rev-parse", "HEAD") == head
+    assert gb.git(game, "status", "--porcelain") == ""
+    assert len(gb.git(game, "worktree", "list", "--porcelain").splitlines()) == 3
+
+
 @pytest.fixture
 def initialized(tmp_path, monkeypatch):
     monkeypatch.setenv("AITELIER_HOME", str(tmp_path / "owned-home"))
@@ -113,7 +167,8 @@ def test_existing_initialized_fence_authorize_effect_and_journal(
     override = tmp_path / "quota.json"
     override.write_text(json.dumps({"services": {"godot-builder": {"environment": QUOTAS}}}))
     expected = {"cid": "b" * 64, "pid": 123, "image": "sha256:" + "c" * 64}
-    after = {**expected, "cid": "d" * 64, "pid": 456}
+    target_image = "sha256:" + "e" * 64
+    after = {**expected, "cid": "d" * 64, "pid": 456, "image": target_image}
     identities = iter([expected, after, {**after, "pid": 999} if failure == "identity" else after])
     monkeypatch.setattr(server, "_godot_identity", lambda: next(identities))
     calls = []
@@ -128,10 +183,9 @@ def test_existing_initialized_fence_authorize_effect_and_journal(
         calls.append(args)
         overlay = json.loads(Path(args[1]).read_text())
         assert set(overlay["services"]) == {"godot-builder"}
-        assert overlay["services"]["godot-builder"]["image"] == expected["image"]
+        assert overlay["services"]["godot-builder"]["image"] == target_image
         assert overlay["services"]["godot-builder"]["environment"] == QUOTAS
-        assert overlay["services"]["godot-builder"]["volumes"] == [
-            str(SOURCE / gb.FILES[0]) + ":/srv/godot_harness.py:ro"]
+        assert set(overlay["services"]["godot-builder"]) == {"image", "environment"}
         return SimpleNamespace(returncode=23 if failure == "compose" else 0)
 
     monkeypatch.setattr(server, "_compose", compose)
@@ -143,7 +197,7 @@ def test_existing_initialized_fence_authorize_effect_and_journal(
     report = tmp_path / "effect.json"
     args = dict(override_file=str(override), binding_file=str(manifest),
                 expected_cid=expected["cid"], expected_pid=expected["pid"],
-                expected_image=expected["image"], report_file=str(report))
+                expected_image=expected["image"], target_image=target_image, report_file=str(report))
     if failure:
         with pytest.raises((ValueError, RuntimeError)):
             server.recreate_godot_builder(**args)
@@ -174,7 +228,7 @@ def test_unsafe_quota_shape_refuses_before_runtime(initialized, bound, tmp_path,
     with pytest.raises(ValueError, match="four owned finite"):
         server.recreate_godot_builder(override_file=str(override), binding_file=str(manifest),
                                      expected_cid="b" * 64, expected_pid=123,
-                                     expected_image="sha256:" + "c" * 64,
+                                     expected_image="sha256:" + "c" * 64, target_image="sha256:" + "e" * 64,
                                      report_file=str(tmp_path / "effect.json"))
 
 
@@ -190,7 +244,7 @@ def test_initialized_foreign_write_owner_blocks_before_effect(initialized, bound
     with pytest.raises(RuntimeError, match="not quiescent"):
         server.recreate_godot_builder(override_file=str(override), binding_file=str(manifest),
                                      expected_cid="b" * 64, expected_pid=123,
-                                     expected_image="sha256:" + "c" * 64,
+                                     expected_image="sha256:" + "c" * 64, target_image="sha256:" + "e" * 64,
                                      report_file=str(tmp_path / "effect.json"))
     latest = json.loads(dq.evidence_path().read_text())["latest"]
     assert latest["status"] == "aborted" and not latest["usable"]

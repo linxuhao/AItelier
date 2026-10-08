@@ -502,7 +502,7 @@ def _godot_health(cid: str) -> dict:
 
 def recreate_godot_builder(*, override_file: str, binding_file: str,
                            expected_cid: str, expected_pid: int,
-                           expected_image: str, report_file: str,
+                           expected_image: str, target_image: str, report_file: str,
                            base_url: str = _DEFAULT_URL) -> dict:
     """Narrow initialized-runtime redeploy: quota/source binding, Godot only."""
     import hashlib
@@ -523,7 +523,8 @@ def recreate_godot_builder(*, override_file: str, binding_file: str,
     expected = {"cid": expected_cid, "pid": expected_pid, "image": expected_image}
     if (not re.fullmatch(r"[0-9a-f]{64}", expected_cid)
             or type(expected_pid) is not int or expected_pid < 1
-            or not re.fullmatch(r"sha256:[0-9a-f]{64}", expected_image)):
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", expected_image)
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", target_image)):
         raise ValueError("exact expected old Godot CID/PID/image required")
     if binding["engine_sha256"] != binding["files"]["docker/godot/godot_harness.py"]:
         raise ValueError("Godot engine must load the same frozen Python harness")
@@ -534,13 +535,12 @@ def recreate_godot_builder(*, override_file: str, binding_file: str,
     clearance = _require_deployment_clearance("redeploy", base_url=base_url)
     receipt = {"service": "godot-builder", "override_sha256": override_sha,
                "binding_sha256": binding_sha, "source": binding,
-               "expected_before": expected}
+               "expected_before": expected, "target_image": target_image}
     try:
         with tempfile.TemporaryDirectory(prefix="aitelier-godot-recreate-") as temp:
             overlay = Path(temp) / "godot.json"
             overlay.write_text(json.dumps({"services": {"godot-builder": {
-                "image": expected_image, "environment": quotas,
-                "volumes": [binding["source"] + "/docker/godot/godot_harness.py:/srv/godot_harness.py:ro"]}}}))
+                "image": target_image, "environment": quotas}}}))
             receipt["effect_override_sha256"] = hashlib.sha256(overlay.read_bytes()).hexdigest()
             receipt["before"] = _godot_identity()
             if receipt["before"] != expected:
@@ -556,7 +556,7 @@ def recreate_godot_builder(*, override_file: str, binding_file: str,
                 raise RuntimeError(f"Godot-only recreation failed with exit {result.returncode}")
             receipt["after"] = _godot_identity()
             if (receipt["after"]["cid"] == expected_cid
-                    or receipt["after"]["image"] != expected_image):
+                    or receipt["after"]["image"] != target_image):
                 raise ValueError("Godot-only recreation identity differs")
             receipt["health"] = _godot_health(receipt["after"]["cid"])
             health = receipt["health"]

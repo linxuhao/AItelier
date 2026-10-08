@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "scope": "SOURCE candidate only; not SDK publication, host pin change, integration, deployment, or runtime acceptance",
+  "host_base_sha": "68bd5117c496f0ff511927a5b00c2929e30e4da9",
+  "sdk_base_sha": "3d37eb6ac70a5c753f980c936771dba1623e2a1d",
+  "required_sdk_source_sha": "10b5cfa5bb5a14e78ed9b13722786a2b533b84a8",
+  "required_sdk_contract": "skillflow.ToolExecutionRefused",
+  "official_release_check": {
+    "checked_at": "2026-10-08T04:59:37.253224+00:00",
+    "metadata_url": "https://pypi.org/pypi/skillflow-py/json",
+    "latest_official_release": "1.5.84",
+    "wheel": {
+      "filename": "skillflow_py-1.5.84-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/7b/0e/cc0ec50b3644d32d75ae91638e7735f1f1ea1231b1cb88c1560fb424d30c/skillflow_py-1.5.84-py3-none-any.whl",
+      "sha256": "9d62ee6c0283c54d7e467eb42025146c9bd8dc266fbada16927276416341fe8f"
+    },
+    "official_release_has_definitive_refusal_contract": false,
+    "decision": "No newer official upgrade is available; a separate SDK SOURCE candidate is necessary."
+  },
+  "current_host_package_pin": "skillflow-py==1.5.84",
+  "integration_requirement": "Publish and independently validate a compatible official SDK release, then explicitly update the host pin; current official 1.5.84 cannot import this host candidate.",
+  "fallback": "none",
+  "classification": "Only the existing _reset_replay warnings/drift refusal; other BenchError and I/O retain normal retry.",
+  "replay_validation": "Reuse the existing actual full replay, warnings, and reconciliation result; no duplicate validator.",
+  "incident_run_id": "c8573505-27ea-410f-b7a5-e8209bcd6ad2",
+  "incident_history": "Original ch89 three-call history retained by director; untouched by this SOURCE attempt.",
+  "attempt_id": "attempt-4a21cb6357fe4c28ace7014ab7f22a9a",
+  "context_hash": "7c8ab862a80a1d8f8b38f3f760d1dd87e7f2868c76f8a7804d99c44657b5ef2f",
+  "author_tests": {
+    "sdk": "63 passed in 5.46s",
+    "host": "36 passed in 15.50s"
+  },
+  "independent_acceptance": "pending; author evidence is not acceptance"
+}

@@ -18,7 +18,7 @@ import yaml
 from aitelier import novel_state as ns
 from .context import assemble, read_frozen
 from .reading import (PROTOCOL, Material, frame, material_identity, validate_certificate, validate_targets)
-from .storage import (BenchError, TREE_LIMIT, checked_root, checkout, clean_head,
+from .storage import (BenchError, BenchReplayRefused, TREE_LIMIT, checked_root, checkout, clean_head,
                       commit_id, decode, encode, git, git_files, identifier,
                       immutable, lock, materialize, read_file, relative, require, sha)
 
@@ -359,7 +359,8 @@ class Bench:
         ns.rebuild_digest(wt)
         index = ns.rebuild_index(wt)
         drift = ns.reconcile(wt)
-        require(not warnings and not drift, "full replay refused: " + str(warnings + drift))
+        if warnings or drift:
+            raise BenchReplayRefused("full replay refused: " + str(warnings + drift))
         return index
 
     def _replay_guard(self, revision: str, genesis_files: dict[str, bytes]) -> None:

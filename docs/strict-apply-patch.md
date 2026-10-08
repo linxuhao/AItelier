@@ -94,6 +94,12 @@ Limits are 128 files, 2 MiB UTF-8 patch text, 1024 hunks per updated file, 16 Mi
 
 ## Read and lifecycle rules
 
+Source `read` results also return `file_byte_sha256` and `byte_size` for the
+complete raw file bytes, computed from the same buffer used for the served
+content. These identify the file even when the response is paged or numbered;
+`citation.sha` remains the engine-issued edit authorization for the served
+window and is not a raw file hash. No additional read permission is granted.
+
 Every citable `read` issues a citation for the window it served: read the intended range, cite its `sha`, and send the new text. Coordinates may be omitted; explicit columns require the span confirmation above. Inspect the resulting echo before the next edit. When a V4A hunk is used instead and comes back stale or ambiguous, the remedy is the same citation — reread that range and cite it — rather than retyping the current text or widening the copied context. `raw=true` remains the way to obtain patch context when a diff is genuinely the right shape; default numbered output is for navigation and must not be copied into a patch. Do not approximate whitespace or line endings.
 
 For `output.target: code`, a successful mutation immediately changes the run's uncommitted worktree. It does not mean validation, review, commit, or delivery passed. Artifact `create`/`edit` is different: it writes the step's staged candidate and is promoted only after confirmation. When reading an artifact step's own staged candidate, use `source="self"`; this is not the code-worktree `apply_patch` lifecycle.
@@ -113,8 +119,8 @@ AItelier owns:
 - task-card path authorization and complete-batch refusal;
 - host root injection, role grants, tool filtering, loop accounting, and prompt guidance;
 - pipeline-forge guidance for newly generated code roles;
-- its exact `skillflow-py==1.5.80` package pin.
+- its exact `skillflow-py==1.5.86` package pin.
 
 Existing saved generated pipelines are historical inputs and are not silently rewritten. New/reloaded definitions receive only the tools their role configuration explicitly grants.
 
-Deployment requires the official SkillFlow 1.5.80 package, the AItelier image resolving that exact pin, and observed integration and regression results on the fresh image.
+Deployment requires the official SkillFlow 1.5.86 package, the AItelier image resolving that exact pin, and observed integration and regression results on the fresh image.

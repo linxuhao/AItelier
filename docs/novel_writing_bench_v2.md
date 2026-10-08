@@ -161,10 +161,15 @@ A complete author-supplied ledger is replayed this same way once already, at
 `prepare`, on a disposable owned candidate before any literary or ledger review
 material is published: a supplied ledger that changes an already-dead character
 or otherwise breaks the accepted journal refuses there, before review calls are
-spent. The observed result is recorded in `early_replay.json`. When any chapter
-still needs the extractor, `prepare` records a deferred early replay because the
-extractor output does not exist yet and is never guessed; the unchanged `stage`
-guard above remains the only replay for it.
+spent. The observed result is recorded in `early_replay.json`. A missing ledger
+never hides a deterministically invalid known one: when only part of a
+submission is supplied, the provided chapters are still replayed under the
+minimal supported ordering — every provided chapter of a `revision`, and the
+contiguous provided prefix before the first missing chapter of a `new`
+submission — and `prepare` records a `partial` receipt naming the validated
+chapters. The extractor output does not exist yet and is never guessed, so a
+submission with nothing replayable records a deferred early replay, and the
+unchanged `stage` guard above remains the only replay for the rest.
 
 The stage exposes complete submitted prose, both independent reports, the exact
 ledger, `semantic_changes.json` (current before/after state without recopying all

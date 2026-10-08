@@ -376,25 +376,56 @@ class Bench:
         isolated candidate and full-history guard used at ``stage`` runs over a
         disposable checkout, so a ledger that touches an already-dead character
         or otherwise breaks the accepted journal refuses here. Extractor output
-        does not exist yet and is never guessed, so any chapter still missing a
-        ledger returns a deferred receipt and the unchanged later ``stage``
-        guard remains the only replay for it.
+        does not exist yet and is never guessed.
+
+        A missing ledger never hides a deterministically invalid *known* one.
+        When only part of the submission is supplied, the provided chapters are
+        still replayed under the minimal supported ordering: every provided
+        chapter in a ``revision`` (each replaces its own historic bytes), and
+        in a ``new`` submission the contiguous provided prefix before the
+        first missing chapter (a later new chapter cannot be replayed without
+        the missing chapter before it). Such a run reports ``partial`` with the
+        validated chapters; a submission with nothing replayable reports
+        ``deferred`` and the unchanged later ``stage`` guard remains the only
+        replay for it.
         """
         path, m = self.input(run_id)
         missing = [c["chapter"] for c in m["chapters"] if not c["provided_ledger"]]
-        if missing:
+        provided = [c["chapter"] for c in m["chapters"] if c["provided_ledger"]]
+        if missing and not provided:
             return {"early_replay": "deferred", "missing_chapters": missing}
+        if missing:
+            if m["mode"] == "revision":
+                early = provided
+            else:
+                early = [n for n in provided if n < min(missing)]
+            if not early:
+                return {"early_replay": "deferred", "missing_chapters": missing}
+            subset = dict(m, chapters=[c for c in m["chapters"] if c["chapter"] in early])
+        else:
+            subset = m
+            early = provided
         self.verify_baseline(path, m)
-        ledgers = self.ledgers(run_id)
+        ledgers = {"ledgers": {}}
+        for c in subset["chapters"]:
+            value = self._json(path, f"chapters/ch{c['chapter']:04d}/proposed_events.json")
+            validate_ledger(value, c["chapter"], c["title"])
+            ledgers["ledgers"][str(c["chapter"])] = value
         clean_head(self.policy.repo, self.policy.branch, m["base"])
         require(git(self.policy.repo, "rev-parse", "novel-genesis") == self.policy.genesis, "genesis drift")
         genesis_files = git_files(self.policy.repo, self.policy.genesis)
         self._replay_guard(m["base"], genesis_files)
         with checkout(self.policy.repo, m["base"], self.root / "scratch") as wt:
-            self._write_candidate_chapters(wt, path, m, ledgers)
+            self._write_candidate_chapters(wt, path, subset, ledgers)
             index = self._reset_replay(wt, genesis_files)
-        return {"early_replay": "passed", "review_key": ledgers["review_key"],
-                "counters": {k: index[k] for k in ("chapters_written", "last_chapter", "next_chapter")}}
+        counters = {k: index[k] for k in ("chapters_written", "last_chapter", "next_chapter")}
+        review_key = sha(encode({"literary_key": m["literary_key"],
+                                 "ledgers": ledgers["ledgers"],
+                                 "contract": m["contracts"]["ledger"]}))
+        if missing:
+            return {"early_replay": "partial", "missing_chapters": missing,
+                    "validated_chapters": early, "counters": counters}
+        return {"early_replay": "passed", "review_key": review_key, "counters": counters}
 
     def _write_candidate_chapters(self, wt: Path, path: Path, m: dict, ledgers: dict) -> None:
         """Write each proposed chapter's prose, summary and journal into the

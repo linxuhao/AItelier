@@ -63,6 +63,90 @@ def test_replay_provided_defers_missing_ledger_to_extractor(bench):
         bench.ledgers("run1")
 
 
+def _accept_fresh_chapter(bench, n, sid, name):
+    """Accept chapter n by creating a new living character (旅人 is dead)."""
+    value = ledger(n, "过桥" if n == 2 else "夜航")
+    value["events"] = [{"entity_type": "character", "entity_name": name,
+                        "create": True, "changes": {"status": "alive", "位置": "渡口"},
+                        "reason": name + "登场。"}]
+    value["appearances"] = [{"name": name, "importance": 3}]
+    accept(bench, staged(bench, request(bench, sid=sid, n=n, value=value), "run" + str(n)), "run" + str(n))
+
+
+def _revision_request(bench, chapters):
+    """Build one multi-chapter revision request from per-chapter parts."""
+    merged = None
+    for sid, n, value in chapters:
+        part = request(bench, sid=sid, n=n, provided=value is not None, mode="revision", value=value)
+        if merged is None:
+            merged = part
+        else:
+            merged["chapters"].append(part["chapters"][0])
+    return merged
+
+
+def test_mixed_revision_missing_ledger_does_not_hide_invalid_supplied(bench):
+    # Accept chapter 1 (kills 旅人), then chapters 2 and 3, and revise 2+3:
+    # chapter 2 has no ledger, chapter 3 moves the already-dead 旅人.
+    _accepted_dead_chapter(bench)
+    _accept_fresh_chapter(bench, 2, "ch2", "船夫")
+    _accept_fresh_chapter(bench, 3, "ch3", "渔夫")
+    req = _revision_request(bench, [("r2", 2, None), ("r3", 3, ledger(3, "夜航"))])
+    bench.freeze(req, "run9", RULES, CONTRACTS)
+    with pytest.raises(BenchError, match="full replay refused"):
+        bench.replay_provided("run9")
+    assert not (bench.work("run9") / "literary.json").exists()
+    assert not (bench.work("run9") / "audit.json").exists()
+    assert not (bench.work("run9") / "stage.json").exists()
+
+
+def test_mixed_revision_valid_supplied_ledger_replays_partial(bench):
+    _accepted_dead_chapter(bench)
+    _accept_fresh_chapter(bench, 2, "ch2", "船夫")
+    _accept_fresh_chapter(bench, 3, "ch3", "渔夫")
+    value = ledger(3, "夜航", "湖心")
+    req = _revision_request(bench, [("r2", 2, None), ("r3", 3, value)])
+    bench.freeze(req, "run9", RULES, CONTRACTS)
+    receipt = bench.replay_provided("run9")
+    assert receipt["early_replay"] == "partial"
+    assert receipt["missing_chapters"] == [2]
+    assert receipt["validated_chapters"] == [3]
+    assert receipt["counters"] == {"chapters_written": 3, "last_chapter": 3, "next_chapter": 4}
+    # The extracted ledger for chapter 2 is still not guessed or forged.
+    with pytest.raises(BenchError, match="missing extracted"):
+        bench.ledgers("run9")
+
+
+def test_mixed_new_submission_replays_only_contiguous_prefix(bench):
+    _accepted_dead_chapter(bench)
+    # New chapters 2 (valid, provided) and 3 (missing): only the provided
+    # prefix before the first missing chapter is replayable.
+    value2 = ledger(2, "过桥")
+    value2["events"] = [{"entity_type": "character", "entity_name": "船夫",
+                         "create": True, "changes": {"status": "alive", "位置": "渡口"},
+                         "reason": "船夫登场。"}]
+    value2["appearances"] = [{"name": "船夫", "importance": 3}]
+    req2 = request(bench, sid="n2", n=2, value=value2)
+    req3 = request(bench, sid="n3", n=3, provided=False)
+    req2["chapters"].append(req3["chapters"][0])
+    bench.freeze(req2, "run9", RULES, CONTRACTS)
+    receipt = bench.replay_provided("run9")
+    assert receipt["early_replay"] == "partial"
+    assert receipt["validated_chapters"] == [2] and receipt["missing_chapters"] == [3]
+
+
+def test_mixed_new_submission_after_gap_is_fully_deferred(bench):
+    _accepted_dead_chapter(bench)
+    # New chapter 2 missing, chapter 3 provided: chapter 3 cannot be replayed
+    # without the missing chapter before it, and nothing is guessed.
+    req2 = request(bench, sid="g2", n=2, provided=False)
+    req3 = request(bench, sid="g3", n=3, value=ledger(3, "夜航"))
+    req2["chapters"].append(req3["chapters"][0])
+    bench.freeze(req2, "run9", RULES, CONTRACTS)
+    assert bench.replay_provided("run9") == {"early_replay": "deferred", "missing_chapters": [2]}
+
+
+
 def test_stage_guard_still_refuses_extracted_ledger_for_dead_character(bench):
     # The later existing full-replay guard is unchanged for extractor input.
     _accepted_dead_chapter(bench)

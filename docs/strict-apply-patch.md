@@ -119,8 +119,8 @@ AItelier owns:
 - task-card path authorization and complete-batch refusal;
 - host root injection, role grants, tool filtering, loop accounting, and prompt guidance;
 - pipeline-forge guidance for newly generated code roles;
-- its exact `skillflow-py==1.5.86` package pin.
+- its exact `skillflow-py==1.5.87` package pin.
 
 Existing saved generated pipelines are historical inputs and are not silently rewritten. New/reloaded definitions receive only the tools their role configuration explicitly grants.
 
-Deployment requires the official SkillFlow 1.5.86 package, the AItelier image resolving that exact pin, and observed integration and regression results on the fresh image.
+Deployment requires the official SkillFlow 1.5.87 package, the AItelier image resolving that exact pin, and observed integration and regression results on the fresh image.

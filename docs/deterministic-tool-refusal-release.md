@@ -1,6 +1,6 @@
 # Writing Bench definitive replay refusal
 
-The current host source exact-pins `skillflow-py==1.5.86`. The public
+The current host source exact-pins `skillflow-py==1.5.87`. The public
 `ToolExecutionRefused` contract introduced in 1.5.85 continues to support the
 independently reviewed Writing Bench SOURCE change.
 Only the existing full-replay warnings/drift refusal raises `BenchReplayRefused`;

@@ -92,7 +92,7 @@ Do not use resumed legacy runs as evidence that the new storage mode is working.
 ## Installation and first observation
 
 The current host source exact-pins the reviewed public SkillFlow release
-`1.5.86` from PyPI. Docker installs it from the public index; startup rejects an
+`1.5.87` from PyPI. Docker installs it from the public index; startup rejects an
 engine without the output-target contract. Rebuild the backend image, then recreate/restart it:
 
 ```sh

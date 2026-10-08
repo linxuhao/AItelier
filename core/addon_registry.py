@@ -21,8 +21,12 @@ Composition is a LIST: ``run(base, [addon, ...])``. The result name is emergent
 """
 from __future__ import annotations
 
+import copy
 import logging
 from pathlib import Path
+
+from skillflow import PipelineGraph, graph_digest
+from skillflow.graph import loop_body_map
 
 log = logging.getLogger(__name__)
 
@@ -293,6 +297,37 @@ def load_addon_aliases(sf, registry) -> list[str]:
     return registered
 
 
+def _registered_graph_identity(sf, name: str, graph, definition: dict) -> dict:
+    """Match one projected definition to recorded content, never guess latest."""
+    result = {"graph_version": None, "graph_digest": None,
+              "registration_status": "unavailable"}
+    try:
+        rows = sf.list_graph_versions(name)
+        if not rows:
+            return result
+        result["registration_status"] = "conflict"
+        digest = graph_digest(definition)
+        # The official SDK pins runs to the newest record for their exact
+        # content; publication to _graphs precedes its history transaction.
+        row = next((row for row in rows if row.get("digest") == digest), None)
+        if not row or type(row.get("version")) is not int or row["version"] < 1:
+            return result
+        saved = sf.get_graph_version(name, row["version"])
+        if (isinstance(saved, dict) and type(saved.get("version")) is int
+                and saved["version"] == row["version"]
+                and saved.get("digest") == digest
+                and isinstance(saved.get("graph"), dict)
+                and graph_digest(saved["graph"]) == digest
+                and sf._graphs.get(name) is graph
+                and graph_digest(graph.to_dict()) == digest):
+            result.update(graph_version=row["version"], graph_digest=digest,
+                          registration_status="available")
+    except Exception:
+        # Read failures are explicit but never publish exception/private values.
+        result["registration_status"] = "unavailable"
+    return result
+
+
 def graph_view(config_name: str) -> dict | None:
     """The COMPOSED graph of a runnable config, projected for display.
 
@@ -313,16 +348,14 @@ def graph_view(config_name: str) -> dict | None:
     graph = getattr(sf, "_graphs", {}).get(config_name)
     if graph is None:
         return None
-    d = graph.to_dict()
+    d = copy.deepcopy(graph.to_dict())
     # Loop membership, from skillflow's own reach-back computation rather than a
     # second guess at it here. Without it a fan-out renders as four ordinary
     # boxes and the picture claims each ran once, when the body actually runs
     # per item (see `loop_item` on the step rows).
     loop_of: dict[str, str] = {}
     try:
-        # by-name-ok: addon compose/registration — no run in scope
-        resolver = sf._get_resolver(config_name)
-        for loop_id, body in resolver.loop_bodies().items():
+        for loop_id, body in loop_body_map(PipelineGraph._from_dict(d).steps).items():
             for node_id in body:
                 loop_of.setdefault(node_id, loop_id)
     except Exception:            # a graph with no loops, or an unloadable one
@@ -364,7 +397,8 @@ def graph_view(config_name: str) -> dict | None:
                              "max_loop": t.get("max_loop")}
                             for t in (s.get("transitions") or [])],
         })
-    return {"config_name": config_name, "base": base,
+    return {**_registered_graph_identity(sf, config_name, graph, d),
+            "config_name": config_name, "base": base,
             "addons": decomp.get("addons") or [], "addon_steps": addon_steps,
             "begin": d.get("begin"), "description": d.get("description"),
             "end_conditions": d.get("end_conditions") or {}, "steps": steps,

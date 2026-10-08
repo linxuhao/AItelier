@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import sqlite3
 import multiprocessing
 import threading
 import time
@@ -18,6 +21,38 @@ from core import scheduler
 from core.skillflow_host import AItelierSkillFlow
 
 _ROOT = Path(__file__).resolve().parents[2]
+
+
+@pytest.fixture
+def owned_cpu_binding(monkeypatch):
+    """Bind only owned fixtures to the existing normal operator facility.
+
+    The evaluator provides a dedicated State DB and host launcher socket, and
+    mounts fixture paths identically in the host and disposable pytest caller.
+    Missing infrastructure stays an explicit failure; there is no fallback.
+    """
+    from core import datadir
+    socket_path = os.environ.get("AITELIER_HOST_LAUNCHER_SOCKET")
+    state_db = os.environ.get("AITELIER_TEST_LAUNCHER_STATE_DB")
+    test_home = os.environ.get("AITELIER_TEST_LAUNCHER_HOME")
+    if not socket_path or not state_db or not test_home:
+        pytest.fail("owned normal host CPU launcher and fixture State DB required")
+
+    monkeypatch.setenv("AITELIER_HOME", test_home)
+
+    def bind(run_id, repo):
+        with sqlite3.connect(state_db) as conn:
+            conn.execute("INSERT INTO run_isolation VALUES(?,?,?,?,?)",
+                         (run_id, "worktree", str(repo), str(repo),
+                          "owner-recovery-fixture-20261008"))
+        return (datadir.aitelier_home() / "gate-reports" /
+                hashlib.sha256(run_id.encode()).hexdigest())
+    return bind
+
+
+def _marker_lines(report_root, marker):
+    return [line for path in sorted(report_root.glob("rt-*/effect/" + marker))
+            for line in path.read_text().splitlines()]
 
 
 def _graph() -> PipelineGraph:
@@ -333,13 +368,14 @@ def test_two_processes_append_one_durable_recovery_decision(tmp_path):
 
 
 def test_two_controllers_cannot_admit_after_both_pass_preflight(
-        tmp_path, monkeypatch):
+        tmp_path, monkeypatch, owned_cpu_binding):
     """Reproduce the reviewed cutover interleaving with the real run_tests tool."""
     repo = tmp_path / "repo"
     repo.mkdir()
-    effect = repo / "effect"
     gate = repo / "run_tests.sh"
-    gate.write_text(f"#!/bin/bash\nset -eu\necho ran >> {effect!s}\n")
+    gate.write_text("#!/bin/bash\nset -eu\n"
+                    "mkdir \"$GATE_REPORT_DIR/effect\"\n"
+                    "echo ran >> \"$GATE_REPORT_DIR/effect/ran\"\n")
     gate.chmod(0o755)
 
     db_path = tmp_path / "sf.db"
@@ -348,6 +384,7 @@ def test_two_controllers_cannot_admit_after_both_pass_preflight(
     old = _engine(db_path, workspace, projects, repo)
     run_id = old.create_run("owner_recovery_gate", {"project_id": "p"},
                             project_id="p")
+    report_root = owned_cpu_binding(run_id, repo)
     old.start_run(run_id)
     fresh = _engine(db_path, workspace, projects, repo)
 
@@ -408,7 +445,7 @@ def test_two_controllers_cannot_admit_after_both_pass_preflight(
     assert [row["id"] for row in operations] == [1]
     assert operations[0]["step_instance_id"] is not None
     assert operations[0]["claim_epoch"] == 1
-    assert not effect.exists()
+    assert _marker_lines(report_root, "ran") == []
 
     monkeypatch.setattr(fresh, "_operation_blocks_reentry", fresh_preflight)
     monkeypatch.setattr(fresh, "_admit_op", real_fresh_admit)
@@ -416,7 +453,7 @@ def test_two_controllers_cannot_admit_after_both_pass_preflight(
         1, evidence="REF adversarial-cutover: old process injected before claim; "
         "no child launched and effect marker absent")
     fresh.advance_run(run_id)
-    assert effect.read_text().splitlines() == ["ran"]
+    assert _marker_lines(report_root, "ran") == ["ran"]
     assert fresh.unsettled_operations(run_id) == []
 
 
@@ -481,7 +518,8 @@ async def test_periodic_recovery_reconciles_operations_before_claims(
     ]
 
 
-def test_real_run_tests_restart_never_overlaps_old_effect(tmp_path, monkeypatch):
+def test_real_run_tests_restart_never_overlaps_old_effect(
+        tmp_path, monkeypatch, owned_cpu_binding):
     """Kill the runtime during the real repo gate, then perform a cutover.
 
     The bash child deliberately outlives the killed Python owner. A fresh host
@@ -491,22 +529,19 @@ def test_real_run_tests_restart_never_overlaps_old_effect(tmp_path, monkeypatch)
     """
     repo = tmp_path / "repo"
     repo.mkdir()
-    active = repo / "active"
-    started = repo / "started"
-    allow_finish = repo / "allow_finish"
-    invocations = repo / "invocations"
-    effects = repo / "effects"
-    overlap = repo / "OVERLAP"
     gate = repo / "run_tests.sh"
     gate.write_text(
         "#!/bin/bash\n"
         "set -eu\n"
-        f"if ! mkdir {active!s}; then touch {overlap!s}; exit 91; fi\n"
-        f"trap 'rmdir {active!s}' EXIT\n"
-        f"echo start >> {invocations!s}\n"
-        f"touch {started!s}\n"
-        f"while [ ! -f {allow_finish!s} ]; do sleep 0.02; done\n"
-        f"echo effect >> {effects!s}\n",
+        "mkdir \"$GATE_REPORT_DIR/effect\"\n"
+        "cd \"$GATE_REPORT_DIR/effect\"\n"
+        "if ! mkdir active; then touch OVERLAP; exit 91; fi\n"
+        "trap 'rmdir active' EXIT\n"
+        "echo $$ > child-pid\n"
+        "echo start >> invocations\n"
+        "touch started\n"
+        "while [ ! -f allow_finish ]; do sleep 0.02; done\n"
+        "echo effect >> effects\n",
         encoding="utf-8")
     gate.chmod(0o755)
 
@@ -515,22 +550,40 @@ def test_real_run_tests_restart_never_overlaps_old_effect(tmp_path, monkeypatch)
     setup = _engine(db_path, workspace, projects, repo)
     run_id = setup.create_run(
         "owner_recovery_gate", {"project_id": "p"}, project_id="p")
+    report_root = owned_cpu_binding(run_id, repo)
     setup.start_run(run_id)
 
     proc = multiprocessing.get_context("spawn").Process(
         target=_invoke_long_gate,
         args=(str(db_path), str(workspace), str(projects), str(repo), run_id))
     proc.start()
+    first_ticket = None
     try:
-        _wait_for(started)
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            started = list(report_root.glob("rt-*/effect/started"))
+            if started:
+                first_ticket = started[0].parent
+                break
+            time.sleep(0.02)
+        assert first_ticket is not None, "real owned gate never started"
+        active = first_ticket / "active"
+        allow_finish = first_ticket / "allow_finish"
         old = _engine(db_path, workspace, projects, repo).unsettled_operations(run_id)
         assert len(old) == 1
         assert old[0]["step_instance_id"] is not None
         assert old[0]["claim_epoch"] == 1
 
+        _wait_for(first_ticket / "host-observed")
         proc.kill()
         proc.join(5)
         assert proc.exitcode is not None
+        (first_ticket / "owner-killed").touch()
+        _wait_for(first_ticket / "post-owner-observation")
+        observation = json.loads((first_ticket / "post-owner-observation").read_text())
+        assert observation["running"], (
+            "normal host launcher settled the genuine child after owner loss: "
+            + json.dumps(observation))
         assert active.is_dir(), "the real bash effect did not outlive its owner"
 
         recovered = _engine(db_path, workspace, projects, repo)
@@ -543,16 +596,16 @@ def test_real_run_tests_restart_never_overlaps_old_effect(tmp_path, monkeypatch)
 
         for _ in range(3):
             assert recovered.advance_run(run_id) is None
-        assert invocations.read_text().splitlines() == ["start"]
+        assert _marker_lines(report_root, "invocations") == ["start"]
         assert active.is_dir()
-        assert not overlap.exists()
+        assert not list(report_root.glob("rt-*/effect/OVERLAP"))
 
         allow_finish.touch()
         deadline = time.monotonic() + 10
         while active.exists() and time.monotonic() < deadline:
             time.sleep(0.02)
         assert not active.exists()
-        assert effects.read_text().splitlines() == ["effect"]
+        assert _marker_lines(report_root, "effects") == ["effect"]
 
         evidence = (
             f"REF integration child-exit={proc.exitcode}: orphan repo gate "
@@ -561,14 +614,28 @@ def test_real_run_tests_restart_never_overlaps_old_effect(tmp_path, monkeypatch)
         assert released["released"] is True
 
         scheduler.recover_claims_on_startup()
+        def finish_later_ticket():
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                tickets = [p.parent for p in report_root.glob("rt-*/effect/started")
+                           if p.parent != first_ticket]
+                if tickets:
+                    (tickets[0] / "allow_finish").touch()
+                    return
+                time.sleep(0.02)
+        finisher = threading.Thread(target=finish_later_ticket)
+        finisher.start()
         recovered.advance_run(run_id)
-        assert invocations.read_text().splitlines() == ["start", "start"]
-        assert effects.read_text().splitlines() == ["effect", "effect"]
+        finisher.join(timeout=20)
+        assert not finisher.is_alive()
+        assert _marker_lines(report_root, "invocations") == ["start", "start"]
+        assert _marker_lines(report_root, "effects") == ["effect", "effect"]
         assert not active.exists()
-        assert not overlap.exists(), "two run_tests effects overlapped"
+        assert not list(report_root.glob("rt-*/effect/OVERLAP")), "two run_tests effects overlapped"
         assert recovered.unsettled_operations(run_id) == []
     finally:
-        allow_finish.touch(exist_ok=True)
+        if first_ticket is not None:
+            (first_ticket / "allow_finish").touch(exist_ok=True)
         if proc.is_alive():
             proc.kill()
             proc.join(5)

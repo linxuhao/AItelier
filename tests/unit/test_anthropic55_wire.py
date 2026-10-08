@@ -25,7 +25,11 @@ def test_55_actual_wire_omits_sampling_and_preserves_effort(wiring, monkeypatch,
     p=c.map_openai_params(params,{},model,False)
     body=c.transform_request(model,MSGS,p,{"drop_params":True},{})
     assert "temperature" not in body and "extra_body" not in body
-    assert body["thinking"]["type"] == ("adaptive" if enabled else "disabled")
+    if model == "claude-opus-5-5" and not enabled:
+        # Official Opus 5.5 always thinks; LiteLLM omits disabled accordingly.
+        assert "thinking" not in body
+    else:
+        assert body["thinking"]["type"] == ("adaptive" if enabled else "disabled")
     if effort:
         assert k["reasoning_effort"]==effort
         assert body["output_config"]["effort"]==effort

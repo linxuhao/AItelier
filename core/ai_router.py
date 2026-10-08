@@ -1232,7 +1232,7 @@ class AIGateway:
                 # LiteLLM 1.104 can fetch a catalog whose exact Haiku entry
                 # predates release and silently drop output_config.effort.
                 # Register only documented capabilities; preserve its pricing.
-                litellm.register_model({self.litellm_model: {
+                litellm.register_model({model: {
                     "litellm_provider": "anthropic",
                     "supports_adaptive_thinking": True,
                     "supports_output_config": True,

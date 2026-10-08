@@ -171,12 +171,10 @@ class _FakeHost(threading.Thread):
 
 
 def _execute_via_host(sock_path: str):
-    os.environ[repository_executor.HOST_LAUNCHER_ENV] = sock_path
-    try:
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setenv(repository_executor.HOST_LAUNCHER_ENV, sock_path)
         return repository_executor.execute(Path("/proj"), ["python3", "-m", "pytest"],
                                            60)
-    finally:
-        os.environ.pop(repository_executor.HOST_LAUNCHER_ENV, None)
 
 
 def test_execute_routes_through_host_launcher(monkeypatch):
@@ -214,3 +212,42 @@ def test_timeout_maps_to_timeout_expired(monkeypatch):
     with pytest.raises(subprocess.TimeoutExpired):
         _execute_via_host(fake.path)
     fake.join(5)
+
+
+@pytest.mark.parametrize("initially_present", [True, False])
+@pytest.mark.parametrize("reply", ["success", "refusal", "timeout"])
+def test_execute_via_host_preserves_launcher_environment(monkeypatch, tmp_path,
+                                                          initially_present, reply):
+    env_name = repository_executor.HOST_LAUNCHER_ENV
+    original = str(tmp_path / "existing-launcher.sock")
+    if initially_present:
+        monkeypatch.setenv(env_name, original)
+    else:
+        monkeypatch.delenv(env_name, raising=False)
+    result = {"returncode": 0, "stdout": "hi", "stderr": "",
+              "timed_out": False, "import_error": ""}
+    if reply == "refusal":
+        response = {"ok": False, "error": "operator refused"}
+        expected_error = repository_executor.IsolationUnavailable
+    elif reply == "timeout":
+        result.update(returncode=-9, timed_out=True)
+        response = {"ok": True, "result": result}
+        expected_error = subprocess.TimeoutExpired
+    else:
+        response = {"ok": True, "result": result}
+        expected_error = None
+    fake = _FakeHost(response)
+    monkeypatch.setattr(repository_executor, "_execute",
+                        lambda *a, **k: pytest.fail("local docker fallback used"))
+    try:
+        if expected_error:
+            with pytest.raises(expected_error):
+                _execute_via_host(fake.path)
+        else:
+            assert _execute_via_host(fake.path).stdout == "hi"
+        if initially_present:
+            assert os.environ[env_name] == original
+        else:
+            assert env_name not in os.environ
+    finally:
+        fake.join(5)

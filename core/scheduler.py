@@ -1674,10 +1674,11 @@ async def _advance_off_the_loop(sf, run_id: str, project_id: str = ""):
     Nothing about the tick needed to be ON the loop; it blocked there only
     because a tick that blocks is a tick that cannot be re-entered, and that
     accident was carrying the mutual exclusion. It no longer has to: the
-    per-project lock is a threading.Lock that `poll_and_execute` takes at
-    dispatch and `_on_detached_tick_done` releases once the tick's task is done
-    (the demo and per-owner pollers take the same lock in
-    `_execute_skillflow_tick`, around the whole tick), so it is held across
+    per-project lock is a threading.Lock that EVERY poller takes at dispatch
+    (`poll_and_execute`, `poll_and_execute_demo`, `poll_and_execute_owner`, all
+    through `_dispatch_detached_ticks`) and `_on_detached_tick_done` releases
+    once the tick's task is done, so it is held across
+
     every await of the tick and a second tick for the same project fails its
     non-blocking acquire and logs `locked` — and a claim now names its
     owner, so nothing has to infer "still working" from "still blocked". Two
@@ -2780,10 +2781,30 @@ async def poll_and_execute():
     if not projects:
         tick_log("", "idle")
         return []
+    return _dispatch_detached_ticks(projects, loop)
+
+
+def _dispatch_detached_ticks(projects, loop) -> list:
+    """Start a tick for every free project the cap allows, then RETURN.
+
+    Shared by EVERY poller — `poll_and_execute` (main), `poll_and_execute_demo`
+    (FIFO) and `poll_and_execute_owner` — so they admit newly active projects the
+    same way instead of three divergent copies:
+
+    * the SAME project — its per-project lock is taken HERE, at dispatch, and
+      released only when its task is done (`_on_detached_tick_done`). A project
+      with a tick in flight logs `locked` and is not started again; because the
+      caller passes a LIST built by the poller, an in-flight project does not
+      block the ones behind it;
+    * the CAP — at most MAX_CONCURRENT_PROJECTS ticks in flight at once, counted
+      over `_detached_ticks`, i.e. GLOBALLY across all three entry points and all
+      polls. A free project over the cap logs `at_capacity`.
+
+    No await in the loop: the check and the take are atomic with respect to every
+    other poll (interval job, wake-on-confirm date jobs), all of which run on this
+    same event loop.
+    """
     started = []
-    # No await in this loop: the check and the take are atomic with respect to
-    # every other poll (interval job, wake-on-confirm date jobs), all of which
-    # run on this same event loop.
     for p in projects:
         pid = p["project_id"]
         lock = _get_tick_lock(pid)
@@ -2807,6 +2828,7 @@ async def poll_and_execute():
             lambda t, pid=pid, lock=lock: _on_detached_tick_done(pid, lock, t))
         started.append(task)
     return started
+
 
 
 def _on_detached_tick_done(project_id: str, lock: threading.Lock,
@@ -2852,29 +2874,52 @@ def _cancel_detached_ticks(_event=None) -> int:
 
 
 async def poll_and_execute_demo():
-    """Demo mode: FIFO ordering."""
-    import asyncio
+    """Demo mode: FIFO ordering, dispatched detached like the main poller.
+
+    It used to pick ONE FIFO project and `await _execute_skillflow_tick(...)`, and
+    apscheduler runs this job with `max_instances=1`: a project inside a long step
+    owned the job, and a project that became active after the pick was not in it
+    and got no tick until the step returned (iss-29db2c9e/iss29db2c9e028a4c71).
+
+    Now the tick is dispatched DETACHED, exactly like `poll_and_execute`, and the
+    next poll re-reads the FIFO list and starts whatever is new. FIFO is preserved:
+    `get_active_projects(fifo=True)` is still oldest-first, and a project whose
+    tick is in flight is reported `locked` and skipped, so only an eligible (free)
+    project runs and the cap/owner/shutdown rules are the main poller's own — see
+    `_dispatch_detached_ticks`. Held/paused projects are excluded by
+    `get_active_projects` itself, as before.
+    """
     loop = asyncio.get_running_loop()
 
     await _sweep_ended_leases_async()
 
-    project = db.get_next_active_project(fifo=True)
-    if not project:
-        return
-    await _execute_skillflow_tick(project["project_id"], loop)
+    projects = db.get_active_projects(
+        fifo=True, limit=MAX_CONCURRENT_PROJECTS + len(_detached_ticks))
+    if not projects:
+        return []
+    return _dispatch_detached_ticks(projects, loop)
 
 
 async def poll_and_execute_owner(owner_email: str):
-    """Same as poll_and_execute but scoped to a single user's projects."""
-    import asyncio
+    """Same as `poll_and_execute`, scoped to ONE user's projects.
+
+    Detached for the same reason as `poll_and_execute`/`poll_and_execute_demo`:
+    the per-owner job runs with `max_instances=1`, so awaiting the tick let one
+    long step in one of this owner's projects starve every later one. The owner
+    scope is unchanged — `get_active_projects(owner_email=...)` still filters, so
+    an owner's poller never advances another owner's project.
+    """
     loop = asyncio.get_running_loop()
 
     await _sweep_ended_leases_async()
 
-    project = db.get_next_active_project(owner_email=owner_email)
-    if not project:
-        return
-    await _execute_skillflow_tick(project["project_id"], loop)
+    projects = db.get_active_projects(
+        owner_email=owner_email,
+        limit=MAX_CONCURRENT_PROJECTS + len(_detached_ticks))
+    if not projects:
+        return []
+    return _dispatch_detached_ticks(projects, loop)
+
 
 
 # ── Scheduler management ────────────────────────────────────────────
@@ -3020,12 +3065,15 @@ def _add_scheduler_job(scheduler: AsyncIOScheduler, settings: dict,
         )
     except Exception:
         pass
-    if job_func is poll_and_execute and scheduler not in _shutdown_listener_on:
-        # Its ticks outlive the job, so the shutdown that used to cancel them by
-        # cancelling the job no longer does. See `poll_and_execute`.
+    # EVERY poller dispatches DETACHED ticks that outlive the job that started
+    # them, so the shutdown that used to cancel them by cancelling the job no
+    # longer does — the demo and per-owner jobs included, not just
+    # `poll_and_execute`. See `poll_and_execute` and `_dispatch_detached_ticks`.
+    if scheduler not in _shutdown_listener_on:
         from apscheduler.events import EVENT_SCHEDULER_SHUTDOWN
         scheduler.add_listener(_cancel_detached_ticks, EVENT_SCHEDULER_SHUTDOWN)
         _shutdown_listener_on.add(scheduler)
+
 
 
 # ── Wake-on-confirm hook ──────────────────────────────────────────

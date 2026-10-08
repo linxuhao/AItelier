@@ -40,6 +40,7 @@ def env(monkeypatch, tmp_path):
     monkeypatch.setattr(sc, "_tick_locks", {})
     monkeypatch.setattr(sc, "_tick_last_stuck", {})
     monkeypatch.setattr(sc, "_detached_ticks", {})
+    monkeypatch.setattr(sc, "_detached_tick_owners", {})
     monkeypatch.setattr(sc, "_sweep_ended_leases", lambda: None)
     monkeypatch.setattr(sc, "_sweep_ended_leases_async",
                         lambda: asyncio.sleep(0))

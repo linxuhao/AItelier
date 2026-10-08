@@ -325,7 +325,13 @@ dispatch and held until its tick's task is done) and the CAP (a free project
 over it logs `at_capacity`; a long step costs one slot of the cap, not the
 poller). Outside the poller, the Godot engine render lock serializes engine
 gates. Scheduler shutdown cancels every in-flight tick, and each hands its claim
-back (see "Four loops hold a claim across an await").
+back (see "Four loops hold a claim across an await"). The scope follows the
+scheduler: a main/backend shutdown cancels them all, but stopping ONE per-owner
+scheduler (`stop_scheduler(owner_email)`) cancels only the ticks that owner's
+poller dispatched (`_detached_tick_owners`) — another live owner's tasks,
+claims and retry budget are untouched. Owner poll jobs (interval and the
+wake-on-confirm date job) are registered as `functools.partial` over the
+coroutine function, so apscheduler recognizes and awaits them itself.
 
 Two consequences worth knowing before you read the log. A project that cannot
 advance (a zombie stuck `awaiting_brief`, say) is still picked every tick and

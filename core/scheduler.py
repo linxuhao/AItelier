@@ -8,6 +8,7 @@
 
 import logging
 import asyncio
+import functools
 import json
 import threading
 import time as _time
@@ -308,7 +309,7 @@ def wake_scheduler(owner_email: str = None):
         sched = _user_scheduler_map[owner_email]
         if sched and sched.running:
             sched.add_job(
-                lambda: poll_and_execute_owner(owner_email),
+                functools.partial(poll_and_execute_owner, owner_email),
                 'date', run_date=datetime.now(),
             )
             return
@@ -2598,6 +2599,13 @@ MAX_CONCURRENT_PROJECTS = int(_os.getenv("AITELIER_MAX_CONCURRENT_PROJECTS", "4"
 # event loop (dispatch and the done callback), so no lock of its own.
 _detached_ticks: dict[str, asyncio.Task] = {}
 
+# Which scheduler owns each of those ticks: the owner_email for a per-owner
+# poller, None for the main/demo pollers. Stopping ONE owner's scheduler
+# (`stop_scheduler(owner_email)`) must cancel only that owner's in-flight
+# ticks — another live owner's ticks, claims and retry budget stay untouched.
+# A main/backend shutdown passes no owner and still cancels everything.
+_detached_tick_owners: dict[str, "str | None"] = {}
+
 # How often the poller re-asks whether a held checkout lease can be released.
 # A lease is released on the tick where its run goes terminal — but a run that
 # ends while DRAINING is still holding admitted operations then, so the answer
@@ -2781,10 +2789,11 @@ async def poll_and_execute():
     if not projects:
         tick_log("", "idle")
         return []
-    return _dispatch_detached_ticks(projects, loop)
+    return _dispatch_detached_ticks(projects, loop, owner_email=None)
 
 
-def _dispatch_detached_ticks(projects, loop) -> list:
+def _dispatch_detached_ticks(projects, loop,
+                             owner_email: "str | None" = None) -> list:
     """Start a tick for every free project the cap allows, then RETURN.
 
     Shared by EVERY poller — `poll_and_execute` (main), `poll_and_execute_demo`
@@ -2821,6 +2830,7 @@ def _dispatch_detached_ticks(projects, loop) -> list:
         task = loop.create_task(_run_skillflow_tick(pid, loop),
                                 name=f"tick:{pid}")
         _detached_ticks[pid] = task
+        _detached_tick_owners[pid] = owner_email
         # A done callback, not a `finally` inside the coroutine: a task
         # cancelled before its first step never enters the coroutine's body, so
         # a `finally` there would leave the lock held forever.
@@ -2842,6 +2852,7 @@ def _on_detached_tick_done(project_id: str, lock: threading.Lock,
     """
     if _detached_ticks.get(project_id) is task:
         del _detached_ticks[project_id]
+    _detached_tick_owners.pop(project_id, None)
     lock.release()
     if task.cancelled():
         return
@@ -2853,13 +2864,20 @@ def _on_detached_tick_done(project_id: str, lock: threading.Lock,
                  error=str(exc)[:160].replace("\n", " "))
 
 
-def _cancel_detached_ticks(_event=None) -> int:
-    """Cancel every in-flight tick. Listener for EVENT_SCHEDULER_SHUTDOWN.
+def _cancel_detached_ticks(_event=None,
+                           owner_email: "str | None" = None) -> int:
+    """Cancel in-flight ticks. Listener for EVENT_SCHEDULER_SHUTDOWN.
 
     Each tick's own `except asyncio.CancelledError` releases its claim; this
     only delivers the cancellation. Returns how many ticks it cancelled.
+
+    With `owner_email`, cancel ONLY the ticks that owner's scheduler
+    dispatched — stopping one per-owner scheduler must not touch another live
+    owner's work. Without it (main/backend global shutdown) cancel everything.
     """
-    tasks = list(_detached_ticks.values())
+    tasks = [t for pid, t in _detached_ticks.items()
+             if owner_email is None
+             or _detached_tick_owners.get(pid) == owner_email]
     for t in tasks:
         loop = t.get_loop()
         try:
@@ -2897,7 +2915,7 @@ async def poll_and_execute_demo():
         fifo=True, limit=MAX_CONCURRENT_PROJECTS + len(_detached_ticks))
     if not projects:
         return []
-    return _dispatch_detached_ticks(projects, loop)
+    return _dispatch_detached_ticks(projects, loop, owner_email=None)
 
 
 async def poll_and_execute_owner(owner_email: str):
@@ -2918,7 +2936,7 @@ async def poll_and_execute_owner(owner_email: str):
         limit=MAX_CONCURRENT_PROJECTS + len(_detached_ticks))
     if not projects:
         return []
-    return _dispatch_detached_ticks(projects, loop)
+    return _dispatch_detached_ticks(projects, loop, owner_email=owner_email)
 
 
 
@@ -3021,7 +3039,13 @@ def _add_scheduler_job(scheduler: AsyncIOScheduler, settings: dict,
     if demo:
         job_func = poll_and_execute_demo
     elif owner_email:
-        job_func = lambda: poll_and_execute_owner(owner_email)
+        # A partial of the coroutine function, not a plain lambda returning the
+        # coroutine: apscheduler treats a SYNCHRONOUS callable as a sync job,
+        # and its default executor would return the unawaited coroutine object
+        # — the owner's projects would never be polled. `functools.partial`
+        # over a coroutine function is exactly what apscheduler's
+        # `iscoroutinefunction_partial` recognizes.
+        job_func = functools.partial(poll_and_execute_owner, owner_email)
     else:
         job_func = poll_and_execute
     scheduler_type = settings.get("scheduler_type", "interval")
@@ -3071,7 +3095,11 @@ def _add_scheduler_job(scheduler: AsyncIOScheduler, settings: dict,
     # `poll_and_execute`. See `poll_and_execute` and `_dispatch_detached_ticks`.
     if scheduler not in _shutdown_listener_on:
         from apscheduler.events import EVENT_SCHEDULER_SHUTDOWN
-        scheduler.add_listener(_cancel_detached_ticks, EVENT_SCHEDULER_SHUTDOWN)
+        # A per-owner scheduler cancels only the ticks IT dispatched; the
+        # main/backend scheduler (owner_email=None) cancels them all.
+        scheduler.add_listener(
+            functools.partial(_cancel_detached_ticks, owner_email=owner_email),
+            EVENT_SCHEDULER_SHUTDOWN)
         _shutdown_listener_on.add(scheduler)
 
 

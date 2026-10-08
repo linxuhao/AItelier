@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import sqlite3
 import multiprocessing
 import threading
 import time
@@ -18,6 +21,39 @@ from core import scheduler
 from core.skillflow_host import AItelierSkillFlow
 
 _ROOT = Path(__file__).resolve().parents[2]
+
+
+@pytest.fixture
+def owned_cpu_binding(monkeypatch):
+    """Bind only owned fixtures to the existing normal operator facility.
+
+    The evaluator provides a dedicated State DB and host launcher socket, and
+    mounts fixture paths identically in the host and disposable pytest caller.
+    Missing infrastructure stays an explicit failure; there is no fallback.
+    """
+    from core import datadir
+    socket_path = os.environ.get("AITELIER_HOST_LAUNCHER_SOCKET")
+    state_db = os.environ.get("AITELIER_TEST_LAUNCHER_STATE_DB")
+    test_home = os.environ.get("AITELIER_TEST_LAUNCHER_HOME")
+    project_id = os.environ.get("AITELIER_TEST_LAUNCHER_PROJECT_ID")
+    if not socket_path or not state_db or not test_home or not project_id:
+        pytest.fail("owned normal host CPU launcher and fixture State DB required")
+
+    monkeypatch.setenv("AITELIER_HOME", test_home)
+
+    def bind(run_id, repo):
+        with sqlite3.connect(state_db) as conn:
+            conn.execute("INSERT INTO run_isolation VALUES(?,?,?,?,?)",
+                         (run_id, "worktree", str(repo), str(repo),
+                          project_id))
+        return (datadir.aitelier_home() / "gate-reports" /
+                hashlib.sha256(run_id.encode()).hexdigest())
+    return bind
+
+
+def _marker_lines(report_root, marker):
+    return [line for path in sorted(report_root.glob("rt-*/effect/" + marker))
+            for line in path.read_text().splitlines()]
 
 
 def _graph() -> PipelineGraph:
@@ -333,13 +369,14 @@ def test_two_processes_append_one_durable_recovery_decision(tmp_path):
 
 
 def test_two_controllers_cannot_admit_after_both_pass_preflight(
-        tmp_path, monkeypatch):
+        tmp_path, monkeypatch, owned_cpu_binding):
     """Reproduce the reviewed cutover interleaving with the real run_tests tool."""
     repo = tmp_path / "repo"
     repo.mkdir()
-    effect = repo / "effect"
     gate = repo / "run_tests.sh"
-    gate.write_text(f"#!/bin/bash\nset -eu\necho ran >> {effect!s}\n")
+    gate.write_text("#!/bin/bash\nset -eu\n"
+                    "mkdir \"$GATE_REPORT_DIR/effect\"\n"
+                    "echo ran >> \"$GATE_REPORT_DIR/effect/ran\"\n")
     gate.chmod(0o755)
 
     db_path = tmp_path / "sf.db"
@@ -348,6 +385,7 @@ def test_two_controllers_cannot_admit_after_both_pass_preflight(
     old = _engine(db_path, workspace, projects, repo)
     run_id = old.create_run("owner_recovery_gate", {"project_id": "p"},
                             project_id="p")
+    report_root = owned_cpu_binding(run_id, repo)
     old.start_run(run_id)
     fresh = _engine(db_path, workspace, projects, repo)
 
@@ -408,7 +446,7 @@ def test_two_controllers_cannot_admit_after_both_pass_preflight(
     assert [row["id"] for row in operations] == [1]
     assert operations[0]["step_instance_id"] is not None
     assert operations[0]["claim_epoch"] == 1
-    assert not effect.exists()
+    assert _marker_lines(report_root, "ran") == []
 
     monkeypatch.setattr(fresh, "_operation_blocks_reentry", fresh_preflight)
     monkeypatch.setattr(fresh, "_admit_op", real_fresh_admit)
@@ -416,7 +454,7 @@ def test_two_controllers_cannot_admit_after_both_pass_preflight(
         1, evidence="REF adversarial-cutover: old process injected before claim; "
         "no child launched and effect marker absent")
     fresh.advance_run(run_id)
-    assert effect.read_text().splitlines() == ["ran"]
+    assert _marker_lines(report_root, "ran") == ["ran"]
     assert fresh.unsettled_operations(run_id) == []
 
 
@@ -481,32 +519,28 @@ async def test_periodic_recovery_reconciles_operations_before_claims(
     ]
 
 
-def test_real_run_tests_restart_never_overlaps_old_effect(tmp_path, monkeypatch):
-    """Kill the runtime during the real repo gate, then perform a cutover.
+def test_real_run_tests_restart_never_overlaps_old_effect(
+        tmp_path, monkeypatch, owned_cpu_binding):
+    """Normal transport settlement cannot erase the durable replay fence.
 
-    The bash child deliberately outlives the killed Python owner. A fresh host
-    reconciles the durable operation before startup claim recovery and is asked
-    to advance repeatedly. A second invocation may start only after the child
-    exits and the operator releases that exact operation with evidence.
+    The observer measures the exact Docker child on the host. Caller loss
+    cancels that child through the normal transport; physical settlement alone
+    cannot authorize replay. Only supported operation release permits the
+    later real invocation.
     """
     repo = tmp_path / "repo"
     repo.mkdir()
-    active = repo / "active"
-    started = repo / "started"
-    allow_finish = repo / "allow_finish"
-    invocations = repo / "invocations"
-    effects = repo / "effects"
-    overlap = repo / "OVERLAP"
     gate = repo / "run_tests.sh"
     gate.write_text(
         "#!/bin/bash\n"
         "set -eu\n"
-        f"if ! mkdir {active!s}; then touch {overlap!s}; exit 91; fi\n"
-        f"trap 'rmdir {active!s}' EXIT\n"
-        f"echo start >> {invocations!s}\n"
-        f"touch {started!s}\n"
-        f"while [ ! -f {allow_finish!s} ]; do sleep 0.02; done\n"
-        f"echo effect >> {effects!s}\n",
+        "mkdir \"$GATE_REPORT_DIR/effect\"\n"
+        "cd \"$GATE_REPORT_DIR/effect\"\n"
+        "echo $$ > child-pid\n"
+        "echo start >> invocations\n"
+        "touch started\n"
+        "while [ ! -f allow_finish ]; do sleep 0.02; done\n"
+        "echo effect >> effects\n",
         encoding="utf-8")
     gate.chmod(0o755)
 
@@ -515,60 +549,106 @@ def test_real_run_tests_restart_never_overlaps_old_effect(tmp_path, monkeypatch)
     setup = _engine(db_path, workspace, projects, repo)
     run_id = setup.create_run(
         "owner_recovery_gate", {"project_id": "p"}, project_id="p")
+    report_root = owned_cpu_binding(run_id, repo)
     setup.start_run(run_id)
 
     proc = multiprocessing.get_context("spawn").Process(
         target=_invoke_long_gate,
         args=(str(db_path), str(workspace), str(projects), str(repo), run_id))
     proc.start()
+    first_ticket = None
     try:
-        _wait_for(started)
-        old = _engine(db_path, workspace, projects, repo).unsettled_operations(run_id)
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            started = list(report_root.glob("rt-*/effect/started"))
+            if started:
+                first_ticket = started[0].parent
+                break
+            time.sleep(0.02)
+        assert first_ticket is not None, "real owned gate never started"
+        _wait_for(first_ticket / "host-observed")
+        observed = json.loads((first_ticket / "host-observed").read_text())
+        assert observed["running"] and observed["host_pid"] > 0
+        assert observed["bash_pid"] > 0
+
+        recovered = _engine(db_path, workspace, projects, repo)
+        old = recovered.unsettled_operations(run_id)
         assert len(old) == 1
         assert old[0]["step_instance_id"] is not None
         assert old[0]["claim_epoch"] == 1
+        # While the measured child is gated, no controller may launch another.
+        for _ in range(3):
+            assert recovered.advance_run(run_id) is None
+        assert _marker_lines(report_root, "invocations") == ["start"]
+        assert _marker_lines(report_root, "effects") == []
 
+        owner_pid = proc.pid
         proc.kill()
         proc.join(5)
-        assert proc.exitcode is not None
-        assert active.is_dir(), "the real bash effect did not outlive its owner"
+        assert proc.exitcode == -9
+        (first_ticket / "owner-killed").write_text(str(owner_pid))
+        # Repeat immediately during transport cleanup, without authorizing it.
+        for _ in range(3):
+            assert recovered.advance_run(run_id) is None
+        _wait_for(first_ticket / "physical-settlement")
+        settlement = json.loads((first_ticket / "physical-settlement").read_text())
+        assert settlement["container"] == observed["container"]
+        assert settlement["container_absent"]
+        assert settlement["original_host_pid_gone"]
+        assert settlement["original_host_pid"] == observed["host_pid"]
 
-        recovered = _engine(db_path, workspace, projects, repo)
         monkeypatch.setattr(scheduler, "get_skillflow", lambda: recovered)
         scheduler.recover_claims_on_startup()
         claim = recovered._conn.execute(
-            "SELECT status, claimed_by FROM skillflow_steps WHERE id=?",
+            "SELECT status FROM skillflow_steps WHERE id=?",
             (old[0]["step_instance_id"],)).fetchone()
         assert claim["status"] == "claimed"
-
+        # Even confirmed child removal must leave the exact operation fenced.
+        remaining = recovered.unsettled_operations(run_id)
+        assert [op["id"] for op in remaining] == [old[0]["id"]]
+        assert remaining[0]["claim_epoch"] == old[0]["claim_epoch"]
         for _ in range(3):
             assert recovered.advance_run(run_id) is None
-        assert invocations.read_text().splitlines() == ["start"]
-        assert active.is_dir()
-        assert not overlap.exists()
-
-        allow_finish.touch()
-        deadline = time.monotonic() + 10
-        while active.exists() and time.monotonic() < deadline:
-            time.sleep(0.02)
-        assert not active.exists()
-        assert effects.read_text().splitlines() == ["effect"]
+        assert _marker_lines(report_root, "invocations") == ["start"]
+        assert _marker_lines(report_root, "effects") == []
 
         evidence = (
-            f"REF integration child-exit={proc.exitcode}: orphan repo gate "
-            "exited; active marker absent; first effect settled")
+            f"REF physical-settlement container={settlement['container']} "
+            f"host-pid={settlement['original_host_pid']} gone; caller "
+            f"pid={owner_pid} exit={proc.exitcode}; normal EOF cleanup; "
+            "original effect absent, durable operation retained")
         released = recovered.release_operation(old[0]["id"], evidence=evidence)
         assert released["released"] is True
-
         scheduler.recover_claims_on_startup()
+
+        def finish_later_ticket():
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                tickets = [p.parent for p in report_root.glob("rt-*/effect/started")
+                           if p.parent != first_ticket]
+                if tickets:
+                    (tickets[0] / "allow_finish").touch()
+                    return
+                time.sleep(0.02)
+        finisher = threading.Thread(target=finish_later_ticket)
+        finisher.start()
         recovered.advance_run(run_id)
-        assert invocations.read_text().splitlines() == ["start", "start"]
-        assert effects.read_text().splitlines() == ["effect", "effect"]
-        assert not active.exists()
-        assert not overlap.exists(), "two run_tests effects overlapped"
+        finisher.join(timeout=20)
+        assert not finisher.is_alive()
+        assert _marker_lines(report_root, "invocations") == ["start", "start"]
+        assert _marker_lines(report_root, "effects") == ["effect"]
         assert recovered.unsettled_operations(run_id) == []
+        (first_ticket / "recovery-proof.json").write_text(json.dumps({
+            "owner_pid": owner_pid, "owner_exitcode": proc.exitcode,
+            "operation_id": old[0]["id"], "claim_epoch": old[0]["claim_epoch"],
+            "physical_settlement": settlement, "released": released,
+            "original_effects": 0, "later_effects": 1,
+            "blocked_before_caller_loss": 3, "blocked_during_cleanup": 3,
+            "blocked_after_child_removal": 3,
+        }, indent=2))
     finally:
-        allow_finish.touch(exist_ok=True)
+        if first_ticket is not None:
+            (first_ticket / "allow_finish").touch(exist_ok=True)
         if proc.is_alive():
             proc.kill()
             proc.join(5)

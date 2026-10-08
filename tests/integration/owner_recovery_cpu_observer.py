@@ -28,7 +28,7 @@ def _inspect(container):
                           capture_output=True, text=True, timeout=10)
     if done.returncode == 0:
         return json.loads(done.stdout)[0]
-    if "No such object" in done.stderr and container in done.stderr:
+    if "no such object" in done.stderr.lower() and container in done.stderr:
         return None
     raise RuntimeError(f"exact container inspection failed: {done.stderr}")
 

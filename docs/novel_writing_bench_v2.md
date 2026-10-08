@@ -157,19 +157,21 @@ journal history from `novel-genesis`, constructs an isolated candidate, checks
 permitted file changes and repeats the exact-commit replay guard. No live novel
 file changes during this work.
 
-A complete author-supplied ledger is replayed this same way once already, at
-`prepare`, on a disposable owned candidate before any literary or ledger review
-material is published: a supplied ledger that changes an already-dead character
-or otherwise breaks the accepted journal refuses there, before review calls are
-spent. The observed result is recorded in `early_replay.json`. A missing ledger
-never hides a deterministically invalid known one: when only part of a
-submission is supplied, the provided chapters are still replayed under the
-minimal supported ordering — every provided chapter of a `revision`, and the
-contiguous provided prefix before the first missing chapter of a `new`
-submission — and `prepare` records a `partial` receipt naming the validated
-chapters. The extractor output does not exist yet and is never guessed, so a
-submission with nothing replayable records a deferred early replay, and the
-unchanged `stage` guard above remains the only replay for the rest.
+The same candidate is first built and replayed once every chapter's ledger is
+known, before any review is released. The order is `prepare` (freeze; hand the
+extractor only the frozen prose) → `extract_ledger` (only for missing ledgers)
+→ `ledger_ready` (complete candidate replay, then literary review material) →
+`literary_review` → `literary_check` (then ledger audit material) →
+`ledger_audit` → `stage`. A supplied ledger that moves an already-dead character
+or otherwise breaks the journal refuses at `ledger_ready`: with every ledger
+supplied no model step has run, otherwise only the extractor has. A supplied
+later chapter is judged together with the ACTUAL extracted ledger of an earlier
+revised chapter, never with that chapter's old accepted journal or a guess: the
+replacement may remove an old death, or record a return, and so make the later
+chapter valid. `candidate_replay.json` records each chapter's ledger source
+(`author` or `extractor`), the candidate file hashes and counters; review
+material is published only for a run with this receipt, and `stage` refuses a
+candidate whose files differ from it. The stage guard above still runs in full.
 
 The stage exposes complete submitted prose, both independent reports, the exact
 ledger, `semantic_changes.json` (current before/after state without recopying all

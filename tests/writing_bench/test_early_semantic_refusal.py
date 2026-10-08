@@ -1,223 +1,238 @@
-"""Early supplied-ledger semantic replay must refuse before paid review work.
+"""The complete candidate replays before any review is released.
 
-Synthetic repositories and no engine: no live novel, State database, provider
-or network is touched. The guard reuses the exact stage replay machinery, so a
-supplied ledger that touches an already-dead character is refused at prepare
-before any literary or ledger review material is published.
+Real SkillFlow routing, real adapter publication, real Git and the real stage on
+synthetic owned repositories; only model text is synthetic. A missing ledger is
+unknown until the extractor returns it, so a supplied later chapter is decided
+together with the ACTUAL extracted ledger, never with a guess or with the old
+accepted journal the revision replaces. Whatever the case, a replay refusal
+comes before literary or ledger review material exists.
 """
 from __future__ import annotations
-
-from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
 from aitelier.writing_bench import adapter
-from aitelier.writing_bench.storage import BenchError
-from test_bench import CONTRACTS, RULES, accept, bench, ledger, request, staged
+from aitelier.writing_bench.storage import BenchError, decode, git
+from test_bench import CONTRACTS, RULES, accept, bench, ledger, request, staged  # noqa: F401
+from test_workflow import Session
+
+REVIEW_FILES = {"review_request.json", "editor_packet.md", "audit_packet.md", "review_context.md",
+                "proposed_ledgers.md"}
 
 
-def _accepted_dead_chapter(bench, run="run1", sid="draft1"):
-    """Accept chapter 1 with a journal that kills 旅人."""
-    value = ledger()
-    value["events"] = [{"entity_type": "protagonist", "entity_name": "旅人",
-                        "changes": {"status": "dead", "位置": "门外"},
-                        "reason": "旅人倒下，不再是活人。"}]
-    accept(bench, staged(bench, request(bench, sid=sid, value=value), run), run)
+def _value(n, events, title=None, summary="本章情节推进。"):
+    value = ledger(n, title or ("启程" if n == 1 else "过桥"))
+    value["events"], value["summary"] = events, summary
+    value["appearances"] = [{"name": e["entity_name"], "importance": 3} for e in events]
+    return value
 
 
-def test_replay_provided_refuses_dead_character_before_review(bench):
-    _accepted_dead_chapter(bench)
-    req = request(bench, sid="ch2", n=2, value=ledger(2, "过桥"))
-    bench.freeze(req, "run2", RULES, CONTRACTS)
+def _traveler(changes, reason="旅人的实际变化。"):
+    return {"entity_type": "protagonist", "entity_name": "旅人", "changes": changes, "reason": reason}
+
+
+def _newcomer(name):
+    return {"entity_type": "character", "entity_name": name, "create": True,
+            "changes": {"status": "alive", "位置": "渡口"}, "reason": name + "登场。"}
+
+
+def _accept(bench, n, value, mode="new"):
+    sid = f"acc{n}"
+    accept(bench, staged(bench, request(bench, sid=sid, n=n, value=value, mode=mode), sid), sid)
+
+
+def _revise_2_missing_3_supplied(bench, ch3):
+    """ch3 still creates 渔夫 as accepted, so no managed file is deleted."""
+    ch3 = dict(ch3, events=[_newcomer("渔夫"), *ch3["events"]])
+    ch3["appearances"] = [{"name": e["entity_name"], "importance": 3} for e in ch3["events"]]
+    r2 = request(bench, sid="rev2", n=2, mode="revision", provided=False)
+    r3 = request(bench, sid="rev3", n=3, mode="revision", value=ch3)
+    return dict(r2, submission_id="mixed", chapters=r2["chapters"] + r3["chapters"])
+
+
+def _snapshot(bench):
+    repo = bench.policy.repo
+    return {"head": git(repo, "rev-parse", "HEAD"), "status": git(repo, "status", "--porcelain"),
+            "refs": git(repo, "for-each-ref", "refs/writing-bench"),
+            "author": {str(p): p.read_bytes() for p in bench.policy.submission_root.rglob("*") if p.is_file()}}
+
+
+def _frozen(bench, run):
+    path, _ = bench.input(run)
+    return {str(p.relative_to(path)): p.read_bytes() for p in path.rglob("*") if p.is_file()}
+
+
+def _published(session, run):
+    root = session.sf._workspace.get_config_path("execution", adapter.CONFIG)
+    return {p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file()}
+
+
+def _refused_before_review(session, bench, run, before):
+    """Drive until the replay refuses; prove no review work or material followed."""
     with pytest.raises(BenchError, match="full replay refused"):
-        bench.replay_provided("run2")
-    # The refusal precedes every review artifact: no literary or ledger report
-    # and no candidate stage was ever produced for this submission.
-    assert not (bench.work("run2") / "literary.json").exists()
-    assert not (bench.work("run2") / "audit.json").exists()
-    assert not (bench.work("run2") / "stage.json").exists()
-
-
-def test_replay_provided_passes_valid_fresh_chapter(bench):
-    _accepted_dead_chapter(bench)
-    value = ledger(2, "过桥")
-    value["events"] = [{"entity_type": "character", "entity_name": "船夫",
-                        "create": True, "changes": {"status": "alive", "位置": "渡口"},
-                        "reason": "船夫登场。"}]
-    value["appearances"] = [{"name": "船夫", "importance": 3}]
-    req = request(bench, sid="ch2", n=2, value=value)
-    bench.freeze(req, "run2", RULES, CONTRACTS)
-    receipt = bench.replay_provided("run2")
-    assert receipt["early_replay"] == "passed"
-    assert receipt["counters"] == {"chapters_written": 2, "last_chapter": 2, "next_chapter": 3}
-
-
-def test_replay_provided_defers_missing_ledger_to_extractor(bench):
-    # A pure-prose submission cannot be replayed early: nothing is guessed and
-    # the extractor is still the only source for a missing ledger.
-    bench.freeze(request(bench, provided=False), "run1", RULES, CONTRACTS)
-    receipt = bench.replay_provided("run1")
-    assert receipt == {"early_replay": "deferred", "missing_chapters": [1]}
-    with pytest.raises(BenchError, match="missing extracted"):
-        bench.ledgers("run1")
-
-
-def _accept_fresh_chapter(bench, n, sid, name):
-    """Accept chapter n by creating a new living character (旅人 is dead)."""
-    value = ledger(n, "过桥" if n == 2 else "夜航")
-    value["events"] = [{"entity_type": "character", "entity_name": name,
-                        "create": True, "changes": {"status": "alive", "位置": "渡口"},
-                        "reason": name + "登场。"}]
-    value["appearances"] = [{"name": name, "importance": 3}]
-    accept(bench, staged(bench, request(bench, sid=sid, n=n, value=value), "run" + str(n)), "run" + str(n))
-
-
-def _revision_request(bench, chapters):
-    """Build one multi-chapter revision request from per-chapter parts."""
-    merged = None
-    for sid, n, value in chapters:
-        part = request(bench, sid=sid, n=n, provided=value is not None, mode="revision", value=value)
-        if merged is None:
-            merged = part
-        else:
-            merged["chapters"].append(part["chapters"][0])
-    return merged
-
-
-def test_mixed_revision_missing_ledger_does_not_hide_invalid_supplied(bench):
-    # Accept chapter 1 (kills 旅人), then chapters 2 and 3, and revise 2+3:
-    # chapter 2 has no ledger, chapter 3 moves the already-dead 旅人.
-    _accepted_dead_chapter(bench)
-    _accept_fresh_chapter(bench, 2, "ch2", "船夫")
-    _accept_fresh_chapter(bench, 3, "ch3", "渔夫")
-    req = _revision_request(bench, [("r2", 2, None), ("r3", 3, ledger(3, "夜航"))])
-    bench.freeze(req, "run9", RULES, CONTRACTS)
+        session.drive(run)
+    frozen = _frozen(bench, run)
+    calls = list(session.agent_calls)
+    # Re-driving the refused run repeats only the CPU replay, never a model step.
     with pytest.raises(BenchError, match="full replay refused"):
-        bench.replay_provided("run9")
-    assert not (bench.work("run9") / "literary.json").exists()
-    assert not (bench.work("run9") / "audit.json").exists()
-    assert not (bench.work("run9") / "stage.json").exists()
+        session.drive(run)
+    assert session.agent_calls == calls
+    assert "literary_review" not in calls and "ledger_audit" not in calls
+    published = _published(session, run)
+    assert not {name for name in published if name.rsplit("/", 1)[-1] in REVIEW_FILES}, published
+    assert not any(name.startswith("ledger_ready/") for name in published), published
+    for receipt in ("candidate_replay.json", "literary.json", "audit.json", "stage.json"):
+        assert not (bench.work(run) / receipt).exists(), receipt
+    with pytest.raises(BenchError, match="review not released"):
+        bench.replayed(run)
+    assert _frozen(bench, run) == frozen
+    assert _snapshot(bench) == before
+    return calls
 
 
-def test_mixed_revision_valid_supplied_ledger_replays_partial(bench):
-    _accepted_dead_chapter(bench)
-    _accept_fresh_chapter(bench, 2, "ch2", "船夫")
-    _accept_fresh_chapter(bench, 3, "ch3", "渔夫")
-    value = ledger(3, "夜航", "湖心")
-    req = _revision_request(bench, [("r2", 2, None), ("r3", 3, value)])
-    bench.freeze(req, "run9", RULES, CONTRACTS)
-    receipt = bench.replay_provided("run9")
-    assert receipt["early_replay"] == "partial"
-    assert receipt["missing_chapters"] == [2]
-    assert receipt["validated_chapters"] == [3]
-    assert receipt["counters"] == {"chapters_written": 3, "last_chapter": 3, "next_chapter": 4}
-    # The extracted ledger for chapter 2 is still not guessed or forged.
-    with pytest.raises(BenchError, match="missing extracted"):
-        bench.ledgers("run9")
+def _staged_without_acceptance(session, bench, run, before):
+    assert session.drive(run) == "paused"
+    replay = decode((bench.work(run) / "candidate_replay.json").read_bytes())
+    stage = decode((bench.work(run) / "stage.json").read_bytes())
+    assert stage["files"] == replay["files"] and stage["counters"] == replay["counters"]
+    assert stage["requires_manual_approval"] and not stage["accepted"]
+    after = _snapshot(bench)
+    assert after["head"] == before["head"] and after["status"] == "" and after["author"] == before["author"]
+    return replay, stage
 
 
-def test_mixed_new_submission_replays_only_contiguous_prefix(bench):
-    _accepted_dead_chapter(bench)
-    # New chapters 2 (valid, provided) and 3 (missing): only the provided
-    # prefix before the first missing chapter is replayable.
-    value2 = ledger(2, "过桥")
-    value2["events"] = [{"entity_type": "character", "entity_name": "船夫",
-                         "create": True, "changes": {"status": "alive", "位置": "渡口"},
-                         "reason": "船夫登场。"}]
-    value2["appearances"] = [{"name": "船夫", "importance": 3}]
-    req2 = request(bench, sid="n2", n=2, value=value2)
-    req3 = request(bench, sid="n3", n=3, provided=False)
-    req2["chapters"].append(req3["chapters"][0])
-    bench.freeze(req2, "run9", RULES, CONTRACTS)
-    receipt = bench.replay_provided("run9")
-    assert receipt["early_replay"] == "partial"
-    assert receipt["validated_chapters"] == [2] and receipt["missing_chapters"] == [3]
+def test_all_supplied_dead_character_refused_before_any_model_step(tmp_path, monkeypatch, bench):
+    _accept(bench, 1, _value(1, [_traveler({"status": "dead"}, "旅人倒下。")]))
+    session = Session(tmp_path, monkeypatch, bench)
+    req = request(bench, sid="ch2", n=2, value=_value(2, [_traveler({"位置": "桥边"})]))
+    before = _snapshot(bench)
+    run = session.start(req)
+    assert _refused_before_review(session, bench, run, before) == []
 
 
-def test_mixed_new_submission_after_gap_is_fully_deferred(bench):
-    _accepted_dead_chapter(bench)
-    # New chapter 2 missing, chapter 3 provided: chapter 3 cannot be replayed
-    # without the missing chapter before it, and nothing is guessed.
-    req2 = request(bench, sid="g2", n=2, provided=False)
-    req3 = request(bench, sid="g3", n=3, value=ledger(3, "夜航"))
-    req2["chapters"].append(req3["chapters"][0])
-    bench.freeze(req2, "run9", RULES, CONTRACTS)
-    assert bench.replay_provided("run9") == {"early_replay": "deferred", "missing_chapters": [2]}
+def test_all_supplied_valid_chapter_replays_then_reviews_and_stages(tmp_path, monkeypatch, bench):
+    _accept(bench, 1, _value(1, [_traveler({"status": "dead"}, "旅人倒下。")]))
+    session = Session(tmp_path, monkeypatch, bench)
+    req = request(bench, sid="ch2", n=2, value=_value(2, [_newcomer("船夫")]))
+    before = _snapshot(bench)
+    run = session.start(req)
+    replay, stage = _staged_without_acceptance(session, bench, run, before)
+    assert session.agent_calls == ["literary_review", "ledger_audit"]
+    assert replay["ledger_sources"] == {"2": "author"}
+    assert stage["counters"] == {"chapters_written": 2, "last_chapter": 2, "next_chapter": 3}
+    assert "ledger_ready/candidate_replay.json" in _published(session, run)
 
 
-
-def test_stage_guard_still_refuses_extracted_ledger_for_dead_character(bench):
-    # The later existing full-replay guard is unchanged for extractor input.
-    _accepted_dead_chapter(bench)
+def test_new_prose_only_chapter_refused_after_extraction_before_review(tmp_path, monkeypatch, bench):
+    _accept(bench, 1, _value(1, [_traveler({"status": "dead"}, "旅人倒下。")]))
+    session = Session(tmp_path, monkeypatch, bench)
+    session.extracted = {"2": _value(2, [_traveler({"位置": "桥边"})])}
     req = request(bench, sid="ch2", n=2, provided=False)
-    with pytest.raises(BenchError, match="full replay refused"):
-        staged(bench, req, "run2", extracted={"2": ledger(2, "过桥")})
+    before = _snapshot(bench)
+    run = session.start(req)
+    assert _refused_before_review(session, bench, run, before) == ["extract_ledger"]
 
 
-def _prepare_fakes(monkeypatch, calls, bench_impl, host=None):
-    monkeypatch.setattr(adapter, "_setup", lambda *a, **k: (
-        Path("/injected/cfg"), Path("/injected/out"), {"project_id": "fiction"},
-        bench_impl, host or SimpleNamespace(rulings=lambda project_id: {},
-                                            review_contracts=lambda conf: {}), {}))
-    monkeypatch.setattr(adapter, "immutable", lambda path, raw: calls.append("write:" + path.name))
-    monkeypatch.setattr(adapter, "publish_review_materials",
-                        lambda b, run_id, phase, out: calls.append("publish:" + phase))
+def _death_in_chapter_two(bench):
+    _accept(bench, 1, _value(1, [_traveler({"位置": "门外"})]))
+    _accept(bench, 2, _value(2, [_traveler({"status": "dead"}, "旅人在桥上倒下。")]))
+    _accept(bench, 3, _value(3, [_newcomer("渔夫")]))
 
 
-def _run_prepare():
-    return adapter.novel_bench(operation="prepare", workspace_root="/w", run_id="run1",
-                               step_id="prepare", config_name=adapter.CONFIG, out_dir="/o")
+def test_missing_revision_that_removes_old_death_is_not_refused(tmp_path, monkeypatch, bench):
+    # Accepted ch2 killed 旅人. The revision of ch2 has no ledger yet, and the
+    # supplied ch3 moves 旅人. Judged against the OLD ch2 journal ch3 looks
+    # invalid; the actual extracted ch2 keeps 旅人 alive, so the candidate is valid.
+    _death_in_chapter_two(bench)
+    session = Session(tmp_path, monkeypatch, bench)
+    session.extracted = {"2": _value(2, [_traveler({"位置": "新桥"})], summary="旅人过桥后活了下来。")}
+    req = _revise_2_missing_3_supplied(bench, _value(3, [_traveler({"位置": "湖心"})]))
+    before = _snapshot(bench)
+    run = session.start(req)
+    replay, stage = _staged_without_acceptance(session, bench, run, before)
+    assert session.agent_calls == ["extract_ledger", "literary_review", "ledger_audit"]
+    assert replay["ledger_sources"] == {"2": "extractor", "3": "author"}
+    assert stage["counters"] == {"chapters_written": 3, "last_chapter": 3, "next_chapter": 4}
+    session.sf.approve_checkpoint(run)
+    assert session.drive(run) == "completed"
+    from aitelier import novel_state as ns
+    card = ns.load_characters(bench.policy.repo)["旅人"]
+    assert card["status"] == "alive" and card["位置"] == "湖心"
 
 
-def test_prepare_replays_supplied_ledger_before_publishing_materials(monkeypatch):
-    calls = []
-
-    class FakeBench:
-        policy = SimpleNamespace(project_id="fiction")
-
-        def freeze(self, *args):
-            calls.append("freeze")
-
-        def input(self, run_id):
-            calls.append("input")
-            return Path("/injected/frozen"), {"chapters": [], "literary_key": "k",
-                                              "contracts": {"ledger": "1" * 64}}
-
-        def replay_provided(self, run_id):
-            calls.append("replay")
-            return {"early_replay": "passed"}
-
-        def editorial_packet(self, run_id):
-            calls.append("editorial_packet")
-            return "packet"
-
-        def literary(self, run_id):
-            calls.append("literary")
-
-    _prepare_fakes(monkeypatch, calls, FakeBench())
-    assert _run_prepare() == {"backup_only": False, "reuse_literary": False}
-    assert calls.index("replay") < calls.index("editorial_packet") < calls.index("publish:literary")
-    assert calls.index("write:early_replay.json") < calls.index("write:editor_packet.md")
+def test_same_submission_refused_when_extracted_revision_keeps_the_death(tmp_path, monkeypatch, bench):
+    # Negative control for the test above: identical submission and supplied
+    # ch3, only the extractor's actual ch2 differs. The decision follows it.
+    _death_in_chapter_two(bench)
+    session = Session(tmp_path, monkeypatch, bench)
+    session.extracted = {"2": _value(2, [_traveler({"status": "dead"}, "旅人在桥上倒下。")])}
+    req = _revise_2_missing_3_supplied(bench, _value(3, [_traveler({"位置": "湖心"})]))
+    before = _snapshot(bench)
+    run = session.start(req)
+    assert _refused_before_review(session, bench, run, before) == ["extract_ledger"]
 
 
-def test_prepare_refuses_before_publishing_when_replay_fails(monkeypatch):
-    calls = []
+def _death_in_chapter_one(bench):
+    _accept(bench, 1, _value(1, [_traveler({"status": "dead"}, "旅人倒下。")]))
+    _accept(bench, 2, _value(2, [_newcomer("船夫")]))
+    _accept(bench, 3, _value(3, [_newcomer("渔夫")]))
 
-    class FakeBench:
-        policy = SimpleNamespace(project_id="fiction")
 
-        def freeze(self, *args):
-            calls.append("freeze")
+def test_original_gap_supplied_move_of_dead_character_refused_before_review(tmp_path, monkeypatch, bench):
+    # The originally observed gap: a missing ch2 must not let a supplied ch3
+    # that moves the ch1-dead 旅人 reach paid review.
+    _death_in_chapter_one(bench)
+    session = Session(tmp_path, monkeypatch, bench)
+    session.extracted = {"2": _value(2, [_newcomer("船夫")])}
+    req = _revise_2_missing_3_supplied(bench, _value(3, [_traveler({"位置": "湖心"})]))
+    before = _snapshot(bench)
+    run = session.start(req)
+    assert _refused_before_review(session, bench, run, before) == ["extract_ledger"]
 
-        def input(self, run_id):
-            return Path("/injected/frozen"), {"chapters": []}
 
-        def replay_provided(self, run_id):
-            raise BenchError("full replay refused: ['character 旅人 is dead but received changes']")
+def test_original_gap_is_undecidable_before_extraction(tmp_path, monkeypatch, bench):
+    # Same submission as the original gap. The native journal permits a
+    # recorded return (status: alive) on a dead card, so the missing ch2 can
+    # make the supplied ch3 valid: refusing it before extraction would be a guess.
+    _death_in_chapter_one(bench)
+    session = Session(tmp_path, monkeypatch, bench)
+    session.extracted = {"2": _value(2, [_newcomer("船夫"), _traveler({"status": "alive"}, "旅人被救回。")])}
+    req = _revise_2_missing_3_supplied(bench, _value(3, [_traveler({"位置": "湖心"})]))
+    before = _snapshot(bench)
+    run = session.start(req)
+    replay, _ = _staged_without_acceptance(session, bench, run, before)
+    assert session.agent_calls == ["extract_ledger", "literary_review", "ledger_audit"]
+    assert replay["ledger_sources"] == {"2": "extractor", "3": "author"}
 
-    _prepare_fakes(monkeypatch, calls, FakeBench())
-    with pytest.raises(BenchError, match="full replay refused"):
-        _run_prepare()
-    assert "editorial_packet" not in calls
-    assert not any(call.startswith("publish:") for call in calls)
+
+def test_ledger_only_correction_reuses_literary_after_its_own_replay(tmp_path, monkeypatch, bench):
+    session = Session(tmp_path, monkeypatch, bench)
+    first_req = request(bench)
+    req = request(bench, sid="ledgerfix", value=ledger(location="院门"))
+    before = _snapshot(bench)
+    first = session.start(first_req)
+    assert session.drive(first) == "paused"
+    session.agent_calls.clear()
+    req["reuse_literary_from"] = first
+    second = session.start(req, project="execution2")
+    assert session.drive(second) == "paused"
+    assert session.agent_calls == ["ledger_audit"]
+    assert decode((bench.work(second) / "literary.json").read_bytes())["reused_from"] == first
+    assert decode((bench.work(second) / "candidate_replay.json").read_bytes())["ledger_sources"] == {"1": "author"}
+    assert _snapshot(bench)["head"] == before["head"]
+
+
+def test_review_release_requires_this_runs_replay_and_is_idempotent(bench, tmp_path):
+    bench.freeze(request(bench, provided=False), "run1", RULES, CONTRACTS)
+    out = tmp_path / "out"
+    with pytest.raises(BenchError, match="review not released"):
+        adapter.publish_review_materials(bench, "run1", "literary", out)
+    assert not out.exists()
+    bench.ledgers("run1", {"1": ledger()})
+    with pytest.raises(BenchError, match="review not released"):
+        adapter.publish_review_materials(bench, "run1", "literary", out)
+    first = bench.replay_candidate("run1")
+    assert bench.replay_candidate("run1") == first == bench.replayed("run1")
+    adapter.publish_review_materials(bench, "run1", "literary", out)
+    adapter.publish_review_materials(bench, "run1", "literary", out)
+    assert {p.name for p in out.iterdir()} == {"review_request.json", "current_prose.md", "review_context.md"}

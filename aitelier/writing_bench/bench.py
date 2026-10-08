@@ -235,7 +235,7 @@ class Bench:
         path, m = self.input(run_id)
         key = (m["literary_key"] if phase == "literary" else
                self._json(self.work(run_id), "ledgers.json")["review_key"])
-        source = "step:prepare" if phase == "literary" else "step:ledger_ready"
+        source = "step:ledger_ready" if phase == "literary" else "step:literary_check"
         targets = [{"chapter": c["chapter"], "title": c["title"],
                     "prose_sha256": m["files"][f"chapters/ch{c['chapter']:04d}/prose.md"]}
                    for c in m["chapters"]]
@@ -368,64 +368,60 @@ class Bench:
             require(not git(wt, "diff", "--name-only", revision, "--", *MANAGED), "accepted replay drift")
             require(not git(wt, "ls-files", "--others", "--exclude-standard"), "untracked replay state")
 
-    def replay_provided(self, run_id: str) -> dict:
-        """Refuse deterministic semantic replay errors in a supplied ledger
-        before literary or ledger review work is spent.
+    def replay_candidate(self, run_id: str) -> dict:
+        """Replay the complete candidate before any review is released.
 
-        A complete author-supplied ledger can be replayed now: the exact same
-        isolated candidate and full-history guard used at ``stage`` runs over a
-        disposable checkout, so a ledger that touches an already-dead character
-        or otherwise breaks the accepted journal refuses here. Extractor output
-        does not exist yet and is never guessed.
-
-        A missing ledger never hides a deterministically invalid *known* one.
-        When only part of the submission is supplied, the provided chapters are
-        still replayed under the minimal supported ordering: every provided
-        chapter in a ``revision`` (each replaces its own historic bytes), and
-        in a ``new`` submission the contiguous provided prefix before the
-        first missing chapter (a later new chapter cannot be replayed without
-        the missing chapter before it). Such a run reports ``partial`` with the
-        validated chapters; a submission with nothing replayable reports
-        ``deferred`` and the unchanged later ``stage`` guard remains the only
-        replay for it.
+        Runs once every chapter's ledger is known: supplied by the author or
+        returned by the extractor (``ledgers.json``). A supplied ledger for a
+        later chapter is only decidable together with the ledger that replaces
+        an earlier missing chapter, so nothing is decided from guessed or old
+        accepted journals. The candidate is built by the same code ``stage``
+        uses, on a disposable checkout; a refusal here is the refusal ``stage``
+        would make, but before literary or ledger review work is spent.
         """
         path, m = self.input(run_id)
-        missing = [c["chapter"] for c in m["chapters"] if not c["provided_ledger"]]
-        provided = [c["chapter"] for c in m["chapters"] if c["provided_ledger"]]
-        if missing and not provided:
-            return {"early_replay": "deferred", "missing_chapters": missing}
-        if missing:
-            if m["mode"] == "revision":
-                early = provided
-            else:
-                early = [n for n in provided if n < min(missing)]
-            if not early:
-                return {"early_replay": "deferred", "missing_chapters": missing}
-            subset = dict(m, chapters=[c for c in m["chapters"] if c["chapter"] in early])
-        else:
-            subset = m
-            early = provided
         self.verify_baseline(path, m)
-        ledgers = {"ledgers": {}}
-        for c in subset["chapters"]:
-            value = self._json(path, f"chapters/ch{c['chapter']:04d}/proposed_events.json")
-            validate_ledger(value, c["chapter"], c["title"])
-            ledgers["ledgers"][str(c["chapter"])] = value
+        ledgers = self._json(self.work(run_id), "ledgers.json")
+        require(ledgers["review_key"] == sha(encode({"literary_key": m["literary_key"],
+                "ledgers": ledgers["ledgers"], "contract": m["contracts"]["ledger"]})), "ledger input changed")
         clean_head(self.policy.repo, self.policy.branch, m["base"])
         require(git(self.policy.repo, "rev-parse", "novel-genesis") == self.policy.genesis, "genesis drift")
         genesis_files = git_files(self.policy.repo, self.policy.genesis)
         self._replay_guard(m["base"], genesis_files)
         with checkout(self.policy.repo, m["base"], self.root / "scratch") as wt:
-            self._write_candidate_chapters(wt, path, subset, ledgers)
-            index = self._reset_replay(wt, genesis_files)
-        counters = {k: index[k] for k in ("chapters_written", "last_chapter", "next_chapter")}
-        review_key = sha(encode({"literary_key": m["literary_key"],
-                                 "ledgers": ledgers["ledgers"],
-                                 "contract": m["contracts"]["ledger"]}))
-        if missing:
-            return {"early_replay": "partial", "missing_chapters": missing,
-                    "validated_chapters": early, "counters": counters}
-        return {"early_replay": "passed", "review_key": review_key, "counters": counters}
+            index, changed = self._build_candidate(wt, path, m, ledgers, genesis_files)
+            files = {name: sha(read_file(wt, name)) for name in changed}
+        receipt = {"version": 2, "run_id": run_id, "base": m["base"], "review_key": ledgers["review_key"],
+                   "ledger_sources": {str(c["chapter"]): "author" if c["provided_ledger"] else "extractor"
+                                      for c in m["chapters"]},
+                   "files": files, "replay_exact": True,
+                   "counters": {k: index[k] for k in ("chapters_written", "last_chapter", "next_chapter")}}
+        immutable(self.work(run_id) / "candidate_replay.json", encode(receipt))
+        return receipt
+
+    def replayed(self, run_id: str) -> dict:
+        """The passed complete-candidate replay that review material is released for."""
+        require((self.work(run_id) / "candidate_replay.json").exists(),
+                "complete candidate replay has not passed; review not released")
+        receipt = self._json(self.work(run_id), "candidate_replay.json")
+        require(receipt["review_key"] == self._json(self.work(run_id), "ledgers.json")["review_key"],
+                "replayed candidate does not match ledgers")
+        return receipt
+
+    def _build_candidate(self, wt: Path, path: Path, m: dict, ledgers: dict,
+                         genesis_files: dict[str, bytes]) -> tuple[dict, list[str]]:
+        before = ns.written_chapters(wt)
+        self._write_candidate_chapters(wt, path, m, ledgers)
+        index = self._reset_replay(wt, genesis_files)
+        expected = before + [m["chapters"][0]["chapter"]] if m["mode"] == "new" else before
+        require(ns.written_chapters(wt) == expected, "chapter inventory changed unexpectedly")
+        git(wt, "add", "--", "novel")
+        changed = git(wt, "diff", "--cached", "--name-only").splitlines()
+        allowed_chapters = {f"novel/chapters/ch{c['chapter']:04d}/{f}" for c in m["chapters"]
+                            for f in ("prose.md", "summary.md", "events.yaml")}
+        require(changed and all(name in allowed_chapters or any(name == rel or name.startswith(rel + "/")
+                for rel in MANAGED) for name in changed), "unexpected candidate file changes")
+        return index, changed
 
     def _write_candidate_chapters(self, wt: Path, path: Path, m: dict, ledgers: dict) -> None:
         """Write each proposed chapter's prose, summary and journal into the
@@ -470,17 +466,9 @@ class Bench:
             genesis_files = git_files(self.policy.repo, self.policy.genesis)
             self._replay_guard(m["base"], genesis_files)
             with checkout(self.policy.repo, m["base"], self.root / "scratch") as wt:
-                before = ns.written_chapters(wt)
-                self._write_candidate_chapters(wt, path, m, ledgers)
-                index = self._reset_replay(wt, genesis_files)
-                expected = before + [m["chapters"][0]["chapter"]] if m["mode"] == "new" else before
-                require(ns.written_chapters(wt) == expected, "chapter inventory changed unexpectedly")
-                git(wt, "add", "--", "novel")
-                changed = git(wt, "diff", "--cached", "--name-only").splitlines()
-                allowed_chapters = {f"novel/chapters/ch{c['chapter']:04d}/{f}" for c in m["chapters"]
-                                    for f in ("prose.md", "summary.md", "events.yaml")}
-                require(changed and all(name in allowed_chapters or any(name == rel or name.startswith(rel + "/")
-                        for rel in MANAGED) for name in changed), "unexpected candidate file changes")
+                index, changed = self._build_candidate(wt, path, m, ledgers, genesis_files)
+                hashes = {name: sha(read_file(wt, name)) for name in changed}
+                require(hashes == self.replayed(run_id)["files"], "staged candidate differs from the replayed candidate")
                 tree = git(wt, "write-tree")
                 ref = "refs/writing-bench/" + identifier(run_id)
                 refs = git(self.policy.repo, "for-each-ref", "--format=%(objectname)", ref).splitlines()
@@ -493,7 +481,6 @@ class Bench:
                         "commit", "-m", "Novel writing bench: " + m["submission_id"])
                     commit = git(wt, "rev-parse", "HEAD")
                     git(self.policy.repo, "update-ref", ref, commit, "0" * 40)
-                hashes = {name: sha(read_file(wt, name)) for name in changed}
                 summaries = {str(c["chapter"]): {"preview": index["chapters"][c["chapter"]]["summary"],
                               "complete_ref": f"novel/chapters/ch{c['chapter']:04d}/summary.md",
                               "sha256": sha(read_file(wt, f"novel/chapters/ch{c['chapter']:04d}/summary.md"))}

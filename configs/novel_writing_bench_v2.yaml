@@ -34,10 +34,10 @@ steps:
   - to: backup
     match:
       backup_only: true
-  - to: literary_check
+  - to: extract_ledger
     match:
-      reuse_literary: true
-  - to: literary_review
+      needs_extraction: true
+  - to: ledger_ready
 - id: literary_review
   step_type: agent
   validation_on_exhaustion: fail
@@ -45,10 +45,10 @@ steps:
   timeout_seconds: 600
   context:
   - source:
-      step: prepare
+      step: ledger_ready
       output: review_request.json
   - source:
-      step: prepare
+      step: ledger_ready
       output: current_prose.md
   output:
     mode: content
@@ -145,10 +145,7 @@ steps:
     operation: literary_check
     out_dir: $STEP_DIR
   transitions:
-  - to: extract_ledger
-    match:
-      needs_extraction: true
-  - to: ledger_ready
+  - to: ledger_audit
 - id: extract_ledger
   step_type: agent
   agent_config: bench_ledger_extractor_v2
@@ -156,13 +153,10 @@ steps:
   context:
   - source:
       step: prepare
-      output: review_request.json
+      output: extraction_request.json
   - source:
       step: prepare
       output: current_prose.md
-  - source:
-      step: prepare
-      output: extraction_request.json
   output:
     mode: content
     fixed:
@@ -184,7 +178,10 @@ steps:
     operation: ledger_ready
     out_dir: $STEP_DIR
   transitions:
-  - to: ledger_audit
+  - to: literary_check
+    match:
+      reuse_literary: true
+  - to: literary_review
 - id: ledger_audit
   step_type: agent
   validation_on_exhaustion: fail
@@ -192,10 +189,10 @@ steps:
   timeout_seconds: 600
   context:
   - source:
-      step: ledger_ready
+      step: literary_check
       output: review_request.json
   - source:
-      step: ledger_ready
+      step: literary_check
       output: current_prose.md
   output:
     mode: content

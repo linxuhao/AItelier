@@ -215,7 +215,12 @@ def test_normal_godot_current_decision_preserves_effect_identity_and_source_chec
     assert event["usable"] is (change is None)
     assert event["inventory_digest"] == seen[0]["digest"]
     assert value["expected_before"]["image"] != value["target_image"]
-    assert event["audit"]["actor"] == "owned-operator"
+    journal = json.loads(dq.evidence_path().read_text())
+    authorization = journal["events"][-2]
+    assert authorization["status"] == "overridden" and authorization["pending"] is True
+    assert authorization["inventory_digest"] == event["inventory_digest"]
+    assert authorization["audit"]["actor"] == "owned-operator"
+    assert authorization["audit"]["affected_ownership"] == seen[0]["blockers"]["external_active"]
     fence = dq.acquire_cutover_fence()
     dq.release_cutover_fence(fence)
 

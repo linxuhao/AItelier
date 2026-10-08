@@ -34,7 +34,7 @@ only change is its observation time. For a human decision made at that boundary,
 runtime provenance, blockers and errors while the existing cutover fence is held.
 The operator supplies identity, reason, authorization reference and expiry,
 separately acknowledges unknown facts if intended, then confirms that inventory.
-Declining, invalid metadata, conflicting file/decision inputs and authoritative
+When an override is needed, declining, invalid metadata, conflicting file/decision inputs and authoritative
 owners combined with unknown-only acknowledgement refuse through the existing
 journal. No acknowledgement is inferred from the command flag itself.
 

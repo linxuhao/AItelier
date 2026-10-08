@@ -44,3 +44,20 @@ def test_off_failover_restores_non_anthropic_sampling(wiring):
     g._apply_binding(k)
     expected=gw(wiring,"deepseek/deepseek-v4-flash",temperature=0.7)._build_kwargs(MSGS)
     assert k==expected
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_native_malformed_400_is_not_retried_or_parked(wiring, monkeypatch, enabled):
+    from core.ai_router import endpoint_cooldowns
+    monkeypatch.setenv("AITELIER_LLM_STREAM", "0")
+    seen=[]
+    def reject(**kwargs):
+        seen.append(kwargs)
+        raise litellm.exceptions.BadRequestError(
+            "messages.0.content: Field required", model="claude-haiku-5-5",llm_provider="anthropic")
+    monkeypatch.setattr(litellm,"completion",reject)
+    g=gw(wiring,"pool",enable_thinking=enabled)
+    with pytest.raises(litellm.exceptions.BadRequestError):
+        g.generate_native(MSGS)
+    assert len(seen)==1
+    assert endpoint_cooldowns()=={}

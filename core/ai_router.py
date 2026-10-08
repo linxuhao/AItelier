@@ -951,7 +951,8 @@ class AIGateway:
                 # dead, the same trade the vision gate made for itself before
                 # the gateway took this over. Once per gateway, and only for a
                 # role that asked for thinking off.
-                if self._suppress_thinking and not self.enable_thinking:
+                if (self._suppress_thinking and not self.enable_thinking
+                        and "extra_body" in kwargs):
                     self._suppress_thinking = False
                     print(f"[ai_router] {self.active_model} rejected the "
                           f"thinking-off keys ({type(e).__name__}); retrying "

@@ -584,12 +584,24 @@ def test_normalize_carries_attr_so_a_failed_assert_can_report_the_value():
     assert by_name["CombatManager.current_round"]["expr"] == "current_round >= 4"
 
 
-def test_probe_reads_the_value_back_only_when_the_assert_failed():
-    """The capture is on the failure path only — a passing assert stays small."""
+def test_probe_reads_the_value_back_for_both_polarities():
+    """The observed value is retained for passing AND failing asserts.
+
+    The capture used to sit behind `if not res["passed"]`, so a green assert
+    said nothing about what it had seen: a passing expression could not be
+    audited (right value, or vacuous truth?) and the report threw away an
+    observation the probe had already paid for. The condition now keys on the
+    attr alone, so both polarities keep their observed value. The read is
+    TAGGED, so a failed read is reported as an observed error instead of being
+    smuggled in as a null value.
+    """
     src = gh.PROBE_GD if hasattr(gh, "PROBE_GD") else Path(gh.__file__).read_text(
         encoding="utf-8")
-    assert 'if not res["passed"] and a.has("attr"):' in src
-    assert 'res["observed"] = _jsonable(_read_attr(target, str(a["attr"])))' in src
+    assert 'if a.has("attr"):' in src
+    assert 'res["observed"] = obs["value"]' in src
+    assert 'res["observed_error"] = obs["error"]' in src
+    assert 'if not res["passed"] and a.has("attr"):' not in src
+
 
 
 @pytest.mark.parametrize("times_out", [False, True])
@@ -1026,3 +1038,77 @@ def test_input_dead_still_fires_on_a_scene_override_that_ignores_input(monkeypat
     by = {s["name"]: s["input_dead"] for s in r["behavior"]["scenarios"]}
     assert by == {"menu_ignores": True, "map_reacts": False}
     assert r["passed"] is False and "menu_ignores" in r["summary"]
+
+
+# ── native assertion-value controls (real Godot; UNRUN by the source worker) ─
+# Meaningful additions beyond the four original native cases: a String
+# observation, a real null baseline, a parse error and a missing baseline, all
+# driven through the live Expression evaluator and the probe's report shape.
+# This is a TRACKED fixture/spec asset, not an invented mirror framework; the
+# root-controlled native slot runs it. The source worker never invokes Godot.
+_VALUE_CONTROLS = (Path(__file__).resolve().parent / "fixtures"
+                   / "godot_assertion_value_controls")
+
+
+@requires_godot
+def test_real_playtest_assertion_value_controls():
+    import json
+    spec = json.loads((_VALUE_CONTROLS / "spec.json").read_text(encoding="utf-8"))
+    r = gh.playtest_project(str(_VALUE_CONTROLS), frames=8, spec=spec)
+    scen = {s["name"]: s for s in r["behavior"]["scenarios"]}
+
+    # A String expression evaluates as a VALUE and its observed value is kept.
+    s = scen["string_observation_positive"]
+    assert s["complete"] is True and s["incomplete_asserts"] == 0
+    assert s["asserts"][0]["passed"] is True
+    assert s["asserts"][0]["observed"] == "ready"
+
+    # A DIRECT String observation (expr == "label", not a comparison): the value
+    # is observed and kept, and its truth is the non-empty String.
+    s = scen["string_value_direct"]
+    assert s["complete"] is True and s["incomplete_asserts"] == 0
+    assert s["asserts"][0]["passed"] is True
+    assert s["asserts"][0]["observed"] == "ready"
+    assert s["asserts"][0]["actual"] == "ready"
+
+    # The EMPTY String is measured, not vacuous: it is a value that decides
+    # advisory-false, and it never crashes via bool(String).
+    s = scen["empty_string_advisory_false"]
+    assert s["complete"] is True and s["incomplete_asserts"] == 0
+    assert s["asserts"][0]["passed"] is False
+    assert s["asserts"][0]["observed"] == ""
+
+    # An UNSUPPORTED observed value (Dictionary) and a delta on one are explicit
+    # incomplete measurements, never str(v) that could compare equal and pass.
+    for name in ("unsupported_observed_attr", "unsupported_delta"):
+        row = scen[name]
+        assert row["complete"] is False and row["incomplete_asserts"] == 1, name
+
+    # A delta whose node did not exist at frame 0 but whose LATER read is valid
+    # is a genuinely ABSENT frame-0 baseline -- reported as baseline_missing, not
+    # as a current-read error.
+    s = scen["absent_frame0_baseline_later_valid"]
+    assert s["complete"] is False and s["incomplete_asserts"] == 1
+    assert s["asserts"][0]["actual"]["baseline_missing"] is True
+    assert "current_error" not in s["asserts"][0]["actual"]
+
+    assert s["asserts"][0]["actual"]["current"] is not None
+
+    # Numeric both polarities: one holds, one does not; both were measured.
+    s = scen["numeric_both_polarities"]
+    assert s["complete"] is True and s["incomplete_asserts"] == 0
+    assert [a["passed"] for a in s["asserts"]] == [True, False]
+    assert all(a["observed"] is not None for a in s["asserts"])
+
+    # A real null captured at frame 0 is a baseline, not a missing one.
+    s = scen["legit_null_baseline"]
+    assert s["complete"] is True and s["incomplete_asserts"] == 0
+    assert s["asserts"][0]["passed"] is True
+
+    # An unparseable expression and a missing frame-0 baseline are HARD
+    # incomplete measurements: the run cannot read as a shorter success.
+    assert r["passed"] is False
+    for name in ("parse_error_expression", "missing_baseline"):
+        row = scen[name]
+        assert row["complete"] is False and row["incomplete_asserts"] == 1, name
+    assert any("incomplete measurement" in e for e in r["spec_errors"])

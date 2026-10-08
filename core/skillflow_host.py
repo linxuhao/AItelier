@@ -484,6 +484,72 @@ class AItelierSkillFlow(SkillFlow):
             "run_status": self._run_status(row["run_id"]),
         }
 
+    def _admit_source_identity(self, run_id: str) -> None:
+        """Propagate this run's typed source-identity refusal before a claim.
+
+        ``run_isolation.resolve_for_resolver`` is the supported answer to "which
+        tree does THIS run read": a path, ``False`` for a run that owns none, or
+        ``None`` for no opinion — and the typed ``IsolationUnavailable`` when a
+        decision exists and cannot be honoured, which is what a readonly review
+        snapshot substituted at canonical HEAD A for the recorded candidate B is.
+
+        Inside the framework that refusal is raised while the context resolver
+        and the read-tool registration run, where SkillFlow's best-effort
+        handlers swallow it and hand the reviewer a claim with NO read surface
+        (its later read then dies on ImportError — the actual FIRST failure).
+        Asked HERE, at the host ingress that runs before ``super()`` ever reaches
+        SkillFlow's claim, the same existing typed refusal refuses the claim
+        itself, so the run stays unclaimed with the reason visible to the caller.
+
+        Scope is the resolver's own, and it is NOT a blanket "no record means
+        legacy": a run WITH a record is bound to it, and a run with NO record is
+        answered by ``run_isolation._no_record``, which draws the
+        modern-versus-genuine-legacy line from THIS deployment's engine. A run
+        this deployment never created (a harness driving its own SkillFlow
+        elsewhere) and a run that predates isolation both keep their
+        project-keyed answer; a run created here after isolation began whose
+        record is gone is refused rather than silently treated as legacy.
+
+        The lookup is deliberately NOT wrapped: an unreadable ledger, a missing
+        isolation table or an unrelated programming error is ``cannot tell``,
+        and ``cannot tell`` must stay distinct and visible instead of being read
+        as "legacy, admit". Only the typed ``IsolationUnavailable`` is the
+        refusal; every other exception is that other exception. Nothing is
+        reimplemented, pre-warmed or bypassed — the SDK still owns the claim,
+        context resolution and read registration.
+        """
+        # A host with no workspace wiring is a unit-test stub, not the deployed
+        # ingress; it keeps its legacy behaviour (nothing to ask the ledger).
+        if getattr(self, "_workspace", None) is None:
+            return
+        from api.dependencies import get_db_manager
+        from core import run_isolation
+        db = get_db_manager()
+        # Ask the resolver itself, not a `has_record` proxy. `resolve_for_resolver`
+        # hands back the run's recorded tree (or no opinion) and raises the typed
+        # ``IsolationUnavailable`` on a bad decision; when the run has NO record it
+        # delegates to `run_isolation._no_record`, which draws the
+        # modern-vs-genuine-legacy line from THIS deployment's engine — the
+        # distinction the seed calls for: a run created here after isolation whose
+        # record is gone is refused, while a run the deployment never created and
+        # a genuine pre-isolation legacy run both keep their project-keyed answer.
+        # A record-less run is classified by the deployment engine that owns
+        # this ledger; a local engine's timestamp alone declares nothing here.
+        # Nothing here is wrapped, so an unreadable ledger, a missing isolation
+        # table or an unrelated error stays distinct and visible instead of being
+        # read as admission.
+        run = self.get_run(run_id) if callable(getattr(self, "get_run", None)) else None
+        if run is None:
+            # Not one of this host's own runs. A record-holding run is always one
+            # of this host's own, so this never skips the binding below; a
+            # record-less run answers no opinion, exactly as a run of a different
+            # deployment.
+            return
+        # The deployment engine's run row, not a timestamp from an arbitrary
+        # local engine, decides whether this ledger declared a record-less run.
+        # Exact review context still requires its record even for another engine.
+        run_isolation.resolve_for_resolver(db, run_id, sf=self)
+
     def _operation_blocks_reentry(self, run_id: str, trigger: str) -> bool:
         if not self.unsettled_operations(run_id):
             return False
@@ -493,6 +559,7 @@ class AItelierSkillFlow(SkillFlow):
     def advance_run(self, run_id: str):
         from core.review_input_bundle import guard_run_inputs
         guard_run_inputs(self, run_id, "advance")
+        self._admit_source_identity(run_id)
         if self._operation_blocks_reentry(run_id, "advance_before_reclaim"):
             return None
         # The other execution point for the same rule. `core/scheduler.py`'s
@@ -509,6 +576,7 @@ class AItelierSkillFlow(SkillFlow):
     def claim_next_step(self, run_id: str):
         from core.review_input_bundle import guard_run_inputs
         guard_run_inputs(self, run_id, "claim")
+        self._admit_source_identity(run_id)
         if self._operation_blocks_reentry(run_id, "claim_before_admission"):
             return None
         return super().claim_next_step(run_id)

@@ -1,0 +1,72 @@
+{
+  "frames": 8,
+  "scenarios": [
+    {
+      "name": "string_observation_positive",
+      "timeline": [
+        {"at": 3, "assert": [
+          {"node": "Main", "attr": "label", "expr": "label == \"ready\""}]}
+      ]
+    },
+    {
+      "name": "string_value_direct",
+      "timeline": [
+        {"at": 3, "assert": [
+          {"node": "Main", "attr": "label", "expr": "label"}]}
+      ]
+    },
+    {
+      "name": "empty_string_advisory_false",
+      "timeline": [
+        {"at": 3, "assert": [
+          {"node": "Main", "attr": "empty_label", "expr": "empty_label"}]}
+      ]
+    },
+    {
+      "name": "unsupported_observed_attr",
+      "timeline": [
+        {"at": 3, "assert": [
+          {"node": "Main", "attr": "stuff", "expr": "stuff"}]}
+      ]
+    },
+    {
+      "name": "unsupported_delta",
+      "timeline": [
+        {"at": 3, "assert": [
+          {"node": "Main", "attr": "stuff", "mode": "unchanged"}]}
+      ]
+    },
+    {
+      "name": "absent_frame0_baseline_later_valid",
+      "timeline": [
+        {"at": 8, "assert": [
+          {"node": "LateNode", "attr": "ticker", "mode": "changed"}]}
+      ]
+    },
+    {
+      "name": "numeric_both_polarities",
+      "timeline": [
+        {"at": 3, "assert": [{"node": "Main", "attr": "score", "expr": "score >= 1"}]},
+        {"at": 4, "assert": [{"node": "Main", "attr": "score", "expr": "score >= 999"}]}
+      ]
+    },
+    {
+      "name": "legit_null_baseline",
+      "timeline": [
+        {"at": 3, "assert": [{"node": "Main", "attr": "maybe", "mode": "unchanged"}]}
+      ]
+    },
+    {
+      "name": "parse_error_expression",
+      "timeline": [
+        {"at": 3, "assert": [{"node": "Main", "expr": "score >= (1"}]}
+      ]
+    },
+    {
+      "name": "missing_baseline",
+      "timeline": [
+        {"at": 3, "assert": [{"node": "Main", "attr": "score >>", "mode": "changed"}]}
+      ]
+    }
+  ]
+}

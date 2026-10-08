@@ -96,7 +96,9 @@ def start_config_run(db, ws, config_name: str, project_id: str, *,
                      priority: int = 0,
                      repo_type: str = "new",
                      repo_url: str | None = None,
-                     repo_path: str | None = None) -> dict:
+                     repo_path: str | None = None,
+                     against_project: str = "", against_run: str = "",
+                     against_commit: str = "") -> dict:
     """Start a run of ``config_name`` keyed by ``project_id``.
 
     ``seed_text`` is written to the config's ``manifest.seed_file``; ``seed_inputs``
@@ -110,6 +112,22 @@ def start_config_run(db, ws, config_name: str, project_id: str, *,
     manifest = get_config_registry().get(config_name)
     if manifest is None:
         return {"status": "error", "message": f"Unknown config '{config_name}'"}
+
+    # Pin a readonly producer before project/workspace/seed/run effects. Legacy
+    # callers without an exact candidate keep their existing path/HEAD policy.
+    if against_run != "" or against_commit != "":
+        try:
+            from core import run_isolation
+            if manifest.repo_mode != "none" or manifest.scheduler_owned:
+                raise run_isolation.IsolationUnavailable(
+                    "an exact candidate review requires a butler-driven readonly config")
+            source = run_isolation.readonly_review_source(
+                db, get_skillflow(), against_project, against_run, against_commit)
+            if repo_path and not run_isolation.same_git_repository(repo_path, source):
+                raise run_isolation.IsolationUnavailable("review repo_path conflicts with the producer repository")
+            repo_type, repo_path = "existing", source
+        except Exception as exc:
+            return {"status": "error", "message": f"exact review refused: {type(exc).__name__}: {exc}"}
 
     # Repo-ness is DECLARED by the config (manifest.repo_mode), not inferred from
     # what the config registers. A config that emits an artifact instead of code
@@ -332,8 +350,11 @@ def start_config_run(db, ws, config_name: str, project_id: str, *,
 
     from core.seed_publication import review_seed_context
     review_input_context = review_seed_context(seed_dir(sf, project_id, config_name), config_name)
-    run_id = sf.get_or_create_run(config_name, project_id,
-                                 {"project_id": project_id, **(review_input_context or {})})
+    run_context = {"project_id": project_id, **(review_input_context or {})}
+    if against_commit:
+        run_context["review_candidate"] = {"project_id": against_project,
+                                           "run_id": against_run, "commit_sha": against_commit}
+    run_id = sf.get_or_create_run(config_name, project_id, run_context)
     # Past every launch refusal and before this run can execute.
     _reconcile_repo_type()
 
@@ -352,7 +373,9 @@ def start_config_run(db, ws, config_name: str, project_id: str, *,
         from core import run_isolation
         run_isolation.ensure_for_run(
             db, run_id=run_id, project_id=project_id, config_name=config_name,
-            repo_mode=manifest.repo_mode)
+            repo_mode=manifest.repo_mode,
+            **({"read_base_sha": against_commit, "read_source_repo": source}
+               if against_commit else {}))
     except Exception as e:
         return {"status": "error", "project_id": project_id, "run_id": run_id,
                 "message": f"could not isolate run {run_id}: "
@@ -377,7 +400,10 @@ def start_config_run(db, ws, config_name: str, project_id: str, *,
         wake_scheduler(owner_email if owner_email != "cli@local" else None)
 
     return {"status": "started", "project_id": project_id, "run_id": run_id,
-            "config_name": config_name, "scheduler_owned": manifest.scheduler_owned}
+            "config_name": config_name, "scheduler_owned": manifest.scheduler_owned,
+            **({"review_candidate": {"project_id": against_project,
+                                    "run_id": against_run, "commit_sha": against_commit}}
+               if against_commit else {})}
 
 
 def start_addon_run(db, ws, base: str, addons: list[str], project_id: str, **kwargs) -> dict:

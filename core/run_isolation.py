@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import os
 import re
+import stat
 import subprocess
 
 from contextlib import contextmanager
@@ -460,7 +461,9 @@ def _require_usable_run_id(run_id) -> str:
 
 def ensure_for_run(db, *, run_id: str, project_id: str, config_name: str,
                    repo_mode: str = "code",
-                   requested_mode: str | None = None) -> dict:
+                   requested_mode: str | None = None,
+                   read_base_sha: str | None = None,
+                   read_source_repo: str | None = None) -> dict:
     """Decide (once) and provision what this run works in. Idempotent.
 
     Called before the run is started, and again on every resume — a second call
@@ -488,15 +491,25 @@ def ensure_for_run(db, *, run_id: str, project_id: str, config_name: str,
     UNKNOWN; only this controlled race is reproduced and asserted.
     """
     _require_usable_run_id(run_id)
+    if read_base_sha is not None:
+        validate_base_sha(read_base_sha)
+        if repo_mode != "none":
+            raise IsolationUnavailable("an exact review base requires a readonly config")
     with _run_provision_lock(run_id):
         existing = record(db, run_id)
         if existing is not None:
+            if read_base_sha is not None and (existing["mode"] != MODE_READ_SNAPSHOT
+                                             or existing["base_sha"] != read_base_sha
+                                             or (read_source_repo is not None and not same_git_repository(
+                                                 existing["source_repo"], read_source_repo))):
+                raise IsolationUnavailable("existing review snapshot differs from the requested candidate")
             return _resume_existing(db, existing, run_id, project_id,
                                     config_name)
         return _provision_for_run(
             db, run_id=run_id, project_id=project_id,
             config_name=config_name, repo_mode=repo_mode,
-            requested_mode=requested_mode)
+            requested_mode=requested_mode, read_base_sha=read_base_sha,
+            read_source_repo=read_source_repo)
 
 
 
@@ -531,10 +544,13 @@ def _resume_existing(db, existing: dict, run_id: str, project_id: str,
 
 
 def _provision_for_run(db, *, run_id, project_id, config_name, repo_mode,
-                       requested_mode) -> dict:
+                       requested_mode, read_base_sha=None, read_source_repo=None) -> dict:
     """The decision body, run by the single caller that holds the lock."""
 
     source = _source_repo_for(db, project_id)
+    if read_base_sha is not None and read_source_repo is not None:
+        if not source or not same_git_repository(source, read_source_repo):
+            raise IsolationUnavailable("review repository identity changed before snapshot provisioning")
     owns_repo = (repo_mode or "code") != "none"
 
     if not owns_repo:
@@ -544,11 +560,13 @@ def _provision_for_run(db, *, run_id, project_id, config_name, repo_mode,
         # checkout keeps moving under it, so the read target is a detached
         # snapshot. With no target at all, the run is repo-less, unchanged.
         if not source or not _is_git_repo(source):
+            if read_base_sha is not None:
+                raise IsolationUnavailable("the exact review source repository is unavailable")
             return _write_record(db, run_id=run_id, project_id=project_id,
                                  config_name=config_name, mode=MODE_NONE)
         return _provision_tree(db, run_id=run_id, project_id=project_id,
                                config_name=config_name, source=source,
-                               mode=MODE_READ_SNAPSHOT)
+                               mode=MODE_READ_SNAPSHOT, read_base_sha=read_base_sha)
 
     mode = requested_mode or MODE_WORKTREE
     if mode == MODE_DIRECT:
@@ -703,6 +721,160 @@ def validate_base_sha(base_sha: str) -> str:
     return base_sha
 
 
+def same_git_repository(left, right) -> bool:
+    """Compare actual Git common-directory identity, including linked worktrees."""
+    identities = [_git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")
+                  for repo in (left, right)]
+    return (all(r.returncode == 0 and r.stdout.strip() for r in identities)
+            and os.path.realpath(identities[0].stdout.strip())
+            == os.path.realpath(identities[1].stdout.strip()))
+
+
+def readonly_review_source(db, sf, project_id: str, producer_run_id: str,
+                          commit_sha: str) -> str:
+    """Verify an explicit completed producer/candidate before review effects.
+
+    A project's path or a mutable branch tip is not an artifact identity.
+    The existing State attempt binds the producer's final artifact immutably;
+    its isolation record binds the repository. No guessed newest run, current
+    code_changes string, branch tip or another repo's equal SHA is authority.
+    This only reads identity and never fetches, checks out or substitutes HEAD.
+    """
+    if not isinstance(commit_sha, str) or len(commit_sha) != 40:
+        raise IsolationUnavailable("against_commit must be an exact 40-hex Git commit")
+    validate_base_sha(commit_sha)
+    if not isinstance(producer_run_id, str) or not producer_run_id or not project_id:
+        raise IsolationUnavailable("an exact review requires against_project, against_run and against_commit")
+    run = sf.get_run(producer_run_id)
+    if (not run or run.get("status") != "completed"
+            or run.get("project_id") != project_id):
+        raise IsolationUnavailable("the review producer must be the completed run of against_project")
+    producer = record(db, producer_run_id)
+    if (not producer or producer["project_id"] != project_id
+            or producer["config_name"] != run["graph_name"]
+            or producer["mode"] != MODE_WORKTREE):
+        raise IsolationUnavailable("the review producer has no matching owned repository record")
+    with db.get_connection() as conn:
+        artifact = conn.execute(
+            "SELECT execution_project_id,artifact_ref FROM state_attempts "
+            "WHERE execution_kind='skillflow' AND run_id=?", (producer_run_id,)).fetchone()
+    if (not artifact or artifact["execution_project_id"] != project_id
+            or artifact["artifact_ref"] != commit_sha):
+        raise IsolationUnavailable("the completed producer has no matching retained State candidate declaration")
+    project_source = (db.get_repo_info(project_id) or {}).get("repo_path")
+    source = producer["source_repo"]
+    if not project_source or not source:
+        raise IsolationUnavailable("the review producer repository is unavailable")
+    if not same_git_repository(project_source, source):
+        raise IsolationUnavailable("against_project repository differs from the producer repository")
+    candidate = _git(source, "cat-file", "-t", commit_sha)
+    if candidate.returncode != 0 or candidate.stdout.strip() != "commit":
+        raise IsolationUnavailable("the requested review commit is unavailable or differs from the producer candidate")
+    return source
+
+
+def _blob_sha1(data: bytes) -> str:
+    import hashlib
+    h = hashlib.sha1()
+    h.update(b"blob %d\0" % len(data))
+    h.update(data)
+    return h.hexdigest()
+
+
+def verify_served_tree(worktree_path, commit_sha: str, *, _report=None) -> dict:
+    """The served tracked bytes and modes ARE the candidate tree — proven, not assumed.
+
+    `git worktree add --detach <path> <commit>` builds the snapshot through the
+    index, and the index honours several config/flag inputs that make what is
+    on disk diverge from what the tree says: `core.filemode=false` drops
+    executable bits, `skip-worktree` and `assume-unchanged` leave tracked paths
+    unwritten or stale, and a warm stat cache can make even `git status`
+    (an index-refreshing command, and therefore forbidden here) under-report a
+    tampered file. A review pinned to commit B must read B's bytes, so the
+    admission check reads the checkout the way a reviewer does:
+
+    * the trusted side is the commit's TREE — `git ls-tree -r -z <commit>`,
+      pure object-database reads, no index involved;
+    * the served side is the disk — lstat type, pinned file bytes and modes, never the
+      index's opinion of them;
+    * a tracked path whose bytes do not hash to its tree blob, whose
+      executable/symlink mode differs, or that is missing, refuses the review.
+
+    READONLY means readonly: nothing here runs `git update-index`,
+    `git read-tree`, `git reset`, any `--refresh`, and nothing clears a
+    skip-worktree or assume-unchanged flag to make a mismatch go away. A
+    mismatch is a refusal, not something to repair.
+    """
+    if not isinstance(commit_sha, str) or not _SHA1.match(commit_sha):
+        raise IsolationUnavailable("a served tree can only be verified against a 40-hex commit")
+    root = Path(worktree_path)
+    if not root.is_dir():
+        raise IsolationUnavailable(f"review snapshot {root} does not exist to verify")
+    listing = _git(root, "ls-tree", "-r", "-z", commit_sha)
+    if listing.returncode != 0:
+        raise IsolationUnavailable(
+            f"cannot read tree {commit_sha} to verify the review snapshot: "
+            f"{(listing.stderr or listing.stdout).strip()[:300]}")
+    problems: list[str] = []
+    checked = 0
+    for entry in listing.stdout.split("\0"):
+        if not entry:
+            continue
+        meta, _, path = entry.partition("\t")
+        mode, otype, blob_sha = meta.split(" ")
+        if otype != "blob":
+            continue  # a gitlink (submodule) has no served bytes to compare
+        checked += 1
+        target = root / path
+        try:
+            before = target.lstat()
+            if mode == "120000":
+                if not stat.S_ISLNK(before.st_mode):
+                    problems.append(f"{path}: tree says symlink, disk says otherwise")
+                    continue
+                served = os.readlink(target).encode()
+                after = target.lstat()
+                if (before.st_dev, before.st_ino, before.st_ctime_ns) != (
+                        after.st_dev, after.st_ino, after.st_ctime_ns):
+                    raise OSError("symlink changed while verifying its link text")
+                served_mode = "120000"
+            else:
+                if not stat.S_ISREG(before.st_mode):
+                    problems.append(f"{path}: tree says regular file, disk type differs")
+                    continue
+                fd = os.open(target, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                with os.fdopen(fd, "rb") as stream:
+                    opened = os.fstat(stream.fileno())
+                    if (not stat.S_ISREG(opened.st_mode)
+                            or (before.st_dev, before.st_ino) != (
+                                opened.st_dev, opened.st_ino)):
+                        raise OSError("tracked object changed before verification")
+                    served = stream.read()
+                    after = os.fstat(stream.fileno())
+                    if (opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns) != (
+                            after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+                        raise OSError("tracked bytes changed during verification")
+                served_mode = "100755" if opened.st_mode & 0o111 else "100644"
+        except OSError as e:
+            problems.append(f"{path}: tracked file unreadable ({e.strerror or e})")
+            continue
+        if served_mode != mode:
+            problems.append(f"{path}: tree mode {mode}, served mode {served_mode}")
+        if _blob_sha1(served) != blob_sha:
+            problems.append(f"{path}: served bytes do not hash to tree blob {blob_sha[:12]}")
+        if len(problems) >= 20:
+            break
+    if _report is not None:
+        _report({"commit_sha": commit_sha, "tracked_entries": checked,
+                 "problems": problems})
+    if problems:
+        raise IsolationUnavailable(
+            f"review snapshot {root} does not serve candidate {commit_sha}: "
+            f"{len(problems)} mismatch(es), first: {problems[0]}. Refusing the "
+            f"review rather than refreshing, restaging or clearing index flags.")
+    return {"commit_sha": commit_sha, "tracked_entries": checked, "problems": []}
+
+
 def request_base(db, project_id: str, base_sha: str, note: str = "") -> dict:
     """Ask that the NEXT worktree provisioned for `project_id` start at `base_sha`.
 
@@ -739,9 +911,17 @@ def requested_base(db, project_id: str) -> dict | None:
         return dict(row) if row else None
 
 
-def _provision_tree(db, *, run_id, project_id, config_name, source, mode) -> dict:
-    base = _head_sha(source)
-    note = None
+def _provision_tree(db, *, run_id, project_id, config_name, source, mode,
+                    read_base_sha=None) -> dict:
+    if read_base_sha is not None:
+        if mode != MODE_READ_SNAPSHOT:
+            raise IsolationUnavailable("an exact review base requires a read snapshot")
+        validate_base_sha(read_base_sha)
+        probe = _git(source, "cat-file", "-t", read_base_sha)
+        if probe.returncode != 0 or probe.stdout.strip() != "commit":
+            raise IsolationUnavailable(f"review candidate {read_base_sha} is not a commit in {source}")
+    base = read_base_sha if read_base_sha is not None else _head_sha(source)
+    note = f"readonly candidate {read_base_sha}" if read_base_sha is not None else None
     request = requested_base(db, project_id)
     if request:
         if mode != MODE_WORKTREE:
@@ -775,6 +955,13 @@ def _provision_tree(db, *, run_id, project_id, config_name, source, mode) -> dic
         raise IsolationUnavailable(
             f"could not create the {mode} tree for run {run_id} from {source}: "
             f"{(r.stderr or r.stdout).strip()[:400]}")
+    if mode == MODE_READ_SNAPSHOT and read_base_sha is not None:
+        # Exact-candidate ingress: before the run can be recorded against this
+        # snapshot, the tree actually served on disk is compared to the trusted
+        # candidate object — bytes and modes, index-independent, with no index
+        # refresh, reset, stage or flag clearing. A snapshot that does not
+        # serve the candidate is refused, and no record is written for it.
+        verify_served_tree(path, read_base_sha)
     return _write_record(db, run_id=run_id, project_id=project_id,
                          config_name=config_name, mode=mode,
                          source_repo=source, worktree_path=str(path),
@@ -784,7 +971,8 @@ def _provision_tree(db, *, run_id, project_id, config_name, source, mode) -> dic
 # ── resolution ───────────────────────────────────────────────────────
 
 def resolve_for_resolver(db, run_id: str,
-                         run_created_at: str | None = None) -> str | bool | None:
+                         run_created_at: str | None = None, *,
+                         sf=None) -> str | bool | None:
     """The answer the code-path resolver gives for THIS run.
 
     Three answers, and they are all different statements:
@@ -800,6 +988,27 @@ def resolve_for_resolver(db, run_id: str,
     was isolated from, and a run that resumes there quietly writes into it.
     """
     rec = record(db, run_id)
+    if sf is not None:
+        run = sf.get_run(run_id)
+        if run is not None:
+            import json
+            context = json.loads(run.get("context_json") or "{}")
+            binding = context.get("review_candidate")
+            if binding is not None:
+                if not isinstance(binding, dict):
+                    raise IsolationUnavailable("the exact review candidate declaration is invalid")
+                if (not rec or rec["mode"] != MODE_READ_SNAPSHOT
+                        or rec["base_sha"] != binding.get("commit_sha")
+                        or rec["project_id"] != run.get("project_id")
+                        or rec["config_name"] != run.get("graph_name")):
+                    raise IsolationUnavailable(
+                        "the exact review has no matching recorded candidate snapshot")
+                source = readonly_review_source(
+                    db, sf, binding.get("project_id"), binding.get("run_id"),
+                    binding.get("commit_sha"))
+                if not same_git_repository(source, rec["source_repo"]):
+                    raise IsolationUnavailable(
+                        "the review snapshot repository differs from its producer declaration")
     if rec is None:
         return _no_record(db, run_id, run_created_at)
 
@@ -822,7 +1031,98 @@ def resolve_for_resolver(db, run_id: str,
             f"not a live worktree of {rec['source_repo']!r}. Refusing to "
             f"substitute the source checkout. Re-create the tree at that path "
             f"or record a disposition for the run.")
+    if mode == MODE_READ_SNAPSHOT:
+        _require_snapshot_binding(rec, run_id, path)
     return rec["worktree_path"]
+
+
+def _require_snapshot_binding(rec: dict, run_id: str, path) -> None:
+    """Bind a readonly snapshot's actual HEAD AND served bytes to the candidate.
+
+    A live worktree of the right repository (same Git common dir) is still not
+    the recorded candidate: the recorded path can be re-created detached at
+    another commit of the same repository, and every check above would accept
+    it. A readonly review serves candidate files to the reviewer BEFORE the
+    first claim, so two things are verified here, at resolution:
+
+    * the tree's actual HEAD equals the recorded ``base_sha`` — the IDENTITY of
+      the candidate; and
+    * the tracked working tree and index match that commit — the BYTES and
+      MODES the reviewer will read. A clean HEAD with a dirty tracked preview (a
+      file edited in place, a staged change, a mode flip) is downstream or
+      operator work, not the retained candidate, and serving it would hand the
+      reviewer something other than B under B's identity.
+
+    ``git diff-index`` reads the index and working tree and writes neither, and
+    ``_git`` disables Git's optional locks, so the check never mutates the
+    snapshot. A check that cannot be RUN is not a clean check: a non-zero,
+    non-1 exit is refused rather than read as "no differences".
+
+    Legacy unpinned snapshots record the HEAD they were pinned to, so the same
+    checks keep them valid; nothing is fetched, checked out or moved.
+    """
+    validate_base_sha(rec["base_sha"])
+    head = _git(path, "rev-parse", "HEAD")
+    if head.returncode != 0 or not head.stdout.strip():
+        raise IsolationUnavailable(
+            f"run {run_id} is a readonly review snapshot recorded at candidate "
+            f"{rec['base_sha']}, but the tree at {str(path)!r} has no readable "
+            f"HEAD ({(head.stderr or '').strip()[:200]}); refusing to serve an "
+            f"unverifiable snapshot before any review effect")
+    actual = head.stdout.strip()
+    if actual != rec["base_sha"]:
+        raise IsolationUnavailable(
+            f"run {run_id} is a readonly review snapshot recorded at candidate "
+            f"{rec['base_sha']}, but the tree at {str(path)!r} is at HEAD "
+            f"{actual[:12] or 'unknown'}; refusing to serve a substituted "
+            f"snapshot before any review effect")
+    tracked = _git(path, "diff-index", "--quiet", "--ignore-submodules",
+                   "HEAD", "--")
+    if tracked.returncode == 0:
+        # Index flags can conceal the served bytes/type/mode. Compare the disk
+        # against the commit tree at EVERY resolution, including post-provision
+        # preclaim and later read calls; leave both disk and index untouched.
+        try:
+            verify_served_tree(path, rec["base_sha"])
+        except IsolationUnavailable as exc:
+            raise IsolationUnavailable(
+                f"run {run_id} has a tracked review snapshot that differs from "
+                f"its candidate: {exc}") from exc
+        return
+    if tracked.returncode == 1:
+        raise IsolationUnavailable(
+            f"run {run_id} is a readonly review snapshot recorded at candidate "
+            f"{rec['base_sha']}, but the tree at {str(path)!r} has tracked "
+            f"working-tree or index changes relative to that candidate; a "
+            f"readonly review serves the exact recorded candidate bytes, and a "
+            f"dirty preview is not it. Refusing before any review effect.")
+    raise IsolationUnavailable(
+        f"run {run_id} is a readonly review snapshot recorded at candidate "
+        f"{rec['base_sha']}, but the tracked-tree check at {str(path)!r} could "
+        f"not be run ({(tracked.stderr or '').strip()[:200]}); refusing to serve "
+        f"a snapshot whose bytes cannot be verified.")
+
+
+def require_recorded_identity(db, run_id: str, *,
+                              run_created_at: str | None = None):
+    """Ask THIS run's recorded source identity, before any review claim.
+
+    ``resolve_for_resolver`` is the one supported answer to "where does this
+    run's code live now" — a path, ``False`` (owns none) or ``None`` (no
+    opinion) — and it raises the typed ``IsolationUnavailable`` when a decision
+    exists and cannot be honoured. A readonly review snapshot whose live HEAD is
+    not the recorded candidate is exactly that case, and it is a PRE-claim fact:
+    the review is served the candidate tree before the first claim, so asking it
+    at claim ingress is asking it in time. Handing the run its recorded path (or
+    refusing) is all this adds; it reimplements no resolver logic.
+
+    Only a run that HAS an isolation record is in scope. A record-less run is
+    legacy, direct or repo-less, already answered by the project-keyed path, and
+    keeps its old behaviour untouched.
+    """
+    if record(db, run_id) is None:
+        return None
+    return resolve_for_resolver(db, run_id, run_created_at=run_created_at)
 
 
 _UNKNOWN_RUN = object()

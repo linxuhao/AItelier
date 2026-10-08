@@ -256,6 +256,127 @@ recommended path; that is the whole reason they exist.
 `docker compose up -d` also starts **aitelier-godot** — the compile/playtest
 sidecar for the game pipeline. Harmless if unused; `docker compose up -d aitelier`
 starts just the main service.
+### The Godot builder harness (`docker/godot/godot_harness.py`)
+
+It serves the game pipeline's HTTP routes over :8080:
+
+* `POST /compile` — `godot --headless --import`, parse-checked.
+* `POST /playtest` — copy the project, inject a probe, run N frames (optional
+  `{"timeout": seconds}` bounds each engine run, default 120), return
+  runtime errors, a scene-tree variable snapshot, and (on demand via
+  `{"captures": N}`) base64 PNGs of real rendered frames.
+Each authored-scenario assertion is a MEASURED value, not a bare truth. The
+probe records `actual` (the value the expression produced) for every assertion,
+and decides truth only for a Boolean, a non-empty String, a number or null — a
+String observation is a value, never `bool(String)`, and any other type is an
+incomplete measurement rather than a vacuous pass. The asserted attribute's
+current value is read back into `observed` for BOTH passing and failing
+assertions; a read that could not happen is reported as an `observed_error`,
+never smuggled in as a null value. `_read_attr` is a TAGGED read — a legitimately
+captured null and a FAILED read (parse/execute error, unsupported type) are
+different facts — so a failed frame-0 read never becomes a delta baseline, and a
+delta with no baseline is a HARD incomplete measurement, not a comparison
+against a fabricated null. A scheduled assertion with no result row, a probe
+that never reached its frame budget, an unsupported/parse/eval/truncated
+observation, or a missing baseline makes the scenario an INCOMPLETE measurement:
+`passed` is false and `spec_errors` says why, so it can never read as a shorter
+successful (or advisory-green) run. A comparison that was measured and simply
+came out FALSE keeps the ordinary advisory behaviour.
+
+* `POST /script` — run each discovered `extends SceneTree` entry point under
+  `tests/` with `-s`. **Headless by default**; add `{"render": true}` to run
+  the same admitted entry points — the default discovery or an explicitly
+  named selection — through `_run(render=True)` (Xvfb + software GL) so a
+  suite can assert on real pixels. An explicitly named selection is validated
+  against the project's real admitted SceneTree entries (type, relative path,
+  existence, `extends SceneTree`) **before** render-owner admission, the
+  project copy, the import pass or any engine/output work; a rendered request
+  with no real project is refused — never answered with a green render — and
+  a render failure is never retried into a headless green. The report always
+  states `render_mode` (`render`/`headless`) and `render_requested`; an opt-in
+  render with nothing admitted is a HARD failure. `scripts` must be a list or
+  null; omitted/null/empty-list selects full discovery, while false, 0, an
+  empty string or mapping is refused before effects. Discovery finding no
+  admitted entry is the historic skip **only when retention was not
+  requested**; an explicit retention request on such a project still allocates
+  its owned destination and writes a bounded raw-only manifest (a zero-pass
+  explicit raw-only request is a truthful success, a declaration no pass can
+  satisfy is a truthful hard failure), and an opt-in render stays a hard
+  failure.
+
+
+**Owned invocation evidence.** `/script` and `/playtest` accept
+`"retain": {"files": ["reports/summary.json", "frames/f2.png"]}` — each a
+literal relative `user://` path this invocation generated — plus an optional
+`"patterns": ["monthly-journey-actual-*/runtime.json"]` selector for artifacts
+whose directory or filename the invocation derives at run time (a ticks- or
+timestamp-suffixed report/PNG). A pattern must begin with a literal first
+directory prefix, keep a fixed component depth, may wildcard only within one
+path component (`*`/`?`, never a recursive `**` or a root-wide `*`), and a
+pattern that matches nothing is reported missing, exactly like a literal file; a
+pattern that SELECTED a regular artifact that vanished (or whose name was
+replaced by a different inode) before the pinned copy opened it is likewise a
+hard failure naming the selected rel, never a silent "matched nothing" green
+and never a copy of the replacement object: the copy consumes the exact object
+held by the discovery descriptor through name validation and copying. Its live
+`(st_dev, st_ino)` prevents inode reuse after unlink; a removed or replaced name
+still fails rather than copying the orphaned pin. Every selected descriptor is
+closed on success, duplicate selection, quota exit or exception, with no retry,
+reopen or path fallback.
+
+Neither selector may reach the `saves`/`saved_games`/`profile`/`profiles`
+subtrees (matched case-insensitively at every traversal depth): a literal path
+naming one of them is refused before any home is
+
+touched, exactly like a pattern. A request that names
+neither `files` nor `patterns` — including the explicit empty mapping
+`"retain": {}` — is a **raw-only** request: it keeps the full
+stdout/stderr streams and no artifacts, while an omitted `retain` key leaves the
+historic no-retention behaviour unchanged.
+Every pass (each script
+entry, each scenario, the legacy smoke pass, the import pass, every control) runs in its own
+throwaway `$HOME`, registered the moment it is created; retention resolves the
+declared paths against the REAL Godot user-data roots inside that home
+(`$HOME/.local/share/godot/app_userdata/<config/name>`, a custom user dir, or
+an explicitly HOME-root generated file for older callers) — never the whole HOME — and
+keeps EVERY pass that generated a match: the first keeps the declared
+relative path, later passes are kept under distinct per-pass prefixes, each
+manifest row carrying its pass identity (`script`/`scenario`/`control`/`import`). Before the
+throwaway homes are deleted, the declared (literal or pattern-matched) JSON/PNG
+artifacts are copied
+**with the full untruncated stdout/stderr of every pass** (import included)
+into a unique server-chosen directory under the durable `godot-control` state
+root. Imports have isolated HOME and XDG data/config/cache roots on both routes
+and transfer their HOME to invocation retention when artifacts are requested;
+declared import-generated JSON/PNG files are retained before outer cleanup,
+including failure/timeout/unexpected errors. Direct import helper calls and
+requests without retention still clean the import HOME immediately. Full raw
+streams survive within the same budget.
+Godot boolean `config/use_custom_user_dir=true` uses
+`config/custom_user_dir_name`; absolute or traversal metadata cannot select
+a foreign root. The caller names *what* to keep, never *where*. A `manifest.json`
+beside the files records each retained path, size, SHA256, its `user://`
+source, and the server-resolved project/run/operation correlation, including
+the acquired render owner id and generation. Absolute paths, `..` traversal,
+symlink, hard link, FIFO or non-regular artifact is refused; a source swapped
+between validation and copy stays bound to the validated inode (all ancestors
+are opened without following aliases and source/destination descriptors stay
+pinned); the raw streams count toward the
+same declared budget (`GODOT_RETAIN_MAX_FILES`/`_BYTES`), checked before each
+stream, and a pattern's fixed-depth enumeration is bounded by
+`GODOT_RETAIN_MAX_SEARCH_ENTRIES` with at most `GODOT_RETAIN_MAX_PATTERNS`
+selectors per request. A normal whole gate is sized for this explicitly: a
+69-script gate emits >= 140 raw streams (69 entry points + the import pass, each
+with stdout+stderr) and a 221-scenario playtest >= 442 raw streams before any
+on-demand captures or input-dead controls, so `GODOT_RETAIN_MAX_FILES` must be
+configured at least that high — the default `64` is a small-run default, and a
+short quota is a truthful HARD failure, never a silent truncation. A missing declared
+artifact or an exceeded limit makes the call's `passed` false and says so — a
+partial retention is never a green. On success, failure, timeout OR an
+unexpected error the owned homes are still cleaned, a truthful manifest is
+still written, and the original error is preserved. The response keeps its
+4000-char excerpts for compatibility; the raw logs do not truncate.
+
 
 Publishing through an existing **cloudflared** connector is one line. The network
 lives in `docker-compose.yml` itself and is selected BY NAME, with no

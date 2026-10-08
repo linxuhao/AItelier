@@ -76,7 +76,8 @@ def _existing_repo_code_path(project_id: str,
         # the project-keyed path below — which would hand the run the shared
         # checkout it was isolated from, silently, which is the whole defect.
         from core import run_isolation
-        answer = run_isolation.resolve_for_resolver(db_instance, run_id)
+        answer = run_isolation.resolve_for_resolver(
+            db_instance, run_id, sf=get_skillflow())
         if answer is not None:
             return answer
     try:

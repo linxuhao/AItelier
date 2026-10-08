@@ -460,3 +460,123 @@ def restart_server(base_url: str = _DEFAULT_URL, max_wait: int = 120) -> bool:
         raise
     _finish_deployment(clearance, success=True)
     return True
+
+
+def _godot_identity() -> dict:
+    """Observe only the named Godot service; never return Docker environment."""
+    found = _compose("ps", "-q", "godot-builder", capture_output=True, text=True, timeout=15)
+    cid = found.stdout.strip()
+    if found.returncode or not re.fullmatch(r"[0-9a-f]{12,64}", cid):
+        raise ValueError("Godot container identity unavailable")
+    result = subprocess.run(
+        ["docker", "inspect", "--format",
+         "{{.Id}} {{.Image}} {{.State.Pid}} {{.State.Status}}", cid],
+        capture_output=True, text=True, timeout=10)
+    if result.returncode:
+        raise ValueError("Godot process identity unavailable")
+    actual_cid, image, pid, status = result.stdout.strip().split()
+    if not (re.fullmatch(r"[0-9a-f]{64}", actual_cid)
+            and re.fullmatch(r"sha256:[0-9a-f]{64}", image)
+            and pid.isdigit() and int(pid) > 0 and status == "running"):
+        raise ValueError("Godot service is not a running identified process")
+    return {"cid": actual_cid, "image": image, "pid": int(pid)}
+
+
+def _godot_health(cid: str) -> dict:
+    import json
+    result = subprocess.run(
+        ["docker", "exec", cid, "python3", "-c",
+         "import time, urllib.request\n"
+         "deadline=time.monotonic()+30\n"
+         "while True:\n"
+         " try:\n"
+         "  print(urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=5).read().decode()); break\n"
+         " except Exception:\n"
+         "  if time.monotonic() >= deadline: raise\n"
+         "  time.sleep(0.5)"],
+        capture_output=True, text=True, timeout=40)
+    if result.returncode:
+        raise ValueError("Godot health unavailable")
+    return json.loads(result.stdout)
+
+
+def recreate_godot_builder(*, override_file: str, binding_file: str,
+                           expected_cid: str, expected_pid: int,
+                           expected_image: str, report_file: str,
+                           base_url: str = _DEFAULT_URL) -> dict:
+    """Narrow initialized-runtime redeploy: quota/source binding, Godot only."""
+    import hashlib
+    import json
+    import tempfile
+    import yaml
+    from tools.gate_binding import load_binding, digest
+
+    # This is a closed operation, not a generic Compose overlay interface.
+    quotas = {"GODOT_RETAIN_MAX_FILES": "4096", "GODOT_RETAIN_MAX_BYTES": "536870912",
+              "GODOT_RETAIN_MAX_PATTERNS": "16", "GODOT_RETAIN_MAX_SEARCH_ENTRIES": "4096"}
+    override_sha = digest(override_file)
+    if yaml.safe_load(Path(override_file).read_text()) != {
+            "services": {"godot-builder": {"environment": quotas}}}:
+        raise ValueError("override may only set the four owned finite Godot quotas")
+    binding_sha = digest(binding_file)
+    binding = load_binding(binding_file)
+    expected = {"cid": expected_cid, "pid": expected_pid, "image": expected_image}
+    if (not re.fullmatch(r"[0-9a-f]{64}", expected_cid)
+            or type(expected_pid) is not int or expected_pid < 1
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", expected_image)):
+        raise ValueError("exact expected old Godot CID/PID/image required")
+    if binding["engine_sha256"] != binding["files"]["docker/godot/godot_harness.py"]:
+        raise ValueError("Godot engine must load the same frozen Python harness")
+    report = Path(report_file)
+    if not report.is_absolute() or report.exists() or not report.parent.is_dir():
+        raise ValueError("a new absolute owned report path is required")
+    _require_docker()
+    clearance = _require_deployment_clearance("redeploy", base_url=base_url)
+    receipt = {"service": "godot-builder", "override_sha256": override_sha,
+               "binding_sha256": binding_sha, "source": binding,
+               "expected_before": expected}
+    try:
+        with tempfile.TemporaryDirectory(prefix="aitelier-godot-recreate-") as temp:
+            overlay = Path(temp) / "godot.json"
+            overlay.write_text(json.dumps({"services": {"godot-builder": {
+                "image": expected_image, "environment": quotas,
+                "volumes": [binding["source"] + "/docker/godot/godot_harness.py:/srv/godot_harness.py:ro"]}}}))
+            receipt["effect_override_sha256"] = hashlib.sha256(overlay.read_bytes()).hexdigest()
+            receipt["before"] = _godot_identity()
+            if receipt["before"] != expected:
+                raise ValueError("Godot owner identity changed before effect")
+            # Revalidate after taking the real fence and immediately before effects.
+            if digest(override_file) != override_sha or digest(binding_file) != binding_sha:
+                raise ValueError("owned configuration changed before effect")
+            load_binding(binding_file)
+            result = _compose("-f", str(overlay), "up", "-d", "--no-deps",
+                              "--force-recreate", "--no-build", "godot-builder")
+            receipt["compose_exit"] = result.returncode
+            if result.returncode:
+                raise RuntimeError(f"Godot-only recreation failed with exit {result.returncode}")
+            receipt["after"] = _godot_identity()
+            if (receipt["after"]["cid"] == expected_cid
+                    or receipt["after"]["image"] != expected_image):
+                raise ValueError("Godot-only recreation identity differs")
+            receipt["health"] = _godot_health(receipt["after"]["cid"])
+            health = receipt["health"]
+            source = health.get("source_identity", {})
+            limits = {"files": 4096, "bytes": 536870912, "patterns": 16, "search_entries": 4096}
+            if (health.get("ok") is not True or health.get("retention_limits") != limits
+                    or source.get("path") != "/srv/godot_harness.py"
+                    or source.get("sha256") != binding["engine_sha256"]
+                    or source.get("loaded_sha256") != binding["engine_sha256"]):
+                raise ValueError("Godot active source/finite quotas differ")
+            if _godot_identity() != receipt["after"]:
+                raise ValueError("Godot process changed during health observation")
+            load_binding(binding_file)
+            if digest(override_file) != override_sha or digest(binding_file) != binding_sha:
+                raise ValueError("owned configuration changed during effect")
+    except BaseException as exc:
+        receipt["error"] = f"{type(exc).__name__}: {exc}"
+        receipt["journal"] = _finish_deployment(clearance, success=False, error=exc)
+        report.write_text(json.dumps(receipt, indent=2) + "\n")
+        raise
+    receipt["journal"] = _finish_deployment(clearance, success=True)
+    report.write_text(json.dumps(receipt, indent=2) + "\n")
+    return receipt

@@ -2814,6 +2814,25 @@ def rollback(
 
 
 @app.command()
+def recreate_godot(
+    override_file: str = typer.Option(..., "--quota-override"),
+    binding_file: str = typer.Option(..., "--source-binding"),
+    expected_cid: str = typer.Option(..., "--expected-cid"),
+    expected_pid: int = typer.Option(..., "--expected-pid"),
+    expected_image: str = typer.Option(..., "--expected-image"),
+    report_file: str = typer.Option(..., "--report"),
+    server_url: str = typer.Option(_DEFAULT_URL, "--url"),
+):
+    """Recreate only Godot with frozen Source and the owned finite quotas."""
+    from cli.server import recreate_godot_builder
+    recreate_godot_builder(override_file=override_file, binding_file=binding_file,
+                          expected_cid=expected_cid, expected_pid=expected_pid,
+                          expected_image=expected_image, report_file=report_file,
+                          base_url=server_url)
+    console.print(f"[green]Godot-only recreation completed; evidence: {report_file}[/green]")
+
+
+@app.command()
 def server(
     host: str = typer.Option("0.0.0.0", "--host", help="Bind host (--no-docker only)"),
     port: int = typer.Option(_DEFAULT_PORT, "--port", "-p", help="Bind port (--no-docker only)"),

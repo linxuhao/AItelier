@@ -5177,6 +5177,21 @@ def x11_input_smoke(project_dir: str, timeout: int = 180) -> dict:
         shutil.rmtree(work, ignore_errors=True)
 
 
+_LOADED_SOURCE_SHA256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+
+
+def health_snapshot():
+    """Named effective limits and actual loaded source; no environment dump."""
+    return {"ok": True, "engine": "godot", "bin": GODOT_BIN,
+            "source_identity": {"path": str(Path(__file__).resolve()),
+                                "sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+                                "loaded_sha256": _LOADED_SOURCE_SHA256,
+                                "pid": os.getpid()},
+            "retention_limits": {"files": _RETAIN_MAX_FILES, "bytes": _RETAIN_MAX_BYTES,
+                                 "patterns": _RETAIN_MAX_PATTERNS,
+                                 "search_entries": _RETAIN_MAX_SEARCH_ENTRIES}}
+
+
 class _Handler(BaseHTTPRequestHandler):
     def _send(self, code: int, payload: dict) -> None:
         body = json.dumps(payload).encode()
@@ -5237,7 +5252,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/health":
-            self._send(200, {"ok": True, "engine": "godot", "bin": GODOT_BIN})
+            self._send(200, health_snapshot())
         elif self.path == "/lifecycle":
             try:
                 self._send(200, {"resource": "render",

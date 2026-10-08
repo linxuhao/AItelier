@@ -23,12 +23,55 @@
       ]
     },
     {
-      "name": "unsupported_observed_attr",
+      "name": "unsupported_callable_attr",
       "timeline": [
         {"at": 3, "assert": [
-          {"node": "Main", "attr": "stuff", "expr": "stuff"}]}
+          {"node": "Main", "attr": "cb", "expr": "cb"}]}
       ]
     },
+    {
+      "name": "vector2i_unchanged",
+      "timeline": [
+        {"at": 3, "assert": [{"node": "Main", "attr": "cell", "mode": "unchanged"}]}
+      ]
+    },
+    {
+      "name": "vector2i_changed",
+      "timeline": [
+        {"at": 3, "assert": [{"node": "Main", "attr": "cell_moved", "mode": "changed"}]}
+      ]
+    },
+    {
+      "name": "rect2_unchanged",
+      "timeline": [
+        {"at": 3, "assert": [{"node": "Main", "attr": "box", "mode": "unchanged"}]}
+      ]
+    },
+    {
+      "name": "color_changed",
+      "timeline": [
+        {"at": 3, "assert": [{"node": "Main", "attr": "tint", "mode": "changed"}]}
+      ]
+    },
+    {
+      "name": "nested_array_unchanged",
+      "timeline": [
+        {"at": 3, "assert": [{"node": "Main", "attr": "items", "mode": "unchanged"}]}
+      ]
+    },
+    {
+      "name": "dictionary_reorder_is_not_a_change",
+      "timeline": [
+        {"at": 3, "assert": [{"node": "Main", "attr": "stats", "mode": "unchanged"}]}
+      ]
+    },
+    {
+      "name": "dictionary_value_changed",
+      "timeline": [
+        {"at": 3, "assert": [{"node": "Main", "attr": "stats_moved", "mode": "changed"}]}
+      ]
+    },
+
     {
       "name": "unsupported_delta",
       "timeline": [
@@ -51,6 +94,73 @@
       ]
     },
     {
+      "name": "unsupported_observed_attr",
+      "timeline": [
+        {"at": 3, "assert": [
+          {"node": "Main", "attr": "stuff", "expr": "stuff"}]}
+      ]
+    },
+    {
+      "name": "float_lossless_unchanged",
+      "timeline": [
+        {"at": 3, "assert": [{"node": "Main", "attr": "ratio", "mode": "unchanged"}]}
+      ]
+    },
+    {
+      "name": "float_close_step_is_a_change",
+      "timeline": [
+        {"at": 3, "assert": [{"node": "Main", "attr": "ratio_close", "mode": "changed"}]}
+      ]
+    },
+    {
+      "name": "float_close_step_unchanged_is_false",
+      "timeline": [
+        {"at": 3, "assert": [{"node": "Main", "attr": "ratio_close", "mode": "unchanged"}]}
+      ]
+    },
+    {
+      "name": "float_key_reorder_is_not_a_change",
+      "timeline": [
+        {"at": 3, "assert": [{"node": "Main", "attr": "keyed", "mode": "unchanged"}]}
+      ]
+    },
+    {
+      "name": "byte_budget_string_refused",
+      "timeline": [
+        {"at": 3, "assert": [{"node": "Main", "attr": "big_text", "mode": "unchanged"}]}
+      ]
+    },
+    {
+      "name": "byte_budget_string_key_refused",
+      "timeline": [
+        {"at": 3, "assert": [{"node": "Main", "attr": "big_key", "mode": "unchanged"}]}
+      ]
+    },
+    {
+      "name": "nonfinite_float_refused",
+      "timeline": [
+        {"at": 3, "assert": [{"node": "Main", "attr": "blowup", "mode": "unchanged"}]}
+      ]
+    },
+    {
+      "name": "nonfinite_color_refused",
+      "timeline": [
+        {"at": 3, "assert": [{"node": "Main", "attr": "tint_nan", "mode": "unchanged"}]}
+      ]
+    },
+    {
+      "name": "nonfinite_vector_refused",
+      "timeline": [
+        {"at": 3, "assert": [{"node": "Main", "attr": "cell_nan", "mode": "unchanged"}]}
+      ]
+    },
+    {
+      "name": "cycle_refused",
+      "timeline": [
+        {"at": 3, "assert": [{"node": "Main", "attr": "looping", "mode": "unchanged"}]}
+      ]
+    },
+    {
       "name": "legit_null_baseline",
       "timeline": [
         {"at": 3, "assert": [{"node": "Main", "attr": "maybe", "mode": "unchanged"}]}
@@ -66,6 +176,168 @@
       "name": "missing_baseline",
       "timeline": [
         {"at": 3, "assert": [{"node": "Main", "attr": "score >>", "mode": "changed"}]}
+      ]
+    },
+    {
+      "name": "tiny_float_unchanged",
+      "timeline": [
+        {"at": 3, "assert": [{"node": "Main", "attr": "tiny", "mode": "unchanged"}]}
+      ]
+    },
+    {
+      "name": "tiny_float_step_is_a_change",
+      "timeline": [
+        {"at": 3, "assert": [{"node": "Main", "attr": "tiny_close", "mode": "changed"}]}
+      ]
+    },
+    {
+      "name": "tiny_float_step_unchanged_is_false",
+      "timeline": [
+        {"at": 3, "assert": [{"node": "Main", "attr": "tiny_close", "mode": "unchanged"}]}
+      ]
+    },
+    {
+      "name": "subnormal_float_unchanged",
+      "timeline": [
+        {"at": 3, "assert": [{"node": "Main", "attr": "subnormal", "mode": "unchanged"}]}
+      ]
+    },
+    {
+      "name": "minnormal_float_unchanged",
+      "timeline": [
+        {"at": 3, "assert": [{"node": "Main", "attr": "minnormal", "mode": "unchanged"}]}
+      ]
+    },
+    {
+      "name": "huge_float_unchanged",
+      "timeline": [
+        {"at": 3, "assert": [{"node": "Main", "attr": "huge", "mode": "unchanged"}]}
+      ]
+    },
+    {
+      "name": "signed_zero_is_not_a_change",
+      "timeline": [
+        {"at": 3, "assert": [{"node": "Main", "attr": "zero_neg", "mode": "unchanged"}]}
+      ]
+    },
+    {
+      "name": "tiny_typed_key_change_is_a_change",
+      "timeline": [
+        {"at": 3, "assert": [{"node": "Main", "attr": "tiny_key", "mode": "changed"}]}
+      ]
+    },
+    {
+      "name": "int_to_float_type_change_is_a_change",
+      "timeline": [
+        {"at": 3, "assert": [{"node": "Main", "attr": "typed", "mode": "changed"}]}
+      ]
+    },
+    {
+      "name": "bool_type_change_is_a_change",
+      "timeline": [
+        {"at": 3, "assert": [{"node": "Main", "attr": "flag", "mode": "changed"}]}
+      ]
+    },
+    {
+      "name": "typed_keys_unchanged",
+      "timeline": [
+        {"at": 3, "assert": [{"node": "Main", "attr": "typed_keys", "mode": "unchanged"}]}
+      ]
+    },
+    {
+      "name": "typed_keys_value_change_is_a_change",
+      "timeline": [
+        {"at": 3, "assert": [{"node": "Main", "attr": "typed_keys_moved", "mode": "changed"}]}
+      ]
+    },
+    {
+      "name": "byte_cap_string_below_admitted",
+      "timeline": [
+        {"at": 3, "assert": [{"node": "Main", "attr": "leaf_under", "mode": "unchanged"}]}
+      ]
+    },
+    {
+      "name": "byte_cap_string_key_below_admitted",
+      "timeline": [
+        {"at": 3, "assert": [{"node": "Main", "attr": "key_under", "mode": "unchanged"}]}
+      ]
+    },
+    {
+      "name": "byte_cap_emoji_refused",
+      "timeline": [
+        {"at": 3, "assert": [{"node": "Main", "attr": "byte_over_emoji", "mode": "unchanged"}]}
+      ]
+    },
+    {
+      "name": "byte_cap_emoji_below_admitted",
+      "timeline": [
+        {"at": 3, "assert": [{"node": "Main", "attr": "byte_under_emoji", "mode": "unchanged"}]}
+      ]
+    },
+    {
+      "name": "byte_cap_escape_refused",
+      "timeline": [
+        {"at": 3, "assert": [{"node": "Main", "attr": "escape_over", "mode": "unchanged"}]}
+      ]
+    },
+    {
+      "name": "byte_cap_escape_below_admitted",
+      "timeline": [
+        {"at": 3, "assert": [{"node": "Main", "attr": "escape_under", "mode": "unchanged"}]}
+      ]
+    },
+    {
+      "name": "byte_cap_float_tag_refused",
+      "timeline": [
+        {"at": 3, "assert": [{"node": "Main", "attr": "float_array_over", "mode": "unchanged"}]}
+      ]
+    },
+    {
+      "name": "byte_cap_float_tag_below_admitted",
+      "timeline": [
+        {"at": 3, "assert": [{"node": "Main", "attr": "float_array_under", "mode": "unchanged"}]}
+      ]
+    },
+    {
+      "name": "byte_cap_vector_refused",
+      "timeline": [
+        {"at": 3, "assert": [{"node": "Main", "attr": "vector_over", "mode": "unchanged"}]}
+      ]
+    },
+    {
+      "name": "byte_cap_vector_below_admitted",
+      "timeline": [
+        {"at": 3, "assert": [{"node": "Main", "attr": "vector_under", "mode": "unchanged"}]}
+      ]
+    },
+    {
+      "name": "subnormal_literal_staged_nonzero",
+      "timeline": [
+        {"at": 3, "assert": [{"node": "Main", "attr": "subnormal_raw", "expr": "subnormal_raw > 0.0"}]}
+      ]
+    },
+    {
+      "name": "ieee_subnormal_runtime_staged_nonzero",
+      "timeline": [
+        {"at": 3, "assert": [{"node": "Main", "attr": "ieee_subnormal", "expr": "ieee_subnormal > 0.0"}]}
+      ]
+    },
+    {
+      "name": "ieee_subnormal_unchanged_token_is_nonzero",
+      "timeline": [
+        {"at": 3, "assert": [{"node": "Main", "attr": "ieee_subnormal", "mode": "unchanged"}]}
+      ]
+    },
+    {
+      "name": "minnormal_staged_nonzero",
+      "timeline": [
+        {"at": 3, "assert": [{"node": "Main", "attr": "minnormal_raw", "expr": "minnormal_raw > 0.0"}]}
+      ]
+    },
+    {
+      "name": "huge_staged_finite_positive",
+      "timeline": [
+        {"at": 3, "assert": [{"node": "Main", "attr": "huge_raw", "expr": "huge_raw > 0.0 and huge_raw < INF"}]}
       ]
     }
   ]

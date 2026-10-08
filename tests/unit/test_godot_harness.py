@@ -6,6 +6,7 @@ real end-to-end compile/playtest runs only when a Godot binary is available
 """
 
 import importlib.util
+import json
 import os
 import shutil
 from pathlib import Path
@@ -1078,9 +1079,12 @@ def test_real_playtest_assertion_value_controls():
     assert s["asserts"][0]["passed"] is False
     assert s["asserts"][0]["observed"] == ""
 
-    # An UNSUPPORTED observed value (Dictionary) and a delta on one are explicit
-    # incomplete measurements, never str(v) that could compare equal and pass.
-    for name in ("unsupported_observed_attr", "unsupported_delta"):
+    # An UNSUPPORTED observed value (a live Object and a Callable) and a delta on
+    # one are explicit incomplete measurements, never str(v) that could compare
+    # equal and pass. Color/Dictionary/Array are now safely representable, so the
+    # false-green control deliberately uses a live Object/Callable instead.
+    for name in ("unsupported_observed_attr", "unsupported_callable_attr",
+                 "unsupported_delta"):
         row = scen[name]
         assert row["complete"] is False and row["incomplete_asserts"] == 1, name
 
@@ -1105,6 +1109,130 @@ def test_real_playtest_assertion_value_controls():
     assert s["complete"] is True and s["incomplete_asserts"] == 0
     assert s["asserts"][0]["passed"] is True
 
+    # Safely representable structured values carry their TYPE and key/value
+    # distinctions: an unchanged Vector2i/Rect2/nested Array is a measured
+    # complete observation, and a MOVED Vector2i/Color/Dictionary is a measured
+    # `changed`. The tagged envelope keeps Vector2i(3,4) distinct from [3, 4].
+    for name in ("vector2i_unchanged", "rect2_unchanged", "nested_array_unchanged"):
+        row = scen[name]
+        assert row["complete"] is True and row["incomplete_asserts"] == 0, name
+        assert row["asserts"][0]["passed"] is True, name
+    for name in ("vector2i_changed", "color_changed", "dictionary_value_changed"):
+        row = scen[name]
+        assert row["complete"] is True and row["incomplete_asserts"] == 0, name
+        assert row["asserts"][0]["passed"] is True, name
+    # Insertion order alone is NOT a value change: the same Dictionary entries in
+    # a different order are an unchanged observation.
+    s = scen["dictionary_reorder_is_not_a_change"]
+    assert s["complete"] is True and s["incomplete_asserts"] == 0
+    assert s["asserts"][0]["passed"] is True
+    # The tagged envelope survives into the report, so the type is observable.
+    assert scen["vector2i_unchanged"]["asserts"][0]["actual"]["current"]["__t"] == "Vector2i"
+
+    # A Float observation is exported LOSSLESSLY in the engine's SCIENTIFIC form
+    # (`String.num_scientific`), so close and tiny finite values are DISTINCT
+    # wire tokens and dictionary key sorting is total. Unchanged on 1.0 passes; a
+    # single close finite step is a real `changed` and NOT an `unchanged`.
+    s = scen["float_lossless_unchanged"]
+    assert s["complete"] is True and s["incomplete_asserts"] == 0
+    assert s["asserts"][0]["passed"] is True
+    cur = s["asserts"][0]["actual"]["current"]
+    assert isinstance(cur, dict) and cur["__t"] == "Float"
+    s = scen["float_close_step_is_a_change"]
+    assert s["complete"] is True and s["incomplete_asserts"] == 0
+    assert s["asserts"][0]["passed"] is True
+    close = s["asserts"][0]["actual"]["current"]
+    assert isinstance(close, dict) and close["__t"] == "Float"
+    assert close["__v"] != cur["__v"]
+    # ...and the unchanged polarity on the moved value is a measured advisory
+    # miss, never a vacuous green.
+    s = scen["float_close_step_unchanged_is_false"]
+    assert s["complete"] is True and s["incomplete_asserts"] == 0
+    assert s["asserts"][0]["passed"] is False
+    # Two close finite Float KEYS stay distinct under the canonical key sort:
+    # reordering them alone is not a value change.
+    s = scen["float_key_reorder_is_not_a_change"]
+    assert s["complete"] is True and s["incomplete_asserts"] == 0
+    assert s["asserts"][0]["passed"] is True
+
+    # TINY magnitude, subnormal, min-normal and huge finite doubles each keep
+    # their exact value under the scientific token (a fixed-decimal formatter
+    # would flatten the tiny ones to 0.000000). A 1e-20 -> 2e-20 step is a real
+    # change; the unchanged polarity on it is a measured advisory miss.
+    for name in ("tiny_float_unchanged", "subnormal_float_unchanged",
+                 "minnormal_float_unchanged", "huge_float_unchanged"):
+        row = scen[name]
+        assert row["complete"] is True and row["incomplete_asserts"] == 0, name
+        assert row["asserts"][0]["passed"] is True, name
+        assert row["asserts"][0]["actual"]["current"]["__t"] == "Float", name
+    s = scen["tiny_float_step_is_a_change"]
+    assert s["complete"] is True and s["incomplete_asserts"] == 0
+    assert s["asserts"][0]["passed"] is True
+    assert s["asserts"][0]["actual"]["baseline"]["__v"] != s["asserts"][0]["actual"]["current"]["__v"]
+    s = scen["tiny_float_step_unchanged_is_false"]
+    assert s["complete"] is True and s["incomplete_asserts"] == 0
+    assert s["asserts"][0]["passed"] is False
+    # +0.0 and -0.0 compare equal in ordinary Godot numeric equality: a raw sign
+    # difference is NOT a legacy delta, so an `unchanged` on -0.0 passes.
+    s = scen["signed_zero_is_not_a_change"]
+    assert s["complete"] is True and s["incomplete_asserts"] == 0
+    assert s["asserts"][0]["passed"] is True
+    # A TINY Float KEY change, an int->float TYPE change and a bool flip are each
+    # a real value change per the actual engine, not Python number equality.
+    for name in ("tiny_typed_key_change_is_a_change",
+                 "int_to_float_type_change_is_a_change",
+                 "bool_type_change_is_a_change"):
+        row = scen[name]
+        assert row["complete"] is True and row["incomplete_asserts"] == 0, name
+        assert row["asserts"][0]["passed"] is True, name
+    # Typed dictionary keys (int/bool/float) sort canonically and are stable; a
+    # value flip under a stable key set is a change.
+    s = scen["typed_keys_unchanged"]
+    assert s["complete"] is True and s["incomplete_asserts"] == 0
+    assert s["asserts"][0]["passed"] is True
+    s = scen["typed_keys_value_change_is_a_change"]
+    assert s["complete"] is True and s["incomplete_asserts"] == 0
+    assert s["asserts"][0]["passed"] is True
+
+    # The cap is on the ACTUAL compact JSON encoding of the finished
+    # observation, so a value genuinely under the byte cap is ADMITTED (the
+    # below-cap twins), while its over-cap twin is a HARD incomplete refusal --
+    # never a truncation and never a fabricated null. This distinguishes a real
+    # payload cap from an arbitrary character/scan-pattern estimate.
+    for name in ("byte_budget_string_refused", "byte_budget_string_key_refused",
+                 "byte_cap_emoji_refused", "byte_cap_escape_refused",
+                 "byte_cap_float_tag_refused", "byte_cap_vector_refused"):
+        row = scen[name]
+        assert row["complete"] is False and row["incomplete_asserts"] == 1, name
+    for name in ("byte_cap_string_below_admitted",
+                 "byte_cap_string_key_below_admitted",
+                 "byte_cap_emoji_below_admitted",
+                 "byte_cap_escape_below_admitted",
+                 "byte_cap_float_tag_below_admitted",
+                 "byte_cap_vector_below_admitted"):
+        row = scen[name]
+    for name in ("byte_cap_string_below_admitted",
+                 "byte_cap_string_key_below_admitted",
+                 "byte_cap_emoji_below_admitted",
+                 "byte_cap_escape_below_admitted",
+                 "byte_cap_float_tag_below_admitted",
+                 "byte_cap_vector_below_admitted"):
+        row = scen[name]
+        assert row["complete"] is True and row["incomplete_asserts"] == 0, name
+        assert row["asserts"][0]["passed"] is True, name
+
+    # An unrepresentable observed value is a HARD incomplete refusal, never a
+    # stringification or a fabricated null: a Float that became non-finite
+    # (inf/nan), a Color or Vector component carrying NaN, and a self-referential
+    # (cyclic) container are each exactly one unmeasured assertion.
+    for name in ("nonfinite_float_refused", "nonfinite_color_refused",
+                 "nonfinite_vector_refused", "cycle_refused"):
+        row = scen[name]
+        assert row["complete"] is False and row["incomplete_asserts"] == 1, name
+
+
+
+
     # An unparseable expression and a missing frame-0 baseline are HARD
     # incomplete measurements: the run cannot read as a shorter success.
     assert r["passed"] is False
@@ -1112,3 +1240,625 @@ def test_real_playtest_assertion_value_controls():
         row = scen[name]
         assert row["complete"] is False and row["incomplete_asserts"] == 1, name
     assert any("incomplete measurement" in e for e in r["spec_errors"])
+
+    # SCIENTIFIC staging fidelity: the token cases above prove an UNCHANGED
+    # observation keeps its wire token, which a staged ZERO would also satisfy
+    # vacuously. These controls read the raw pre-encoder value back at frame 3 and
+    # assert it is genuinely positive -- so an unchanged-zero green can never stand
+    # in for a fidelity measurement. The admitted native batch showed the source
+    # `5e-324` / `2.2250738585072014e-308` literals stage as 0.0 here, so the fixture
+    # supplies these raw values from GENUINE IEEE-754 bit patterns decoded at
+    # runtime (PackedByteArray.decode_double), shared with the delta fields; the
+    # `subnormal_literal_staged_nonzero` ID is retained for evidence
+    # continuity and now means "the fixture-supplied raw value is nonzero".
+    s = scen["subnormal_literal_staged_nonzero"]
+    assert s["complete"] is True and s["incomplete_asserts"] == 0
+    assert s["asserts"][0]["passed"] is True
+    assert s["asserts"][0]["observed"]["__t"] == "Float"
+    assert s["asserts"][0]["observed"]["__v"] != "0"
+    s = scen["ieee_subnormal_runtime_staged_nonzero"]
+    assert s["complete"] is True and s["incomplete_asserts"] == 0
+    assert s["asserts"][0]["passed"] is True
+    assert s["asserts"][0]["observed"]["__v"] != "0"
+    s = scen["minnormal_staged_nonzero"]
+    assert s["complete"] is True and s["incomplete_asserts"] == 0
+    assert s["asserts"][0]["passed"] is True
+    assert s["asserts"][0]["observed"]["__v"] != "0"
+    s = scen["huge_staged_finite_positive"]
+    assert s["complete"] is True and s["incomplete_asserts"] == 0
+    assert s["asserts"][0]["passed"] is True
+    assert s["asserts"][0]["observed"]["__t"] == "Float"
+
+# ── same-frame text/geometry observation (Godot-free halves) ───────────────
+# The probe's collector is GDScript and runs inside the engine; these tests
+# cover the Python half (_attach_pngs forwarding) with a real temp PNG, and the
+# collector/refusal bookkeeping by reading the emitted source. The native pilot
+# that drives the real built-in Controls is @requires_godot and UNRUN here.
+import base64 as _b64
+
+
+def _tiny_png(path):
+    # A tiny opaque byte sequence; the harness only base64s it, so it need not be
+    # a decodable image.
+    data = b"\x89PNG\r\n\x1a\n" + bytes(range(24))
+    path.write_bytes(data)
+    return data
+
+
+def test_attach_pngs_forwards_the_text_observation_verbatim(tmp_path):
+    """The same-frame text/geometry observation rides home with its PNG.
+
+    _attach_pngs used to keep ONLY frame/file/png_b64, stripping everything
+    else the probe attached. A capture's observation was therefore thrown away
+    before the caller could see it. The observation is now forwarded verbatim,
+    and the exact PNG bytes still ride alongside it (PNG correspondence).
+    """
+    obs = {"frame": 0, "locale": "en", "controls": [
+        {"path": "/root/TextRoot/VisibleIdLabel", "class": "Label",
+         "source_text": "VISIBLE_TABLE_ID", "displayed_text": "VISIBLE_TABLE_ID",
+         "complete": True}], "complete": True}
+    raw = _tiny_png(tmp_path / "frame_0000.png")
+    caps = [{"frame": 0, "file": "/container/local/frame_0000.png",
+             "text_observation": obs}]
+    out = gh._attach_pngs(caps, tmp_path)
+    assert len(out) == 1 and out[0]["file"] == "frame_0000.png"
+    assert out[0]["text_observation"] is obs
+    assert out[0]["png_b64"] == _b64.b64encode(raw).decode()
+
+
+def test_attach_pngs_reports_a_missing_observation_never_drops_it(tmp_path):
+    """A capture row without an observation is an ABSENT observation, not a
+    silently complete empty corpus: it is kept on the row with complete=false."""
+    _tiny_png(tmp_path / "frame_0003.png")
+    caps = [{"frame": 3, "file": "/container/local/frame_0003.png"}]
+    out = gh._attach_pngs(caps, tmp_path)
+    assert out[0]["frame"] == 3
+    assert out[0]["text_observation"]["complete"] is False
+    assert "no text observation" in out[0]["text_observation"]["error"]
+    # The PNG still rode home; only the observation is reported absent.
+    assert out[0].get("png_b64")
+
+
+def test_attach_pngs_reports_a_missing_png_visibly(tmp_path):
+    """A scheduled capture whose PNG is not on disk is an explicit png_error on
+    the row; it is never presented as a successful capture of an empty frame."""
+    caps = [{"frame": 2, "file": "/container/local/frame_0002.png",
+             "text_observation": {"frame": 2, "complete": False}}]
+    timing = {}
+    out = gh._attach_pngs(caps, tmp_path, timing=timing)
+    assert out[0]["png_error"] == "missing PNG file"
+    assert "png_b64" not in out[0]
+    assert timing["png_missing"] == ["frame_0002.png"]
+    # The observation is still forwarded, so a missing PNG is distinguishable
+    # from a missing observation.
+    assert out[0]["text_observation"]["frame"] == 2
+
+
+def test_observe_text_source_observes_supported_and_marks_unsupported():
+    """Source-level contract of the emitted GDScript collector.
+
+    The collector must: walk the live tree (so script-less Controls are seen),
+    support the ordinary Label/Button text classes, mark the visibly
+    text-bearing but unsupported classes explicitly, report the engine locale,
+    and refuse a whole over-budget observation rather than truncating it. A
+    source-census classifier must NOT gate what gets captured.
+    """
+    src = _HARNESS.read_text(encoding="utf-8")
+    assert "func _observe_text(" in src
+    assert "_observe_text_walk(root, 0, obs)" in src
+    assert "get_tree().get_root()" in src
+    assert 'const _TEXT_SUPPORTED = ["Label", "Button"]' in src
+    for cls in ("RichTextLabel", "LineEdit", "OptionButton", "ItemList", "Tree"):
+        assert cls in src, cls
+    # The engine's OWN locale is observed, never inferred from a requested lang.
+    assert "TranslationServer.get_locale()" in src
+    assert "TranslationServer.get_loaded_locales()" in src
+    assert "TranslationServer.translate(" in src
+    # Whole-observation refusal on the byte ceiling, never truncation.
+    assert "_TEXT_OBSERVE_BYTES_MAX" in src
+    assert "the whole observation is refused rather than truncated" in src
+    # Rendering-chain clip + viewport intersection for the effective rect.
+    assert "func _render_chain(c: Control) -> Dictionary:" in src
+    assert "get_visible_rect()" in src
+    assert "clip_contents" in src
+    # The walk's root is declared inside the probe (the generated probe has
+    # no `root` member; an undeclared identifier would not even parse).
+    assert "var root: Node = get_tree().get_root()" in src
+    # Presence only: the ceiling is checked on the returned dictionary itself.
+    assert "if _text_envelope_bytes(obs) > _TEXT_OBSERVE_BYTES_MAX:" in src
+
+
+def test_observe_text_records_geometry_as_rects_not_ink_bounds():
+    """Geometry is reported as Control/clip/viewport rects only. The observer
+    must not claim a glyph ink bound or proof of occlusion anywhere."""
+    src = _HARNESS.read_text(encoding="utf-8")
+    for key in ("global_rect", "screen_rect", "clip_rect", "viewport_rect",
+                "effective_rect"):
+        assert '"%s"' % key in src
+    # Honest coverage fields: unsupported surfaces and unresolved text are
+    # named as incomplete reasons, never silently dropped.
+    assert "incomplete_reasons" in src
+    assert "displayed_text_resolved" in src
+    assert "unsupported visible text surface" in src
+
+
+# ── planned native fixture controls (real Godot; UNRUN by source worker) ─────
+# The root-controlled native slot drives the fixture's two live built-in
+# Controls (a script-less Label with a visible id and a Button whose text is a
+# missing-catalog translation key), plus the real ancestor clip/viewport
+# intersection. The source worker never invokes Godot.
+_TEXT_OBSERVE_CONTROLS = (Path(__file__).resolve().parent / "fixtures"
+                          / "godot_text_observation_controls")
+
+
+def test_native_fixture_declares_visible_id_and_missing_catalog_key():
+    """The literal captured corpus the native pilot observes carries BOTH
+    injected strings: a visible id label and a missing-catalog translation key.
+    These are present in the fixture SOURCE, not produced by any classifier."""
+    main = (_TEXT_OBSERVE_CONTROLS / "main.gd").read_text(encoding="utf-8")
+    assert "VISIBLE_TABLE_ID" in main
+    assert "missing_catalog.key" in main
+    # Both surfaces are script-less built-in Controls.
+    assert "Label.new()" in main and "Button.new()" in main
+    assert (_TEXT_OBSERVE_CONTROLS / "project.godot").is_file()
+    assert (_TEXT_OBSERVE_CONTROLS / "main.tscn").is_file()
+
+
+@requires_godot
+def test_real_playtest_text_observation_same_frame_as_png(tmp_path):
+    """Native: at a captured frame the observation describes that SAME frame.
+
+    The observer sees the script-less Label by walking the live tree, records
+    its global/clip/viewport rects and the engine locale, and the missing-
+    catalog key stays the literal displayed string (translate() returns it
+    unchanged). This is the criterion the independent native pilot confirms;
+    it is UNRUN by the source worker.
+    """
+    import shutil as _shutil
+    proj = tmp_path / "textobs"
+    _shutil.copytree(_TEXT_OBSERVE_CONTROLS, proj)
+    r = gh.playtest_project(str(proj), frames=8, captures=2)
+    assert r["render_mode"] in ("render", "headless")
+    caps = r["captures"]
+    assert caps, "expected at least one captured frame"
+    obs = caps[0]["text_observation"]
+    assert "locale" in obs
+    # The nested-viewport surface leaves the observation explicitly
+    # INCOMPLETE: its geometry is named as unresolved, never guessed.
+    assert obs["complete"] is False
+    assert any("NestedViewportLabel" in r for r in obs["incomplete_reasons"])
+    label = next(c for c in obs["controls"]
+                 if c["source_text"] == "VISIBLE_TABLE_ID")
+    assert label["source_text"] == "VISIBLE_TABLE_ID"
+    assert label["displayed_text"] == "VISIBLE_TABLE_ID"
+    assert label["displayed_text_resolved"] is True
+    for key in ("global_rect", "clip_rect", "viewport_rect", "effective_rect"):
+        assert isinstance(label[key], list) and len(label[key]) == 4, key
+    button = next(c for c in obs["controls"] if c["class"] == "Button")
+    assert button["source_text"] == "missing_catalog.key"
+    assert button["displayed_text_resolved"] is True
+    assert button["displayed_text"] == "missing_catalog.key"
+    # Known-hidden surfaces (own alpha 0, ancestor modulate 0, clipped out,
+    # hidden scene-tree parent of a top_level Label) are reported hidden.
+    hidden = " ".join(h["path"] for h in obs["hidden_surfaces"])
+    for name in ("OwnSelfModulateZeroLabel", "FadedLabel", "ClippedOutLabel",
+                 "HiddenLabel", "TopLevelUnderHiddenLabel"):
+        assert name in hidden, name
+    # The rendering chain ends at a plain Node and at top_level: modulate,
+    # visibility (plain Node only) and clip do not cross it, and the chain
+    # end is resolved, not unresolved.
+    for name in ("ParentSelfModulateChildLabel", "UnicodeLocalizedLabel",
+                 "TopLevelLabel"):
+        row = next(c for c in obs["controls"] if c["path"].endswith(name))
+        assert row["clip_resolved"] is True, name
+        assert row["text_possibly_visible"] is True, name
+        assert name not in hidden, name
+    uni = next(c for c in obs["controls"]
+               if c["path"].endswith("UnicodeLocalizedLabel"))
+    assert uni["displayed_text"] == "战况表 · localized_display"
+    # Label._shape transforms: uppercase and VC_CHARS_BEFORE_SHAPING.
+    up = next(c for c in obs["controls"] if c["path"].endswith("UppercaseLabel"))
+    assert up["source_text"] == "upper_case_text"
+    assert up["displayed_text"] == "UPPER_CASE_TEXT"
+    vc = next(c for c in obs["controls"]
+              if c["path"].endswith("VisibleCharactersLabel"))
+    assert vc["displayed_text"] == "visi"
+    # A sub-half-pixel clip_contents rect is dropped by the renderer.
+    assert "SubPixelClippedLabel" in hidden
+    assert obs["coordinate_space"].startswith("screen_rect/clip_rect/effective_rect")
+
+
+def test_grab_preserves_an_explicit_incomplete_observation_per_failure():
+    """Source contract: a requested rendered frame whose grab fails (null
+    viewport/texture/image or a failed save_png) is kept as an explicit
+    incomplete row -- it never vanishes and never reads as a complete empty
+    corpus. Frame 0 is subject to the same accounting.
+    """
+    src = _HARNESS.read_text(encoding="utf-8")
+    assert "func _capture_failure(drawn: int, reason: String) -> Dictionary" in src
+    for reason in ("viewport is null at frame_post_draw", "viewport texture is null",
+                   "viewport texture image is null", "save_png failed for"):
+        assert reason in src, reason
+    # Every early exit appends the failure row; the success path is the only
+    # one that appends a complete observation.
+    assert src.count("_captures.append(_capture_failure(drawn") == 4
+    assert '"text_observation": _observe_text(drawn, img.get_size())})' in src
+
+
+def test_collector_follows_the_rendering_chain_not_whole_node_ancestry():
+    """Source contract (string presence only; the engine behavior is UNRUN).
+
+    Official 4.7.2 CanvasItem::get_parent_item() is not exposed to scripts,
+    so the collector re-derives the rendering parent: the direct CanvasItem
+    parent unless the item is top_level; a non-CanvasItem parent or top_level
+    ends the chain at the canvas, which is resolved. Modulate, cull mask and
+    clip_contents follow that chain; visibility is the engine's own
+    is_visible_in_tree(). Nested viewports, rotated/skewed transforms and
+    pixel-mask clipping are refused as unresolved.
+    """
+    src = _HARNESS.read_text(encoding="utf-8")
+    probe = src.split("_PROBE_GD = r\'\'\'", 1)[1].split("\'\'\'", 1)[0]
+    # Named once in a comment; never called (it is not bound for scripts).
+    assert probe.count("get_parent_item(") == 1
+    assert "CanvasItem::get_parent_item()" in probe
+    assert "func _render_chain(c: Control) -> Dictionary:" in src
+    assert "if item.top_level:" in src
+    assert "if p is CanvasItem:" in src
+    assert 'out["chain_end"] = "canvas"' in src
+    assert "c.get_global_transform_with_canvas()" in src
+    assert "vp.canvas_cull_mask" in src
+    assert "CanvasItem.CLIP_CHILDREN_DISABLED" in src
+    assert "custom_viewport" in src
+    assert "c.self_modulate.a" in src
+    assert "c.is_visible_in_tree()" in src
+    assert "nested viewport/window whose screen geometry is not resolvable" in src
+    assert "rotated or skewed canvas transform" in src
+    assert '"text_possibly_visible": possibly_visible' in src
+    assert "chain is broken" not in src
+
+
+def test_collector_traversal_is_finitely_bounded():
+    """Source contract: node count and depth are bounded BEFORE the walk, and a
+    bound stop is an incomplete reason -- never a silently partial corpus.
+    """
+    src = _HARNESS.read_text(encoding="utf-8")
+    assert "const _TEXT_OBSERVE_MAX_NODES := 4096" in src
+    assert "const _TEXT_OBSERVE_MAX_DEPTH := 64" in src
+    assert "_text_walk_nodes = 0" in src
+    assert 'obs["traversal_bounded"] = true' in src
+    assert "the frame's corpus is not complete" in src
+    # A bound stop ends the WHOLE walk: no remaining sibling or subtree
+    # continues past it (only the current child used to be skipped while
+    # every remaining child kept appending the bound reason).
+    assert ("func _observe_text_walk(node: Node, depth: int, obs: Dictionary)"
+            " -> bool:") in src
+    # Children are visited by index, never via a whole get_children() array.
+    assert "for i in node.get_child_count():" in src
+    assert "if _observe_text_walk(node.get_child(i), depth + 1, obs):" in src
+
+
+def test_byte_ceiling_is_checked_on_the_returned_observation():
+    """Source contract (string presence only; the engine behavior is UNRUN).
+
+    Every row and reason goes through _obs_add, which charges its JSON size
+    and stops allocating once the ceiling cannot be met; text/path longer
+    than the ceiling stop the walk before a row is built. The summary reasons
+    are added BEFORE the returned dictionary is measured, the measurement
+    includes its own "bytes" field, and a refusal is a fixed small shape with
+    no rows, no locale list and a length-capped locale."""
+    src = _HARNESS.read_text(encoding="utf-8")
+    assert "func _obs_add(obs: Dictionary, key: String, row) -> void:" in src
+    assert "var _text_bytes_spent := 0" in src
+    probe = src.split("_PROBE_GD = r\'\'\'", 1)[1]
+    body = probe[probe.index("func _observe_text(drawn: int"):]
+    body = body[:body.index("\nfunc ")]
+    # No direct append bypasses the accounting inside the observer.
+    observer = probe[probe.index("func _render_chain("):probe.index("func _load_spec(")]
+    assert ".append(" not in observer.replace("chain.append(", "").replace(
+        "hidden_by.append(", "").replace("obs[key].append(row)", "")
+    # Summary reasons are charged before the final whole-envelope check.
+    assert body.index("unresolved displayed text") < body.index(
+        "if _text_envelope_bytes(obs) > _TEXT_OBSERVE_BYTES_MAX:")
+    assert "while int(obs.get(\"bytes\", -1)) != n:" in src
+    assert '"loaded_locales_count": locales_total' in src
+    assert "_TEXT_LOCALE_MAX_CHARS" in src
+    assert "the whole observation is refused rather than truncated" in src
+
+
+def test_probe_gdscript_declares_every_underscore_identifier_it_uses():
+    """CPU check over the generated probe text: every `_name` identifier the
+    probe reads or assigns is declared (member var/const, func, local var,
+    loop variable or parameter). cb424 assigned an undeclared
+    `_text_bytes_spent`, which makes the whole probe fail to parse -- every
+    input, assertion and capture with it. This is a lexical check, not a
+    GDScript compile; the native parse remains UNRUN."""
+    import re
+    probe = re.search(r"_PROBE_GD = r\'\'\'(.*?)\'\'\'",
+                      _HARNESS.read_text(encoding="utf-8"), re.S).group(1)
+    s = re.sub(r'"(?:\\.|[^"\\\n])*"', '""', probe)
+    s = re.sub(r"#[^\n]*", "", s)
+    declared = set(re.findall(r"\b(?:var|const|func)\s+(_\w+)", s))
+    declared |= set(re.findall(r"\bfor\s+(_\w+)\s+in\b", s))
+    for params in re.findall(r"^func\s+\w+\(([^)]*)\)", s, re.M):
+        declared |= set(re.findall(r"(_\w+)\s*(?::|=|,|$)", params))
+    used = set(re.findall(r"(?<![.\w])(_\w+)\b(?!\s*\()", s))
+    assert sorted(used - declared) == []
+    assert "_text_bytes_spent" in used
+
+
+def test_requested_capture_frames_never_observed_are_retained():
+    """Source contract: a requested capture frame (frame 0 included) that
+    never reached frame_post_draw is kept as an explicit incomplete row and
+    named in the report -- it never vanishes from the corpus."""
+    src = _HARNESS.read_text(encoding="utf-8")
+    assert "was never observed at frame_post_draw" in src
+    assert 'out["captures_unobserved"] = unobserved' in src
+
+
+def test_attach_pngs_invalidates_complete_observation_when_png_is_missing(tmp_path):
+    """A missing PNG means there is NO frame the observation could describe,
+    so a COMPLETE same-frame observation is invalidated (complete=false with
+    an explicit reason) while the row and the raw png_error are retained."""
+    caps = [{"frame": 1, "file": "/container/local/frame_0001.png",
+             "text_observation": {"frame": 1, "complete": True,
+                                  "incomplete_reasons": []}}]
+    out = gh._attach_pngs(caps, tmp_path)
+    assert out[0]["png_error"] == "missing PNG file"
+    obs = out[0]["text_observation"]
+    assert obs["complete"] is False
+    assert any("same-frame observation invalidated" in r for r in obs["incomplete_reasons"])
+    assert obs["png_error"] == "missing PNG file"
+
+
+def test_attach_pngs_invalidates_complete_observation_when_png_is_unreadable(
+        tmp_path, monkeypatch):
+    """Same accounting for a PNG that exists but cannot be read. An already-
+    incomplete observation simply stays false; the row is never dropped."""
+    png = tmp_path / "frame_0002.png"
+    png.write_bytes(b"x")
+    real_read = Path.read_bytes
+
+    def broken_read(self):
+        if self == png:
+            raise OSError("permission denied")
+        return real_read(self)
+
+    monkeypatch.setattr(Path, "read_bytes", broken_read)
+    caps = [{"frame": 2, "file": "/container/local/frame_0002.png",
+             "text_observation": {"frame": 2, "complete": True}}]
+    out = gh._attach_pngs(caps, tmp_path)
+    assert "read error" in out[0]["png_error"]
+    assert out[0]["text_observation"]["complete"] is False
+    caps2 = [{"frame": 3, "file": "missing.png",
+              "text_observation": {"frame": 3, "complete": False}}]
+    out2 = gh._attach_pngs(caps2, tmp_path)
+    assert out2[0]["text_observation"]["complete"] is False
+
+
+def test_fixture_declares_hidden_clipped_alpha_and_intermediary_surfaces():
+    """The native pilot's fixture carries the meaningful minimal edge cases in
+    its SOURCE: a non-Control intermediary, a hidden Label, a Label clipped
+    fully out of its ancestor, and a Label with effective alpha 0. Hidden
+    surfaces are never fabricated as visible text."""
+    main = (_TEXT_OBSERVE_CONTROLS / "main.gd").read_text(encoding="utf-8")
+    assert "NonControlIntermediary" in main
+    assert "localized_display" in main and "战况表" in main
+    assert "hidden_label.visible = false" in main
+    assert "clip_panel.clip_contents = true" in main
+    assert "Color(1, 1, 1, 0.0)" in main
+    assert "fully_transparent_text" in main
+    # Minimal positive/negative CanvasItem-semantics cases: own self_modulate
+    # zero vs PARENT-only self_modulate zero (which does NOT inherit), the
+    # top_level flag, and a nested-viewport surface.
+    assert "own_faded.self_modulate = Color(1, 1, 1, 0.0)" in main
+    assert "parent_faded.self_modulate = Color(1, 1, 1, 0.0)" in main
+    assert "parent_self_modulate_does_not_inherit" in main
+    assert "top_label.top_level = true" in main
+    assert "tl_clip.add_child(top_label)" in main
+    assert "veiled.add_child(intermediary)" in main
+    assert "TopLevelUnderHiddenLabel" in main
+    assert "SubViewport" in main and "nested_viewport_text" in main
+
+
+# ── final observation seal under the actual response serializer (CPU) ───────
+def _wire_body(payload: dict) -> bytes:
+    """The bytes the real _Handler._send_timed writes for `payload`."""
+    import io
+    h = object.__new__(gh._Handler)
+    h.wfile = io.BytesIO()
+    h.send_response = lambda *a, **k: None
+    h.send_header = lambda *a, **k: None
+    h.end_headers = lambda: None
+    h._send_timed(200, payload)
+    return h.wfile.getvalue()
+
+
+def _wire_observation(out: list) -> tuple[dict, bytes]:
+    body = _wire_body({"captures": out, "timing": {"report_serialize_sec": 0.0}})
+    obs = json.loads(body)["captures"][0]["text_observation"]
+    return obs, body
+
+
+def _assert_sealed(obs: dict, body: bytes) -> None:
+    # "bytes" is the observation subtree exactly as it rides in the body.
+    sub = json.dumps(obs).encode()
+    assert sub in body
+    assert obs["bytes"] == len(sub) <= gh._TEXT_OBS_MAX_BYTES
+    assert obs["bytes_encoding"] == "json.dumps"
+
+
+def _complete_obs(frame: int, text: str, rows: int) -> dict:
+    return {"frame": frame, "locale": "en", "complete": True,
+            "incomplete_reasons": [], "refused": [], "byte_capped": False,
+            "controls": [{"path": "/root/T/L%d" % i, "class": "Label",
+                          "source_text": text, "displayed_text": text,
+                          "displayed_text_resolved": True} for i in range(rows)]}
+
+
+def test_seal_refuses_unicode_that_fits_compact_utf8_but_not_the_wire(tmp_path):
+    """The probe measures compact UTF-8; the response escapes non-ASCII
+    (3 UTF-8 bytes -> 6 escaped bytes per BMP char). An observation the probe
+    admitted is refused as a whole once its wire form exceeds the ceiling."""
+    _tiny_png(tmp_path / "frame_0001.png")
+    obs = _complete_obs(1, "战" * 8000, 1)
+    compact = json.dumps(obs, ensure_ascii=False, separators=(",", ":"))
+    assert len(compact.encode("utf-8")) < gh._TEXT_OBS_MAX_BYTES
+    out = gh._attach_pngs([{"frame": 1, "file": "x/frame_0001.png",
+                            "text_observation": obs}], tmp_path)
+    wire, body = _wire_observation(out)
+    _assert_sealed(wire, body)
+    assert wire["complete"] is False and wire["byte_capped"] is True
+    assert wire["controls"] == [] and wire["incomplete_reasons"] == []
+    assert "refused rather than truncated" in wire["refused"][0]
+    assert wire["refused_bytes"] > gh._TEXT_OBS_MAX_BYTES
+    assert wire["frame"] == 1 and wire["locale"] == "en"
+    assert b"\\u6218" not in body
+    # The PNG still rode home on the row: only the observation is refused.
+    assert out[0]["png_b64"]
+
+
+def test_seal_keeps_a_near_cap_unicode_observation_that_fits_the_wire(tmp_path):
+    _tiny_png(tmp_path / "frame_0002.png")
+    obs = _complete_obs(2, "战况表", 1)
+    while len(json.dumps(obs)) < gh._TEXT_OBS_MAX_BYTES - 400:
+        obs["controls"].append(dict(obs["controls"][0]))
+    out = gh._attach_pngs([{"frame": 2, "file": "x/frame_0002.png",
+                            "text_observation": obs}], tmp_path)
+    wire, body = _wire_observation(out)
+    _assert_sealed(wire, body)
+    assert wire["complete"] is True
+    assert wire["controls"][0]["displayed_text"] == "战况表"
+    assert len(wire["controls"]) == len(obs["controls"])
+
+
+def test_png_invalidation_is_resealed_and_refused_over_the_wire_cap(tmp_path):
+    """A complete ASCII observation just under the ceiling loses its PNG: the
+    invalidation reason and png_error are added FIRST, then the final seal
+    re-measures and refuses the whole observation rather than truncating."""
+    import copy
+    obs = _complete_obs(3, "a" * 64, 200)
+    obs["controls"][0]["note"] = ""
+    pad = gh._TEXT_OBS_MAX_BYTES - 120 - len(json.dumps(obs))
+    obs["controls"][0]["note"] = "n" * pad
+    # With its PNG, the same observation fits the ceiling and stays complete.
+    (tmp_path / "ok").mkdir()
+    _tiny_png(tmp_path / "ok" / "frame_0003.png")
+    kept = gh._attach_pngs([{"frame": 3, "file": "x/frame_0003.png",
+                             "text_observation": copy.deepcopy(obs)}], tmp_path / "ok")
+    assert kept[0]["text_observation"]["complete"] is True
+    out = gh._attach_pngs([{"frame": 3, "file": "x/frame_0003.png",
+                            "text_observation": obs}], tmp_path)
+    assert out[0]["png_error"] == "missing PNG file"
+    wire, body = _wire_observation(out)
+    _assert_sealed(wire, body)
+    assert wire["complete"] is False and wire["byte_capped"] is True
+    assert wire["png_error"] == "missing PNG file"
+    assert wire["controls"] == []
+
+
+def test_png_invalidation_under_the_cap_is_sealed_with_its_reason(tmp_path, monkeypatch):
+    png = tmp_path / "frame_0004.png"
+    png.write_bytes(b"x")
+    real_read = Path.read_bytes
+
+    def broken_read(self):
+        if self == png:
+            raise OSError("permission denied")
+        return real_read(self)
+
+    monkeypatch.setattr(Path, "read_bytes", broken_read)
+    out = gh._attach_pngs([{"frame": 4, "file": "x/frame_0004.png",
+                            "text_observation": _complete_obs(4, "VISIBLE_TABLE_ID", 1)}],
+                          tmp_path)
+    wire, body = _wire_observation(out)
+    _assert_sealed(wire, body)
+    assert wire["complete"] is False
+    assert "read error" in wire["png_error"]
+    assert any("same-frame observation invalidated" in r
+               for r in wire["incomplete_reasons"])
+    assert wire["controls"][0]["source_text"] == "VISIBLE_TABLE_ID"
+    # An already-incomplete observation is invalidated the same way.
+    out2 = gh._attach_pngs([{"frame": 5, "file": "x/frame_0005.png",
+                             "text_observation": {"frame": 5, "complete": False,
+                                                  "incomplete_reasons": ["u"]}}],
+                           tmp_path)
+    w2, b2 = _wire_observation(out2)
+    _assert_sealed(w2, b2)
+    assert w2["png_error"] == "missing PNG file"
+    assert w2["incomplete_reasons"][0] == "u" and len(w2["incomplete_reasons"]) == 2
+
+
+def test_refusal_is_small_and_drops_long_locale_error_and_reason_fields(tmp_path):
+    """Over the cap, long locale/error/reason/path data are NOT retained: the
+    refusal is a fixed small shape, never a truncated copy of them."""
+    obs = {"frame": 6, "complete": False, "locale": "x" * 70000,
+           "error": "e" * 70000, "incomplete_reasons": ["r" * 1000] * 80,
+           "loaded_locales": ["l" * 500] * 200}
+    out = gh._attach_pngs([{"frame": 6, "file": "x/frame_0006.png",
+                            "text_observation": obs}], tmp_path)
+    wire, body = _wire_observation(out)
+    _assert_sealed(wire, body)
+    assert wire["byte_capped"] is True and wire["complete"] is False
+    assert wire["locale"] is None and wire["error"] is None
+    assert wire["png_error"] == "missing PNG file"
+    assert "loaded_locales" not in wire and wire["incomplete_reasons"] == []
+    assert wire["bytes"] < 1024
+    # The row still names the PNG failure outside the capped subtree.
+    assert out[0]["png_error"] == "missing PNG file"
+
+
+def test_absent_or_non_object_observation_is_sealed_explicitly(tmp_path):
+    _tiny_png(tmp_path / "frame_0007.png")
+    out = gh._attach_pngs([{"frame": 7, "file": "x/frame_0007.png"},
+                           {"frame": 7, "file": "x/frame_0007.png",
+                            "text_observation": None}], tmp_path)
+    for row in out:
+        obs = row["text_observation"]
+        assert obs["complete"] is False and "no text observation" in obs["error"]
+        assert obs["bytes"] == len(json.dumps(obs).encode())
+        assert row["png_b64"]
+
+
+def test_normal_capture_stays_complete_and_png_corresponds(tmp_path):
+    raw = _tiny_png(tmp_path / "frame_0000.png")
+    obs = _complete_obs(0, "VISIBLE_TABLE_ID", 2)
+    out = gh._attach_pngs([{"frame": 0, "file": "x/frame_0000.png",
+                            "text_observation": obs}], tmp_path)
+    wire, body = _wire_observation(out)
+    _assert_sealed(wire, body)
+    assert wire["complete"] is True and wire["frame"] == 0
+    assert json.loads(body)["captures"][0]["png_b64"] == _b64.b64encode(raw).decode()
+    assert "png_error" not in wire
+
+
+def test_label_display_transform_follows_label_shape_or_is_unresolved():
+    """Source contract (native UNRUN): the drawn string reproduces
+    Label._shape's uppercase + VC_CHARS_BEFORE_SHAPING substr through the same
+    public TextServer call and the node's own atr(); glyph/line selection after
+    shaping and locale-dependent case mapping are unresolved, never guessed."""
+    src = _HARNESS.read_text(encoding="utf-8")
+    assert "func _label_display_transform(c: Control, txt: String) -> Dictionary:" in src
+    assert "TextServerManager.get_primary_interface()" in src
+    assert "ts.string_to_upper(txt, lang)" in src
+    assert "TextServer.VC_CHARS_BEFORE_SHAPING" in src
+    assert "txt = txt.substr(0, vc)" in src
+    assert "TextServer.OVERRUN_NO_TRIMMING" in src
+    assert "lines_skipped" in src and "max_lines_visible" in src
+    assert "displayed = str(c.atr(source_text))" in src
+    assert "var shaped := _label_display_transform(c, str(displayed))" in src
+
+
+def test_clip_follows_renderer_half_pixel_and_rounding_in_png_space():
+    """Source contract (native UNRUN): clips are accumulated canvas-down in
+    the captured PNG's pixel space, an under-0.5 px clip drops the item and a
+    kept clip is rounded, as renderer_canvas_cull.cpp does; stretch is applied
+    via the viewport's final transform or the geometry is refused."""
+    src = _HARNESS.read_text(encoding="utf-8")
+    assert "if clip.size.x < 0.5 or clip.size.y < 0.5:" in src
+    assert "clip = Rect2(clip.position.round(), clip.size.round())" in src
+    assert "for i in range(chain.size() - 1, -1, -1):" in src
+    assert "_png_xform = vp.get_final_transform()" in src
+    assert "var t := _png_xform * c.get_global_transform_with_canvas()" in src
+    assert "vp.get_stretch_transform() * vp.get_visible_rect()" in src
+    assert '"coordinate_space":' in src and '"png_from_viewport_2d":' in src
+    assert "under 0.5 px, so the renderer does not draw it" in src

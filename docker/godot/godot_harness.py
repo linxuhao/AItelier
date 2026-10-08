@@ -1091,19 +1091,483 @@ func _on_post_draw() -> void:
     var t0 := Time.get_ticks_usec()
     _grab(drawn)
     _capture_usec += Time.get_ticks_usec() - t0
+func _capture_failure(drawn: int, reason: String) -> Dictionary:
+    # One explicit incomplete observation per REQUESTED rendered frame. A null
+    # viewport/texture/image or a failed save_png must never make the frame
+    # VANISH from the report: the row is kept with complete=false and the exact
+    # reason, so a lost capture can never read as a complete empty corpus.
+    return {"frame": drawn, "file": "", "complete": false, "error": reason,
+        "text_observation": {"frame": drawn, "complete": false,
+            "error": reason,
+            "incomplete_reasons": ["capture failure: %s" % reason]}}
 func _grab(drawn: int) -> void:
     var vp := get_viewport()
     if vp == null:
+        _captures.append(_capture_failure(drawn,
+            "viewport is null at frame_post_draw"))
         return
     var tex := vp.get_texture()
     if tex == null:
+        _captures.append(_capture_failure(drawn, "viewport texture is null"))
         return
     var img := tex.get_image()
     if img == null:
+        _captures.append(_capture_failure(drawn,
+            "viewport texture image is null"))
         return
     var path := _capture_dir.path_join("frame_%04d.png" % drawn)
-    if img.save_png(path) == OK:
-        _captures.append({"frame": drawn, "file": path})
+    if img.save_png(path) != OK:
+        _captures.append(_capture_failure(drawn,
+            "save_png failed for %s" % path))
+        return
+    # Same-frame text/geometry observation: the PNG and the observation are
+    # taken at the SAME _on_post_draw instant, so both describe one frame.
+    _captures.append({"frame": drawn, "file": path,
+        "text_observation": _observe_text(drawn, img.get_size())})
+
+func _rect_json(r: Rect2) -> Array:
+    return [r.position.x, r.position.y, r.size.x, r.size.y]
+func _prop_or_null(obj: Object, name: String):
+    # Object.get() on an ABSENT property returns null indistinguishably from a
+    # real null value, so the property LIST is what decides existence.
+    for p in obj.get_property_list():
+        if str(p.name) == name:
+            return obj.get(name)
+    return null
+func _autotranslate_disabled(mode):
+    # `auto_translate_mode` is the Godot 4 enum (ALWAYS/DISABLED/INHERIT); the
+    # legacy `auto_translate` bool is true == translate. Either shape is handled,
+    # and an absent mode is never guessed.
+    if mode == null:
+        return false
+    if typeof(mode) == TYPE_BOOL:
+        return not mode
+    return mode == Control.AUTO_TRANSLATE_MODE_DISABLED
+func _autotranslate_inherit(mode):
+    if mode == null or typeof(mode) == TYPE_BOOL:
+        return false
+    return mode == Control.AUTO_TRANSLATE_MODE_INHERIT
+# Rendering parent, per official 4.7.2 CanvasItem::get_parent_item() (which is
+# NOT exposed to scripts): the direct parent when it is a CanvasItem and this
+# item is not top_level; otherwise the item is parented straight to its canvas
+# (the nearest CanvasLayer's canvas, else the viewport's world canvas) and its
+# rendering chain ENDS there. That end is the ordinary root of every 2D/GUI
+# tree, so it is resolved. The renderer (renderer_canvas_cull.cpp) applies
+# modulate, the visibility_layer/canvas_cull_mask test and clip_contents clips
+# down THIS chain only; visibility (is_visible_in_tree) follows the scene-tree
+# CanvasItem parents instead, including across top_level, and is read from the
+# engine rather than re-derived.
+# screen_rect/clip_rect/effective_rect are in the CAPTURED PNG's pixel space:
+# the renderer draws every canvas through the viewport's stretch *
+# global_canvas transform (get_final_transform), which
+# get_global_transform_with_canvas does not include, and it rounds each
+# clip_contents rect in that space and drops the item when the clip is under
+# 0.5 px. global_rect/viewport_rect stay in the logical viewport 2D space.
+const _CANVAS_CULL_ALPHA := 0.007  # renderer: modulate.a below this is not drawn
+var _png_xform := Transform2D.IDENTITY
+var _png_rect := Rect2()
+var _png_unresolved := ""
+func _axis_aligned(t: Transform2D) -> bool:
+    return is_zero_approx(t.x.y) and is_zero_approx(t.y.x)
+func _render_chain(c: Control) -> Dictionary:
+    var out := {"resolved": false, "reason": "", "clip": Rect2(),
+        "screen_rect": Rect2(), "chain_alpha": 0.0, "layer_culled": false,
+        "clip_culled": false, "chain_end": ""}
+    var vp := get_viewport()
+    if c.get_viewport() != vp:
+        out["reason"] = "lives in a nested viewport/window whose screen geometry is not resolvable against the captured viewport"
+        return out
+    if _png_unresolved != "":
+        out["reason"] = _png_unresolved
+        return out
+    var t := _png_xform * c.get_global_transform_with_canvas()
+    if not _axis_aligned(t):
+        out["reason"] = "rotated or skewed canvas transform; the drawn quad is not an axis-aligned rect"
+        return out
+    out["screen_rect"] = t * Rect2(Vector2.ZERO, c.size)
+    var chain := []
+    var item: CanvasItem = c
+    while true:
+        chain.append(item)
+        if item.clip_children != CanvasItem.CLIP_CHILDREN_DISABLED or item is CanvasGroup:
+            out["reason"] = "%s uses clip_children/CanvasGroup: a drawn-pixel mask, not a rect" % str(item.get_path())
+            return out
+        if item.top_level:
+            out["chain_end"] = "top_level"
+            break
+        var p := item.get_parent()
+        if p is CanvasItem:
+            item = p as CanvasItem
+        else:
+            out["chain_end"] = "canvas"
+            break
+    # The canvas the chain is parented to: the engine walks from the chain's
+    # top item to the nearest CanvasLayer or Viewport.
+    var n: Node = item
+    while n != null and not (n is Viewport):
+        if n is CanvasLayer:
+            if (n as CanvasLayer).custom_viewport != null:
+                out["reason"] = "CanvasLayer %s renders into a custom_viewport" % str(n.get_path())
+                return out
+            if (n as CanvasLayer).follow_viewport_enabled and (n as CanvasLayer).follow_viewport_scale != 1.0:
+                out["reason"] = "CanvasLayer %s follows the viewport at nonunit scale; PNG pixel geometry is unsupported" % str(n.get_path())
+                return out
+            break
+        n = n.get_parent()
+    # Accumulated from the canvas down, as the renderer does: an alpha prefix
+    # below the cull threshold, or a clip under 0.5 px, stops that item and its
+    # children; a kept clip is rounded before it clips the next one.
+    var clip := _png_rect
+    var acc := 1.0
+    var culled := false
+    for i in range(chain.size() - 1, -1, -1):
+        var ci: CanvasItem = chain[i]
+        acc *= ci.modulate.a
+        if acc < _CANVAS_CULL_ALPHA:
+            culled = true
+        if (ci.visibility_layer & vp.canvas_cull_mask) == 0:
+            out["layer_culled"] = true
+        if ci is Control and (ci as Control).clip_contents and not out["clip_culled"]:
+            var it := _png_xform * ci.get_global_transform_with_canvas()
+            if not _axis_aligned(it):
+                out["reason"] = "clip_contents ancestor %s has a rotated or skewed canvas transform" % str(ci.get_path())
+                return out
+            clip = clip.intersection(it * Rect2(Vector2.ZERO, (ci as Control).size))
+            if clip.size.x < 0.5 or clip.size.y < 0.5:
+                out["clip_culled"] = true
+                clip = Rect2(clip.position, Vector2.ZERO)
+            else:
+                clip = Rect2(clip.position.round(), clip.size.round())
+    out["chain_alpha"] = 0.0 if culled else acc
+    out["clip"] = clip
+    out["resolved"] = true
+    return out
+const _TEXT_SUPPORTED = ["Label", "Button"]
+# Classes that visibly bear text but whose DISPLAYED string is not an ordinary
+# text property: RichTextLabel markup, LineEdit/TextEdit masking + secret mode,
+# the item-model OptionButton/ItemList/Tree/PopupMenu, and the shader/custom
+# draw surfaces. They are reported explicitly, never silently dropped and never
+# counted as covered.
+const _TEXT_UNSUPPORTED := ["RichTextLabel", "LineEdit", "TextEdit", "CodeEdit",
+    "OptionButton", "ItemList", "Tree", "PopupMenu", "TabBar", "MenuButton",
+    "LinkButton", "CheckBox", "CheckButton", "ColorPickerButton", "FileDialog",
+    "ProgressBar", "SpinBox"]
+# Byte ceiling on the JSON of ONE frame's returned observation. Over it, the
+# whole observation is replaced by a small refusal; rows are never truncated.
+# This is the probe's early bound; the harness re-seals the final observation
+# as the response serializes it (_seal_text_observation).
+const _TEXT_OBSERVE_BYTES_MAX = 65536
+const _TEXT_LOCALE_MAX_CHARS := 64
+var _text_bytes_spent := 0
+# Appends one row/reason and charges its JSON size to the running total, so
+# the walk stops allocating once the ceiling cannot be met. The returned
+# envelope is still measured as a whole in _observe_text.
+func _obs_add(obs: Dictionary, key: String, row) -> void:
+    if obs["byte_capped"]:
+        return
+    var n := JSON.stringify(row).to_utf8_buffer().size() + 1
+    if _text_bytes_spent + n > _TEXT_OBSERVE_BYTES_MAX:
+        obs["byte_capped"] = true
+        return
+    _text_bytes_spent += n
+    obs[key].append(row)
+# Label._shape (official 4.7.2 label.cpp) draws
+#   txt = uppercase ? TS.string_to_upper(xl_text, lang) : xl_text
+#   then txt.substr(0, visible_characters) for VC_CHARS_BEFORE_SHAPING.
+# Those two are reproduced with the same public TextServer call. The other
+# visible-character behaviours, text_overrun trimming and line skipping/limits
+# select glyphs or lines AFTER shaping, so the drawn string is reported as
+# unresolved instead of guessed. Case mapping that depends on a locale the
+# script cannot read (Control._get_locale is not exposed) is also unresolved.
+const _CASE_LOCALES := ["", "tr", "az", "lt", "el"]
+func _label_display_transform(c: Control, txt: String) -> Dictionary:
+    var upper = _prop_or_null(c, "uppercase")
+    if typeof(upper) == TYPE_BOOL and upper:
+        var ts := TextServerManager.get_primary_interface()
+        var lang = _prop_or_null(c, "language")
+        if typeof(lang) == TYPE_STRING and lang != "":
+            txt = ts.string_to_upper(txt, lang)
+        else:
+            var up := ts.string_to_upper(txt, TranslationServer.get_locale())
+            for l in _CASE_LOCALES:
+                if ts.string_to_upper(txt, l) != up:
+                    return {"text": null, "note": "uppercase mapping of this text depends on the control's locale, which is not exposed to scripts; the displayed string is unresolved"}
+            txt = up
+    var vc = _prop_or_null(c, "visible_characters")
+    if typeof(vc) == TYPE_INT and vc >= 0:
+        if _prop_or_null(c, "visible_characters_behavior") != TextServer.VC_CHARS_BEFORE_SHAPING:
+            return {"text": null, "note": "visible_characters trims glyphs after shaping; the displayed string is unresolved"}
+        txt = txt.substr(0, vc)
+    var ob = _prop_or_null(c, "text_overrun_behavior")
+    if ob != null and ob != TextServer.OVERRUN_NO_TRIMMING:
+        return {"text": null, "note": "text_overrun_behavior may trim/ellipsize after shaping; the displayed string is unresolved"}
+    var skip = _prop_or_null(c, "lines_skipped")
+    var maxl = _prop_or_null(c, "max_lines_visible")
+    if (skip != null and skip > 0) or (maxl != null and maxl >= 0):
+        return {"text": null, "note": "lines_skipped/max_lines_visible select shaped lines; the displayed string is unresolved"}
+    return {"text": txt, "note": ""}
+func _observe_control_text(c: Control, cls: String, path: String, obs: Dictionary) -> Dictionary:
+    var source_text := str(c.get("text"))
+    var global_rect := c.get_global_rect()
+    var chain := _render_chain(c)
+    var clip_rect: Rect2 = chain["clip"]
+    var clip_resolved: bool = chain["resolved"]
+    var screen_rect: Rect2 = chain["screen_rect"]
+    var effective_rect = null
+    var intersects := false
+    var viewport_rect := get_viewport().get_visible_rect()
+    var alpha = null
+    var possibly_visible = null
+    if clip_resolved:
+        var eff := screen_rect.intersection(clip_rect)
+        effective_rect = Rect2(eff.position,
+            Vector2(max(0.0, eff.size.x), max(0.0, eff.size.y)))
+        intersects = effective_rect.size.x > 0.0 and effective_rect.size.y > 0.0
+        # self_modulate applies to this item only, after the chain.
+        alpha = float(chain["chain_alpha"]) * c.self_modulate.a
+        var hidden_by := PackedStringArray()
+        if not c.is_visible_in_tree():
+            hidden_by.append("not visible in tree")
+        if chain["layer_culled"]:
+            hidden_by.append("visibility_layer outside the viewport canvas_cull_mask on the rendering chain")
+        if chain["clip_culled"]:
+            hidden_by.append("a clip_contents rect on the rendering chain is under 0.5 px, so the renderer does not draw it")
+        if alpha <= 0.0:
+            hidden_by.append("effective alpha 0 (rendering-chain modulate below the engine cull threshold, or own self_modulate 0)")
+        if not intersects and not chain["clip_culled"]:
+            hidden_by.append("no intersection with the clip/viewport rect")
+        possibly_visible = hidden_by.is_empty()
+        if not possibly_visible:
+            _obs_add(obs, "hidden_surfaces", {
+                "path": path,
+                "class": cls,
+                "visible_in_tree": c.is_visible_in_tree(),
+                "effective_alpha": alpha,
+                "intersects_viewport": intersects,
+                "reason": "; ".join(hidden_by),
+            })
+    else:
+        _obs_add(obs, "incomplete_reasons",
+            "geometry/visibility of control %s (%s) is unresolved: %s" % [path, cls, str(chain["reason"])])
+    var auto_mode = _prop_or_null(c, "auto_translate_mode")
+    if auto_mode == null:
+        auto_mode = _prop_or_null(c, "auto_translate")
+    var autotranslate_known := auto_mode != null
+    # TranslationServer.translate() returns the message UNCHANGED when no
+    # translation resolves, so a source property alone is not always the
+    # displayed string. The engine's own CURRENT locale is what we report -- we
+    # never infer a locale from a requested language and never force one.
+    var translated := str(TranslationServer.translate(source_text))
+    var differs := translated != source_text
+    var resolved := true
+    var displayed = source_text
+    var note := ""
+    if c.has_method("atr"):
+        # Node.atr() is exactly what Label/Button draw (xl_text = atr(text)):
+        # it applies this node's resolved auto_translate_mode (INHERIT
+        # included) and translation domain.
+        displayed = str(c.atr(source_text))
+    elif not differs:
+        # No translation resolves for this message, so the source property IS
+        # the displayed string. The missing-catalog key is exactly this case.
+        displayed = source_text
+    elif not autotranslate_known:
+        # A translation EXISTS and whether it is applied depends on an
+        # autotranslate mode this engine does not expose: the displayed string
+        # is genuinely unresolved, so we refuse to name one.
+        resolved = false
+        displayed = null
+        note = "a translation resolves for this message but the autotranslate mode is not exposed by this engine; the displayed string is unresolved"
+    elif _autotranslate_disabled(auto_mode):
+        # The control has autotranslation DISABLED, so the raw source property is
+        # what is drawn even though a translation exists.
+        displayed = source_text
+        note = "autotranslate is disabled on this control; the source property is displayed"
+    elif _autotranslate_inherit(auto_mode):
+        # INHERIT defers to an ancestor / the engine default this function cannot
+        # see from one Control, so the displayed string is unresolved.
+        resolved = false
+        displayed = null
+        note = "autotranslate mode is INHERIT; the displayed string depends on an ancestor/engine default that is not resolved here"
+    else:
+        # ALWAYS (or auto_translate == true): the translated string is displayed.
+        displayed = translated
+    if resolved:
+        var shaped := _label_display_transform(c, str(displayed))
+        displayed = shaped["text"]
+        if shaped["note"] != "":
+            note = shaped["note"]
+        if displayed == null:
+            resolved = false
+    return {
+        "path": path,
+        "class": cls,
+        "visible_in_tree": c.is_visible_in_tree(),
+        "effective_alpha": alpha,
+        "text_possibly_visible": possibly_visible,
+        "global_rect": _rect_json(global_rect),
+        "screen_rect": _rect_json(screen_rect) if clip_resolved else null,
+        "clip_rect": _rect_json(clip_rect),
+        "viewport_rect": _rect_json(viewport_rect),
+        "effective_rect": _rect_json(effective_rect) if effective_rect != null else null,
+        "intersects_viewport": intersects,
+        "clip_resolved": clip_resolved,
+        "clip_unresolved_reason": str(chain["reason"]),
+        "top_level": c.top_level,
+        "rendering_chain_end": chain["chain_end"],
+        "auto_translate_mode": auto_mode,
+        "autotranslate_known": autotranslate_known,
+        "source_text": source_text,
+        "engine_translated_text": translated,
+        "translation_differs": differs,
+        "displayed_text": displayed,
+        "displayed_text_resolved": resolved,
+        "note": note,
+    }
+# Finite traversal bounds: the walk stops at a fixed node count and depth and
+# records the stop as an incomplete reason. A bounded frame corpus is reported
+# as incomplete; it is never passed off as the whole tree.
+const _TEXT_OBSERVE_MAX_NODES := 4096
+const _TEXT_OBSERVE_MAX_DEPTH := 64
+var _text_walk_nodes := 0
+# Returns TRUE to stop the whole remaining walk (a bound was reached).
+func _observe_text_walk(node: Node, depth: int, obs: Dictionary) -> bool:
+    if obs["byte_capped"]:
+        return true
+    _text_walk_nodes += 1
+    if _text_walk_nodes > _TEXT_OBSERVE_MAX_NODES or depth > _TEXT_OBSERVE_MAX_DEPTH:
+        obs["traversal_bounded"] = true
+        _obs_add(obs, "incomplete_reasons",
+            "text-observation traversal stopped at the finite node/depth bound (%d nodes, depth %d); the frame's corpus is not complete" % [_TEXT_OBSERVE_MAX_NODES, _TEXT_OBSERVE_MAX_DEPTH])
+        return true
+    if node is CanvasModulate and (node as CanvasModulate).is_visible_in_tree() \
+            and (node as CanvasModulate).color.a != 1.0:
+        _obs_add(obs, "incomplete_reasons",
+            "CanvasModulate %s changes canvas-wide alpha, which effective_alpha does not include" % str(node.get_path()))
+    if node is Control:
+        var c := node as Control
+        var cls := c.get_class()
+        var supported := _TEXT_SUPPORTED.has(cls)
+        var unsupported := _TEXT_UNSUPPORTED.has(cls)
+        var t = null
+        if not supported and not unsupported:
+            # Property LIST probe: Object.get on an absent property would push
+            # an engine error.
+            t = _prop_or_null(c, "text")
+        if supported or unsupported or (typeof(t) == TYPE_STRING and str(t) != "" and c.is_visible_in_tree()):
+            # Pre-row bound: a path or text with more characters than the
+            # ceiling has bytes cannot fit in any returned observation.
+            var path := str(c.get_path())
+            if path.length() > _TEXT_OBSERVE_BYTES_MAX or (supported
+                    and str(c.get("text")).length() > _TEXT_OBSERVE_BYTES_MAX):
+                obs["byte_capped"] = true
+                return true
+            if supported:
+                _obs_add(obs, "controls", _observe_control_text(c, cls, path, obs))
+            elif unsupported:
+                _obs_add(obs, "unsupported", {
+                    "path": path,
+                    "class": cls,
+                    "visible_in_tree": c.is_visible_in_tree(),
+                    "reason": "displayed string is not an ordinary text property for this class (markup/masking/item model/shader surface); not observed",
+                })
+            else:
+                _obs_add(obs, "unsupported", {
+                    "path": path,
+                    "class": cls,
+                    "visible_in_tree": true,
+                    "reason": "class is outside the supported text-surface set; its text property is not claimed to be the displayed string",
+                })
+    if obs["byte_capped"]:
+        return true
+    # Indexed children: no array of every child is allocated up front.
+    for i in node.get_child_count():
+        if _observe_text_walk(node.get_child(i), depth + 1, obs):
+            return true
+    return false
+# Writes the envelope's own size into "bytes" until it is self-consistent and
+# returns it: the number covers every returned field, "bytes" included.
+func _text_envelope_bytes(obs: Dictionary) -> int:
+    var n := JSON.stringify(obs).to_utf8_buffer().size()
+    while int(obs.get("bytes", -1)) != n:
+        obs["bytes"] = n
+        n = JSON.stringify(obs).to_utf8_buffer().size()
+    return n
+func _text_refusal(drawn: int, obs: Dictionary, locales_total: int) -> Dictionary:
+    # Fixed small shape: no rows, no reasons list, no locale list, and the
+    # locale only when it is short.
+    var locale := str(obs["locale"])
+    var out := {
+        "frame": drawn,
+        "complete": false,
+        "byte_capped": true,
+        "traversal_bounded": obs["traversal_bounded"],
+        "locale": locale if locale.length() <= _TEXT_LOCALE_MAX_CHARS else null,
+        "loaded_locales_count": locales_total,
+        "controls": [],
+        "unsupported": [],
+        "hidden_surfaces": [],
+        "incomplete_reasons": [],
+        "refused": ["text observation for frame %d exceeds the %d-byte ceiling; the whole observation is refused rather than truncated" % [drawn, _TEXT_OBSERVE_BYTES_MAX]],
+    }
+    _text_envelope_bytes(out)
+    return out
+func _observe_text(drawn: int, image_size: Vector2i) -> Dictionary:
+    # Finite, literal observation of the built-in text surfaces present in the
+    # frame that was just drawn. It only OBSERVES: it does not classify where a
+    # string came from, does not change assertion truth and does not gate.
+    var locale := str(TranslationServer.get_locale())
+    var vp := get_viewport()
+    _png_xform = vp.get_final_transform()
+    _png_rect = Rect2(Vector2.ZERO, Vector2(image_size))
+    _png_unresolved = ""
+    if not (vp.get_stretch_transform() * vp.get_visible_rect()).is_equal_approx(_png_rect):
+        _png_unresolved = "the stretched viewport rect does not match the captured image size, so PNG pixel geometry is unresolved"
+    elif vp.snap_2d_transforms_to_pixel:
+        _png_unresolved = "2D transform pixel snapping is enabled; the renderer's snapped positions are not reproduced"
+    var obs := {
+        "frame": drawn,
+        "locale": locale,
+        "loaded_locales": [],
+        "supported_classes": _TEXT_SUPPORTED.duplicate(),
+        "unsupported_classes": _TEXT_UNSUPPORTED.duplicate(),
+        "viewport_rect": _rect_json(get_viewport().get_visible_rect()),
+        "image_size": [image_size.x, image_size.y],
+        "coordinate_space": "screen_rect/clip_rect/effective_rect: captured PNG pixels; global_rect/viewport_rect: logical viewport 2D",
+        "png_from_viewport_2d": [_png_xform.x.x, _png_xform.x.y, _png_xform.y.x, _png_xform.y.y, _png_xform.origin.x, _png_xform.origin.y],
+        "controls": [],
+        "unsupported": [],
+        "hidden_surfaces": [],
+        "refused": [],
+        "traversal_bounded": false,
+        "byte_capped": false,
+        "incomplete_reasons": [],
+        "complete": false,
+    }
+    _text_walk_nodes = 0
+    _text_bytes_spent = JSON.stringify(obs).to_utf8_buffer().size()
+    var locales := TranslationServer.get_loaded_locales()
+    if locale.length() > _TEXT_LOCALE_MAX_CHARS:
+        obs["byte_capped"] = true
+    for loc in locales:
+        _obs_add(obs, "loaded_locales", str(loc))
+        if obs["byte_capped"]:
+            break
+    var root: Node = get_tree().get_root()
+    if root != null:
+        _observe_text_walk(root, 0, obs)
+    for u in obs["unsupported"]:
+        if bool(u.get("visible_in_tree", false)):
+            _obs_add(obs, "incomplete_reasons", "unsupported visible text surface %s (%s)" % [u["path"], u["class"]])
+    for c in obs["controls"]:
+        if not bool(c.get("displayed_text_resolved", false)):
+            _obs_add(obs, "incomplete_reasons", "unresolved displayed text for %s (%s)" % [c["path"], c["class"]])
+    if obs["byte_capped"]:
+        return _text_refusal(drawn, obs, locales.size())
+    obs["complete"] = obs["incomplete_reasons"].is_empty()
+    if _text_envelope_bytes(obs) > _TEXT_OBSERVE_BYTES_MAX:
+        return _text_refusal(drawn, obs, locales.size())
+    return obs
 func _load_spec(path: String) -> void:
     var f := FileAccess.open(path, FileAccess.READ)
     if f == null:
@@ -1456,17 +1920,23 @@ func _capture_baselines() -> void:
             _baselines[key] = r["value"]
         else:
             _baseline_missing.append(key)
-## The raw Godot types a probe read may OBSERVE. Anything else (Object, Color,
-## Dictionary, Array, RID, ...) has no JSONable observation of its own and is a
-## tagged read failure -- never str(v). This is checked on the RAW value before
-## any conversion, because `_jsonable` keeps a str(v) catch-all for the public
-## dumps and would otherwise stringify an unsupported baseline.
+## The raw Godot types a probe read may OBSERVE, and the gate checked on the RAW
+## value BEFORE any conversion. Anything else (Object, RID, Callable, ...) has no
+## observation of its own and is a tagged read failure -- never str(v). `_jsonable`
+## keeps its str(v) catch-all for the PUBLIC dumps, so the observation conversion
+## below is a SEPARATE, type-preserving walk (`_observe_value`), not `_jsonable`.
 func _is_observable(v) -> bool:
     match typeof(v):
         TYPE_NIL, TYPE_BOOL, TYPE_INT, TYPE_FLOAT, TYPE_STRING, TYPE_VECTOR2, TYPE_VECTOR3:
             return true
+        # A structured value is observable only if every member is: the recursive
+        # walk in `_observe_value` refuses an unsafe member, a cycle (depth bound)
+        # or excessive size/count, rather than str(v) or a fabricated null.
+        TYPE_VECTOR2I, TYPE_RECT2, TYPE_COLOR, TYPE_ARRAY, TYPE_DICTIONARY:
+            return true
         _:
             return false
+
 
 func _read_attr(target: Object, attr: String) -> Dictionary:
     # A tagged read: a legitimate null value and a FAILED read are DIFFERENT
@@ -1483,16 +1953,224 @@ func _read_attr(target: Object, attr: String) -> Dictionary:
     var v = e.execute([], target, false)
     if e.has_execute_failed():
         return {"ok": false, "error": "read execute failed: " + e.get_error_text()}
-    # Gate on the RAW type BEFORE converting. `_jsonable` still has its str(v)
-    # catch-all for the public dumps, so converting first would turn an
-    # unsupported value (Color, Dictionary, Array, Object, ...) into a String and
-    # let it through: a frame-0 baseline would be that string and a later read
-    # would stringify identically, so an `unchanged` delta passed vacuously. An
+    # Gate on the RAW type BEFORE converting. The conversion is `_observe_value`,
+    # a type-preserving bounded walk that REFUSES an unsafe member (Object/RID/
+    # Callable), a cycle or an over-large value instead of falling back to
+    # `_jsonable`'s public str(v) catch-all: converting first would turn an
+    # unsupported value into a String and let a delta pass vacuously. An
     # unsupported value has no observation of its own, so both an attribute read
     # and a frame-0 baseline refuse it.
     if not _is_observable(v):
         return {"ok": false, "error": "attribute is not a supported observable type (%d)" % typeof(v)}
-    return {"ok": true, "value": _jsonable(v)}
+    var obs := _observe_value(v)
+    if not obs["ok"]:
+        return {"ok": false, "error": "attribute is not a supported observable type (%d): %s" % [typeof(v), obs["error"]]}
+    return {"ok": true, "value": obs["value"]}
+
+## Bounded, type-preserving conversion of a safely representable observation.
+## Returns {"ok": true, "value": <tagged>} or {"ok": false, "error": <why>}.
+## Primitives keep their JSON value EXCEPT Float, which is exported losslessly in
+## the engine's SCIENTIFIC form as {"__t": "Float", "__v": <token>}: an
+## observation must keep 1.0, 1.000000000000001 and 1e-20 distinct, where the
+## report's default JSON precision (6 decimals) would collapse them. Structured
+## values are wrapped in a tagged envelope so their TYPE and KEYS survive
+## comparison: Vector2i(3,4) is NOT the same observation as Array [3,4] or
+## Vector2(3,4). A Dictionary is emitted as a canonically ORDERED list of
+## [key, value] pairs, sorted by the OBSERVED key representation (already
+## lossless), so insertion order alone is never a value change. A cycle, an unsafe
+## member (Object/RID/Callable), a NON-FINITE Float or vector/Rect2/Color
+## component (NaN/INF have no legitimate observation -- the official JSON path
+## would turn them into a fabricated null or an overflow), or a value whose
+## COMPLETE compact encoding exceeds the byte cap is refused -- never str(v),
+## never truncated, never a fabricated null.
+const _OBS_MAX_DEPTH := 8
+const _OBS_MAX_NODES := 4096
+## The finite cap on the WHOLE returned observation payload, measured over the
+## ACTUAL compact JSON encoding of the finished observation (`JSON.stringify`
+## then `.to_utf8_buffer().size()`), not an internal character-count estimate. It
+## is a POSTCONDITION, so it honestly counts nested tags, Array brackets,
+## Dictionary key/value pairs, Vector/Rect2/Color component tags and JSON
+## escaping (a backslash or a multi-byte glyph is charged what it really encodes
+## to). An over-cap observation is REFUSED -- never truncated into a smaller,
+## equal-looking value and never replaced by a fabricated null.
+const _OBS_MAX_BYTES := 65536
+
+
+func _observe_value(v) -> Dictionary:
+    if not _is_observable(v):
+        return {"ok": false, "error": "unsupported observation type %d" % typeof(v)}
+    var r := _observe_at(v, 0, {"n": 0})
+    if not r["ok"]:
+        return r
+    # The complete byte postcondition, applied to the ACTUAL compact encoding of
+    # the finished observation BEFORE it can return ok or be stored as a
+    # baseline. The depth/node guards above bound only its SHAPE; this is what
+    # bounds the whole payload, and a raw-String preflight inside the walk only
+    # avoids constructing an already-doomed giant leaf.
+    var encoded := JSON.stringify(r["value"])
+    var nbytes := encoded.to_utf8_buffer().size()
+    if nbytes > _OBS_MAX_BYTES:
+        return {"ok": false, "error": "observation exceeds the %d byte cap (%d encoded bytes)" % [_OBS_MAX_BYTES, nbytes]}
+    return r
+
+## The lossless export of a FINITE Float, using the engine's scientific formatter
+## (`String.num_scientific`), which emits a shortest round-trippable form rather
+## than fixed decimal places: tiny magnitudes (1e-20), subnormals, min-normal and
+## huge powers of ten all keep their exact double and never collapse under the
+## report's default 6-decimal JSON precision. +0.0 and -0.0 share ONE canonical
+## token because Godot's numeric equality treats them as equal -- exporting the
+## raw sign bit would invent a `changed` delta the legacy comparison never saw.
+## Non-finite values never reach here -- the caller refuses them first.
+func _observe_float(f: float) -> Dictionary:
+    var zero := 0.0
+    if f == 0.0:
+        f = zero
+    return {"__t": "Float", "__v": String.num_scientific(f)}
+
+
+func _observe_at(v, depth: int, budget: Dictionary) -> Dictionary:
+    budget["n"] = int(budget["n"]) + 1
+    if int(budget["n"]) > _OBS_MAX_NODES:
+        return {"ok": false, "error": "observation exceeds the %d node bound" % _OBS_MAX_NODES}
+    var vt := typeof(v)
+    if vt == TYPE_STRING:
+        # Minimal PRE-CONSTRUCTION guard: a raw String whose own UTF-8 payload
+        # already exceeds the cap can never sit inside an admissible observation,
+        # so refuse it before the walk builds the huge tagged structure. The
+        # complete postcondition in `_observe_value` still owns the final verdict,
+        # because escaping and tags can push an under-cap leaf over.
+        if v.to_utf8_buffer().size() > _OBS_MAX_BYTES:
+            return {"ok": false, "error": "observation exceeds the %d byte cap" % _OBS_MAX_BYTES}
+    if vt == TYPE_FLOAT:
+        # A finite Float is exported LOSSLESSLY as a tagged value; a non-finite
+        # one has no legitimate observation at all. This guard sits above the
+        # match so the shared primitive arm below never sees a Float.
+        if not is_finite(v):
+            return {"ok": false, "error": "non-finite Float is not an observation"}
+        return {"ok": true, "value": _observe_float(v)}
+
+    match vt:
+        TYPE_NIL:
+            return {"ok": true, "value": null}
+        TYPE_BOOL, TYPE_INT, TYPE_FLOAT, TYPE_STRING:
+            # A finite Float returned above; Bool/Int/String keep their plain JSON
+            # value. TYPE_FLOAT is listed so the primitives share one arm.
+            return {"ok": true, "value": v}
+        TYPE_VECTOR2:
+            if not (is_finite(v.x) and is_finite(v.y)):
+                return {"ok": false, "error": "non-finite Vector2 component is not an observation"}
+            return {"ok": true, "value": [_observe_float(v.x), _observe_float(v.y)]}
+        TYPE_VECTOR3:
+            if not (is_finite(v.x) and is_finite(v.y) and is_finite(v.z)):
+                return {"ok": false, "error": "non-finite Vector3 component is not an observation"}
+            return {"ok": true, "value": [_observe_float(v.x), _observe_float(v.y), _observe_float(v.z)]}
+        TYPE_VECTOR2I:
+            return {"ok": true, "value": {"__t": "Vector2i", "__v": [v.x, v.y]}}
+        TYPE_RECT2:
+            if not (is_finite(v.position.x) and is_finite(v.position.y)
+                    and is_finite(v.size.x) and is_finite(v.size.y)):
+                return {"ok": false, "error": "non-finite Rect2 component is not an observation"}
+            return {"ok": true, "value": {"__t": "Rect2", "__v": [
+                _observe_float(v.position.x), _observe_float(v.position.y),
+                _observe_float(v.size.x), _observe_float(v.size.y)]}}
+        TYPE_COLOR:
+            if not (is_finite(v.r) and is_finite(v.g) and is_finite(v.b) and is_finite(v.a)):
+                return {"ok": false, "error": "non-finite Color component is not an observation"}
+            return {"ok": true, "value": {"__t": "Color", "__v": [
+                _observe_float(v.r), _observe_float(v.g),
+                _observe_float(v.b), _observe_float(v.a)]}}
+        TYPE_ARRAY:
+            if depth >= _OBS_MAX_DEPTH:
+                return {"ok": false, "error": "observation exceeds the %d level depth bound" % _OBS_MAX_DEPTH}
+            var items := []
+            for e in v:
+                var r := _observe_at(e, depth + 1, budget)
+                if not r["ok"]:
+                    return r
+                items.append(r["value"])
+            return {"ok": true, "value": {"__t": "Array", "__v": items}}
+        TYPE_DICTIONARY:
+            if depth >= _OBS_MAX_DEPTH:
+                return {"ok": false, "error": "observation exceeds the %d level depth bound" % _OBS_MAX_DEPTH}
+            var pairs := []
+            for k in v.keys():
+                var kr := _observe_at(k, depth + 1, budget)
+                if not kr["ok"]:
+                    return kr
+                var vr := _observe_at(v[k], depth + 1, budget)
+                if not vr["ok"]:
+                    return vr
+                pairs.append([kr["value"], vr["value"]])
+            # Canonical order by the OBSERVED key representation, which is already
+            # lossless (a Float key is a scientific token), so close but distinct
+            # keys never collapse into one sort token and the order is total and
+            # deterministic. The same entries in any insertion order compare equal.
+            pairs.sort_custom(func(a, b): return JSON.stringify(a[0]) < JSON.stringify(b[0]))
+            return {"ok": true, "value": {"__t": "Dictionary", "__v": pairs}}
+        _:
+            return {"ok": false, "error": "unsupported observation type %d" % vt}
+
+
+## Type-aware equality over the SUPPORTED observed representation. Both sides of
+## a delta went through the SAME `_observe_value` walk, so a supported observation
+## is canonical and carries its type: plain JSON scalars (null/bool/int/string), a
+## tagged Float envelope and tagged structured envelopes (Vector2i/Rect2/Color/
+## Array/Dictionary). A delta must NEVER feed these to Godot's native `==`/`!=`:
+## an int baseline against a tagged-Float current is `int != Dictionary`, an
+## engine "Invalid operands" error that stopped the whole probe (strictcontroller
+## RC1) instead of deciding the assert. This walks the VALUES instead:
+##   * two envelopes must share `__t` AND compare equal on `__v`, so
+##     Vector2i(3,4) is not Array [3,4] and a Dictionary is not an Array;
+##   * an Array compares element-wise and in ORDER (a nested difference is real);
+##   * a Dictionary's `__v` is already the canonically sorted pair list, so entry
+##     insertion order alone is never a change while a key/value/type difference
+##     is;
+##   * a scalar TYPE difference is a real change: int 1 and tagged Float 1.0 are
+##     DIFFERENT observations;
+##   * a legitimately captured null baseline compares equal to a null current.
+## Bounded and total: it recurses only over shapes `_observe_value` already
+## admitted, so it can never see a cycle, an over-cap payload or a live Object.
+func _observe_equal(a, b) -> bool:
+    var ta := typeof(a)
+    var tb := typeof(b)
+    var at := ""
+    var bt := ""
+    if ta == TYPE_DICTIONARY and a.has("__t"):
+        at = str(a.get("__t", ""))
+    if tb == TYPE_DICTIONARY and b.has("__t"):
+        bt = str(b.get("__t", ""))
+    if at != "" or bt != "":
+        # At least one side is a TAGGED envelope. Both must be tagged with the
+        # SAME type, or they are different observations -- an envelope never
+        # equals a bare scalar/Array of the same shape.
+        if at == "" or bt == "" or at != bt:
+            return false
+        if at == "Dictionary":
+            # `__v` is the sorted pair list; recurse as an Array so entry order
+            # is canonical and each key/value pair is itself walked.
+            return _observe_equal(a.get("__v", []), b.get("__v", []))
+        return _observe_equal(a.get("__v", null), b.get("__v", null))
+    if ta == TYPE_DICTIONARY or tb == TYPE_DICTIONARY:
+        # No UNTAGGED Dictionary can come out of `_observe_value`; if one does
+        # (hand-built report data), compare its keys rather than native `==`.
+        if ta != TYPE_DICTIONARY or tb != TYPE_DICTIONARY:
+            return false
+        return str(a) == str(b)
+    if ta == TYPE_ARRAY or tb == TYPE_ARRAY:
+        if ta != TYPE_ARRAY or tb != TYPE_ARRAY:
+            return false
+        if a.size() != b.size():
+            return false
+        for i in a.size():
+            if not _observe_equal(a[i], b[i]):
+                return false
+        return true
+    if ta != tb:
+        # A scalar TYPE difference (int vs bool vs String vs tagged Float) is a
+        # real value change: 1 and 1.0 are not the same observation.
+        return false
+    return a == b
+
 
 func _eval_delta(a: Dictionary, target: Node, res: Dictionary) -> void:
     var attr := str(a.get("attr", ""))
@@ -1528,7 +2206,11 @@ func _eval_delta(a: Dictionary, target: Node, res: Dictionary) -> void:
         return
     var base = _baselines.get(key, null)
     res["actual"] = {"baseline": base, "current": cur}
-    res["passed"] = (cur != base) if mode == "changed" else (cur == base)
+    # Both polarities decide through the TYPE-AWARE walk, never native `==`/`!=`:
+    # a heterogeneous pair (int vs tagged Float) would otherwise be an engine
+    # error rather than an assert. `changed` is the negation of the same walk.
+    var same := _observe_equal(cur, base)
+    res["passed"] = (not same) if mode == "changed" else same
     _results.append(res)
 
 func _truthy(v) -> bool:
@@ -1612,6 +2294,19 @@ func _finish() -> void:
         if str(r.get("measurement", "")) == "incomplete":
             incomplete_count += 1
     out["asserts_incomplete"] = incomplete_count
+
+    # Requested-but-unobserved capture accounting: any frame listed in
+    # AITELIER_PROBE_CAPTURE_AT that never produced a capture row (the run
+    # ended first, or frame_post_draw never fired for it -- frame 0 included)
+    # is kept as an explicit incomplete row and named. It never vanishes and
+    # never reads as a shorter but complete corpus.
+    var unobserved := []
+    for f in _capture_at.keys():
+        _captures.append(_capture_failure(int(f),
+            "requested capture frame %d was never observed at frame_post_draw" % int(f)))
+        unobserved.append(int(f))
+    unobserved.sort()
+    out["captures_unobserved"] = unobserved
 
     var t_walk := Time.get_ticks_usec()
     _walk(get_tree().get_root(), out["nodes"])
@@ -1799,6 +2494,69 @@ def _probe_once(args: list[str], env: dict, state_path: Path, timeout: int,
     return probe, errs, timed_out
 
 
+def _invalidate_observation_for_png(entry: dict, why: str) -> None:
+    """A missing/unreadable PNG means there is NO frame the observation could
+    describe, so the same-frame observation is invalidated in place
+    (complete=false + explicit reason). The row and the raw png_error stay."""
+    obs = entry.get("text_observation")
+    if isinstance(obs, dict):
+        obs["complete"] = False
+        reasons = obs.get("incomplete_reasons")
+        if not isinstance(reasons, list):
+            reasons = obs["incomplete_reasons"] = []
+        reasons.append("same-frame observation invalidated: %s (%s)" % (why, entry.get("file")))
+        obs["png_error"] = why
+
+
+# The same ceiling the probe applies, enforced here on the observation as the
+# outgoing serializer (_Handler: plain json.dumps, ASCII-escaped) encodes it.
+_TEXT_OBS_MAX_BYTES = 65536
+_TEXT_OBS_SHORT_CHARS = 256
+
+
+def _text_obs_wire_bytes(obs: dict) -> int:
+    """Writes the observation's own wire size into "bytes" until it is
+    self-consistent: the number covers every field, "bytes" included."""
+    n = len(json.dumps(obs).encode())
+    while obs.get("bytes") != n:
+        obs["bytes"] = n
+        n = len(json.dumps(obs).encode())
+    return n
+
+
+def _seal_text_observation(obs) -> dict:
+    """The ONE final step for a capture row's observation, run after every
+    mutation (absent observation, PNG invalidation). Over the ceiling, the whole
+    observation becomes a small fixed refusal: no rows, no lists, and a string
+    field only when it is short -- never a truncated corpus."""
+    if not isinstance(obs, dict):
+        obs = {"complete": False,
+               "error": "probe reported no text observation object for this frame"}
+    obs["bytes_encoding"] = "json.dumps"
+    n = _text_obs_wire_bytes(obs)
+    if n <= _TEXT_OBS_MAX_BYTES:
+        return obs
+
+    def short(v):
+        return v if isinstance(v, str) and len(v) <= _TEXT_OBS_SHORT_CHARS else None
+
+    frame = obs.get("frame")
+    out = {"frame": frame if isinstance(frame, int) else None,
+           "complete": False, "byte_capped": True,
+           "locale": short(obs.get("locale")),
+           "error": short(obs.get("error")),
+           "png_error": short(obs.get("png_error")),
+           "refused_bytes": n,
+           "controls": [], "unsupported": [], "hidden_surfaces": [],
+           "incomplete_reasons": [],
+           "refused": ["text observation exceeds the %d-byte ceiling as serialized for "
+                       "the response; the whole observation is refused rather than "
+                       "truncated" % _TEXT_OBS_MAX_BYTES],
+           "bytes_encoding": "json.dumps"}
+    _text_obs_wire_bytes(out)
+    return out
+
+
 def _attach_pngs(captures: list, cap_dir: Path, timing: dict | None = None) -> list:
     """Inline each captured PNG as base64 and keep only its basename: the sidecar
     mounts the workspace read-only, so the bytes have to ride home in the JSON
@@ -1806,16 +2564,42 @@ def _attach_pngs(captures: list, cap_dir: Path, timing: dict | None = None) -> l
     out = []
     t0 = time.monotonic()
     png_bytes = 0
+    png_missing = []
     for c in captures:
         png = cap_dir / Path(str(c.get("file", ""))).name
+        entry = {"frame": c.get("frame"), "file": png.name}
+        # The probe's same-frame text/geometry observation is forwarded verbatim.
+        # A capture row with NO observation is reported as an ABSENT observation,
+        # never dropped and never turned into a complete empty corpus.
+        if "text_observation" in c:
+            entry["text_observation"] = c["text_observation"]
+        else:
+            entry["text_observation"] = {
+                "complete": False,
+                "error": "probe reported no text observation for this frame"}
         if png.is_file():
-            raw = png.read_bytes()
-            png_bytes += len(raw)
-            out.append({"frame": c.get("frame"), "file": png.name,
-                        "png_b64": base64.b64encode(raw).decode()})
+            try:
+                raw = png.read_bytes()
+            except OSError as e:
+                # A read error is VISIBLE on the row; the PNG is not silently
+                # treated as absent, and the observation still rides home.
+                entry["png_error"] = "read error: %s" % e
+                png_missing.append(png.name)
+                _invalidate_observation_for_png(entry, entry["png_error"])
+            else:
+                png_bytes += len(raw)
+                entry["png_b64"] = base64.b64encode(raw).decode()
+        else:
+            entry["png_error"] = "missing PNG file"
+            png_missing.append(png.name)
+            _invalidate_observation_for_png(entry, entry["png_error"])
+        entry["text_observation"] = _seal_text_observation(entry["text_observation"])
+        out.append(entry)
     if timing is not None:
         timing["png_b64_sec"] = timing.get("png_b64_sec", 0.0) + (time.monotonic() - t0)
         timing["png_bytes"] = timing.get("png_bytes", 0) + png_bytes
+        if png_missing:
+            timing["png_missing"] = png_missing
     return out
 
 

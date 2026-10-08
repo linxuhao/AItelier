@@ -97,39 +97,39 @@ async def test_stopping_one_owner_scheduler_leaves_the_other_untouched(
         runs[pid] = sf.get_or_create_run("demo_owner_work_t", pid, {})
         sf.start_run(runs[pid])
 
-    all_in = asyncio.Event()
-
-    async def execute(claimed):
-        if len([t for t in asyncio.all_tasks()
-                if t.get_name().startswith("tick:")]) == 2:
-            all_in.set()
-        await asyncio.Event().wait()          # an agent step that never ends
-    _wire_real_tick(monkeypatch, sf, runs, execute)
-    env.active.extend(pids.values())
-
     def rows():
         return {r["run_id"]: dict(r) for r in sf._conn.execute(
             "SELECT run_id, status, retry_count, release_count "
             "FROM skillflow_steps WHERE step_id = 'a'").fetchall()}
 
+    all_claimed = asyncio.Event()
+
+    async def execute(claimed):
+        # Runner entry follows the real claim; signal only after both actual
+        # rows exist and are claimed, so the stop cannot race dispatch.
+        current = rows()
+        if all(current[runs[pid]]["status"] == "claimed" for pid in pids.values()):
+            all_claimed.set()
+        await asyncio.Event().wait()          # an agent step that never ends
+    _wire_real_tick(monkeypatch, sf, runs, execute)
+    env.active.extend(pids.values())
+
     scheds = {}
     try:
         for who, email in owners.items():
             scheds[who] = sc.start_user_scheduler(email, _owner_settings())
-        await asyncio.wait_for(all_in.wait(), timeout=INTERVAL_S + MARGIN_S)
-        assert all(r["status"] == "claimed" for r in rows().values()), rows()
+        await asyncio.wait_for(all_claimed.wait(), timeout=INTERVAL_S + MARGIN_S)
+        assert all(rows()[runs[pid]]["status"] == "claimed"
+                   for pid in pids.values()), rows()
+        alice_task = sc._detached_ticks.get(pids["alice"])
+        bob_task = sc._detached_ticks.get(pids["bob"])
+        assert alice_task is not None and bob_task is not None, sc._detached_ticks
 
         sc.stop_scheduler(OWNER)              # stop ONLY Alice
-        await asyncio.sleep(0.2)
-
-        alice_tasks = [t for t in asyncio.all_tasks()
-                       if t.get_name() == f"tick:{pids['alice']}"]
-        bob_tasks = [t for t in asyncio.all_tasks()
-                     if t.get_name() == f"tick:{pids['bob']}"]
-        done, pending = await asyncio.wait(alice_tasks, timeout=5)
+        done, pending = await asyncio.wait([alice_task], timeout=5)
         assert done and all(t.cancelled() for t in done), (
             "Alice's tick was not cancelled by her scheduler's stop")
-        assert bob_tasks and not any(t.done() for t in bob_tasks), (
+        assert not bob_task.done(), (
             "Bob's live task was cancelled with Alice's scheduler")
 
         bob_row = rows()[runs[pids["bob"]]]
@@ -149,9 +149,11 @@ async def test_stopping_one_owner_scheduler_leaves_the_other_untouched(
         assert pids["alice"] not in sc._detached_ticks, "Alice's slot left"
         assert pids["bob"] in sc._detached_ticks, "Bob's slot was dropped"
     finally:
-        for t in [t for t in asyncio.all_tasks()
-                  if t.get_name().startswith("tick:")]:
-            t.cancel()
+        for task in (sc._detached_ticks.get(pids["alice"]),
+                     sc._detached_ticks.get(pids["bob"]),
+                     locals().get("alice_task"), locals().get("bob_task")):
+            if task is not None and not task.done():
+                task.cancel()
         for s in scheds.values():
             if s.running:
                 s.shutdown(wait=False)

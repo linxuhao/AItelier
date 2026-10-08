@@ -23,6 +23,7 @@ from core.workspace_manager import DPE_GRAPH_NAME
 from aitelier.step_labels import COARSE_MAP
 from core.orphan_dbg import odbg as _odbg
 from core import gate_deferral
+from core import event_loop_lag
 
 # NB-1 runaway-loop guard: max total step executions before a run is force-failed.
 # A normal DPE run is well under this; this only trips on a non-converging loop.
@@ -2891,6 +2892,80 @@ def _cancel_detached_ticks(_event=None,
     return len(tasks)
 
 
+# ── Direct event-loop lag observation ───────────────────────────────
+# `_check_hung_claims` answers "is a CLAIM stale": it runs 30 s apart, on the
+# loop it is trying to supervise, and reports about a step. It cannot report
+# about the loop itself — if the loop is not turning, neither is it. The
+# monitor in `core/event_loop_lag` measures the gap between when a sleep on the
+# loop was due and when it actually woke, which IS the time the loop spent
+# blocked, and attributes it to the projects with a tick in flight (or
+# `unknown`). It is one task per scheduler lifecycle, cancelled and awaited on
+# shutdown, with bounded retention and rate-limited logging.
+
+
+def _current_operation_attribution() -> str:
+    """Name the control-plane operations genuinely in flight, or `unknown`.
+
+    Attribution is deliberately narrow: the only operations this process can
+    name from here are the detached scheduler ticks, and their project ids are
+    already in the tick log. Nothing about a payload, prompt or credential is
+    read. A tick whose task has already finished is filtered out, so the label
+    names the context active when the lag was sampled — not a completed step and
+    not a proven blocking cause. When no tick is in flight the loop was busy
+    with something this monitor cannot name, so the answer is honestly
+    `unknown`, not a guess. Only string ids are joined; the join is bounded.
+    """
+    try:
+        in_flight = sorted(
+            pid for pid, task in _detached_ticks.items()
+            if not (isinstance(task, asyncio.Task) and task.done()))
+    except Exception:                                              # noqa: BLE001
+        return "unknown"
+    if not in_flight:
+        return "unknown"
+    return "tick:" + ",".join(str(pid)[:64] for pid in in_flight[:4])
+
+
+# Schedulers that already carry the lag-monitor shutdown listener, so a
+# `reschedule_scheduler` (which re-runs `_add_scheduler_job` on the same
+# scheduler at every settings change) does not stack one per change.
+_lag_monitor_listener_on: "weakref.WeakSet[AsyncIOScheduler]" = weakref.WeakSet()
+
+
+def _stop_lag_monitor(scheduler: AsyncIOScheduler) -> int:
+    """Cancel the lifecycle's monitor and await teardown on its OWN loop.
+
+    Called from the EVENT_SCHEDULER_SHUTDOWN listener for `scheduler`, and from
+    `stop_scheduler`. Cancel is delivered thread-safely; the awaited `aclose`
+    is always scheduled on the loop that owns the monitor, so a stop issued
+    from another thread (or before the loop runs) still leaves no sampling task
+    behind — the await is never attempted off its loop.
+    """
+    monitor = event_loop_lag.monitor_for(scheduler)
+    if monitor is None:
+        return 0
+    task = monitor.task
+    cancelled = monitor.cancel()
+    if task is None or task.done():
+        return cancelled
+    loop = task.get_loop()
+    if loop.is_closed():
+        return cancelled
+
+    def _await_close() -> None:
+        loop.create_task(monitor.aclose())
+
+    try:
+        running = asyncio.get_running_loop()
+    except RuntimeError:
+        running = None
+    if running is loop:
+        _await_close()
+    else:                            # shutdown called from another thread
+        loop.call_soon_threadsafe(_await_close)
+    return cancelled
+
+
 async def poll_and_execute_demo():
     """Demo mode: FIFO ordering, dispatched detached like the main poller.
 
@@ -3004,7 +3079,7 @@ def start_user_scheduler(owner_email: str, settings: dict):
 
 
 def stop_scheduler(owner_email: str = None):
-    """Shut down a scheduler."""
+    """Shut down a scheduler, tearing down its lag monitor with it."""
     if owner_email:
         sched = _user_scheduler_map.pop(owner_email, None)
     else:
@@ -3012,6 +3087,10 @@ def stop_scheduler(owner_email: str = None):
         sched = _scheduler_instance
         _scheduler_instance = None
     if sched and sched.running:
+        try:
+            _stop_lag_monitor(sched)
+        except Exception:                                          # noqa: BLE001
+            pass
         sched.shutdown(wait=False)
 
 
@@ -3101,6 +3180,18 @@ def _add_scheduler_job(scheduler: AsyncIOScheduler, settings: dict,
             functools.partial(_cancel_detached_ticks, owner_email=owner_email),
             EVENT_SCHEDULER_SHUTDOWN)
         _shutdown_listener_on.add(scheduler)
+    if scheduler not in _lag_monitor_listener_on:
+        # One lag monitor per scheduler lifecycle, torn down with it. See the
+        # module section above `_stop_lag_monitor`.
+        from apscheduler.events import EVENT_SCHEDULER_SHUTDOWN
+
+        def _on_shutdown_stop_lag(_event=None, _sched=scheduler):
+            _stop_lag_monitor(_sched)
+        scheduler.add_listener(_on_shutdown_stop_lag, EVENT_SCHEDULER_SHUTDOWN)
+        _lag_monitor_listener_on.add(scheduler)
+    event_loop_lag.start_monitor(scheduler,
+                                 attribution=_current_operation_attribution)
+
 
 
 

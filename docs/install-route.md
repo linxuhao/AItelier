@@ -78,6 +78,8 @@ because the errors are still what you would see if you bypass the CLI.
 | Media generation unavailable | Refuses naming `AITELIER_MEDIA_MCP_URL` — and the doc warns that server holds the **cast**, so repointing it mid-project recasts every character |
 | One project starving the others | Fixed: the scheduler runs different projects in parallel, serial within a project, at most `AITELIER_MAX_CONCURRENT_PROJECTS` (default 4) in flight; the poller does not wait for the ticks it starts, so a project dispatched during another's long step is picked up on the next interval |
 | A long step makes the tick log go quiet | Covered: every poll reports an in-flight project as `outcome=locked` (one heartbeat a minute per project), and a free project held back by the cap as `outcome=at_capacity` |
+| **The whole backend goes unresponsive**, not just one project | Covered: the event-loop lag monitor (`docs/event-loop-lag.md`) records when the loop itself stops turning, attributed to the in-flight ticks or to `unknown`. A hung step and a hung loop are different, and the watchdog that runs *on* the loop cannot report the second |
+
 
 ## 6. Read the result
 

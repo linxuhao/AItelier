@@ -240,7 +240,8 @@ def test_the_graph_projection_publishes_names_only(client):
 
     assert set(body) == {"config_name", "label", "origin", "base", "addons",
                          "addon_steps", "begin", "description", "end_conditions",
-                         "steps", "loops", "checkpoints"}
+                         "steps", "loops", "checkpoints", "graph_version",
+                         "graph_digest", "registration_status"}
     for step in body["steps"]:
         assert set(step) == {"id", "type", "checkpoint", "tool_name",
                              "agent_config", "loop_over", "loop_id", "is_loop",

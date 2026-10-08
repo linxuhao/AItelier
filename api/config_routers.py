@@ -112,7 +112,9 @@ def pipeline_graph(config_name: str, registry=Depends(get_config_registry),
 
     What makes that safe is the PROJECTION, not the route. This returns names and
     structure — step ids, types, role NAMES, routing conditions — and never a
-    value: no ``tool_params``, no role config, no prompt, no key. Widening it to
+    value: no ``tool_params``, no role config, no prompt, no key. Current graph
+    version/digest/status are nonsecret metadata, bound to this same projected
+    definition; unavailable/conflict states carry no version or digest. Widening it to
     include any of those would quietly turn a decision about publishing structure
     into publishing content, so ``test_the_graph_projection_publishes_names_only``
     pins the field list rather than trusting a future reader to remember.
@@ -134,6 +136,15 @@ def pipeline_graph(config_name: str, registry=Depends(get_config_registry),
     view["origin"] = ("generated" if config_name.startswith(GEN_PREFIX)
                       else "native")
     view["checkpoints"] = manifest.to_dict().get("checkpoints") or {}
+    if view.get("registration_status") == "available":
+        from skillflow import graph_digest
+        from api.dependencies import get_skillflow as initialized_skillflow
+        try:
+            current = initialized_skillflow()._graphs.get(config_name)
+            if current is None or graph_digest(current.to_dict()) != view["graph_digest"]:
+                view.update(graph_version=None, graph_digest=None, registration_status="conflict")
+        except Exception:
+            view.update(graph_version=None, graph_digest=None, registration_status="unavailable")
     return view
 
 

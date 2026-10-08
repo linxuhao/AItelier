@@ -29,6 +29,7 @@ class Session:
         self.fail_backup = False
         self.backup_calls = []
         self.agent_calls = []
+        self.extracted = None  # synthetic extractor output; None = one plain ledger per missing chapter
         self.conf = {"review_revision": 1}
         loader = ToolLoader(Path(skillflow.__file__).parent / "tools", ROOT / "aitelier/tools")
         self.sf = SkillFlow(str(tmp_path / "engine.sqlite"), tool_loader=loader,
@@ -126,7 +127,8 @@ class Session:
                 writer = "write_verdict"
             elif claim.step_id == "extract_ledger":
                 _, m = self.bench.input(run)
-                obj = {str(c["chapter"]): ledger(c["chapter"], c["title"]) for c in m["chapters"] if not c["provided_ledger"]}
+                obj = self.extracted or {str(c["chapter"]): ledger(c["chapter"], c["title"])
+                                         for c in m["chapters"] if not c["provided_ledger"]}
                 writer = "write_ledger"
             elif claim.step_id == "ledger_audit":
                 bundle = decode((self.bench.work(run) / "ledgers.json").read_bytes())
@@ -167,7 +169,7 @@ def test_graph_without_ledger_extractor_and_reject(tmp_path, monkeypatch, bench)
     base = git(bench.policy.repo, "rev-parse", "HEAD")
     run = session.start(request(bench, provided=False))
     assert session.drive(run) == "paused"
-    assert session.agent_calls == ["literary_review", "extract_ledger", "ledger_audit"]
+    assert session.agent_calls == ["extract_ledger", "literary_review", "ledger_audit"]
     session.sf.reject_checkpoint(run, "stage", "需要调整人物选择", redirect_to="rejected")
     assert session.drive(run) == "completed"
     assert git(bench.policy.repo, "rev-parse", "HEAD") == base

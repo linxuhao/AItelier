@@ -79,7 +79,8 @@ def test_m9_missing_certificate_is_refused_at_the_real_tool_entry(bench, tmp_pat
 
     session = Session(tmp_path, monkeypatch, bench)
     run = session.start(request(bench))
-    session.sf.advance_run(run)
+    session.sf.advance_run(run)  # prepare
+    session.sf.advance_run(run)  # ledger_ready: replay, then release literary review
     claim = session.sf.claim_next_step(run)
     assert claim.step_id == "literary_review"
     identity, _ = bench.review_materials(run, "literary")

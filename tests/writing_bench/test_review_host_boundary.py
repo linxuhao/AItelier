@@ -56,7 +56,7 @@ def test_runner_refuses_verdict_before_framework_write(monkeypatch,tmp_path):
 def test_real_graph_pass_flags_without_host_certificate_never_stage(tmp_path,monkeypatch,bench):
     from skillflow import StepResult
     session=Session(tmp_path,monkeypatch,bench);run=session.start(request(bench))
-    session.sf.advance_run(run);claim=session.sf.claim_next_step(run)
+    session.sf.advance_run(run);session.sf.advance_run(run);claim=session.sf.claim_next_step(run)  # prepare, ledger_ready
     assert claim.step_id=='literary_review'
     identity,_=bench.review_materials(run,'literary')
     value={'review_key':identity['review_key'],'reviewed_chapters':identity['targets'],
@@ -73,7 +73,7 @@ def test_real_graph_pass_flags_without_host_certificate_never_stage(tmp_path,mon
 
 def test_host_session_composes_from_exact_live_step(tmp_path,monkeypatch,bench):
     session=Session(tmp_path,monkeypatch,bench);run=session.start(request(bench))
-    session.sf.advance_run(run);claim=session.sf.claim_next_step(run)
+    session.sf.advance_run(run);session.sf.advance_run(run);claim=session.sf.claim_next_step(run)  # prepare, ledger_ready
     e=SimpleNamespace(_config_name=adapter.CONFIG,_current_step=claim.step_id,_run_id=run,
                       _step_instance_id=claim.token.step_instance_id,_claim_epoch=claim.token.claim_epoch)
     observed=adapter.begin_observed_review(e)
@@ -113,7 +113,7 @@ def test_host_rejects_prior_claim_epoch_even_with_same_step_instance(tmp_path,mo
     from skillflow import StepResult
     from aitelier.writing_bench.reading import ReviewSession,Coverage
     session=Session(tmp_path,monkeypatch,bench);run=session.start(request(bench))
-    session.sf.advance_run(run);claim=session.sf.claim_next_step(run)
+    session.sf.advance_run(run);session.sf.advance_run(run);claim=session.sf.claim_next_step(run)  # prepare, ledger_ready
     identity,materials=bench.review_materials(run,'literary')
     observed=ReviewSession(Coverage('literary',identity['review_key'],identity['targets'],materials),
              bench.work(run)/'reading',{'run_id':run,'step_id':claim.step_id,
@@ -134,7 +134,7 @@ def test_graph_resolver_and_prompt_assembler_present_current_prose_verbatim(tmp_
     from core.ai_router import AIGateway
     from core.dpe_pipeline import _project_native_messages
     session=Session(tmp_path,monkeypatch,bench);run=session.start(request(bench))
-    session.sf.advance_run(run);claim=session.sf.claim_next_step(run)
+    session.sf.advance_run(run);session.sf.advance_run(run);claim=session.sf.claim_next_step(run)  # prepare, ledger_ready
     identity,materials=bench.review_materials(run,'literary')
     c=Coverage('literary',identity['review_key'],identity['targets'],materials)
     workspace=session.sf._workspace.get_project_path('execution')

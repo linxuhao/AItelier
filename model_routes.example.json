@@ -53,6 +53,24 @@
     "qwen/deepseek-v4-flash-0731",
     "deepseek/deepseek-flash"
   ],
+  "_flash_review_note": [
+    "Reviewer roles (the *_reviewer roles that used to ride `flash`) name their own",
+    "route so a deployment can staff review apart from implementation. Measured",
+    "2026-10-08 by replaying 6 recorded implementation reviews on the commits they",
+    "reviewed (2 samples each; 5 carry defects confirmed by the next commit or by",
+    "reading the code): confirmed defects named out of 10 - DeepSeek V4.1-Flash at",
+    "effort high 9, Claude Sonnet 5.5 high 9, V4.1 low 7, Haiku 5.5 high 6,",
+    "GLM-5.3-Flash low 4 and high 4, Haiku low 3, Sonnet low 0. GLM is not a rubber",
+    "stamp - it catches what is visible in the files it reads - but misses defects",
+    "that need cross-file or engine reasoning, and effort does not change that. On",
+    "Claude, effort governs how much it checks: never staff a reviewer at low.",
+    "This example keeps the same candidates as `flash` so a clean checkout starts."
+  ],
+  "flash_review": [
+    "ark/deepseek-v4-flash",
+    "qwen/deepseek-v4-flash-0731",
+    "deepseek/deepseek-flash"
+  ],
   "_deepseek_ids_note": [
     "Read off api-docs.deepseek.com on 2026-09-11. Two of the ids above are",
     "ALIASES, and a completion cannot tell you which model served it — the",

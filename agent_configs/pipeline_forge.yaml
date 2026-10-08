@@ -60,7 +60,7 @@ graph_emitter:
 # reasoning inside max_output_tokens, so an unbounded default-effort chain of
 # thought at 4096 silently ate the verdict tool call. effort "low" + 8192 headroom.
 reviewer:
-  model: "flash"
+  model: "flash_review"
   temperature: 0.1
   template: "forge_review_red.md"
   tools: ["read_file"]

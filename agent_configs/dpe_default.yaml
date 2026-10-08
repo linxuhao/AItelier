@@ -41,7 +41,7 @@ researcher:
     effort: "max"
 
 researcher_reviewer:
-  model: "flash"
+  model: "flash_review"
   temperature: 0.1
   template: "step1_5_researcher_red.md"
   tools: ["list_tree"]
@@ -65,7 +65,7 @@ architect:
     effort: "max"
 
 architect_reviewer:
-  model: "flash"
+  model: "flash_review"
   temperature: 0.1
   template: "step2_architect_red.md"
   tools: ["list_tree"]
@@ -90,7 +90,7 @@ pm:
     enable: true
 
 pm_reviewer:
-  model: "flash"
+  model: "flash_review"
   temperature: 0.1
   template: "step3_pm_red.md"
   tools: ["list_tree"]
@@ -139,7 +139,7 @@ task_planner:
     enable: true
 
 task_planner_reviewer:
-  model: "flash"
+  model: "flash_review"
   temperature: 0.1
   template: "task_plan_red.md"
   tools: ["list_tree"]
@@ -227,7 +227,7 @@ task_implementer:
     effort: "low"
 
 task_implementer_reviewer:
-  model: "flash"
+  model: "flash_review"
   temperature: 0.1
   template: "task_implementer_red.md"
   tools: ["list_tree"]
@@ -271,7 +271,7 @@ final_verifier:
     enable: true
 
 final_verifier_reviewer:
-  model: "flash"
+  model: "flash_review"
   temperature: 0.1
   template: "step5_verifier_red.md"
   tools: ["list_tree"]

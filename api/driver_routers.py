@@ -104,7 +104,12 @@ def project_drivers(project_id: str):
 
 @router.get("/{driver_id}", dependencies=[Depends(authz.require_reader)])
 def get_driver(driver_id: str):
-    return _call(_registry().get, driver_id)
+    registry = _registry()
+    try:
+        return registry.get(driver_id)
+    except drivers.DriverError as exc:
+        # A missing resource is the self-register client's pre-create branch.
+        raise HTTPException(404, str(exc)) from exc
 
 
 @router.get("/{driver_id}/audit", dependencies=[Depends(authz.require_admin)])

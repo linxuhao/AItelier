@@ -76,10 +76,10 @@ def test_recreated_logical_actor_is_not_an_instance_id_in_protocol():
 def test_capture_uses_existing_safe_read_and_owns_structured_value():
     src = gh._PROBE_GD
     capture = src.split("func _capture_before", 1)[1].split("func _capture_baselines", 1)[0]
-    assert '_read_attr(target, record["attr"])' in capture
+    assert '_read_before_attr(target, record["attr"])' in capture
     assert 'if read["ok"]:' in capture
     assert 'value.duplicate(true)' in capture
-    assert capture.index('if _before_captures.has(id)') < capture.index('_read_attr(')
+    assert capture.index('if _before_captures.has(id)') < capture.index('_read_before_attr(')
     assert '_spec_errors.append' in capture
     assert '_jsonable' not in capture and 'str(value)' not in capture
     delta = src.split("func _eval_delta", 1)[1].split("func _truthy", 1)[0]
@@ -90,6 +90,58 @@ def test_capture_uses_existing_safe_read_and_owns_structured_value():
     assert '_observe_equal(cur, base)' in delta
     assert '(not same) if mode == "changed" else same' in delta
     assert 'elif not _baselines.has(key):' in delta
+
+
+@pytest.mark.parametrize("attr", [
+    "health", "input_stats.hp", 'profile.cultivation["month"]',
+    "items[0]", "items[-1].health", "items[2]['hp']",
+    'stats["health * 0"]',
+])
+def test_before_property_access_paths_are_admitted(attr):
+    raw = timeline()
+    raw[0]["capture_before"][0]["attr"] = attr
+    raw[2]["assert"][0]["attr"] = attr
+    assert gh._normalize_timeline(raw)[1] == []
+
+
+@pytest.mark.parametrize("attr", [
+    "42", "-42", "0.0", "true", "false", "null", "self", "PI", "TAU", "INF", "NAN",
+    "health * 0", "health - health", "health == health", "health + 1",
+    "not health", "health and health", "health if health else health", "health ? 1 : 0",
+    "min(health, health)", "get('health')", "health.size()", "stats.get('hp')",
+    "[health]", "{'hp': health}", "(health)", "self.health", "get_node('Actor').health",
+    "items[index]", "items[health - health]", "items[0 + 0]", "stats[true]",
+    "items[1.0]", "items[00]", "health\n", "health;health", "health # comment",
+    "items[0] + health", "items[-1].health == health", '"health"',
+    "health / health", "health % 1", "health ** 0", "health | 0",
+    "health & health", "health ^ health", "~health", "health << 0",
+    "health or true", "health is int", "health in [health]",
+    "health if true else 0", "items[abs(health)]", "health.to_string()",
+])
+def test_before_rejects_computations_literals_calls_and_dynamic_index_masking(attr):
+    raw = timeline()
+    raw[0]["capture_before"][0]["attr"] = attr
+    raw[2]["assert"][0]["attr"] = attr
+    assert gh._normalize_timeline(raw)[1]
+
+
+def test_explicit_reads_require_same_shared_grammar_and_real_node_property():
+    src = gh._PROBE_GD
+    read = src.split("func _read_before_attr", 1)[1].split("func _capture_baselines", 1)[0]
+    assert '__BEFORE_PROPERTY_PATH_RE__' not in src
+    assert 'path.compile(' in read and 'path.search(attr) == null' in read
+    assert 'target.get_property_list()' in read
+    assert read.index('target.get_property_list()') < read.index('return _read_attr(target, attr)')
+    assert 'str(property.get("name", "")) == root' in read
+    delta = src.split("func _eval_delta", 1)[1].split("func _truthy", 1)[0]
+    assert '_read_before_attr(target, attr) if a.has("before") else _read_attr(target, attr)' in delta
+
+
+def test_legacy_expression_operands_keep_their_existing_admission():
+    raw = timeline()[1:]
+    raw[1]["assert"][0].pop("before")
+    raw[1]["assert"][0]["attr"] = "health * 0"
+    assert gh._normalize_timeline(raw)[1] == []
 
 
 def test_admitted_controls_bind_existing_live_input_fixture_operands():

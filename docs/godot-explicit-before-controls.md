@@ -21,6 +21,14 @@ input-free control point. The captured operand is a real, type-preserving
 
 The capture frame must precede a declared press or click, and that input must
 precede the delta assertion. IDs are unique within one scenario invocation.
+The explicit operand is a property access path: an identifier, optional dotted
+properties, and literal integer or quoted-string indices (for example,
+`profile.cultivation["month"]`). Arithmetic, predicates, calls, conditionals,
+literal values, escaped index keys and dynamic indexing are refused. Both reads require the root
+to occur in the resolved node's actual property list; a global or class constant
+cannot masquerade as a node property. Legacy reads without `before` retain
+their existing expression behavior.
+
 The node and operand must match exactly. A logical node may be recreated
 between legs of a scenario; its earlier value remains immutable. Every
 capture receipt records scenario, frame, action frame, operand, and actual

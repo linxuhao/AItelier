@@ -989,6 +989,13 @@ def compile_project(project_dir: str, timeout: int = 120) -> dict:
 
 
 # ── playtest gate ──────────────────────────────────────────────────────────
+# Explicit before controls observe node-owned data, never computed predicates.
+# One grammar is shared with the embedded probe: property identifiers, dotted
+# access, and literal integer/string indexing. Root literals are not identifiers.
+_BEFORE_OPERAND_PATTERN = '(?!(?:true|false|null|self|PI|TAU|INF|NAN)(?:[.\\[]|$))[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*|\\[(?:-?(?:0|[1-9][0-9]*)|"[^"\\\\\\r\\n]*"|\'[^\'\\\\\\r\\n]*\')\\])*'
+_BEFORE_OPERAND_RE = re.compile(_BEFORE_OPERAND_PATTERN)
+
+
 _PROBE_GD = r'''extends Node
 # AItelier runtime probe (injected). Two modes:
 #   * SPEC mode  (AITELIER_PROBE_SPEC set): drive an AUTHORED input timeline and,
@@ -1925,7 +1932,7 @@ func _capture_before(c: Dictionary) -> void:
         if target == null:
             record["error"] = "before capture node not found: " + record["node"]
         else:
-            var read := _read_attr(target, record["attr"])
+            var read := _read_before_attr(target, record["attr"])
             if read["ok"]:
                 record["ok"] = true
                 # Own the value so later game mutation cannot rewrite the before.
@@ -1935,6 +1942,19 @@ func _capture_before(c: Dictionary) -> void:
                 record["error"] = read["error"]
     if not record["ok"]:
         _spec_errors.append("before capture %s failed: %s" % [id, record.get("error", "")])
+
+func _read_before_attr(target: Object, attr: String) -> Dictionary:
+    var path := RegEx.new()
+    if path.compile(__BEFORE_PROPERTY_PATH_RE__) != OK or path.search(attr) == null:
+        return {"ok": false, "error": "before operand must be a property access path"}
+    # A syntactic identifier could otherwise resolve to a global/class constant.
+    # Require the root to be an actual property of this resolved node, on BOTH
+    # reads, including when the logical node is recreated between battle legs.
+    var root := attr.get_slice(".", 0).get_slice("[", 0)
+    for property in target.get_property_list():
+        if str(property.get("name", "")) == root:
+            return _read_attr(target, attr)
+    return {"ok": false, "error": "before operand root is not a node property: " + root}
 
 func _capture_baselines() -> void:
     for w in _watch:
@@ -2212,7 +2232,7 @@ func _eval_delta(a: Dictionary, target: Node, res: Dictionary) -> void:
     var mode := str(a.get("mode", "changed"))
     var key := str(a.get("node", "")) + "|" + attr
     res["expr"] = attr + " " + mode + " since frame 0"
-    var cur_read := _read_attr(target, attr)
+    var cur_read := _read_before_attr(target, attr) if a.has("before") else _read_attr(target, attr)
     if not cur_read["ok"]:
         # The CURRENT read did not happen (parse/execute failure, or no
         # JSONable value). That is an incomplete measurement, never a
@@ -2415,6 +2435,8 @@ func _walk(node: Node, acc: Dictionary) -> void:
     for c in node.get_children():
         _walk(c, acc)
 '''
+_PROBE_GD = _PROBE_GD.replace(
+    "__BEFORE_PROPERTY_PATH_RE__", json.dumps(r"\A(?:" + _BEFORE_OPERAND_PATTERN + r")\z"))
 
 
 def _inject_probe(dst: Path) -> None:
@@ -2987,6 +3009,8 @@ def _before_control_errors(timeline: list) -> list:
                 errors.append("duplicate before capture: " + c["id"])
                 continue
             captures[c["id"]] = {**c, "frame": e["at"]}
+            if _BEFORE_OPERAND_RE.fullmatch(c["attr"]) is None:
+                errors.append("before capture %s operand must be a property access path" % c["id"])
             if not e["at"] < c["action_frame"] or c["action_frame"] not in inputs:
                 errors.append("before capture %s must precede a declared press/click" % c["id"])
     for e in timeline:

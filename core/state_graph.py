@@ -300,16 +300,9 @@ def initialize_graph_schema(db) -> None:
             conn.execute("ALTER TABLE state_nodes ADD COLUMN facet TEXT "
                          "CHECK(facet IN ('design','contract','test','content','integration'))")
         # Additive (design/multi-driver-coop.md §9.1): every existing project is off.
-        policy_columns = {r["name"] for r in conn.execute("PRAGMA table_info(state_project_policy)")}
-        if "multi_driver" not in policy_columns:
+        if "multi_driver" not in {r["name"] for r in conn.execute("PRAGMA table_info(state_project_policy)")}:
             conn.execute("ALTER TABLE state_project_policy ADD COLUMN multi_driver TEXT NOT NULL "
                          "DEFAULT 'off' CHECK(multi_driver IN ('off','on'))")
-        # Additive (design §7.3, P3): claims are ENFORCED only behind this second
-        # switch (owner decision 2026-10-09: set_multi_driver alone keeps P1's
-        # record-only behaviour). Every existing project is off.
-        if "claim_enforcement" not in policy_columns:
-            conn.execute("ALTER TABLE state_project_policy ADD COLUMN claim_enforcement TEXT NOT NULL "
-                         "DEFAULT 'off' CHECK(claim_enforcement IN ('off','on'))")
         conn.commit()
 
 

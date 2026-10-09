@@ -159,10 +159,8 @@ def project_run_summary(service, project_id):
                   'finished':counts['finished']+external['finished'],'failed':counts['failed']+external['failed'],
                   'other':counts['other']+external['other'],'unavailable':counts['unavailable']}
     from core.state_subagents import orphan_count
-    orphans = None
-    if service.store.project_read_trusted:
-        with service.store.transaction() as conn:
-            orphans = orphan_count(conn, project_id)
+    with service.store.transaction() as conn:
+        orphans = orphan_count(conn, project_id)
     return {'project_id':project_id,'counts':counts,'execution_counts':executions,'running_runs':running,'usage':usage,
             'orphaned_subagents':orphans,
             'external_attempts_excluded':external['total'],'running_external':holding,

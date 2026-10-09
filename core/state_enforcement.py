@@ -38,14 +38,16 @@ _ACTIVE = ("reserved", "launching", "running", "paused", "unknown")
 MAX_OVERRIDE_REASON = 2000
 
 
-def policy_row(conn, project_id) -> dict:
-    row = conn.execute("SELECT * FROM state_project_policy WHERE project_id=?", (project_id,)).fetchone()
-    return dict(row) if row else {}
+def _has_table(conn, name) -> bool:
+    return conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone() is not None
 
 
 def enforced(conn, project_id) -> bool:
     """True only when multi_driver=on AND claim_enforcement=on."""
-    row = policy_row(conn, project_id)
+    from core.state_metadata import project_policy
+    if not _has_table(conn, "state_project_policy"):
+        return False
+    row = project_policy(conn, project_id)
     return row.get("multi_driver") == "on" and row.get("claim_enforcement") == "on"
 
 
@@ -63,6 +65,12 @@ def dispatch_claim(conn, project_id, node_key, driver_id, is_admin, claim_id=Non
     an explicitly supplied claim is still checked (a wrong fence is a wrong
     fence) but none is required.
     """
+    if not _has_table(conn, "state_node_claims"):
+        # A store built by StateAttempts alone (tests, embedders) has no claim
+        # tables and therefore nothing to enforce or bind.
+        if claim_id is not None:
+            raise ClaimError("stale_fence", f"claim {claim_id} does not exist here")
+        return None, False
     live = conn.execute("SELECT * FROM state_node_claims WHERE project_id=? AND node_key=? AND status='live' "
                         "AND purpose='implement'", (project_id, node_key)).fetchone()
     live = dict(live) if live else None
@@ -102,7 +110,7 @@ def dependents(conn, project_id, node_key) -> list[str]:
 
 def holders(conn, project_id, node_keys, driver_id) -> list[dict]:
     """Other drivers' live claims and active owned attempts on these nodes."""
-    if not node_keys:
+    if not node_keys or not _has_table(conn, "state_node_claims"):
         return []
     marks = ",".join("?" for _ in node_keys)
     found = []
@@ -166,7 +174,8 @@ class StructuralGuard:
                     conn, self.store, target_driver_id=driver, kind=kind, project_id=project_id,
                     subject=f"{check['action']} over your claim on {check['node_key']}", body=body,
                     refs={"node_key": check["node_key"], "action": check["action"],
-                          "held": mine, "by_actor": self.actor, "break_glass": check["break_glass"]},
+                          "held": mine, "by_actor": self.actor, "break_glass": check["break_glass"],
+                          "override_reason": check["override_reason"]},
                     actor=self.actor))
             self.store._event(conn, project_id, check["node_key"], "claim_overridden", {
                 "action": check["action"], "actor": self.actor, "driver_id": self.driver_id,
@@ -213,8 +222,10 @@ def checkpoint_controller(db, run_id, driver_id, is_admin, actor) -> dict:
             return {"enforced": False}
         row = conn.execute("SELECT attempt_id,project_id,node_key,owner_driver_id,owner_fence,status "
                            "FROM state_attempts WHERE run_id=?", (run_id,)).fetchone()
-        if row is None or not enforced(conn, row["project_id"]) or not row["owner_driver_id"]:
-            return {"enforced": False, "attempt_id": row["attempt_id"] if row else None}
+        if row is None:
+            return {"enforced": False}
+        if not enforced(conn, row["project_id"]) or not row["owner_driver_id"]:
+            return {"enforced": False, "attempt_id": row["attempt_id"]}
         attempt = dict(row)
     if attempt["owner_driver_id"] == driver_id:
         return {"enforced": True, "attempt_id": attempt["attempt_id"], "owner_driver_id": driver_id,

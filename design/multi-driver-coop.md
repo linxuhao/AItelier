@@ -1,7 +1,7 @@
 # 多 driver 协作（multi-driver coop）—— 同一个 State project 由多个 director 共同驱动
 
 Status: **approved for implementation**（所有者 2026-10-09 16:11 批准）。实施按第 10 节 P0–P5 进行，从 P0 开始；对应的实现节点在 `aitelier` State DAG 中。
-进度：**P0 已合并（main 6790f14446，2026-10-09）并于 2026-10-09 在生产启用**（`AITELIER_DRIVER_IDENTITY=on`；已登记 `owner-cli`、`public`、`grok`、`codex`）；新 LAN driver 自助领取 token：`scripts/driver_token.py self-register`（见 `docs/driver-identity.md`）。**P1 已实现（分支 `grok/multi-driver-p1`），尚未合并或部署**：claim / 租约 / 心跳 / `lease_expired` 事件，只记录不强制，按项目 `multi_driver` 开关（默认 off），见 `docs/driver-claims.md`。P2–P5 未开始。
+进度：**P0 已合并（main 6790f14446，2026-10-09）并于 2026-10-09 在生产启用**（`AITELIER_DRIVER_IDENTITY=on`；已登记 `owner-cli`、`public`、`grok`、`codex`）；新 LAN driver 自助领取 token：`scripts/driver_token.py self-register`（见 `docs/driver-identity.md`）。**P1 已实现（分支 `grok/multi-driver-p1`），尚未合并或部署**：claim / 租约 / 心跳 / `lease_expired` 事件，只记录不强制，按项目 `multi_driver` 开关（默认 off），见 `docs/driver-claims.md`。**P3 已实现（分支 `grok/multi-driver-p3`，基于 main 53daff7ff2），尚未合并或部署**：`abandoned` 终止状态（`state_attempts`/`state_external_owners` 事务性重建）、按项目的第二个开关 `claim_enforcement`（默认 off，所有者裁决：`set_multi_driver` 本身不开始强制）、abandon/take_over、`driver_subagents` 登记与 adopt/orphan/settle、offer/accept/decline/withdraw handoff、单一通知接口 `core/driver_notices.py`（P2 inbox 未落地前以 `driver_notice` 事件 + 待办行投递），见 `docs/driver-claims.md`。P2 由另一 driver 并行实现；P4–P5 未开始。
 Date: 2026-10-09（初稿）；同日按所有者裁决 D1–D12 及全部待决问题的答复多次修订，16:11 批准实施，见第 0 节。
 Scope: `core/state_*`、`core/director_messaging*.py`、`api/state_*`、`api/mcp_router.py`、`api/authz.py`、
 `.codex/hooks/postcompact_driver_state.py`、driver guide（`core/state_driver_guide.py`、`docs/state-agent-driver.md`）。
@@ -893,7 +893,7 @@ REST GET（私有）：`/api/drivers`、`/api/drivers/me`、`/api/drivers/{id}/p
 | P0 身份 | 全局 `drivers` / `project_drivers` / `driver_audit`；多 token 查表（authz、admin_routers、state_only 及各调用方）；公网 = `driver:public`；`whoami`；`director_identity` 校验；LAN driver 共用 `linxuhao` 经 SSH 访问 127.0.0.1:4444（D11）；`~/.aitelier-drivers/` 下每个 driver 一个 0600 token 文件；driver guide 写入 3.2a 的约定；不改其他行为 | Codex 和 Grok 各自经 SSH、用自己的 LAN token 调 `whoami` 并返回正确；公网 MCP 被认成 `public`；`owner-cli` 用旧 token 照常可用 |
 | P1 租约（只告警） | attempt / claim 的租约（2 小时）、`heartbeat`、`lease_expired` 事件、overview 字段；**不强制** claim | 一周内统计：心跳到达率、误报的过期次数（driver 实际还活着却过期）、父 driver 能否稳定地为 subagent 续租 |
 | P2 driver inbox + 私有笔记 + 项目 inbox ack 模式 | 5.2；5.3（driver notebook 泛化为按作用域）；5.1a（`at_least_n` / `broadcast`，v3）；`wait_for_driver_inbox`；PostCompact 按 driver 投影 | Codex ↔ Grok 互发 transient/standing；一方 ack 不影响另一方；各自写私有笔记，对方能读不能写 |
-| P3 claim 强制 + 回收 + subagent 接管 + handoff | `multi_driver=on` 先只对 `aitelier` 开启；`abandon`、`take_over`、`driver_subagents`、`adopt_subagent`、`offer/accept_handoff` | 用 AMI 那条 legacy attempt 走一遍人工回收（需所有者批准），包括一个 `unobservable` subagent 的 orphan 流程；一次真实的 Codex → Grok handoff |
+| P3 claim 强制 + 回收 + subagent 接管 + handoff | **已实现（分支 `grok/multi-driver-p3`，待 review/合并/部署）**。强制在第二个开关 `set_claim_enforcement(on)` 之后才生效（默认 off）；`multi_driver=on` + `claim_enforcement=on` 先只对 `aitelier` 开启；`abandon`、`take_over`、`driver_subagents`、`adopt_subagent`、`offer/accept_handoff` | 用 AMI 那条 legacy attempt 走一遍人工回收（需所有者批准），包括一个 `unobservable` subagent 的 orphan 流程；一次真实的 Codex → Grok handoff |
 | P4 扩展到 wuxia | `wuxia-myth` 开启 `multi_driver`；可选开启 `review_independence=advisory` | 一轮 wuxia 批次中没有出现重复 dispatch；`self_reviewed` 计数可见 |
 | P5 清理 | 归档 `novel-lingwu-deputy` 这类邮箱项目；driver guide 删除旧的绕过说明 | — |
 

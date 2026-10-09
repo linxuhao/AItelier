@@ -43,6 +43,13 @@ OBSERVABILITIES = ("controllable", "observable_only", "unobservable")
 STATUSES = ("active", "settled", "adopted", "orphaned_unobservable", "terminated")
 OPEN_STATUSES = ("active", "adopted")
 _LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}\Z")
+_SUBAGENT_ID = re.compile(r"[a-z0-9][a-z0-9_.-]{0,63}/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}\Z")
+
+
+def subagent_id_text(value) -> str:
+    if not isinstance(value, str) or not _SUBAGENT_ID.match(value):
+        raise StateGraphError("subagent_id must be '<driver_id>/<label>'")
+    return value
 _HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 
 SCHEMA = """
@@ -113,7 +120,7 @@ class StateSubagents:
     @staticmethod
     def _row(conn, project_id, subagent_id):
         row = conn.execute("SELECT * FROM driver_subagents WHERE subagent_id=? AND project_id=?",
-                           (key(subagent_id, "subagent_id"), project_id)).fetchone()
+                           (subagent_id_text(subagent_id), project_id)).fetchone()
         if row is None:
             raise StateNotFound(f"subagent {subagent_id!r} not found in project {project_id!r}")
         return dict(row)

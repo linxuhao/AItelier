@@ -6,6 +6,16 @@ CREATE TABLE IF NOT EXISTS state_project_policy (
     reason TEXT NOT NULL, actor TEXT NOT NULL, updated_at TEXT NOT NULL,
     FOREIGN KEY(project_id) REFERENCES state_projects(project_id)
 );
+-- Multi-driver P3 (design §7.3): claims are ENFORCED only behind this second
+-- switch (owner decision 2026-10-09: set_multi_driver alone keeps P1's
+-- record-only behaviour). Its own row, so the policy table keeps its shape;
+-- it shares the policy revision for the CAS. No row = off.
+CREATE TABLE IF NOT EXISTS state_project_enforcement (
+    project_id TEXT PRIMARY KEY,
+    claim_enforcement TEXT NOT NULL CHECK(claim_enforcement IN ('off','on')),
+    reason TEXT NOT NULL, actor TEXT NOT NULL, updated_at TEXT NOT NULL,
+    FOREIGN KEY(project_id) REFERENCES state_projects(project_id)
+);
 CREATE TABLE IF NOT EXISTS state_node_holds (
     project_id TEXT NOT NULL, node_key TEXT NOT NULL, revision INTEGER NOT NULL,
     held INTEGER NOT NULL CHECK(held IN (0,1)), reason TEXT NOT NULL,
@@ -40,9 +50,21 @@ BEGIN SELECT RAISE(ABORT,'historical references are append-only'); END;
 
 def project_policy(conn, project_id):
     row = conn.execute("SELECT * FROM state_project_policy WHERE project_id=?", (project_id,)).fetchone()
-    return dict(row) if row else {"project_id": project_id, "revision": 0,
-                                 "dispatch": "active", "reason": "", "actor": "", "updated_at": None,
-                                 "multi_driver": "off", "claim_enforcement": "off"}
+    policy = dict(row) if row else {"project_id": project_id, "revision": 0,
+                                    "dispatch": "active", "reason": "", "actor": "", "updated_at": None,
+                                    "multi_driver": "off"}
+    policy.setdefault("multi_driver", "off")
+    policy["claim_enforcement"] = claim_enforcement(conn, project_id)
+    return policy
+
+
+def claim_enforcement(conn, project_id) -> str:
+    """off | on; off unless multi_driver is on too (the switch has no meaning alone)."""
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='state_project_enforcement'").fetchone():
+        return "off"
+    row = conn.execute("SELECT claim_enforcement FROM state_project_enforcement WHERE project_id=?",
+                       (project_id,)).fetchone()
+    return row[0] if row else "off"
 
 
 def node_hold(conn, project_id, node_key):

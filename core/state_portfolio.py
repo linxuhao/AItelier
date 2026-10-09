@@ -98,16 +98,17 @@ class StatePortfolio:
             old = project_policy(conn, project_id)
             if old["revision"] != expected_revision:
                 raise StateConflict("project policy revision changed")
-            # Turning multi_driver off takes enforcement down with it: there is
-            # nothing left to enforce against, and a later `on` starts record-only.
-            enforcement = old.get("claim_enforcement", "off") if multi_driver == "on" else "off"
             conn.execute("INSERT INTO state_project_policy(project_id,revision,dispatch,reason,actor,updated_at,"
-                         "multi_driver,claim_enforcement) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(project_id) DO UPDATE SET "
-                         "revision=excluded.revision,multi_driver=excluded.multi_driver,"
-                         "claim_enforcement=excluded.claim_enforcement,reason=excluded.reason,"
+                         "multi_driver) VALUES(?,?,?,?,?,?,?) ON CONFLICT(project_id) DO UPDATE SET "
+                         "revision=excluded.revision,multi_driver=excluded.multi_driver,reason=excluded.reason,"
                          "actor=excluded.actor,updated_at=excluded.updated_at",
                          (project_id, expected_revision + 1, old["dispatch"], reason, self.actor, now(),
-                          multi_driver, enforcement))
+                          multi_driver))
+            if multi_driver == "off" and old.get("claim_enforcement") == "on":
+                # Turning multi_driver off takes enforcement down with it: there is
+                # nothing left to enforce against, and a later `on` starts record-only.
+                conn.execute("UPDATE state_project_enforcement SET claim_enforcement='off',reason=?,actor=?,"
+                             "updated_at=? WHERE project_id=?", (reason, self.actor, now(), project_id))
             self.store._event(conn, project_id, None, "multi_driver_policy_changed",
                               {"multi_driver": multi_driver, "reason": reason,
                                "revision": expected_revision + 1, "actor": self.actor})
@@ -137,11 +138,15 @@ class StatePortfolio:
                 from core.state_claims import ClaimError
                 raise ClaimError("multi_driver_off", "turn multi_driver on before enforcing claims")
             conn.execute("INSERT INTO state_project_policy(project_id,revision,dispatch,reason,actor,updated_at,"
-                         "multi_driver,claim_enforcement) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(project_id) DO UPDATE SET "
-                         "revision=excluded.revision,claim_enforcement=excluded.claim_enforcement,reason=excluded.reason,"
+                         "multi_driver) VALUES(?,?,?,?,?,?,?) ON CONFLICT(project_id) DO UPDATE SET "
+                         "revision=excluded.revision,reason=excluded.reason,"
                          "actor=excluded.actor,updated_at=excluded.updated_at",
                          (project_id, expected_revision + 1, old["dispatch"], reason, self.actor, now(),
-                          old.get("multi_driver", "off"), claim_enforcement))
+                          old.get("multi_driver", "off")))
+            conn.execute("INSERT INTO state_project_enforcement(project_id,claim_enforcement,reason,actor,updated_at) "
+                         "VALUES(?,?,?,?,?) ON CONFLICT(project_id) DO UPDATE SET "
+                         "claim_enforcement=excluded.claim_enforcement,reason=excluded.reason,actor=excluded.actor,"
+                         "updated_at=excluded.updated_at", (project_id, claim_enforcement, reason, self.actor, now()))
             self.store._event(conn, project_id, None, "claim_enforcement_policy_changed",
                               {"claim_enforcement": claim_enforcement, "reason": reason,
                                "revision": expected_revision + 1, "actor": self.actor})
@@ -286,12 +291,11 @@ class StatePortfolio:
                 nodes.append(entry)
             seq = conn.execute("SELECT COALESCE(MAX(seq),0) FROM state_events WHERE project_id=?", (project_id,)).fetchone()[0]
             # P3 §4.6: subagents taken over but not yet confirmed stopped - the
-            # standing "two writers may exist" warning. The registry is private,
-            # so an anonymous reader of an opened project sees None, not a count.
-            orphans = None
-            if self.store.project_read_trusted:
-                from core.state_subagents import orphan_count
-                orphans = orphan_count(conn, project_id)
+            # standing "two writers may exist" warning. The registry is private;
+            # an untrusted connection sees only (project_id, status) of opened
+            # projects (core.state_privacy.PROJECTIONS), enough for this count.
+            from core.state_subagents import orphan_count
+            orphans = orphan_count(conn, project_id)
             return {"project": view["project"], "source": self._source(conn, view["project"]),
                     "policy": project_policy(conn, project_id), "nodes": nodes,
                     "orphaned_subagents": orphans,

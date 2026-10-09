@@ -90,7 +90,7 @@ PUBLIC_STATE_TABLES = frozenset({
     "state_external_observations", "state_external_report_blobs", "state_external_owners",
     "state_design_revisions", "state_design_baselines", "state_design_heads",
     "state_design_bindings", "state_issues", "state_issue_nodes",
-    "state_project_policy", "state_node_holds", "state_source_bindings",
+    "state_project_policy", "state_project_enforcement", "state_node_holds", "state_source_bindings",
     "state_history_links",
 })
 
@@ -257,6 +257,18 @@ PROJECTIONS = {
         frozenset({"claim_id", "project_id", "node_key", "driver_id", "subagent", "purpose", "status",
                    "fence", "node_revision", "lease_seconds", "lease_expires_at", "last_heartbeat_at",
                    "created_at"})),
+    # Subagent registry of opened projects (P3, design §4.6): only enough to
+    # COUNT the orphans the overview warns about - project and status. Hosts,
+    # control handles, workspaces and checkpoints stay private.
+    "driver_subagents": (
+        ("SELECT NULL AS subagent_id, NULL AS owner_driver_id, NULL AS origin_driver_id, project_id, "
+         "NULL AS attempt_id, NULL AS node_key, NULL AS host, NULL AS runtime, NULL AS control_handle, "
+         "NULL AS workspace, NULL AS context_ref, NULL AS context_sha256, NULL AS checkpoint_ref, "
+         "NULL AS checkpoint_sha256, NULL AS observability, status, NULL AS fence, NULL AS lease_expires_at, "
+         "NULL AS last_heartbeat_at, NULL AS request_hash, NULL AS settled_report_ref, "
+         "NULL AS settled_report_sha256, NULL AS created_at, NULL AS updated_at "
+         f"FROM main.driver_subagents WHERE project_id IN ({_OPENED})"),
+        frozenset({"project_id", "status"})),
 }
 
 # The notebook, copied for ONE project and only when that project is opened

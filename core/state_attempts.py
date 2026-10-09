@@ -337,6 +337,19 @@ class StateAttempts:
                 payload["claim_id"] = claim["claim_id"]
             if break_glass:
                 payload["break_glass"] = True
+                # Q13: the admin wrote around the claim rule; whoever holds the
+                # node's live implement claim learns that an attempt started.
+                holder = conn.execute("SELECT claim_id,driver_id FROM state_node_claims WHERE project_id=? AND node_key=? "
+                                      "AND status='live' AND purpose='implement'", (project_id, node_key)).fetchone()
+                if holder is not None and holder["driver_id"] != owner_driver_id:
+                    from core import driver_notices
+                    driver_notices.notify(
+                        conn, self.store, target_driver_id=holder["driver_id"], kind="break_glass",
+                        project_id=project_id, subject=f"admin started attempt {aid} on {node_key} over your claim",
+                        body=f"An admin ({owner_driver_id or 'owner'}) started attempt {aid} on node {node_key} without "
+                             f"holding its implement claim ({holder['claim_id']} is yours). Break-glass write.",
+                        refs={"attempt_id": aid, "node_key": node_key, "claim_id": holder["claim_id"],
+                              "break_glass": True}, actor=f"driver:{owner_driver_id}" if owner_driver_id else "admin")
             self.store._event(conn, project_id, node_key,
                               "external_attempt_registered" if external else "attempt_reserved", payload)
             return _public(self._attempt(conn, aid))

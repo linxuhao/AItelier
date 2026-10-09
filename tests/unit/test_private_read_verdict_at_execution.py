@@ -45,6 +45,8 @@ NON_PUBLIC_READS = sorted(a for a in READ_REQUESTS if read_visibility(a) != "pub
 # trusted caller gets an answer with them.
 _ARGS = {
     "events": {"project_id": C.OPEN},
+    "get_claim": {"project_id": C.OPEN, "claim_id": "claim-canary-public-id"},
+    "list_claims": {"project_id": C.OPEN},
     "list_director_messages": {"project_id": C.OPEN},
     "project_visibility": {"project_id": C.OPEN},
     "wait_for_state_change": {"project_id": C.OPEN, "timeout_seconds": 0,

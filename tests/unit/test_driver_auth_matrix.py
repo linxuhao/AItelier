@@ -207,3 +207,118 @@ class TestRegistryRoutes:
         r = client.post("/api/drivers", headers=_adm(LEGACY),
                         json={"driver_id": "x", "display_name": "x", "token": "chosen"})
         assert r.status_code == 422
+
+
+# ── MCP dimension: the same verdicts through `api.mcp_router._authorize` ──────
+
+def _fake_request(headers):
+    from starlette.datastructures import Headers
+    return type("FakeRequest", (), {"headers": Headers(headers), "cookies": {}})()
+
+
+@pytest.fixture
+def mcp_on(on, monkeypatch):
+    from api import mcp_router
+    monkeypatch.setitem(mcp_router._TOOL_KIND, "_probe_write", "write")
+    return on, mcp_router
+
+
+class TestMcpMatrix:
+    def _authorize(self, mcp_router, monkeypatch, headers):
+        request = _fake_request(headers)
+        monkeypatch.setattr(mcp_router, "_request_from", lambda ctx: request)
+        mcp_router._authorize("_probe_write", object())
+        return state_routes.authenticated_actor(request)
+
+    def test_driver_token_off_tunnel_is_driver(self, mcp_on, monkeypatch):
+        (_, _, tokens), mcp_router = mcp_on
+        assert self._authorize(mcp_router, monkeypatch, _drv(tokens["codex"])) == "driver:codex"
+        assert self._authorize(mcp_router, monkeypatch, _adm(tokens["codex"])) == "driver:codex"
+        assert self._authorize(mcp_router, monkeypatch, _adm(LEGACY)) == "driver:owner-cli"
+
+    def test_driver_token_via_cloudflare_is_refused(self, mcp_on, monkeypatch):
+        (_, _, tokens), mcp_router = mcp_on
+        with pytest.raises(mcp_router.ToolDenied):
+            self._authorize(mcp_router, monkeypatch, {**_drv(tokens["codex"]), **CF})
+        with pytest.raises(mcp_router.ToolDenied):
+            self._authorize(mcp_router, monkeypatch, {**_drv(tokens["codex"]), "Cf-Access-Jwt-Assertion": "x"})
+
+    def test_external_token_via_tunnel_is_public(self, mcp_on, monkeypatch):
+        _, mcp_router = mcp_on
+        headers = {**CF, "X-AItelier-MCP-External-Token": EXTERNAL}
+        assert self._authorize(mcp_router, monkeypatch, headers) == "driver:public"
+        with pytest.raises(mcp_router.ToolDenied):
+            self._authorize(mcp_router, monkeypatch, {**CF, "X-AItelier-MCP-External-Token": "bad"})
+
+    def test_owner_email_is_owner(self, mcp_on, monkeypatch):
+        _, mcp_router = mcp_on
+        monkeypatch.setattr(mcp_router, "_EXTERNAL_TOKEN", "")
+        headers = {"X-Test-Email": OWNER, "Cf-Access-Jwt-Assertion": "jwt"}
+        assert self._authorize(mcp_router, monkeypatch, headers) == "owner:" + OWNER
+
+    def test_suspended_and_unknown_are_refused(self, mcp_on, monkeypatch):
+        (_, registry, tokens), mcp_router = mcp_on
+        registry.set_status("codex", "suspended", 1, "pause", actor="t")
+        for token in (tokens["codex"], "aitd_unknown"):
+            with pytest.raises(mcp_router.ToolDenied):
+                self._authorize(mcp_router, monkeypatch, _drv(token))
+
+    def test_feature_off_mcp_is_unchanged(self, off, monkeypatch):
+        from api import mcp_router
+        monkeypatch.setitem(mcp_router._TOOL_KIND, "_probe_write", "write")
+        assert self._authorize(mcp_router, monkeypatch, _adm(LEGACY)) == "authorized-state-operator"
+        with pytest.raises(mcp_router.ToolDenied):
+            self._authorize(mcp_router, monkeypatch, _drv("aitd_anything"))
+
+
+# ── Every door on the driver router is guarded (TestExhaustiveDoors-style) ───
+
+class TestDriverRouterDoors:
+    def test_every_route_refuses_the_anonymous_caller(self, on):
+        client, _, _ = on
+        probed = {}
+        for route in driver_routers.router.routes:
+            path = route.path.replace("{driver_id}", "codex").replace("{project_id}", "p")
+            for method in route.methods:
+                body = {} if method in {"POST", "PUT"} else None
+                response = client.request(method, path, json=body)
+                probed[(method, route.path)] = response.status_code
+                assert response.status_code == 403, (method, route.path, response.text)
+        assert len(probed) == len([m for r in driver_routers.router.routes for m in r.methods]) >= 10
+
+    def test_every_write_route_is_admin_only(self, on):
+        client, _, tokens = on
+        for route in driver_routers.router.routes:
+            path = route.path.replace("{driver_id}", "grok-bot").replace("{project_id}", "p")
+            for method in route.methods - {"GET"}:
+                response = client.request(method, path, json={}, headers=_drv(tokens["codex"]))
+                assert response.status_code == 403, (method, route.path)
+                assert response.headers["X-AItelier-Denial"] == authz.ADMIN_REQUIRED
+
+    def test_one_audit_row_per_admin_action(self, on):
+        client, registry, _ = on
+        h = _adm(LEGACY)
+        before = len(registry.audit("codex"))
+        steps = [
+            ("POST", "/api/drivers/codex/rotate", {"expected_revision": 1}),
+            ("POST", "/api/drivers/codex/admin", {"is_admin": True, "expected_revision": 2, "reason": "r"}),
+            ("POST", "/api/drivers/codex/status", {"status": "suspended", "expected_revision": 3, "reason": "r"}),
+            ("POST", "/api/drivers/codex/status", {"status": "retired", "expected_revision": 4, "reason": "r"}),
+        ]
+        for i, (method, path, body) in enumerate(steps, 1):
+            assert client.request(method, path, json=body, headers=h).status_code == 200, path
+            assert len(registry.audit("codex")) == before + i
+        registry.set_membership("p", "grok-bot", "member", 0, "join", actor="driver:owner-cli")
+        assert registry.audit("grok-bot")[0]["operation"] == "membership"
+        ops = [a["operation"] for a in registry.audit("codex")][:4]
+        assert ops == ["retire", "suspend", "set_admin", "rotate"]
+
+    def test_whoami_lists_memberships_and_capabilities(self, on):
+        client, registry, _ = on
+        out = client.post("/api/drivers", headers=_adm(LEGACY), json={
+            "driver_id": "claude", "display_name": "Claude", "capabilities": {"mcp": True}}).json()
+        registry.set_membership("aitelier", "claude", "member", 0, "join", actor="t")
+        me = client.get("/api/drivers/me", headers=_drv(out["token"])).json()
+        assert me["driver"]["capabilities"] == {"mcp": True}
+        assert me["driver"]["projects"] == [{"project_id": "aitelier", "status": "member", "revision": 1}]
+        assert "token_hash" not in client.get("/api/drivers/claude", headers=_adm(LEGACY)).json()

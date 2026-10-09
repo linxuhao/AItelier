@@ -31,6 +31,11 @@ ENV_SECRET_RE = re.compile(
     r"(_KEY|_TOKEN|_SECRET|_SECRETS|PASSWORD|_CREDENTIAL|_CREDENTIALS)$", re.I)
 
 
+# Names that POINT at a credential rather than hold one (multi-driver P0,
+# docs/driver-identity.md): a child must not learn which token file to read.
+ENV_SECRET_NAMES = frozenset({"AITELIER_DRIVER_TOKEN_FILE", "AITELIER_OWNER_TOKEN_FILE"})
+
+
 def scrubbed_env(base: dict[str, str] | None = None, **overrides: str) -> dict[str, str]:
     """`os.environ` (or `base`) minus anything whose NAME looks like a secret.
 
@@ -39,6 +44,7 @@ def scrubbed_env(base: dict[str, str] | None = None, **overrides: str) -> dict[s
     by an inherited value of the same name.
     """
     src = os.environ if base is None else base
-    env = {k: v for k, v in src.items() if not ENV_SECRET_RE.search(k)}
+    env = {k: v for k, v in src.items()
+           if not ENV_SECRET_RE.search(k) and k.upper() not in ENV_SECRET_NAMES}
     env.update(overrides)
     return env

@@ -190,3 +190,25 @@ class TestIdentityHelpers:
         for bad in ("grok-bot", "codexx", "codex/", 5):
             with pytest.raises(drivers.DriverError):
                 drivers.check_director_identity("codex", bad)
+
+
+class TestMigrationPreservesRows:
+    def test_existing_state_rows_are_untouched(self, tmp_path):
+        from core.state_service import StateService
+        path = tmp_path / "state.sqlite"
+        svc = StateService(StateDatabase(str(path)), actor=drivers.LEGACY_ACTOR, project_read_trusted=True)
+        svc.create_project("p", "P")
+        svc.open_project("p")
+        db = StateDatabase(str(path))
+
+        def snapshot():
+            with db.get_connection() as conn:
+                return {t: [tuple(r) for r in conn.execute(f"SELECT * FROM {t}").fetchall()]
+                        for t in ("state_projects", "state_events", "state_project_access")}
+        before = snapshot()
+        for _ in range(2):
+            reg = drivers.DriverRegistry(db, PEPPER)
+            reg.seed(LEGACY)
+        assert snapshot() == before
+        with db.get_connection() as conn:
+            assert conn.execute("SELECT changed_by FROM state_project_access").fetchone()[0] == drivers.LEGACY_ACTOR

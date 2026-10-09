@@ -174,3 +174,11 @@ class TestClientCredentials:
         assert path.stat().st_mode & 0o777 == 0o600
         assert path.parent.stat().st_mode & 0o777 == 0o700
         assert driver_token({"AITELIER_DRIVER_ID": "codex"}, tmp_path) == "aitd_secret"
+
+
+def test_child_processes_never_inherit_driver_credentials():
+    from core.env_scrub import scrubbed_env
+    env = scrubbed_env({"AITELIER_DRIVER_TOKEN": "aitd_x", "AITELIER_ADMIN_TOKEN": "a",
+                        "AITELIER_DRIVER_TOKEN_FILE": "/x", "AITELIER_OWNER_TOKEN_FILE": "/y",
+                        "AITELIER_DRIVER_ID": "codex", "PATH": "/bin"})
+    assert env == {"AITELIER_DRIVER_ID": "codex", "PATH": "/bin"}

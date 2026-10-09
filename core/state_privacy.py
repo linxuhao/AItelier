@@ -246,10 +246,10 @@ PROJECTIONS = {
     # Claims of opened projects: holder, purpose, fence and lease only
     # (core.state_claims.PUBLIC_CLAIM_COLUMNS); never workspace or request key.
     "state_node_claims": (
-        "SELECT claim_id, project_id, node_key, driver_id, subagent, purpose, status, fence, "
-        "node_revision, NULL AS attempt_id, NULL AS workspace, lease_seconds, lease_expires_at, "
-        "last_heartbeat_at, NULL AS request_key, NULL AS request_hash, created_at, NULL AS updated_at "
-        f"FROM main.state_node_claims WHERE project_id IN ({_OPENED})",
+        ("SELECT claim_id, project_id, node_key, driver_id, subagent, purpose, status, fence, "
+         "node_revision, NULL AS attempt_id, NULL AS workspace, lease_seconds, lease_expires_at, "
+         "last_heartbeat_at, NULL AS request_key, NULL AS request_hash, created_at, NULL AS updated_at "
+         f"FROM main.state_node_claims WHERE project_id IN ({_OPENED})"),
         frozenset({"claim_id", "project_id", "node_key", "driver_id", "subagent", "purpose", "status",
                    "fence", "node_revision", "lease_seconds", "lease_expires_at", "last_heartbeat_at",
                    "created_at"})),

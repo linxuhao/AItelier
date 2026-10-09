@@ -182,6 +182,15 @@ def read_spec(repo: Path) -> tuple[dict | None, dict]:
     ``{"source": "playtest/" | "playtest_spec.yaml" | "", "errors": [...],
     "notes": [...]}``. ``spec`` is None when the repo declares no contract —
     the sidecar then runs the legacy canned smoke test.
+
+    A scenario may declare execution_budget with exactly max_frames and
+    timeout_seconds. It is forwarded unchanged, including by scenario
+    selection. The sidecar preflights the complete authored spec before any
+    import/probe: omission retains the 3000-frame ceiling; an explicit finite
+    ceiling must cover the last event plus 30 and the shared frame floor.
+    Scenario timeout cannot exceed the caller timeout (default 120); this
+    reader never widens it or converts fixed-FPS game time into walltime.
+    Unknown/invalid budgets are refusals, not a smaller runnable scenario.
     """
     info: dict = {"source": "", "errors": [], "notes": []}
     split, errors = _read_split(repo)

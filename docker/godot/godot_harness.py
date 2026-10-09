@@ -68,6 +68,8 @@ import hashlib
 import fcntl
 import json
 import os
+import math
+import signal
 import re
 import select
 import shutil
@@ -681,6 +683,22 @@ def _split_diagnostics(errs: list[dict]) -> tuple[list[dict], list[dict]]:
     return gating, debt
 
 
+# subprocess.communicate uses native poll milliseconds on this Linux sidecar.
+# This is a representation limit, not a newly granted execution budget.
+_MAX_POLL_MILLISECONDS = (1 << 31) - 1
+
+
+def _valid_process_timeout(value) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        seconds = float(value)
+        return (math.isfinite(seconds) and 0 < seconds <= _MAX_POLL_MILLISECONDS / 1000
+                and math.ceil(seconds * 1000) <= _MAX_POLL_MILLISECONDS)
+    except (OverflowError, ValueError):
+        return False
+
+
 def _run(args: list[str], timeout: int, extra_env: dict | None = None,
          render: bool = False) -> subprocess.CompletedProcess:
     env = dict(os.environ)
@@ -697,9 +715,30 @@ def _run(args: list[str], timeout: int, extra_env: dict | None = None,
                "--display-driver", "x11", "--rendering-driver", "opengl3", *args]
     else:
         cmd = [GODOT_BIN, "--headless", *args]
-    return subprocess.run(
-        cmd, capture_output=True, text=True, timeout=timeout, env=env,
-    )
+    if os.name != "posix":
+        raise ValueError("owned process-group execution requires POSIX sessions")
+    if not _valid_process_timeout(timeout):
+        raise ValueError("timeout must be finite, positive and fit native poll milliseconds")
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, env=env, start_new_session=True)
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except BaseException as exc:
+        # The session was created by THIS call; never target a foreign group.
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            stdout, stderr = proc.communicate(timeout=5)
+            if isinstance(exc, subprocess.TimeoutExpired):
+                exc.output, exc.stderr = stdout, stderr
+        except subprocess.TimeoutExpired:
+            # Do not mask the original failure or wait without a deadline.
+            proc.stdout.close()
+            proc.stderr.close()
+        raise
+    return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
 
 
 # ── compile gate ───────────────────────────────────────────────────────────
@@ -2685,6 +2724,8 @@ def _run_probe(dst: Path, state_path: Path, frames: int, timeout: int,
     ride inside probe_report, because callers (and the unit tests that fake this)
     depend on the 3-tuple. When `raw` is given, each pass's full untruncated
     stdout/stderr is appended to it for the invocation's owned evidence."""
+    if not _valid_process_timeout(timeout):
+        raise ValueError("timeout must be finite, positive and fit native poll milliseconds")
     args = ["--path", str(dst)]
     if PLAYTEST_FIXED_FPS > 0:
         # Ahead of the scene argument: this is an engine flag, not a scene.
@@ -2703,10 +2744,12 @@ def _run_probe(dst: Path, state_path: Path, frames: int, timeout: int,
         cap_dir.mkdir(parents=True, exist_ok=True)
         env["AITELIER_PROBE_CAPTURE"] = str(cap_dir)
         env["AITELIER_PROBE_CAPTURE_AT"] = ",".join(str(f) for f in capture_at)
+    deadline = time.monotonic() + timeout
     probe, errs, timed_out = _probe_once(args, env, state_path, timeout, render,
                                         timing=timing, raw=raw,
                                         raw_label=raw_label)
-    if render and not probe:
+    remaining = deadline - time.monotonic()
+    if render and not probe and not timed_out and remaining > 0:
         # A broken X/GL setup must degrade to yesterday's behaviour, not take the
         # whole playtest gate down: retry once, headless, with capture off.
         env.pop("AITELIER_PROBE_CAPTURE", None)
@@ -2714,9 +2757,11 @@ def _run_probe(dst: Path, state_path: Path, frames: int, timeout: int,
         render = False
         if timing is not None:
             timing["headless_retry"] = True
-        probe, errs, timed_out = _probe_once(args, env, state_path, timeout, False,
+        probe, errs, timed_out = _probe_once(args, env, state_path, remaining, False,
                                              timing=timing, raw=raw,
                                              raw_label=raw_label)
+    if not probe and remaining <= 0:
+        timed_out = True
     if probe:
         # Report which mode actually produced this, so a silent fallback to the
         # pixel-blind path is visible rather than looking like "no captures".
@@ -2927,6 +2972,7 @@ _SCENARIO_KEY_TYPES = {
     "scene": (lambda v: isinstance(v, str), "a string"),
     "repeatability": (lambda v: isinstance(v, bool), "true or false"),
     "description": (lambda v: isinstance(v, str), "a plain string"),
+    "execution_budget": (lambda v: isinstance(v, dict), "a mapping"),
 }
 _SPEC_KEYS = set(_SPEC_KEY_TYPES)
 _SCENARIO_KEYS = set(_SCENARIO_KEY_TYPES)
@@ -2987,7 +3033,70 @@ def _aim_errors(key: str, aim) -> list:
     return errors
 
 
-_MAX_SPEC_FRAMES = 3000   # safety cap on how long one scenario may run
+_MAX_SPEC_FRAMES = 3000   # unchanged default; longer work needs an explicit budget
+# JSON.parse_string converts numbers to float before the probe's int cast.
+_MAX_JSON_FRAME = (1 << 53) - 1
+
+
+def _valid_frame_count(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and 0 < value <= _MAX_JSON_FRAME
+
+
+def _authored_execution_plan(spec, frames, timeout):
+    """Preflight the entire authored request before import or any probe.
+
+    Explicit frame ceiling is finite work, not a walltime estimate. Every
+    scenario timeout stays inside the caller's existing process timeout.
+    """
+    errors, plans = [], []
+    if not _valid_frame_count(frames):
+        errors.append("caller frames must be a positive exact JSON integer (<= 2^53-1)")
+    if not _valid_process_timeout(timeout):
+        errors.append("caller timeout must be finite, positive and fit native poll milliseconds")
+    if not isinstance(spec, dict):
+        return [], errors + ["spec must be a mapping"]
+    errors += _key_type_errors("spec", spec, _SPEC_KEY_TYPES)
+    unknown = sorted(str(k) for k in spec if k not in _SPEC_KEYS)
+    if unknown:
+        errors.append("spec has unknown top-level key(s) " + ", ".join(unknown))
+    default = spec.get("frames", frames)
+    if not _valid_frame_count(default):
+        errors.append("spec frames must be a positive exact JSON integer (<= 2^53-1)")
+    scenarios = spec.get("scenarios")
+    if not isinstance(scenarios, list) or not scenarios:
+        return [], errors + ["spec needs a non-empty scenarios list"]
+    if errors:
+        return [], errors
+    for index, sc in enumerate(scenarios):
+        where = "scenario %r" % (sc.get("name", "scenario") if isinstance(sc, dict) else index)
+        if not isinstance(sc, dict):
+            errors.append(where + " must be a mapping")
+            plans.append(None)
+            continue
+        unknown = sorted(str(k) for k in sc if k not in _SCENARIO_KEYS)
+        if unknown:
+            errors.append(where + " has unknown key(s) " + ", ".join(unknown))
+        errors += _key_type_errors(where, sc, _SCENARIO_KEY_TYPES)
+        raw_timeline = sc.get("timeline", [])
+        timeline, bad = _normalize_timeline(raw_timeline if isinstance(raw_timeline, list) else [])
+        errors += [where + ": " + e for e in bad]
+        ceiling, seconds = _MAX_SPEC_FRAMES, timeout
+        if "execution_budget" in sc:
+            budget = sc["execution_budget"]
+            if not isinstance(budget, dict) or set(budget) != {"max_frames", "timeout_seconds"}:
+                errors.append(where + ": execution_budget requires exactly max_frames and timeout_seconds")
+            else:
+                ceiling, seconds = budget["max_frames"], budget["timeout_seconds"]
+                if not _valid_frame_count(ceiling):
+                    errors.append(where + ": max_frames must be a positive exact JSON integer (<= 2^53-1)")
+                if not _valid_process_timeout(seconds) or seconds > timeout:
+                    errors.append(where + ": timeout_seconds must be finite, positive, selector-representable and <= caller timeout")
+        last = max((e["at"] for e in timeline), default=0)
+        needed = max(last + 30, default) if timeline else default
+        if _valid_frame_count(ceiling) and needed > ceiling:
+            errors.append(where + ": needs %d frames including timeline frame(s) %s, past the %d-frame cap/budget; no scenario was run" % (needed, ", ".join(str(e["at"]) for e in timeline if e["at"] >= ceiling) or str(last), ceiling))
+        plans.append((needed, seconds))
+    return plans, errors
 
 
 def _before_control_errors(timeline: list) -> list:
@@ -3154,6 +3263,33 @@ def _digest(nodes: dict) -> dict:
     capture paths differ between any two runs, which would defeat the
     no-input comparison in _playtest_spec."""
     return {k: v for k, v in (nodes or {}).items() if "_AItelierProbe" not in k}
+
+
+def _comparison_observation_error(probe: dict, required_frames: int) -> str | None:
+    """Actual emitted frame extent + observed node state, not a complete proxy.
+
+    Native _finish always emits frames and nodes; older native reports may
+    omit complete. An observed empty dictionary is valid state and must still
+    compare equal, unlike an absent snapshot which cannot buy a comparison.
+    """
+    if not isinstance(probe, dict) or "nodes" not in probe or not isinstance(probe["nodes"], dict):
+        return "node snapshot is missing or not a mapping"
+    if any(not isinstance(k, str) or not isinstance(v, dict) for k, v in probe["nodes"].items()):
+        return "node snapshot is not the emitted node-name/property mapping"
+    frames = probe.get("frames")
+    if (isinstance(frames, bool) or not isinstance(frames, (int, float))
+            or frames < required_frames or frames > _MAX_JSON_FRAME
+            or not math.isfinite(frames) or frames != int(frames)):
+        return "measured frame extent did not reach the requested budget"
+    if "complete" in probe and probe["complete"] is not True:
+        return "reported completeness is false or malformed"
+    timing = probe.get("timing")
+    if isinstance(timing, dict) and "frames_stepped" in timing:
+        if timing["frames_stepped"] != frames:
+            return "measured frame counters disagree"
+    if probe.get("spec_errors"):
+        return "control reported spec errors"
+    return None
 
 
 def _scenario_ledger(name: str, scene: str, wall_sec: float, t: dict) -> dict:
@@ -3360,7 +3496,12 @@ def _playtest_spec_inner(dst: Path, spec: dict, frames: int, timeout: int,
     can never stall a build that otherwise runs clean."""
     # A spec with keys is read as a spec or refused; the canned smoke test is
     # only for a request that carries no spec (see playtest_project).
-    spec_errors = []
+    plans, admission_errors = _authored_execution_plan(spec, frames, timeout)
+    # Existing readers keep their precise schema diagnostics. Add only new
+    # budget diagnostics here; preflight still refuses ALL invalid work.
+    budget_markers = ("caller frames", "caller timeout", "spec frames", ": execution_budget",
+                      ": max_frames", ": timeout_seconds", ": needs ")
+    spec_errors = [e for e in admission_errors if any(m in e for m in budget_markers)]
     if not isinstance(spec, dict):
         spec_errors.append("spec is a %s - it must be a mapping with a `scenarios` "
                            "list. No scenario was run." % type(spec).__name__)
@@ -3378,7 +3519,8 @@ def _playtest_spec_inner(dst: Path, spec: dict, frames: int, timeout: int,
     header_errors = _key_type_errors("spec", spec, _SPEC_KEY_TYPES)
     spec_errors.extend(m + " No scenario was run." for m in header_errors)
     scene = str(spec.get("scene", "") or "")
-    default_frames = int(spec.get("frames") or frames) if not header_errors else frames
+    floor = spec.get("frames", frames)
+    default_frames = floor if _valid_frame_count(floor) else 0
     scenarios = spec.get("scenarios") if isinstance(spec.get("scenarios"), list) else []
     state_path = dst.parent / "probe_state.json"
     spec_path = dst.parent / "scenario_spec.json"
@@ -3389,6 +3531,7 @@ def _playtest_spec_inner(dst: Path, spec: dict, frames: int, timeout: int,
     all_debt: list[dict] = []
     scen_nodes: list[dict] = []
     scen_frames: list[int] = []
+    scen_timeouts: list[float] = []
     scen_scenes: list[str] = []
     # Every scenario's (and control's) throwaway $HOME, kept until the owned
     # retention below has copied the declared artifacts out of them.
@@ -3403,7 +3546,7 @@ def _playtest_spec_inner(dst: Path, spec: dict, frames: int, timeout: int,
         spec_errors.append(
             "spec has unknown top-level key(s) %s - allowed: %s. No scenario was run."
             % (", ".join(unknown_spec), ", ".join(sorted(_SPEC_KEYS))))
-    header_bad = bool(spec_errors)
+    header_bad = bool(spec_errors) or bool(admission_errors)
     for i, sc in enumerate(scenarios):
         refused = header_bad
         if not isinstance(sc, dict):
@@ -3427,29 +3570,12 @@ def _playtest_spec_inner(dst: Path, spec: dict, frames: int, timeout: int,
                                  "pressed": False, "input_dead": False})
             scen_nodes.append({})
             scen_frames.append(0)
+            scen_timeouts.append(0)
             scen_scenes.append("")
             continue
-        max_at = max([int(e.get("at", 0)) for e in timeline], default=0)
-        # Run long enough to REACH the last timeline event (+margin) -- default_frames
-        # is a floor, not a ceiling. Capped for safety. Truncating here would drop a
-        # scenario's late assertions (e.g. one that checks at frame 300).
-        want = max(max_at + 30, default_frames) if timeline else default_frames
-        sframes = min(want, _MAX_SPEC_FRAMES)
-        if want > _MAX_SPEC_FRAMES:
-            # The cap is a safety limit, not a truncation the author consented
-            # to: an assertion scheduled past it simply never fires, vanishes
-            # from asserts[], and `all(a.passed)` then holds over whatever did
-            # run. A scenario losing its terminal assertion must not read as a
-            # scenario that passed it. An input past the cap never fires either,
-            # so it is refused the same way.
-            dropped = sorted({int(e.get("at", 0)) for e in timeline
-                              if int(e.get("at", 0)) >= _MAX_SPEC_FRAMES})
-            if dropped:
-                spec_errors.append(
-                    "scenario %r: timeline entry(ies) scheduled at frame(s) %s, past "
-                    "the %d-frame cap - they would never run. Reach the same "
-                    "state sooner, or act and assert earlier."
-                    % (name, ", ".join(str(d) for d in dropped), _MAX_SPEC_FRAMES))
+        # Admission validated the complete timeline and its explicit/default
+        # ceiling before any pass; never clamp and grade a shorter run.
+        sframes, scenario_timeout = plans[i]
         spec_path.write_text(json.dumps({"frames": sframes, "timeline": timeline, "scenario": name}))
         # Per-scenario scene override. `run_godot` has always been able to boot
         # a specific scene instead of main; only the SPEC-level scene was ever
@@ -3492,7 +3618,7 @@ def _playtest_spec_inner(dst: Path, spec: dict, frames: int, timeout: int,
         t_scen_start = time.monotonic()
         try:
             probe, errs, timed_out = _run_probe(
-                dst, state_path, sframes, timeout,
+                dst, state_path, sframes, scenario_timeout,
                 {"AITELIER_PROBE_SPEC": str(spec_path), **_home_env(sc_home)},
                 scene=sc_scene,
                 capture_at=_capture_frames(sframes, timeline, limit=cap_limit),
@@ -3512,6 +3638,8 @@ def _playtest_spec_inner(dst: Path, spec: dict, frames: int, timeout: int,
         errs, debt = _split_diagnostics(errs)
         ran = bool(probe) or not timed_out
         ran_any = ran_any or ran
+        if timed_out:
+            spec_errors.append("scenario %r: exceeded its %.6g-second execution timeout; snapshot is not a passing result" % (name, scenario_timeout))
         if errs:
             crashed = True
         all_errors.extend({**e, "scenario": name} for e in errs)
@@ -3559,11 +3687,13 @@ def _playtest_spec_inner(dst: Path, spec: dict, frames: int, timeout: int,
                 "result, so it cannot count as a passing or advisory outcome."
                 % (name, "; ".join(why) or "incomplete", len(asserts),
                    expected_asserts))
-        scen_passed = (ran and not errs and complete and not missing_asserts
+        scen_passed = (ran and not timed_out and not errs and complete and not missing_asserts
                        and not incomplete
                        and bool(asserts) and all(a.get("passed") for a in asserts))
 
-        scen_results.append({"name": name, "ran": ran, "errors": errs,
+        comparison_error = _comparison_observation_error(probe, sframes)
+        scen_results.append({"name": name, "ran": ran, "timed_out": timed_out,
+                             "comparison_error": comparison_error, "errors": errs,
                              "native_debt": debt,
                              "asserts": asserts, "passed": scen_passed,
                              "before_captures": probe.get("before_captures", {}),
@@ -3586,8 +3716,10 @@ def _playtest_spec_inner(dst: Path, spec: dict, frames: int, timeout: int,
                              # incident, one level up.
                              "pressed": any(set(e) - {"at", "assert"} for e in timeline),
                              "input_dead": False})
-        scen_nodes.append(_digest(probe.get("nodes", {})))
+        observed_nodes = probe.get("nodes")
+        scen_nodes.append(_digest(observed_nodes) if isinstance(observed_nodes, dict) else {})
         scen_frames.append(sframes)
+        scen_timeouts.append(scenario_timeout)
         scen_scenes.append(sc_scene)
         last_state = probe.get("nodes", last_state)
         render_mode = probe.get("render_mode", render_mode)
@@ -3603,16 +3735,22 @@ def _playtest_spec_inner(dst: Path, spec: dict, frames: int, timeout: int,
     # it is the cheapest run in the file. This is the gate that would have caught
     # the `actions:`-vs-`press:` mismatch on day one instead of two games later.
     driven = [i for i, r in enumerate(scen_results) if r["pressed"] and r["ran"]]
-    # Keyed by (scene, frame budget): the control must boot the SAME scene the
+    # Keyed by (scene, frame budget, wall budget): the control must boot the SAME scene the
     # scenario booted. It was keyed by frame budget alone and always booted the
     # spec-level scene, so every scenario with its own `scene:` override (86 of
     # 172 on the wuxia tree) was compared against a different node tree --
     # digests that can never be equal, so input_dead could never fire for them.
-    controls: dict[tuple[str, int], dict] = {}
-    if driven and not crashed:
+    controls: dict[tuple[str, int, float], dict | None] = {}
+    if driven and not crashed and not spec_errors:
+        # A refused/invalid scenario already hard-fails. Preserve its original
+        # diagnostic instead of spending a comparison on unusable evidence.
         for i in driven:
             n = scen_frames[i]
-            key = (scen_scenes[i], n)
+            if scen_results[i]["comparison_error"]:
+                spec_errors.append("scenario %r: driven state is not a complete comparable observation (%s); no-input comparison is unobserved" % (scen_results[i]["name"], scen_results[i]["comparison_error"]))
+                scen_results[i]["passed"] = False
+                continue
+            key = (scen_scenes[i], n, scen_timeouts[i])
             if key not in controls:
                 spec_path.write_text(json.dumps({"frames": n, "timeline": []}))
                 # The control is a RUN, so it needs the same throwaway user://
@@ -3632,7 +3770,7 @@ def _playtest_spec_inner(dst: Path, spec: dict, frames: int, timeout: int,
                     ctrl_kwargs = ({"raw": raw_logs, "raw_label": ctrl_label}
                                    if (retain or retain_errors or retain_patterns
                                        or retain_requested) else {})
-                    ctrl, _e, _t = _run_probe(dst, state_path, n, timeout,
+                    ctrl, _e, _t = _run_probe(dst, state_path, n, scen_timeouts[i],
                                               {"AITELIER_PROBE_SPEC": str(spec_path),
                                                **_home_env(ctrl_home)},
                                               scene=scen_scenes[i], timing=t_ctrl,
@@ -3643,10 +3781,15 @@ def _playtest_spec_inner(dst: Path, spec: dict, frames: int, timeout: int,
                 ctrl_timing.append(_scenario_ledger(
                     "control:%s@%d" % (scen_scenes[i] or "(main)", n),
                     scen_scenes[i], time.monotonic() - t_ctrl_start, t_ctrl))
-                controls[key] = _digest(ctrl.get("nodes", {}))
-            # An empty control means the control pass itself failed to report --
-            # stay quiet rather than accuse the game on missing evidence.
-            if controls[key] and scen_nodes[i] == controls[key]:
+                observation_error = _comparison_observation_error(ctrl, n)
+                if _t or _e or observation_error:
+                    spec_errors.append("scenario %r: no-input control is not a complete comparable observation (%s); input-dead comparison is unobserved" % (scen_results[i]["name"], observation_error or "timeout/runtime error"))
+                    controls[key] = None
+                else:
+                    controls[key] = _digest(ctrl["nodes"])
+            # A failed control is a hard unobserved comparison above; do not
+            # accuse the game of dead input or turn missing evidence green.
+            if controls[key] is not None and scen_nodes[i] == controls[key]:
                 scen_results[i]["input_dead"] = True
                 scen_results[i]["passed"] = False
 
@@ -3804,6 +3947,9 @@ def playtest_project(project_dir: str, frames: int = DEFAULT_PLAYTEST_FRAMES,
         return {"passed": True, "frames": 0, "errors": [], "state": {},
                 "behavior": None, "spec_used": False, "no_project": True,
                 "summary": "No Godot project — playtest skipped."}
+    if spec and _authored_execution_plan(spec, frames, timeout)[1]:
+        # Invalid authored work is a structured refusal BEFORE copy/import.
+        return _playtest_spec(proj, spec, frames, timeout, corr=corr)
     # The real Godot user:// root name for THIS project — retention searches
     # the invocation-owned app_userdata/<name> (or custom user dir), never a
     # guessed HOME root and never the whole HOME.

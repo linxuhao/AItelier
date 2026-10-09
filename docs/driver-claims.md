@@ -1,39 +1,39 @@
-# Driver claims and leases (multi-driver P1)
+# Driver claims and leases (multi-driver P1 + P3)
 
-Design: `design/multi-driver-coop.md` §4.1–4.3a and §4.5, phase P1 ("leases, alert
-only"). Identity (who a driver is) is P0, see `docs/driver-identity.md`. This page
-covers what P1 adds: node claims, leases on claims and attempts, heartbeats and
-lease events. Enforcement, takeover/abandon, handoff and subagent registration
-are P3; nothing here blocks or cancels anything.
+Design: `design/multi-driver-coop.md` §4 (claims, leases, reclaim, subagents),
+§6 (handoff) and §7.3 (conflict rules). Identity (who a driver is) is P0, see
+`docs/driver-identity.md`. P1 added node claims, leases on claims and attempts,
+heartbeats and lease events, all record-only. P3 adds the terminal attempt
+status `abandoned`, reclaim (abandon / take over), the subagent registry with
+takeover classification, voluntary handoffs, and ENFORCEMENT of the claim rules
+behind a second per-project switch.
 
 ## Status
 
-Implemented on branch `grok/multi-driver-p1`; not yet deployed. Every project is
-`multi_driver=off` after the migration, so nothing changes until the owner turns
-it on for a project.
+P1 merged to main (53daff7ff2). P3 implemented on branch `grok/multi-driver-p3`;
+not yet merged or deployed. After the migration every project is
+`multi_driver=off` and `claim_enforcement=off`, so nothing changes until the owner
+turns both on for a project.
 
-## Turning it on (owner / admin driver)
+## Two switches (owner / admin driver)
 
-`set_multi_driver(project_id, multi_driver="on"|"off", expected_revision, reason)`
-(MCP `state_graph_write`, or `POST /api/state/commands/set_multi_driver`). It
-shares the `state_project_policy` revision with `set_dispatch` (read it from
-`project_overview.policy.revision`) and emits `multi_driver_policy_changed`.
-Only the owner's Access email or an `is_admin` driver (`owner-cli`) may call it;
-anyone else gets `admin_required`.
+- `set_multi_driver(project_id, multi_driver="on"|"off", expected_revision, reason)` —
+  record claims and leases (P1). With it off, `claim_node` is refused
+  (`multi_driver_off`), new attempts are written exactly as before and report
+  `lease_state=legacy_unleased`.
+- `set_claim_enforcement(project_id, claim_enforcement="on"|"off", expected_revision, reason)` —
+  turn the recorded claims into refusals (P3). Needs `multi_driver=on`
+  (`multi_driver_off` otherwise); turning `multi_driver` off turns enforcement off
+  with it. Stored in its own row (`state_project_enforcement`); shares the
+  `state_project_policy` revision for the CAS (read it from
+  `project_overview.policy.revision`). Emits `claim_enforcement_policy_changed`.
 
-With `multi_driver=off` (the default):
+Owner decision 2026-10-09: `set_multi_driver(on)` alone keeps P1's record-only
+behaviour. A project with `multi_driver=on, claim_enforcement=off` admits any
+dispatch, report and structural write exactly as P1 did; a project with
+`multi_driver=off` behaves byte-for-byte as before P1.
 
-- `claim_node` is refused with `multi_driver_off`;
-- new attempts are written exactly as before (no owner, no lease, same event
-  payload) and report `lease_state=legacy_unleased`;
-- dispatch, observation and structural writes are unchanged.
-
-With `multi_driver=on`, claims are recorded and new attempts started by a
-registered driver record `owner_driver_id`, `owner_fence=1` and a 7200-second
-lease. Claims are still NOT enforced: anyone may dispatch, report, revise or
-hold regardless of claims (enforcement is P3).
-
-## Claims
+## Claims (P1, unchanged)
 
 `claim_node(project_id, node_key, purpose, expected_revision, request_key,
 lease_seconds=7200, workspace="", subagent=None)`
@@ -48,104 +48,177 @@ lease_seconds=7200, workspace="", subagent=None)`
 - At most one live `implement`/`plan` claim per node (partial unique index
   `state_node_claims_one_exclusive`); concurrent claims have exactly one winner.
 - `lease_seconds` is 60..86400; grace after expiry is 900 seconds.
-- `fence` is per node and monotonic: each new claim on a node gets
-  `1 + max(fence)` of that node, so a holder whose claim lapsed and was replaced
-  cannot act with its old fence.
-- `request_key` is idempotent per (project, node, driver): repeating the same
-  request returns the same claim (`idempotent: true`); reusing the key for a
-  different request is `request_key_reused`.
-- `subagent="<your driver_id>/<label>"` marks a claim held for one of your
-  subagents (they have no credentials of their own, D3).
-- The node must exist at `expected_revision` (`revision_changed`) and not be
-  SUPERSEDED (an `implement` claim also refuses VERIFIED): `node_closed`.
+- `fence` is per node and monotonic; a holder whose claim lapsed and was replaced
+  cannot act with its old fence (`stale_fence`).
+- `request_key` is idempotent per (project, node, driver); reuse for a different
+  request is `request_key_reused`.
+- `subagent="<your driver_id>/<label>"` marks a claim held for one of your subagents.
+- The node must exist at `expected_revision` and not be closed (`node_closed`).
+- An implement claim is BOUND to the attempt it dispatches (`claim.attempt_id`);
+  a terminal report (candidate/failed), an abandon or a takeover releases or
+  transfers it.
 
 `release_claim(project_id, claim_id, fence, reason)` — the holder, or an admin
-(recorded `break_glass: true` in the `claim_released` event). Releasing an already
-released claim is idempotent.
+(`break_glass: true` in the event).
 
-Reads (private, writer credential): `list_claims(project_id, node_keys?,
-statuses? = ["live"], driver_id?, limit?)` and `get_claim(project_id, claim_id)`
-(with its append-only history). REST: `GET /api/state/projects/{id}/claims` and
-`GET /api/state/projects/{id}/claims/{claim_id}`.
+Reads (private): `list_claims`, `get_claim`; REST `GET /api/state/projects/{id}/claims[/{claim_id}]`.
 
-## Heartbeat
+## Heartbeat (P1, extended)
 
 `heartbeat(project_id, claims=[{claim_id, fence}], attempts=[{attempt_id, fence}],
-subagents=[{subagent_id}])`, 1..100 items in total.
+subagents=[{subagent_id}])`, 1..100 items; writes only the two lease columns.
+A `subagents` item renews every live claim you hold for that label AND its
+`driver_subagents` row when you are its current owner (an inherited subagent
+counts). Item errors add `not_subagent_owner`, `orphaned` (nobody renews an
+orphan) and `subagent_closed`.
 
-- Writes ONLY `lease_expires_at` and `last_heartbeat_at`: no `state_events` row,
-  no history row, no `observation_version` bump, no `updated_at` change.
-- Each item is renewed or refused independently, so one stale entry does not
-  cost a parent the other 99 renewals. Response: `{renewed: [{kind, id, fence,
-  lease_expires_at}], refused: [{kind, id, error}], heartbeat_at}`.
-- A `subagents` item renews every live claim the caller holds for that label.
-- Item errors: `not_found`, `not_claim_owner`, `not_attempt_owner`,
-  `stale_fence`, `claim_not_live`, `attempt_not_active`, `legacy_unleased`,
-  `not_your_subagent`, `no_live_claims`.
-- Renew from the same client loop that runs your `wait_for_state_change`, every
-  20–30 minutes, and only while you actually supervise the work (§12.2 item 7).
+## Lease states and events (P1, unchanged)
 
-## Lease states and events
+`healthy` → `expired` (within the 900 s grace) → `reclaimable`; `legacy_unleased`
+never expires. Events: `claim_acquired`, `claim_released`, `lease_expired`,
+plus P3: `claim_transferred`, `attempt_abandoned`, `attempt_ownership_transferred`,
+`claim_overridden`, `subagent_*`, `handoff_*`, `driver_notice`,
+`checkpoint_break_glass`. Expiry is detected lazily (claim reads, `claim_node`,
+every `wait_for_state_change` iteration). An attempt is NEVER changed by expiry;
+P3 makes the change an explicit, audited member action (below).
 
-| `lease_state` | when |
+## Enforcement (P3, `claim_enforcement=on`)
+
+Every rule has a stable error code; the message starts with it.
+
+| rule (design §7.3) | refusal |
 |---|---|
-| `healthy` | now < `lease_expires_at` |
-| `expired` | expired, within the 900-second grace |
-| `reclaimable` | grace passed |
-| `legacy_unleased` | active attempt with no recorded lease (all pre-P1 attempts); never expires |
+| 1 dispatch: `start_attempt` / `start_external_attempt` need YOUR live `implement` claim on the node. Optional `claim_id`+`fence` pin what you believe you hold. | `claim_required`, `claimed_by_other` (names holder and expiry), `stale_fence`, `not_claim_owner` |
+| 2 observe: `report_external_attempt` needs the attempt owner and `fence=<owner_fence>`. The previous owner after a takeover/handoff is stale; anyone else is not the owner. A report on an ABANDONED attempt by its original reporter is recorded with `late_after_abandon=1`, `resulting_status=superseded`, never current. | `fence_required`, `stale_fence`, `not_attempt_owner` |
+| 4 structural: `revise_node`, `split_node`, `supersede_node`, `set_node_facet` over a node — or a transitive dependent, which the write invalidates — on which another driver holds a live claim or an active owned attempt need `override_reason`; the holder is notified (`override_notice`) and `claim_overridden` is emitted. | `override_reason_required` (facts: `holders`) |
+| 5 hold: `set_node_hold(held=false)` on a hold another driver placed needs `override_reason`; the placer is notified. | `override_reason_required` |
+| 8 one writer per checkout: an exclusive `claim_node` whose `workspace` is already declared by another live exclusive claim in the project is refused. `register_subagent` applies the same rule to subagent workspaces. | `workspace_in_use` |
+| 9 one controller per run: the checkpoint of a SkillFlow run bound to an owned attempt is answered by the owner driver only (MCP `answer_checkpoint`, REST `/checkpoint/approve|reject`). | `not_attempt_owner` |
+| Q8 subagents: a claim held for a subagent and evidence recorded under a `<you>/<label>` identity name a registered subagent. | `subagent_unregistered` |
+| Q13 admin: an admin (owner e-mail, `owner-cli`) is never refused by these rules; the write carries `break_glass: true` and the affected driver gets a `break_glass` notice. | — |
 
-Only state changes emit events: `claim_acquired`, `claim_released`,
-`lease_expired` (payload `subject` = claim|attempt, `lease_id`, `phase` =
-expired|reclaimable, `lease_expires_at`, `reclaimable_at`, `driver_id`, `fence`;
-`attempt_id` for attempts so `attempt_ids` wait filters match).
+Priority changes (`set_node_priority`), evidence and verification are unchanged:
+any member may record evidence on any CANDIDATE.
 
-Expiry is detected lazily, never by a background job: in the private claim
-reads (`list_claims`, `get_claim`), inside `claim_node`, and on every iteration
-of `wait_for_state_change` (about once a second while it waits). Public reads
-(`project_overview`, `get_node`, `project_run_summary`) never write; they derive
-`lease_state` from the clock, so a claim past its grace that no sweep retired yet
-is shown as `reclaimable`. Each phase is
-emitted once per lease. When a claim reaches `reclaimable` its status becomes
-`expired` (history row written) and it stops blocking a new exclusive claim.
-An attempt is NEVER changed: it stays ACTIVE and keeps the node's one active
-slot; recovering it (abandon/take over) is P3.
+## Reclaim: abandon or take over (P3, design §4.4)
 
-## Overview and wait
+Available in any `multi_driver=on` project once an attempt's `lease_state` is
+`reclaimable` (expiry + 900 s). No further wait (Q12). Before that:
+`lease_not_expired` with `reclaimable_at`. Both need `expected_owner_fence`
+(`stale_fence`), raise the owner fence, and notify the previous owner.
 
-- `project_overview`: `policy.multi_driver`; per node `claims` (live claims:
-  holder `driver_id`, `subagent`, `purpose`, `fence`, lease fields — the same
-  public subset for every reader of an opened project; `workspace`,
-  `request_key` and history are only in `list_claims`/`get_claim`) and
-  `latest_attempt.owner_driver_id`, `owner_fence`, `lease_expires_at`,
-  `lease_state`.
-- `readiness` may be `in_progress_lease_expired` (an active attempt whose lease
-  lapsed); `readiness_counts` counts it. Treat it like `in_progress` plus "the
-  owner stopped renewing".
-- `get_node`: `claims` (same public subset) and per attempt `owner_driver_id`, `owner_fence`,
-  `lease_expires_at`, `lease_state`. Every attempt read carries `lease_state`.
-- `project_run_summary`: `running_external[*]` gains `owner_driver_id`,
-  `owner_fence`, `lease_expires_at`, `lease_state`, plus `live_claims`.
-- `wait_for_state_change(include_lease_events=true)`: wakes on the three lease
-  events; with `false` they are filtered out of the scan. With
-  `return_when_idle=true`, a scope whose only nonterminal attempts are
-  `reclaimable` returns `reason=action_required` with those attempts and their
-  lease fields instead of waiting forever.
+- `abandon_external_attempt(attempt_id, expected_owner_fence, abandon_kind, reason, report_ref?, report_sha256?, override_reason?)`
+  — the attempt ends in the new terminal status **`abandoned`** (not `failed`:
+  no criterion diagnosis, no acceptance change). It frees the node's one active
+  slot (readiness returns to `ready`, the frontier lists the node, a
+  `return_when_idle` wait no longer waits on it, run summary counts it under
+  `external_counts.abandoned`), releases its bound claims, voids open handoffs
+  and sets `state_external_owners.status=abandoned`.
+  `abandon_kind=confirmed_stopped` is your attestation that the old worker is
+  quiescent and REQUIRES `report_ref`/`report_sha256` (retained like any report);
+  it also settles the attempt's registered subagents. `unknown` says you do not
+  know: the node's next attempt must declare `base_sha` and ride a claim whose
+  `workspace` differs from the abandoned attempt's (`workspace_in_use` otherwise)
+  — two possibly live workers never share a checkout. Only external attempts
+  can be abandoned (`not_external`); a SkillFlow attempt's run is alive or not
+  by the engine's account, so its controller is taken over instead.
+- `take_over_attempt(attempt_id, expected_owner_fence, reason, override_reason?)`
+  — you become owner and controller: `owner_driver_id`, fence +1, lease reset;
+  the live claim bound to the attempt is `transferred` and a fresh live
+  `implement` claim is created for you; every registered `active`/`adopted`
+  subagent of the attempt moves to you (fence +1) and awaits `adopt_subagent`.
+  `already_owner` if it is yours.
+- A `legacy_unleased` attempt (no lease) is reclaimed only with an explicit
+  `override_reason` (design §9.2 step 4; owner confirmation is procedural).
+  An admin may reclaim before the grace or without the reason: `break_glass`.
 
-## Schema migration
+## Subagent registry and takeover (P3, design §4.6, D8, Q8, Q9)
 
-Additive, idempotent, in the existing transactional initializers
-(`docs/state-external-harness.md` "Schema migration"):
+`driver_subagents`: `subagent_id='<driver>/<label>'`, `owner_driver_id` (changes on
+takeover/handoff), `origin_driver_id` (never changes), `attempt_id`, `host`,
+`runtime` (`local_process|server_process|skillflow_run|remote_session`),
+`control_handle` (non-secret hint), `workspace` (`host:path#branch`, its own
+branch), `context_ref`/`context_sha256` (retained), `checkpoint_ref`/`checkpoint_sha256`,
+`observability`, `status` (`active|settled|adopted|orphaned_unobservable|terminated`),
+`fence`, lease columns.
 
-- `state_attempts` + `owner_driver_id TEXT`, `owner_fence INTEGER NOT NULL
-  DEFAULT 0`, `lease_expires_at TEXT`, `last_heartbeat_at TEXT`, and the partial
-  index `state_attempts_lease`. No rebuild, no CHECK change; existing rows keep
-  NULL/0 (never backfilled: the historical shared actor names no driver).
-- `state_project_policy` + `multi_driver TEXT NOT NULL DEFAULT 'off'`.
-- New `state_node_claims` (claims are never deleted; trigger) and
-  `state_claim_history` (append-only; UPDATE/DELETE refused by triggers).
-- `set_dispatch` now names its columns on insert, so it keeps working on the
-  wider policy row.
+- `register_subagent(project_id, attempt_id, label, host, runtime, workspace, context_ref, context_sha256, control_handle="")`
+  — by the attempt's owner, BEFORE the subagent starts; idempotent for identical
+  arguments, `subagent_exists` otherwise; `workspace_in_use` if another open
+  subagent declares the same workspace; `legacy_unleased` for an attempt without
+  an owner (take it over first).
+- `update_subagent_checkpoint(project_id, subagent_id, fence, checkpoint_ref, checkpoint_sha256)` — owner, current fence.
+- `adopt_subagent(project_id, subagent_id, fence, observability, reason)` — by the
+  new owner after a takeover/handoff: `controllable` / `observable_only` →
+  `adopted` (you renew it); `unobservable` → `orphaned_unobservable`: not
+  renewed, not assumed stopped, fenced out, a STANDING `subagent_orphaned`
+  notice to the origin driver, and the response's `continue_from` gives you
+  `checkpoint_ref` to continue at once on a NEW branch and workspace (Q9). The
+  old branch is reference only.
+- `report_subagent_settled(project_id, subagent_id, quiescent=true, report_ref, report_sha256, fence?)`
+  — by the ORIGIN driver, with any (old) fence; the only old-fence write. It
+  only closes an orphan (`not_orphaned`), to `terminated`, resolves the standing
+  notice and notifies the current owner. `quiescence_required` otherwise.
+- `project_overview.orphaned_subagents` and `project_run_summary.orphaned_subagents`
+  count orphans not yet confirmed stopped (public for an opened project; the
+  registry itself is private: `list_subagents(project_id, attempt_id?, owner_driver_id?, statuses?)`,
+  REST `GET /api/state/projects/{id}/subagents`).
 
-Back up before deploying and do not run old and new State writers on one
-database. Rolling back code is safe for data (old code ignores the new columns
-and tables); claims and leases simply stop being maintained.
+## Handoff (P3, design §6)
+
+- `offer_handoff(project_id, request_key, expected_owner_fence, package, attempt_id|claim_id, to_driver_id?)`
+  — by the subject's owner; `to_driver_id` omitted = any member. One open offer
+  per subject (`handoff_pending`). The `package` is bounded (16 KiB canonical),
+  holds references only — `context_hash`, `observation_version`, `event_cursor`,
+  `source`, `workspace`, `workers{quiescent,detail,host}`, `pending_checkpoint`,
+  `reports[{ref,sha256}]` (≤20, retained), `open_issue_ids` (≤100),
+  `note_entries` (≤50), `private_notes` (≤50), `subagents` (≤100, yours on this
+  attempt), `next_step` (≤2000 chars) — and is checked against State where it
+  can be (`package_mismatch`). It lives on the handoff row and is never written
+  to the notebook. Offers lease 24 h, then `expired`; nothing transfers.
+- `accept_handoff(project_id, handoff_id, expected_owner_fence)` — the target (or
+  any member for a pool offer; never the offerer: `not_handoff_target`). Moves
+  owner, fence (+1), lease, bound claim and registered subagents atomically;
+  `stale_fence` if ownership moved since the offer; `handoff_expired` /
+  `handoff_closed`. §6.3: if the package says `workers.quiescent=false`, the
+  receiver's registered `capabilities.observable_hosts` must cover every host the
+  attempt's open subagents (and the package) name, else
+  `receiver_cannot_observe_workers`.
+- `decline_handoff(project_id, handoff_id, reason)` closes an offer addressed to
+  you; on a pool offer it only records the decline. `withdraw_handoff` — offerer
+  only. Reads: `list_handoffs`, `get_handoff`; REST `GET /api/state/projects/{id}/handoffs[/{handoff_id}]`.
+- A takeover or abandon of the subject voids its open offers (`withdrawn` by `system`).
+
+## Notices (the one notifier)
+
+Every driver-addressed notification — reclaim, takeover, orphan, handoff offer and
+reply, override, break glass — goes through `core/driver_notices.py:notify`.
+Until the P2 per-driver inbox is deployed it stores a pending `driver_notices`
+row (`sender_driver_id` NULL for system notices) and emits a project
+`driver_notice` event (payload: `target_driver_id`, `kind`, `subject`, `refs`), so a
+driver waiting on the project wakes. Read yours with
+`list_driver_notices(project_id, statuses?, kinds?)` (admins may pass
+`driver_id`); REST `GET /api/state/projects/{id}/driver-notices`. Re-pointing to
+the P2 inbox is one function (`_deliver`).
+
+## Schema migration (P3)
+
+Transactional, idempotent, in the existing attempt initializer
+(`core/state_attempt_schema.py`), rehearsed on a copy of the production database:
+
+- `state_attempts` is REBUILT once (a CHECK cannot be altered in place): status
+  gains `abandoned`, column `abandon_kind` is added; every row is copied by
+  column name, the `sqlite_sequence` high-water mark is carried over, every
+  index and trigger that hung off the table is recreated, counts and foreign
+  keys are verified, and a damaged table fails the copy without touching the
+  original. `state_external_owners` is rebuilt the same way (status gains
+  `abandoned`).
+- `state_external_observations` + `late_after_abandon INTEGER NOT NULL DEFAULT 0`,
+  `fence INTEGER` (additive).
+- New tables: `state_project_enforcement`, `state_handoffs` (private),
+  `driver_subagents`, `driver_notices` (never deleted; triggers).
+- Nothing is backfilled; legacy attempts stay `legacy_unleased`.
+
+Rolling back code after `abandoned` rows exist: old code's CHECK does not know
+the status, so it cannot write those attempts' rows (reads are fine). Confirm
+there are none, or accept those nodes read-only, before a rollback.

@@ -1042,6 +1042,9 @@ var _game_usec := 0.0
 # scenarios were green.)
 var _frame_load_usec := 0
 var _watch := []         # [{node, attr}] whose frame-0 value a delta assert needs
+var _before_captures := {} # scenario-local immutable receipts
+var _before_scope := ""
+var _before_actions := {} # frames whose declared input was dispatched
 var _baselines := {}     # "node|attr" -> frame-0 value
 var _baseline_missing := []  # "node|attr" the frame-0 walk could not read at all
 func _ready() -> void:
@@ -1577,6 +1580,7 @@ func _load_spec(path: String) -> void:
     if typeof(data) != TYPE_DICTIONARY:
         return
     _spec_mode = true
+    _before_scope = str(data.get("scenario", ""))
     if data.has("frames"):
         _max = int(data["frames"])
     var tl = data.get("timeline", [])
@@ -1594,7 +1598,7 @@ func _load_spec(path: String) -> void:
         var asserts = e.get("assert", [])
         if typeof(asserts) == TYPE_ARRAY:
             for a in asserts:
-                if a.has("mode"):
+                if a.has("mode") and not a.has("before"):
                     _watch.append({"node": str(a.get("node", "")), "attr": str(a.get("attr", ""))})
 func _process(_d: float) -> void:
     # The first _process is the boundary between "booting" and "stepping": the
@@ -1808,6 +1812,10 @@ func _click_at(node_name: String, offset: Vector2, button: int, spec: String) ->
 
 
 func _apply_entry(e: Dictionary) -> void:
+    for c in e.get("capture_before", []):
+        _capture_before(c)
+    if str(e.get("press", "")) != "" or str(e.get("click", "")) != "":
+        _before_actions[_frame] = true
     # Hover BEFORE click on the same frame: a scenario that writes both means
     # "point here, then press", which is the order a real pointer does it in.
     var hv = e.get("hover", "")
@@ -1900,6 +1908,33 @@ func _eval_assert(a: Dictionary) -> void:
             if res["error"] == "":
                 res["error"] = "observed read failed: " + obs["error"]
     _results.append(res)
+
+func _capture_before(c: Dictionary) -> void:
+    var id := str(c.get("id", ""))
+    if _before_captures.has(id):
+        _spec_errors.append("duplicate before capture: " + id)
+        return
+    var record := {"id": id, "scope": _before_scope, "node": str(c.get("node", "")),
+        "attr": str(c.get("attr", "")), "frame": _frame,
+        "action_frame": int(c.get("action_frame", -1)), "ok": false}
+    _before_captures[id] = record
+    if _before_scope == "" or id == "" or _frame >= record["action_frame"]:
+        record["error"] = "missing scope/id or capture not before action"
+    else:
+        var target := _resolve(record["node"])
+        if target == null:
+            record["error"] = "before capture node not found: " + record["node"]
+        else:
+            var read := _read_attr(target, record["attr"])
+            if read["ok"]:
+                record["ok"] = true
+                # Own the value so later game mutation cannot rewrite the before.
+                var value = read["value"]
+                record["value"] = value.duplicate(true) if typeof(value) == TYPE_ARRAY or typeof(value) == TYPE_DICTIONARY else value
+            else:
+                record["error"] = read["error"]
+    if not record["ok"]:
+        _spec_errors.append("before capture %s failed: %s" % [id, record.get("error", "")])
 
 func _capture_baselines() -> void:
     for w in _watch:
@@ -2190,7 +2225,20 @@ func _eval_delta(a: Dictionary, target: Node, res: Dictionary) -> void:
         _results.append(res)
         return
     var cur = cur_read["value"]
-    if not _baselines.has(key):
+    var before := str(a.get("before", ""))
+    var captured := {}
+    if a.has("before"):
+        captured = _before_captures.get(before, {})
+        res["expr"] = attr + " " + mode + " since before " + before
+        res["before"] = captured.duplicate(true)
+        if not captured.get("ok", false) or captured.get("scope", "") != _before_scope or captured.get("node", "") != str(a.get("node", "")) or captured.get("attr", "") != attr or int(captured.get("frame", _frame)) >= int(captured.get("action_frame", -1)) or int(captured.get("action_frame", _frame)) >= _frame or not _before_actions.has(int(captured.get("action_frame", -1))):
+            res["measurement"] = "incomplete"
+            res["error"] = "missing, failed, late or wrongly bound before capture: " + before
+            res["actual"] = {"baseline": null, "current": cur, "baseline_missing": true}
+            res["passed"] = false
+            _results.append(res)
+            return
+    elif not _baselines.has(key):
         # No frame-0 baseline was ever captured for this attribute (its node
         # did not resolve at frame 0, or its frame-0 read failed). A missing
         # baseline is an INCOMPLETE measurement, not a comparison that happens
@@ -2204,7 +2252,7 @@ func _eval_delta(a: Dictionary, target: Node, res: Dictionary) -> void:
         res["passed"] = false
         _results.append(res)
         return
-    var base = _baselines.get(key, null)
+    var base = captured["value"] if a.has("before") else _baselines.get(key, null)
     res["actual"] = {"baseline": base, "current": cur}
     # Both polarities decide through the TYPE-AWARE walk, never native `==`/`!=`:
     # a heterogeneous pair (int vs tagged Float) would otherwise be an engine
@@ -2289,6 +2337,7 @@ func _finish() -> void:
     out["asserts_missing"] = max(0, scheduled - _results.size())
     out["complete"] = _frame >= _max
     out["baseline_missing"] = _baseline_missing
+    out["before_captures"] = _before_captures
     var incomplete_count := 0
     for r in _results:
         if str(r.get("measurement", "")) == "incomplete":
@@ -2821,7 +2870,7 @@ def _normalize_asserts(raw) -> list:
 
 
 _TIMELINE_KEYS = {"at", "press", "release", "actions", "assert", "click", "clicks",
-                  "hover", "hovers"}
+                  "hover", "hovers", "capture_before"}
 # The two levels above a timeline entry are checked the same way: a key outside
 # these sets is a spec error and the scenario does not run. A key nothing reads
 # is a second reading of the file -- assert blocks parked under
@@ -2869,7 +2918,7 @@ def _key_type_errors(where: str, mapping: dict, types: dict) -> list:
 
 # A list-form assert item is read by the probe's _eval_assert: node, expr and
 # name, or node, attr and mode for a delta assert, which never reads expr.
-_ASSERT_ITEM_KEYS = {"name", "node", "expr", "mode", "attr"}
+_ASSERT_ITEM_KEYS = {"name", "node", "expr", "mode", "attr", "before"}
 
 
 def _assert_errors(raw) -> list:
@@ -2887,6 +2936,9 @@ def _assert_errors(raw) -> list:
         if unknown:
             errors.append("assert item %d has unknown key(s) %s - allowed: %s"
                           % (j, ", ".join(unknown), ", ".join(sorted(_ASSERT_ITEM_KEYS))))
+        if "before" in a and (not isinstance(a["before"], str) or not a["before"].strip()
+                              or a.get("mode") not in _DELTA_MODES):
+            errors.append("assert item %d: before requires a nonempty id and delta mode" % j)
         if "mode" in a and "expr" in a:
             errors.append("assert item %d has both `mode` and `expr`; a `mode` "
                           "assert compares `attr` with frame 0 and never reads "
@@ -2914,6 +2966,40 @@ def _aim_errors(key: str, aim) -> list:
 
 
 _MAX_SPEC_FRAMES = 3000   # safety cap on how long one scenario may run
+
+
+def _before_control_errors(timeline: list) -> list:
+    """Bind each explicit delta to one immutable real pre-input capture."""
+    errors, captures = [], {}
+    inputs = {e["at"] for e in timeline if e.get("press") or e.get("click")}
+    for e in timeline:
+        raw = e.get("capture_before", [])
+        if not isinstance(raw, list):
+            errors.append("capture_before must be a list")
+            continue
+        for c in raw:
+            if (not isinstance(c, dict) or set(c) != {"id", "node", "attr", "action_frame"}
+                    or any(not isinstance(c[k], str) or not c[k].strip() for k in ("id", "node", "attr"))
+                    or isinstance(c["action_frame"], bool) or not isinstance(c["action_frame"], int)):
+                errors.append("capture_before requires exactly id/node/attr nonempty strings and integer action_frame")
+                continue
+            if c["id"] in captures:
+                errors.append("duplicate before capture: " + c["id"])
+                continue
+            captures[c["id"]] = {**c, "frame": e["at"]}
+            if not e["at"] < c["action_frame"] or c["action_frame"] not in inputs:
+                errors.append("before capture %s must precede a declared press/click" % c["id"])
+    for e in timeline:
+        for a in e.get("assert", []):
+            if "before" not in a:
+                continue
+            c = captures.get(a["before"])
+            if c is None:
+                errors.append("unknown before capture: " + a["before"])
+            elif (c["node"] != a.get("node") or c["attr"] != a.get("attr")
+                    or not c["frame"] < c["action_frame"] < e["at"]):
+                errors.append("wrong operand or order for before capture: " + a["before"])
+    return errors
 
 
 def _normalize_timeline(timeline: list) -> tuple[list, list]:
@@ -3000,6 +3086,10 @@ def _normalize_timeline(timeline: list) -> tuple[list, list]:
             errors.extend("timeline entry %d (at: %d): %s" % (i, at, m)
                           for m in shape_errors)
             continue
+        if e.get("capture_before") and any(e.get(k) for k in
+                ("actions", "press", "release", "click", "clicks", "hover", "hovers")):
+            errors.append("timeline entry %d: capture_before must be input-free" % i)
+            continue
         acts = e.get("actions") or []
         if isinstance(acts, str):
             acts = [acts]
@@ -3028,9 +3118,10 @@ def _normalize_timeline(timeline: list) -> tuple[list, list]:
         # this function existed. An input the spec asked for and the probe never
         # delivered is indistinguishable from a game that ignored it.
         if (base.get("press") or base.get("release") or base.get("click")
-                or base.get("hover") or base.get("assert")
+                or base.get("hover") or base.get("assert") or base.get("capture_before")
                 or not (acts or clicks or hovers)):
             out.append(base)
+    errors.extend(_before_control_errors(out))
     return out, errors
 
 
@@ -3335,7 +3426,7 @@ def _playtest_spec_inner(dst: Path, spec: dict, frames: int, timeout: int,
                     "the %d-frame cap - they would never run. Reach the same "
                     "state sooner, or act and assert earlier."
                     % (name, ", ".join(str(d) for d in dropped), _MAX_SPEC_FRAMES))
-        spec_path.write_text(json.dumps({"frames": sframes, "timeline": timeline}))
+        spec_path.write_text(json.dumps({"frames": sframes, "timeline": timeline, "scenario": name}))
         # Per-scenario scene override. `run_godot` has always been able to boot
         # a specific scene instead of main; only the SPEC-level scene was ever
         # wired to it, so all 27 scenarios booted main.tscn and each one paid
@@ -3451,6 +3542,7 @@ def _playtest_spec_inner(dst: Path, spec: dict, frames: int, timeout: int,
         scen_results.append({"name": name, "ran": ran, "errors": errs,
                              "native_debt": debt,
                              "asserts": asserts, "passed": scen_passed,
+                             "before_captures": probe.get("before_captures", {}),
                              # Measurement-completeness rows: what was scheduled
                              # vs what the probe actually reported.
                              "expected_asserts": expected_asserts,

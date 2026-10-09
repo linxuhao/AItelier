@@ -664,7 +664,8 @@ async def test_wait_names_the_unpinned_candidate_and_keeps_healthy_scope_usable(
     a = reserve(system)
     _, rid = _complete_without_artifact(system, a)
     _record_dead_worktree(store, rid, tmp_path)
-    other = reserve(system, request="other-owner")
+    store.add_nodes("game", [spec("d")])
+    other = reserve(system, "d", request="other-owner")
     service = StateService(store.db, WorkspaceManager(str(tmp_path / "workspaces")), sf, {},
                            project_read_trusted=True)
     cursor = store.events("game")[-1]["seq"]
@@ -794,3 +795,128 @@ async def test_wait_replays_event_after_artifact_pin_with_a_fresh_watermark(syst
     assert replayed["events"][-1]["event_type"] == "attempt_observed"
     assert replayed["events"][-1]["payload"]["artifact_ref"] == ARTIFACT
 
+
+
+# ── project/node waits distinguish current candidates from history ──
+
+def _wait_history_rows(store):
+    with store.transaction() as conn:
+        return {name: [dict(row) for row in conn.execute("SELECT * FROM " + name + " ORDER BY rowid")]
+                for name in ("state_attempts", "state_nodes", "state_evidence", "state_acceptances", "state_events")}
+
+
+def _old_unpinned_and_accepted_successor(system, tmp_path):
+    store, attempts, _ = system
+    old = reserve(system, request="old-unpinned")
+    _, rid = _complete_without_artifact(system, old)
+    _record_dead_worktree(store, rid, tmp_path)
+    newer = finish(system, reserve(system, request="accepted-successor"))
+    receipt = accept(system, newer)
+    assert store.get_node("game", "a")["status"] == "VERIFIED"
+    assert attempts.get(old["attempt_id"])["artifact_ref"] is None
+    return old, newer, receipt
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("nodes", [None, ["a"]])
+@pytest.mark.parametrize("timeout", [0, .2])
+async def test_wait_ignores_obsolete_unpinned_candidate_after_new_acceptance(system, tmp_path, nodes, timeout):
+    store, attempts, _ = system
+    old, newer, receipt = _old_unpinned_and_accepted_successor(system, tmp_path)
+    service = _recovery_service(system, tmp_path)
+    cursor = store.events("game")[-1]["seq"]
+    before = _wait_history_rows(store)
+    result = await service.wait_for_state_change("game", after=cursor, node_keys=nodes,
+        return_when_idle=True, timeout_seconds=timeout)
+    print(json.dumps({"old_attempt": old["attempt_id"], "old_artifact": None,
+                      "current_attempt": newer["attempt_id"], "current_receipt": receipt["receipt_id"],
+                      "actual_wait": result}))
+    assert result == {"events": [], "next_after": cursor, "timed_out": False,
+                      "reason": "nothing_to_wait"}
+    assert _wait_history_rows(store) == before
+    assert attempts.get(old["attempt_id"])["status"] == "candidate"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("contract_changed", [False, True])
+async def test_explicit_historical_candidate_wait_is_diagnostic_without_reconciliation(system, tmp_path, contract_changed):
+    store, attempts, _ = system
+    old, _, _ = _old_unpinned_and_accepted_successor(system, tmp_path)
+    if contract_changed:
+        store.revise_node("game", "a", 1, "new contract", goal="New revision")
+    service = _recovery_service(system, tmp_path)
+    cursor = store.events("game")[-1]["seq"]
+    before = _wait_history_rows(store)
+    result = await service.wait_for_state_change("game", after=cursor, attempt_ids=[old["attempt_id"]],
+        return_when_idle=True, timeout_seconds=.2)
+    assert result == {"events": [], "next_after": cursor, "timed_out": False,
+        "reason": "action_required", "attempts": [
+            {"attempt_id": old["attempt_id"], "status": "candidate", "artifact_ref": None}]}
+    assert _wait_history_rows(store) == before
+
+
+@pytest.mark.asyncio
+async def test_wait_does_not_recover_candidate_from_old_node_revision(system, tmp_path):
+    store, attempts, _ = system
+    old = reserve(system)
+    _, rid = _complete_without_artifact(system, old)
+    _record_dead_worktree(store, rid, tmp_path)
+    store.revise_node("game", "a", 1, "changed", goal="New revision")
+    service = _recovery_service(system, tmp_path)
+    cursor = store.events("game")[-1]["seq"]
+    before = _wait_history_rows(store)
+    result = await service.wait_for_state_change("game", after=cursor, node_keys=["a"],
+        return_when_idle=True, timeout_seconds=.2)
+    assert result["reason"] == "nothing_to_wait" and not result["timed_out"]
+    assert _wait_history_rows(store) == before
+    assert attempts.get(old["attempt_id"])["status"] == "candidate"
+
+
+@pytest.mark.asyncio
+async def test_obsolete_candidate_exception_names_only_explicit_attempts_and_preserves_filter_modes(system, tmp_path):
+    store, attempts, _ = system
+    old, _, _ = _old_unpinned_and_accepted_successor(system, tmp_path)
+    store.add_nodes("game", [spec("d")])
+    healthy = reserve(system, "d", request="healthy-unrelated")
+    service = _recovery_service(system, tmp_path)
+    cursor = store.events("game")[-1]["seq"]
+    before = _wait_history_rows(store)
+    any_result = await service.wait_for_state_change("game", after=cursor, node_keys=["d"],
+        attempt_ids=[old["attempt_id"]], filter_mode="any", return_when_idle=True, timeout_seconds=.02)
+    assert any_result["reason"] == "action_required"
+    assert any_result["attempts"] == [{"attempt_id": old["attempt_id"], "status": "candidate", "artifact_ref": None}]
+    all_result = await service.wait_for_state_change("game", after=cursor, node_keys=["d"],
+        attempt_ids=[old["attempt_id"]], filter_mode="all", return_when_idle=True, timeout_seconds=.02)
+    assert all_result["reason"] == "nothing_to_wait"
+    unnamed = await service.wait_for_state_change("game", after=cursor, node_keys=["a"],
+        attempt_ids=[healthy["attempt_id"]], filter_mode="any", return_when_idle=True, timeout_seconds=.02)
+    assert unnamed["timed_out"] and "reason" not in unnamed
+    assert _wait_history_rows(store) == before
+
+
+@pytest.mark.asyncio
+async def test_latest_failed_attempt_does_not_make_wait_blind_to_unrelated_actual_owner(system, tmp_path):
+    store, attempts, sf = system
+    old = reserve(system)
+    _, rid = _complete_without_artifact(system, old)
+    _record_dead_worktree(store, rid, tmp_path)
+    successor = reserve(system, request="failed-successor")
+    failed_run = launch(system, successor)
+    sf.fail_run(failed_run, "actual failed successor")
+    assert attempts.reconcile(successor["attempt_id"], sf)["status"] == "failed"
+    store.add_nodes("game", [spec("d")])
+    healthy = reserve(system, "d", request="healthy-owner")
+    healthy_run = launch(system, healthy)
+    service = _recovery_service(system, tmp_path)
+    cursor = store.events("game")[-1]["seq"]
+    result = await service.wait_for_state_change("game", after=cursor, return_when_idle=True,
+                                               timeout_seconds=.02)
+    assert result["timed_out"] and "reason" not in result
+    assert attempts.get(healthy["attempt_id"])["status"] == "running"
+    assert attempts.get(old["attempt_id"])["status"] == "candidate"
+    sf.pause_run(healthy_run)
+    paused = await service.wait_for_state_change("game", after=result["next_after"],
+                                                return_when_idle=True, timeout_seconds=.2)
+    assert paused["events"][0]["payload"]["attempt_id"] == healthy["attempt_id"]
+    assert paused["events"][0]["payload"]["status"] == "paused"
+    assert attempts.get(old["attempt_id"])["artifact_ref"] is None

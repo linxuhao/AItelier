@@ -259,3 +259,34 @@ async def test_director_commit_between_scan_and_disposition_replays_first(servic
     monkeypatch.setattr(state_changes, "wait_disposition", racing_disposition)
     result = await service.wait_for_state_change("p", after=cursor, return_when_idle=True)
     assert result["events"][0]["event_type"] == "node_revised"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["reserved", "launching", "running", "paused", "unknown"])
+@pytest.mark.parametrize("node_change", ["held", "revised", "superseded"])
+async def test_candidate_filter_never_hides_actual_active_owner(service, status, node_change):
+    if status in {"reserved", "launching"}:
+        attempt = service.attempts.reserve("p", "a", 1, "workflow", "active")
+        if status == "launching":
+            assert service.attempts.claim_launch(attempt["attempt_id"])
+    else:
+        attempt = register_external(service)
+        if status != "running":
+            observe_external(service, attempt, status)
+    if node_change == "held":
+        service.set_node_hold("p", "a", True, 0, "hold does not end ownership")
+    elif node_change == "revised":
+        service.store.revise_node("p", "a", 1, "new contract", goal="Revised")
+    else:
+        service.store.supersede_node("p", "a", 1, "new contract elsewhere")
+    cursor = service.store.events("p")[-1]["seq"]
+    before = service.attempts.get(attempt["attempt_id"])
+    result = await service.wait_for_state_change("p", after=cursor, return_when_idle=True,
+                                               timeout_seconds=.01)
+    assert result["events"] == [] and result["next_after"] == cursor
+    if status == "paused":
+        assert result["reason"] == "action_required"
+        assert result["attempts"] == [{"attempt_id": attempt["attempt_id"], "status": "paused"}]
+    else:
+        assert result["timed_out"] and "reason" not in result
+    assert service.attempts.get(attempt["attempt_id"]) == before

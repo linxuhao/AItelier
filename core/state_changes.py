@@ -164,6 +164,28 @@ async def wait_for_state_change(service, project_id, after=0, node_keys=None, at
                 pass
 
 
+def _candidate_selection(attempt_ids=None):
+    """Only current candidates affect project/node ownership snapshots.
+
+    Match StateAttempts' latest-per-node and revision/contract eligibility;
+    leave every noncandidate owner visible regardless of its node's age/hold.
+    Explicit attempt watches may inspect historical candidate rows, but must
+    not reconcile them merely to diagnose their retained missing artifact.
+    """
+    current = """(EXISTS (SELECT 1 FROM state_nodes n
+        WHERE n.project_id=state_attempts.project_id AND n.node_key=state_attempts.node_key
+        AND n.revision=state_attempts.node_revision AND n.contract_hash=state_attempts.contract_hash
+        AND n.status!='SUPERSEDED')
+        AND NOT EXISTS (SELECT 1 FROM state_attempts newer
+        WHERE newer.project_id=state_attempts.project_id AND newer.node_key=state_attempts.node_key
+        AND newer.seq>state_attempts.seq))"""
+    args = []
+    if attempt_ids:
+        current = "(attempt_id IN (" + ",".join("?" for _ in attempt_ids) + ") OR " + current + ")"
+        args.extend(attempt_ids)
+    return "(status!='candidate' OR " + current + ")", args
+
+
 def wait_disposition(store, project_id, cursor, node_keys, attempt_ids,
                      note_after_revision=None, filter_mode="all"):
     """An idle decision is a snapshot, never proof of remote quiescence."""
@@ -192,7 +214,8 @@ def wait_disposition(store, project_id, cursor, node_keys, attempt_ids,
         if attempt_ids is not None:
             filters.append("attempt_id IN (" + ",".join("?" for _ in attempt_ids) + ")")
             filter_args.extend(attempt_ids)
-        clauses, args = ["project_id=?"], [project_id]
+        candidates, candidate_args = _candidate_selection(attempt_ids)
+        clauses, args = ["project_id=?", candidates], [project_id, *candidate_args]
         if filters:
             joiner = " OR " if filter_mode == "any" else " AND "
             clauses.append("(" + joiner.join(filters) + ")")
@@ -268,6 +291,8 @@ def _recover_page(service, project_id, after, node_keys, attempt_ids, filter_mod
         service.store._project(conn, project_id)
         clauses = ["project_id=?", "seq>?", "run_id IS NOT NULL", "execution_kind='skillflow'",
                    "(status IN ('running','paused','unknown') OR (status='candidate' AND artifact_ref IS NULL))"]
+        candidates, _ = _candidate_selection()
+        clauses.append(candidates)
         args = [project_id, after]
         # Node and attempt scopes form ONE OR/AND filter group, exactly as the
         # matching wait filters them. Without this a union scope required the

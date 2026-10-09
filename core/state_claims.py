@@ -22,9 +22,10 @@ Everything is opt-in per project through ``state_project_policy.multi_driver``
 (default ``off``): with it off no claim can be taken and new attempts carry no
 lease, so nothing here changes what an existing project sees.
 
-Lease expiry is detected lazily: ``sweep`` runs on trusted reads (list_claims,
-project_overview, get_node, project_run_summary), inside claim_node, and on
-every iteration of wait_for_state_change, and emits each expiry event once.
+Lease expiry is detected lazily: ``sweep`` runs on the private claim reads
+(list_claims, get_claim), inside claim_node, and on every iteration of
+wait_for_state_change, and emits each expiry event once. Public reads never
+write; they derive lease_state from the clock.
 """
 from __future__ import annotations
 
@@ -51,6 +52,13 @@ MAX_LEASE_SECONDS = 86400
 GRACE_SECONDS = 900                   # Q7: fifteen minutes after expiry
 MAX_HEARTBEAT_ITEMS = 100
 LEASE_EVENTS = ("claim_acquired", "claim_released", "lease_expired")
+# What a PUBLIC read (overview, get_node, run_summary) shows of a claim, for a
+# trusted and an anonymous reader alike: who holds which node, why and until
+# when. The declared workspace and request key stay in the private reads
+# (list_claims, get_claim); core.state_privacy projects exactly these columns.
+PUBLIC_CLAIM_COLUMNS = ("claim_id", "project_id", "node_key", "driver_id", "subagent", "purpose", "status",
+                        "fence", "node_revision", "lease_seconds", "lease_expires_at", "last_heartbeat_at",
+                        "created_at")
 _ACTIVE_ATTEMPT = ("reserved", "launching", "running", "paused", "unknown")
 
 SCHEMA = """
@@ -172,9 +180,15 @@ def _claim_view(row, current: str) -> dict:
 
 
 def live_claims(conn, project_id, node_key=None, current: str | None = None) -> list[dict]:
-    """Live claims of a project (or one node), oldest first, with lease_state."""
+    """Live claims of a project (or one node), oldest first, with lease_state.
+
+    Public columns only, so the answer is identical for every reader of an
+    opened project. A claim past its grace that no sweep has retired yet is
+    still listed, as reclaimable: that is what it is.
+    """
     current = current or now_stamp()
-    sql, args = "SELECT * FROM state_node_claims WHERE project_id=? AND status='live'", [project_id]
+    sql, args = ("SELECT " + ",".join(PUBLIC_CLAIM_COLUMNS) +
+                 " FROM state_node_claims WHERE project_id=? AND status='live'", [project_id])
     if node_key is not None:
         sql += " AND node_key=?"
         args.append(node_key)

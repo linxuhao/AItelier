@@ -895,3 +895,20 @@ def test_supported_session_activation_sources_preserve_malformed_marker(
     assert output["continue"] is True
     assert "handoff recovery required" in output["systemMessage"]
     assert marker.read_bytes() == original
+
+
+def test_lapsed_lease_stays_listed_as_active_ownership():
+    """Multi-driver P1: in_progress_lease_expired is still an active owner."""
+    summary = load_hook_module()._frontier_summary({"event_seq": 9, "nodes": [
+        {"node_key": "lapsed", "status": "OPEN", "readiness": "in_progress_lease_expired",
+         "next_action": None, "latest_attempt": {
+             "attempt_id": "attempt-l", "status": "running", "reporting_actor": "driver:grok",
+             "owner_driver_id": "grok", "lease_state": "expired"}},
+        {"node_key": "legacy", "status": "OPEN", "readiness": "in_progress", "next_action": None,
+         "latest_attempt": {"attempt_id": "attempt-old", "status": "running",
+                            "lease_state": "legacy_unleased"}},
+    ]})
+    assert "- lapsed: attempt_id=attempt-l" in summary
+    assert "owner_driver_id=grok lease_state=expired" in summary
+    legacy = next(line for line in summary.splitlines() if line.startswith("- legacy:"))
+    assert legacy.endswith("checkpoint_id=none")

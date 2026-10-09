@@ -2,7 +2,8 @@
 
 Design: `design/multi-driver-coop.md` §3 (D9, D11, Q1, Q4, Q5). This page is the
 operator/driver guide for phase P0 only: identity, tokens and attribution.
-Leases, inbox routing and enforced claims are later phases.
+Claims, leases and heartbeats (P1, record-only) are in `docs/driver-claims.md`;
+inbox routing and enforced claims are later phases.
 
 ## Status
 

@@ -209,17 +209,12 @@ class StatePortfolio:
 
     def overview(self, project_id):
         from core.state_claims import attempt_lease_view, live_claims, now_stamp
-        trusted = self.store.project_read_trusted
-        if self.service is not None and trusted:
-            self.service.claims.sweep(project_id)
         current = now_stamp()
         with self.store.transaction() as conn:
             view = self.store._graph_view(conn, project_id)
-            # Claims live in a private table: only a trusted reader gets them.
             claims = {}
-            if trusted:
-                for claim in live_claims(conn, project_id, current=current):
-                    claims.setdefault(claim["node_key"], []).append(claim)
+            for claim in live_claims(conn, project_id, current=current):
+                claims.setdefault(claim["node_key"], []).append(claim)
             latest = {r["node_key"]: dict(r) for r in conn.execute("SELECT a.* FROM state_attempts a "
                       "JOIN (SELECT node_key,MAX(seq) AS last FROM state_attempts WHERE project_id=? GROUP BY node_key) b "
                       "ON a.seq=b.last", (project_id,))}
@@ -249,8 +244,7 @@ class StatePortfolio:
                                              if a else None),
                              latest_evidence=dict(evidence.get(a["attempt_id"], {})) if a else {},
                              open_issue_count=open_issues[n["node_key"]])
-                if trusted:
-                    entry["claims"] = claims.get(n["node_key"], [])
+                entry["claims"] = claims.get(n["node_key"], [])
                 nodes.append(entry)
             seq = conn.execute("SELECT COALESCE(MAX(seq),0) FROM state_events WHERE project_id=?", (project_id,)).fetchone()[0]
             return {"project": view["project"], "source": self._source(conn, view["project"]),

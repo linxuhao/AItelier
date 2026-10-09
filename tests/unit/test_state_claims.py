@@ -418,18 +418,32 @@ class TestOverviewAndWait:
         assert overview["readiness_counts"]["in_progress_lease_expired"] == 1
         assert read(grok, "project_run_summary", project_id="p")["running_external"][0]["lease_state"] == "expired"
 
-    def test_anonymous_overview_of_an_opened_project_carries_no_claims(self, db):
+    def test_public_reads_show_the_same_claim_subset_to_every_reader(self, db, clock):
         owner = project(db)
-        claim(svc(db, "grok"), "a", "review")
+        grok = svc(db, "grok")
+        held = claim(grok, "a", "review", workspace="secret-host:/private/path#b", request_key="private-rk")
         owner.open_project("p")
         anonymous = svc(db, trusted=False)
-        overview = read(anonymous, "project_overview", project_id="p")
-        assert all("claims" not in n for n in overview["nodes"])
-        assert "claims" not in read(anonymous, "get_node", project_id="p", node_key="a")
-        assert "live_claims" not in read(anonymous, "project_run_summary", project_id="p")
+        for action, args in (("project_overview", {"project_id": "p"}),
+                             ("get_node", {"project_id": "p", "node_key": "a"}),
+                             ("project_run_summary", {"project_id": "p"})):
+            public, writer = read(anonymous, action, **args), read(grok, action, **args)
+            public.pop("observed_at", None), writer.pop("observed_at", None)
+            assert public == writer, action
+            text = json.dumps(public)
+            assert held["claim_id"] in text and "secret-host" not in text and "private-rk" not in text
+        node = next(n for n in read(anonymous, "project_overview", project_id="p")["nodes"] if n["node_key"] == "a")
+        assert node["claims"][0]["driver_id"] == "grok" and node["claims"][0]["lease_state"] == "healthy"
+        before = max_seq(db)
+        clock.advance(7200 + 900)
+        assert read(grok, "project_overview", project_id="p")["nodes"][0]["claims"][0]["lease_state"] == \
+            "reclaimable"
+        assert max_seq(db) == before, "a public read never writes"
         from core.state_commands import ProjectPrivate
-        with pytest.raises(ProjectPrivate):
-            read(anonymous, "list_claims", project_id="p")
+        for action in ("list_claims", "get_claim"):
+            with pytest.raises(ProjectPrivate):
+                read(anonymous, action, project_id="p", claim_id=held["claim_id"]) if action == "get_claim" \
+                    else read(anonymous, action, project_id="p")
 
     async def test_wait_wakes_on_lease_expired(self, db, clock):
         project(db)

@@ -40,11 +40,7 @@ FROM (
 def project_run_summary(service, project_id):
     """Private projection; returns identities ONLY for currently running runs."""
     from core.state_claims import attempt_lease_view, live_claims, now_stamp
-    trusted = service.store.project_read_trusted
-    if trusted:
-        service.claims.sweep(project_id)
     current = now_stamp()
-    claims = None
     with service.store.transaction() as conn:
         service.store._project(conn, project_id)
         membership = {}
@@ -71,8 +67,7 @@ def project_run_summary(service, project_id):
             (project_id, *ACTIVE))]
         for row in holding:
             row["lease_state"] = attempt_lease_view(row, current)["lease_state"]
-        if trusted:
-            claims = live_claims(conn, project_id, current=current)
+        claims = live_claims(conn, project_id, current=current)
     # The active count IS the listed rows, by construction: a number over an
     # empty list (or a listed agent under a zero) is the confusion this fixes.
     # 'candidate' is an external delivery, not an accepted goal — the same
@@ -163,7 +158,7 @@ def project_run_summary(service, project_id):
             'external_attempts_excluded':external['total'],'running_external':holding,
             'external_counts':external,
             'observed_at':now(),
-            **({'live_claims':claims} if claims is not None else {}),
+            'live_claims':claims,
             'runtime_unavailable':engine_unavailable,
             'scope':'Distinct workflow runs bound to State attempts or explicit run references, plus external attempts; '
                     'external executions are not synthetic runs and carry no usage. counts is workflow-only, '

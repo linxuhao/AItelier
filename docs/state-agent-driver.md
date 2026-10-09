@@ -7,6 +7,14 @@ Before any write, identify yourself: call driver_whoami (MCP) or GET /api/driver
 - New LAN driver on the shared server account: look for `~/.aitelier-drivers/<id>.token`. If it is missing, run once from the repo root `python3 scripts/driver_token.py self-register <id> --display-name "<name>"` (idempotent; refuses to replace an existing driver's token unless `--rotate`). Then run with `AITELIER_DRIVER_ID=<id>` and verify with /api/drivers/me.
 - Read only your own token file; the `.env` admin token is for the self-register script only; write only through the API. Full details: docs/driver-identity.md.
 
+## Claims and leases (multi-driver)
+In a project whose policy has `multi_driver=on` (`project_overview.policy.multi_driver`; only the owner or an admin driver changes it with `set_multi_driver`), record what you work on. Claims are recorded and shown, not enforced (phase P1): they never block dispatch, observations or structural writes.
+- Claim before you work: `claim_node(project_id, node_key, purpose=implement|review|investigate|plan, expected_revision, request_key, lease_seconds=7200, workspace?, subagent?)`. One live implement/plan claim per node; review/investigate claims coexist.
+- Refusals start with a stable code: `claimed_by_other` (names the holder and its lease expiry), `already_held`, `stale_fence` (ownership moved; reload with `list_claims`/`get_claim`), `multi_driver_off`.
+- Renew with one `heartbeat(project_id, claims=[{claim_id, fence}], attempts=[{attempt_id, fence}], subagents=[{subagent_id}])` of up to 100 items every 20–30 minutes, from the client loop that runs your wait. A parent claims with `subagent="<id>/<label>"`; one subagents item renews all that subagent's claims. Heartbeats write no event. Renew only while you really supervise the work.
+- Attempts you start there carry `owner_driver_id`, `owner_fence=1` and a 7200-second lease; older attempts are `legacy_unleased` and never expire.
+- A lapsed lease emits `lease_expired` (`include_lease_events` defaults true); readiness shows `in_progress_lease_expired`; 900 seconds later it is `reclaimable`. Nothing is cancelled. `release_claim(project_id, claim_id, fence, reason)` when you stop. Details: docs/driver-claims.md.
+
 ## Resume safely
 1. Read state_graph_help schemas, project_overview and the relevant get_node/attempt_detail. Recover durable IDs before acting. Use the current revision and frozen dependency receipts. Do not repeat an old task because its notification was delayed.
    Read get_driver_note for the current project notebook. If a historical decision is missing, use search_driver_note_history with narrow filters and its revision cursor; do not inject the full append-only note history into routine resumes or compact recovery.

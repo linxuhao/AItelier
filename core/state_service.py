@@ -230,16 +230,11 @@ class StateService:
         return project_run_summary(self, project_id)
 
     def node_context(self, project_id, node_key):
-        self.claims.sweep(project_id)
+        from core.state_claims import live_claims
         node = self.store.get_node(project_id, node_key)
         receipts = {}
-        claims = None
         with self.store.transaction() as conn:
-            if self.project_read_trusted:
-                # Claims are private (state_node_claims is a private table): an
-                # anonymous reader of an opened project does not see them.
-                from core.state_claims import live_claims
-                claims = live_claims(conn, project_id, node_key)
+            claims = live_claims(conn, project_id, node_key)
             for dep in node["dependencies"]:
                 d = self.store._node(conn, project_id, dep)
                 r = conn.execute("SELECT * FROM state_acceptances WHERE receipt_id=?", (d["verified_receipt"],)).fetchone()
@@ -250,7 +245,7 @@ class StateService:
                 "attempts": self.attempts.list(project_id, node_key, limit=10),
                 "references": self.portfolio.references(project_id, node_key, limit=100),
                 "design": self.design.node_bindings(project_id, node_key),
-                **({"claims": claims} if claims is not None else {})}
+                "claims": claims}
 
     def _components(self):
         # Goal inspection/planning must survive an unavailable executor. Only

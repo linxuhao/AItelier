@@ -73,10 +73,10 @@ PRIVATE_STATE_TABLES = frozenset({
     # through an untrusted connection, so this table is classified here and the
     # identity is projected with ``bundle_bytes`` replaced by NULL below.
     "state_git_artifacts",
-    # Who is working on what (design/multi-driver-coop.md §4.2): driver ids,
-    # workspaces and release reasons. Writer-only like the mailbox; a public
-    # read of an opened project shows only the attempt lease columns, which
-    # live in the public state_attempts table.
+    # Who is working on what (design/multi-driver-coop.md §4.2). The declared
+    # workspace, request key and every history row (release reasons) are
+    # private; a public read of an OPENED project sees only the projected
+    # columns below, the same subset a writer's public read shows.
     "state_node_claims", "state_claim_history",
 })
 
@@ -243,6 +243,16 @@ PROJECTIONS = {
         "WHERE commit_sha IN (SELECT artifact_ref FROM main.state_attempts "
         f"WHERE project_id IN ({_OPENED}))",
         None),
+    # Claims of opened projects: holder, purpose, fence and lease only
+    # (core.state_claims.PUBLIC_CLAIM_COLUMNS); never workspace or request key.
+    "state_node_claims": (
+        "SELECT claim_id, project_id, node_key, driver_id, subagent, purpose, status, fence, "
+        "node_revision, NULL AS attempt_id, NULL AS workspace, lease_seconds, lease_expires_at, "
+        "last_heartbeat_at, NULL AS request_key, NULL AS request_hash, created_at, NULL AS updated_at "
+        f"FROM main.state_node_claims WHERE project_id IN ({_OPENED})",
+        frozenset({"claim_id", "project_id", "node_key", "driver_id", "subagent", "purpose", "status",
+                   "fence", "node_revision", "lease_seconds", "lease_expires_at", "last_heartbeat_at",
+                   "created_at"})),
 }
 
 # The notebook, copied for ONE project and only when that project is opened

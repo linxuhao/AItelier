@@ -1,7 +1,7 @@
 # 多 driver 协作（multi-driver coop）—— 同一个 State project 由多个 director 共同驱动
 
 Status: **approved for implementation**（所有者 2026-10-09 16:11 批准）。实施按第 10 节 P0–P5 进行，从 P0 开始；对应的实现节点在 `aitelier` State DAG 中。
-进度：**P0 已合并（main 6790f14446，2026-10-09）并于 2026-10-09 在生产启用**（`AITELIER_DRIVER_IDENTITY=on`；已登记 `owner-cli`、`public`、`grok`、`codex`）；新 LAN driver 自助领取 token：`scripts/driver_token.py self-register`（见 `docs/driver-identity.md`）。P1–P5 未开始。
+进度：**P0 已合并（main 6790f14446，2026-10-09）并于 2026-10-09 在生产启用**（`AITELIER_DRIVER_IDENTITY=on`；已登记 `owner-cli`、`public`、`grok`、`codex`）；新 LAN driver 自助领取 token：`scripts/driver_token.py self-register`（见 `docs/driver-identity.md`）。**P1 已实现（分支 `grok/multi-driver-p1`），尚未合并或部署**：claim / 租约 / 心跳 / `lease_expired` 事件，只记录不强制，按项目 `multi_driver` 开关（默认 off），见 `docs/driver-claims.md`。P2–P5 未开始。
 Date: 2026-10-09（初稿）；同日按所有者裁决 D1–D12 及全部待决问题的答复多次修订，16:11 批准实施，见第 0 节。
 Scope: `core/state_*`、`core/director_messaging*.py`、`api/state_*`、`api/mcp_router.py`、`api/authz.py`、
 `.codex/hooks/postcompact_driver_state.py`、driver guide（`core/state_driver_guide.py`、`docs/state-agent-driver.md`）。

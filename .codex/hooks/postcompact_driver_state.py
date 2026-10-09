@@ -565,17 +565,23 @@ def _frontier_summary(overview: dict[str, Any]) -> str:
         readiness = str(node.get("readiness", "unknown"))
         next_action = node.get("next_action")
         latest = node.get("latest_attempt")
-        if readiness == "in_progress" and isinstance(latest, dict):
+        # in_progress_lease_expired (multi-driver P1) is still active ownership:
+        # the attempt holds its slot; only its owner stopped renewing the lease.
+        if readiness in {"in_progress", "in_progress_lease_expired"} and isinstance(latest, dict):
             run_id = latest.get("run_id") or "none"
             owner = latest.get("owner") or latest.get("reporting_actor") or "unknown"
             checkpoint = latest.get("checkpoint") or "none"
             checkpoint_id = latest.get("checkpoint_id") or "none"
+            lease = ""
+            if latest.get("lease_state") not in {None, "legacy_unleased"}:
+                lease = (f" owner_driver_id={latest.get('owner_driver_id') or 'none'}"
+                         f" lease_state={latest.get('lease_state')}")
             active.append(
                 f"- {node.get('node_key', node.get('key', '?'))}: "
                 f"attempt_id={latest.get('attempt_id', 'unknown')} "
                 f"run_id={run_id} "
                 f"attempt_status={latest.get('status', 'unknown')} "
-                f"owner={owner} checkpoint={checkpoint} checkpoint_id={checkpoint_id}"
+                f"owner={owner} checkpoint={checkpoint} checkpoint_id={checkpoint_id}{lease}"
             )
         if readiness == "ready" and next_action in {"new_attempt", "candidate_review"}:
             candidate = ""

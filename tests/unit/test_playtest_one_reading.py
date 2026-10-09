@@ -361,7 +361,10 @@ def _probe_lookups():
 
 
 def test_every_tree_lookup_in_the_probe_is_one_of_these():
+    # The existing rendered-text observer walks actual children by index; it
+    # does not resolve a missing path by its leaf name. Keep every lookup named.
     assert _probe_lookups() == [
+        ("_observe_text_walk", "if _observe_text_walk(node.get_child(i), depth + 1, obs):"),
         ("_resolve", "return get_node_or_null(NodePath(name))"),
         ("_resolve", "return scene.get_node_or_null(NodePath(name))"),
         ("_resolve", "return get_tree().get_root().find_child(name, true, false)"),
@@ -521,7 +524,7 @@ def test_k17_an_unknown_key_in_a_list_form_assert_item_is_refused(monkeypatch, t
     spec = spec1(Y(sc_yaml(timeline="- at: 185\n  assert:\n  - {node: PlanEditKind1, expr: 'true', precondition: 'get_popup().visible == true'}\n")))
     _refused(monkeypatch, tmp_path, spec, "scenario 's'", "timeline entry 0 (at: 185)",
              "assert item 0 has unknown key(s) precondition",
-             "allowed: attr, expr, mode, name, node")
+             "allowed: attr, before, expr, mode, name, node")
 
 
 def test_k18_mode_and_expr_in_one_assert_item_is_refused(monkeypatch, tmp_path):

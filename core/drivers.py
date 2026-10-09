@@ -362,7 +362,7 @@ class DriverRegistry:
             conn.execute("UPDATE drivers SET status=?, revision=revision+1 WHERE driver_id=?",
                          (status, driver_id))
             operation = {"active": "activate", "suspended": "suspend", "retired": "retire"}[status]
-            self._audit(conn, driver_id, operation, {"reason": reason, "previous": row["status"]}, actor)
+            self._audit(conn, driver_id, operation, {"previous": row["status"]}, actor)
         return self.get(driver_id)
 
     def set_admin(self, driver_id, is_admin, expected_revision, reason, *, actor: str) -> dict:
@@ -375,7 +375,7 @@ class DriverRegistry:
                 raise DriverError("only a LAN driver can be an admin")
             conn.execute("UPDATE drivers SET is_admin=?, revision=revision+1 WHERE driver_id=?",
                          (int(is_admin), driver_id))
-            self._audit(conn, driver_id, "set_admin", {"is_admin": is_admin, "reason": reason}, actor)
+            self._audit(conn, driver_id, "set_admin", {"is_admin": is_admin}, actor)
         return self.get(driver_id)
 
     def set_membership(self, project_id, driver_id, status, expected_revision, reason, *, actor: str,
@@ -402,7 +402,8 @@ class DriverRegistry:
                 conn.execute("UPDATE project_drivers SET status=?, revision=revision+1, actor=?, updated_at=? "
                              "WHERE project_id=? AND driver_id=?", (status, actor, now(), project_id, driver_id))
             self._audit(conn, driver_id, "membership",
-                        {"project_id": project_id, "status": status, "reason": reason}, actor)
+                        {"membership_ref": conn.execute("SELECT rowid FROM project_drivers WHERE project_id=? AND driver_id=?",
+                                                        (project_id, driver_id)).fetchone()[0], "status": status}, actor)
             result = dict(conn.execute("SELECT project_id, driver_id, status, revision, updated_at "
                                        "FROM project_drivers WHERE project_id=? AND driver_id=?",
                                        (project_id, driver_id)).fetchone())
@@ -428,13 +429,44 @@ class DriverRegistry:
                      (driver_id, display_name, kind, int(is_admin), digest, stamp if digest else None,
                       host_label, caps, stamp))
         self._audit(conn, driver_id, "register",
-                    {"kind": kind, "is_admin": bool(is_admin), "display_name": display_name}, actor)
+                    {"kind": kind, "is_admin": bool(is_admin)}, actor)
 
-    @staticmethod
-    def _audit(conn, driver_id, operation, payload, actor):
-        # Never a token, never a hash: a hash plus the pepper file is a token oracle.
-        if {"token", "token_hash"} & set(payload):
-            raise DriverError("audit payload must not carry credentials")
+    def _audit(self, conn, driver_id, operation, payload, actor):
+        """Persist only operation-defined facts, never caller prose or metadata.
+
+        Membership targets use the durable row reference, not an arbitrary
+        project label. Reasons are accepted by public methods for compatibility
+        but are not retained: recursive key filtering cannot make prose safe.
+        """
+        schemas = {
+            "register": {"kind": ("lan", "public_cf"), "is_admin": bool},
+            "rotate": {},
+            "activate": {"previous": _STATUSES},
+            "suspend": {"previous": _STATUSES},
+            "retire": {"previous": _STATUSES},
+            "set_admin": {"is_admin": bool},
+            "membership": {"membership_ref": int, "status": ("member", "removed")},
+        }
+        schema = schemas.get(operation)
+        if operation == "rotate" and payload == {"source": "legacy_admin_token"}:
+            schema = {"source": ("legacy_admin_token",)}
+        if schema is None or not isinstance(payload, dict) or set(payload) != set(schema):
+            raise DriverError("audit payload does not match its closed operation schema")
+        for key, expected in schema.items():
+            value = payload[key]
+            if isinstance(expected, tuple):
+                valid = type(value) is str and value in expected
+            else:
+                valid = type(value) is expected and (expected is not int or value > 0)
+            if not valid:
+                raise DriverError("audit payload contains an invalid operation fact")
+        known = {row[0] for row in conn.execute(
+            "SELECT token_hash FROM drivers WHERE token_hash IS NOT NULL")}
+        # Fixed enumerations are not an arbitrary text sink. Still refuse a
+        # coincidental known credential/hash value rather than persist it.
+        for value in (*payload.values(), driver_id, actor):
+            if isinstance(value, str) and (value in known or token_hash(self._pepper, value) in known):
+                raise DriverError("audit payload must not carry credentials")
         conn.execute("INSERT INTO driver_audit(driver_id, operation, payload_json, actor, created_at) "
                      "VALUES(?,?,?,?,?)",
                      (driver_id, operation, json.dumps(payload, sort_keys=True, ensure_ascii=False), actor, now()))

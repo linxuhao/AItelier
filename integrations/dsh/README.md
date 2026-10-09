@@ -94,6 +94,8 @@ current State before acting; notes cannot grant permission or certify results.
 | `get_step_output` | read | The files ONE step produced. Each is capped at 20000 chars; a file that was cut says so in the text and in a `truncated` map, and `file=<name>` reads one file at a 200000-char cap. |
 | `list_runs` | read | Recent runs, newest first — the entry point when you hold no id. |
 | `trace_list` / `trace_search` / `trace_read` | read | The durable trace: find where it broke, then read the actual prompt / response / tool result. |
+| `driver_whoami` | read | Resolve this credential to its driver/owner identity, memberships and capabilities. |
+| `observe_deployment_quiescence` | write | Record an actual deployment-quiescence observation; does not authorize a deployment. |
 | `state_graph_help` | read | The typed operation contracts of the persistent State DAG, plus `driver_guide`. Read it before any other `state_graph_*` call. |
 | `state_graph_read` | read | Persistent State projects, node context, dependency frontier, attempts, evidence — and `wait_for_state_change`. A PRIVATE read: needs the token. |
 | `state_graph_write` | write | Manage State DAG goals and attempts. Starts only ready nodes; workflow completion is never verification. |

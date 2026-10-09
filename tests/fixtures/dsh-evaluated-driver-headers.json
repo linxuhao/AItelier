@@ -1,0 +1,40 @@
+{
+  "provenance": {
+    "node": "v22.23.3",
+    "actual_patch_sha256": "8b5d315836eda19d74ef6e1e97136bdb948383733bfe500d07471895c40f52b5",
+    "expressions": {
+      "X-AItelier-Admin-Token": "process.env.AITELIER_ADMIN_TOKEN || ''",
+      "X-AItelier-Driver-Token": "process.env.AITELIER_DRIVER_TOKEN || ''"
+    },
+    "cases": [
+      "driver",
+      "alias",
+      "owner"
+    ],
+    "credentials": "synthetic only; no host environment consulted",
+    "installed_dsh": "NOT_CLAIMED"
+  },
+  "cases": [
+    {
+      "name": "driver",
+      "headers": {
+        "X-AItelier-Admin-Token": "synthetic-dsh-owner-token",
+        "X-AItelier-Driver-Token": "synthetic-dsh-driver-token"
+      }
+    },
+    {
+      "name": "alias",
+      "headers": {
+        "X-AItelier-Admin-Token": "synthetic-dsh-driver-token",
+        "X-AItelier-Driver-Token": ""
+      }
+    },
+    {
+      "name": "owner",
+      "headers": {
+        "X-AItelier-Admin-Token": "synthetic-dsh-owner-token",
+        "X-AItelier-Driver-Token": ""
+      }
+    }
+  ]
+}

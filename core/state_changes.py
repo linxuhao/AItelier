@@ -174,7 +174,7 @@ async def wait_for_state_change(service, project_id, after=0, node_keys=None, at
 
 def _sweep_leases(service, project_id):
     """Best effort: a busy database must not turn a wait into an error. The
-    next iteration (or any trusted read) sweeps again; nothing is lost."""
+    next iteration (or a claim read) sweeps again; nothing is lost."""
     claims = getattr(service, "claims", None)
     if claims is None:
         return

@@ -123,3 +123,5 @@ After enabling, the same operator now reports as `driver:<id>`; reporting on
 such a legacy attempt is still accepted from any registered driver, and an
 `<email>` owner continues as `owner:<email>` (`core.drivers.actor_continues`).
 New attempts are owned by the exact `driver:<id>`.
+
+Audit payloads contain only operation-defined booleans/enumerations and a durable membership row reference. Registration labels and caller-provided reason text are not copied into the append-only audit. Public methods still validate reasons; storing arbitrary prose would admit credential values. Unknown/nested payload fields and invalid or known credential/hash values are refused before insertion.

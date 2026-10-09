@@ -159,8 +159,12 @@ class StateService:
         from core.state_issues import StateIssues
         self.issues = StateIssues(self.store, actor)
         self.attempts = StateAttempts(self.store)
+        # Owner (Access email) or an is_admin driver, from the same raw
+        # credential. Grants the admin steps of claims/policy and break-glass
+        # writes around other drivers' claims (P3, Q13).
+        self.is_admin = is_admin is True
         from core.state_external import ExternalAttempts
-        self.external = ExternalAttempts(self.attempts, actor, driver_id=driver_id)
+        self.external = ExternalAttempts(self.attempts, actor, driver_id=driver_id, is_admin=self.is_admin)
         self.attach_driver = attach_driver
         self.actor = actor
         # The registered driver behind this request (design/multi-driver-coop.md
@@ -168,13 +172,26 @@ class StateService:
         # off or not a driver (owner, legacy, internal). `execute` uses it to
         # pin `director_identity` to `<driver_id>` / `<driver_id>/<label>`.
         self.driver_id = driver_id
-        # Owner (Access email) or an is_admin driver, from the same raw
-        # credential. Grants only the admin steps of claims/policy (P1).
-        self.is_admin = is_admin is True
         from core.state_claims import StateClaims
         self.claims = StateClaims(self.store, actor, driver_id=driver_id, is_admin=self.is_admin)
         from core.driver_inbox import DriverInbox
         self.driver_inbox = DriverInbox(self.store, actor, driver_id)
+        # Multi-driver P3: reclaim (abandon / take over), subagent registry,
+        # handoffs, driver notices and the structural-write guard. Each is the
+        # one writer of its table; all are inert unless the project's policy
+        # has multi_driver=on (and, for enforcement, claim_enforcement=on).
+        from core.state_recovery import StateRecovery
+        self.recovery = StateRecovery(self.store, actor, driver_id=driver_id, is_admin=self.is_admin,
+                                      claims=self.claims)
+        from core.state_subagents import StateSubagents
+        self.subagents = StateSubagents(self.store, actor, driver_id=driver_id, is_admin=self.is_admin)
+        from core.state_handoffs import StateHandoffs
+        self.handoffs = StateHandoffs(self.store, actor, driver_id=driver_id, is_admin=self.is_admin,
+                                      recovery=self.recovery)
+        from core.driver_notices import DriverNotices
+        self.notices = DriverNotices(self.store, actor, driver_id=driver_id, is_admin=self.is_admin)
+        from core.state_enforcement import StructuralGuard
+        self.guard = StructuralGuard(self.store, actor, driver_id, self.is_admin)
         from core.state_design import StateDesign
         self.design = StateDesign(self.store, actor)
         self.runtime_factory = runtime_factory
@@ -399,7 +416,7 @@ class StateService:
         return requested["base_sha"] if requested else "HEAD"
 
     def start_external_attempt(self, project_id, node_key, expected_revision, harness, external_id,
-                               request_key, instruction="", base_sha=None):
+                               request_key, instruction="", base_sha=None, claim_id=None, fence=None):
         """Register external execution scope; never compose or dispatch a workflow."""
         preflight_failure = []
         def preflight():
@@ -410,7 +427,8 @@ class StateService:
                 raise
         try:
             return self.external.register(project_id, node_key, expected_revision, harness, external_id,
-                request_key, instruction, base_sha=base_sha, preflight=preflight if base_sha else None)
+                request_key, instruction, base_sha=base_sha, preflight=preflight if base_sha else None,
+                claim_id=claim_id, fence=fence)
         except StateConflict:
             if preflight_failure:
                 self._record_artifact_refusal(project_id, node_key, base_sha, preflight_failure[0])
@@ -468,13 +486,43 @@ class StateService:
 
     def report_external_attempt(self, attempt_id, observation_id, expected_version, context_hash,
                                 status, report_ref, report_sha256, quiescent=False,
-                                artifact=None, artifact_kind=None, detail=""):
+                                artifact=None, artifact_kind=None, detail="", fence=None):
         return self.external.observe(attempt_id, observation_id, expected_version, context_hash,
                                      status, report_ref, report_sha256, quiescent=quiescent,
-                                     artifact=artifact, artifact_kind=artifact_kind, detail=detail)
+                                     artifact=artifact, artifact_kind=artifact_kind, detail=detail, fence=fence)
+
+    # -- structural writes (P3, design §7.3 rule 4): the store does the write;
+    # the guard refuses without override_reason when another driver's live claim
+    # or active attempt is affected, and notifies that driver afterwards.
+    def revise_node(self, project_id, node_key, expected_revision, reason, goal=None, acceptance=None,
+                    dependencies=None, override_reason=None):
+        check = self.guard.check(project_id, node_key, override_reason, "revise_node")
+        result = self.store.revise_node(project_id, node_key, expected_revision, reason, goal=goal,
+                                        acceptance=acceptance, dependencies=dependencies)
+        self.guard.notify(project_id, check)
+        return result
+
+    def split_node(self, project_id, node_key, expected_revision, children, reason, override_reason=None):
+        check = self.guard.check(project_id, node_key, override_reason, "split_node")
+        result = self.store.split_node(project_id, node_key, expected_revision, children, reason)
+        self.guard.notify(project_id, check)
+        return result
+
+    def supersede_node(self, project_id, node_key, expected_revision, reason, override_reason=None):
+        check = self.guard.check(project_id, node_key, override_reason, "supersede_node")
+        result = self.store.supersede_node(project_id, node_key, expected_revision, reason)
+        self.guard.notify(project_id, check)
+        return result
+
+    def set_node_facet(self, project_id, node_key, facet, override_reason=None):
+        check = self.guard.check(project_id, node_key, override_reason, "set_node_facet")
+        result = self.store.set_node_facet(project_id, node_key, facet)
+        self.guard.notify(project_id, check)
+        return result
 
     def start_attempt(self, project_id, node_key, expected_revision, workflow, request_key, instruction="",
-                      base_sha=None, continue_from=None, relay_digest=None, frozen_prerequisites=None):
+                      base_sha=None, continue_from=None, relay_digest=None, frozen_prerequisites=None,
+                      claim_id=None, fence=None):
         if relay_digest is not None and continue_from is None:
             raise StateGraphError("relay_digest only accompanies continue_from")
         if continue_from is not None and relay_digest is None:
@@ -511,7 +559,8 @@ class StateService:
         attempt = self.attempts.reserve(project_id, node_key, expected_revision, workflow, request_key, instruction,
                                         continue_from=continue_from, relay_digest=relay_digest,
                                         frozen_prerequisites=frozen_prerequisites, base_sha=base_sha,
-                                        owner_driver_id=self.driver_id)
+                                        owner_driver_id=self.driver_id, claim_id=claim_id, fence=fence,
+                                        is_admin=self.is_admin)
         return self._launch_or_recover(attempt, manifest, source)
 
     def _launch_or_recover(self, attempt, manifest, source):
@@ -1001,7 +1050,7 @@ class StateService:
 
     # An attempt in one of these states has stopped producing work, so what it
     # did and did not do is now the whole record.
-    _TERMINAL = ("candidate", "failed", "superseded")
+    _TERMINAL = ("candidate", "failed", "superseded", "abandoned")
 
     def get_attempt(self, attempt_id):
         """The read surface's view of one attempt; a failed SkillFlow attempt
@@ -1205,6 +1254,13 @@ class StateService:
     def record_evidence(self, attempt_id, evidence_id, criterion_id, verdict, artifact, report_ref, report_sha256, detail="",
                         director_identity=None):
         director_identity = evidence_director_identity(director_identity)
+        if self.driver_id and director_identity and director_identity != self.driver_id:
+            # Q8: evidence produced by a subagent of yours names a registered one
+            # in an enforced project.
+            from core.state_enforcement import require_registered_subagent
+            with self.store.transaction() as conn:
+                row = self.attempts._attempt(conn, attempt_id)
+                require_registered_subagent(conn, row["project_id"], self.driver_id, director_identity, "evidence")
         self.reconcile_attempt(attempt_id)
         from core.state_report_integrity import retain_report, validate_evidence_semantics
         report_ref, report_bytes = retain_report(report_ref, report_sha256, completed=True)
@@ -1265,7 +1321,14 @@ class StateService:
         common = str((path / self._git(path, "rev-parse", "--git-common-dir")).resolve())
         return self.portfolio.bind_source(project_id, str(path), common, expected_revision)
 
-    def set_node_hold(self, project_id, node_key, held, expected_revision, reason):
+    def set_node_hold(self, project_id, node_key, held, expected_revision, reason, override_reason=None):
+        from core.state_enforcement import hold_release_check, override_reason_text
+        override_reason = override_reason_text(override_reason)
+        override = None
+        if held is False:
+            with self.store.transaction() as conn:
+                override = hold_release_check(conn, project_id, node_key, self.actor, self.driver_id,
+                                              self.is_admin, override_reason)
         if held is False:
             # Protected references may be legacy runs, never reparented attempts.
             with self.store.transaction() as conn:
@@ -1281,7 +1344,20 @@ class StateService:
                     if (not isinstance(audit, dict) or audit.get("lost") != [] or audit.get("unknown") != []
                             or type(audit.get("alive")) is not int or audit["alive"] != 0):
                         raise StateConflict("protected external run has unretired/unknown operations")
-        return self.portfolio.set_hold(project_id, node_key, held, expected_revision, reason)
+        result = self.portfolio.set_hold(project_id, node_key, held, expected_revision, reason)
+        if override and override["placer_driver"]:
+            from core import driver_notices
+            with self.store.transaction(write=True) as conn:
+                driver_notices.notify(
+                    conn, self.store, target_driver_id=override["placer_driver"],
+                    kind="break_glass" if override["break_glass"] else "override_notice", project_id=project_id,
+                    subject=f"your hold on {node_key} was released by {self.actor}",
+                    body=(f"Reason: {reason}. " + ("Admin break-glass write." if override["break_glass"]
+                                                   else f"override_reason: {override['override_reason']}")),
+                    refs={"node_key": node_key, "action": "set_node_hold", "held": False,
+                          "override_reason": override["override_reason"], "break_glass": override["break_glass"]},
+                    actor=self.actor)
+        return result
 
     def add_reference(self, project_id, node_key, reference_id, kind, ref, label, provenance_actor,
                       artifact_ref=None, report_sha256=None, protect=False):

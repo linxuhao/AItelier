@@ -790,10 +790,27 @@ def get_pending_checkpoint(
     )
 
 
+def state_checkpoint_controller(http_request, run_id, db):
+    """Multi-driver P3 (design §7.3 rule 9, Q14): a run bound to a State attempt in
+    a project that enforces claims is answered only by the attempt's owner
+    driver; an admin passes as break_glass and the owner is notified. Any other
+    run, project or caller is unconstrained. One function for the REST doors
+    (here, and run_routers delegating here) and the MCP answer_checkpoint tool."""
+    from api.state_graph_routers import authenticated_actor, authenticated_driver_id, authenticated_is_admin
+    from core.state_claims import ClaimError
+    from core.state_enforcement import checkpoint_controller
+    try:
+        return checkpoint_controller(db, run_id, authenticated_driver_id(http_request),
+                                     authenticated_is_admin(http_request), authenticated_actor(http_request))
+    except ClaimError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
 @router.post("/{project_id}/checkpoint/approve")
 def approve_checkpoint(
     project_id: str,
     request: CheckpointApprovalRequest,
+    http_request: Request,
     user: CurrentUser | None = Depends(get_optional_user),
     db: DBManager = Depends(get_db_manager),
 ):
@@ -827,6 +844,7 @@ def approve_checkpoint(
     _step_id, _label, run_id, _graph, _inst = _get_checkpoint_info(project_id)
     if not run_id:
         raise HTTPException(400, "Project is not waiting for approval")
+    state_checkpoint_controller(http_request, run_id, db)
 
     # AT-7 idempotency guard: only act if the requested checkpoint is the one the
     # run is actually paused at. A stale modal, double-click, or client retry that
@@ -930,6 +948,7 @@ def approve_checkpoint(
 def reject_checkpoint(
     project_id: str,
     request: CheckpointRejectionRequest,
+    http_request: Request,
     user: CurrentUser | None = Depends(get_optional_user),
     db: DBManager = Depends(get_db_manager),
 ):
@@ -942,6 +961,7 @@ def reject_checkpoint(
     step_id, _label, run_id, _graph, _inst = _get_checkpoint_info(project_id)
     if not run_id or not step_id:
         raise HTTPException(400, "Project is not waiting for approval")
+    state_checkpoint_controller(http_request, run_id, db)
 
     # AT-7 idempotency guard (see approve_checkpoint): ignore a reject aimed at a
     # checkpoint the run is no longer paused at.

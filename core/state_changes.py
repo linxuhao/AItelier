@@ -264,7 +264,7 @@ def wait_disposition(store, project_id, cursor, node_keys, attempt_ids,
             return {"reason": "action_required", "attempts": unpinned}
         # An allowlist of terminal states fails conservatively for unknown or
         # future statuses. Reservations and external registrations count as work.
-        waiting = [row for row in rows if row["status"] not in {"candidate", "failed", "superseded"}]
+        waiting = [row for row in rows if row["status"] not in {"candidate", "failed", "superseded", "abandoned"}]
         if waiting and include_lease_events:
             # Only attempts nobody renewed past their grace remain: that is work
             # to decide (design §4.5), not something to keep waiting on. The

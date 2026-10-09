@@ -81,27 +81,34 @@ class AddNodes(Project):
     nodes: list[dict] = Field(min_length=1, max_length=200)
 
 
+# `override_reason` (P3, design §7.3 rule 4): required in an enforced project
+# when the write affects a node another driver holds a live claim or active
+# attempt on; the holder is notified. Ignored elsewhere.
 class ReviseNode(Node):
     expected_revision: int
     reason: str
     goal: str | None = None
     acceptance: list[dict] | None = None
     dependencies: list[str] | None = None
+    override_reason: str | None = Field(default=None, max_length=2000)
 
 
 class SplitNode(Node):
     expected_revision: int
     children: list[dict]
     reason: str
+    override_reason: str | None = Field(default=None, max_length=2000)
 
 
 class SupersedeNode(Node):
     expected_revision: int
     reason: str
+    override_reason: str | None = Field(default=None, max_length=2000)
 
 
 class SetNodeFacet(Node):
     facet: str
+    override_reason: str | None = Field(default=None, max_length=2000)
 
 
 class SetNodePriority(Node):
@@ -234,6 +241,129 @@ class DriverDeliveryTransition(Request):
     expected_version: int = Field(ge=1)
     request_key: str = Field(min_length=1, max_length=320)
     break_glass_reason: str | None = Field(default=None, min_length=1, max_length=500)
+
+
+# -- Multi-driver P3: enforcement, reclaim, subagents, handoffs (design §4.4, §4.6, §6, §7.3)
+class SetClaimEnforcement(Project):
+    claim_enforcement: Literal["off", "on"] = Field(description=(
+        "on: start_attempt/start_external_attempt need your live implement claim, reports need the owner "
+        "fence, structural writes over another driver's claim need override_reason, one writer per "
+        "workspace, checkpoints by the attempt owner. Needs multi_driver=on; default off."))
+    expected_revision: int
+    reason: str = Field(min_length=1, max_length=4000)
+
+
+class AbandonExternalAttempt(Request):
+    attempt_id: str
+    expected_owner_fence: int = Field(ge=0)
+    abandon_kind: Literal["confirmed_stopped", "unknown"] = Field(description=(
+        "confirmed_stopped: you attest the old worker is quiescent (report_ref/report_sha256 required). "
+        "unknown: you do not know; the node's next attempt must declare base_sha and another workspace."))
+    reason: str = Field(min_length=1, max_length=4000)
+    report_ref: str | None = None
+    report_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    override_reason: str | None = Field(default=None, max_length=2000, description=(
+        "Required to reclaim a legacy_unleased attempt (no lease); never shortens a live lease."))
+
+
+class TakeOverAttempt(Request):
+    attempt_id: str
+    expected_owner_fence: int = Field(ge=0)
+    reason: str = Field(min_length=1, max_length=4000)
+    override_reason: str | None = Field(default=None, max_length=2000)
+
+
+class RegisterSubagent(Project):
+    attempt_id: str
+    label: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$",
+                       description="subagent_id becomes '<your driver_id>/<label>'.")
+    host: str = Field(min_length=1, max_length=200)
+    runtime: Literal["local_process", "server_process", "skillflow_run", "remote_session"]
+    workspace: str = Field(min_length=3, max_length=500, description="host:path#branch; its own branch.")
+    context_ref: str = Field(min_length=1, max_length=2000, description=(
+        "Absolute local path of the frozen instructions handed to the subagent; retained by hash."))
+    context_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    control_handle: str = Field(default="", max_length=500, description=(
+        "Non-secret control hint: tmux session, thread id, run_id. Never a credential."))
+
+
+class UpdateSubagentCheckpoint(Project):
+    subagent_id: str = Field(min_length=3, max_length=320)
+    fence: int = Field(ge=1)
+    checkpoint_ref: str = Field(min_length=1, max_length=2000)
+    checkpoint_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class AdoptSubagent(Project):
+    subagent_id: str = Field(min_length=3, max_length=320)
+    fence: int = Field(ge=1)
+    observability: Literal["controllable", "observable_only", "unobservable"]
+    reason: str = Field(min_length=1, max_length=4000)
+
+
+class ReportSubagentSettled(Project):
+    subagent_id: str = Field(min_length=3, max_length=320)
+    quiescent: bool
+    report_ref: str = Field(min_length=1, max_length=2000)
+    report_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    fence: int | None = Field(default=None, ge=1, description="Your (possibly old) fence; recorded, not checked.")
+
+
+class ListSubagents(Project):
+    attempt_id: str | None = None
+    owner_driver_id: str | None = None
+    statuses: list[Literal["active", "settled", "adopted", "orphaned_unobservable", "terminated"]] | None = Field(
+        default=None, min_length=1)
+    limit: int = Field(default=100, ge=1, le=500)
+
+
+class OfferHandoff(Project):
+    request_key: str = Field(min_length=1, max_length=200)
+    expected_owner_fence: int = Field(ge=0)
+    package: dict = Field(description=(
+        "Bounded (16 KiB) structured references: context_hash, observation_version, event_cursor, source, "
+        "workspace, workers{quiescent,detail,host}, pending_checkpoint, reports[{ref,sha256}], open_issue_ids, "
+        "note_entries, private_notes, subagents, next_step (<=2000 chars). Stored on the handoff, never in "
+        "the notebook."))
+    attempt_id: str | None = None
+    claim_id: str | None = None
+    to_driver_id: str | None = Field(default=None, description="Omit to offer to any project member.")
+
+    @model_validator(mode="after")
+    def one_subject(self):
+        if (self.attempt_id is None) == (self.claim_id is None):
+            raise ValueError("offer exactly one of attempt_id or claim_id")
+        return self
+
+
+class HandoffRef(Project):
+    handoff_id: str
+
+
+class AcceptHandoff(HandoffRef):
+    expected_owner_fence: int = Field(ge=0)
+
+
+class DeclineHandoff(HandoffRef):
+    reason: str = Field(min_length=1, max_length=2000)
+
+
+class WithdrawHandoff(HandoffRef):
+    reason: str = Field(default="", max_length=2000)
+
+
+class ListHandoffs(Project):
+    statuses: list[Literal["offered", "accepted", "declined", "withdrawn", "expired"]] | None = Field(
+        default=None, min_length=1)
+    limit: int = Field(default=100, ge=1, le=500)
+
+
+class ListDriverNotices(Project):
+    driver_id: str | None = Field(default=None, description="Admins may read another driver's notices.")
+    statuses: list[Literal["pending", "resolved"]] | None = Field(default=None, min_length=1)
+    kinds: list[str] | None = Field(default=None, min_length=1)
+    limit: int = Field(default=100, ge=1, le=500)
+
 
 class SendDirectorMessage(Request):
     protocol_version: Literal["v2","v3"] = "v2"
@@ -483,6 +613,10 @@ class StartAttempt(Node):
     request_key: str
     instruction: str = ""
     base_sha: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
+    # P3: in an enforced project the dispatch rides your live implement claim;
+    # naming it pins the fence you believe you hold (stale_fence otherwise).
+    claim_id: str | None = None
+    fence: int | None = Field(default=None, ge=1)
     # Continue a FAILED SkillFlow attempt of this node: its branch head becomes
     # the new run's base and its staged draft is seeded into the new staging.
     # Explicit, so a relay is a recorded decision taken after inspecting the
@@ -506,6 +640,8 @@ class StartExternalAttempt(Node):
     request_key: str
     instruction: str = ""
     base_sha: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
+    claim_id: str | None = None
+    fence: int | None = Field(default=None, ge=1)
 
 
 class DispositionFailedAttempt(Attempt):
@@ -542,6 +678,10 @@ class ExternalObservation(Attempt):
     artifact: str | None = None
     artifact_kind: str | None = None
     detail: str = ""
+    fence: int | None = Field(default=None, ge=0, description=(
+        "The attempt's owner_fence you hold. Required in an enforced project (fence_required); a fence "
+        "that ownership moved past is stale_fence. A report on an abandoned attempt is recorded as "
+        "late_after_abandon/superseded."))
 
 
 class Evidence(Attempt):
@@ -619,6 +759,8 @@ class NodeHold(Node):
     held: bool
     expected_revision: int
     reason: str
+    override_reason: str | None = Field(default=None, max_length=2000, description=(
+        "P3: releasing a hold another driver placed, in an enforced project; the placer is notified."))
 
 
 class HistoricalReference(Node):
@@ -718,6 +860,8 @@ READ_REQUESTS = {
     "list_issues": ListIssues, "get_issue": IssueRef,
     "project_visibility": ProjectVisibility,
     "list_claims": ListClaims, "get_claim": ClaimRef,
+    "list_subagents": ListSubagents, "list_handoffs": ListHandoffs, "get_handoff": HandoffRef,
+    "list_driver_notices": ListDriverNotices,
 }
 # ── Read visibility: public or writer-only ─────────────────────────────────
 # ONE table, one writer. `READ_REQUESTS` answers "can this mutate?" — no. This
@@ -777,6 +921,9 @@ WRITER_ONLY_READS = frozenset({
     "project_visibility",
     # Multi-driver claims: who works on what, in which workspace (P1).
     "list_claims", "get_claim",
+    # P3: subagent registry (hosts, control handles, workspaces), handoff
+    # packages and driver-addressed notices. All private.
+    "list_subagents", "list_handoffs", "get_handoff", "list_driver_notices",
 })
 
 
@@ -819,7 +966,12 @@ WRITE_REQUESTS = {
     "resolve_director_message": TransitionDirectorMessage,
     "report_issue": ReportIssue, "link_issue": LinkIssue, "resolve_issue": ResolveIssue,
     "claim_node": ClaimNode, "release_claim": ReleaseClaim, "heartbeat": Heartbeat,
-    "set_multi_driver": SetMultiDriver,
+    "set_multi_driver": SetMultiDriver, "set_claim_enforcement": SetClaimEnforcement,
+    "abandon_external_attempt": AbandonExternalAttempt, "take_over_attempt": TakeOverAttempt,
+    "register_subagent": RegisterSubagent, "update_subagent_checkpoint": UpdateSubagentCheckpoint,
+    "adopt_subagent": AdoptSubagent, "report_subagent_settled": ReportSubagentSettled,
+    "offer_handoff": OfferHandoff, "accept_handoff": AcceptHandoff,
+    "decline_handoff": DeclineHandoff, "withdraw_handoff": WithdrawHandoff,
 }
 REQUESTS = READ_REQUESTS | WRITE_REQUESTS
 # Actions that no longer exist but are refused LOUDLY, with the error naming what
@@ -942,8 +1094,8 @@ def _handlers(service) -> dict:
         "create_project": service.create_project, "add_nodes": service.store.add_nodes,
         "open_project": service.open_project, "close_project": service.close_project,
         "project_visibility": service.project_visibility,
-        "revise_node": service.store.revise_node, "split_node": service.store.split_node,
-        "supersede_node": service.store.supersede_node, "set_node_facet": service.store.set_node_facet,
+        "revise_node": service.revise_node, "split_node": service.split_node,
+        "supersede_node": service.supersede_node, "set_node_facet": service.set_node_facet,
         "set_node_priority": service.set_node_priority,
         "start_attempt": service.start_attempt,
         "request_attempt_base": service.request_attempt_base,
@@ -973,6 +1125,18 @@ def _handlers(service) -> dict:
         "claim_node": service.claims.claim_node, "release_claim": service.claims.release_claim,
         "heartbeat": service.claims.heartbeat, "list_claims": service.claims.list_claims,
         "get_claim": service.claims.get_claim, "set_multi_driver": service.portfolio.set_multi_driver,
+        "set_claim_enforcement": service.portfolio.set_claim_enforcement,
+        "abandon_external_attempt": service.recovery.abandon_external_attempt,
+        "take_over_attempt": service.recovery.take_over_attempt,
+        "register_subagent": service.subagents.register_subagent,
+        "update_subagent_checkpoint": service.subagents.update_subagent_checkpoint,
+        "adopt_subagent": service.subagents.adopt_subagent,
+        "report_subagent_settled": service.subagents.report_subagent_settled,
+        "list_subagents": service.subagents.list_subagents,
+        "offer_handoff": service.handoffs.offer_handoff, "accept_handoff": service.handoffs.accept_handoff,
+        "decline_handoff": service.handoffs.decline_handoff, "withdraw_handoff": service.handoffs.withdraw_handoff,
+        "list_handoffs": service.handoffs.list_handoffs, "get_handoff": service.handoffs.get_handoff,
+        "list_driver_notices": service.notices.list_driver_notices,
     }
 
 

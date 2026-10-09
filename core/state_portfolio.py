@@ -98,14 +98,52 @@ class StatePortfolio:
             old = project_policy(conn, project_id)
             if old["revision"] != expected_revision:
                 raise StateConflict("project policy revision changed")
+            # Turning multi_driver off takes enforcement down with it: there is
+            # nothing left to enforce against, and a later `on` starts record-only.
+            enforcement = old.get("claim_enforcement", "off") if multi_driver == "on" else "off"
             conn.execute("INSERT INTO state_project_policy(project_id,revision,dispatch,reason,actor,updated_at,"
-                         "multi_driver) VALUES(?,?,?,?,?,?,?) ON CONFLICT(project_id) DO UPDATE SET "
-                         "revision=excluded.revision,multi_driver=excluded.multi_driver,reason=excluded.reason,"
+                         "multi_driver,claim_enforcement) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(project_id) DO UPDATE SET "
+                         "revision=excluded.revision,multi_driver=excluded.multi_driver,"
+                         "claim_enforcement=excluded.claim_enforcement,reason=excluded.reason,"
                          "actor=excluded.actor,updated_at=excluded.updated_at",
                          (project_id, expected_revision + 1, old["dispatch"], reason, self.actor, now(),
-                          multi_driver))
+                          multi_driver, enforcement))
             self.store._event(conn, project_id, None, "multi_driver_policy_changed",
                               {"multi_driver": multi_driver, "reason": reason,
+                               "revision": expected_revision + 1, "actor": self.actor})
+            return project_policy(conn, project_id)
+
+    def set_claim_enforcement(self, project_id, claim_enforcement, expected_revision, reason):
+        """Owner/admin switch that turns recorded claims into refusals (P3, §7.3).
+
+        Owner decision 2026-10-09: enforcement sits behind its OWN switch, default
+        off, so set_multi_driver alone never starts refusing anything. It can be
+        turned on only while multi_driver is on; turning multi_driver off turns
+        enforcement off with it (set_multi_driver below).
+        """
+        if not getattr(self.service, "is_admin", False):
+            from core.state_claims import ClaimError
+            raise ClaimError("admin_required", "only the owner or an admin driver changes claim_enforcement")
+        if not isinstance(claim_enforcement, str) or claim_enforcement not in {"off", "on"}:
+            raise StateGraphError("claim_enforcement must be off or on")
+        integer(expected_revision, "expected_revision", 0)
+        reason = text(reason, "claim_enforcement reason", 4000)
+        with self.store.transaction(write=True) as conn:
+            self.store._project(conn, project_id)
+            old = project_policy(conn, project_id)
+            if old["revision"] != expected_revision:
+                raise StateConflict("project policy revision changed")
+            if claim_enforcement == "on" and old.get("multi_driver") != "on":
+                from core.state_claims import ClaimError
+                raise ClaimError("multi_driver_off", "turn multi_driver on before enforcing claims")
+            conn.execute("INSERT INTO state_project_policy(project_id,revision,dispatch,reason,actor,updated_at,"
+                         "multi_driver,claim_enforcement) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(project_id) DO UPDATE SET "
+                         "revision=excluded.revision,claim_enforcement=excluded.claim_enforcement,reason=excluded.reason,"
+                         "actor=excluded.actor,updated_at=excluded.updated_at",
+                         (project_id, expected_revision + 1, old["dispatch"], reason, self.actor, now(),
+                          old.get("multi_driver", "off"), claim_enforcement))
+            self.store._event(conn, project_id, None, "claim_enforcement_policy_changed",
+                              {"claim_enforcement": claim_enforcement, "reason": reason,
                                "revision": expected_revision + 1, "actor": self.actor})
             return project_policy(conn, project_id)
 
@@ -247,8 +285,16 @@ class StatePortfolio:
                 entry["claims"] = claims.get(n["node_key"], [])
                 nodes.append(entry)
             seq = conn.execute("SELECT COALESCE(MAX(seq),0) FROM state_events WHERE project_id=?", (project_id,)).fetchone()[0]
+            # P3 §4.6: subagents taken over but not yet confirmed stopped - the
+            # standing "two writers may exist" warning. The registry is private,
+            # so an anonymous reader of an opened project sees None, not a count.
+            orphans = None
+            if self.store.project_read_trusted:
+                from core.state_subagents import orphan_count
+                orphans = orphan_count(conn, project_id)
             return {"project": view["project"], "source": self._source(conn, view["project"]),
                     "policy": project_policy(conn, project_id), "nodes": nodes,
+                    "orphaned_subagents": orphans,
                     "counts": dict(Counter(n["status"] for n in nodes)),
                     "readiness_counts": dict(Counter(n["readiness"] for n in nodes)),
                     "ready_action_counts": ready_action_counts(nodes),

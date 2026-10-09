@@ -300,9 +300,16 @@ def initialize_graph_schema(db) -> None:
             conn.execute("ALTER TABLE state_nodes ADD COLUMN facet TEXT "
                          "CHECK(facet IN ('design','contract','test','content','integration'))")
         # Additive (design/multi-driver-coop.md §9.1): every existing project is off.
-        if "multi_driver" not in {r["name"] for r in conn.execute("PRAGMA table_info(state_project_policy)")}:
+        policy_columns = {r["name"] for r in conn.execute("PRAGMA table_info(state_project_policy)")}
+        if "multi_driver" not in policy_columns:
             conn.execute("ALTER TABLE state_project_policy ADD COLUMN multi_driver TEXT NOT NULL "
                          "DEFAULT 'off' CHECK(multi_driver IN ('off','on'))")
+        # Additive (design §7.3, P3): claims are ENFORCED only behind this second
+        # switch (owner decision 2026-10-09: set_multi_driver alone keeps P1's
+        # record-only behaviour). Every existing project is off.
+        if "claim_enforcement" not in policy_columns:
+            conn.execute("ALTER TABLE state_project_policy ADD COLUMN claim_enforcement TEXT NOT NULL "
+                         "DEFAULT 'off' CHECK(claim_enforcement IN ('off','on'))")
         conn.commit()
 
 
@@ -330,6 +337,12 @@ def initialize_state_schema(db) -> None:
     initialize_messaging(db)
     from core.state_claims import initialize as initialize_claims
     initialize_claims(db)
+    from core.driver_notices import initialize as initialize_notices
+    initialize_notices(db)
+    from core.state_subagents import initialize as initialize_subagents
+    initialize_subagents(db)
+    from core.state_handoffs import initialize as initialize_handoffs
+    initialize_handoffs(db)
 
 
 class StateGraphStore:

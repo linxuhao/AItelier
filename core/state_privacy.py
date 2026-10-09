@@ -79,6 +79,9 @@ PRIVATE_STATE_TABLES = frozenset({
     # private; a public read of an OPENED project sees only the projected
     # columns below, the same subset a writer's public read shows.
     "state_node_claims", "state_claim_history",
+    # Handoff packages (design §6.2): references into a driver's in-flight work
+    # (report refs, private note addresses, next steps). Never public.
+    "state_handoffs",
 })
 
 PUBLIC_STATE_TABLES = frozenset({

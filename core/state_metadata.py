@@ -42,7 +42,7 @@ def project_policy(conn, project_id):
     row = conn.execute("SELECT * FROM state_project_policy WHERE project_id=?", (project_id,)).fetchone()
     return dict(row) if row else {"project_id": project_id, "revision": 0,
                                  "dispatch": "active", "reason": "", "actor": "", "updated_at": None,
-                                 "multi_driver": "off"}
+                                 "multi_driver": "off", "claim_enforcement": "off"}
 
 
 def node_hold(conn, project_id, node_key):

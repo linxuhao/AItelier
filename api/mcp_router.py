@@ -1332,6 +1332,21 @@ def _register_run_tools(tool, mcp=None):
                         f"requirement in the run's seed before launching. Re-send "
                         f"as a rejection, or drop `feedback` if you really do mean "
                         f"'approve as-is'.")}
+        # Multi-driver P3 (design §7.3 rule 9): a run bound to a State attempt in
+        # an enforcing project is answered by the attempt's owner driver only.
+        try:
+            from api.dependencies import get_db_manager
+            from api.meta_routers import state_checkpoint_controller
+            from fastapi import HTTPException as _HTTPException
+            try:
+                _request = _request_from(mcp.get_context()) if mcp is not None else None
+            except Exception:
+                _request = None
+            controller = state_checkpoint_controller(_request, run_id, get_db_manager())
+        except _HTTPException as exc:
+            return {**echo, "error": exc.detail}
+        if controller.get("break_glass"):
+            echo = {**echo, "break_glass": True, "attempt_id": controller.get("attempt_id")}
         if run.get("status") != "paused":
             # A project id takes the NEWEST run, which is not always the one with
             # the checkpoint: a project can acquire a meta_conversation run AFTER

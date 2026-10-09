@@ -456,6 +456,36 @@ def create_state_router(service_dependency, access_dependency, read_dependency=N
 
     _declare(router.get("/projects/{project_id}/claims/{claim_id}")(claim), "read", "get_claim")
 
+    # Multi-driver P3 (design §8): subagent registry, handoffs, driver notices.
+    # All private; the exhaustive-doors test derives that from these declarations.
+    def subagents(project_id: str, attempt_id: str | None = None, owner_driver_id: str | None = None,
+                  status: Annotated[list[str] | None, Query()] = None, limit: int = 100,
+                  service=Depends(service_dependency)):  # noqa: B008
+        return _call(service, "list_subagents", {"project_id": project_id, "attempt_id": attempt_id,
+                                                 "owner_driver_id": owner_driver_id, "statuses": status,
+                                                 "limit": limit})
+
+    _declare(router.get("/projects/{project_id}/subagents")(subagents), "read", "list_subagents")
+
+    def handoffs(project_id: str, status: Annotated[list[str] | None, Query()] = None, limit: int = 100,
+                 service=Depends(service_dependency)):  # noqa: B008
+        return _call(service, "list_handoffs", {"project_id": project_id, "statuses": status, "limit": limit})
+
+    _declare(router.get("/projects/{project_id}/handoffs")(handoffs), "read", "list_handoffs")
+
+    def handoff(project_id: str, handoff_id: str, service=Depends(service_dependency)):  # noqa: B008
+        return _call(service, "get_handoff", {"project_id": project_id, "handoff_id": handoff_id})
+
+    _declare(router.get("/projects/{project_id}/handoffs/{handoff_id}")(handoff), "read", "get_handoff")
+
+    def driver_notices(project_id: str, driver_id: str | None = None,
+                       status: Annotated[list[str] | None, Query()] = None, limit: int = 100,
+                       service=Depends(service_dependency)):  # noqa: B008
+        return _call(service, "list_driver_notices", {"project_id": project_id, "driver_id": driver_id,
+                                                      "statuses": status, "limit": limit})
+
+    _declare(router.get("/projects/{project_id}/driver-notices")(driver_notices), "read", "list_driver_notices")
+
     def attempts(project_id: str, after: int = 0, limit: int = 30, service=Depends(service_dependency)):
         return _call(service, "project_attempts", {"project_id": project_id, "after": after, "limit": limit})
 

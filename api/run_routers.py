@@ -460,24 +460,26 @@ def get_run_checkpoint(
 def approve_run_checkpoint(
     run_id: str,
     body: CheckpointApprovalRequest,
+    request: Request,
     user: CurrentUser | None = Depends(get_optional_user),
     db: DBManager = Depends(get_db_manager),
 ):
     """Approve a run's checkpoint (delegates to the project-keyed handler)."""
     from api.meta_routers import approve_checkpoint
-    return approve_checkpoint(_run_to_project_id(run_id), body, user, db)
+    return approve_checkpoint(_run_to_project_id(run_id), body, request, user, db)
 
 
 @router.post("/runs/{run_id}/checkpoint/reject")
 def reject_run_checkpoint(
     run_id: str,
     body: CheckpointRejectionRequest,
+    request: Request,
     user: CurrentUser | None = Depends(get_optional_user),
     db: DBManager = Depends(get_db_manager),
 ):
     """Reject a run's checkpoint (delegates to the project-keyed handler)."""
     from api.meta_routers import reject_checkpoint
-    return reject_checkpoint(_run_to_project_id(run_id), body, user, db)
+    return reject_checkpoint(_run_to_project_id(run_id), body, request, user, db)
 
 
 @router.get("/runs/{run_id}/graph")

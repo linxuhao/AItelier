@@ -135,13 +135,14 @@ class StateAttempts:
                 workflow: str, request_key: str, instruction: str = "",
                 continue_from: str | None = None, relay_digest: str | None = None,
                 frozen_prerequisites: dict | None = None,
-                base_sha: str | None = None, owner_driver_id: str | None = None) -> dict:
+                base_sha: str | None = None, owner_driver_id: str | None = None,
+                claim_id: str | None = None, fence: int | None = None, is_admin: bool = False) -> dict:
         """Idempotent intent, persisted before a workflow can be launched."""
         key(workflow, "workflow")
         return self._reserve(project_id, node_key, expected_revision, workflow, request_key, instruction,
                              continue_from=continue_from, relay_digest=relay_digest,
                              frozen_prerequisites=frozen_prerequisites, base_sha=base_sha,
-                             owner_driver_id=owner_driver_id)
+                             owner_driver_id=owner_driver_id, claim_id=claim_id, fence=fence, is_admin=is_admin)
 
     @staticmethod
     def _relay_source(conn, prior_id, project_id, node_key, workflow, node, deps):
@@ -183,13 +184,21 @@ class StateAttempts:
     def _reserve(self, project_id, node_key, expected_revision, workflow, request_key, instruction, *,
                  external=None, continue_from=None, relay_digest=None,
                  frozen_prerequisites=None, base_sha=None, relay_handoff=None, preflight=None,
-                 owner_driver_id=None):
+                 owner_driver_id=None, claim_id=None, fence=None, is_admin=False):
         """Common atomic ownership/pin guard for every execution adapter.
 
         ``owner_driver_id`` is the registered driver behind the request. Only in
         a project whose policy has multi_driver=on does the new attempt record
         it with fence 1 and a default lease (design §4.2); otherwise the row is
-        written exactly as before. The lease is RECORDED, never enforced here.
+        written exactly as before. In a project that also has
+        claim_enforcement=on (P3, design §7.3 rule 1) the caller must hold the
+        node's live implement claim (``claim_required``); a supplied
+        ``claim_id``/``fence`` must name it (``stale_fence``), and the claim is
+        bound to the new attempt. An admin passes without a claim; the event
+        then carries ``break_glass``. After an ``abandon_kind=unknown`` the
+        node's next attempt must declare ``base_sha`` and ride a claim whose
+        workspace differs from the abandoned attempt's (two possibly live
+        workers never share a checkout).
         """
         key(request_key, "request key")
         integer(expected_revision, "expected_revision", 1)
@@ -240,6 +249,11 @@ class StateAttempts:
             deps = self.store.dependency_snapshot(conn, project_id, node_key)
             if not all(d["status"] == "VERIFIED" and d["verified_receipt"] for d in deps.values()):
                 raise StateConflict("dependencies are not verified")
+            from core.state_enforcement import dispatch_claim, enforced
+            claim, break_glass = dispatch_claim(conn, project_id, node_key, owner_driver_id, is_admin,
+                                                claim_id=claim_id, fence=fence)
+            if enforced(conn, project_id):
+                self._after_unknown_abandon(conn, project_id, node_key, claim, base_sha, is_admin)
             ctx = {"state_project_id": project_id, "node_key": node_key, "revision": expected_revision,
                    "goal": node["goal"], "acceptance": json.loads(node["contract_json"]),
                    "contract_hash": node["contract_hash"], "dependencies": deps, "instruction": instruction}
@@ -300,6 +314,9 @@ class StateAttempts:
                              ",".join("?" for _ in record) + ")", tuple(record.values()))
             except sqlite3.IntegrityError as exc:
                 raise StateConflict("node has an active attempt or this external execution identity was already registered") from exc
+            if claim is not None:
+                conn.execute("UPDATE state_node_claims SET attempt_id=?,updated_at=? WHERE claim_id=?",
+                             (aid, now(), claim["claim_id"]))
             if external:
                 conn.execute(
                     "INSERT INTO state_external_owners("
@@ -316,9 +333,37 @@ class StateAttempts:
             if lease is not None:
                 payload.update(owner_driver_id=owner_driver_id, owner_fence=1,
                                lease_expires_at=lease["lease_expires_at"])
+            if claim is not None:
+                payload["claim_id"] = claim["claim_id"]
+            if break_glass:
+                payload["break_glass"] = True
             self.store._event(conn, project_id, node_key,
                               "external_attempt_registered" if external else "attempt_reserved", payload)
             return _public(self._attempt(conn, aid))
+
+    @staticmethod
+    def _after_unknown_abandon(conn, project_id, node_key, claim, base_sha, is_admin):
+        """§4.4: after abandon_kind=unknown the old worker MAY still be writing its
+        checkout, so the next attempt pins its base and declares another one."""
+        last = conn.execute("SELECT attempt_id,abandon_kind FROM state_attempts WHERE project_id=? AND node_key=? "
+                            "ORDER BY seq DESC LIMIT 1", (project_id, node_key)).fetchone()
+        if last is None or last["abandon_kind"] != "unknown" or is_admin:
+            return
+        old = conn.execute("SELECT workspace FROM state_node_claims WHERE attempt_id=? AND workspace!='' "
+                           "ORDER BY created_at DESC LIMIT 1", (last["attempt_id"],)).fetchone()
+        old_workspace = old["workspace"] if old else None
+        problems = []
+        if base_sha is None:
+            problems.append("declare base_sha")
+        if claim is None or not claim["workspace"]:
+            problems.append("claim with a declared workspace")
+        elif old_workspace and claim["workspace"] == old_workspace:
+            problems.append(f"claim a workspace other than {old_workspace}")
+        if problems:
+            from core.state_claims import ClaimError
+            raise ClaimError("workspace_in_use", f"the previous attempt {last['attempt_id']} was abandoned with "
+                             f"quiescence unknown; its worker may still write its checkout: {'; '.join(problems)}",
+                             abandoned_attempt_id=last["attempt_id"], old_workspace=old_workspace)
 
     def record_preflight(self, attempt_id: str, report: dict, error: str | None = None) -> dict:
         """Durably trace required/actual identities before launch admission."""
@@ -540,8 +585,13 @@ class StateAttempts:
             fresh = self._pins_current(conn, current)
             if status in {"candidate", "failed"} and not fresh:
                 status = "superseded"
-            if current["status"] in {"candidate", "failed", "superseded"} and status in ACTIVE:
+            if current["status"] in {"candidate", "failed", "superseded", "abandoned"} and status in ACTIVE:
                 raise StateConflict("terminal attempt's run was revived; use a new attempt")
+            if current["status"] == "abandoned":
+                # The controller was declared gone and the slot released; the
+                # engine's later word about the run is recorded as a terminal
+                # observation, never as a resurrection or a candidate.
+                raise StateConflict("attempt was abandoned; its run outcome is historical - use a new attempt")
             artifact = current["artifact_ref"]
             if candidate_artifact is not None and status == "candidate":
                 if artifact and artifact != candidate_artifact:

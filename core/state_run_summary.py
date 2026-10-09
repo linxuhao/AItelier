@@ -74,8 +74,12 @@ def project_run_summary(service, project_id):
     # distance from VERIFIED that a completed workflow run is, so it lands in
     # the same bucket. 'unavailable' has no external counterpart: an external
     # status is always readable and always merely reported.
+    # 'abandoned' (multi-driver P3) is terminal without a verdict: nobody renewed
+    # the attempt and a member closed it. Counted under 'other' with superseded,
+    # and named on its own so the two are never confused.
     external = {'active':len(holding),'finished':by_status['candidate'],
-                'failed':by_status['failed'],'other':by_status['superseded'],'total':sum(by_status.values())}
+                'failed':by_status['failed'],'other':by_status['superseded']+by_status['abandoned'],
+                'abandoned':by_status['abandoned'],'total':sum(by_status.values())}
     counts = {'total':len(membership),'running':0,'finished':0,'failed':0,'other':0,'unavailable':0}
     sums = Counter()
     running = []
@@ -154,7 +158,13 @@ def project_run_summary(service, project_id):
     executions = {'total':counts['total']+external['total'],'running':counts['running']+external['active'],
                   'finished':counts['finished']+external['finished'],'failed':counts['failed']+external['failed'],
                   'other':counts['other']+external['other'],'unavailable':counts['unavailable']}
+    from core.state_subagents import orphan_count
+    orphans = None
+    if service.store.project_read_trusted:
+        with service.store.transaction() as conn:
+            orphans = orphan_count(conn, project_id)
     return {'project_id':project_id,'counts':counts,'execution_counts':executions,'running_runs':running,'usage':usage,
+            'orphaned_subagents':orphans,
             'external_attempts_excluded':external['total'],'running_external':holding,
             'external_counts':external,
             'observed_at':now(),

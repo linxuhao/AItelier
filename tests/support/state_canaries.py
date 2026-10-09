@@ -128,6 +128,15 @@ def _plan():
              "lease_expires_at,actor,reason,created_at) VALUES(?,?,'a',?,'implement','released',1,?,?,?,?)"),
             ("claim-canary-public-id", OPEN, c("state_claim_history"), now,
              c("state_claim_history"), c("state_claim_history"), now)),
+        # A handoff OFFERED on the opened project: its package carries the
+        # offerer's in-flight references and must never reach an anonymous reader.
+        "state_handoffs": (
+            ("INSERT INTO state_handoffs(handoff_id,project_id,subject_kind,attempt_id,claim_id,node_key,"
+             "from_driver_id,to_driver_id,status,package_json,expected_owner_fence,request_key,request_hash,"
+             "lease_expires_at,created_at,updated_at) "
+             "VALUES(?,?,'claim',NULL,'claim-canary-public-id','a',?,NULL,'offered',?,1,?,'0',?,?,?)"),
+            ("handoff-canary", OPEN, c("state_handoffs"), '{"next_step": "%s"}' % c("state_handoffs"),
+             c("state_handoffs"), "2999-01-01T00:00:00.000000+00:00", now, now)),
     }
 
 

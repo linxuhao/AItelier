@@ -859,10 +859,10 @@ def _handlers(service) -> dict:
         "wait_for_state_change": service.wait_for_state_change, "events": service.store.events,
         "get_driver_note": service.driver_notes.get, "driver_note_history": service.driver_notes.history,
         "search_driver_note_history": service.driver_notes.search,
-        "driver_note_index": service.notebook_handler("entry_index"),
-        "search_driver_note_entries": service.notebook_handler("search_entries"),
-        "get_driver_note_entry": service.notebook_handler("get_entry"),
-        "check_driver_note_index": service.notebook_handler("check_index"),
+        "driver_note_index": service.driver_notes.entry_index,
+        "search_driver_note_entries": service.driver_notes.search_entries,
+        "get_driver_note_entry": service.driver_notes.get_entry,
+        "check_driver_note_index": service.driver_notes.check_index,
         "get_driver_guide_section": _driver_guide_section,
         "get_attempt": service.get_attempt,
         "list_attempts": service.attempts.list, "evidence": service.attempts.evidence,
@@ -887,9 +887,9 @@ def _handlers(service) -> dict:
         "set_node_hold": service.set_node_hold, "add_reference": service.add_reference,
         "refresh_project": service.refresh_project,
         "start_external_attempt": service.start_external_attempt, "report_external_attempt": service.report_external_attempt,
-        "write_driver_note_entry": service.notebook_handler("write_entry"),
-        "supersede_driver_note_entry": service.notebook_handler("supersede_entry"),
-        "delist_driver_note_entry": service.notebook_handler("delist_entry"),
+        "write_driver_note_entry": service.driver_notes.write_entry,
+        "supersede_driver_note_entry": service.driver_notes.supersede_entry,
+        "delist_driver_note_entry": service.driver_notes.delist_entry,
         "send_director_message": service.director_messages.send_director_message,
         "list_director_messages": service.director_messages.list_director_messages,
         "acknowledge_director_message": service.director_messages.acknowledge_director_message,
@@ -988,8 +988,19 @@ def execute(service, action: str, arguments: dict, *, allow_write: bool = False)
     if args.get("driver_id") and not service.project_read_trusted:
         raise ProjectPrivate()
     handlers = _handlers(service)
+    handler = handlers[action]
+    notes = None
+    if issubclass(REQUESTS[action],NotebookScopeRequest):
+        target_driver = args.pop("driver_id",None)
+        reason = args.pop("break_glass_reason",None)
+        if target_driver:
+            notes = service.driver_notes.for_driver(target_driver,service.driver_id,reason)
+            args["project_id"] = target_driver
+            handler = getattr(notes,handler.__name__)
     try:
-        result = handlers[action](**args)
+        result = handler(**args)
+        if notes is not None:
+            result = notes._presentation(result)
     except Exception as exc:
         if director_action:
             from core.director_messaging_protocol import DirectorMessageError

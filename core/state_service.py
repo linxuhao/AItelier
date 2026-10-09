@@ -178,17 +178,6 @@ class StateService:
         self.director_messages = SQLiteDirectorMessaging(self.store, actor,
                                                           project_read_trusted=project_read_trusted, driver_id=driver_id)
 
-    def notebook_handler(self, method):
-        def invoke(project_id=None, driver_id=None, break_glass_reason=None, **kwargs):
-            if bool(project_id) == bool(driver_id):
-                raise StateGraphError("exactly one notebook scope is required")
-            notes = self.driver_notes
-            if driver_id:
-                notes = notes.for_driver(driver_id, self.driver_id, break_glass_reason)
-            result = getattr(notes, method)(driver_id or project_id, **kwargs)
-            return notes._presentation(result)
-        return invoke
-
     def driver_postcompact_guidance(self, project_id):
         from core.state_driver_notes import _redact
         if not self.project_read_trusted or not (self.driver_id or self.actor.startswith("owner:")):

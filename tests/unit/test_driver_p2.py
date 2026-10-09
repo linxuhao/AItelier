@@ -38,7 +38,7 @@ def test_private_driver_deliveries_cas_and_recipient(peers):
  assert execute(s["bob"],"acknowledge_driver_message",args,allow_write=True)==ack
  with pytest.raises(StateGraphError,match="version_conflict"):
   s["bob"].driver_inbox.transition(bob["delivery_id"],1,"stale","resolved")
- result=s["bob"].driver_inbox.transition(bob["delivery_id"],2,"resolved","resolved")
+ result=execute(s["bob"],"resolve_driver_message",{"delivery_id":bob["delivery_id"],"expected_version":2,"request_key":"resolved"},allow_write=True)
  assert result["status"]=="resolved"
  assert s["carol"].driver_inbox.list_driver_messages()["messages"][0]["status"]=="unread"
  assert "list_driver_messages" not in PUBLIC_READS

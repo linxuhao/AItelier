@@ -35,6 +35,7 @@ from api.run_routers import router as run_router
 from api.run_history_routers import router as run_history_router
 from api.config_routers import router as config_router
 from api.admin_routers import router as admin_router
+from api.driver_routers import router as driver_router
 from api.repo_routers import router as repo_router
 from api.model_routers import router as model_router
 from api.state_graph_routers import router as state_graph_router
@@ -280,6 +281,7 @@ app.include_router(run_router)
 app.include_router(run_history_router)
 app.include_router(config_router)
 app.include_router(admin_router)
+app.include_router(driver_router)
 app.include_router(repo_router)
 app.include_router(model_router)
 app.include_router(state_graph_router)

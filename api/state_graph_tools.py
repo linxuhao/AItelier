@@ -30,7 +30,7 @@ def register_state_tools(tool, mcp, service_factory=None):
             return service_factory()
         from api.dependencies import get_db_manager, get_workspace_manager, get_skillflow, get_config_registry
         from api.mcp_router import _request_from, _start_driver
-        from api.state_graph_routers import authenticated_actor
+        from api.state_graph_routers import authenticated_actor, authenticated_driver_id
         request = None
         try:
             request = _request_from(mcp.get_context())
@@ -44,7 +44,8 @@ def register_state_tools(tool, mcp, service_factory=None):
         return StateService(get_db_manager(), get_workspace_manager(), attach_driver=_start_driver,
                             actor=authenticated_actor(request),
                             runtime_factory=lambda: (get_skillflow(), get_config_registry()),
-                            project_read_trusted=mcp_read_trust(request))
+                            project_read_trusted=mcp_read_trust(request),
+                            driver_id=authenticated_driver_id(request))
 
     def invoke(action, arguments, write):
         from mcp.server.fastmcp.exceptions import ToolError as MCPToolError
@@ -62,6 +63,26 @@ def register_state_tools(tool, mcp, service_factory=None):
                 "driver_guide_sections": guide_index_addresses(),
                 "driver_guide_full_chars": len(STATE_DRIVER_GUIDE),
                 "driver_prompt": "state_graph_driver", "driver_resource": "aitelier://state/driver-guide"}
+
+    @tool("driver_whoami", "read", "Who this MCP credential is to AItelier: kind (driver/owner/legacy), actor, driver_id, is_admin and, when driver identity is enabled, the driver's project memberships and capabilities. Call once at startup before waiting or dispatching (design/multi-driver-coop.md section 3.4). Reveals no token.")
+    def driver_whoami() -> dict:
+        from api.mcp_router import _request_from
+        request = _request_from(mcp.get_context())
+        if service_factory is not None:
+            # The State-only service authenticates per request itself.
+            svc = service_factory()
+            return {"kind": "state-only", "actor": svc.actor, "driver_id": getattr(svc, "driver_id", None)}
+        from api import authz
+        identity = authz.request_identity(request) if request is not None else None
+        registry = authz.driver_registry()
+        out = {"enabled": registry is not None,
+               "kind": identity.kind if identity else None,
+               "actor": identity.actor if identity else None,
+               "driver_id": identity.driver_id if identity else None,
+               "is_admin": bool(identity and identity.is_admin)}
+        if registry is not None and identity is not None and identity.driver_id:
+            out["driver"] = registry.get(identity.driver_id)
+        return out
 
     @tool("state_graph_read", "read", "State query. Over MCP this whole tool requires writer authorization even though it does not mutate. Actions include list_director_messages, list_issues, get_issue, get_driver_note, driver_note_index, search_driver_note_entries, get_driver_note_entry, check_driver_note_index, get_driver_guide_section, driver_note_history, search_driver_note_history, list_projects, get_graph, get_node, facet_lint, frontier, events, get_attempt, list_attempts, evidence, search_design_items, design_impact, wait_for_state_change. get_driver_note returns the entry index, its counts and revision, never free text; the index (and driver_note_index) lists only current, listed entries unless include_superseded/include_delisted is set, and superseded_count/delisted_count report what it hides. search_driver_note_entries matches entry assertions and bodies (Unicode case-insensitive literal) with bounded redacted excerpts and a next_after cursor. search_driver_note_history returns bounded redacted excerpts of retired section text in revision order. Design queries return candidates/review hints, not semantic proof. Use cursor-based waits for updates. Exact arguments: state_graph_help. On the REST transport the table core.state_commands.PUBLIC_READS decides which of these an anonymous visitor may read.")
     async def state_graph_read(action: str, arguments: dict) -> dict:

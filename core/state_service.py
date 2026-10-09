@@ -130,7 +130,7 @@ _UNDECLARED_TRUST = object()
 
 class StateService:
     def __init__(self, db, ws=None, sf=None, registry=None, attach_driver=None, actor="local-operator",
-                 runtime_factory=None, project_read_trusted=_UNDECLARED_TRUST):
+                 runtime_factory=None, project_read_trusted=_UNDECLARED_TRUST, driver_id=None):
         # Whether the caller behind THIS service may read a project nobody opened.
         # The State HTTP transport derives it from the raw request credential; the
         # internal driver, MCP and every embedder pass it EXPLICITLY. There is no
@@ -162,6 +162,11 @@ class StateService:
         self.external = ExternalAttempts(self.attempts, actor)
         self.attach_driver = attach_driver
         self.actor = actor
+        # The registered driver behind this request (design/multi-driver-coop.md
+        # §3), derived by the transport from the raw credential. None = feature
+        # off or not a driver (owner, legacy, internal). `execute` uses it to
+        # pin `director_identity` to `<driver_id>` / `<driver_id>/<label>`.
+        self.driver_id = driver_id
         from core.state_design import StateDesign
         self.design = StateDesign(self.store, actor)
         self.runtime_factory = runtime_factory

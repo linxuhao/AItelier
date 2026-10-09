@@ -90,6 +90,122 @@ def is_via_tunnel(request) -> bool:
     return bool(headers and headers.get("Cf-Ray"))
 
 
+# ── Driver identity (design/multi-driver-coop.md §3, P0) ─────────────────────
+# A LAN driver presents its OWN token in `X-AItelier-Driver-Token`; the
+# historical `X-AItelier-Admin-Token` header stays an alias so every existing
+# caller keeps working. Both are honored only OFF-tunnel (the anti-replay rule
+# above is unchanged). With the feature off (`core.drivers.feature_enabled()`)
+# nothing below changes a verdict: the single env ADMIN_TOKEN is compared as
+# before. With it on, the token is looked up in the `drivers` table, which is
+# seeded from that same env token as `owner-cli`.
+DRIVER_TOKEN_HEADER = "X-AItelier-Driver-Token"
+ADMIN_TOKEN_HEADER = "X-AItelier-Admin-Token"
+ADMIN_REQUIRED = "admin_required"
+
+
+def presented_token(request) -> str:
+    headers = getattr(request, "headers", None)
+    if headers is None:
+        return ""
+    return (headers.get(DRIVER_TOKEN_HEADER, "") or headers.get(ADMIN_TOKEN_HEADER, "")).strip()
+
+
+def driver_registry():
+    """The live DriverRegistry, or None while the feature is off.
+
+    Resolved lazily so importing this module never opens the production
+    database; tests replace this function.
+    """
+    from core import drivers
+    if not drivers.feature_enabled():
+        return None
+    from api.dependencies import get_db_manager
+    return drivers.registry_for(get_db_manager())
+
+
+def request_identity(request):
+    """WHO this request is, from the raw credential only (never from arguments).
+
+    Returns a `core.drivers.Identity`, or None for no recognised credential.
+    Feature off: the pre-P0 actors (the Access email, else the shared
+    `authorized-state-operator`) as kind 'legacy'.
+    """
+    from core import drivers
+    headers = getattr(request, "headers", None) if request is not None else None
+    email = None
+    if headers is not None:
+        email = cf_access.email_from_request_headers(headers, getattr(request, "cookies", {}))
+    registry = driver_registry()
+    if registry is None:
+        if email:
+            return drivers.Identity("legacy", email, email=email)
+        return drivers.Identity("legacy", drivers.LEGACY_ACTOR)
+    if email and email in WRITERS:
+        # Q1 (confirmed): the owner's browser via Cloudflare is the owner, not `public`.
+        return drivers.Identity("owner", "owner:" + email, is_admin=True, email=email)
+    if request is None:
+        return None
+    token = presented_token(request)
+    if token and not is_via_cloudflare(request):
+        row = registry.lookup_token(token)
+        if row is not None:
+            return drivers.Identity("driver", "driver:" + row["driver_id"], row["driver_id"],
+                                    is_admin=bool(row["is_admin"]))
+    if is_via_tunnel(request):
+        from api.mcp_router import _external_token_ok
+        if _external_token_ok(request):
+            row = registry.public_driver()
+            if row is not None:
+                return drivers.Identity("driver", "driver:" + drivers.PUBLIC_DRIVER_ID,
+                                        drivers.PUBLIC_DRIVER_ID)
+    return None
+
+
+def request_actor(request) -> str:
+    """The actor string State records for this (already authorized) request."""
+    from core import drivers
+    identity = request_identity(request)
+    return identity.actor if identity is not None else drivers.LEGACY_ACTOR
+
+
+def _token_authorizes(request, token: str) -> bool:
+    registry = driver_registry()
+    if registry is None:
+        return bool(ADMIN_TOKEN and hmac.compare_digest(token, ADMIN_TOKEN))
+    return registry.lookup_token(token) is not None
+
+
+def local_admin_authority(request) -> bool:
+    """An OFF-tunnel admin credential: the env admin token (feature off) or an
+    active `is_admin` LAN driver token (feature on). Never a Cloudflare caller."""
+    if is_via_cloudflare(request):
+        return False
+    token = presented_token(request)
+    if not token:
+        return False
+    registry = driver_registry()
+    if registry is None:
+        return bool(ADMIN_TOKEN and hmac.compare_digest(token, ADMIN_TOKEN))
+    row = registry.lookup_token(token)
+    return bool(row and row["is_admin"])
+
+
+def require_admin(request: Request) -> None:
+    """FastAPI dependency: break-glass/admin operations (driver registry writes).
+
+    Admin = an off-tunnel `is_admin` driver token, or the owner's allowlisted
+    Access email. Test mode and an unconfigured gate behave like require_writer.
+    """
+    if getattr(request.app.state, "_test_mode", False) or not gate_enabled():
+        return
+    identity = request_identity(request)
+    if (identity is not None and identity.is_admin
+            and (identity.kind == "owner" or not is_via_cloudflare(request))):
+        return
+    raise HTTPException(status_code=403, detail="This operation needs an admin driver or the owner.",
+                        headers={"X-AItelier-Denial": ADMIN_REQUIRED})
+
+
 def write_denial_reason(request: Request) -> str | None:
     """Why a request may NOT write — None means it may.
 
@@ -104,9 +220,8 @@ def write_denial_reason(request: Request) -> str | None:
     if not gate_enabled():
         return None
     via_cloudflare = is_via_cloudflare(request)
-    token = request.headers.get("X-AItelier-Admin-Token", "")
-    if (not via_cloudflare and ADMIN_TOKEN and token
-            and hmac.compare_digest(token, ADMIN_TOKEN)):
+    token = presented_token(request)
+    if not via_cloudflare and token and _token_authorizes(request, token):
         return None
     email = cf_access.email_from_request_headers(request.headers, request.cookies)
     if email:

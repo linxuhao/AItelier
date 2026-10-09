@@ -2,6 +2,9 @@
 
 State owns product goals, versioned acceptance contracts, dependencies and evidence. SkillFlow or an external harness owns execution. Use one long-lived project for one product; workflows and external workers are attempts, not replacement product projects.
 
+## Identify yourself
+When driver identity is enabled, each driver presents its own token (see docs/driver-identity.md: `~/.aitelier-drivers/<id>.token`, `AITELIER_DRIVER_ID=<id>`) and is recorded as `driver:<id>`. Call driver_whoami (MCP) or GET /api/drivers/me once at startup; never borrow another driver's token file.
+
 ## Resume safely
 1. Read state_graph_help schemas, project_overview and the relevant get_node/attempt_detail. Recover durable IDs before acting. Use the current revision and frozen dependency receipts. Do not repeat an old task because its notification was delayed.
    Read get_driver_note for the current project notebook. If a historical decision is missing, use search_driver_note_history with narrow filters and its revision cursor; do not inject the full append-only note history into routine resumes or compact recovery.

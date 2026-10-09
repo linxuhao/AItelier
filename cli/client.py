@@ -26,9 +26,13 @@ _DEFAULT_URL = f"http://localhost:{os.environ.get('AITELIER_PORT', '4444')}"
 
 
 def _auth_headers() -> dict:
-    """Admin-token header so the CLI passes the server's write-gate."""
-    token = os.environ.get("AITELIER_ADMIN_TOKEN", "").strip()
-    return {"X-AItelier-Admin-Token": token} if token else {}
+    """Credential header so the CLI passes the server's write-gate.
+
+    A per-driver token (core/driver_credentials.py) when one is configured,
+    else the legacy admin token exactly as before.
+    """
+    from core.driver_credentials import auth_headers
+    return auth_headers()
 
 
 class APIClient:

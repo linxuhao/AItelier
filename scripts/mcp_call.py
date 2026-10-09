@@ -13,6 +13,9 @@ import sys
 import httpx
 from dotenv import dotenv_values
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from core.driver_credentials import CredentialError, auth_headers
+
 _ENDPOINT = "http://127.0.0.1:4444/mcp/"
 
 
@@ -38,17 +41,26 @@ def main(argv=None) -> int:
               "run_pipeline requires checkpoints=ask.", file=sys.stderr)
         return 2
 
-    token = os.environ.get("AITELIER_ADMIN_TOKEN")
-    if not token:
-        token = dotenv_values(Path.home() / "AItelier" / ".env").get("AITELIER_ADMIN_TOKEN")
-    if not token:
-        print("AITELIER_ADMIN_TOKEN is missing from environment and ~/AItelier/.env.",
-              file=sys.stderr)
+    # A per-driver token (core/driver_credentials.py) wins; else the legacy
+    # admin token from the environment or ~/AItelier/.env, as before.
+    try:
+        headers = auth_headers(admin_token="")
+    except CredentialError as exc:
+        print(str(exc), file=sys.stderr)
         return 2
+    if not headers:
+        token = os.environ.get("AITELIER_ADMIN_TOKEN")
+        if not token:
+            token = dotenv_values(Path.home() / "AItelier" / ".env").get("AITELIER_ADMIN_TOKEN")
+        if not token:
+            print("AITELIER_ADMIN_TOKEN is missing from environment and ~/AItelier/.env.",
+                  file=sys.stderr)
+            return 2
+        headers = {"X-AItelier-Admin-Token": token}
     try:
         response = httpx.post(
             _ENDPOINT,
-            headers={"X-AItelier-Admin-Token": token,
+            headers={**headers,
                      "Accept": "application/json, text/event-stream"},
             json={"jsonrpc": "2.0", "id": 1, "method": "tools/call",
                   "params": {"name": options.tool, "arguments": arguments}},

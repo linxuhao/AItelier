@@ -54,6 +54,9 @@ TEST_ACCEPTANCE = [
 
 
 def admin_token():
+    from core.driver_credentials import driver_token
+    if driver_token():
+        return ""  # Api sends the per-driver token instead (core/driver_credentials.py).
     token = os.environ.get("AITELIER_ADMIN_TOKEN")
     if not token:
         env = Path(__file__).resolve().parents[1] / ".env"
@@ -71,8 +74,10 @@ class Api:
         self.base, self.token = base.rstrip("/"), token
 
     def _call(self, path, body):
+        from core.driver_credentials import auth_headers
         req = urllib.request.Request(self.base + path, data=json.dumps(body).encode(), method="POST",
-                                     headers={"Content-Type": "application/json", "X-AItelier-Admin-Token": self.token})
+                                     headers={"Content-Type": "application/json",
+                                              **auth_headers(admin_token=self.token)})
         try:
             with urllib.request.urlopen(req, timeout=60) as resp:
                 return json.load(resp)

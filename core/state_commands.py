@@ -871,6 +871,19 @@ def execute(service, action: str, arguments: dict, *, allow_write: bool = False)
         # Bounded validation errors without echoing whole inputs into logs.
         details = [{"field": ".".join(map(str, e["loc"])), "error": e["msg"]} for e in exc.errors(include_input=False)[:10]]
         raise StateGraphError(str(details)) from exc
+    driver_id = getattr(service, "driver_id", None)
+    if driver_id and "director_identity" in REQUESTS[action].model_fields:
+        # A registered driver's self-declared identity is its id or a subagent
+        # label under it (design/multi-driver-coop.md §3.2). Provenance only -
+        # it still grants nothing.
+        from core.drivers import DriverError, check_director_identity
+        try:
+            args["director_identity"] = check_director_identity(driver_id, args.get("director_identity"))
+        except DriverError as exc:
+            if director_action:
+                from core.director_messaging_protocol import DirectorMessageError
+                return DirectorMessageError("invalid_request").as_dict()
+            raise StateGraphError(str(exc)) from exc
     handlers = _handlers(service)
     try:
         result = handlers[action](**args)

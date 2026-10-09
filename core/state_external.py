@@ -11,6 +11,7 @@ import json
 import re
 
 from core.state_graph import StateConflict, StateGraphError, digest, integer, key, now, text
+from core.drivers import actor_continues
 from core.state_attempts import _public
 from core.state_report_integrity import retain_report, store_report_blob, validate_external_semantics
 
@@ -84,7 +85,7 @@ class ExternalAttempts:
             owner = self.attempts._attempt(conn, attempt_id)
             if owner['execution_kind'] != 'external':
                 raise StateConflict('external reports cannot complete or override a SkillFlow attempt')
-            if owner['reporting_actor'] != self.actor:
+            if not actor_continues(owner['reporting_actor'], self.actor):
                 raise StateConflict('external observation belongs to a different authenticated reporter')
             if context_hash != digest(json.loads(owner['context_json'])):
                 raise StateConflict('report describes a different frozen goal/contract/dependency context')
@@ -139,7 +140,7 @@ class ExternalAttempts:
             a = self.attempts._attempt(conn, attempt_id)
             if a['execution_kind'] != 'external':
                 raise StateConflict('external reports cannot complete or override a SkillFlow attempt')
-            if a['reporting_actor'] != self.actor:
+            if not actor_continues(a['reporting_actor'], self.actor):
                 raise StateConflict('external observation belongs to a different authenticated reporter')
             prior = conn.execute('SELECT * FROM state_external_observations WHERE attempt_id=? AND observation_id=?',
                                  (attempt_id, observation_id)).fetchone()

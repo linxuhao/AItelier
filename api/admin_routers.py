@@ -45,11 +45,10 @@ def deployment_runtime_observation(request: Request):
     runtime, clears ownership, or grants deployment authorization.
     """
     import sys
-    import hmac
     from api import authz
-    if (authz.is_via_cloudflare(request) or not authz.ADMIN_TOKEN
-            or not hmac.compare_digest(request.headers.get("X-AItelier-Admin-Token", ""),
-                                       authz.ADMIN_TOKEN)):
+    # Off-tunnel admin authority: the env admin token (driver identity off) or an
+    # active is_admin LAN driver such as owner-cli (on). See api/authz.py.
+    if not authz.local_admin_authority(request):
         raise HTTPException(403, "Original runtime observation requires the local CLI admin authority")
     dependencies = sys.modules.get("api.dependencies")
     sf = getattr(dependencies, "_skillflow_instance", None)

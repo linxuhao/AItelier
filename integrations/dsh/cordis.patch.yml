@@ -17,6 +17,10 @@
 #                    and a direct container-network connection are. Leave it unset
 #                    for a read-only installation — the write tools then answer
 #                    `denied: …` instead of failing obscurely.
+# AITELIER_DRIVER_TOKEN  optional per-driver token (docs/driver-identity.md).
+#                    When driver identity is enabled and this is set, the server
+#                    attributes calls to `driver:<id>`; it takes precedence over
+#                    the admin token. Empty = the legacy behavior above.
 - insert:
     - id: mcp-aitelier
       name: '@deepseek-ai/dsh-mcp-client'
@@ -26,6 +30,7 @@
         url: !!js process.env.AITELIER_MCP_URL || 'http://127.0.0.1:4444/mcp'
         headers:
           X-AItelier-Admin-Token: !!js process.env.AITELIER_ADMIN_TOKEN || ''
+          X-AItelier-Driver-Token: !!js process.env.AITELIER_DRIVER_TOKEN || ''
         # An AItelier run is long and pauses for human approval, so `wait_for_run`
         # blocks. dsh-mcp-client's own default is 60s, and a wait longer than the
         # CLIENT's timeout does not wait longer — the client hangs up first and the

@@ -409,10 +409,42 @@ def _connection() -> tuple[str, dict[str, str]]:
                     headers.update({str(k): str(v) for k, v in parsed.items() if isinstance(v, str)})
         except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
             pass
-    token = os.environ.get("AITELIER_ADMIN_TOKEN")
-    if token and not any(k.lower() in {"authorization", "x-aitelier-admin-token"} for k in headers):
-        headers["X-AItelier-Admin-Token"] = token
+    # Per-driver token first (design/multi-driver-coop.md §3; same order as
+    # core/driver_credentials.py, inlined because hooks stay dependency-free),
+    # then the legacy admin token exactly as before.
+    credential_keys = {"authorization", "x-aitelier-admin-token", "x-aitelier-driver-token"}
+    if not any(k.lower() in credential_keys for k in headers):
+        driver_token = _driver_token()
+        token = os.environ.get("AITELIER_ADMIN_TOKEN")
+        if driver_token:
+            headers["X-AItelier-Driver-Token"] = driver_token
+        elif token:
+            headers["X-AItelier-Admin-Token"] = token
     return url.rstrip("/") + "/", headers
+
+
+def _driver_token() -> str | None:
+    """AITELIER_DRIVER_TOKEN, AITELIER_DRIVER_TOKEN_FILE, or ~/.aitelier-drivers/$AITELIER_DRIVER_ID.token.
+
+    A file readable by group/other is ignored (fail closed to the legacy path).
+    """
+    token = (os.environ.get("AITELIER_DRIVER_TOKEN") or "").strip()
+    if token:
+        return token
+    path = (os.environ.get("AITELIER_DRIVER_TOKEN_FILE") or "").strip()
+    driver_id = (os.environ.get("AITELIER_DRIVER_ID") or "").strip()
+    if not path and driver_id and "/" not in driver_id and not driver_id.startswith("."):
+        path = os.path.join(os.path.expanduser("~"), ".aitelier-drivers", driver_id + ".token")
+    if not path:
+        return None
+    try:
+        if os.stat(path).st_mode & 0o077:
+            return None
+        with open(path, encoding="utf-8") as handle:
+            value = handle.read().strip()
+    except OSError:
+        return None
+    return value if value and "\n" not in value else None
 
 
 def _mcp_call(url: str, headers: dict[str, str], name: str, arguments: dict[str, Any]) -> dict[str, Any]:

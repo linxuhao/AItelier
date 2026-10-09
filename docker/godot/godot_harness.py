@@ -3741,7 +3741,9 @@ def _playtest_spec_inner(dst: Path, spec: dict, frames: int, timeout: int,
     # 172 on the wuxia tree) was compared against a different node tree --
     # digests that can never be equal, so input_dead could never fire for them.
     controls: dict[tuple[str, int, float], dict | None] = {}
-    if driven and not crashed:
+    if driven and not crashed and not spec_errors:
+        # A refused/invalid scenario already hard-fails. Preserve its original
+        # diagnostic instead of spending a comparison on unusable evidence.
         for i in driven:
             n = scen_frames[i]
             if scen_results[i]["comparison_error"]:

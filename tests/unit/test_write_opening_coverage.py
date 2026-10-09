@@ -187,6 +187,8 @@ _ARGUMENT_SEEDS = {
     "disposition_failed_attempt": {"disposition": "leave-stopped"},
     "send_director_message": {"sender_project_id": "mutation-target",
                               "target_project_id": "mutation-target", "body": "b"},
+    # Every heartbeat list is optional, but a batch needs at least one item.
+    "heartbeat": {"claims": [{"claim_id": "claim-mutation", "fence": 1}]},
     "report_external_attempt": {"observation_id": "obs-1", "expected_version": 0,
                                 "context_hash": "0" * 64, "status": "candidate",
                                 "report_ref": "r", "report_sha256": "0" * 64},

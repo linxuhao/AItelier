@@ -3077,7 +3077,8 @@ def _authored_execution_plan(spec, frames, timeout):
         if unknown:
             errors.append(where + " has unknown key(s) " + ", ".join(unknown))
         errors += _key_type_errors(where, sc, _SCENARIO_KEY_TYPES)
-        timeline, bad = _normalize_timeline(sc.get("timeline", []))
+        raw_timeline = sc.get("timeline", [])
+        timeline, bad = _normalize_timeline(raw_timeline if isinstance(raw_timeline, list) else [])
         errors += [where + ": " + e for e in bad]
         ceiling, seconds = _MAX_SPEC_FRAMES, timeout
         if "execution_budget" in sc:
@@ -3262,6 +3263,33 @@ def _digest(nodes: dict) -> dict:
     capture paths differ between any two runs, which would defeat the
     no-input comparison in _playtest_spec."""
     return {k: v for k, v in (nodes or {}).items() if "_AItelierProbe" not in k}
+
+
+def _comparison_observation_error(probe: dict, required_frames: int) -> str | None:
+    """Actual emitted frame extent + observed node state, not a complete proxy.
+
+    Native _finish always emits frames and nodes; older native reports may
+    omit complete. An observed empty dictionary is valid state and must still
+    compare equal, unlike an absent snapshot which cannot buy a comparison.
+    """
+    if not isinstance(probe, dict) or "nodes" not in probe or not isinstance(probe["nodes"], dict):
+        return "node snapshot is missing or not a mapping"
+    if any(not isinstance(k, str) or not isinstance(v, dict) for k, v in probe["nodes"].items()):
+        return "node snapshot is not the emitted node-name/property mapping"
+    frames = probe.get("frames")
+    if (isinstance(frames, bool) or not isinstance(frames, (int, float))
+            or frames < required_frames or frames > _MAX_JSON_FRAME
+            or not math.isfinite(frames) or frames != int(frames)):
+        return "measured frame extent did not reach the requested budget"
+    if "complete" in probe and probe["complete"] is not True:
+        return "reported completeness is false or malformed"
+    timing = probe.get("timing")
+    if isinstance(timing, dict) and "frames_stepped" in timing:
+        if timing["frames_stepped"] != frames:
+            return "measured frame counters disagree"
+    if probe.get("spec_errors"):
+        return "control reported spec errors"
+    return None
 
 
 def _scenario_ledger(name: str, scene: str, wall_sec: float, t: dict) -> dict:
@@ -3663,7 +3691,9 @@ def _playtest_spec_inner(dst: Path, spec: dict, frames: int, timeout: int,
                        and not incomplete
                        and bool(asserts) and all(a.get("passed") for a in asserts))
 
-        scen_results.append({"name": name, "ran": ran, "timed_out": timed_out, "errors": errs,
+        comparison_error = _comparison_observation_error(probe, sframes)
+        scen_results.append({"name": name, "ran": ran, "timed_out": timed_out,
+                             "comparison_error": comparison_error, "errors": errs,
                              "native_debt": debt,
                              "asserts": asserts, "passed": scen_passed,
                              "before_captures": probe.get("before_captures", {}),
@@ -3686,7 +3716,8 @@ def _playtest_spec_inner(dst: Path, spec: dict, frames: int, timeout: int,
                              # incident, one level up.
                              "pressed": any(set(e) - {"at", "assert"} for e in timeline),
                              "input_dead": False})
-        scen_nodes.append(_digest(probe.get("nodes", {})))
+        observed_nodes = probe.get("nodes")
+        scen_nodes.append(_digest(observed_nodes) if isinstance(observed_nodes, dict) else {})
         scen_frames.append(sframes)
         scen_timeouts.append(scenario_timeout)
         scen_scenes.append(sc_scene)
@@ -3709,10 +3740,14 @@ def _playtest_spec_inner(dst: Path, spec: dict, frames: int, timeout: int,
     # spec-level scene, so every scenario with its own `scene:` override (86 of
     # 172 on the wuxia tree) was compared against a different node tree --
     # digests that can never be equal, so input_dead could never fire for them.
-    controls: dict[tuple[str, int, float], dict] = {}
+    controls: dict[tuple[str, int, float], dict | None] = {}
     if driven and not crashed:
         for i in driven:
             n = scen_frames[i]
+            if scen_results[i]["comparison_error"]:
+                spec_errors.append("scenario %r: driven state is not a complete comparable observation (%s); no-input comparison is unobserved" % (scen_results[i]["name"], scen_results[i]["comparison_error"]))
+                scen_results[i]["passed"] = False
+                continue
             key = (scen_scenes[i], n, scen_timeouts[i])
             if key not in controls:
                 spec_path.write_text(json.dumps({"frames": n, "timeline": []}))
@@ -3744,14 +3779,15 @@ def _playtest_spec_inner(dst: Path, spec: dict, frames: int, timeout: int,
                 ctrl_timing.append(_scenario_ledger(
                     "control:%s@%d" % (scen_scenes[i] or "(main)", n),
                     scen_scenes[i], time.monotonic() - t_ctrl_start, t_ctrl))
-                if _t or _e or not ctrl or ctrl.get("complete") is False:
-                    spec_errors.append("scenario %r: no-input control did not complete within its execution budget; input-dead comparison is unobserved" % scen_results[i]["name"])
-                    controls[key] = {}
+                observation_error = _comparison_observation_error(ctrl, n)
+                if _t or _e or observation_error:
+                    spec_errors.append("scenario %r: no-input control is not a complete comparable observation (%s); input-dead comparison is unobserved" % (scen_results[i]["name"], observation_error or "timeout/runtime error"))
+                    controls[key] = None
                 else:
-                    controls[key] = _digest(ctrl.get("nodes", {}))
+                    controls[key] = _digest(ctrl["nodes"])
             # A failed control is a hard unobserved comparison above; do not
             # accuse the game of dead input or turn missing evidence green.
-            if controls[key] and scen_nodes[i] == controls[key]:
+            if controls[key] is not None and scen_nodes[i] == controls[key]:
                 scen_results[i]["input_dead"] = True
                 scen_results[i]["passed"] = False
 

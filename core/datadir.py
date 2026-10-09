@@ -115,3 +115,10 @@ def state_report_store_dir() -> Path:
 def writing_bench_dir() -> Path:
     """Operator policy and immutable writing artifacts, outside source checkouts."""
     return aitelier_home() / "writing-bench"
+
+
+def driver_tokens_dir() -> Path:
+    """CLIENT-side per-driver token files (docs/driver-identity.md): one
+    ``<driver_id>.token`` (0600) per LAN driver in a 0700 directory. Not part of
+    the server data dir: the server stores only HMAC hashes."""
+    return Path(os.getenv("AITELIER_DRIVER_TOKENS_DIR") or Path.home() / ".aitelier-drivers")

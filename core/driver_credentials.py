@@ -39,7 +39,10 @@ class CredentialError(RuntimeError):
 
 
 def drivers_dir(home: Path | None = None) -> Path:
-    return (home if home is not None else Path.home()) / DRIVERS_DIR_NAME
+    if home is not None:
+        return home / DRIVERS_DIR_NAME
+    from core.datadir import driver_tokens_dir
+    return driver_tokens_dir()
 
 
 def token_file_for(driver_id: str, home: Path | None = None) -> Path:

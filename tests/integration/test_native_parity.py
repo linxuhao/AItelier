@@ -363,7 +363,7 @@ def test_repeated_starvation_keeps_the_configured_cap(engine):
     nat = _wire_real_escalation(engine.factory.get_native_agent.return_value, 8192)
     nat.turn.side_effect = [
         _turn(truncated=True), _turn(truncated=True),
-        _turn(tool_calls=[_tc("write", {"file": "main.py", "content": "x"}), _tc("finish_step")]),
+        _turn(tool_calls=[_tc("write", {"file": "main.py", "content": "x"}), _tc("finish_step", cid="finish")]),
     ]
     assert _run(engine, ws) is True
     assert nat.gateway.max_output_tokens == 8192
@@ -375,7 +375,7 @@ def test_starve_at_the_ceiling_can_correct_within_existing_budget(engine):
     nat = _wire_real_escalation(engine.factory.get_native_agent.return_value, OUTPUT_CAP_CEILING)
     nat.turn.side_effect = [
         _turn(truncated=True),
-        _turn(tool_calls=[_tc("write", {"file": "main.py", "content": "x"}), _tc("finish_step")]),
+        _turn(tool_calls=[_tc("write", {"file": "main.py", "content": "x"}), _tc("finish_step", cid="finish")]),
     ]
     assert _run(engine, ws) is True
     assert nat.gateway.max_output_tokens == OUTPUT_CAP_CEILING

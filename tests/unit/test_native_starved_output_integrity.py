@@ -79,6 +79,8 @@ def test_recovery_transport_error_retains_partial_work_and_accounting(budget_cas
     _turn(tool_calls=[{"id": "bad", "function": {"name": "finish_step", "arguments": "{"}}]),
     _turn(tool_calls=[{"id": "bad", "function": {"name": "edit", "arguments": "[]"}}]),
     _turn(tool_calls=[{"function": {"name": "edit", "arguments": "{}"}}]),
+    _turn(tool_calls=[_tc("read_file", cid="duplicate"), _tc("finish_step", cid="duplicate")]),
+    _turn(tool_calls=[_tc("edit", cid="duplicate"), _tc("finish_step", cid="duplicate")]),
 ])
 def test_absent_or_invalid_correction_cannot_complete_or_execute_effects(budget_case, correction):
     eng, ws, draft, traces = budget_case
@@ -191,6 +193,6 @@ def test_unique_batch_ids_and_cross_turn_reuse_still_finish(budget_case, partial
     nat, calls, emitted = script_case(budget_case, responses, cap=8192, budget=len(responses))
     assert _run(eng, ws) is True
     assert len(calls) == len(responses)
-    assert eng._exec_tool.call_count == int(partial) + 1
+    assert eng._exec_tool.call_count == int(partial) + 2
     assert nat.gateway.max_output_tokens == 8192
     assert not [p for _, ev, p in traces if ev == "output_starvation_invalid_correction"]

@@ -996,7 +996,7 @@ def execute(service, action: str, arguments: dict, *, allow_write: bool = False)
         if target_driver:
             notes = service.driver_notes.for_driver(target_driver,service.driver_id,reason)
             args["project_id"] = target_driver
-            handler = getattr(notes,handler.__name__)
+            handler = handler.__func__.__get__(notes,type(notes))
     try:
         result = handler(**args)
         if notes is not None:

@@ -3610,6 +3610,8 @@ def _playtest_spec_inner(dst: Path, spec: dict, frames: int, timeout: int,
         errs, debt = _split_diagnostics(errs)
         ran = bool(probe) or not timed_out
         ran_any = ran_any or ran
+        if timed_out:
+            spec_errors.append("scenario %r: exceeded its %.6g-second execution timeout; snapshot is not a passing result" % (name, scenario_timeout))
         if errs:
             crashed = True
         all_errors.extend({**e, "scenario": name} for e in errs)
@@ -3657,11 +3659,11 @@ def _playtest_spec_inner(dst: Path, spec: dict, frames: int, timeout: int,
                 "result, so it cannot count as a passing or advisory outcome."
                 % (name, "; ".join(why) or "incomplete", len(asserts),
                    expected_asserts))
-        scen_passed = (ran and not errs and complete and not missing_asserts
+        scen_passed = (ran and not timed_out and not errs and complete and not missing_asserts
                        and not incomplete
                        and bool(asserts) and all(a.get("passed") for a in asserts))
 
-        scen_results.append({"name": name, "ran": ran, "errors": errs,
+        scen_results.append({"name": name, "ran": ran, "timed_out": timed_out, "errors": errs,
                              "native_debt": debt,
                              "asserts": asserts, "passed": scen_passed,
                              "before_captures": probe.get("before_captures", {}),
@@ -3742,9 +3744,13 @@ def _playtest_spec_inner(dst: Path, spec: dict, frames: int, timeout: int,
                 ctrl_timing.append(_scenario_ledger(
                     "control:%s@%d" % (scen_scenes[i] or "(main)", n),
                     scen_scenes[i], time.monotonic() - t_ctrl_start, t_ctrl))
-                controls[key] = _digest(ctrl.get("nodes", {}))
-            # An empty control means the control pass itself failed to report --
-            # stay quiet rather than accuse the game on missing evidence.
+                if _t or _e or not ctrl or ctrl.get("complete") is False:
+                    spec_errors.append("scenario %r: no-input control did not complete within its execution budget; input-dead comparison is unobserved" % scen_results[i]["name"])
+                    controls[key] = {}
+                else:
+                    controls[key] = _digest(ctrl.get("nodes", {}))
+            # A failed control is a hard unobserved comparison above; do not
+            # accuse the game of dead input or turn missing evidence green.
             if controls[key] and scen_nodes[i] == controls[key]:
                 scen_results[i]["input_dead"] = True
                 scen_results[i]["passed"] = False

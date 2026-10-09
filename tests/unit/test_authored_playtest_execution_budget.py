@@ -151,3 +151,21 @@ def test_reader_and_selection_preserve_budget_without_widening(tmp_path):
     narrowed,unknown=select_scenarios(loaded,['late']);assert unknown==[]
     assert narrowed['scenarios'][0]['execution_budget']=={'max_frames':48150,'timeout_seconds':120}
     assert 'timeout' not in narrowed
+
+
+@pytest.mark.parametrize('failed_pass',['scenario','control'])
+def test_timeout_with_snapshot_cannot_buy_success_or_input_dead_proof(monkeypatch,tmp_path,failed_pass):
+    count=0
+    def probe(dst,state_path,frames,timeout,extra,**kwargs):
+        nonlocal count
+        count+=1
+        timeline=json.loads(Path(extra['AITELIER_PROBE_SPEC']).read_text())['timeline']
+        kwargs.get('timing',{}).update(game_usec=int(frames/60*1000000))
+        rows=[{'passed':True}] if timeline else []
+        bad=(count==1) if failed_pass=='scenario' else not timeline
+        return {'frames':frames,'complete':True,'nodes':{'N':{'x':bool(timeline)}},'asserts':rows},[],bad
+    monkeypatch.setattr(gh,'_run_probe',probe)
+    result=gh._playtest_spec(tmp_path/'project',authored(20,50),20,0.75)
+    assert not result['passed']
+    expected='execution timeout' if failed_pass=='scenario' else 'no-input control'
+    assert any(expected in e for e in result['spec_errors'])

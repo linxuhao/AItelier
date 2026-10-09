@@ -134,6 +134,74 @@ class WaitForStateChange(Project):
     return_when_idle: bool = False
     timeout_seconds: float = Field(default=30.0, ge=0, le=900)
     limit: int = Field(default=100, ge=1, le=500)
+    include_lease_events: bool = Field(default=True, description=(
+        "Wake on claim_acquired, claim_released and lease_expired (multi-driver leases), and let "
+        "return_when_idle report attempts nobody renewed past their grace as action_required."))
+
+
+# -- Multi-driver claims and leases (design/multi-driver-coop.md §4, P1) -----
+class ClaimNode(Node):
+    purpose: Literal["implement", "review", "investigate", "plan"]
+    expected_revision: int
+    request_key: str = Field(min_length=1, max_length=200)
+    lease_seconds: int = Field(default=7200, ge=60, le=86400, description=(
+        "Lease length; renew with heartbeat well before it runs out. Expiry plus 900 seconds of "
+        "grace makes the claim reclaimable; nothing is cancelled."))
+    workspace: str = Field(default="", max_length=500, description="Declared checkout, host:path#branch.")
+    subagent: str | None = Field(default=None, max_length=320, description=(
+        "Optional '<your driver_id>/<label>': the subagent this claim is held for, so one heartbeat "
+        "item can renew all of that subagent's claims."))
+
+
+class ReleaseClaim(Project):
+    claim_id: str
+    fence: int = Field(ge=1)
+    reason: str = Field(min_length=1, max_length=2000)
+
+
+class ClaimFence(Request):
+    claim_id: str
+    fence: int = Field(ge=1)
+
+
+class AttemptFence(Request):
+    attempt_id: str
+    fence: int = Field(ge=0)
+
+
+class SubagentRenewal(Request):
+    subagent_id: str = Field(min_length=3, max_length=320)
+
+
+class Heartbeat(Project):
+    claims: list[ClaimFence] = Field(default_factory=list, max_length=100)
+    attempts: list[AttemptFence] = Field(default_factory=list, max_length=100)
+    subagents: list[SubagentRenewal] = Field(default_factory=list, max_length=100, description=(
+        "Renews every live claim you hold for each '<your driver_id>/<label>'."))
+
+    @model_validator(mode="after")
+    def bounded_batch(self):
+        if not 1 <= len(self.claims) + len(self.attempts) + len(self.subagents) <= 100:
+            raise ValueError("heartbeat takes 1 to 100 items in total")
+        return self
+
+
+class ListClaims(Project):
+    node_keys: list[str] | None = Field(default=None, min_length=1, max_length=100)
+    statuses: list[Literal["live", "released", "expired", "transferred", "revoked"]] | None = Field(
+        default=None, min_length=1, description="Defaults to live claims only.")
+    driver_id: str | None = None
+    limit: int = Field(default=100, ge=1, le=500)
+
+
+class ClaimRef(Project):
+    claim_id: str
+
+
+class SetMultiDriver(Project):
+    multi_driver: Literal["off", "on"]
+    expected_revision: int
+    reason: str = Field(min_length=1, max_length=4000)
 
 
 class SendDirectorMessage(Request):
@@ -591,6 +659,7 @@ READ_REQUESTS = {
     "list_director_messages": ListDirectorMessages,
     "list_issues": ListIssues, "get_issue": IssueRef,
     "project_visibility": ProjectVisibility,
+    "list_claims": ListClaims, "get_claim": ClaimRef,
 }
 # ── Read visibility: public or writer-only ─────────────────────────────────
 # ONE table, one writer. `READ_REQUESTS` answers "can this mutate?" — no. This
@@ -648,6 +717,8 @@ WRITER_ONLY_READS = frozenset({
     # The privacy record itself: who opened a project and when. Private by
     # default like every unclassified read; the writer verdict reads it back.
     "project_visibility",
+    # Multi-driver claims: who works on what, in which workspace (P1).
+    "list_claims", "get_claim",
 })
 
 
@@ -687,6 +758,8 @@ WRITE_REQUESTS = {
     "acknowledge_director_message": TransitionDirectorMessage,
     "resolve_director_message": TransitionDirectorMessage,
     "report_issue": ReportIssue, "link_issue": LinkIssue, "resolve_issue": ResolveIssue,
+    "claim_node": ClaimNode, "release_claim": ReleaseClaim, "heartbeat": Heartbeat,
+    "set_multi_driver": SetMultiDriver,
 }
 REQUESTS = READ_REQUESTS | WRITE_REQUESTS
 # Actions that no longer exist but are refused LOUDLY, with the error naming what
@@ -812,6 +885,9 @@ def _handlers(service) -> dict:
         "report_issue": service.issues.report, "list_issues": service.issues.list,
         "get_issue": service.issues.get, "link_issue": service.issues.link,
         "resolve_issue": service.issues.resolve,
+        "claim_node": service.claims.claim_node, "release_claim": service.claims.release_claim,
+        "heartbeat": service.claims.heartbeat, "list_claims": service.claims.list_claims,
+        "get_claim": service.claims.get_claim, "set_multi_driver": service.portfolio.set_multi_driver,
     }
 
 

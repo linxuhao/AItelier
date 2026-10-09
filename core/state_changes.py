@@ -40,7 +40,7 @@ def notify(db_path):
 
 
 def scan(store, project_id, after, node_keys, attempt_ids, note_after_revision,
-         filter_mode, actionable_only, limit):
+         filter_mode, actionable_only, limit, include_lease_events=True):
     # Filter in SQL so an unbounded quiet backlog never becomes an unbounded read.
     with store.transaction() as conn:
         store._project(conn, project_id)
@@ -69,6 +69,10 @@ def scan(store, project_id, after, node_keys, attempt_ids, note_after_revision,
             clauses.append("(event_type='director_message_received' OR (" +
                            joiner.join(filters) + "))")
             args.extend(filter_args)
+        if not include_lease_events:
+            from core.state_claims import LEASE_EVENTS
+            clauses.append("event_type NOT IN (" + ",".join("?" for _ in LEASE_EVENTS) + ")")
+            args.extend(LEASE_EVENTS)
         if actionable_only:
             clauses.append("event_type NOT IN (" + ",".join("?" for _ in _QUIET) + ")")
             args.extend(sorted(_QUIET))
@@ -88,14 +92,15 @@ def scan(store, project_id, after, node_keys, attempt_ids, note_after_revision,
 
 async def wait_for_state_change(service, project_id, after=0, node_keys=None, attempt_ids=None,
                                 note_after_revision=None, filter_mode="all", actionable_only=True,
-                                timeout_seconds=30.0, limit=100, return_when_idle=False):
+                                timeout_seconds=30.0, limit=100, return_when_idle=False,
+                                include_lease_events=True):
     # Service callers receive the same strict contract as REST/MCP callers.
     from core.state_commands import WaitForStateChange
     from core.state_graph import key
     args = WaitForStateChange(project_id=project_id, after=after, node_keys=node_keys,
         attempt_ids=attempt_ids, note_after_revision=note_after_revision, filter_mode=filter_mode,
         actionable_only=actionable_only, timeout_seconds=timeout_seconds,
-        limit=limit, return_when_idle=return_when_idle)
+        limit=limit, return_when_idle=return_when_idle, include_lease_events=include_lease_events)
     key(project_id, "project_id")
     for value in (node_keys or []) + (attempt_ids or []):
         key(value)
@@ -108,9 +113,12 @@ async def wait_for_state_change(service, project_id, after=0, node_keys=None, at
     with subscribe(service.db.db_path) as signal:
         while True:
             signal.clear()
+            # Lease expiry is noticed lazily: each wait iteration (about once a
+            # second while idle) emits any lease_expired event that came due.
+            await asyncio.to_thread(_sweep_leases, service, project_id)
             events, cursor = await asyncio.to_thread(
                 scan, service.store, project_id, cursor, node_keys, attempt_ids,
-                note_after_revision, filter_mode, actionable_only, limit)
+                note_after_revision, filter_mode, actionable_only, limit, include_lease_events)
             if events:
                 return {"events": events, "next_after": cursor, "timed_out": False}
             recovery_ok = True
@@ -131,7 +139,7 @@ async def wait_for_state_change(service, project_id, after=0, node_keys=None, at
                 # Preserve actionable events committed by other rows in the page.
                 events, cursor = await asyncio.to_thread(
                     scan, service.store, project_id, cursor, node_keys, attempt_ids,
-                    note_after_revision, filter_mode, actionable_only, limit)
+                    note_after_revision, filter_mode, actionable_only, limit, include_lease_events)
                 if events:
                     return {"events": events, "next_after": cursor, "timed_out": False}
                 return {"events": [], "next_after": cursor, "timed_out": False,
@@ -148,7 +156,7 @@ async def wait_for_state_change(service, project_id, after=0, node_keys=None, at
             if args.return_when_idle:
                 outcome = await asyncio.to_thread(
                     wait_disposition, service.store, project_id, cursor, node_keys,
-                    attempt_ids, note_after_revision, filter_mode)
+                    attempt_ids, note_after_revision, filter_mode, include_lease_events)
                 if outcome == "rescan":
                     continue
                 if outcome is not None:
@@ -162,6 +170,19 @@ async def wait_for_state_change(service, project_id, after=0, node_keys=None, at
                 await asyncio.wait_for(signal.wait(), timeout=min(1.0, remaining))
             except asyncio.TimeoutError:
                 pass
+
+
+def _sweep_leases(service, project_id):
+    """Best effort: a busy database must not turn a wait into an error. The
+    next iteration (or any trusted read) sweeps again; nothing is lost."""
+    claims = getattr(service, "claims", None)
+    if claims is None:
+        return
+    try:
+        claims.sweep(project_id)
+    except Exception:
+        import logging
+        logging.getLogger(__name__).warning("lease sweep failed for %s", project_id, exc_info=True)
 
 
 def _candidate_selection(attempt_ids=None):
@@ -187,7 +208,7 @@ def _candidate_selection(attempt_ids=None):
 
 
 def wait_disposition(store, project_id, cursor, node_keys, attempt_ids,
-                     note_after_revision=None, filter_mode="all"):
+                     note_after_revision=None, filter_mode="all", include_lease_events=True):
     """An idle decision is a snapshot, never proof of remote quiescence."""
     with store.transaction() as conn:
         # Check event watermark and attempts in one snapshot. A commit after the
@@ -220,7 +241,7 @@ def wait_disposition(store, project_id, cursor, node_keys, attempt_ids,
             joiner = " OR " if filter_mode == "any" else " AND "
             clauses.append("(" + joiner.join(filters) + ")")
             args.extend(filter_args)
-        rows = conn.execute("SELECT attempt_id,status,artifact_ref FROM state_attempts WHERE " +
+        rows = conn.execute("SELECT * FROM state_attempts WHERE " +
                             " AND ".join(clauses), args).fetchall()
         paused = [{"attempt_id": row["attempt_id"], "status": row["status"]}
                   for row in rows if row["status"] == "paused"]
@@ -238,7 +259,18 @@ def wait_disposition(store, project_id, cursor, node_keys, attempt_ids,
             return {"reason": "action_required", "attempts": unpinned}
         # An allowlist of terminal states fails conservatively for unknown or
         # future statuses. Reservations and external registrations count as work.
-        if any(row["status"] not in {"candidate", "failed", "superseded"} for row in rows):
+        waiting = [row for row in rows if row["status"] not in {"candidate", "failed", "superseded"}]
+        if waiting and include_lease_events:
+            # Only attempts nobody renewed past their grace remain: that is work
+            # to decide (design §4.5), not something to keep waiting on. The
+            # attempts are reported, never changed.
+            from core.state_claims import attempt_lease_view
+            leases = [attempt_lease_view(row) for row in waiting]
+            if all(lease["lease_state"] == "reclaimable" for lease in leases):
+                return {"reason": "action_required", "attempts": [
+                    {"attempt_id": row["attempt_id"], "status": row["status"], **lease}
+                    for row, lease in zip(waiting, leases)]}
+        if waiting:
             return None
         if note_pending:
             return None

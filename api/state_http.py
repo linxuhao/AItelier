@@ -443,6 +443,19 @@ def create_state_router(service_dependency, access_dependency, read_dependency=N
 
     _declare(router.get("/projects/{project_id}/nodes/{node_key}")(node), "read", "get_node")
 
+    def claims(project_id: str, node_key: Annotated[list[str] | None, Query()] = None,
+               status: Annotated[list[str] | None, Query()] = None, driver_id: str | None = None,
+               limit: int = 100, service=Depends(service_dependency)):  # noqa: B008
+        return _call(service, "list_claims", {"project_id": project_id, "node_keys": node_key,
+                                              "statuses": status, "driver_id": driver_id, "limit": limit})
+
+    _declare(router.get("/projects/{project_id}/claims")(claims), "read", "list_claims")
+
+    def claim(project_id: str, claim_id: str, service=Depends(service_dependency)):  # noqa: B008
+        return _call(service, "get_claim", {"project_id": project_id, "claim_id": claim_id})
+
+    _declare(router.get("/projects/{project_id}/claims/{claim_id}")(claim), "read", "get_claim")
+
     def attempts(project_id: str, after: int = 0, limit: int = 30, service=Depends(service_dependency)):
         return _call(service, "project_attempts", {"project_id": project_id, "after": after, "limit": limit})
 

@@ -1,8 +1,8 @@
 """State DAG HTTP endpoints. Reads of the graph and the driver guide are public, and so are the driver's working notes for a project that has been opened; the director mailbox and the event plumbing are not."""
 from fastapi import Depends, Request
 
-from api.authz import (may_read_private, request_actor, request_identity, require_reader,
-                       require_writer)
+from api.authz import (is_via_cloudflare, may_read_private, request_actor, request_identity,
+                       require_reader, require_writer)
 from api.dependencies import get_db_manager, get_workspace_manager, get_skillflow, get_config_registry
 from core.state_service import StateService
 
@@ -25,6 +25,13 @@ def authenticated_driver_id(request) -> str | None:
     return identity.driver_id if identity is not None and identity.kind == "driver" else None
 
 
+def authenticated_is_admin(request) -> bool:
+    """Owner email or an is_admin driver, judged exactly like `require_admin`."""
+    identity = request_identity(request) if request is not None else None
+    return bool(identity is not None and identity.is_admin
+                and (identity.kind == "owner" or not is_via_cloudflare(request)))
+
+
 def get_service(request: Request, db=Depends(get_db_manager), ws=Depends(get_workspace_manager)):
     from api.mcp_router import _start_driver
     # WHO this request is is recorded ONCE, from the raw credential and not from
@@ -34,7 +41,8 @@ def get_service(request: Request, db=Depends(get_db_manager), ws=Depends(get_wor
     return StateService(db, ws, attach_driver=_start_driver, actor=authenticated_actor(request),
                         runtime_factory=lambda: (get_skillflow(), get_config_registry()),
                         project_read_trusted=may_read_private(request),
-                        driver_id=authenticated_driver_id(request))
+                        driver_id=authenticated_driver_id(request),
+                        is_admin=authenticated_is_admin(request))
 
 
 # Two verdicts, one identity check: `require_writer` for writes and for any read

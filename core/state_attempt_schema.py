@@ -32,6 +32,13 @@ CREATE TABLE {name} (
 )
 """
 
+LEASE_COLUMNS = (
+    ('owner_driver_id', 'TEXT'),
+    ('owner_fence', 'INTEGER NOT NULL DEFAULT 0'),
+    ('lease_expires_at', 'TEXT'),
+    ('last_heartbeat_at', 'TEXT'),
+)
+
 EXTRA_SCHEMA = """
 CREATE TABLE IF NOT EXISTS state_git_artifacts (
     commit_sha TEXT PRIMARY KEY, tree_sha TEXT NOT NULL,
@@ -140,6 +147,14 @@ def initialize(db, existing_schema: str) -> None:
             if not {'execution_kind','harness','external_id','reporting_actor','observation_version',
                     'artifact_kind','terminal_observation_id'} <= columns_now:
                 raise sqlite3.IntegrityError('Incomplete executor-neutral attempt schema; refusing partial upgrade')
+            # Multi-driver leases (design/multi-driver-coop.md §4.2, P1): additive
+            # columns only. Existing rows keep NULL owner/lease = legacy_unleased,
+            # which never expires; nothing is backfilled or guessed.
+            for column, ddl in LEASE_COLUMNS:
+                if column not in columns_now:
+                    conn.execute(f'ALTER TABLE state_attempts ADD COLUMN {column} {ddl}')
+            conn.execute('CREATE INDEX IF NOT EXISTS state_attempts_lease ON state_attempts(project_id,lease_expires_at) '
+                         'WHERE lease_expires_at IS NOT NULL')
             # Existing table creation is IF NOT EXISTS; keep its evidence/receipt
             # schema and triggers, indexes and explicit legacy compatibility.
             for statement in _statements(existing_schema):

@@ -39,6 +39,12 @@ FROM (
 
 def project_run_summary(service, project_id):
     """Private projection; returns identities ONLY for currently running runs."""
+    from core.state_claims import attempt_lease_view, live_claims, now_stamp
+    trusted = service.store.project_read_trusted
+    if trusted:
+        service.claims.sweep(project_id)
+    current = now_stamp()
+    claims = None
     with service.store.transaction() as conn:
         service.store._project(conn, project_id)
         membership = {}
@@ -57,12 +63,16 @@ def project_run_summary(service, project_id):
         # would be the lie. A reserved attempt has no report yet, and says so.
         holding = [dict(row) for row in conn.execute(
             "SELECT attempt_id,node_key,node_revision,harness,external_id,reporting_actor,status,"
-            "observation_version,created_at,updated_at,"
+            "observation_version,created_at,updated_at,owner_driver_id,owner_fence,lease_expires_at,"
             "(SELECT o.created_at FROM state_external_observations o WHERE o.attempt_id=a.attempt_id"
             " ORDER BY o.version DESC LIMIT 1) AS last_report_at "
             "FROM state_attempts a WHERE project_id=? AND execution_kind='external' "
             f"AND status IN ({','.join('?' * len(ACTIVE))}) ORDER BY updated_at DESC,attempt_id",
             (project_id, *ACTIVE))]
+        for row in holding:
+            row["lease_state"] = attempt_lease_view(row, current)["lease_state"]
+        if trusted:
+            claims = live_claims(conn, project_id, current=current)
     # The active count IS the listed rows, by construction: a number over an
     # empty list (or a listed agent under a zero) is the confusion this fixes.
     # 'candidate' is an external delivery, not an accepted goal — the same
@@ -153,6 +163,7 @@ def project_run_summary(service, project_id):
             'external_attempts_excluded':external['total'],'running_external':holding,
             'external_counts':external,
             'observed_at':now(),
+            **({'live_claims':claims} if claims is not None else {}),
             'runtime_unavailable':engine_unavailable,
             'scope':'Distinct workflow runs bound to State attempts or explicit run references, plus external attempts; '
                     'external executions are not synthetic runs and carry no usage. counts is workflow-only, '

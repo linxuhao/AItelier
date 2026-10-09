@@ -30,6 +30,9 @@ from core.state_service import StateService
 _DEDICATED_ACTOR = 'authenticated-state-token'
 _CALLER: contextvars.ContextVar = contextvars.ContextVar('state_only_caller',
                                                          default=(_DEDICATED_ACTOR, None))
+# Whether that driver is an is_admin driver (claims/policy admin steps, P1).
+_CALLER_IS_ADMIN: contextvars.ContextVar = contextvars.ContextVar('state_only_caller_is_admin',
+                                                                  default=False)
 
 
 class _BearerAuth:
@@ -49,6 +52,7 @@ class _BearerAuth:
         driver_header = [v for k,v in scope.get('headers',[]) if k.lower()==b'x-aitelier-driver-token']
         accepted = False
         caller = (_DEDICATED_ACTOR, None)
+        is_admin = False
         presented = None
         if len(auth)==1 and auth[0][:7].lower()==b'bearer ':
             presented = auth[0][7:]
@@ -63,14 +67,17 @@ class _BearerAuth:
             if row is not None:
                 accepted = True
                 caller = ('driver:' + row['driver_id'], row['driver_id'])
+                is_admin = bool(row['is_admin'])
         if not accepted:
             await JSONResponse({'detail':'State-only bearer authentication required'},status_code=401,
                                headers={'WWW-Authenticate':'Bearer'})(scope,receive,send)
             return
         reset = _CALLER.set(caller)
+        reset_admin = _CALLER_IS_ADMIN.set(is_admin)
         try:
             await self.app(scope,receive,send)
         finally:
+            _CALLER_IS_ADMIN.reset(reset_admin)
             _CALLER.reset(reset)
 
 
@@ -86,7 +93,8 @@ def create_app(db_path: str, token: str, *, with_mcp: bool = True) -> FastAPI:
         actor, driver_id = _CALLER.get()
         if driver_id is None:
             return shared
-        return StateService(database, actor=actor, project_read_trusted=True, driver_id=driver_id)
+        return StateService(database, actor=actor, project_read_trusted=True, driver_id=driver_id,
+                            is_admin=_CALLER_IS_ADMIN.get())
     mcp = None
     if with_mcp:
         from mcp.server.fastmcp import FastMCP

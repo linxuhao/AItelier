@@ -30,7 +30,8 @@ def register_state_tools(tool, mcp, service_factory=None):
             return service_factory()
         from api.dependencies import get_db_manager, get_workspace_manager, get_skillflow, get_config_registry
         from api.mcp_router import _request_from, _start_driver
-        from api.state_graph_routers import authenticated_actor, authenticated_driver_id
+        from api.state_graph_routers import (authenticated_actor, authenticated_driver_id,
+                                             authenticated_is_admin)
         request = None
         try:
             request = _request_from(mcp.get_context())
@@ -45,7 +46,8 @@ def register_state_tools(tool, mcp, service_factory=None):
                             actor=authenticated_actor(request),
                             runtime_factory=lambda: (get_skillflow(), get_config_registry()),
                             project_read_trusted=mcp_read_trust(request),
-                            driver_id=authenticated_driver_id(request))
+                            driver_id=authenticated_driver_id(request),
+                            is_admin=authenticated_is_admin(request))
 
     def invoke(action, arguments, write):
         from mcp.server.fastmcp.exceptions import ToolError as MCPToolError
@@ -84,7 +86,7 @@ def register_state_tools(tool, mcp, service_factory=None):
             out["driver"] = registry.get(identity.driver_id)
         return out
 
-    @tool("state_graph_read", "read", "State query. Over MCP this whole tool requires writer authorization even though it does not mutate. Actions include list_director_messages, list_issues, get_issue, get_driver_note, driver_note_index, search_driver_note_entries, get_driver_note_entry, check_driver_note_index, get_driver_guide_section, driver_note_history, search_driver_note_history, list_projects, get_graph, get_node, facet_lint, frontier, events, get_attempt, list_attempts, evidence, search_design_items, design_impact, wait_for_state_change. get_driver_note returns the entry index, its counts and revision, never free text; the index (and driver_note_index) lists only current, listed entries unless include_superseded/include_delisted is set, and superseded_count/delisted_count report what it hides. search_driver_note_entries matches entry assertions and bodies (Unicode case-insensitive literal) with bounded redacted excerpts and a next_after cursor. search_driver_note_history returns bounded redacted excerpts of retired section text in revision order. Design queries return candidates/review hints, not semantic proof. Use cursor-based waits for updates. Exact arguments: state_graph_help. On the REST transport the table core.state_commands.PUBLIC_READS decides which of these an anonymous visitor may read.")
+    @tool("state_graph_read", "read", "State query. Over MCP this whole tool requires writer authorization even though it does not mutate. Actions include list_director_messages, list_issues, get_issue, get_driver_note, driver_note_index, search_driver_note_entries, get_driver_note_entry, check_driver_note_index, get_driver_guide_section, driver_note_history, search_driver_note_history, list_projects, get_graph, get_node, facet_lint, frontier, events, get_attempt, list_attempts, evidence, search_design_items, design_impact, wait_for_state_change, list_claims, get_claim. get_driver_note returns the entry index, its counts and revision, never free text; the index (and driver_note_index) lists only current, listed entries unless include_superseded/include_delisted is set, and superseded_count/delisted_count report what it hides. search_driver_note_entries matches entry assertions and bodies (Unicode case-insensitive literal) with bounded redacted excerpts and a next_after cursor. search_driver_note_history returns bounded redacted excerpts of retired section text in revision order. Design queries return candidates/review hints, not semantic proof. Use cursor-based waits for updates. Exact arguments: state_graph_help. On the REST transport the table core.state_commands.PUBLIC_READS decides which of these an anonymous visitor may read.")
     async def state_graph_read(action: str, arguments: dict) -> dict:
         from mcp.server.fastmcp.exceptions import ToolError as MCPToolError
         try:
@@ -95,7 +97,7 @@ def register_state_tools(tool, mcp, service_factory=None):
         except StateGraphError as exc:
             raise MCPToolError(str(exc)) from exc
 
-    @tool("state_graph_write", "write", "Manage State facts using typed state_graph_help contracts. Actions include report_issue, link_issue, resolve_issue, send_director_message, acknowledge_director_message, resolve_director_message, write_driver_note_entry, supersede_driver_note_entry, delist_driver_note_entry, create_project, add_nodes, revise_node, split_node, supersede_node, set_node_facet, start_attempt, recover_attempt, reconcile_attempt, disposition_failed_attempt, start_external_attempt, report_external_attempt, record_evidence, verify_node, import_tasks. The director notebook holds rules only (update_driver_note and force=informational are refused): in-flight state goes to the State DAG instead - attempts, set_node_hold, report_issue, set_node_priority. Retire a rule with supersede_driver_note_entry; delist only an entry that can no longer change a decision. Report observations (defects, gaps, hand-offs, questions) with report_issue, not add_nodes; nodes are acceptance-bearing goals. Checkpoints stay ask; completion never implies verification. Evidence must come from an actual verifier, not invented passing results. Failed external attempts may retain scoped evidence only after a terminal quiescent report; they remain failed and unverifiable.")
+    @tool("state_graph_write", "write", "Manage State facts using typed state_graph_help contracts. Actions include report_issue, link_issue, resolve_issue, send_director_message, acknowledge_director_message, resolve_director_message, write_driver_note_entry, supersede_driver_note_entry, delist_driver_note_entry, create_project, add_nodes, revise_node, split_node, supersede_node, set_node_facet, start_attempt, recover_attempt, reconcile_attempt, disposition_failed_attempt, start_external_attempt, report_external_attempt, record_evidence, verify_node, import_tasks, claim_node, heartbeat, release_claim, set_multi_driver. The director notebook holds rules only (update_driver_note and force=informational are refused): in-flight state goes to the State DAG instead - attempts, set_node_hold, report_issue, set_node_priority. Retire a rule with supersede_driver_note_entry; delist only an entry that can no longer change a decision. Report observations (defects, gaps, hand-offs, questions) with report_issue, not add_nodes; nodes are acceptance-bearing goals. Checkpoints stay ask; completion never implies verification. Evidence must come from an actual verifier, not invented passing results. Failed external attempts may retain scoped evidence only after a terminal quiescent report; they remain failed and unverifiable.")
     def state_graph_write(action: str, arguments: dict) -> dict:
         return {"result": invoke(action, arguments, True)}
 

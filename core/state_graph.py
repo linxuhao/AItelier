@@ -299,6 +299,10 @@ def initialize_graph_schema(db) -> None:
         if "facet" not in {r["name"] for r in conn.execute("PRAGMA table_info(state_nodes)")}:
             conn.execute("ALTER TABLE state_nodes ADD COLUMN facet TEXT "
                          "CHECK(facet IN ('design','contract','test','content','integration'))")
+        # Additive (design/multi-driver-coop.md §9.1): every existing project is off.
+        if "multi_driver" not in {r["name"] for r in conn.execute("PRAGMA table_info(state_project_policy)")}:
+            conn.execute("ALTER TABLE state_project_policy ADD COLUMN multi_driver TEXT NOT NULL "
+                         "DEFAULT 'off' CHECK(multi_driver IN ('off','on'))")
         conn.commit()
 
 
@@ -324,6 +328,8 @@ def initialize_state_schema(db) -> None:
     initialize_issues(db)
     from core.director_messaging import initialize as initialize_messaging
     initialize_messaging(db)
+    from core.state_claims import initialize as initialize_claims
+    initialize_claims(db)
 
 
 class StateGraphStore:
@@ -767,10 +773,18 @@ class StateGraphStore:
         policy = project_policy(conn, project_id)
         holds = {r["node_key"]: dict(r) for r in conn.execute(
             "SELECT * FROM state_node_holds WHERE project_id=?", (project_id,))}
-        active = set()
+        active, lapsed = set(), set()
         if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='state_attempts'").fetchone():
-            active = {r[0] for r in conn.execute("SELECT node_key FROM state_attempts WHERE project_id=? "
-                      "AND status IN ('reserved','launching','running','paused','unknown')", (project_id,))}
+            from core.state_claims import now_stamp
+            current = now_stamp()
+            for r in conn.execute("SELECT * FROM state_attempts WHERE project_id=? "
+                                  "AND status IN ('reserved','launching','running','paused','unknown')", (project_id,)):
+                active.add(r["node_key"])
+                # A leased attempt whose lease ran out is still in progress (State
+                # never infers the worker stopped); readiness only says so.
+                expires = dict(r).get("lease_expires_at")
+                if expires is not None and current >= expires:
+                    lapsed.add(r["node_key"])
         result = []
         for nk, node in nodes.items():
             blocked_by = [d for d in graph[nk] if nodes[d]["status"] != "VERIFIED" or not nodes[d]["verified_receipt"]]
@@ -783,6 +797,7 @@ class StateGraphStore:
             item["blocked_by"] = blocked_by
             item["hold"], item["node_hold"] = hold, own_hold
             item["readiness"] = ("closed" if node["status"] in {"VERIFIED", "SUPERSEDED"}
+                                 else "in_progress_lease_expired" if nk in lapsed
                                  else "in_progress" if nk in active else "held" if hold
                                  else "blocked" if blocked_by else "ready")
             item["next_action"] = ready_next_action(node["status"], item["readiness"])

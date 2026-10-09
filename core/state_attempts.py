@@ -85,6 +85,11 @@ def _public(row: dict) -> dict:
     result["context"] = json.loads(result.pop("context_json"))
     result["dependencies"] = json.loads(result.pop("dependency_snapshot"))
     result["context_hash"] = digest(result["context"])
+    if result.get("status") in ACTIVE:
+        from core.state_claims import lease_state
+        result["lease_state"] = lease_state(result.get("lease_expires_at"))
+    else:
+        result["lease_state"] = None
     return result
 
 
@@ -130,12 +135,13 @@ class StateAttempts:
                 workflow: str, request_key: str, instruction: str = "",
                 continue_from: str | None = None, relay_digest: str | None = None,
                 frozen_prerequisites: dict | None = None,
-                base_sha: str | None = None) -> dict:
+                base_sha: str | None = None, owner_driver_id: str | None = None) -> dict:
         """Idempotent intent, persisted before a workflow can be launched."""
         key(workflow, "workflow")
         return self._reserve(project_id, node_key, expected_revision, workflow, request_key, instruction,
                              continue_from=continue_from, relay_digest=relay_digest,
-                             frozen_prerequisites=frozen_prerequisites, base_sha=base_sha)
+                             frozen_prerequisites=frozen_prerequisites, base_sha=base_sha,
+                             owner_driver_id=owner_driver_id)
 
     @staticmethod
     def _relay_source(conn, prior_id, project_id, node_key, workflow, node, deps):
@@ -176,8 +182,15 @@ class StateAttempts:
 
     def _reserve(self, project_id, node_key, expected_revision, workflow, request_key, instruction, *,
                  external=None, continue_from=None, relay_digest=None,
-                 frozen_prerequisites=None, base_sha=None, relay_handoff=None, preflight=None):
-        """Common atomic ownership/pin guard for every execution adapter."""
+                 frozen_prerequisites=None, base_sha=None, relay_handoff=None, preflight=None,
+                 owner_driver_id=None):
+        """Common atomic ownership/pin guard for every execution adapter.
+
+        ``owner_driver_id`` is the registered driver behind the request. Only in
+        a project whose policy has multi_driver=on does the new attempt record
+        it with fence 1 and a default lease (design §4.2); otherwise the row is
+        written exactly as before. The lease is RECORDED, never enforced here.
+        """
         key(request_key, "request key")
         integer(expected_revision, "expected_revision", 1)
         if not isinstance(instruction, str) or len(instruction) > 20000:
@@ -272,6 +285,16 @@ class StateAttempts:
                       "external_id": external["external_id"] if external else None,
                       "reporting_actor": external["reporting_actor"] if external else None,
                       "status": "running" if external else "reserved", "created_at": now(), "updated_at": now()}
+            lease = None
+            if owner_driver_id:
+                from core import state_claims
+                if state_claims.multi_driver_on(conn, project_id):
+                    current = state_claims.now_stamp()
+                    lease = {"owner_driver_id": owner_driver_id, "owner_fence": 1,
+                             "lease_expires_at": state_claims.add_seconds(
+                                 current, state_claims.DEFAULT_LEASE_SECONDS),
+                             "last_heartbeat_at": current}
+                    record.update(lease)
             try:
                 conn.execute("INSERT INTO state_attempts(" + ",".join(record) + ") VALUES(" +
                              ",".join("?" for _ in record) + ")", tuple(record.values()))
@@ -287,11 +310,14 @@ class StateAttempts:
                 )
             conn.execute("UPDATE state_nodes SET status='OPEN',updated_at=? WHERE project_id=? AND node_key=?",
                          (now(), project_id, node_key))
+            payload = {"attempt_id": aid, "execution_project_id": execution, "execution_kind": kind,
+                       "workflow": workflow, "revision": expected_revision, "external": external,
+                       "relay_of": ctx.get("relay_of")}
+            if lease is not None:
+                payload.update(owner_driver_id=owner_driver_id, owner_fence=1,
+                               lease_expires_at=lease["lease_expires_at"])
             self.store._event(conn, project_id, node_key,
-                              "external_attempt_registered" if external else "attempt_reserved",
-                              {"attempt_id": aid, "execution_project_id": execution, "execution_kind": kind,
-                               "workflow": workflow, "revision": expected_revision, "external": external,
-                               "relay_of": ctx.get("relay_of")})
+                              "external_attempt_registered" if external else "attempt_reserved", payload)
             return _public(self._attempt(conn, aid))
 
     def record_preflight(self, attempt_id: str, report: dict, error: str | None = None) -> dict:

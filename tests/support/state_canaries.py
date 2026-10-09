@@ -106,6 +106,20 @@ def _plan():
             (c("state_git_artifacts"), c("state_git_artifacts") + "-tree",
              c("state_git_artifacts") + "-sha256", "refs/vault/canary",
              c("state_git_artifacts").encode(), now)),
+        # A LIVE claim on the OPENED project's public node: an anonymous
+        # overview/get_node/run_summary of that project must not carry it.
+        "state_node_claims": (
+            ("INSERT INTO state_node_claims(claim_id,project_id,node_key,driver_id,purpose,status,fence,"
+             "node_revision,attempt_id,workspace,subagent,lease_seconds,lease_expires_at,last_heartbeat_at,"
+             "request_key,request_hash,created_at,updated_at) "
+             "VALUES(?,?,'a',?,'implement','live',1,1,NULL,?,NULL,7200,?,?,'canary-rk','0',?,?)"),
+            (c("state_node_claims") + "-claim", OPEN, c("state_node_claims"), c("state_node_claims"),
+             "2999-01-01T00:00:00.000000+00:00", now, now, now)),
+        "state_claim_history": (
+            ("INSERT INTO state_claim_history(claim_id,project_id,node_key,driver_id,purpose,status,fence,"
+             "lease_expires_at,actor,reason,created_at) VALUES(?,?,'a',?,'implement','released',1,?,?,?,?)"),
+            (c("state_node_claims") + "-claim", OPEN, c("state_claim_history"), now,
+             c("state_claim_history"), c("state_claim_history"), now)),
     }
 
 

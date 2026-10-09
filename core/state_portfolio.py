@@ -15,7 +15,8 @@ from core.state_metadata import node_hold, project_policy
 
 ATTEMPT_COLUMNS = ("seq", "attempt_id", "project_id", "node_key", "node_revision", "workflow",
                    "execution_project_id", "run_id", "status", "artifact_ref", "created_at", "updated_at",
-                   "execution_kind", "harness", "external_id", "reporting_actor", "observation_version", "artifact_kind")
+                   "execution_kind", "harness", "external_id", "reporting_actor", "observation_version", "artifact_kind",
+                   "owner_driver_id", "owner_fence", "lease_expires_at")
 
 
 class StatePortfolio:
@@ -70,12 +71,42 @@ class StatePortfolio:
             old = project_policy(conn, project_id)
             if old["revision"] != expected_revision:
                 raise StateConflict("project policy revision changed")
-            conn.execute("INSERT INTO state_project_policy VALUES(?,?,?,?,?,?) ON CONFLICT(project_id) DO UPDATE SET "
+            conn.execute("INSERT INTO state_project_policy(project_id,revision,dispatch,reason,actor,updated_at) "
+                         "VALUES(?,?,?,?,?,?) ON CONFLICT(project_id) DO UPDATE SET "
                          "revision=excluded.revision,dispatch=excluded.dispatch,reason=excluded.reason,"
                          "actor=excluded.actor,updated_at=excluded.updated_at",
                          (project_id, expected_revision + 1, dispatch, reason, self.actor, now()))
             self.store._event(conn, project_id, None, "dispatch_policy_changed",
                               {"dispatch": dispatch, "reason": reason, "revision": expected_revision + 1, "actor": self.actor})
+            return project_policy(conn, project_id)
+
+    def set_multi_driver(self, project_id, multi_driver, expected_revision, reason):
+        """Owner/admin switch for claims and attempt leases (design §9.1, D2/§7.1).
+
+        Shares the policy revision with set_dispatch (one CAS for the row). In
+        P1 `on` only RECORDS claims and leases; nothing is enforced.
+        """
+        if not getattr(self.service, "is_admin", False):
+            from core.state_claims import ClaimError
+            raise ClaimError("admin_required", "only the owner or an admin driver changes multi_driver")
+        if not isinstance(multi_driver, str) or multi_driver not in {"off", "on"}:
+            raise StateGraphError("multi_driver must be off or on")
+        integer(expected_revision, "expected_revision", 0)
+        reason = text(reason, "multi_driver reason", 4000)
+        with self.store.transaction(write=True) as conn:
+            self.store._project(conn, project_id)
+            old = project_policy(conn, project_id)
+            if old["revision"] != expected_revision:
+                raise StateConflict("project policy revision changed")
+            conn.execute("INSERT INTO state_project_policy(project_id,revision,dispatch,reason,actor,updated_at,"
+                         "multi_driver) VALUES(?,?,?,?,?,?,?) ON CONFLICT(project_id) DO UPDATE SET "
+                         "revision=excluded.revision,multi_driver=excluded.multi_driver,reason=excluded.reason,"
+                         "actor=excluded.actor,updated_at=excluded.updated_at",
+                         (project_id, expected_revision + 1, old["dispatch"], reason, self.actor, now(),
+                          multi_driver))
+            self.store._event(conn, project_id, None, "multi_driver_policy_changed",
+                              {"multi_driver": multi_driver, "reason": reason,
+                               "revision": expected_revision + 1, "actor": self.actor})
             return project_policy(conn, project_id)
 
     def _hold(self, conn, project_id, node_key, held, expected_revision, reason):
@@ -177,8 +208,18 @@ class StatePortfolio:
             return {"projects": result[:limit], "next_after": result[limit - 1]["project_id"] if len(result) > limit else None}
 
     def overview(self, project_id):
+        from core.state_claims import attempt_lease_view, live_claims, now_stamp
+        trusted = self.store.project_read_trusted
+        if self.service is not None and trusted:
+            self.service.claims.sweep(project_id)
+        current = now_stamp()
         with self.store.transaction() as conn:
             view = self.store._graph_view(conn, project_id)
+            # Claims live in a private table: only a trusted reader gets them.
+            claims = {}
+            if trusted:
+                for claim in live_claims(conn, project_id, current=current):
+                    claims.setdefault(claim["node_key"], []).append(claim)
             latest = {r["node_key"]: dict(r) for r in conn.execute("SELECT a.* FROM state_attempts a "
                       "JOIN (SELECT node_key,MAX(seq) AS last FROM state_attempts WHERE project_id=? GROUP BY node_key) b "
                       "ON a.seq=b.last", (project_id,))}
@@ -203,9 +244,13 @@ class StatePortfolio:
                 entry["facet"] = n.get("facet")
                 entry.update(title=n["goal"].splitlines()[0][:180], domain=n["node_key"].split(".")[0],
                              criteria_count=len(n["acceptance"]), attempt_count=count.get(n["node_key"], 0),
-                             latest_attempt={k: a[k] for k in ATTEMPT_COLUMNS} if a else None,
+                             latest_attempt=({**{k: a[k] for k in ATTEMPT_COLUMNS},
+                                              "lease_state": attempt_lease_view(a, current)["lease_state"]}
+                                             if a else None),
                              latest_evidence=dict(evidence.get(a["attempt_id"], {})) if a else {},
                              open_issue_count=open_issues[n["node_key"]])
+                if trusted:
+                    entry["claims"] = claims.get(n["node_key"], [])
                 nodes.append(entry)
             seq = conn.execute("SELECT COALESCE(MAX(seq),0) FROM state_events WHERE project_id=?", (project_id,)).fetchone()[0]
             return {"project": view["project"], "source": self._source(conn, view["project"]),

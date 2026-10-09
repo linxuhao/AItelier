@@ -73,6 +73,11 @@ PRIVATE_STATE_TABLES = frozenset({
     # through an untrusted connection, so this table is classified here and the
     # identity is projected with ``bundle_bytes`` replaced by NULL below.
     "state_git_artifacts",
+    # Who is working on what (design/multi-driver-coop.md §4.2): driver ids,
+    # workspaces and release reasons. Writer-only like the mailbox; a public
+    # read of an opened project shows only the attempt lease columns, which
+    # live in the public state_attempts table.
+    "state_node_claims", "state_claim_history",
 })
 
 PUBLIC_STATE_TABLES = frozenset({

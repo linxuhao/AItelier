@@ -130,7 +130,8 @@ _UNDECLARED_TRUST = object()
 
 class StateService:
     def __init__(self, db, ws=None, sf=None, registry=None, attach_driver=None, actor="local-operator",
-                 runtime_factory=None, project_read_trusted=_UNDECLARED_TRUST, driver_id=None):
+                 runtime_factory=None, project_read_trusted=_UNDECLARED_TRUST, driver_id=None,
+                 is_admin=False):
         # Whether the caller behind THIS service may read a project nobody opened.
         # The State HTTP transport derives it from the raw request credential; the
         # internal driver, MCP and every embedder pass it EXPLICITLY. There is no
@@ -159,7 +160,7 @@ class StateService:
         self.issues = StateIssues(self.store, actor)
         self.attempts = StateAttempts(self.store)
         from core.state_external import ExternalAttempts
-        self.external = ExternalAttempts(self.attempts, actor)
+        self.external = ExternalAttempts(self.attempts, actor, driver_id=driver_id)
         self.attach_driver = attach_driver
         self.actor = actor
         # The registered driver behind this request (design/multi-driver-coop.md
@@ -167,6 +168,11 @@ class StateService:
         # off or not a driver (owner, legacy, internal). `execute` uses it to
         # pin `director_identity` to `<driver_id>` / `<driver_id>/<label>`.
         self.driver_id = driver_id
+        # Owner (Access email) or an is_admin driver, from the same raw
+        # credential. Grants only the admin steps of claims/policy (P1).
+        self.is_admin = is_admin is True
+        from core.state_claims import StateClaims
+        self.claims = StateClaims(self.store, actor, driver_id=driver_id, is_admin=self.is_admin)
         from core.state_design import StateDesign
         self.design = StateDesign(self.store, actor)
         self.runtime_factory = runtime_factory
@@ -179,14 +185,16 @@ class StateService:
     @writer_only_read("wait_for_state_change")
     async def wait_for_state_change(self, project_id, after=0, node_keys=None, attempt_ids=None,
                                     note_after_revision=None, filter_mode="all", actionable_only=True,
-                                    timeout_seconds=30.0, limit=100, return_when_idle=False):
+                                    timeout_seconds=30.0, limit=100, return_when_idle=False,
+                                    include_lease_events=True):
         from core.state_changes import wait_for_state_change
         if note_after_revision is not None:
             from core.state_driver_notes import NOTE_AFTER_REVISION_RETIRED
             raise StateGraphError(NOTE_AFTER_REVISION_RETIRED)
         return await wait_for_state_change(
             self, project_id, after, node_keys, attempt_ids, note_after_revision,
-            filter_mode, actionable_only, timeout_seconds, limit, return_when_idle)
+            filter_mode, actionable_only, timeout_seconds, limit, return_when_idle,
+            include_lease_events)
 
     def create_project(self, project_id, title, source_project_id=None):
         if source_project_id and not self.db.get_project(source_project_id):
@@ -222,9 +230,16 @@ class StateService:
         return project_run_summary(self, project_id)
 
     def node_context(self, project_id, node_key):
+        self.claims.sweep(project_id)
         node = self.store.get_node(project_id, node_key)
         receipts = {}
+        claims = None
         with self.store.transaction() as conn:
+            if self.project_read_trusted:
+                # Claims are private (state_node_claims is a private table): an
+                # anonymous reader of an opened project does not see them.
+                from core.state_claims import live_claims
+                claims = live_claims(conn, project_id, node_key)
             for dep in node["dependencies"]:
                 d = self.store._node(conn, project_id, dep)
                 r = conn.execute("SELECT * FROM state_acceptances WHERE receipt_id=?", (d["verified_receipt"],)).fetchone()
@@ -234,7 +249,8 @@ class StateService:
         return {"node": node, "dependency_receipts": receipts, "open_issues": open_issues,
                 "attempts": self.attempts.list(project_id, node_key, limit=10),
                 "references": self.portfolio.references(project_id, node_key, limit=100),
-                "design": self.design.node_bindings(project_id, node_key)}
+                "design": self.design.node_bindings(project_id, node_key),
+                **({"claims": claims} if claims is not None else {})}
 
     def _components(self):
         # Goal inspection/planning must survive an unavailable executor. Only
@@ -437,7 +453,8 @@ class StateService:
             raise StateGraphError("continue_from needs a code-producing workflow; only a worktree can carry a draft forward")
         attempt = self.attempts.reserve(project_id, node_key, expected_revision, workflow, request_key, instruction,
                                         continue_from=continue_from, relay_digest=relay_digest,
-                                        frozen_prerequisites=frozen_prerequisites, base_sha=base_sha)
+                                        frozen_prerequisites=frozen_prerequisites, base_sha=base_sha,
+                                        owner_driver_id=self.driver_id)
         return self._launch_or_recover(attempt, manifest, source)
 
     def _launch_or_recover(self, attempt, manifest, source):

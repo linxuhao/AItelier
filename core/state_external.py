@@ -17,10 +17,12 @@ from core.state_report_integrity import retain_report, store_report_blob, valida
 
 
 class ExternalAttempts:
-    def __init__(self, attempts, actor: str):
+    def __init__(self, attempts, actor: str, driver_id: str | None = None):
         self.attempts = attempts
         self.store = attempts.store
         self.actor = text(actor, 'authenticated reporter', 300)
+        # Recorded as the attempt's owner only where multi_driver=on (P1 leases).
+        self.driver_id = driver_id
 
     def register(self, project_id, node_key, expected_revision, harness, external_id,
                  request_key, instruction='', base_sha=None, preflight=None):
@@ -31,7 +33,8 @@ class ExternalAttempts:
         with dq.operation_admission_fence():
             return self.attempts._reserve(
                 project_id, node_key, expected_revision, None, request_key,
-                instruction, external=identity, base_sha=base_sha, preflight=preflight)
+                instruction, external=identity, base_sha=base_sha, preflight=preflight,
+                owner_driver_id=self.driver_id)
 
     def register_relay_handoff(self, project_id, node_key, expected_revision,
                                harness, external_id, request_key, instruction,
@@ -50,7 +53,8 @@ class ExternalAttempts:
         with dq.operation_admission_fence():
             return self.attempts._reserve(
                 project_id, node_key, expected_revision, None, request_key,
-                instruction, external=identity, relay_handoff=relay_handoff)
+                instruction, external=identity, relay_handoff=relay_handoff,
+                owner_driver_id=self.driver_id)
 
     @staticmethod
     def _terminal_report(report_ref: str, report_sha256: str) -> tuple[str, bytes]:

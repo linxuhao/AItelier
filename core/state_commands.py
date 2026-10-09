@@ -640,7 +640,7 @@ READ_REQUESTS = {
     "search_driver_note_history": SearchDriverNoteHistory, "get_attempt": Attempt,
     "driver_note_index": DriverNoteIndex, "get_driver_note_entry": DriverNoteEntry,
     "search_driver_note_entries": SearchDriverNoteEntries,
-    "check_driver_note_index": DriverNote, "get_driver_guide_section": DriverGuideSection,
+    "check_driver_note_index": NotebookScopeRequest, "get_driver_guide_section": DriverGuideSection,
     "list_attempts": ListAttempts, "evidence": Attempt,
     "project_catalog": ProjectCatalog, "project_overview": Project,
     "project_run_summary": Project,

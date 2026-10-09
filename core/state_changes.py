@@ -88,14 +88,16 @@ def scan(store, project_id, after, node_keys, attempt_ids, note_after_revision,
 
 async def wait_for_state_change(service, project_id, after=0, node_keys=None, attempt_ids=None,
                                 note_after_revision=None, filter_mode="all", actionable_only=True,
-                                timeout_seconds=30.0, limit=100, return_when_idle=False):
+                                timeout_seconds=30.0, limit=100, return_when_idle=False,
+                                include_driver_inbox=False, inbox_after=0):
     # Service callers receive the same strict contract as REST/MCP callers.
     from core.state_commands import WaitForStateChange
     from core.state_graph import key
     args = WaitForStateChange(project_id=project_id, after=after, node_keys=node_keys,
         attempt_ids=attempt_ids, note_after_revision=note_after_revision, filter_mode=filter_mode,
         actionable_only=actionable_only, timeout_seconds=timeout_seconds,
-        limit=limit, return_when_idle=return_when_idle)
+        limit=limit, return_when_idle=return_when_idle,
+        include_driver_inbox=include_driver_inbox, inbox_after=inbox_after)
     key(project_id, "project_id")
     for value in (node_keys or []) + (attempt_ids or []):
         key(value)
@@ -111,8 +113,15 @@ async def wait_for_state_change(service, project_id, after=0, node_keys=None, at
             events, cursor = await asyncio.to_thread(
                 scan, service.store, project_id, cursor, node_keys, attempt_ids,
                 note_after_revision, filter_mode, actionable_only, limit)
-            if events:
-                return {"events": events, "next_after": cursor, "timed_out": False}
+            inbox = None
+            if include_driver_inbox:
+                inbox = await asyncio.to_thread(service.driver_inbox.list_driver_messages, None, inbox_after, limit)
+                inbox_after = inbox["next_after"]
+            if events or (inbox and inbox["messages"]):
+                result = {"events": events, "next_after": cursor, **({"next_inbox_after": inbox_after} if include_driver_inbox else {}), "timed_out": False}
+                if include_driver_inbox:
+                    result.update(driver_inbox=inbox["messages"], next_inbox_after=inbox_after)
+                return result
             recovery_ok = True
             if timeout_seconds > 0 and (service.sf is not None or service.runtime_factory is not None):
                 # One bounded page per observation cycle; rotated to prevent
@@ -124,7 +133,7 @@ async def wait_for_state_change(service, project_id, after=0, node_keys=None, at
                             recover_page, service, project_id, recovery_after, node_keys,
                             attempt_ids, filter_mode), timeout=remaining)
                     except asyncio.TimeoutError:
-                        return {"events": [], "next_after": cursor, "timed_out": True}
+                        return {"events": [], "next_after": cursor, **({"next_inbox_after": inbox_after} if include_driver_inbox else {}), "timed_out": True}
 
             if args.return_when_idle and not recovery_ok:
                 # Recovery failures cannot authorize a decision from cached state.
@@ -133,8 +142,8 @@ async def wait_for_state_change(service, project_id, after=0, node_keys=None, at
                     scan, service.store, project_id, cursor, node_keys, attempt_ids,
                     note_after_revision, filter_mode, actionable_only, limit)
                 if events:
-                    return {"events": events, "next_after": cursor, "timed_out": False}
-                return {"events": [], "next_after": cursor, "timed_out": False,
+                    return {"events": events, "next_after": cursor, **({"next_inbox_after": inbox_after} if include_driver_inbox else {}), "timed_out": False}
+                return {"events": [], "next_after": cursor, **({"next_inbox_after": inbox_after} if include_driver_inbox else {}), "timed_out": False,
                         "reason": "observation_unavailable"}
             # Recovery may have committed an actionable event; read it before sleeping.
             if signal.is_set():
@@ -143,7 +152,7 @@ async def wait_for_state_change(service, project_id, after=0, node_keys=None, at
             # In particular a resumed checkpoint may still be projected paused.
             if recovery_after:
                 if loop.time() >= deadline:
-                    return {"events": [], "next_after": cursor, "timed_out": True}
+                    return {"events": [], "next_after": cursor, **({"next_inbox_after": inbox_after} if include_driver_inbox else {}), "timed_out": True}
                 continue
             if args.return_when_idle:
                 outcome = await asyncio.to_thread(
@@ -152,10 +161,10 @@ async def wait_for_state_change(service, project_id, after=0, node_keys=None, at
                 if outcome == "rescan":
                     continue
                 if outcome is not None:
-                    return {"events": [], "next_after": cursor, "timed_out": False, **outcome}
+                    return {"events": [], "next_after": cursor, **({"next_inbox_after": inbox_after} if include_driver_inbox else {}), "timed_out": False, **outcome}
             remaining = deadline - loop.time()
             if remaining <= 0:
-                return {"events": [], "next_after": cursor, "timed_out": True}
+                return {"events": [], "next_after": cursor, **({"next_inbox_after": inbox_after} if include_driver_inbox else {}), "timed_out": True}
             try:
                 # Other processes do not share the notification registry. This
                 # bounded server-side fallback also replays commits after restart.

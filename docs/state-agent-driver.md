@@ -119,3 +119,46 @@ Every node you create carries `facet`: design | contract | test | content | inte
 ## Evolve and hand off
 Add/revise/split/hold/supersede goals with expected revisions and reasons. Do not weaken a criterion to hide failure. After a contract change, reread the frozen context and dispatch a new attempt only when dependencies permit. External reports cannot replace a SkillFlow attempt's completion. One external job covering multiple goals needs a separately scoped attempt per goal.
 Maintain the compact notebook and reference State events and exact reports without duplicating their histories. Notify the user for meaningful completion, failure, blockers or required decisions; coalesce routine progress. A wait, refresh, completed run or private commit never authorizes publication or deployment.
+
+
+## Driver inbox, private notebooks and project quorum (P2)
+
+Do not create a project as a driver mailbox. send_driver_message addresses
+target_driver_id or project_members; recipients own separate versioned deliveries.
+Only the recipient may acknowledge/resolve, except explicit owner/admin
+break-glass with a reason. System notices carry sender_driver_id=null.
+wait_for_driver_inbox uses the recipient sequence. For a combined wait set
+include_driver_inbox=true and pass inbox_after; keep both next_after and
+next_inbox_after. These reads are private and never PUBLIC_READS.
+
+The seven entry notebook actions accept either project_id or driver_id.
+state_graph_help preserves the project argument schema and publishes
+driver_arguments for the private scope. Project rules remain in_force only.
+Driver notes default to informational and may also be in_force; only the
+notebook owner writes, registered drivers/owner read. Public must be a project
+member before it can read private notebooks. dnote entries never enter overview,
+frontier, waits or PostCompact; State remains authoritative. Project rules cannot
+reference dnote addresses. Driver entries may reference either notebook namespace
+and explicit attempt://, issue://, node://, claim:// and subagent:// State addresses,
+which are checked on write.
+
+Project messages still have one delivery per target project. ack_mode=at_least_n
+defaults to ack_quorum=1; ack_mode=broadcast snapshots that project's members.
+It differs from broadcast=true, the cross-project send flag. Each driver acks
+once with CAS; repeated same-driver ack replays the first result. Transient quorum
+completion resolves in the ack transaction. Standing remains acknowledged until
+explicit resolve. Member removal drops only pending snapshot obligations, never
+lowers a numeric quorum; unreachable numeric quorums are exposed.
+
+Unextended v2 requests retain the closed v2 wire projection. Registered callers
+still use the quorum state (a first transient ack can therefore be resolved).
+protocol_version=v3 or new ack options request the v3 metadata/error envelope.
+V3 same-project sends refuse use_driver_inbox; the legacy v2 invalid-request
+shape remains for old clients. List v3 exposes acks, pending_drivers, acked_by_me,
+legacy_ack and needs_my_ack. Historical status/version/idempotency/events remain
+unchanged; historical acknowledgements have no invented driver ack rows.
+
+PostCompact detects P2 capability and authenticated identity, then reads
+driver_postcompact_guidance. It combines project standing, the caller's unacked
+broadcast transient messages and own driver standing notices within eight items
+and 3000 characters. It does not read private notebook bodies.

@@ -2,14 +2,26 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from functools import wraps
 from datetime import datetime, timezone
 import json
 import unicodedata
 from uuid import UUID, uuid4
 
-from core.director_messaging_protocol import DirectorMessageError, SCHEMA_ID
+from core.director_messaging_protocol import DirectorMessageError, SCHEMA_ID, V3_SCHEMA_ID, ERROR_CODES
 from core.state_driver_notes import _redact
 from core.state_privacy import UntrustedDatabase, writer_only_read
+
+
+def _message_errors(method):
+    @wraps(method)
+    def invoke(self, *args, **kwargs):
+        try:
+            return method(self, *args, **kwargs)
+        except DirectorMessageError as exc:
+            schema = self.reply_schema if exc.code in ERROR_CODES else V3_SCHEMA_ID
+            raise DirectorMessageError(exc.code, schema) from exc
+    return invoke
 
 
 SCHEMA = """
@@ -117,6 +129,18 @@ def initialize(db) -> None:
                 "ALTER TABLE state_director_messages ADD COLUMN "
                 "delivery_mode TEXT NOT NULL DEFAULT 'transient' "
                 "CHECK(delivery_mode IN ('transient','standing'))")
+        from core import director_messaging_quorum as quorum
+        migrate_acks = "ack_mode" not in columns
+        for name, definition in [
+            ("sender_driver_id", "TEXT"),
+            ("ack_mode", "TEXT NOT NULL DEFAULT 'at_least_n' CHECK(ack_mode IN ('at_least_n','broadcast'))"),
+            ("ack_quorum", "INTEGER NOT NULL DEFAULT 1 CHECK(ack_quorum>=1)"),
+        ]:
+            if name not in columns:
+                conn.execute("ALTER TABLE state_director_messages ADD COLUMN " + name + " " + definition)
+        conn.executescript(quorum.SCHEMA)
+        if migrate_acks:
+            conn.execute("INSERT OR IGNORE INTO state_director_legacy_acks SELECT delivery_id FROM state_director_deliveries WHERE status IN ('acknowledged','resolved')")
         conn.commit()
 
 
@@ -124,11 +148,14 @@ class SQLiteDirectorMessaging:
     """Actor-bound provider sharing State's SQLite transaction/event boundary."""
 
     def __init__(self, store, actor: str, *, clock=None, id_factory=None, redactor=_redact,
-                 project_read_trusted: bool = False):
+                 project_read_trusted: bool = False, driver_id=None):
         if not isinstance(actor, str) or not actor:
             raise ValueError("actor must be authenticated nonempty text")
         self.store = store
         self.actor = actor
+        self.driver_id = driver_id
+        self.v3 = bool(driver_id or actor.startswith("owner:"))
+        self.reply_schema = SCHEMA_ID
         # Undeclared is UNTRUSTED: a provider rebuilt from an anonymous service's
         # store must not read the director inbox by staying silent.
         self.project_read_trusted = bool(project_read_trusted)
@@ -141,7 +168,8 @@ class SQLiteDirectorMessaging:
     def for_actor(self, actor):
         return type(self)(self.store, actor, clock=self._clock,
                           id_factory=self._id_factory, redactor=self._redactor,
-                          project_read_trusted=self.project_read_trusted)
+                          project_read_trusted=self.project_read_trusted,
+                          driver_id=self.driver_id if actor == self.actor else None)
 
     def _new_id(self):
         value = self._id_factory()
@@ -187,14 +215,46 @@ class SQLiteDirectorMessaging:
         if operation == "send_director_message":
             result.get("message", {}).setdefault("delivery_mode", "transient")
         result["replayed"] = True
-        return _success(result)
+        return self._success(result)
 
     def _record(self, conn, scope, operation, request_key, payload_json, result):
         conn.execute(
             "INSERT INTO state_director_idempotency"
             "(actor,scope_project_id,operation,request_key,payload_json,result_json) VALUES(?,?,?,?,?,?)",
             (self.actor, scope, operation, request_key, payload_json, _canonical(result)))
-        return _success(deepcopy(result))
+        return self._success(deepcopy(result))
+
+    def _set_reply_schema(self, protocol_version, extended=False):
+        if protocol_version not in ("v2","v3"):
+            _invalid()
+        self.reply_schema = V3_SCHEMA_ID if protocol_version=="v3" or extended else SCHEMA_ID
+        if protocol_version=="v3" or extended:
+            self.v3 = True
+
+    def _success(self, result):
+        result = deepcopy(result)
+        if self.reply_schema == SCHEMA_ID:
+            if "message" in result:
+                result["message"] = {k:v for k,v in result["message"].items()
+                                     if k not in ("sender_driver_id","ack_mode","ack_quorum")}
+            if "items" in result:
+                result["items"] = [{"message":{k:v for k,v in i["message"].items()
+                                    if k not in ("sender_driver_id","ack_mode","ack_quorum")},
+                                   "delivery":i["delivery"]} for i in result["items"]]
+            if "delivery" in result:
+                result = {k:v for k,v in result.items() if k in ("delivery","replayed")}
+        return {"schema": self.reply_schema, "result": result}
+
+    def _acker(self, conn, project_id):
+        from core.director_messaging_quorum import members
+        if self.actor.startswith("owner:"):
+            return "owner"
+        if not self.driver_id or self.driver_id not in members(conn, project_id):
+            raise DirectorMessageError("unauthorized", V3_SCHEMA_ID)
+        row = conn.execute("SELECT status FROM drivers WHERE driver_id=?", (self.driver_id,)).fetchone()
+        if row is None or row["status"] != "active":
+            raise DirectorMessageError("unauthorized", V3_SCHEMA_ID)
+        return self.driver_id
 
     @staticmethod
     def _next_delivery_seq(conn, project_id):
@@ -210,9 +270,14 @@ class SQLiteDirectorMessaging:
                          (seq + 1, project_id))
         return seq
 
+    @_message_errors
     def send_director_message(self, sender_project_id, director_identity, request_key,
                               subject, body, target_project_id=None, broadcast=False,
-                              reply_to_delivery_id=None, delivery_mode="transient"):
+                              reply_to_delivery_id=None, delivery_mode="transient",
+                              ack_mode=None, ack_quorum=None, protocol_version="v2"):
+        self._set_reply_schema(protocol_version, ack_mode is not None or ack_quorum is not None)
+        if ack_mode is not None or ack_quorum is not None:
+            self.v3 = True
         sender_project_id = _db_id(sender_project_id)
         director_identity = _nfc(director_identity, 1, 320)
         request_key = _nfc(request_key, 1, 320)
@@ -232,6 +297,8 @@ class SQLiteDirectorMessaging:
         if sum((targeted, broadcasting, replying)) != 1:
             _invalid()
         if targeted and target_project_id == sender_project_id:
+            if self.reply_schema == V3_SCHEMA_ID:
+                raise DirectorMessageError("use_driver_inbox", V3_SCHEMA_ID)
             _invalid()
         payload = {
             "body": body, "broadcast": broadcast, "director_identity": director_identity,
@@ -239,6 +306,13 @@ class SQLiteDirectorMessaging:
             "sender_project_id": sender_project_id, "subject": subject,
             "target_project_id": target_project_id, "delivery_mode": delivery_mode,
         }
+        if ack_mode is not None or ack_quorum is not None:
+            self.v3 = True
+            payload.update(ack_mode=ack_mode or "at_least_n", ack_quorum=ack_quorum if ack_quorum is not None else 1)
+        ack_mode = "at_least_n" if ack_mode is None else ack_mode
+        ack_quorum = 1 if ack_quorum is None else ack_quorum
+        if ack_mode not in ("at_least_n","broadcast") or type(ack_quorum) is not int or ack_quorum<1:
+            _invalid()
         payload_json = _canonical(payload)
         operation = "send_director_message"
         with self.store.transaction(write=True) as conn:
@@ -269,6 +343,9 @@ class SQLiteDirectorMessaging:
                 targets = [cited["sender_project_id"]]
                 thread_id = cited["thread_id"]
 
+            from core.director_messaging_quorum import members
+            if self.v3 and ack_mode == "at_least_n" and any(ack_quorum > len(members(conn,t)) for t in targets):
+                raise DirectorMessageError("ack_quorum_unreachable", V3_SCHEMA_ID)
             message_id = self._new_id()
             thread_id = thread_id or message_id
             created_at = self._now()
@@ -287,6 +364,8 @@ class SQLiteDirectorMessaging:
                 tuple(message[key] for key in (
                     "message_id", "thread_id", "sender_project_id", "director_identity", "actor",
                     "subject", "body", "created_at", "reply_to_delivery_id", "delivery_mode")))
+            conn.execute("UPDATE state_director_messages SET sender_driver_id=?,ack_mode=?,ack_quorum=? WHERE message_id=?",
+                         (self.driver_id,ack_mode,ack_quorum,message_id))
             deliveries = []
             for target in targets:
                 delivery = {
@@ -297,16 +376,25 @@ class SQLiteDirectorMessaging:
                 }
                 conn.execute("INSERT INTO state_director_deliveries VALUES(?,?,?,?,?,?)",
                              tuple(delivery.values()))
+                if self.v3 and ack_mode == "broadcast":
+                    for member in members(conn,target):
+                        conn.execute("INSERT INTO state_director_delivery_acks(delivery_id,driver_id,required) VALUES(?,?,1)", (delivery["delivery_id"],member))
                 self.store._event(conn, target, None, "director_message_received", {
                     "message_id": message_id, "thread_id": thread_id,
                     "delivery_id": delivery["delivery_id"], "summary": summary})
                 deliveries.append(delivery)
+            if self.v3:
+                message.update(sender_driver_id=self.driver_id,ack_mode=ack_mode,ack_quorum=ack_quorum)
             result = {"message": message, "deliveries": deliveries, "replayed": False}
             return self._record(conn, sender_project_id, operation, request_key, payload_json, result)
 
     @writer_only_read("list_director_messages")
+    @_message_errors
     def list_director_messages(self, project_id, after=0, limit=100,
-                               delivery_mode=None, statuses=None):
+                               delivery_mode=None, statuses=None, needs_my_ack=False, protocol_version="v2", ack_mode=None):
+        self._set_reply_schema(protocol_version, needs_my_ack or ack_mode is not None)
+        if ack_mode not in (None,"at_least_n","broadcast"):
+            _invalid()
         project_id = _db_id(project_id)
         after = _integer(after, 0)
         limit = _integer(limit, 1, 100)
@@ -327,12 +415,24 @@ class SQLiteDirectorMessaging:
                 (project_id,)).fetchone()["high"]
             clauses = ["d.target_project_id=?", "d.delivery_seq>?", "d.delivery_seq<=?"]
             parameters = [project_id, after, high]
+            if ack_mode is not None:
+                clauses.append("m.ack_mode=?")
+                parameters.append(ack_mode)
             if delivery_mode is not None:
                 clauses.append("m.delivery_mode=?")
                 parameters.append(delivery_mode)
             if statuses is not None:
                 clauses.append("d.status IN (" + ",".join("?" for _ in statuses) + ")")
                 parameters.extend(statuses)
+            if needs_my_ack:
+                self._acker(conn, project_id)
+                if not self.v3:
+                    raise DirectorMessageError("unauthorized")
+                clauses.append("NOT EXISTS(SELECT 1 FROM state_director_legacy_acks l WHERE l.delivery_id=d.delivery_id)")
+                clauses.append("d.status<>'resolved' AND NOT EXISTS(SELECT 1 FROM state_director_delivery_acks a WHERE a.delivery_id=d.delivery_id AND a.driver_id=? AND a.acked_at IS NOT NULL)")
+                parameters.append(self.driver_id or "owner")
+                clauses.append("(m.ack_mode='at_least_n' AND (SELECT COUNT(*) FROM state_director_delivery_acks a WHERE a.delivery_id=d.delivery_id AND a.acked_at IS NOT NULL)<m.ack_quorum OR m.ack_mode='broadcast' AND EXISTS(SELECT 1 FROM state_director_delivery_acks a WHERE a.delivery_id=d.delivery_id AND a.driver_id=? AND a.required=1 AND a.removed_at IS NULL AND a.acked_at IS NULL))")
+                parameters.append(self.driver_id or "owner")
             where = " AND ".join(clauses)
             matched_total = conn.execute(
                 "SELECT COUNT(*) AS count FROM state_director_deliveries d "
@@ -344,10 +444,20 @@ class SQLiteDirectorMessaging:
                 "WHERE " + where + " ORDER BY d.delivery_seq LIMIT ?",
                 (*parameters, limit)).fetchall()
             items = [{"message": _row_message(row), "delivery": _row_delivery(row)} for row in rows]
+            if self.v3:
+                from core.director_messaging_quorum import details
+                for item in items:
+                    item.update(details(conn,item["delivery"],self.driver_id or ("owner" if self.actor.startswith("owner:") else None)))
+                    sender = conn.execute("SELECT sender_driver_id FROM state_director_messages WHERE message_id=?", (item["message"]["message_id"],)).fetchone()[0]
+                    item["message"].update(sender_driver_id=sender,ack_mode=item["ack_mode"],ack_quorum=item["ack_quorum"])
+            if needs_my_ack:
+                items = [i for i in items if not i.get("acked_by_me") and i["delivery"]["status"]!="resolved"
+                         and (i.get("ack_mode")=="broadcast" and self.driver_id in i.get("pending_drivers",[])
+                              or i.get("ack_mode")=="at_least_n" and not i.get("quorum_met"))]
             has_more = matched_total > len(items)
             next_after = (items[-1]["delivery"]["delivery_seq"] if has_more
                           else max(after, high))
-            return _success({"project_id": project_id, "items": items,
+            return self._success({"project_id": project_id, "items": items,
                              "matched_total": matched_total, "has_more": has_more,
                              "next_after": next_after})
 
@@ -355,7 +465,13 @@ class SQLiteDirectorMessaging:
         """Return bounded, redacted active standing guidance without mutation."""
         result = self.list_director_messages(
             project_id, after=0, limit=8, delivery_mode="standing",
-            statuses=["unread", "acknowledged"])["result"]
+            statuses=["unread", "acknowledged"], protocol_version="v3" if self.v3 else "v2")["result"]
+        if self.v3:
+            transient = self.list_director_messages(project_id,limit=8,delivery_mode="transient", protocol_version="v3",
+                                                   statuses=["unread","acknowledged"],needs_my_ack=True)["result"]
+            selected = [i for i in transient["items"] if i.get("ack_mode")=="broadcast"]
+            result["items"] = sorted(result["items"] + selected, key=lambda i:i["delivery"]["delivery_seq"])[:8]
+            result["matched_total"] += len(selected)
         lines = []
         for item in result["items"]:
             message, delivery = item["message"], item["delivery"]
@@ -381,11 +497,15 @@ class SQLiteDirectorMessaging:
                 return projection
             included -= 1
 
-    def acknowledge_director_message(self, project_id, delivery_id, expected_version, request_key):
+    @_message_errors
+    def acknowledge_director_message(self, project_id, delivery_id, expected_version, request_key, protocol_version="v2"):
+        self._set_reply_schema(protocol_version)
         return self._transition("acknowledge_director_message", project_id, delivery_id,
                                 expected_version, request_key, "acknowledged")
 
-    def resolve_director_message(self, project_id, delivery_id, expected_version, request_key):
+    @_message_errors
+    def resolve_director_message(self, project_id, delivery_id, expected_version, request_key, protocol_version="v2"):
+        self._set_reply_schema(protocol_version)
         return self._transition("resolve_director_message", project_id, delivery_id,
                                 expected_version, request_key, "resolved")
 
@@ -408,6 +528,39 @@ class SQLiteDirectorMessaging:
             if row is None or row["target_project_id"] != project_id:
                 raise DirectorMessageError("unknown_delivery")
             delivery = _row_delivery(row)
+            if self.v3:
+                from core.director_messaging_quorum import details
+                acker = self._acker(conn, project_id)
+                prior = conn.execute("SELECT acked_at FROM state_director_delivery_acks WHERE delivery_id=? AND driver_id=?", (delivery_id,acker)).fetchone()
+                if target_status == "acknowledged" and prior and prior["acked_at"]:
+                    original = conn.execute("SELECT result_json FROM state_director_idempotency WHERE actor=? AND scope_project_id=? AND operation=? AND json_extract(payload_json,'$.delivery_id')=? ORDER BY rowid LIMIT 1",
+                                            (self.actor,project_id,operation,delivery_id)).fetchone()
+                    result = json.loads(original["result_json"]) if original else {"delivery":delivery}
+                    result["replayed"] = True
+                    return self._success(result)
+                if delivery["version"] != expected_version:
+                    raise DirectorMessageError("version_conflict", V3_SCHEMA_ID)
+                if delivery["status"] == "resolved":
+                    if target_status == "resolved":
+                        return self._record(conn,project_id,operation,request_key,payload_json,{"delivery":delivery,"replayed":False,**details(conn,delivery,acker)})
+                    raise DirectorMessageError("invalid_transition", V3_SCHEMA_ID)
+                if target_status == "acknowledged":
+                    conn.execute("INSERT INTO state_director_delivery_acks(delivery_id,driver_id,required,acked_at) VALUES(?,?,0,?) ON CONFLICT(delivery_id,driver_id) DO UPDATE SET acked_at=excluded.acked_at",
+                                 (delivery_id,acker,self._now()))
+                    meta = details(conn,delivery,acker)
+                    mode = conn.execute("SELECT delivery_mode FROM state_director_messages WHERE message_id=?", (delivery["message_id"],)).fetchone()[0]
+                    status = "resolved" if meta["quorum_met"] and mode=="transient" else "acknowledged"
+                else:
+                    status = "resolved"
+                conn.execute("UPDATE state_director_deliveries SET status=?,version=version+1 WHERE delivery_id=? AND version=?", (status,delivery_id,expected_version))
+                delivery.update(status=status,version=expected_version+1)
+                self.store._event(conn,project_id,None,"director_message_acked" if target_status=="acknowledged" else "director_message_resolved",
+                                  {"delivery_id":delivery_id,"driver_id":acker,"acks":details(conn,delivery,acker)["acks"]})
+                if target_status == "acknowledged":
+                    seq=conn.execute("SELECT MAX(seq) FROM state_events").fetchone()[0]
+                    conn.execute("UPDATE state_director_delivery_acks SET ack_event_seq=? WHERE delivery_id=? AND driver_id=?", (seq,delivery_id,acker))
+                return self._record(conn,project_id,operation,request_key,payload_json,
+                                    {"delivery":delivery,"replayed":False,**details(conn,delivery,acker)})
             if delivery["status"] == target_status:
                 return self._record(conn, project_id, operation, request_key, payload_json,
                                     {"delivery": delivery, "replayed": False})

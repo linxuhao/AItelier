@@ -212,6 +212,29 @@ def _split_sections(guide: str) -> dict:
     return sections
 
 
+STATE_DRIVER_GUIDE += """
+## P2 driver messaging and private notebook scope
+
+Use send_driver_message(target_driver_id=... | project_members=...), not a mailbox
+project. Driver inbox deliveries have recipient-only CAS and a per-driver seq.
+wait_for_state_change(include_driver_inbox=true,inbox_after=...) returns both
+next_after and next_inbox_after; retain both cursors.
+
+Entry actions take project_id XOR driver_id. Use state_graph_help driver_arguments
+for a private notebook: default informational or in_force, only its owner writes.
+Project rules stay in_force and cannot reference dnote://. Private entries never
+enter State overview/wait/PostCompact and are non-authoritative.
+
+Project ack_mode=broadcast (every snapshot member) is distinct from the
+cross-project broadcast flag. at_least_n defaults to one distinct driver ack.
+Transient quorum completion resolves atomically; standing needs explicit resolve.
+Choose protocol_version=v3 for per-driver ack metadata and needs_my_ack; old v2
+arguments retain a closed v2 projection. Historical legacy_ack has no fabricated
+ackers. driver_postcompact_guidance combines the caller's applicable notices
+within eight items/3000 characters, never private notebook bodies.
+"""
+
+
 GUIDE_SECTIONS = _split_sections(STATE_DRIVER_GUIDE)
 
 # Each entry: (marker that must appear in the guide, why this rule stays injected).
@@ -299,7 +322,7 @@ def _build_index() -> str:
         "superseded_count and revision; include_superseded=true lists superseded entries too. "
         "write_driver_note_entry takes a short assertion plus a body and returns the body's "
         "address; the assertion cap is enforced at write time and refuses, never truncates. "
-        "Every entry is a rule: force=\"informational\" is refused (owner ruling 2026-10-06). "
+        "Every project entry is a rule: force=\"informational\" is refused (owner ruling 2026-10-06). "
         "In-flight state goes to the State DAG, not the notebook: attempts, set_node_hold, "
         "report_issue, set_node_priority. Retire a rule with supersede_driver_note_entry (a "
         "successor exists; the old address keeps a tombstone); delist_driver_note_entry only "
@@ -330,3 +353,4 @@ def guide_section(address: str) -> dict:
 
 def guide_index_addresses() -> list[str]:
     return [GUIDE_ADDRESS_PREFIX + slug for slug in GUIDE_SECTIONS]
+

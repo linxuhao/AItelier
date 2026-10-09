@@ -8,6 +8,18 @@ extends Node
 #   * `maybe`  -- a real null, unchanged across frames (a captured null baseline
 #                 is NOT a missing baseline).
 var score := 0
+var input_health := 30
+var input_stats := {"hp": 30}
+var damage_inputs := 0
+
+func _input(event: InputEvent) -> void:
+	if event.is_action_pressed("before_damage"):
+		damage_inputs += 1
+		input_health -= 2
+		input_stats["hp"] -= 2
+	# before_noop is deliberately admitted input with no value mutation.
+	# A changed delta on it must be false, even though the input was dispatched.
+
 var label := "ready"
 var empty_label := ""
 var maybe = null
@@ -215,4 +227,3 @@ func _process(_d):
 		typed = 1.0
 		flag = false
 		typed_keys_moved = {7: "int", true: "bool", 1.5: "changed"}
-

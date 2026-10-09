@@ -4584,6 +4584,10 @@ class PipelineEngine:
                             raise ValueError("required correction produced no tool call")
                         offered = {tool["function"]["name"] for tool in native_tools}
                         offered.update({"finish_step", "ask_more_turns"})
+                        ids = [tc.get("id") for tc in result.tool_calls]
+                        if (not all(isinstance(cid, str) and cid for cid in ids)
+                                or len(set(ids)) != len(ids)):
+                            raise ValueError("required correction contains invalid or duplicate tool call ids")
                         for tc in result.tool_calls:
                             if (not tc.get("id") or tc["function"]["name"] not in offered
                                     or not isinstance(json.loads(

@@ -161,3 +161,36 @@ def test_ordinary_no_tool_completion_without_starvation_is_unchanged(budget_case
         _turn(tool_calls=[_tc("edit")]), _turn(text="ordinary completion")], budget=2)
     assert _run(eng, ws) is True
     assert draft.exists()
+
+@pytest.mark.parametrize("partial,cap", [(False, 8192), (True, 8192), (True, OUTPUT_CAP_CEILING)])
+@pytest.mark.parametrize("bad_id", ["duplicate", 7, True, ["call"], {"call": 1}])
+def test_correction_batch_identity_refuses_before_any_tool_effect(budget_case, monkeypatch, partial, cap, bad_id):
+    eng, ws, draft, traces = budget_case
+    remember = MagicMock()
+    monkeypatch.setattr(agents, "remember_output_cap", remember)
+    responses = ([_turn(tool_calls=[_tc("edit")])] if partial else []) + [
+        _turn(truncated=True),
+        _turn(tool_calls=[_tc("read_file", cid=bad_id), _tc("finish_step", cid=bad_id)])]
+    nat, calls, emitted = script_case(budget_case, responses, cap=cap, budget=len(responses))
+    with pytest.raises(NativeOutputCapExhausted):
+        _run(eng, ws)
+    failed = assert_retained_incomplete(budget_case, nat, emitted, partial=partial, calls=len(responses))
+    assert eng._exec_tool.call_count == int(partial)
+    assert "tool call ids" in failed["correction_error"]
+    assert nat.gateway.max_output_tokens == cap
+    remember.assert_not_called()
+
+
+@pytest.mark.parametrize("partial", [False, True])
+def test_unique_batch_ids_and_cross_turn_reuse_still_finish(budget_case, partial):
+    eng, ws, draft, traces = budget_case
+    # c1 belongs to a later assistant batch, so a previous edit's c1 may be reused.
+    responses = ([_turn(tool_calls=[_tc("edit", cid="c1")])] if partial else []) + [
+        _turn(truncated=True),
+        _turn(tool_calls=[_tc("read_file", cid="c1"), _tc("finish_step", cid="c2")])]
+    nat, calls, emitted = script_case(budget_case, responses, cap=8192, budget=len(responses))
+    assert _run(eng, ws) is True
+    assert len(calls) == len(responses)
+    assert eng._exec_tool.call_count == int(partial) + 1
+    assert nat.gateway.max_output_tokens == 8192
+    assert not [p for _, ev, p in traces if ev == "output_starvation_invalid_correction"]

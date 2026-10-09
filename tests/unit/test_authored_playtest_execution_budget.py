@@ -51,11 +51,11 @@ def test_explicit_budget_reaches_every_original_input_assert_before_event(monkey
     assert calls[1]['frames']==last+30 and calls[1]['timeout']==0.5 and calls[1]['data']['timeline']==[]
 
 
-@pytest.mark.parametrize('request',[authored(),authored(48120,48149),
+@pytest.mark.parametrize('case_spec',[authored(),authored(48120,48149),
     {'frames':5000,'scenarios':[{'name':'floor','timeline':[{'at':1,'assert':{'N.x':'x==1'}}]}]}])
-def test_default_undersized_and_frame_floor_never_execute_partial(monkeypatch,tmp_path,request):
+def test_default_undersized_and_frame_floor_never_execute_partial(monkeypatch,tmp_path,case_spec):
     calls=recorder(monkeypatch)
-    report=gh._playtest_spec(tmp_path/'project',request,180,0.75)
+    report=gh._playtest_spec(tmp_path/'project',case_spec,180,0.75)
     assert not report['passed'] and report['spec_errors']
     assert calls==[]
     assert all(not s['ran'] for s in report['behavior']['scenarios'])

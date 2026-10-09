@@ -3,6 +3,13 @@
 
     python3 scripts/driver_token.py register codex --display-name "Codex driver"
     python3 scripts/driver_token.py rotate grok-bot
+    python3 scripts/driver_token.py self-register <id> --display-name "<name>" [--rotate]
+
+`self-register` is the self-service path for a NEW LAN driver on the shared
+account (design D11): it is idempotent (a token file that already authenticates
+as <id> is left alone), refuses to replace the token of a driver that already
+exists unless --rotate is given, never creates an admin driver and never
+touches `owner-cli` or `public`.
 
 Talks to the running server over loopback (127.0.0.1:4444) with the OWNER's
 credential (the legacy admin token = `owner-cli`, or an is_admin driver token
@@ -26,6 +33,7 @@ from core.driver_credentials import (
     CredentialError,
     auth_headers,
     drivers_dir,
+    read_token_file,
     token_file_for,
 )
 
@@ -49,7 +57,8 @@ def _owner_headers() -> dict:
     return auth_headers(environ=env)
 
 
-def _call(method: str, path: str, body: dict | None, headers: dict) -> dict:
+def _call(method: str, path: str, body: dict | None, headers: dict,
+          missing_ok: bool = False) -> dict | None:
     data = None if body is None else json.dumps(body).encode()
     req = urllib.request.Request(_BASE + path, data=data, method=method,
                                  headers={"Content-Type": "application/json", **headers})
@@ -57,6 +66,8 @@ def _call(method: str, path: str, body: dict | None, headers: dict) -> dict:
         with urllib.request.urlopen(req, timeout=30) as resp:
             return json.load(resp)
     except urllib.error.HTTPError as exc:
+        if missing_ok and exc.code == 404:
+            return None
         # The server never echoes a token in an error; still, print only the detail.
         try:
             detail = json.loads(exc.read()).get("detail")
@@ -79,6 +90,56 @@ def write_token_file(driver_id: str, token: str, home: Path | None = None) -> Pa
     return path
 
 
+RESERVED_IDS = frozenset({"owner-cli", "public"})
+
+
+class SelfRegisterRefused(SystemExit):
+    """A refusal that must not change anything (exit code 3)."""
+
+    def __init__(self, message: str):
+        super().__init__(3)
+        self.message = message
+
+
+def self_register(driver_id: str, display_name: str, *, rotate: bool = False,
+                  host_label: str = "linxuhaserver", home: Path | None = None,
+                  owner_headers=None, call=None) -> dict:
+    """Give the calling driver its own token file; see the module docstring."""
+    call = call or _call
+    if driver_id in RESERVED_IDS:
+        raise SelfRegisterRefused(f"'{driver_id}' is reserved and cannot be self-registered")
+    path = token_file_for(driver_id, home)
+    if path.exists() and not rotate:
+        me = call("GET", "/api/drivers/me", None,
+                  {"X-AItelier-Driver-Token": read_token_file(path)}, missing_ok=True)
+        if me and me.get("driver_id") == driver_id:
+            return {"status": "already_registered", "driver_id": driver_id, "token_file": str(path)}
+        raise SelfRegisterRefused(
+            f"{path} exists but does not authenticate as driver:{driver_id}; "
+            "rerun with --rotate to issue a new token (the old one stops working)")
+    headers = owner_headers() if owner_headers else _owner_headers()
+    if not headers:
+        raise SelfRegisterRefused("no owner credential on this account (AITELIER_ADMIN_TOKEN in ~/AItelier/.env)")
+    me = call("GET", "/api/drivers/me", None, headers, missing_ok=True) or {}
+    if me.get("enabled") is False:
+        raise SelfRegisterRefused("driver identity is not enabled on this server (AITELIER_DRIVER_IDENTITY)")
+    existing = call("GET", f"/api/drivers/{driver_id}", None, headers, missing_ok=True)
+    if existing is not None and not rotate:
+        raise SelfRegisterRefused(
+            f"driver:{driver_id} already exists and its token is not in {path}; "
+            "use your existing token file, or rerun with --rotate to replace it")
+    if existing is not None:
+        result = call("POST", f"/api/drivers/{driver_id}/rotate",
+                      {"expected_revision": existing["revision"]}, headers)
+        status = "rotated"
+    else:
+        result = call("POST", "/api/drivers", {"driver_id": driver_id, "display_name": display_name,
+                                                "host_label": host_label, "is_admin": False}, headers)
+        status = "registered"
+    written = write_token_file(driver_id, result.pop("token"), home)
+    return {"status": status, "driver_id": driver_id, "token_file": str(written)}
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -89,7 +150,24 @@ def main(argv=None) -> int:
     reg.add_argument("--admin", action="store_true")
     rot = sub.add_parser("rotate")
     rot.add_argument("driver_id")
+    selfreg = sub.add_parser("self-register")
+    selfreg.add_argument("driver_id")
+    selfreg.add_argument("--display-name", default=None)
+    selfreg.add_argument("--host-label", default="linxuhaserver")
+    selfreg.add_argument("--rotate", action="store_true")
     options = parser.parse_args(argv)
+    if options.command == "self-register":
+        try:
+            result = self_register(options.driver_id, options.display_name or options.driver_id,
+                                   rotate=options.rotate, host_label=options.host_label)
+        except SelfRegisterRefused as exc:
+            print(exc.message, file=sys.stderr)
+            return 3
+        except CredentialError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
     try:
         headers = _owner_headers()
     except CredentialError as exc:

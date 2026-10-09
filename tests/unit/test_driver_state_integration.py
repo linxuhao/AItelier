@@ -3,6 +3,7 @@ legacy attempt continuity, the State-only service, and client credentials."""
 from __future__ import annotations
 
 import os
+from typing import ClassVar
 
 import pytest
 from fastapi.testclient import TestClient
@@ -182,3 +183,110 @@ def test_child_processes_never_inherit_driver_credentials():
                         "AITELIER_DRIVER_TOKEN_FILE": "/x", "AITELIER_OWNER_TOKEN_FILE": "/y",
                         "AITELIER_DRIVER_ID": "codex", "PATH": "/bin"})
     assert env == {"AITELIER_DRIVER_ID": "codex", "PATH": "/bin"}
+
+
+def _driver_token_script():
+    import importlib.util
+    from pathlib import Path
+    spec = importlib.util.spec_from_file_location(
+        "driver_token_script_selfreg", Path(__file__).resolve().parents[2] / "scripts/driver_token.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class _FakeServer:
+    """The /api/drivers surface self-register talks to, with tokens kept in memory."""
+
+    OWNER: ClassVar[dict] = {"X-AItelier-Admin-Token": "owner"}
+
+    def __init__(self, enabled=True):
+        self.enabled = enabled
+        self.drivers = {}   # id -> {"revision": n, "token": t}
+        self.calls = []
+
+    def __call__(self, method, path, body, headers, missing_ok=False):
+        self.calls.append((method, path))
+        if path == "/api/drivers/me":
+            if not self.enabled:
+                return {"enabled": False}
+            token = headers.get("X-AItelier-Driver-Token")
+            for driver_id, row in self.drivers.items():
+                if token and token == row["token"]:
+                    return {"enabled": True, "driver_id": driver_id}
+            return {"enabled": True, "driver_id": "owner-cli"} if headers == self.OWNER else None
+        assert headers == self.OWNER, "only the owner credential may administer"
+        if method == "GET":
+            row = self.drivers.get(path.rsplit("/", 1)[1])
+            return None if row is None else {"revision": row["revision"]}
+        if path == "/api/drivers":
+            assert body["is_admin"] is False
+            self.drivers[body["driver_id"]] = {"revision": 1, "token": "aitd_" + body["driver_id"] + "_1"}
+            return {"token": self.drivers[body["driver_id"]]["token"], "driver": {}}
+        driver_id = path.split("/")[3]
+        row = self.drivers[driver_id]
+        assert body["expected_revision"] == row["revision"]
+        row["revision"] += 1
+        row["token"] = f"aitd_{driver_id}_{row['revision']}"
+        return {"token": row["token"], "driver": {}}
+
+
+class TestSelfRegister:
+    def _run(self, mod, server, tmp_path, driver_id="newbie", **kw):
+        return mod.self_register(driver_id, "New driver", home=tmp_path,
+                                 owner_headers=lambda: dict(server.OWNER), call=server, **kw)
+
+    def test_registers_once_then_is_idempotent(self, tmp_path):
+        mod, server = _driver_token_script(), _FakeServer()
+        first = self._run(mod, server, tmp_path)
+        assert first["status"] == "registered"
+        path = tmp_path / ".aitelier-drivers" / "newbie.token"
+        assert path.stat().st_mode & 0o777 == 0o600
+        assert driver_token({"AITELIER_DRIVER_ID": "newbie"}, tmp_path) == "aitd_newbie_1"
+        assert "aitd_newbie_1" not in repr(first)
+        again = self._run(mod, server, tmp_path)
+        assert again["status"] == "already_registered"
+        assert server.drivers["newbie"]["revision"] == 1
+
+    def test_existing_driver_without_its_file_is_refused_unless_rotate(self, tmp_path):
+        mod, server = _driver_token_script(), _FakeServer()
+        server.drivers["codex"] = {"revision": 3, "token": "aitd_codex_3"}
+        with pytest.raises(mod.SelfRegisterRefused) as info:
+            self._run(mod, server, tmp_path, "codex")
+        assert "--rotate" in info.value.message
+        assert server.drivers["codex"]["token"] == "aitd_codex_3"
+        assert not (tmp_path / ".aitelier-drivers" / "codex.token").exists()
+        rotated = self._run(mod, server, tmp_path, "codex", rotate=True)
+        assert rotated["status"] == "rotated"
+        assert driver_token({"AITELIER_DRIVER_ID": "codex"}, tmp_path) == "aitd_codex_4"
+
+    def test_stale_file_is_refused_unless_rotate(self, tmp_path):
+        mod, server = _driver_token_script(), _FakeServer()
+        mod.write_token_file("newbie", "aitd_stale", home=tmp_path)
+        server.drivers["newbie"] = {"revision": 1, "token": "aitd_other"}
+        with pytest.raises(mod.SelfRegisterRefused):
+            self._run(mod, server, tmp_path)
+        assert driver_token({"AITELIER_DRIVER_ID": "newbie"}, tmp_path) == "aitd_stale"
+
+    def test_reserved_ids_and_disabled_feature_are_refused(self, tmp_path):
+        mod = _driver_token_script()
+        for reserved in ("owner-cli", "public"):
+            with pytest.raises(mod.SelfRegisterRefused):
+                self._run(mod, _FakeServer(), tmp_path, reserved)
+        server = _FakeServer(enabled=False)
+        with pytest.raises(mod.SelfRegisterRefused) as info:
+            self._run(mod, server, tmp_path)
+        assert "not enabled" in info.value.message
+        assert all(method == "GET" for method, _ in server.calls)
+
+    def test_cli_exit_code_and_no_token_in_output(self, tmp_path, monkeypatch, capsys):
+        mod, server = _driver_token_script(), _FakeServer()
+        monkeypatch.setattr(mod, "_call", server)
+        monkeypatch.setattr(mod, "_owner_headers", lambda: dict(server.OWNER))
+        monkeypatch.setattr(mod, "token_file_for",
+                            lambda driver_id, home=None: tmp_path / f"{driver_id}.token")
+        monkeypatch.setattr(mod, "drivers_dir", lambda home=None: tmp_path)
+        assert mod.main(["self-register", "newbie"]) == 0
+        assert mod.main(["self-register", "public"]) == 3
+        out = capsys.readouterr()
+        assert "aitd_" not in out.out + out.err

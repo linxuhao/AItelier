@@ -4,6 +4,12 @@ STATE_DRIVER_GUIDE = """# State DAG director protocol
 
 State owns product goals, versioned acceptance contracts, dependencies and evidence. A separately authorized execution transport owns execution. Use one long-lived project for one product; workflow-backed and externally observed workers are attempts, not replacement product projects.
 
+## Identify yourself
+Before any write, identify yourself: present your own driver token and confirm it with driver_whoami (MCP) or GET /api/drivers/me, which must answer driver:<your id>. When it answers enabled:false, driver identity is off and the legacy credential applies unchanged.
+- LAN drivers share one server account and reach http://127.0.0.1:4444 over SSH (port tunnel or remote exec). Your token lives in ~/.aitelier-drivers/<id>.token (directory 0700, file 0600); run with AITELIER_DRIVER_ID=<id> and the clients read it.
+- If that file is missing, self-register once from the repository root: python3 scripts/driver_token.py self-register <id> --display-name "<name>". It is idempotent, never prints the token, never creates an admin driver and refuses to replace an existing driver's token; only --rotate does that, and the old token then stops working.
+- Read only your own token file. The admin token in .env is used by the self-register script alone; never read it yourself or borrow another driver's file. Write only through the API, never the database. Public (Cloudflare) callers are the single driver public and cannot self-register.
+
 ## Resume safely
 1. Read state_graph_help schemas, project_overview and the relevant get_node/attempt_detail. Recover durable IDs before acting. Use the current revision and frozen dependency receipts. Do not repeat an old task because its notification was delayed.
 2. Capture project_overview.event_seq BEFORE dispatching work (or retain the last wait next_after). Keep that cursor with project_id, selected filters, attempt IDs, run IDs, source SHA, worker ownership and pending checkpoint in your handoff. On context compaction, preserve these facts and report references; read current state after resuming.
@@ -210,6 +216,8 @@ GUIDE_SECTIONS = _split_sections(STATE_DRIVER_GUIDE)
 
 # Each entry: (marker that must appear in the guide, why this rule stays injected).
 INJECTED_RULES = (
+    ("Before any write, identify yourself",
+     "the first call of a new driver decides whose name every later write carries"),
     ("start_external_attempt BEFORE dispatching workers",
      "names the ONLY correct ordering; a reader who fetches first has already dispatched"),
     ("Do not send VERIFIED as an execution status",

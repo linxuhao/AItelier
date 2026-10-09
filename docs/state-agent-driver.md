@@ -3,7 +3,9 @@
 State owns product goals, versioned acceptance contracts, dependencies and evidence. SkillFlow or an external harness owns execution. Use one long-lived project for one product; workflows and external workers are attempts, not replacement product projects.
 
 ## Identify yourself
-When driver identity is enabled, each driver presents its own token (see docs/driver-identity.md: `~/.aitelier-drivers/<id>.token`, `AITELIER_DRIVER_ID=<id>`) and is recorded as `driver:<id>`. Call driver_whoami (MCP) or GET /api/drivers/me once at startup; never borrow another driver's token file.
+Before any write, identify yourself: call driver_whoami (MCP) or GET /api/drivers/me; it must answer `driver:<your id>` (`enabled:false` means identity is off and the legacy credential applies).
+- New LAN driver on the shared server account: look for `~/.aitelier-drivers/<id>.token`. If it is missing, run once from the repo root `python3 scripts/driver_token.py self-register <id> --display-name "<name>"` (idempotent; refuses to replace an existing driver's token unless `--rotate`). Then run with `AITELIER_DRIVER_ID=<id>` and verify with /api/drivers/me.
+- Read only your own token file; the `.env` admin token is for the self-register script only; write only through the API. Full details: docs/driver-identity.md.
 
 ## Resume safely
 1. Read state_graph_help schemas, project_overview and the relevant get_node/attempt_detail. Recover durable IDs before acting. Use the current revision and frozen dependency receipts. Do not repeat an old task because its notification was delayed.

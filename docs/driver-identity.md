@@ -4,6 +4,38 @@ Design: `design/multi-driver-coop.md` §3 (D9, D11, Q1, Q4, Q5). This page is th
 operator/driver guide for phase P0 only: identity, tokens and attribution.
 Leases, inbox routing and enforced claims are later phases.
 
+## Status
+
+Enabled in production on 2026-10-09 (`AITELIER_DRIVER_IDENTITY=on`). Registered:
+`owner-cli` (legacy admin token, is_admin), `public` (Cloudflare external token),
+`grok` (Grok Bot), `codex` (Codex on the owner's MacBook Air; reaches the server over SSH).
+
+## New driver? Start here (self-service)
+
+On linxuhaserver, as the shared `linxuhao` account, from `~/AItelier`:
+
+1. Pick a stable id (`[a-z0-9][a-z0-9_.-]*`, not `owner-cli`/`public`).
+2. If `~/.aitelier-drivers/<id>.token` does not exist, run once:
+   `python3 scripts/driver_token.py self-register <id> --display-name "<name>"`
+   - creates `driver:<id>` (never admin) and writes the token to the 0600 file; the
+     token is never printed;
+   - idempotent: if the file already authenticates as `<id>` nothing changes;
+   - refuses (exit 3, nothing changed) when `<id>` already exists but your file is
+     missing or stale; only `--rotate` issues a new token, and the old one stops working;
+   - refuses when identity is disabled on the server.
+3. Run your driver process with `AITELIER_DRIVER_ID=<id>` (clients such as
+   `scripts/mcp_call.py`, `cli/client.py` and the codex hook pick up the file).
+4. Verify: `GET /api/drivers/me` (or MCP `driver_whoami`) must answer `driver:<id>`.
+   Quick check without printing the token:
+   `AITELIER_DRIVER_ID=<id> python3 -c "import json,urllib.request;from core.driver_credentials import auth_headers;print(json.load(urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:4444/api/drivers/me',headers=auth_headers()))))"`
+5. Ask the owner (or an admin driver) to add you to projects if you need a
+   membership (`PUT /api/drivers/<id>/projects/<project_id>`); P0 does not
+   enforce membership for writes.
+
+Conventions: read only your own token file; the `.env` admin token is read only by
+`self-register` itself, never by you; write only through the API, never the
+database; don't touch other drivers' worktrees or processes.
+
 ## What changes
 
 | Caller | Credential | Recorded actor (feature on) |

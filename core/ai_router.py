@@ -65,6 +65,35 @@ RETRYABLE_EXCEPTIONS = (
 # are properties of the request, not the endpoint — failing over just replays
 # the same doomed call against every provider in the list, turning one clear
 # error into N confusing ones and burning the quota we are trying to conserve.
+class ProviderRefusal(Exception):
+    """The endpoint declined to answer this call.
+
+    finish_reason `content_filter` (Anthropic's stop_reason `refusal`) with no
+    content and no tool calls. Returned as is, it is an empty turn, and the
+    native loop reads "no tool calls" as the agent saying it is done — the step
+    ends early and fails later with no word of why. Measured 2026-10-09:
+    claude-sonnet-5-5 answered this way to 340 of 349 prompts that quoted
+    another agent's reasoning. Like a request error it belongs to THIS content,
+    so it never parks the endpoint; unlike one, another model may well answer,
+    so it fails over.
+    """
+
+
+def _raise_if_refused(response, endpoint: str) -> None:
+    try:
+        choice = response.choices[0]
+    except (AttributeError, IndexError, TypeError):
+        return
+    if (getattr(choice, "finish_reason", "") or "") != "content_filter":
+        return
+    msg = getattr(choice, "message", None)
+    if (getattr(msg, "content", None) or "").strip() or getattr(msg, "tool_calls", None):
+        return
+    raise ProviderRefusal(
+        f"{endpoint} declined to answer (finish_reason content_filter, "
+        f"no content, no tool calls)")
+
+
 FAILOVER_EXCEPTIONS = (
     litellm.exceptions.AuthenticationError,
     litellm.exceptions.PermissionDeniedError,
@@ -74,6 +103,7 @@ FAILOVER_EXCEPTIONS = (
     litellm.exceptions.APIConnectionError,
     litellm.exceptions.Timeout,
     litellm.exceptions.NotFoundError,
+    ProviderRefusal,
 )
 # ContextWindowExceededError is deliberately NOT here. It is not an endpoint
 # outage, so walking the list blindly would replay a doomed request at every
@@ -893,6 +923,7 @@ class AIGateway:
         while True:
             try:
                 response = self._completion_bounded(kwargs)
+                _raise_if_refused(response, self.active_model)
             except FAILOVER_EXCEPTIONS as e:
                 if not self._failover(e):
                     # Name the endpoints that would have to reopen. The escaping

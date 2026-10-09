@@ -47,7 +47,14 @@ re-derived from the env admin token at startup.
 All LAN drivers run as `linxuhao` on linxuhaserver (D11) and reach the server
 by SSH to linxuhaserver and `http://127.0.0.1:4444` (Q4; no `tailscale serve`).
 Isolation between drivers is therefore **cooperative**: any process of that
-user can read every file of that user. The convention that keeps it honest:
+user can read every file of that user. Two supported ways in, both ending at
+the loopback-only port (nothing is re-bound or exposed):
+
+    ssh -N -L 4444:127.0.0.1:4444 linxuhao@linxuhaserver   # tunnel, then http://127.0.0.1:4444
+    ssh linxuhao@linxuhaserver 'python3 ~/AItelier/scripts/mcp_call.py ...'   # remote exec
+
+Never put a token on an ssh command line or in a log; the client reads it
+from the token file on the server. The convention that keeps it honest:
 
     ~/.aitelier-drivers/            0700
     ~/.aitelier-drivers/<id>.token  0600, one line, written by scripts/driver_token.py

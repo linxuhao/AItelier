@@ -14,7 +14,7 @@ import pytest
 
 from core.dpe_pipeline import PipelineEngine, MaxRetriesExceeded
 
-TS = {"read_file": {}, "list_tree": {}, "write": {}}
+TS = {"read_file": {}, "list_tree": {}, "write": {}, "edit": {}}
 
 
 class _WS:
@@ -333,13 +333,7 @@ def test_reasoning_starved_turn_is_reported_not_silent(engine):
     assert starved[0]["turn"] == 1
 
 
-# ── Starved-turn recovery: escalate the cap instead of repeating the call ──
-#
-# Detecting the starve was only half of it. The step used to reissue a
-# byte-identical call — same model, prompt, effort and cap — which necessarily
-# starves again; observed live as task_implementer burning two consecutive full
-# 32768-token budgets on pure reasoning and buying nothing with either.
-
+# ── Starved-turn recovery within the existing cap and turn budget ──
 def _wire_real_escalation(nat, cap):
     """Give the mock gateway the REAL escalation, so these tests exercise the
     pipeline↔gateway contract rather than a mock that agrees with itself."""
@@ -350,80 +344,42 @@ def _wire_real_escalation(nat, cap):
     return nat
 
 
-def test_starved_turn_escalates_output_cap_for_the_retry(engine):
-    """The retry after a starve must be a DIFFERENT call: same everything, but
-    double the cap that caused the truncation."""
+def test_starved_turn_corrects_without_escalating(engine):
     tmp = Path(tempfile.mkdtemp()); _setup(tmp); ws = _WS(tmp)
     engine._exec_tool = MagicMock(return_value={"written": "main.py"})
     nat = _wire_real_escalation(engine.factory.get_native_agent.return_value, 8192)
     nat.turn.side_effect = [
-        _turn(reasoning="t" * 900, truncated=True),                          # starved
+        _turn(reasoning="starved", truncated=True),
         _turn(tool_calls=[_tc("write", {"file": "main.py", "content": "x"})]),
         _turn(tool_calls=[_tc("finish_step")]),
     ]
-    events = []
-    engine._emit = lambda ev, payload=None: events.append((ev, payload or {}))
     assert _run(engine, ws) is True
+    assert nat.gateway.max_output_tokens == 8192
 
-    esc = [p for ev, p in events if ev == "output_cap_escalated"]
-    assert len(esc) == 1, [ev for ev, _ in events]
-    assert esc[0]["previous_cap"] == 8192
-    assert esc[0]["new_cap"] == 16384
-    assert esc[0]["turn"] == 1
-    # The point of the whole change: the cap the next turn actually uses moved.
-    assert nat.gateway.max_output_tokens == 16384
-
-
-def test_escalated_cap_persists_across_the_rest_of_the_step(engine):
-    """The condition that starved turn 1 — a huge stable prefix plus deep
-    reasoning — is still there on turn 2, so the raised cap must not reset per
-    turn. A second starve escalates again, from the already-raised value."""
+def test_repeated_starvation_keeps_the_configured_cap(engine):
     tmp = Path(tempfile.mkdtemp()); _setup(tmp); ws = _WS(tmp)
     engine._exec_tool = MagicMock(return_value={"written": "main.py"})
-    engine.factory.get_max_tool_turns.return_value = 5
+    engine.factory.get_max_tool_turns.return_value = 4
     nat = _wire_real_escalation(engine.factory.get_native_agent.return_value, 8192)
     nat.turn.side_effect = [
-        _turn(reasoning="t" * 900, truncated=True),                          # starved
-        _turn(reasoning="t" * 900, truncated=True),                          # starved again
-        _turn(tool_calls=[_tc("write", {"file": "main.py", "content": "x"})]),
-        _turn(tool_calls=[_tc("finish_step")]),
+        _turn(truncated=True), _turn(truncated=True),
+        _turn(tool_calls=[_tc("write", {"file": "main.py", "content": "x"}), _tc("finish_step")]),
     ]
-    events = []
-    engine._emit = lambda ev, payload=None: events.append((ev, payload or {}))
     assert _run(engine, ws) is True
+    assert nat.gateway.max_output_tokens == 8192
 
-    esc = [p for ev, p in events if ev == "output_cap_escalated"]
-    assert [(e["previous_cap"], e["new_cap"]) for e in esc] == [
-        (8192, 16384), (16384, 32768)]
-    assert nat.gateway.max_output_tokens == 32768
-
-
-def test_starve_at_the_ceiling_reports_instead_of_escalating(engine):
-    """At the ceiling there is nothing left to double into but an API error.
-    The step must say so rather than claim an escalation it did not make."""
+def test_starve_at_the_ceiling_can_correct_within_existing_budget(engine):
     from core.ai_router import OUTPUT_CAP_CEILING
     tmp = Path(tempfile.mkdtemp()); _setup(tmp); ws = _WS(tmp)
     engine._exec_tool = MagicMock(return_value={"written": "main.py"})
-    nat = _wire_real_escalation(engine.factory.get_native_agent.return_value,
-                                OUTPUT_CAP_CEILING)
+    nat = _wire_real_escalation(engine.factory.get_native_agent.return_value, OUTPUT_CAP_CEILING)
     nat.turn.side_effect = [
-        _turn(reasoning="t" * 900, truncated=True),                          # starved
-        _turn(tool_calls=[_tc("write", {"file": "main.py", "content": "x"})]),
-        _turn(tool_calls=[_tc("finish_step")]),
+        _turn(truncated=True),
+        _turn(tool_calls=[_tc("write", {"file": "main.py", "content": "x"}), _tc("finish_step")]),
     ]
-    events = []
-    engine._emit = lambda ev, payload=None: events.append((ev, payload or {}))
-    with pytest.raises(MaxRetriesExceeded, match="output cap.*explicit attention required"):
-        _run(engine, ws)
-
-    assert [p for ev, p in events if ev == "output_cap_escalated"] == []
-    ceil = [p for ev, p in events if ev == "output_cap_ceiling"]
-    assert len(ceil) == 1
-    assert ceil[0]["previous_cap"] == OUTPUT_CAP_CEILING
-    assert ceil[0]["new_cap"] is None
+    assert _run(engine, ws) is True
     assert nat.gateway.max_output_tokens == OUTPUT_CAP_CEILING
-    assert nat.turn.call_count == 1
-
+    assert nat.turn.call_count == 2
 
 def test_healthy_turns_never_escalate(engine):
     """A truncated turn that still produced a tool call is not starved, and a
@@ -449,8 +405,7 @@ def test_healthy_turns_never_escalate(engine):
 def test_starved_turns_truncated_reasoning_is_not_replayed(engine):
     """The starved chain of thought is a full cap's worth of tokens, cut off
     mid-sentence. Replaying it into every later turn would grow the prompt by
-    exactly the budget just doubled, pushing the request toward the context
-    window the raised cap has to share."""
+    a full output budget, pushing the request toward the context window."""
     tmp = Path(tempfile.mkdtemp()); _setup(tmp); ws = _WS(tmp)
     engine._exec_tool = MagicMock(return_value={"written": "main.py"})
     nat = _wire_real_escalation(engine.factory.get_native_agent.return_value, 8192)
@@ -471,42 +426,19 @@ def test_starved_turns_truncated_reasoning_is_not_replayed(engine):
     assert any(m.get("role") == "assistant" for m in final)
 
 
-# The escalation is raised "for the retry" — but `for … in range(max_turns)`
-# freezes the bound at loop entry, so a starve on the LAST turn raised the cap
-# and then immediately ended the step empty. Live, jinyong-usable 2026-08-23:
-# nine consecutive t_plan executions starved on turn 6 of 6, each logged
-# "16384 → 32768 for the retry", each returned a 0-byte task_plan.md, and the
-# second escalation never once appeared — no turn ever ran at the raised cap.
-
-def test_last_turn_starve_grants_the_turn_the_escalation_was_raised_for(engine):
-    """A raised cap that no turn ever uses is not a fix, it is a log line."""
+def test_last_turn_starve_is_incomplete_without_grant(engine):
     tmp = Path(tempfile.mkdtemp()); _setup(tmp); ws = _WS(tmp)
-    engine._exec_tool = MagicMock(return_value={"written": "main.py"})
-    engine.factory.get_max_tool_turns.return_value = 1      # turn 1 IS the last
+    engine.factory.get_max_tool_turns.return_value = 1
     nat = _wire_real_escalation(engine.factory.get_native_agent.return_value, 16384)
-    nat.turn.side_effect = [
-        _turn(reasoning="t" * 900, truncated=True),                          # starved
-        _turn(tool_calls=[_tc("write", {"file": "main.py", "content": "x"}),
-                          _tc("finish_step")]),
-    ]
-    events = []
-    engine._emit = lambda ev, payload=None: events.append((ev, payload or {}))
-    assert _run(engine, ws) is True
-
-    granted = [p for ev, p in events if ev == "turn_granted_for_escalation"]
-    assert len(granted) == 1, [ev for ev, _ in events]
-    assert nat.gateway.max_output_tokens == 32768
-    # The whole point: the step produced its output instead of completing empty.
-    # (_exec_tool is mocked, so the write is observed through the event, not ws.)
-    assert [p for ev, p in events if ev == "files_written"], [ev for ev, _ in events]
-    assert not [p for ev, p in events if ev == "step_done"
-                and "budget reached" in (p.get("preview") or "")]
-
+    nat.turn.side_effect = [_turn(truncated=True)]
+    with pytest.raises(MaxRetriesExceeded, match="output cap.*explicit attention required"):
+        _run(engine, ws)
+    assert nat.gateway.max_output_tokens == 16384
+    assert nat.turn.call_count == 1
 
 def test_last_turn_starve_at_the_ceiling_grants_nothing(engine):
-    """The grant is bounded by the escalation, not by a counter of its own: at
-    OUTPUT_CAP_CEILING escalate_output_cap() declines, so there is nothing to
-    buy a turn for and the loop must still end."""
+    """Starvation at the ceiling also consumes the final configured turn;
+    it cannot earn a grant or complete an empty step."""
     from core.ai_router import OUTPUT_CAP_CEILING
     tmp = Path(tempfile.mkdtemp()); _setup(tmp); ws = _WS(tmp)
     engine._exec_tool = MagicMock(return_value={"written": "main.py"})
@@ -675,16 +607,17 @@ def test_output_ceiling_stops_without_retry_or_delivery(budget_case, partial):
     emitted = []
     eng._emit = lambda event, payload=None: emitted.append(event)
     nat.turn.side_effect = ([_turn(tool_calls=[_tc("edit")])] if partial else []) + [
-        _turn(reasoning="retained ceiling reasoning", truncated=True)]
+        _turn(reasoning="retained ceiling reasoning", truncated=True)
+        for _ in range(20 - int(partial))]
     with pytest.raises(MaxRetriesExceeded, match="output cap.*explicit attention required"):
         _run(eng, ws)
-    assert nat.turn.call_count == (2 if partial else 1)
+    assert nat.turn.call_count == 20
     assert draft.exists() is partial
     if partial:
         assert draft.read_text() == "partial draft; not completed\n"
     assert not (ws.get_code_path("default") / "partial.gd").exists()
     names = [event for _category, event, _payload in events]
-    assert names[-3:] == ["output_cap_starved", "output_cap_ceiling", "output_cap_exhausted"]
+    assert names[-2:] == ["output_cap_starved", "output_cap_exhausted"]
     failed = events[-1][2]
     assert failed["attempt"] == 1 and failed["written_files"] == (["partial.gd"] if partial else [])
     assert "step_done" not in emitted and "files_written" not in emitted
@@ -701,7 +634,7 @@ async def test_output_ceiling_driver_has_no_confirm_or_retry(budget_case, monkey
     import aitelier.runner
     eng, ws, draft, events = budget_case
     nat = _wire_real_escalation(eng.factory.get_native_agent.return_value, OUTPUT_CAP_CEILING)
-    nat.turn.side_effect = ([_turn(tool_calls=[_tc("edit")])] if partial else []) + [_turn(truncated=True)]
+    nat.turn.side_effect = ([_turn(tool_calls=[_tc("edit")])] if partial else []) + [_turn(truncated=True) for _ in range(20 - int(partial))]
     sf = SkillFlow(":memory:")
     sf.register_graph(PipelineGraph(name="output_guard", begin="t_impl", steps=[
         StepNode(id="t_impl", step_type="agent", lifecycle={"on_deliver": {"tool": "repo_apply"}}, transitions=[Transition(to="test")]),
@@ -720,7 +653,7 @@ async def test_output_ceiling_driver_has_no_confirm_or_retry(budget_case, monkey
     assert await _step(sf,None,ws,rid,False,5) == "failed"
     confirm.assert_not_called()
     assert fail.call_count == 1 and fail.call_args.kwargs["retryable"] is False
-    assert nat.turn.call_count == (2 if partial else 1)
+    assert nat.turn.call_count == 20
     assert sf.get_run(rid)["current_node"] == "t_impl"
     assert draft.exists() is partial
     assert not (ws.get_code_path("default")/"partial.gd").exists()

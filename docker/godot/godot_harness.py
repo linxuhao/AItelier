@@ -3093,7 +3093,7 @@ def _authored_execution_plan(spec, frames, timeout):
         last = max((e["at"] for e in timeline), default=0)
         needed = max(last + 30, default) if timeline else default
         if _valid_frame_count(ceiling) and needed > ceiling:
-            errors.append(where + ": needs %d frames, past the %d-frame cap/budget; no scenario was run" % (needed, ceiling))
+            errors.append(where + ": needs %d frames including timeline frame(s) %s, past the %d-frame cap/budget; no scenario was run" % (needed, ", ".join(str(e["at"]) for e in timeline if e["at"] >= ceiling) or str(last), ceiling))
         plans.append((needed, seconds))
     return plans, errors
 
@@ -3469,7 +3469,11 @@ def _playtest_spec_inner(dst: Path, spec: dict, frames: int, timeout: int,
     # A spec with keys is read as a spec or refused; the canned smoke test is
     # only for a request that carries no spec (see playtest_project).
     plans, admission_errors = _authored_execution_plan(spec, frames, timeout)
-    spec_errors = list(admission_errors)
+    # Existing readers keep their precise schema diagnostics. Add only new
+    # budget diagnostics here; preflight still refuses ALL invalid work.
+    budget_markers = ("caller frames", "caller timeout", "spec frames", ": execution_budget",
+                      ": max_frames", ": timeout_seconds", ": needs ")
+    spec_errors = [e for e in admission_errors if any(m in e for m in budget_markers)]
     if not isinstance(spec, dict):
         spec_errors.append("spec is a %s - it must be a mapping with a `scenarios` "
                            "list. No scenario was run." % type(spec).__name__)
@@ -3514,7 +3518,7 @@ def _playtest_spec_inner(dst: Path, spec: dict, frames: int, timeout: int,
         spec_errors.append(
             "spec has unknown top-level key(s) %s - allowed: %s. No scenario was run."
             % (", ".join(unknown_spec), ", ".join(sorted(_SPEC_KEYS))))
-    header_bad = bool(spec_errors)
+    header_bad = bool(spec_errors) or bool(admission_errors)
     for i, sc in enumerate(scenarios):
         refused = header_bad
         if not isinstance(sc, dict):

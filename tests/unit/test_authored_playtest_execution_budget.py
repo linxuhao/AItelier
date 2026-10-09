@@ -45,7 +45,7 @@ def test_explicit_budget_reaches_every_original_input_assert_before_event(monkey
     timeline=scenario['data']['timeline']
     assert [e['at'] for e in timeline]==[last-2,last-1,last]
     assert timeline[0]['capture_before']==request['scenarios'][0]['timeline'][0]['capture_before']
-    assert timeline[1]['press']==['advance']
+    assert timeline[1]['press']=='advance'
     assert timeline[2]['assert'][0]['before']=='b'
     # Genuine no-input control gets the SAME frame AND wall budget.
     assert calls[1]['frames']==last+30 and calls[1]['timeout']==0.5 and calls[1]['data']['timeline']==[]

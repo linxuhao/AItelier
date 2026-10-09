@@ -161,7 +161,7 @@ def test_every_key_the_game_contract_uses_is_allowed_and_runs(monkeypatch, tmp_p
 def test_the_allowed_sets_are_exactly_these():
     assert gh._SPEC_KEYS == {"scene", "frames", "scenarios", "actions", "surface"}
     assert gh._SCENARIO_KEYS == {"name", "timeline", "scene", "repeatability",
-                                 "description"}
+                                 "description", "execution_budget"}
 
 
 # ── `description` is allowed only as a plain string ──────────────────────

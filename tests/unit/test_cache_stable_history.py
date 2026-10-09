@@ -110,7 +110,7 @@ def test_reclaim_uses_latest_segment_but_retains_old_observations_and_effects():
     rows = [
         row(0, 0, "system", "s"),
         row(0, 1, "assistant", "", content_null=True,
-            tool_calls=json.dumps([{"id": "c1", "function": {"name": "write"}}])),
+            tool_calls=json.dumps([{"id": "c1", "function": {"name": "write", "arguments": json.dumps({"file":"a.py","content":"owned"})}}])),
         row(0, 2, "tool", old_result, tool_call_id="c1"),
         row(1, 0, "system", "s"),
         row(1, 1, "user", "handoff"),

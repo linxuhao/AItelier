@@ -697,14 +697,31 @@ def _project_native_messages(messages: list[dict], *,
     limit = max(1, int(history_char_budget))
     projected = [dict(m) if isinstance(m, dict) else m for m in messages]
     compacted_tools = 0
+    replaced_indices: list[int] = []
+    wire_view: list[dict] = []
     for i, message in enumerate(projected):
         if not (isinstance(message, dict) and message.get("role") == "tool"
                 and isinstance(message.get("content"), str)):
             continue
         content = message["content"]
-        if len(content) > limit:
-            projected[i]["content"] = _compact_marker(content, "tool result")
+        wire = content
+        is_projected = len(content) > limit
+        if is_projected:
+            wire = _compact_marker(content, "tool result")
+            projected[i]["content"] = wire
             compacted_tools += 1
+            replaced_indices.append(i)
+        # Per-delta wire identity: what this exact tool result looks like on the
+        # wire this send, derived from the same _compact_marker the projected
+        # view carries — no separate fake projection, no new bookkeeping layer.
+        wire_view.append({
+            "index": i,
+            "raw_chars": len(content),
+            "wire_chars": len(wire),
+            "projected": is_projected,
+            "sha256": _observation_digest(content),
+            "wire_sha256": _observation_storage_digest(wire),
+        })
 
     def _chars(seq):
         return sum(
@@ -721,7 +738,10 @@ def _project_native_messages(messages: list[dict], *,
         "compacted_reasoning": 0,
         "observation_char_limit": limit,
         "stable_at_first_send": True,
+        "replaced_indices": replaced_indices,
+        "wire_view": wire_view,
     }
+
 
 def _context_boundary(gateway, messages: list[dict], tools: list[dict]) -> dict:
     """Return the active endpoint's measured handoff decision.
@@ -1792,10 +1812,23 @@ class PipelineEngine:
             if content_null:
                 payload["content_null"] = True    # an assistant tool-call turn: content None
             persist = getattr(self, "_persist_native_observation", None)
-            if (m.get("role") == "tool" and isinstance(m.get("content"), str)
-                    and len(m["content"]) > _NATIVE_HISTORY_TOOL_CHARS
-                    and callable(persist)):
-                payload["observation_ref"] = persist(m["content"])
+            if (m.get("role") == "tool" and isinstance(m.get("content"), str)):
+                raw = m["content"]
+                # Wire identity, derived from the SAME projector the native loop
+                # runs before each provider call: a result over the per-
+                # observation cap is frozen to the compact marker at first send,
+                # so its wire view is deterministic here — no separate fake
+                # projection, no new context manager. Small results record
+                # projected=False so analysts can distinguish them from
+                # compacted markers, and unchanged reasoning records nothing.
+                wire = _compact_marker(raw, "tool result") if len(raw) > _NATIVE_HISTORY_TOOL_CHARS else raw
+                payload["wire_projected"] = wire is not raw
+                payload["raw_chars"] = len(raw)
+                payload["wire_chars"] = len(wire)
+                payload["observation_sha256"] = _observation_digest(raw)
+                payload["wire_sha256"] = _observation_storage_digest(wire)
+                if len(raw) > _NATIVE_HISTORY_TOOL_CHARS and callable(persist):
+                    payload["observation_ref"] = persist(raw)
             for k in ("tool_call_id", "tool_calls", "reasoning_content", "name"):
                 if m.get(k) is not None:
                     v = m[k]

@@ -1210,40 +1210,19 @@ def _measurement_subject(line: str) -> str:
                 and words[index].endswith(".py")):
             return " ".join((words[0], words[index]))
         return line
-    # A direct native executable may carry serialized settings, never code
-    # identity. Do not apply this to opaque interpreter/shell launch modes.
-    if name in {"sh", "bash", "dash", "zsh", "env", "node", "nodejs",
-                "perl", "ruby", "timeout", "nice", "xargs"}:
-        return line
-    try:
-        if str((proc / "exe").readlink()) != words[0]:
-            return line
-    except OSError:
-        return line
-    scanned = []
-    for word in words:
-        try:
-            structured = json.loads(word)
-        except (ValueError, TypeError):
-            structured = None
-        if not isinstance(structured, (dict, list)):
-            scanned.append(word)
-    return " ".join(scanned)
+    # Native arguments are data; only an interpreter's bounded module/script
+    # grammar above identifies launched code. Render classification and explicit
+    # ownership/gate flags are handled separately by the owner reader.
+    return _native_program(line) or line
 
 
 def _native_program(line: str) -> str | None:
-    """The program a verified native executable runs, else None.
+    """Return corroborated native code identity, never argument prose.
 
-    An evaluator's name is a property of the code it launches. A native
-    binary's arguments are data — flags, settings, and for an agent CLI a whole
-    system prompt — so "review" or "judge" there names nothing that runs.
-    Measured 2026-10-07: each open Claude Code desktop session (ccd-cli, ~52 KB
-    of argv) matched MEASUREMENT_NAME_PATTERN on its prompt text and blocked
-    every audited override. Verified the way _measurement_subject verifies a
-    native launch: /proc argv matches the ps line and the exe link is argv[0].
-    A binary replaced on disk while running reads '<path> (deleted)'; that
-    path is still what was launched. Interpreters, shells and wrappers are
-    never native here — their arguments ARE the launched code.
+    The kernel exe link identifies code even when argv[0] is a bare launch
+    label. Such labels require an opened ELF image, rather than a basename
+    guess. Path launches must additionally agree with that image; relative
+    paths are resolved in the process cwd. Opaque launchers stay conservative.
     """
     fields = line.strip().split(None, 2)
     if len(fields) != 3 or not all(field.isdecimal() for field in fields[:2]):
@@ -1252,6 +1231,7 @@ def _native_program(line: str) -> str | None:
     try:
         raw = (proc / "cmdline").read_bytes()
         exe = str((proc / "exe").readlink())
+        comm = (proc / "comm").read_text().strip()
         if not raw.endswith(b"\0"):
             return None
         words = [word.decode("utf-8") for word in raw[:-1].split(b"\0")]
@@ -1259,14 +1239,36 @@ def _native_program(line: str) -> str | None:
         return None
     if not words or " ".join(words).rstrip() != fields[2]:
         return None
-    name = Path(words[0]).name.lower()
-    if (name in {"sh", "bash", "dash", "zsh", "env", "node", "nodejs", "perl",
-                 "ruby", "timeout", "nice", "xargs"}
-            or re.fullmatch(r"python(?:[23](?:\.\d+)?)?", name)):
+    executable = exe.removesuffix(" (deleted)")
+    if not executable.startswith("/") or not words[0]:
         return None
-    if exe.removesuffix(" (deleted)") != words[0]:
+    if comm not in {Path(words[0]).name[:15], Path(executable).name[:15]}:
         return None
-    return words[0]
+    opaque = {"sh", "bash", "dash", "zsh", "env", "node", "nodejs", "perl",
+              "ruby", "timeout", "nice", "xargs"}
+    for name in (Path(words[0]).name.lower(), Path(executable).name.lower()):
+        if name in opaque or re.fullmatch(r"python(?:[23](?:\.\d+)?)?", name):
+            return None
+    if words[0].startswith("/"):
+        if executable != words[0]:
+            return None
+    else:
+        try:
+            with (proc / "exe").open("rb") as image:
+                if image.read(4) != b"\x7fELF":
+                    return None
+                image_stat = os.fstat(image.fileno())
+            if "/" in words[0]:
+                launch = (proc / "cwd").readlink() / words[0]
+                launch_stat = launch.stat()
+                if (launch_stat.st_dev, launch_stat.st_ino) != (image_stat.st_dev, image_stat.st_ino):
+                    return None
+            if ((proc / "cmdline").read_bytes() != raw
+                    or str((proc / "exe").readlink()) != exe):
+                return None
+        except OSError:
+            return None
+    return executable
 
 
 def measurer_pids() -> set[str]:
@@ -1329,7 +1331,10 @@ def external_owners(*, runner: Callable[[list[str]], subprocess.CompletedProcess
                 continue
             lowered = line.lower()
             subject = _measurement_subject(line).lower()
-            named = (_native_program(line) or subject).lower()
+            program = _native_program(line)
+            named = (program or subject).lower()
+            native_render = (program is not None
+                             and Path(program).name.lower() in {"godot", "xvfb-run"})
             measurement_name = (bool(MEASUREMENT_NAME_PATTERN.search(named))
                                 or "--long-gate" in lowered)
             command = line.strip()
@@ -1343,8 +1348,8 @@ def external_owners(*, runner: Callable[[list[str]], subprocess.CompletedProcess
             unknown_measurement = (measurement_name
                                    and not _kernel_thread(line)
                                    and not _resident_service_identity(line))
-            if any(needle in subject for needle in needles) or unknown_measurement or matched:
-                active = any(token in subject for token in (
+            if native_render or any(needle in subject for needle in needles) or unknown_measurement or matched:
+                active = native_render or any(token in subject for token in (
                     "godot --", "godot --headless", "xvfb-run",
                     "playtest", "render", "x11_input_smoke", "run_script")) or unknown_measurement or bool(matched)
                 ownership = "registered" if matched else "unregistered"

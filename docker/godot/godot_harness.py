@@ -3781,6 +3781,11 @@ def _playtest_spec_inner(dst: Path, spec: dict, frames: int, timeout: int,
                 ctrl_timing.append(_scenario_ledger(
                     "control:%s@%d" % (scen_scenes[i] or "(main)", n),
                     scen_scenes[i], time.monotonic() - t_ctrl_start, t_ctrl))
+                # A control keeps the same diagnostic classes as its driven pass;
+                # debt remains visible even when the observation itself fails.
+                _e, control_debt = _split_diagnostics(_e)
+                all_errors.extend({**e, "control": ctrl_label} for e in _e)
+                all_debt.extend({**e, "control": ctrl_label} for e in control_debt)
                 observation_error = _comparison_observation_error(ctrl, n)
                 if _t or _e or observation_error:
                     spec_errors.append("scenario %r: no-input control is not a complete comparable observation (%s); input-dead comparison is unobserved" % (scen_results[i]["name"], observation_error or "timeout/runtime error"))

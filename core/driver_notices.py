@@ -6,18 +6,22 @@ or answered for it, somebody overrode its live claim, an admin wrote around its
 claim (break glass) - goes through ``notify``. Nothing else in P3 addresses a
 driver directly.
 
-The per-driver inbox of design/multi-driver-coop.md §5.2 (phase P2) is being
-built in parallel and is not on main yet, so this module delivers in the two
-durable ways the current schema has: one ``driver_notice`` row in the project's
-``state_events`` stream (payload carries ``target_driver_id`` and ``kind``, so a
-driver waiting on the project with ``wait_for_state_change`` wakes), and one
-pending row in ``driver_notices``, which the target driver reads back with
-``list_driver_notices`` and the system resolves when the matter is settled.
+A notice is stored three ways, all inside the caller's ownership transaction:
+one ``driver_notice`` row in the project's ``state_events`` stream (payload
+carries ``target_driver_id`` and ``kind``, so a driver waiting on the project
+with ``wait_for_state_change`` wakes), one pending row in ``driver_notices``
+(read back with ``list_driver_notices``, resolved by the system when the matter
+is settled), and - through the adapter seam below - one message in the target's
+per-driver inbox of design/multi-driver-coop.md §5.2 (P2, ``core/driver_inbox.py``:
+``list_driver_messages`` / ``wait_for_driver_inbox``), whose delivery the
+system marks ``resolved`` when the notice is. ``sender_driver_id`` is NULL for
+every system notice, as §5.2 specifies. The inbox is keyed to the P0 driver
+registry, so a target that is not a registered driver gets the first two and a
+returned ``inbox: {"skipped": "unregistered_driver"}``.
 
-Re-pointing to the P2 inbox is ONE edit: ``_deliver`` is the only place that
-knows how a notice is stored; its callers hand it the same (target, kind,
-subject, body, refs, delivery_mode) tuple the inbox takes. ``sender_driver_id``
-is NULL for every system notice, as §5.2 specifies.
+``_deliver`` is the only place that knows how a notice is stored; its callers
+hand it the same (target, kind, subject, body, refs, delivery_mode) tuple the
+inbox takes.
 """
 from __future__ import annotations
 
@@ -115,6 +119,9 @@ def initialize(db) -> None:
 
 
 # -- the P2 inbox adapter seam ----------------------------------------------
+# The default hooks are the real P2 inbox (``core.driver_inbox.deliver_notice``
+# / ``resolve_notices``); ``set_inbox_adapter`` overrides them (a test double)
+# and ``set_inbox_adapter()`` restores the default.
 # Both hooks take the CALLER'S connection: a notice is delivered and resolved
 # inside the ownership transaction that caused it, never in a transaction of
 # its own. ``deliver(conn, message, notice)`` receives the ``inbox_message``
@@ -131,8 +138,15 @@ _ADAPTER = {"deliver": None, "resolve": None}
 
 
 def set_inbox_adapter(*, deliver=None, resolve=None) -> None:
-    """Install (or clear, with None) the connection-sharing P2 inbox hooks."""
+    """Override the connection-sharing P2 inbox hooks; None = the real inbox."""
     _ADAPTER["deliver"], _ADAPTER["resolve"] = deliver, resolve
+
+
+def _inbox_hook(name):
+    if _ADAPTER[name] is not None:
+        return _ADAPTER[name]
+    from core import driver_inbox
+    return {"deliver": driver_inbox.deliver_notice, "resolve": driver_inbox.resolve_notices}[name]
 
 
 def _deliver(conn, store, target_driver_id, kind, subject, body, refs, delivery_mode, project_id,
@@ -157,11 +171,10 @@ def _deliver(conn, store, target_driver_id, kind, subject, body, refs, delivery_
     stored = {"notice_id": notice_id, "target_driver_id": target_driver_id, "sender_driver_id": sender_driver_id,
               "project_id": project_id, "kind": kind, "delivery_mode": delivery_mode, "subject": subject,
               "body": body, "refs": refs, "status": "pending", "created_at": created}
-    if _ADAPTER["deliver"] is not None:
-        # The hook gets the P2 keyword set AND the complete stored notice
-        # (sender_driver_id, project_id, refs...): P2 derives the sender from
-        # its instance, so the adapter must be able to select it per notice.
-        stored["inbox"] = _ADAPTER["deliver"](conn, inbox_message(stored), stored)
+    # The hook gets the P2 keyword set AND the complete stored notice
+    # (sender_driver_id, project_id, refs...): P2 derives the sender from
+    # its instance, so the adapter must be able to select it per notice.
+    stored["inbox"] = _inbox_hook("deliver")(conn, inbox_message(stored), stored)
     return stored
 
 
@@ -209,8 +222,8 @@ def resolve(conn, *, notice_ids=None, project_id=None, kind=None, ref_key=None, 
     resolving = [_view(r) for r in conn.execute("SELECT * FROM driver_notices WHERE " + where, args).fetchall()]
     cursor = conn.execute("UPDATE driver_notices SET status='resolved',resolved_at=?,resolved_reason=? WHERE "
                           + where, [now(), reason, *args])
-    if resolving and _ADAPTER["resolve"] is not None:
-        _ADAPTER["resolve"](conn, resolving, reason)
+    if resolving:
+        _inbox_hook("resolve")(conn, resolving, reason)
     return cursor.rowcount
 
 
@@ -254,4 +267,5 @@ class DriverNotices:
             rows = conn.execute(sql + " ORDER BY created_at DESC, notice_id LIMIT ?", [*args, limit + 1]).fetchall()
         return {"notices": [_view(r) for r in rows[:limit]], "truncated": len(rows) > limit,
                 "target_driver_id": target,
-                "delivery": "state_event driver_notice + driver_notices row (P2 driver inbox not deployed)"}
+                "delivery": "state_event driver_notice + driver_notices row + driver inbox message "
+                            "(list_driver_messages / wait_for_driver_inbox)"}

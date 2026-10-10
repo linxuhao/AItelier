@@ -210,16 +210,23 @@ branch), `context_ref`/`context_sha256` (retained), `checkpoint_ref`/`checkpoint
 
 Every driver-addressed notification — reclaim, takeover, orphan, handoff offer and
 reply, override, break glass — goes through `core/driver_notices.py:notify`.
-Until the P2 per-driver inbox is deployed it stores a pending `driver_notices`
-row (`sender_driver_id` NULL for system notices) and emits a project
+Inside the ownership transaction it stores a pending `driver_notices`
+row (`sender_driver_id` NULL for system notices), emits a project
 `driver_notice` event (payload: `target_driver_id`, `kind`, `subject`, `refs`), so a
 driver waiting on the project wakes (the subject ids also sit at the payload top level, so an
-attempt-scoped wait sees its notices). `set_inbox_adapter(deliver=, resolve=)` installs
-connection-sharing hooks for the P2 inbox; `inbox_message(stored_notice)` normalizes a stored
-notice to P2's `send_driver_message` keywords. Read yours with
+attempt-scoped wait sees its notices), and delivers one message to the target's per-driver
+inbox (P2, `core/driver_inbox.py:deliver_notice`): read it with `list_driver_messages` /
+`wait_for_driver_inbox`, kinds mapped to the inbox's (`override_notice` and `break_glass`
+arrive as `lease_notice` with a `[kind]` body prefix), refs reduced to
+`attempt_id | claim_id | subagent_id | node_key`. When the system resolves a notice (offer
+accepted, declined, withdrawn, expired; orphan settled) the inbox delivery is marked
+`resolved` too. The inbox is keyed to the driver registry, so a target that is not a
+registered driver gets no inbox message (`inbox: {"skipped": "unregistered_driver"}` in the
+write's `notified` entry) but still the row and the event.
+`set_inbox_adapter(deliver=, resolve=)` overrides the hooks (tests); `inbox_message(stored_notice)`
+is the normalization. Read the notice rows with
 `list_driver_notices(project_id, statuses?, kinds?)` (admins, and writer
-credentials that are not drivers such as the owner's e-mail, pass `driver_id`); REST `GET /api/state/projects/{id}/driver-notices`. Re-pointing to
-the P2 inbox is one function (`_deliver`).
+credentials that are not drivers such as the owner's e-mail, pass `driver_id`); REST `GET /api/state/projects/{id}/driver-notices`.
 
 ## Schema migration (P3)
 

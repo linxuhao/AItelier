@@ -215,3 +215,79 @@ class DriverInbox:
                 "SELECT m.*,d.delivery_id,d.seq,d.status FROM driver_inbox_messages m JOIN driver_inbox_deliveries d USING(message_id) WHERE d.target_driver_id=? AND m.delivery_mode='standing' AND d.status IN ('unread','acknowledged') ORDER BY d.seq LIMIT 8", (self.driver_id,))]
             total=conn.execute("SELECT COUNT(*) FROM driver_inbox_messages m JOIN driver_inbox_deliveries d USING(message_id) WHERE d.target_driver_id=? AND m.delivery_mode='standing' AND d.status IN ('unread','acknowledged')", (self.driver_id,)).fetchone()[0]
             return {"items":rows,"matched_total":total}
+
+
+# -- P3 notices into this inbox (core/driver_notices.py's adapter seam) -------
+# Both helpers take the CALLER'S connection: a P3 notice is delivered and
+# resolved inside the ownership transaction that caused it (an abandon, a
+# takeover, a handoff decision), so a rolled-back write leaves no message.
+# They write the rows `send_driver_message` writes after validation; the
+# validation itself is P3's (`driver_notices.inbox_message` produced the
+# keyword set) and the ids are P3's own, written in the same transaction.
+_INBOX_TABLES = ("driver_inbox_messages", "driver_inbox_deliveries", "driver_inbox_requests")
+NOTICE_ACTOR = "system"
+
+
+def deliver_notice(conn, message, notice):
+    """Insert one P3 notice as one inbox message with one delivery.
+
+    Returns `send_driver_message`'s result shape, or `{"skipped": reason}`
+    when the target has no inbox: the inbox is keyed to the P0 driver
+    registry (`driver_inbox_deliveries.target_driver_id REFERENCES drivers`),
+    so a notice addressed to an unregistered driver id is kept only as its
+    `driver_notices` row. The skip is returned, never swallowed."""
+    present = {r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name IN (?,?,?,?)", (*_INBOX_TABLES, "drivers"))}
+    if not present.issuperset(_INBOX_TABLES):
+        return {"skipped": "inbox_unavailable"}
+    target = message["target_driver_id"]
+    if (not target or "drivers" not in present
+            or conn.execute("SELECT 1 FROM drivers WHERE driver_id=?", (target,)).fetchone() is None):
+        return {"skipped": "unregistered_driver"}
+    payload = json.dumps([message["subject"], message["body"], target, None, message["project_id"],
+                          message["kind"], message["delivery_mode"], message["refs"], None,
+                          notice["sender_driver_id"]], sort_keys=True)
+    mid = str(uuid4())
+    conn.execute("INSERT INTO driver_inbox_messages VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                 (mid, mid, notice["sender_driver_id"], message["project_id"], message["kind"],
+                  message["delivery_mode"], message["subject"], message["body"], json.dumps(message["refs"]),
+                  None, now()))
+    seq = conn.execute("SELECT COALESCE(MAX(seq),0)+1 FROM driver_inbox_deliveries WHERE target_driver_id=?",
+                       (target,)).fetchone()[0]
+    did = str(uuid4())
+    conn.execute("INSERT INTO driver_inbox_deliveries VALUES(?,?,?,?,?,?)", (did, mid, target, seq, "unread", 1))
+    result = {"message_id": mid, "deliveries": [{"delivery_id": did, "target_driver_id": target, "seq": seq,
+                                                   "status": "unread", "version": 1}]}
+    # The idempotency row is also the correlation: notice_id -> message_id, so
+    # resolving the notice later finds its deliveries without a new column.
+    conn.execute("INSERT INTO driver_inbox_requests VALUES(?,?,?,?,?)",
+                 (NOTICE_ACTOR, "send", notice["notice_id"], payload, json.dumps(result)))
+    return result
+
+
+def resolve_notices(conn, notices, reason):
+    """Mark the deliveries of resolved P3 notices `resolved` (system, any
+    prior status): a settled handoff offer or orphan no longer waits on the
+    target's acknowledgement. Returns the delivery ids it closed."""
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='driver_inbox_requests'").fetchone():
+        return []
+    closed = []
+    for notice in notices:
+        row = conn.execute("SELECT result_json FROM driver_inbox_requests WHERE actor=? AND operation='send' AND request_key=?",
+                           (NOTICE_ACTOR, notice["notice_id"])).fetchone()
+        if row is None:
+            continue
+        for delivery in json.loads(row["result_json"]).get("deliveries", []):
+            current = conn.execute("SELECT status,version FROM driver_inbox_deliveries WHERE delivery_id=?",
+                                   (delivery["delivery_id"],)).fetchone()
+            if current is None or current["status"] == "resolved":
+                continue
+            conn.execute("UPDATE driver_inbox_deliveries SET status='resolved',version=version+1 WHERE delivery_id=?",
+                         (delivery["delivery_id"],))
+            conn.execute("INSERT OR IGNORE INTO driver_inbox_requests VALUES(?,?,?,?,?)",
+                         (NOTICE_ACTOR, "resolved", notice["notice_id"],
+                          json.dumps([delivery["delivery_id"], current["version"], "resolved", reason]),
+                          json.dumps({"delivery_id": delivery["delivery_id"], "status": "resolved",
+                                      "version": current["version"] + 1, "reason": reason})))
+            closed.append(delivery["delivery_id"])
+    return closed

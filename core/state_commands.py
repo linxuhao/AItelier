@@ -200,12 +200,6 @@ class ClaimRef(Project):
     claim_id: str
 
 
-class SetMultiDriver(Project):
-    multi_driver: Literal["off", "on"]
-    expected_revision: int
-    reason: str = Field(min_length=1, max_length=4000)
-
-
 class SendDriverMessage(Request):
     request_key: str = Field(min_length=1, max_length=320)
     subject: str = Field(min_length=1, max_length=200)
@@ -241,7 +235,7 @@ class SetClaimEnforcement(Project):
     claim_enforcement: Literal["off", "on"] = Field(description=(
         "on: start_attempt/start_external_attempt need your live implement claim, reports need the owner "
         "fence, structural writes over work another driver holds are refused (not_owner), checkpoints are "
-        "answered by the attempt owner. The only enforcement switch; needs multi_driver=on; default off."))
+        "answered by the attempt owner. The only enforcement switch; default off."))
     expected_revision: int
     reason: str = Field(min_length=1, max_length=4000)
 
@@ -251,7 +245,7 @@ class SetReviewIndependence(Project):
         "advisory: verify_node still succeeds, but a review criterion whose latest evidence came from the "
         "attempt's current or former owner marks the receipt provenance self_reviewed=true and counts in "
         "project_overview.self_reviewed_receipts. Visibility only; there is no required mode. "
-        "Needs multi_driver=on; default off."))
+        "Default off."))
     expected_revision: int
     reason: str = Field(min_length=1, max_length=4000)
 
@@ -938,7 +932,7 @@ WRITE_REQUESTS = {
     "resolve_director_message": TransitionDirectorMessage,
     "report_issue": ReportIssue, "link_issue": LinkIssue, "resolve_issue": ResolveIssue,
     "claim_node": ClaimNode, "release_claim": ReleaseClaim, "heartbeat": Heartbeat,
-    "set_multi_driver": SetMultiDriver, "set_claim_enforcement": SetClaimEnforcement,
+    "set_claim_enforcement": SetClaimEnforcement,
     "set_review_independence": SetReviewIndependence,
     "abandon_external_attempt": AbandonExternalAttempt, "take_over_attempt": TakeOverAttempt,
     "register_subagent": RegisterSubagent,
@@ -1096,7 +1090,7 @@ def _handlers(service) -> dict:
         "resolve_issue": service.issues.resolve,
         "claim_node": service.claims.claim_node, "release_claim": service.claims.release_claim,
         "heartbeat": service.claims.heartbeat, "list_claims": service.claims.list_claims,
-        "get_claim": service.claims.get_claim, "set_multi_driver": service.portfolio.set_multi_driver,
+        "get_claim": service.claims.get_claim,
         "set_claim_enforcement": service.portfolio.set_claim_enforcement,
         "set_review_independence": service.portfolio.set_review_independence,
         "abandon_external_attempt": service.recovery.abandon_external_attempt,

@@ -80,51 +80,11 @@ class StatePortfolio:
                               {"dispatch": dispatch, "reason": reason, "revision": expected_revision + 1, "actor": self.actor})
             return project_policy(conn, project_id)
 
-    def set_multi_driver(self, project_id, multi_driver, expected_revision, reason):
-        """Owner/admin switch for claims and attempt leases (design §9.1, D2/§7.1).
-
-        Shares the policy revision with set_dispatch (one CAS for the row). In
-        P1 `on` only RECORDS claims and leases; nothing is enforced.
-        """
-        if not getattr(self.service, "is_admin", False):
-            from core.state_claims import ClaimError
-            raise ClaimError("admin_required", "only the owner or an admin driver changes multi_driver")
-        if not isinstance(multi_driver, str) or multi_driver not in {"off", "on"}:
-            raise StateGraphError("multi_driver must be off or on")
-        integer(expected_revision, "expected_revision", 0)
-        reason = text(reason, "multi_driver reason", 4000)
-        with self.store.transaction(write=True) as conn:
-            self.store._project(conn, project_id)
-            old = project_policy(conn, project_id)
-            if old["revision"] != expected_revision:
-                raise StateConflict("project policy revision changed")
-            conn.execute("INSERT INTO state_project_policy(project_id,revision,dispatch,reason,actor,updated_at,"
-                         "multi_driver) VALUES(?,?,?,?,?,?,?) ON CONFLICT(project_id) DO UPDATE SET "
-                         "revision=excluded.revision,multi_driver=excluded.multi_driver,reason=excluded.reason,"
-                         "actor=excluded.actor,updated_at=excluded.updated_at",
-                         (project_id, expected_revision + 1, old["dispatch"], reason, self.actor, now(),
-                          multi_driver))
-            if multi_driver == "off" and (old.get("claim_enforcement") == "on"
-                                          or old.get("review_independence") == "advisory"):
-                # Turning multi_driver off takes enforcement down with it: there is
-                # nothing left to enforce against, and a later `on` starts record-only.
-                # Advisory review marking goes the same way (P4): without owners there
-                # is nobody to compare a reviewer against.
-                conn.execute("UPDATE state_project_enforcement SET claim_enforcement='off',"
-                             "review_independence='off',reason=?,actor=?,updated_at=? WHERE project_id=?",
-                             (reason, self.actor, now(), project_id))
-            self.store._event(conn, project_id, None, "multi_driver_policy_changed",
-                              {"multi_driver": multi_driver, "reason": reason,
-                               "revision": expected_revision + 1, "actor": self.actor})
-            return project_policy(conn, project_id)
-
     def set_claim_enforcement(self, project_id, claim_enforcement, expected_revision, reason):
         """Owner/admin switch that turns recorded claims into refusals (P3, §7.3).
 
         Owner decision 2026-10-09: enforcement sits behind its OWN switch, default
-        off, so set_multi_driver alone never starts refusing anything. It can be
-        turned on only while multi_driver is on; turning multi_driver off turns
-        enforcement off with it (set_multi_driver below).
+        off, so recorded claims alone never refuse anything.
         """
         if not getattr(self.service, "is_admin", False):
             from core.state_claims import ClaimError
@@ -138,15 +98,11 @@ class StatePortfolio:
             old = project_policy(conn, project_id)
             if old["revision"] != expected_revision:
                 raise StateConflict("project policy revision changed")
-            if claim_enforcement == "on" and old.get("multi_driver") != "on":
-                from core.state_claims import ClaimError
-                raise ClaimError("multi_driver_off", "turn multi_driver on before enforcing claims")
-            conn.execute("INSERT INTO state_project_policy(project_id,revision,dispatch,reason,actor,updated_at,"
-                         "multi_driver) VALUES(?,?,?,?,?,?,?) ON CONFLICT(project_id) DO UPDATE SET "
+            conn.execute("INSERT INTO state_project_policy(project_id,revision,dispatch,reason,actor,updated_at) "
+                         "VALUES(?,?,?,?,?,?) ON CONFLICT(project_id) DO UPDATE SET "
                          "revision=excluded.revision,reason=excluded.reason,"
                          "actor=excluded.actor,updated_at=excluded.updated_at",
-                         (project_id, expected_revision + 1, old["dispatch"], reason, self.actor, now(),
-                          old.get("multi_driver", "off")))
+                         (project_id, expected_revision + 1, old["dispatch"], reason, self.actor, now()))
             conn.execute("INSERT INTO state_project_enforcement(project_id,claim_enforcement,reason,actor,updated_at) "
                          "VALUES(?,?,?,?,?) ON CONFLICT(project_id) DO UPDATE SET "
                          "claim_enforcement=excluded.claim_enforcement,reason=excluded.reason,actor=excluded.actor,"
@@ -163,8 +119,7 @@ class StatePortfolio:
         advisory: verify_node still succeeds; a review criterion whose latest
         evidence came from the attempt's current or former owner marks the
         receipt provenance self_reviewed=true, counted by project_overview.
-        There is no `required` mode. Needs multi_driver=on; turning
-        multi_driver off resets it (set_multi_driver above).
+        There is no `required` mode.
         """
         from core.state_claims import ClaimError
         if not getattr(self.service, "is_admin", False):
@@ -178,14 +133,11 @@ class StatePortfolio:
             old = project_policy(conn, project_id)
             if old["revision"] != expected_revision:
                 raise StateConflict("project policy revision changed")
-            if review_independence == "advisory" and old.get("multi_driver") != "on":
-                raise ClaimError("multi_driver_off", "turn multi_driver on before advisory review marking")
-            conn.execute("INSERT INTO state_project_policy(project_id,revision,dispatch,reason,actor,updated_at,"
-                         "multi_driver) VALUES(?,?,?,?,?,?,?) ON CONFLICT(project_id) DO UPDATE SET "
+            conn.execute("INSERT INTO state_project_policy(project_id,revision,dispatch,reason,actor,updated_at) "
+                         "VALUES(?,?,?,?,?,?) ON CONFLICT(project_id) DO UPDATE SET "
                          "revision=excluded.revision,reason=excluded.reason,"
                          "actor=excluded.actor,updated_at=excluded.updated_at",
-                         (project_id, expected_revision + 1, old["dispatch"], reason, self.actor, now(),
-                          old.get("multi_driver", "off")))
+                         (project_id, expected_revision + 1, old["dispatch"], reason, self.actor, now()))
             conn.execute("INSERT INTO state_project_enforcement(project_id,claim_enforcement,reason,actor,updated_at,"
                          "review_independence) VALUES(?,?,?,?,?,?) ON CONFLICT(project_id) DO UPDATE SET "
                          "review_independence=excluded.review_independence,reason=excluded.reason,"

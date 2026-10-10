@@ -208,3 +208,94 @@ Rehearsal script: `/tmp/p3-logs/rehearse.py` (host python, `AITELIER_HOME=/tmp/p
     registry says you own it (P1 refused any id not under your prefix; the registry decides now).
 11. P2 inbox not on main: all notices go through `core/driver_notices.py` as described; `driver_notices`
     rows are never deleted (resolve only).
+
+## Fix round 1 (2026-10-10, after the Codex review `P3_REVIEW_CODEX.md`)
+
+Every finding was verified against the code of `200b73c3` before deciding. Fix commits: `44a38675`
+(code + tests), `89f5fcbc` (docs). Regression tests: `tests/unit/test_state_p3_fix_round1.py` — all 19 FAIL
+on `200b73c3` (verified by copying the module into a detached worktree of that commit and running it in a
+throwaway container: 19 failed, 0 passed) and pass on `44a38675`. Existing P3 tests that encoded the old
+behaviour were adjusted to the fixed semantics (bound claim on an explicit `claim_id`, `workers` declared in
+handoff packages, `not_subagent_owner` before `not_orphaned`); no existing assertion outside P3's own module
+was touched.
+
+| # | verdict | fix (commit `44a38675`) | regression test | evidence / notes |
+|---|---|---|---|---|
+| 1 | CONFIRMED | `claim_launch(attempt_id, driver_id, is_admin, actor)` runs `state_enforcement.launch_authorization` inside the `reserved → launching` transaction (owner + live implement claim; admin = `break_glass` event + owner notice); `_reserve` refuses another driver's replay of an enforced owned reservation (`not_attempt_owner`) | `TestFinding1LaunchAuthorization` (3 tests) | `recover_attempt` → `_launch_or_recover` → `claim_launch` had no ownership check (state_service.py:1036/504, state_attempts.py:465). External replays were already refused by the request hash (reporting actor is hashed); SkillFlow replays were not. |
+| 2 | CONFIRMED | `_release_bound_claims` re-creates every transferred claim with its workspace, purpose and subagent; `new_claim_for(purpose, workspace, subagent)` | `TestFinding2TransferKeepsWorkspace` | `new_claim_for` defaulted `workspace=""` and the caller passed none. |
+| 3 | CONFIRMED | `state_enforcement.checkout_in_use` / `refuse_checkout_in_use`: one writer per CHECKOUT (`host:path`, branch suffix ignored) across live exclusive claims and open subagents INCLUDING `orphaned_unobservable`; used by `claim_node`, `register_subagent`, `_after_unknown_abandon` | `TestFinding3OrphanKeepsCheckout` | registration clash excluded orphans and compared the full `host:path#branch` string. |
+| 4 | CONFIRMED | `subagent_registered` requires `owner_driver_id = caller`; `heartbeat` judges the registry row before renewing anything; takeover/handoff moves every live claim with `subagent=label` (`transfer_subagent_claims`), orphaning revokes them (`revoke_subagent_claims`, status `revoked`) | `TestFinding4FormerOwnerIsFencedOut` | state_enforcement.py:258 ignored `driver_id`; state_claims.py:479 renewed claims first. |
+| 5 | CONFIRMED | attempt packages must declare `workers.quiescent` (`quiescence_required`); `_check_observability` no longer defaults undeclared to quiescent | `test_finding5_…` | `workers.get("quiescent", True)`. |
+| 6 | CONFIRMED | `StructuralGuard.check/notify` take the write connection; `revise_node`/`split_node`/`supersede_node`/`set_node_facet` and the hold release run check + write + audit event + notices in ONE `BEGIN IMMEDIATE` transaction (store gained `_split`, `_supersede`, `_set_facet`) | `test_finding6_…` (a failing notice rolls the revision back; hold path too) | three transactions before. |
+| 7 | CONFIRMED | `live_implement_claim` judges the lease at the write; a `reclaimable` claim is absent (`claim_required`, naming the lapsed claim); also used by `launch_authorization` | `test_finding7_…` (expiry + grace, no sweep, dispatch refused) | `dispatch_claim` checked `status='live'` only. |
+| 8 | CONFIRMED | `_authorize_report` returns `(late, break_glass)`; an admin (owner-cli or owner e-mail) is admitted on any attempt, every integrity check applies, event carries `break_glass`, owner notified in the observation transaction | `test_finding8_…` | `self.is_admin` was never consulted. |
+| 9 | CONFIRMED | with enforcement off nothing is bound unless the caller names `claim_id`; release-on-terminal only touches bound claims, so P1 rows/history are unchanged | `test_finding9_…` | implicit bind + unconditional release at state_external.py:279. |
+| 10 | CONFIRMED | `EXTERNAL_OWNER_STATUSES` gains `abandoned`; the registry query joins `state_attempts.abandon_kind` and drops `abandoned` + `confirmed_stopped`; `abandoned` (unknown) stays a durable blocker and matches processes like `unknown`; a late `quiescent=true` report by the original reporter (or an admin) settles the owner row (`owner_settled`) | `test_finding10_…` (both kinds, through `dq.measure`) | before: invalid inventory ("unknown status 'abandoned'") and a permanent blocker for both kinds. |
+| 11 | CONFIRMED | a terminal quiescent report settles the attempt's `active`/`adopted` workers (`settle_open_subagents`, `settled_subagents` in the response); `report_subagent_settled` also lets the CURRENT owner (current fence) settle a worker of an attempt that is no longer active | `test_finding11_…` (2 tests) | workers stayed active and reserved their checkout forever. |
+| 12 | CONFIRMED | `new_claim_for(purpose=…)` inserts the real purpose (history, event, exclusive index) | `test_finding12_…` (review claim handed off beside an implement claim) | insert-as-implement then UPDATE violated `state_node_claims_one_exclusive`. |
+| 13 | CONFIRMED | new PRIVATE table `state_subagent_contexts` (immutable, canary planted) holds the frozen instructions; nothing goes to `state_external_report_blobs` | `test_finding13_…` (+ `test_undeclared_reader…` / `test_every_private_table_reader…` via the canary) | `store_report_blob` wrote to the public blob table. |
+| 14 | CONFIRMED | `_members` selects `status == "member"` | `test_finding14_…` (real `drivers` registry: member notified, removed not) | `project_drivers.status ∈ {member, removed}`; `"active"` matched nothing. |
+| 15 | CONFIRMED (minor, fixed) | `driver_notice` events carry `attempt_id`/`claim_id`/`subagent_id`/`handoff_id`/`node_key`/`run_id` at the payload top level | `test_finding15_…` (attempt-scoped wait returns the notice) | `scan` filters on `$.attempt_id`. |
+| 16 | CONFIRMED (minor, documented + helper) | `driver_notices.inbox_message(notice, project_members=…)` normalizes a P3 notice to P2's `send_driver_message` keywords; contract documented in the module header (below) | `test_finding16_…` | P2 branch (`12fbef9a`, read-only inspection, not merged) differs as the review says. |
+
+### P2 adapter contract (finding 16)
+Read-only inspection of the P2 branch commit `12fbef9a` (`core/driver_inbox.py`, not merged, not pulled):
+`DriverInbox.send_driver_message(request_key, subject, body, target_driver_id | project_members, project_id,
+kind, delivery_mode, refs, reply_to_message_id, _system)` with: system kinds `lease_notice | takeover_notice |
+subagent_orphaned | handoff_offer` (and `handoff_reply` only as a DRIVER kind with a sender); `subject` 1..200
+chars; `body` ≤ 8000; `refs` keys restricted to `attempt_id | issue_id | claim_id | subagent_id` (+ `node_key`
+with a project) whose values exist, no nulls, no extra keys; it opens its OWN write transaction and records
+idempotency by `(actor, operation, request_key)`. P3 differs in: two extra kinds (`override_notice`,
+`break_glass` → `lease_notice` with a `[kind]` body prefix), subjects up to 300 chars, richer refs (`fence`,
+`held`, `break_glass`, `action`, `by_actor`, `observation_id`, `run_id`, `workspace`, …), and delivery INSIDE the
+ownership transaction. `inbox_message` performs the normalization (kind map, subject/body caps, ref filter,
+`request_key = notice_id`, `_system = sender is NULL`, pool offers as `project_members`). What the merge needs
+on the P2 side: a connection-taking row insert (the body of `send_driver_message` after validation) callable
+from `driver_notices._deliver(conn, …)`, plus a connection-taking resolve for `driver_notices.resolve`; the
+reviewer's merge note (conflicts in `core/state_changes.py` and `core/state_service.py`) stands.
+
+### Test results (fix round 1)
+- Targeted suites after the fixes (claims, external, attempts, run summary, deployment quiescence, privacy
+  doors, P3, fix-round module): 529 passed, 0 failed.
+- Full suite on HEAD `44a38675` (docs-only `89f5fcbc` on top), one container, 29:09: **361 failed, 6446 passed,
+  13 skipped, 23 errors** — failure-ID set IDENTICAL to base `53daff7ff2` (361F; `comm` new = 0, fixed = 0);
+  +19 passed = the fix-round regression tests. Logs: `/tmp/p3-logs/head_full3.log`, `/tmp/p3-logs/oldcheck.log`
+  (the 19 tests failing on `200b73c3`). Migration/rebuild code was not changed in this round, so the
+  rehearsal was not repeated.
+
+## Fix round 2 (2026-10-10, after `P3_REVIEW2_CODEX.md`)
+
+Every item was verified against the code of `89f5fcbc` first; all 12 are CONFIRMED (none rejected). Fix commit:
+`8c3d7079` (code, tests, docs). Regression tests: `tests/unit/test_state_p3_fix_round2.py` — all 14 FAIL on
+`89f5fcbc` (the module was copied into a detached worktree of that commit and run in a throwaway container:
+14 failed, 0 passed; the module's autouse fixture tolerates the pre-fix tree so each test fails for ITS
+reason) and pass on `8c3d7079`. Two round-1 assertions that encoded a defect were corrected and are explained
+below (F10, F16). No other existing assertion was changed.
+
+| item | verdict | fix (commit `8c3d7079`) | regression test | evidence / notes |
+|---|---|---|---|---|
+| R1 stale-fence replay | CONFIRMED | `_reserve` replay judges a NAMED `claim_id`/`fence` through `dispatch_claim` (release C1, claim C2, replay with C1 → `stale_fence`); `launch_authorization` returns `(break_glass, claim_to_bind)`: a released/lapsed bound claim does not authorize, the owner's current live claim does and is BOUND at launch (`attempt_launching.claim_id`) | `TestR1StaleFenceReplay` (2) | state_attempts.py replay path returned the row untested; launch accepted any owner claim without binding. |
+| R2 takeover after sweep | CONFIRMED | `checkout_in_use` now counts the executor checkout of every ACTIVE attempt (workspace of the claim it was dispatched/transferred on, whatever that claim's status is); `_release_bound_claims` sources the replacement from the latest bound claim when none is live and re-validates occupancy (`refuse_checkout_in_use(exclude_attempt=…, same_executor=…)`) | `test_r2_…` (sweep via `list_claims` before the takeover) | state_recovery.py:85 selected `status='live'` only → `workspace=""`. |
+| R4 evidence authorization | CONFIRMED | `StateAttempts.record_evidence(authorize=)` runs the subagent verdict INSIDE the evidence write transaction before the insert; the service keeps the same check early (fast refusal) and passes it as `authorize` | `test_r4_…` (hook sees `conn.in_transaction`, refusal leaves no row) | state_service.py:1205 read in a separate transaction. |
+| R15 decline replies | CONFIRMED | decline notices carry `attempt_id`/`claim_id` in refs (flattened to the event top level) | `test_r15_…` (attempt-scoped wait returns the reply, cursor advances past it) | state_handoffs.py:409 refs lacked the subject. |
+| R16 / N7 P2 normalization | CONFIRMED | `inbox_message` takes ONE shape — the complete stored notice (row with `refs_json`, or `notify()`'s now-complete return incl. project/sender/body/refs) — and refuses a notice without `sender_driver_id`; `set_inbox_adapter(deliver=, resolve=)` installs connection-sharing hooks called inside the ownership transaction (`_deliver` → `deliver(conn, inbox_message(stored))`, `resolve` → `resolve(conn, rows_with_refs, reason)` so `handoff_id` correlation survives) | `TestR16InboxAdapter` (2); F16 rewritten | helper read `refs` only and `notify()` returned a partial dict. The P2 branch was inspected read-only (`12fbef9a`), not merged. |
+| N1 unverified late quiescence | CONFIRMED | a late `quiescent=true` report on an abandoned attempt must carry a retained, digest-verified report (`retain_report(completed=False)`, stored); invalid ref/digest → `StateConflict`, nothing recorded, blocker stays | `test_n1_…`; F10 corrected (bare `/tmp/x` + zero digest now refused; real file settles; blocker checked in between) | state_external.py:261 settled on any `quiescent=True`. |
+| N2 orphan side checkouts | CONFIRMED | `checkout_in_use` also reserves every checkout of a claim ever held FOR an unresolved orphan (its revoked side claims included) until settlement | `test_n2_…` (exclusive side claim on another checkout) | revocation freed them. |
+| N3 worker's own checkout | CONFIRMED | `same_executor=<subagent>`: the worker's registry row and the claims held for it are one executor — `claim_node(subagent=W)` at W's workspace and `register_subagent(W)` at a workspace already claimed for W both pass; distinct executors still refuse; registration ownership is validated first | `test_n3_…` (both orders + distinct executors) | collision check saw two writers. |
+| N4 settled-worker evidence | CONFIRMED | `require_registered_subagent(allow_settled=True)` for evidence (`active/adopted/settled`); checkout writes still need an open worker | `test_n4_…` (register → terminal report → attributed evidence recorded; unknown worker refused) | settlement withdrew attribution. |
+| N5 admin reporting with enforcement off | CONFIRMED | the admin break-glass path exists only where `enforced(conn, project)`; otherwise P1's `actor_continues` rule applies verbatim | `test_n5_…[False/True]` | `_authorize_report` never checked `enforced`. |
+| N6 fence omitted on settlement | CONFIRMED | current-owner settlement needs the current fence (`fence_required`, `stale_fence`); the old-fence exception stays origin-driver orphan closure only | `test_n6_…` | fence checked only when supplied. |
+
+Also noted by the review and left as is: a database that ran the pre-round-1 P3 code could still hold public copies
+of subagent contexts in `state_external_report_blobs` (none exists: P3 was never deployed); and the owner
+re-claiming the checkout its own active attempt runs in is allowed (`owner=` in `checkout_in_use`), because
+that is one writer, not two — the R1 replay tests depend on it.
+
+### Test results (fix round 2)
+- `tests/unit/test_state_p3_fix_round2.py` 14 passed; round-1 module 19 passed; P3 module 33 passed (66 total).
+- Affected suites (claims, external, attempts, changes, run summary, deployment quiescence, privacy doors,
+  private-read verdict, read visibility): 510 passed, 0 failed.
+- Full suite on HEAD `8c3d7079`, one container, 29:50: **361 failed, 6460 passed, 13 skipped, 23 errors** —
+  failure-ID set IDENTICAL to base `53daff7ff2` (361F; `comm` new = 0, fixed = 0); +14 passed = the round-2
+  regression tests. Logs: `/tmp/p3-logs/head_full4.log`, `/tmp/p3-logs/oldcheck2.log`. Migration/rebuild code
+  was not changed in this round, so the rehearsal was not repeated.

@@ -68,15 +68,27 @@ class TestTheNextClaimStartsThere:
         assert AgentFactory(registry=reg)._build_gateway("other").max_output_tokens == 8192
 
 
-def test_the_escalation_site_records_it():
-    # The store is useless unless the one place that escalates calls it.
-    import inspect
-    from core.dpe_pipeline import PipelineEngine
-    src = inspect.getsource(PipelineEngine)
-    assert "remember_output_cap(" in src
-    # Anchor on the ASSIGNMENT, not the first textual mention — the comment
-    # block above the call site also says "escalate_output_cap()", and the
-    # first version of this test measured its distance from the comment.
-    i = src.index("escalated = agent.gateway.escalate_output_cap()")
-    assert "remember_output_cap(" in src[i:i + 900], \
-        "recorded too far from the escalation to be on that path"
+
+
+from tests.integration.test_native_parity import engine, budget_case, _run, _turn, _tc
+
+
+def test_reasoning_only_native_starvation_does_not_remember_a_larger_role_cap(budget_case, monkeypatch):
+    from unittest.mock import MagicMock
+    from core.ai_router import AIGateway
+    eng, ws, draft, _traces = budget_case
+    eng.factory.get_max_tool_turns.return_value = 3
+    nat = eng.factory.get_native_agent.return_value
+    nat.gateway.max_output_tokens = 8192
+    nat.gateway.last_usage = {}
+    nat.gateway.last_outbound = {}
+    nat.gateway.escalate_output_cap = MagicMock(side_effect=lambda:AIGateway.escalate_output_cap(nat.gateway))
+    remember = MagicMock(wraps=agents_mod.remember_output_cap)
+    monkeypatch.setattr(agents_mod, "remember_output_cap", remember)
+    nat.turn.side_effect = [_turn(truncated=True),
+        _turn(tool_calls=[_tc("edit"), _tc("finish_step", cid="finish")])]
+    assert _run(eng,ws) is True and draft.exists()
+    assert nat.gateway.max_output_tokens == 8192
+    nat.gateway.escalate_output_cap.assert_not_called()
+    remember.assert_not_called()
+    assert agents_mod._LEARNED_OUTPUT_CAPS == {}

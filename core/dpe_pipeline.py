@@ -1554,7 +1554,29 @@ class PipelineEngine:
         legacy_effect_keys: set[str] = set()
         effect_result_refs: dict[str, str] = {}
         fenced_written: list[str] = []
-        for event, payload in rows:
+        recovery_pending = False
+        recovery_turns = 0
+        last_starved_row = -1
+        position_rows = {}
+        message_turns = {}
+        output_budget = {}
+        for row_index, (event, payload) in enumerate(rows):
+            if not isinstance(payload, dict):
+                continue
+            if event == "user_prompt" and payload.get("mode") == "native":
+                recovery_pending = False
+                recovery_turns = 0
+                last_starved_row = -1
+            elif event == "output_cap_starved":
+                recovery_pending = True
+                last_starved_row = row_index
+                recovery_turns = max(recovery_turns, int(payload.get("turn") or 0))
+            elif event == "output_starvation_turn_started":
+                recovery_pending = True
+                recovery_turns = max(recovery_turns, int(payload.get("turn") or 0))
+                output_budget = payload.get("output_budget") or output_budget
+            elif event == "output_starvation_recovered":
+                recovery_pending = False
             if event == "side_effect_completed" and isinstance(payload, dict):
                 key = payload.get("invocation_key") or payload.get("call_key")
                 if isinstance(key, str) and key:
@@ -1593,12 +1615,17 @@ class PipelineEngine:
                         pass
                 m[k] = v
             by_position[(segment, idx)] = m
+            position_rows[(segment, idx)] = row_index
+            message_turns[id(m)] = int(payload.get("turn") or 0)
         if not by_position:
             return None
         latest_segment = max(segment for segment, _ in by_position)
         messages = [by_position[key] for key in sorted(by_position)
                     if key[0] == latest_segment]
         all_messages = [by_position[key] for key in sorted(by_position)]
+        # Conversation recovery drops an unfinished assistant batch, but its
+        # already durable receipts remain facts for accounting and effects.
+        accounting_messages = list(all_messages)
         dropped = 0
         recovery_turn = None
         # trailing incomplete turn
@@ -1608,12 +1635,19 @@ class PipelineEngine:
             call_ids = {c.get("id") for c in calls if isinstance(c, dict)}
             got = len({m.get("tool_call_id") for m in messages[last_a + 1:]
                        if m["role"] == "tool" and m.get("tool_call_id") in call_ids})
-            if not calls or got < len(calls):
+            # Reasoning-only starvation is a completed provider turn even
+            # though its host placeholder has no calls. Keep its correction.
+            completed_starvation = (not calls and recovery_pending
+                                    and last_starved_row >= 0
+                                    and position_rows.get(
+                                        (latest_segment, sorted(key[1] for key in by_position if key[0] == latest_segment)[last_a]), -1) > last_starved_row)
+            if (not calls and not completed_starvation) or got < len(calls):
                 dropped = len(messages) - last_a
                 # Settle this exact requested batch before another provider
                 # call. Do not ask a model to guess which mutations ran.
                 recovery_turn = {
                     "assistant": messages[last_a],
+                    "turn": message_turns.get(id(messages[last_a]), 0),
                     "index": sorted(key[1] for key in by_position
                                     if key[0] == latest_segment)[last_a],
                     "tool_results": [m for m in messages[last_a + 1:]
@@ -1623,11 +1657,64 @@ class PipelineEngine:
         all_messages = [by_position[key] for key in sorted(by_position)
                         if key[0] < latest_segment] + messages
         turns = sum(1 for m in all_messages if m["role"] == "assistant")
+        # A dispatched correction is charged before calling the provider;
+        # repeated host crashes must not replenish the original finite budget.
+        turns = max(turns, recovery_turns)
+        # Bind receipts to one assistant batch in its own segment. Tool ids
+        # can be reused on later turns, so they are not global result identity.
+        ordered_positions = sorted(by_position)
+        results_by_batch: dict[int, dict[str, str]] = {}
+        complete_batches: set[int] = set()
+        accounted_receipts: set[int] = set()
+        for offset, key in enumerate(ordered_positions):
+            m = by_position[key]
+            calls = m.get("tool_calls") or []
+            if m.get("role") != "assistant" or not isinstance(calls, list) or not calls:
+                continue
+            receipts = []
+            for next_key in ordered_positions[offset + 1:]:
+                receipt = by_position[next_key]
+                if next_key[0] != key[0] or receipt.get("role") != "tool":
+                    break
+                receipts.append((next_key, receipt))
+            try:
+                ids = [call["id"] for call in calls]
+                if (len(receipts) > len(calls) or not all(ids)
+                        or len(set(ids)) != len(ids)
+                        or not all(isinstance(json.loads(call["function"]["arguments"]), dict)
+                                   for call in calls)):
+                    continue
+                for call, (receipt_key, receipt) in zip(calls, receipts):
+                    if (position_rows[receipt_key] <= position_rows[key]
+                            or receipt.get("tool_call_id") != call["id"]
+                            or receipt.get("name", call["function"]["name"]) != call["function"]["name"]
+                            or not isinstance(json.loads(receipt["content"]), dict)):
+                        break
+                else:
+                    results_by_batch[id(m)] = {
+                        call["id"]: receipt["content"]
+                        for call, (_, receipt) in zip(calls, receipts)}
+                    accounted_receipts.update(id(receipt) for _, receipt in receipts)
+                    if len(receipts) == len(calls):
+                        complete_batches.add(id(m))
+            except (KeyError, TypeError, ValueError):
+                continue
+        # Legacy completed traces predate the explicit recovered event. Only
+        # a complete successful finish batch after starvation clears recovery.
+        if recovery_pending and last_starved_row >= 0:
+            for key, m in by_position.items():
+                calls = m.get("tool_calls") or []
+                results = results_by_batch.get(id(m))
+                if (position_rows[key] > last_starved_row and id(m) in complete_batches and results
+                        and any((call.get("function") or {}).get("name") == "finish_step"
+                                for call in calls)
+                        and not any(_is_failed_tool_result(value) for value in results.values())):
+                    recovery_pending = False
         written: list[str] = list(fenced_written)
         grants = 0
         extra_total = 0
-        for m in all_messages:
-            if m["role"] != "tool":
+        for m in accounting_messages:
+            if m["role"] != "tool" or id(m) not in accounted_receipts:
                 continue
             try:
                 res = json.loads(m["content"])
@@ -1649,29 +1736,29 @@ class PipelineEngine:
         # pair, but the workspace still contains their effects. Keep the exact
         # call identity + result so an identical retry is acknowledged without
         # executing it a second time.
-        results_by_id = {m.get("tool_call_id"): m.get("content", "")
-                         for m in all_messages if m.get("role") == "tool"
-                         and m.get("tool_call_id")}
         completed_effect_calls: dict[str, str] = dict(fenced_effects)
         confirmed_effect_keys: set[str] = set()
-        first_write_turn: int | None = None
+        first_write_turn: int | None = next((
+            p["first_write_turn"] for event, p in rows
+            if event == "implementation_first_write" and isinstance(p, dict)
+            and isinstance(p.get("first_write_turn"), int) and p["first_write_turn"] > 0), None)
         reads_searches = 0
         tool_failures = 0
         expansion_requests: list[dict] = []
         assistant_turn = 0
-        for m in all_messages:
+        for m in accounting_messages:
             if m.get("role") != "assistant":
                 continue
-            assistant_turn += 1
+            assistant_turn = message_turns.get(id(m)) or assistant_turn + 1
             for call in m.get("tool_calls") or []:
                 fn = (call or {}).get("function") or {}
                 tool_name = str(fn.get("name") or "")
-                if tool_name in _REPOSITORY_READ_TOOLS:
-                    reads_searches += 1
                 call_id = (call or {}).get("id")
-                result_text = results_by_id.get(call_id)
+                result_text = results_by_batch.get(id(m), {}).get(call_id)
                 if not result_text:
                     continue
+                if tool_name in _REPOSITORY_READ_TOOLS:
+                    reads_searches += 1
                 try:
                     result = json.loads(result_text)
                     params = json.loads(fn.get("arguments") or "{}")
@@ -1699,11 +1786,25 @@ class PipelineEngine:
                     completed_effect_calls.setdefault(_repeat_call_key(
                         tool_name, params), result_text)
 
+        usage_rows = [p for event, p in rows if event == "token_usage" and isinstance(p, dict)]
+        if usage_rows:
+            output_budget = dict(output_budget)
+            output_budget["completion_tokens"] = sum(int(p.get("completion_tokens") or 0) for p in usage_rows)
+            output_budget["reasoning_tokens"] = sum(int(p.get("reasoning_tokens") or 0) for p in usage_rows)
+            for usage in usage_rows:
+                cap = int(usage.get("max_output_tokens") or 0)
+                completion = int(usage.get("completion_tokens") or 0)
+                if not cap:
+                    continue
+                output_budget.setdefault("cap_at_start", cap)
+                if completion / cap > float(output_budget.get("spent_fraction") or 0):
+                    output_budget.update(peak_turn_completion_tokens=completion,
+                                         peak_turn_cap=cap, spent_fraction=completion / cap)
         written = list(dict.fromkeys(written))
         return {"messages": messages, "turns": turns, "written_files": written,
                 "turn_grants": grants, "current_max_turns": max_turns + extra_total,
                 "dropped_tail": dropped, "segment": latest_segment,
-                "recall_messages": [m for m in all_messages
+                "recall_messages": [m for m in accounting_messages
                                     if m.get("role") == "tool"],
                 "completed_effect_calls": completed_effect_calls,
                 "confirmed_effect_keys": sorted(confirmed_effect_keys),
@@ -1713,7 +1814,9 @@ class PipelineEngine:
                 "first_write_turn": first_write_turn,
                 "reads_searches": reads_searches,
                 "tool_failures": tool_failures,
-                "expansion_requests": expansion_requests}
+                "expansion_requests": expansion_requests,
+                "starved_recovery_pending": recovery_pending,
+                "output_budget": output_budget}
 
     def _resume_from_trace(self, project_id: str, max_turns: int) -> dict | None:
         """Read this instance's `prompt_delta` rows and rebuild; None if none.
@@ -3872,13 +3975,15 @@ class PipelineEngine:
         # The output budget, counted alongside the turn budget for the whole
         # step (all attempts): the gateway that owns the cap is built once per
         # step, so its escalation ladder is a step-level resource.
-        output_completion_tokens = 0
-        output_reasoning_tokens = 0
+        resumed_output = _resumed.get("output_budget") or {}
+        output_completion_tokens = int(resumed_output.get("completion_tokens") or 0)
+        output_reasoning_tokens = int(resumed_output.get("reasoning_tokens") or 0)
         output_peak_fill = 0.0
-        output_peak_completion = 0
-        output_peak_cap = 0
-        output_escalations_used = 0
-        output_cap_at_start = 0
+        output_peak_completion = int(resumed_output.get("peak_turn_completion_tokens") or 0)
+        output_peak_cap = int(resumed_output.get("peak_turn_cap") or 0)
+        output_peak_fill = output_peak_completion / output_peak_cap if output_peak_cap else 0.0
+        output_escalations_used = int(resumed_output.get("escalations_used") or 0)
+        output_cap_at_start = int(resumed_output.get("cap_at_start") or 0)
         relay_acknowledged = not bool(relay_progress)
         relay_read_limit = (
             max(4, 3 * len(relay_progress["retained_files"]))
@@ -3939,6 +4044,12 @@ class PipelineEngine:
                     "content": lead + self._validation_error_block(
                         self._validation_error),
                 }
+                if _resumed.get("starved_recovery_pending"):
+                    resume_notice["content"] += (
+                        "\n[Required starvation recovery] The previous reasoning-only "
+                        "turn produced no action. The output cap and original finite "
+                        "turn budget are unchanged. Emit the next concrete tool call, "
+                        "or finish_step only after the required work and checks are complete.")
                 if recovery_turn:
                     recovery_notice = resume_notice
                 else:
@@ -4090,7 +4201,7 @@ class PipelineEngine:
             # simply failed to produce output.
             agent_signaled_done = False
 
-            # The turn budget is MUTABLE — two separate mechanisms below raise
+            # The turn budget is MUTABLE — earned ask_more_turns requests raise
             # it mid-step — but `for … in range(max_turns)` freezes the bound at
             # loop entry, so both raises were discarded and the loop stopped at
             # the original count. Hoist the bound into a variable the loop
@@ -4117,6 +4228,10 @@ class PipelineEngine:
                 current_max_turns = max(_resumed["current_max_turns"], max_turns)
                 turn_grants = _resumed["turn_grants"]
                 turn_count = _resumed["turns"] - 1
+                if recovery_turn and recovery_turn.get("turn", 0) == _resumed["turns"]:
+                    # The provider already paid for this incomplete batch.
+                    # Settle it on that turn before requesting any new call.
+                    turn_count -= 1
                 # DeepSeek thinking+tools wants reasoning_content on the next
                 # assistant turn; carry the last one the trace holds.
                 for _m in reversed(_resumed["messages"]):
@@ -4129,6 +4244,40 @@ class PipelineEngine:
                 # One empty reply right after a resume is a hiccup, not a
                 # verdict: nudge once, then trust the next one.
                 resume_nudges_left = 1
+            starved_recovery_pending = bool(attempt == 1 and _resumed.get("starved_recovery_pending"))
+            def fail_starved_output(detail):
+                cap = int(getattr(agent.gateway, "max_output_tokens", 0) or 0)
+                failure = _budget_failure_report(
+                    max_turns=current_max_turns,
+                    first_write_turn=first_write_turn,
+                    written_files=written_files,
+                    reads_searches=reads_searches,
+                    tool_failures=tool_failures,
+                    expansion_requests=expansion_requests,
+                    relay=relay_progress,
+                    turns_used=turn_count + 1,
+                    budget_exhausted="output",
+                    read_accounting=self._read_accounting(),
+                    output_budget=_output_budget_state(
+                        completion_tokens=output_completion_tokens,
+                        reasoning_tokens=output_reasoning_tokens,
+                        peak_turn_completion=output_peak_completion,
+                        peak_turn_cap=output_peak_cap,
+                        max_output_tokens=cap,
+                        cap_at_start=output_cap_at_start,
+                        escalations_used=output_escalations_used,
+                    ),
+                )
+                incomplete = {**detail,
+                              "written_files": sorted(set(written_files)),
+                              "early_progress_intervened": early_progress_intervened,
+                              **failure}
+                self._trace("step", "output_cap_exhausted", incomplete)
+                self._emit("output_cap_exhausted", incomplete)
+                raise NativeOutputCapExhausted(
+                    f"Step {step_id}: output cap {cap} exhausted; "
+                    "outputs and trace retained; explicit attention required")
+
             while True:
                 turn_count += 1
                 if turn_count >= current_max_turns:
@@ -4257,7 +4406,7 @@ class PipelineEngine:
                         "max_turns": current_max_turns,
                         "written_files": sorted(written_files or []),
                     })
-                if remaining > 1:
+                if remaining > 1 or starved_recovery_pending:
                     tool_choice = "auto"
                 elif not recovery_turn and not written_files and write_tool_names:
                     # Final turn and the step still has no output. Exploration-
@@ -4343,6 +4492,19 @@ class PipelineEngine:
                                 "attempt": attempt, "turn": turn_count + 1,
                                 **projection,
                             })
+                        if starved_recovery_pending:
+                            self._trace("step", "output_starvation_turn_started", {
+                                "step_id": step_id, "attempt": attempt,
+                                "turn": turn_count + 1,
+                                "output_budget": _output_budget_state(
+                                    completion_tokens=output_completion_tokens,
+                                    reasoning_tokens=output_reasoning_tokens,
+                                    peak_turn_completion=output_peak_completion,
+                                    peak_turn_cap=output_peak_cap,
+                                    max_output_tokens=int(getattr(agent.gateway, "max_output_tokens", 0) or 0),
+                                    cap_at_start=output_cap_at_start,
+                                    escalations_used=output_escalations_used),
+                            })
                         result = agent.turn(
                             messages=model_messages, tools=native_tools,
                             tool_choice=tool_choice,
@@ -4367,6 +4529,12 @@ class PipelineEngine:
                         if is_quota_exhausted(e):
                             raise
                         self._emit("native_error", {"error": str(e)[:200]})
+                        if starved_recovery_pending:
+                            fail_starved_output({
+                                "step_id": step_id, "attempt": attempt,
+                                "turn": turn_count + 1,
+                                "correction_error": f"{type(e).__name__}: {e}",
+                            })
                         feedback = f"Native tool calling error: {e}. Response truncated."
                         break
 
@@ -4407,7 +4575,33 @@ class PipelineEngine:
                         "outbound_append_only": outbound.get("append_only"),
                         "outbound_message_count": outbound.get("message_count"),
                         **usage,
+                        "max_output_tokens": cap_this_turn,
                     })
+
+                if starved_recovery_pending and (result.tool_calls or result.text or not result.truncated):
+                    try:
+                        if not result.tool_calls:
+                            raise ValueError("required correction produced no tool call")
+                        offered = {tool["function"]["name"] for tool in native_tools}
+                        offered.update({"finish_step", "ask_more_turns"})
+                        ids = [tc.get("id") for tc in result.tool_calls]
+                        if (not all(isinstance(cid, str) and cid for cid in ids)
+                                or len(set(ids)) != len(ids)):
+                            raise ValueError("required correction contains invalid or duplicate tool call ids")
+                        for tc in result.tool_calls:
+                            if (not tc.get("id") or tc["function"]["name"] not in offered
+                                    or not isinstance(json.loads(
+                                        tc["function"]["arguments"]), dict)):
+                                raise ValueError("required correction contains an invalid tool call")
+                    except (ValueError, TypeError, KeyError, AttributeError) as exc:
+                        detail = {
+                            "step_id": step_id, "attempt": attempt,
+                            "turn": turn_count + 1, "text": result.text or "",
+                            "tool_calls": result.tool_calls,
+                            "correction_error": f"{type(exc).__name__}: {exc}",
+                        }
+                        self._trace("response", "output_starvation_invalid_correction", detail)
+                        fail_starved_output(detail)
 
                 # Record trace — store the full response (free text + every
                 # tool call with untruncated args + reasoning) so the trace is
@@ -4430,7 +4624,8 @@ class PipelineEngine:
                 # emitted. Untagged this looks exactly like a well-behaved
                 # no-op, which is how a reviewer step "passed" without ever
                 # reviewing anything. Say so loudly, in the event stream and in
-                # the durable trace, so the role's budget can be re-sized.
+                # the durable trace, so recovery cannot mistake missing output
+                # for completion.
                 starved_turn = bool(result.truncated and not result.tool_calls
                                     and not result.text)
                 if starved_turn:
@@ -4450,120 +4645,33 @@ class PipelineEngine:
                     })
                     self._trace("response", "output_cap_starved", starved)
 
-                    # Detection on its own changes nothing: the next turn (and
-                    # the next attempt) reissues a byte-identical call — same
-                    # model, prompt, effort and cap — which necessarily starves
-                    # again. Observed live: task_implementer burned two full
-                    # 32768-token budgets on pure reasoning back to back. So
-                    # raise the one setting that produced the truncation and let
-                    # the existing retry path make the call again.
-                    #
-                    # This needs no limit of its own, and deliberately has none.
-                    # Magnitude is bounded by OUTPUT_CAP_CEILING, past which
-                    # escalate_output_cap() declines. Frequency is bounded by
-                    # the step's existing turn budget, because the escalated
-                    # retry IS the next ordinary turn rather than an inner loop
-                    # — and a starved turn emits no tool call, so it can never
-                    # reach ask_more_turns to extend that budget. The raised cap
-                    # rides on the gateway, which get_native_agent() builds once
-                    # per step, so it persists across this step's remaining
-                    # turns and attempts (the condition that starved turn 1 is
-                    # still there on turn 2) and resets for the next step.
-                    previous_cap = starved["max_output_tokens"]
-                    escalated = agent.gateway.escalate_output_cap()
-                    detail = {**starved, "previous_cap": previous_cap,
-                              "new_cap": escalated}
-                    if escalated:
-                        output_escalations_used += 1
-                        # Carry it into the next claim of this role, so the
-                        # ladder is climbed once per process, not once per card.
-                        try:
-                            from core.agents import remember_output_cap
-                            remember_output_cap(agent_config_name, escalated)
-                        except Exception:  # noqa: BLE001 — telemetry must not break a turn
-                            logging.getLogger("aitelier.pipeline").warning(
-                                "could not remember output cap", exc_info=True)
-                        self._emit("output_cap_escalated", {
-                            **detail, "level": "warning",
-                            "preview": (f"{role_label} turn {turn_count + 1}: raising "
-                                        f"output cap {previous_cap} → {escalated} "
-                                        f"for the retry"),
-                        })
-                        self._trace("response", "output_cap_escalated", detail)
-                        # The cap is raised "for the retry" — and on the LAST
-                        # turn there is no retry: the no-tool-call branch below
-                        # completes the step EMPTY and the freshly-raised
-                        # gateway is thrown away. So the escalation could only
-                        # ever help a starve that happened early, and the loop
-                        # head aims the biggest write demand at the final turn
-                        # ("Your VERY NEXT action MUST be a write_ call"),
-                        # making the final turn the likeliest to starve.
-                        # Live, jinyong-usable 2026-08-23: nine consecutive
-                        # t_plan executions each starved on turn 6 of 6, each
-                        # logged "16384 → 32768 for the retry", and each
-                        # returned a 0-byte task_plan.md. The second escalation
-                        # never once appeared in the log — no turn ever ran at
-                        # the raised cap. The empty plans were then confirmed as
-                        # "no change needed", and the reviewer's (correct)
-                        # rejections burned the run's plan-loop budget to its
-                        # limit. Buy back the turn.
-                        # Bounded without a counter of its own: a grant requires
-                        # a SUCCESSFUL escalation, and escalate_output_cap()
-                        # returns None at OUTPUT_CAP_CEILING — so a role
-                        # starting at 16384 gets at most two.
-                        if not written_files and turn_count >= current_max_turns - 1:
-                            current_max_turns += 1
-                            self._emit("turn_granted_for_escalation", {
-                                **detail, "level": "warning",
-                                "preview": (f"{role_label}: last turn starved — granting "
-                                            f"turn {current_max_turns} so the raised cap "
-                                            f"({escalated}) is actually used"),
-                            })
-                    else:
-                        # Already at the ceiling — doubling again would only buy
-                        # an API error. Say so, so a role that keeps landing
-                        # here is visible as needing a smaller prompt or less
-                        # reasoning rather than a bigger budget.
-                        self._emit("output_cap_ceiling", {
-                            **detail, "level": "warning",
-                            "preview": (f"{role_label} turn {turn_count + 1}: output cap "
-                                        f"already at the ceiling ({previous_cap}) — "
-                                        f"cannot escalate"),
-                        })
-                        self._trace("response", "output_cap_ceiling", detail)
-                        # An attempt that ends here ran out of OUTPUT, not
-                        # turns. Say so, next to how much of the turn budget was
-                        # still unspent, so the remedy chosen is the right one.
-                        failure = _budget_failure_report(
-                            max_turns=current_max_turns,
-                            first_write_turn=first_write_turn,
-                            written_files=written_files,
-                            reads_searches=reads_searches,
-                            tool_failures=tool_failures,
-                            expansion_requests=expansion_requests,
-                            relay=relay_progress,
-                            turns_used=turn_count + 1,
-                            budget_exhausted="output",
-                            read_accounting=self._read_accounting(),
-                            output_budget=_output_budget_state(
-                                completion_tokens=output_completion_tokens,
-                                reasoning_tokens=output_reasoning_tokens,
-                                peak_turn_completion=output_peak_completion,
-                                peak_turn_cap=output_peak_cap,
-                                max_output_tokens=previous_cap,
-                                cap_at_start=output_cap_at_start,
-                                escalations_used=output_escalations_used,
+                    # Missing output consumes an ordinary turn. Changing the
+                    # instruction can recover it; buying a larger persistent cap
+                    # or an extra turn rewards the same unproductive reasoning.
+                    if turn_count < current_max_turns - 1:
+                        salvage_msg = {"role": "assistant", "content": None}
+                        if last_reasoning:
+                            salvage_msg["reasoning_content"] = last_reasoning
+                        messages.append(salvage_msg)
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                "[Output cap consumed by reasoning] Your last turn "
+                                "produced no text or tool call and consumed one turn. "
+                                "The output cap and turn budget are unchanged. Stop "
+                                "planning the whole implementation. Your VERY NEXT "
+                                "action must emit a concrete tool call for the next "
+                                "smallest required action, or finish_step only if "
+                                "the required work and checks are complete."
                             ),
-                        )
-                        incomplete = {**detail,
-                                      "written_files": sorted(set(written_files)),
-                                      "early_progress_intervened": early_progress_intervened,
-                                      **failure}
-                        self._trace("step", "output_cap_exhausted", incomplete)
-                        self._emit("output_cap_exhausted", incomplete)
-                        raise NativeOutputCapExhausted(
-                            f"Step {step_id}: output cap {previous_cap} exhausted; "
-                            "outputs and trace retained; explicit attention required")
+                        })
+                        starved_recovery_pending = True
+                        self._trace("step", "output_starvation_correction", {
+                            **starved, "remaining_turns": current_max_turns - turn_count - 1,
+                            "action": "emit_next_tool_within_existing_budget",
+                        })
+                        continue
+                    fail_starved_output(starved)
 
                 if result.text:
                     self._emit("agent_message", {
@@ -4658,6 +4766,7 @@ class PipelineEngine:
                 self._trace_prompt_deltas(messages, turn_count + 1)
 
                 called_finish = False
+                correction_tool_failed = False
                 ask_more_extra = 0
                 ask_more_reason = ""
                 assistant_index = len(messages) - 1
@@ -4692,8 +4801,6 @@ class PipelineEngine:
                     # minutes, and without these the liveness line either
                     # lingers on a stale "generating" or shows nothing.
                     self._note_phase("tool", tool_name)
-                    if tool_name in _REPOSITORY_READ_TOOLS:
-                        reads_searches += 1
                     repeat_key = (_repeat_call_key(tool_name, params)
                                   if tool_name in _REPEATABLE_READ_TOOLS else "")
                     repeated = repeat_index.get(repeat_key) if repeat_key else None
@@ -4702,6 +4809,8 @@ class PipelineEngine:
                         self._context_segment, assistant_index, call_index, effect_key)
                     replayed_effect = effect_replays.get(invocation_key)
                     observed_result = recovered_results.get(tc["id"])
+                    if tool_name in _REPOSITORY_READ_TOOLS and observed_result is None:
+                        reads_searches += 1
                     host_policy_refusal = False
                     if not relay_acknowledged and tool_name != "acknowledge_relay":
                         host_policy_refusal = True
@@ -4803,9 +4912,7 @@ class PipelineEngine:
                             self._note_phase("tool_done", tool_name)
                     if tool_name == "ask_more_turns":
                         if observed_result is not None:
-                            ask_more_extra = (int(tool_result.get("turns") or 0)
-                                              if tool_result.get("status") == "granted" else 0)
-                            turn_grants += bool(ask_more_extra)
+                            ask_more_extra = 0  # retained grant is in resumed accounting
                         else:
                             # _exec_tool answers "granted" unconditionally; the
                             # provider must never read a false grant, so fail closed
@@ -4827,19 +4934,22 @@ class PipelineEngine:
                                 "status": "granted" if ask_more_extra else "denied",
                                 "turns": ask_more_extra, "note": grant_msg,
                             })
-                        expansion_requests.append({
-                            "turn": turn_count + 1,
-                            "asked": int(params.get("turns", 3) or 3),
-                            "granted": ask_more_extra,
-                            "reason": ask_more_reason,
-                        })
+                        if observed_result is None:
+                            expansion_requests.append({
+                                "turn": turn_count + 1,
+                                "asked": int(params.get("turns", 3) or 3),
+                                "granted": ask_more_extra,
+                                "reason": ask_more_reason,
+                            })
                     elif observed_result is None and replayed_effect is None:
                         progress = _progress_signature(tool_name, params, tool_result)
                         if progress:
                             progress_signatures.add(progress)
                     result_str = json.dumps(tool_result, ensure_ascii=False)
-                    if _is_failed_tool_result(result_str) and not host_policy_refusal:
+                    failed_result = _is_failed_tool_result(result_str)
+                    if failed_result and not host_policy_refusal and observed_result is None:
                         tool_failures += 1
+                    correction_tool_failed |= failed_result or host_policy_refusal
 
                     # Classify the result before exposing another crash point.
                     # A successful mutation is fenced independently of the
@@ -4936,6 +5046,22 @@ class PipelineEngine:
                     messages.append(recovery_notice)
                     self._native_messages.append(dict(recovery_notice))
                     recovery_notice = None
+
+                if starved_recovery_pending:
+                    if correction_tool_failed:
+                        fail_starved_output({
+                            "step_id": step_id, "attempt": attempt,
+                            "turn": turn_count + 1,
+                            "correction_error": "required correction tool batch did not succeed",
+                        })
+                    # A read or write is progress, not proof the incomplete
+                    # recovery finished. Keep the fence until a valid finish.
+                    if called_finish:
+                        starved_recovery_pending = False
+                        self._trace("step", "output_starvation_recovered", {
+                            "step_id": step_id, "attempt": attempt,
+                            "turn": turn_count + 1,
+                        })
 
                 # Apply ask_more_turns budget extension after all tool calls
                 # in this turn have been processed.

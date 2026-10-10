@@ -14,9 +14,10 @@ per-project switch.
 P1 merged to main (53daff7ff2). P3 merged to main (6dc8674eb) and slimmed on
 2026-10-10 (owner-approved, branch `grok/multi-driver-p3-slim`): checkout
 occupancy, checkpoint decision fences, pool handoffs, subagent adoption/orphans
-and mandatory registration were removed or deferred. Every production project
-is `multi_driver=off` and `claim_enforcement=off`, so nothing changes until the
-owner turns both on for a project.
+and mandatory registration were removed or deferred. Since 2026-10-10
+(owner-approved) `multi_driver` is always on: every project records claims and
+leases, and `set_multi_driver` no longer exists. `claim_enforcement` stays off
+until the owner turns it on for a project.
 
 P3 acceptance (State node `driver.multi-driver-p3-enforced-claims`):
 1. migration: the `state_attempts` rebuild keeps every historical row, the seq
@@ -34,16 +35,14 @@ P3 acceptance (State node `driver.multi-driver-p3-enforced-claims`):
 
 ## Switches (owner / admin driver)
 
-- `set_multi_driver(project_id, multi_driver="on"|"off", expected_revision, reason)` —
-  record claims and leases (P1). With it off, `claim_node` is refused
-  (`multi_driver_off`), new attempts are written exactly as before and report
-  `lease_state=legacy_unleased`.
+Claims and leases are always recorded (`multi_driver` is always on;
+`project_overview.policy.multi_driver` reads `on` for compatibility; the legacy
+`state_project_policy.multi_driver` column is ignored).
+
 - `set_claim_enforcement(project_id, claim_enforcement="on"|"off", expected_revision, reason)` —
   turn the recorded claims into refusals (P3). It is the ONLY enforcement
   switch: every rule asks one helper (`core.state_enforcement.enforced`), which
-  reads `claim_enforcement` and treats it as `off` whenever `multi_driver` is
-  off. Turning it on needs `multi_driver=on` (`multi_driver_off` otherwise);
-  turning `multi_driver` off turns it off too. Stored in its own row
+  reads `claim_enforcement`. Stored in its own row
   (`state_project_enforcement`); shares the `state_project_policy` revision for
   the CAS (read it from `project_overview.policy.revision`). Emits
   `claim_enforcement_policy_changed`.
@@ -52,15 +51,13 @@ P3 acceptance (State node `driver.multi-driver-p3-enforced-claims`):
   still succeeds, but a `kind=review` criterion whose latest evidence came from the
   attempt's current or former owner marks the receipt `provenance_json` with
   `self_reviewed=true` (+ `self_reviewed_criteria`); `project_overview.self_reviewed_receipts`
-  counts them. Admin only; needs `multi_driver=on` (`multi_driver_off`); turning
-  `multi_driver` off resets it. Same row and CAS as enforcement (column
+  counts them. Admin only. Same row and CAS as enforcement (column
   `review_independence`, added on open). Emits `review_independence_policy_changed`.
   Rollout steps: `docs/multi-driver-rollout.md`.
 
-Owner decision 2026-10-09: `set_multi_driver(on)` alone keeps P1's record-only
-behaviour. A project with `multi_driver=on, claim_enforcement=off` admits any
-dispatch, report and structural write exactly as P1 did; a project with
-`multi_driver=off` behaves byte-for-byte as before P1.
+Owner decision 2026-10-09: recorded claims alone keep P1's record-only
+behaviour. A project with `claim_enforcement=off` admits any dispatch, report
+and structural write exactly as P1 did. Nothing resets either switch.
 
 ## Claims (P1, unchanged)
 
@@ -136,7 +133,7 @@ P0 accepts (no subagent registration is required).
 
 ## Reclaim: abandon or take over (P3, design §4.4)
 
-Available in any `multi_driver=on` project once an attempt's `lease_state` is
+Available in any project once an attempt's `lease_state` is
 `reclaimable` (expiry + 900 s). No further wait (Q12). Before that:
 `lease_not_expired` with `reclaimable_at`. Both need `expected_owner_fence`
 (`stale_fence`), raise the owner fence, and notify the previous owner.
@@ -178,7 +175,7 @@ Available in any `multi_driver=on` project once an attempt's `lease_state` is
 
 - `register_subagent(project_id, attempt_id, label, workspace)` — by the
   attempt's owner (`not_attempt_owner`), on an active attempt
-  (`attempt_not_active`), in a `multi_driver=on` project; idempotent for
+  (`attempt_not_active`); idempotent for
   identical arguments, `subagent_exists` otherwise.
 - `list_subagents(project_id, attempt_id?, parent_driver_id?)` (private); REST
   `GET /api/state/projects/{id}/subagents`.

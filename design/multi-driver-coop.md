@@ -1,7 +1,7 @@
 # 多 driver 协作（multi-driver coop）—— 同一个 State project 由多个 director 共同驱动
 
 Status: **approved for implementation**（所有者 2026-10-09 16:11 批准）。实施按第 10 节 P0–P5 进行，从 P0 开始；对应的实现节点在 `aitelier` State DAG 中。
-进度：**P0 已合并（main 6790f14446，2026-10-09）并于 2026-10-09 在生产启用**（`AITELIER_DRIVER_IDENTITY=on`；已登记 `owner-cli`、`public`、`grok`、`codex`）；新 LAN driver 自助领取 token：`scripts/driver_token.py self-register`（见 `docs/driver-identity.md`）。**P1 已实现（分支 `grok/multi-driver-p1`），尚未合并或部署**：claim / 租约 / 心跳 / `lease_expired` 事件，只记录不强制，按项目 `multi_driver` 开关（默认 off），见 `docs/driver-claims.md`。**P3 已合并到 main（6dc8674eb），2026-10-10 按所有者批准瘦身（分支 `grok/multi-driver-p3-slim`）**：P3 的范围和验收以第 0a 节为准，第 4.4、4.6、6、7.3、8 节里与之冲突的内容（subagent 三类接管、强制登记、跨节点 checkout 占用、pool handoff、checkpoint 决策 fence、break_glass 通知链）已推迟或删除。见 `docs/driver-claims.md`。
+进度：**P0 已合并（main 6790f14446，2026-10-09）并于 2026-10-09 在生产启用**（`AITELIER_DRIVER_IDENTITY=on`；已登记 `owner-cli`、`public`、`grok`、`codex`）；新 LAN driver 自助领取 token：`scripts/driver_token.py self-register`（见 `docs/driver-identity.md`）。**P1 已实现（分支 `grok/multi-driver-p1`），尚未合并或部署**：claim / 租约 / 心跳 / `lease_expired` 事件，只记录不强制，按项目 `multi_driver` 开关（默认 off），见 `docs/driver-claims.md`。**P3 已合并到 main（6dc8674eb），2026-10-10 按所有者批准瘦身（分支 `grok/multi-driver-p3-slim`）**：P3 的范围和验收以第 0a 节为准，第 4.4、4.6、6、7.3、8 节里与之冲突的内容（subagent 三类接管、强制登记、跨节点 checkout 占用、pool handoff、checkpoint 决策 fence、break_glass 通知链）已推迟或删除。见 `docs/driver-claims.md`。**2026-10-10 所有者批准：`multi_driver` 始终开启**（分支 `grok/multi-driver-always-on`）：每个项目都记录 claim 和租约，`set_multi_driver` 已删除，`state_project_policy.multi_driver` 列保留但被忽略，`project_overview.policy.multi_driver` 恒为 `on`；`claim_enforcement` 和 `review_independence` 不再依赖它，也不会被任何操作重置。下文以 `multi_driver=on/off` 为条件的描述都是历史记录，现在一律按 `multi_driver=on` 理解。
 Date: 2026-10-09（初稿）；同日按所有者裁决 D1–D12 及全部待决问题的答复多次修订，16:11 批准实施，见第 0 节。
 Scope: `core/state_*`、`core/director_messaging*.py`、`api/state_*`、`api/mcp_router.py`、`api/authz.py`、
 `.codex/hooks/postcompact_driver_state.py`、driver guide（`core/state_driver_guide.py`、`docs/state-agent-driver.md`）。
@@ -49,8 +49,8 @@ abandon/take_over（fence+1，原 owner 收到 P2 driver inbox 通知）；obser
 recover/replay 在 `reserved → launching` 处同样授权；结构写入（revise/split/supersede/facet）对别人持有的节点只做 owner 检查
 （`not_owner`）；点对点 handoff offer/accept/decline/withdraw；checkpoint 回答与失败 run 救援只在路由入口检查一次 owner。
 
-**开关**：强制只由 `claim_enforcement` 决定，它要求 `multi_driver=on`（`multi_driver=off` 时它读作 off）；代码里只有一个判断
-`core.state_enforcement.enforced`。`multi_driver=on` 本身仍是只记录、不强制（所有者裁决 2026-10-09）。
+**开关**：强制只由 `claim_enforcement` 决定；代码里只有一个判断 `core.state_enforcement.enforced`。claim 本身只记录、
+不强制（所有者裁决 2026-10-09）。`multi_driver` 自 2026-10-10 起始终开启，不再是开关。
 
 **简化**：通知直接写 P2 driver inbox（`core/driver_notices.py`，无待办通知表、无 `driver_notice` 事件、无解决钩子）；
 `break_glass` 只是审计事件上的一个标记（admin 的派发/启动/回收/结构写入照常通过并记 `break_glass=true`，
@@ -116,7 +116,7 @@ pool handoff（`to_driver_id` 必填）；subagent 三类接管 / `adopt_subagen
 
 绕过办法已经出现过：10-06 创建了 `novel-lingwu-deputy`（"灵舞 · 副导演收件箱(只收 director message,不建节点)"），
 开一个空 State project 专门当邮箱。它没有节点，也没有 delivery，等于用项目命名空间冒充 driver 身份。
-所有者明确不想要这种 hack。
+所有者明确不想要这种 hack。（历史记录：该项目已归档，这种绕过办法不再使用；driver 身份绝不能建成项目。）
 
 现有消息量（只读统计）：`aitelier → wuxia-myth` transient 共 61 条（54 acknowledged / 7 resolved），
 `wuxia-myth → aitelier` 36 条（14 条仍 unread）。跨项目消息本身运作良好，本设计**不改**跨项目语义。
@@ -532,7 +532,7 @@ CREATE TABLE IF NOT EXISTS driver_subagents (
 ```
 
 - `register_subagent`：父 driver 启动 subagent **之前**登记（和 `start_external_attempt` 必须在派 worker 之前调用的规则一致）。
-  在 `multi_driver=on` 的项目里，凡是会写 checkout 或产出 evidence 的 subagent 都必须登记，见 Q8。没登记的 subagent 对系统不可见，也就无法被接管。
+  在 `multi_driver=on` 的项目里，凡是会写 checkout 或产出 evidence 的 subagent 都必须登记，见 Q8（P3 瘦身后已推迟：登记只用于可见性，不强制，见 0a）。没登记的 subagent 对系统不可见，也就无法被接管。
 - `update_subagent_checkpoint`：父 driver 在 subagent 的阶段性节点更新 `checkpoint_*`，这决定了别人接手时能从哪里续做。
 - **每个 subagent 写自己的分支**（`workspace` 里的 `#branch`）。这是接管时能够隔离旧进程的前提。
 
@@ -580,7 +580,7 @@ D7 把"发给项目的事"和"发给某个 driver 的事"分开。这样还带�
 - 多个成员共享同一个项目 inbox：`acknowledge` 的含义明确为"**我（这个 driver）接手处理这条**"，事件里记录是哪个 driver ack 的；
   其他成员仍能在列表里看到它，以及谁接了。这本身就是自助餐模式下的认领（Q6，**已确认**）。按 driver 记录的 ack 见 5.1a（D12）。
 - `novel-lingwu-deputy` 这类"只当邮箱"的项目在 driver inbox 上线后归档（`set_dispatch(archive)`），保留全部记录；
-  driver guide 里写明：**不要为 driver 身份开新项目**。
+  driver guide 里写明：**不要为 driver 身份开新项目**。（已完成：`novel-lingwu-deputy` 已归档。）
 
 ### 5.1a 项目 inbox 的 ack 模式（D12）
 
@@ -811,7 +811,7 @@ CREATE TABLE IF NOT EXISTS driver_inbox_deliveries (
 > 唯一 writer）推迟；`receiver_cannot_observe_workers`、`override_reason_required`（结构写）不再出现。全部只在
 > `claim_enforcement=on` 时生效。
 
-1. **dispatch**：在 `multi_driver=on` 的项目里，`start_attempt` / `start_external_attempt` 要求调用者持有该节点的 live
+1. **dispatch**：在 `claim_enforcement=on` 的项目里，`start_attempt` / `start_external_attempt` 要求调用者持有该节点的 live
    `implement` claim，且 fence 一致；否则拒绝，错误码 `claim_required`。这条排他由 `state_node_claims_one_exclusive`
    唯一索引在数据库层面保证，**只有一个赢家**，输家得到 `claimed_by_other`，并附上对方的 driver_id 和租约到期时间。
    `claim_node` 本身就是"抢单"：先到先得，不需要任何人分配。
@@ -903,7 +903,7 @@ REST GET（私有）：`/api/drivers`、`/api/drivers/me`、`/api/drivers/{id}/p
 - `state_node_holds`、`state_driver_note_entries`：`driver_id`；
 - `state_director_messages`：加 `sender_driver_id`、`ack_mode`、`ack_quorum` 三列（5.1、5.1a）；`state_director_deliveries` **不动**；
   新表 `state_director_delivery_acks`（D12）；
-- `state_project_policy`：`multi_driver ∈ {off,on}`（默认 off）、`review_independence ∈ {off,advisory}`（默认 off）、`lease_defaults_json`（默认 7200 秒，grace 900 秒）。
+- `state_project_policy`：`multi_driver ∈ {off,on}`（默认 off；2026-10-10 起为忽略的历史列，始终按 on 处理）、`review_independence ∈ {off,advisory}`（默认 off）、`lease_defaults_json`（默认 7200 秒，grace 900 秒）。
 
 ### 9.2 迁移步骤（与 `docs/state-external-harness.md`「Schema migration」一致）
 
@@ -922,7 +922,7 @@ REST GET（私有）：`/api/drivers`、`/api/drivers/me`、`/api/drivers/{id}/p
 
 ### 9.3 兼容性
 
-- `multi_driver=off` 的项目：所有新参数都可选，不要求 claim、不要求 fence，消息的同项目拒收仍然生效，但错误码改为明确的
+- （历史：2026-10-10 起没有 `multi_driver=off` 的项目；`claim_enforcement=off` 时同样不要求 claim 和 fence。）`multi_driver=off` 的项目：所有新参数都可选，不要求 claim、不要求 fence，消息的同项目拒收仍然生效，但错误码改为明确的
   `use_driver_inbox`。除了错误码更具体以外，行为和现在逐字节一致。这一点要用回归测试钉住：现有
   `tests/unit/test_state_graph.py`、`test_state_attempts.py` 和 director messaging 的测试原样通过。
 - admin token：现有 `AITELIER_ADMIN_TOKEN` 迁移后作为 `owner-cli` 的 token 继续可用，请求头 `X-AItelier-Admin-Token` 作为别名保留；它是 break-glass。AGENTS.md 说"开发期不需要向后兼容"，但 State 库里有生产历史（evidence、receipt、
@@ -943,9 +943,9 @@ REST GET（私有）：`/api/drivers`、`/api/drivers/me`、`/api/drivers/{id}/p
 | P0 身份 | 全局 `drivers` / `project_drivers` / `driver_audit`；多 token 查表（authz、admin_routers、state_only 及各调用方）；公网 = `driver:public`；`whoami`；`director_identity` 校验；LAN driver 共用 `linxuhao` 经 SSH 访问 127.0.0.1:4444（D11）；`~/.aitelier-drivers/` 下每个 driver 一个 0600 token 文件；driver guide 写入 3.2a 的约定；不改其他行为 | Codex 和 Grok 各自经 SSH、用自己的 LAN token 调 `whoami` 并返回正确；公网 MCP 被认成 `public`；`owner-cli` 用旧 token 照常可用 |
 | P1 租约（只告警） | attempt / claim 的租约（2 小时）、`heartbeat`、`lease_expired` 事件、overview 字段；**不强制** claim | 一周内统计：心跳到达率、误报的过期次数（driver 实际还活着却过期）、父 driver 能否稳定地为 subagent 续租 |
 | P2 driver inbox + 私有笔记 + 项目 inbox ack 模式 | 5.2；5.3（driver notebook 泛化为按作用域）；5.1a（`at_least_n` / `broadcast`，v3）；`wait_for_driver_inbox`；PostCompact 按 driver 投影 | Codex ↔ Grok 互发 transient/standing；一方 ack 不影响另一方；各自写私有笔记，对方能读不能写 |
-| P3 claim 强制 + 回收 + handoff（瘦身，见 0a） | 已合并 main 6dc8674eb，2026-10-10 瘦身（分支 `grok/multi-driver-p3-slim`）。强制只由 `claim_enforcement` 决定（要求 `multi_driver=on`，默认 off），先只对 `aitelier` 开启；`abandon`、`take_over`、点对点 `offer/accept/decline/withdraw_handoff`、记录用 `driver_subagents` | 0a 的 5 条最小验收；线上演练：用 AMI 那条 legacy attempt 走一遍人工回收（需所有者批准）；一次真实的 Codex → Grok handoff |
-| P4 扩展到 wuxia | `wuxia-myth` 开启 `multi_driver`；可选开启 `review_independence=advisory` | 一轮 wuxia 批次中没有出现重复 dispatch；`self_reviewed` 计数可见 |
-| P5 清理 | 归档 `novel-lingwu-deputy` 这类邮箱项目；driver guide 删除旧的绕过说明 | — |
+| P3 claim 强制 + 回收 + handoff（瘦身，见 0a） | 已合并 main 6dc8674eb，2026-10-10 瘦身（分支 `grok/multi-driver-p3-slim`）。强制只由 `claim_enforcement` 决定（默认 off），先只对 `aitelier` 开启；`abandon`、`take_over`、点对点 `offer/accept/decline/withdraw_handoff`、记录用 `driver_subagents` | 0a 的 5 条最小验收；线上演练：用 AMI 那条 legacy attempt 走一遍人工回收（需所有者批准）；一次真实的 Codex → Grok handoff |
+| P4 扩展到 wuxia | `wuxia-myth` 开启 `claim_enforcement`（`multi_driver` 自 2026-10-10 起始终开启）；可选开启 `review_independence=advisory` | 一轮 wuxia 批次中没有出现重复 dispatch；`self_reviewed` 计数可见 |
+| P5 清理 | 归档 `novel-lingwu-deputy` 这类邮箱项目；driver guide 删除旧的绕过说明 | 已完成：`novel-lingwu-deputy` 已归档；driver guide 写明 driver 身份绝不能建成项目 |
 
 每个阶段的度量：
 
@@ -964,7 +964,7 @@ REST GET（私有）：`/api/drivers`、`/api/drivers/me`、`/api/drivers/{id}/p
 | Q2 | `public` driver 能否也用 REST（`/api/state/query`、`/commands`）？现在经 tunnel 的 REST 写入只认 Access 邮箱，不认 external token。 | **允许**，用同一个 external token。否则公网 Codex 绕过 MCP 300 秒截断的直连 HTTP 长等待（`docs/state-agent-driver.md` 第 20 行）就用不了。 |
 | Q3 | 以后是否需要在公网区分多个 driver？ | **暂不需要**。主力 driver 都走 LAN；公网只给临时 agent 用。需要时再引入按 driver 的公网 token。 |
 | Q7 | 租约过期后的 grace 多长？ | **15 分钟**。 |
-| Q8 | `register_subagent` 是否强制？ | **在 `multi_driver=on` 的项目里强制**，范围是会写 checkout 或产出 evidence 的 subagent；纯只读的调研 subagent 可以不登记。 |
+| Q8 | `register_subagent` 是否强制？ | **在 `multi_driver=on` 的项目里强制**，范围是会写 checkout 或产出 evidence 的 subagent；纯只读的调研 subagent 可以不登记。（P3 瘦身后已推迟：登记只用于可见性，不强制，见 0a。） |
 | Q9 | 回收时遇到观察不到的 subagent（`unobservable`），回收方能否立即在新分支续做，还是要等原 driver 确认它已停？ | **可以立即续做**（新分支 + 新工作目录），旧 subagent 的写入被 fence 挡住，旧分支不经检查不合并。 |
 | Q11 | AMI 遗留 attempt `attempt-4547c5dc…` 怎么处理？ | **上线 P3 后**：由 Codex 确认 Mac 上没在跑再 `abandon(attested)`；或者由回收方 `take_over`，把它的子代理当 `unobservable` 处理。在那之前不动。 |
 | Q12 | 回收别人过期的 attempt 前是否要额外等待？ | **不额外等**（grace 本身就是等待期），系统自动通知原 driver。 |

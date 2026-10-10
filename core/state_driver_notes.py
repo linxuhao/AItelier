@@ -254,11 +254,11 @@ class StateDriverNotes:
         project_id = key(project_id, "project_id")
         with self._transaction(notebook=project_id) as conn:
             self._entity(conn, project_id)
-            row = self._execute(conn, "SELECT revision FROM state_driver_notes WHERE project_id=?",
+            row = None if self.driver_scope else self._execute(conn, "SELECT revision FROM state_driver_notes WHERE project_id=?",
                                (project_id,)).fetchone()
             index = self._index_projection(conn, project_id, include_superseded,
                                            include_delisted)
-        return {"project_id": project_id, "revision": row["revision"] if row else 0, **index}
+        return self._presentation({"project_id": project_id, "revision": row["revision"] if row else 0, **index})
 
     @writer_only_read("driver_note_history")
     def history(self, project_id: str, after_revision: int = 0, limit: int = 100) -> dict:

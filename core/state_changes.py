@@ -115,7 +115,7 @@ async def wait_for_state_change(service, project_id, after=0, node_keys=None, at
                 note_after_revision, filter_mode, actionable_only, limit)
             inbox = None
             if include_driver_inbox:
-                inbox = await asyncio.to_thread(service.driver_inbox.list_driver_messages, None, inbox_after, limit)
+                inbox = await asyncio.to_thread(service.driver_inbox.list_driver_messages, None, inbox_after, min(limit, 100))
                 inbox_after = inbox["next_after"]
             if events or (inbox and inbox["messages"]):
                 result = {"events": events, "next_after": cursor, **({"next_inbox_after": inbox_after} if include_driver_inbox else {}), "timed_out": False}

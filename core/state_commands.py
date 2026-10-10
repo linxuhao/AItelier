@@ -636,7 +636,7 @@ READ_REQUESTS = {
     "export_design_markdown": DesignBaseline, "check_design_markdown": CheckDesignMarkdown,
     "list_projects": Empty, "get_graph": Project, "get_node": Node, "search_nodes": SearchNodes, "facet_lint": Project,
     "frontier": Frontier, "events": Events, "wait_for_state_change": WaitForStateChange,
-    "get_driver_note": ProjectDriverNote, "driver_note_history": DriverNoteHistory,
+    "get_driver_note": GetDriverNote, "driver_note_history": DriverNoteHistory,
     "search_driver_note_history": SearchDriverNoteHistory, "get_attempt": Attempt,
     "driver_note_index": DriverNoteIndex, "get_driver_note_entry": DriverNoteEntry,
     "search_driver_note_entries": SearchDriverNoteEntries,
@@ -1003,10 +1003,10 @@ def execute(service, action: str, arguments: dict, *, allow_write: bool = False)
             result = notes._presentation(result)
     except Exception as exc:
         if director_action:
-            from core.director_messaging_protocol import DirectorMessageError
+            from core.director_messaging_protocol import DirectorMessageError, ERROR_CODES
             if isinstance(exc, DirectorMessageError):
                 result = exc.as_dict()
-                result["schema"] = _director_schema(service)
+                result["schema"] = exc.envelope["schema"] if exc.code not in ERROR_CODES else _director_schema(service)
                 return result
         raise
     if anonymous and action in _CATALOG_READS:

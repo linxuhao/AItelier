@@ -297,12 +297,9 @@ came out FALSE keeps the ordinary advisory behaviour.
   render with nothing admitted is a HARD failure. `scripts` must be a list or
   null; omitted/null/empty-list selects full discovery, while false, 0, an
   empty string or mapping is refused before effects. Discovery finding no
-  admitted entry is the historic skip **only when retention was not
-  requested**; an explicit retention request on such a project still allocates
-  its owned destination and writes a bounded raw-only manifest (a zero-pass
-  explicit raw-only request is a truthful success, a declaration no pass can
-  satisfy is a truthful hard failure), and an opt-in render stays a hard
-  failure.
+  admitted entry fails in both modes: zero suites ran. An explicit retention
+  request still writes a bounded raw-only manifest; retention success does not
+  make the script verdict pass. Omitted retention writes no evidence.
 
 
 **Owned invocation evidence.** `/script` and `/playtest` accept
@@ -363,7 +360,9 @@ between validation and copy stays bound to the validated inode (all ancestors
 are opened without following aliases and source/destination descriptors stay
 pinned); the raw streams count toward the
 same declared budget (`GODOT_RETAIN_MAX_FILES`/`_BYTES`), checked before each
-stream, and a pattern's fixed-depth enumeration is bounded by
+stream. The accepted pattern union uses one descriptor-based fixed-depth
+enumeration per owned user root, charging each directory entry once across
+overlapping selectors. Unique traversal work is still bounded by
 `GODOT_RETAIN_MAX_SEARCH_ENTRIES` with at most `GODOT_RETAIN_MAX_PATTERNS`
 selectors per request. A normal whole gate is sized for this explicitly: a
 69-script gate emits >= 140 raw streams (69 entry points + the import pass, each

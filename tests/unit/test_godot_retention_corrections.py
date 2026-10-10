@@ -38,10 +38,11 @@ regression to the previously observed shape is red rather than silent:
     pointing at bytes never written would be a false green) while the
     allocation failure alone makes `ok` False;
   * an explicit retention request on an empty-but-valid project still writes a
-    bounded, truthful manifest (zero-pass raw-only success, or a hard failure
-    naming a declaration no pass can satisfy) under a unique server-owned
-    invocation directory, while an omitted `retain` keeps the historic
-    no-entry skip unchanged.
+    bounded, truthful manifest (raw-only, since zero suites ever ran, or a hard
+    failure naming a declaration no pass can satisfy) under a unique
+    server-owned invocation directory. The no-entry verdict itself is a FAILED
+    SCRIPT verdict in both modes with or without retention — an omitted
+    `retain` writes no retention at all; retention success is never a pass.
 """
 
 from __future__ import annotations
@@ -639,7 +640,11 @@ def test_empty_project_explicit_raw_only_retention_writes_a_truthful_manifest(
     _empty_project(tmp_path)
     r = gh.run_script(str(tmp_path), [], timeout=30, retain=[],
                       retain_requested=True)
-    assert r["passed"] is True, r
+    # The raw copy succeeded, but zero executable suites ran: retention
+    # success is evidence, never a test PASS — the SCRIPT verdict fails.
+    assert r["passed"] is False, r
+    assert r["executed_suites"] == 0, r
+    assert "FAILED" in r["summary"] and "zero authored tests" in r["summary"], r
     assert r["discovered"] == [] and r["results"] == [], r
     retention = r["retention"]
     assert retention["ok"] is True, retention
@@ -681,15 +686,18 @@ def test_empty_project_explicit_declaration_no_pass_can_satisfy_hard_fails(
     assert len(r["retention"]["refused"]) == 1, r["retention"]
     assert "notes.txt" in r["retention"]["refused"][0], r["retention"]
 
-def test_empty_project_without_retention_keeps_the_historic_skip(
+def test_empty_project_without_retention_is_a_failed_verdict_and_no_retention(
         monkeypatch, tmp_path):
-    """An OMITTED `retain` key is not a retention request: the historic
-    no-admitted-entry skip is unchanged and no `retention` key appears."""
+    """An OMITTED `retain` key is not a retention request: no `retention` key
+    appears, but the zero-entry verdict is still a failed SCRIPT verdict — the
+    historic headless green is gone, because zero authored tests executed."""
     gh = _load(tmp_path, monkeypatch)
     _empty_project(tmp_path)
     r = gh.run_script(str(tmp_path), [], timeout=30)
-    assert r["passed"] is True and r["discovered"] == [], r
+    assert r["passed"] is False and r["discovered"] == [], r
+    assert r["executed_suites"] == 0 and "FAILED" in r["summary"], r
     assert "retention" not in r, r
+
 
 
 def test_empty_project_render_with_explicit_retention_stays_a_hard_failure(
@@ -703,6 +711,7 @@ def test_empty_project_render_with_explicit_retention_stays_a_hard_failure(
                       retain_requested=True)
     assert r["passed"] is False, r
     assert r["render_mode"] == "render" and r["render_requested"] is True, r
+    assert "nothing to render" in r["summary"] and "FAILED" in r["summary"], r
     assert r["retention"]["ok"] is True, r["retention"]
 
 
@@ -773,6 +782,7 @@ def test_http_route_empty_project_explicit_retention_gets_a_manifest(
         body = json.loads(resp.read())
         assert resp.status == 200, body
         assert runs and runs[-1]["retain_requested"] is True, runs
+        assert body["passed"] is False, body
         assert body["retention"]["ok"] is True, body
         assert Path(body["retention"]["manifest"]).is_file(), body
 
@@ -782,6 +792,7 @@ def test_http_route_empty_project_explicit_retention_gets_a_manifest(
         resp = conn.getresponse()
         body = json.loads(resp.read())
         assert resp.status == 200 and "retention" not in body, body
+        assert body["passed"] is False, body
         conn.close()
     finally:
         server.shutdown()

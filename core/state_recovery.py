@@ -58,6 +58,13 @@ class StateRecovery:
             raise ClaimError("multi_driver_off", "reclaiming attempts needs a project with multi_driver=on")
         if attempt["status"] not in ACTIVE:
             raise ClaimError("attempt_not_active", f"attempt is {attempt['status']}; nothing to reclaim")
+        # §4.4: "any project MEMBER". Judged inside the ownership transaction; an
+        # admin passes as break glass. A checkpoint decision in flight holds the
+        # ownership still until the engine has been told.
+        from core.state_enforcement import refuse_checkpoint_in_flight, require_member
+        member_break_glass = require_member(self.store, attempt["project_id"], self.driver_id, self.is_admin,
+                                            "reclaiming an attempt")
+        refuse_checkpoint_in_flight(conn, attempt["attempt_id"])
         if type(expected_owner_fence) is not int or expected_owner_fence != attempt["owner_fence"]:
             raise ClaimError("stale_fence", f"attempt owner fence is {attempt['owner_fence']}, "
                              f"not {expected_owner_fence}; reload", owner_fence=attempt["owner_fence"])
@@ -67,7 +74,7 @@ class StateRecovery:
                 raise ClaimError("override_reason_required",
                                  "this attempt predates leases (legacy_unleased); reclaiming it needs an explicit "
                                  "override_reason and the owner's confirmation (design §9.2 step 4)")
-            return override_reason is None
+            return override_reason is None or member_break_glass
         state = lease_state(expires, current)
         if state != "reclaimable":
             if self.is_admin:
@@ -76,14 +83,19 @@ class StateRecovery:
                              f"{add_seconds(expires, GRACE_SECONDS)} (expiry {expires} + {GRACE_SECONDS}s grace)",
                              lease_state=state, lease_expires_at=expires,
                              reclaimable_at=add_seconds(expires, GRACE_SECONDS))
-        return False
+        return member_break_glass
 
     def _release_bound_claims(self, conn, attempt, current, reason, new_holder=None):
         """Live claims bound to the attempt stop (released) or move (transferred
         plus a fresh live implement claim for the new holder)."""
         released, created = [], None
-        rows = conn.execute("SELECT * FROM state_node_claims WHERE project_id=? AND attempt_id=? AND status='live'",
-                            (attempt["project_id"], attempt["attempt_id"])).fetchall()
+        # Bound claims, plus the previous owner's live exclusive claim on the
+        # attempt's own node (the executor's claim even when the dispatch never
+        # bound it): both stop or move with the attempt.
+        rows = conn.execute("SELECT * FROM state_node_claims WHERE project_id=? AND status='live' AND (attempt_id=? "
+                            "OR (node_key=? AND driver_id=? AND purpose IN ('implement','plan')))",
+                            (attempt["project_id"], attempt["attempt_id"], attempt["node_key"],
+                             attempt["owner_driver_id"] or "")).fetchall()
         for row in rows:
             claim = dict(row)
             status = "transferred" if new_holder else "released"
@@ -261,8 +273,7 @@ class StateRecovery:
         return {**result, "break_glass": break_glass, "released_claims": released, "subagents": subagents,
                 "notified": notice}
 
-    @staticmethod
-    def _settle_subagents(conn, attempt, current, abandon_kind):
+    def _settle_subagents(self, conn, attempt, current, abandon_kind):
         """confirmed_stopped covers the attempt's subagents too (they are settled);
         unknown leaves them as they are - nobody attested anything about them."""
         if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='driver_subagents'").fetchone():
@@ -275,6 +286,9 @@ class StateRecovery:
             if status != row["status"]:
                 conn.execute("UPDATE driver_subagents SET status=?,updated_at=? WHERE subagent_id=?",
                              (status, current, row["subagent_id"]))
+                from core.state_subagents import close_worker_claims
+                close_worker_claims(conn, self.store, attempt["project_id"], row["subagent_id"], self.actor,
+                                    f"worker settled with abandoned attempt {attempt['attempt_id']}")
             out.append({"subagent_id": row["subagent_id"], "status": status})
         return out
 

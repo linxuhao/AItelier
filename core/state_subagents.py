@@ -102,10 +102,34 @@ def _view(row, current=None) -> dict:
     return data
 
 
+def close_worker_claims(conn, store, project_id, subagent_id, actor, reason) -> list[str]:
+    """A worker that is settled or terminated holds no claim any more: every live
+    claim held FOR it (bound to its attempt or a side claim on another node) is
+    released in the same transaction, so nothing renews or dispatches through a
+    closed worker's authority."""
+    released = []
+    for row in conn.execute("SELECT * FROM state_node_claims WHERE project_id=? AND subagent=? AND status='live'",
+                            (project_id, subagent_id)).fetchall():
+        claim = dict(row)
+        conn.execute("UPDATE state_node_claims SET status='released',updated_at=? WHERE claim_id=?",
+                     (now_stamp(), claim["claim_id"]))
+        conn.execute("INSERT INTO state_claim_history(claim_id,project_id,node_key,driver_id,purpose,status,fence,"
+                     "lease_expires_at,actor,reason,created_at) VALUES(?,?,?,?,?,'released',?,?,?,?,?)",
+                     (claim["claim_id"], project_id, claim["node_key"], claim["driver_id"], claim["purpose"],
+                      claim["fence"], claim["lease_expires_at"], actor, reason, now_stamp()))
+        store._event(conn, project_id, claim["node_key"], "claim_released", {
+            "claim_id": claim["claim_id"], "driver_id": claim["driver_id"], "purpose": claim["purpose"],
+            "fence": claim["fence"], "reason": reason, "subagent": subagent_id, "attempt_id": claim["attempt_id"],
+            "actor": actor, "break_glass": False})
+        released.append(claim["claim_id"])
+    return released
+
+
 def settle_open_subagents(conn, store, attempt, actor, reason) -> list[str]:
     """A terminal, quiescent report by the owner covers the attempt's open
-    workers: they are settled with it and stop reserving their checkouts
-    (orphans are NOT: nobody attested anything about them)."""
+    workers: they are settled with it, their claims are released and they stop
+    reserving their checkouts (orphans are NOT: nobody attested anything about
+    them)."""
     if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='driver_subagents'").fetchone():
         return []
     rows = conn.execute("SELECT subagent_id,node_key FROM driver_subagents WHERE attempt_id=? "
@@ -114,9 +138,10 @@ def settle_open_subagents(conn, store, attempt, actor, reason) -> list[str]:
     for row in rows:
         conn.execute("UPDATE driver_subagents SET status='settled',updated_at=? WHERE subagent_id=?",
                      (now_stamp(), row["subagent_id"]))
+        released = close_worker_claims(conn, store, attempt["project_id"], row["subagent_id"], actor, reason)
         store._event(conn, attempt["project_id"], row["node_key"], "subagent_settled", {
             "subagent_id": row["subagent_id"], "attempt_id": attempt["attempt_id"], "closing": "settled",
-            "reason": reason, "actor": actor})
+            "reason": reason, "actor": actor, "released_claims": released})
         settled.append(row["subagent_id"])
     return settled
 
@@ -358,6 +383,8 @@ class StateSubagents:
             store_report_blob(conn, report_ref, report_sha256, report_bytes)
             conn.execute("UPDATE driver_subagents SET status=?,settled_report_ref=?,settled_report_sha256=?,"
                          "updated_at=? WHERE subagent_id=?", (closing, report_ref, report_sha256, current, subagent_id))
+            released_claims = close_worker_claims(conn, self.store, project_id, subagent_id, self.actor,
+                                                  f"worker {subagent_id} {closing}")
             resolved = driver_notices.resolve(conn, project_id=project_id, kind="subagent_orphaned",
                                               ref_key="subagent_id", ref_value=subagent_id,
                                               reason="origin driver reported the orphan settled")
@@ -365,7 +392,7 @@ class StateSubagents:
                 "subagent_id": subagent_id, "attempt_id": row["attempt_id"], "origin_driver_id": row["origin_driver_id"],
                 "owner_driver_id": row["owner_driver_id"], "settled_by": driver, "closing": closing,
                 "presented_fence": fence, "current_fence": row["fence"],
-                "report_sha256": report_sha256, "actor": self.actor})
+                "report_sha256": report_sha256, "actor": self.actor, "released_claims": released_claims})
             notice = None
             if row["owner_driver_id"] != driver:
                 notice = driver_notices.notify(

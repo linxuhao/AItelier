@@ -1347,6 +1347,13 @@ def _register_run_tools(tool, mcp=None):
             return {**echo, "error": exc.detail}
         if controller.get("break_glass"):
             echo = {**echo, "break_glass": True, "attempt_id": controller.get("attempt_id")}
+        try:
+            return _answer_checkpoint_body(sf, run, resolved, run_id, decision, feedback, echo)
+        finally:
+            from api.meta_routers import finish_state_checkpoint_decision
+            finish_state_checkpoint_decision(controller, get_db_manager())
+
+    def _answer_checkpoint_body(sf, run, resolved, run_id, decision, feedback, echo):
         if run.get("status") != "paused":
             # A project id takes the NEWEST run, which is not always the one with
             # the checkpoint: a project can acquire a meta_conversation run AFTER

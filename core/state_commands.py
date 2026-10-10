@@ -587,6 +587,15 @@ class RequestAttemptBase(Attempt):
     base_sha: str
 
 
+class RecoverAttempt(Attempt):
+    # P3: a recovery that launches a still-reserved attempt in an enforced
+    # project rides the owner's live implement claim; name it (and its fence)
+    # to launch deliberately on a claim that replaced the one the attempt was
+    # reserved on.
+    claim_id: str | None = None
+    fence: int | None = Field(default=None, ge=1)
+
+
 class RetireReservation(Attempt):
     reason: str
 
@@ -951,7 +960,7 @@ WRITE_REQUESTS = {
     "split_node": SplitNode, "supersede_node": SupersedeNode, "set_node_facet": SetNodeFacet,
     "set_node_priority": SetNodePriority,
     "start_attempt": StartAttempt, "request_attempt_base": RequestAttemptBase,
-    "recover_attempt": Attempt, "reconcile_attempt": Attempt,
+    "recover_attempt": RecoverAttempt, "reconcile_attempt": Attempt,
     "disposition_failed_attempt": DispositionFailedAttempt,
     "retire_reservation": RetireReservation, "record_evidence": Evidence,
     "verify_node": Verify, "import_tasks": ImportTasks,
@@ -1145,6 +1154,23 @@ def _director_schema(service):
     return getattr(getattr(service, "director_messages", None), "reply_schema", SCHEMA_ID)
 
 
+def _owns_inherited_subagent(service, identity) -> bool:
+    """Whether ``identity`` (``<other>/<label>``) is a registered subagent the
+    service's driver CURRENTLY owns (open or settled) in any project."""
+    driver_id = getattr(service, "driver_id", None)
+    store = getattr(service, "store", None)
+    if not driver_id or not isinstance(identity, str) or "/" not in identity or store is None:
+        return False
+    try:
+        with store.transaction() as conn:
+            if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='driver_subagents'").fetchone():
+                return False
+            return conn.execute("SELECT 1 FROM driver_subagents WHERE subagent_id=? AND owner_driver_id=? "
+                                "AND status IN ('active','adopted','settled')", (identity, driver_id)).fetchone() is not None
+    except Exception:  # noqa: BLE001 - an untrusted store cannot read it; then it is not yours here
+        return False
+
+
 def execute(service, action: str, arguments: dict, *, allow_write: bool = False):
     if isinstance(action, str) and action in RETIRED_ACTIONS:
         raise StateGraphError(RETIRED_ACTIONS[action])
@@ -1221,10 +1247,14 @@ def execute(service, action: str, arguments: dict, *, allow_write: bool = False)
         try:
             args["director_identity"] = check_director_identity(driver_id, args.get("director_identity"))
         except DriverError as exc:
-            if director_action:
-                from core.director_messaging_protocol import DirectorMessageError
-                return DirectorMessageError("invalid_request", _director_schema(service)).as_dict()
-            raise StateGraphError(str(exc)) from exc
+            # P3: an INHERITED worker keeps its origin's prefix (codex/w1 taken
+            # over by grok). The registry's current ownership, not the prefix,
+            # says whose it is; the handler re-judges it inside its transaction.
+            if not _owns_inherited_subagent(service, args.get("director_identity")):
+                if director_action:
+                    from core.director_messaging_protocol import DirectorMessageError
+                    return DirectorMessageError("invalid_request", _director_schema(service)).as_dict()
+                raise StateGraphError(str(exc)) from exc
     if args.get("driver_id") and not service.project_read_trusted:
         raise ProjectPrivate()
     handlers = _handlers(service)

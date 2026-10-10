@@ -567,9 +567,9 @@ class StateService:
                                         frozen_prerequisites=frozen_prerequisites, base_sha=base_sha,
                                         owner_driver_id=self.driver_id, claim_id=claim_id, fence=fence,
                                         is_admin=self.is_admin)
-        return self._launch_or_recover(attempt, manifest, source)
+        return self._launch_or_recover(attempt, manifest, source, claim_id=claim_id, fence=fence)
 
-    def _launch_or_recover(self, attempt, manifest, source):
+    def _launch_or_recover(self, attempt, manifest, source, claim_id=None, fence=None):
         aid = attempt["attempt_id"]
         if attempt["run_id"]:
             return self.reconcile_attempt(aid)
@@ -657,7 +657,10 @@ class StateService:
         if missing:
             raise StateConflict("workflow requires producer outputs not present for this attempt; use a self-contained "
                                 "node workflow or prepare its prerequisites through the standard producer: " + canonical(missing))
-        if not self.attempts.claim_launch(aid, self.driver_id, self.is_admin, self.actor):
+        # The claim/fence the CALLER named travel into the launch transaction: a
+        # replay with a stale fence, or a reservation whose claim was replaced
+        # during preflight, is judged there, not at reservation time only.
+        if not self.attempts.claim_launch(aid, self.driver_id, self.is_admin, self.actor, claim_id=claim_id, fence=fence):
             return self.attempts.get(aid)
         # Do not duplicate portable base64 bytes in the model's goal seed.
         seed_context = dict(attempt["context"])
@@ -1101,7 +1104,7 @@ class StateService:
             refused = {"total": None, "unreadable": f"{type(exc).__name__}: {str(exc)[:160]}"}
         return {**envelope, "refused_tool_calls": refused}
 
-    def recover_attempt(self, attempt_id):
+    def recover_attempt(self, attempt_id, claim_id=None, fence=None):
         attempt = self.attempts.get(attempt_id)
         if attempt["execution_kind"] == "external":
             return self.external.inspect(attempt_id)
@@ -1111,7 +1114,8 @@ class StateService:
             raise StateConflict("workflow registration unavailable; preserve the attempt")
         if attempt["run_id"]:
             return self._attach_and_observe(attempt_id, manifest)
-        return self._launch_or_recover(attempt, manifest, self._source(attempt["project_id"]))
+        return self._launch_or_recover(attempt, manifest, self._source(attempt["project_id"]),
+                                       claim_id=claim_id, fence=fence)
 
     def _artifact(self, attempt):
         from core import run_isolation

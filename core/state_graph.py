@@ -336,6 +336,8 @@ def initialize_state_schema(db) -> None:
     initialize_subagents(db)
     from core.state_handoffs import initialize as initialize_handoffs
     initialize_handoffs(db)
+    from core.state_enforcement import initialize as initialize_enforcement
+    initialize_enforcement(db)
 
 
 class StateGraphStore:

@@ -249,13 +249,18 @@ class StateAttempts:
                     from core.state_claims import ClaimError
                     raise ClaimError("not_attempt_owner", f"attempt {old['attempt_id']} belongs to driver "
                                      f"{old['owner_driver_id']}", owner_driver_id=old["owner_driver_id"])
-                if claim_id is not None:
-                    # A replay that names a claim is judged on THAT claim now: a
-                    # released or lapsed one is stale, whatever the row remembers.
+                if claim_id is not None or fence is not None:
+                    # A replay that names a claim OR a fence is judged on the live
+                    # claim now: a released or lapsed one is stale, whatever the
+                    # row remembers. The named live claim is bound to the attempt
+                    # it replays (so a terminal report releases it).
                     from core.state_enforcement import dispatch_claim
                     from core import state_claims
-                    dispatch_claim(conn, project_id, node_key, owner_driver_id, is_admin, claim_id=claim_id,
-                                   fence=fence, current=state_claims.now_stamp())
+                    named, _ = dispatch_claim(conn, project_id, node_key, owner_driver_id, is_admin, claim_id=claim_id,
+                                              fence=fence, current=state_claims.now_stamp())
+                    if named is not None and old["status"] in ACTIVE and named["attempt_id"] in (None, old["attempt_id"]):
+                        conn.execute("UPDATE state_node_claims SET attempt_id=?,updated_at=? WHERE claim_id=?",
+                                     (old["attempt_id"], now(), named["claim_id"]))
                 return _public(dict(old))
             from core.state_metadata import require_dispatch
             require_dispatch(conn, project_id, node_key)
@@ -482,7 +487,7 @@ class StateAttempts:
             return _public(self._attempt(conn, attempt_id))
 
     def claim_launch(self, attempt_id: str, driver_id: str | None = None, is_admin: bool = False,
-                     actor: str | None = None) -> bool:
+                     actor: str | None = None, claim_id: str | None = None, fence: int | None = None) -> bool:
         """Only the first caller dispatches. Uncertain launches are not retried.
 
         P3: the ``reserved -> launching`` transition is the one place every
@@ -497,7 +502,8 @@ class StateAttempts:
             if attempt["status"] != "reserved":
                 return False
             from core.state_enforcement import launch_authorization
-            break_glass, rebind = launch_authorization(conn, attempt, driver_id, is_admin)
+            break_glass, rebind = launch_authorization(conn, attempt, driver_id, is_admin, claim_id=claim_id,
+                                                       fence=fence)
             from core.state_metadata import require_dispatch
             require_dispatch(conn, attempt["project_id"], attempt["node_key"])
             if not self._pins_current(conn, attempt):

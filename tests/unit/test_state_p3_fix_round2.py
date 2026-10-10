@@ -58,7 +58,12 @@ class TestR1StaleFenceReplay:
             codex.attempts.claim_launch("attempt-res", "codex", False, "driver:codex")
         assert refused.value.code == "claim_required"
         c2 = claim(codex, "b", workspace="h:/w#c", request_key="c2")
-        assert codex.attempts.claim_launch("attempt-res", "codex", False, "driver:codex") is True
+        # Round 3: the replacement is bound only when NAMED (no silent rebind).
+        with pytest.raises(ClaimError) as refused:
+            codex.attempts.claim_launch("attempt-res", "codex", False, "driver:codex")
+        assert refused.value.code == "claim_required"
+        assert codex.attempts.claim_launch("attempt-res", "codex", False, "driver:codex",
+                                           claim_id=c2["claim_id"], fence=c2["fence"]) is True
         assert claims_of(db, claim_id=c2["claim_id"])[0]["attempt_id"] == "attempt-res"
         assert events(db, "attempt_launching")[-1]["claim_id"] == c2["claim_id"]
 
@@ -151,7 +156,7 @@ class TestR16InboxAdapter:
     def test_adapter_hooks_share_the_ownership_transaction(self, db, clock):
         delivered, resolved = [], []
         driver_notices.set_inbox_adapter(
-            deliver=lambda conn, message: delivered.append((conn.in_transaction, message)) or "inbox-msg",
+            deliver=lambda conn, message, notice: delivered.append((conn.in_transaction, message, notice)) or "inbox-msg",
             resolve=lambda conn, rows, reason: resolved.append((conn.in_transaction, [r["refs"] for r in rows], reason)))
         project(db)
         codex, grok = svc(db, "codex"), svc(db, "grok")

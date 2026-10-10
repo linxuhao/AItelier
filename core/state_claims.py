@@ -307,9 +307,11 @@ class StateClaims:
         key(request_key, "request_key")
         if not isinstance(workspace, str) or len(workspace) > 500:
             raise StateGraphError("workspace must be text of at most 500 characters")
-        if subagent is not None and not (isinstance(subagent, str) and subagent.startswith(driver + "/")
-                                         and len(subagent) > len(driver) + 1 and len(subagent) <= 320):
-            raise ClaimError("not_your_subagent", f"subagent must be '{driver}/<label>'")
+        if subagent is not None and not (isinstance(subagent, str) and "/" in subagent
+                                         and len(subagent) > 2 and len(subagent) <= 320):
+            raise ClaimError("not_your_subagent", f"subagent must be '{driver}/<label>' (or an inherited "
+                             "'<origin>/<label>' the registry says you own)")
+        own_prefix = subagent is None or (subagent.startswith(driver + "/") and len(subagent) > len(driver) + 1)
         request_hash = digest({"purpose": purpose, "revision": expected_revision, "lease_seconds": lease_seconds,
                                "workspace": workspace, "subagent": subagent})
         with self.store.transaction(write=True) as conn:
@@ -328,6 +330,16 @@ class StateClaims:
                 raise ClaimError("revision_changed", f"node revision is {node['revision']}; reload")
             if node["status"] == "SUPERSEDED" or (purpose == "implement" and node["status"] == "VERIFIED"):
                 raise ClaimError("node_closed", f"node is {node['status']}")
+            if not own_prefix:
+                # An INHERITED worker (codex/w1 taken over by grok): the registry's
+                # current ownership, judged in this transaction, makes it yours.
+                owned = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='driver_subagents'"
+                                     ).fetchone() and conn.execute(
+                    "SELECT 1 FROM driver_subagents WHERE project_id=? AND subagent_id=? AND owner_driver_id=? "
+                    "AND status IN ('active','adopted')", (project_id, subagent, driver)).fetchone()
+                if not owned:
+                    raise ClaimError("not_your_subagent", f"subagent must be '{driver}/<label>', or a registered "
+                                     f"worker you currently own; {subagent} is neither")
             current = now_stamp()
             self._sweep_conn(conn, project_id, current, node_key)
             if purpose in EXCLUSIVE_PURPOSES:
@@ -341,7 +353,8 @@ class StateClaims:
                 # subagents, project-wide - where that worker's own registration
                 # is the same executor, not a second writer.
                 if purpose in EXCLUSIVE_PURPOSES and workspace:
-                    refuse_checkout_in_use(conn, project_id, workspace, same_executor=subagent, owner=driver)
+                    refuse_checkout_in_use(conn, project_id, workspace, same_executor=subagent,
+                                           reclaiming=(driver, node_key))
             fence = 1 + conn.execute("SELECT COALESCE(MAX(fence),0) FROM state_node_claims "
                                      "WHERE project_id=? AND node_key=?", (project_id, node_key)).fetchone()[0]
             claim = {"claim_id": "claim-" + uuid.uuid4().hex, "project_id": project_id, "node_key": node_key,

@@ -391,10 +391,9 @@ class TestAbandonedAndReclaim:
         reclaimable(clock)
         write(codex, "abandon_external_attempt", attempt_id=attempt["attempt_id"], expected_owner_fence=1,
               abandon_kind="unknown", reason="gone")
-        same = claim(codex, workspace="h:/w#g")
-        assert code_of(lambda: external(codex, "a", "rk-2", claim_id=same["claim_id"], fence=same["fence"],
-                                        base_sha="a" * 40)) == "workspace_in_use"
-        write(codex, "release_claim", project_id="p", claim_id=same["claim_id"], fence=same["fence"], reason="move")
+        # Fix round 3: the abandoned worker's checkout stays reserved until a verified
+        # quiescence report settles it - even the claim at that checkout is refused.
+        assert code_of(lambda: claim(codex, workspace="h:/w#g")) == "workspace_in_use"
         other = claim(codex, workspace="h:/w2#c", request_key="codex-a-2")
         assert code_of(lambda: external(codex, "a", "rk-3", claim_id=other["claim_id"], fence=other["fence"])
                        ) == "workspace_in_use"       # still no base_sha
@@ -899,6 +898,8 @@ class TestTransports:
         tokens = {"owner": self.ADMIN,
                   "grok": registry.register("grok", "Grok", actor="t")["token"],
                   "codex": registry.register("codex", "Codex", actor="t")["token"]}
+        for who in ("grok", "codex"):                       # reclaiming is for project MEMBERS (round 3)
+            registry.set_membership("p", who, "member", 0, "member of p", actor="t")
         with TestClient(app) as client:
             yield client, tokens
         drivers._REGISTRIES.clear()

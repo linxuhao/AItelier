@@ -85,9 +85,13 @@ class TestFinding1LaunchAuthorization:
     def test_owner_with_live_claim_launches(self, db, clock):
         project(db, enforce=True)
         codex = svc(db, "codex")
-        claim(codex, "b")
+        held = claim(codex, "b")
         reserved_skillflow_attempt(db, "attempt-sf", "codex")
-        assert codex.attempts.claim_launch("attempt-sf", "codex", False, "driver:codex") is True
+        # Round 3: an unbound live claim launches only when the caller NAMES it.
+        with pytest.raises(ClaimError):
+            codex.attempts.claim_launch("attempt-sf", "codex", False, "driver:codex")
+        assert codex.attempts.claim_launch("attempt-sf", "codex", False, "driver:codex",
+                                           claim_id=held["claim_id"], fence=held["fence"]) is True
         assert "break_glass" not in events(db, "attempt_launching")[-1]
 
     def test_replaying_another_drivers_request_key_does_not_hand_over_the_attempt(self, db, clock):

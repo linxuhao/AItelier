@@ -40,11 +40,33 @@ Q13. an admin (owner e-mail, ``owner-cli``) is never refused by a claim rule;
 """
 from __future__ import annotations
 
-from core.state_claims import ClaimError, lease_state, now_stamp
+import uuid
+
+from core.state_claims import ClaimError, add_seconds, lease_state, now_stamp
 from core.state_graph import text
 
 _ACTIVE = ("reserved", "launching", "running", "paused", "unknown")
 MAX_OVERRIDE_REASON = 2000
+# A checkpoint decision holds the attempt's ownership still while the engine is
+# told; a crashed decider releases it by expiry.
+CHECKPOINT_DECISION_SECONDS = 120
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS driver_checkpoint_decisions (
+    decision_id TEXT PRIMARY KEY,
+    attempt_id TEXT NOT NULL, run_id TEXT NOT NULL, project_id TEXT NOT NULL,
+    driver_id TEXT, owner_fence INTEGER NOT NULL, break_glass INTEGER NOT NULL CHECK(break_glass IN (0,1)),
+    started_at TEXT NOT NULL, expires_at TEXT NOT NULL, finished_at TEXT,
+    FOREIGN KEY(attempt_id) REFERENCES state_attempts(attempt_id)
+);
+CREATE INDEX IF NOT EXISTS driver_checkpoint_decisions_open ON driver_checkpoint_decisions(attempt_id, finished_at, expires_at);
+"""
+
+
+def initialize(db) -> None:
+    with db.get_connection() as conn:
+        conn.executescript(SCHEMA)
+        conn.commit()
 # Subagent rows that still (may) write their checkout.
 OPEN_SUBAGENT_STATUSES = ("active", "adopted", "orphaned_unobservable")
 
@@ -75,7 +97,7 @@ def checkout_of(workspace: str) -> str:
 
 
 def checkout_in_use(conn, project_id, workspace, *, exclude_claim=None, exclude_subagent=None,
-                    same_executor=None, exclude_attempt=None, owner=None):
+                    same_executor=None, exclude_attempt=None, reclaiming=None):
     """The holder of this checkout (``host:path``), if any. A checkout is held by:
 
     * a live exclusive claim declaring it;
@@ -87,10 +109,16 @@ def checkout_in_use(conn, project_id, workspace, *, exclude_claim=None, exclude_
       included) - the worker may still write every checkout it was given.
 
     ``same_executor`` names the subagent whose own records are not a second
-    writer (its registry row and the claims held for it); ``owner`` is the
-    driver whose own active attempts' executor checkouts are not a second writer
-    either (the owner re-claiming the tree its attempt runs in); ``exclude_claim``
-    / ``exclude_subagent`` / ``exclude_attempt`` skip the caller's own records.
+    writer (its registry row and the claims held for it); ``reclaiming`` is a
+    ``(driver_id, node_key)`` pair naming the ONE executor a claim explicitly
+    re-associates with - the driver's own active attempt on that very node -
+    which is not a second writer either (common ownership alone is: the same
+    driver's attempt on another node is another executor); ``exclude_claim`` /
+    ``exclude_subagent`` / ``exclude_attempt`` skip the caller's own records.
+
+    An attempt abandoned with ``abandon_kind=unknown`` keeps its executor
+    checkout reserved until its owner row is SETTLED by a verified quiescence
+    report: nobody attested that worker stopped.
     None when the checkout is free or undeclared."""
     checkout = checkout_of(workspace)
     if not checkout:
@@ -106,14 +134,17 @@ def checkout_in_use(conn, project_id, workspace, *, exclude_claim=None, exclude_
             if checkout_of(row["workspace"]) == checkout:
                 return {"kind": "claim", "id": row["claim_id"], "driver_id": row["driver_id"],
                         "node_key": row["node_key"], "workspace": row["workspace"]}
-        # Executor checkouts of active attempts, independent of claim status.
+        # Executor checkouts of active attempts, independent of claim status; plus
+        # attempts abandoned with quiescence UNKNOWN whose owner row is not settled.
         for row in conn.execute(
                 "SELECT c.claim_id,c.driver_id,c.node_key,c.workspace,c.attempt_id,a.owner_driver_id FROM state_node_claims c "
                 "JOIN state_attempts a ON a.attempt_id=c.attempt_id WHERE c.project_id=? AND c.workspace!='' "
-                "AND a.status IN (" + ",".join("?" for _ in _ACTIVE) + ")", (project_id, *_ACTIVE)):
+                "AND (a.status IN (" + ",".join("?" for _ in _ACTIVE) + ") OR (a.status='abandoned' "
+                "AND a.abandon_kind='unknown' AND EXISTS (SELECT 1 FROM state_external_owners o "
+                "WHERE o.attempt_id=a.attempt_id AND o.status!='settled')))", (project_id, *_ACTIVE)):
             if row["attempt_id"] == exclude_attempt or row["claim_id"] == exclude_claim:
                 continue
-            if owner is not None and row["owner_driver_id"] == owner:
+            if reclaiming is not None and (row["owner_driver_id"], row["node_key"]) == tuple(reclaiming):
                 continue
             if checkout_of(row["workspace"]) == checkout:
                 return {"kind": "attempt", "id": row["attempt_id"], "driver_id": row["owner_driver_id"] or row["driver_id"],
@@ -213,20 +244,26 @@ def dispatch_claim(conn, project_id, node_key, driver_id, is_admin, claim_id=Non
                      lease_state=lease_state(live["lease_expires_at"], current or now_stamp()))
 
 
-def launch_authorization(conn, attempt, driver_id, is_admin):
+def launch_authorization(conn, attempt, driver_id, is_admin, claim_id=None, fence=None):
     """Rule 1 at the real ``reserved -> launching`` transition.
 
     A recovery (`recover_attempt`) or a replayed `start_attempt` reaches the
     launch with an EXISTING reservation, so the reservation-time check alone
     would let any member launch another driver's attempt. In an enforced
     project the launcher must be the attempt's owner and hold the node's live
-    implement claim: the claim BOUND to the attempt when it is still live, else
-    the owner's current live claim, which the launch then binds (a released or
-    lapsed bound claim does not authorize by memory). Returns
-    ``(break_glass, claim_to_bind)``; an admin passes with ``break_glass``.
-    Legacy reservations without an owner are unconstrained.
+    implement claim. The claim the caller NAMED (``claim_id``/``fence``, carried
+    into this transaction from the request) must be that live claim
+    (``stale_fence`` otherwise). If the claim BOUND to the attempt is still live
+    the launch rides it; if it was released or lapsed and the owner holds a NEW
+    live claim, the launch binds that replacement only when the caller named it
+    - a deliberate re-authorization, never a silent rebind (``claim_required``).
+    Returns ``(break_glass, claim_to_bind)``; an admin passes with
+    ``break_glass``. Legacy reservations without an owner are unconstrained.
     """
     if not enforced(conn, attempt["project_id"]) or not attempt.get("owner_driver_id"):
+        if claim_id is not None or fence is not None:
+            dispatch_claim(conn, attempt["project_id"], attempt["node_key"], driver_id, is_admin,
+                           claim_id=claim_id, fence=fence)
         return False, None
     if attempt["owner_driver_id"] == driver_id:
         live, lapsed = live_implement_claim(conn, attempt["project_id"], attempt["node_key"])
@@ -236,13 +273,99 @@ def launch_authorization(conn, attempt, driver_id, is_admin):
             raise ClaimError("claim_required", f"launching attempt {attempt['attempt_id']} needs your live implement "
                              f"claim on {attempt['node_key']}" + (" (yours lapsed)" if lapsed else ""),
                              node_key=attempt["node_key"])
+        if claim_id is not None and claim_id != live["claim_id"]:
+            raise ClaimError("stale_fence", f"claim {claim_id} is not your live implement claim on "
+                             f"{attempt['node_key']} ({live['claim_id']} is); reload", claim_id=live["claim_id"])
+        if fence is not None and fence != live["fence"]:
+            raise ClaimError("stale_fence", f"claim fence is {live['fence']}, not {fence}; reload",
+                             claim_id=live["claim_id"])
         bound = live["attempt_id"] == attempt["attempt_id"]
-        return False, (None if bound else live)
+        if bound:
+            return False, None
+        if claim_id == live["claim_id"]:
+            return False, live
+        raise ClaimError("claim_required", f"the claim attempt {attempt['attempt_id']} was reserved on is gone; "
+                         f"your current implement claim {live['claim_id']} (fence {live['fence']}) is not bound to "
+                         "it - name it (claim_id, fence) to launch on it deliberately", claim_id=live["claim_id"],
+                         fence=live["fence"])
     if is_admin:
         return True, None
     raise ClaimError("not_attempt_owner", f"attempt {attempt['attempt_id']} belongs to driver "
                      f"{attempt['owner_driver_id']}; take_over_attempt or a handoff changes the controller",
                      owner_driver_id=attempt["owner_driver_id"])
+
+
+# -- membership (design §4.4, §6.2: "any project MEMBER") -------------------------
+def project_membership(store, project_id, driver_id):
+    """True / False from the P0 registry; None when driver identity is off (no
+    registry, hence no membership to check - the legacy single-credential world)."""
+    if not driver_id:
+        return None
+    try:
+        from core.drivers import registry_for
+        registry = registry_for(store.db)
+    except Exception:  # noqa: BLE001 - no registry = no membership concept
+        return None
+    if registry is None:
+        return None
+    try:
+        return any(m["driver_id"] == driver_id and m.get("status") == "member"
+                   for m in registry.project_members(project_id))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def require_member(store, project_id, driver_id, is_admin, what) -> bool:
+    """Refuse a non-member (`not_project_member`); an admin passes and the
+    caller records break_glass. Returns whether this is a break-glass pass."""
+    member = project_membership(store, project_id, driver_id)
+    if member is None or member:
+        return False
+    if is_admin:
+        return True
+    raise ClaimError("not_project_member", f"{what} is for members of project {project_id}; driver {driver_id} "
+                     "is not one (ask an admin for set_project_driver)", project_id=project_id)
+
+
+# -- rule 9b: a checkpoint decision holds ownership still ------------------------
+def open_checkpoint_decision(conn, attempt, run_id, driver_id, break_glass) -> str:
+    decision_id = "decision-" + uuid.uuid4().hex
+    current = now_stamp()
+    conn.execute("INSERT INTO driver_checkpoint_decisions(decision_id,attempt_id,run_id,project_id,driver_id,"
+                 "owner_fence,break_glass,started_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                 (decision_id, attempt["attempt_id"], run_id, attempt["project_id"], driver_id,
+                  attempt["owner_fence"], int(break_glass), current, add_seconds(current, CHECKPOINT_DECISION_SECONDS)))
+    return decision_id
+
+
+def checkpoint_decision_in_flight(conn, attempt_id):
+    """The unfinished, unexpired decision on this attempt, if any. Ownership
+    transfers refuse while one exists (`checkpoint_in_progress`)."""
+    if not _has_table(conn, "driver_checkpoint_decisions"):
+        return None
+    row = conn.execute("SELECT * FROM driver_checkpoint_decisions WHERE attempt_id=? AND finished_at IS NULL "
+                       "AND expires_at>? ORDER BY started_at DESC LIMIT 1", (attempt_id, now_stamp())).fetchone()
+    return dict(row) if row else None
+
+
+def refuse_checkpoint_in_flight(conn, attempt_id):
+    open_decision = checkpoint_decision_in_flight(conn, attempt_id)
+    if open_decision is not None:
+        raise ClaimError("checkpoint_in_progress", f"driver {open_decision['driver_id']} is answering a checkpoint of "
+                         f"run {open_decision['run_id']} (until {open_decision['expires_at']}); ownership of attempt "
+                         f"{attempt_id} cannot move until it is finished", decision_id=open_decision["decision_id"],
+                         expires_at=open_decision["expires_at"])
+
+
+def finish_checkpoint_decision(db, decision_id) -> bool:
+    """Close the decision once the engine answered (or refused). Idempotent."""
+    if not decision_id:
+        return False
+    from core.state_graph import StateGraphStore
+    store = StateGraphStore(db, project_read_trusted=True)
+    with store.transaction(write=True) as conn:
+        return conn.execute("UPDATE driver_checkpoint_decisions SET finished_at=? WHERE decision_id=? "
+                            "AND finished_at IS NULL", (now_stamp(), decision_id)).rowcount == 1
 
 
 # -- rule 4/5: structural writes -------------------------------------------------
@@ -286,6 +409,9 @@ class StructuralGuard:
 
     def __init__(self, store, actor, driver_id, is_admin):
         self.store, self.actor, self.driver_id, self.is_admin = store, actor, driver_id, is_admin is True
+        from core.state_privacy import UntrustedDatabase
+        if not isinstance(store.db, UntrustedDatabase):
+            initialize(store.db)
 
     def check(self, conn, project_id, node_key, override_reason, action) -> dict | None:
         override_reason = override_reason_text(override_reason)
@@ -362,6 +488,7 @@ def checkpoint_controller(db, run_id, driver_id, is_admin, actor) -> dict:
     if not run_id:
         return {"enforced": False}
     store = StateGraphStore(db, project_read_trusted=True)
+    initialize(db)
     with store.transaction() as conn:
         if not _has_table(conn, "state_attempts"):
             return {"enforced": False}
@@ -373,14 +500,26 @@ def checkpoint_controller(db, run_id, driver_id, is_admin, actor) -> dict:
             return {"enforced": False, "attempt_id": row["attempt_id"]}
         attempt = dict(row)
     if attempt["owner_driver_id"] == driver_id:
+        with store.transaction(write=True) as conn:
+            # Re-read under the write lock: the owner must still be the owner at
+            # the moment the decision opens, and the decision then holds every
+            # transfer off until finish_checkpoint_decision (or expiry).
+            fresh = conn.execute("SELECT attempt_id,project_id,node_key,owner_driver_id,owner_fence "
+                                 "FROM state_attempts WHERE attempt_id=?", (attempt["attempt_id"],)).fetchone()
+            if fresh is None or fresh["owner_driver_id"] != driver_id:
+                raise ClaimError("not_attempt_owner", f"attempt {attempt['attempt_id']} changed owner "
+                                 f"(now {fresh['owner_driver_id'] if fresh else None}) before the decision opened",
+                                 owner_driver_id=fresh["owner_driver_id"] if fresh else None)
+            decision_id = open_checkpoint_decision(conn, dict(fresh), run_id, driver_id, False)
         return {"enforced": True, "attempt_id": attempt["attempt_id"], "owner_driver_id": driver_id,
-                "break_glass": False}
+                "break_glass": False, "decision_id": decision_id}
     if not is_admin:
         raise ClaimError("not_attempt_owner", f"checkpoints of run {run_id} are decided by the owner of attempt "
                          f"{attempt['attempt_id']} (driver {attempt['owner_driver_id']}); take_over_attempt "
                          "or a handoff changes the controller", owner_driver_id=attempt["owner_driver_id"])
     from core import driver_notices
     with store.transaction(write=True) as conn:
+        decision_id = open_checkpoint_decision(conn, attempt, run_id, driver_id, True)
         driver_notices.notify(conn, store, target_driver_id=attempt["owner_driver_id"], kind="break_glass",
                               project_id=attempt["project_id"],
                               subject=f"checkpoint of run {run_id} answered by an admin",
@@ -393,7 +532,7 @@ def checkpoint_controller(db, run_id, driver_id, is_admin, actor) -> dict:
             "attempt_id": attempt["attempt_id"], "run_id": run_id, "actor": actor,
             "owner_driver_id": attempt["owner_driver_id"], "break_glass": True})
     return {"enforced": True, "attempt_id": attempt["attempt_id"], "owner_driver_id": attempt["owner_driver_id"],
-            "break_glass": True}
+            "break_glass": True, "decision_id": decision_id}
 
 
 # -- Q8: registered subagents ----------------------------------------------------
@@ -419,12 +558,13 @@ def require_registered_subagent(conn, project_id, driver_id, director_identity, 
     """Q8: in an enforced project a subagent that produces evidence or writes a
     checkout must be registered to the caller. ``director_identity`` of the form
     ``<driver>/<label>`` names one; a bare driver id names none."""
-    if not driver_id or not director_identity or director_identity == driver_id:
+    if not driver_id or not director_identity or director_identity == driver_id or "/" not in director_identity:
         return
-    if not director_identity.startswith(driver_id + "/"):
+    if not enforced(conn, project_id) and director_identity.startswith(driver_id + "/"):
         return
-    if not enforced(conn, project_id):
-        return
+    # Under your own prefix: your registered worker. Under ANOTHER driver's prefix
+    # (an inherited worker, e.g. codex/w1 now owned by grok): the registry's
+    # current ownership is the only thing that makes it yours - always checked.
     statuses = EVIDENCE_SUBAGENT_STATUSES if allow_settled else ("active", "adopted")
     if not subagent_registered(conn, project_id, driver_id, director_identity, statuses):
         raise ClaimError("subagent_unregistered", f"{what} by subagent {director_identity} needs a subagent "

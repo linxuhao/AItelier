@@ -304,9 +304,15 @@ class StateHandoffs:
             handoff = self._handoff(conn, project_id, handoff_id)
             self._eligible(handoff, driver)
             self._open(conn, handoff, current)
+            # §6.2: a member accepts (a pool offer is "any MEMBER"); judged here,
+            # inside the ownership transaction, so a removal after the offer
+            # counts. An admin passes as break glass.
+            from core.state_enforcement import refuse_checkpoint_in_flight, require_member
+            break_glass = require_member(self.store, project_id, driver, self.is_admin, "accepting a handoff")
             package = json.loads(handoff["package_json"])
             if handoff["subject_kind"] == "attempt":
                 attempt = self.recovery._attempt(conn, handoff["attempt_id"])
+                refuse_checkpoint_in_flight(conn, attempt["attempt_id"])
                 if attempt["status"] not in ACTIVE:
                     raise ClaimError("attempt_not_active", f"attempt is {attempt['status']}")
                 if attempt["owner_driver_id"] != handoff["from_driver_id"] or attempt["owner_fence"] != expected_owner_fence \
@@ -326,7 +332,8 @@ class StateHandoffs:
                     "attempt_id": attempt["attempt_id"], "mode": "handoff", "handoff_id": handoff_id,
                     "from_driver_id": handoff["from_driver_id"], "to_driver_id": driver,
                     "previous_fence": attempt["owner_fence"], "fence": fence, "lease_expires_at": expires,
-                    "subagents": [s["subagent_id"] for s in subagents], "actor": self.actor})
+                    "subagents": [s["subagent_id"] for s in subagents], "actor": self.actor,
+                    "break_glass": break_glass})
                 moved = {"attempt": _public(self.recovery._attempt(conn, attempt["attempt_id"])), "claim": claim,
                          "subagents": subagents}
             else:

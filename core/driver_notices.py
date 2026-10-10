@@ -153,7 +153,10 @@ def _deliver(conn, store, target_driver_id, kind, subject, body, refs, delivery_
               "project_id": project_id, "kind": kind, "delivery_mode": delivery_mode, "subject": subject,
               "body": body, "refs": refs, "status": "pending", "created_at": created}
     if _ADAPTER["deliver"] is not None:
-        stored["inbox"] = _ADAPTER["deliver"](conn, inbox_message(stored))
+        # The hook gets the P2 keyword set AND the complete stored notice
+        # (sender_driver_id, project_id, refs...): P2 derives the sender from
+        # its instance, so the adapter must be able to select it per notice.
+        stored["inbox"] = _ADAPTER["deliver"](conn, inbox_message(stored), stored)
     return stored
 
 

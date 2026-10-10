@@ -307,11 +307,9 @@ class StateClaims:
         key(request_key, "request_key")
         if not isinstance(workspace, str) or len(workspace) > 500:
             raise StateGraphError("workspace must be text of at most 500 characters")
-        if subagent is not None and not (isinstance(subagent, str) and "/" in subagent
-                                         and len(subagent) > 2 and len(subagent) <= 320):
-            raise ClaimError("not_your_subagent", f"subagent must be '{driver}/<label>' (or an inherited "
-                             "'<origin>/<label>' the registry says you own)")
-        own_prefix = subagent is None or (subagent.startswith(driver + "/") and len(subagent) > len(driver) + 1)
+        if subagent is not None and not (isinstance(subagent, str) and subagent.startswith(driver + "/")
+                                         and len(subagent) > len(driver) + 1 and len(subagent) <= 320):
+            raise ClaimError("not_your_subagent", f"subagent must be '{driver}/<label>'")
         request_hash = digest({"purpose": purpose, "revision": expected_revision, "lease_seconds": lease_seconds,
                                "workspace": workspace, "subagent": subagent})
         with self.store.transaction(write=True) as conn:
@@ -330,31 +328,10 @@ class StateClaims:
                 raise ClaimError("revision_changed", f"node revision is {node['revision']}; reload")
             if node["status"] == "SUPERSEDED" or (purpose == "implement" and node["status"] == "VERIFIED"):
                 raise ClaimError("node_closed", f"node is {node['status']}")
-            if not own_prefix:
-                # An INHERITED worker (codex/w1 taken over by grok): the registry's
-                # current ownership, judged in this transaction, makes it yours.
-                owned = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='driver_subagents'"
-                                     ).fetchone() and conn.execute(
-                    "SELECT 1 FROM driver_subagents WHERE project_id=? AND subagent_id=? AND owner_driver_id=? "
-                    "AND status IN ('active','adopted')", (project_id, subagent, driver)).fetchone()
-                if not owned:
-                    raise ClaimError("not_your_subagent", f"subagent must be '{driver}/<label>', or a registered "
-                                     f"worker you currently own; {subagent} is neither")
             current = now_stamp()
             self._sweep_conn(conn, project_id, current, node_key)
             if purpose in EXCLUSIVE_PURPOSES:
                 self._refuse_exclusive_holder(conn, project_id, node_key, driver, current)
-            from core.state_enforcement import enforced, refuse_checkout_in_use, require_registered_subagent
-            if enforced(conn, project_id):
-                # Q8 first: a claim held FOR a subagent names one registered to you ...
-                require_registered_subagent(conn, project_id, driver, subagent, "a claim")
-                # ... then §7.3 rule 8: one writer per CHECKOUT (host:path), across
-                # live exclusive claims, active executors and open or orphaned
-                # subagents, project-wide - where that worker's own registration
-                # is the same executor, not a second writer.
-                if purpose in EXCLUSIVE_PURPOSES and workspace:
-                    refuse_checkout_in_use(conn, project_id, workspace, same_executor=subagent,
-                                           reclaiming=(driver, node_key))
             fence = 1 + conn.execute("SELECT COALESCE(MAX(fence),0) FROM state_node_claims "
                                      "WHERE project_id=? AND node_key=?", (project_id, node_key)).fetchone()[0]
             claim = {"claim_id": "claim-" + uuid.uuid4().hex, "project_id": project_id, "node_key": node_key,
@@ -474,42 +451,16 @@ class StateClaims:
                                 "lease_expires_at": expires})
             for item in subagents:
                 label = item["subagent_id"]
-                if "/" not in label:
+                if not label.startswith(driver + "/") or len(label) <= len(driver) + 1:
                     refused.append({"kind": "subagent", "id": label, "error": "not_your_subagent"})
                     continue
-                if not label.startswith(driver + "/") or len(label) <= len(driver) + 1:
-                    # Not under your id: it may still be a subagent you INHERITED
-                    # (take_over / handoff); the registry decides below.
-                    inherited = conn.execute("SELECT owner_driver_id FROM driver_subagents WHERE subagent_id=? "
-                                             "AND project_id=?", (label, project_id)).fetchone()
-                    if inherited is None or inherited["owner_driver_id"] != driver:
-                        refused.append({"kind": "subagent", "id": label, "error": "not_your_subagent"})
-                        continue
-                # The registry row (P3, §4.6) is judged FIRST: a subagent that was
-                # transferred away or orphaned renews nothing for this caller,
-                # not even the claims still carrying its label.
-                registered = conn.execute("SELECT * FROM driver_subagents WHERE subagent_id=? AND project_id=?",
-                                          (label, project_id)).fetchone()
-                if registered is not None:
-                    code = ("not_subagent_owner" if registered["owner_driver_id"] != driver
-                            else "orphaned" if registered["status"] == "orphaned_unobservable"
-                            else "subagent_closed" if registered["status"] not in ("active", "adopted") else None)
-                    if code:
-                        refused.append({"kind": "subagent", "id": label, "error": code})
-                        continue
                 rows = conn.execute("SELECT * FROM state_node_claims WHERE project_id=? AND driver_id=? "
                                     "AND subagent=? AND status='live' ORDER BY claim_id",
                                     (project_id, driver, label)).fetchall()
+                if not rows:
+                    refused.append({"kind": "subagent", "id": label, "error": "no_live_claims"})
                 for row in rows:
                     renew_claim(row)
-                if registered is not None:
-                    expires = add_seconds(current, DEFAULT_LEASE_SECONDS)
-                    conn.execute("UPDATE driver_subagents SET lease_expires_at=?,last_heartbeat_at=? "
-                                 "WHERE subagent_id=?", (expires, current, label))
-                    renewed.append({"kind": "subagent", "id": label, "fence": registered["fence"],
-                                    "lease_expires_at": expires})
-                elif not rows:
-                    refused.append({"kind": "subagent", "id": label, "error": "no_live_claims"})
         return {"renewed": renewed, "refused": refused, "heartbeat_at": current}
 
     # -- reads -------------------------------------------------------------

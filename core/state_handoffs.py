@@ -3,10 +3,11 @@
 A takeover (core.state_recovery) is for an owner that is gone. A handoff is for
 an owner that is present and wants out - going offline, context nearly full,
 a reviewer with the right judge model - and it moves ownership ATOMICALLY: the
-attempt's owner, its fence (+1), its lease, its live bound claims (transferred,
-and a fresh live claim for the receiver) and its registered subagents all change
-in one transaction when the receiver accepts. Until then the offerer stays the
-owner; an offer that nobody accepts within its 24-hour lease simply lapses and
+attempt's owner, its fence (+1), its lease and its live bound claims
+(transferred, and a fresh live claim for the receiver) all change in one
+transaction when the receiver accepts. Point to point only: an offer names ONE
+receiver. Until then the offerer stays the owner; decline and withdraw change
+nothing; an offer nobody accepts within its 24-hour lease simply lapses and
 transfers nothing.
 
 The package the offerer attaches is structured and BOUNDED (16 KiB canonical),
@@ -16,15 +17,13 @@ dnote:// addresses, subagent ids, open issue ids, ≤ 2000 characters of
 the shared notebook (in-flight state does not go there, owner ruling
 2026-10-06). Where the package names something checkable against State, State
 checks it: the attempt's frozen context hash, its current observation version,
-the project's event high-water mark, the listed subagents, and each report's
-retained bytes.
+the project's event high-water mark and each report's retained bytes.
 
-§6.3: when the package says the workers are NOT quiescent, the receiver must
-be able to observe them - its registered ``capabilities.observable_hosts``
-must cover every host the attempt's open subagents (and the package) name;
-otherwise ``accept_handoff`` is refused with ``receiver_cannot_observe_workers``
-and the owner either waits for its workers to settle or lets the lease lapse so
-the takeover path (with its orphan handling) applies.
+§6.3, warn and record only: when the package does not declare the offerer's
+workers quiescent, ``accept_handoff`` still moves ownership; its result and
+its ``attempt_ownership_transferred`` event carry ``quiescence_warning``
+(with the attempt's registered subagents). Those workers are fenced out by
+the fence+1 like any former owner's.
 """
 from __future__ import annotations
 
@@ -87,37 +86,6 @@ def _view(row, current=None) -> dict:
     return data
 
 
-def _members(store, project_id) -> list[str]:
-    """Member drivers of the project from the P0 registry; [] when identity is off."""
-    try:
-        from core.drivers import registry_for
-        registry = registry_for(store.db)
-    except Exception:  # noqa: BLE001 - a notification fan-out never fails the write
-        registry = None
-    if registry is None:
-        return []
-    try:
-        # project_drivers.status is member|removed (core.drivers); the driver's own
-        # activity is a separate attribute and is not consulted here.
-        return sorted(m["driver_id"] for m in registry.project_members(project_id) if m.get("status") == "member")
-    except Exception:  # noqa: BLE001
-        return []
-
-
-def _observable_hosts(store, driver_id) -> set[str] | None:
-    """The hosts this driver DECLARED it can observe (design §4.6); None = unknown."""
-    try:
-        from core.drivers import registry_for
-        registry = registry_for(store.db)
-        if registry is None:
-            return None
-        caps = (registry.get(driver_id) or {}).get("capabilities") or {}
-    except Exception:  # noqa: BLE001
-        return None
-    hosts = caps.get("observable_hosts")
-    return {str(h) for h in hosts} if isinstance(hosts, list) else set()
-
-
 class StateHandoffs:
     """The ONE writer of ``state_handoffs``; ownership moves through StateRecovery's helpers."""
 
@@ -142,7 +110,7 @@ class StateHandoffs:
         return dict(row)
 
     # -- package -------------------------------------------------------------
-    def _check_package(self, conn, project_id, package, attempt, driver):
+    def _check_package(self, conn, project_id, package, attempt):
         if not isinstance(package, dict):
             raise StateGraphError("package must be an object")
         unknown = sorted(set(package) - _ALLOWED_KEYS)
@@ -161,13 +129,6 @@ class StateHandoffs:
         workers = package.get("workers")
         if workers is not None and (not isinstance(workers, dict) or type(workers.get("quiescent")) is not bool):
             raise StateGraphError("package.workers must be {quiescent: bool, detail?, host?}")
-        if attempt is not None and workers is None:
-            # §6.3 needs an explicit attestation: an undeclared quiescence is not
-            # "quiescent", it is unknown, and unknown workers cannot be handed to
-            # a driver that cannot see them.
-            raise ClaimError("quiescence_required", "an attempt handoff package must declare "
-                             "workers={quiescent: true|false, host?, detail?}: whether your workers still run "
-                             "decides who may accept")
         if attempt is not None:
             if "context_hash" in package and package["context_hash"] != digest(json.loads(attempt["context_json"])):
                 raise ClaimError("package_mismatch", "package.context_hash is not this attempt's frozen context")
@@ -185,14 +146,6 @@ class StateHandoffs:
                 raise StateGraphError("package.reports items are {ref, sha256}")
             from core.state_report_integrity import retain_report
             retain_report(ref["ref"], ref["sha256"], completed=False)
-        for subagent_id in package.get("subagents") or []:
-            row = conn.execute("SELECT attempt_id,owner_driver_id FROM driver_subagents WHERE subagent_id=? "
-                               "AND project_id=?", (subagent_id, project_id)).fetchone() if conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='driver_subagents'").fetchone() else None
-            if row is None or (attempt is not None and row["attempt_id"] != attempt["attempt_id"]) \
-                    or row["owner_driver_id"] != driver:
-                raise ClaimError("package_mismatch", f"package.subagents names {subagent_id}, which is not a "
-                                 "registered subagent of yours on this attempt")
         return encoded
 
     # -- offer -------------------------------------------------------------
@@ -202,8 +155,8 @@ class StateHandoffs:
         key(request_key, "request_key")
         if (attempt_id is None) == (claim_id is None):
             raise StateGraphError("offer exactly one subject: attempt_id or claim_id")
-        if to_driver_id is not None and (to_driver_id == driver or not isinstance(to_driver_id, str)):
-            raise StateGraphError("to_driver_id names another driver, or is omitted for any member")
+        if not isinstance(to_driver_id, str) or not to_driver_id or to_driver_id == driver:
+            raise StateGraphError("to_driver_id names the one other driver you offer to (point to point)")
         if type(expected_owner_fence) is not int:
             raise StateGraphError("expected_owner_fence must be an integer")
         current = now_stamp()
@@ -238,7 +191,7 @@ class StateHandoffs:
                 if claim["fence"] != expected_owner_fence:
                     raise ClaimError("stale_fence", f"claim fence is {claim['fence']}")
                 node_key = claim["node_key"]
-            encoded = self._check_package(conn, project_id, package, attempt, driver)
+            encoded = self._check_package(conn, project_id, package, attempt)
             request_hash = digest({"attempt_id": attempt_id, "claim_id": claim_id, "to": to_driver_id,
                                    "fence": expected_owner_fence, "package": package})
             old = conn.execute("SELECT * FROM state_handoffs WHERE project_id=? AND from_driver_id=? AND request_key=?",
@@ -267,25 +220,22 @@ class StateHandoffs:
                 "handoff_id": row["handoff_id"], "subject_kind": row["subject_kind"], "attempt_id": attempt_id,
                 "claim_id": claim_id, "from_driver_id": driver, "to_driver_id": to_driver_id,
                 "lease_expires_at": row["lease_expires_at"], "actor": self.actor})
-            targets = [to_driver_id] if to_driver_id else [m for m in _members(self.store, project_id) if m != driver]
-            notified = []
-            for target in targets:
-                notified.append(driver_notices.notify(
-                    conn, self.store, target_driver_id=target, kind="handoff_offer", project_id=project_id,
-                    sender_driver_id=driver,
-                    subject=f"{driver} offers you {row['subject_kind']} {attempt_id or claim_id} on {node_key}",
-                    body=(f"accept_handoff(project_id={project_id}, handoff_id={row['handoff_id']}, "
-                          f"expected_owner_fence={expected_owner_fence}) before {row['lease_expires_at']}; "
-                          f"get_handoff shows the package. {package.get('next_step', '')[:500]}"),
-                    refs={"handoff_id": row["handoff_id"], "attempt_id": attempt_id, "claim_id": claim_id,
-                          "node_key": node_key}, actor=self.actor))
+            notified = driver_notices.notify(
+                conn, target_driver_id=to_driver_id, kind="handoff_offer", project_id=project_id,
+                sender_driver_id=driver,
+                subject=f"{driver} offers you {row['subject_kind']} {attempt_id or claim_id} on {node_key}",
+                body=(f"accept_handoff(project_id={project_id}, handoff_id={row['handoff_id']}, "
+                      f"expected_owner_fence={expected_owner_fence}) before {row['lease_expires_at']}; "
+                      f"get_handoff shows the package. {package.get('next_step', '')[:500]}"),
+                refs={"handoff_id": row["handoff_id"], "attempt_id": attempt_id, "claim_id": claim_id,
+                      "node_key": node_key})
             return {**_view(row, current), "idempotent": False, "notified": notified}
 
     # -- accept ------------------------------------------------------------
     def _eligible(self, handoff, driver):
         if handoff["from_driver_id"] == driver:
             raise ClaimError("not_handoff_target", "the offerer does not accept or decline its own offer; withdraw it")
-        if handoff["to_driver_id"] is not None and handoff["to_driver_id"] != driver:
+        if handoff["to_driver_id"] != driver:
             raise ClaimError("not_handoff_target", f"this handoff was offered to driver {handoff['to_driver_id']}")
 
     def _open(self, conn, handoff, current):
@@ -304,22 +254,17 @@ class StateHandoffs:
             handoff = self._handoff(conn, project_id, handoff_id)
             self._eligible(handoff, driver)
             self._open(conn, handoff, current)
-            # §6.2: a member accepts (a pool offer is "any MEMBER"); judged here,
-            # inside the ownership transaction, so a removal after the offer
-            # counts. An admin passes as break glass.
-            from core.state_enforcement import refuse_checkpoint_in_flight, require_member
-            break_glass = require_member(self.store, project_id, driver, self.is_admin, "accepting a handoff")
             package = json.loads(handoff["package_json"])
+            warning = None
             if handoff["subject_kind"] == "attempt":
                 attempt = self.recovery._attempt(conn, handoff["attempt_id"])
-                refuse_checkpoint_in_flight(conn, attempt["attempt_id"])
                 if attempt["status"] not in ACTIVE:
                     raise ClaimError("attempt_not_active", f"attempt is {attempt['status']}")
                 if attempt["owner_driver_id"] != handoff["from_driver_id"] or attempt["owner_fence"] != expected_owner_fence \
                         or attempt["owner_fence"] != handoff["expected_owner_fence"]:
                     raise ClaimError("stale_fence", f"attempt owner fence is {attempt['owner_fence']} (owner "
                                      f"{attempt['owner_driver_id']}); the offer no longer matches", owner_fence=attempt["owner_fence"])
-                self._check_observability(conn, project_id, package, attempt, driver)
+                warning = self._quiescence_warning(conn, package, attempt)
                 fence = attempt["owner_fence"] + 1
                 expires = add_seconds(current, 7200)
                 conn.execute("UPDATE state_attempts SET owner_driver_id=?,owner_fence=?,lease_expires_at=?,"
@@ -327,15 +272,12 @@ class StateHandoffs:
                              (driver, fence, expires, current, current, attempt["attempt_id"]))
                 _, claim = self.recovery._release_bound_claims(conn, attempt, current,
                                                               f"handoff {handoff_id} accepted", new_holder=driver)
-                subagents = self.recovery._transfer_subagents(conn, attempt, current, expires)
                 self.store._event(conn, project_id, attempt["node_key"], "attempt_ownership_transferred", {
                     "attempt_id": attempt["attempt_id"], "mode": "handoff", "handoff_id": handoff_id,
                     "from_driver_id": handoff["from_driver_id"], "to_driver_id": driver,
                     "previous_fence": attempt["owner_fence"], "fence": fence, "lease_expires_at": expires,
-                    "subagents": [s["subagent_id"] for s in subagents], "actor": self.actor,
-                    "break_glass": break_glass})
-                moved = {"attempt": _public(self.recovery._attempt(conn, attempt["attempt_id"])), "claim": claim,
-                         "subagents": subagents}
+                    "quiescence_warning": warning, "actor": self.actor})
+                moved = {"attempt": _public(self.recovery._attempt(conn, attempt["attempt_id"])), "claim": claim}
             else:
                 claim = conn.execute("SELECT * FROM state_node_claims WHERE claim_id=?", (handoff["claim_id"],)).fetchone()
                 claim = dict(claim)
@@ -349,8 +291,7 @@ class StateHandoffs:
                 self.recovery.claims._history(conn, claim, "transferred", f"handoff {handoff_id} accepted")
                 self.store._event(conn, project_id, claim["node_key"], "claim_transferred", {
                     "claim_id": claim["claim_id"], "driver_id": claim["driver_id"], "to_driver_id": driver,
-                    "purpose": claim["purpose"], "fence": claim["fence"], "handoff_id": handoff_id, "actor": self.actor,
-                    "break_glass": break_glass})
+                    "purpose": claim["purpose"], "fence": claim["fence"], "handoff_id": handoff_id, "actor": self.actor})
                 pseudo = {"attempt_id": claim["attempt_id"], "project_id": project_id, "node_key": claim["node_key"],
                           "node_revision": claim["node_revision"]}
                 new_claim = self.recovery.new_claim_for(conn, pseudo, driver, current, f"handoff {handoff_id} accepted",
@@ -359,38 +300,31 @@ class StateHandoffs:
                 moved = {"claim": new_claim}
             conn.execute("UPDATE state_handoffs SET status='accepted',decided_by=?,decision_reason='accepted',"
                          "updated_at=? WHERE handoff_id=?", (driver, current, handoff_id))
-            driver_notices.resolve(conn, project_id=project_id, kind="handoff_offer", ref_key="handoff_id",
-                                   ref_value=handoff_id, reason="accepted")
             notice = driver_notices.notify(
-                conn, self.store, target_driver_id=handoff["from_driver_id"], kind="handoff_reply",
+                conn, target_driver_id=handoff["from_driver_id"], kind="handoff_reply",
                 project_id=project_id, sender_driver_id=driver,
                 subject=f"{driver} accepted handoff {handoff_id} ({handoff['subject_kind']} on {handoff['node_key']})",
                 body=f"Ownership moved to {driver}; your fence is stale. Stop renewing and stop writing that subject.",
                 refs={"handoff_id": handoff_id, "attempt_id": handoff["attempt_id"], "claim_id": handoff["claim_id"],
-                      "node_key": handoff["node_key"], "decision": "accepted"}, actor=self.actor)
+                      "node_key": handoff["node_key"]})
             view = _view(self._handoff(conn, project_id, handoff_id), current)
-        return {**view, **moved, "notified": notice, "break_glass": break_glass}
+        return {**view, **moved, "notified": notice, "quiescence_warning": warning}
 
-    def _check_observability(self, conn, project_id, package, attempt, driver):
-        """§6.3: non-quiescent workers may only be handed to a driver that can observe them."""
+    @staticmethod
+    def _quiescence_warning(conn, package, attempt):
+        """§6.3, warn and record only: workers the package does not declare
+        quiescent may still be running. Nothing is refused; the receiver is
+        told which workers were registered on the attempt."""
         workers = package.get("workers") or {}
         if workers.get("quiescent") is True:
-            return
-        hosts = set()
-        if isinstance(workers.get("host"), str):
-            hosts.add(workers["host"])
-        if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='driver_subagents'").fetchone():
-            for row in conn.execute("SELECT host FROM driver_subagents WHERE attempt_id=? AND status IN ('active','adopted')",
-                                    (attempt["attempt_id"],)):
-                hosts.add(row["host"])
-        observable = _observable_hosts(self.store, driver)
-        unseen = sorted(hosts - (observable or set()))
-        if not hosts or unseen:
-            raise ClaimError("receiver_cannot_observe_workers",
-                             "the package says the workers are not quiescent and you have not declared that you can "
-                             f"observe {unseen or 'them (no host is named)'}: register capabilities.observable_hosts, "
-                             "or wait until the offerer reports them settled", hosts=sorted(hosts),
-                             observable_hosts=sorted(observable or []))
+            return None
+        registered = [r[0] for r in conn.execute(
+            "SELECT subagent_id FROM driver_subagents WHERE attempt_id=? ORDER BY subagent_id",
+            (attempt["attempt_id"],))]
+        return {"workers_quiescent": workers.get("quiescent"), "detail": workers.get("detail"),
+                "registered_subagents": registered,
+                "warning": "the offerer did not declare its workers quiescent: they are fenced out of State "
+                           "(fence+1) but may still write their checkouts - check before you write there"}
 
     # -- decline / withdraw ------------------------------------------------
     def decline_handoff(self, project_id, handoff_id, reason):
@@ -401,22 +335,16 @@ class StateHandoffs:
             handoff = self._handoff(conn, project_id, handoff_id)
             self._eligible(handoff, driver)
             self._open(conn, handoff, current)
-            closes = handoff["to_driver_id"] is not None
-            if closes:
-                conn.execute("UPDATE state_handoffs SET status='declined',decided_by=?,decision_reason=?,updated_at=? "
-                             "WHERE handoff_id=?", (driver, reason, current, handoff_id))
-                driver_notices.resolve(conn, project_id=project_id, kind="handoff_offer", ref_key="handoff_id",
-                                       ref_value=handoff_id, reason="declined")
+            conn.execute("UPDATE state_handoffs SET status='declined',decided_by=?,decision_reason=?,updated_at=? "
+                         "WHERE handoff_id=?", (driver, reason, current, handoff_id))
             self.store._event(conn, project_id, handoff["node_key"], "handoff_declined", {
-                "handoff_id": handoff_id, "by_driver_id": driver, "reason": reason, "closes_offer": closes,
-                "actor": self.actor})
+                "handoff_id": handoff_id, "by_driver_id": driver, "reason": reason, "actor": self.actor})
             notice = driver_notices.notify(
-                conn, self.store, target_driver_id=handoff["from_driver_id"], kind="handoff_reply",
+                conn, target_driver_id=handoff["from_driver_id"], kind="handoff_reply",
                 project_id=project_id, sender_driver_id=driver,
-                subject=f"{driver} declined handoff {handoff_id}" + ("" if closes else " (offer stays open to others)"),
-                body=reason, refs={"handoff_id": handoff_id, "node_key": handoff["node_key"], "decision": "declined",
-                                   "attempt_id": handoff["attempt_id"], "claim_id": handoff["claim_id"]},
-                actor=self.actor)
+                subject=f"{driver} declined handoff {handoff_id}", body=reason,
+                refs={"handoff_id": handoff_id, "node_key": handoff["node_key"],
+                      "attempt_id": handoff["attempt_id"], "claim_id": handoff["claim_id"]})
             view = _view(self._handoff(conn, project_id, handoff_id), current)
         return {**view, "notified": notice}
 
@@ -435,8 +363,6 @@ class StateHandoffs:
             self._open(conn, handoff, current)
             conn.execute("UPDATE state_handoffs SET status='withdrawn',decided_by=?,decision_reason=?,updated_at=? "
                          "WHERE handoff_id=?", (driver, reason, current, handoff_id))
-            driver_notices.resolve(conn, project_id=project_id, kind="handoff_offer", ref_key="handoff_id",
-                                   ref_value=handoff_id, reason="withdrawn")
             self.store._event(conn, project_id, handoff["node_key"], "handoff_withdrawn", {
                 "handoff_id": handoff_id, "by_driver_id": driver, "reason": reason, "actor": self.actor,
                 "break_glass": handoff["from_driver_id"] != driver})

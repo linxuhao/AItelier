@@ -290,15 +290,8 @@ class StatePortfolio:
                 entry["claims"] = claims.get(n["node_key"], [])
                 nodes.append(entry)
             seq = conn.execute("SELECT COALESCE(MAX(seq),0) FROM state_events WHERE project_id=?", (project_id,)).fetchone()[0]
-            # P3 §4.6: subagents taken over but not yet confirmed stopped - the
-            # standing "two writers may exist" warning. The registry is private;
-            # an untrusted connection sees only (project_id, status) of opened
-            # projects (core.state_privacy.PROJECTIONS), enough for this count.
-            from core.state_subagents import orphan_count
-            orphans = orphan_count(conn, project_id)
             return {"project": view["project"], "source": self._source(conn, view["project"]),
                     "policy": project_policy(conn, project_id), "nodes": nodes,
-                    "orphaned_subagents": orphans,
                     "counts": dict(Counter(n["status"] for n in nodes)),
                     "readiness_counts": dict(Counter(n["readiness"] for n in nodes)),
                     "ready_action_counts": ready_action_counts(nodes),

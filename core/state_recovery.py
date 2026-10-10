@@ -13,15 +13,17 @@ member driver may either
   ``unknown`` says so honestly, and the node's NEXT attempt must then declare a
   base_sha and a different workspace (one writer per checkout);
 * ``take_over_attempt`` - become the owner (and controller) of the still-active
-  attempt, inheriting its registered subagents (D8), each of which the taker
-  then classifies with ``adopt_subagent``.
+  attempt.
 
 Both raise the owner fence, so every later write presenting the old fence is
 ``stale_fence``; a late observation on an abandoned attempt is recorded as
-``late_after_abandon`` / ``superseded`` (core.state_external). Both notify the
-previous owner through core.driver_notices. Neither waits beyond the grace
-(Q12). An admin may act before the grace or on a legacy (unleased) attempt; the
-write is then ``break_glass``. A legacy attempt otherwise needs an explicit
+``late_after_abandon`` / ``superseded`` (core.state_external). That fence is
+also all that stops the old owner's workers: they are not inherited, adopted
+or tracked (the record-only subagent registry keeps who started them); the
+taker registers its own. Both notify the previous owner in its P2 driver inbox
+(core.driver_notices). Neither waits beyond the grace (Q12). An admin may act
+before the grace or on a legacy (unleased) attempt; the event then carries
+``break_glass``. A legacy attempt otherwise needs an explicit
 ``override_reason`` (design §9.2 step 4).
 """
 from __future__ import annotations
@@ -59,12 +61,10 @@ class StateRecovery:
         if attempt["status"] not in ACTIVE:
             raise ClaimError("attempt_not_active", f"attempt is {attempt['status']}; nothing to reclaim")
         # §4.4: "any project MEMBER". Judged inside the ownership transaction; an
-        # admin passes as break glass. A checkpoint decision in flight holds the
-        # ownership still until the engine has been told.
-        from core.state_enforcement import refuse_checkpoint_in_flight, require_member
+        # admin passes as break glass.
+        from core.state_enforcement import require_member
         member_break_glass = require_member(self.store, attempt["project_id"], self.driver_id, self.is_admin,
                                             "reclaiming an attempt")
-        refuse_checkpoint_in_flight(conn, attempt["attempt_id"])
         if type(expected_owner_fence) is not int or expected_owner_fence != attempt["owner_fence"]:
             raise ClaimError("stale_fence", f"attempt owner fence is {attempt['owner_fence']}, "
                              f"not {expected_owner_fence}; reload", owner_fence=attempt["owner_fence"])
@@ -111,8 +111,8 @@ class StateRecovery:
             released.append(claim["claim_id"])
         if new_holder:
             # The replacement keeps the executor association, the purpose and
-            # the WORKSPACE: a running worker's checkout stays reserved across
-            # the transfer. When several claims were bound, the implement one is
+            # the WORKSPACE: it still declares the checkout a running worker
+            # writes. When several claims were bound, the implement one is
             # reported. If no bound claim is live any more (a sweep retired it,
             # or it was transferred before), the LATEST claim ever bound to the
             # attempt still says which checkout the executor writes.
@@ -123,13 +123,7 @@ class StateRecovery:
                                     (attempt["project_id"], attempt["attempt_id"])).fetchone()
                 if last is not None:
                     sources = [dict(last)]
-            from core.state_enforcement import refuse_checkout_in_use
             for claim in sources:
-                if claim["workspace"]:
-                    # Occupancy is re-validated in the ownership transaction: the
-                    # attempt's own records are not a second writer, anyone else is.
-                    refuse_checkout_in_use(conn, attempt["project_id"], claim["workspace"],
-                                           exclude_attempt=attempt["attempt_id"], same_executor=claim["subagent"])
                 moved = self.new_claim_for(conn, attempt, new_holder, current, reason, workspace=claim["workspace"],
                                            purpose=claim["purpose"], subagent=claim["subagent"])
                 if created is None or claim["purpose"] == "implement":
@@ -165,47 +159,6 @@ class StateRecovery:
             "lease_expires_at": claim["lease_expires_at"], "workspace": claim["workspace"], "subagent": subagent,
             "attempt_id": attempt.get("attempt_id"), "transfer": True, "actor": self.actor})
         return _claim_view(claim, current)
-
-    def transfer_subagent_claims(self, conn, project_id, subagent_id, new_holder, current, reason):
-        """Every live claim held FOR a subagent (any node) follows the subagent to
-        its new owner: the old rows become ``transferred`` and the new owner gets
-        live replacements with the same purpose, workspace and subagent."""
-        moved = []
-        for row in conn.execute("SELECT * FROM state_node_claims WHERE project_id=? AND subagent=? AND status='live'",
-                                (project_id, subagent_id)).fetchall():
-            claim = dict(row)
-            if claim["driver_id"] == new_holder:
-                continue
-            conn.execute("UPDATE state_node_claims SET status='transferred',updated_at=? WHERE claim_id=?",
-                         (current, claim["claim_id"]))
-            claim.update(status="transferred", updated_at=current)
-            self.claims._history(conn, claim, "transferred", reason)
-            self.store._event(conn, project_id, claim["node_key"], "claim_transferred", {
-                "claim_id": claim["claim_id"], "driver_id": claim["driver_id"], "purpose": claim["purpose"],
-                "fence": claim["fence"], "reason": reason, "to_driver_id": new_holder, "subagent": subagent_id,
-                "attempt_id": claim["attempt_id"], "actor": self.actor})
-            pseudo = {"project_id": project_id, "attempt_id": claim["attempt_id"], "node_key": claim["node_key"],
-                      "node_revision": claim["node_revision"]}
-            moved.append(self.new_claim_for(conn, pseudo, new_holder, current, reason, workspace=claim["workspace"],
-                                            purpose=claim["purpose"], subagent=subagent_id))
-        return moved
-
-    def revoke_subagent_claims(self, conn, project_id, subagent_id, current, reason):
-        """An orphaned subagent's claims are revoked: nobody vouches for them."""
-        revoked = []
-        for row in conn.execute("SELECT * FROM state_node_claims WHERE project_id=? AND subagent=? AND status='live'",
-                                (project_id, subagent_id)).fetchall():
-            claim = dict(row)
-            conn.execute("UPDATE state_node_claims SET status='revoked',updated_at=? WHERE claim_id=?",
-                         (current, claim["claim_id"]))
-            claim.update(status="revoked", updated_at=current)
-            self.claims._history(conn, claim, "revoked", reason)
-            self.store._event(conn, project_id, claim["node_key"], "claim_released", {
-                "claim_id": claim["claim_id"], "driver_id": claim["driver_id"], "purpose": claim["purpose"],
-                "fence": claim["fence"], "reason": reason, "revoked": True, "subagent": subagent_id,
-                "attempt_id": claim["attempt_id"], "actor": self.actor, "break_glass": False})
-            revoked.append(claim["claim_id"])
-        return revoked
 
     @staticmethod
     def _void_open_handoffs(conn, attempt_id, current, reason):
@@ -248,49 +201,27 @@ class StateRecovery:
             conn.execute("UPDATE state_external_owners SET status='abandoned',updated_at=?,settled_at=? "
                          "WHERE attempt_id=?", (current, current, attempt_id))
             released, _ = self._release_bound_claims(conn, attempt, current, f"attempt abandoned: {reason}")
-            subagents = self._settle_subagents(conn, attempt, current, abandon_kind)
             voided = self._void_open_handoffs(conn, attempt_id, current, "attempt abandoned")
             payload = {"attempt_id": attempt_id, "abandon_kind": abandon_kind, "reason": reason,
                        "previous_owner_driver_id": attempt["owner_driver_id"], "previous_fence": attempt["owner_fence"],
                        "fence": fence, "actor": self.actor, "driver_id": self.driver_id, "break_glass": break_glass,
                        "override_reason": override_reason, "report_sha256": report_sha256,
-                       "released_claims": released, "subagents": subagents, "voided_handoffs": voided}
+                       "released_claims": released, "voided_handoffs": voided}
             self.store._event(conn, attempt["project_id"], attempt["node_key"], "attempt_abandoned", payload)
             notice = None
             if attempt["owner_driver_id"] and attempt["owner_driver_id"] != self.driver_id:
                 notice = driver_notices.notify(
-                    conn, self.store, target_driver_id=attempt["owner_driver_id"],
-                    kind="break_glass" if break_glass else "takeover_notice", project_id=attempt["project_id"],
+                    conn, target_driver_id=attempt["owner_driver_id"], kind="takeover_notice",
+                    project_id=attempt["project_id"],
                     subject=f"your attempt {attempt_id} on {attempt['node_key']} was abandoned ({abandon_kind})",
                     body=(f"{self.actor} abandoned attempt {attempt_id} (node {attempt['node_key']}) after its lease "
                           f"lapsed: {reason}. Its fence is now {fence}; a late report from you is recorded as "
                           "late_after_abandon/superseded and can no longer make the node CANDIDATE. If you really "
                           "finished, register the same artifact under a NEW attempt."
                           + (" quiescence=unknown: do not write that checkout again." if abandon_kind == "unknown" else "")),
-                    refs={"attempt_id": attempt_id, "node_key": attempt["node_key"], "fence": fence,
-                          "abandon_kind": abandon_kind, "break_glass": break_glass}, actor=self.actor)
+                    refs={"attempt_id": attempt_id, "node_key": attempt["node_key"]})
             result = _public(self._attempt(conn, attempt_id))
-        return {**result, "break_glass": break_glass, "released_claims": released, "subagents": subagents,
-                "notified": notice}
-
-    def _settle_subagents(self, conn, attempt, current, abandon_kind):
-        """confirmed_stopped covers the attempt's subagents too (they are settled);
-        unknown leaves them as they are - nobody attested anything about them."""
-        if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='driver_subagents'").fetchone():
-            return []
-        rows = conn.execute("SELECT subagent_id,status FROM driver_subagents WHERE attempt_id=? "
-                            "AND status IN ('active','adopted') ORDER BY subagent_id", (attempt["attempt_id"],)).fetchall()
-        out = []
-        for row in rows:
-            status = "settled" if abandon_kind == "confirmed_stopped" else row["status"]
-            if status != row["status"]:
-                conn.execute("UPDATE driver_subagents SET status=?,updated_at=? WHERE subagent_id=?",
-                             (status, current, row["subagent_id"]))
-                from core.state_subagents import close_worker_claims
-                close_worker_claims(conn, self.store, attempt["project_id"], row["subagent_id"], self.actor,
-                                    f"worker settled with abandoned attempt {attempt['attempt_id']}")
-            out.append({"subagent_id": row["subagent_id"], "status": status})
-        return out
+        return {**result, "break_glass": break_glass, "released_claims": released, "notified": notice}
 
     # -- take over ---------------------------------------------------------
     def take_over_attempt(self, attempt_id, expected_owner_fence, reason, override_reason=None):
@@ -312,50 +243,21 @@ class StateRecovery:
                          (self.driver_id, fence, expires, current, current, attempt_id))
             _, claim = self._release_bound_claims(conn, attempt, current, f"attempt taken over: {reason}",
                                                  new_holder=self.driver_id)
-            subagents = self._transfer_subagents(conn, attempt, current, expires)
             voided = self._void_open_handoffs(conn, attempt_id, current, "attempt taken over")
             payload = {"attempt_id": attempt_id, "mode": "takeover", "from_driver_id": attempt["owner_driver_id"],
                        "to_driver_id": self.driver_id, "previous_fence": attempt["owner_fence"], "fence": fence,
                        "lease_expires_at": expires, "reason": reason, "override_reason": override_reason,
-                       "break_glass": break_glass, "actor": self.actor,
-                       "subagents": [s["subagent_id"] for s in subagents], "voided_handoffs": voided}
+                       "break_glass": break_glass, "actor": self.actor, "voided_handoffs": voided}
             self.store._event(conn, attempt["project_id"], attempt["node_key"], "attempt_ownership_transferred", payload)
             notice = None
             if attempt["owner_driver_id"]:
                 notice = driver_notices.notify(
-                    conn, self.store, target_driver_id=attempt["owner_driver_id"],
-                    kind="break_glass" if break_glass else "takeover_notice", project_id=attempt["project_id"],
+                    conn, target_driver_id=attempt["owner_driver_id"], kind="takeover_notice",
+                    project_id=attempt["project_id"],
                     subject=f"your attempt {attempt_id} on {attempt['node_key']} was taken over by {self.driver_id}",
                     body=(f"{self.actor} took over attempt {attempt_id} (node {attempt['node_key']}) after its lease "
                           f"lapsed: {reason}. Fence is now {fence}; your observe/report calls with the old fence are "
-                          f"refused (stale_fence). {len(subagents)} registered subagent(s) moved to the new owner; "
-                          "you will be told about any it cannot observe."),
-                    refs={"attempt_id": attempt_id, "node_key": attempt["node_key"], "fence": fence,
-                          "to_driver_id": self.driver_id, "break_glass": break_glass}, actor=self.actor)
+                          "refused (stale_fence). Stop your workers on it: they are fenced out, not inherited."),
+                    refs={"attempt_id": attempt_id, "node_key": attempt["node_key"]})
             result = _public(self._attempt(conn, attempt_id))
-        return {**result, "break_glass": break_glass, "claim": claim, "subagents": subagents, "notified": notice,
-                "next": "adopt_subagent each inherited subagent (controllable | observable_only | unobservable)"}
-
-    def _transfer_subagents(self, conn, attempt, current, expires):
-        """D8: the attempt's registered, still-open subagents move to the taker
-        with a raised fence; classification is the taker's next step."""
-        if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='driver_subagents'").fetchone():
-            return []
-        rows = conn.execute("SELECT * FROM driver_subagents WHERE attempt_id=? AND status IN ('active','adopted') "
-                            "ORDER BY subagent_id", (attempt["attempt_id"],)).fetchall()
-        out = []
-        for row in rows:
-            fence = row["fence"] + 1
-            conn.execute("UPDATE driver_subagents SET owner_driver_id=?,fence=?,status='active',observability=NULL,"
-                         "lease_expires_at=?,last_heartbeat_at=?,updated_at=? WHERE subagent_id=?",
-                         (self.driver_id, fence, expires, current, current, row["subagent_id"]))
-            claims = self.transfer_subagent_claims(conn, attempt["project_id"], row["subagent_id"], self.driver_id,
-                                                   current, f"subagent {row['subagent_id']} moved with its attempt")
-            self.store._event(conn, attempt["project_id"], attempt["node_key"], "subagent_transferred", {
-                "subagent_id": row["subagent_id"], "attempt_id": attempt["attempt_id"],
-                "from_driver_id": row["owner_driver_id"], "to_driver_id": self.driver_id, "fence": fence,
-                "claims": [c["claim_id"] for c in claims], "actor": self.actor})
-            out.append({"subagent_id": row["subagent_id"], "fence": fence, "host": row["host"],
-                        "runtime": row["runtime"], "workspace": row["workspace"],
-                        "checkpoint_ref": row["checkpoint_ref"], "status": "active", "needs": "adopt_subagent"})
-        return out
+        return {**result, "break_glass": break_glass, "claim": claim, "notified": notice}

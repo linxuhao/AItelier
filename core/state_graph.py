@@ -330,14 +330,10 @@ def initialize_state_schema(db) -> None:
     initialize_messaging(db)
     from core.state_claims import initialize as initialize_claims
     initialize_claims(db)
-    from core.driver_notices import initialize as initialize_notices
-    initialize_notices(db)
     from core.state_subagents import initialize as initialize_subagents
     initialize_subagents(db)
     from core.state_handoffs import initialize as initialize_handoffs
     initialize_handoffs(db)
-    from core.state_enforcement import initialize as initialize_enforcement
-    initialize_enforcement(db)
 
 
 class StateGraphStore:

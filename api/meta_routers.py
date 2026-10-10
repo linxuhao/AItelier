@@ -791,18 +791,12 @@ def get_pending_checkpoint(
 
 
 def state_checkpoint_controller(http_request, run_id, db):
-    """Multi-driver P3 (design §7.3 rule 9, Q14): a run bound to a State attempt in
-    a project that enforces claims is answered only by the attempt's owner
-    driver; an admin passes as break_glass and the owner is notified. Any other
-    run, project or caller is unconstrained. One function for the REST doors
-    (here, and run_routers delegating here) and the MCP answer_checkpoint tool.
-
-    The returned dict carries ``decision_id`` while the decision is OPEN: from
-    here until ``finish_state_checkpoint_decision`` every ownership transfer of
-    the attempt (takeover, handoff, abandon) is refused, so the engine is told
-    by the driver that was the owner when the check ran. Call finish in a
-    ``finally`` around the engine call; a crashed decider expires after
-    CHECKPOINT_DECISION_SECONDS."""
+    """Multi-driver P3 (design §7.3 rule 9): a run bound to a State attempt in a
+    project that enforces claims is answered - approved, rejected, or rescued
+    from failure - only by the attempt's owner driver; an admin passes with
+    ``break_glass`` recorded. Any other run, project or caller is unconstrained.
+    ONE owner check at the entry of each route (here, run_routers delegating
+    here, and the MCP answer_checkpoint tool); a refusal is 409."""
     from api.state_graph_routers import authenticated_actor, authenticated_driver_id, authenticated_is_admin
     from core.state_claims import ClaimError
     from core.state_enforcement import checkpoint_controller
@@ -811,25 +805,6 @@ def state_checkpoint_controller(http_request, run_id, db):
                                      authenticated_is_admin(http_request), authenticated_actor(http_request))
     except ClaimError as exc:
         raise HTTPException(409, str(exc)) from exc
-
-
-def finish_state_checkpoint_decision(controller, db) -> None:
-    from core.state_enforcement import finish_checkpoint_decision
-    if controller and controller.get("decision_id"):
-        finish_checkpoint_decision(db, controller["decision_id"])
-
-
-def assert_state_checkpoint_decision_open(controller, db) -> None:
-    """Called immediately before the engine is told: a decision that expired
-    (a handler delayed past CHECKPOINT_DECISION_SECONDS, during which ownership
-    may have moved) must not mutate the run. 409 names it."""
-    from core.state_claims import ClaimError
-    from core.state_enforcement import assert_decision_open
-    if controller and controller.get("decision_id"):
-        try:
-            assert_decision_open(db, controller["decision_id"])
-        except ClaimError as exc:
-            raise HTTPException(409, str(exc)) from exc
 
 
 @router.post("/{project_id}/checkpoint/approve")
@@ -870,14 +845,7 @@ def approve_checkpoint(
     _step_id, _label, run_id, _graph, _inst = _get_checkpoint_info(project_id)
     if not run_id:
         raise HTTPException(400, "Project is not waiting for approval")
-    controller = state_checkpoint_controller(http_request, run_id, db)
-    try:
-        return _approve_checkpoint_body(project_id, request, run_id, _step_id, _label, db, controller)
-    finally:
-        finish_state_checkpoint_decision(controller, db)
-
-
-def _approve_checkpoint_body(project_id, request, run_id, _step_id, _label, db, controller=None):
+    state_checkpoint_controller(http_request, run_id, db)
 
     # AT-7 idempotency guard: only act if the requested checkpoint is the one the
     # run is actually paused at. A stale modal, double-click, or client retry that
@@ -905,7 +873,6 @@ def _approve_checkpoint_body(project_id, request, run_id, _step_id, _label, db, 
     # For failed runs (A3 rescue path), fall back to reactivate + resume.
     next_node = ""
     if run and run["status"] == "paused":
-        assert_state_checkpoint_decision_open(controller, db)
         next_node = sf.approve_checkpoint(run_id)
         # Sync the project status immediately so the scheduler picks it up.
         # Without this, the aitelier DB still shows "checkpoint:..." and the
@@ -914,11 +881,6 @@ def _approve_checkpoint_body(project_id, request, run_id, _step_id, _label, db, 
         from core.scheduler import _sync_project_status_to_db
         _sync_project_status_to_db(project_id)
     elif run and run["status"] == "failed":
-        # The failed-run rescue path mutates the engine twice; the State
-        # decision is checked before each mutation (the budget restore between
-        # them can be slow, and a delayed handler must not resume a run whose
-        # attempt moved to another owner meanwhile).
-        assert_state_checkpoint_decision_open(controller, db)
         sf.reactivate_run(run_id)
         from core.run_driver import restore_retry_budget
         # Restoring the budget is best-effort; RESUMING is not. Unguarded, a
@@ -935,7 +897,6 @@ def _approve_checkpoint_body(project_id, request, run_id, _step_id, _label, db, 
             logger.warning("restore_retry_budget failed for run %s; resuming "
                            "anyway — the blocked step may re-fail immediately",
                            run_id, exc_info=True)
-        assert_state_checkpoint_decision_open(controller, db)
         sf.resume_run(run_id)
 
     # Clear the drafting gate: the user approved the brief, so the scheduler
@@ -1001,14 +962,7 @@ def reject_checkpoint(
     step_id, _label, run_id, _graph, _inst = _get_checkpoint_info(project_id)
     if not run_id or not step_id:
         raise HTTPException(400, "Project is not waiting for approval")
-    controller = state_checkpoint_controller(http_request, run_id, db)
-    try:
-        return _reject_checkpoint_body(project_id, request, run_id, step_id, _label, _graph, db, controller)
-    finally:
-        finish_state_checkpoint_decision(controller, db)
-
-
-def _reject_checkpoint_body(project_id, request, run_id, step_id, _label, _graph, db=None, controller=None):
+    state_checkpoint_controller(http_request, run_id, db)
 
     # AT-7 idempotency guard (see approve_checkpoint): ignore a reject aimed at a
     # checkpoint the run is no longer paused at.
@@ -1037,7 +991,6 @@ def _reject_checkpoint_body(project_id, request, run_id, step_id, _label, _graph
     from core.run_driver import checkpoint_reject_target
     redirect_to = checkpoint_reject_target(sf, _graph, step_id, run_id)
     try:
-        assert_state_checkpoint_decision_open(controller, db)
         sf.reject_checkpoint(run_id, step_id, request.feedback,
                              redirect_to=redirect_to)
     except Exception as e:

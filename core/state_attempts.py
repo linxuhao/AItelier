@@ -358,20 +358,8 @@ class StateAttempts:
             if claim is not None:
                 payload["claim_id"] = claim["claim_id"]
             if break_glass:
+                # Q13: an admin dispatched without the claim; the audit flag is the record.
                 payload["break_glass"] = True
-                # Q13: the admin wrote around the claim rule; whoever holds the
-                # node's live implement claim learns that an attempt started.
-                holder = conn.execute("SELECT claim_id,driver_id FROM state_node_claims WHERE project_id=? AND node_key=? "
-                                      "AND status='live' AND purpose='implement'", (project_id, node_key)).fetchone()
-                if holder is not None and holder["driver_id"] != owner_driver_id:
-                    from core import driver_notices
-                    driver_notices.notify(
-                        conn, self.store, target_driver_id=holder["driver_id"], kind="break_glass",
-                        project_id=project_id, subject=f"admin started attempt {aid} on {node_key} over your claim",
-                        body=f"An admin ({owner_driver_id or 'owner'}) started attempt {aid} on node {node_key} without "
-                             f"holding its implement claim ({holder['claim_id']} is yours). Break-glass write.",
-                        refs={"attempt_id": aid, "node_key": node_key, "claim_id": holder["claim_id"],
-                              "break_glass": True}, actor=f"driver:{owner_driver_id}" if owner_driver_id else "admin")
             self.store._event(conn, project_id, node_key,
                               "external_attempt_registered" if external else "attempt_reserved", payload)
             return _public(self._attempt(conn, aid))
@@ -384,7 +372,8 @@ class StateAttempts:
                             "ORDER BY seq DESC LIMIT 1", (project_id, node_key)).fetchone()
         if last is None or last["abandon_kind"] != "unknown" or is_admin:
             return
-        from core.state_enforcement import checkout_of
+        def checkout_of(workspace):          # host:path#branch -> host:path, the one writer's tree
+            return (workspace or "").split("#", 1)[0]
         old = conn.execute("SELECT workspace FROM state_node_claims WHERE attempt_id=? AND workspace!='' "
                            "ORDER BY created_at DESC LIMIT 1", (last["attempt_id"],)).fetchone()
         old_workspace = old["workspace"] if old else None
@@ -495,7 +484,7 @@ class StateAttempts:
         where an enforced project checks that the launcher owns the attempt and
         holds the node's live implement claim (core.state_enforcement.
         launch_authorization). An admin launches as break_glass: the event says
-        so and the owner is notified.
+        so.
         """
         with self.store.transaction(write=True) as conn:
             attempt = self._attempt(conn, attempt_id)
@@ -523,17 +512,8 @@ class StateAttempts:
                              (attempt_id, now(), rebind["claim_id"]))
                 payload["claim_id"] = rebind["claim_id"]
             if break_glass:
-                payload.update(break_glass=True, launched_by=driver_id, owner_driver_id=attempt["owner_driver_id"])
-                if attempt["owner_driver_id"] and attempt["owner_driver_id"] != driver_id:
-                    from core import driver_notices
-                    driver_notices.notify(
-                        conn, self.store, target_driver_id=attempt["owner_driver_id"], kind="break_glass",
-                        project_id=attempt["project_id"],
-                        subject=f"admin launched your attempt {attempt_id} on {attempt['node_key']}",
-                        body=f"{actor or driver_id or 'admin'} launched attempt {attempt_id} that you own, without "
-                             "your claim. Break-glass write.",
-                        refs={"attempt_id": attempt_id, "node_key": attempt["node_key"], "break_glass": True},
-                        actor=actor or "admin")
+                payload.update(break_glass=True, launched_by=driver_id, actor=actor,
+                               owner_driver_id=attempt["owner_driver_id"])
             self.store._event(conn, attempt["project_id"], attempt["node_key"], "attempt_launching", payload)
             return True
 
@@ -771,13 +751,8 @@ class StateAttempts:
     def record_evidence(self, attempt_id: str, evidence_id: str, criterion_id: str, verdict: str,
                         artifact: str, report_ref: str, report_sha256: str, reviewer: str,
                         detail: str = "", *, report_bytes: bytes | None = None,
-                        director_identity: str | None = None, authorize=None) -> dict:
-        """Append a scoped verifier attestation, never infer it from agent prose.
-
-        ``authorize(conn, attempt)`` runs INSIDE the write transaction, before
-        the row is inserted, so a verdict about who may attest (P3: the subagent
-        named by ``director_identity`` is still the caller's) is taken on the
-        rows that exist when the evidence commits."""
+                        director_identity: str | None = None) -> dict:
+        """Append a scoped verifier attestation, never infer it from agent prose."""
         director_identity = evidence_director_identity(director_identity)
         key(evidence_id, "evidence id")
         key(criterion_id, "criterion id")
@@ -798,8 +773,6 @@ class StateAttempts:
         payload_hash = digest(payload)
         with self.store.transaction(write=True) as conn:
             attempt = self._attempt(conn, attempt_id)
-            if authorize is not None:
-                authorize(conn, attempt)
             prior = conn.execute("SELECT * FROM state_evidence WHERE evidence_id=?", (evidence_id,)).fetchone()
             if prior:
                 if prior["payload_hash"] != payload_hash:

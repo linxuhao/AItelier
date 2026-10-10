@@ -81,34 +81,27 @@ class AddNodes(Project):
     nodes: list[dict] = Field(min_length=1, max_length=200)
 
 
-# `override_reason` (P3, design §7.3 rule 4): required in an enforced project
-# when the write affects a node another driver holds a live claim or active
-# attempt on; the holder is notified. Ignored elsewhere.
 class ReviseNode(Node):
     expected_revision: int
     reason: str
     goal: str | None = None
     acceptance: list[dict] | None = None
     dependencies: list[str] | None = None
-    override_reason: str | None = Field(default=None, max_length=2000)
 
 
 class SplitNode(Node):
     expected_revision: int
     children: list[dict]
     reason: str
-    override_reason: str | None = Field(default=None, max_length=2000)
 
 
 class SupersedeNode(Node):
     expected_revision: int
     reason: str
-    override_reason: str | None = Field(default=None, max_length=2000)
 
 
 class SetNodeFacet(Node):
     facet: str
-    override_reason: str | None = Field(default=None, max_length=2000)
 
 
 class SetNodePriority(Node):
@@ -247,8 +240,8 @@ class DriverDeliveryTransition(Request):
 class SetClaimEnforcement(Project):
     claim_enforcement: Literal["off", "on"] = Field(description=(
         "on: start_attempt/start_external_attempt need your live implement claim, reports need the owner "
-        "fence, structural writes over another driver's claim need override_reason, one writer per "
-        "workspace, checkpoints by the attempt owner. Needs multi_driver=on; default off."))
+        "fence, structural writes over work another driver holds are refused (not_owner), checkpoints are "
+        "answered by the attempt owner. The only enforcement switch; needs multi_driver=on; default off."))
     expected_revision: int
     reason: str = Field(min_length=1, max_length=4000)
 
@@ -277,43 +270,12 @@ class RegisterSubagent(Project):
     attempt_id: str
     label: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$",
                        description="subagent_id becomes '<your driver_id>/<label>'.")
-    host: str = Field(min_length=1, max_length=200)
-    runtime: Literal["local_process", "server_process", "skillflow_run", "remote_session"]
-    workspace: str = Field(min_length=3, max_length=500, description="host:path#branch; its own branch.")
-    context_ref: str = Field(min_length=1, max_length=2000, description=(
-        "Absolute local path of the frozen instructions handed to the subagent; retained by hash."))
-    context_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    control_handle: str = Field(default="", max_length=500, description=(
-        "Non-secret control hint: tmux session, thread id, run_id. Never a credential."))
-
-
-class UpdateSubagentCheckpoint(Project):
-    subagent_id: str = Field(min_length=3, max_length=320)
-    fence: int = Field(ge=1)
-    checkpoint_ref: str = Field(min_length=1, max_length=2000)
-    checkpoint_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-
-
-class AdoptSubagent(Project):
-    subagent_id: str = Field(min_length=3, max_length=320)
-    fence: int = Field(ge=1)
-    observability: Literal["controllable", "observable_only", "unobservable"]
-    reason: str = Field(min_length=1, max_length=4000)
-
-
-class ReportSubagentSettled(Project):
-    subagent_id: str = Field(min_length=3, max_length=320)
-    quiescent: bool
-    report_ref: str = Field(min_length=1, max_length=2000)
-    report_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    fence: int | None = Field(default=None, ge=1, description="Your (possibly old) fence; recorded, not checked.")
+    workspace: str = Field(min_length=1, max_length=500, description="The checkout it writes, host:path#branch.")
 
 
 class ListSubagents(Project):
     attempt_id: str | None = None
-    owner_driver_id: str | None = None
-    statuses: list[Literal["active", "settled", "adopted", "orphaned_unobservable", "terminated"]] | None = Field(
-        default=None, min_length=1)
+    parent_driver_id: str | None = None
     limit: int = Field(default=100, ge=1, le=500)
 
 
@@ -324,10 +286,10 @@ class OfferHandoff(Project):
         "Bounded (16 KiB) structured references: context_hash, observation_version, event_cursor, source, "
         "workspace, workers{quiescent,detail,host}, pending_checkpoint, reports[{ref,sha256}], open_issue_ids, "
         "note_entries, private_notes, subagents, next_step (<=2000 chars). Stored on the handoff, never in "
-        "the notebook."))
+        "the notebook. workers.quiescent other than true makes accept warn (quiescence_warning), not refuse."))
     attempt_id: str | None = None
     claim_id: str | None = None
-    to_driver_id: str | None = Field(default=None, description="Omit to offer to any project member.")
+    to_driver_id: str = Field(min_length=1, max_length=320, description="The one driver you offer it to.")
 
     @model_validator(mode="after")
     def one_subject(self):
@@ -355,13 +317,6 @@ class WithdrawHandoff(HandoffRef):
 class ListHandoffs(Project):
     statuses: list[Literal["offered", "accepted", "declined", "withdrawn", "expired"]] | None = Field(
         default=None, min_length=1)
-    limit: int = Field(default=100, ge=1, le=500)
-
-
-class ListDriverNotices(Project):
-    driver_id: str | None = Field(default=None, description="Admins may read another driver's notices.")
-    statuses: list[Literal["pending", "resolved"]] | None = Field(default=None, min_length=1)
-    kinds: list[str] | None = Field(default=None, min_length=1)
     limit: int = Field(default=100, ge=1, le=500)
 
 
@@ -870,7 +825,6 @@ READ_REQUESTS = {
     "project_visibility": ProjectVisibility,
     "list_claims": ListClaims, "get_claim": ClaimRef,
     "list_subagents": ListSubagents, "list_handoffs": ListHandoffs, "get_handoff": HandoffRef,
-    "list_driver_notices": ListDriverNotices,
 }
 # ── Read visibility: public or writer-only ─────────────────────────────────
 # ONE table, one writer. `READ_REQUESTS` answers "can this mutate?" — no. This
@@ -930,9 +884,8 @@ WRITER_ONLY_READS = frozenset({
     "project_visibility",
     # Multi-driver claims: who works on what, in which workspace (P1).
     "list_claims", "get_claim",
-    # P3: subagent registry (hosts, control handles, workspaces), handoff
-    # packages and driver-addressed notices. All private.
-    "list_subagents", "list_handoffs", "get_handoff", "list_driver_notices",
+    # P3: subagent registry (workspaces) and handoff packages. Both private.
+    "list_subagents", "list_handoffs", "get_handoff",
 })
 
 
@@ -977,8 +930,7 @@ WRITE_REQUESTS = {
     "claim_node": ClaimNode, "release_claim": ReleaseClaim, "heartbeat": Heartbeat,
     "set_multi_driver": SetMultiDriver, "set_claim_enforcement": SetClaimEnforcement,
     "abandon_external_attempt": AbandonExternalAttempt, "take_over_attempt": TakeOverAttempt,
-    "register_subagent": RegisterSubagent, "update_subagent_checkpoint": UpdateSubagentCheckpoint,
-    "adopt_subagent": AdoptSubagent, "report_subagent_settled": ReportSubagentSettled,
+    "register_subagent": RegisterSubagent,
     "offer_handoff": OfferHandoff, "accept_handoff": AcceptHandoff,
     "decline_handoff": DeclineHandoff, "withdraw_handoff": WithdrawHandoff,
 }
@@ -1138,37 +1090,16 @@ def _handlers(service) -> dict:
         "abandon_external_attempt": service.recovery.abandon_external_attempt,
         "take_over_attempt": service.recovery.take_over_attempt,
         "register_subagent": service.subagents.register_subagent,
-        "update_subagent_checkpoint": service.subagents.update_subagent_checkpoint,
-        "adopt_subagent": service.subagents.adopt_subagent,
-        "report_subagent_settled": service.subagents.report_subagent_settled,
         "list_subagents": service.subagents.list_subagents,
         "offer_handoff": service.handoffs.offer_handoff, "accept_handoff": service.handoffs.accept_handoff,
         "decline_handoff": service.handoffs.decline_handoff, "withdraw_handoff": service.handoffs.withdraw_handoff,
         "list_handoffs": service.handoffs.list_handoffs, "get_handoff": service.handoffs.get_handoff,
-        "list_driver_notices": service.notices.list_driver_notices,
     }
 
 
 def _director_schema(service):
     from core.director_messaging_protocol import SCHEMA_ID, V3_SCHEMA_ID
     return getattr(getattr(service, "director_messages", None), "reply_schema", SCHEMA_ID)
-
-
-def _owns_inherited_subagent(service, identity) -> bool:
-    """Whether ``identity`` (``<other>/<label>``) is a registered subagent the
-    service's driver CURRENTLY owns (open or settled) in any project."""
-    driver_id = getattr(service, "driver_id", None)
-    store = getattr(service, "store", None)
-    if not driver_id or not isinstance(identity, str) or "/" not in identity or store is None:
-        return False
-    try:
-        with store.transaction() as conn:
-            if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='driver_subagents'").fetchone():
-                return False
-            return conn.execute("SELECT 1 FROM driver_subagents WHERE subagent_id=? AND owner_driver_id=? "
-                                "AND status IN ('active','adopted','settled')", (identity, driver_id)).fetchone() is not None
-    except Exception:  # noqa: BLE001 - an untrusted store cannot read it; then it is not yours here
-        return False
 
 
 def execute(service, action: str, arguments: dict, *, allow_write: bool = False):
@@ -1247,14 +1178,10 @@ def execute(service, action: str, arguments: dict, *, allow_write: bool = False)
         try:
             args["director_identity"] = check_director_identity(driver_id, args.get("director_identity"))
         except DriverError as exc:
-            # P3: an INHERITED worker keeps its origin's prefix (codex/w1 taken
-            # over by grok). The registry's current ownership, not the prefix,
-            # says whose it is; the handler re-judges it inside its transaction.
-            if not _owns_inherited_subagent(service, args.get("director_identity")):
-                if director_action:
-                    from core.director_messaging_protocol import DirectorMessageError
-                    return DirectorMessageError("invalid_request", _director_schema(service)).as_dict()
-                raise StateGraphError(str(exc)) from exc
+            if director_action:
+                from core.director_messaging_protocol import DirectorMessageError
+                return DirectorMessageError("invalid_request", _director_schema(service)).as_dict()
+            raise StateGraphError(str(exc)) from exc
     if args.get("driver_id") and not service.project_read_trusted:
         raise ProjectPrivate()
     handlers = _handlers(service)

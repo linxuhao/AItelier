@@ -59,10 +59,13 @@ def project_policy(conn, project_id):
 
 
 def claim_enforcement(conn, project_id) -> str:
-    """off | on; off unless multi_driver is on too (the switch has no meaning alone)."""
+    """off | on: THE enforcement switch (P3; core.state_enforcement.enforced).
+    It requires multi_driver=on, so it reads off whenever multi_driver is off,
+    whatever its own row says."""
     if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='state_project_enforcement'").fetchone():
         return "off"
-    row = conn.execute("SELECT claim_enforcement FROM state_project_enforcement WHERE project_id=?",
+    row = conn.execute("SELECT e.claim_enforcement FROM state_project_enforcement e JOIN state_project_policy p "
+                       "ON p.project_id=e.project_id WHERE e.project_id=? AND p.multi_driver='on'",
                        (project_id,)).fetchone()
     return row[0] if row else "off"
 

@@ -1370,30 +1370,21 @@ def _register_run_tools(tool, mcp=None):
                         f"as a rejection, or drop `feedback` if you really do mean "
                         f"'approve as-is'.")}
         # Multi-driver P3 (design §7.3 rule 9): a run bound to a State attempt in
-        # an enforcing project is answered by the attempt's owner driver only.
+        # an enforcing project is answered by the attempt's owner driver only;
+        # one check here, the same function as the REST doors.
+        from api.dependencies import get_db_manager
+        from api.meta_routers import state_checkpoint_controller
+        from fastapi import HTTPException as _HTTPException
         try:
-            from api.dependencies import get_db_manager
-            from api.meta_routers import state_checkpoint_controller
-            from fastapi import HTTPException as _HTTPException
-            try:
-                _request = _request_from(mcp.get_context()) if mcp is not None else None
-            except Exception:
-                _request = None
+            _request = _request_from(mcp.get_context()) if mcp is not None else None
+        except Exception:
+            _request = None
+        try:
             controller = state_checkpoint_controller(_request, run_id, get_db_manager())
         except _HTTPException as exc:
             return {**echo, "error": exc.detail}
         if controller.get("break_glass"):
             echo = {**echo, "break_glass": True, "attempt_id": controller.get("attempt_id")}
-        try:
-            return _answer_checkpoint_body(sf, run, resolved, run_id, decision, feedback, echo, controller)
-        finally:
-            from api.meta_routers import finish_state_checkpoint_decision
-            finish_state_checkpoint_decision(controller, get_db_manager())
-
-    def _answer_checkpoint_body(sf, run, resolved, run_id, decision, feedback, echo, controller=None):
-        from api.dependencies import get_db_manager
-        from api.meta_routers import assert_state_checkpoint_decision_open
-        from fastapi import HTTPException as _HTTPException
         if run.get("status") != "paused":
             # A project id takes the NEWEST run, which is not always the one with
             # the checkpoint: a project can acquire a meta_conversation run AFTER
@@ -1412,10 +1403,6 @@ def _register_run_tools(tool, mcp=None):
                              f"there is no checkpoint to answer{extra}"}
         try:
             if decision == "approve":
-                try:
-                    assert_state_checkpoint_decision_open(controller, get_db_manager())
-                except _HTTPException as exc:
-                    return {**echo, "error": exc.detail}
                 sf.approve_checkpoint(run_id)
             else:
                 # `reject_checkpoint` needs the STEP the run is paused at, and
@@ -1434,15 +1421,10 @@ def _register_run_tools(tool, mcp=None):
                             "error": f"run '{run_id}' is paused but no checkpoint "
                                      f"step could be resolved for it"}
                 from core.run_driver import checkpoint_reject_target
-                # Resolve the TARGET first (it reads the engine and can take a
-                # while), then check the State decision immediately before the
-                # mutation it guards.
-                redirect_to = checkpoint_reject_target(sf, run.get("graph_name") or _graph, step_id, run_id)
-                try:
-                    assert_state_checkpoint_decision_open(controller, get_db_manager())
-                except _HTTPException as exc:
-                    return {**echo, "error": exc.detail}
-                sf.reject_checkpoint(run_id, step_id, feedback, redirect_to=redirect_to)
+                sf.reject_checkpoint(
+                    run_id, step_id, feedback,
+                    redirect_to=checkpoint_reject_target(
+                        sf, run.get("graph_name") or _graph, step_id, run_id))
         except Exception as e:
             # An exception is NOT proof the answer failed. skillflow can persist
             # the state change and then raise on the way out — live, 2026-08-29,

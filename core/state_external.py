@@ -39,15 +39,12 @@ class ExternalAttempts:
                 instruction, external=identity, base_sha=base_sha, preflight=preflight,
                 owner_driver_id=self.driver_id, claim_id=claim_id, fence=fence, is_admin=self.is_admin)
 
-    def _authorize_report(self, conn, a, fence) -> tuple[bool, bool]:
+    def _authorize_report(self, conn, a, fence) -> bool:
         """Who may append an observation, and with which fence (P3, §7.3 rule 2).
 
-        Returns ``(late, break_glass)``. ``late`` is a report on an ABANDONED
-        attempt: recorded (bytes are never dropped) but never current.
-        ``break_glass`` is an admin (owner e-mail, owner-cli) reporting on an
-        attempt it neither owns nor originally reported (Q13): admitted, every
-        integrity check still applies, the event says break_glass and the owner
-        is notified. Rules, in order:
+        Returns ``late``: a report on an ABANDONED attempt is recorded (bytes
+        are never dropped) but never current. An admin is an ordinary reporter
+        here: there is no break-glass reporting path. Rules, in order:
         * an attempt with no owner (legacy, or identity off): the recorded
           reporter continues it, exactly as before;
         * an abandoned attempt: its original reporter (or current owner) may
@@ -59,27 +56,17 @@ class ExternalAttempts:
         """
         continues = actor_continues(a['reporting_actor'], self.actor)
         owner = a['owner_driver_id']
-        # Q13 break-glass exists only where claims are ENFORCED. With the switch
-        # off (or multi_driver off) an admin is an ordinary reporter, exactly as
-        # in P1: the recorded reporter continues an attempt, nobody else.
-        admin = self.is_admin and enforced(conn, a['project_id'])
         if owner is None or self.driver_id is None:
             if not continues:
-                if admin:
-                    return a['status'] == 'abandoned', True
                 raise StateConflict('external observation belongs to a different authenticated reporter')
             if fence is not None and a['owner_fence'] and fence != a['owner_fence']:
                 raise ClaimError('stale_fence', f"attempt owner fence is {a['owner_fence']}, not {fence}")
-            return a['status'] == 'abandoned', False
+            return a['status'] == 'abandoned'
         if a['status'] == 'abandoned':
             if not continues and owner != self.driver_id:
-                if admin:
-                    return True, True
                 raise StateConflict('external observation belongs to a different authenticated reporter')
-            return True, False
+            return True
         if owner != self.driver_id:
-            if admin:
-                return False, True
             if continues:
                 raise ClaimError('stale_fence', f"attempt {a['attempt_id']} is now owned by driver {owner} "
                                  f"(fence {a['owner_fence']}); your fence is stale", owner_driver_id=owner)
@@ -91,18 +78,7 @@ class ExternalAttempts:
         elif fence != a['owner_fence']:
             raise ClaimError('stale_fence', f"attempt owner fence is {a['owner_fence']}, not {fence}; reload",
                              owner_fence=a['owner_fence'])
-        return False, False
-
-    def _break_glass_notice(self, conn, a, observation_id, status):
-        from core import driver_notices
-        return driver_notices.notify(
-            conn, self.store, target_driver_id=a['owner_driver_id'], kind='break_glass',
-            project_id=a['project_id'],
-            subject=f"admin reported {status} on your attempt {a['attempt_id']}",
-            body=f"{self.actor} appended observation {observation_id} ({status}) to attempt {a['attempt_id']} "
-                 f"(node {a['node_key']}) that you own or reported. Admin break-glass write.",
-            refs={'attempt_id': a['attempt_id'], 'node_key': a['node_key'], 'observation_id': observation_id,
-                  'break_glass': True}, actor=self.actor)
+        return False
 
     def register_relay_handoff(self, project_id, node_key, expected_revision,
                                harness, external_id, request_key, instruction,
@@ -159,7 +135,7 @@ class ExternalAttempts:
             owner = self.attempts._attempt(conn, attempt_id)
             if owner['execution_kind'] != 'external':
                 raise StateConflict('external reports cannot complete or override a SkillFlow attempt')
-            late_candidate, _ = self._authorize_report(conn, owner, fence)
+            late_candidate = self._authorize_report(conn, owner, fence)
             if context_hash != digest(json.loads(owner['context_json'])):
                 raise StateConflict('report describes a different frozen goal/contract/dependency context')
             prior_observation = conn.execute(
@@ -218,7 +194,7 @@ class ExternalAttempts:
             a = self.attempts._attempt(conn, attempt_id)
             if a['execution_kind'] != 'external':
                 raise StateConflict('external reports cannot complete or override a SkillFlow attempt')
-            late, break_glass = self._authorize_report(conn, a, fence)
+            late = self._authorize_report(conn, a, fence)
             if late and quiescent and report_bytes is None:
                 raise StateConflict('a quiescence attestation on an abandoned attempt needs its retained report')
             prior = conn.execute('SELECT * FROM state_external_observations WHERE attempt_id=? AND observation_id=?',
@@ -270,7 +246,7 @@ class ExternalAttempts:
                              (version,now(),attempt_id))
                 owner_settled = False
                 if quiescent and a['owner_fence'] is not None:
-                    # The old owner (or an admin) attests the abandoned worker is
+                    # The original reporter attests the abandoned worker is
                     # quiescent: the owner-registry row settles, so the deployment
                     # gate stops counting an abandon_kind=unknown attempt as a live
                     # external owner. The attempt itself stays abandoned.
@@ -280,15 +256,13 @@ class ExternalAttempts:
                 self.store._event(conn, a['project_id'], a['node_key'], 'external_attempt_observed',
                     {'attempt_id':attempt_id,'observation_id':observation_id,'version':version,'status':result_status,
                      'reported_status':status,'report_sha256':report_sha256,'quiescent':quiescent,'actor':self.actor,
-                     'stale_inputs':not current,'late_after_abandon':True,'fence':fence,'break_glass':break_glass,
+                     'stale_inputs':not current,'late_after_abandon':True,'fence':fence,
                      'owner_settled':owner_settled})
-                if break_glass and a['owner_driver_id']:
-                    self._break_glass_notice(conn, a, observation_id, status)
                 updated = self.attempts._attempt(conn, attempt_id)
                 row = conn.execute('SELECT * FROM state_external_observations WHERE attempt_id=? AND observation_id=?',
                                    (attempt_id,observation_id)).fetchone()
                 return {**_public(updated),'observation':dict(row),'idempotent':False,'stale_inputs':not current,
-                        'late_after_abandon':True,'break_glass':break_glass,'owner_settled':owner_settled}
+                        'late_after_abandon':True,'owner_settled':owner_settled}
             owner_status = {'running':'active','paused':'paused','unknown':'unknown'}.get(
                 result_status, 'settled')
             updated_owner = conn.execute(
@@ -318,16 +292,7 @@ class ExternalAttempts:
             self.store._event(conn, a['project_id'], a['node_key'], 'external_attempt_observed',
                 {'attempt_id':attempt_id,'observation_id':observation_id,'version':version,'status':result_status,
                  'report_sha256':report_sha256,'quiescent':quiescent,'actor':self.actor,'stale_inputs':not current,
-                 'fence':fence,'break_glass':break_glass})
-            if break_glass and a['owner_driver_id']:
-                self._break_glass_notice(conn, a, observation_id, status)
-            settled_workers = []
-            if terminal:
-                # The owner attests quiescence for the attempt: its registered
-                # open workers are settled with it and stop reserving checkouts.
-                from core.state_subagents import settle_open_subagents
-                settled_workers = settle_open_subagents(conn, self.store, a, self.actor,
-                                                       f'attempt settled as {result_status}')
+                 'fence':fence})
             if terminal and a['owner_driver_id']:
                 # A settled attempt releases the claims bound to it (design §4.3).
                 for claim in conn.execute("SELECT * FROM state_node_claims WHERE attempt_id=? AND status='live'",
@@ -346,8 +311,7 @@ class ExternalAttempts:
             updated = self.attempts._attempt(conn, attempt_id)
             row = conn.execute('SELECT * FROM state_external_observations WHERE attempt_id=? AND observation_id=?',
                                (attempt_id,observation_id)).fetchone()
-            return {**_public(updated),'observation':dict(row),'idempotent':False,'stale_inputs':not current,
-                    'break_glass':break_glass,'settled_subagents':settled_workers}
+            return {**_public(updated),'observation':dict(row),'idempotent':False,'stale_inputs':not current}
 
     def inspect(self, attempt_id):
         """Read-only observation view; never calls a runtime or opens a report URL."""

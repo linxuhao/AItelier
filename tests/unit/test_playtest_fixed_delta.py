@@ -23,10 +23,13 @@ def _capture_run(monkeypatch, tmp_path):
     """Run _run_probe with the engine replaced by a recorder."""
     seen = {}
 
-    def fake(args, env, state_path, timeout, render, timing=None):
+    def fake(args, env, state_path, timeout, render, timing=None,
+             raw=None, raw_label=None):
         seen["args"] = list(args)
         seen["env"] = dict(env)
-        return {}, [], False
+        frames = int(env["AITELIER_PROBE_FRAMES"])
+        return {"frames": frames, "complete": True, "nodes": {}, "asserts": [],
+                "timing": {"frames_stepped": frames}}, [], False
 
     monkeypatch.setattr(gh, "_probe_once", fake)
     gh._run_probe(tmp_path, tmp_path / "probe_state.json", 30, 10, {})
@@ -100,10 +103,13 @@ def test_turning_the_photographs_off_does_not_turn_the_renderer_off(monkeypatch,
     """
     seen = {}
 
-    def fake(args, env, state_path, timeout, render, timing=None):
+    def fake(args, env, state_path, timeout, render, timing=None,
+             raw=None, raw_label=None):
         seen["render"] = render
         seen["env"] = dict(env)
-        return {"frames": 1}, [], False
+        frames = int(env["AITELIER_PROBE_FRAMES"])
+        return {"frames": frames, "complete": True, "nodes": {}, "asserts": [],
+                "timing": {"frames_stepped": frames}}, [], False
 
     monkeypatch.setattr(gh, "_probe_once", fake)
     gh._run_probe(tmp_path, tmp_path / "s.json", 30, 10, {}, capture_at=None)
@@ -130,3 +136,43 @@ def test_the_control_pass_stays_headless(monkeypatch, tmp_path):
     gh._playtest_spec(tmp_path / "proj", spec, 300, 120)
     # [scenario, control]
     assert seen["modes"] == [True, False], seen["modes"]
+
+
+
+def test_fixed_delta_controls_still_reject_return_of_the_real_time_cap(monkeypatch, tmp_path):
+    monkeypatch.setattr(gh, "PLAYTEST_FIXED_FPS", 60)
+    seen = _capture_run(monkeypatch, tmp_path)
+    assert ["--fixed-fps", "60"] == seen["args"][2:4]
+    assert "AITELIER_PROBE_MAX_FPS" not in seen["env"]
+    # Run the actual old-cap path: its emitted arguments/environment cannot
+    # satisfy the normal fixed-delta invariant. This is not a constant-false
+    # assertion or a fabricated empty report.
+    monkeypatch.setattr(gh, "PLAYTEST_FIXED_FPS", 0)
+    old = _capture_run(monkeypatch, tmp_path)
+    assert old["env"]["AITELIER_PROBE_MAX_FPS"] == "60"
+    with pytest.raises(AssertionError):
+        assert ["--fixed-fps", "60"] == old["args"][2:4]
+    with pytest.raises(AssertionError):
+        assert "AITELIER_PROBE_MAX_FPS" not in old["env"]
+
+
+def test_no_photographs_does_not_buy_a_dummy_render_control(monkeypatch, tmp_path):
+    seen = {}
+    def fake(args, env, state_path, timeout, render, timing=None,
+             raw=None, raw_label=None):
+        seen["render"] = render
+        frames = int(env["AITELIER_PROBE_FRAMES"])
+        return {"frames": frames, "complete": True, "nodes": {}, "asserts": []}, [], False
+    monkeypatch.setattr(gh, "_probe_once", fake)
+    actual = gh._run_probe
+    actual(tmp_path, tmp_path / "state.json", 30, 10, {}, capture_at=None)
+    assert seen["render"] is True
+    # The previous regression let photography decide rendering. Execute that
+    # policy with the SAME actual probe/emitter, then apply the real invariant.
+    def photography_decides_render(*args, **kwargs):
+        kwargs["render"] = bool(kwargs.get("capture_at"))
+        return actual(*args, **kwargs)
+    photography_decides_render(tmp_path, tmp_path / "state.json", 30, 10, {}, capture_at=None)
+    assert seen["render"] is False
+    with pytest.raises(AssertionError):
+        assert seen["render"] is True

@@ -80,9 +80,14 @@ or its history is unavailable: its position cannot be proved. Legacy citations
 issued without a frame retain the strict whole-window comparison. Reread
 after refusal. There is no fuzzy matching.
 
-Applied reference and Update edits return `echo`, read back from disk around
-the result, with absolute file line numbers. Reference results also retain
-`replaced`. The run trace stores the apply_patch echo exactly as returned.
+Applied reference and Update edits return `echo`, read back from disk with
+absolute file line numbers and 20 unchanged lines of surrounding context. A
+touched range of at most 80 lines is shown whole; a larger range shows its
+first 40 and last 40 lines. Issued citations cover exactly the displayed lines,
+including context, so a context followup can cite the echo without another
+read. Elided and outside lines remain uncited and are refused. Reference
+results also retain `replaced`. The run trace stores the echo as returned.
+Recorded read-coverage percentages are upper bounds, not measured avoided reads.
 
 A file may appear in `patch` or in `references` for a given call, not both.
 
@@ -119,8 +124,8 @@ AItelier owns:
 - task-card path authorization and complete-batch refusal;
 - host root injection, role grants, tool filtering, loop accounting, and prompt guidance;
 - pipeline-forge guidance for newly generated code roles;
-- its exact `skillflow-py==1.5.87` package pin.
+- its exact `skillflow-py==1.5.89` package pin.
 
 Existing saved generated pipelines are historical inputs and are not silently rewritten. New/reloaded definitions receive only the tools their role configuration explicitly grants.
 
-Deployment requires the official SkillFlow 1.5.87 package, the AItelier image resolving that exact pin, and observed integration and regression results on the fresh image.
+Deployment requires the official SkillFlow 1.5.89 package, the AItelier image resolving that exact pin, and observed integration and regression results on the fresh image.

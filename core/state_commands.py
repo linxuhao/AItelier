@@ -1003,10 +1003,10 @@ def execute(service, action: str, arguments: dict, *, allow_write: bool = False)
             result = notes._presentation(result)
     except Exception as exc:
         if director_action:
-            from core.director_messaging_protocol import DirectorMessageError, ERROR_CODES
+            from core.director_messaging_protocol import DirectorMessageError
             if isinstance(exc, DirectorMessageError):
                 result = exc.as_dict()
-                result["schema"] = exc.envelope["schema"] if exc.code not in ERROR_CODES else _director_schema(service)
+                result["schema"] = _director_schema(service)
                 return result
         raise
     if anonymous and action in _CATALOG_READS:

@@ -50,6 +50,18 @@ def test_same_project_code_preserves_closed_envelope(peers,protocol):
               director_identity="ada",request_key="same",subject="same",body="")
     if protocol:args["protocol_version"]=protocol
     result=execute(s["ada"],"send_director_message",args,allow_write=True)
-    assert result["code"]=="use_driver_inbox"
-    from contracts.director_messaging.v3.conformance import validate_envelope
-    validate_envelope(result)
+    if protocol=="v3":
+        assert result["code"]=="use_driver_inbox"
+        from contracts.director_messaging.v3.conformance import validate_envelope
+        validate_envelope(result)
+    else:
+        assert result=={"schema":"aitelier.director-messaging.v2",
+                        "code":"invalid_request","detail":{"message":"invalid_request"}}
+        import json
+        from pathlib import Path
+        from jsonschema import Draft202012Validator, ValidationError
+        schema=json.loads(Path("contracts/director_messaging/v2/schema.json").read_text())
+        validator=Draft202012Validator({"$ref":"#/$defs/error","$defs":schema["$defs"]})
+        validator.validate(result)
+        with pytest.raises(ValidationError):
+            validator.validate({**result,"code":"use_driver_inbox","detail":{"message":"use_driver_inbox"}})

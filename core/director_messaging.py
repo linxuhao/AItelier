@@ -297,7 +297,9 @@ class SQLiteDirectorMessaging:
         if sum((targeted, broadcasting, replying)) != 1:
             _invalid()
         if targeted and target_project_id == sender_project_id:
-            raise DirectorMessageError("use_driver_inbox", V3_SCHEMA_ID)
+            if self.reply_schema == V3_SCHEMA_ID:
+                raise DirectorMessageError("use_driver_inbox", V3_SCHEMA_ID)
+            _invalid()
         payload = {
             "body": body, "broadcast": broadcast, "director_identity": director_identity,
             "reply_to_delivery_id": reply_to_delivery_id, "request_key": request_key,

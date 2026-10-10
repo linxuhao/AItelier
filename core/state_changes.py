@@ -118,7 +118,7 @@ async def wait_for_state_change(service, project_id, after=0, node_keys=None, at
                 inbox = await asyncio.to_thread(service.driver_inbox.list_driver_messages, None, inbox_after, min(limit, 100))
                 inbox_after = inbox["next_after"]
             if events or (inbox and inbox["messages"]):
-                result = {"events": events, "next_after": cursor, **({"next_inbox_after": inbox_after} if include_driver_inbox else {}), "timed_out": False}
+                result = {"events": events, "next_after": cursor, **({"next_inbox_after": inbox_after, "driver_inbox": inbox["messages"]} if include_driver_inbox else {}), "timed_out": False}
                 if include_driver_inbox:
                     result.update(driver_inbox=inbox["messages"], next_inbox_after=inbox_after)
                 return result
@@ -133,7 +133,7 @@ async def wait_for_state_change(service, project_id, after=0, node_keys=None, at
                             recover_page, service, project_id, recovery_after, node_keys,
                             attempt_ids, filter_mode), timeout=remaining)
                     except asyncio.TimeoutError:
-                        return {"events": [], "next_after": cursor, **({"next_inbox_after": inbox_after} if include_driver_inbox else {}), "timed_out": True}
+                        return {"events": [], "next_after": cursor, **({"next_inbox_after": inbox_after, "driver_inbox": inbox["messages"]} if include_driver_inbox else {}), "timed_out": True}
 
             if args.return_when_idle and not recovery_ok:
                 # Recovery failures cannot authorize a decision from cached state.
@@ -142,8 +142,8 @@ async def wait_for_state_change(service, project_id, after=0, node_keys=None, at
                     scan, service.store, project_id, cursor, node_keys, attempt_ids,
                     note_after_revision, filter_mode, actionable_only, limit)
                 if events:
-                    return {"events": events, "next_after": cursor, **({"next_inbox_after": inbox_after} if include_driver_inbox else {}), "timed_out": False}
-                return {"events": [], "next_after": cursor, **({"next_inbox_after": inbox_after} if include_driver_inbox else {}), "timed_out": False,
+                    return {"events": events, "next_after": cursor, **({"next_inbox_after": inbox_after, "driver_inbox": inbox["messages"]} if include_driver_inbox else {}), "timed_out": False}
+                return {"events": [], "next_after": cursor, **({"next_inbox_after": inbox_after, "driver_inbox": inbox["messages"]} if include_driver_inbox else {}), "timed_out": False,
                         "reason": "observation_unavailable"}
             # Recovery may have committed an actionable event; read it before sleeping.
             if signal.is_set():
@@ -152,7 +152,7 @@ async def wait_for_state_change(service, project_id, after=0, node_keys=None, at
             # In particular a resumed checkpoint may still be projected paused.
             if recovery_after:
                 if loop.time() >= deadline:
-                    return {"events": [], "next_after": cursor, **({"next_inbox_after": inbox_after} if include_driver_inbox else {}), "timed_out": True}
+                    return {"events": [], "next_after": cursor, **({"next_inbox_after": inbox_after, "driver_inbox": inbox["messages"]} if include_driver_inbox else {}), "timed_out": True}
                 continue
             if args.return_when_idle:
                 outcome = await asyncio.to_thread(
@@ -161,10 +161,10 @@ async def wait_for_state_change(service, project_id, after=0, node_keys=None, at
                 if outcome == "rescan":
                     continue
                 if outcome is not None:
-                    return {"events": [], "next_after": cursor, **({"next_inbox_after": inbox_after} if include_driver_inbox else {}), "timed_out": False, **outcome}
+                    return {"events": [], "next_after": cursor, **({"next_inbox_after": inbox_after, "driver_inbox": inbox["messages"]} if include_driver_inbox else {}), "timed_out": False, **outcome}
             remaining = deadline - loop.time()
             if remaining <= 0:
-                return {"events": [], "next_after": cursor, **({"next_inbox_after": inbox_after} if include_driver_inbox else {}), "timed_out": True}
+                return {"events": [], "next_after": cursor, **({"next_inbox_after": inbox_after, "driver_inbox": inbox["messages"]} if include_driver_inbox else {}), "timed_out": True}
             try:
                 # Other processes do not share the notification registry. This
                 # bounded server-side fallback also replays commits after restart.

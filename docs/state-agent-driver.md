@@ -162,3 +162,5 @@ PostCompact detects P2 capability and authenticated identity, then reads
 driver_postcompact_guidance. It combines project standing, the caller's unacked
 broadcast transient messages and own driver standing notices within eight items
 and 3000 characters. It does not read private notebook bodies.
+
+Same-project project-mailbox sends must use the private driver inbox instead. Default and explicit v2 requests retain the closed legacy invalid_request code and message; explicit v3 returns use_driver_inbox. The v2 envelope cannot carry extra guidance fields or a new detail.message enum.

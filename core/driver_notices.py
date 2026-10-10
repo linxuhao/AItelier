@@ -117,11 +117,16 @@ def initialize(db) -> None:
 # -- the P2 inbox adapter seam ----------------------------------------------
 # Both hooks take the CALLER'S connection: a notice is delivered and resolved
 # inside the ownership transaction that caused it, never in a transaction of
-# its own. ``deliver(conn, message)`` receives the ``inbox_message`` keyword set
-# and returns what it stored (kept in the notice's return value under
-# ``inbox``); ``resolve(conn, notices, reason)`` receives the full notice rows
-# being resolved - each still carries its ``refs`` (``handoff_id``,
-# ``subagent_id``, ...), which is the correlation key P2 needs.
+# its own. ``deliver(conn, message, notice)`` receives the ``inbox_message``
+# keyword set AND the complete stored notice - ``notice_id``,
+# ``target_driver_id``, ``sender_driver_id`` (None for a system notice; P2
+# derives the sender from its instance, so the adapter selects it per notice),
+# ``project_id``, ``kind``, ``delivery_mode``, ``subject``, ``body``, ``refs``
+# (``attempt_id`` / ``claim_id`` / ``subagent_id`` / ``handoff_id`` /
+# ``node_key`` correlation) - and returns what it stored (kept in the notice's
+# return value under ``inbox``); ``resolve(conn, notices, reason)`` receives
+# the full notice rows being resolved, each still carrying its ``refs``,
+# which is the correlation key P2 needs to mark deliveries resolved.
 _ADAPTER = {"deliver": None, "resolve": None}
 
 

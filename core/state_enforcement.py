@@ -111,10 +111,14 @@ def checkout_in_use(conn, project_id, workspace, *, exclude_claim=None, exclude_
     ``same_executor`` names the subagent whose own records are not a second
     writer (its registry row and the claims held for it); ``reclaiming`` is a
     ``(driver_id, node_key)`` pair naming the ONE executor a claim explicitly
-    re-associates with - the driver's own active attempt on that very node -
-    which is not a second writer either (common ownership alone is: the same
-    driver's attempt on another node is another executor); ``exclude_claim`` /
-    ``exclude_subagent`` / ``exclude_attempt`` skip the caller's own records.
+    re-associates with - the driver's own ACTIVE attempt on that very node,
+    dispatched for the same executor (the claim it rode carried the same
+    ``subagent``, or none) - which is not a second writer either. Common
+    ownership alone is: the same driver's attempt on another node, or the same
+    node's attempt dispatched for a different worker, is another executor, and
+    an attempt abandoned with quiescence unknown is never exempt.
+    ``exclude_claim`` / ``exclude_subagent`` / ``exclude_attempt`` skip the
+    caller's own records.
 
     An attempt abandoned with ``abandon_kind=unknown`` keeps its executor
     checkout reserved until its owner row is SETTLED by a verified quiescence
@@ -137,14 +141,17 @@ def checkout_in_use(conn, project_id, workspace, *, exclude_claim=None, exclude_
         # Executor checkouts of active attempts, independent of claim status; plus
         # attempts abandoned with quiescence UNKNOWN whose owner row is not settled.
         for row in conn.execute(
-                "SELECT c.claim_id,c.driver_id,c.node_key,c.workspace,c.attempt_id,a.owner_driver_id FROM state_node_claims c "
+                "SELECT c.claim_id,c.driver_id,c.node_key,c.workspace,c.attempt_id,c.subagent,a.owner_driver_id,a.status "
+                "FROM state_node_claims c "
                 "JOIN state_attempts a ON a.attempt_id=c.attempt_id WHERE c.project_id=? AND c.workspace!='' "
                 "AND (a.status IN (" + ",".join("?" for _ in _ACTIVE) + ") OR (a.status='abandoned' "
                 "AND a.abandon_kind='unknown' AND EXISTS (SELECT 1 FROM state_external_owners o "
                 "WHERE o.attempt_id=a.attempt_id AND o.status!='settled')))", (project_id, *_ACTIVE)):
             if row["attempt_id"] == exclude_attempt or row["claim_id"] == exclude_claim:
                 continue
-            if reclaiming is not None and (row["owner_driver_id"], row["node_key"]) == tuple(reclaiming):
+            if (reclaiming is not None and row["status"] in _ACTIVE
+                    and (row["owner_driver_id"], row["node_key"]) == tuple(reclaiming)
+                    and row["subagent"] == same_executor):
                 continue
             if checkout_of(row["workspace"]) == checkout:
                 return {"kind": "attempt", "id": row["attempt_id"], "driver_id": row["owner_driver_id"] or row["driver_id"],
@@ -355,6 +362,33 @@ def refuse_checkpoint_in_flight(conn, attempt_id):
                          f"run {open_decision['run_id']} (until {open_decision['expires_at']}); ownership of attempt "
                          f"{attempt_id} cannot move until it is finished", decision_id=open_decision["decision_id"],
                          expires_at=open_decision["expires_at"])
+
+
+def assert_decision_open(db, decision_id) -> dict:
+    """The decision must still be open and unexpired at the moment the engine is
+    told. A handler delayed past the decision's expiry finds ownership possibly
+    moved; it is refused here (`checkpoint_decision_expired`) instead of
+    resuming or rewinding a run it no longer controls. The residual window is
+    the gap between this read and the engine call - milliseconds, not a lease."""
+    from core.state_graph import StateGraphStore
+    store = StateGraphStore(db, project_read_trusted=True)
+    with store.transaction() as conn:
+        row = conn.execute("SELECT * FROM driver_checkpoint_decisions WHERE decision_id=?", (decision_id,)).fetchone()
+        if row is None:
+            raise ClaimError("checkpoint_decision_expired", f"decision {decision_id} is unknown")
+        row = dict(row)
+        current = now_stamp()
+        if row["finished_at"] is not None or row["expires_at"] <= current:
+            raise ClaimError("checkpoint_decision_expired", f"checkpoint decision {decision_id} on attempt "
+                             f"{row['attempt_id']} expired at {row['expires_at']} before the engine was told; "
+                             "ownership may have moved - answer the checkpoint again", attempt_id=row["attempt_id"])
+        owner = conn.execute("SELECT owner_driver_id,owner_fence FROM state_attempts WHERE attempt_id=?",
+                             (row["attempt_id"],)).fetchone()
+        if owner is None or owner["owner_fence"] != row["owner_fence"] or (
+                not row["break_glass"] and owner["owner_driver_id"] != row["driver_id"]):
+            raise ClaimError("checkpoint_decision_expired", f"attempt {row['attempt_id']} changed owner or fence "
+                             "while the decision was open", attempt_id=row["attempt_id"])
+        return row
 
 
 def finish_checkpoint_decision(db, decision_id) -> bool:

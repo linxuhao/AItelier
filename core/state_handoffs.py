@@ -349,7 +349,8 @@ class StateHandoffs:
                 self.recovery.claims._history(conn, claim, "transferred", f"handoff {handoff_id} accepted")
                 self.store._event(conn, project_id, claim["node_key"], "claim_transferred", {
                     "claim_id": claim["claim_id"], "driver_id": claim["driver_id"], "to_driver_id": driver,
-                    "purpose": claim["purpose"], "fence": claim["fence"], "handoff_id": handoff_id, "actor": self.actor})
+                    "purpose": claim["purpose"], "fence": claim["fence"], "handoff_id": handoff_id, "actor": self.actor,
+                    "break_glass": break_glass})
                 pseudo = {"attempt_id": claim["attempt_id"], "project_id": project_id, "node_key": claim["node_key"],
                           "node_revision": claim["node_revision"]}
                 new_claim = self.recovery.new_claim_for(conn, pseudo, driver, current, f"handoff {handoff_id} accepted",
@@ -368,7 +369,7 @@ class StateHandoffs:
                 refs={"handoff_id": handoff_id, "attempt_id": handoff["attempt_id"], "claim_id": handoff["claim_id"],
                       "node_key": handoff["node_key"], "decision": "accepted"}, actor=self.actor)
             view = _view(self._handoff(conn, project_id, handoff_id), current)
-        return {**view, **moved, "notified": notice}
+        return {**view, **moved, "notified": notice, "break_glass": break_glass}
 
     def _check_observability(self, conn, project_id, package, attempt, driver):
         """§6.3: non-quiescent workers may only be handed to a driver that can observe them."""

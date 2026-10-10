@@ -819,6 +819,19 @@ def finish_state_checkpoint_decision(controller, db) -> None:
         finish_checkpoint_decision(db, controller["decision_id"])
 
 
+def assert_state_checkpoint_decision_open(controller, db) -> None:
+    """Called immediately before the engine is told: a decision that expired
+    (a handler delayed past CHECKPOINT_DECISION_SECONDS, during which ownership
+    may have moved) must not mutate the run. 409 names it."""
+    from core.state_claims import ClaimError
+    from core.state_enforcement import assert_decision_open
+    if controller and controller.get("decision_id"):
+        try:
+            assert_decision_open(db, controller["decision_id"])
+        except ClaimError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+
 @router.post("/{project_id}/checkpoint/approve")
 def approve_checkpoint(
     project_id: str,
@@ -859,12 +872,12 @@ def approve_checkpoint(
         raise HTTPException(400, "Project is not waiting for approval")
     controller = state_checkpoint_controller(http_request, run_id, db)
     try:
-        return _approve_checkpoint_body(project_id, request, run_id, _step_id, db)
+        return _approve_checkpoint_body(project_id, request, run_id, _step_id, _label, db, controller)
     finally:
         finish_state_checkpoint_decision(controller, db)
 
 
-def _approve_checkpoint_body(project_id, request, run_id, _step_id, db):
+def _approve_checkpoint_body(project_id, request, run_id, _step_id, _label, db, controller=None):
 
     # AT-7 idempotency guard: only act if the requested checkpoint is the one the
     # run is actually paused at. A stale modal, double-click, or client retry that
@@ -892,6 +905,7 @@ def _approve_checkpoint_body(project_id, request, run_id, _step_id, db):
     # For failed runs (A3 rescue path), fall back to reactivate + resume.
     next_node = ""
     if run and run["status"] == "paused":
+        assert_state_checkpoint_decision_open(controller, db)
         next_node = sf.approve_checkpoint(run_id)
         # Sync the project status immediately so the scheduler picks it up.
         # Without this, the aitelier DB still shows "checkpoint:..." and the
@@ -983,12 +997,12 @@ def reject_checkpoint(
         raise HTTPException(400, "Project is not waiting for approval")
     controller = state_checkpoint_controller(http_request, run_id, db)
     try:
-        return _reject_checkpoint_body(project_id, request, run_id, step_id)
+        return _reject_checkpoint_body(project_id, request, run_id, step_id, _label, _graph, db, controller)
     finally:
         finish_state_checkpoint_decision(controller, db)
 
 
-def _reject_checkpoint_body(project_id, request, run_id, step_id):
+def _reject_checkpoint_body(project_id, request, run_id, step_id, _label, _graph, db=None, controller=None):
 
     # AT-7 idempotency guard (see approve_checkpoint): ignore a reject aimed at a
     # checkpoint the run is no longer paused at.
@@ -1017,6 +1031,7 @@ def _reject_checkpoint_body(project_id, request, run_id, step_id):
     from core.run_driver import checkpoint_reject_target
     redirect_to = checkpoint_reject_target(sf, _graph, step_id, run_id)
     try:
+        assert_state_checkpoint_decision_open(controller, db)
         sf.reject_checkpoint(run_id, step_id, request.feedback,
                              redirect_to=redirect_to)
     except Exception as e:

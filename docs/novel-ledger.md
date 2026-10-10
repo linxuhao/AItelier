@@ -48,4 +48,10 @@ ledger_query(kind="characters", name="尹骁", field="右臂", chapter_from=8)
 
 **Operator CLI** on the server: `python scripts/novel_ledger.py query <novel_repo> --kind characters --name 尹骁 --field 右臂`.
 
-Migrating an old repo (history still inside bible files): `python scripts/novel_ledger.py migrate <novel_repo> --dry-run` first; it never commits. Migrate **before the first chapter booked after deploy** if you can (chapters booked earlier are kept and merged, but a pre-migration probe still shows the old flattened card keys). The ledger is rebuilt from `chapters/*/events.yaml`, so a migrated repo equals a fresh replay of its journals; `--stale-after N` is opt-in and breaks that equality (writing-bench repos must not use it). Re-running is a no-op once no legacy history block is left; the write is one transaction.
+## Migrating an old repo (history still inside bible files)
+
+`python scripts/novel_ledger.py migrate <novel_repo> [--dry-run] [--stale-after N] [--mode auto|replay|strip]` — never commits; review `git diff` and commit by hand. Run it **after deploy and before the next chapter is booked**.
+
+- **replay** (auto when the repo has the `novel-genesis` tag — every scaffolded book): resets the replay-managed paths to the genesis bible and re-books every `chapters/*/events.yaml` with the current code (the same `replay_chapter` the writing bench's replay guard uses), so the result is byte-identical to a bench replay by construction. If the replayed current state differs from the old bible (bible edited outside the journal), it refuses and lists the differences; `--force` accepts the replayed values, `--mode strip` keeps the old values.
+- **strip** (no genesis tag): removes history blocks and 本章* keys in place and derives the ledger from the journals. Current state is correct, but files are **not** guaranteed byte-identical to a replay, so such books cannot use the writing bench's replay guard.
+- One transaction (failure rolls back); re-running after success is a no-op. `--stale-after N` is opt-in and breaks replay equality.

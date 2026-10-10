@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """novel ledger CLI.
 
-  novel_ledger.py migrate <novel_repo> [--dry-run] [--force] [--stale-after N]
+  novel_ledger.py migrate <novel_repo> [--dry-run] [--force] [--stale-after N] [--mode auto|replay|strip]
       split in-bible history into novel/ledger/ + compact current-state bible
       (does NOT commit; review `git diff` in the novel repo first)
   novel_ledger.py query <novel_repo> [--kind K] [--name N] [--chapter C]
@@ -31,6 +31,8 @@ def main(argv=None) -> int:
     m.add_argument("repo")
     m.add_argument("--dry-run", action="store_true")
     m.add_argument("--force", action="store_true")
+    m.add_argument("--mode", choices=["auto", "replay", "strip"], default="auto",
+                   help="auto: replay when the novel-genesis tag exists, else strip")
     m.add_argument("--stale-after", type=int, default=None,
                    help="also drop card state keys not updated in the last N chapters")
     q = sub.add_parser("query")
@@ -50,7 +52,7 @@ def main(argv=None) -> int:
 
     if a.cmd == "migrate":
         out = migrate(repo, dry_run=a.dry_run, force=a.force,
-                      stale_after=a.stale_after)
+                      stale_after=a.stale_after, mode=a.mode)
     elif a.cmd == "query":
         out = ns.query_ledger(repo, kind=a.kind, name=a.name, chapter=a.chapter,
                               chapter_from=a.chapter_from, chapter_to=a.chapter_to,

@@ -248,8 +248,8 @@ def _legacy_genesis(ws):
         ns.dump_yaml(ns.character_path(ws, c["name"]), c)
 
 
-def _journals(ws):
-    for n, rec in JOURNALS.items():
+def _journals(ws, journals=None):
+    for n, rec in (journals or JOURNALS).items():
         d = ns.chapter_dir(ws, n)
         d.mkdir(parents=True, exist_ok=True)
         (d / "prose.md").write_text("正文", encoding="utf-8")
@@ -257,9 +257,9 @@ def _journals(ws):
         ns.dump_yaml(d / "events.yaml", {"chapter": n, **copy.deepcopy(rec)})
 
 
-def _old_code_apply(ws):
+def _old_code_apply(ws, journals=None):
     """What the PRE-ledger apply_* wrote (history inside the bible)."""
-    for n, rec in JOURNALS.items():
+    for n, rec in (journals or JOURNALS).items():
         cards = ns.load_characters(ws)
         prot = ns._find_protagonist(cards)
         world = ns.load_yaml(ns.bible_dir(ws) / "world.yaml", {})
@@ -278,7 +278,7 @@ def _old_code_apply(ws):
                     card["initial"] = {k: v for k, v in card.items() if k not in ("initial", "progression")}
                 card["progression"].append({"chapter": n, "changes": ch, "reason": ev["reason"]})
                 ns.dump_yaml(ns.character_path(ws, name), card)
-            else:
+            elif ev["entity_type"] == "world_setting":
                 st = world.setdefault("settings", {})
                 new = ev["entity_name"] not in st
                 e = st.setdefault(ev["entity_name"], {})
@@ -299,8 +299,12 @@ def _old_code_apply(ws):
             t = next((t for t in threads if t["name"] == up["name"]), None)
             if t is None:
                 threads.append({"name": up["name"], "status": "open", "introduced_chapter": n, "hints": []})
-            else:
+            elif up["action"] == "hint":
                 t["hints"].append({"chapter": n, "hint": up["detail"]})
+            elif up["action"] == "resolve":
+                t["status"], t["resolution_chapter"], t["resolution"] = "resolved", n, up["detail"]
+            elif up["action"] == "abandon":
+                t["status"], t["abandon_reason"] = "abandoned", up["detail"]
         ns.dump_yaml(ns.bible_dir(ws) / "threads.yaml", threads)
         arcs = ns.load_yaml(ns.bible_dir(ws) / "arcs.yaml", [])
         for up in rec["arc_updates"]:
@@ -308,7 +312,10 @@ def _old_code_apply(ws):
             for nid in up["nodes_completed"]:
                 nd = next(x for x in a["nodes"] if x["id"] == nid)
                 nd["status"], nd["completed_chapter"] = "done", n
-            a.setdefault("progress_notes", []).append({"chapter": n, "note": up["notes"]})
+            if up.get("notes"):
+                a.setdefault("progress_notes", []).append({"chapter": n, "note": up["notes"]})
+            if all(x.get("status") == "done" for x in a["nodes"]) and a.get("status") != "completed":
+                a["status"], a["end_chapter"] = "completed", n
         ns.dump_yaml(ns.bible_dir(ws) / "arcs.yaml", arcs)
 
 
@@ -422,3 +429,95 @@ def test_migration_cli_runs(tmp_path):
     out = subprocess.run([sys.executable, str(script), "context-size", str(tmp_path)],
                          capture_output=True, text=True, check=True)
     assert json.loads(out.stdout)["chars"] > 0
+
+
+
+# ── genesis-tagged books: migration == bench replay, by construction ────────
+
+JOURNALS_HARD = {
+    **JOURNALS,
+    3: {"events": [{"entity_type": "character", "entity_name": "陆竞", "create": True,
+                    "changes": {"role": "ally", "本章行动": "堵门", "伤情": None}, "reason": "登场"},
+                   {"entity_type": "world_setting", "entity_name": "雾",
+                    "changes": {"浓度": "高", "本章表现": "涌入"}, "reason": "首现"}],
+        "appearances": [{"name": "陆竞"}],
+        "thread_updates": [{"name": "门", "action": "resolve", "detail": "门后是走廊"},
+                           {"name": "钥匙", "action": "hint", "detail": "铁锈味"}],
+        "arc_updates": [{"name": "主线", "nodes_completed": ["n2"], "notes": "收束"}]},
+    4: {"events": [], "appearances": [],
+        "thread_updates": [{"name": "钥匙", "action": "abandon", "detail": "放弃"}],
+        "arc_updates": []},
+}
+
+
+def _git(ws, *args):
+    return subprocess.run(["git", *args], cwd=ws, check=True, capture_output=True,
+                          text=True).stdout
+
+
+def _tagged_legacy_book(ws, journals):
+    ws.mkdir(parents=True)
+    _git(ws, "init", "-q")
+    _git(ws, "config", "user.email", "t@t")
+    _git(ws, "config", "user.name", "t")
+    _legacy_genesis(ws)
+    _git(ws, "add", "-A")
+    _git(ws, "commit", "-qm", "genesis")
+    _git(ws, "tag", ns.GENESIS_TAG)
+    _journals(ws, journals)
+    _old_code_apply(ws, journals)
+    ns.rebuild_index(ws)
+    ns.rebuild_digest(ws)
+    _git(ws, "add", "-A")
+    _git(ws, "commit", "-qm", "legacy chapters")
+
+
+def test_tagged_book_migrates_by_replay_and_passes_bench_replay(tmp_path):
+    """All three field-order shapes: hint→resolve/abandon, note→arc completed,
+    mid-book create whose first event carries 本章*/null keys."""
+    from aitelier.writing_bench.bench import Bench
+    from aitelier.writing_bench.storage import git_files
+    ws = tmp_path / "book"
+    _tagged_legacy_book(ws, JOURNALS_HARD)
+    rep = migrate(ws)
+    assert rep["mode"] == "replay" and rep["drift"] == [], rep
+    _git(ws, "add", "-A")
+    _git(ws, "commit", "-qm", "migrate")
+    # the bench's own replay over the migrated commit must change nothing
+    genesis_sha = _git(ws, "rev-parse", ns.GENESIS_TAG + "^{commit}").strip()
+    Bench._reset_replay(object(), ws, git_files(ws, genesis_sha))
+    assert _git(ws, "status", "--porcelain") == ""
+    t = {x["name"]: x for x in ns.load_yaml(ns.bible_dir(ws) / "threads.yaml")}
+    assert t["门"]["status"] == "resolved" and t["门"]["hint_count"] == 2
+    assert t["钥匙"]["status"] == "abandoned"
+    arc = ns.load_yaml(ns.bible_dir(ws) / "arcs.yaml")[0]
+    assert arc["status"] == "completed" and arc["latest_note"]["note"] == "收束"
+    lu = ns.load_characters(ws)["陆竞"]
+    assert "本章行动" not in lu and "本章行动" not in lu["initial"] and "伤情" not in lu
+    assert migrate(ws)["migrated"] is False
+
+
+def test_tagged_book_with_off_journal_edit_refuses_then_force(tmp_path):
+    ws = tmp_path / "book"
+    _tagged_legacy_book(ws, JOURNALS)
+    card = ns.load_yaml(ns.character_path(ws, "尹骁"))
+    card["power_level"] = 9999                         # hand edit, no journal entry
+    ns.dump_yaml(ns.character_path(ws, "尹骁"), card)
+    before = _files(ws)
+    from aitelier.novel_ledger_migrate import MigrationDrift
+    with pytest.raises(MigrationDrift) as e:
+        migrate(ws)
+    assert any("power_level" in d for d in e.value.drift)
+    assert _files(ws) == before                        # rolled back
+    dry = migrate(ws, dry_run=True)
+    assert dry["dry_run"] and dry["drift"] and _files(ws) == before
+    assert migrate(ws, force=True)["mode"] == "replay"
+    assert ns.load_characters(ws)["尹骁"]["power_level"] == 4000   # journal wins
+
+
+def test_untagged_book_uses_strip_mode(tmp_path):
+    ws = tmp_path / "w"
+    _legacy_genesis(ws)
+    _journals(ws)
+    _old_code_apply(ws)
+    assert migrate(ws).get("mode", "strip") == "strip"

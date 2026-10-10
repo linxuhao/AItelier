@@ -812,6 +812,26 @@ def apply_arc_updates(ws, updates: list[dict], chapter: int) -> list[str]:
     return warnings
 
 
+# ── Full replay (genesis bible + journals → current state + ledger) ─────────
+
+# Everything a replay REBUILDS. Shared by the writing bench's replay guard and
+# the genesis-mode ledger migration, so the two are identical by construction.
+REPLAY_MANAGED = ("novel/bible/characters", "novel/bible/world.yaml",
+                  "novel/bible/threads.yaml", "novel/bible/arcs.yaml",
+                  "novel/state/index.yaml", "novel/state/digest.md",
+                  "novel/ledger")
+
+
+def replay_chapter(ws, n: int, rec: dict) -> list[str]:
+    """Book one historic journal exactly as apply_state step 2 does."""
+    validate_events(ws, rec.get("events", []))
+    warnings = apply_events(ws, rec.get("events", []), n)
+    warnings += log_appearances(ws, rec.get("appearances", []), n)
+    warnings += apply_thread_updates(ws, rec.get("thread_updates", []), n)
+    warnings += apply_arc_updates(ws, rec.get("arc_updates", []), n)
+    return warnings
+
+
 # ── Digest / index (derived state) ───────────────────────────────────────────
 
 RECENT_FULL = 10  # last N chapter summaries kept verbatim in the digest
@@ -942,6 +962,8 @@ def reconcile(ws) -> list[str]:
             if ev.get("entity_type") not in ("character", "protagonist"):
                 continue
             name = str(ev.get("entity_name") or "")
+            if ev.get("entity_type") == "protagonist" and name not in replayed:
+                name = _find_protagonist(replayed) or name   # same alias rule as apply_events
             if name not in replayed:
                 if ev.get("create"):
                     replayed[name] = {"name": name, "status": "alive"}

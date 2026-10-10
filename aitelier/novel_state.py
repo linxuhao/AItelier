@@ -406,7 +406,7 @@ def query_ledger(ws, kind: str | None = None, name: str | None = None,
                     continue
                 rows.append({"kind": k, **r})
     rows.sort(key=lambda r: (r.get("chapter") or 0))
-    if limit:
+    if limit is not None and int(limit) > 0:
         rows = rows[-int(limit):]
     return rows
 
@@ -590,15 +590,15 @@ def apply_events(ws, events: list[dict], chapter: int) -> list[str]:
                 warnings.append(
                     f"character '{name}' power_level regressed {old_p}→{new_p} "
                     f"(reason: {reason or 'none'})")
+            card.pop("progression", None)   # legacy in-card history (see migrate)
             _overwrite(card, changes)
             if created:
                 # Opening balance = the state the character ENTERS the story
                 # with (this first entry applied). Genesis-cast cards get
                 # theirs from scaffold_bible; this covers mid-book arrivals so
                 # every card can feed the probe's 初始→现在 two-point view.
-                card["initial"] = copy.deepcopy(
-                    {k: v for k, v in card.items()
-                     if k not in ("initial", "progression")})
+                card["initial"] = {k: v for k, v in card.items()
+                                   if k not in ("initial", "progression")}
             ledger_append(ws, "characters", name, {
                 "chapter": chapter, "type": "create" if created else "event",
                 "changes": changes, "reason": reason})
@@ -607,6 +607,7 @@ def apply_events(ws, events: list[dict], chapter: int) -> list[str]:
         elif etype == "faction":
             factions = world.setdefault("factions", {})
             entry = factions.setdefault(name, {})   # validated: known or create
+            entry.pop("progression", None)          # legacy in-bible history
             _overwrite(entry, changes)
             ledger_append(ws, "factions", name, {
                 "chapter": chapter, "type": "event", "changes": changes,
@@ -657,6 +658,7 @@ def log_appearances(ws, appearances: list[dict], chapter: int) -> list[str]:
         if card is None:
             warnings.append(f"appearance logged for unknown character '{name}'")
             continue
+        card.pop("progression", None)       # legacy in-card history
         card["last_appearance"] = chapter
         if not card.get("first_appearance"):
             card["first_appearance"] = chapter
@@ -697,6 +699,18 @@ def thread_revealable(thread: dict, arcs: list[dict]) -> bool:
     return node_done(arcs, gate.get("arc", ""), gate.get("node", ""))
 
 
+def absorb_legacy_hints(t: dict) -> None:
+    """Pre-ledger threads carried ``hints: [...]``; fold it into the
+    current-state summary (the history itself is the thread's ledger)."""
+    if "hints" not in t:
+        return
+    hints = t.pop("hints") or []
+    if hints:
+        t["hint_count"] = len(hints)
+        t["last_hint_chapter"] = hints[-1].get("chapter")
+        t["last_hint"] = hints[-1].get("hint", "")
+
+
 def apply_thread_updates(ws, updates: list[dict], chapter: int) -> list[str]:
     warnings: list[str] = []
     path = bible_dir(ws) / "threads.yaml"
@@ -722,6 +736,7 @@ def apply_thread_updates(ws, updates: list[dict], chapter: int) -> list[str]:
                 continue
             warnings.append(f"thread update for unknown thread '{name}' ({action})")
             continue
+        absorb_legacy_hints(t)
         if action in ("hint", "resolve", "abandon"):
             ledger_append(ws, "threads", name, {
                 "chapter": chapter, "type": action,
@@ -729,8 +744,7 @@ def apply_thread_updates(ws, updates: list[dict], chapter: int) -> list[str]:
         if action == "hint":
             # Current state keeps only the latest hint + a count; the full
             # hint history is the thread's ledger.
-            legacy = t.pop("hints", None) or []
-            t["hint_count"] = int(t.get("hint_count") or len(legacy)) + 1
+            t["hint_count"] = int(t.get("hint_count") or 0) + 1
             t["last_hint_chapter"] = chapter
             t["last_hint"] = up.get("detail", "")
         elif action == "resolve":

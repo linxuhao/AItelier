@@ -7,23 +7,27 @@ world.yaml, ``hints`` on threads, ``progress_notes`` on arcs — and flattened
 every change key onto the card top level, so one-off keys (本章行动…) stayed on
 the card as stale "current" fields forever.
 
-``migrate(repo)`` moves each of those histories into the entity's ledger file
-and leaves the bible as a snapshot:
-  - card: progression removed; 本章* keys removed (they live in the ledger);
-    ``initial`` deep-copied (no YAML anchors); everything else is already the
-    last-written value, i.e. the current state.
-  - world: factions[*].progression and setting_log → ledger.
-  - threads: hints → ledger; thread keeps hint_count/last_hint_chapter/last_hint.
-  - arcs: progress_notes + node completions → ledger; arc keeps latest_note.
-Appearances are re-derived from chapters/chNNNN/events.yaml.
+``migrate(repo)``:
+  - bible: strips every legacy history block (``strip_legacy_history``) and
+    the 本章* keys, keeps every other value as written (the last-written value
+    IS the current state); threads get hint_count/last_hint_chapter/last_hint,
+    arcs get latest_note — exactly what the new apply_* code would have written.
+  - ledger: REBUILT FROM THE IMMUTABLE JOURNALS (chapters/chNNNN/events.yaml)
+    with the same row shapes and order apply_state produces, so a migrated repo
+    is byte-identical to a fresh replay of its journals under the new code
+    (the writing bench's replay guard depends on that). Existing ledger rows
+    (chapters booked after deploy, before migration) are kept and merged in
+    chapter order; chapters already present in the ledger are not re-derived.
 
-Refuses to run twice (a non-empty ledger dir means already migrated). Writes
-nothing in dry_run mode. Never commits — review ``git diff`` and commit by hand.
+Detection is by CONTENT: a bible with no legacy history blocks has nothing to
+migrate (re-running is a no-op). All writes are one ``state_transaction`` —
+a failure restores bible/ + ledger/ byte-for-byte. Never commits.
+``stale_after`` is opt-in and makes the result diverge from a pure replay.
 """
 
 from __future__ import annotations
 
-import copy
+import json
 from pathlib import Path
 
 from aitelier import novel_state as ns
@@ -40,146 +44,214 @@ PROTECTED_KEYS = {"name", "role", "status", "power_level", "tier", "aliases",
                   "initial"}
 
 
-def migrate(repo, dry_run: bool = False, force: bool = False,
-            stale_after: int | None = None) -> dict:
-    """``stale_after=N``: also drop card state keys whose LAST update is more
-    than N chapters before the latest chapter (opt-in — the value stays in the
-    ledger, but the current-state card stops carrying it). Profile keys and
-    anything in the card's ``initial`` are never dropped."""
-    ws = Path(repo)
-    if not ns.bible_exists(ws):
-        raise ValueError(f"migrate: no novel bible under {ws}")
-    led = ns.ledger_dir(ws)
-    if led.is_dir() and any(led.rglob("*.jsonl")) and not force:
-        raise ValueError(f"migrate: {led} already has ledger files — already "
-                         "migrated? (pass force=True to append anyway)")
+def has_legacy_history(ws) -> bool:
+    for card in ns.load_characters(ws).values():
+        # Empty legacy lists (progression: [] on an untouched genesis card)
+        # are what a replay leaves too — only CONTENT means "not migrated".
+        if card.get("progression") or any(ns.is_transient_key(k) for k in card):
+            return True
+    world = ns.load_yaml(ns.bible_dir(ws) / "world.yaml", {}) or {}
+    if "setting_log" in world or any(
+            isinstance(f, dict) and f.get("progression")
+            for f in (world.get("factions") or {}).values()):
+        return True
+    if any(t.get("hints") for t in ns.load_yaml(ns.bible_dir(ws) / "threads.yaml", []) or []):
+        return True
+    return any("progress_notes" in a
+               for a in ns.load_yaml(ns.bible_dir(ws) / "arcs.yaml", []) or [])
 
+
+def journal_ledger_rows(ws, genesis_cast: set[str], genesis_threads: set[str]
+                        ) -> list[tuple[str, str, dict]]:
+    """(kind, entity, row) in apply_state order, derived from events.yaml."""
+    out: list[tuple[str, str, dict]] = []
+    cards = ns.load_characters(ws)
+    protagonist = ns._find_protagonist(cards)
+    known = set(genesis_cast)
+    threads_known = set(genesis_threads)
+    arcs = {str(a.get("name")): {str(nd.get("id")) for nd in a.get("nodes") or []}
+            for a in ns.load_yaml(ns.bible_dir(ws) / "arcs.yaml", []) or []}
+    done: dict[str, set] = {k: set() for k in arcs}
+    for n in ns.written_chapters(ws):
+        rec = ns.load_yaml(ns.chapter_dir(ws, n) / "events.yaml", {}) or {}
+        for ev in rec.get("events") or []:
+            et, name = ev.get("entity_type"), str(ev.get("entity_name") or "")
+            changes, reason = ev.get("changes") or {}, str(ev.get("reason") or "")
+            if et in ("character", "protagonist"):
+                if et == "protagonist" and name not in known and protagonist:
+                    name = protagonist
+                created = name not in known
+                known.add(name)
+                out.append(("characters", name, {
+                    "chapter": n, "type": "create" if created else "event",
+                    "changes": changes, "reason": reason}))
+            elif et == "faction":
+                out.append(("factions", name, {"chapter": n, "type": "event",
+                                               "changes": changes, "reason": reason}))
+            elif et == "world_setting":
+                out.append(("settings", name, {"chapter": n, "type": "event",
+                                               "changes": changes, "reason": reason}))
+        for ap in rec.get("appearances") or []:
+            nm = str(ap.get("name") or "")
+            if nm in known:
+                row = {"chapter": n, "type": "appearance"}
+                if ap.get("importance") is not None:
+                    row["importance"] = ap.get("importance")
+                out.append(("characters", nm, row))
+        for up in rec.get("thread_updates") or []:
+            nm, action = str(up.get("name") or ""), up.get("action")
+            if nm not in threads_known:
+                if action == "register":
+                    threads_known.add(nm)
+                    out.append(("threads", nm, {"chapter": n, "type": "register",
+                                                "detail": up.get("detail", "")}))
+                continue
+            if action in ("hint", "resolve", "abandon"):
+                out.append(("threads", nm, {"chapter": n, "type": action,
+                                            "detail": up.get("detail", "")}))
+        for up in rec.get("arc_updates") or []:
+            nm = str(up.get("name") or "")
+            if nm not in arcs:
+                continue
+            for nid in up.get("nodes_completed") or []:
+                nid = str(nid)
+                if nid in arcs[nm] and nid not in done[nm]:
+                    done[nm].add(nid)
+                    out.append(("arcs", nm, {"chapter": n, "type": "node_completed",
+                                             "node": nid}))
+            if up.get("notes"):
+                out.append(("arcs", nm, {"chapter": n, "type": "note",
+                                         "detail": up["notes"]}))
+    return out
+
+
+def strip_legacy_history(ws, touched: set[tuple[str, str]],
+                         stale_after: int | None = None) -> dict:
+    """Bring a pre-ledger bible to the new current-state shape, in place.
+
+    Mirrors what the new apply_* code does to an entity it TOUCHES (pops the
+    legacy ``progression``/``hints`` block): only entities with a journal row
+    (``touched``) are rewritten, so an untouched genesis card keeps its empty
+    ``progression: []`` exactly as a replay of the journals would."""
+    rep = {"characters": 0, "dropped_transient_keys": 0, "dropped_stale_keys": 0}
+    latest = (ns.written_chapters(ws) or [0])[-1]
     bib = ns.bible_dir(ws)
-    before = _tree_bytes(bib)
-    rows: dict[tuple[str, str], list[dict]] = {}
-
-    def add(kind, name, row):
-        rows.setdefault((kind, str(name)), []).append({**row, "migrated": True})
-
-    report = {"characters": 0, "character_rows": 0, "dropped_transient_keys": 0,
-              "faction_rows": 0, "setting_rows": 0, "thread_rows": 0,
-              "arc_rows": 0, "appearance_rows": 0, "dropped_stale_keys": 0}
-    chapters_done = ns.written_chapters(ws)
-    latest = chapters_done[-1] if chapters_done else 0
-
-    # ── characters ──
-    new_cards: dict[Path, dict] = {}
     for p in sorted(ns.characters_dir(ws).glob("*.yaml")):
         card = ns.load_yaml(p, {}) or {}
-        name = str(card.get("name") or p.stem)
-        last_set: dict[str, int] = {}
-        for e in card.get("progression") or []:
-            for k in (e.get("changes") or {}):
-                last_set[k] = e.get("chapter") or 0
+        cname = str(card.get("name") or p.stem)
+        if ("characters", cname) not in touched and not card.get("progression") \
+                and not any(ns.is_transient_key(k) for k in card):
+            continue
+        before = dict(card)
+        prog = card.pop("progression", None) or []
+        for k in [k for k in card if ns.is_transient_key(k)]:
+            card.pop(k)
+            rep["dropped_transient_keys"] += 1
         if stale_after is not None:
+            last_set: dict[str, int] = {}
+            for e in prog:
+                for k in (e.get("changes") or {}):
+                    last_set[k] = e.get("chapter") or 0
             keep = PROTECTED_KEYS | set(card.get("initial") or {})
             for k, ch in last_set.items():
                 if k in card and k not in keep and latest - ch > stale_after:
                     card.pop(k)
-                    report["dropped_stale_keys"] += 1
-        for e in card.pop("progression", None) or []:
-            add("characters", name, {"chapter": e.get("chapter"), "type": "event",
-                                     "changes": e.get("changes") or {},
-                                     "reason": e.get("reason", "")})
-            report["character_rows"] += 1
-        for k in [k for k in card if ns.is_transient_key(k)]:
-            card.pop(k)
-            report["dropped_transient_keys"] += 1
-        if "initial" in card:
-            card["initial"] = copy.deepcopy(card["initial"])
-        new_cards[p] = copy.deepcopy(card)
-        report["characters"] += 1
+                    rep["dropped_stale_keys"] += 1
+        rep["characters"] += 1
+        if card != before:
+            ns.dump_yaml(p, card)
+    wp = bib / "world.yaml"
+    world = ns.load_yaml(wp, None)
+    if isinstance(world, dict):
+        changed = world.pop("setting_log", None) is not None
+        for fname, f in (world.get("factions") or {}).items():
+            if isinstance(f, dict) and "progression" in f and (
+                    ("factions", str(fname)) in touched or f["progression"]):
+                f.pop("progression")
+                changed = True
+        if changed:
+            ns.dump_yaml(wp, world)
+    tp = bib / "threads.yaml"
+    threads = ns.load_yaml(tp, None)
+    if isinstance(threads, list):
+        hit = [t for t in threads if "hints" in t and (
+            ("threads", str(t.get("name"))) in touched or t.get("hints"))]
+        for t in hit:
+            ns.absorb_legacy_hints(t)
+        if hit:
+            ns.dump_yaml(tp, threads)
+    ap = bib / "arcs.yaml"
+    arcs = ns.load_yaml(ap, None)
+    if isinstance(arcs, list) and any("progress_notes" in a for a in arcs):
+        for a in arcs:
+            notes = a.pop("progress_notes", None) or []
+            if notes:
+                a["latest_note"] = notes[-1]
+        ns.dump_yaml(ap, arcs)
+    return rep
 
+
+def migrate(repo, dry_run: bool = False, force: bool = False,
+            stale_after: int | None = None) -> dict:
+    ws = Path(repo)
+    if not ns.bible_exists(ws):
+        raise ValueError(f"migrate: no novel bible under {ws}")
+    if not has_legacy_history(ws) and not force:
+        return {"migrated": False, "reason": "no legacy history in bible — "
+                "nothing to migrate"}
+    bib, led = ns.bible_dir(ws), ns.ledger_dir(ws)
+    before = _tree_bytes(bib)
+
+    # Genesis cast/threads = entities never created/registered by a journal.
+    created, registered = set(), set()
     for n in ns.written_chapters(ws):
-        ev = ns.load_yaml(ns.chapter_dir(ws, n) / "events.yaml", {}) or {}
-        for ap in ev.get("appearances") or []:
-            if ap.get("name"):
-                row = {"chapter": n, "type": "appearance"}
-                if ap.get("importance") is not None:
-                    row["importance"] = ap["importance"]
-                add("characters", ap["name"], row)
-                report["appearance_rows"] += 1
+        rec = ns.load_yaml(ns.chapter_dir(ws, n) / "events.yaml", {}) or {}
+        created |= {str(e.get("entity_name")) for e in rec.get("events") or []
+                    if e.get("create")}
+        registered |= {str(u.get("name")) for u in rec.get("thread_updates") or []
+                       if u.get("action") == "register"}
+    cast = set(ns.load_characters(ws)) - created
+    threads = {str(t.get("name")) for t in
+               ns.load_yaml(bib / "threads.yaml", []) or []} - registered
+    # Legacy bibles may list an early-registered thread in genesis too; a
+    # thread registered by a journal is only "known" from that chapter on.
 
-    # ── world: factions + settings ──
-    world_path = bib / "world.yaml"
-    world = ns.load_yaml(world_path, {}) or {}
-    for fname, f in (world.get("factions") or {}).items():
-        if isinstance(f, dict):
-            for e in f.pop("progression", None) or []:
-                add("factions", fname, {"chapter": e.get("chapter"), "type": "event",
-                                        "changes": e.get("changes") or {},
-                                        "reason": e.get("reason", "")})
-                report["faction_rows"] += 1
-    for e in world.pop("setting_log", None) or []:
-        add("settings", e.get("name", "_unnamed"),
-            {"chapter": e.get("chapter"), "type": "event",
-             "changes": e.get("changes") or {}, "reason": e.get("reason", "")})
-        report["setting_rows"] += 1
+    existing: dict[tuple[str, str], list[dict]] = {}
+    booked: set[int] = set()
+    if led.is_dir():
+        for kind in ns.LEDGER_KINDS:
+            for f in sorted((led / kind).glob("*.jsonl")) if (led / kind).is_dir() else []:
+                rows = [json.loads(x) for x in f.read_text(encoding="utf-8").splitlines() if x.strip()]
+                if rows:
+                    existing[(kind, rows[0].get("entity", f.stem))] = rows
+                    booked |= {r.get("chapter") for r in rows}
 
-    # ── threads ──
-    threads_path = bib / "threads.yaml"
-    threads = ns.load_yaml(threads_path, []) or []
-    for t in threads:
-        tname = t.get("name")
-        if t.get("introduced_chapter"):
-            add("threads", tname, {"chapter": t["introduced_chapter"],
-                                   "type": "register", "detail": ""})
-        hints = t.pop("hints", None) or []
-        for h in hints:
-            add("threads", tname, {"chapter": h.get("chapter"), "type": "hint",
-                                   "detail": h.get("hint", "")})
-            report["thread_rows"] += 1
-        if hints:
-            t["hint_count"] = len(hints)
-            t["last_hint_chapter"] = hints[-1].get("chapter")
-            t["last_hint"] = hints[-1].get("hint", "")
-        if t.get("resolution_chapter"):
-            add("threads", tname, {"chapter": t["resolution_chapter"],
-                                   "type": "resolve",
-                                   "detail": t.get("resolution", "")})
+    derived = [(k, nm, r) for k, nm, r in journal_ledger_rows(ws, cast, threads)
+               if r["chapter"] not in booked]
+    rows: dict[tuple[str, str], list[dict]] = {}
+    for k, nm, r in derived:
+        rows.setdefault((k, nm), []).append({"entity": nm, **r})
+    for key, rs in existing.items():
+        rows.setdefault(key, []).extend(rs)
 
-    # ── arcs ──
-    arcs_path = bib / "arcs.yaml"
-    arcs = ns.load_yaml(arcs_path, []) or []
-    for a in arcs:
-        aname = a.get("name")
-        for nd in a.get("nodes") or []:
-            if nd.get("completed_chapter"):
-                add("arcs", aname, {"chapter": nd["completed_chapter"],
-                                    "type": "node_completed",
-                                    "node": str(nd.get("id"))})
-                report["arc_rows"] += 1
-        notes = a.pop("progress_notes", None) or []
-        for nt in notes:
-            add("arcs", aname, {"chapter": nt.get("chapter"), "type": "note",
-                                "detail": nt.get("note", "")})
-            report["arc_rows"] += 1
-        if notes:
-            a["latest_note"] = notes[-1]
-
-    report["ledger_files"] = len(rows)
+    report = {"migrated": True, "ledger_rows": len(derived),
+              "kept_existing_rows": sum(len(v) for v in existing.values()),
+              "ledger_files": len(rows)}
     if dry_run:
         report["dry_run"] = True
         return report
 
-    for p, card in new_cards.items():
-        ns.dump_yaml(p, card)
-    if world:
-        ns.dump_yaml(world_path, world)
-    if threads_path.is_file():
-        ns.dump_yaml(threads_path, threads)
-    if arcs_path.is_file():
-        ns.dump_yaml(arcs_path, arcs)
-    for (kind, name), rs in rows.items():
-        rs.sort(key=lambda r: (r.get("chapter") or 0))
-        for r in rs:
-            ns.ledger_append(ws, kind, name, r)
-    ns.rebuild_index(ws)
+    with ns.state_transaction(ws):
+        touched = {(k, nm) for k, nm, _ in journal_ledger_rows(ws, cast, threads)} \
+            | set(existing)
+        report.update(strip_legacy_history(ws, touched, stale_after=stale_after))
+        for (kind, name), rs in rows.items():
+            rs.sort(key=lambda r: (r.get("chapter") or 0))   # stable: keeps order within a chapter
+            p = ns.ledger_path(ws, kind, name)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("".join(json.dumps(r, ensure_ascii=False, default=str) + "\n"
+                                 for r in rs), encoding="utf-8")
+        ns.rebuild_index(ws)
 
     report["bible_bytes_before"] = before
     report["bible_bytes_after"] = _tree_bytes(bib)

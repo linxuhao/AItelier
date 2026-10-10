@@ -203,47 +203,182 @@ def test_repeated_across_chapters_excludes_names():
 
 # ── migration ───────────────────────────────────────────────────────────────
 
-def test_migration_splits_history_and_is_idempotent_guarded(tmp_path):
-    legacy = {"name": "尹骁", "status": "dead", "power_level": 4000,
-              "progression": [
-                  {"chapter": 3, "changes": {"伤情": "红", "本章行动": "断后"}, "reason": "a"},
-                  {"chapter": 8, "changes": {"伤情": "白"}, "reason": "b"}],
-              "initial": {"name": "尹骁", "status": "alive"},
-              "伤情": "白", "本章行动": "断后"}
-    _bible(tmp_path, [legacy],
-           threads=[{"name": "门", "status": "open", "introduced_chapter": 1,
-                     "hints": [{"chapter": 2, "hint": "h1"}, {"chapter": 5, "hint": "h2"}]}],
-           arcs=[{"name": "主线", "nodes": [{"id": "n1", "status": "done", "completed_chapter": 4}],
-                  "progress_notes": [{"chapter": 4, "note": "完"}]}],
-           world={"factions": {"会": {"tier": 2, "progression": [{"chapter": 1, "changes": {"tier": 2}}]}},
-                  "setting_log": [{"chapter": 1, "name": "灵气", "changes": {"v": 1}}]})
-    _chapter(tmp_path, 1, "正文", appearances=["尹骁"])
-    dry = migrate(tmp_path, dry_run=True)
-    assert dry["character_rows"] == 2 and "progression" in ns.load_characters(tmp_path)["尹骁"]
-    rep = migrate(tmp_path)
-    card = ns.load_characters(tmp_path)["尹骁"]
-    assert "progression" not in card and "本章行动" not in card and card["伤情"] == "白"
-    assert rep["dropped_transient_keys"] == 1 and rep["appearance_rows"] == 1
-    rows = ns.read_ledger(tmp_path, "characters", "尹骁")
-    assert [r["type"] for r in rows] == ["appearance", "event", "event"]
-    t = ns.load_yaml(ns.bible_dir(tmp_path) / "threads.yaml")[0]
-    assert t["hint_count"] == 2 and t["last_hint_chapter"] == 5 and "hints" not in t
-    world = ns.load_yaml(ns.bible_dir(tmp_path) / "world.yaml")
-    assert "setting_log" not in world and "progression" not in world["factions"]["会"]
-    assert ns.query_ledger(tmp_path, kind="arcs", entry_type="note")[0]["detail"] == "完"
-    assert rep["bible_bytes_after"] < rep["bible_bytes_before"]
-    with pytest.raises(ValueError, match="already"):
-        migrate(tmp_path)
+import copy
+import shutil
+
+GENESIS_CARDS = [
+    {"name": "季衡", "role": "protagonist", "is_protagonist": True, "status": "alive",
+     "power_level": 1, "personality": ["数数"], "progression": []},
+    {"name": "尹骁", "role": "mentor", "status": "alive", "power_level": 4000,
+     "progression": []},
+]
+JOURNALS = {
+    1: {"events": [{"entity_type": "character", "entity_name": "尹骁",
+                    "changes": {"伤情": "右臂发红", "本章行动": "断后"}, "reason": "a"},
+                   {"entity_type": "world_setting", "entity_name": "灵气",
+                    "changes": {"v": "1%"}, "reason": "测"}],
+        "appearances": [{"name": "季衡"}, {"name": "尹骁", "importance": 9}],
+        "thread_updates": [{"name": "门", "action": "hint", "detail": "门响"}],
+        "arc_updates": [{"name": "主线", "nodes_completed": ["n1"], "notes": "半"}]},
+    2: {"events": [{"entity_type": "character", "entity_name": "尹骁",
+                    "changes": {"伤情": "右臂发白", "status": "dead"}, "reason": "b"},
+                   {"entity_type": "character", "entity_name": "唐栀", "create": True,
+                    "changes": {"role": "ally", "power_level": 5}, "reason": "登场"},
+                   {"entity_type": "protagonist", "entity_name": "主角",
+                    "changes": {"power_level": 2}, "reason": "c"}],
+        "appearances": [{"name": "季衡"}, {"name": "唐栀"}],
+        "thread_updates": [{"name": "门", "action": "hint", "detail": "门开"},
+                           {"name": "钥匙", "action": "register", "detail": "新"}],
+        "arc_updates": [{"name": "主线", "nodes_completed": [], "notes": "推进"}]},
+}
 
 
-def test_migration_cli_runs(tmp_path):
-    _bible(tmp_path, [{"name": "甲", "status": "alive"}])
-    import sys
-    from pathlib import Path
-    script = Path(__file__).resolve().parents[2] / "scripts" / "novel_ledger.py"
-    out = subprocess.run([sys.executable, str(script), "context-size", str(tmp_path)],
-                         capture_output=True, text=True, check=True)
-    assert json.loads(out.stdout)["chars"] > 0
+def _legacy_genesis(ws):
+    b = ns.bible_dir(ws)
+    b.mkdir(parents=True, exist_ok=True)
+    (b / "overview.md").write_text("# 总纲", encoding="utf-8")
+    ns.dump_yaml(b / "pacing.yaml", {"min_chars_per_chapter": 10})
+    ns.dump_yaml(b / "world.yaml", {"factions": {}})
+    ns.dump_yaml(b / "threads.yaml", [{"name": "门", "status": "open", "hints": []}])
+    ns.dump_yaml(b / "arcs.yaml", [{"name": "主线", "status": "active", "nodes": [
+        {"id": "n1", "beat": "x", "status": "pending"}, {"id": "n2", "beat": "y", "status": "pending"}]}])
+    for c in GENESIS_CARDS:
+        c = copy.deepcopy(c)
+        c["initial"] = {k: v for k, v in c.items() if k not in ("initial", "progression")}
+        ns.dump_yaml(ns.character_path(ws, c["name"]), c)
+
+
+def _journals(ws):
+    for n, rec in JOURNALS.items():
+        d = ns.chapter_dir(ws, n)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "prose.md").write_text("正文", encoding="utf-8")
+        (d / "summary.md").write_text(f"# 第{n}章\n\n摘要", encoding="utf-8")
+        ns.dump_yaml(d / "events.yaml", {"chapter": n, **copy.deepcopy(rec)})
+
+
+def _old_code_apply(ws):
+    """What the PRE-ledger apply_* wrote (history inside the bible)."""
+    for n, rec in JOURNALS.items():
+        cards = ns.load_characters(ws)
+        prot = ns._find_protagonist(cards)
+        world = ns.load_yaml(ns.bible_dir(ws) / "world.yaml", {})
+        for ev in rec["events"]:
+            name, ch = ev["entity_name"], ev["changes"]
+            if ev["entity_type"] in ("character", "protagonist"):
+                if ev["entity_type"] == "protagonist" and name not in cards:
+                    name = prot
+                card = cards.get(name)
+                created = card is None
+                if created:
+                    card = cards[name] = {"name": name, "status": "alive", "progression": []}
+                for k, v in ch.items():
+                    card[k] = v
+                if created:
+                    card["initial"] = {k: v for k, v in card.items() if k not in ("initial", "progression")}
+                card["progression"].append({"chapter": n, "changes": ch, "reason": ev["reason"]})
+                ns.dump_yaml(ns.character_path(ws, name), card)
+            else:
+                st = world.setdefault("settings", {})
+                new = ev["entity_name"] not in st
+                e = st.setdefault(ev["entity_name"], {})
+                e.update(ch)
+                if new:
+                    e["initial"] = dict(ch)
+                world.setdefault("setting_log", []).append(
+                    {"chapter": n, "name": ev["entity_name"], "changes": ch, "reason": ev["reason"]})
+        ns.dump_yaml(ns.bible_dir(ws) / "world.yaml", world)
+        cards = ns.load_characters(ws)
+        for ap in rec["appearances"]:
+            c = cards[ap["name"]]
+            c["last_appearance"] = n
+            c.setdefault("first_appearance", n)
+            ns.dump_yaml(ns.character_path(ws, ap["name"]), c)
+        threads = ns.load_yaml(ns.bible_dir(ws) / "threads.yaml", [])
+        for up in rec["thread_updates"]:
+            t = next((t for t in threads if t["name"] == up["name"]), None)
+            if t is None:
+                threads.append({"name": up["name"], "status": "open", "introduced_chapter": n, "hints": []})
+            else:
+                t["hints"].append({"chapter": n, "hint": up["detail"]})
+        ns.dump_yaml(ns.bible_dir(ws) / "threads.yaml", threads)
+        arcs = ns.load_yaml(ns.bible_dir(ws) / "arcs.yaml", [])
+        for up in rec["arc_updates"]:
+            a = arcs[0]
+            for nid in up["nodes_completed"]:
+                nd = next(x for x in a["nodes"] if x["id"] == nid)
+                nd["status"], nd["completed_chapter"] = "done", n
+            a.setdefault("progress_notes", []).append({"chapter": n, "note": up["notes"]})
+        ns.dump_yaml(ns.bible_dir(ws) / "arcs.yaml", arcs)
+
+
+def _new_code_replay(ws):
+    """The writing bench's replay: legacy genesis → new apply_* (no pre-pass)."""
+    for n, rec in JOURNALS.items():
+        ns.apply_events(ws, copy.deepcopy(rec["events"]), n)
+        ns.log_appearances(ws, rec["appearances"], n)
+        ns.apply_thread_updates(ws, rec["thread_updates"], n)
+        ns.apply_arc_updates(ws, rec["arc_updates"], n)
+    ns.rebuild_index(ws)
+
+
+def _files(root):
+    base = ns.novel_root(root)
+    return {str(p.relative_to(base)): p.read_bytes()
+            for sub in ("bible", "ledger", "state/index.yaml")
+            for p in ([base / sub] if (base / sub).is_file() else sorted((base / sub).rglob("*")))
+            if p.is_file()}
+
+
+def test_migrated_legacy_repo_equals_new_code_replay(tmp_path):
+    """The writing bench's replay guard needs this byte-for-byte."""
+    legacy, replay = tmp_path / "legacy", tmp_path / "replay"
+    _legacy_genesis(legacy)
+    _journals(legacy)
+    shutil.copytree(legacy, replay)
+    _old_code_apply(legacy)
+    ns.rebuild_index(legacy)
+    assert "progression" in ns.load_characters(legacy)["尹骁"]
+    rep = migrate(legacy)
+    assert rep["migrated"] is True and rep["dropped_transient_keys"] == 1
+    _new_code_replay(replay)
+    a, b = _files(legacy), _files(replay)
+    assert a.keys() == b.keys()
+    diff = [k for k in a if a[k] != b[k]]
+    assert not diff, {k: (a[k].decode()[:400], b[k].decode()[:400]) for k in diff}
+    card = ns.load_characters(legacy)["尹骁"]
+    assert card["伤情"] == "右臂发白" and "本章行动" not in card
+    assert [r["type"] for r in ns.read_ledger(legacy, "characters", "唐栀")] == ["create", "appearance"]
+    assert migrate(legacy)["migrated"] is False          # content-detected no-op
+
+
+def test_migration_keeps_post_deploy_rows_and_rolls_back(tmp_path, monkeypatch):
+    ws = tmp_path / "w"
+    _legacy_genesis(ws)
+    _journals(ws)
+    _old_code_apply(ws)
+    # a chapter booked by the new code before anyone migrated
+    ns.ledger_append(ws, "characters", "季衡", {"chapter": 3, "type": "appearance"})
+    before = _files(ws)
+    import aitelier.novel_ledger_migrate as m
+    monkeypatch.setattr(m.ns, "rebuild_index", lambda w: (_ for _ in ()).throw(RuntimeError("boom")))
+    with pytest.raises(RuntimeError):
+        migrate(ws)
+    assert _files(ws) == before                          # transaction rolled back
+    monkeypatch.undo()
+    migrate(ws)
+    rows = ns.read_ledger(ws, "characters", "季衡")
+    assert [r["chapter"] for r in rows] == [1, 2, 2, 3]   # ch2 = event + appearance
+
+
+def test_migration_dry_run_writes_nothing(tmp_path):
+    ws = tmp_path / "w"
+    _legacy_genesis(ws)
+    _journals(ws)
+    _old_code_apply(ws)
+    before = _files(ws)
+    assert migrate(ws, dry_run=True)["dry_run"] is True
+    assert _files(ws) == before
 
 
 def test_migration_stale_after_drops_old_state_keys_only(tmp_path):
@@ -258,4 +393,32 @@ def test_migration_stale_after_drops_old_state_keys_only(tmp_path):
     card = ns.load_characters(tmp_path)["甲"]
     assert "旧伤" not in card and card["新伤"] == "y" and card["power_level"] == 1
     assert rep["dropped_stale_keys"] == 1
-    assert ns.query_ledger(tmp_path, name="甲", field="旧伤")  # still queryable
+
+
+def test_bad_tic_regex_is_advisory_not_crash(tmp_path):
+    _bible(tmp_path, [{"name": "甲", "status": "alive"}],
+           pacing={"min_chars_per_chapter": 10,
+                   "style": {"narration_tics": [{"pattern": "走到(", "max_per_chapter": 0}]}})
+    _stage(tmp_path, "# 第1章：试\n\n走到肩。\n\n他抬手——")
+    r = continuity_check(workspace_root=str(tmp_path), out_dir=str(tmp_path / "cc"))
+    assert r["passed"] is True
+    rep = json.loads((tmp_path / "cc" / "continuity_report.json").read_text(encoding="utf-8"))
+    assert any("正则无效" in a for a in rep["advisories"])
+
+
+def test_negative_limit_does_not_drop_rows(tmp_path):
+    _bible(tmp_path, [{"name": "甲", "status": "alive"}])
+    for ch in (1, 2):
+        ns.ledger_append(tmp_path, "characters", "甲", {"chapter": ch, "type": "event"})
+    assert len(ns.query_ledger(tmp_path, limit=-1)) == 2
+    assert ledger_query(workspace_root=str(tmp_path), limit=-5)["count"] == 1
+
+
+def test_migration_cli_runs(tmp_path):
+    _bible(tmp_path, [{"name": "甲", "status": "alive"}])
+    import sys
+    from pathlib import Path
+    script = Path(__file__).resolve().parents[2] / "scripts" / "novel_ledger.py"
+    out = subprocess.run([sys.executable, str(script), "context-size", str(tmp_path)],
+                         capture_output=True, text=True, check=True)
+    assert json.loads(out.stdout)["chars"] > 0

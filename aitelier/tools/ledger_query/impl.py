@@ -29,7 +29,7 @@ def ledger_query(*, project_root: str = "", workspace_root: str = "",
         base, kind=kind or None, name=name or None, chapter=chapter,
         chapter_from=chapter_from, chapter_to=chapter_to, field=field or None,
         entry_type=entry_type or None,
-        limit=min(int(limit or MAX_ROWS), MAX_ROWS))
+        limit=max(1, min(int(limit or MAX_ROWS), MAX_ROWS)))
     result = {"count": len(rows), "rows": rows}
     if out_dir:
         out = Path(out_dir)

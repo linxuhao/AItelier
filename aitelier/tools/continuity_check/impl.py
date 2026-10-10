@@ -81,7 +81,10 @@ _CJK_RUN = re.compile(r"[\u4e00-\u9fff]+")
 
 def _count(prose: str, rule: dict) -> int:
     if rule.get("pattern"):
-        return len(re.findall(str(rule["pattern"]), prose))
+        try:
+            return len(re.findall(str(rule["pattern"]), prose))
+        except re.error:
+            return 0          # reported once by voice_checks, never crashes the gate
     return prose.count(str(rule.get("text") or "")) if rule.get("text") else 0
 
 
@@ -155,6 +158,13 @@ def voice_checks(base, prose: str, n: int) -> tuple[list[str], list[str]]:
     style = ns.load_style(base)
     characters = ns.load_characters(base)
     rules = _tic_rules(style, characters)
+    for r in list(rules):
+        if r.get("pattern"):
+            try:
+                re.compile(str(r["pattern"]))
+            except re.error as e:
+                advisories.append(f"style 口癖正则无效，已跳过: /{r['pattern']}/ ({e})")
+                rules.remove(r)
     for r in rules:
         c = _count(prose, r)
         cap = int(r.get("max_per_chapter", 1))

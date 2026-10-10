@@ -48,4 +48,4 @@ ledger_query(kind="characters", name="尹骁", field="右臂", chapter_from=8)
 
 **Operator CLI** on the server: `python scripts/novel_ledger.py query <novel_repo> --kind characters --name 尹骁 --field 右臂`.
 
-Migrating an old repo (history still inside bible files): `python scripts/novel_ledger.py migrate <novel_repo> --dry-run` first; it never commits.
+Migrating an old repo (history still inside bible files): `python scripts/novel_ledger.py migrate <novel_repo> --dry-run` first; it never commits. Migrate **before the first chapter booked after deploy** if you can (chapters booked earlier are kept and merged, but a pre-migration probe still shows the old flattened card keys). The ledger is rebuilt from `chapters/*/events.yaml`, so a migrated repo equals a fresh replay of its journals; `--stale-after N` is opt-in and breaks that equality (writing-bench repos must not use it). Re-running is a no-op once no legacy history block is left; the write is one transaction.

@@ -11,6 +11,10 @@ from core.director_messaging_protocol import DirectorMessageError
 from tests.unit.test_driver_p2 import peers,send
 
 TABLES={'state_director_delivery_acks','state_director_legacy_acks'}
+# Multi-driver P3 (rebased onto this policy) classifies its own tables: handoff
+# packages and frozen subagent contexts private, the enforcement switch public.
+P3_PRIVATE={'state_handoffs','state_subagent_contexts'}
+P3_PUBLIC={'state_project_enforcement'}
 BASE='f367c46f2cd29d4d3306aa6ca540bf8c54ebbeb9'
 
 def old_sets():
@@ -22,10 +26,11 @@ def old_sets():
 
 def test_policy_adds_only_two_private_ack_tables_and_preserves_public_set():
     old=old_sets()
-    assert set(PRIVATE_STATE_TABLES)-old['PRIVATE_STATE_TABLES']==TABLES
+    assert set(PRIVATE_STATE_TABLES)-old['PRIVATE_STATE_TABLES']==TABLES|P3_PRIVATE
     assert not old['PRIVATE_STATE_TABLES']-set(PRIVATE_STATE_TABLES)
-    assert set(PUBLIC_STATE_TABLES)==old['PUBLIC_STATE_TABLES']
-    assert not TABLES & set(PUBLIC_STATE_TABLES)
+    assert set(PUBLIC_STATE_TABLES)-old['PUBLIC_STATE_TABLES']==P3_PUBLIC
+    assert not old['PUBLIC_STATE_TABLES']-set(PUBLIC_STATE_TABLES)
+    assert not (TABLES|P3_PRIVATE) & set(PUBLIC_STATE_TABLES)
 
 def ack_ledger(db):
     with db.get_connection() as c:

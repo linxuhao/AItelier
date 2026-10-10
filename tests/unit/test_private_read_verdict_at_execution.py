@@ -54,7 +54,7 @@ _ARGS = {
     "get_handoff": {"project_id": C.OPEN, "handoff_id": "handoff-canary"},
     "list_handoffs": {"project_id": C.OPEN},
     "list_subagents": {"project_id": C.OPEN},
-    "list_driver_notices": {"project_id": C.OPEN, "driver_id": "seeder-driver"},
+    "list_driver_notices": {"project_id": C.OPEN, "driver_id": "execpoint"},
     "list_director_messages": {"project_id": C.OPEN},
     "project_visibility": {"project_id": C.OPEN},
     "wait_for_state_change": {"project_id": C.OPEN, "timeout_seconds": 0,

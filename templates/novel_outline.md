@@ -73,3 +73,11 @@
 - **反馈里的引文是"被投诉的旧句"，不是"要改成的样子"**：用户/评审引用原文是为了定位问题。把引文抄回章纲 = 精确回退修复（实际发生过的事故）。动手前先看当前版本，核对仍有效的历史裁定；同事项被最新明确裁定取代的要求不再执行。
 - 章纲长度 500-800 字为宜——给正文留创作空间，但情节走向无歧义。
 - 语言与设定集一致。
+
+## 当前状态 vs 历史（ledger_query）
+- 上下文包（probe）里的角色卡/世界/伏笔/剧情前沿就是**当前状态**，直接据此写，不要从历史里重建。
+- 需要**历史**（某人第 N 章的伤势/位置、某伏笔以前的暗示、某人上次出场）时用 `ledger_query` 按需查，**只问一个实体、一段章号或一个字段**，例如：
+  - `ledger_query(kind="characters", name="尹骁", field="右臂", chapter_from=8)`
+  - `ledger_query(kind="threads", name="伏笔名", entry_type="hint")`
+  - `ledger_query(kind="characters", name="配角名", entry_type="appearance", limit=3)`
+- 不要去读 bible 文件里旧的 progression / setting_log / hints 块（迁移前遗留），也不要先整章翻旧正文。外部 driver 用 MCP `novel_ledger_query`（多一个 `project_id` 参数）或 `GET /api/projects/<id>/novel/ledger`，详见 docs/novel-ledger.md。

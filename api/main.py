@@ -39,6 +39,7 @@ from api.driver_routers import router as driver_router
 from api.repo_routers import router as repo_router
 from api.model_routers import router as model_router
 from api.state_graph_routers import router as state_graph_router
+from api.novel_routers import router as novel_router
 from api.sse_manager import stream_manager
 from core.scheduler import start_scheduler
 
@@ -285,6 +286,7 @@ app.include_router(driver_router)
 app.include_router(repo_router)
 app.include_router(model_router)
 app.include_router(state_graph_router)
+app.include_router(novel_router)
 
 # A project-privacy refusal raised at the `execute` chokepoint answers 403 on every
 # route of the product app — including one a route author forges by reusing the real

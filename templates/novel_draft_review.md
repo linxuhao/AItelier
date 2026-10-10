@@ -13,6 +13,14 @@
 
 **举证纪律**：每条不通过意见必须引用正文原句。无法引用原文的印象式意见（"感觉节奏不太好"）不得作为打回理由。这是硬规则：无举证 = 无效意见。
 
+## 当前状态 vs 历史（ledger_query）
+- 上下文包（probe）里的角色卡/世界/伏笔/剧情前沿就是**当前状态**，直接据此写，不要从历史里重建。
+- 需要**历史**（某人第 N 章的伤势/位置、某伏笔以前的暗示、某人上次出场）时用 `ledger_query` 按需查，**只问一个实体、一段章号或一个字段**，例如：
+  - `ledger_query(kind="characters", name="尹骁", field="右臂", chapter_from=8)`
+  - `ledger_query(kind="threads", name="伏笔名", entry_type="hint")`
+  - `ledger_query(kind="characters", name="配角名", entry_type="appearance", limit=3)`
+- 不要去读 bible 文件里旧的 progression / setting_log / hints 块（迁移前遗留），也不要先整章翻旧正文。外部 driver 用 MCP `novel_ledger_query`（多一个 `project_id` 参数）或 `GET /api/projects/<id>/novel/ledger`，详见 docs/novel-ledger.md。
+
 ## 七维评审
 
 1. **设定一致性**：境界/能力/地理/规则与上下文包的 bible 摘要相符？数字前后一致（灵石数量、年龄、距离）？

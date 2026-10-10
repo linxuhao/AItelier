@@ -65,6 +65,7 @@ _TOOL_KIND: dict[str, str] = {}
 # State goals/evidence may contain private product plans: reads require a writer.
 _PRIVATE_READ_TOOLS = frozenset({
     "state_graph_read", "trace_list", "trace_search", "trace_read", "get_step_output",
+    "novel_ledger_query",   # novel content is private (commercial source)
 })
 _DIRECTOR_ACTIONS = frozenset({
     "send_director_message", "list_director_messages",
@@ -347,6 +348,7 @@ def build_mcp() -> FastMCP:
     _register_trace_tools(tool)
     _register_lifecycle_tools(tool)
     _register_model_tools(tool)
+    _register_novel_tools(tool)
     from api.state_graph_tools import register_state_tools
     register_state_tools(tool, mcp)
     _install_director_call_guard(mcp)
@@ -367,6 +369,41 @@ def build_mcp() -> FastMCP:
         )
 
     return mcp
+
+
+# ── Novel ledger (history lookup) ───────────────────────────────────────────
+# Bible cards are CURRENT STATE (in the state_probe context pack); per-chapter
+# history is the append-only novel/ledger/. Same query as the HTTP route
+# GET /api/projects/{id}/novel/ledger and the internal `ledger_query` tool.
+
+def _register_novel_tools(tool):
+    @tool("novel_ledger_query", "read",
+          "Look up a novel project's per-chapter HISTORY (append-only ledger) - "
+          "e.g. what a character's injury was in chapter 8, which hints a thread "
+          "got, when someone last appeared. Current state is already in the "
+          "chapter context pack (step `probe`, novel_context.md); use this for "
+          "history only, never by reading old bible history blocks. Filters: "
+          "kind (characters|factions|settings|threads|arcs), name (canonical "
+          "entity name), chapter / chapter_from / chapter_to, field (substring "
+          "of a changed key, e.g. 右臂), entry_type (event|create|appearance|"
+          "register|hint|resolve|abandon|node_completed|note), limit (newest "
+          "rows kept; default 50, max 200). Private read.")
+    def novel_ledger_query(project_id: str, kind: str = "", name: str = "",
+                           chapter: int | None = None,
+                           chapter_from: int | None = None,
+                           chapter_to: int | None = None, field: str = "",
+                           entry_type: str = "", limit: int = 50) -> dict:
+        import api.dependencies as deps
+        from api.novel_routers import LedgerLookupError, ledger_lookup
+        try:
+            return ledger_lookup(
+                project_id, db=deps.get_db_manager(),
+                ws=deps.get_workspace_manager(), kind=kind, name=name,
+                chapter=chapter, chapter_from=chapter_from,
+                chapter_to=chapter_to, field=field, entry_type=entry_type,
+                limit=limit)
+        except LedgerLookupError as e:
+            return {"error": str(e)}
 
 
 # ── Model routing tools ──────────────────────────────────────────────────────

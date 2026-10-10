@@ -273,7 +273,9 @@ def state_probe(*, project_root: str = "", workspace_root: str = "",
             "- **记账本（ledger，只供查询）** `novel/ledger/<kind>/<名>.jsonl`，kind ∈ "
             "characters/factions/settings/threads/arcs，每行一条逐章分录。按实体+章号查用 "
             "`ledger_query`（如 kind=characters, name=尹骁, field=右臂, chapter_from=8），"
-            "或直接 read 单个实体文件。bible 里的卡片只有当前状态，不含历史。",
+            "或直接 read 单个实体文件。外部 driver 用 MCP `novel_ledger_query`（加 project_id）或 "
+            "`GET /api/projects/<id>/novel/ledger`。bible 里的卡片只有当前状态，不含历史——"
+            "不要读旧的 progression/setting_log/hints 块。",
             "- **边界**：`novel/chapters/` 只有**已入册的旧章**。**本章**的草稿/章纲/"
             "终稿是 step 输出，读它们用 `source: \"step:draft\"` 等 + 文件名本身"
             "（如 `read(path='chapter_draft.md', source='step:draft')`），"

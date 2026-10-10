@@ -40,6 +40,14 @@ checkpoint 反馈、director_brief、章纲里的限制是作者约束，不是�
   - 自检：遮住对话标签，每句台词仍能认出是谁说的。“说/问”可自然使用，不为躲避重复硬塞表情、动作或同义词。
 - **章末照章纲落钩**，收在情绪未落地处；禁止"一切安好"式收尾。
 
+## 当前状态 vs 历史（ledger_query）
+- 上下文包（probe）里的角色卡/世界/伏笔/剧情前沿就是**当前状态**，直接据此写，不要从历史里重建。
+- 需要**历史**（某人第 N 章的伤势/位置、某伏笔以前的暗示、某人上次出场）时用 `ledger_query` 按需查，**只问一个实体、一段章号或一个字段**，例如：
+  - `ledger_query(kind="characters", name="尹骁", field="右臂", chapter_from=8)`
+  - `ledger_query(kind="threads", name="伏笔名", entry_type="hint")`
+  - `ledger_query(kind="characters", name="配角名", entry_type="appearance", limit=3)`
+- 不要去读 bible 文件里旧的 progression / setting_log / hints 块（迁移前遗留），也不要先整章翻旧正文。外部 driver 用 MCP `novel_ledger_query`（多一个 `project_id` 参数）或 `GET /api/projects/<id>/novel/ledger`，详见 docs/novel-ledger.md。
+
 ## 去 AI 味（初稿即控制，润色步会再过一遍并有机器密度门槛）
 - 少用：不禁、仿佛、宛如、映入眼帘、只见、脸色一变、嘴角微扬、心中暗道、目光如炬、眼中闪过一丝。
 - 禁止空洞结语：这注定是一个不平凡的夜晚、未来的路还很长、前途无量。

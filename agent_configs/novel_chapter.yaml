@@ -10,7 +10,7 @@ novel_outliner:
   # Web tools: pull current 梗/时事 or sample a "写得像《X》/像作者Y" style ref while
   # planning. Used ON DEMAND only (see template) — most chapters need zero searches.
   # web_search needs SEARXNG_URL set; unset → it fails soft and the outliner proceeds.
-  tools: ["web_search", "web_fetch"]
+  tools: ["web_search", "web_fetch", "ledger_query"]  # ledger_query: 历史按需查
   max_tool_turns: 40
   native_tool_calling: true
   fallback_to_json_mode: true
@@ -29,7 +29,7 @@ novel_outline_reviewer:
 novel_writer:
   model: "novel"
   template: "novel_draft.md"
-  tools: []
+  tools: ["ledger_query"]   # 历史按需查（当前状态已在 probe 包里）
   max_tool_turns: 40   # full chapter prose (2000-4500字) in one write
   native_tool_calling: true
   fallback_to_json_mode: true
@@ -49,7 +49,7 @@ novel_humanizer:
 novel_chapter_reviewer:
   model: "novel_alt"
   template: "novel_draft_review.md"
-  tools: []
+  tools: ["ledger_query"]   # 核对历史一致性
   native_tool_calling: true
   fallback_to_json_mode: true
   thinking:
@@ -70,7 +70,7 @@ novel_humanize_reviewer:
 novel_finalizer:
   model: "flash"
   template: "novel_finalize.md"
-  tools: []
+  tools: ["ledger_query"]   # 沿用已有状态槽键名
   max_tool_turns: 40   # chapter_events.json can be a sizeable structured write
   native_tool_calling: true
   fallback_to_json_mode: true

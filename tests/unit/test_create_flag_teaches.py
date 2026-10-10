@@ -68,7 +68,8 @@ class TestBehaviourIsUnchanged:
                      {"name": "郑毅", "status": "alive", "progression": []})
         _apply(ws, "郑毅")                       # no `create` key at all
         card = ns.load_yaml(ns.character_path(ws, "郑毅"), {})
-        assert card["progression"], "the event should have been booked"
+        assert ns.read_ledger(ws, "characters", "郑毅"), \
+            "the event should have been booked in the ledger"
 
     def test_it_still_refuses_rather_than_auto_creating(self, ws):
         """The guard exists to catch typos; a silent card for a misspelling is

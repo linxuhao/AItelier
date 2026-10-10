@@ -92,6 +92,7 @@ current State before acting; notes cannot grant permission or certify results.
 | `get_run_status` | read | A single non-blocking look. |
 | `get_run_summary` | read | What the run did: per-step status, the FIRST failure with its error, final outputs. Inside a loop each entry names the **item** it ran for. |
 | `get_step_output` | read | The files ONE step produced. Each is capped at 20000 chars; a file that was cut says so in the text and in a `truncated` map, and `file=<name>` reads one file at a 200000-char cap. |
+| `novel_ledger_query` | read | A novel project's per-chapter history from its append-only ledger (by entity / chapter range / field / entry type). Current state is in the chapter context pack; this is for history only. Private read. See docs/novel-ledger.md. |
 | `list_runs` | read | Recent runs, newest first — the entry point when you hold no id. |
 | `trace_list` / `trace_search` / `trace_read` | read | The durable trace: find where it broke, then read the actual prompt / response / tool result. |
 | `driver_whoami` | read | Resolve this credential to its driver/owner identity, memberships and capabilities. |

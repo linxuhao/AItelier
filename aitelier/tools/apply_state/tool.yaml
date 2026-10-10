@@ -3,7 +3,8 @@ description: >
   Terminal tool of the chapter loop — the "book the journal entries" step. Runs
   only after the final human checkpoint. Copies the approved prose + summary +
   events into the immutable novel/chapters/chNNNN/ record, posts the events to
-  the bible balances (character progression, threads, arcs, appearances),
+  the bible CURRENT STATE (cards, world, threads, arcs; overwrite) and appends
+  every change to the append-only novel/ledger/ (query-only history),
   rebuilds the rolling digest and derived index, then reconciles (replays all
   journals over the genesis snapshot vs the live bible) and reports drift as
   warnings, then git-commits the chapter into the code repo (history + download).

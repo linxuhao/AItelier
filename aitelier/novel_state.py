@@ -9,9 +9,16 @@ The novel's durable state lives under ``<code_repo>/novel/`` as plain files
       compass.md             指南针 (endgame direction + active long lines)
       world.yaml             力量体系 / 地理 / 势力 / world rules
       pacing.yaml            爽点公式 / word-count & hook conventions (chapter RHYTHM)
-      characters/<name>.yaml 人物卡 incl. progression (time series, not snapshot)
-      threads.yaml           伏笔登记表 (status/hints/earliest_reveal node gate)
+      characters/<name>.yaml 人物卡 = CURRENT STATE only (profile + voice +
+                             current balances, overwritten in place; no history)
+      threads.yaml           伏笔登记表 (status/last hint/earliest_reveal node gate)
       arcs.yaml              故事线：有序剧情节点 nodes (plot PROGRESS)
+    ledger/                ← "journal by account": append-only per-entity history,
+      characters/<name>.jsonl  QUERY-ONLY (ledger_query / read) — never fed whole
+      factions/<name>.jsonl    to the drafting context. One JSON object per line:
+      settings/<name>.jsonl    {chapter, type, changes?, reason?, detail?, ...}
+      threads/<name>.jsonl
+      arcs/<name>.jsonl
     chapters/chNNNN/       ← immutable per-chapter record
       prose.md  summary.md  events.yaml   (events = "journal entries", append-only)
     state/
@@ -70,6 +77,10 @@ def chapters_dir(ws) -> Path:
 
 def state_dir(ws) -> Path:
     return novel_root(ws) / "state"
+
+
+def ledger_dir(ws) -> Path:
+    return novel_root(ws) / "ledger"
 
 
 GENESIS_TAG = "novel-genesis"  # git tag stamped by scaffold_bible = reconcile baseline
@@ -231,7 +242,7 @@ def safe_filename(name: str) -> str:
 
 # The two subtrees a chapter apply MUTATES. chapters/ is append-only, so it is
 # not copied — the rollback just removes whatever the failed apply added.
-_MUTABLE_SUBTREES = ("bible", "state")
+_MUTABLE_SUBTREES = ("bible", "state", "ledger")
 
 
 @contextmanager
@@ -311,6 +322,93 @@ def written_chapters(ws) -> list[int]:
 def next_chapter_number(ws) -> int:
     done = written_chapters(ws)
     return (done[-1] + 1) if done else 1
+
+
+# ── Ledger (append-only, query-only history) vs current state ───────────────
+#
+# Cards and other bible entities are CURRENT STATE: overwritten in place, small,
+# what the drafting context reads. Every per-chapter change is ALSO appended to
+# the entity's ledger file — the queryable history ("尹骁第8章右臂怎样了"). The
+# ledger is never dumped into a prompt; agents look things up with ledger_query
+# or by reading one entity's file.
+
+LEDGER_KINDS = ("characters", "factions", "settings", "threads", "arcs")
+
+# A change key that only describes THIS chapter (本章行动/本章表现…) is a
+# journal fact, not a balance: it goes to the ledger but never into the card,
+# otherwise it lingers as a stale "current" field forever.
+TRANSIENT_KEY_PREFIXES = ("本章", "this_chapter")
+
+
+def is_transient_key(key) -> bool:
+    return str(key).startswith(TRANSIENT_KEY_PREFIXES)
+
+
+def ledger_path(ws, kind: str, name: str) -> Path:
+    if kind not in LEDGER_KINDS:
+        raise ValueError(f"ledger: unknown kind {kind!r} (one of {LEDGER_KINDS})")
+    return ledger_dir(ws) / kind / f"{safe_filename(str(name))}.jsonl"
+
+
+def ledger_append(ws, kind: str, name: str, entry: dict) -> None:
+    path = ledger_path(ws, kind, name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    row = {"entity": str(name), **entry}
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
+
+
+def read_ledger(ws, kind: str, name: str) -> list[dict]:
+    path = ledger_path(ws, kind, name)
+    if not path.is_file():
+        return []
+    out = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            out.append(json.loads(line))
+    return out
+
+
+def query_ledger(ws, kind: str | None = None, name: str | None = None,
+                 chapter: int | None = None, chapter_from: int | None = None,
+                 chapter_to: int | None = None, field: str | None = None,
+                 entry_type: str | None = None, limit: int | None = None
+                 ) -> list[dict]:
+    """Filter ledger rows. ``field`` keeps rows whose ``changes`` touch that key
+    (substring match on the key, so 右臂 finds 右臂伤 too). Rows come back in
+    chapter order, each tagged with its ``kind``; ``limit`` keeps the LAST n."""
+    kinds = [kind] if kind else list(LEDGER_KINDS)
+    rows: list[dict] = []
+    for k in kinds:
+        if name:
+            files = [ledger_path(ws, k, name)]
+        else:
+            d = ledger_dir(ws) / k
+            files = sorted(d.glob("*.jsonl")) if d.is_dir() else []
+        for f in files:
+            if not f.is_file():
+                continue
+            for line in f.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                r = json.loads(line)
+                c = r.get("chapter")
+                if chapter is not None and c != chapter:
+                    continue
+                if chapter_from is not None and (c is None or c < chapter_from):
+                    continue
+                if chapter_to is not None and (c is None or c > chapter_to):
+                    continue
+                if entry_type and r.get("type") != entry_type:
+                    continue
+                if field and not any(field in str(key)
+                                     for key in (r.get("changes") or {})):
+                    continue
+                rows.append({"kind": k, **r})
+    rows.sort(key=lambda r: (r.get("chapter") or 0))
+    if limit is not None and int(limit) > 0:
+        rows = rows[-int(limit):]
+    return rows
 
 
 # ── Characters ───────────────────────────────────────────────────────────────
@@ -451,9 +549,10 @@ def validate_events(ws, events: list[dict]) -> None:
 def apply_events(ws, events: list[dict], chapter: int) -> list[str]:
     """Post journal entries to the bible balances. Returns human warnings.
 
-    Character/protagonist changes shallow-merge into the card and append a
-    ``progression`` entry {chapter, changes, reason} — the card stays a time
-    series, never just a snapshot. Unknown entities are a hard error unless
+    Character/protagonist changes OVERWRITE the card's current state (a
+    ``null`` value clears a stale key; 本章* keys are journal-only) and the full
+    entry {chapter, changes, reason} is appended to the entity's LEDGER file —
+    the card is a snapshot, the ledger is the time series. Unknown entities are a hard error unless
     the entry carries ``create: true`` (new characters must be deliberate) —
     checked for the WHOLE list up front, so a bad entry writes nothing.
     """
@@ -477,7 +576,7 @@ def apply_events(ws, events: list[dict], chapter: int) -> list[str]:
             card = characters.get(name)
             created = card is None
             if card is None:                # validated above: carries create:true
-                card = {"name": name, "status": "alive", "progression": []}
+                card = {"name": name, "status": "alive"}
                 characters[name] = card
             # Guardrails the reviewer relies on:
             if card.get("status") == "dead" and changes.get("status") not in ("alive",):
@@ -491,8 +590,8 @@ def apply_events(ws, events: list[dict], chapter: int) -> list[str]:
                 warnings.append(
                     f"character '{name}' power_level regressed {old_p}→{new_p} "
                     f"(reason: {reason or 'none'})")
-            for k, v in changes.items():
-                card[k] = v
+            card.pop("progression", None)   # legacy in-card history (see migrate)
+            _overwrite(card, changes)
             if created:
                 # Opening balance = the state the character ENTERS the story
                 # with (this first entry applied). Genesis-cast cards get
@@ -500,17 +599,19 @@ def apply_events(ws, events: list[dict], chapter: int) -> list[str]:
                 # every card can feed the probe's 初始→现在 two-point view.
                 card["initial"] = {k: v for k, v in card.items()
                                    if k not in ("initial", "progression")}
-            card.setdefault("progression", []).append(
-                {"chapter": chapter, "changes": changes, "reason": reason})
+            ledger_append(ws, "characters", name, {
+                "chapter": chapter, "type": "create" if created else "event",
+                "changes": changes, "reason": reason})
             dump_yaml(character_path(ws, name), card)
 
         elif etype == "faction":
             factions = world.setdefault("factions", {})
             entry = factions.setdefault(name, {})   # validated: known or create
-            for k, v in changes.items():
-                entry[k] = v
-            entry.setdefault("progression", []).append(
-                {"chapter": chapter, "changes": changes, "reason": reason})
+            entry.pop("progression", None)          # legacy in-bible history
+            _overwrite(entry, changes)
+            ledger_append(ws, "factions", name, {
+                "chapter": chapter, "type": "event", "changes": changes,
+                "reason": reason})
             dump_yaml(world_path, world)
 
         else:  # world_setting
@@ -518,24 +619,37 @@ def apply_events(ws, events: list[dict], chapter: int) -> list[str]:
             created = name not in settings
             entry = settings.setdefault(name, {})
             if isinstance(entry, dict):
-                for k, v in changes.items():
-                    entry[k] = v
+                _overwrite(entry, changes)
                 if created:
                     # Opening balance for a setting born mid-book (e.g. 灵气浓度
                     # first measured in ch.1) — lets the probe show 初始→现在.
-                    entry["initial"] = dict(changes)
+                    entry["initial"] = {k: v for k, v in changes.items()
+                                        if v is not None
+                                        and not is_transient_key(k)}
             else:
                 settings[name] = changes
-            world.setdefault("setting_log", []).append(
-                {"chapter": chapter, "name": name, "changes": changes,
-                 "reason": reason})
+            ledger_append(ws, "settings", name, {
+                "chapter": chapter, "type": "event", "changes": changes,
+                "reason": reason})
             dump_yaml(world_path, world)
 
     return warnings
 
 
+def _overwrite(entry: dict, changes: dict) -> None:
+    """Current-state write: last value wins, ``None`` clears, 本章* skipped."""
+    for k, v in (changes or {}).items():
+        if is_transient_key(k):
+            continue
+        if v is None:
+            entry.pop(k, None)
+        else:
+            entry[k] = v
+
+
 def log_appearances(ws, appearances: list[dict], chapter: int) -> list[str]:
-    """Update characters' last_appearance (the 防配角蒸发 ledger)."""
+    """Update characters' last_appearance (current state) and append an
+    appearance row to their ledger (the 防配角蒸发 history)."""
     warnings: list[str] = []
     characters = load_characters(ws)
     for ap in appearances or []:
@@ -544,9 +658,14 @@ def log_appearances(ws, appearances: list[dict], chapter: int) -> list[str]:
         if card is None:
             warnings.append(f"appearance logged for unknown character '{name}'")
             continue
+        card.pop("progression", None)       # legacy in-card history
         card["last_appearance"] = chapter
         if not card.get("first_appearance"):
             card["first_appearance"] = chapter
+        row = {"chapter": chapter, "type": "appearance"}
+        if ap.get("importance") is not None:
+            row["importance"] = ap.get("importance")
+        ledger_append(ws, "characters", name, row)
         dump_yaml(character_path(ws, name), card)
     return warnings
 
@@ -580,6 +699,18 @@ def thread_revealable(thread: dict, arcs: list[dict]) -> bool:
     return node_done(arcs, gate.get("arc", ""), gate.get("node", ""))
 
 
+def absorb_legacy_hints(t: dict) -> None:
+    """Pre-ledger threads carried ``hints: [...]``; fold it into the
+    current-state summary (the history itself is the thread's ledger)."""
+    if "hints" not in t:
+        return
+    hints = t.pop("hints") or []
+    if hints:
+        t["hint_count"] = len(hints)
+        t["last_hint_chapter"] = hints[-1].get("chapter")
+        t["last_hint"] = hints[-1].get("hint", "")
+
+
 def apply_thread_updates(ws, updates: list[dict], chapter: int) -> list[str]:
     warnings: list[str] = []
     path = bible_dir(ws) / "threads.yaml"
@@ -593,18 +724,29 @@ def apply_thread_updates(ws, updates: list[dict], chapter: int) -> list[str]:
         if t is None:
             if action == "register":
                 t = {"name": name, "status": "open",
-                     "introduced_chapter": chapter, "hints": []}
+                     "introduced_chapter": chapter}
                 for k in ("description", "type", "importance", "earliest_reveal"):
                     if up.get(k) is not None:
                         t[k] = up[k]
                 threads.append(t)
                 by_name[name] = t
+                ledger_append(ws, "threads", name, {
+                    "chapter": chapter, "type": "register",
+                    "detail": up.get("detail", "")})
                 continue
             warnings.append(f"thread update for unknown thread '{name}' ({action})")
             continue
+        absorb_legacy_hints(t)
+        if action in ("hint", "resolve", "abandon"):
+            ledger_append(ws, "threads", name, {
+                "chapter": chapter, "type": action,
+                "detail": up.get("detail", "")})
         if action == "hint":
-            t.setdefault("hints", []).append(
-                {"chapter": chapter, "hint": up.get("detail", "")})
+            # Current state keeps only the latest hint + a count; the full
+            # hint history is the thread's ledger.
+            t["hint_count"] = int(t.get("hint_count") or 0) + 1
+            t["last_hint_chapter"] = chapter
+            t["last_hint"] = up.get("detail", "")
         elif action == "resolve":
             if not thread_revealable(t, arcs):
                 gate = t.get("earliest_reveal", {})
@@ -656,14 +798,37 @@ def apply_arc_updates(ws, updates: list[dict], chapter: int) -> list[str]:
                     f"(frontier is '{frontier.get('id')}') — 跳步?")
             nd["status"] = "done"
             nd["completed_chapter"] = chapter
+            ledger_append(ws, "arcs", name, {
+                "chapter": chapter, "type": "node_completed", "node": str(nid)})
         if up.get("notes"):
-            a.setdefault("progress_notes", []).append(
-                {"chapter": chapter, "note": up["notes"]})
+            ledger_append(ws, "arcs", name, {
+                "chapter": chapter, "type": "note", "detail": up["notes"]})
+            a["latest_note"] = {"chapter": chapter, "note": up["notes"]}
         if a.get("nodes") and arc_frontier(a) is None \
                 and a.get("status") != "completed":
             a["status"] = "completed"
             a["end_chapter"] = chapter
     dump_yaml(path, arcs)
+    return warnings
+
+
+# ── Full replay (genesis bible + journals → current state + ledger) ─────────
+
+# Everything a replay REBUILDS. Shared by the writing bench's replay guard and
+# the genesis-mode ledger migration, so the two are identical by construction.
+REPLAY_MANAGED = ("novel/bible/characters", "novel/bible/world.yaml",
+                  "novel/bible/threads.yaml", "novel/bible/arcs.yaml",
+                  "novel/state/index.yaml", "novel/state/digest.md",
+                  "novel/ledger")
+
+
+def replay_chapter(ws, n: int, rec: dict) -> list[str]:
+    """Book one historic journal exactly as apply_state step 2 does."""
+    validate_events(ws, rec.get("events", []))
+    warnings = apply_events(ws, rec.get("events", []), n)
+    warnings += log_appearances(ws, rec.get("appearances", []), n)
+    warnings += apply_thread_updates(ws, rec.get("thread_updates", []), n)
+    warnings += apply_arc_updates(ws, rec.get("arc_updates", []), n)
     return warnings
 
 
@@ -797,13 +962,18 @@ def reconcile(ws) -> list[str]:
             if ev.get("entity_type") not in ("character", "protagonist"):
                 continue
             name = str(ev.get("entity_name") or "")
+            if ev.get("entity_type") == "protagonist" and name not in replayed:
+                name = _find_protagonist(replayed) or name   # same alias rule as apply_events
             if name not in replayed:
                 if ev.get("create"):
                     replayed[name] = {"name": name, "status": "alive"}
                 else:
                     continue  # already reported at apply time
             for k, v in (ev.get("changes") or {}).items():
-                replayed[name][k] = v
+                if v is None:
+                    replayed[name].pop(k, None)
+                else:
+                    replayed[name][k] = v
 
     drift: list[str] = []
     live = load_characters(ws)
@@ -837,3 +1007,27 @@ BANNED_PHRASES = [
 ]
 
 META_MARKERS = ["[说明]", "TODO", "（待补充）", "（此处", "[待", "<!--"]
+
+
+# ── Per-book style config (bible/style.yaml) ─────────────────────────────────
+#
+# The global BANNED_PHRASES list above catches generic AI-isms; a book also
+# grows ITS OWN tics (live: 「没平」 four chapters running). Those are per book,
+# so they live in the bible (style.yaml, or pacing.yaml's ``style:`` block):
+#
+#   narration_tics:            # 叙述口癖黑名单（text 字面 / pattern 正则）
+#     - {text: "没平", max_per_chapter: 1}
+#     - {pattern: "走到.{1,3}，走到.{1,3}，走到", max_per_chapter: 1}
+#   extra_banned_phrases: []   # 并入全局套话表做密度统计
+#   repeat_window: 3           # 同一口癖/高频短语连续 N 章出现 → 警告
+#   max_speakers_per_scene: 3  # 章纲/写作约定（机检只做提示）
+#
+# Character catchphrase caps come from each card's voice.catchphrases.
+
+def load_style(ws) -> dict:
+    """bible/style.yaml, or the ``style:`` block of pacing.yaml (the design
+    step writes it there so scaffold needs no new file); style.yaml wins."""
+    pacing = load_yaml(bible_dir(ws) / "pacing.yaml", {}) or {}
+    style = dict(pacing.get("style") or {}) if isinstance(pacing, dict) else {}
+    style.update(load_yaml(bible_dir(ws) / "style.yaml", {}) or {})
+    return style

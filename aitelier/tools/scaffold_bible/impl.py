@@ -19,6 +19,7 @@ Deterministic, no LLM. A completed index/tag blocks a second run; a private
 gitdir recovery record distinguishes a failed freeze and makes retry safe.
 """
 
+import copy
 import json
 import os
 import subprocess
@@ -267,19 +268,20 @@ def scaffold_bible(*, project_root: str = "", workspace_root: str = "",
     # ── Phase 2: normalize + write ──
     for card in characters:
         card.setdefault("status", "alive")
-        card.setdefault("progression", [])
+        card.pop("progression", None)   # history lives in novel/ledger/, not the card
         # Opening balance: the card as authored at genesis (design prompt
         # mandates first-appearance state). Kept ON the card so the probe can
         # feed 初始→现在 without touching git in the hot path; characters
         # created later get theirs stamped in apply_events (create: true).
-        card["initial"] = {k: v for k, v in card.items()
-                          if k not in ("initial", "progression")}
+        # voice is authoring guidance, not a balance — no need to snapshot it.
+        card["initial"] = copy.deepcopy(
+            {k: v for k, v in card.items()
+             if k not in ("initial", "progression", "voice")})
         ns.dump_yaml(ns.character_path(ws, str(card["name"]).strip()), card)
     chars_path.unlink()
 
     for t in threads:
         t.setdefault("status", "open")
-        t.setdefault("hints", [])
     ns.dump_yaml(bib / "threads.yaml", threads)
 
     for a in arcs:

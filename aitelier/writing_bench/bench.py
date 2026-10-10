@@ -22,9 +22,7 @@ from .storage import (BenchError, BenchReplayRefused, TREE_LIMIT, checked_root, 
                       commit_id, decode, encode, git, git_files, identifier,
                       immutable, lock, materialize, read_file, relative, require, sha)
 
-MANAGED = ("novel/bible/characters", "novel/bible/world.yaml",
-           "novel/bible/threads.yaml", "novel/bible/arcs.yaml",
-           "novel/state/index.yaml", "novel/state/digest.md")
+MANAGED = ns.REPLAY_MANAGED  # incl. novel/ledger; shared with the ledger migration
 LISTS = ("events", "appearances", "locations", "thread_updates", "arc_updates")
 
 
@@ -351,11 +349,7 @@ class Bench:
         for n in ns.written_chapters(wt):
             rec = ns.load_yaml(ns.chapter_dir(wt, n) / "events.yaml", {})
             require(rec.get("chapter") == n, "historic journal identity mismatch")
-            ns.validate_events(wt, rec.get("events", []))
-            warnings += ns.apply_events(wt, rec.get("events", []), n)
-            warnings += ns.log_appearances(wt, rec.get("appearances", []), n)
-            warnings += ns.apply_thread_updates(wt, rec.get("thread_updates", []), n)
-            warnings += ns.apply_arc_updates(wt, rec.get("arc_updates", []), n)
+            warnings += ns.replay_chapter(wt, n, rec)
         ns.rebuild_digest(wt)
         index = ns.rebuild_index(wt)
         drift = ns.reconcile(wt)

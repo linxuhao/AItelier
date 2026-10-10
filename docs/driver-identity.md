@@ -37,6 +37,10 @@ Conventions: read only your own token file; the `.env` admin token is read only 
 `self-register` itself, never by you; write only through the API, never the
 database; don't touch other drivers' worktrees or processes.
 
+Writing novels as a driver? Current state comes in the chapter context pack;
+look up history with MCP `novel_ledger_query` or `GET /api/projects/<id>/novel/ledger`
+(your driver token, private read) - see `docs/novel-ledger.md`.
+
 ## What changes
 
 | Caller | Credential | Recorded actor (feature on) |

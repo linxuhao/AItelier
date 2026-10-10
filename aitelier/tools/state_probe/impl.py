@@ -32,20 +32,61 @@ def _yaml_block(data) -> str:
         data, allow_unicode=True, sort_keys=False).strip() + "\n```"
 
 
-def character_context(base: str | Path) -> list[dict]:
-    """Current balances and initial deltas; shared by both writing workflows."""
+# Fields kept for an off-stage dead character: they cannot speak or act, so
+# the rest of the card is ledger material (look it up when a flashback needs it).
+DEAD_CARD_FIELDS = ("name", "role", "status", "aliases", "last_appearance")
+VOICE_CAST_RECENT = 3   # 近 N 章出场的角色 + 主角 → 声音表
+
+
+def is_dead(card: dict) -> bool:
+    st = str(card.get("status") or "").strip().lower()
+    return st == "dead" or st.startswith(("死亡", "已死", "阵亡"))
+
+
+def character_context(base: str | Path, *, compact_dead: bool = False,
+                      drop_voice: frozenset | set = frozenset()) -> list[dict]:
+    """CURRENT STATE ONLY + initial deltas; shared by both writing workflows.
+    Ledger history (and legacy in-card ``progression``) never enters here."""
     cards = []
     for name, value in sorted(ns.load_characters(base).items()):
         c = dict(value)
-        c.pop("progression", None)
+        c.pop("progression", None)       # legacy (pre-ledger) cards
+        if compact_dead and is_dead(c):
+            cards.append({k: c[k] for k in DEAD_CARD_FIELDS if k in c})
+            continue
+        if name in drop_voice:
+            c.pop("voice", None)         # already shown in the voice table
         initial = c.pop("initial", None)
         if initial:
             delta = {k: v for k, v in initial.items()
-                     if k not in ("initial", "progression") and c.get(k) != v}
+                     if k not in ("initial", "progression", "voice")
+                     and c.get(k) != v}
             if delta:
                 c["初始状态（登场时；仅列与现状不同的字段）"] = delta
         cards.append(c)
     return cards
+
+
+def voice_cast(base, characters: dict[str, dict]) -> list[str]:
+    """Who probably speaks this chapter: the protagonist + everyone alive who
+    appeared in the last VOICE_CAST_RECENT chapters (probe runs before the
+    outline, so the outline's cast is not known yet)."""
+    done = ns.written_chapters(base)
+    recent = set(done[-VOICE_CAST_RECENT:])
+    names: list[str] = []
+    for name, card in characters.items():
+        if is_dead(card) or not isinstance(card.get("voice"), dict):
+            continue
+        last = card.get("last_appearance")
+        if card.get("is_protagonist") or card.get("role") == "protagonist" \
+                or (isinstance(last, int) and last in recent) \
+                or (not done and card.get("voice")):
+            names.append(name)
+    return sorted(names)
+
+
+def voice_table(characters: dict[str, dict], names: list[str]) -> list[dict]:
+    return [{"name": nm, **(characters[nm].get("voice") or {})} for nm in names]
 
 
 def state_probe(*, project_root: str = "", workspace_root: str = "",
@@ -76,10 +117,10 @@ def state_probe(*, project_root: str = "", workspace_root: str = "",
         # progression) stay in the repo for on-demand reads — the prompt gets
         # each mutated setting's trajectory endpoints, which compress the whole
         # timeline into one line (初始 0% → 现在 0.3% tells the arc).
-        w = {k: v for k, v in world.items() if k != "setting_log"}
+        w = {k: v for k, v in world.items() if k != "setting_log"}  # legacy
         for f in (w.get("factions") or {}).values():
             if isinstance(f, dict):
-                f.pop("progression", None)
+                f.pop("progression", None)                            # legacy
         for entry in (w.get("settings") or {}).values():
             if isinstance(entry, dict):
                 init = entry.pop("initial", None)
@@ -88,9 +129,14 @@ def state_probe(*, project_root: str = "", workspace_root: str = "",
                              if entry.get(k) != v}
                     if delta:
                         entry["初始状态（与现状不同的字段）"] = delta
-        parts += ["## 世界设定（含 初始→现在；完整演变史在 novel/bible/world.yaml 的 "
-                  "setting_log，可用 read 按需查）", "", _yaml_block(w), ""]
+        parts += ["## 世界设定（当前状态，含 初始→现在；逐章演变史在 novel/ledger/"
+                  "settings|factions/，用 ledger_query 按需查）", "", _yaml_block(w), ""]
     pacing = ns.load_yaml(bib / "pacing.yaml", {}) or {}
+    style = ns.load_style(base)
+    if style:
+        pacing = {k: v for k, v in pacing.items() if k != "style"}
+        parts += ["## 本书文风约束（叙述口癖黑名单与上限；continuity_check 机检）",
+                  "", _yaml_block(style), ""]
     if pacing:
         parts += ["## 节奏与爽点约定", "", _yaml_block(pacing), ""]
 
@@ -100,10 +146,17 @@ def state_probe(*, project_root: str = "", workspace_root: str = "",
         # (first-appearance state, fields that changed since). Two points draw
         # the growth line without the O(chapters) progression history — that
         # stays in the per-card file for on-demand reads.
-        cards = character_context(base)
-        parts += ["## 角色卡（当前状态 + 登场时初始状态；出场角色仅限于此，新增角色须在"
-                  "章纲阶段提案。完整成长履历在 novel/bible/characters/<名>.yaml 的 "
-                  "progression，可用 read 按需查）",
+        # Voice table FIRST, so dialogue rules are not buried under balances.
+        cast = voice_cast(base, characters)
+        if cast:
+            parts += ["## 本章出场角色 voice（近%d章出场角色+主角；写对话逐条对照："
+                      "rhythm/口头禅上限/banned_words/称呼/情绪变化。章纲新增的角色"
+                      "看其角色卡的 voice）" % VOICE_CAST_RECENT, "",
+                      _yaml_block(voice_table(characters, cast)), ""]
+        cards = character_context(base, compact_dead=True, drop_voice=set(cast))
+        parts += ["## 角色卡（当前状态 + 登场时初始状态；已死亡角色只列身份与状态。"
+                  "出场角色仅限于此，新增角色须在章纲阶段提案。逐章履历在 "
+                  "novel/ledger/characters/<名>.jsonl，用 ledger_query 按需查）",
                   "", _yaml_block(cards), ""]
 
     # 出场过、但从没记过事件 → 还没有档案。这一名单存在于反向索引与角色卡之差，
@@ -157,9 +210,10 @@ def state_probe(*, project_root: str = "", workspace_root: str = "",
     def _slim(t, with_stale=False):
         s = {"name": t.get("name"), "importance": t.get("importance"),
              "description": t.get("description")}
-        hints = t.get("hints") or []
-        last = max((h.get("chapter", 0) for h in hints),
-                   default=t.get("introduced_chapter", 0) or 0)
+        hints = t.get("hints") or []          # legacy in-thread history
+        last = t.get("last_hint_chapter") or max(
+            (h.get("chapter", 0) for h in hints),
+            default=t.get("introduced_chapter", 0) or 0)
         if with_stale and n - last >= thread_horizon and (t.get("importance") or 0) >= 6:
             s["⚠️陈旧"] = f"已 {n - last} 章无暗示，考虑本章埋一笔"
         if not with_stale:
@@ -216,8 +270,12 @@ def state_probe(*, project_root: str = "", workspace_root: str = "",
             "伏笔/单行摘要）。写到旧地点、久未出场的配角、历史伏笔时，先在这里定位章号。",
             "- **单章明细** `novel/chapters/chNNNN/`：`events.yaml`（该章全部状态变更"
             "分录）、`summary.md`（摘要）、`prose.md`（全文，慎读，很长）。",
-            "- **完整履历**：角色卡 `novel/bible/characters/<名>.yaml` 的 progression；"
-            "世界设定演变 `novel/bible/world.yaml` 的 setting_log。",
+            "- **记账本（ledger，只供查询）** `novel/ledger/<kind>/<名>.jsonl`，kind ∈ "
+            "characters/factions/settings/threads/arcs，每行一条逐章分录。按实体+章号查用 "
+            "`ledger_query`（如 kind=characters, name=尹骁, field=右臂, chapter_from=8），"
+            "或直接 read 单个实体文件。外部 driver 用 MCP `novel_ledger_query`（加 project_id）或 "
+            "`GET /api/projects/<id>/novel/ledger`。bible 里的卡片只有当前状态，不含历史——"
+            "不要读旧的 progression/setting_log/hints 块。",
             "- **边界**：`novel/chapters/` 只有**已入册的旧章**。**本章**的草稿/章纲/"
             "终稿是 step 输出，读它们用 `source: \"step:draft\"` 等 + 文件名本身"
             "（如 `read(path='chapter_draft.md', source='step:draft')`），"

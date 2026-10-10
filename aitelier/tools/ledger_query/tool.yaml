@@ -1,0 +1,56 @@
+name: ledger_query
+description: >
+  Query the novel's append-only LEDGER (novel/ledger/<kind>/<entity>.jsonl) —
+  the per-chapter history of characters, factions, world settings, threads and
+  arcs. Bible cards hold only CURRENT STATE; use this for "what happened to X
+  in chapter N / when did X's field change". Read-only. Returns
+  {count, rows:[{kind, entity, chapter, type, changes?, reason?, detail?}]},
+  chapter-ordered, at most `limit` (last rows kept).
+parameters:
+  project_root:
+    type: string
+    description: "Project code repo root (auto-injected). Novel tree lives here."
+    required: false
+  workspace_root:
+    type: string
+    description: "Fallback root (auto-injected); used only when project_root is empty (tests)."
+    required: false
+  kind:
+    type: string
+    description: "characters | factions | settings | threads | arcs (empty = all)"
+    required: false
+  name:
+    type: string
+    description: "Entity canonical name, e.g. 尹骁 (empty = all entities of kind)"
+    required: false
+  chapter:
+    type: integer
+    description: "Exact chapter"
+    required: false
+  chapter_from:
+    type: integer
+    description: "Inclusive lower chapter bound"
+    required: false
+  chapter_to:
+    type: integer
+    description: "Inclusive upper chapter bound"
+    required: false
+  field:
+    type: string
+    description: "Keep rows whose changes touch a key containing this text (e.g. 右臂)"
+    required: false
+  entry_type:
+    type: string
+    description: "event | create | appearance | register | hint | resolve | abandon | node_completed | note | migrated_state"
+    required: false
+  limit:
+    type: integer
+    description: "Max rows returned, newest kept (default 50, cap 200)"
+    required: false
+  out_dir:
+    type: string
+    description: "Optional output dir — receives ledger_query.json"
+    required: false
+
+output:
+  target: artifact

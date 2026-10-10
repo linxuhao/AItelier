@@ -41,6 +41,11 @@ big_beat_every_chapters: "3-5"
 high_to_buffer_ratio: "3:1"
 hook_types_rotation: ["对话断句", "动作未完成", "信息不对称", "留白反转", "新设定"]
 notes: "按题材调整数字：玄幻/都市密、悬疑/言情疏"
+style:                     # 本书文风约束（continuity_check 机检；可先留空列表，写作中发现口癖再补）
+  narration_tics: []       # 叙述口癖黑名单，如 {text: "没平", max_per_chapter: 1} 或 {pattern: "走到.{1,3}，走到", max_per_chapter: 1}
+  extra_banned_phrases: [] # 本书额外禁用套话（并入全局套话表）
+  repeat_window: 3         # 同一口癖连续 N 章出现即警告
+  max_speakers_per_scene: 3
 ```
 `min_chars_per_chapter` 是机器硬门槛；`max_chars_per_chapter` 是 draft 阶段的写作目标
 （终稿只给 advisory，不卡死——否则与「润色不得增删情节」互相矛盾，循环无解）。
@@ -65,6 +70,19 @@ bible 是记账系统：角色卡是"余额"，每章的记账分录逐章把它
   personality: [缺陷, 欲望, "..."]
   golden_finger: {name: "...", abilities: [], limits: [触发条件, 能力边界, 代价]}
   aliases: [绰号/称呼]
+  voice:                                    # 说话方式（写对话、Red 盲测、机检口头禅都靠它）
+    rhythm: "短句为主，少问句；紧张时只剩动词"     # 节奏/句长
+    register: "口语，带职业词，不用书面腔"         # 语域
+    catchphrases:                             # 口头禅：必须带每章上限，否则会被写滥
+      - {text: "行。", max_per_chapter: 2}
+    favored_words: ["划算", "省着"]            # 常用词/职业词
+    banned_words: ["应该", "或许"]             # 这个人绝不会说的词
+    address: {self: "我", others: {某配角: "老X"}}  # 怎么称呼自己和别人
+    deflection: "被问到过去时用一句玩笑岔开"       # 被追问时如何回避
+    under_emotion: {angry: "更短", afraid: "反而多话，开始安排别人", grief: "不说，改做事"}
+    with_whom: {新人: "解释一句就停"}            # 对不同的人怎么变
+    sample_lines: ["够我心疼一下。", "别散。"]     # 2-4 句示范台词（不带名字也要认得出是谁）
+    never: "不长篇解释规则，不替读者复盘剧情"        # 反例
 - name: 重要配角/反派名
   role: mentor|rival|villain|...
   status: alive
@@ -72,7 +90,13 @@ bible 是记账系统：角色卡是"余额"，每章的记账分录逐章把它
   tier: 0
   personality: []
   aliases: []
+  voice: {rhythm: "...", catchphrases: [], banned_words: [], address: {}, sample_lines: []}
 ```
+**voice 填写纪律**：
+- 主角与开局重要配角/反派**必须**填 `rhythm`、`catchphrases`（每条带 `max_per_chapter`）、`banned_words`、`address`、`sample_lines`（2-4 句）；龙套可只写 `rhythm`。
+- **任意两人的 voice 必须可区分**：节奏、口头禅、称呼方式至少两项不同；把所有 `sample_lines` 去掉名字混在一起，应能认回是谁说的。
+- 口头禅宁少勿多（每人 0-2 个），上限通常每章 1-2 次；口癖是点缀不是标签。
+- voice 是写法约束，不是余额：日后人物经历创伤导致说话方式改变，由记账分录改写 voice 的对应字段并写明原因。
 至少含主角（`is_protagonist: true`）+ 3-6 个开局重要配角/反派。战力（power_level/tier）必须落在 world 的境界战力表区间内。
 
 ### 6. `novel/bible/threads.yaml`（伏笔登记表，YAML 列表）

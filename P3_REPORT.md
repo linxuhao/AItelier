@@ -524,3 +524,48 @@ wiring tests before their fix, both recorded in `smoke2.log` / `targeted1.log`).
 - `wait_for_state_change` does not wake on an inbox-only change for a notice without `project_id` (none of
   P3's notices today); the inbox wait re-polls every second regardless.
 - Not done here, as instructed: no merge, no push, no deploy, `grok/multi-driver-p3` untouched.
+
+## Rebase onto main `7050c1830` (2026-10-10, second re-rebase, owner-approved)
+
+`origin/main` moved from `5b8e374d7` to `7050c1830` (four commits, all in `core/deployment_quiescence.py`
+and `tests/unit/test_deployment_quiescence_process_identity.py`: verified native executable identity for
+render-owner classification, separated from argument data). `git rebase origin/main` replayed all 18 P3
+commits (`8b815fc05` … `0d80eb364`) with **zero conflicts**: P3's quiescence change is additive — the
+`abandoned` owner status in `EXTERNAL_OWNER_STATUSES`, the `abandoned` match in `external_owners`, and the
+`state_attempts.abandon_kind` LEFT JOIN in `_db_rows` that keeps an `abandon_kind=unknown` owner as a durable
+blocker while dropping a `confirmed_stopped` one — and none of it touches the native-identity code main
+changed. Both behaviours are present on the new HEAD unchanged (`git diff origin/main HEAD --
+core/deployment_quiescence.py` is exactly the three P3 hunks; `py_compile` clean).
+
+### Test results
+Throwaway containers only (`docker run --rm --network none --cpus 2 -m 2g --user 1000:1000 -v <tree>:/src:ro
+-v ~/AItelier/.git:~/AItelier/.git:ro -w /src aitelier:latest python -m pytest -p no:cacheprovider -q -rfE
+tests/`, two at once, never `aitelier` / `aitelier-godot` / `aitelier-zg`). Engine in the image: skillflow-py
+1.5.89 (= the `pyproject.toml` pin). Logs under `/tmp/p3rebase2/`.
+
+| run | tree | result | log |
+|---|---|---|---|
+| baseline | `origin/main` `7050c1830` (detached worktree, since removed) | **284 failed, 7132 passed, 12 skipped, 2 errors** (35:54) | `base_full.log`, IDs `base_fail.txt` (286) |
+| rebased HEAD | `0d80eb364` | **284 failed, 7258 passed, 12 skipped, 2 errors** (40:22) | `head_full.log`, IDs `head_fail.txt` (286) |
+
+Failure-ID diff (`comm`): **new = 0, fixed = 0** — the two sets are identical, so HEAD's failure set is
+(trivially) a subset of the baseline's. +126 passed on HEAD = the P3 tests plus their parametrizations in the
+derived suites.
+
+Explicit run on HEAD (`targeted.log`, 1:16): `tests/unit/test_state_p3_enforced_claims.py`,
+`test_state_p3_fix_round1..5.py`, `test_state_p3_inbox_wiring.py`, `tests/unit/test_deployment_quiescence.py`,
+`test_deployment_quiescence_observation_tool.py`, `test_deployment_quiescence_process_identity.py`,
+`tests/integration/test_deployment_quiescence.py` = **375 passed, 1 failed**. The one failure is
+`tests/integration/test_deployment_quiescence.py::test_real_skillflow_cross_project_measurement_then_quiescence`,
+which is **pre-existing on main**: it is in this round's baseline set, in the previous round's baseline set
+(`/tmp/p3rebase/base_fail.txt`, base `5b8e374d7`), and fails identically (`assert set() == {run_a, run_b}`).
+Cause: main's `d139d30ca` ("Deployment gate measures work, not its own shell") marks a blocking-status run with
+zero owned operations as `resumable`, and `_normalized_owner_blockers` excludes resumable runs from
+`active_runs`; the integration test still expects two freshly started, never-claimed runs to appear there. Not
+a P3 effect (P3 touches only the external-owner registry rows) and not fixed here — it is a main-side test/
+producer disagreement outside this task's scope. Every other P3 and quiescence test passes.
+
+### Commits on this branch beyond the previous section
+- (this section)
+
+Not done here, as instructed: no merge, no push, no deploy, no production container touched.

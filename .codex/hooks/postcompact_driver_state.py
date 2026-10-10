@@ -616,7 +616,7 @@ def _frontier_summary(overview: dict[str, Any]) -> str:
     return "\n".join([
         f"event_seq={overview.get('event_seq', 'unknown')}",
         "node_status_counts=" + json.dumps(counts, sort_keys=True, separators=(",", ":")),
-        # Multi-driver: the three policy switches and the advisory review counter (P4).
+        # Multi-driver: policy (multi_driver is always on), the two switches and the advisory review counter (P4).
         f"policy multi_driver={policy.get('multi_driver', 'unknown')} "
         f"claim_enforcement={policy.get('claim_enforcement', 'unknown')} "
         f"review_independence={policy.get('review_independence', 'unknown')} "

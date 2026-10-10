@@ -1210,24 +1210,10 @@ def _measurement_subject(line: str) -> str:
                 and words[index].endswith(".py")):
             return " ".join((words[0], words[index]))
         return line
-    # A direct native executable may carry serialized settings, never code
-    # identity. Do not apply this to opaque interpreter/shell launch modes.
-    if name in {"sh", "bash", "dash", "zsh", "env", "node", "nodejs",
-                "perl", "ruby", "timeout", "nice", "xargs"}:
-        return line
-    program = _native_program(line)
-    if program is None:
-        return line
-    words[0] = program
-    scanned = []
-    for word in words:
-        try:
-            structured = json.loads(word)
-        except (ValueError, TypeError):
-            structured = None
-        if not isinstance(structured, (dict, list)):
-            scanned.append(word)
-    return " ".join(scanned)
+    # Native arguments are data; only an interpreter's bounded module/script
+    # grammar above identifies launched code. Render classification and explicit
+    # ownership/gate flags are handled separately by the owner reader.
+    return _native_program(line) or line
 
 
 def _native_program(line: str) -> str | None:

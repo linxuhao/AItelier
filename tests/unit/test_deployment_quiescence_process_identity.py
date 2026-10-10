@@ -299,3 +299,31 @@ def test_native_render_code_identity_reaches_owner_reader(tmp_path, name):
     finally:
         process.terminate()
         process.wait(timeout=10)
+
+
+@pytest.mark.parametrize("prose", [
+    "godot --headless review judge data",
+    "xvfb-run ordinary prose",
+    "aitelier playtest ordinary prose",
+])
+def test_native_file_argument_data_never_becomes_render_identity(tmp_path, prose):
+    import shutil
+    executable = tmp_path / "native-agent"
+    shutil.copy2("/usr/bin/tail", executable)
+    data = tmp_path / prose
+    data.touch()
+    process = subprocess.Popen(["neutral", "-F", str(data)],
+                               executable=str(executable),
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        line = f"{process.pid} {os.getpid()} neutral -F {data}"
+        deadline = time.monotonic() + 10
+        while dq._native_program(line) is None and time.monotonic() < deadline:
+            assert process.poll() is None
+            time.sleep(.01)
+        assert dq._native_program(line) == str(executable)
+        assert dq._measurement_subject(line) == str(executable)
+        assert dq.external_owners(runner=_probe(line)) == ([], [])
+    finally:
+        process.terminate()
+        process.wait(timeout=10)

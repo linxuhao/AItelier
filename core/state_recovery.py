@@ -32,8 +32,8 @@ import uuid
 
 from core import driver_notices
 from core.state_attempts import ACTIVE, _public
-from core.state_claims import (DEFAULT_LEASE_SECONDS, GRACE_SECONDS, ClaimError, add_seconds, lease_state,
-                               multi_driver_on, now_stamp)
+from core.state_claims import (DEFAULT_LEASE_SECONDS, EXCLUSIVE_PURPOSES, GRACE_SECONDS, ClaimError, add_seconds,
+                               lease_state, multi_driver_on, now_stamp)
 from core.state_enforcement import override_reason_text
 from core.state_graph import StateGraphError, StateNotFound, digest, key, text
 
@@ -123,14 +123,43 @@ class StateRecovery:
                                     (attempt["project_id"], attempt["attempt_id"])).fetchone()
                 if last is not None:
                     sources = [dict(last)]
+            # The new holder may already hold the node's exclusive claim (it
+            # claimed the node after the old claim expired): that claim is
+            # bound to the attempt instead of inserting a second live one.
+            held = conn.execute("SELECT * FROM state_node_claims WHERE project_id=? AND node_key=? AND driver_id=? "
+                                "AND status='live' AND purpose IN ('implement','plan')",
+                                (attempt["project_id"], attempt["node_key"], new_holder)).fetchone()
             for claim in sources:
-                moved = self.new_claim_for(conn, attempt, new_holder, current, reason, workspace=claim["workspace"],
-                                           purpose=claim["purpose"], subagent=claim["subagent"])
+                if held is not None and claim["purpose"] in EXCLUSIVE_PURPOSES:
+                    moved, held = self._bind_held_claim(conn, attempt, dict(held), current, reason), None
+                else:
+                    moved = self.new_claim_for(conn, attempt, new_holder, current, reason,
+                                               workspace=claim["workspace"], purpose=claim["purpose"],
+                                               subagent=claim["subagent"])
                 if created is None or claim["purpose"] == "implement":
                     created = moved
             if created is None:
-                created = self.new_claim_for(conn, attempt, new_holder, current, reason)
+                created = (self._bind_held_claim(conn, attempt, dict(held), current, reason) if held is not None
+                           else self.new_claim_for(conn, attempt, new_holder, current, reason))
         return released, created
+
+    def _bind_held_claim(self, conn, attempt, claim, current, reason):
+        """Bind the new holder's own live exclusive claim to the attempt with a
+        fresh fence (node max + 1); its purpose, workspace and lease stay its own."""
+        from core.state_claims import _claim_view
+        fence = 1 + conn.execute("SELECT COALESCE(MAX(fence),0) FROM state_node_claims WHERE project_id=? AND node_key=?",
+                                 (attempt["project_id"], attempt["node_key"])).fetchone()[0]
+        conn.execute("UPDATE state_node_claims SET attempt_id=?,fence=?,updated_at=? WHERE claim_id=?",
+                     (attempt["attempt_id"], fence, current, claim["claim_id"]))
+        previous_fence = claim["fence"]
+        claim.update(attempt_id=attempt["attempt_id"], fence=fence, updated_at=current)
+        self.claims._history(conn, claim, "live", reason)
+        self.store._event(conn, attempt["project_id"], attempt["node_key"], "claim_acquired", {
+            "claim_id": claim["claim_id"], "driver_id": claim["driver_id"], "purpose": claim["purpose"],
+            "fence": fence, "previous_fence": previous_fence, "lease_expires_at": claim["lease_expires_at"],
+            "workspace": claim["workspace"], "subagent": claim["subagent"], "attempt_id": attempt["attempt_id"],
+            "transfer": True, "actor": self.actor})
+        return _claim_view(claim, current)
 
     def new_claim_for(self, conn, attempt, driver, current, reason, workspace="", purpose="implement",
                       subagent=None, node_key=None, node_revision=None):

@@ -19,8 +19,12 @@ def _message_errors(method):
         try:
             return method(self, *args, **kwargs)
         except DirectorMessageError as exc:
-            schema = self.reply_schema if exc.code in ERROR_CODES else V3_SCHEMA_ID
-            raise DirectorMessageError(exc.code, schema) from exc
+            # Capability/quorum semantics do not widen the negotiated wire.
+            # Every refusal exposed to a legacy caller must fit its closed enum.
+            code = exc.code
+            if self.reply_schema == SCHEMA_ID and code not in ERROR_CODES:
+                code = "invalid_request"
+            raise DirectorMessageError(code, self.reply_schema) from exc
     return invoke
 
 

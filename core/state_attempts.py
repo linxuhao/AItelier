@@ -249,6 +249,13 @@ class StateAttempts:
                     from core.state_claims import ClaimError
                     raise ClaimError("not_attempt_owner", f"attempt {old['attempt_id']} belongs to driver "
                                      f"{old['owner_driver_id']}", owner_driver_id=old["owner_driver_id"])
+                if claim_id is not None:
+                    # A replay that names a claim is judged on THAT claim now: a
+                    # released or lapsed one is stale, whatever the row remembers.
+                    from core.state_enforcement import dispatch_claim
+                    from core import state_claims
+                    dispatch_claim(conn, project_id, node_key, owner_driver_id, is_admin, claim_id=claim_id,
+                                   fence=fence, current=state_claims.now_stamp())
                 return _public(dict(old))
             from core.state_metadata import require_dispatch
             require_dispatch(conn, project_id, node_key)
@@ -490,7 +497,7 @@ class StateAttempts:
             if attempt["status"] != "reserved":
                 return False
             from core.state_enforcement import launch_authorization
-            break_glass = launch_authorization(conn, attempt, driver_id, is_admin)
+            break_glass, rebind = launch_authorization(conn, attempt, driver_id, is_admin)
             from core.state_metadata import require_dispatch
             require_dispatch(conn, attempt["project_id"], attempt["node_key"])
             if not self._pins_current(conn, attempt):
@@ -503,6 +510,12 @@ class StateAttempts:
                 return False
             conn.execute("UPDATE state_attempts SET status='launching',updated_at=? WHERE attempt_id=?", (now(), attempt_id))
             payload = {"attempt_id": attempt_id}
+            if rebind is not None:
+                # The owner's CURRENT live claim carries this launch; bind it so
+                # the reservation the attempt rides on is the one that exists.
+                conn.execute("UPDATE state_node_claims SET attempt_id=?,updated_at=? WHERE claim_id=?",
+                             (attempt_id, now(), rebind["claim_id"]))
+                payload["claim_id"] = rebind["claim_id"]
             if break_glass:
                 payload.update(break_glass=True, launched_by=driver_id, owner_driver_id=attempt["owner_driver_id"])
                 if attempt["owner_driver_id"] and attempt["owner_driver_id"] != driver_id:
@@ -752,8 +765,13 @@ class StateAttempts:
     def record_evidence(self, attempt_id: str, evidence_id: str, criterion_id: str, verdict: str,
                         artifact: str, report_ref: str, report_sha256: str, reviewer: str,
                         detail: str = "", *, report_bytes: bytes | None = None,
-                        director_identity: str | None = None) -> dict:
-        """Append a scoped verifier attestation, never infer it from agent prose."""
+                        director_identity: str | None = None, authorize=None) -> dict:
+        """Append a scoped verifier attestation, never infer it from agent prose.
+
+        ``authorize(conn, attempt)`` runs INSIDE the write transaction, before
+        the row is inserted, so a verdict about who may attest (P3: the subagent
+        named by ``director_identity`` is still the caller's) is taken on the
+        rows that exist when the evidence commits."""
         director_identity = evidence_director_identity(director_identity)
         key(evidence_id, "evidence id")
         key(criterion_id, "criterion id")
@@ -774,6 +792,8 @@ class StateAttempts:
         payload_hash = digest(payload)
         with self.store.transaction(write=True) as conn:
             attempt = self._attempt(conn, attempt_id)
+            if authorize is not None:
+                authorize(conn, attempt)
             prior = conn.execute("SELECT * FROM state_evidence WHERE evidence_id=?", (evidence_id,)).fetchone()
             if prior:
                 if prior["payload_hash"] != payload_hash:

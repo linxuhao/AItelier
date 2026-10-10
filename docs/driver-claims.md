@@ -91,12 +91,12 @@ Every rule has a stable error code; the message starts with it.
 | rule (design §7.3) | refusal |
 |---|---|
 | 1 dispatch: `start_attempt` / `start_external_attempt` need YOUR live `implement` claim on the node, judged by its LEASE at the write (a claim past expiry + grace authorizes nothing, swept or not). Optional `claim_id`+`fence` pin what you believe you hold. The same check guards the real `reserved → launching` transition, so a `recover_attempt` or a replayed start cannot launch another driver's reservation (admin: `break_glass`). | `claim_required`, `claimed_by_other` (names holder and expiry), `stale_fence`, `not_claim_owner`, `not_attempt_owner` |
-| 2 observe: `report_external_attempt` needs the attempt owner and `fence=<owner_fence>`. The previous owner after a takeover/handoff is stale; anyone else is not the owner; an admin is admitted as `break_glass` (owner notified). A report on an ABANDONED attempt by its original reporter is recorded with `late_after_abandon=1`, `resulting_status=superseded`, never current; with `quiescent=true` it settles the owner-registry row (the deployment gate stops counting it). A terminal quiescent report settles the attempt's registered open subagents. | `fence_required`, `stale_fence`, `not_attempt_owner` |
+| 2 observe: `report_external_attempt` needs the attempt owner and `fence=<owner_fence>`. The previous owner after a takeover/handoff is stale; anyone else is not the owner; in an ENFORCED project an admin is admitted as `break_glass` (owner notified) — with enforcement or `multi_driver` off an admin is an ordinary reporter, exactly as in P1. A report on an ABANDONED attempt by its original reporter is recorded with `late_after_abandon=1`, `resulting_status=superseded`, never current; with `quiescent=true` it must carry a retained, digest-verified report and then settles the owner-registry row (the deployment gate stops counting it). A terminal quiescent report settles the attempt's registered open subagents. | `fence_required`, `stale_fence`, `not_attempt_owner` |
 | 4 structural: `revise_node`, `split_node`, `supersede_node`, `set_node_facet` over a node — or a transitive dependent, which the write invalidates — on which another driver holds a live claim or an active owned attempt need `override_reason`; the holder is notified (`override_notice`) and `claim_overridden` is emitted. Check, write, event and notices are ONE transaction. | `override_reason_required` (facts: `holders`) |
 | 5 hold: `set_node_hold(held=false)` on a hold another driver placed needs `override_reason`; the placer is notified. | `override_reason_required` |
-| 8 one writer per checkout: the CHECKOUT is `host:path` (the `#branch` suffix does not make a second writer safe). An exclusive `claim_node` or a `register_subagent` whose checkout is already declared by a live exclusive claim or an open subagent — active, adopted or ORPHANED until its origin driver reports it settled — is refused. Takeover and handoff keep the transferred claim's workspace. | `workspace_in_use` |
+| 8 one writer per checkout: the CHECKOUT is `host:path` (the `#branch` suffix does not make a second writer safe). A checkout is held by a live exclusive claim, by the executor of an ACTIVE attempt (the workspace of the claim it was dispatched or transferred on, whatever that claim's status is now), by an open subagent — active, adopted or ORPHANED until its origin driver reports it settled — and by every checkout a claim was ever held FOR an unresolved orphan. A worker's own registration and the claims held for it (`subagent=<id>`) are one executor, not two writers. Takeover and handoff keep the transferred claim's workspace and re-check occupancy. | `workspace_in_use` |
 | 9 one controller per run: the checkpoint of a SkillFlow run bound to an owned attempt is answered by the owner driver only (MCP `answer_checkpoint`, REST `/checkpoint/approve|reject`). | `not_attempt_owner` |
-| Q8 subagents: a claim held for a subagent and evidence recorded under a `<you>/<label>` identity name a subagent registered TO YOU (a transferred or orphaned worker is no longer its origin driver's). | `subagent_unregistered` |
+| Q8 subagents: a claim held for a subagent names an OPEN subagent registered TO YOU; evidence recorded under a `<you>/<label>` identity names one registered to you that is open or SETTLED (a finished worker's results are what gets attested). A transferred or orphaned worker is no longer its origin driver's. Judged inside the evidence write transaction. | `subagent_unregistered` |
 | Q13 admin: an admin (owner e-mail, `owner-cli`) is never refused by these rules; the write carries `break_glass: true` and the affected driver gets a `break_glass` notice. | — |
 
 Priority changes (`set_node_priority`), evidence and verification are unchanged:
@@ -162,7 +162,7 @@ branch), `context_ref`/`context_sha256` (retained), `checkpoint_ref`/`checkpoint
   old-fence write), closed to `terminated`; the standing notice is resolved and
   the current owner notified. An `active`/`adopted` worker of an attempt that is
   no longer active (candidate, failed, superseded, abandoned): by its current
-  owner with the current fence, closed to `settled`. On an active attempt:
+  owner with the current fence (required: `fence_required`), closed to `settled`. On an active attempt:
   `not_orphaned` (report the attempt terminal instead; that settles its workers).
   `quiescence_required` without `quiescent=true`.
 - Takeover/handoff moves every live claim held FOR a worker (`subagent=label`,
@@ -210,7 +210,10 @@ reply, override, break glass — goes through `core/driver_notices.py:notify`.
 Until the P2 per-driver inbox is deployed it stores a pending `driver_notices`
 row (`sender_driver_id` NULL for system notices) and emits a project
 `driver_notice` event (payload: `target_driver_id`, `kind`, `subject`, `refs`), so a
-driver waiting on the project wakes. Read yours with
+driver waiting on the project wakes (the subject ids also sit at the payload top level, so an
+attempt-scoped wait sees its notices). `set_inbox_adapter(deliver=, resolve=)` installs
+connection-sharing hooks for the P2 inbox; `inbox_message(stored_notice)` normalizes a stored
+notice to P2's `send_driver_message` keywords. Read yours with
 `list_driver_notices(project_id, statuses?, kinds?)` (admins, and writer
 credentials that are not drivers such as the owner's e-mail, pass `driver_id`); REST `GET /api/state/projects/{id}/driver-notices`. Re-pointing to
 the P2 inbox is one function (`_deliver`).

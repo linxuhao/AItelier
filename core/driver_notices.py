@@ -56,10 +56,20 @@ INBOX_BODY_CHARS = 8000
 
 
 def inbox_message(notice: dict, *, project_members: str | None = None) -> dict:
-    """Normalize one stored P3 notice (a ``driver_notices`` row or ``notify``'s
-    return value plus ``body``/``refs``) into P2 ``send_driver_message`` keywords."""
-    refs = notice.get("refs")
-    if isinstance(refs, str):
+    """Normalize one P3 notice into P2 ``send_driver_message`` keywords.
+
+    ONE input shape: the complete stored notice - a ``driver_notices`` row
+    (``refs_json``) or ``notify``'s return value (``refs``), both carrying
+    ``project_id``, ``sender_driver_id``, ``kind``, ``delivery_mode``,
+    ``subject``, ``body``. A notice without the sender key is refused rather
+    than silently turned into a system notice."""
+    for required in ("notice_id", "target_driver_id", "kind", "subject", "body"):
+        if required not in notice:
+            raise StateGraphError(f"inbox_message needs the complete stored notice ({required} missing)")
+    if "sender_driver_id" not in notice:
+        raise StateGraphError("inbox_message needs sender_driver_id (None for a system notice), not a guess")
+    refs = notice["refs_json"] if "refs_json" in notice else notice.get("refs")
+    if isinstance(refs, (str, bytes)):
         refs = json.loads(refs or "{}")
     refs = {k: v for k, v in (refs or {}).items() if k in INBOX_REF_KEYS and isinstance(v, str) and v}
     if "node_key" in refs and not notice.get("project_id"):
@@ -104,6 +114,22 @@ def initialize(db) -> None:
         conn.commit()
 
 
+# -- the P2 inbox adapter seam ----------------------------------------------
+# Both hooks take the CALLER'S connection: a notice is delivered and resolved
+# inside the ownership transaction that caused it, never in a transaction of
+# its own. ``deliver(conn, message)`` receives the ``inbox_message`` keyword set
+# and returns what it stored (kept in the notice's return value under
+# ``inbox``); ``resolve(conn, notices, reason)`` receives the full notice rows
+# being resolved - each still carries its ``refs`` (``handoff_id``,
+# ``subagent_id``, ...), which is the correlation key P2 needs.
+_ADAPTER = {"deliver": None, "resolve": None}
+
+
+def set_inbox_adapter(*, deliver=None, resolve=None) -> None:
+    """Install (or clear, with None) the connection-sharing P2 inbox hooks."""
+    _ADAPTER["deliver"], _ADAPTER["resolve"] = deliver, resolve
+
+
 def _deliver(conn, store, target_driver_id, kind, subject, body, refs, delivery_mode, project_id,
              sender_driver_id, actor) -> dict:
     """Store ONE notice. The single place that knows the delivery mechanism."""
@@ -123,8 +149,12 @@ def _deliver(conn, store, target_driver_id, kind, subject, body, refs, delivery_
             if isinstance(refs.get(field), str):
                 payload[field] = refs[field]
         store._event(conn, project_id, refs.get("node_key"), EVENT, payload)
-    return {"notice_id": notice_id, "target_driver_id": target_driver_id, "kind": kind,
-            "delivery_mode": delivery_mode, "subject": subject, "created_at": created}
+    stored = {"notice_id": notice_id, "target_driver_id": target_driver_id, "sender_driver_id": sender_driver_id,
+              "project_id": project_id, "kind": kind, "delivery_mode": delivery_mode, "subject": subject,
+              "body": body, "refs": refs, "status": "pending", "created_at": created}
+    if _ADAPTER["deliver"] is not None:
+        stored["inbox"] = _ADAPTER["deliver"](conn, inbox_message(stored))
+    return stored
 
 
 def notify(conn, store, *, target_driver_id, kind, subject, body, refs=None, project_id=None,
@@ -167,8 +197,12 @@ def resolve(conn, *, notice_ids=None, project_id=None, kind=None, ref_key=None, 
         args.extend(["$." + ref_key, ref_value])
     if len(clauses) == 1:
         raise StateGraphError("resolve needs a selector")
+    where = " AND ".join(clauses)
+    resolving = [_view(r) for r in conn.execute("SELECT * FROM driver_notices WHERE " + where, args).fetchall()]
     cursor = conn.execute("UPDATE driver_notices SET status='resolved',resolved_at=?,resolved_reason=? WHERE "
-                          + " AND ".join(clauses), [now(), reason, *args])
+                          + where, [now(), reason, *args])
+    if resolving and _ADAPTER["resolve"] is not None:
+        _ADAPTER["resolve"](conn, resolving, reason)
     return cursor.rowcount
 
 

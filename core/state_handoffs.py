@@ -406,7 +406,8 @@ class StateHandoffs:
                 conn, self.store, target_driver_id=handoff["from_driver_id"], kind="handoff_reply",
                 project_id=project_id, sender_driver_id=driver,
                 subject=f"{driver} declined handoff {handoff_id}" + ("" if closes else " (offer stays open to others)"),
-                body=reason, refs={"handoff_id": handoff_id, "node_key": handoff["node_key"], "decision": "declined"},
+                body=reason, refs={"handoff_id": handoff_id, "node_key": handoff["node_key"], "decision": "declined",
+                                   "attempt_id": handoff["attempt_id"], "claim_id": handoff["claim_id"]},
                 actor=self.actor)
             view = _view(self._handoff(conn, project_id, handoff_id), current)
         return {**view, "notified": notice}

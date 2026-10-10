@@ -334,12 +334,14 @@ class StateClaims:
                 self._refuse_exclusive_holder(conn, project_id, node_key, driver, current)
             from core.state_enforcement import enforced, refuse_checkout_in_use, require_registered_subagent
             if enforced(conn, project_id):
-                # §7.3 rule 8: one writer per CHECKOUT (host:path), across live
-                # exclusive claims and open or orphaned subagents, project-wide.
-                if purpose in EXCLUSIVE_PURPOSES and workspace:
-                    refuse_checkout_in_use(conn, project_id, workspace)
-                # Q8: a claim held FOR a subagent names one registered to you.
+                # Q8 first: a claim held FOR a subagent names one registered to you ...
                 require_registered_subagent(conn, project_id, driver, subagent, "a claim")
+                # ... then §7.3 rule 8: one writer per CHECKOUT (host:path), across
+                # live exclusive claims, active executors and open or orphaned
+                # subagents, project-wide - where that worker's own registration
+                # is the same executor, not a second writer.
+                if purpose in EXCLUSIVE_PURPOSES and workspace:
+                    refuse_checkout_in_use(conn, project_id, workspace, same_executor=subagent, owner=driver)
             fence = 1 + conn.execute("SELECT COALESCE(MAX(fence),0) FROM state_node_claims "
                                      "WHERE project_id=? AND node_key=?", (project_id, node_key)).fetchone()[0]
             claim = {"claim_id": "claim-" + uuid.uuid4().hex, "project_id": project_id, "node_key": node_key,

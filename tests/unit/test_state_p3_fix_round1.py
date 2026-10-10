@@ -5,7 +5,7 @@ the fix named in P3_REPORT.md "Fix round 1".
 from __future__ import annotations
 
 import asyncio
-import hashlib
+import json
 import sqlite3
 
 import pytest
@@ -314,9 +314,16 @@ def test_finding10_deployment_gate_understands_abandoned_owners(tmp_path, monkey
     # The original reporter later attests quiescence: the owner row settles.
     late = report(codex, unknown, "running", fence=1, oid="late")
     assert late["late_after_abandon"] is True and late["owner_settled"] is False
+    with pytest.raises(StateConflict):          # round 2 (N1): a bare path and hash settle nothing
+        write(codex, "report_external_attempt", attempt_id=unknown["attempt_id"], observation_id="bogus",
+              expected_version=1, context_hash=unknown["context_hash"], status="running",
+              report_ref="/tmp/x", report_sha256="0" * 64, quiescent=True, fence=1)
+    still = dq.measure(skillflow=_quiet_sf(), db=database, external_probe=list)
+    assert [b["attempt_id"] for b in still["blockers"]["registered_external_owners"]] == [unknown["attempt_id"]]
+    quiet_ref, quiet_sha = a_file(tmp_path, "late-quiet.json", {"workers": "exited", "checked_by": "codex"})
     late_quiet = write(codex, "report_external_attempt", attempt_id=unknown["attempt_id"], observation_id="quiet",
                        expected_version=1, context_hash=unknown["context_hash"], status="running",
-                       report_ref="/tmp/x", report_sha256="0" * 64, quiescent=True, fence=1)
+                       report_ref=quiet_ref, report_sha256=quiet_sha, quiescent=True, fence=1)
     assert late_quiet["owner_settled"] is True and late_quiet["status"] == "abandoned"
     observed = dq.measure(skillflow=_quiet_sf(), db=database, external_probe=list)
     assert observed["blockers"]["registered_external_owners"] == [] and observed["errors"] == []
@@ -450,4 +457,12 @@ def test_finding16_inbox_message_normalizes_a_notice_to_the_p2_contract():
     assert reply["kind"] == "handoff_reply" and reply["_system"] is False
     pooled = inbox_message({**notice, "kind": "handoff_offer", "sender_driver_id": "grok"}, project_members="p")
     assert pooled["target_driver_id"] is None and pooled["project_members"] == "p"
-    assert all(hashlib.sha256(str(v).encode()) for v in message.values())  # every field is serializable text/None
+    # The keyword set is exactly P2's send_driver_message signature (branch 12fbef9a), JSON-serializable.
+    assert set(message) == {"request_key", "subject", "body", "target_driver_id", "project_members", "project_id",
+                            "kind", "delivery_mode", "refs", "reply_to_message_id", "_system"}
+    assert json.loads(json.dumps(message)) == message
+    stored = {**notice, "refs_json": json.dumps(notice["refs"])}
+    stored.pop("refs")
+    assert inbox_message(stored)["refs"] == {"attempt_id": "attempt-1", "node_key": "a"}, "stored rows carry refs_json"
+    with pytest.raises(StateGraphError):
+        inbox_message({k: v for k, v in notice.items() if k != "sender_driver_id"})

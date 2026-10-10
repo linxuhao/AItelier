@@ -59,9 +59,13 @@ class ExternalAttempts:
         """
         continues = actor_continues(a['reporting_actor'], self.actor)
         owner = a['owner_driver_id']
+        # Q13 break-glass exists only where claims are ENFORCED. With the switch
+        # off (or multi_driver off) an admin is an ordinary reporter, exactly as
+        # in P1: the recorded reporter continues an attempt, nobody else.
+        admin = self.is_admin and enforced(conn, a['project_id'])
         if owner is None or self.driver_id is None:
             if not continues:
-                if self.is_admin:
+                if admin:
                     return a['status'] == 'abandoned', True
                 raise StateConflict('external observation belongs to a different authenticated reporter')
             if fence is not None and a['owner_fence'] and fence != a['owner_fence']:
@@ -69,12 +73,12 @@ class ExternalAttempts:
             return a['status'] == 'abandoned', False
         if a['status'] == 'abandoned':
             if not continues and owner != self.driver_id:
-                if self.is_admin:
+                if admin:
                     return True, True
                 raise StateConflict('external observation belongs to a different authenticated reporter')
             return True, False
         if owner != self.driver_id:
-            if self.is_admin:
+            if admin:
                 return False, True
             if continues:
                 raise ClaimError('stale_fence', f"attempt {a['attempt_id']} is now owned by driver {owner} "
@@ -155,7 +159,7 @@ class ExternalAttempts:
             owner = self.attempts._attempt(conn, attempt_id)
             if owner['execution_kind'] != 'external':
                 raise StateConflict('external reports cannot complete or override a SkillFlow attempt')
-            self._authorize_report(conn, owner, fence)
+            late_candidate, _ = self._authorize_report(conn, owner, fence)
             if context_hash != digest(json.loads(owner['context_json'])):
                 raise StateConflict('report describes a different frozen goal/contract/dependency context')
             prior_observation = conn.execute(
@@ -190,6 +194,11 @@ class ExternalAttempts:
         if terminal:
             report_ref, report_bytes = self._terminal_report(report_ref, report_sha256)
             validate_external_semantics(report_bytes, status, artifact)
+        elif quiescent and late_candidate:
+            # A quiescence attestation on an ABANDONED attempt settles its owner
+            # row and therefore clears a deployment blocker: it must be
+            # digest-verified retained evidence, never a bare path and hash.
+            report_ref, report_bytes = retain_report(report_ref, report_sha256, completed=False)
         git_artifact = None
         if status == 'candidate':
             size = {'git-sha1': 40, 'sha256': 64}.get(artifact_kind) if isinstance(artifact_kind,str) else None
@@ -210,6 +219,8 @@ class ExternalAttempts:
             if a['execution_kind'] != 'external':
                 raise StateConflict('external reports cannot complete or override a SkillFlow attempt')
             late, break_glass = self._authorize_report(conn, a, fence)
+            if late and quiescent and report_bytes is None:
+                raise StateConflict('a quiescence attestation on an abandoned attempt needs its retained report')
             prior = conn.execute('SELECT * FROM state_external_observations WHERE attempt_id=? AND observation_id=?',
                                  (attempt_id, observation_id)).fetchone()
             if prior:

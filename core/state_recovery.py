@@ -101,8 +101,23 @@ class StateRecovery:
             # The replacement keeps the executor association, the purpose and
             # the WORKSPACE: a running worker's checkout stays reserved across
             # the transfer. When several claims were bound, the implement one is
-            # reported.
-            for claim in [dict(r) for r in rows]:
+            # reported. If no bound claim is live any more (a sweep retired it,
+            # or it was transferred before), the LATEST claim ever bound to the
+            # attempt still says which checkout the executor writes.
+            sources = [dict(r) for r in rows]
+            if not sources:
+                last = conn.execute("SELECT * FROM state_node_claims WHERE project_id=? AND attempt_id=? "
+                                    "ORDER BY created_at DESC, claim_id DESC LIMIT 1",
+                                    (attempt["project_id"], attempt["attempt_id"])).fetchone()
+                if last is not None:
+                    sources = [dict(last)]
+            from core.state_enforcement import refuse_checkout_in_use
+            for claim in sources:
+                if claim["workspace"]:
+                    # Occupancy is re-validated in the ownership transaction: the
+                    # attempt's own records are not a second writer, anyone else is.
+                    refuse_checkout_in_use(conn, attempt["project_id"], claim["workspace"],
+                                           exclude_attempt=attempt["attempt_id"], same_executor=claim["subagent"])
                 moved = self.new_claim_for(conn, attempt, new_holder, current, reason, workspace=claim["workspace"],
                                            purpose=claim["purpose"], subagent=claim["subagent"])
                 if created is None or claim["purpose"] == "implement":

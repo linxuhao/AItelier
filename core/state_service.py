@@ -1260,20 +1260,32 @@ class StateService:
     def record_evidence(self, attempt_id, evidence_id, criterion_id, verdict, artifact, report_ref, report_sha256, detail="",
                         director_identity=None):
         director_identity = evidence_director_identity(director_identity)
+        from core.state_enforcement import require_registered_subagent
+
+        def authorize(conn, attempt):
+            # Q8: evidence attributed to a subagent of yours names one registered
+            # to you (open or settled - a finished worker's results are exactly
+            # what gets attested). Judged INSIDE the evidence write transaction,
+            # so a transfer landing between an early read and the insert cannot
+            # let a former owner attest under a worker it no longer has.
+            if self.driver_id and director_identity and director_identity != self.driver_id:
+                require_registered_subagent(conn, attempt["project_id"], self.driver_id, director_identity,
+                                            "evidence", allow_settled=True)
+
         if self.driver_id and director_identity and director_identity != self.driver_id:
-            # Q8: evidence produced by a subagent of yours names a registered one
-            # in an enforced project.
-            from core.state_enforcement import require_registered_subagent
+            # The same verdict once more, EARLY: a caller that cannot attest learns
+            # it before any report is read; the in-transaction check above is the
+            # one that decides.
             with self.store.transaction() as conn:
-                row = self.attempts._attempt(conn, attempt_id)
-                require_registered_subagent(conn, row["project_id"], self.driver_id, director_identity, "evidence")
+                authorize(conn, self.attempts._attempt(conn, attempt_id))
         self.reconcile_attempt(attempt_id)
         from core.state_report_integrity import retain_report, validate_evidence_semantics
         report_ref, report_bytes = retain_report(report_ref, report_sha256, completed=True)
         validate_evidence_semantics(report_bytes, criterion_id, verdict, artifact)
         return self.attempts.record_evidence(attempt_id, evidence_id, criterion_id, verdict, artifact,
                                              report_ref, report_sha256, self.actor, detail,
-                                             report_bytes=report_bytes, director_identity=director_identity)
+                                             report_bytes=report_bytes, director_identity=director_identity,
+                                             authorize=authorize)
 
     def verify_node(self, project_id, node_key, expected_revision, attempt_id):
         self.reconcile_attempt(attempt_id)

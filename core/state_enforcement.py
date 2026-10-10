@@ -74,26 +74,71 @@ def checkout_of(workspace: str) -> str:
     return (workspace or "").split("#", 1)[0]
 
 
-def checkout_in_use(conn, project_id, workspace, *, exclude_claim=None, exclude_subagent=None):
-    """The holder of this checkout, if any: a live exclusive claim or an open
-    (active, adopted or ORPHANED) subagent of the project declaring the same
-    ``host:path``. None when the checkout is free or undeclared."""
+def checkout_in_use(conn, project_id, workspace, *, exclude_claim=None, exclude_subagent=None,
+                    same_executor=None, exclude_attempt=None, owner=None):
+    """The holder of this checkout (``host:path``), if any. A checkout is held by:
+
+    * a live exclusive claim declaring it;
+    * the executor of an ACTIVE attempt: the workspace of the claim the attempt
+      was dispatched or transferred on, whatever that claim's status is now - a
+      lapsed or transferred claim does not un-reserve a running worker's tree;
+    * an open subagent (active, adopted or ORPHANED until settled);
+    * any claim ever held FOR an unresolved orphan (its revoked side claims
+      included) - the worker may still write every checkout it was given.
+
+    ``same_executor`` names the subagent whose own records are not a second
+    writer (its registry row and the claims held for it); ``owner`` is the
+    driver whose own active attempts' executor checkouts are not a second writer
+    either (the owner re-claiming the tree its attempt runs in); ``exclude_claim``
+    / ``exclude_subagent`` / ``exclude_attempt`` skip the caller's own records.
+    None when the checkout is free or undeclared."""
     checkout = checkout_of(workspace)
     if not checkout:
         return None
-    if _has_table(conn, "state_node_claims"):
-        for row in conn.execute("SELECT claim_id,driver_id,node_key,workspace FROM state_node_claims WHERE project_id=? "
-                                "AND status='live' AND purpose IN ('implement','plan') AND workspace!=''", (project_id,)):
-            if row["claim_id"] != exclude_claim and checkout_of(row["workspace"]) == checkout:
+    claims = _has_table(conn, "state_node_claims")
+    subagents = _has_table(conn, "driver_subagents")
+    if claims:
+        for row in conn.execute("SELECT claim_id,driver_id,node_key,workspace,subagent FROM state_node_claims "
+                                "WHERE project_id=? AND status='live' AND purpose IN ('implement','plan') AND workspace!=''",
+                                (project_id,)):
+            if row["claim_id"] == exclude_claim or (same_executor and row["subagent"] == same_executor):
+                continue
+            if checkout_of(row["workspace"]) == checkout:
                 return {"kind": "claim", "id": row["claim_id"], "driver_id": row["driver_id"],
                         "node_key": row["node_key"], "workspace": row["workspace"]}
-    if _has_table(conn, "driver_subagents"):
+        # Executor checkouts of active attempts, independent of claim status.
+        for row in conn.execute(
+                "SELECT c.claim_id,c.driver_id,c.node_key,c.workspace,c.attempt_id,a.owner_driver_id FROM state_node_claims c "
+                "JOIN state_attempts a ON a.attempt_id=c.attempt_id WHERE c.project_id=? AND c.workspace!='' "
+                "AND a.status IN (" + ",".join("?" for _ in _ACTIVE) + ")", (project_id, *_ACTIVE)):
+            if row["attempt_id"] == exclude_attempt or row["claim_id"] == exclude_claim:
+                continue
+            if owner is not None and row["owner_driver_id"] == owner:
+                continue
+            if checkout_of(row["workspace"]) == checkout:
+                return {"kind": "attempt", "id": row["attempt_id"], "driver_id": row["owner_driver_id"] or row["driver_id"],
+                        "node_key": row["node_key"], "workspace": row["workspace"], "claim_id": row["claim_id"]}
+    if subagents:
         for row in conn.execute("SELECT subagent_id,owner_driver_id,node_key,workspace,status FROM driver_subagents "
                                 "WHERE project_id=? AND status IN (" + ",".join("?" for _ in OPEN_SUBAGENT_STATUSES) + ")",
                                 (project_id, *OPEN_SUBAGENT_STATUSES)):
-            if row["subagent_id"] != exclude_subagent and checkout_of(row["workspace"]) == checkout:
+            if row["subagent_id"] in (exclude_subagent, same_executor):
+                continue
+            if checkout_of(row["workspace"]) == checkout:
                 return {"kind": "subagent", "id": row["subagent_id"], "driver_id": row["owner_driver_id"],
                         "node_key": row["node_key"], "workspace": row["workspace"], "status": row["status"]}
+        if claims:
+            # Every checkout an unresolved orphan was ever given stays reserved.
+            for row in conn.execute(
+                    "SELECT c.claim_id,c.node_key,c.workspace,c.subagent,s.owner_driver_id FROM state_node_claims c "
+                    "JOIN driver_subagents s ON s.subagent_id=c.subagent WHERE c.project_id=? AND c.workspace!='' "
+                    "AND s.status='orphaned_unobservable'", (project_id,)):
+                if row["subagent"] == same_executor:
+                    continue
+                if checkout_of(row["workspace"]) == checkout:
+                    return {"kind": "subagent", "id": row["subagent"], "driver_id": row["owner_driver_id"],
+                            "node_key": row["node_key"], "workspace": row["workspace"],
+                            "status": "orphaned_unobservable", "claim_id": row["claim_id"]}
     return None
 
 
@@ -168,29 +213,33 @@ def dispatch_claim(conn, project_id, node_key, driver_id, is_admin, claim_id=Non
                      lease_state=lease_state(live["lease_expires_at"], current or now_stamp()))
 
 
-def launch_authorization(conn, attempt, driver_id, is_admin) -> bool:
+def launch_authorization(conn, attempt, driver_id, is_admin):
     """Rule 1 at the real ``reserved -> launching`` transition.
 
     A recovery (`recover_attempt`) or a replayed `start_attempt` reaches the
     launch with an EXISTING reservation, so the reservation-time check alone
     would let any member launch another driver's attempt. In an enforced
     project the launcher must be the attempt's owner and hold the node's live
-    implement claim; an admin passes (returns True = break_glass). Legacy
-    reservations without an owner are unconstrained.
+    implement claim: the claim BOUND to the attempt when it is still live, else
+    the owner's current live claim, which the launch then binds (a released or
+    lapsed bound claim does not authorize by memory). Returns
+    ``(break_glass, claim_to_bind)``; an admin passes with ``break_glass``.
+    Legacy reservations without an owner are unconstrained.
     """
     if not enforced(conn, attempt["project_id"]) or not attempt.get("owner_driver_id"):
-        return False
+        return False, None
     if attempt["owner_driver_id"] == driver_id:
         live, lapsed = live_implement_claim(conn, attempt["project_id"], attempt["node_key"])
         if live is None or live["driver_id"] != driver_id:
             if is_admin:
-                return True
+                return True, None
             raise ClaimError("claim_required", f"launching attempt {attempt['attempt_id']} needs your live implement "
                              f"claim on {attempt['node_key']}" + (" (yours lapsed)" if lapsed else ""),
                              node_key=attempt["node_key"])
-        return False
+        bound = live["attempt_id"] == attempt["attempt_id"]
+        return False, (None if bound else live)
     if is_admin:
-        return True
+        return True, None
     raise ClaimError("not_attempt_owner", f"attempt {attempt['attempt_id']} belongs to driver "
                      f"{attempt['owner_driver_id']}; take_over_attempt or a handoff changes the controller",
                      owner_driver_id=attempt["owner_driver_id"])
@@ -348,17 +397,25 @@ def checkpoint_controller(db, run_id, driver_id, is_admin, actor) -> dict:
 
 
 # -- Q8: registered subagents ----------------------------------------------------
-def subagent_registered(conn, project_id, driver_id, label) -> bool:
-    """Whether ``label`` is an open subagent CURRENTLY OWNED by ``driver_id`` in
-    this project. A transferred or orphaned worker is no longer its origin
-    driver's: the origin cannot claim or attest under that identity."""
+def subagent_registered(conn, project_id, driver_id, label, statuses=("active", "adopted")) -> bool:
+    """Whether ``label`` is a subagent CURRENTLY OWNED by ``driver_id`` in this
+    project with one of ``statuses``. A transferred or orphaned worker is no
+    longer its origin driver's: the origin cannot claim or attest under that
+    identity. Checkout writes need an OPEN worker (active/adopted); evidence
+    attribution also accepts a SETTLED one - a worker that finished is exactly
+    the worker whose results get attested, and settlement withdrew its right to
+    write, not its history."""
     if not _has_table(conn, "driver_subagents"):
         return False
     return conn.execute("SELECT 1 FROM driver_subagents WHERE project_id=? AND subagent_id=? AND owner_driver_id=? "
-                        "AND status IN ('active','adopted')", (project_id, label, driver_id)).fetchone() is not None
+                        "AND status IN (" + ",".join("?" for _ in statuses) + ")",
+                        (project_id, label, driver_id, *statuses)).fetchone() is not None
 
 
-def require_registered_subagent(conn, project_id, driver_id, director_identity, what):
+EVIDENCE_SUBAGENT_STATUSES = ("active", "adopted", "settled")
+
+
+def require_registered_subagent(conn, project_id, driver_id, director_identity, what, *, allow_settled=False):
     """Q8: in an enforced project a subagent that produces evidence or writes a
     checkout must be registered to the caller. ``director_identity`` of the form
     ``<driver>/<label>`` names one; a bare driver id names none."""
@@ -368,7 +425,8 @@ def require_registered_subagent(conn, project_id, driver_id, director_identity, 
         return
     if not enforced(conn, project_id):
         return
-    if not subagent_registered(conn, project_id, driver_id, director_identity):
+    statuses = EVIDENCE_SUBAGENT_STATUSES if allow_settled else ("active", "adopted")
+    if not subagent_registered(conn, project_id, driver_id, director_identity, statuses):
         raise ClaimError("subagent_unregistered", f"{what} by subagent {director_identity} needs a subagent "
                          "registered to you (register_subagent) in an enforced project (design §4.6, Q8); a "
                          "transferred or orphaned subagent is no longer yours", subagent_id=director_identity)

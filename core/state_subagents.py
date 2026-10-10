@@ -213,8 +213,10 @@ class StateSubagents:
             # One writer per CHECKOUT, across claims and subagents, including an
             # orphan nobody has confirmed stopped (design §4.6: its checkout stays
             # reserved until the origin driver reports it settled).
+            # ... except the claims already held FOR this very worker (one
+            # executor, two records): they are not a second writer.
             from core.state_enforcement import refuse_checkout_in_use
-            refuse_checkout_in_use(conn, project_id, workspace)
+            refuse_checkout_in_use(conn, project_id, workspace, same_executor=subagent_id)
             self._store_context(conn, context_ref, context_sha256, context_bytes)
             row = {"subagent_id": subagent_id, "owner_driver_id": driver, "origin_driver_id": driver,
                    "project_id": project_id, "attempt_id": attempt_id, "node_key": attempt["node_key"], "host": host,
@@ -344,7 +346,10 @@ class StateSubagents:
                 if row["owner_driver_id"] != driver:
                     raise ClaimError("not_subagent_owner", f"subagent belongs to driver {row['owner_driver_id']}; "
                                      "only an orphan is closed by its origin driver")
-                if fence is not None and fence != row["fence"]:
+                if fence is None:
+                    raise ClaimError("fence_required", f"settling your own worker needs its current fence "
+                                     f"({row['fence']}); only an orphan is closed with an old one")
+                if fence != row["fence"]:
                     raise ClaimError("stale_fence", f"subagent fence is {row['fence']}, not {fence}; reload")
                 if attempt is not None and attempt["status"] in ACTIVE:
                     raise ClaimError("not_orphaned", f"subagent is {row['status']} on an active attempt; report the "

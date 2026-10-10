@@ -174,7 +174,8 @@ def test_zero_entry_failure_is_about_absence_not_a_blanket_filter(
         "tests/helper.gd": "extends RefCounted\n## helper, no entry base\n",
         "tests/entry.gd": "extends SceneTree\n",
     })
-    monkeypatch.setattr(harness, "_copy_project", lambda proj: root)
+    sentinel = root / "source-sentinel.txt"
+    sentinel.write_text("source must survive invocation cleanup")
     monkeypatch.setattr(harness, "_import_resources", lambda dst, timeout=0: None)
 
     class _CP:
@@ -186,3 +187,5 @@ def test_zero_entry_failure_is_about_absence_not_a_blanket_filter(
     r = harness.run_script(str(root), [], timeout=30)
     assert r["passed"] is True and r["discovered"] == ["res://tests/entry.gd"], r
     assert r["results"] and r["results"][0]["passed"] is True, r
+    assert (root / "project.godot").is_file()
+    assert sentinel.read_text() == "source must survive invocation cleanup"

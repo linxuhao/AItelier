@@ -779,6 +779,7 @@ def test_http_route_empty_project_explicit_retention_gets_a_manifest(
                      json.dumps({"project_dir": str(tmp_path), "retain": {}}),
                      {"Content-Type": "application/json"})
         resp = conn.getresponse()
+        body = json.loads(resp.read())
         assert resp.status == 200, body
         assert runs and runs[-1]["retain_requested"] is True, runs
         assert body["passed"] is False, body
@@ -789,6 +790,7 @@ def test_http_route_empty_project_explicit_retention_gets_a_manifest(
                      json.dumps({"project_dir": str(tmp_path)}),
                      {"Content-Type": "application/json"})
         resp = conn.getresponse()
+        body = json.loads(resp.read())
         assert resp.status == 200 and "retention" not in body, body
         assert body["passed"] is False, body
         conn.close()

@@ -66,7 +66,6 @@ def test_unproven_tail_identity_stays_unknown(tmp_path, monkeypatch, failure):
     (['python', '-c', 'run_evaluator_worker()'], '/usr/bin/python3'),
     (['python', '/tmp/eval_worker.py', '--repo', '/tmp/zvec-grep'], '/usr/bin/python3'),
     (['sh', '-c', 'python /tmp/grader_worker.py'], '/usr/bin/dash'),
-    (['tail_worker', '-F', '/tmp/metrics.log'], '/usr/bin/tail'),
 ])
 def test_code_and_opaque_measurement_signals_still_block(tmp_path, monkeypatch, argv, executable):
     entry = _proc(tmp_path, monkeypatch, argv=argv, executable=executable)
@@ -191,3 +190,86 @@ def test_missing_sidecar_ledger_still_blocks_without_creating_it(tmp_path):
     assert observed['quiescent'] is False
     assert any('shared sidecar ledger is missing' in error for error in observed['errors'])
     assert not missing.parent.exists()
+
+
+@pytest.mark.parametrize("launch", ["bare", "absolute", "relative", "deleted"])
+def test_real_native_code_identity_ignores_prompt_prose(tmp_path, launch):
+    import shutil
+    executable = tmp_path / "native-agent"
+    shutil.copy2("/usr/bin/tail", executable)
+    prose = tmp_path / "review judge prompt"
+    prose.touch()
+    argv0 = {"bare": "agent", "absolute": str(executable),
+             "relative": "./native-agent", "deleted": "agent"}[launch]
+    process = subprocess.Popen([argv0, "-F", str(prose)], executable=str(executable), cwd=tmp_path, stdout=subprocess.DEVNULL)
+    try:
+        entry = Path("/proc") / str(process.pid)
+        expected = [argv0.encode(), b"-F", str(prose).encode()]
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            assert process.poll() is None
+            if (entry / "cmdline").read_bytes().rstrip(b"\0").split(b"\0") == expected:
+                break
+            time.sleep(.01)
+        else:
+            pytest.fail("native launch did not publish argv")
+        if launch == "deleted":
+            executable.unlink()
+        line = f"{process.pid} {os.getpid()} {argv0} -F {prose}"
+        assert dq._native_program(line) == str(executable)
+        assert dq.external_owners(runner=_probe(line)) == ([], [])
+    finally:
+        process.terminate()
+        process.wait(timeout=10)
+
+
+def test_real_native_evaluator_identity_survives_bare_alias(tmp_path):
+    import shutil
+    executable = tmp_path / "evaluator_worker"
+    shutil.copy2("/usr/bin/sleep", executable)
+    process = subprocess.Popen(["neutral", "30"], executable=str(executable))
+    try:
+        line = f"{process.pid} {os.getpid()} neutral 30"
+        deadline = time.monotonic() + 10
+        while dq._native_program(line) is None and time.monotonic() < deadline:
+            time.sleep(.01)
+        owners, errors = dq.external_owners(runner=_probe(line))
+        assert owners[0]["active"] is True
+        assert owners[0]["resource"] == "external_measurement"
+        assert errors
+    finally:
+        process.terminate()
+        process.wait(timeout=10)
+
+
+@pytest.mark.parametrize("failure", ["not_elf", "relative_mismatch", "absolute_mismatch", "exe_interpreter", "partial_argv"])
+def test_unproven_native_bare_identity_fails_closed(tmp_path, monkeypatch, failure):
+    import shutil
+    executable = tmp_path / "native"
+    shutil.copy2("/usr/bin/sleep", executable)
+    argv = ["neutral", "review judge"]
+    if failure == "relative_mismatch":
+        argv[0] = "./other"
+    elif failure == "absolute_mismatch":
+        argv[0] = "/other/native"
+    elif failure == "exe_interpreter":
+        executable = tmp_path / "python3"
+        shutil.copy2("/usr/bin/sleep", executable)
+    elif failure == "not_elf":
+        executable.write_bytes(b"#!opaque")
+    entry = _proc(tmp_path, monkeypatch, argv=argv, executable=str(executable))
+    (entry / "cwd").symlink_to(tmp_path)
+    if failure == "partial_argv":
+        (entry / "cmdline").write_bytes(b"neutral\0review judge")
+    line = "4321 1 " + " ".join(argv)
+    assert dq._native_program(line) is None
+    owners, errors = dq.external_owners(runner=_probe(line))
+    assert owners[0]["active"] is True
+    assert errors
+
+def test_verified_native_tail_bare_label_is_not_code_identity(tmp_path, monkeypatch):
+    argv = ["tail_worker", "-F", "/tmp/metrics.log"]
+    _proc(tmp_path, monkeypatch, argv=argv, executable="/usr/bin/tail")
+    line = "4321 1 " + " ".join(argv)
+    assert dq._native_program(line) == "/usr/bin/tail"
+    assert dq.external_owners(runner=_probe(line)) == ([], [])

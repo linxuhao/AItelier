@@ -97,7 +97,9 @@ def _members(store, project_id) -> list[str]:
     if registry is None:
         return []
     try:
-        return sorted(m["driver_id"] for m in registry.project_members(project_id) if m.get("status") == "active")
+        # project_drivers.status is member|removed (core.drivers); the driver's own
+        # activity is a separate attribute and is not consulted here.
+        return sorted(m["driver_id"] for m in registry.project_members(project_id) if m.get("status") == "member")
     except Exception:  # noqa: BLE001
         return []
 
@@ -159,6 +161,13 @@ class StateHandoffs:
         workers = package.get("workers")
         if workers is not None and (not isinstance(workers, dict) or type(workers.get("quiescent")) is not bool):
             raise StateGraphError("package.workers must be {quiescent: bool, detail?, host?}")
+        if attempt is not None and workers is None:
+            # §6.3 needs an explicit attestation: an undeclared quiescence is not
+            # "quiescent", it is unknown, and unknown workers cannot be handed to
+            # a driver that cannot see them.
+            raise ClaimError("quiescence_required", "an attempt handoff package must declare "
+                             "workers={quiescent: true|false, host?, detail?}: whether your workers still run "
+                             "decides who may accept")
         if attempt is not None:
             if "context_hash" in package and package["context_hash"] != digest(json.loads(attempt["context_json"])):
                 raise ClaimError("package_mismatch", "package.context_hash is not this attempt's frozen context")
@@ -337,11 +346,8 @@ class StateHandoffs:
                 pseudo = {"attempt_id": claim["attempt_id"], "project_id": project_id, "node_key": claim["node_key"],
                           "node_revision": claim["node_revision"]}
                 new_claim = self.recovery.new_claim_for(conn, pseudo, driver, current, f"handoff {handoff_id} accepted",
-                                                        workspace=claim["workspace"])
-                if claim["purpose"] != "implement":
-                    conn.execute("UPDATE state_node_claims SET purpose=? WHERE claim_id=?",
-                                 (claim["purpose"], new_claim["claim_id"]))
-                    new_claim["purpose"] = claim["purpose"]
+                                                        workspace=claim["workspace"], purpose=claim["purpose"],
+                                                        subagent=claim["subagent"])
                 moved = {"claim": new_claim}
             conn.execute("UPDATE state_handoffs SET status='accepted',decided_by=?,decision_reason='accepted',"
                          "updated_at=? WHERE handoff_id=?", (driver, current, handoff_id))
@@ -360,7 +366,7 @@ class StateHandoffs:
     def _check_observability(self, conn, project_id, package, attempt, driver):
         """§6.3: non-quiescent workers may only be handed to a driver that can observe them."""
         workers = package.get("workers") or {}
-        if workers.get("quiescent", True) is True:
+        if workers.get("quiescent") is True:
             return
         hosts = set()
         if isinstance(workers.get("host"), str):

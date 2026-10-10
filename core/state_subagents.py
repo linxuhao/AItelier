@@ -73,6 +73,14 @@ CREATE TABLE IF NOT EXISTS driver_subagents (
     created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
     FOREIGN KEY(attempt_id) REFERENCES state_attempts(attempt_id)
 );
+CREATE TABLE IF NOT EXISTS state_subagent_contexts (
+    context_sha256 TEXT PRIMARY KEY, context_bytes BLOB NOT NULL,
+    retained_ref TEXT NOT NULL, created_at TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS state_subagent_contexts_no_update BEFORE UPDATE ON state_subagent_contexts
+BEGIN SELECT RAISE(ABORT,'subagent contexts are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS state_subagent_contexts_no_delete BEFORE DELETE ON state_subagent_contexts
+BEGIN SELECT RAISE(ABORT,'subagent contexts are retained'); END;
 CREATE INDEX IF NOT EXISTS driver_subagents_attempt ON driver_subagents(attempt_id, status);
 CREATE INDEX IF NOT EXISTS driver_subagents_project ON driver_subagents(project_id, status, owner_driver_id);
 CREATE TRIGGER IF NOT EXISTS driver_subagents_no_delete BEFORE DELETE ON driver_subagents
@@ -94,6 +102,25 @@ def _view(row, current=None) -> dict:
     return data
 
 
+def settle_open_subagents(conn, store, attempt, actor, reason) -> list[str]:
+    """A terminal, quiescent report by the owner covers the attempt's open
+    workers: they are settled with it and stop reserving their checkouts
+    (orphans are NOT: nobody attested anything about them)."""
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='driver_subagents'").fetchone():
+        return []
+    rows = conn.execute("SELECT subagent_id,node_key FROM driver_subagents WHERE attempt_id=? "
+                        "AND status IN ('active','adopted') ORDER BY subagent_id", (attempt["attempt_id"],)).fetchall()
+    settled = []
+    for row in rows:
+        conn.execute("UPDATE driver_subagents SET status='settled',updated_at=? WHERE subagent_id=?",
+                     (now_stamp(), row["subagent_id"]))
+        store._event(conn, attempt["project_id"], row["node_key"], "subagent_settled", {
+            "subagent_id": row["subagent_id"], "attempt_id": attempt["attempt_id"], "closing": "settled",
+            "reason": reason, "actor": actor})
+        settled.append(row["subagent_id"])
+    return settled
+
+
 def orphan_count(conn, project_id) -> int:
     """Subagents taken over but never confirmed stopped: two writers may exist."""
     if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='driver_subagents'").fetchone():
@@ -105,9 +132,9 @@ def orphan_count(conn, project_id) -> int:
 class StateSubagents:
     """The ONE writer of ``driver_subagents`` rows after a takeover/handoff moved them."""
 
-    def __init__(self, store, actor, driver_id=None, is_admin=False):
+    def __init__(self, store, actor, driver_id=None, is_admin=False, recovery=None):
         self.store, self.actor = store, text(actor, "authenticated actor", 320)
-        self.driver_id, self.is_admin = driver_id, is_admin is True
+        self.driver_id, self.is_admin, self.recovery = driver_id, is_admin is True, recovery
         self.project_read_trusted = store.project_read_trusted
         if not isinstance(store.db, UntrustedDatabase):
             initialize(store.db)
@@ -116,6 +143,21 @@ class StateSubagents:
         if not self.driver_id:
             raise ClaimError("driver_identity_required", "subagents belong to a registered driver")
         return self.driver_id
+
+    @staticmethod
+    def _store_context(conn, context_ref, context_sha256, context_bytes):
+        """The frozen instructions handed to a subagent are PRIVATE (they are a
+        driver's working context): retained in state_subagent_contexts, never in
+        the public external-report blob table."""
+        from core.state_graph import now
+        existing = conn.execute("SELECT context_bytes FROM state_subagent_contexts WHERE context_sha256=?",
+                                (context_sha256,)).fetchone()
+        if existing is not None:
+            if bytes(existing[0]) != context_bytes:
+                raise StateGraphError("retained subagent context bytes differ for this digest")
+            return
+        conn.execute("INSERT INTO state_subagent_contexts(context_sha256,context_bytes,retained_ref,created_at) "
+                     "VALUES(?,?,?,?)", (context_sha256, context_bytes, context_ref, now()))
 
     @staticmethod
     def _row(conn, project_id, subagent_id):
@@ -142,7 +184,7 @@ class StateSubagents:
             raise StateGraphError("control_handle must be text of at most 500 characters (no credentials)")
         if not isinstance(context_sha256, str) or not _HEX64.match(context_sha256):
             raise StateGraphError("context_sha256 must be 64 lowercase hexadecimal characters")
-        from core.state_report_integrity import retain_report, store_report_blob
+        from core.state_report_integrity import retain_report
         context_ref, context_bytes = retain_report(context_ref, context_sha256, completed=False)
         subagent_id = f"{driver}/{label}"
         request_hash = digest({"attempt_id": attempt_id, "host": host, "runtime": runtime, "workspace": workspace,
@@ -168,12 +210,12 @@ class StateSubagents:
                 raise ClaimError("legacy_unleased", "this attempt has no owner; take_over_attempt it first")
             if attempt["owner_driver_id"] != driver:
                 raise ClaimError("not_attempt_owner", f"attempt belongs to driver {attempt['owner_driver_id']}")
-            clash = conn.execute("SELECT subagent_id FROM driver_subagents WHERE project_id=? AND workspace=? "
-                                 "AND status IN ('active','adopted')", (project_id, workspace)).fetchone()
-            if clash:
-                raise ClaimError("workspace_in_use", f"workspace {workspace} is written by subagent "
-                                 f"{clash['subagent_id']}; one writer per checkout", holder=clash["subagent_id"])
-            store_report_blob(conn, context_ref, context_sha256, context_bytes)
+            # One writer per CHECKOUT, across claims and subagents, including an
+            # orphan nobody has confirmed stopped (design §4.6: its checkout stays
+            # reserved until the origin driver reports it settled).
+            from core.state_enforcement import refuse_checkout_in_use
+            refuse_checkout_in_use(conn, project_id, workspace)
+            self._store_context(conn, context_ref, context_sha256, context_bytes)
             row = {"subagent_id": subagent_id, "owner_driver_id": driver, "origin_driver_id": driver,
                    "project_id": project_id, "attempt_id": attempt_id, "node_key": attempt["node_key"], "host": host,
                    "runtime": runtime, "control_handle": control_handle, "workspace": workspace,
@@ -238,6 +280,8 @@ class StateSubagents:
                 # Not renewed, not assumed stopped: fenced out and declared.
                 conn.execute("UPDATE driver_subagents SET status='orphaned_unobservable',observability=?,fence=?,"
                              "updated_at=? WHERE subagent_id=?", (observability, new_fence, current, subagent_id))
+                revoked = self.recovery.revoke_subagent_claims(conn, project_id, subagent_id, current,
+                                                               f"subagent {subagent_id} orphaned") if self.recovery else []
                 event = "subagent_orphaned"
                 if row["origin_driver_id"] != driver:
                     notice = driver_notices.notify(
@@ -261,7 +305,8 @@ class StateSubagents:
             self.store._event(conn, project_id, row["node_key"], event, {
                 "subagent_id": subagent_id, "attempt_id": row["attempt_id"], "observability": observability,
                 "origin_driver_id": row["origin_driver_id"], "owner_driver_id": driver, "fence": new_fence,
-                "reason": reason, "actor": self.actor})
+                "reason": reason, "actor": self.actor,
+                "revoked_claims": revoked if observability == "unobservable" else []})
             view = _view(self._row(conn, project_id, subagent_id), current)
         if observability == "unobservable":
             view["continue_from"] = {"checkpoint_ref": row["checkpoint_ref"], "checkpoint_sha256": row["checkpoint_sha256"],
@@ -282,22 +327,39 @@ class StateSubagents:
         current = now_stamp()
         with self.store.transaction(write=True) as conn:
             row = self._row(conn, project_id, subagent_id)
-            if row["origin_driver_id"] != driver:
-                raise ClaimError("not_origin_driver", f"only the driver that started {subagent_id} "
-                                 f"({row['origin_driver_id']}) can report it settled")
-            if row["status"] == "terminated":
+            if row["status"] in ("terminated", "settled"):
                 return {**_view(row, current), "idempotent": True}
-            if row["status"] != "orphaned_unobservable":
-                raise ClaimError("not_orphaned", f"subagent is {row['status']}; this write only closes an orphan")
+            if row["status"] == "orphaned_unobservable":
+                # The one old-fence write: the ORIGIN driver closes its orphan.
+                if row["origin_driver_id"] != driver:
+                    raise ClaimError("not_origin_driver", f"only the driver that started {subagent_id} "
+                                     f"({row['origin_driver_id']}) can report it settled")
+                closing = "terminated"
+            else:
+                # An open worker of an attempt that is no longer active (candidate,
+                # failed, superseded, abandoned): its CURRENT owner, with the
+                # current fence, releases the checkout it still reserves.
+                attempt = conn.execute("SELECT status FROM state_attempts WHERE attempt_id=?",
+                                       (row["attempt_id"],)).fetchone()
+                if row["owner_driver_id"] != driver:
+                    raise ClaimError("not_subagent_owner", f"subagent belongs to driver {row['owner_driver_id']}; "
+                                     "only an orphan is closed by its origin driver")
+                if fence is not None and fence != row["fence"]:
+                    raise ClaimError("stale_fence", f"subagent fence is {row['fence']}, not {fence}; reload")
+                if attempt is not None and attempt["status"] in ACTIVE:
+                    raise ClaimError("not_orphaned", f"subagent is {row['status']} on an active attempt; report the "
+                                     "attempt terminal (which settles its workers) or adopt/orphan it after a takeover")
+                closing = "settled"
             store_report_blob(conn, report_ref, report_sha256, report_bytes)
-            conn.execute("UPDATE driver_subagents SET status='terminated',settled_report_ref=?,settled_report_sha256=?,"
-                         "updated_at=? WHERE subagent_id=?", (report_ref, report_sha256, current, subagent_id))
+            conn.execute("UPDATE driver_subagents SET status=?,settled_report_ref=?,settled_report_sha256=?,"
+                         "updated_at=? WHERE subagent_id=?", (closing, report_ref, report_sha256, current, subagent_id))
             resolved = driver_notices.resolve(conn, project_id=project_id, kind="subagent_orphaned",
                                               ref_key="subagent_id", ref_value=subagent_id,
                                               reason="origin driver reported the orphan settled")
             self.store._event(conn, project_id, row["node_key"], "subagent_settled", {
-                "subagent_id": subagent_id, "attempt_id": row["attempt_id"], "origin_driver_id": driver,
-                "owner_driver_id": row["owner_driver_id"], "presented_fence": fence, "current_fence": row["fence"],
+                "subagent_id": subagent_id, "attempt_id": row["attempt_id"], "origin_driver_id": row["origin_driver_id"],
+                "owner_driver_id": row["owner_driver_id"], "settled_by": driver, "closing": closing,
+                "presented_fence": fence, "current_fence": row["fence"],
                 "report_sha256": report_sha256, "actor": self.actor})
             notice = None
             if row["owner_driver_id"] != driver:

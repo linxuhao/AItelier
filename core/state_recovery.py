@@ -98,30 +98,87 @@ class StateRecovery:
                                "to_driver_id": new_holder, "attempt_id": attempt["attempt_id"], "actor": self.actor})
             released.append(claim["claim_id"])
         if new_holder:
-            created = self.new_claim_for(conn, attempt, new_holder, current, reason)
+            # The replacement keeps the executor association, the purpose and
+            # the WORKSPACE: a running worker's checkout stays reserved across
+            # the transfer. When several claims were bound, the implement one is
+            # reported.
+            for claim in [dict(r) for r in rows]:
+                moved = self.new_claim_for(conn, attempt, new_holder, current, reason, workspace=claim["workspace"],
+                                           purpose=claim["purpose"], subagent=claim["subagent"])
+                if created is None or claim["purpose"] == "implement":
+                    created = moved
+            if created is None:
+                created = self.new_claim_for(conn, attempt, new_holder, current, reason)
         return released, created
 
-    def new_claim_for(self, conn, attempt, driver, current, reason, workspace=""):
-        """A live implement claim for the attempt's new owner (fence = node max + 1)."""
+    def new_claim_for(self, conn, attempt, driver, current, reason, workspace="", purpose="implement",
+                      subagent=None, node_key=None, node_revision=None):
+        """A live claim for a new holder (fence = node max + 1), inserted with its
+        REAL purpose, workspace and subagent so history, event and the exclusive
+        index see what it is."""
         from core.state_claims import _claim_view
+        node_key = node_key or attempt["node_key"]
         fence = 1 + conn.execute("SELECT COALESCE(MAX(fence),0) FROM state_node_claims WHERE project_id=? AND node_key=?",
-                                 (attempt["project_id"], attempt["node_key"])).fetchone()[0]
-        request_key = f"transfer:{attempt['attempt_id']}:{fence}"
+                                 (attempt["project_id"], node_key)).fetchone()[0]
+        request_key = f"transfer:{attempt.get('attempt_id') or node_key}:{fence}"
         claim = {"claim_id": "claim-" + uuid.uuid4().hex, "project_id": attempt["project_id"],
-                 "node_key": attempt["node_key"], "driver_id": driver, "purpose": "implement", "status": "live",
-                 "fence": fence, "node_revision": attempt["node_revision"], "attempt_id": attempt["attempt_id"],
-                 "workspace": workspace, "subagent": None, "lease_seconds": DEFAULT_LEASE_SECONDS,
+                 "node_key": node_key, "driver_id": driver, "purpose": purpose, "status": "live",
+                 "fence": fence, "node_revision": node_revision or attempt["node_revision"],
+                 "attempt_id": attempt.get("attempt_id"),
+                 "workspace": workspace or "", "subagent": subagent, "lease_seconds": DEFAULT_LEASE_SECONDS,
                  "lease_expires_at": add_seconds(current, DEFAULT_LEASE_SECONDS), "last_heartbeat_at": current,
-                 "request_key": request_key, "request_hash": digest({"transfer": attempt["attempt_id"], "fence": fence}),
+                 "request_key": request_key, "request_hash": digest({"transfer": attempt.get("attempt_id"), "fence": fence,
+                                                                     "node_key": node_key}),
                  "created_at": current, "updated_at": current}
         conn.execute("INSERT INTO state_node_claims(" + ",".join(claim) + ") VALUES("
                      + ",".join("?" for _ in claim) + ")", tuple(claim.values()))
         self.claims._history(conn, claim, "live", reason)
-        self.store._event(conn, attempt["project_id"], attempt["node_key"], "claim_acquired", {
-            "claim_id": claim["claim_id"], "driver_id": driver, "purpose": "implement", "fence": fence,
-            "lease_expires_at": claim["lease_expires_at"], "workspace": workspace, "subagent": None,
-            "attempt_id": attempt["attempt_id"], "transfer": True, "actor": self.actor})
+        self.store._event(conn, attempt["project_id"], node_key, "claim_acquired", {
+            "claim_id": claim["claim_id"], "driver_id": driver, "purpose": purpose, "fence": fence,
+            "lease_expires_at": claim["lease_expires_at"], "workspace": claim["workspace"], "subagent": subagent,
+            "attempt_id": attempt.get("attempt_id"), "transfer": True, "actor": self.actor})
         return _claim_view(claim, current)
+
+    def transfer_subagent_claims(self, conn, project_id, subagent_id, new_holder, current, reason):
+        """Every live claim held FOR a subagent (any node) follows the subagent to
+        its new owner: the old rows become ``transferred`` and the new owner gets
+        live replacements with the same purpose, workspace and subagent."""
+        moved = []
+        for row in conn.execute("SELECT * FROM state_node_claims WHERE project_id=? AND subagent=? AND status='live'",
+                                (project_id, subagent_id)).fetchall():
+            claim = dict(row)
+            if claim["driver_id"] == new_holder:
+                continue
+            conn.execute("UPDATE state_node_claims SET status='transferred',updated_at=? WHERE claim_id=?",
+                         (current, claim["claim_id"]))
+            claim.update(status="transferred", updated_at=current)
+            self.claims._history(conn, claim, "transferred", reason)
+            self.store._event(conn, project_id, claim["node_key"], "claim_transferred", {
+                "claim_id": claim["claim_id"], "driver_id": claim["driver_id"], "purpose": claim["purpose"],
+                "fence": claim["fence"], "reason": reason, "to_driver_id": new_holder, "subagent": subagent_id,
+                "attempt_id": claim["attempt_id"], "actor": self.actor})
+            pseudo = {"project_id": project_id, "attempt_id": claim["attempt_id"], "node_key": claim["node_key"],
+                      "node_revision": claim["node_revision"]}
+            moved.append(self.new_claim_for(conn, pseudo, new_holder, current, reason, workspace=claim["workspace"],
+                                            purpose=claim["purpose"], subagent=subagent_id))
+        return moved
+
+    def revoke_subagent_claims(self, conn, project_id, subagent_id, current, reason):
+        """An orphaned subagent's claims are revoked: nobody vouches for them."""
+        revoked = []
+        for row in conn.execute("SELECT * FROM state_node_claims WHERE project_id=? AND subagent=? AND status='live'",
+                                (project_id, subagent_id)).fetchall():
+            claim = dict(row)
+            conn.execute("UPDATE state_node_claims SET status='revoked',updated_at=? WHERE claim_id=?",
+                         (current, claim["claim_id"]))
+            claim.update(status="revoked", updated_at=current)
+            self.claims._history(conn, claim, "revoked", reason)
+            self.store._event(conn, project_id, claim["node_key"], "claim_released", {
+                "claim_id": claim["claim_id"], "driver_id": claim["driver_id"], "purpose": claim["purpose"],
+                "fence": claim["fence"], "reason": reason, "revoked": True, "subagent": subagent_id,
+                "attempt_id": claim["attempt_id"], "actor": self.actor, "break_glass": False})
+            revoked.append(claim["claim_id"])
+        return revoked
 
     @staticmethod
     def _void_open_handoffs(conn, attempt_id, current, reason):
@@ -263,10 +320,12 @@ class StateRecovery:
             conn.execute("UPDATE driver_subagents SET owner_driver_id=?,fence=?,status='active',observability=NULL,"
                          "lease_expires_at=?,last_heartbeat_at=?,updated_at=? WHERE subagent_id=?",
                          (self.driver_id, fence, expires, current, current, row["subagent_id"]))
+            claims = self.transfer_subagent_claims(conn, attempt["project_id"], row["subagent_id"], self.driver_id,
+                                                   current, f"subagent {row['subagent_id']} moved with its attempt")
             self.store._event(conn, attempt["project_id"], attempt["node_key"], "subagent_transferred", {
                 "subagent_id": row["subagent_id"], "attempt_id": attempt["attempt_id"],
                 "from_driver_id": row["owner_driver_id"], "to_driver_id": self.driver_id, "fence": fence,
-                "actor": self.actor})
+                "claims": [c["claim_id"] for c in claims], "actor": self.actor})
             out.append({"subagent_id": row["subagent_id"], "fence": fence, "host": row["host"],
                         "runtime": row["runtime"], "workspace": row["workspace"],
                         "checkpoint_ref": row["checkpoint_ref"], "status": "active", "needs": "adopt_subagent"})

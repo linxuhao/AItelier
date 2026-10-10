@@ -613,28 +613,31 @@ class StateGraphStore:
         found a package gate migrated as `content`, and superseding a node to
         fix a label is the wrong size of correction.)
         """
+        with self.transaction(write=True) as conn:
+            return self._set_facet(conn, project_id, node_key, facet)
+
+    def _set_facet(self, conn, project_id, node_key, facet) -> dict:
         own = check_facet(facet)
         if own is None:
             raise StateGraphError("facet is required")
-        with self.transaction(write=True) as conn:
-            node = self._node(conn, project_id, node_key)
-            previous = node.get("facet")
-            if previous == own:
-                return {"key": node_key, "facet": own, "changed": False}
-            if previous is not None and node.get("verified_receipt"):
-                raise StateConflict(f"`{node_key}` was accepted as {previous}; a verified node keeps its facet — "
-                                    f"supersede it and create the {own} node")
-            nodes, graph = self._graph(conn, project_id)
-            facets = {k: n.get("facet") for k, n in nodes.items()}
-            facets[node_key] = own
-            # Dependents were accepted against the old label (or none); every
-            # edge must still be legal under the new one.
-            self._check_facets(facets, graph)
-            conn.execute("UPDATE state_nodes SET facet=?,updated_at=? WHERE project_id=? AND node_key=?",
-                         (own, now(), project_id, node_key))
-            self._event(conn, project_id, node_key, "node_facet_set",
-                        {"facet": own, "previous": previous, "revision": node["revision"]})
-            return {"key": node_key, "facet": own, "previous": previous, "changed": True}
+        node = self._node(conn, project_id, node_key)
+        previous = node.get("facet")
+        if previous == own:
+            return {"key": node_key, "facet": own, "changed": False}
+        if previous is not None and node.get("verified_receipt"):
+            raise StateConflict(f"`{node_key}` was accepted as {previous}; a verified node keeps its facet — "
+                                f"supersede it and create the {own} node")
+        nodes, graph = self._graph(conn, project_id)
+        facets = {k: n.get("facet") for k, n in nodes.items()}
+        facets[node_key] = own
+        # Dependents were accepted against the old label (or none); every
+        # edge must still be legal under the new one.
+        self._check_facets(facets, graph)
+        conn.execute("UPDATE state_nodes SET facet=?,updated_at=? WHERE project_id=? AND node_key=?",
+                     (own, now(), project_id, node_key))
+        self._event(conn, project_id, node_key, "node_facet_set",
+                    {"facet": own, "previous": previous, "revision": node["revision"]})
+        return {"key": node_key, "facet": own, "previous": previous, "changed": True}
 
     def set_node_priority(self, project_id: str, node_key: str, priority: int, expected_priority: int,
                           reason: str, actor: str | None = None,
@@ -741,27 +744,33 @@ class StateGraphStore:
                    children: list[dict], reason: str) -> dict:
         """Add child goals and make the parent depend on them, atomically."""
         with self.transaction(write=True) as conn:
-            self._node(conn, project_id, node_key)
-            new_keys = self._add(conn, project_id, children)
-            _, graph = self._graph(conn, project_id)
-            result = self._revise(conn, project_id, node_key, expected_revision, reason=reason,
-                                  deps=sorted(set(graph[node_key]) | set(new_keys)))
-            return {**result, "children": new_keys}
+            return self._split(conn, project_id, node_key, expected_revision, children, reason)
+
+    def _split(self, conn, project_id, node_key, expected_revision, children, reason) -> dict:
+        self._node(conn, project_id, node_key)
+        new_keys = self._add(conn, project_id, children)
+        _, graph = self._graph(conn, project_id)
+        result = self._revise(conn, project_id, node_key, expected_revision, reason=reason,
+                              deps=sorted(set(graph[node_key]) | set(new_keys)))
+        return {**result, "children": new_keys}
 
     def supersede_node(self, project_id: str, node_key: str, expected_revision: int, reason: str) -> dict:
         with self.transaction(write=True) as conn:
-            old = self._node(conn, project_id, node_key)
-            integer(expected_revision, "expected_revision", 1)
-            reason = text(reason, "supersession reason", 4000)
-            if old["revision"] != expected_revision:
-                raise StateConflict("node revision changed")
-            if old["status"] == "SUPERSEDED":
-                return {"key": node_key, "status": "SUPERSEDED", "changed": False}
-            affected = self._invalidate(conn, project_id, node_key)
-            conn.execute("UPDATE state_nodes SET status='SUPERSEDED',updated_at=? WHERE project_id=? AND node_key=?",
-                         (now(), project_id, node_key))
-            self._event(conn, project_id, node_key, "node_superseded", {"reason": reason, "invalidated": affected})
-            return {"key": node_key, "status": "SUPERSEDED", "invalidated": affected}
+            return self._supersede(conn, project_id, node_key, expected_revision, reason)
+
+    def _supersede(self, conn, project_id, node_key, expected_revision, reason) -> dict:
+        old = self._node(conn, project_id, node_key)
+        integer(expected_revision, "expected_revision", 1)
+        reason = text(reason, "supersession reason", 4000)
+        if old["revision"] != expected_revision:
+            raise StateConflict("node revision changed")
+        if old["status"] == "SUPERSEDED":
+            return {"key": node_key, "status": "SUPERSEDED", "changed": False}
+        affected = self._invalidate(conn, project_id, node_key)
+        conn.execute("UPDATE state_nodes SET status='SUPERSEDED',updated_at=? WHERE project_id=? AND node_key=?",
+                     (now(), project_id, node_key))
+        self._event(conn, project_id, node_key, "node_superseded", {"reason": reason, "invalidated": affected})
+        return {"key": node_key, "status": "SUPERSEDED", "invalidated": affected}
 
     @staticmethod
     def dependency_snapshot(conn, project_id, node_key) -> dict:

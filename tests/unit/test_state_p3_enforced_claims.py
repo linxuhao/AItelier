@@ -245,7 +245,7 @@ class TestAbandonedAndReclaim:
         project(db)
         grok, codex = svc(db, "grok"), svc(db, "codex")
         held = claim(grok, workspace="h:/w#g")
-        attempt = external(grok, "a")
+        attempt = external(grok, "a", claim_id=held["claim_id"], fence=1)   # bound explicitly (record-only project)
         assert attempt["owner_driver_id"] == "grok" and attempt["owner_fence"] == 1
 
         def abandon(**extra):
@@ -676,19 +676,23 @@ class TestHandoff:
         codex = svc(db, "codex")
         attempt = external(codex, "a")
         with pytest.raises(StateGraphError):
-            self.offer(codex, attempt, package={"next_step": "x" * 2001})
+            self.offer(codex, attempt, package={"next_step": "x" * 2001, "workers": {"quiescent": True}})
         with pytest.raises(StateGraphError):
-            self.offer(codex, attempt, package={"next_step": "x", "reports": [{"ref": "/r", "sha256": "0" * 64}] * 21})
+            self.offer(codex, attempt, package={"next_step": "x", "workers": {"quiescent": True},
+                                                "reports": [{"ref": "/r", "sha256": "0" * 64}] * 21})
         with pytest.raises(StateGraphError):
-            self.offer(codex, attempt, package={"next_step": "x", "source": {"blob": "y" * 17000}})
+            self.offer(codex, attempt, package={"next_step": "x", "workers": {"quiescent": True},
+                                                "source": {"blob": "y" * 17000}})
         with pytest.raises(StateGraphError):
             self.offer(codex, attempt, package={"transcript": "no"})
-        assert code_of(lambda: self.offer(codex, attempt, package={"context_hash": "0" * 64})) == "package_mismatch"
-        assert code_of(lambda: self.offer(codex, attempt, package={"observation_version": 5})) == "package_mismatch"
-        assert code_of(lambda: self.offer(codex, attempt, package={"event_cursor": 10 ** 6})) == "package_mismatch"
-        assert code_of(lambda: self.offer(codex, attempt, package={"subagents": ["codex/ghost"]})) == "package_mismatch"
+        quiet = {"workers": {"quiescent": True}}
+        assert code_of(lambda: self.offer(codex, attempt, package={"context_hash": "0" * 64, **quiet})) == "package_mismatch"
+        assert code_of(lambda: self.offer(codex, attempt, package={"observation_version": 5, **quiet})) == "package_mismatch"
+        assert code_of(lambda: self.offer(codex, attempt, package={"event_cursor": 10 ** 6, **quiet})) == "package_mismatch"
+        assert code_of(lambda: self.offer(codex, attempt, package={"subagents": ["codex/ghost"], **quiet})) == "package_mismatch"
+        assert code_of(lambda: self.offer(codex, attempt, package={"next_step": "undeclared"})) == "quiescence_required"
         offer = self.offer(codex, attempt, package={"next_step": "where I am", "note_entries": ["note://p/abc123def456"],
-                                                   "private_notes": ["dnote://codex/abc123def456"]})
+                                                   "private_notes": ["dnote://codex/abc123def456"], **quiet})
         assert read(codex, "get_driver_note", project_id="p")["entry_count"] == 0
         conn = sqlite3.connect(str(db))
         assert conn.execute("SELECT COUNT(*) FROM state_driver_note_entries").fetchone()[0] == 0
@@ -697,8 +701,8 @@ class TestHandoff:
         conn.close()
         # Idempotent by request_key; a changed offer under the same key is refused.
         assert self.offer(codex, attempt, package={"next_step": "where I am", "note_entries": ["note://p/abc123def456"],
-                                                   "private_notes": ["dnote://codex/abc123def456"]})["idempotent"] is True
-        assert code_of(lambda: self.offer(codex, attempt, package={"next_step": "other"})) == "request_key_reused"
+                                                   "private_notes": ["dnote://codex/abc123def456"], **quiet})["idempotent"] is True
+        assert code_of(lambda: self.offer(codex, attempt, package={"next_step": "other", **quiet})) == "request_key_reused"
         assert code_of(lambda: self.offer(codex, attempt, key="h2")) == "handoff_pending"
 
     def test_decline_withdraw_expiry_and_stale_offers(self, db, clock):
@@ -714,7 +718,7 @@ class TestHandoff:
                                      expected_owner_fence=1)) == "handoff_closed"
         # Offered to any member: a decline does not close it; the offerer may withdraw.
         pool = write(codex, "offer_handoff", project_id="p", request_key="h2", expected_owner_fence=1,
-                     attempt_id=attempt["attempt_id"], package={"next_step": "anyone"})
+                     attempt_id=attempt["attempt_id"], package={"next_step": "anyone", "workers": {"quiescent": True}})
         assert pool["to_driver_id"] is None
         assert write(grok, "decline_handoff", project_id="p", handoff_id=pool["handoff_id"], reason="no")["status"] == "offered"
         assert write(codex, "withdraw_handoff", project_id="p", handoff_id=pool["handoff_id"], reason="changed my mind"
@@ -723,7 +727,7 @@ class TestHandoff:
                                      expected_owner_fence=1)) == "handoff_closed"
         # Expiry: 24 hours later the offer lapses and the owner is unchanged.
         late = write(codex, "offer_handoff", project_id="p", request_key="h3", expected_owner_fence=1,
-                     attempt_id=attempt["attempt_id"], package={"next_step": "late"})
+                     attempt_id=attempt["attempt_id"], package={"next_step": "late", "workers": {"quiescent": True}})
         clock.advance(24 * 3600)
         assert read(codex, "list_handoffs", project_id="p", statuses=["expired"])["handoffs"][0]["handoff_id"] == late["handoff_id"]
         assert code_of(lambda: write(third, "accept_handoff", project_id="p", handoff_id=late["handoff_id"],
@@ -731,7 +735,7 @@ class TestHandoff:
         assert read(codex, "get_attempt", attempt_id=attempt["attempt_id"])["owner_driver_id"] == "codex"
         # Ownership moved under an open offer: the offer is voided and accept is stale.
         fresh = write(codex, "offer_handoff", project_id="p", request_key="h4", expected_owner_fence=1,
-                      attempt_id=attempt["attempt_id"], package={"next_step": "x"})
+                      attempt_id=attempt["attempt_id"], package={"next_step": "x", "workers": {"quiescent": True}})
         reclaimable(clock)
         write(third, "take_over_attempt", attempt_id=attempt["attempt_id"], expected_owner_fence=1, reason="gone")
         assert read(codex, "get_handoff", project_id="p", handoff_id=fresh["handoff_id"])["handoff"]["status"] == "withdrawn"
@@ -820,7 +824,8 @@ class TestSubagentTakeover:
         settle = lambda who, sid, **e: write(who, "report_subagent_settled", project_id="p", subagent_id=sid,
                                               quiescent=True, report_ref=ref, report_sha256=sha, **e)
         assert code_of(lambda: settle(grok, "codex/mac", fence=3)) == "not_origin_driver"
-        assert code_of(lambda: settle(codex, "codex/srv", fence=1)) == "not_orphaned"
+        assert code_of(lambda: settle(codex, "codex/srv", fence=1)) == "not_subagent_owner"   # codex no longer owns it
+        assert code_of(lambda: settle(grok, "codex/srv", fence=3)) == "not_orphaned"          # attempt still active
         assert code_of(lambda: write(codex, "report_subagent_settled", project_id="p", subagent_id="codex/mac",
                                      quiescent=False, report_ref=ref, report_sha256=sha)) == "quiescence_required"
         closed = settle(codex, "codex/mac", fence=1)
@@ -939,7 +944,8 @@ class TestTransports:
             assert client.get(path).status_code in (401, 403), path
         offer = self._post(client, tokens["grok"], "/api/state/commands/offer_handoff",
                            {"project_id": "p", "request_key": "h", "expected_owner_fence": 1, "attempt_id": attempt_id,
-                            "to_driver_id": "codex", "package": {"next_step": "take it"}})
+                            "to_driver_id": "codex", "package": {"next_step": "take it",
+                                                                 "workers": {"quiescent": True}}})
         assert offer.status_code == 200, offer.text
         inbox = client.get("/api/state/projects/p/driver-notices", headers={"Authorization": "Bearer " + tokens["codex"]})
         assert inbox.json()["notices"][0]["kind"] == "handoff_offer"

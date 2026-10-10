@@ -332,19 +332,13 @@ class StateClaims:
             self._sweep_conn(conn, project_id, current, node_key)
             if purpose in EXCLUSIVE_PURPOSES:
                 self._refuse_exclusive_holder(conn, project_id, node_key, driver, current)
-            from core.state_enforcement import enforced, require_registered_subagent
+            from core.state_enforcement import enforced, refuse_checkout_in_use, require_registered_subagent
             if enforced(conn, project_id):
-                # §7.3 rule 8: one writer per declared checkout, project-wide.
+                # §7.3 rule 8: one writer per CHECKOUT (host:path), across live
+                # exclusive claims and open or orphaned subagents, project-wide.
                 if purpose in EXCLUSIVE_PURPOSES and workspace:
-                    other = conn.execute("SELECT claim_id,driver_id,node_key FROM state_node_claims WHERE project_id=? "
-                                         "AND status='live' AND purpose IN ('implement','plan') AND workspace=?",
-                                         (project_id, workspace)).fetchone()
-                    if other is not None:
-                        raise ClaimError("workspace_in_use", f"workspace {workspace} is already the checkout of claim "
-                                         f"{other['claim_id']} (driver {other['driver_id']}, node {other['node_key']}); "
-                                         "one writer per checkout", holder=other["driver_id"],
-                                         claim_id=other["claim_id"], node_key=other["node_key"])
-                # Q8: a claim held FOR a subagent names a registered one.
+                    refuse_checkout_in_use(conn, project_id, workspace)
+                # Q8: a claim held FOR a subagent names one registered to you.
                 require_registered_subagent(conn, project_id, driver, subagent, "a claim")
             fence = 1 + conn.execute("SELECT COALESCE(MAX(fence),0) FROM state_node_claims "
                                      "WHERE project_id=? AND node_key=?", (project_id, node_key)).fetchone()[0]
@@ -476,28 +470,29 @@ class StateClaims:
                     if inherited is None or inherited["owner_driver_id"] != driver:
                         refused.append({"kind": "subagent", "id": label, "error": "not_your_subagent"})
                         continue
+                # The registry row (P3, §4.6) is judged FIRST: a subagent that was
+                # transferred away or orphaned renews nothing for this caller,
+                # not even the claims still carrying its label.
+                registered = conn.execute("SELECT * FROM driver_subagents WHERE subagent_id=? AND project_id=?",
+                                          (label, project_id)).fetchone()
+                if registered is not None:
+                    code = ("not_subagent_owner" if registered["owner_driver_id"] != driver
+                            else "orphaned" if registered["status"] == "orphaned_unobservable"
+                            else "subagent_closed" if registered["status"] not in ("active", "adopted") else None)
+                    if code:
+                        refused.append({"kind": "subagent", "id": label, "error": code})
+                        continue
                 rows = conn.execute("SELECT * FROM state_node_claims WHERE project_id=? AND driver_id=? "
                                     "AND subagent=? AND status='live' ORDER BY claim_id",
                                     (project_id, driver, label)).fetchall()
                 for row in rows:
                     renew_claim(row)
-                # The registry row (P3, §4.6): renewed by its CURRENT owner; an
-                # orphan is never renewed - nobody can vouch for it.
-                registered = conn.execute("SELECT * FROM driver_subagents WHERE subagent_id=? AND project_id=?",
-                                          (label, project_id)).fetchone()
                 if registered is not None:
-                    if registered["owner_driver_id"] != driver:
-                        refused.append({"kind": "subagent", "id": label, "error": "not_subagent_owner"})
-                    elif registered["status"] == "orphaned_unobservable":
-                        refused.append({"kind": "subagent", "id": label, "error": "orphaned"})
-                    elif registered["status"] not in ("active", "adopted"):
-                        refused.append({"kind": "subagent", "id": label, "error": "subagent_closed"})
-                    else:
-                        expires = add_seconds(current, DEFAULT_LEASE_SECONDS)
-                        conn.execute("UPDATE driver_subagents SET lease_expires_at=?,last_heartbeat_at=? "
-                                     "WHERE subagent_id=?", (expires, current, label))
-                        renewed.append({"kind": "subagent", "id": label, "fence": registered["fence"],
-                                        "lease_expires_at": expires})
+                    expires = add_seconds(current, DEFAULT_LEASE_SECONDS)
+                    conn.execute("UPDATE driver_subagents SET lease_expires_at=?,last_heartbeat_at=? "
+                                 "WHERE subagent_id=?", (expires, current, label))
+                    renewed.append({"kind": "subagent", "id": label, "fence": registered["fence"],
+                                    "lease_expires_at": expires})
                 elif not rows:
                     refused.append({"kind": "subagent", "id": label, "error": "no_live_claims"})
         return {"renewed": renewed, "refused": refused, "heartbeat_at": current}

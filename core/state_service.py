@@ -184,7 +184,8 @@ class StateService:
         self.recovery = StateRecovery(self.store, actor, driver_id=driver_id, is_admin=self.is_admin,
                                       claims=self.claims)
         from core.state_subagents import StateSubagents
-        self.subagents = StateSubagents(self.store, actor, driver_id=driver_id, is_admin=self.is_admin)
+        self.subagents = StateSubagents(self.store, actor, driver_id=driver_id, is_admin=self.is_admin,
+                                        recovery=self.recovery)
         from core.state_handoffs import StateHandoffs
         self.handoffs = StateHandoffs(self.store, actor, driver_id=driver_id, is_admin=self.is_admin,
                                       recovery=self.recovery)
@@ -491,34 +492,39 @@ class StateService:
                                      status, report_ref, report_sha256, quiescent=quiescent,
                                      artifact=artifact, artifact_kind=artifact_kind, detail=detail, fence=fence)
 
-    # -- structural writes (P3, design §7.3 rule 4): the store does the write;
-    # the guard refuses without override_reason when another driver's live claim
-    # or active attempt is affected, and notifies that driver afterwards.
+    # -- structural writes (P3, design §7.3 rule 4): holder check, the write,
+    # the audit event and the holders' notices share ONE write transaction, so a
+    # claim taken concurrently is seen or excluded by the same serialized
+    # transaction, and a refused write (or a failed notice) commits nothing.
     def revise_node(self, project_id, node_key, expected_revision, reason, goal=None, acceptance=None,
                     dependencies=None, override_reason=None):
-        check = self.guard.check(project_id, node_key, override_reason, "revise_node")
-        result = self.store.revise_node(project_id, node_key, expected_revision, reason, goal=goal,
-                                        acceptance=acceptance, dependencies=dependencies)
-        self.guard.notify(project_id, check)
-        return result
+        with self.store.transaction(write=True) as conn:
+            check = self.guard.check(conn, project_id, node_key, override_reason, "revise_node")
+            result = self.store._revise(conn, project_id, node_key, expected_revision, reason=reason, goal=goal,
+                                        acceptance=acceptance, deps=dependencies)
+            self.guard.notify(conn, project_id, check)
+            return result
 
     def split_node(self, project_id, node_key, expected_revision, children, reason, override_reason=None):
-        check = self.guard.check(project_id, node_key, override_reason, "split_node")
-        result = self.store.split_node(project_id, node_key, expected_revision, children, reason)
-        self.guard.notify(project_id, check)
-        return result
+        with self.store.transaction(write=True) as conn:
+            check = self.guard.check(conn, project_id, node_key, override_reason, "split_node")
+            result = self.store._split(conn, project_id, node_key, expected_revision, children, reason)
+            self.guard.notify(conn, project_id, check)
+            return result
 
     def supersede_node(self, project_id, node_key, expected_revision, reason, override_reason=None):
-        check = self.guard.check(project_id, node_key, override_reason, "supersede_node")
-        result = self.store.supersede_node(project_id, node_key, expected_revision, reason)
-        self.guard.notify(project_id, check)
-        return result
+        with self.store.transaction(write=True) as conn:
+            check = self.guard.check(conn, project_id, node_key, override_reason, "supersede_node")
+            result = self.store._supersede(conn, project_id, node_key, expected_revision, reason)
+            self.guard.notify(conn, project_id, check)
+            return result
 
     def set_node_facet(self, project_id, node_key, facet, override_reason=None):
-        check = self.guard.check(project_id, node_key, override_reason, "set_node_facet")
-        result = self.store.set_node_facet(project_id, node_key, facet)
-        self.guard.notify(project_id, check)
-        return result
+        with self.store.transaction(write=True) as conn:
+            check = self.guard.check(conn, project_id, node_key, override_reason, "set_node_facet")
+            result = self.store._set_facet(conn, project_id, node_key, facet)
+            self.guard.notify(conn, project_id, check)
+            return result
 
     def start_attempt(self, project_id, node_key, expected_revision, workflow, request_key, instruction="",
                       base_sha=None, continue_from=None, relay_digest=None, frozen_prerequisites=None,
@@ -651,7 +657,7 @@ class StateService:
         if missing:
             raise StateConflict("workflow requires producer outputs not present for this attempt; use a self-contained "
                                 "node workflow or prepare its prerequisites through the standard producer: " + canonical(missing))
-        if not self.attempts.claim_launch(aid):
+        if not self.attempts.claim_launch(aid, self.driver_id, self.is_admin, self.actor):
             return self.attempts.get(aid)
         # Do not duplicate portable base64 bytes in the model's goal seed.
         seed_context = dict(attempt["context"])
@@ -1324,11 +1330,6 @@ class StateService:
     def set_node_hold(self, project_id, node_key, held, expected_revision, reason, override_reason=None):
         from core.state_enforcement import hold_release_check, override_reason_text
         override_reason = override_reason_text(override_reason)
-        override = None
-        if held is False:
-            with self.store.transaction() as conn:
-                override = hold_release_check(conn, project_id, node_key, self.actor, self.driver_id,
-                                              self.is_admin, override_reason)
         if held is False:
             # Protected references may be legacy runs, never reparented attempts.
             with self.store.transaction() as conn:
@@ -1344,10 +1345,14 @@ class StateService:
                     if (not isinstance(audit, dict) or audit.get("lost") != [] or audit.get("unknown") != []
                             or type(audit.get("alive")) is not int or audit["alive"] != 0):
                         raise StateConflict("protected external run has unretired/unknown operations")
-        result = self.portfolio.set_hold(project_id, node_key, held, expected_revision, reason)
-        if override and override["placer_driver"]:
-            from core import driver_notices
-            with self.store.transaction(write=True) as conn:
+        with self.store.transaction(write=True) as conn:
+            override = None
+            if held is False:
+                override = hold_release_check(conn, project_id, node_key, self.actor, self.driver_id,
+                                              self.is_admin, override_reason)
+            result = self.portfolio._hold(conn, project_id, node_key, held, expected_revision, reason)
+            if override and override["placer_driver"]:
+                from core import driver_notices
                 driver_notices.notify(
                     conn, self.store, target_driver_id=override["placer_driver"],
                     kind="break_glass" if override["break_glass"] else "override_notice", project_id=project_id,

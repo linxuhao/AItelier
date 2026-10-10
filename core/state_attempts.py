@@ -241,6 +241,14 @@ class StateAttempts:
             if old:
                 if old["request_hash"] != request_hash:
                     raise StateConflict("request key already used with a different launch request")
+                from core.state_enforcement import enforced
+                if (old["owner_driver_id"] and old["owner_driver_id"] != owner_driver_id and not is_admin
+                        and enforced(conn, project_id)):
+                    # A replay is idempotent for the driver that made the request;
+                    # another driver replaying the same key does not inherit it.
+                    from core.state_claims import ClaimError
+                    raise ClaimError("not_attempt_owner", f"attempt {old['attempt_id']} belongs to driver "
+                                     f"{old['owner_driver_id']}", owner_driver_id=old["owner_driver_id"])
                 return _public(dict(old))
             from core.state_metadata import require_dispatch
             require_dispatch(conn, project_id, node_key)
@@ -250,8 +258,10 @@ class StateAttempts:
             if not all(d["status"] == "VERIFIED" and d["verified_receipt"] for d in deps.values()):
                 raise StateConflict("dependencies are not verified")
             from core.state_enforcement import dispatch_claim, enforced
+            from core import state_claims
+            current = state_claims.now_stamp()
             claim, break_glass = dispatch_claim(conn, project_id, node_key, owner_driver_id, is_admin,
-                                                claim_id=claim_id, fence=fence)
+                                                claim_id=claim_id, fence=fence, current=current)
             if enforced(conn, project_id):
                 self._after_unknown_abandon(conn, project_id, node_key, claim, base_sha, is_admin)
             ctx = {"state_project_id": project_id, "node_key": node_key, "revision": expected_revision,
@@ -362,6 +372,7 @@ class StateAttempts:
                             "ORDER BY seq DESC LIMIT 1", (project_id, node_key)).fetchone()
         if last is None or last["abandon_kind"] != "unknown" or is_admin:
             return
+        from core.state_enforcement import checkout_of
         old = conn.execute("SELECT workspace FROM state_node_claims WHERE attempt_id=? AND workspace!='' "
                            "ORDER BY created_at DESC LIMIT 1", (last["attempt_id"],)).fetchone()
         old_workspace = old["workspace"] if old else None
@@ -370,8 +381,9 @@ class StateAttempts:
             problems.append("declare base_sha")
         if claim is None or not claim["workspace"]:
             problems.append("claim with a declared workspace")
-        elif old_workspace and claim["workspace"] == old_workspace:
-            problems.append(f"claim a workspace other than {old_workspace}")
+        elif old_workspace and checkout_of(claim["workspace"]) == checkout_of(old_workspace):
+            problems.append(f"claim a checkout other than {checkout_of(old_workspace)} (a different branch in the "
+                            "same checkout is the same writer)")
         if problems:
             from core.state_claims import ClaimError
             raise ClaimError("workspace_in_use", f"the previous attempt {last['attempt_id']} was abandoned with "
@@ -462,12 +474,23 @@ class StateAttempts:
                               {"attempt_id": attempt_id, "descriptor": descriptor})
             return _public(self._attempt(conn, attempt_id))
 
-    def claim_launch(self, attempt_id: str) -> bool:
-        """Only the first caller dispatches. Uncertain launches are not retried."""
+    def claim_launch(self, attempt_id: str, driver_id: str | None = None, is_admin: bool = False,
+                     actor: str | None = None) -> bool:
+        """Only the first caller dispatches. Uncertain launches are not retried.
+
+        P3: the ``reserved -> launching`` transition is the one place every
+        launch passes (first start, replayed start, recover_attempt), so this is
+        where an enforced project checks that the launcher owns the attempt and
+        holds the node's live implement claim (core.state_enforcement.
+        launch_authorization). An admin launches as break_glass: the event says
+        so and the owner is notified.
+        """
         with self.store.transaction(write=True) as conn:
             attempt = self._attempt(conn, attempt_id)
             if attempt["status"] != "reserved":
                 return False
+            from core.state_enforcement import launch_authorization
+            break_glass = launch_authorization(conn, attempt, driver_id, is_admin)
             from core.state_metadata import require_dispatch
             require_dispatch(conn, attempt["project_id"], attempt["node_key"])
             if not self._pins_current(conn, attempt):
@@ -479,7 +502,20 @@ class StateAttempts:
                                   {"attempt_id": attempt_id})
                 return False
             conn.execute("UPDATE state_attempts SET status='launching',updated_at=? WHERE attempt_id=?", (now(), attempt_id))
-            self.store._event(conn, attempt["project_id"], attempt["node_key"], "attempt_launching", {"attempt_id": attempt_id})
+            payload = {"attempt_id": attempt_id}
+            if break_glass:
+                payload.update(break_glass=True, launched_by=driver_id, owner_driver_id=attempt["owner_driver_id"])
+                if attempt["owner_driver_id"] and attempt["owner_driver_id"] != driver_id:
+                    from core import driver_notices
+                    driver_notices.notify(
+                        conn, self.store, target_driver_id=attempt["owner_driver_id"], kind="break_glass",
+                        project_id=attempt["project_id"],
+                        subject=f"admin launched your attempt {attempt_id} on {attempt['node_key']}",
+                        body=f"{actor or driver_id or 'admin'} launched attempt {attempt_id} that you own, without "
+                             "your claim. Break-glass write.",
+                        refs={"attempt_id": attempt_id, "node_key": attempt["node_key"], "break_glass": True},
+                        actor=actor or "admin")
+            self.store._event(conn, attempt["project_id"], attempt["node_key"], "attempt_launching", payload)
             return True
 
     def retire_reservation(self, attempt_id: str, reason: str) -> dict:

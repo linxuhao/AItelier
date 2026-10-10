@@ -82,6 +82,9 @@ PRIVATE_STATE_TABLES = frozenset({
     # Handoff packages (design §6.2): references into a driver's in-flight work
     # (report refs, private note addresses, next steps). Never public.
     "state_handoffs",
+    # The frozen instructions a driver handed its subagent (design §4.6): a
+    # driver's working context, retained by hash, never a public report.
+    "state_subagent_contexts",
 })
 
 PUBLIC_STATE_TABLES = frozenset({

@@ -33,6 +33,50 @@ DELIVERY_MODES = ("transient", "standing")
 STATUSES = ("pending", "resolved")
 EVENT = "driver_notice"
 MAX_BODY_CHARS = 4000
+SUBJECT_FIELDS = ("attempt_id", "claim_id", "subagent_id", "handoff_id", "node_key", "run_id")
+
+# -- P2 driver-inbox adapter contract (design §5.2; P2 branch core/driver_inbox.py) --
+# P2's send_driver_message(request_key, subject, body, target_driver_id | project_members,
+# project_id, kind, delivery_mode, refs, _system) accepts ONLY: system kinds
+# lease_notice / takeover_notice / subagent_orphaned / handoff_offer (handoff_reply
+# is a DRIVER kind and needs a sender), subject 1..200 chars, body <= 8000, refs
+# restricted to attempt_id / issue_id / claim_id / subagent_id (+ node_key with a
+# project) whose values exist, and it opens its OWN write transaction. P3 notices
+# carry two more kinds and richer refs, and are written inside the ownership
+# transaction. `inbox_message` is the normalization: it maps a P3 notice to the
+# exact keyword set P2 takes; wiring it means calling P2's row-level insert with
+# the caller's connection (a `_deliver`-shaped helper on the P2 side) instead of
+# P2's public method, which would start a nested transaction.
+INBOX_KIND = {"lease_notice": "lease_notice", "takeover_notice": "takeover_notice",
+              "subagent_orphaned": "subagent_orphaned", "handoff_offer": "handoff_offer",
+              "handoff_reply": "handoff_reply", "override_notice": "lease_notice", "break_glass": "lease_notice"}
+INBOX_REF_KEYS = ("attempt_id", "issue_id", "claim_id", "subagent_id", "node_key")
+INBOX_SUBJECT_CHARS = 200
+INBOX_BODY_CHARS = 8000
+
+
+def inbox_message(notice: dict, *, project_members: str | None = None) -> dict:
+    """Normalize one stored P3 notice (a ``driver_notices`` row or ``notify``'s
+    return value plus ``body``/``refs``) into P2 ``send_driver_message`` keywords."""
+    refs = notice.get("refs")
+    if isinstance(refs, str):
+        refs = json.loads(refs or "{}")
+    refs = {k: v for k, v in (refs or {}).items() if k in INBOX_REF_KEYS and isinstance(v, str) and v}
+    if "node_key" in refs and not notice.get("project_id"):
+        refs.pop("node_key")
+    kind = INBOX_KIND[notice["kind"]]
+    system = notice.get("sender_driver_id") is None
+    if kind == "handoff_reply" and system:
+        kind = "takeover_notice"
+    subject = (notice.get("subject") or "")[:INBOX_SUBJECT_CHARS] or "notice"
+    body = (notice.get("body") or "")
+    if notice["kind"] in ("override_notice", "break_glass"):
+        body = f"[{notice['kind']}] " + body
+    return {"request_key": notice["notice_id"], "subject": subject, "body": body[:INBOX_BODY_CHARS],
+            "target_driver_id": None if project_members else notice["target_driver_id"],
+            "project_members": project_members, "project_id": notice.get("project_id"), "kind": kind,
+            "delivery_mode": notice.get("delivery_mode", "transient"), "refs": refs,
+            "reply_to_message_id": None, "_system": system}
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS driver_notices (
@@ -70,9 +114,15 @@ def _deliver(conn, store, target_driver_id, kind, subject, body, refs, delivery_
                  (notice_id, target_driver_id, sender_driver_id, project_id, kind, delivery_mode, subject, body,
                   canonical(refs), created))
     if project_id is not None:
-        store._event(conn, project_id, refs.get("node_key"), EVENT, {
-            "notice_id": notice_id, "target_driver_id": target_driver_id, "sender_driver_id": sender_driver_id,
-            "kind": kind, "delivery_mode": delivery_mode, "subject": subject, "refs": refs, "actor": actor})
+        payload = {"notice_id": notice_id, "target_driver_id": target_driver_id, "sender_driver_id": sender_driver_id,
+                   "kind": kind, "delivery_mode": delivery_mode, "subject": subject, "refs": refs, "actor": actor}
+        # The subject ids ALSO sit at the top level of the payload: a wait scoped
+        # with attempt_ids filters on `$.attempt_id`, so a notice about that
+        # attempt must be visible to it, not only to an unscoped wait.
+        for field in SUBJECT_FIELDS:
+            if isinstance(refs.get(field), str):
+                payload[field] = refs[field]
+        store._event(conn, project_id, refs.get("node_key"), EVENT, payload)
     return {"notice_id": notice_id, "target_driver_id": target_driver_id, "kind": kind,
             "delivery_mode": delivery_mode, "subject": subject, "created_at": created}
 

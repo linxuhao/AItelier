@@ -69,7 +69,12 @@ JOURNAL_SUCCESSORS = {
 }
 SIDECAR_DESIRED = frozenset({"ready", "released"})
 SIDECAR_OUTCOMES = frozenset({"pending", "ready", "released", "error"})
-EXTERNAL_OWNER_STATUSES = frozenset({"active", "paused", "unknown", "settled"})
+# `abandoned` (multi-driver P3): the attempt was reclaimed after its lease
+# lapsed. With abandon_kind=confirmed_stopped the reclaimer attested quiescence
+# and the owner row is as settled as a settled one; with abandon_kind=unknown
+# nobody did, so the row stays a durable blocker until a late quiescent report
+# by the original reporter (or an admin) settles it.
+EXTERNAL_OWNER_STATUSES = frozenset({"active", "paused", "unknown", "settled", "abandoned"})
 EXTERNAL_OWNER_KINDS = frozenset({"docker", "process"})
 GODOT_OWNER_STATUSES = frozenset({"active", "owner_lost", "reconciled", "released"})
 # Names that read as a measurement. A bare `eval` is deliberately absent: every
@@ -1339,7 +1344,7 @@ def external_owners(*, runner: Callable[[list[str]], subprocess.CompletedProcess
                                 or "--long-gate" in lowered)
             command = line.strip()
             matched = next((row for row in registered_external_owners
-                            if row.get("status") in {"active", "paused", "unknown"}
+                            if row.get("status") in {"active", "paused", "unknown", "abandoned"}
                             and isinstance(row.get("external_id"), str)
                             and _command_has_identity(command, row["external_id"])), None)
             # These are already enumerated shared services or kernel
@@ -1450,10 +1455,19 @@ def _db_rows(db) -> tuple[list[dict], list[dict], list[dict], list[str]]:
                     if "no such table" not in str(exc):
                         errors.append(f"{table} measurement failed: {exc}")
             try:
-                external_registry.extend(dict(row) for row in conn.execute(
-                    "SELECT attempt_id,project_id,node_key,harness,external_id,status,"
-                    "admitted_at,updated_at,settled_at FROM state_external_owners "
-                    "WHERE status != 'settled' ORDER BY project_id,node_key,attempt_id"))
+                attempt_columns = {row["name"] for row in conn.execute("PRAGMA table_info(state_attempts)")}
+                if "abandon_kind" in attempt_columns:
+                    registry_sql = (
+                        "SELECT o.attempt_id,o.project_id,o.node_key,o.harness,o.external_id,o.status,"
+                        "o.admitted_at,o.updated_at,o.settled_at,a.abandon_kind FROM state_external_owners o "
+                        "LEFT JOIN state_attempts a ON a.attempt_id=o.attempt_id "
+                        "WHERE o.status != 'settled' AND NOT (o.status='abandoned' AND a.abandon_kind='confirmed_stopped') "
+                        "ORDER BY o.project_id,o.node_key,o.attempt_id")
+                else:
+                    registry_sql = ("SELECT attempt_id,project_id,node_key,harness,external_id,status,"
+                                    "admitted_at,updated_at,settled_at FROM state_external_owners "
+                                    "WHERE status != 'settled' ORDER BY project_id,node_key,attempt_id")
+                external_registry.extend(dict(row) for row in conn.execute(registry_sql))
                 active_attempts = [dict(row) for row in conn.execute(
                     "SELECT attempt_id,project_id,node_key,harness,external_id,status "
                     "FROM state_attempts WHERE execution_kind='external' "

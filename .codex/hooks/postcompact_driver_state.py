@@ -496,11 +496,26 @@ def _read_sources() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dic
             "statuses": ["unread", "acknowledged"],
         },
     })
+    private_guidance = standing.get("schema") == "aitelier.director-messaging.v3"
+    if "driver_postcompact_guidance" in guide.get("operations", {}):
+        identity = _mcp_call(url, headers, "driver_whoami", {})
+        private_guidance = bool(identity.get("driver_id") or str(identity.get("actor","")).startswith("owner:"))
+    if private_guidance:
+        standing = _mcp_call(url, headers, "state_graph_read", {
+            "action": "driver_postcompact_guidance", "arguments": {"project_id": PROJECT_ID},
+        })
     return note, overview, guide, standing
 
 
 def _active_standing_projection(envelope: dict[str, Any]) -> str:
     """Render whole, redacted v2 inbox lines inside the contract's hard cap."""
+    if envelope.get("schema") == "aitelier.driver-guidance.v1":
+        projection = envelope.get("projection")
+        if (envelope.get("project_id") != PROJECT_ID or not isinstance(projection,str)
+                or len(projection)>3000 or type(envelope.get("included")) is not int
+                or not 0<=envelope["included"]<=8):
+            raise SourceUnavailable("private guidance bounds mismatch")
+        return projection
     if envelope.get("schema") != "aitelier.director-messaging.v2":
         raise SourceUnavailable("director inbox schema mismatch")
     result = envelope.get("result")

@@ -173,6 +173,8 @@ class StateService:
         self.is_admin = is_admin is True
         from core.state_claims import StateClaims
         self.claims = StateClaims(self.store, actor, driver_id=driver_id, is_admin=self.is_admin)
+        from core.driver_inbox import DriverInbox
+        self.driver_inbox = DriverInbox(self.store, actor, driver_id)
         from core.state_design import StateDesign
         self.design = StateDesign(self.store, actor)
         self.runtime_factory = runtime_factory
@@ -180,13 +182,70 @@ class StateService:
         self.portfolio = StatePortfolio(self.store, actor, service=self)
         from core.director_messaging import SQLiteDirectorMessaging
         self.director_messages = SQLiteDirectorMessaging(self.store, actor,
-                                                          project_read_trusted=project_read_trusted)
+                                                          project_read_trusted=project_read_trusted, driver_id=driver_id)
+
+    def driver_postcompact_guidance(self, project_id):
+        from core.state_driver_notes import _redact
+        if not self.project_read_trusted or not (self.driver_id or self.actor.startswith("owner:")):
+            raise StateGraphError("private_guidance")
+        standing = self.director_messages.list_director_messages(project_id,limit=8,
+                       delivery_mode="standing",statuses=["unread","acknowledged"],protocol_version="v3")["result"]
+        transient = self.director_messages.list_director_messages(project_id,limit=8,
+                       delivery_mode="transient",ack_mode="broadcast",needs_my_ack=True,
+                       statuses=["unread","acknowledged"],protocol_version="v3")["result"]
+        mail = {"items":standing["items"]+transient["items"]}
+        total = standing["matched_total"]+transient["matched_total"]
+        rows = []
+        for item in mail["items"]:
+            m, d = item["message"], item["delivery"]
+            if m["delivery_mode"] == "standing" or (item.get("ack_mode")=="broadcast"
+                    and self.driver_id in item.get("pending_drivers",[])):
+                rows.append({"source":"project_inbox","message_id":m["message_id"],
+                             "delivery_id":d["delivery_id"],"subject":_redact(m["subject"]),
+                             "body_excerpt":_redact(m["body"])[:320],"created_at":m["created_at"]})
+        if self.driver_id:
+            inbox = self.driver_inbox.active_standing()
+            total += inbox["matched_total"]
+            for m in inbox["items"]:
+                rows.append({"source":"driver_inbox","message_id":m["message_id"],
+                             "delivery_id":m["delivery_id"],"subject":_redact(m["subject"]),
+                             "body_excerpt":_redact(m["body"])[:320],"created_at":m["created_at"]})
+        rows.sort(key=lambda m:(m["created_at"],m["message_id"]))
+        kept=rows[:8]
+        import json
+        while True:
+            text="\n".join(json.dumps(m,ensure_ascii=False,sort_keys=True) for m in kept)
+            if len(text)<=3000:
+                break
+            kept.pop()
+        return {"schema":"aitelier.driver-guidance.v1","project_id":project_id,
+                "driver_id":self.driver_id,"projection":text,"included":len(kept),
+                "omitted":total-len(kept)}
+
+    def list_driver_notebooks(self):
+        if not self.project_read_trusted or not (self.driver_id or self.actor.startswith("owner:")):
+            raise StateGraphError("private_notebook")
+        with self.store.transaction() as conn:
+            if self.driver_id and not conn.execute("SELECT 1 FROM drivers WHERE driver_id=? AND status='active'", (self.driver_id,)).fetchone():
+                raise StateGraphError("private_notebook")
+            if self.driver_id == "public" and not conn.execute(
+                    "SELECT 1 FROM project_drivers WHERE driver_id='public' AND status='member'").fetchone():
+                raise StateGraphError("private_notebook")
+            entries = []
+            for row in conn.execute("SELECT driver_id FROM drivers ORDER BY driver_id"):
+                did = row["driver_id"]
+                counts = conn.execute("SELECT COUNT(*) total,SUM(listing='listed') listed,SUM(listing='delisted') delisted,SUM(superseded_by IS NOT NULL) superseded,MAX(updated_at) updated FROM driver_note_entries WHERE driver_id=?", (did,)).fetchone()
+                entries.append({"driver_id":did,"address":"dnote://"+did,
+                                "entry_count":counts["total"],"listed_count":counts["listed"] or 0,
+                                "delisted_count":counts["delisted"] or 0,"superseded_count":counts["superseded"] or 0,
+                                "updated_at":counts["updated"]})
+            return {"notebooks":entries}
 
     @writer_only_read("wait_for_state_change")
     async def wait_for_state_change(self, project_id, after=0, node_keys=None, attempt_ids=None,
                                     note_after_revision=None, filter_mode="all", actionable_only=True,
                                     timeout_seconds=30.0, limit=100, return_when_idle=False,
-                                    include_lease_events=True):
+                                    include_lease_events=True, include_driver_inbox=False, inbox_after=0):
         from core.state_changes import wait_for_state_change
         if note_after_revision is not None:
             from core.state_driver_notes import NOTE_AFTER_REVISION_RETIRED
@@ -194,7 +253,8 @@ class StateService:
         return await wait_for_state_change(
             self, project_id, after, node_keys, attempt_ids, note_after_revision,
             filter_mode, actionable_only, timeout_seconds, limit, return_when_idle,
-            include_lease_events)
+            include_lease_events=include_lease_events,
+            include_driver_inbox=include_driver_inbox, inbox_after=inbox_after)
 
     def create_project(self, project_id, title, source_project_id=None):
         if source_project_id and not self.db.get_project(source_project_id):

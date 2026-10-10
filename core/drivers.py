@@ -404,6 +404,9 @@ class DriverRegistry:
             self._audit(conn, driver_id, "membership",
                         {"membership_ref": conn.execute("SELECT rowid FROM project_drivers WHERE project_id=? AND driver_id=?",
                                                         (project_id, driver_id)).fetchone()[0], "status": status}, actor)
+            if status == "removed":
+                from core.director_messaging_quorum import membership_removed
+                membership_removed(conn, project_id, driver_id, actor)
             result = dict(conn.execute("SELECT project_id, driver_id, status, revision, updated_at "
                                        "FROM project_drivers WHERE project_id=? AND driver_id=?",
                                        (project_id, driver_id)).fetchone())

@@ -222,6 +222,10 @@ def _best_effort_arguments(action):
     # actions take NO project_id — the project is resolved from the attempt.
     args = {name: ("mutation-target" if name == "project_id" else _filler(f.annotation))
             for name, f in model.model_fields.items() if f.is_required()}
+    if "project_id" in model.model_fields and "driver_id" in model.model_fields:
+        args["project_id"] = "mutation-target"
+    if action == "send_driver_message":
+        args["project_id"] = "mutation-target"
     args.update(_ARGUMENT_SEEDS.get(action, {}))
     return args
 
@@ -244,6 +248,17 @@ def test_performing_a_write_action_leaves_the_project_private(action, tmp_path):
             args["attempt_id"] = ext["attempt_id"]
         except Exception:
             pass
+    if action in ("acknowledge_driver_message","resolve_driver_message"):
+        from core.drivers import DriverRegistry
+        registry = DriverRegistry(service.db,"synthetic-mutation-pepper-not-a-secret")
+        registry.register("mutation-driver","Mutation",actor="fixture")
+        service = StateService(service.db,actor="driver:mutation-driver",driver_id="mutation-driver",project_read_trusted=True)
+        sent = service.driver_inbox.send_driver_message("fixture","fixture","",
+                    target_driver_id="mutation-driver",project_id="mutation-target")
+        args["delivery_id"] = sent["deliveries"][0]["delivery_id"]
+        if action == "resolve_driver_message":
+            service.driver_inbox.acknowledge_driver_message(args["delivery_id"],1,"prepare")
+            args["expected_version"] = 2
     try:
         execute(service, action, args, allow_write=True)
     except Exception:

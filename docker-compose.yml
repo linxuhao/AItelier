@@ -240,6 +240,10 @@ services:
       dockerfile: Dockerfile.godot
     image: aitelier-godot:latest
     container_name: aitelier-godot
+    # PID 1 = tini, same reason as the aitelier service: xvfb-run kills its
+    # Xvfb without wait()ing and exits, so every render orphans an Xvfb onto
+    # PID 1; a bare godot_harness.py PID 1 never reaps them → zombie pile-up.
+    init: true
     # Same host user → can read the host-owned workspace files it checks.
     user: "${AITELIER_UID:-1000}:${AITELIER_GID:-1000}"
     environment:

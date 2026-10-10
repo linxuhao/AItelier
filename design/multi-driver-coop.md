@@ -1,14 +1,14 @@
 # 多 driver 协作（multi-driver coop）—— 同一个 State project 由多个 director 共同驱动
 
-Status: **approved for implementation**（所有者 2026-10-09 16:11 批准）。实施按第 10 节 P0–P5 进行，从 P0 开始；对应的实现节点在 `aitelier` State DAG 中。
-进度：**P0 已合并（main 6790f14446，2026-10-09）并于 2026-10-09 在生产启用**（`AITELIER_DRIVER_IDENTITY=on`；已登记 `owner-cli`、`public`、`grok`、`codex`）；新 LAN driver 自助领取 token：`scripts/driver_token.py self-register`（见 `docs/driver-identity.md`）。**P1 已实现（分支 `grok/multi-driver-p1`），尚未合并或部署**：claim / 租约 / 心跳 / `lease_expired` 事件，只记录不强制，按项目 `multi_driver` 开关（默认 off），见 `docs/driver-claims.md`。**P3 已合并到 main（6dc8674eb），2026-10-10 按所有者批准瘦身（分支 `grok/multi-driver-p3-slim`）**：P3 的范围和验收以第 0a 节为准，第 4.4、4.6、6、7.3、8 节里与之冲突的内容（subagent 三类接管、强制登记、跨节点 checkout 占用、pool handoff、checkpoint 决策 fence、break_glass 通知链）已推迟或删除。见 `docs/driver-claims.md`。**2026-10-10 所有者批准：`multi_driver` 始终开启**（分支 `grok/multi-driver-always-on`）：每个项目都记录 claim 和租约，`set_multi_driver` 已删除，`state_project_policy.multi_driver` 列保留但被忽略，`project_overview.policy.multi_driver` 恒为 `on`；`claim_enforcement` 和 `review_independence` 不再依赖它，也不会被任何操作重置。下文以 `multi_driver=on/off` 为条件的描述都是历史记录，现在一律按 `multi_driver=on` 理解。
-Date: 2026-10-09（初稿）；同日按所有者裁决 D1–D12 及全部待决问题的答复多次修订，16:11 批准实施，见第 0 节。
+Status: **IMPLEMENTED**（2026-10-11）。P0–P5 已全部交付（P3、P4、P5 按所有者批准瘦身），交付内容与推迟项见第 13 节。
+本文现在是**历史设计记录**：第 0–12 节保留实施前的提案与裁决过程，不再维护。现行规则只写在 `core/state_driver_guide.py`（`state_graph_help` 的 driver guide）、
+`docs/state-agent-driver.md`、`docs/driver-identity.md`、`docs/driver-claims.md`、`docs/multi-driver-rollout.md`，本文不再复述；两者冲突时以它们为准。
+Date: 2026-10-09（初稿）；同日按所有者裁决 D1–D12 及全部待决问题的答复多次修订，16:11 批准实施，见第 0 节；2026-10-11 标记为 IMPLEMENTED，转为历史记录。
 Scope: `core/state_*`、`core/director_messaging*.py`、`api/state_*`、`api/mcp_router.py`、`api/authz.py`、
 `.codex/hooks/postcompact_driver_state.py`、driver guide（`core/state_driver_guide.py`、`docs/state-agent-driver.md`）。
 
-> 本文是仓库里的设计文档（未迁移成 State design item）。按 `docs/state-agent-driver.md`「Synchronize design」
-> 的规则，如果以后把它迁移成 `create_design_revision`，那份 State design revision 就成为唯一可写来源，
-> 本文件只保留为历史提案，不再维护同一节规范。
+> 本文是仓库里的设计文档（未迁移成 State design item），现已是历史提案，不再维护同一节规范。
+> 下文凡是与上面五处现行来源重复的规则，都已换成指向它们的指针；代码和测试里引用的节号保持不变。
 
 ---
 
@@ -306,15 +306,9 @@ CREATE TABLE IF NOT EXISTS driver_audit (        -- append-only，触发器禁�
 所有 LAN driver 都以 `linxuhao` 身份登录 `linxuhaserver`。所以 driver token 的作用是**归属**（谁做了什么、谁持有哪个 claim），
 **不是**隔离边界。操作系统不会阻止一个 driver 使用另一个 driver 的身份。
 
-**约定（driver guide 写明，靠自觉遵守）**：
-- 每个 driver 的 token 放在自己的文件里：`~/.aitelier-drivers/<driver_id>.token`，目录权限 0700，文件权限 0600。
-  在共用账号下，这挡不住其他 driver 读取，作用是**避免误用**：脚本只按自己的 `driver_id` 拼路径，不去扫描整个目录，
-  也不依赖某个共享的环境变量。token 不写进 `.env`、笔记、消息、报告或日志。
-- driver 只读自己的 token 文件，不读其他 driver 的，也不读 `~/AItelier/.env` 里的 admin token。admin 操作只能由所有者
-  通过 `owner-cli` 执行。
-- 所有写入都走 4444 的 API，**不**直接写 `~/.AItelier/aitelier.db`，也不 `docker exec` 进容器改状态（AGENTS.md 本来就要求经由 API）。
-- 每个 driver 用自己的工作目录和分支（"一 checkout 一 writer"、4.6）。不动其他 driver 的进程、tmux 会话和临时文件。
-- 收到别的 driver 的 token、或者发现自己拿错了 token，应立即停止，并通知所有者轮换（`rotate_driver_token`）。
+**约定（driver guide 写明，靠自觉遵守）**：token 文件位置与权限、只读自己的 token、只经 API 写入、不动其他 driver 的
+工作目录和进程，现行写法见 `docs/driver-identity.md`（「New driver? Start here」末尾的 Conventions、「Token files」）和
+driver guide「Identify yourself」。另一条：收到别的 driver 的 token、或者发现自己拿错了 token，应立即停止，并通知所有者轮换。
 
 **接受的风险（所有者已知晓并接受）**：
 1. **冒用**：任何 LAN driver 在技术上都能读到其他 driver 的 token 和 admin token，以其他身份写入，越过 claim、fence 和"本人才能写"的私有笔记规则。
@@ -429,25 +423,21 @@ claim_node(purpose=implement) ──► live ──heartbeat──► live ...
 
 默认值（D3；可按项目在 `state_project_policy` 里覆盖）：
 
-- **所有 claim 和 active attempt：租期 2 小时（7200 秒），可无限续租。** 建议每 20–30 分钟续一次，最晚在剩余 30 分钟前续。
-  过期后有一段 grace（建议默认 15 分钟，见 Q7），grace 结束才进入 reclaimable。
+- 租期、续租节奏和 grace（实施值：7200 秒、每 20–30 分钟续一次、grace 900 秒）的现行规则见 driver guide「Claims and leases」
+  和 `docs/driver-claims.md`。
 - SkillFlow attempt：租约约束的是 **controller**，即负责回答 checkpoint、调用 reconcile 的 driver，**不是** run 本身。
   run 的存活由引擎的 `skillflow_active_ops`、`owner_lost_at` 判断，本设计不碰。
 
 #### 4.3a subagent 的续租（D3）
 
-- attempt 和 claim 的 owner 永远是**父 driver**。subagent 只是父 driver 手下的执行者，没有自己的凭据。
-  但 subagent 要在 `driver_subagents` 表登记（4.6），这样才能被续租、被交接、被接管（D8）。
-- **父 driver 负责为自己名下所有 subagent 续租**（attempt 和 subagent 记录一起续）：一次 `heartbeat(attempt_ids=[...], subagent_ids=[...], fences=[...])`
-  可以批量续最多 100 个，所以父 driver 只需要一个循环。推荐把它放在 client 进程里，和 `wait_for_state_change`
-  的等待循环放在一起（`docs/state-agent-driver.md`「Keep the wait loop in the tool/client process」），不要每次续租都开一个新的模型回合。
-- 父 driver 自己下线、上下文被压缩或会话结束之前：要么把 attempt 交接出去（第 6 节），要么在报告 settle 之后释放。
-  做不到时就让租约自然过期。过期的意思是"没人负责了，请其他人处理"，正是本机制要表达的信号。
-- 心跳只证明**父 driver 还在负责**，**不**证明 subagent 进程还活着（State 仍然不探测远程进程）。
-  父 driver 只应在确实还在监管 subagent 时续租，不能用一个独立脚本无条件续租，否则遗留 attempt 会被永远续命，
-  又回到 1.3 的问题。详见 12.2。
+现行规则（父 driver 在等待循环里批量 `heartbeat`、只在确实监管时续租、下线前交接或让租约过期）见 driver guide
+「Driver loop」第 4、5 步和「Claims and leases」。P3 瘦身后 subagent 记录不续租、不接管；`heartbeat` 的 `subagents`
+项续的是父 driver 以 `<id>/<label>` 为该 subagent 持有的 claim。心跳只证明父 driver 还在负责，不证明 subagent 进程还活着（理由见 12.2）。
 
 ### 4.4 回收：不假装 worker 已停
+
+> 现行规则见 `docs/driver-claims.md`「Reclaim: abandon or take over」。实施时参数 `quiescence ∈ {attested, unknown}`
+> 定名为 `abandon_kind ∈ {confirmed_stopped, unknown}`。下文是实施前的提案。
 
 现有不变量（`docs/state-external-harness.md:128-133`、`docs/state-graph.md:149-153`）：超时或丢失回调都不能证明 worker 已经停止，
 系统里也**故意不提供** force-reset。本设计保留这一点，只是在"有人负责"和"无人负责"之间加一个显式、可审计的中间态。
@@ -614,37 +604,9 @@ CREATE TABLE IF NOT EXISTS state_director_delivery_acks (
 -- 触发器：acked_at 一旦写入就不能再改，也不能删行（与其他审计表一致）
 ```
 
-**规则**：
-- **发送**：
-  - `ack_mode=broadcast` 时，事务内按目标项目当时的 `project_drivers`（status=member）为每个成员插入一行 `required=1, acked_at=NULL`。
-    `public` 默认不是成员（Q5），因此不在其中。
-  - `at_least_n` 时，如果 `ack_quorum` 大于目标项目当前的成员数，拒绝，错误码 `ack_quorum_unreachable`。
-  - 跨项目群发（`broadcast=true`）时，对每个目标项目分别检查。
-- **ack**：
-  - `acknowledge_director_message(delivery_id, expected_version, request_key)` 的含义变为"**调用者这个 driver** ack"。
-  - 只有目标项目的成员或所有者可以 ack。同一 driver 重复 ack 视为幂等重放，返回原结果，不增加计数。
-  - 每次 ack 都写一行（或填上那行的 `acked_at`）和一条事件，并给 delivery 的 `version` 加 1，沿用 v2 的 CAS。
-    并发 ack 时输家得到 `version_conflict`，重读后再 ack 即可，因为每个 driver 只需成功一次。
-- **完成规则**：quorum 满足时（`at_least_n` 为 ack 数 ≥ N，`broadcast` 为所有 `required=1` 且未 `removed_at` 的行都已 ack），
-  - **transient**：系统在同一事务里把 delivery 从 `unread`/`acknowledged` 置为 **`resolved`**。这就是 D12 说的"处理完毕"，事件记录全部 ack 者。
-  - **standing**：quorum 满足后，delivery 置为 `acknowledged`，但**不**自动 `resolved`，仍然留在 PostCompact 投影里。
-    原因是 standing 是持续生效的规则，自动 resolved 会让规则在所有人确认后从恢复上下文里消失，这与 v2 standing 的定义冲突。
-    它要等任一成员或所有者显式 `resolve_director_message` 才退出。
-    这是对 D12 的**解释**：严格按字面，standing 在 quorum 后也应 resolved；如果所有者要字面语义，只改这一条即可。
-  - quorum 满足之前，delivery 保持 `unread`（还没人 ack）或 `acknowledged`（有部分人 ack）。
-  - 显式的 `resolve_director_message` 仍然可用：任一成员或所有者可以提前关闭，事件里注明 quorum 未满足。
-- **可见性（修复共享 ack 问题）**：`list_director_messages` 的每个 item 增加 `ack_mode`、`ack_quorum`、`acks: [{driver_id, acked_at}]`、
-  `acked_count`、`pending_drivers`（broadcast 时还没 ack 的成员）和 `acked_by_me`。
-  - 新增过滤参数 `needs_my_ack: bool`：broadcast 下"我还没 ack"，或 at_least_n 下"quorum 未满足且我没 ack"。
-  - PostCompact 投影：standing 消息照旧；`broadcast` 模式的 transient 消息，在**本 driver 未 ack** 时也进入投影（仍受 8 条、3000 字符上限），
-    确保每个 driver 都看到规则变更。`at_least_n` 的 transient 保持 v2 行为，不注入。
-- **成员变动**：成员在 ack 前被 `set_project_driver(removed)` 时，填上 `removed_at`，然后重新判断 quorum。
-  `at_least_n` 的成员数降到 N 以下时，不自动降低 N，overview 标出 `ack_quorum_unreachable`，由任一成员或所有者显式 resolve。
-- **迁移**：现有消息全部为 `ack_mode=at_least_n, ack_quorum=1`。现有 delivery 的 status 和 version **不变**，不回填 ack 行，因为历史 ack 者都是
-  `authorized-state-operator`，猜出来的身份就是伪造的出处。已 `acknowledged`/`resolved` 的历史 delivery 视为 quorum 已满足，
-  列表里 `acks=[]`，标 `legacy_ack=true`。
-- **兼容**：不带新参数的 v2 请求等价于 `at_least_n, N=1`。对 transient 而言，唯一的行为变化是第一个 ack 会直接 resolved，
-  而 v2 需要 ack 后再显式 resolve。需要"做完再关"的跟踪放到 State（claim / issue），driver guide 同步说明。
+**规则**：发送、ack、完成、可见性、成员变动、迁移和 v2 兼容的现行规则见 driver guide「Two inboxes (project vs driver),
+ack modes and your private notebook (P2)」（`docs/state-agent-driver.md`）。设计时的一处解释留作记录：standing 消息在 quorum
+满足后只置为 `acknowledged`、不自动 `resolved`，以免持续生效的规则从 PostCompact 投影里消失；这是对 D12 字面语义的偏离，已按此实现。
 
 ### 5.2 per-driver inbox（新增）
 
@@ -669,17 +631,8 @@ CREATE TABLE IF NOT EXISTS driver_inbox_deliveries (
 );
 ```
 
-- **寻址**：`target_driver_id`（一个 driver）或 `project_members=<project_id>`（该项目除发送者外的全部成员）。
-  每个收件人一行 delivery，各自走 `unread → acknowledged → resolved`，复用 `_transition` 的 CAS 写法（`expected_version`）。
-  只有收件人本人（或 break-glass）能改它的状态。
-- **transient / standing** 语义照搬 v2。standing 进入**该 driver 自己的** PostCompact 投影
-  （`.codex/hooks/postcompact_driver_state.py` 增加 driver inbox 来源；上限仍是 8 条、3000 字符）。
-- **系统通知**：租约过期、被回收、subagent 变成 orphan、handoff 请求，都由服务端写进相关 driver 的 inbox（`sender_driver_id=NULL`）。
-- **refs 校验**：引用的 attempt / node / issue / claim / subagent 必须存在。消息正文仍是不可信输出，不能授予权限，也不能替代 State 记录。
-- **等待**：新 read action `wait_for_driver_inbox(after, timeout_seconds, return_when_idle)`，游标是该 driver 的 `seq`。
-  另外，`wait_for_state_change` 增加 `include_driver_inbox=true`，可以在一次长等待里同时等项目事件和自己的 inbox。
-  这需要两套游标，响应里分别返回 `next_after` 和 `next_inbox_after`。
-- **读权限**：私有。只有收件人本人和所有者能读；不进 `PUBLIC_READS`。
+- 寻址、逐收件人的 delivery 与 CAS、transient / standing、系统通知、refs 校验、等待游标和读权限的现行规则见 driver guide
+  「Two inboxes ...」（`docs/state-agent-driver.md`）。
 - **`public` driver 的 inbox 由所有公网 agent 共用**（D6 的直接后果，见 12.3）。
 
 ### 5.3 per-driver 私有笔记（D7 已确认；D10：复用 driver notebook，目录模式）
@@ -711,18 +664,9 @@ CREATE TABLE IF NOT EXISTS driver_inbox_deliveries (
 - `get_driver_note`、`driver_note_history`、`search_driver_note_history` 只服务于项目 notebook 已关闭的 free-text 历史，driver 作用域不支持。
   `update_driver_note` 照旧关闭。
 
-**权限**：
-- 写入时，调用者推导出的 `driver_id` 必须等于作用域里的 `driver_id`，否则返回 `not_notebook_owner`；只有 break-glass 例外，并做标记。
-  `director_identity` 可以是 subagent 子标签（`codex-macbook-air/sub-3`），以便区分是哪个 subagent 写的。
-- 读取要求调用者是已注册的 driver 或所有者。`public` 只有在被所有者加入某个项目之后才能读（Q5 默认不加，所以默认读不到）。
-- `writer_only_read` 装饰器和 `transaction(notebook=...)` 要从"按项目"扩展成"按作用域"。driver 作用域**不进** `PUBLIC_READS`。
-
-**其他规则**：
-- 引用 State ID：私有条目里出现的 attempt / node / claim / subagent 等引用，写入时校验它们存在。State 永远是权威；
-  其他 driver 读到的私有条目是**不可信输出**。
-- 不删除：沿用 notebook 的规则，supersede 或 delist，不提供删除。
-- 事件：私有写入**不进**项目事件流（`driver_note_updated` 只属于项目 notebook），也不唤醒任何 wait。overview、frontier、wait 都不读私有笔记，
-  "现在谁在做什么"只看 claim / attempt / subagent 表，私有笔记只回答"这个 driver 打算怎么做、做到哪了"。
+**权限与其他规则**：只有本人写、注册 driver 和所有者只读、`public` 须先成为项目成员、项目规则不得引用 `dnote://`、写入时校验
+State 引用、私有条目不进 overview / frontier / wait / PostCompact，现行规则见 driver guide「Two inboxes ...」
+（`docs/state-agent-driver.md`）。以下两条是提案，留作记录：
 - **回收时（D8）**：别人本来就能读，不需要复制。`take_over_attempt` 会把原 driver notebook 里引用了该 attempt 的 `dnote://` 地址
   列进 handoff 记录。回收方不能改原 driver 的笔记，只能在自己的 notebook 里写续做进度。
 - `public` 的 notebook 由所有公网 agent 共写（D6 的后果，见 12.3）。
@@ -739,7 +683,8 @@ CREATE TABLE IF NOT EXISTS driver_inbox_deliveries (
 
 > **P3 瘦身（0a）**：只做点对点（`to_driver_id` 必填，没有 `to="any"` 公共池）；accept 不转移 subagent，
 > 不检查成员资格或可观察性；`workers.quiescent` 不为 true 时 accept 照常转移，只在结果和
-> `attempt_ownership_transferred` 事件里记录 `quiescence_warning`（6.3 的拒绝规则推迟）。
+> `attempt_ownership_transferred` 事件里记录 `quiescence_warning`（6.3 的拒绝规则推迟）。现行规则见
+> `docs/driver-claims.md`「Handoff」；下文是实施前的提案。
 
 1. `offer_handoff(project_id, subject: {attempt_id | claim_id}, to: {driver_id | "any"}, package, expected_owner_fence, request_key)`
    - `to="any"`：放进项目公共池，任何成员都可以 accept（自助餐，D2）。
@@ -794,22 +739,15 @@ CREATE TABLE IF NOT EXISTS driver_inbox_deliveries (
 
 ### 7.2 review 独立性：可选、advisory、默认关闭
 
-项目策略 `review_independence ∈ {off, advisory}`，**默认 `off`**。没有 `required`（D2）。
-
-- `off`：与现在完全相同。
-- `advisory`：`verify_node` 照常放行。如果某个 `kind=review` 的 criterion 的最新 evidence 来自实现者本人
-  （`evidence.reviewer_driver = attempt.owner_driver_id`，或者等于曾经拥有过这个 attempt 的任何 driver），
-  就在 acceptance receipt 的 `provenance_json` 里标 `self_reviewed=true`，并在 overview 里显示一个计数。
-  这只是可见性，不是拦截。
-- 不论设置为何，产品自己的验收条件（criterion 文本里写的"independent gpt-6.1-sol review"之类）仍然由 criterion 本身
-  和填 evidence 的 driver 负责，和现在一样。
+项目策略 `review_independence ∈ {off, advisory}`，**默认 `off`**。没有 `required`（D2）。`advisory` 只标记
+`self_reviewed`，不拦截。现行规则见 driver guide「Driver loop」后的 Advisory review marking 段、`docs/driver-claims.md`
+「Switches」和 `docs/multi-driver-rollout.md`。
 
 ### 7.3 冲突规则
 
-> **P3 瘦身（0a）**：第 1、2、5、9 条按下文实现（9 = 路由入口一次 owner 检查）；第 4 条改为只做 owner 检查
-> （别人持有 live claim 或 active attempt 时拒绝，`not_owner`，不再有 `override_reason` 放行和通知）；第 8 条（checkout
-> 唯一 writer）推迟；`receiver_cannot_observe_workers`、`override_reason_required`（结构写）不再出现。全部只在
-> `claim_enforcement=on` 时生效。
+> 现行规则（P3 瘦身后实际生效的第 1、2、4、5、9 条及其错误码，只在 `claim_enforcement=on` 时生效）见
+> `docs/driver-claims.md`「Enforcement」表（按下列编号引用）和 driver guide「Claims and leases」。下列编号清单是实施前的提案，
+> 第 4 条的 `override_reason` 放行、第 8 条和第 10 条里的 `receiver_cannot_observe_workers` 等未实现（见第 0a、13 节）。
 
 1. **dispatch**：在 `claim_enforcement=on` 的项目里，`start_attempt` / `start_external_attempt` 要求调用者持有该节点的 live
    `implement` claim，且 fence 一致；否则拒绝，错误码 `claim_required`。这条排他由 `state_node_claims_one_exclusive`
@@ -833,6 +771,9 @@ CREATE TABLE IF NOT EXISTS driver_inbox_deliveries (
     `workspace_in_use`、`use_driver_inbox`、`receiver_cannot_observe_workers`，方便 driver 程序化处理。
 
 ## 8. API 变更（MCP 与 REST 同一套 typed contract）
+
+> 实施后的 action、参数和错误码以 `state_graph_help` 的 schema 与 driver guide、`docs/driver-claims.md` 和
+> `docs/driver-identity.md`「API」为准；本节是实施前的提案，个别名字已变（例如 driver inbox 的读动作是 `list_driver_messages`）。
 
 所有新动作都进入 `core/state_commands.py` 的读/写表和 `_handlers`（第 758 行）。MCP 仍然只有 `state_graph_read` / `state_graph_write`
 两个入口（`api/state_graph_tools.py`），不新增工具。REST 走现有的 `/api/state/query/{read_action}` 和
@@ -945,7 +886,7 @@ REST GET（私有）：`/api/drivers`、`/api/drivers/me`、`/api/drivers/{id}/p
 | P2 driver inbox + 私有笔记 + 项目 inbox ack 模式 | 5.2；5.3（driver notebook 泛化为按作用域）；5.1a（`at_least_n` / `broadcast`，v3）；`wait_for_driver_inbox`；PostCompact 按 driver 投影 | Codex ↔ Grok 互发 transient/standing；一方 ack 不影响另一方；各自写私有笔记，对方能读不能写 |
 | P3 claim 强制 + 回收 + handoff（瘦身，见 0a） | 已合并 main 6dc8674eb，2026-10-10 瘦身（分支 `grok/multi-driver-p3-slim`）。强制只由 `claim_enforcement` 决定（默认 off），先只对 `aitelier` 开启；`abandon`、`take_over`、点对点 `offer/accept/decline/withdraw_handoff`、记录用 `driver_subagents` | 0a 的 5 条最小验收；线上演练：用 AMI 那条 legacy attempt 走一遍人工回收（需所有者批准）；一次真实的 Codex → Grok handoff |
 | P4 扩展到 wuxia | `wuxia-myth` 开启 `claim_enforcement`（`multi_driver` 自 2026-10-10 起始终开启）；可选开启 `review_independence=advisory` | 一轮 wuxia 批次中没有出现重复 dispatch；`self_reviewed` 计数可见 |
-| P5 清理 | 归档 `novel-lingwu-deputy` 这类邮箱项目；driver guide 删除旧的绕过说明 | 已完成：`novel-lingwu-deputy` 已归档；driver guide 写明 driver 身份绝不能建成项目 |
+| P5 清理（瘦身） | 归档 `novel-lingwu-deputy` 这类邮箱项目；driver guide 删除旧的绕过说明；API 收紧推迟（第 13 节） | 已完成：`novel-lingwu-deputy` 已归档；driver guide 写明 driver 身份绝不能建成项目 |
 
 每个阶段的度量：
 
@@ -1091,6 +1032,30 @@ REST GET（私有）：`/api/drivers`、`/api/drivers/me`、`/api/drivers/{id}/p
     - transient 消息在 N=1 时首个 ack 即 resolved，改变了 v2 的"先 ack、后 resolve"两步；需要"做完再关"的跟踪，应放到 State（claim / issue），不放在 inbox。
     - standing 消息不随 quorum 自动 resolved，这是本文对 D12 的解释（5.1a），需所有者知晓。
     - `ack_mode=broadcast` 和 v2 的跨项目 `broadcast` 参数同名，容易误用。
+
+## 13. 实施结果（IMPLEMENTED，2026-10-11）
+
+本节只列交付了什么、推迟了什么；规则本身见各行的「现行来源」，不在此复述。
+
+| 阶段 | 交付 | 现行来源 |
+|---|---|---|
+| P0 driver 身份 | 全局 `drivers` / `project_drivers` / `driver_audit`；每个 LAN driver 一个 token（`scripts/driver_token.py self-register`）；公网 = `driver:public`；`whoami`；`director_identity` 校验。设计提交 6790f1444，2026-10-09 生产启用（`AITELIER_DRIVER_IDENTITY=on`） | `docs/driver-identity.md` |
+| P1 claim / 租约 | `claim_node` / `heartbeat` / `release_claim`、2 小时租约、`lease_expired` 事件、`in_progress_lease_expired` / `reclaimable`；claim 只记录不强制 | `docs/driver-claims.md`、driver guide「Claims and leases」 |
+| P2 driver inbox、私有笔记、ack 模式 | `send_driver_message` / `wait_for_driver_inbox`；`dnote://` 私有 notebook（本人写，其他 driver 只读）；项目 inbox `ack_mode=at_least_n` / `broadcast`（v3）；PostCompact 按 driver 投影 | driver guide「Two inboxes ...」 |
+| P3（瘦身，第 0a 节） | 合并 main 6dc8674eb 后瘦身。`abandoned` 状态；租约到期 + 900 s 后 `abandon_external_attempt` / `take_over_attempt`（fence+1，原 owner 收 inbox 通知）；`claim_enforcement=on` 时的 claim / owner / fence 检查；点对点 handoff；`driver_subagents` 只记录。另含 claim 转移修复：接收方已持有该节点的 live claim 时绑定它，不再插入第二条（9c36502fc） | `docs/driver-claims.md` |
+| P4（瘦身） | `review_independence=advisory` 标记 `self_reviewed`（不拦截）；driver guide、docs、PostCompact hook 更新；`wuxia-myth` 开启 `claim_enforcement` | `docs/multi-driver-rollout.md`、`docs/driver-claims.md`「Switches」 |
+| `multi_driver` 始终开启 | 每个项目都记录 claim 和租约；`set_multi_driver` 已删除；`state_project_policy.multi_driver` 列保留但被忽略 | driver guide「Claims and leases」 |
+| P5（瘦身） | `novel-lingwu-deputy` 已归档；driver guide 写明 driver 身份绝不建成项目 | driver guide「Identify yourself」 |
+
+**推迟**（未实现；需要时另开 issue）：
+
+- subagent 接管：三类接管、`adopt_subagent`、`update_subagent_checkpoint`、`report_subagent_settled`、orphan 处理、强制登记（Q8），
+  以及按 subagent 记录续租（4.3a、4.6）；
+- 跨节点 checkout 占用检查（7.3 第 8 条，`workspace_in_use` 只剩 `abandon_kind=unknown` 之后那一条）与同 driver 多 executor 检查；
+- checkpoint 决策行与失败 run 救援的 fence（现在只在路由入口检查一次 owner）；
+- pool handoff（`to="any"`）与 6.3 的 `receiver_cannot_observe_workers` 拒绝（现在只记录 `quiescence_warning`）；
+- 结构写的 `override_reason` 放行与通知（现在只做 owner 检查，`not_owner`）；`break_glass` 的通知链（现在只在事件上标记）；
+- 9.3 所说的过渡期后收紧 API（例如不论 `claim_enforcement` 都要求 observe 带 fence）：P5 评估后认为是过度设闸，推迟。
 
 ## 附：引用索引
 

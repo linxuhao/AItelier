@@ -192,11 +192,9 @@ _ARGUMENT_SEEDS = {
     "report_external_attempt": {"observation_id": "obs-1", "expected_version": 0,
                                 "context_hash": "0" * 64, "status": "candidate",
                                 "report_ref": "r", "report_sha256": "0" * 64},
-    # P3 (multi-driver): digests must be 64 hex and a handoff names ONE subject,
-    # or pydantic refuses before the handler - and the mutation - can run.
-    "register_subagent": {"label": "w", "workspace": "h:/w#b", "context_sha256": "0" * 64},
-    "update_subagent_checkpoint": {"subagent_id": "codex/w", "checkpoint_sha256": "0" * 64},
-    "report_subagent_settled": {"subagent_id": "codex/w", "quiescent": True, "report_sha256": "0" * 64},
+    # P3 (multi-driver): a label must match its pattern and a handoff names ONE
+    # subject, or pydantic refuses before the handler - and the mutation - can run.
+    "register_subagent": {"label": "w", "workspace": "h:/w#b"},
     "offer_handoff": {"claim_id": "claim-mutation", "package": {"next_step": "x"}},
 }
 

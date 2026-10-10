@@ -12,8 +12,8 @@ from tests.unit.test_driver_p2 import peers,send
 
 TABLES={'state_director_delivery_acks','state_director_legacy_acks'}
 # Multi-driver P3 (rebased onto this policy) classifies its own tables: handoff
-# packages and frozen subagent contexts private, the enforcement switch public.
-P3_PRIVATE={'state_handoffs','state_subagent_contexts'}
+# packages private, the enforcement switch public.
+P3_PRIVATE={'state_handoffs'}
 P3_PUBLIC={'state_project_enforcement'}
 BASE='f367c46f2cd29d4d3306aa6ca540bf8c54ebbeb9'
 

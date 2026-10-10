@@ -137,12 +137,6 @@ def _plan():
              "VALUES(?,?,'claim',NULL,'claim-canary-public-id','a',?,NULL,'offered',?,1,?,'0',?,?,?)"),
             ("handoff-canary", OPEN, c("state_handoffs"), '{"next_step": "%s"}' % c("state_handoffs"),
              c("state_handoffs"), "2999-01-01T00:00:00.000000+00:00", now, now)),
-        # A registered subagent's frozen instructions: the canary is the retained
-        # BYTES (and the ref), exactly what must never reach an anonymous reader.
-        "state_subagent_contexts": (
-            "INSERT INTO state_subagent_contexts(context_sha256,context_bytes,retained_ref,created_at) "
-            "VALUES(?,?,?,?)",
-            ("c" * 64, c("state_subagent_contexts").encode(), c("state_subagent_contexts"), now)),
     }
 
 

@@ -1,24 +1,24 @@
-"""Multi-driver P3, fix round 1: one regression test per CONFIRMED review finding
-(P3_REVIEW_CODEX.md, 2026-10-10). Each test fails on 200b73c3 and passes after
-the fix named in P3_REPORT.md "Fix round 1".
+"""Multi-driver P3, fix round 1: regression tests of the CONFIRMED review findings
+(P3_REVIEW_CODEX.md, 2026-10-10) whose mechanisms survive the slimming
+(P3_SLIM.md): 1 launch authorization, 2 transfers keep the workspace, 7 lapsed
+claims authorize nothing, 9 enforcement off is P1, 10 the deployment gate and
+abandoned owners, 12 a review-claim handoff. Findings 1, 2, 7 and 9 are
+MUST-FIX regressions (P3_SLIM.md section c); the tests of removed mechanisms
+(checkout occupancy, subagent adoption/orphans, admin reporting, pool offers,
+notice adapter) went with them.
 """
 from __future__ import annotations
 
-import asyncio
-import json
 import sqlite3
 
 import pytest
 
-from core import drivers
 from core.state_claims import ClaimError
-from core.state_commands import ProjectPrivate, execute
-from core.state_database import StateDatabase
-from core.state_graph import StateConflict, StateGraphError, digest
+from core.state_graph import StateConflict, digest
 from core.state_service import StateService
 from tests.unit.test_state_p3_enforced_claims import (  # noqa: F401 - fixtures `clock`, `db`
-    GRACE, LEASE, NODE, _insert_skillflow_attempt, a_file, claim, clock, code_of, db, events, external,
-    notices, project, read, reclaimable, register, report, svc, write)
+    GRACE, LEASE, NODE, a_file, claim, clock, code_of, db, events, external, notices, project, read,
+    reclaimable, registered, report, svc, write)
 
 
 def terminal_report(service, attempt, tmp_path, fence=None, status="failed", oid="done"):
@@ -65,6 +65,7 @@ def claims_of(db, **where):
 class TestFinding1LaunchAuthorization:
     def test_reserved_to_launching_is_authorized_for_owner_claim_and_admin(self, db, clock):
         project(db, enforce=True)
+        registered(db, "codex", "grok", "owner-cli")
         codex, grok, owner = svc(db, "codex"), svc(db, "grok"), svc(db, "owner-cli", admin=True)
         reserved_skillflow_attempt(db, "attempt-res", "codex")
         # Another driver (a recovery, a replay) cannot launch codex's reservation.
@@ -76,11 +77,12 @@ class TestFinding1LaunchAuthorization:
             codex.attempts.claim_launch("attempt-res", "codex", False, "driver:codex")
         assert refused.value.code == "claim_required"
         assert read(codex, "get_attempt", attempt_id="attempt-res")["status"] == "reserved"
-        # An admin launches as break glass; the owner is told.
+        # An admin launches as break glass: recorded on the event (slim: an audit
+        # flag only, no notice).
         assert owner.attempts.claim_launch("attempt-res", "owner-cli", True, "driver:owner-cli") is True
         launching = events(db, "attempt_launching")[-1]
         assert launching["break_glass"] is True and launching["owner_driver_id"] == "codex"
-        assert notices(codex, kinds=["break_glass"])[0]["refs"]["attempt_id"] == "attempt-res"
+        assert launching["launched_by"] == "owner-cli" and notices(db, "codex") == []
 
     def test_owner_with_live_claim_launches(self, db, clock):
         project(db, enforce=True)
@@ -123,111 +125,16 @@ class TestFinding2TransferKeepsWorkspace:
         taken = write(grok, "take_over_attempt", attempt_id=attempt["attempt_id"], expected_owner_fence=1, reason="gone")
         assert taken["claim"]["workspace"] == "linxuhaserver:/w#c" and taken["claim"]["purpose"] == "implement"
         assert taken["claim"]["attempt_id"] == attempt["attempt_id"]
-        assert code_of(lambda: claim(third, "b", workspace="linxuhaserver:/w#other")) == "workspace_in_use"
+        # Slim scope is the node: nobody else can claim it while the moved claim lives
+        # (the cross-node checkout check was removed with P3_SLIM.md).
+        assert code_of(lambda: claim(third, "a", workspace="linxuhaserver:/w#other")) == "claimed_by_other"
         offer = write(grok, "offer_handoff", project_id="p", request_key="h", expected_owner_fence=2,
                       attempt_id=attempt["attempt_id"], to_driver_id="third",
                       package={"next_step": "x", "workers": {"quiescent": True}})
         moved = write(third, "accept_handoff", project_id="p", handoff_id=offer["handoff_id"], expected_owner_fence=2)
         assert moved["claim"]["workspace"] == "linxuhaserver:/w#c" and moved["claim"]["driver_id"] == "third"
-        assert code_of(lambda: claim(grok, "b", workspace="linxuhaserver:/w#again")) == "workspace_in_use"
-
-
-# 3 ---------------------------------------------------------------------------
-class TestFinding3OrphanKeepsCheckout:
-    def test_orphaned_checkout_is_reserved_until_settled_even_on_another_branch(self, db, clock, tmp_path):
-        project(db, enforce=True)
-        codex, grok = svc(db, "codex"), svc(db, "grok")
-        held = claim(codex, "a", workspace="linxuhaserver:/w#c")
-        attempt = external(codex, "a", claim_id=held["claim_id"], fence=1)
-        register(codex, attempt, tmp_path, "mac", host="macbook-air", workspace="macbook-air:/w#mac")
-        reclaimable(clock)
-        write(grok, "take_over_attempt", attempt_id=attempt["attempt_id"], expected_owner_fence=1, reason="gone")
-        write(grok, "adopt_subagent", project_id="p", subagent_id="codex/mac", fence=2, observability="unobservable",
-              reason="mac")
-        assert code_of(lambda: register(grok, attempt, tmp_path, "mac2", host="macbook-air",
-                                        workspace="macbook-air:/w#new-branch")) == "workspace_in_use"
-        assert code_of(lambda: claim(grok, "b", workspace="macbook-air:/w#plan")) == "workspace_in_use"
-        assert register(grok, attempt, tmp_path, "mac3", host="macbook-air", workspace="macbook-air:/w2#mac3")["status"] == "active"
-        ref, sha = a_file(tmp_path, "settled.json", {"process": "exited"})
-        write(codex, "report_subagent_settled", project_id="p", subagent_id="codex/mac", quiescent=True,
-              report_ref=ref, report_sha256=sha)
-        assert register(grok, attempt, tmp_path, "mac4", host="macbook-air", workspace="macbook-air:/w#new-branch")["status"] == "active"
-
-
-# 4 ---------------------------------------------------------------------------
-class TestFinding4FormerOwnerIsFencedOut:
-    def test_former_owner_cannot_claim_attest_or_renew_under_a_transferred_worker(self, db, clock, tmp_path):
-        project(db, enforce=True)
-        codex, grok = svc(db, "codex"), svc(db, "grok")
-        held = claim(codex, "a", workspace="h:/w#c")
-        attempt = external(codex, "a", claim_id=held["claim_id"], fence=1)
-        register(codex, attempt, tmp_path, "mac", host="macbook-air", workspace="macbook-air:/w#mac")
-        side = claim(codex, "b", "review", subagent="codex/mac")      # a claim on ANOTHER node for the worker
-        reclaimable(clock)
-        write(grok, "take_over_attempt", attempt_id=attempt["attempt_id"], expected_owner_fence=1, reason="gone")
-        # Claims held for the worker moved with it; the old row is transferred.
-        assert claims_of(db, claim_id=side["claim_id"])[0]["status"] == "transferred"
-        moved = [c for c in claims_of(db, node_key="b", status="live")]
-        assert moved and moved[0]["driver_id"] == "grok" and moved[0]["subagent"] == "codex/mac" and moved[0]["purpose"] == "review"
-        # The former owner neither claims nor attests under that identity, and renews nothing.
-        assert code_of(lambda: claim(codex, "c", "review", subagent="codex/mac", request_key="again")) == "subagent_unregistered"
-        assert code_of(lambda: write(codex, "record_evidence", attempt_id=attempt["attempt_id"], evidence_id="e1",
-                                     criterion_id="c", verdict="pass", artifact="a" * 40, report_ref="/x",
-                                     report_sha256="0" * 64, director_identity="codex/mac")) == "subagent_unregistered"
-        beat = write(codex, "heartbeat", project_id="p", subagents=[{"subagent_id": "codex/mac"}])
-        assert beat["renewed"] == [] and beat["refused"][0]["error"] == "not_subagent_owner"
-        # Orphaning revokes the worker's claims; nobody renews them.
-        write(grok, "adopt_subagent", project_id="p", subagent_id="codex/mac", fence=2, observability="unobservable",
-              reason="mac")
-        assert {c["status"] for c in claims_of(db, subagent="codex/mac")} == {"transferred", "revoked"}
-        beat = write(grok, "heartbeat", project_id="p", subagents=[{"subagent_id": "codex/mac"}])
-        assert beat["renewed"] == [] and beat["refused"][0]["error"] == "orphaned"
-        assert events(db, "subagent_orphaned")[-1]["revoked_claims"] == [moved[0]["claim_id"]]
-
-
-# 5 ---------------------------------------------------------------------------
-def test_finding5_attempt_handoff_needs_an_explicit_quiescence_attestation(db, clock, tmp_path):
-    project(db)
-    codex, grok = svc(db, "codex"), svc(db, "grok")
-    attempt = external(codex, "a")
-    register(codex, attempt, tmp_path, "mac", host="macbook-air")
-    offer = lambda pkg, key: write(codex, "offer_handoff", project_id="p", request_key=key, expected_owner_fence=1,
-                                   attempt_id=attempt["attempt_id"], to_driver_id="grok", package=pkg)
-    assert code_of(lambda: offer({}, "h0")) == "quiescence_required"
-    assert code_of(lambda: offer({"next_step": "x"}, "h1")) == "quiescence_required"
-    with pytest.raises(StateGraphError):
-        offer({"workers": {"detail": "no boolean"}}, "h2")
-    stated = offer({"workers": {"quiescent": False}}, "h3")
-    assert code_of(lambda: write(grok, "accept_handoff", project_id="p", handoff_id=stated["handoff_id"],
-                                 expected_owner_fence=1)) == "receiver_cannot_observe_workers"
-
-
-# 6 ---------------------------------------------------------------------------
-def test_finding6_structural_guard_write_and_notices_are_one_transaction(db, clock, monkeypatch):
-    project(db, enforce=True)
-    codex, grok = svc(db, "codex"), svc(db, "grok")
-    claim(codex, "a")
-    from core import driver_notices
-
-    def boom(*args, **kwargs):
-        raise RuntimeError("notice store unavailable")
-
-    monkeypatch.setattr(driver_notices, "notify", boom)
-    with pytest.raises(RuntimeError):
-        write(grok, "revise_node", project_id="p", node_key="a", expected_revision=1, reason="r", override_reason="x")
-    assert read(grok, "get_node", project_id="p", node_key="a")["node"]["revision"] == 1
-    assert events(db, "node_revised") == [] and events(db, "claim_overridden") == []
-    monkeypatch.undo()
-    assert write(grok, "revise_node", project_id="p", node_key="a", expected_revision=1, reason="r",
-                 override_reason="x")["revision"] == 2
-    assert len(events(db, "claim_overridden")) == 1 and len(notices(codex, kinds=["override_notice"])) == 1
-    # The hold path is one transaction too.
-    write(codex, "set_node_hold", project_id="p", node_key="b", held=True, expected_revision=0, reason="w")
-    monkeypatch.setattr(driver_notices, "notify", boom)
-    with pytest.raises(RuntimeError):
-        write(grok, "set_node_hold", project_id="p", node_key="b", held=False, expected_revision=1, reason="g",
-              override_reason="x")
-    assert read(grok, "get_node", project_id="p", node_key="b")["node"]["node_hold"]["held"] == 1
+        assert moved["claim"]["attempt_id"] == attempt["attempt_id"]
+        assert code_of(lambda: claim(grok, "a", workspace="linxuhaserver:/w#again")) == "claimed_by_other"
 
 
 # 7 ---------------------------------------------------------------------------
@@ -242,25 +149,6 @@ def test_finding7_a_lapsed_claim_authorizes_no_dispatch_even_before_any_sweep(db
     fresh = claim(codex, "b", workspace="h:/w2#c")
     clock.advance(LEASE + GRACE - 1)
     assert external(codex, "b", "rk-b", claim_id=fresh["claim_id"], fence=fresh["fence"])["owner_driver_id"] == "codex"
-
-
-# 8 ---------------------------------------------------------------------------
-def test_finding8_admin_reports_as_break_glass_and_the_owner_is_told(db, clock):
-    project(db, enforce=True)
-    codex = svc(db, "codex")
-    held = claim(codex, "a")
-    attempt = external(codex, "a", claim_id=held["claim_id"], fence=1)
-    owner_cli = svc(db, "owner-cli", admin=True)
-    out = report(owner_cli, attempt, "running", fence=1)
-    assert out["break_glass"] is True and out["observation"]["actor"] == "driver:owner-cli"
-    assert events(db, "external_attempt_observed")[-1]["break_glass"] is True
-    assert notices(codex, kinds=["break_glass"])[0]["refs"]["observation_id"] == "o1"
-    email = StateService(StateDatabase(str(db)), actor="owner:o@example.com", project_read_trusted=True, is_admin=True)
-    out = report(email, {**attempt, "observation_version": 1}, "running", oid="o2")
-    assert out["break_glass"] is True
-    # A plain driver still cannot.
-    assert code_of(lambda: report(svc(db, "grok"), {**attempt, "observation_version": 2}, "running", fence=1, oid="o3")) \
-        == "not_attempt_owner"
 
 
 # 9 ---------------------------------------------------------------------------
@@ -333,39 +221,6 @@ def test_finding10_deployment_gate_understands_abandoned_owners(tmp_path, monkey
     assert observed["blockers"]["registered_external_owners"] == [] and observed["errors"] == []
 
 
-# 11 --------------------------------------------------------------------------
-def test_finding11_completed_workers_settle_and_release_their_checkout(db, clock, tmp_path):
-    project(db, enforce=True)
-    codex = svc(db, "codex")
-    held = claim(codex, "a", workspace="h:/w#c")
-    attempt = external(codex, "a", claim_id=held["claim_id"], fence=1)
-    register(codex, attempt, tmp_path, "w1", host="linxuhaserver", workspace="linxuhaserver:/sub#w1")
-    assert code_of(lambda: claim(codex, "b", workspace="linxuhaserver:/sub#plan")) == "workspace_in_use"
-    out = terminal_report(codex, attempt, tmp_path, fence=1)
-    assert out["settled_subagents"] == ["codex/w1"]
-    statuses = {s["subagent_id"]: s["status"] for s in read(codex, "list_subagents", project_id="p")["subagents"]}
-    assert statuses == {"codex/w1": "settled"}
-    assert claim(codex, "b", workspace="linxuhaserver:/sub#plan")["status"] == "live"
-
-
-def test_finding11_owner_settles_a_worker_of_an_abandoned_attempt(db, clock, tmp_path):
-    project(db)
-    codex, grok = svc(db, "codex"), svc(db, "grok")
-    attempt = external(codex, "a")
-    register(codex, attempt, tmp_path, "w1", host="linxuhaserver", workspace="linxuhaserver:/sub#w1")
-    ref, sha = a_file(tmp_path, "settled.json", {"process": "exited"})
-    settle = lambda who, **e: write(who, "report_subagent_settled", project_id="p", subagent_id="codex/w1",
-                                    quiescent=True, report_ref=ref, report_sha256=sha, **e)
-    assert code_of(lambda: settle(codex, fence=1)) == "not_orphaned", "still active: report the attempt instead"
-    reclaimable(clock)
-    write(grok, "abandon_external_attempt", attempt_id=attempt["attempt_id"], expected_owner_fence=1,
-          abandon_kind="unknown", reason="nobody knows")
-    assert code_of(lambda: settle(grok, fence=1)) == "not_subagent_owner"
-    assert code_of(lambda: settle(codex, fence=7)) == "stale_fence"
-    assert settle(codex, fence=1)["status"] == "settled"
-    assert settle(codex)["idempotent"] is True
-
-
 # 12 --------------------------------------------------------------------------
 def test_finding12_review_claim_handoff_beside_an_implement_claim(db, clock):
     project(db, enforce=True)
@@ -381,92 +236,3 @@ def test_finding12_review_claim_handoff_beside_an_implement_claim(db, clock):
     assert [h["purpose"] for h in history] == ["review"]
     assert events(db, "claim_acquired")[-1]["purpose"] == "review"
     assert len([c for c in claims_of(db, node_key="a", status="live")]) == 2
-
-
-# 13 --------------------------------------------------------------------------
-def test_finding13_subagent_context_bytes_are_private(db, clock, tmp_path):
-    owner = project(db)
-    codex = svc(db, "codex")
-    attempt = external(codex, "a")
-    sub = register(codex, attempt, tmp_path, "w1")
-    conn = sqlite3.connect(str(db))
-    assert conn.execute("SELECT COUNT(*) FROM state_external_report_blobs WHERE report_sha256=?",
-                        (sub["context_sha256"],)).fetchone()[0] == 0
-    assert conn.execute("SELECT context_bytes FROM state_subagent_contexts WHERE context_sha256=?",
-                        (sub["context_sha256"],)).fetchone()[0] == tmp_path.joinpath("ctx-w1.json").read_bytes()
-    conn.close()
-    owner.open_project("p")
-    anonymous = svc(db, trusted=False)
-    with pytest.raises(ProjectPrivate):
-        with anonymous.store.db.get_connection() as armed:
-            armed.execute("SELECT context_bytes FROM state_subagent_contexts").fetchall()
-    with anonymous.store.db.get_connection() as armed:
-        assert armed.execute("SELECT COUNT(*) FROM state_external_report_blobs").fetchone()[0] == 0
-
-
-# 14 --------------------------------------------------------------------------
-def test_finding14_pool_offers_reach_project_members(db, clock, tmp_path, monkeypatch):
-    monkeypatch.setenv("AITELIER_SECRETS_DIR", str(tmp_path / "secrets"))
-    (tmp_path / "secrets").mkdir()
-    (tmp_path / "secrets" / drivers.PEPPER_SECRET_NAME).write_text("p" * 48)
-    monkeypatch.setenv(drivers.FEATURE_ENV, "on")
-    drivers._REGISTRIES.clear()
-    try:
-        project(db)
-        registry = drivers.registry_for(StateDatabase(str(db)))
-        for who in ("codex", "grok", "gone"):
-            registry.register(who, who.title(), actor="t")
-            registry.set_membership("p", who, "member", 0, "join", actor="t")
-        registry.set_membership("p", "gone", "removed", 1, "left", actor="t")
-        codex = svc(db, "codex")
-        attempt = external(codex, "a")
-        offer = write(codex, "offer_handoff", project_id="p", request_key="pool", expected_owner_fence=1,
-                      attempt_id=attempt["attempt_id"], package={"next_step": "anyone", "workers": {"quiescent": True}})
-        assert [n["target_driver_id"] for n in offer["notified"]] == ["grok"]
-        assert notices(svc(db, "grok"), kinds=["handoff_offer"])[0]["refs"]["handoff_id"] == offer["handoff_id"]
-        assert notices(svc(db, "gone"), kinds=["handoff_offer"]) == []
-    finally:
-        drivers._REGISTRIES.clear()
-
-
-# 15 --------------------------------------------------------------------------
-def test_finding15_attempt_scoped_waits_see_their_notices(db, clock):
-    project(db)
-    codex, grok = svc(db, "codex"), svc(db, "grok")
-    attempt = external(codex, "a")
-    cursor = read(codex, "project_overview", project_id="p")["event_seq"]
-    reclaimable(clock)
-    write(grok, "take_over_attempt", attempt_id=attempt["attempt_id"], expected_owner_fence=1, reason="gone")
-    got = asyncio.run(codex.wait_for_state_change("p", after=cursor, attempt_ids=[attempt["attempt_id"]],
-                                                  timeout_seconds=0))
-    kinds = [(e["event_type"], e["payload"].get("target_driver_id")) for e in got["events"]]
-    assert ("driver_notice", "codex") in kinds, kinds
-    notice = next(e for e in got["events"] if e["event_type"] == "driver_notice")
-    assert notice["payload"]["attempt_id"] == attempt["attempt_id"] and notice["payload"]["node_key"] == "a"
-
-
-# 16 --------------------------------------------------------------------------
-def test_finding16_inbox_message_normalizes_a_notice_to_the_p2_contract():
-    from core.driver_notices import INBOX_REF_KEYS, inbox_message
-    notice = {"notice_id": "notice-1", "target_driver_id": "codex", "sender_driver_id": None, "project_id": "p",
-              "kind": "break_glass", "delivery_mode": "transient", "subject": "s" * 300, "body": "b",
-              "refs": {"attempt_id": "attempt-1", "node_key": "a", "fence": 2, "break_glass": True, "held": [{}],
-                       "claim_id": None}}
-    message = inbox_message(notice)
-    assert message["kind"] == "lease_notice" and message["_system"] is True
-    assert message["request_key"] == "notice-1" and len(message["subject"]) == 200
-    assert set(message["refs"]) <= set(INBOX_REF_KEYS) and message["refs"] == {"attempt_id": "attempt-1", "node_key": "a"}
-    assert message["body"].startswith("[break_glass] ")
-    reply = inbox_message({**notice, "kind": "handoff_reply", "sender_driver_id": "grok", "subject": "ok", "body": "b"})
-    assert reply["kind"] == "handoff_reply" and reply["_system"] is False
-    pooled = inbox_message({**notice, "kind": "handoff_offer", "sender_driver_id": "grok"}, project_members="p")
-    assert pooled["target_driver_id"] is None and pooled["project_members"] == "p"
-    # The keyword set is exactly P2's send_driver_message signature (branch 12fbef9a), JSON-serializable.
-    assert set(message) == {"request_key", "subject", "body", "target_driver_id", "project_members", "project_id",
-                            "kind", "delivery_mode", "refs", "reply_to_message_id", "_system"}
-    assert json.loads(json.dumps(message)) == message
-    stored = {**notice, "refs_json": json.dumps(notice["refs"])}
-    stored.pop("refs")
-    assert inbox_message(stored)["refs"] == {"attempt_id": "attempt-1", "node_key": "a"}, "stored rows carry refs_json"
-    with pytest.raises(StateGraphError):
-        inbox_message({k: v for k, v in notice.items() if k != "sender_driver_id"})

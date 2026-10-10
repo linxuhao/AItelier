@@ -1,9 +1,11 @@
-"""Multi-driver P3: enforced claims, reclaim, handoff, subagent takeover
+"""Multi-driver P3 (slim): enforced claims, reclaim, handoff, subagent record
 (design/multi-driver-coop.md §4.4, §4.6, §6, §7.3).
 
 One test class per acceptance item of State node
-driver.multi-driver-p3-enforced-claims: abandoned-and-reclaim, enforced-dispatch,
-handoff, subagent-takeover; plus the transports and the status enumeration sweep.
+driver.multi-driver-p3-enforced-claims (P3_SLIM.md section d): migration and
+reclaim, mutual exclusion (enforced dispatch, owner/fence), point-to-point
+handoff, compatibility with enforcement off; plus the record-only subagent
+registry, the transports and the status enumeration sweep.
 """
 from __future__ import annotations
 
@@ -17,6 +19,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from core import drivers, state_claims
+from core.drivers import DriverRegistry
 from core.state_claims import ClaimError
 from core.state_commands import execute
 from core.state_database import StateDatabase
@@ -119,15 +122,31 @@ def events(db, event_type):
         conn.close()
 
 
-def notices(service, kinds=None, statuses=None):
-    return read(service, "list_driver_notices", project_id="p", kinds=kinds, statuses=statuses)["notices"]
+def registered(db, *ids):
+    """Put drivers in the P0 registry: only a registered driver has a P2 inbox."""
+    registry = DriverRegistry(StateDatabase(str(db)), "p3-test-pepper-not-a-secret-padded-to-32-chars")
+    for who in ids:
+        registry.register(who, who.title(), actor="t")
 
 
-def register(service, attempt, tmp_path, label="w1", host="macbook", workspace=None):
-    ref, sha = a_file(tmp_path, f"ctx-{label}.json", {"instructions": label})
+def notices(db, driver, kind=None):
+    """The P2 inbox messages delivered to ``driver`` (where every P3 notice goes)."""
+    conn = sqlite3.connect(str(db))
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = [dict(r) for r in conn.execute(
+            "SELECT m.*,d.status,d.seq FROM driver_inbox_messages m JOIN driver_inbox_deliveries d USING(message_id) "
+            "WHERE d.target_driver_id=? ORDER BY d.seq", (driver,))]
+    finally:
+        conn.close()
+    for row in rows:
+        row["refs"] = json.loads(row.pop("refs_json"))
+    return [r for r in rows if kind is None or r["kind"] == kind]
+
+
+def register(service, attempt, label="w1", workspace=None):
     return write(service, "register_subagent", project_id="p", attempt_id=attempt["attempt_id"], label=label,
-                 host=host, runtime="local_process", workspace=workspace or f"{host}:/w/{label}#{label}",
-                 context_ref=ref, context_sha256=sha, control_handle="tmux:" + label)
+                 workspace=workspace or f"macbook:/w/{label}#{label}")
 
 
 def reclaimable(clock):
@@ -162,8 +181,7 @@ def _downgrade_to_pre_p3(path):
     conn.execute("UPDATE sqlite_sequence SET seq=999 WHERE name='state_attempts'")
     conn.execute("ALTER TABLE state_external_observations DROP COLUMN late_after_abandon")
     conn.execute("ALTER TABLE state_external_observations DROP COLUMN fence")
-    conn.executescript("DROP TABLE state_handoffs; DROP TABLE driver_subagents; DROP TABLE driver_notices; "
-                       "DROP TABLE state_project_enforcement;")
+    conn.executescript("DROP TABLE state_handoffs; DROP TABLE driver_subagents; DROP TABLE state_project_enforcement;")
     conn.commit()
     conn.close()
 
@@ -210,7 +228,7 @@ class TestAbandonedAndReclaim:
         assert seq_after["state_attempts"] == seq_before["state_attempts"] == 999
         obs = after["state_external_observations"][0]
         assert obs["late_after_abandon"] == 0 and obs["fence"] is None
-        assert {"state_handoffs", "driver_subagents", "driver_notices", "state_project_enforcement"} <= set(after)
+        assert {"state_handoffs", "driver_subagents", "state_project_enforcement"} <= set(after)
         conn = sqlite3.connect(str(db))
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
         assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
@@ -241,8 +259,53 @@ class TestAbandonedAndReclaim:
         assert not conn.execute("SELECT 1 FROM sqlite_master WHERE name='state_attempts_rebuild'").fetchone()
         conn.close()
 
+    def test_tables_of_removed_mechanisms_are_dropped_only_while_empty(self, db, clock):
+        project(db)
+        conn = sqlite3.connect(str(db))
+        # The pre-slimming P3 shapes (deployed 2026-10-10), all empty, plus one
+        # retired table that holds a row.
+        conn.executescript("""
+            DROP TABLE driver_subagents;
+            CREATE TABLE driver_subagents (subagent_id TEXT PRIMARY KEY, owner_driver_id TEXT NOT NULL,
+                context_ref TEXT NOT NULL, context_sha256 TEXT NOT NULL);
+            CREATE INDEX driver_subagents_attempt ON driver_subagents(owner_driver_id);
+            CREATE TABLE state_subagent_contexts (context_sha256 TEXT PRIMARY KEY, context_bytes BLOB NOT NULL);
+            CREATE TABLE driver_checkpoint_decisions (decision_id TEXT PRIMARY KEY);
+            CREATE TABLE driver_notices (notice_id TEXT PRIMARY KEY);
+            INSERT INTO driver_notices VALUES ('kept');
+        """)
+        conn.commit()
+        conn.close()
+        svc(db, "codex")                       # initialization runs on construction
+        conn = sqlite3.connect(str(db))
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        assert not {"state_subagent_contexts", "driver_checkpoint_decisions"} & tables
+        assert conn.execute("SELECT notice_id FROM driver_notices").fetchall() == [("kept",)]
+        assert "parent_driver_id" in {r[1] for r in conn.execute("PRAGMA table_info(driver_subagents)")}
+        conn.close()
+        # An old-shape registry holding rows is renamed aside, never dropped.
+        conn = sqlite3.connect(str(db))
+        conn.executescript("""
+            DROP TABLE driver_subagents;
+            CREATE TABLE driver_subagents (subagent_id TEXT PRIMARY KEY, owner_driver_id TEXT NOT NULL,
+                context_ref TEXT NOT NULL, context_sha256 TEXT NOT NULL);
+            INSERT INTO driver_subagents VALUES ('codex/w1','codex','/ctx','0');
+        """)
+        conn.commit()
+        conn.close()
+        svc(db, "codex")
+        conn = sqlite3.connect(str(db))
+        assert conn.execute("SELECT subagent_id FROM driver_subagents_p3_takeover").fetchall() == [("codex/w1",)]
+        assert "parent_driver_id" in {r[1] for r in conn.execute("PRAGMA table_info(driver_subagents)")}
+        assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        conn.close()
+        before = _rows(db)
+        svc(db, "grok")
+        assert _rows(db) == before, "a second start changes nothing"
+
     def test_abandon_refused_until_grace_then_allowed_at_once(self, db, clock):
         project(db)
+        registered(db, "grok", "codex")
         grok, codex = svc(db, "grok"), svc(db, "codex")
         held = claim(grok, workspace="h:/w#g")
         attempt = external(grok, "a", claim_id=held["claim_id"], fence=1)   # bound explicitly (record-only project)
@@ -268,10 +331,11 @@ class TestAbandonedAndReclaim:
         conn.close()
         # The bound claim was released with the attempt.
         assert read(grok, "get_claim", project_id="p", claim_id=held["claim_id"])["claim"]["status"] == "released"
-        # The previous owner is told, through the one notifier (NULL sender).
-        mine = notices(grok, kinds=["takeover_notice"])
-        assert len(mine) == 1 and mine[0]["sender_driver_id"] is None and mine[0]["refs"]["fence"] == 2
-        assert events(db, "driver_notice")[-1]["target_driver_id"] == "grok"
+        # The previous owner is told in its P2 driver inbox (a system notice: no sender).
+        mine = notices(db, "grok", "takeover_notice")
+        assert len(mine) == 1 and mine[0]["sender_driver_id"] is None and mine[0]["status"] == "unread"
+        assert mine[0]["refs"] == {"attempt_id": attempt["attempt_id"], "node_key": "a"} and "fence is now 2" in mine[0]["body"]
+        assert notices(db, "codex") == []
         # Twice: nothing to reclaim.
         assert code_of(abandon) == "attempt_not_active"
 
@@ -320,11 +384,10 @@ class TestAbandonedAndReclaim:
         with pytest.raises(StateConflict):
             report(codex, {**attempt, "observation_version": 1}, "running", fence=2, oid="o2")
 
-    def test_confirmed_stopped_needs_a_report_and_settles_registered_subagents(self, db, clock, tmp_path):
+    def test_confirmed_stopped_needs_a_report(self, db, clock, tmp_path):
         project(db)
         grok, codex = svc(db, "grok"), svc(db, "codex")
         attempt = external(grok, "a")
-        register(grok, attempt, tmp_path, "w1")
         reclaimable(clock)
         with pytest.raises(StateGraphError):
             write(codex, "abandon_external_attempt", attempt_id=attempt["attempt_id"], expected_owner_fence=1,
@@ -332,13 +395,14 @@ class TestAbandonedAndReclaim:
         ref, sha = a_file(tmp_path, "quiescence.json", {"workers": "exited", "worktree": "settled"})
         out = write(codex, "abandon_external_attempt", attempt_id=attempt["attempt_id"], expected_owner_fence=1,
                     abandon_kind="confirmed_stopped", reason="codex confirmed", report_ref=ref, report_sha256=sha)
-        assert out["abandon_kind"] == "confirmed_stopped" and out["subagents"] == [{"subagent_id": "grok/w1", "status": "settled"}]
+        assert out["abandon_kind"] == "confirmed_stopped" and out["owner_fence"] == 2
         conn = sqlite3.connect(str(db))
         assert conn.execute("SELECT 1 FROM state_external_report_blobs WHERE report_sha256=?", (sha,)).fetchone()
         conn.close()
 
     def test_take_over_moves_owner_fence_claim_and_refuses_the_old_owner(self, db, clock):
         project(db, enforce=True)
+        registered(db, "grok", "codex")
         grok, codex = svc(db, "grok"), svc(db, "codex")
         held = claim(grok, workspace="h:/w#g")
         attempt = external(grok, "a", claim_id=held["claim_id"], fence=1)
@@ -351,7 +415,7 @@ class TestAbandonedAndReclaim:
         assert out["claim"]["driver_id"] == "codex" and out["claim"]["status"] == "live" and out["claim"]["fence"] == 2
         assert read(codex, "get_claim", project_id="p", claim_id=held["claim_id"])["claim"]["status"] == "transferred"
         assert events(db, "attempt_ownership_transferred")[-1]["mode"] == "takeover"
-        assert notices(grok, kinds=["takeover_notice"])[0]["refs"]["to_driver_id"] == "codex"
+        assert "taken over by codex" in notices(db, "grok", "takeover_notice")[0]["subject"]
         # The old owner is fenced out everywhere.
         beat = write(grok, "heartbeat", project_id="p", attempts=[{"attempt_id": attempt["attempt_id"], "fence": 1}])
         assert beat["refused"][0]["error"] == "not_attempt_owner"
@@ -375,13 +439,16 @@ class TestAbandonedAndReclaim:
         out = write(codex, "take_over_attempt", attempt_id=legacy["attempt_id"], expected_owner_fence=0, reason="AMI",
                     override_reason="owner confirmed 2026-10-09")
         assert out["owner_driver_id"] == "codex" and out["owner_fence"] == 1 and out["break_glass"] is False
-        # An admin reclaims a HEALTHY lease: allowed, flagged, owner notified.
+        # An admin reclaims a HEALTHY lease: allowed and flagged; the owner gets the
+        # ordinary reclaim notice (break_glass is an audit flag, not a notice kind).
+        registered(db, "grok")
         grok = svc(db, "grok")
         second = external(grok, "b", "rk-b")
         out = write(owner, "abandon_external_attempt", attempt_id=second["attempt_id"], expected_owner_fence=1,
                     abandon_kind="unknown", reason="owner decision")
         assert out["break_glass"] is True and events(db, "attempt_abandoned")[-1]["break_glass"] is True
-        assert notices(grok, kinds=["break_glass"])[0]["refs"]["attempt_id"] == second["attempt_id"]
+        assert [n["refs"]["attempt_id"] for n in notices(db, "grok")] == [second["attempt_id"]]
+        assert notices(db, "grok")[0]["kind"] == "takeover_notice"
 
     def test_abandon_unknown_binds_the_next_attempt_to_a_base_and_another_workspace(self, db, clock):
         project(db, enforce=True)
@@ -391,9 +458,13 @@ class TestAbandonedAndReclaim:
         reclaimable(clock)
         write(codex, "abandon_external_attempt", attempt_id=attempt["attempt_id"], expected_owner_fence=1,
               abandon_kind="unknown", reason="gone")
-        # Fix round 3: the abandoned worker's checkout stays reserved until a verified
-        # quiescence report settles it - even the claim at that checkout is refused.
-        assert code_of(lambda: claim(codex, workspace="h:/w#g")) == "workspace_in_use"
+        # The old worker may still write h:/w: the node's next attempt cannot ride a
+        # claim on that checkout (another branch of it is the same writer) ...
+        same = claim(codex, workspace="h:/w#g2")
+        assert code_of(lambda: external(codex, "a", "rk-2", claim_id=same["claim_id"], fence=same["fence"],
+                                        base_sha="a" * 40)) == "workspace_in_use"
+        write(codex, "release_claim", project_id="p", claim_id=same["claim_id"], fence=same["fence"], reason="moving")
+        # ... and must declare its base.
         other = claim(codex, workspace="h:/w2#c", request_key="codex-a-2")
         assert code_of(lambda: external(codex, "a", "rk-3", claim_id=other["claim_id"], fence=other["fence"])
                        ) == "workspace_in_use"       # still no base_sha
@@ -458,6 +529,19 @@ class TestEnforcedDispatch:
         assert policy == {**policy, "multi_driver": "off", "claim_enforcement": "off"}
         assert events(db, "claim_enforcement_policy_changed")[-1]["claim_enforcement"] == "on"
 
+    def test_one_switch_claim_enforcement_reads_off_without_multi_driver(self, db, clock):
+        owner = project(db, enforce=True)
+        conn = sqlite3.connect(str(db))     # a stale row: enforcement on, multi_driver off
+        conn.execute("UPDATE state_project_policy SET multi_driver='off'")
+        conn.commit()
+        conn.close()
+        assert read(owner, "project_overview", project_id="p")["policy"]["claim_enforcement"] == "off"
+        from core.state_enforcement import enforced
+        with owner.store.transaction() as conn:
+            assert enforced(conn, "p") is False
+        attempt = external(svc(db), "a")            # P1: no claim needed, no owner recorded
+        assert attempt["owner_driver_id"] is None
+
     def test_dispatch_needs_your_live_implement_claim(self, db, clock):
         project(db, enforce=True)
         grok, codex = svc(db, "grok"), svc(db, "codex")
@@ -488,64 +572,45 @@ class TestEnforcedDispatch:
         out = report(codex, attempt, "running", fence=1)
         assert out["observation"]["fence"] == 1 and out["observation"]["late_after_abandon"] == 0
 
-    def test_structural_write_over_another_drivers_claim_needs_override_and_notifies(self, db, clock):
+    def test_structural_write_over_another_drivers_work_is_refused(self, db, clock):
         project(db, enforce=True)
+        registered(db, "grok", "codex")
         grok, codex = svc(db, "grok"), svc(db, "codex")
         held = claim(codex, "a", workspace="h:/w#c")
-        revise = lambda **e: write(grok, "revise_node", project_id="p", node_key="a", expected_revision=1,
-                                   reason="tighten", **e)
-        assert code_of(revise) == "override_reason_required"
+        revise = lambda who=grok, **e: write(who, "revise_node", project_id="p", node_key="a", expected_revision=1,
+                                             reason="tighten", **e)
+        assert code_of(revise) == "not_owner"
         assert read(codex, "get_node", project_id="p", node_key="a")["node"]["revision"] == 1
+        with pytest.raises(StateGraphError):            # the override path is gone
+            revise(override_reason="contract defect found in review")
         # c depends on a: a revision of a invalidates c, so a claim on c counts too.
         on_c = claim(codex, "c", "plan", workspace="h:/w3#c")
-        assert code_of(lambda: write(grok, "revise_node", project_id="p", node_key="a", expected_revision=1,
-                                     reason="r")) == "override_reason_required"
-        assert revise(override_reason="contract defect found in review")["revision"] == 2
-        mine = notices(codex, kinds=["override_notice"])
-        assert len(mine) == 1 and mine[0]["refs"]["override_reason"] == "contract defect found in review"
-        assert {h["id"] for h in mine[0]["refs"]["held"]} == {held["claim_id"], on_c["claim_id"]}
-        overridden = events(db, "claim_overridden")[-1]
-        assert overridden["action"] == "revise_node" and overridden["break_glass"] is False
-        # Own claims never need a reason; a node nobody holds never does.
-        assert write(codex, "supersede_node", project_id="p", node_key="b", expected_revision=1, reason="r")["status"] \
+        write(codex, "release_claim", project_id="p", claim_id=held["claim_id"], fence=held["fence"], reason="done")
+        assert code_of(revise) == "not_owner"
+        for action, extra in (("split_node", {"expected_revision": 1, "children": [{"key": "a1", **NODE}],
+                                              "reason": "r"}),
+                              ("supersede_node", {"expected_revision": 1, "reason": "r"}),
+                              ("set_node_facet", {"facet": "contract"})):
+            assert code_of(lambda: write(grok, action, project_id="p", node_key="a", **extra)) == "not_owner"
+        # The holder itself, and a node nobody holds, are never refused.
+        assert write(grok, "supersede_node", project_id="p", node_key="b", expected_revision=1, reason="r")["status"] \
             == "SUPERSEDED"
         assert write(codex, "set_node_facet", project_id="p", node_key="a", facet="contract")["changed"] is True
-        # An admin passes without a reason: break_glass, holder notified.
+        assert revise(codex)["revision"] == 2
+        # An admin passes: the write is recorded break_glass, nobody is notified.
         owner = svc(db, "owner-cli", admin=True)
         write(owner, "revise_node", project_id="p", node_key="a", expected_revision=2, reason="owner edit")
-        assert events(db, "claim_overridden")[-1]["break_glass"] is True
-        assert notices(codex, kinds=["break_glass"])[0]["refs"]["action"] == "revise_node"
-        # A write the engine refuses leaves no notice behind.
-        with pytest.raises(StateConflict):
-            write(grok, "revise_node", project_id="p", node_key="a", expected_revision=1, reason="stale",
-                  override_reason="x")
-        assert len(notices(codex, kinds=["override_notice"])) == 1
-
-    def test_split_requires_override_too(self, db, clock):
-        project(db, enforce=True)
-        grok, codex = svc(db, "grok"), svc(db, "codex")
-        claim(codex, "b")
-        assert code_of(lambda: write(grok, "split_node", project_id="p", node_key="b", expected_revision=1,
-                                     children=[{"key": "b1", **NODE}], reason="r")) == "override_reason_required"
-        assert write(grok, "split_node", project_id="p", node_key="b", expected_revision=1,
-                     children=[{"key": "b1", **NODE}], reason="r", override_reason="agreed")["children"] == ["b1"]
-
-    def test_one_writer_per_declared_workspace(self, db, clock):
-        project(db, enforce=True)
-        grok, codex = svc(db, "grok"), svc(db, "codex")
-        claim(codex, "a", workspace="linxuhaserver:/w#c")
-        assert code_of(lambda: claim(grok, "b", workspace="linxuhaserver:/w#c")) == "workspace_in_use"
-        assert claim(grok, "b", "review", workspace="linxuhaserver:/w#c")["status"] == "live"   # reads only
-        assert claim(grok, "b", workspace="linxuhaserver:/w2#g")["status"] == "live"
-        assert claim(grok, "c", workspace="")["status"] == "live"                               # undeclared
-        # Not enforced: declared duplicates are recorded, as in P1.
-        project(db.parent / "other.sqlite")
-        other = svc(db.parent / "other.sqlite", "grok")
-        claim(other, "a", workspace="x#y")
-        assert claim(svc(db.parent / "other.sqlite", "codex"), "b", workspace="x#y")["status"] == "live"
+        overridden = events(db, "claim_overridden")[-1]
+        assert overridden["action"] == "revise_node" and overridden["break_glass"] is True
+        assert [h["id"] for h in overridden["held"]] == [on_c["claim_id"]]
+        assert notices(db, "codex") == []
+        # Enforcement off: the same write over a held node proceeds, as in P1.
+        write(owner, "set_claim_enforcement", project_id="p", claim_enforcement="off", expected_revision=2, reason="off")
+        assert write(grok, "revise_node", project_id="p", node_key="a", expected_revision=3, reason="r")["revision"] == 4
 
     def test_releasing_another_drivers_hold_needs_override(self, db, clock):
         project(db, enforce=True)
+        registered(db, "grok", "codex")
         grok, codex = svc(db, "grok"), svc(db, "codex")
         write(codex, "set_node_hold", project_id="p", node_key="a", held=True, expected_revision=0, reason="wait")
         assert code_of(lambda: write(grok, "set_node_hold", project_id="p", node_key="a", held=False,
@@ -553,7 +618,9 @@ class TestEnforcedDispatch:
         out = write(grok, "set_node_hold", project_id="p", node_key="a", held=False, expected_revision=1, reason="go",
                     override_reason="owner asked")
         assert out["held"] == 0
-        assert notices(codex, kinds=["override_notice"])[0]["refs"]["action"] == "set_node_hold"
+        told = notices(db, "codex", "lease_notice")
+        assert len(told) == 1 and "override_reason: owner asked" in told[0]["body"] and told[0]["refs"] == {"node_key": "a"}
+        assert events(db, "claim_overridden")[-1]["action"] == "set_node_hold"
         # Your own hold, or the hold of a project with enforcement off, needs nothing.
         write(grok, "set_node_hold", project_id="p", node_key="a", held=True, expected_revision=2, reason="w")
         assert write(grok, "set_node_hold", project_id="p", node_key="a", held=False, expected_revision=3,
@@ -566,23 +633,26 @@ class TestEnforcedDispatch:
         attempt = external(owner, "a")
         assert attempt["owner_driver_id"] == "owner-cli"
         assert events(db, "external_attempt_registered")[-1]["break_glass"] is True
-        got = notices(codex, kinds=["break_glass"])
-        assert got[0]["refs"]["claim_id"] == held["claim_id"] and got[0]["refs"]["attempt_id"] == attempt["attempt_id"]
+        assert read(codex, "get_claim", project_id="p", claim_id=held["claim_id"])["claim"]["status"] == "live"
 
     def test_checkpoint_is_decided_by_the_attempt_owner(self, db, clock):
         project(db, enforce=True)
         _insert_skillflow_attempt(db, "codex")
         from core.state_enforcement import checkpoint_controller
         database = StateDatabase(str(db))
-        assert checkpoint_controller(database, "run-1", "codex", False, "driver:codex")["break_glass"] is False
+        owner = checkpoint_controller(database, "run-1", "codex", False, "driver:codex")
+        assert owner["break_glass"] is False and owner["owner_fence"] == 1
         with pytest.raises(ClaimError) as caught:
             checkpoint_controller(database, "run-1", "grok", False, "driver:grok")
         assert caught.value.code == "not_attempt_owner"
         assert checkpoint_controller(database, "run-unbound", "grok", False, "driver:grok") == {"enforced": False}
         glass = checkpoint_controller(database, "run-1", "owner-cli", True, "driver:owner-cli")
         assert glass["break_glass"] is True
-        assert notices(svc(db, "codex"), kinds=["break_glass"])[0]["refs"]["run_id"] == "run-1"
         assert events(db, "checkpoint_break_glass")[-1]["attempt_id"] == "attempt-sf"
+        # One check at entry: nothing is held open between the check and the engine call.
+        conn = sqlite3.connect(str(db))
+        assert not conn.execute("SELECT 1 FROM sqlite_master WHERE name='driver_checkpoint_decisions'").fetchone()
+        conn.close()
         # The REST door calls the same function and maps the refusal to 409.
         from api.meta_routers import state_checkpoint_controller
         from fastapi import HTTPException
@@ -619,16 +689,18 @@ class TestHandoff:
                                                                   "observation_version": attempt["observation_version"],
                                                                   "workers": {"quiescent": True}})
 
-    def test_offer_and_accept_move_attempt_claim_and_subagents_atomically(self, db, clock, tmp_path):
+    def test_offer_and_accept_move_attempt_and_claim_atomically(self, db, clock):
         project(db, enforce=True)
+        registered(db, "grok", "codex")
         grok, codex = svc(db, "grok"), svc(db, "codex")
         held = claim(codex, "a", workspace="h:/w#c")
         attempt = external(codex, "a", claim_id=held["claim_id"], fence=1)
-        sub = register(codex, attempt, tmp_path, "w1")
-        offer = self.offer(codex, attempt, package={"next_step": "finish", "subagents": [sub["subagent_id"]],
-                                                   "event_cursor": 0, "workers": {"quiescent": True}})
+        offer = self.offer(codex, attempt, package={"next_step": "finish", "event_cursor": 0,
+                                                   "workers": {"quiescent": True}})
         assert offer["status"] == "offered" and offer["to_driver_id"] == "grok"
-        assert notices(grok, kinds=["handoff_offer"])[0]["sender_driver_id"] == "codex"
+        told = notices(db, "grok", "handoff_offer")
+        assert len(told) == 1 and told[0]["sender_driver_id"] == "codex" and offer["handoff_id"] in told[0]["body"]
+        assert told[0]["refs"]["handoff_id"] == offer["handoff_id"]
         assert read(grok, "get_handoff", project_id="p", handoff_id=offer["handoff_id"])["handoff"]["package"]["next_step"] == "finish"
         # Wrong fence, wrong driver, offerer itself.
         assert code_of(lambda: write(grok, "accept_handoff", project_id="p", handoff_id=offer["handoff_id"],
@@ -637,38 +709,37 @@ class TestHandoff:
                                      handoff_id=offer["handoff_id"], expected_owner_fence=1)) == "not_handoff_target"
         assert code_of(lambda: write(codex, "accept_handoff", project_id="p", handoff_id=offer["handoff_id"],
                                      expected_owner_fence=1)) == "not_handoff_target"
+        assert read(grok, "get_attempt", attempt_id=attempt["attempt_id"])["owner_driver_id"] == "codex"
         out = write(grok, "accept_handoff", project_id="p", handoff_id=offer["handoff_id"], expected_owner_fence=1)
         assert out["status"] == "accepted" and out["attempt"]["owner_driver_id"] == "grok" and out["attempt"]["owner_fence"] == 2
-        assert out["claim"]["driver_id"] == "grok" and out["claim"]["fence"] == 2
-        assert out["subagents"][0]["subagent_id"] == "codex/w1" and out["subagents"][0]["fence"] == 2
+        assert out["claim"]["driver_id"] == "grok" and out["claim"]["fence"] == 2 and out["claim"]["workspace"] == "h:/w#c"
+        assert out["quiescence_warning"] is None
         assert read(grok, "get_claim", project_id="p", claim_id=held["claim_id"])["claim"]["status"] == "transferred"
-        listed = read(grok, "list_subagents", project_id="p")["subagents"][0]
-        assert listed["owner_driver_id"] == "grok" and listed["origin_driver_id"] == "codex" and listed["status"] == "active"
         assert events(db, "attempt_ownership_transferred")[-1]["mode"] == "handoff"
-        assert notices(codex, kinds=["handoff_reply"])[0]["refs"]["decision"] == "accepted"
-        assert notices(grok, kinds=["handoff_offer"]) == [] and notices(grok, kinds=["handoff_offer"], statuses=["resolved"])
+        reply = notices(db, "codex", "handoff_reply")
+        assert len(reply) == 1 and reply[0]["sender_driver_id"] == "grok" and "accepted" in reply[0]["subject"]
         # The receiver now reports with its fence; the offerer is stale.
         assert report(grok, attempt, "running", fence=2)["observation"]["fence"] == 2
         assert code_of(lambda: report(codex, attempt, "running", fence=1, oid="o2")) == "stale_fence"
-        # The inherited subagent renews under its new owner, not its origin.
-        assert write(grok, "heartbeat", project_id="p", subagents=[{"subagent_id": "codex/w1"}])["renewed"][0]["kind"] == "subagent"
-        assert write(codex, "heartbeat", project_id="p", subagents=[{"subagent_id": "codex/w1"}])["refused"][0]["error"] \
-            == "not_subagent_owner"
+        assert code_of(lambda: report(codex, attempt, "running", fence=2, oid="o3")) == "stale_fence"
 
-    def test_accept_refused_when_workers_run_where_the_receiver_cannot_see(self, db, clock, tmp_path, monkeypatch):
+    def test_accept_with_workers_not_declared_quiescent_warns_and_records(self, db, clock):
         project(db)
         grok, codex = svc(db, "grok"), svc(db, "codex")
         attempt = external(codex, "a")
-        register(codex, attempt, tmp_path, "w1", host="macbook-air")
+        register(codex, attempt, "w1")
         offer = self.offer(codex, attempt, package={"workers": {"quiescent": False, "detail": "codex thread running"},
                                                    "next_step": "x"})
-        assert code_of(lambda: write(grok, "accept_handoff", project_id="p", handoff_id=offer["handoff_id"],
-                                     expected_owner_fence=1)) == "receiver_cannot_observe_workers"
-        assert read(grok, "get_attempt", attempt_id=attempt["attempt_id"])["owner_driver_id"] == "codex"
-        from core import state_handoffs
-        monkeypatch.setattr(state_handoffs, "_observable_hosts", lambda store, driver: {"macbook-air"})
-        assert write(grok, "accept_handoff", project_id="p", handoff_id=offer["handoff_id"],
-                     expected_owner_fence=1)["attempt"]["owner_driver_id"] == "grok"
+        out = write(grok, "accept_handoff", project_id="p", handoff_id=offer["handoff_id"], expected_owner_fence=1)
+        assert out["attempt"]["owner_driver_id"] == "grok", "a warning, never a refusal"
+        warning = out["quiescence_warning"]
+        assert warning["workers_quiescent"] is False and warning["registered_subagents"] == ["codex/w1"]
+        assert events(db, "attempt_ownership_transferred")[-1]["quiescence_warning"] == warning
+        # An undeclared quiescence warns the same way.
+        second = external(codex, "b", "rk-b")
+        undeclared = self.offer(codex, second, package={"next_step": "y"}, key="h2")
+        out = write(grok, "accept_handoff", project_id="p", handoff_id=undeclared["handoff_id"], expected_owner_fence=1)
+        assert out["quiescence_warning"]["workers_quiescent"] is None
 
     def test_package_is_bounded_checked_and_never_in_the_notebook(self, db, clock):
         project(db)
@@ -688,8 +759,6 @@ class TestHandoff:
         assert code_of(lambda: self.offer(codex, attempt, package={"context_hash": "0" * 64, **quiet})) == "package_mismatch"
         assert code_of(lambda: self.offer(codex, attempt, package={"observation_version": 5, **quiet})) == "package_mismatch"
         assert code_of(lambda: self.offer(codex, attempt, package={"event_cursor": 10 ** 6, **quiet})) == "package_mismatch"
-        assert code_of(lambda: self.offer(codex, attempt, package={"subagents": ["codex/ghost"], **quiet})) == "package_mismatch"
-        assert code_of(lambda: self.offer(codex, attempt, package={"next_step": "undeclared"})) == "quiescence_required"
         offer = self.offer(codex, attempt, package={"next_step": "where I am", "note_entries": ["note://p/abc123def456"],
                                                    "private_notes": ["dnote://codex/abc123def456"], **quiet})
         assert read(codex, "get_driver_note", project_id="p")["entry_count"] == 0
@@ -706,35 +775,36 @@ class TestHandoff:
 
     def test_decline_withdraw_expiry_and_stale_offers(self, db, clock):
         project(db)
+        registered(db, "grok", "codex", "third")
         grok, codex, third = svc(db, "grok"), svc(db, "codex"), svc(db, "third")
         attempt = external(codex, "a")
         offer = self.offer(codex, attempt)
         assert code_of(lambda: write(grok, "withdraw_handoff", project_id="p", handoff_id=offer["handoff_id"])) \
             == "not_handoff_owner"
         declined = write(grok, "decline_handoff", project_id="p", handoff_id=offer["handoff_id"], reason="busy")
-        assert declined["status"] == "declined" and notices(codex, kinds=["handoff_reply"])[0]["body"] == "busy"
+        assert declined["status"] == "declined" and notices(db, "codex", "handoff_reply")[0]["body"] == "busy"
+        assert read(codex, "get_attempt", attempt_id=attempt["attempt_id"])["owner_fence"] == 1
         assert code_of(lambda: write(grok, "accept_handoff", project_id="p", handoff_id=offer["handoff_id"],
                                      expected_owner_fence=1)) == "handoff_closed"
-        # Offered to any member: a decline does not close it; the offerer may withdraw.
-        pool = write(codex, "offer_handoff", project_id="p", request_key="h2", expected_owner_fence=1,
-                     attempt_id=attempt["attempt_id"], package={"next_step": "anyone", "workers": {"quiescent": True}})
-        assert pool["to_driver_id"] is None
-        assert write(grok, "decline_handoff", project_id="p", handoff_id=pool["handoff_id"], reason="no")["status"] == "offered"
-        assert write(codex, "withdraw_handoff", project_id="p", handoff_id=pool["handoff_id"], reason="changed my mind"
-                     )["status"] == "withdrawn"
-        assert code_of(lambda: write(third, "accept_handoff", project_id="p", handoff_id=pool["handoff_id"],
+        # Point to point only: an offer names its receiver.
+        with pytest.raises(StateGraphError):
+            write(codex, "offer_handoff", project_id="p", request_key="h2", expected_owner_fence=1,
+                  attempt_id=attempt["attempt_id"], package={"next_step": "anyone", "workers": {"quiescent": True}})
+        withdrawn = self.offer(codex, attempt, to="third", key="h2b")
+        assert write(codex, "withdraw_handoff", project_id="p", handoff_id=withdrawn["handoff_id"],
+                     reason="changed my mind")["status"] == "withdrawn"
+        assert code_of(lambda: write(third, "accept_handoff", project_id="p", handoff_id=withdrawn["handoff_id"],
                                      expected_owner_fence=1)) == "handoff_closed"
+        assert read(codex, "get_attempt", attempt_id=attempt["attempt_id"])["owner_driver_id"] == "codex"
         # Expiry: 24 hours later the offer lapses and the owner is unchanged.
-        late = write(codex, "offer_handoff", project_id="p", request_key="h3", expected_owner_fence=1,
-                     attempt_id=attempt["attempt_id"], package={"next_step": "late", "workers": {"quiescent": True}})
+        late = self.offer(codex, attempt, to="third", key="h3")
         clock.advance(24 * 3600)
         assert read(codex, "list_handoffs", project_id="p", statuses=["expired"])["handoffs"][0]["handoff_id"] == late["handoff_id"]
         assert code_of(lambda: write(third, "accept_handoff", project_id="p", handoff_id=late["handoff_id"],
                                      expected_owner_fence=1)) == "handoff_expired"
         assert read(codex, "get_attempt", attempt_id=attempt["attempt_id"])["owner_driver_id"] == "codex"
         # Ownership moved under an open offer: the offer is voided and accept is stale.
-        fresh = write(codex, "offer_handoff", project_id="p", request_key="h4", expected_owner_fence=1,
-                      attempt_id=attempt["attempt_id"], package={"next_step": "x", "workers": {"quiescent": True}})
+        fresh = self.offer(codex, attempt, to="third", key="h4")
         reclaimable(clock)
         write(third, "take_over_attempt", attempt_id=attempt["attempt_id"], expected_owner_fence=1, reason="gone")
         assert read(codex, "get_handoff", project_id="p", handoff_id=fresh["handoff_id"])["handoff"]["status"] == "withdrawn"
@@ -753,112 +823,48 @@ class TestHandoff:
 
 
 # ---------------------------------------------------------------------------
-# 4. subagent-takeover
+# 4. subagent registry: a record, nothing more
 # ---------------------------------------------------------------------------
-class TestSubagentTakeover:
-    def test_registration_is_mandatory_in_enforced_projects(self, db, clock, tmp_path):
-        project(db, enforce=True)
-        codex = svc(db, "codex")
-        assert code_of(lambda: claim(codex, "a", subagent="codex/worker")) == "subagent_unregistered"
-        held = claim(codex, "a", workspace="h:/w#c")
-        attempt = external(codex, "a", claim_id=held["claim_id"], fence=1)
-        assert code_of(lambda: write(codex, "record_evidence", attempt_id=attempt["attempt_id"], evidence_id="e1",
-                                     criterion_id="c", verdict="pass", artifact="a" * 40, report_ref="/x",
-                                     report_sha256="0" * 64, director_identity="codex/worker")) == "subagent_unregistered"
-        sub = register(codex, attempt, tmp_path, "worker")
-        assert sub["subagent_id"] == "codex/worker" and sub["fence"] == 1 and sub["lease_state"] == "healthy"
-        assert claim(codex, "b", subagent="codex/worker", workspace="h:/w2#c")["subagent"] == "codex/worker"
-        assert register(codex, attempt, tmp_path, "worker")["idempotent"] is True
-        assert code_of(lambda: register(codex, attempt, tmp_path, "worker", host="elsewhere")) == "subagent_exists"
-        assert code_of(lambda: register(codex, attempt, tmp_path, "w2", workspace="macbook:/w/worker#worker")) \
-            == "workspace_in_use"
-        with pytest.raises(StateGraphError):
-            register(codex, attempt, tmp_path, "w3", workspace="no-branch")
-        assert code_of(lambda: register(svc(db, "grok"), attempt, tmp_path, "w4")) == "not_attempt_owner"
-        # Not enforced: a subagent claim needs no registration (P1 behaviour).
-        project(db.parent / "o.sqlite")
-        assert claim(svc(db.parent / "o.sqlite", "codex"), "a", subagent="codex/free")["status"] == "live"
-
-    def test_take_over_inherits_subagents_and_adoption_classifies_them(self, db, clock, tmp_path):
-        project(db, enforce=True)
+class TestSubagentRecord:
+    def test_registry_records_who_which_checkout_and_parent_and_grants_nothing(self, db, clock):
+        owner = project(db, enforce=True)
         grok, codex = svc(db, "grok"), svc(db, "codex")
-        held = claim(codex, "a", workspace="linxuhaserver:/w#c")
+        # Registration is required by nothing: a claim for an unregistered worker passes.
+        held = claim(codex, "a", subagent="codex/worker", workspace="h:/w#c")
         attempt = external(codex, "a", claim_id=held["claim_id"], fence=1)
-        local = register(codex, attempt, tmp_path, "mac", host="macbook-air", workspace="macbook-air:/w#mac")
-        server = register(codex, attempt, tmp_path, "srv", host="linxuhaserver", workspace="linxuhaserver:/w2#srv")
-        write(codex, "update_subagent_checkpoint", project_id="p", subagent_id="codex/mac", fence=1,
-              checkpoint_ref="refs/heads/mac@abc", checkpoint_sha256="1" * 64)
+        sub = register(codex, attempt, "worker", workspace="h:/w#c")
+        assert sub == {**sub, "subagent_id": "codex/worker", "parent_driver_id": "codex", "workspace": "h:/w#c",
+                       "attempt_id": attempt["attempt_id"], "node_key": "a", "idempotent": False}
+        assert set(sub) == {"subagent_id", "parent_driver_id", "project_id", "attempt_id", "node_key", "workspace",
+                            "created_at", "idempotent"}, "no instructions, leases or takeover state"
+        assert register(codex, attempt, "worker", workspace="h:/w#c")["idempotent"] is True
+        assert code_of(lambda: register(codex, attempt, "worker", workspace="h:/elsewhere#c")) == "subagent_exists"
+        assert code_of(lambda: register(grok, attempt, "w4")) == "not_attempt_owner"
+        assert register(codex, attempt, "second", workspace="h:/w#c")["subagent_id"] == "codex/second"
+        # After a takeover the record is unchanged and grants the old parent nothing:
+        # the fence +1 is what refuses the old owner and its workers.
         reclaimable(clock)
-        taken = write(grok, "take_over_attempt", attempt_id=attempt["attempt_id"], expected_owner_fence=1, reason="gone")
-        assert {s["subagent_id"]: s["fence"] for s in taken["subagents"]} == {"codex/mac": 2, "codex/srv": 2}
-        assert all(s["needs"] == "adopt_subagent" for s in taken["subagents"])
-        # The old parent is fenced out of its former subagents.
-        assert code_of(lambda: write(codex, "update_subagent_checkpoint", project_id="p", subagent_id="codex/mac",
-                                     fence=1, checkpoint_ref="x", checkpoint_sha256="2" * 64)) == "not_subagent_owner"
-        assert code_of(lambda: write(grok, "adopt_subagent", project_id="p", subagent_id="codex/srv", fence=1,
-                                     observability="controllable", reason="r")) == "stale_fence"
-        adopted = write(grok, "adopt_subagent", project_id="p", subagent_id="codex/srv", fence=2,
-                        observability="controllable", reason="tmux on this host")
-        assert adopted["status"] == "adopted" and adopted["fence"] == 3 and adopted["lease_state"] == "healthy"
-        orphan = write(grok, "adopt_subagent", project_id="p", subagent_id="codex/mac", fence=2,
-                       observability="unobservable", reason="runs on the MacBook")
-        assert orphan["status"] == "orphaned_unobservable" and orphan["fence"] == 3
-        assert orphan["continue_from"] == {"checkpoint_ref": "refs/heads/mac@abc", "checkpoint_sha256": "1" * 64,
-                                           "old_workspace": "macbook-air:/w#mac", "rule": orphan["continue_from"]["rule"]}
-        assert "NEW branch" in orphan["continue_from"]["rule"]
-        standing = notices(codex, kinds=["subagent_orphaned"])
-        assert len(standing) == 1 and standing[0]["delivery_mode"] == "standing"
-        assert standing[0]["refs"]["subagent_id"] == "codex/mac" and "report_subagent_settled" in standing[0]["body"]
-        assert events(db, "subagent_orphaned")[-1]["origin_driver_id"] == "codex"
-        # Nobody renews an orphan; the taker renews what it adopted.
-        beat = write(grok, "heartbeat", project_id="p", subagents=[{"subagent_id": "codex/mac"}, {"subagent_id": "codex/srv"}])
-        assert beat["refused"] == [{"kind": "subagent", "id": "codex/mac", "error": "orphaned"}]
-        assert beat["renewed"][0]["id"] == "codex/srv"
-        assert read(grok, "project_overview", project_id="p")["orphaned_subagents"] == 1
-        assert read(grok, "project_run_summary", project_id="p")["orphaned_subagents"] == 1
-        # The reclaimer continues at once: a new workspace claim and attempt are not blocked by the orphan.
-        assert read(grok, "get_attempt", attempt_id=attempt["attempt_id"])["owner_driver_id"] == "grok"
-        # Only the origin driver closes the orphan, with any fence, and only an orphan.
-        ref, sha = a_file(tmp_path, "settled.json", {"process": "exited"})
-        settle = lambda who, sid, **e: write(who, "report_subagent_settled", project_id="p", subagent_id=sid,
-                                              quiescent=True, report_ref=ref, report_sha256=sha, **e)
-        assert code_of(lambda: settle(grok, "codex/mac", fence=3)) == "not_origin_driver"
-        assert code_of(lambda: settle(codex, "codex/srv", fence=1)) == "not_subagent_owner"   # codex no longer owns it
-        assert code_of(lambda: settle(grok, "codex/srv", fence=3)) == "not_orphaned"          # attempt still active
-        assert code_of(lambda: write(codex, "report_subagent_settled", project_id="p", subagent_id="codex/mac",
-                                     quiescent=False, report_ref=ref, report_sha256=sha)) == "quiescence_required"
-        closed = settle(codex, "codex/mac", fence=1)
-        assert closed["status"] == "terminated" and closed["resolved_notices"] == 1
-        assert notices(codex, kinds=["subagent_orphaned"]) == []
-        assert read(grok, "project_overview", project_id="p")["orphaned_subagents"] == 0
-        assert notices(grok, kinds=["subagent_orphaned"])[0]["refs"]["subagent_id"] == "codex/mac"
-        assert settle(codex, "codex/mac")["idempotent"] is True
-        # A closed subagent accepts no more writes from anyone.
-        assert code_of(lambda: write(grok, "adopt_subagent", project_id="p", subagent_id="codex/mac", fence=3,
-                                     observability="controllable", reason="r")) == "subagent_closed"
-        statuses = {s["subagent_id"]: s["status"] for s in read(grok, "list_subagents", project_id="p")["subagents"]}
-        assert statuses == {"codex/mac": "terminated", "codex/srv": "adopted"}
-
-    def test_public_overview_shows_the_orphan_count_but_not_the_registry(self, db, clock, tmp_path):
-        owner = project(db)
-        codex = svc(db, "codex")
-        attempt = external(codex, "a")
-        register(codex, attempt, tmp_path, "mac", host="macbook-air")
-        reclaimable(clock)
-        grok = svc(db, "grok")
         write(grok, "take_over_attempt", attempt_id=attempt["attempt_id"], expected_owner_fence=1, reason="gone")
-        write(grok, "adopt_subagent", project_id="p", subagent_id="codex/mac", fence=2, observability="unobservable",
-              reason="mac")
+        listed = read(grok, "list_subagents", project_id="p", attempt_id=attempt["attempt_id"])["subagents"]
+        assert [(s["subagent_id"], s["parent_driver_id"]) for s in listed] == [("codex/second", "codex"),
+                                                                              ("codex/worker", "codex")]
+        assert code_of(lambda: report(codex, attempt, "running", fence=1)) == "stale_fence"
+        assert code_of(lambda: register(codex, attempt, "late")) == "not_attempt_owner"
+        assert register(grok, attempt, "mine")["parent_driver_id"] == "grok"
+        assert read(grok, "list_subagents", project_id="p", parent_driver_id="grok")["subagents"][0]["subagent_id"] \
+            == "grok/mine"
+        # Private: an anonymous reader of the opened project sees no registry.
         owner.open_project("p")
         anonymous = svc(db, trusted=False)
-        public = read(anonymous, "project_overview", project_id="p")
-        assert public["orphaned_subagents"] == 1
+        assert "orphaned_subagents" not in read(anonymous, "project_overview", project_id="p")
         with pytest.raises(Exception):
             read(anonymous, "list_subagents", project_id="p")
-        with pytest.raises(Exception):
-            read(anonymous, "list_driver_notices", project_id="p", driver_id="codex")
-        assert code_of(lambda: read(grok, "list_driver_notices", project_id="p", driver_id="codex")) == "not_notice_target"
-        assert read(owner, "list_driver_notices", project_id="p", driver_id="codex")["target_driver_id"] == "codex"
+        # Not in a multi-driver project.
+        project(db.parent / "o.sqlite", multi_driver=False)
+        plain = svc(db.parent / "o.sqlite", "codex")
+        legacy = external(plain, "a")
+        assert code_of(lambda: write(plain, "register_subagent", project_id="p", attempt_id=legacy["attempt_id"],
+                                     label="w", workspace="h:/w#c")) == "multi_driver_off"
 
 
 # ---------------------------------------------------------------------------
@@ -939,17 +945,16 @@ class TestTransports:
                                "report_ref": "/r", "report_sha256": "0" * 64})
         assert no_fence.status_code == 409 and no_fence.json()["detail"].startswith("fence_required")
         auth = {"Authorization": "Bearer " + tokens["grok"]}
-        for path in ("/api/state/projects/p/subagents", "/api/state/projects/p/handoffs",
-                     "/api/state/projects/p/driver-notices"):
+        for path in ("/api/state/projects/p/subagents", "/api/state/projects/p/handoffs"):
             assert client.get(path, headers=auth).status_code == 200, path
             assert client.get(path).status_code in (401, 403), path
+        assert client.get("/api/state/projects/p/driver-notices", headers=auth).status_code == 404
         offer = self._post(client, tokens["grok"], "/api/state/commands/offer_handoff",
                            {"project_id": "p", "request_key": "h", "expected_owner_fence": 1, "attempt_id": attempt_id,
                             "to_driver_id": "codex", "package": {"next_step": "take it",
                                                                  "workers": {"quiescent": True}}})
         assert offer.status_code == 200, offer.text
-        inbox = client.get("/api/state/projects/p/driver-notices", headers={"Authorization": "Bearer " + tokens["codex"]})
-        assert inbox.json()["notices"][0]["kind"] == "handoff_offer"
+        assert offer.json()["notified"]["target_driver_id"] == "codex"          # a P2 inbox delivery
         accepted = self._post(client, tokens["codex"], "/api/state/commands/accept_handoff",
                               {"project_id": "p", "handoff_id": offer.json()["handoff_id"], "expected_owner_fence": 1})
         assert accepted.status_code == 200 and accepted.json()["attempt"]["owner_driver_id"] == "codex"

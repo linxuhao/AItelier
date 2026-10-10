@@ -5,7 +5,7 @@ import json
 import time
 from uuid import uuid4
 from core.state_graph import StateGraphError, now
-from core.state_privacy import UntrustedDatabase
+from core.state_privacy import UntrustedDatabase, writer_only_read
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS driver_inbox_messages (
@@ -31,6 +31,7 @@ SYSTEM_KINDS = {"lease_notice", "takeover_notice", "subagent_orphaned", "handoff
 class DriverInbox:
     def __init__(self, store, actor, driver_id=None):
         self.store, self.actor, self.driver_id = store, actor, driver_id
+        self.project_read_trusted = store.project_read_trusted
         if not isinstance(store.db, UntrustedDatabase):
             with store.db.get_connection() as conn:
                 conn.executescript(SCHEMA)
@@ -145,6 +146,7 @@ class DriverInbox:
     def system_notice(self, **kwargs):
         return self.send_driver_message(_system=True, **kwargs)
 
+    @writer_only_read('list_driver_messages')
     def list_driver_messages(self, driver_id=None, after=0, limit=100):
         driver_id = driver_id or self.driver_id
         self._authorize(driver_id)
@@ -179,6 +181,7 @@ class DriverInbox:
             result={**dict(row),"status":target_status,"version":expected_version+1}
             return self._record(conn,target_status,request_key,payload,result)
 
+    @writer_only_read('wait_for_driver_inbox')
     async def wait_for_driver_inbox(self, after=0, timeout_seconds=30, return_when_idle=False, driver_id=None):
         if type(timeout_seconds) not in (int,float) or not 0<=timeout_seconds<=900:
             raise StateGraphError("invalid_request")

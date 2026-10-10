@@ -184,6 +184,7 @@ class StateService:
         self.director_messages = SQLiteDirectorMessaging(self.store, actor,
                                                           project_read_trusted=project_read_trusted, driver_id=driver_id)
 
+    @writer_only_read('driver_postcompact_guidance')
     def driver_postcompact_guidance(self, project_id):
         from core.state_driver_notes import _redact
         if not self.project_read_trusted or not (self.driver_id or self.actor.startswith("owner:")):
@@ -222,6 +223,7 @@ class StateService:
                 "driver_id":self.driver_id,"projection":text,"included":len(kept),
                 "omitted":total-len(kept)}
 
+    @writer_only_read('list_driver_notebooks')
     def list_driver_notebooks(self):
         if not self.project_read_trusted or not (self.driver_id or self.actor.startswith("owner:")):
             raise StateGraphError("private_notebook")

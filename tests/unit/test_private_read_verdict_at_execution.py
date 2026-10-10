@@ -44,6 +44,10 @@ NON_PUBLIC_READS = sorted(a for a in READ_REQUESTS if read_visibility(a) != "pub
 # someone choosing its arguments - and `test_the_arguments_are_valid` proves a
 # trusted caller gets an answer with them.
 _ARGS = {
+    'driver_postcompact_guidance': {'project_id': C.OPEN},
+    'list_driver_messages': {},
+    'list_driver_notebooks': {},
+    'wait_for_driver_inbox': {'timeout_seconds': 0},
     "events": {"project_id": C.OPEN},
     "get_claim": {"project_id": C.OPEN, "claim_id": "claim-canary-public-id"},
     "list_claims": {"project_id": C.OPEN},
@@ -64,8 +68,15 @@ def _settle(value):
 
 def _services(tmp_path):
     db = C.new_database(tmp_path, "execpoint.sqlite")
-    return (StateService(db, actor="seeder", project_read_trusted=True),
-            StateService(db, actor="anonymous", project_read_trusted=False))
+    from core.drivers import DriverRegistry
+    registry = DriverRegistry(db, "owned-execution-point-pepper")
+    registry.register("execpoint", "Owned reader", actor="fixture")
+    registry.set_membership(C.OPEN, "execpoint", "member", 0, "owned fixture", actor="fixture")
+    trusted = StateService(db, actor="driver:execpoint", driver_id="execpoint",
+                           project_read_trusted=True)
+    trusted.driver_inbox.send_driver_message("execpoint", SECRET, SECRET,
+            target_driver_id="execpoint", delivery_mode="standing")
+    return trusted, StateService(db, actor="anonymous", project_read_trusted=False)
 
 
 def _classify(call):

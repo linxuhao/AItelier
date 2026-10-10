@@ -1,5 +1,6 @@
 """CPU SOURCE checks of actual /script discovery; never start Godot."""
 import importlib.util
+import json
 import os
 from pathlib import Path
 
@@ -9,6 +10,9 @@ import pytest
 @pytest.fixture
 def harness(tmp_path, monkeypatch):
     monkeypatch.setenv("GODOT_LIFECYCLE_DB", str(tmp_path / "owners.sqlite3"))
+    monkeypatch.setenv("GODOT_DEPLOYMENT_LOCK", str(tmp_path / "deployment.lock"))
+    monkeypatch.setenv("GODOT_RENDER_EFFECT_LOCK", str(tmp_path / "effect.lock"))
+    monkeypatch.setenv("GODOT_EVIDENCE_ROOT", str(tmp_path / "evidence-root"))
     source = Path(os.environ.get("HARNESS_SOURCE", Path(__file__).resolve().parents[2]
                                  / "docker/godot/godot_harness.py"))
     spec = importlib.util.spec_from_file_location("gh_inheritance_discovery", source)
@@ -106,3 +110,79 @@ def test_roster_helper_successor_keeps_aggregate_run(harness, tmp_path):
     assert harness._discover_entry_points(root) == ["res://tests/unit_test_runner.gd"]
     assert '"res://tests/roster.gd"' in (root / "tests/unit_test_runner.gd").read_text()
     assert "return false" in (root / "tests/roster.gd").read_text()
+
+
+# ── a zero-entry valid project is a FAILED SCRIPT verdict, never a pass ─────
+#
+# The consumer's green always meant "some authored tests actually executed".
+# Default discovery finding NO executable suite means that property cannot
+# hold, so the verdict fails in both headless and render modes, with or
+# without retention; retention success stays independent (raw copy done,
+# verdict still failed). The no-project legacy headless skip is unchanged.
+
+
+def test_zero_entry_headless_without_retention_fails_and_writes_no_retention(
+        harness, tmp_path):
+    root = project(tmp_path, {"tests/helper.gd":
+                              "extends RefCounted\n## helper, no entry base\n"})
+    r = harness.run_script(str(root), [], timeout=30)
+    assert r["passed"] is False, r
+    assert r["executed_suites"] == 0 and r["results"] == [], r
+    assert "FAILED" in r["summary"] and "zero authored tests" in r["summary"], r
+    assert "retention" not in r, r
+
+
+def test_zero_entry_headless_with_retention_still_fails_but_retains_raw(
+        harness, tmp_path):
+    root = project(tmp_path, {"tests/helper.gd":
+                              "extends RefCounted\n## helper, no entry base\n"})
+    r = harness.run_script(str(root), [], timeout=30, retain=[],
+                           retain_requested=True)
+    assert r["passed"] is False, r
+    assert r["executed_suites"] == 0, r
+    # Retention success is recorded INDEPENDENTLY — evidence, never a pass.
+    assert r["retention"]["ok"] is True, r["retention"]
+    assert Path(r["retention"]["manifest"]).is_file(), r["retention"]
+    assert json.loads(Path(r["retention"]["manifest"]).read_text())["ok"] is True
+
+
+def test_zero_entry_render_with_retention_fails_and_names_nothing_to_render(
+        harness, tmp_path):
+    root = project(tmp_path, {"tests/helper.gd":
+                              "extends RefCounted\n## helper, no entry base\n"})
+    r = harness.run_script(str(root), [], timeout=30, render=True,
+                           retain_requested=True)
+    assert r["passed"] is False, r
+    assert r["render_mode"] == "render" and r["render_requested"] is True, r
+    assert "nothing to render" in r["summary"] and "FAILED" in r["summary"], r
+    assert r["retention"]["ok"] is True, r["retention"]
+
+
+def test_no_project_legacy_headless_skip_is_unchanged(harness, tmp_path):
+    bare = tmp_path / "bare"
+    bare.mkdir()
+    r = harness.run_script(str(bare), [], timeout=30)
+    assert r["passed"] is True and r.get("no_project") is True, r
+
+
+def test_zero_entry_failure_is_about_absence_not_a_blanket_filter(
+        harness, tmp_path, monkeypatch):
+    """The failed zero-entry verdict must not swallow genuine entry points: a
+    project whose authored SceneTree suite is still admitted still runs and
+    still passes (engine faked; this is a CPU source check)."""
+    root = project(tmp_path, {
+        "tests/helper.gd": "extends RefCounted\n## helper, no entry base\n",
+        "tests/entry.gd": "extends SceneTree\n",
+    })
+    monkeypatch.setattr(harness, "_copy_project", lambda proj: root)
+    monkeypatch.setattr(harness, "_import_resources", lambda dst, timeout=0: None)
+
+    class _CP:
+        returncode, stdout, stderr = 0, "PASS all\n", ""
+
+    monkeypatch.setattr(harness, "_run",
+                        lambda cmd, timeout, extra_env=None, render=False: _CP)
+
+    r = harness.run_script(str(root), [], timeout=30)
+    assert r["passed"] is True and r["discovered"] == ["res://tests/entry.gd"], r
+    assert r["results"] and r["results"][0]["passed"] is True, r

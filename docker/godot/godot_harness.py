@@ -5115,14 +5115,17 @@ def run_script(project_dir: str, scripts: list, timeout: int = 600,
     declaration (or a pattern that matched nothing) makes `passed` False — never
     a silent green for evidence the caller asked for and did not get. An explicit
     request with neither files nor patterns (``retain_requested``) still retains
-    the full raw streams. An explicit retention request on a valid project whose
-    discovery found NO admitted entry still allocates its owned destination and
-    writes a bounded manifest (a zero-pass raw-only success, or a hard failure
-    naming a declaration no pass can satisfy); the omitted-``retain`` no-entry
-    case keeps the historic skip. On ANY exit path — pass, failure, timeout or an
-    error nobody predicted — every owned HOME is removed in the outer finally,
-    after a truthful retention attempt has written its manifest; the original
-    error is never replaced by a green.
+    the full raw streams. On a valid project whose discovery found NO admitted
+    entry, the verdict is a FAILED SCRIPT verdict in BOTH modes, with or without
+    retention — zero executable suites means zero authored tests executed, so
+    nothing here is a pass — while an explicit request still allocates its owned
+    destination and writes a bounded, truthful raw-only manifest (its
+    ``retention.ok`` records only that the raw copy succeeded, never a test
+    PASS); an omitted-``retain`` no-entry case writes no retention at all. The
+    no-project legacy headless skip is unchanged. On ANY exit path — pass,
+    failure, timeout or an error nobody predicted — every owned HOME is removed
+    in the outer finally, after a truthful retention attempt has written its
+    manifest; the original error is never replaced by a green.
     """
     proj = Path(project_dir)
     retain = list(retain or [])
@@ -5150,38 +5153,36 @@ def run_script(project_dir: str, scripts: list, timeout: int = 600,
                 "render_mode": render_mode, "render_requested": bool(render),
                 "summary": "script entrypoint discovery failed: %s" % exc}
     if not scripts:
-        # Opt-in render with nothing admitted must not be answered by the
-        # pixel-blind path: there is no render to do, so this is a HARD failure
-        # rather than a silent headless pass. A plain (headless) request with no
-        # admitted entry point stays the pre-existing skip it always was.
-        if not want_raw:
-            return {"passed": not render, "results": [], "discovered": [],
-                    "render_mode": render_mode, "render_requested": bool(render),
-                    "summary": ("No admitted `extends SceneTree` entry point under tests/ "
-                                "-- a rendered /script has nothing to render.") if render
-                               else "No `extends SceneTree` entry point under tests/."}
-        # An EXPLICIT retention request does not get to skip silently just
-        # because discovery found nothing: the caller asked for evidence, so the
-        # owned destination is allocated and a bounded, truthful manifest is
-        # written (raw-only, zero passes). An empty valid project is therefore an
-        # explicit raw-only success; a declaration no pass can satisfy is a
-        # truthful hard failure. Omitted retention keeps the historic skip above.
-        retention = _retain_copy(retain, [], raw_logs,
-                                 {**corr, "mode": render_mode},
-                                 extra_errors=retain_errors,
-                                 pass_labels=pass_labels,
-                                 user_dir_name=_project_user_dir_name(proj),
-                                 patterns=retain_patterns, requested=True)
+        # A valid Godot project whose discovery found NO executable suite is a
+        # FAILED SCRIPT verdict in BOTH modes, with or without retention. The
+        # consumer's green has always meant "some authored tests actually
+        # executed"; zero entries means that property cannot hold, so a
+        # headless missing-tests / helper-only tree must never read as a pass —
+        # and a rendered /script has nothing to render besides. Retention never
+        # rescues the verdict: an explicit request still allocates its owned
+        # destination and writes a bounded, truthful raw-only manifest, and
+        # ``retention.ok`` keeps recording ONLY that the raw copy succeeded —
+        # retention success is evidence, never a test PASS. An omitted retain
+        # writes nothing and returns no ``retention`` key.
+        retention = None
+        if want_raw:
+            retention = _retain_copy(retain, [], raw_logs,
+                                     {**corr, "mode": render_mode},
+                                     extra_errors=retain_errors,
+                                     pass_labels=pass_labels,
+                                     user_dir_name=_project_user_dir_name(proj),
+                                     patterns=retain_patterns, requested=True)
+        summary = ("No admitted `extends SceneTree` entry point under tests/: "
+                   "0 executable suite(s) ran, so the SCRIPT verdict is "
+                   "FAILED — zero authored tests were executed.")
         if render:
-            passed = False
-            summary = ("No admitted `extends SceneTree` entry point under tests/ "
-                       "-- a rendered /script has nothing to render.")
-        else:
-            passed = bool(retention["ok"])
+            summary += " A rendered /script has nothing to render."
+        if retention is not None:
             if retention["ok"]:
-                summary = ("No admitted `extends SceneTree` entry point under tests/; "
-                           "the explicit retention request wrote a bounded raw-only "
-                           "manifest at %s." % retention["manifest"])
+                summary += (" The explicit retention request still wrote a "
+                            "bounded raw-only manifest at %s (retention "
+                            "success is not a test pass)."
+                            % retention["manifest"])
             else:
                 why = []
                 if retention["refused"]:
@@ -5191,12 +5192,15 @@ def run_script(project_dir: str, scripts: list, timeout: int = 600,
                                % ", ".join(retention["missing"]))
                 if retention["limit_hit"]:
                     why.append("retention limit hit: %s" % retention["limit_hit"])
-                summary = ("No admitted `extends SceneTree` entry point under tests/, "
-                           "and the explicit retention request could not be fully "
-                           "satisfied (%s)." % " | ".join(why))
-        return {"passed": passed, "results": [], "discovered": [],
-                "render_mode": render_mode, "render_requested": bool(render),
-                "retention": retention, "summary": summary}
+                summary += (" The explicit retention request could not be fully "
+                            "satisfied (%s)." % " | ".join(why))
+        report = {"passed": False, "results": [], "discovered": [],
+                  "executed_suites": 0,
+                  "render_mode": render_mode, "render_requested": bool(render),
+                  "summary": summary}
+        if retention is not None:
+            report["retention"] = retention
+        return report
 
     # The real Godot user:// root name for THIS project — retention searches
     # the invocation-owned app_userdata/<name> (or custom user dir), never a

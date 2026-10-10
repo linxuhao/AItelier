@@ -294,7 +294,7 @@ class TestAbandonedAndReclaim:
         assert "a" in [n["node_key"] for n in read(codex, "frontier", project_id="p")["nodes"]]
         assert read(codex, "get_attempt", attempt_id=attempt["attempt_id"])["lease_state"] is None
         summary = read(codex, "project_run_summary", project_id="p")
-        assert summary["external_counts"]["abandoned"] == 1 and summary["external_counts"]["active"] == 0
+        assert summary["abandoned_external"] == 1 and summary["external_counts"]["active"] == 0
         assert summary["running_external"] == [] and summary["execution_counts"]["other"] == 1
         idle = asyncio.run(codex.wait_for_state_change("p", after=overview["event_seq"], timeout_seconds=0,
                                                        return_when_idle=True))

@@ -112,7 +112,7 @@ Available in any `multi_driver=on` project once an attempt's `lease_state` is
   no criterion diagnosis, no acceptance change). It frees the node's one active
   slot (readiness returns to `ready`, the frontier lists the node, a
   `return_when_idle` wait no longer waits on it, run summary counts it under
-  `external_counts.abandoned`), releases its bound claims, voids open handoffs
+  `external_counts.other` and names the number in `abandoned_external`), releases its bound claims, voids open handoffs
   and sets `state_external_owners.status=abandoned`.
   `abandon_kind=confirmed_stopped` is your attestation that the old worker is
   quiescent and REQUIRES `report_ref`/`report_sha256` (retained like any report);
@@ -197,8 +197,8 @@ Until the P2 per-driver inbox is deployed it stores a pending `driver_notices`
 row (`sender_driver_id` NULL for system notices) and emits a project
 `driver_notice` event (payload: `target_driver_id`, `kind`, `subject`, `refs`), so a
 driver waiting on the project wakes. Read yours with
-`list_driver_notices(project_id, statuses?, kinds?)` (admins may pass
-`driver_id`); REST `GET /api/state/projects/{id}/driver-notices`. Re-pointing to
+`list_driver_notices(project_id, statuses?, kinds?)` (admins, and writer
+credentials that are not drivers such as the owner's e-mail, pass `driver_id`); REST `GET /api/state/projects/{id}/driver-notices`. Re-pointing to
 the P2 inbox is one function (`_deliver`).
 
 ## Schema migration (P3)

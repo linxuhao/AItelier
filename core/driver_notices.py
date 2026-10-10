@@ -143,8 +143,12 @@ class DriverNotices:
         from core.state_claims import ClaimError
         target = driver_id or self.driver_id
         if not target:
-            raise ClaimError("driver_identity_required", "notices are addressed to a registered driver")
-        if target != self.driver_id and not self.is_admin:
+            raise ClaimError("driver_identity_required", "notices are addressed to a registered driver; pass driver_id")
+        # A DRIVER reads its own notices (an admin driver anyone's). A writer
+        # credential that is not a driver - the owner's e-mail, the legacy
+        # shared operator - already passed the transport's writer gate and has
+        # no inbox of its own; it names the driver it reads for.
+        if self.driver_id is not None and target != self.driver_id and not self.is_admin:
             raise ClaimError("not_notice_target", "only the addressed driver (or an admin) reads these notices")
         statuses = statuses or ["pending"]
         with self.store.transaction() as conn:

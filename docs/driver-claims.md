@@ -54,9 +54,11 @@ lease_seconds=7200, workspace="", subagent=None)`
   request is `request_key_reused`.
 - `subagent="<your driver_id>/<label>"` marks a claim held for one of your subagents.
 - The node must exist at `expected_revision` and not be closed (`node_closed`).
-- An implement claim is BOUND to the attempt it dispatches (`claim.attempt_id`);
-  a terminal report (candidate/failed), an abandon or a takeover releases or
-  transfers it.
+- In an ENFORCED project the implement claim is BOUND to the attempt it
+  dispatches (`claim.attempt_id`); a terminal report (candidate/failed), an
+  abandon or a takeover releases or transfers it. With enforcement off nothing
+  is bound or released unless you NAME the claim (`claim_id`+`fence` on the
+  start): P1 claim rows and history are byte-for-byte as before.
 
 `release_claim(project_id, claim_id, fence, reason)` — the holder, or an admin
 (`break_glass: true` in the event).
@@ -88,13 +90,13 @@ Every rule has a stable error code; the message starts with it.
 
 | rule (design §7.3) | refusal |
 |---|---|
-| 1 dispatch: `start_attempt` / `start_external_attempt` need YOUR live `implement` claim on the node. Optional `claim_id`+`fence` pin what you believe you hold. | `claim_required`, `claimed_by_other` (names holder and expiry), `stale_fence`, `not_claim_owner` |
-| 2 observe: `report_external_attempt` needs the attempt owner and `fence=<owner_fence>`. The previous owner after a takeover/handoff is stale; anyone else is not the owner. A report on an ABANDONED attempt by its original reporter is recorded with `late_after_abandon=1`, `resulting_status=superseded`, never current. | `fence_required`, `stale_fence`, `not_attempt_owner` |
-| 4 structural: `revise_node`, `split_node`, `supersede_node`, `set_node_facet` over a node — or a transitive dependent, which the write invalidates — on which another driver holds a live claim or an active owned attempt need `override_reason`; the holder is notified (`override_notice`) and `claim_overridden` is emitted. | `override_reason_required` (facts: `holders`) |
+| 1 dispatch: `start_attempt` / `start_external_attempt` need YOUR live `implement` claim on the node, judged by its LEASE at the write (a claim past expiry + grace authorizes nothing, swept or not). Optional `claim_id`+`fence` pin what you believe you hold. The same check guards the real `reserved → launching` transition, so a `recover_attempt` or a replayed start cannot launch another driver's reservation (admin: `break_glass`). | `claim_required`, `claimed_by_other` (names holder and expiry), `stale_fence`, `not_claim_owner`, `not_attempt_owner` |
+| 2 observe: `report_external_attempt` needs the attempt owner and `fence=<owner_fence>`. The previous owner after a takeover/handoff is stale; anyone else is not the owner; an admin is admitted as `break_glass` (owner notified). A report on an ABANDONED attempt by its original reporter is recorded with `late_after_abandon=1`, `resulting_status=superseded`, never current; with `quiescent=true` it settles the owner-registry row (the deployment gate stops counting it). A terminal quiescent report settles the attempt's registered open subagents. | `fence_required`, `stale_fence`, `not_attempt_owner` |
+| 4 structural: `revise_node`, `split_node`, `supersede_node`, `set_node_facet` over a node — or a transitive dependent, which the write invalidates — on which another driver holds a live claim or an active owned attempt need `override_reason`; the holder is notified (`override_notice`) and `claim_overridden` is emitted. Check, write, event and notices are ONE transaction. | `override_reason_required` (facts: `holders`) |
 | 5 hold: `set_node_hold(held=false)` on a hold another driver placed needs `override_reason`; the placer is notified. | `override_reason_required` |
-| 8 one writer per checkout: an exclusive `claim_node` whose `workspace` is already declared by another live exclusive claim in the project is refused. `register_subagent` applies the same rule to subagent workspaces. | `workspace_in_use` |
+| 8 one writer per checkout: the CHECKOUT is `host:path` (the `#branch` suffix does not make a second writer safe). An exclusive `claim_node` or a `register_subagent` whose checkout is already declared by a live exclusive claim or an open subagent — active, adopted or ORPHANED until its origin driver reports it settled — is refused. Takeover and handoff keep the transferred claim's workspace. | `workspace_in_use` |
 | 9 one controller per run: the checkpoint of a SkillFlow run bound to an owned attempt is answered by the owner driver only (MCP `answer_checkpoint`, REST `/checkpoint/approve|reject`). | `not_attempt_owner` |
-| Q8 subagents: a claim held for a subagent and evidence recorded under a `<you>/<label>` identity name a registered subagent. | `subagent_unregistered` |
+| Q8 subagents: a claim held for a subagent and evidence recorded under a `<you>/<label>` identity name a subagent registered TO YOU (a transferred or orphaned worker is no longer its origin driver's). | `subagent_unregistered` |
 | Q13 admin: an admin (owner e-mail, `owner-cli`) is never refused by these rules; the write carries `break_glass: true` and the affected driver gets a `break_glass` notice. | — |
 
 Priority changes (`set_node_priority`), evidence and verification are unchanged:
@@ -156,9 +158,18 @@ branch), `context_ref`/`context_sha256` (retained), `checkpoint_ref`/`checkpoint
   `checkpoint_ref` to continue at once on a NEW branch and workspace (Q9). The
   old branch is reference only.
 - `report_subagent_settled(project_id, subagent_id, quiescent=true, report_ref, report_sha256, fence?)`
-  — by the ORIGIN driver, with any (old) fence; the only old-fence write. It
-  only closes an orphan (`not_orphaned`), to `terminated`, resolves the standing
-  notice and notifies the current owner. `quiescence_required` otherwise.
+  — two cases. An ORPHAN: by its origin driver, with any (old) fence (the only
+  old-fence write), closed to `terminated`; the standing notice is resolved and
+  the current owner notified. An `active`/`adopted` worker of an attempt that is
+  no longer active (candidate, failed, superseded, abandoned): by its current
+  owner with the current fence, closed to `settled`. On an active attempt:
+  `not_orphaned` (report the attempt terminal instead; that settles its workers).
+  `quiescence_required` without `quiescent=true`.
+- Takeover/handoff moves every live claim held FOR a worker (`subagent=label`,
+  any node) with it; orphaning REVOKES them. `heartbeat` judges the registry
+  first: a worker you no longer own renews nothing, not even claims with its label.
+- The worker's frozen instructions are retained in the private table
+  `state_subagent_contexts`, never in the public report-blob table.
 - `project_overview.orphaned_subagents` and `project_run_summary.orphaned_subagents`
   count orphans not yet confirmed stopped (public for an opened project; the
   registry itself is private: `list_subagents(project_id, attempt_id?, owner_driver_id?, statuses?)`,
@@ -167,8 +178,11 @@ branch), `context_ref`/`context_sha256` (retained), `checkpoint_ref`/`checkpoint
 ## Handoff (P3, design §6)
 
 - `offer_handoff(project_id, request_key, expected_owner_fence, package, attempt_id|claim_id, to_driver_id?)`
-  — by the subject's owner; `to_driver_id` omitted = any member. One open offer
-  per subject (`handoff_pending`). The `package` is bounded (16 KiB canonical),
+  — by the subject's owner; `to_driver_id` omitted = any member (every
+  `project_drivers` row with status `member`, from the P0 registry). One open
+  offer per subject (`handoff_pending`). An attempt package MUST declare
+  `workers.quiescent` (`quiescence_required`): undeclared is unknown, not quiet.
+  The `package` is bounded (16 KiB canonical),
   holds references only — `context_hash`, `observation_version`, `event_cursor`,
   `source`, `workspace`, `workers{quiescent,detail,host}`, `pending_checkpoint`,
   `reports[{ref,sha256}]` (≤20, retained), `open_issue_ids` (≤100),

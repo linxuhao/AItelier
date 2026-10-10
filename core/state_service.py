@@ -178,8 +178,7 @@ class StateService:
         self.driver_inbox = DriverInbox(self.store, actor, driver_id)
         # Multi-driver P3: reclaim (abandon / take over), the record-only
         # subagent registry and point-to-point handoffs. Each is the one writer
-        # of its table; all are inert unless the project's policy has
-        # multi_driver=on (enforcement: core.state_enforcement.enforced).
+        # of its table (enforcement: core.state_enforcement.enforced).
         from core.state_recovery import StateRecovery
         self.recovery = StateRecovery(self.store, actor, driver_id=driver_id, is_admin=self.is_admin,
                                       claims=self.claims)

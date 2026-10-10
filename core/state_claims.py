@@ -18,9 +18,8 @@ What P1 does NOT do, on purpose:
 * record anything on a heartbeat except the two lease columns: no event, no
   observation_version bump, no history row. A heartbeat is not a state change.
 
-Everything is opt-in per project through ``state_project_policy.multi_driver``
-(default ``off``): with it off no claim can be taken and new attempts carry no
-lease, so nothing here changes what an existing project sees.
+Every project records claims and leases (multi_driver is always on); refusals
+come only from the separate ``claim_enforcement`` switch (core.state_enforcement).
 
 Lease expiry is detected lazily: ``sweep`` runs on the private claim reads
 (list_claims, get_claim), inside claim_node, and on every iteration of
@@ -155,11 +154,6 @@ def attempt_lease_view(row, current: str | None = None) -> dict:
     return {"owner_driver_id": data.get("owner_driver_id"), "owner_fence": data.get("owner_fence", 0),
             "lease_expires_at": expires, "lease_state": lease_state(expires, current),
             "reclaimable_at": add_seconds(expires, GRACE_SECONDS) if expires else None}
-
-
-def multi_driver_on(conn, project_id) -> bool:
-    row = conn.execute("SELECT * FROM state_project_policy WHERE project_id=?", (project_id,)).fetchone()
-    return bool(row) and dict(row).get("multi_driver") == "on"
 
 
 class ClaimError(StateConflict):
@@ -321,9 +315,6 @@ class StateClaims:
                 if old["request_hash"] != request_hash:
                     raise ClaimError("request_key_reused", "this request_key was used for a different claim")
                 return {**_claim_view(old, now_stamp()), "idempotent": True}
-            if not multi_driver_on(conn, project_id):
-                raise ClaimError("multi_driver_off",
-                                 "claims are recorded only in projects whose policy has multi_driver=on")
             if node["revision"] != expected_revision:
                 raise ClaimError("revision_changed", f"node revision is {node['revision']}; reload")
             if node["status"] == "SUPERSEDED" or (purpose == "implement" and node["status"] == "VERIFIED"):

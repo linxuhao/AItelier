@@ -23,7 +23,7 @@ class ExternalAttempts:
         self.attempts = attempts
         self.store = attempts.store
         self.actor = text(actor, 'authenticated reporter', 300)
-        # Recorded as the attempt's owner only where multi_driver=on (P1 leases).
+        # Recorded as the attempt's owner (P1 leases).
         self.driver_id = driver_id
         self.is_admin = is_admin is True
 

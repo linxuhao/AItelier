@@ -299,7 +299,8 @@ def initialize_graph_schema(db) -> None:
         if "facet" not in {r["name"] for r in conn.execute("PRAGMA table_info(state_nodes)")}:
             conn.execute("ALTER TABLE state_nodes ADD COLUMN facet TEXT "
                          "CHECK(facet IN ('design','contract','test','content','integration'))")
-        # Additive (design/multi-driver-coop.md §9.1): every existing project is off.
+        # Legacy column (design/multi-driver-coop.md §9.1), kept so old and fresh
+        # databases share one shape; ignored since multi_driver is always on.
         if "multi_driver" not in {r["name"] for r in conn.execute("PRAGMA table_info(state_project_policy)")}:
             conn.execute("ALTER TABLE state_project_policy ADD COLUMN multi_driver TEXT NOT NULL "
                          "DEFAULT 'off' CHECK(multi_driver IN ('off','on'))")

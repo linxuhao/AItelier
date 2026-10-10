@@ -15,7 +15,7 @@ from __future__ import annotations
 import re
 
 from core.state_attempts import ACTIVE
-from core.state_claims import ClaimError, digest, multi_driver_on, now_stamp
+from core.state_claims import ClaimError, digest, now_stamp
 from core.state_graph import StateGraphError, StateNotFound, key, text
 from core.state_privacy import UntrustedDatabase, writer_only_read
 
@@ -84,8 +84,6 @@ class StateSubagents:
         request_hash = digest({"attempt_id": attempt_id, "workspace": workspace})
         with self.store.transaction(write=True) as conn:
             self.store._project(conn, project_id)
-            if not multi_driver_on(conn, project_id):
-                raise ClaimError("multi_driver_off", "subagents are registered only in projects with multi_driver=on")
             old = conn.execute("SELECT * FROM driver_subagents WHERE subagent_id=?", (subagent_id,)).fetchone()
             if old is not None:
                 if old["request_hash"] == request_hash and old["project_id"] == project_id:

@@ -33,7 +33,7 @@ import uuid
 
 from core import driver_notices
 from core.state_attempts import ACTIVE, _public
-from core.state_claims import ClaimError, add_seconds, digest, multi_driver_on, now_stamp
+from core.state_claims import ClaimError, add_seconds, digest, now_stamp
 from core.state_graph import StateGraphError, StateNotFound, canonical, key, text
 from core.state_privacy import UntrustedDatabase, writer_only_read
 
@@ -162,8 +162,6 @@ class StateHandoffs:
         current = now_stamp()
         with self.store.transaction(write=True) as conn:
             self.store._project(conn, project_id)
-            if not multi_driver_on(conn, project_id):
-                raise ClaimError("multi_driver_off", "handoffs need a project with multi_driver=on")
             attempt = claim = None
             if attempt_id is not None:
                 attempt = conn.execute("SELECT * FROM state_attempts WHERE attempt_id=? AND project_id=?",

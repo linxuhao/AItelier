@@ -187,10 +187,9 @@ class StateAttempts:
                  owner_driver_id=None, claim_id=None, fence=None, is_admin=False):
         """Common atomic ownership/pin guard for every execution adapter.
 
-        ``owner_driver_id`` is the registered driver behind the request. Only in
-        a project whose policy has multi_driver=on does the new attempt record
-        it with fence 1 and a default lease (design §4.2); otherwise the row is
-        written exactly as before. In a project that also has
+        ``owner_driver_id`` is the registered driver behind the request; the new
+        attempt records it with fence 1 and a default lease (design §4.2). In a
+        project that has
         claim_enforcement=on (P3, design §7.3 rule 1) the caller must hold the
         node's live implement claim (``claim_required``); a supplied
         ``claim_id``/``fence`` must name it (``stale_fence``), and the claim is
@@ -324,13 +323,12 @@ class StateAttempts:
             lease = None
             if owner_driver_id:
                 from core import state_claims
-                if state_claims.multi_driver_on(conn, project_id):
-                    current = state_claims.now_stamp()
-                    lease = {"owner_driver_id": owner_driver_id, "owner_fence": 1,
-                             "lease_expires_at": state_claims.add_seconds(
-                                 current, state_claims.DEFAULT_LEASE_SECONDS),
-                             "last_heartbeat_at": current}
-                    record.update(lease)
+                current = state_claims.now_stamp()
+                lease = {"owner_driver_id": owner_driver_id, "owner_fence": 1,
+                         "lease_expires_at": state_claims.add_seconds(
+                             current, state_claims.DEFAULT_LEASE_SECONDS),
+                         "last_heartbeat_at": current}
+                record.update(lease)
             try:
                 conn.execute("INSERT INTO state_attempts(" + ",".join(record) + ") VALUES(" +
                              ",".join("?" for _ in record) + ")", tuple(record.values()))

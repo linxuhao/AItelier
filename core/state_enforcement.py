@@ -2,8 +2,7 @@
 
 P1 recorded claims and leases and enforced nothing. This module holds every
 rule that turns them into refusals, behind ONE switch: ``enforced(conn,
-project_id)``, which reads ``claim_enforcement`` (default ``off``; it requires
-``multi_driver=on`` and reads ``off`` whenever multi_driver is off,
+project_id)``, which reads ``claim_enforcement`` (default ``off``,
 core.state_metadata.claim_enforcement). Every rule here asks that helper and
 nothing else. With the switch off every function here is a no-op that returns
 "nothing to enforce", so such a project behaves exactly as P1: no claim is
@@ -47,7 +46,7 @@ def _has_table(conn, name) -> bool:
 
 
 def enforced(conn, project_id) -> bool:
-    """THE enforcement switch: claim_enforcement=on (which requires multi_driver=on)."""
+    """THE enforcement switch: claim_enforcement=on."""
     from core.state_metadata import claim_enforcement
     return claim_enforcement(conn, project_id) == "on"
 

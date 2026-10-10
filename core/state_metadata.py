@@ -6,9 +6,9 @@ CREATE TABLE IF NOT EXISTS state_project_policy (
     reason TEXT NOT NULL, actor TEXT NOT NULL, updated_at TEXT NOT NULL,
     FOREIGN KEY(project_id) REFERENCES state_projects(project_id)
 );
--- Multi-driver P3 (design §7.3): claims are ENFORCED only behind this second
--- switch (owner decision 2026-10-09: set_multi_driver alone keeps P1's
--- record-only behaviour). Its own row, so the policy table keeps its shape;
+-- Multi-driver P3 (design §7.3): claims are ENFORCED only behind this switch
+-- (owner decision 2026-10-09: claims are record-only by default; multi_driver
+-- is always on since 2026-10-10). Its own row, so the policy table keeps its shape;
 -- it shares the policy revision for the CAS. No row = off.
 -- Multi-driver P4 (design §7.2): review_independence off|advisory lives on
 -- the same row; advisory only MARKS a receipt whose review evidence came from
@@ -55,33 +55,29 @@ BEGIN SELECT RAISE(ABORT,'historical references are append-only'); END;
 def project_policy(conn, project_id):
     row = conn.execute("SELECT * FROM state_project_policy WHERE project_id=?", (project_id,)).fetchone()
     policy = dict(row) if row else {"project_id": project_id, "revision": 0,
-                                    "dispatch": "active", "reason": "", "actor": "", "updated_at": None,
-                                    "multi_driver": "off"}
-    policy.setdefault("multi_driver", "off")
+                                    "dispatch": "active", "reason": "", "actor": "", "updated_at": None}
+    # Always on (owner decision 2026-10-10); reported as a constant for
+    # compatibility. The legacy state_project_policy.multi_driver column is ignored.
+    policy["multi_driver"] = "on"
     policy["claim_enforcement"] = claim_enforcement(conn, project_id)
     policy["review_independence"] = review_independence(conn, project_id)
     return policy
 
 
 def claim_enforcement(conn, project_id) -> str:
-    """off | on: THE enforcement switch (P3; core.state_enforcement.enforced).
-    It requires multi_driver=on, so it reads off whenever multi_driver is off,
-    whatever its own row says."""
+    """off | on: THE enforcement switch (P3; core.state_enforcement.enforced)."""
     if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='state_project_enforcement'").fetchone():
         return "off"
-    row = conn.execute("SELECT e.claim_enforcement FROM state_project_enforcement e JOIN state_project_policy p "
-                       "ON p.project_id=e.project_id WHERE e.project_id=? AND p.multi_driver='on'",
+    row = conn.execute("SELECT claim_enforcement FROM state_project_enforcement WHERE project_id=?",
                        (project_id,)).fetchone()
     return row[0] if row else "off"
 
 
 def review_independence(conn, project_id) -> str:
-    """off | advisory (P4, design §7.2; there is no `required` mode). Like
-    claim_enforcement it reads off whenever multi_driver is off."""
+    """off | advisory (P4, design §7.2; there is no `required` mode)."""
     if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='state_project_enforcement'").fetchone():
         return "off"
-    row = conn.execute("SELECT e.review_independence FROM state_project_enforcement e JOIN state_project_policy p "
-                       "ON p.project_id=e.project_id WHERE e.project_id=? AND p.multi_driver='on'",
+    row = conn.execute("SELECT review_independence FROM state_project_enforcement WHERE project_id=?",
                        (project_id,)).fetchone()
     return row[0] if row else "off"
 

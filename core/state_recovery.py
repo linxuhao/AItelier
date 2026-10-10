@@ -33,7 +33,7 @@ import uuid
 from core import driver_notices
 from core.state_attempts import ACTIVE, _public
 from core.state_claims import (DEFAULT_LEASE_SECONDS, EXCLUSIVE_PURPOSES, GRACE_SECONDS, ClaimError, add_seconds,
-                               lease_state, multi_driver_on, now_stamp)
+                               lease_state, now_stamp)
 from core.state_enforcement import override_reason_text
 from core.state_graph import StateGraphError, StateNotFound, digest, key, text
 
@@ -56,8 +56,6 @@ class StateRecovery:
 
     def _reclaimable(self, conn, attempt, expected_owner_fence, override_reason, current) -> bool:
         """Every precondition of §4.4; returns whether this is a break-glass write."""
-        if not multi_driver_on(conn, attempt["project_id"]):
-            raise ClaimError("multi_driver_off", "reclaiming attempts needs a project with multi_driver=on")
         if attempt["status"] not in ACTIVE:
             raise ClaimError("attempt_not_active", f"attempt is {attempt['status']}; nothing to reclaim")
         # §4.4: "any project MEMBER". Judged inside the ownership transaction; an

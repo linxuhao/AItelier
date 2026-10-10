@@ -50,7 +50,7 @@ LISTING_VALUES = ("listed", "delisted")
 ENTRY_ID = re.compile(r"[0-9a-f]{12}")
 ADDRESS = re.compile(r"note://([A-Za-z0-9][A-Za-z0-9._-]{0,127})/([0-9a-f]{12})")
 
-ENTRY_SCHEMA = """
+_ENTRY_TEMPLATE = """
 CREATE TABLE IF NOT EXISTS state_driver_note_entries (
     project_id TEXT NOT NULL,
     entry_id TEXT NOT NULL,
@@ -79,6 +79,18 @@ CREATE TRIGGER IF NOT EXISTS state_driver_note_entries_no_delete
 BEFORE DELETE ON state_driver_note_entries
 BEGIN SELECT RAISE(ABORT,'driver note entries are never deleted; supersede or delist'); END;
 """
+
+def entry_schema(table: str, scope_column: str, parent: str) -> str:
+    if (table, scope_column, parent) not in (
+        ("state_driver_note_entries", "project_id", "state_projects"),
+        ("driver_note_entries", "driver_id", "drivers"),
+    ):
+        raise ValueError("unsupported notebook scope")
+    return _ENTRY_TEMPLATE.replace("state_driver_note_entries", table).replace("project_id", scope_column).replace("state_projects", parent)
+
+ENTRY_SCHEMA = entry_schema("state_driver_note_entries", "project_id", "state_projects")
+DRIVER_ENTRY_SCHEMA = entry_schema("driver_note_entries", "driver_id", "drivers")
+
 
 
 def new_entry_id() -> str:

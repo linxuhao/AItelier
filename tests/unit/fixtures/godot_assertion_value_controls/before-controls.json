@@ -1,0 +1,145 @@
+{
+  "scenarios": [
+    {
+      "name": "before_damage_changed",
+      "timeline": [
+        {
+          "at": 10,
+          "capture_before": [
+            {
+              "id": "health",
+              "node": "Main",
+              "attr": "input_health",
+              "action_frame": 20
+            },
+            {
+              "id": "stats",
+              "node": "Main",
+              "attr": "input_stats",
+              "action_frame": 20
+            }
+          ]
+        },
+        {
+          "at": 20,
+          "actions": [
+            "before_damage"
+          ]
+        },
+        {
+          "at": 30,
+          "assert": [
+            {
+              "node": "Main",
+              "attr": "input_health",
+              "mode": "changed",
+              "before": "health",
+              "name": "health_actual_delta"
+            },
+            {
+              "node": "Main",
+              "attr": "input_stats",
+              "mode": "changed",
+              "before": "stats",
+              "name": "stats_actual_delta"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "before_noop_changed",
+      "timeline": [
+        {
+          "at": 10,
+          "capture_before": [
+            {
+              "id": "health",
+              "node": "Main",
+              "attr": "input_health",
+              "action_frame": 20
+            },
+            {
+              "id": "stats",
+              "node": "Main",
+              "attr": "input_stats",
+              "action_frame": 20
+            }
+          ]
+        },
+        {
+          "at": 20,
+          "actions": [
+            "before_noop"
+          ]
+        },
+        {
+          "at": 30,
+          "assert": [
+            {
+              "node": "Main",
+              "attr": "input_health",
+              "mode": "changed",
+              "before": "health",
+              "name": "health_actual_delta"
+            },
+            {
+              "node": "Main",
+              "attr": "input_stats",
+              "mode": "changed",
+              "before": "stats",
+              "name": "stats_actual_delta"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "before_noop_unchanged",
+      "timeline": [
+        {
+          "at": 10,
+          "capture_before": [
+            {
+              "id": "health",
+              "node": "Main",
+              "attr": "input_health",
+              "action_frame": 20
+            },
+            {
+              "id": "stats",
+              "node": "Main",
+              "attr": "input_stats",
+              "action_frame": 20
+            }
+          ]
+        },
+        {
+          "at": 20,
+          "actions": [
+            "before_noop"
+          ]
+        },
+        {
+          "at": 30,
+          "assert": [
+            {
+              "node": "Main",
+              "attr": "input_health",
+              "mode": "unchanged",
+              "before": "health",
+              "name": "health_actual_delta"
+            },
+            {
+              "node": "Main",
+              "attr": "input_stats",
+              "mode": "unchanged",
+              "before": "stats",
+              "name": "stats_actual_delta"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

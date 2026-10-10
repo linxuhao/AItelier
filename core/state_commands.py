@@ -122,6 +122,8 @@ class Events(Project):
 
 
 class WaitForStateChange(Project):
+    include_driver_inbox: bool = False
+    inbox_after: int = Field(default=0, ge=0)
     after: int = Field(default=0, ge=0, le=2**63-1)
     node_keys: list[str] | None = Field(default=None, min_length=1, max_length=100)
     attempt_ids: list[str] | None = Field(default=None, min_length=1, max_length=100)
@@ -204,7 +206,37 @@ class SetMultiDriver(Project):
     reason: str = Field(min_length=1, max_length=4000)
 
 
+class SendDriverMessage(Request):
+    request_key: str = Field(min_length=1, max_length=320)
+    subject: str = Field(min_length=1, max_length=200)
+    body: str = Field(max_length=8000)
+    target_driver_id: str | None = None
+    project_members: str | None = None
+    project_id: str | None = None
+    kind: Literal["note", "request", "review_request", "handoff_offer", "handoff_reply"] = "note"
+    delivery_mode: Literal["transient", "standing"] = "transient"
+    refs: dict = Field(default_factory=dict)
+    reply_to_message_id: str | None = None
+
+class ListDriverMessages(Request):
+    driver_id: str | None = None
+    after: int = Field(default=0, ge=0)
+    limit: int = Field(default=100, ge=1, le=100)
+
+class WaitForDriverInbox(Request):
+    driver_id: str | None = None
+    after: int = Field(default=0, ge=0)
+    timeout_seconds: float = Field(default=30, ge=0, le=900)
+    return_when_idle: bool = False
+
+class DriverDeliveryTransition(Request):
+    delivery_id: str
+    expected_version: int = Field(ge=1)
+    request_key: str = Field(min_length=1, max_length=320)
+    break_glass_reason: str | None = Field(default=None, min_length=1, max_length=500)
+
 class SendDirectorMessage(Request):
+    protocol_version: Literal["v2","v3"] = "v2"
     sender_project_id: str
     director_identity: str
     request_key: str
@@ -214,9 +246,14 @@ class SendDirectorMessage(Request):
     broadcast: bool = False
     reply_to_delivery_id: str | None = None
     delivery_mode: Literal["transient", "standing"] = "transient"
+    ack_mode: Literal["at_least_n","broadcast"] | None = None
+    ack_quorum: int | None = Field(default=None, ge=1)
 
 
 class ListDirectorMessages(Project):
+    ack_mode: Literal["at_least_n","broadcast"] | None = None
+    protocol_version: Literal["v2","v3"] = "v2"
+    needs_my_ack: bool = False
     after: int = 0
     limit: int = 100
     delivery_mode: Literal["transient", "standing"] | None = None
@@ -231,6 +268,7 @@ class ListDirectorMessages(Project):
 
 
 class TransitionDirectorMessage(Project):
+    protocol_version: Literal["v2","v3"] = "v2"
     delivery_id: str
     expected_version: int
     request_key: str
@@ -274,18 +312,34 @@ class SearchDriverNoteHistory(Project):
                                description="Maximum characters in each redacted excerpt.")
 
 
-class DriverNoteEntry(Project):
+class NotebookScopeRequest(Request):
+    project_id: str | None = None
+    driver_id: str | None = None
+    break_glass_reason: str | None = Field(default=None, min_length=1, max_length=500)
+
+    @model_validator(mode="after")
+    def one_notebook_scope(self):
+        if bool(self.project_id) == bool(self.driver_id):
+            raise ValueError("exactly one project_id or driver_id is required")
+        return self
+
+class DriverNoteEntry(NotebookScopeRequest):
     entry_id: str = Field(min_length=12, max_length=12,
                           description="The 12-hex address suffix returned by write_driver_note_entry.")
 
 
-class GetDriverNote(Project):
+class GetDriverNote(NotebookScopeRequest):
     include_superseded: bool = Field(
         default=False, description=(
             "Include superseded entries (with superseded_by). By default the index holds only "
             "current entries; superseded_count reports how many it hides."))
     include_delisted: bool = Field(
         default=False, description="Include entries evicted from the index; their bodies stay readable.")
+
+
+class ProjectDriverNote(Project):
+    include_superseded: bool = False
+    include_delisted: bool = False
 
 
 class DriverNoteIndex(GetDriverNote):
@@ -304,7 +358,7 @@ class SearchDriverNoteEntries(GetDriverNote):
                                description="Maximum characters in each redacted excerpt.")
 
 
-class WriteDriverNoteEntry(Project):
+class WriteDriverNoteEntry(NotebookScopeRequest):
     assertion: str = Field(
         min_length=1, max_length=MAX_ASSERTION_CHARS, description=(
             "One line a reader cannot violate, WITH its status, not a topic. Over the cap the "
@@ -315,12 +369,13 @@ class WriteDriverNoteEntry(Project):
     # A plain string so that "informational" reaches the core refusal and its
     # verbatim message instead of a generic enum validation error. The schema
     # advertises in_force only.
-    force: str = Field(default="in_force", max_length=32, json_schema_extra={"enum": ["in_force"]},
-                       description=(
-        "Always in_force: an entry is a rule; reading it can still change a decision, so it "
-        "leaves the index only through supersede. force=\"informational\" is refused (owner "
-        "ruling 2026-10-06): in-flight state goes to the State DAG (attempts, node hold, "
-        "issues, node priority), not the notebook."))
+    force: str = Field(default="in_force", max_length=32, json_schema_extra={"enum":["in_force"]})
+
+    @model_validator(mode="after")
+    def driver_default_force(self):
+        if self.driver_id and "force" not in self.model_fields_set:
+            self.force = "informational"
+        return self
     landed: str = Field(default="", max_length=MAX_LANDED_CHARS, description=(
         "Landed status, e.g. 'three places VERIFIED'. Landed is NOT expired: a landed rule "
         "stays in force."))
@@ -331,7 +386,7 @@ class SupersedeDriverNoteEntry(WriteDriverNoteEntry):
     reason: str = Field(min_length=1, max_length=MAX_REASON_CHARS)
 
 
-class DelistDriverNoteEntry(Project):
+class DelistDriverNoteEntry(NotebookScopeRequest):
     entry_id: str = Field(min_length=12, max_length=12)
     reason: str = Field(min_length=1, max_length=MAX_REASON_CHARS, description=(
         "Kept with the entry, not a one-shot command-line argument."))
@@ -640,6 +695,9 @@ class CheckDesignMarkdown(DesignBaseline):
 
 
 READ_REQUESTS = {
+    "driver_postcompact_guidance": Project,
+    "list_driver_notebooks": Request,
+    "list_driver_messages": ListDriverMessages, "wait_for_driver_inbox": WaitForDriverInbox,
     "design_catalog": Project, "get_design_revision": DesignRevision,
     "search_design_items": SearchDesignItems, "design_impact": DesignImpact,
     "get_design_baseline": DesignBaseline, "get_design_bindings": Node,
@@ -650,7 +708,7 @@ READ_REQUESTS = {
     "search_driver_note_history": SearchDriverNoteHistory, "get_attempt": Attempt,
     "driver_note_index": DriverNoteIndex, "get_driver_note_entry": DriverNoteEntry,
     "search_driver_note_entries": SearchDriverNoteEntries,
-    "check_driver_note_index": DriverNote, "get_driver_guide_section": DriverGuideSection,
+    "check_driver_note_index": NotebookScopeRequest, "get_driver_guide_section": DriverGuideSection,
     "list_attempts": ListAttempts, "evidence": Attempt,
     "project_catalog": ProjectCatalog, "project_overview": Project,
     "project_run_summary": Project,
@@ -737,6 +795,8 @@ def is_public_read(action: str) -> bool:
 
 
 WRITE_REQUESTS = {
+    "send_driver_message": SendDriverMessage,
+    "acknowledge_driver_message": DriverDeliveryTransition, "resolve_driver_message": DriverDeliveryTransition,
     "create_design_revision": CreateDesignRevision, "create_design_baseline": CreateDesignBaseline,
     "bind_node_design": BindDesign,
     "create_project": CreateProject, "add_nodes": AddNodes, "revise_node": ReviseNode,
@@ -768,11 +828,29 @@ REQUESTS = READ_REQUESTS | WRITE_REQUESTS
 RETIRED_ACTIONS = {"update_driver_note": FREE_TEXT_CLOSED}
 
 
+def _operation_schema(name, model):
+    item = {"mutates":name in WRITE_REQUESTS,"arguments":model.model_json_schema()}
+    if issubclass(model, NotebookScopeRequest):
+        from copy import deepcopy
+        item["arguments"]["required"] = sorted(set(item["arguments"].get("required",[])) | {"project_id"})
+        item["arguments"]["properties"]["project_id"] = {"type":"string","minLength":1,"maxLength":128}
+        item["arguments"]["properties"]["driver_id"] = {"type":"null","default":None}
+        private = deepcopy(item["arguments"])
+        private["required"] = [k for k in private["required"] if k!="project_id"]
+        private["required"] = sorted(set(private.get("required",[])) | {"driver_id"})
+        private["properties"]["project_id"] = {"type":"null","default":None}
+        private["properties"]["driver_id"] = {"type":"string","minLength":1,"maxLength":64}
+        if "force" in private["properties"]:
+            private["properties"]["force"] = {"type":"string","enum":["informational","in_force"],"default":"informational"}
+        item["driver_arguments"] = private
+        item["scope_selection"] = "Use driver_arguments for driver_id; arguments preserves the project notebook contract."
+    return item
+
+
 def describe() -> dict:
     return {"architecture": "State DAG owns facts; a separately authorized execution transport owns execution. Completion is only a candidate.",
             "trust": "Evidence is an authorized verifier attestation, not an automatic guarantee of truth.",
-            "operations": {name: {"mutates": name in WRITE_REQUESTS, "arguments": model.model_json_schema()}
-                           for name, model in REQUESTS.items()}}
+            "operations": {name: _operation_schema(name, model) for name, model in REQUESTS.items()}}
 
 
 # The reads whose ANSWER can name an unopened project even though no single
@@ -836,6 +914,13 @@ def _handlers(service) -> dict:
     mutation must infect. A new action lands in WRITE_REQUESTS and its handler
     here, and the gate covers it automatically — no second handwritten list."""
     return {
+        "driver_postcompact_guidance": service.driver_postcompact_guidance,
+        "list_driver_notebooks": service.list_driver_notebooks,
+        "send_driver_message": service.driver_inbox.send_driver_message,
+        "list_driver_messages": service.driver_inbox.list_driver_messages,
+        "wait_for_driver_inbox": service.driver_inbox.wait_for_driver_inbox,
+        "acknowledge_driver_message": service.driver_inbox.acknowledge_driver_message,
+        "resolve_driver_message": service.driver_inbox.resolve_driver_message,
         "design_catalog": service.design.catalog, "get_design_revision": service.design.get_revision,
         "search_design_items": service.design.search, "design_impact": service.design.impact,
         "get_design_baseline": service.design.get_baseline, "get_design_bindings": service.design.node_bindings,
@@ -891,6 +976,11 @@ def _handlers(service) -> dict:
     }
 
 
+def _director_schema(service):
+    from core.director_messaging_protocol import SCHEMA_ID, V3_SCHEMA_ID
+    return getattr(getattr(service, "director_messages", None), "reply_schema", SCHEMA_ID)
+
+
 def execute(service, action: str, arguments: dict, *, allow_write: bool = False):
     if isinstance(action, str) and action in RETIRED_ACTIONS:
         raise StateGraphError(RETIRED_ACTIONS[action])
@@ -904,8 +994,19 @@ def execute(service, action: str, arguments: dict, *, allow_write: bool = False)
     if not isinstance(arguments, dict):
         if director_action:
             from core.director_messaging_protocol import DirectorMessageError
-            return DirectorMessageError("invalid_request").as_dict()
+            return DirectorMessageError("invalid_request", _director_schema(service)).as_dict()
         raise StateGraphError("arguments must be an object")
+    if director_action:
+        setter = getattr(getattr(service,"director_messages",None),"_set_reply_schema",None)
+        if setter:
+            try:
+                setter(arguments.get("protocol_version","v2"),
+                       any(arguments.get(k) is not None for k in ("ack_mode","ack_quorum")) or arguments.get("needs_my_ack",False))
+            except Exception as exc:
+                from core.director_messaging_protocol import DirectorMessageError
+                if isinstance(exc,DirectorMessageError):
+                    return exc.as_dict()
+                raise
     # Confidentiality is decided by the ACTION that is being read, at the
     # moment the private read EXECUTES, and by the PROJECT's own privacy, from
     # the trust level the transport derived from the raw credential. Neither
@@ -943,7 +1044,7 @@ def execute(service, action: str, arguments: dict, *, allow_write: bool = False)
     except ValidationError as exc:
         if director_action:
             from core.director_messaging_protocol import DirectorMessageError
-            return DirectorMessageError("invalid_request").as_dict()
+            return DirectorMessageError("invalid_request", _director_schema(service)).as_dict()
         # Bounded validation errors without echoing whole inputs into logs.
         details = [{"field": ".".join(map(str, e["loc"])), "error": e["msg"]} for e in exc.errors(include_input=False)[:10]]
         raise StateGraphError(str(details)) from exc
@@ -958,16 +1059,31 @@ def execute(service, action: str, arguments: dict, *, allow_write: bool = False)
         except DriverError as exc:
             if director_action:
                 from core.director_messaging_protocol import DirectorMessageError
-                return DirectorMessageError("invalid_request").as_dict()
+                return DirectorMessageError("invalid_request", _director_schema(service)).as_dict()
             raise StateGraphError(str(exc)) from exc
+    if args.get("driver_id") and not service.project_read_trusted:
+        raise ProjectPrivate()
     handlers = _handlers(service)
+    handler = handlers[action]
+    notes = None
+    if issubclass(REQUESTS[action],NotebookScopeRequest):
+        target_driver = args.pop("driver_id",None)
+        reason = args.pop("break_glass_reason",None)
+        if target_driver:
+            notes = service.driver_notes.for_driver(target_driver,service.driver_id,reason)
+            args["project_id"] = target_driver
+            handler = handler.__func__.__get__(notes,type(notes))
     try:
-        result = handlers[action](**args)
+        result = handler(**args)
+        if notes is not None:
+            result = notes._presentation(result)
     except Exception as exc:
         if director_action:
             from core.director_messaging_protocol import DirectorMessageError
             if isinstance(exc, DirectorMessageError):
-                return exc.as_dict()
+                result = exc.as_dict()
+                result["schema"] = _director_schema(service)
+                return result
         raise
     if anonymous and action in _CATALOG_READS:
         result = _filter_catalog(service, action, result)

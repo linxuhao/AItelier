@@ -44,16 +44,22 @@ REFERENCE_CURVE = [
     (13, 163, 61, False),
     (14, 12832, 12348, False),
     (15, 19251, 18610, False),
-    (16, 32768, 31573, True),    # cap 32768 filled -> escalate to 65536
+    (16, 32768, 31573, True),    # historical cap32768 filled; old policy escalated
     (17, 46829, 45065, False),
     (18, 36667, 35303, False),
     (19, 19573, 18579, False),
-    (20, 65536, 62770, True),    # cap 65536 == ceiling -> attempt dies here
+    (20, 65536, 62770, True),    # historical raised-cap attempt ended here
 ]
 REFERENCE_MAX_TURNS = 100
 REFERENCE_START_CAP = 32768
 CURVE_COMPLETION = sum(row[1] for row in REFERENCE_CURVE)
 CURVE_REASONING = sum(row[2] for row in REFERENCE_CURVE)
+# Preserve all historical rows. Current policy cannot honestly replay post16
+# spending above its unchanged32768cap; replay the valid prefix and then a
+# finite explicit correction or unavailable correction, not an IndexError.
+CURRENT_PREFIX = REFERENCE_CURVE[:16]
+CURRENT_COMPLETION = sum(row[1] for row in CURRENT_PREFIX)
+CURRENT_REASONING = sum(row[2] for row in CURRENT_PREFIX)
 
 TS = {"read_file": {}, "list_tree": {}, "write": {}}
 
@@ -114,13 +120,18 @@ def engine():
 
 
 def _replay(engine, ws, *, write_on_first_turn=False, expect_death=True):
-    """Drive the REAL native turn loop over the reference consumption curve."""
+    """Drive the real loop over the valid original-cap prefix and correction."""
     nat = engine.factory.get_native_agent.return_value
     calls = {"n": 0}
 
     def _one_turn(**_kw):
         calls["n"] += 1
-        turn, completion, reasoning, starved = REFERENCE_CURVE[calls["n"] - 1]
+        if calls["n"] > len(CURRENT_PREFIX):
+            if expect_death:
+                raise RuntimeError("scripted required correction unavailable")
+            nat.gateway.last_usage = {"completion_tokens":7,"reasoning_tokens":0}
+            return _turn(tool_calls=[_tc("finish_step",cid="explicit-correction-finish")])
+        turn, completion, reasoning, starved = CURRENT_PREFIX[calls["n"] - 1]
         nat.gateway.last_usage = {"prompt_tokens": 10000,
                                   "completion_tokens": completion,
                                   "reasoning_tokens": reasoning}
@@ -178,24 +189,26 @@ def test_output_budget_is_reported_next_to_the_turn_count(engine):
     exhausted = [p for _c, e, p in traces if e == "output_cap_exhausted"]
     assert len(exhausted) == 1
     budget = exhausted[0]["output_budget"]
-    assert budget["completion_tokens"] == CURVE_COMPLETION == 238112
-    assert budget["reasoning_tokens"] == CURVE_REASONING == 227418
-    assert budget["max_output_tokens"] == OUTPUT_CAP_CEILING == 65536
+    assert budget["completion_tokens"] == CURRENT_COMPLETION
+    assert CURVE_COMPLETION == 238112  # original historical evidence unchanged
+    assert budget["reasoning_tokens"] == CURRENT_REASONING
+    assert CURVE_REASONING == 227418
+    assert budget["max_output_tokens"] == REFERENCE_START_CAP == 32768
     assert budget["cap_at_start"] == REFERENCE_START_CAP
-    assert budget["escalations_used"] == 1
-    assert budget["escalations_remaining"] == 0
+    assert budget["escalations_used"] == 0
+    assert budget["escalations_remaining"] == 1  # observed API headroom is not a starvation grant
     assert budget["spent_fraction"] == 1.0
     assert budget["half_spent"] is True
     # ...and the turn count is right there beside it, not merged into it.
-    assert exhausted[0]["turn_budget"] == {"turns_used": 20, "max_turns": 100}
+    assert exhausted[0]["turn_budget"] == {"turns_used": 17, "max_turns": 100}
 
 
 def test_a_step_that_already_wrote_is_not_flagged(engine):
     """NEGATIVE POLE: identical output curve, but the step delivered on turn 1.
 
-    The curve is the same up to turn 16, where the starve ends a step that has
-    already written (nothing is left to nudge it into). The budget is still
-    OBSERVED — what is withheld is the intervention.
+    Prior partial output withholds the broad exploration intervention, but
+    turn16 starvation is still incomplete. The scripted explicit finish on
+    turn17, within the original budget, is what permits successful delivery.
     """
     tmp = Path(tempfile.mkdtemp()); _setup(tmp)
     traces = _replay(engine, _WS(tmp), write_on_first_turn=True, expect_death=False)
@@ -290,7 +303,7 @@ def test_the_report_names_output_and_shows_the_turns_left_unspent(engine):
     traces = _replay(engine, _WS(tmp))
     report = [p for _c, e, p in traces if e == "output_cap_exhausted"][0]
     assert report["budget_exhausted"] == "output"
-    assert report["turn_budget"]["turns_used"] == 20
+    assert report["turn_budget"]["turns_used"] == 17
     assert report["turn_budget"]["max_turns"] == 100
     assert report["output_budget"]["spent_fraction"] == 1.0
     assert report["first_write_turn"] is None

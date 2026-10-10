@@ -67,6 +67,7 @@ PRIVATE_STATE_TABLES = frozenset({
     "state_events", "state_project_access",
     "state_director_messages", "state_director_deliveries",
     "state_director_inbox_sequences", "state_director_idempotency",
+    "state_director_delivery_acks", "state_director_legacy_acks",
     # A retained candidate's ``bundle_bytes`` are the exact private Git bytes
     # that would reconstruct the candidate. The commit/tree identity is public
     # (an opened project's attempt names it); the bytes must never be read

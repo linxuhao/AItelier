@@ -5,6 +5,7 @@ from copy import deepcopy
 
 
 SCHEMA_ID = "aitelier.director-messaging.v2"
+V3_SCHEMA_ID = "aitelier.director-messaging.v3"
 ACTIONS = (
     "send_director_message",
     "list_director_messages",
@@ -16,17 +17,18 @@ ERROR_CODES = frozenset({
     "idempotency_conflict", "invalid_transition", "version_conflict",
     "recipient_limit", "no_recipients",
 })
+V3_ERROR_CODES = ERROR_CODES | {"use_driver_inbox", "ack_quorum_unreachable"}
 
 
 class DirectorMessageError(Exception):
     """Stable protocol error, represented by its closed JSON object."""
 
-    def __init__(self, code: str):
-        if code not in ERROR_CODES:
+    def __init__(self, code: str, schema=SCHEMA_ID):
+        if code not in V3_ERROR_CODES:
             raise ValueError(f"unknown director message error code: {code}")
         self.code = code
         self.envelope = {
-            "schema": SCHEMA_ID,
+            "schema": schema,
             "code": code,
             "detail": {"message": code},
         }

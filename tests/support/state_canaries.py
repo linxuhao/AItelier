@@ -86,6 +86,13 @@ def _plan():
             "INSERT INTO state_director_deliveries(delivery_id,message_id,target_project_id,"
             "delivery_seq,status,version) VALUES(?,?,?,900,'unread',1)",
             (c("state_director_deliveries"), message_id, OPEN)),
+        "state_director_delivery_acks": (
+            "INSERT INTO state_director_delivery_acks(delivery_id,driver_id,required,acked_at) "
+            "VALUES(?,?,0,?)",
+            (c("state_director_deliveries"), c("state_director_delivery_acks"), now)),
+        "state_director_legacy_acks": (
+            "INSERT INTO state_director_legacy_acks(delivery_id) VALUES(?)",
+            (c("state_director_legacy_acks"),)),
         "state_director_inbox_sequences": (
             "INSERT INTO state_director_inbox_sequences(project_id,next_seq) VALUES(?,900)",
             (c("state_director_inbox_sequences"),)),

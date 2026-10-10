@@ -69,6 +69,11 @@ def pytest_configure(config):
                     store = self if isinstance(self, StateGraphStore) else self.store
                     resolved = store.project_for_attempt(values["attempt_id"])
                     pids = [resolved] if resolved else []
+                if not pids and values.get("delivery_id") and action in ("acknowledge_driver_message","resolve_driver_message"):
+                    with self.store.transaction() as conn:
+                        related = conn.execute("SELECT m.project_id FROM driver_inbox_deliveries d JOIN driver_inbox_messages m USING(message_id) WHERE d.delivery_id=?",(values["delivery_id"],)).fetchone()
+                        if related and related["project_id"]:
+                            pids = [related["project_id"]]
                 if pids:
                     store = self if isinstance(self, StateGraphStore) else self.store
                     for pid in pids:

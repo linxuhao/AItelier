@@ -83,7 +83,8 @@ def test_additive_schema_migrates_existing_state_database_and_survives_restart(t
         names = {row[0] for row in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'state_director_%'")}
     assert names == {"state_director_messages", "state_director_deliveries",
-                     "state_director_inbox_sequences", "state_director_idempotency"}
+                     "state_director_inbox_sequences", "state_director_idempotency",
+                     "state_director_delivery_acks", "state_director_legacy_acks"}
 
 
 def test_populated_v1_rows_and_dedupe_migrate_without_identity_or_audit_loss(tmp_path):

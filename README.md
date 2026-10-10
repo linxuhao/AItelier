@@ -184,7 +184,7 @@ The flagship DPE pipeline planning, building, and reviewing a real e-commerce ap
 
 ```bash
 python3.12 -m venv .venv && source .venv/bin/activate
-# Install AItelier (the skillflow-py framework is pulled from PyPI automatically)
+# Install AItelier with the reviewed exact skillflow-py==1.5.89 PyPI pin
 pip install -e .
 ```
 

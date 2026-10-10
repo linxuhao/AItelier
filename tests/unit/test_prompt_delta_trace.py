@@ -53,6 +53,10 @@ def _tool(content, cid="c1"):
     return {"role": "tool", "tool_call_id": cid, "content": content}
 
 
+def _call(cid, name, **arguments):
+    return {"id": cid, "function": {"name": name, "arguments": json.dumps(arguments)}}
+
+
 def _deltas_from(msgs):
     """What the trace holds after a live loop traced these messages."""
     h = _Host(); h._delta_traced = 0
@@ -62,9 +66,9 @@ def _deltas_from(msgs):
 
 def test_rebuild_is_byte_identical_for_complete_turns():
     msgs = [{"role": "system", "content": "S"}, {"role": "user", "content": "U"},
-            {"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "function": {"name": "read"}}]},
+            {"role": "assistant", "content": "", "tool_calls": [_call("c1", "read", path="existing.gd")]},
             _tool(json.dumps({"content": "file body"})),
-            {"role": "assistant", "content": "", "tool_calls": [{"id": "c2", "function": {"name": "create"}}]},
+            {"role": "assistant", "content": "", "tool_calls": [_call("c2", "create", file="a.gd", content="fixture A")]},
             _tool(json.dumps({"created": "a.gd"}), "c2")]
     r = PipelineEngine._rebuild_from_deltas(_deltas_from(msgs), max_turns=30)
     assert r["messages"] == msgs
@@ -74,18 +78,22 @@ def test_rebuild_is_byte_identical_for_complete_turns():
 
 def test_a_trailing_incomplete_turn_is_dropped():
     msgs = [{"role": "system", "content": "S"}, {"role": "user", "content": "U"},
-            {"role": "assistant", "content": "", "tool_calls": [{"id": "c1"}]},
+            {"role": "assistant", "content": "", "tool_calls": [_call("c1", "create", file="a.gd", content="fixture A")]},
             _tool(json.dumps({"created": "a.gd"})),
-            {"role": "assistant", "content": "", "tool_calls": [{"id": "c2"}, {"id": "c3"}]},
+            {"role": "assistant", "content": "", "tool_calls": [_call("c2", "create", file="b.gd", content="fixture B"), _call("c3", "finish_step", summary="unfinished batch")]},
             _tool(json.dumps({"created": "b.gd"}), "c2")]     # c3 never traced: crash mid-turn
     r = PipelineEngine._rebuild_from_deltas(_deltas_from(msgs), max_turns=30)
     assert r["messages"] == msgs[:4]
-    assert r["turns"] == 1 and r["written_files"] == ["a.gd"] and r["dropped_tail"] == 2
+    assert r["turns"] == 1 and r["written_files"] == ["a.gd", "b.gd"] and r["dropped_tail"] == 2
+
+    # The unfinished conversation tail drops, but its durable partial receipt
+    # remains an observed effect; accepted starvation recovery keeps that fact.
+    assert r["recovery_turn"]["tool_results"] == msgs[-1:]
 
 
 def test_grants_are_restored_from_the_tool_results():
     msgs = [{"role": "system", "content": "S"}, {"role": "user", "content": "U"},
-            {"role": "assistant", "content": "", "tool_calls": [{"id": "c1"}]},
+            {"role": "assistant", "content": "", "tool_calls": [_call("c1", "ask_more_turns", turns=6, reason="retained grant")]},
             _tool(json.dumps({"status": "granted", "turns": 6, "note": "ask_more_turns: +6 turns granted (1/2)."}))]
     r = PipelineEngine._rebuild_from_deltas(_deltas_from(msgs), max_turns=30)
     assert r["current_max_turns"] == 36 and r["turn_grants"] == 1
@@ -172,3 +180,18 @@ def test_projection_is_deterministic_so_resume_can_recreate_the_model_prompt():
         _project_native_messages(json.loads(json.dumps(messages)),
                                  history_char_budget=1024)
     )
+
+
+def test_malformed_legacy_calls_replay_without_crediting_effects_or_grants():
+    # Retain the old shorthand as explicit negative controls: an unbound or
+    # invalid call cannot turn its claimed result into trusted accounting.
+    for call in [{"id": "c1"}, {"id": "c1", "function": {"name": "create"}},
+                 {"id": "c1", "function": {"name": "create", "arguments": "not json"}}]:
+        msgs = [{"role": "user", "content": "U"},
+                {"role": "assistant", "content": "", "tool_calls": [call]},
+                _tool(json.dumps({"created": "a.gd", "status": "granted", "turns": 6,
+                                  "note": "ask_more_turns: +6 turns granted (1/2)."}))]
+        r = PipelineEngine._rebuild_from_deltas(_deltas_from(msgs), max_turns=30)
+        assert r["messages"] == msgs and r["turns"] == 1
+        assert r["written_files"] == [] and r["turn_grants"] == 0
+        assert r["current_max_turns"] == 30

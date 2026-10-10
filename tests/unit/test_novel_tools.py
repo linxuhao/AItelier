@@ -242,9 +242,12 @@ def test_apply_state_books_the_chapter(tmp_path):
     assert (ch / "prose.md").is_file() and (ch / "events.yaml").is_file()
     lin = ns.load_characters(tmp_path)["林凡"]
     assert lin["power_level"] == 15 and lin["last_appearance"] == 1
-    assert lin["progression"][-1]["chapter"] == 1
+    assert "progression" not in lin          # card = current state only
+    assert ns.read_ledger(tmp_path, "characters", "林凡")[0]["chapter"] == 1
     threads = ns.load_yaml(ns.bible_dir(tmp_path) / "threads.yaml")
-    assert threads[0]["hints"][0]["chapter"] == 1
+    assert threads[0]["last_hint_chapter"] == 1 and "hints" not in threads[0]
+    assert ns.query_ledger(tmp_path, kind="threads", name="身世之谜",
+                           entry_type="hint")[0]["chapter"] == 1
     # node booked: n1 done with completed_chapter record, frontier moved to n2
     arcs = ns.load_yaml(ns.bible_dir(tmp_path) / "arcs.yaml")
     n1 = arcs[0]["nodes"][0]

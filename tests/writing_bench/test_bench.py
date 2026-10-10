@@ -259,7 +259,8 @@ def test_multi_chapter_revision_is_single_commit_and_full_summary(bench):
     assert git(bench.policy.repo, "rev-parse", third["commit"] + "^") == before
     accept(bench, third, "run3")
     assert ns.load_characters(bench.policy.repo)["旅人"]["位置"] == "新桥"
-    assert len(ns.load_characters(bench.policy.repo)["旅人"]["progression"]) == 2
+    assert len(ns.query_ledger(bench.policy.repo, kind="characters", name="旅人",
+                               entry_type="event")) == 2
 
 
 def test_stage_and_approval_artifact_tampering_refused(bench):

@@ -32,6 +32,7 @@ re-emit prose and would burn the loop budget before dying on "cycle limit".
 """
 
 import json
+import re
 from pathlib import Path
 
 from aitelier import novel_state as ns
@@ -69,6 +70,124 @@ DEFAULT_MAX_CHARS = 6000
 # it belongs to humanize_review's A/B diff and the human at CP#2.
 HUMANIZE_LEN_DELTA_MAX = 10.0    # percent
 HUMANIZE_PARA_TOLERANCE = 0.15   # fraction of the draft's paragraph count
+
+
+DEFAULT_REPEAT_WINDOW = 3         # 同一口癖连续 N 章（含本章）出现 → 警告
+DEFAULT_CATCHPHRASE_MAX = 2       # voice.catchphrases 未写上限时的每章默认上限
+NGRAM_MIN, NGRAM_MAX = 4, 8       # 自动发现跨章重复短语的长度区间
+NGRAM_MIN_PER_CHAPTER = 2         # 每章都至少出现这么多次才算"惯用"
+_CJK_RUN = re.compile(r"[\u4e00-\u9fff]+")
+
+
+def _count(prose: str, rule: dict) -> int:
+    if rule.get("pattern"):
+        return len(re.findall(str(rule["pattern"]), prose))
+    return prose.count(str(rule.get("text") or "")) if rule.get("text") else 0
+
+
+def _label(rule: dict) -> str:
+    return str(rule.get("text") or f"/{rule.get('pattern')}/")
+
+
+def _tic_rules(style: dict, characters: dict) -> list[dict]:
+    """Per-book narration tics + every character's capped catchphrases."""
+    rules: list[dict] = []
+    for r in style.get("narration_tics") or []:
+        r = {"text": r} if isinstance(r, str) else dict(r or {})
+        if r.get("text") or r.get("pattern"):
+            r.setdefault("max_per_chapter", 1)
+            r["owner"] = "叙述"
+            rules.append(r)
+    for name, card in characters.items():
+        voice = card.get("voice") if isinstance(card.get("voice"), dict) else {}
+        for cp in voice.get("catchphrases") or []:
+            cp = {"text": cp} if isinstance(cp, str) else dict(cp or {})
+            if cp.get("text") or cp.get("pattern"):
+                cp.setdefault("max_per_chapter", DEFAULT_CATCHPHRASE_MAX)
+                cp["owner"] = name
+                rules.append(cp)
+    return rules
+
+
+def _ngrams(text: str) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for run in _CJK_RUN.findall(text):
+        for n in range(NGRAM_MIN, NGRAM_MAX + 1):
+            for i in range(len(run) - n + 1):
+                g = run[i:i + n]
+                out[g] = out.get(g, 0) + 1
+    return out
+
+
+def repeated_across_chapters(texts: list[str], exclude: set[str],
+                             top: int = 8) -> list[str]:
+    """Phrases (4-8 CJK chars) used ≥NGRAM_MIN_PER_CHAPTER times in EVERY one
+    of ``texts`` (consecutive chapters, current last) — the 「没平连用四章」
+    shape, discovered without a configured list. Names/aliases excluded;
+    only maximal phrases kept (a hit's substrings are dropped)."""
+    if len(texts) < 2:
+        return []
+    names = sorted((x for x in exclude if x), key=len, reverse=True)
+    common: dict[str, int] | None = None
+    for t in texts:
+        for x in names:                       # a name splits a run, never joins one
+            t = t.replace(x, "|")
+        grams = {g: c for g, c in _ngrams(t).items()
+                 if c >= NGRAM_MIN_PER_CHAPTER}
+        common = grams if common is None else {
+            g: min(c, grams[g]) for g, c in common.items() if g in grams}
+        if not common:
+            return []
+    hits = list(common)
+    hits.sort(key=lambda g: (-len(g), -common[g]))
+    kept: list[str] = []
+    for g in hits:
+        if not any(g in k for k in kept):
+            kept.append(g)
+    return sorted(kept, key=lambda g: -common[g])[:top]
+
+
+def voice_checks(base, prose: str, n: int) -> tuple[list[str], list[str]]:
+    """Per-book tic blacklist + catchphrase caps (violations) and the
+    cross-chapter repeated-phrase warning (advisory)."""
+    violations: list[str] = []
+    advisories: list[str] = []
+    style = ns.load_style(base)
+    characters = ns.load_characters(base)
+    rules = _tic_rules(style, characters)
+    for r in rules:
+        c = _count(prose, r)
+        cap = int(r.get("max_per_chapter", 1))
+        if c > cap:
+            who = "叙述口癖" if r["owner"] == "叙述" else f"{r['owner']} 的口头禅"
+            violations.append(
+                f"{who}『{_label(r)}』本章 {c} 次，超过上限 {cap} —— 换成具体动作/"
+                "感知，或换个说法（上限见 bible style / 角色卡 voice.catchphrases）")
+
+    window = int(style.get("repeat_window") or DEFAULT_REPEAT_WINDOW)
+    prev = ns.written_chapters(base)
+    prev = [m for m in prev if m < n][-(window - 1):] if window > 1 else []
+    prev_texts = []
+    for m in prev:
+        pp = ns.chapter_dir(base, m) / "prose.md"
+        if pp.is_file():
+            prev_texts.append(pp.read_text(encoding="utf-8"))
+    if len(prev_texts) == window - 1 and window > 1:
+        texts = prev_texts + [prose]
+        streak = [_label(r) for r in rules if all(_count(t, r) for t in texts)]
+        if streak:
+            advisories.append(
+                f"口癖连续 {window} 章出现: {'、'.join(streak)} —— 考虑本章换掉")
+        exclude = set(characters)
+        for card in characters.values():
+            exclude.update(str(a) for a in card.get("aliases") or [])
+        auto = repeated_across_chapters(texts, exclude)
+        if auto:
+            advisories.append(
+                f"跨章重复短语（连续 {window} 章每章≥{NGRAM_MIN_PER_CHAPTER} 次）: "
+                + "、".join(auto) + " —— 可能是新长出的口癖；确属口癖就加进 "
+                "bible style.narration_tics")
+    return violations, advisories
 
 
 def _title_line(text: str) -> str:
@@ -139,7 +258,9 @@ def continuity_check(*, project_root: str = "", workspace_root: str = "",
 
         # ── Known AI-ism density (crude first pass; semantic slop is Red's job) ──
         hits: dict[str, int] = {}
-        for phrase in ns.BANNED_PHRASES:
+        extra = [str(x) for x in (ns.load_style(base).get("extra_banned_phrases")
+                                  or [])]
+        for phrase in list(dict.fromkeys(ns.BANNED_PHRASES + extra)):
             c = prose.count(phrase)
             if c:
                 hits[phrase] = c
@@ -156,6 +277,11 @@ def continuity_check(*, project_root: str = "", workspace_root: str = "",
             advisories.append(
                 "少量高频词（未超标）: "
                 + "、".join(f"{p}×{c}" for p, c in hits.items()))
+
+        # ── Per-book tics / character catchphrase caps / cross-chapter repeats ──
+        v, a = voice_checks(base, prose, n)
+        violations += v
+        advisories += a
 
         # ── Meta markers ──
         found = [m for m in ns.META_MARKERS if m in prose]

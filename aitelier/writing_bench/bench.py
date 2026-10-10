@@ -24,7 +24,8 @@ from .storage import (BenchError, BenchReplayRefused, TREE_LIMIT, checked_root, 
 
 MANAGED = ("novel/bible/characters", "novel/bible/world.yaml",
            "novel/bible/threads.yaml", "novel/bible/arcs.yaml",
-           "novel/state/index.yaml", "novel/state/digest.md")
+           "novel/state/index.yaml", "novel/state/digest.md",
+           "novel/ledger")  # append-only history, rebuilt by replay
 LISTS = ("events", "appearances", "locations", "thread_updates", "arc_updates")
 
 

@@ -299,3 +299,44 @@ that is one writer, not two — the R1 replay tests depend on it.
   failure-ID set IDENTICAL to base `53daff7ff2` (361F; `comm` new = 0, fixed = 0); +14 passed = the round-2
   regression tests. Logs: `/tmp/p3-logs/head_full4.log`, `/tmp/p3-logs/oldcheck2.log`. Migration/rebuild code
   was not changed in this round, so the rehearsal was not repeated.
+
+## Fix round 3 (2026-10-10, after `P3_REVIEW3_CODEX.md`)
+
+Every item was verified against the code of `8c3d7079` first; all 8 are CONFIRMED (none rejected). Fix commit:
+`f0fbfb8c` (code, tests, docs); the pending report edits were committed as `daa50f0c`. Regression tests:
+`tests/unit/test_state_p3_fix_round3.py` — all 11 FAIL on `8c3d7079` for their own reasons (the module looks the
+round-3 API up lazily; run from a detached worktree of that commit in a throwaway container: 11 failed, 0
+passed) and pass on `f0fbfb8c`. Three earlier tests that encoded the silent-rebind / free-checkout behaviour
+the review calls defects were corrected and are explained below. No other existing assertion was changed.
+
+| item | verdict | fix (commit `f0fbfb8c`) | regression test | evidence / notes |
+|---|---|---|---|---|
+| 1 same driver, two executors, one checkout | CONFIRMED | `checkout_in_use(reclaiming=(driver, node_key))` exempts only the driver's own active attempt on the SAME node the claim re-associates with; the blanket `owner=` exemption is gone | `test_1_…` (same driver, other node → `workspace_in_use`; same node → allowed) | state_enforcement.py exempted every attempt owned by the requester. |
+| 2 (R1) stale authorization at launch | CONFIRMED | `_reserve` replay validates when `claim_id` OR `fence` is named and binds the named live claim to the replayed attempt; `claim_launch(..., claim_id, fence)` carries the caller's named claim/fence into the launch transaction (`start_attempt` and `recover_attempt`, whose contract gains `claim_id`/`fence`); `launch_authorization` refuses a stale named claim/fence (`stale_fence`), launches on a still-bound live claim, and binds a replacement ONLY when the caller names it (`claim_required` names the replacement) — never a silent rebind | `TestItem2StaleAuthorizationAtLaunch` (3: fence-only replay, replacement during preflight, external replay binding → settlement releases C2, contract fields) | replay validated only with `claim_id`; `claim_launch` received no expected values; external replay left C2 unbound. |
+| 3 unknown abandonment frees the checkout | CONFIRMED | the occupancy scan also reserves the executor checkout of an attempt abandoned with `abandon_kind=unknown` while its owner row is not `settled` (a verified late quiescence report settles it) | `test_3_…` (other node's claim and worker registration refused; freed after the verified report) | bound claims were released and the attempt left the active set. |
+| 4 checkpoint vs transfer race | CONFIRMED | `checkpoint_controller` re-reads the owner under the write lock and OPENS a decision row (`driver_checkpoint_decisions`, 120 s TTL); `take_over_attempt`, `abandon_external_attempt` and `accept_handoff` refuse `checkpoint_in_progress` while one is open; the REST doors (approve/reject bodies extracted) and the MCP tool finish the decision in `finally` after the engine call (`finish_state_checkpoint_decision`) | `test_4_…` (open decision blocks takeover/accept; finish lifts it; former owner cannot reopen; expiry lifts a crashed decider) + `test_4_rest_door_…` | authorization transaction closed before the engine call. New table → rehearsal re-run (below). |
+| 5 nonmembers reclaim / accept | CONFIRMED | `require_member` (P0 registry `project_drivers.status=member`) inside the ownership transactions of take-over, abandon and accept; admin passes as `break_glass` (event flag); identity off = no membership to check | `test_5_…` (nonmember, member removed after the offer, admin break glass; real registry) | eligibility never consulted membership. |
+| 6 inherited identities | CONFIRMED | `claim_node(subagent=<origin>/<label>)` accepted when the registry says the caller currently owns it (judged in the write transaction); `execute` consults the registry before refusing a foreign-prefix `director_identity`; `require_registered_subagent` always judges a foreign prefix by current ownership | `test_6_…` (adoption → new claim; adoption → terminal report → attributed evidence; origin driver refused) | prefix checks refused `codex/w1` for `grok`. |
+| 7 settled workers keep side claims | CONFIRMED | `close_worker_claims` releases every live claim held FOR a worker when it is settled (terminal report, owner settlement, orphan closure, confirmed abandon); renewal → `claim_not_live`, dispatch → `stale_fence`, checkout reusable | `test_7_…` (pre-existing side claim released; heartbeat/dispatch refused; takeover moves side claims, orphaning revokes them) | only attempt-bound claims were released. |
+| 8 (minor, R16) hook without sender | CONFIRMED | `deliver(conn, message, notice)` receives the complete stored notice (sender, project, refs, delivery_mode) next to the P2 keyword set | `test_8_…` | the hook got only the keyword set. **Deferred:** a real P2 adapter (insertion into `driver_inbox_messages`/`_deliveries`, system resolution before acknowledgement, rollback) cannot be written or tested here without merging the P2 branch (`12fbef9a`, inspected read-only, not pulled): its schema, idempotency table and lifecycle live only there. The seam is complete — `set_inbox_adapter(deliver, resolve)`, both connection-sharing, the full notice and the normalized keywords on delivery, the full notice rows with `refs` (handoff_id/subagent_id correlation) on resolution — and the adapter is a ~40-line function on the P2 side: insert message + deliveries (seq per target) inside the given connection, record `(actor='system', 'send', notice_id)` idempotency, and mark deliveries `resolved` by correlation. |
+
+Corrected earlier tests (each change encoded a defect this round fixes): round-2 `TestR1StaleFenceReplay.test_launch_requires_a_live_claim_and_binds_the_current_one` and round-1 `TestFinding1LaunchAuthorization.test_owner_with_live_claim_launches` asserted a SILENT rebind at launch — they now assert `claim_required` without a named claim and success when the replacement is named; P3-module `test_abandon_unknown_binds_the_next_attempt…` asserted that a claim at the abandoned worker's checkout succeeds — it now asserts `workspace_in_use` (item 3). The round-2 adapter test's lambda takes the third `notice` argument (item 8). The transport fixture registers `grok`/`codex` as project members (item 5).
+
+Also found while running the suites: `tests/unit/test_mcp_router.py::test_every_run_taking_tool_actually_resolves_a_project_id` fails on base too (`_WaitSF` lacks `get_steps`); it is in the base failure set, not new.
+
+### Migration rehearsal (round 3, new table `driver_checkpoint_decisions`)
+Fresh single-snapshot copy of production (17,180,782,592 bytes, 89 s) at 05:29 UTC, rehearsed on the host with
+`AITELIER_HOME` redirected, copy deleted afterwards (`/tmp/p3-rehearsal` gone; disk back to 48 GB free):
+first run 0.93 s; every pre-existing table's row count unchanged (2731 attempts now; `state_attempts` seq
+high-water 2759 → 2759; attempt digest equal); `lost_schema_objects: []`; new objects = the P3 tables incl.
+`driver_checkpoint_decisions` (+ index) and `state_subagent_contexts`; `foreign_key_check` = [];
+`integrity_check` = ok; second run byte-identical. JSON: `/tmp/p3-logs/report_round3.json`.
+
+### Test results (fix round 3)
+- `tests/unit/test_state_p3_fix_round3.py` 11 passed; round-2 14, round-1 19, P3 module 33 (77 total).
+- Affected suites (claims, external, attempts, changes, run summary, deployment quiescence, privacy doors,
+  private-read verdict, read visibility, MCP router, checkpoint reject target, write-opening mutation gate):
+  700 passed, 1 failed — the pre-existing base failure named above.
+- Full suite on HEAD `f0fbfb8c`, one container, 30:04: **361 failed, 6471 passed, 13 skipped, 23 errors** —
+  failure-ID set IDENTICAL to base `53daff7ff2` (361F; `comm` new = 0, fixed = 0); +11 passed = the round-3
+  regression tests. Logs: `/tmp/p3-logs/head_full5.log`, `/tmp/p3-logs/oldcheck3.log`.

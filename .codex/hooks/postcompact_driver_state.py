@@ -44,6 +44,7 @@ DELIVERY_FAILED = "failed"
 SESSION_BOOTSTRAP_SOURCES = frozenset({"startup", "resume", "compact"})
 GUIDE_HEADINGS = (
     "# State DAG director protocol",
+    "## Driver loop: whoami, claim, dispatch, heartbeat",
     "## Resume safely",
     "## Dispatch through either executor",
     "## Wait instead of repeatedly querying",
@@ -611,9 +612,15 @@ def _frontier_summary(overview: dict[str, Any]) -> str:
             )
     selected = selected[:8]
     active = active[:8]
+    policy = overview.get("policy") if isinstance(overview.get("policy"), dict) else {}
     return "\n".join([
         f"event_seq={overview.get('event_seq', 'unknown')}",
         "node_status_counts=" + json.dumps(counts, sort_keys=True, separators=(",", ":")),
+        # Multi-driver: the three policy switches and the advisory review counter (P4).
+        f"policy multi_driver={policy.get('multi_driver', 'unknown')} "
+        f"claim_enforcement={policy.get('claim_enforcement', 'unknown')} "
+        f"review_independence={policy.get('review_independence', 'unknown')} "
+        f"self_reviewed_receipts={overview.get('self_reviewed_receipts', 'unknown')}",
         "bounded active ownership (readiness=in_progress, max 8; retain identities):",
         *(active or ["- none listed"]),
         "bounded actionable frontier (readiness=ready, max 8; reconcile exact records before acting):",
@@ -626,6 +633,7 @@ def _recovery_context(failed_sources: str = "driver note, State overview, or gui
 project_id={PROJECT_ID}
 The current {failed_sources} could not be loaded within the bounded PostCompact hook request. Do not use ~/.AItelier/DRIVER_STATE.md and do not infer current ownership or acceptance from this message.
 Before continuing director work, reconnect the configured AItelier MCP and call:
+0. driver_whoami() - it must answer driver:<your id> before any write
 1. state_graph_read(action=\"get_driver_note\", arguments={{\"project_id\":\"{PROJECT_ID}\"}})
 2. state_graph_read(action=\"project_overview\", arguments={{\"project_id\":\"{PROJECT_ID}\"}})
 3. state_graph_help()
@@ -655,6 +663,10 @@ entry_count={note.get('entry_count', 'unknown')} listed={note.get('listed_count'
 
 ## Current State snapshot (bounded)
 {_frontier_summary(overview)}
+
+## Multi-driver loop (bounded reminder; guide://driver-loop-whoami-claim-dispatch-heartbeat)
+whoami (driver_whoami must answer driver:<your id>) -> claim_node(implement|review) on a ready node -> start_*attempt with claim_id+fence (register_subagent records your workers) -> heartbeat(claims, attempts, subagents) every 20-30 min from the client wait loop while you supervise -> record_evidence, verify_node, release_claim or offer_handoff. Lapsed leases are reclaimable by any member; never renew unattended.
+Two inboxes: project inbox = send_director_message (ack means "I take this"; ack_mode=at_least_n default, ack_mode=broadcast needs every member's ack; distinct from the cross-project broadcast flag). Driver inbox = send_driver_message / list_driver_messages / wait_for_driver_inbox (private; system notices land here). Your private notebook dnote://<your id> is fetched by address with driver_id, never injected here. The standing section below is driver_postcompact_guidance: project standing, your unacked broadcast transients, your standing driver notices.
 
 ## Stable State driver guidance selected from the live MCP response
 {_guide_sections(guide)}

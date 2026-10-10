@@ -32,7 +32,7 @@ P3 acceptance (State node `driver.multi-driver-p3-enforced-claims`):
 5. compatibility: with `claim_enforcement=off` P1 behaviour and tests are
    unchanged; the full-suite failure set equals the baseline.
 
-## Two switches (owner / admin driver)
+## Switches (owner / admin driver)
 
 - `set_multi_driver(project_id, multi_driver="on"|"off", expected_revision, reason)` —
   record claims and leases (P1). With it off, `claim_node` is refused
@@ -47,6 +47,15 @@ P3 acceptance (State node `driver.multi-driver-p3-enforced-claims`):
   (`state_project_enforcement`); shares the `state_project_policy` revision for
   the CAS (read it from `project_overview.policy.revision`). Emits
   `claim_enforcement_policy_changed`.
+- `set_review_independence(project_id, review_independence="off"|"advisory", expected_revision, reason)` —
+  P4 (design §7.2), advisory only, no `required` mode. With `advisory`, `verify_node`
+  still succeeds, but a `kind=review` criterion whose latest evidence came from the
+  attempt's current or former owner marks the receipt `provenance_json` with
+  `self_reviewed=true` (+ `self_reviewed_criteria`); `project_overview.self_reviewed_receipts`
+  counts them. Admin only; needs `multi_driver=on` (`multi_driver_off`); turning
+  `multi_driver` off resets it. Same row and CAS as enforcement (column
+  `review_independence`, added on open). Emits `review_independence_policy_changed`.
+  Rollout steps: `docs/multi-driver-rollout.md`.
 
 Owner decision 2026-10-09: `set_multi_driver(on)` alone keeps P1's record-only
 behaviour. A project with `multi_driver=on, claim_enforcement=off` admits any

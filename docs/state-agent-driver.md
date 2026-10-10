@@ -7,6 +7,16 @@ Before any write, identify yourself: call driver_whoami (MCP) or GET /api/driver
 - New LAN driver on the shared server account: look for `~/.aitelier-drivers/<id>.token`. If it is missing, run once from the repo root `python3 scripts/driver_token.py self-register <id> --display-name "<name>"` (idempotent; refuses to replace an existing driver's token unless `--rotate`). Then run with `AITELIER_DRIVER_ID=<id>` and verify with /api/drivers/me.
 - Read only your own token file; the `.env` admin token is for the self-register script only; write only through the API. Full details: docs/driver-identity.md.
 
+## Driver loop: whoami → claim → dispatch → heartbeat
+A member driver of a `multi_driver=on` project runs one loop (design/multi-driver-coop.md §4, §7; full wording in the MCP guide section `guide://driver-loop-whoami-claim-dispatch-heartbeat`):
+1. **whoami** — at session start and after every reconnect, `driver_whoami` / `GET /api/drivers/me` must answer `driver:<your id>`. `project_overview.policy` shows `multi_driver`, `claim_enforcement` and `review_independence`.
+2. **claim** — pick a ready node from `project_overview`; `claim_node(purpose=implement, workspace=host:path#branch, request_key)`. `claimed_by_other` = someone else is on it: take other work. Before reviewing a CANDIDATE, `claim_node(purpose=review)` so others see a review is under way (review claims coexist).
+3. **dispatch** — `start_external_attempt` / `start_attempt` with `claim_id` + `fence` BEFORE any worker runs; `register_subagent` records the workers you start (visibility only). Capture `event_seq` and your inbox cursor.
+4. **heartbeat** — from the client loop that runs your wait: one `heartbeat(claims, attempts, subagents)` every 20–30 minutes while you supervise the work, between `wait_for_state_change(include_driver_inbox=true, inbox_after=...)` calls. Stop renewing when you stop supervising; a lapsed lease is the signal that another member may reclaim.
+5. **close** — `record_evidence` for every criterion, `verify_node`; a terminal report releases the attempt's bound claims. Leaving a node unfinished: `release_claim`, or `offer_handoff` when another driver should continue. Before compaction or logout, hand off or let the lease lapse; never renew from an unattended script.
+
+Advisory review marking (P4, design §7.2): with `review_independence=advisory` (`set_review_independence`, admin only, needs `multi_driver=on`; default `off`; there is no `required` mode) `verify_node` still succeeds, but a `kind=review` criterion whose latest evidence was recorded by the attempt's current or former owner (or that owner's `<id>/<label>` identity) marks the receipt `provenance_json` with `self_reviewed=true` (+ `self_reviewed_criteria`) and `project_overview.self_reviewed_receipts` counts such receipts. Where a criterion asks for an independent review, let another member record that evidence. Owner rollout steps: docs/multi-driver-rollout.md.
+
 ## Claims and leases (multi-driver)
 In a project whose policy has `multi_driver=on` (`project_overview.policy.multi_driver`; only the owner or an admin driver changes it with `set_multi_driver`), record what you work on. With `claim_enforcement=off` (default; `set_claim_enforcement`, admin only; the only enforcement switch, and it requires `multi_driver=on`) claims are recorded and shown, not enforced. With it on, the P3 rules refuse with stable codes (design §0a, §7.3).
 - Claim before you work: `claim_node(project_id, node_key, purpose=implement|review|investigate|plan, expected_revision, request_key, lease_seconds=7200, workspace?, subagent?)`. One live implement/plan claim per node; review/investigate claims coexist.
@@ -132,7 +142,9 @@ Add/revise/split/hold/supersede goals with expected revisions and reasons. Do no
 Maintain the compact notebook and reference State events and exact reports without duplicating their histories. Notify the user for meaningful completion, failure, blockers or required decisions; coalesce routine progress. A wait, refresh, completed run or private commit never authorizes publication or deployment.
 
 
-## Driver inbox, private notebooks and project quorum (P2)
+## Two inboxes (project vs driver), ack modes and your private notebook (P2)
+
+Project inbox = `send_director_message` to a project (one delivery per target project; acknowledging means "I take this" and records your driver; `ack_mode=at_least_n` (default, one ack) or `ack_mode=broadcast` (every member snapshotted at send time)). Driver inbox = `send_driver_message` to a driver or a project's members (private; system notices land here). Private notebook = `dnote://<your id>/...`, the entry actions with `driver_id`. Details:
 
 Do not create a project as a driver mailbox. send_driver_message addresses
 target_driver_id or project_members; recipients own separate versioned deliveries.

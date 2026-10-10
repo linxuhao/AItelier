@@ -91,12 +91,12 @@ def test_n1_only_a_verified_quiescence_report_settles_an_abandoned_owner(db, clo
 
 
 # N5 --------------------------------------------------------------------------
-@pytest.mark.parametrize("multi_driver,enforce", [(False, False), (True, False), (True, True)])
-def test_n5_admin_reporting_bypass_exists_only_where_claims_are_enforced(db, clock, multi_driver, enforce):
+@pytest.mark.parametrize("enforce", [False, True])
+def test_n5_admin_reporting_bypass_exists_only_where_claims_are_enforced(db, clock, enforce):
     # Slim (P3_SLIM.md): break_glass is an audit flag on dispatch/launch/reclaim
     # writes only; there is no admin reporting path at all, so an admin is an
     # ordinary reporter with enforcement off (P1, this regression) and on.
-    project(db, multi_driver=multi_driver, enforce=enforce)
+    project(db, enforce=enforce)
     reporter = svc(db, "codex")
     held = claim(reporter, "a") if enforce else None
     attempt = external(reporter, "a", **({"claim_id": held["claim_id"], "fence": 1} if enforce else {}))

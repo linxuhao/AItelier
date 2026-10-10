@@ -153,7 +153,7 @@ def test_finding7_a_lapsed_claim_authorizes_no_dispatch_even_before_any_sweep(db
 
 # 9 ---------------------------------------------------------------------------
 def test_finding9_enforcement_off_binds_and_releases_nothing(db, clock, tmp_path):
-    project(db)                                   # multi_driver on, enforcement off: P1 behaviour
+    project(db)                                   # enforcement off: P1 behaviour
     codex = svc(db, "codex")
     held = claim(codex, "a", workspace="h:/w#c")
     attempt = external(codex, "a")
@@ -188,7 +188,6 @@ def test_finding10_deployment_gate_understands_abandoned_owners(tmp_path, monkey
     owner = service("owner-cli", admin=True)
     owner.create_project("p", "P")
     owner.store.add_nodes("p", [{"key": "a", **NODE}, {"key": "b", **NODE}])
-    write(owner, "set_multi_driver", project_id="p", multi_driver="on", expected_revision=0, reason="r")
     codex, grok = service("codex"), service("grok")
     confirmed = external(codex, "a", "job-a")
     unknown = external(codex, "b", "job-b")

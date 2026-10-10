@@ -57,15 +57,13 @@ def code_of(call):
     return caught.value.code
 
 
-def project(db, multi_driver=True, advisory=False):
+def project(db, advisory=False):
     owner = svc(db, "owner-cli", admin=True)
     owner.create_project("p", "P")
     owner.store.add_nodes("p", [{"key": k, **NODE} for k in ("a", "b", "c")])
-    if multi_driver:
-        write(owner, "set_multi_driver", project_id="p", multi_driver="on", expected_revision=0, reason="P4 test")
     if advisory:
         write(owner, "set_review_independence", project_id="p", review_independence="advisory",
-              expected_revision=1, reason="P4 test")
+              expected_revision=0, reason="P4 test")
     return owner
 
 
@@ -155,8 +153,8 @@ class TestAdvisoryReviewMarking:
         overview = read(owner, "project_overview", project_id="p")
         assert overview["self_reviewed_receipts"] == 0
         assert overview["nodes"][0]["status"] == "VERIFIED"
-        # A project that never turned multi_driver on is untouched too (no enforcement row at all).
-        project(db.parent / "legacy.sqlite", multi_driver=False)
+        # A project with no policy or enforcement row at all, written by a non-driver caller, is untouched too.
+        project(db.parent / "legacy.sqlite")
         legacy = svc(db.parent / "legacy.sqlite")
         legacy_attempt = candidate(legacy, tmp_path, "a", "k-legacy")
         evidence(legacy, tmp_path, legacy_attempt, "test", "l-test")
@@ -265,42 +263,44 @@ class TestAdvisoryReviewMarking:
         marked = provenance(verify(third, attempt, "a"))
         assert marked["self_reviewed"] is True and marked["self_reviewed_criteria"] == ["review"]
 
-    def test_switch_rules_admin_only_needs_multi_driver_cas_and_resets_with_it(self, db):
-        owner = project(db, multi_driver=False)
+    def test_switch_rules_admin_only_cas_and_nothing_resets_it(self, db):
+        owner = project(db)
         codex = svc(db, "codex")
         assert code_of(lambda: write(codex, "set_review_independence", project_id="p",
                                      review_independence="advisory", expected_revision=0, reason="r")) == "admin_required"
-        assert code_of(lambda: write(owner, "set_review_independence", project_id="p",
-                                     review_independence="advisory", expected_revision=0, reason="r")) == "multi_driver_off"
-        # off can always be written, even with multi_driver off (idempotent, revision advances).
-        policy = write(owner, "set_review_independence", project_id="p", review_independence="off",
-                       expected_revision=0, reason="r")
-        assert policy["review_independence"] == "off" and policy["revision"] == 1
         with pytest.raises(StateGraphError):
             write(owner, "set_review_independence", project_id="p", review_independence="required",
-                  expected_revision=1, reason="r")
-        write(owner, "set_multi_driver", project_id="p", multi_driver="on", expected_revision=1, reason="r")
+                  expected_revision=0, reason="r")
         with pytest.raises(StateConflict):
             write(owner, "set_review_independence", project_id="p", review_independence="advisory",
-                  expected_revision=1, reason="stale")
+                  expected_revision=5, reason="stale")
+        # No multi_driver precondition: advisory is accepted directly.
         policy = write(owner, "set_review_independence", project_id="p", review_independence="advisory",
-                       expected_revision=2, reason="r")
+                       expected_revision=0, reason="r")
         assert policy == {**policy, "multi_driver": "on", "claim_enforcement": "off",
-                          "review_independence": "advisory", "revision": 3}
+                          "review_independence": "advisory", "revision": 1}
         assert events(db, "review_independence_policy_changed")[-1]["review_independence"] == "advisory"
         # Enforcement and advisory marking share the row without clobbering each other.
-        write(owner, "set_claim_enforcement", project_id="p", claim_enforcement="on", expected_revision=3, reason="r")
+        write(owner, "set_claim_enforcement", project_id="p", claim_enforcement="on", expected_revision=1, reason="r")
         policy = read(owner, "project_overview", project_id="p")["policy"]
         assert policy["claim_enforcement"] == "on" and policy["review_independence"] == "advisory"
-        # multi_driver off takes both down.
-        policy = write(owner, "set_multi_driver", project_id="p", multi_driver="off", expected_revision=4, reason="r")
-        assert policy == {**policy, "multi_driver": "off", "claim_enforcement": "off", "review_independence": "off"}
+        # Nothing else resets them: set_dispatch keeps both and set_multi_driver no longer exists.
+        policy = write(owner, "set_dispatch", project_id="p", dispatch="hold", expected_revision=2, reason="r")
+        assert policy == {**policy, "claim_enforcement": "on", "review_independence": "advisory", "revision": 3}
+        with pytest.raises(StateGraphError, match="unknown state graph action"):
+            write(owner, "set_multi_driver", project_id="p", multi_driver="off", expected_revision=3, reason="r")
+        policy = read(owner, "project_overview", project_id="p")["policy"]
+        assert policy == {**policy, "claim_enforcement": "on", "review_independence": "advisory", "revision": 3}
+        # off can always be written back (revision advances).
+        policy = write(owner, "set_review_independence", project_id="p", review_independence="off",
+                       expected_revision=3, reason="r")
+        assert policy == {**policy, "claim_enforcement": "on", "review_independence": "off", "revision": 4}
 
     def test_pre_p4_enforcement_table_gains_the_column_and_reads_off(self, db):
         # A real database whose enforcement table is put back into its P3 shape.
         project(db)
         write(svc(db, "owner-cli", admin=True), "set_claim_enforcement", project_id="p", claim_enforcement="on",
-              expected_revision=1, reason="r")
+              expected_revision=0, reason="r")
         conn = sqlite3.connect(str(db))
         conn.executescript("""
             CREATE TABLE p3_enforcement AS SELECT project_id,claim_enforcement,reason,actor,updated_at

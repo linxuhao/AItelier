@@ -73,15 +73,13 @@ def code_of(call):
     return caught.value.code
 
 
-def project(db, multi_driver=True, enforce=False):
+def project(db, enforce=False):
     owner = svc(db, "owner-cli", admin=True)
     owner.create_project("p", "P")
     owner.store.add_nodes("p", [{"key": "a", **NODE}, {"key": "b", **NODE},
                                 {"key": "c", **NODE, "dependencies": ["a"]}])
-    if multi_driver:
-        write(owner, "set_multi_driver", project_id="p", multi_driver="on", expected_revision=0, reason="P3 test")
     if enforce:
-        write(owner, "set_claim_enforcement", project_id="p", claim_enforcement="on", expected_revision=1,
+        write(owner, "set_claim_enforcement", project_id="p", claim_enforcement="on", expected_revision=0,
               reason="P3 test")
     return owner
 
@@ -428,11 +426,10 @@ class TestAbandonedAndReclaim:
                                      expected_owner_fence=2, reason="again")) == "already_owner"
 
     def test_legacy_unleased_attempt_needs_override_reason_and_admin_is_break_glass(self, db, clock):
-        project(db, multi_driver=False)
-        legacy = external(svc(db), "a")
+        project(db)
+        legacy = external(svc(db), "a")             # no registered driver behind it: unleased
         assert legacy["owner_driver_id"] is None and legacy["lease_state"] == "legacy_unleased"
         owner = svc(db, "owner-cli", admin=True)
-        write(owner, "set_multi_driver", project_id="p", multi_driver="on", expected_revision=0, reason="on")
         codex = svc(db, "codex")
         assert code_of(lambda: write(codex, "take_over_attempt", attempt_id=legacy["attempt_id"],
                                      expected_owner_fence=0, reason="AMI")) == "override_reason_required"
@@ -497,8 +494,8 @@ def _insert_skillflow_attempt(db, owner, run_id="run-1", node="b"):
 # 2. enforced-dispatch
 # ---------------------------------------------------------------------------
 class TestEnforcedDispatch:
-    def test_multi_driver_on_alone_does_not_enforce(self, db, clock):
-        project(db)                                  # multi_driver on, enforcement off
+    def test_recorded_claims_alone_do_not_enforce(self, db, clock):
+        project(db)                                  # enforcement off (the default)
         grok, codex = svc(db, "grok"), svc(db, "codex")
         claim(codex, "a")                            # somebody else's claim
         attempt = external(grok, "a")                # still admitted, as in P1
@@ -508,8 +505,8 @@ class TestEnforcedDispatch:
         policy = read(grok, "project_overview", project_id="p")["policy"]
         assert policy["multi_driver"] == "on" and policy["claim_enforcement"] == "off"
 
-    def test_switch_off_projects_are_untouched(self, db, clock):
-        project(db, multi_driver=False)
+    def test_non_driver_callers_are_untouched_and_enforcement_needs_only_admin(self, db, clock):
+        project(db)
         plain = svc(db)
         attempt = external(plain, "a")
         assert attempt["owner_driver_id"] is None and "claim_id" not in events(db, "external_attempt_registered")[-1]
@@ -518,29 +515,22 @@ class TestEnforcedDispatch:
         assert code_of(lambda: write(codex, "set_claim_enforcement", project_id="p", claim_enforcement="on",
                                      expected_revision=0, reason="r")) == "admin_required"
         owner = svc(db, "owner-cli", admin=True)
-        assert code_of(lambda: write(owner, "set_claim_enforcement", project_id="p", claim_enforcement="on",
-                                     expected_revision=0, reason="r")) == "multi_driver_off"
+        policy = write(owner, "set_claim_enforcement", project_id="p", claim_enforcement="on",
+                       expected_revision=0, reason="r")
+        assert policy["claim_enforcement"] == "on" and policy["multi_driver"] == "on"
 
-    def test_turning_multi_driver_off_turns_enforcement_off(self, db, clock):
+    def test_the_legacy_multi_driver_column_is_ignored(self, db, clock):
         owner = project(db, enforce=True)
-        assert read(owner, "project_overview", project_id="p")["policy"]["claim_enforcement"] == "on"
-        write(owner, "set_multi_driver", project_id="p", multi_driver="off", expected_revision=2, reason="off")
-        policy = read(owner, "project_overview", project_id="p")["policy"]
-        assert policy == {**policy, "multi_driver": "off", "claim_enforcement": "off"}
-        assert events(db, "claim_enforcement_policy_changed")[-1]["claim_enforcement"] == "on"
-
-    def test_one_switch_claim_enforcement_reads_off_without_multi_driver(self, db, clock):
-        owner = project(db, enforce=True)
-        conn = sqlite3.connect(str(db))     # a stale row: enforcement on, multi_driver off
+        conn = sqlite3.connect(str(db))     # a stale legacy value: multi_driver off
         conn.execute("UPDATE state_project_policy SET multi_driver='off'")
         conn.commit()
         conn.close()
-        assert read(owner, "project_overview", project_id="p")["policy"]["claim_enforcement"] == "off"
+        policy = read(owner, "project_overview", project_id="p")["policy"]
+        assert policy["multi_driver"] == "on" and policy["claim_enforcement"] == "on"
         from core.state_enforcement import enforced
         with owner.store.transaction() as conn:
-            assert enforced(conn, "p") is False
-        attempt = external(svc(db), "a")            # P1: no claim needed, no owner recorded
-        assert attempt["owner_driver_id"] is None
+            assert enforced(conn, "p") is True
+        assert code_of(lambda: external(svc(db, "grok"), "a")) == "claim_required"
 
     def test_dispatch_needs_your_live_implement_claim(self, db, clock):
         project(db, enforce=True)
@@ -605,7 +595,7 @@ class TestEnforcedDispatch:
         assert [h["id"] for h in overridden["held"]] == [on_c["claim_id"]]
         assert notices(db, "codex") == []
         # Enforcement off: the same write over a held node proceeds, as in P1.
-        write(owner, "set_claim_enforcement", project_id="p", claim_enforcement="off", expected_revision=2, reason="off")
+        write(owner, "set_claim_enforcement", project_id="p", claim_enforcement="off", expected_revision=1, reason="off")
         assert write(grok, "revise_node", project_id="p", node_key="a", expected_revision=3, reason="r")["revision"] == 4
 
     def test_releasing_another_drivers_hold_needs_override(self, db, clock):
@@ -859,12 +849,12 @@ class TestSubagentRecord:
         assert "orphaned_subagents" not in read(anonymous, "project_overview", project_id="p")
         with pytest.raises(Exception):
             read(anonymous, "list_subagents", project_id="p")
-        # Not in a multi-driver project.
-        project(db.parent / "o.sqlite", multi_driver=False)
+        # Every project records subagents (multi_driver is always on).
+        project(db.parent / "o.sqlite")
         plain = svc(db.parent / "o.sqlite", "codex")
-        legacy = external(plain, "a")
-        assert code_of(lambda: write(plain, "register_subagent", project_id="p", attempt_id=legacy["attempt_id"],
-                                     label="w", workspace="h:/w#c")) == "multi_driver_off"
+        own = external(plain, "a")
+        assert write(plain, "register_subagent", project_id="p", attempt_id=own["attempt_id"],
+                     label="w", workspace="h:/w#c")["subagent_id"] == "codex/w"
 
 
 # ---------------------------------------------------------------------------
@@ -918,10 +908,8 @@ class TestTransports:
         client, tokens = world
         for action, body in (("create_project", {"project_id": "p", "title": "P"}),
                              ("add_nodes", {"project_id": "p", "nodes": [{"key": "a", **NODE}]}),
-                             ("set_multi_driver", {"project_id": "p", "multi_driver": "on", "expected_revision": 0,
-                                                   "reason": "r"}),
                              ("set_claim_enforcement", {"project_id": "p", "claim_enforcement": "on",
-                                                        "expected_revision": 1, "reason": "r"})):
+                                                        "expected_revision": 0, "reason": "r"})):
             response = self._post(client, tokens["owner"], "/api/state/commands/" + action, body)
             assert response.status_code == 200, response.text
         start = {"project_id": "p", "node_key": "a", "expected_revision": 1, "harness": "h", "external_id": "j",
@@ -971,10 +959,8 @@ class TestTransports:
 
         call(tokens["owner"], "state_graph_write", "create_project", {"project_id": "p", "title": "P"})
         call(tokens["owner"], "state_graph_write", "add_nodes", {"project_id": "p", "nodes": [{"key": "a", **NODE}]})
-        call(tokens["owner"], "state_graph_write", "set_multi_driver",
-             {"project_id": "p", "multi_driver": "on", "expected_revision": 0, "reason": "r"})
         _, policy = call(tokens["owner"], "state_graph_write", "set_claim_enforcement",
-                         {"project_id": "p", "claim_enforcement": "on", "expected_revision": 1, "reason": "r"})
+                         {"project_id": "p", "claim_enforcement": "on", "expected_revision": 0, "reason": "r"})
         assert policy["claim_enforcement"] == "on"
         raw, _ = call(tokens["grok"], "state_graph_write", "start_external_attempt",
                       {"project_id": "p", "node_key": "a", "expected_revision": 1, "harness": "h",

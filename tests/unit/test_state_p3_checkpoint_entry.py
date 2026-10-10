@@ -21,8 +21,7 @@ def _bind_state_attempt(database, run_id="run-1"):
                          is_admin=True)
     owner.create_project("p", "P")
     owner.store.add_nodes("p", [{"key": "a", **NODE}, {"key": "b", **NODE}])
-    write(owner, "set_multi_driver", project_id="p", multi_driver="on", expected_revision=0, reason="r")
-    write(owner, "set_claim_enforcement", project_id="p", claim_enforcement="on", expected_revision=1, reason="r")
+    write(owner, "set_claim_enforcement", project_id="p", claim_enforcement="on", expected_revision=0, reason="r")
     codex = StateService(database, actor="driver:codex", project_read_trusted=True, driver_id="codex")
     claim(codex, "b")
     with database.get_connection() as conn:

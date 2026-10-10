@@ -69,13 +69,10 @@ def db(tmp_path):
     return tmp_path / "state.sqlite"
 
 
-def project(db, multi_driver=True):
+def project(db):
     owner = svc(db, "owner-cli", admin=True)
     owner.create_project("p", "P")
     owner.store.add_nodes("p", [{"key": k, **NODE} for k in ("a", "b", "c")])
-    if multi_driver:
-        write(owner, "set_multi_driver", project_id="p", multi_driver="on",
-              expected_revision=0, reason="P1 test")
     return owner
 
 
@@ -498,19 +495,6 @@ class TestOverviewAndWait:
 
 # ---------------------------------------------------------------------------
 class TestRecordOnly:
-    def test_flag_off_refuses_claims_and_records_no_lease(self, db, clock):
-        project(db, multi_driver=False)
-        grok = svc(db, "grok")
-        assert code_of(lambda: claim(grok)) == "multi_driver_off"
-        attempt = external(grok, "a")
-        assert attempt["owner_driver_id"] is None and attempt["lease_expires_at"] is None
-        assert attempt["lease_state"] == "legacy_unleased"
-        registered = events(db, "external_attempt_registered")[-1]
-        assert "owner_driver_id" not in registered and "lease_expires_at" not in registered
-        clock.advance(10 * 86400)
-        assert read(grok, "get_node", project_id="p", node_key="a")["node"]["readiness"] == "in_progress"
-        assert events(db, "lease_expired") == []
-
     def test_claims_are_recorded_not_enforced(self, db):
         owner = project(db)
         grok, codex = svc(db, "grok"), svc(db, "codex")
@@ -521,19 +505,6 @@ class TestRecordOnly:
         claim(grok, "c")
         write(codex, "set_node_hold", project_id="p", node_key="c", held=True, expected_revision=0,
               reason="hold is unaffected by claims")
-
-    def test_set_multi_driver_needs_admin_and_cas(self, db):
-        owner = project(db, multi_driver=False)
-        grok = svc(db, "grok")
-        assert code_of(lambda: write(grok, "set_multi_driver", project_id="p", multi_driver="on",
-                                     expected_revision=0, reason="r")) == "admin_required"
-        with pytest.raises(StateGraphError):
-            write(owner, "set_multi_driver", project_id="p", multi_driver="on", expected_revision=5, reason="r")
-        policy = write(owner, "set_multi_driver", project_id="p", multi_driver="on", expected_revision=0,
-                       reason="r")
-        assert policy["multi_driver"] == "on" and policy["dispatch"] == "active" and policy["revision"] == 1
-        held = write(owner, "set_dispatch", project_id="p", dispatch="hold", expected_revision=1, reason="h")
-        assert held["multi_driver"] == "on", "set_dispatch keeps the multi_driver switch"
 
 
 # ---------------------------------------------------------------------------
@@ -577,7 +548,7 @@ def _snapshot(path):
 
 class TestMigration:
     def test_pre_p1_database_migrates_additively_and_idempotently(self, db, clock):
-        owner = project(db, multi_driver=False)
+        owner = project(db)
         write(owner, "set_dispatch", project_id="p", dispatch="hold", expected_revision=0, reason="h")
         write(owner, "set_dispatch", project_id="p", dispatch="active", expected_revision=1, reason="a")
         legacy = external(svc(db), "a")
@@ -639,9 +610,7 @@ class TestTransports:
     def test_rest_claim_heartbeat_list_and_release(self, world):
         client, tokens = world
         for action, body in (("create_project", {"project_id": "p", "title": "P"}),
-                             ("add_nodes", {"project_id": "p", "nodes": [{"key": "a", **NODE}]}),
-                             ("set_multi_driver", {"project_id": "p", "multi_driver": "on",
-                                                   "expected_revision": 0, "reason": "r"})):
+                             ("add_nodes", {"project_id": "p", "nodes": [{"key": "a", **NODE}]})):
             response = self._post(client, tokens["owner"], "/api/state/commands/" + action, body)
             assert response.status_code == 200, response.text
         claim_body = {"project_id": "p", "node_key": "a", "purpose": "implement", "expected_revision": 1,
@@ -668,9 +637,9 @@ class TestTransports:
         done = self._post(client, tokens["grok"], "/api/state/commands/release_claim",
                           {"project_id": "p", "claim_id": claim_id, "fence": 1, "reason": "done"})
         assert done.status_code == 200 and done.json()["status"] == "released"
-        refused = self._post(client, tokens["grok"], "/api/state/commands/set_multi_driver",
-                             {"project_id": "p", "multi_driver": "off", "expected_revision": 1, "reason": "r"})
-        assert refused.status_code == 409 and refused.json()["detail"].startswith("admin_required")
+        retired = self._post(client, tokens["owner"], "/api/state/commands/set_multi_driver",
+                             {"project_id": "p", "multi_driver": "off", "expected_revision": 0, "reason": "r"})
+        assert retired.status_code == 422 and retired.json()["detail"] == "unknown state command"
 
     def test_mcp_claim_and_list_use_the_same_contract(self, world):
         client, tokens = world
@@ -684,8 +653,6 @@ class TestTransports:
 
         call(tokens["owner"], "state_graph_write", "create_project", {"project_id": "p", "title": "P"})
         call(tokens["owner"], "state_graph_write", "add_nodes", {"project_id": "p", "nodes": [{"key": "a", **NODE}]})
-        call(tokens["owner"], "state_graph_write", "set_multi_driver",
-             {"project_id": "p", "multi_driver": "on", "expected_revision": 0, "reason": "r"})
         _, held = call(tokens["grok"], "state_graph_write", "claim_node",
                        {"project_id": "p", "node_key": "a", "purpose": "plan", "expected_revision": 1,
                         "request_key": "k"})

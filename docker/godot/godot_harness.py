@@ -64,6 +64,7 @@ The gate_skipped fail-open->observable contract is enforced on the *tool* side
 from __future__ import annotations
 
 import base64
+import ast
 import hashlib
 import fcntl
 import json
@@ -4152,29 +4153,135 @@ def _has_failure_marker(out: str, err: str) -> bool:
     return any(m in blob for m in _FAILURE_MARKERS)
 
 
-def _discover_entry_points(proj: Path) -> list:
-    """Every `tests/*.gd` that `extends SceneTree` — the scripts `-s` can run.
+_GD_LITERALS = re.compile(
+    r"#[^\n]*|\"\"\"(?:\\[\s\S]|(?!\"\"\")[\s\S])*\"\"\"|"
+    r"'''(?:\\[\s\S]|(?!''')[\s\S])*'''|"
+    r'"(?:\\.|[^"\\\n])*"|\'(?:\\.|[^\'\\\n])*\'')
+# Known native helper roots. Unknown bases are errors, never inferred helpers.
+# This is deliberately not a substitute for Godot's compiler/ClassDB.
+_GD_HELPER_BASES = {
+    "Object", "RefCounted", "Resource", "Node", "Node2D", "Node3D",
+    "Control", "CanvasLayer", "Button", "Label", "VBoxContainer",
+    "HBoxContainer", "Container", "Panel", "PanelContainer", "ScrollContainer",
+    "Camera2D", "Camera3D", "EditorScript", "EditorPlugin",
+}
 
-    Discovered, not configured, because a hard-coded list goes stale silently:
-    the caller keeps passing five names while the project grows a sixth suite,
-    and the new one is never run by anything. `extends SceneTree` is the exact
-    property `-s` requires, so it is also the exact right filter — a plain
-    `test_*.gd` glob would sweep in the 12 static test files that the runner
-    script collects, and running one of those directly is an error, not a test
-    failure.
+
+def _gd_inheritance(path: Path) -> tuple:
+    """Read only inheritance declarations, with comments/string bodies inert.
+
+    Preserve file literals as tokens, indentation and newlines for nested
+    classes. Unsupported/malformed inheritance is reported explicitly; the
+    engine import still owns full GDScript syntax and runtime validation.
+    """
+    strings = {}
+
+    def mask(match):
+        text = match.group()
+        if text.startswith("#") or text.startswith(('"""', "'''")):
+            return re.sub(r"[^\n]", " ", text)
+        token = "__gd_path_%d__" % len(strings)
+        strings[token] = text
+        return token
+
+    source = _GD_LITERALS.sub(mask, path.read_text(encoding="utf-8-sig"))
+    classes, stack, global_name = {(): None}, [], None
+    for line in source.splitlines():
+        if not line.strip():
+            continue
+        indent = len(line) - len(line.lstrip())
+        text = line.strip()
+        text = re.sub(r"^(?:@\w+(?:\([^)]*\))?\s+)+", "", text)
+        while stack and indent <= stack[-1][0]:
+            stack.pop()
+        scope = stack[-1][1] if stack else ()
+        named = re.fullmatch(r"class_name\s+(\w+)(?:\s+extends\s+(.+))?", text)
+        inner = re.fullmatch(r"class\s+(\w+)(?:\s+extends\s+(.+?))?\s*:", text)
+        declared = re.fullmatch(r"extends\s+(.+)", text)
+        if named and not scope and indent == 0:
+            if global_name is not None:
+                raise ValueError("%s: duplicate class_name" % path)
+            global_name, base = named.groups()
+        elif inner:
+            name, base = inner.groups()
+            scope += (name,)
+            if scope in classes:
+                raise ValueError("%s: duplicate inner class %s" % (path, scope))
+            classes[scope] = None
+            stack.append((indent, scope))
+        elif declared and (indent == 0 or stack):
+            base = declared.group(1)
+        else:
+            if (text.startswith(("extends", "class_name"))
+                    and (indent == 0 or stack)):
+                raise ValueError("%s: malformed inheritance %s" % (path, text))
+            continue
+        if base is None:
+            continue
+        if classes[scope] is not None:
+            raise ValueError("%s: duplicate inheritance for %s" % (path, scope))
+        parts = base.split(".")
+        if not all(re.fullmatch(r"\w+", part) for part in parts):
+            raise ValueError("%s: unsupported inheritance %s" % (path, base))
+        if parts[0] in strings:
+            parts[0] = ast.literal_eval(strings[parts[0]])
+        classes[scope] = parts
+    return global_name, classes
+
+
+def _discover_entry_points(proj: Path) -> list:
+    """The actual tests/*.gd MainLoop subclasses, including inherited scripts.
+
+    A comment mentioning SceneTree does not change a RefCounted's base. File,
+    global class and inner class inheritance follow the declarations, not a
+    filename convention. Unreadable, ambiguous, cyclic or unresolved ancestry
+    fails discovery instead of silently removing a potential test.
     """
     tests = proj / "tests"
     if not tests.is_dir():
         return []
-    found = []
-    for f in sorted(tests.glob("*.gd")):
-        try:
-            head = f.read_text(encoding="utf-8", errors="replace")[:4000]
-        except OSError:
+    proj = proj.resolve()
+    parsed, globals_by_name = {}, {}
+    for path in proj.rglob("*.gd"):
+        if any(part.startswith(".") for part in path.relative_to(proj).parts):
             continue
-        if "extends SceneTree" in head:
-            found.append("res://tests/" + f.name)
-    return found
+        name, classes = _gd_inheritance(path)
+        parsed[path.resolve()] = classes
+        if name:
+            globals_by_name.setdefault(name, []).append(path.resolve())
+
+    def executable(path, scope=(), seen=frozenset()):
+        key = (path, scope)
+        if key in seen:
+            raise ValueError("cyclic script inheritance: %s %s" % key)
+        if path not in parsed or scope not in parsed[path]:
+            raise ValueError("unresolved script inheritance: %s %s" % key)
+        base = parsed[path][scope]
+        if base is None:
+            return False  # Godot's implicit base is RefCounted.
+        root, *inner = base
+        if root in ("SceneTree", "MainLoop") and not inner:
+            return True
+        if root in _GD_HELPER_BASES and not inner:
+            return False
+        if root.startswith("res://") or "/" in root or root.endswith(".gd"):
+            target = ((proj / root[6:]) if root.startswith("res://")
+                      else path.parent / root).resolve()
+            if not target.is_relative_to(proj):
+                raise ValueError("script inheritance escapes project: %s" % root)
+            return executable(target, tuple(inner), seen | {key})
+        # A sibling/parent-scope inner class takes precedence over a global.
+        for length in range(len(scope), -1, -1):
+            local = scope[:length] + (root, *inner)
+            if local in parsed[path]:
+                return executable(path, local, seen | {key})
+        targets = globals_by_name.get(root, [])
+        if len(targets) != 1:
+            raise ValueError("unresolved or ambiguous script base: %s in %s" % (root, path))
+        return executable(targets[0], tuple(inner), seen | {key})
+
+    return ["res://tests/" + path.name for path in sorted(tests.glob("*.gd"))
+            if executable(path.resolve())]
 
 
 # ── owned invocation evidence (generated user:// artifacts that survive HOME) ─
@@ -4963,9 +5070,12 @@ def _validate_script_selection(project_dir: str, scripts: list,
             errors.append("render=true requires a real Godot project — there is "
                           "no project.godot at %s" % (proj or "."))
         return errors
+    try:
+        admitted = set(_discover_entry_points(proj))
+    except (OSError, UnicodeError, ValueError, SyntaxError) as exc:
+        return ["script entrypoint discovery failed: %s" % exc]
     if not requested:
         return errors  # default discovery (headless or rendered) is preserved
-    admitted = set(_discover_entry_points(proj))
     for entry in requested:
         if entry not in admitted:
             errors.append("%s: not an admitted `extends SceneTree` entry point "
@@ -5005,14 +5115,17 @@ def run_script(project_dir: str, scripts: list, timeout: int = 600,
     declaration (or a pattern that matched nothing) makes `passed` False — never
     a silent green for evidence the caller asked for and did not get. An explicit
     request with neither files nor patterns (``retain_requested``) still retains
-    the full raw streams. An explicit retention request on a valid project whose
-    discovery found NO admitted entry still allocates its owned destination and
-    writes a bounded manifest (a zero-pass raw-only success, or a hard failure
-    naming a declaration no pass can satisfy); the omitted-``retain`` no-entry
-    case keeps the historic skip. On ANY exit path — pass, failure, timeout or an
-    error nobody predicted — every owned HOME is removed in the outer finally,
-    after a truthful retention attempt has written its manifest; the original
-    error is never replaced by a green.
+    the full raw streams. On a valid project whose discovery found NO admitted
+    entry, the verdict is a FAILED SCRIPT verdict in BOTH modes, with or without
+    retention — zero executable suites means zero authored tests executed, so
+    nothing here is a pass — while an explicit request still allocates its owned
+    destination and writes a bounded, truthful raw-only manifest (its
+    ``retention.ok`` records only that the raw copy succeeded, never a test
+    PASS); an omitted-``retain`` no-entry case writes no retention at all. The
+    no-project legacy headless skip is unchanged. On ANY exit path — pass,
+    failure, timeout or an error nobody predicted — every owned HOME is removed
+    in the outer finally, after a truthful retention attempt has written its
+    manifest; the original error is never replaced by a green.
     """
     proj = Path(project_dir)
     retain = list(retain or [])
@@ -5033,40 +5146,43 @@ def run_script(project_dir: str, scripts: list, timeout: int = 600,
                 "summary": ("render=true requires a real Godot project — no "
                             "project.godot here." if render else
                             "No project.godot -- not a Godot project; script gate skipped.")}
-    scripts = list(scripts or []) or _discover_entry_points(proj)
+    try:
+        scripts = list(scripts or []) or _discover_entry_points(proj)
+    except (OSError, UnicodeError, ValueError, SyntaxError) as exc:
+        return {"passed": False, "results": [], "discovered": [],
+                "render_mode": render_mode, "render_requested": bool(render),
+                "summary": "script entrypoint discovery failed: %s" % exc}
     if not scripts:
-        # Opt-in render with nothing admitted must not be answered by the
-        # pixel-blind path: there is no render to do, so this is a HARD failure
-        # rather than a silent headless pass. A plain (headless) request with no
-        # admitted entry point stays the pre-existing skip it always was.
-        if not want_raw:
-            return {"passed": not render, "results": [], "discovered": [],
-                    "render_mode": render_mode, "render_requested": bool(render),
-                    "summary": ("No admitted `extends SceneTree` entry point under tests/ "
-                                "-- a rendered /script has nothing to render.") if render
-                               else "No `extends SceneTree` entry point under tests/."}
-        # An EXPLICIT retention request does not get to skip silently just
-        # because discovery found nothing: the caller asked for evidence, so the
-        # owned destination is allocated and a bounded, truthful manifest is
-        # written (raw-only, zero passes). An empty valid project is therefore an
-        # explicit raw-only success; a declaration no pass can satisfy is a
-        # truthful hard failure. Omitted retention keeps the historic skip above.
-        retention = _retain_copy(retain, [], raw_logs,
-                                 {**corr, "mode": render_mode},
-                                 extra_errors=retain_errors,
-                                 pass_labels=pass_labels,
-                                 user_dir_name=_project_user_dir_name(proj),
-                                 patterns=retain_patterns, requested=True)
+        # A valid Godot project whose discovery found NO executable suite is a
+        # FAILED SCRIPT verdict in BOTH modes, with or without retention. The
+        # consumer's green has always meant "some authored tests actually
+        # executed"; zero entries means that property cannot hold, so a
+        # headless missing-tests / helper-only tree must never read as a pass —
+        # and a rendered /script has nothing to render besides. Retention never
+        # rescues the verdict: an explicit request still allocates its owned
+        # destination and writes a bounded, truthful raw-only manifest, and
+        # ``retention.ok`` keeps recording ONLY that the raw copy succeeded —
+        # retention success is evidence, never a test PASS. An omitted retain
+        # writes nothing and returns no ``retention`` key.
+        retention = None
+        if want_raw:
+            retention = _retain_copy(retain, [], raw_logs,
+                                     {**corr, "mode": render_mode},
+                                     extra_errors=retain_errors,
+                                     pass_labels=pass_labels,
+                                     user_dir_name=_project_user_dir_name(proj),
+                                     patterns=retain_patterns, requested=True)
+        summary = ("No admitted `extends SceneTree` entry point under tests/: "
+                   "0 executable suite(s) ran, so the SCRIPT verdict is "
+                   "FAILED — zero authored tests were executed.")
         if render:
-            passed = False
-            summary = ("No admitted `extends SceneTree` entry point under tests/ "
-                       "-- a rendered /script has nothing to render.")
-        else:
-            passed = bool(retention["ok"])
+            summary += " A rendered /script has nothing to render."
+        if retention is not None:
             if retention["ok"]:
-                summary = ("No admitted `extends SceneTree` entry point under tests/; "
-                           "the explicit retention request wrote a bounded raw-only "
-                           "manifest at %s." % retention["manifest"])
+                summary += (" The explicit retention request still wrote a "
+                            "bounded raw-only manifest at %s (retention "
+                            "success is not a test pass)."
+                            % retention["manifest"])
             else:
                 why = []
                 if retention["refused"]:
@@ -5076,12 +5192,15 @@ def run_script(project_dir: str, scripts: list, timeout: int = 600,
                                % ", ".join(retention["missing"]))
                 if retention["limit_hit"]:
                     why.append("retention limit hit: %s" % retention["limit_hit"])
-                summary = ("No admitted `extends SceneTree` entry point under tests/, "
-                           "and the explicit retention request could not be fully "
-                           "satisfied (%s)." % " | ".join(why))
-        return {"passed": passed, "results": [], "discovered": [],
-                "render_mode": render_mode, "render_requested": bool(render),
-                "retention": retention, "summary": summary}
+                summary += (" The explicit retention request could not be fully "
+                            "satisfied (%s)." % " | ".join(why))
+        report = {"passed": False, "results": [], "discovered": [],
+                  "executed_suites": 0,
+                  "render_mode": render_mode, "render_requested": bool(render),
+                  "summary": summary}
+        if retention is not None:
+            report["retention"] = retention
+        return report
 
     # The real Godot user:// root name for THIS project — retention searches
     # the invocation-owned app_userdata/<name> (or custom user dir), never a

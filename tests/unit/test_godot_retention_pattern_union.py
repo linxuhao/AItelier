@@ -71,6 +71,7 @@ def test_101_owned_roots_four_patterns_charge_each_directory_once(monkeypatch, t
     assert len(out["files"]) == 2020 and len(out["raw_logs"]) == 444
     assert out["refused"] == out["missing"] == [] and out["limit_hit"] is None
     assert len(scans) == 303 and len(set(scans)) == 303
+    monkeypatch.setattr(gh.os, "scandir", real_scandir)
     for home in homes:
         shutil.rmtree(home)
     manifest = _assert_bytes(out, corr)

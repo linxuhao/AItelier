@@ -533,8 +533,8 @@ D7 把"发给项目的事"和"发给某个 driver 的事"分开。这样还带�
   见 5.1a；因为 v2 是封闭 schema，增量要以 `aitelier.director-messaging.v3` 发布，v2 请求按默认值继续可用。
 - 另有两处小改：
   1. `state_director_messages` 加一列 `sender_driver_id`，记下是哪个 driver 发的；
-  2. 同项目定向消息仍然拒绝（`core/director_messaging.py` 第 234 行），但错误码从笼统的 `invalid_request` 改为明确的
-     `use_driver_inbox`，提示改用 5.2。
+  2. 同项目定向消息仍然拒绝。省略协议版本或显式 v2 保留封闭 v2 响应及原有 `invalid_request` code / detail.message；显式 v3 返回 `use_driver_inbox`，提示改用 5.2。
+     v2 的 schemaTag、code 和 detail.message 均为封闭枚举，不加入新字段或说明文字；改用 driver inbox 的说明放在 API / driver guide 中。
 - 多个成员共享同一个项目 inbox：`acknowledge` 的含义明确为"**我（这个 driver）接手处理这条**"，事件里记录是哪个 driver ack 的；
   其他成员仍能在列表里看到它，以及谁接了。这本身就是自助餐模式下的认领（Q6，**已确认**）。按 driver 记录的 ack 见 5.1a（D12）。
 - `novel-lingwu-deputy` 这类"只当邮箱"的项目在 driver inbox 上线后归档（`set_dispatch(archive)`），保留全部记录；

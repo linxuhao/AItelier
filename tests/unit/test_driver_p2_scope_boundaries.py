@@ -65,3 +65,23 @@ def test_same_project_code_preserves_closed_envelope(peers,protocol):
         validator.validate(result)
         with pytest.raises(ValidationError):
             validator.validate({**result,"code":"use_driver_inbox","detail":{"message":"use_driver_inbox"}})
+
+
+def test_versioned_refusal_real_consumer_inverse(peers):
+    _,s=peers
+    args=dict(sender_project_id="alpha",target_project_id="alpha",
+              director_identity="ada",request_key="inverse",subject="same",body="")
+    legacy=execute(s["ada"],"send_director_message",args,allow_write=True)
+    current=execute(s["ada"],"send_director_message",{**args,"protocol_version":"v3"},allow_write=True)
+    import json
+    from pathlib import Path
+    from jsonschema import Draft202012Validator, ValidationError
+    from contracts.director_messaging.v3.conformance import validate_envelope
+    schema=json.loads(Path("contracts/director_messaging/v2/schema.json").read_text())
+    consumer=Draft202012Validator({"$ref":"#/$defs/error","$defs":schema["$defs"]})
+    consumer.validate(legacy)
+    validate_envelope(current)
+    # The actual immutable v2 consumer rejects both proposed workarounds.
+    with pytest.raises(ValidationError): consumer.validate(current)
+    with pytest.raises(ValidationError):
+        consumer.validate({**legacy,"detail":{"message":"Use the driver inbox"}})

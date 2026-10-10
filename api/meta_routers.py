@@ -914,6 +914,11 @@ def _approve_checkpoint_body(project_id, request, run_id, _step_id, _label, db, 
         from core.scheduler import _sync_project_status_to_db
         _sync_project_status_to_db(project_id)
     elif run and run["status"] == "failed":
+        # The failed-run rescue path mutates the engine twice; the State
+        # decision is checked before each mutation (the budget restore between
+        # them can be slow, and a delayed handler must not resume a run whose
+        # attempt moved to another owner meanwhile).
+        assert_state_checkpoint_decision_open(controller, db)
         sf.reactivate_run(run_id)
         from core.run_driver import restore_retry_budget
         # Restoring the budget is best-effort; RESUMING is not. Unguarded, a
@@ -930,6 +935,7 @@ def _approve_checkpoint_body(project_id, request, run_id, _step_id, _label, db, 
             logger.warning("restore_retry_budget failed for run %s; resuming "
                            "anyway — the blocked step may re-fail immediately",
                            run_id, exc_info=True)
+        assert_state_checkpoint_decision_open(controller, db)
         sf.resume_run(run_id)
 
     # Clear the drafting gate: the user approved the brief, so the scheduler

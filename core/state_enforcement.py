@@ -368,8 +368,12 @@ def assert_decision_open(db, decision_id) -> dict:
     """The decision must still be open and unexpired at the moment the engine is
     told. A handler delayed past the decision's expiry finds ownership possibly
     moved; it is refused here (`checkpoint_decision_expired`) instead of
-    resuming or rewinding a run it no longer controls. The residual window is
-    the gap between this read and the engine call - milliseconds, not a lease."""
+    resuming or rewinding a run it no longer controls. What remains is the gap
+    between this read and the engine call: expected to be small, but NOT
+    bounded by anything here - a suspended thread or engine lock contention can
+    stretch it past the decision's remaining lifetime. Closing it would need a
+    fence inside the engine's own transaction or a lock shared with ownership
+    transfers; this is the documented limitation, not atomic safety."""
     from core.state_graph import StateGraphStore
     store = StateGraphStore(db, project_read_trusted=True)
     with store.transaction() as conn:

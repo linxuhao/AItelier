@@ -1397,14 +1397,15 @@ def _register_run_tools(tool, mcp=None):
                             "error": f"run '{run_id}' is paused but no checkpoint "
                                      f"step could be resolved for it"}
                 from core.run_driver import checkpoint_reject_target
+                # Resolve the TARGET first (it reads the engine and can take a
+                # while), then check the State decision immediately before the
+                # mutation it guards.
+                redirect_to = checkpoint_reject_target(sf, run.get("graph_name") or _graph, step_id, run_id)
                 try:
                     assert_state_checkpoint_decision_open(controller, get_db_manager())
                 except _HTTPException as exc:
                     return {**echo, "error": exc.detail}
-                sf.reject_checkpoint(
-                    run_id, step_id, feedback,
-                    redirect_to=checkpoint_reject_target(
-                        sf, run.get("graph_name") or _graph, step_id, run_id))
+                sf.reject_checkpoint(run_id, step_id, feedback, redirect_to=redirect_to)
         except Exception as e:
             # An exception is NOT proof the answer failed. skillflow can persist
             # the state change and then raise on the way out — live, 2026-08-29,

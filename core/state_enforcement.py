@@ -373,7 +373,7 @@ def assert_decision_open(db, decision_id) -> dict:
     bounded by anything here - a suspended thread or engine lock contention can
     stretch it past the decision's remaining lifetime. Closing it would need a
     fence inside the engine's own transaction or a lock shared with ownership
-    transfers; this is the documented limitation, not atomic safety."""
+    transfers; this is a stated limitation, not atomic safety."""
     from core.state_graph import StateGraphStore
     store = StateGraphStore(db, project_read_trusted=True)
     with store.transaction() as conn:

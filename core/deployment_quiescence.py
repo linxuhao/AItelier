@@ -1215,11 +1215,10 @@ def _measurement_subject(line: str) -> str:
     if name in {"sh", "bash", "dash", "zsh", "env", "node", "nodejs",
                 "perl", "ruby", "timeout", "nice", "xargs"}:
         return line
-    try:
-        if str((proc / "exe").readlink()) != words[0]:
-            return line
-    except OSError:
+    program = _native_program(line)
+    if program is None:
         return line
+    words[0] = program
     scanned = []
     for word in words:
         try:
@@ -1346,7 +1345,10 @@ def external_owners(*, runner: Callable[[list[str]], subprocess.CompletedProcess
                 continue
             lowered = line.lower()
             subject = _measurement_subject(line).lower()
-            named = (_native_program(line) or subject).lower()
+            program = _native_program(line)
+            named = (program or subject).lower()
+            native_render = (program is not None
+                             and Path(program).name.lower() in {"godot", "xvfb-run"})
             measurement_name = (bool(MEASUREMENT_NAME_PATTERN.search(named))
                                 or "--long-gate" in lowered)
             command = line.strip()
@@ -1360,8 +1362,8 @@ def external_owners(*, runner: Callable[[list[str]], subprocess.CompletedProcess
             unknown_measurement = (measurement_name
                                    and not _kernel_thread(line)
                                    and not _resident_service_identity(line))
-            if any(needle in subject for needle in needles) or unknown_measurement or matched:
-                active = any(token in subject for token in (
+            if native_render or any(needle in subject for needle in needles) or unknown_measurement or matched:
+                active = native_render or any(token in subject for token in (
                     "godot --", "godot --headless", "xvfb-run",
                     "playtest", "render", "x11_input_smoke", "run_script")) or unknown_measurement or bool(matched)
                 ownership = "registered" if matched else "unregistered"

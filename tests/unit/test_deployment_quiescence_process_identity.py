@@ -273,3 +273,29 @@ def test_verified_native_tail_bare_label_is_not_code_identity(tmp_path, monkeypa
     line = "4321 1 " + " ".join(argv)
     assert dq._native_program(line) == "/usr/bin/tail"
     assert dq.external_owners(runner=_probe(line)) == ([], [])
+
+
+@pytest.mark.parametrize("name", ["godot", "xvfb-run"])
+def test_native_render_code_identity_reaches_owner_reader(tmp_path, name):
+    import shutil
+    executable = tmp_path / name
+    shutil.copy2("/usr/bin/tail", executable)
+    data = tmp_path / "ordinary-data"
+    data.touch()
+    process = subprocess.Popen(["neutral", "-F", str(data)],
+                               executable=str(executable),
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        line = f"{process.pid} {os.getpid()} neutral -F {data}"
+        deadline = time.monotonic() + 10
+        while dq._native_program(line) is None and time.monotonic() < deadline:
+            assert process.poll() is None
+            time.sleep(.01)
+        assert dq._native_program(line) == str(executable)
+        owners, errors = dq.external_owners(runner=_probe(line))
+        assert owners[0]["active"] is True
+        assert owners[0]["resource"] == "render"
+        assert errors == []
+    finally:
+        process.terminate()
+        process.wait(timeout=10)

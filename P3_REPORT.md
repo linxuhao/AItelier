@@ -340,3 +340,30 @@ high-water 2759 → 2759; attempt digest equal); `lost_schema_objects: []`; new 
 - Full suite on HEAD `f0fbfb8c`, one container, 30:04: **361 failed, 6471 passed, 13 skipped, 23 errors** —
   failure-ID set IDENTICAL to base `53daff7ff2` (361F; `comm` new = 0, fixed = 0); +11 passed = the round-3
   regression tests. Logs: `/tmp/p3-logs/head_full5.log`, `/tmp/p3-logs/oldcheck3.log`.
+
+## Fix round 4 (2026-10-10, after `P3_REVIEW4_CODEX.md`)
+
+Every item was verified against the code of `0fa1175f` first; all 5 are CONFIRMED (none rejected). Fix commit:
+`2bf514b8f` (code, tests, docs). Regression tests: `tests/unit/test_state_p3_fix_round4.py` — all 7 FAIL on
+`0fa1175f` (module copied into a detached worktree of that commit, run in a throwaway container: 7 failed,
+0 passed) and pass on `2bf514b8f`. No existing assertion was changed in this round. No migration or rebuild
+code changed, so the rehearsal was not repeated.
+
+| item | verdict | fix (commit `2bf514b8f`) | regression test | evidence / notes |
+|---|---|---|---|---|
+| 1 REST reject `NameError`, approve loses `_label` | CONFIRMED | `_approve_checkpoint_body(..., _step_id, _label, db, controller)` and `_reject_checkpoint_body(..., step_id, _label, _graph, db, controller)` receive graph and label from their routes | `TestItem1RestCheckpointRoutes` (3): the ACTUAL reject route through `TestClient` reaches `sf.reject_checkpoint("run-1","gather",feedback)` with the graph resolved for the target; the approve body under a running loop pushes the `checkpoint_resolved` payload with its label to the project and `__global__` channels; the routes open and FINISH the State decision on success, on an engine refusal (completed run → 400) and refuse a non-owner at the door without opening one | `_graph`/`_label` were locals of the callers (api/meta_routers.py:1018, 945, 1042); the round-3 "REST door" test only called the helpers. |
+| 2 same-node exemption admits other executors / unknown-abandoned | CONFIRMED | `checkout_in_use(reclaiming=…)` exempts only an ACTIVE attempt of the driver on that node whose dispatching claim carried the same `subagent` (or none) as the new claim; an attempt abandoned with quiescence unknown is never exempt | `test_2_…` (same node + different registered worker → `workspace_in_use`; same executor → allowed; original owner on an unknown-abandoned node → refused until the verified quiescence report) | the skip keyed on (owner, node) only and also matched abandoned rows. |
+| 3 decision expiry does not fence a delayed handler (minor) | CONFIRMED | cheapest sound fence: `assert_decision_open(db, decision_id)` immediately before the engine call in the REST bodies and the MCP tool (`assert_state_checkpoint_decision_open` → 409 / MCP error): the decision must be unfinished, unexpired, and the attempt's owner/fence unchanged since it opened (`checkpoint_decision_expired`). The residual window is the gap between that read and the engine call (milliseconds); a truly atomic State+engine mutation is not possible across two SQLite connections (BEGIN IMMEDIATE on State would block the engine's own write) | `test_3_…` (delayed past expiry + takeover → refused; finished and unknown decisions refused; REST mapping 409) | the open decision only held transfers off until expiry; a surviving handler then mutated the run. |
+| 4 claim-only admin handoff loses `break_glass` (minor) | CONFIRMED | `claim_transferred` event and `accept_handoff` result carry `break_glass` for claim subjects too | `test_4_…` (non-member admin accepts a claim offer → `break_glass=True` in result and event; member → `False`) | only the attempt path recorded it (state_handoffs.py:350). |
+| 5 adapter doc signature (nit) | CONFIRMED | seam comment documents `deliver(conn, message, notice)` and the complete notice's sender / correlation metadata | `test_5_…` | comment still described the two-argument hook. |
+
+### Test results (fix round 4)
+- `tests/unit/test_state_p3_fix_round4.py` 7 passed; rounds 3/2/1 and the P3 module 77 passed;
+  `tests/integration/test_meta_routers.py` 14 passed (98 in one run).
+- Affected suites (claims, external, attempts, changes, run summary, deployment quiescence, privacy doors,
+  private-read verdict, read visibility, MCP router, checkpoint reject target, run routers, write-opening
+  mutation gate): 709 passed, 1 failed — the pre-existing base failure
+  `test_mcp_router.py::test_every_run_taking_tool_actually_resolves_a_project_id`.
+- Full suite on HEAD `2bf514b8f`, one container, 30:16: **361 failed, 6478 passed, 13 skipped, 23 errors** —
+  failure-ID set IDENTICAL to base `53daff7ff2` (361F; `comm` new = 0, fixed = 0); +7 passed = the round-4
+  regression tests. Logs: `/tmp/p3-logs/head_full6.log`, `/tmp/p3-logs/oldcheck4.log`.

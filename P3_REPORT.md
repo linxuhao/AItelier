@@ -367,3 +367,28 @@ code changed, so the rehearsal was not repeated.
 - Full suite on HEAD `2bf514b8f`, one container, 30:16: **361 failed, 6478 passed, 13 skipped, 23 errors** —
   failure-ID set IDENTICAL to base `53daff7ff2` (361F; `comm` new = 0, fixed = 0); +7 passed = the round-4
   regression tests. Logs: `/tmp/p3-logs/head_full6.log`, `/tmp/p3-logs/oldcheck4.log`.
+
+## Fix round 5 (2026-10-10, after `P3_REVIEW5_CODEX.md` — APPROVE WITH NITS; owner-requested fixes)
+
+The review file was dropped at the worktree root as `P3_REVIEW5_CODEX.md` (left untracked). Every item was
+verified against the code of `e46ba98e` first; all 3 are CONFIRMED. Fix commit: `5c1eb7641` (code, tests, docs,
+report wording). Regression tests: `tests/unit/test_state_p3_fix_round5.py` — all 3 FAIL on `e46ba98e` (module
+copied into a detached worktree of that commit, run in a throwaway container: 3 failed, 0 passed) and pass on
+`5c1eb7641`. They drive the ACTUAL doors: the REST approve route and its run-scoped delegate through
+`TestClient`, and the MCP `answer_checkpoint` tool callable. No existing assertion was changed. No migration
+or rebuild code changed, so the rehearsal was not repeated.
+
+| item | verdict | fix (commit `5c1eb7641`) | regression test | evidence / notes |
+|---|---|---|---|---|
+| 1 fence misses the failed-run reactivate/resume path | CONFIRMED | `_approve_checkpoint_body` calls `assert_state_checkpoint_decision_open` before `sf.reactivate_run` AND again before `sf.resume_run` (the budget restore between them can be slow); MCP has no failed-run path (it answers paused runs only) | `TestItem1FailedRunRescueIsFenced` (2): a handler whose engine read outlasts the decision (`sf.get_run` advances the clock 121 s) gets 409 `checkpoint_decision_expired` and neither `reactivate_run` nor `resume_run` is called, the decision is still finished; undelayed, both mutations run; the run-scoped `/api/runs/{id}/checkpoint/approve` delegate is fenced the same way | api/meta_routers.py failed branch (`:916`) mutated twice with no check. |
+| 2 MCP reject checks the fence before resolving the target | CONFIRMED | `checkpoint_reject_target(...)` is resolved first, then the fence, then `sf.reject_checkpoint(..., redirect_to=…)` | `TestItem2McpRejectResolvesTargetBeforeTheFence`: recorded call order is `["target", "fence"]` and the engine receives the resolved redirect; when the target resolution itself outlasts the decision, the tool answers `checkpoint_decision_expired` and never calls `sf.reject_checkpoint` | api/mcp_router.py:1401 asserted the fence before `checkpoint_reject_target`. The REST reject body already resolved the target first (round 4). |
+| 3 "milliseconds" claimed a bound (nit) | CONFIRMED | wording in `core/state_enforcement.assert_decision_open`, `docs/driver-claims.md` and the round-4 report row now says the check-to-mutation gap is expected to be small but NOT bounded by State (thread suspension, engine lock contention); a hard guarantee would need a fence inside the engine transaction or a lock shared with ownership transfers — a documented limitation, not atomic safety | — (documentation) | — |
+
+### Test results (fix round 5)
+- `tests/unit/test_state_p3_fix_round5.py` 3 passed; with round 4, `test_meta_routers.py`, `test_mcp_router.py`
+  and `test_checkpoint_reject_target.py`: 110 passed, 1 failed — the pre-existing base failure
+  `test_mcp_router.py::test_every_run_taking_tool_actually_resolves_a_project_id`.
+- Related suites (run routers, claims, external, attempts, rounds 1–3, P3 module, privacy doors): 314 passed.
+- Full suite on HEAD `5c1eb7641`, one container, 30:14: **361 failed, 6481 passed, 13 skipped, 23 errors** —
+  failure-ID set IDENTICAL to base `53daff7ff2` (361F; `comm` new = 0, fixed = 0); +3 passed = the round-5
+  regression tests. Logs: `/tmp/p3-logs/head_full7.log`, `/tmp/p3-logs/oldcheck5.log`.

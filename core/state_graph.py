@@ -303,6 +303,10 @@ def initialize_graph_schema(db) -> None:
         if "multi_driver" not in {r["name"] for r in conn.execute("PRAGMA table_info(state_project_policy)")}:
             conn.execute("ALTER TABLE state_project_policy ADD COLUMN multi_driver TEXT NOT NULL "
                          "DEFAULT 'off' CHECK(multi_driver IN ('off','on'))")
+        # Additive (design §7.2, P4): every existing project keeps review_independence=off.
+        if "review_independence" not in {r["name"] for r in conn.execute("PRAGMA table_info(state_project_enforcement)")}:
+            conn.execute("ALTER TABLE state_project_enforcement ADD COLUMN review_independence TEXT NOT NULL "
+                         "DEFAULT 'off' CHECK(review_independence IN ('off','advisory'))")
         conn.commit()
 
 

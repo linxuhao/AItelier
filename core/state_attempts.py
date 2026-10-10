@@ -878,6 +878,11 @@ class StateAttempts:
             else:
                 provenance.update(run_id=attempt["run_id"], workflow=attempt["workflow"],
                                   graph_version=attempt["graph_version"], graph_digest=attempt["graph_digest"])
+            # P4 §7.2: advisory only; None (project off) leaves the receipt untouched.
+            from core.state_review_independence import review_marking
+            marking = review_marking(conn, attempt, latest, required)
+            if marking is not None:
+                provenance.update(marking)
             conn.execute("INSERT INTO state_acceptances(receipt_id,project_id,node_key,node_revision,attempt_id,"
                          "artifact_ref,contract_hash,dependency_snapshot,evidence_ids,reviewer,created_at,provenance_json) "
                          "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",

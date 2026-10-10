@@ -246,6 +246,16 @@ class SetClaimEnforcement(Project):
     reason: str = Field(min_length=1, max_length=4000)
 
 
+class SetReviewIndependence(Project):
+    review_independence: Literal["off", "advisory"] = Field(description=(
+        "advisory: verify_node still succeeds, but a review criterion whose latest evidence came from the "
+        "attempt's current or former owner marks the receipt provenance self_reviewed=true and counts in "
+        "project_overview.self_reviewed_receipts. Visibility only; there is no required mode. "
+        "Needs multi_driver=on; default off."))
+    expected_revision: int
+    reason: str = Field(min_length=1, max_length=4000)
+
+
 class AbandonExternalAttempt(Request):
     attempt_id: str
     expected_owner_fence: int = Field(ge=0)
@@ -929,6 +939,7 @@ WRITE_REQUESTS = {
     "report_issue": ReportIssue, "link_issue": LinkIssue, "resolve_issue": ResolveIssue,
     "claim_node": ClaimNode, "release_claim": ReleaseClaim, "heartbeat": Heartbeat,
     "set_multi_driver": SetMultiDriver, "set_claim_enforcement": SetClaimEnforcement,
+    "set_review_independence": SetReviewIndependence,
     "abandon_external_attempt": AbandonExternalAttempt, "take_over_attempt": TakeOverAttempt,
     "register_subagent": RegisterSubagent,
     "offer_handoff": OfferHandoff, "accept_handoff": AcceptHandoff,
@@ -1087,6 +1098,7 @@ def _handlers(service) -> dict:
         "heartbeat": service.claims.heartbeat, "list_claims": service.claims.list_claims,
         "get_claim": service.claims.get_claim, "set_multi_driver": service.portfolio.set_multi_driver,
         "set_claim_enforcement": service.portfolio.set_claim_enforcement,
+        "set_review_independence": service.portfolio.set_review_independence,
         "abandon_external_attempt": service.recovery.abandon_external_attempt,
         "take_over_attempt": service.recovery.take_over_attempt,
         "register_subagent": service.subagents.register_subagent,

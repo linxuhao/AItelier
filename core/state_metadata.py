@@ -10,10 +10,14 @@ CREATE TABLE IF NOT EXISTS state_project_policy (
 -- switch (owner decision 2026-10-09: set_multi_driver alone keeps P1's
 -- record-only behaviour). Its own row, so the policy table keeps its shape;
 -- it shares the policy revision for the CAS. No row = off.
+-- Multi-driver P4 (design §7.2): review_independence off|advisory lives on
+-- the same row; advisory only MARKS a receipt whose review evidence came from
+-- the attempt's owner, it never refuses.
 CREATE TABLE IF NOT EXISTS state_project_enforcement (
     project_id TEXT PRIMARY KEY,
     claim_enforcement TEXT NOT NULL CHECK(claim_enforcement IN ('off','on')),
     reason TEXT NOT NULL, actor TEXT NOT NULL, updated_at TEXT NOT NULL,
+    review_independence TEXT NOT NULL DEFAULT 'off' CHECK(review_independence IN ('off','advisory')),
     FOREIGN KEY(project_id) REFERENCES state_projects(project_id)
 );
 CREATE TABLE IF NOT EXISTS state_node_holds (
@@ -55,6 +59,7 @@ def project_policy(conn, project_id):
                                     "multi_driver": "off"}
     policy.setdefault("multi_driver", "off")
     policy["claim_enforcement"] = claim_enforcement(conn, project_id)
+    policy["review_independence"] = review_independence(conn, project_id)
     return policy
 
 
@@ -65,6 +70,17 @@ def claim_enforcement(conn, project_id) -> str:
     if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='state_project_enforcement'").fetchone():
         return "off"
     row = conn.execute("SELECT e.claim_enforcement FROM state_project_enforcement e JOIN state_project_policy p "
+                       "ON p.project_id=e.project_id WHERE e.project_id=? AND p.multi_driver='on'",
+                       (project_id,)).fetchone()
+    return row[0] if row else "off"
+
+
+def review_independence(conn, project_id) -> str:
+    """off | advisory (P4, design §7.2; there is no `required` mode). Like
+    claim_enforcement it reads off whenever multi_driver is off."""
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='state_project_enforcement'").fetchone():
+        return "off"
+    row = conn.execute("SELECT e.review_independence FROM state_project_enforcement e JOIN state_project_policy p "
                        "ON p.project_id=e.project_id WHERE e.project_id=? AND p.multi_driver='on'",
                        (project_id,)).fetchone()
     return row[0] if row else "off"

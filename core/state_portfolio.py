@@ -104,11 +104,15 @@ class StatePortfolio:
                          "actor=excluded.actor,updated_at=excluded.updated_at",
                          (project_id, expected_revision + 1, old["dispatch"], reason, self.actor, now(),
                           multi_driver))
-            if multi_driver == "off" and old.get("claim_enforcement") == "on":
+            if multi_driver == "off" and (old.get("claim_enforcement") == "on"
+                                          or old.get("review_independence") == "advisory"):
                 # Turning multi_driver off takes enforcement down with it: there is
                 # nothing left to enforce against, and a later `on` starts record-only.
-                conn.execute("UPDATE state_project_enforcement SET claim_enforcement='off',reason=?,actor=?,"
-                             "updated_at=? WHERE project_id=?", (reason, self.actor, now(), project_id))
+                # Advisory review marking goes the same way (P4): without owners there
+                # is nobody to compare a reviewer against.
+                conn.execute("UPDATE state_project_enforcement SET claim_enforcement='off',"
+                             "review_independence='off',reason=?,actor=?,updated_at=? WHERE project_id=?",
+                             (reason, self.actor, now(), project_id))
             self.store._event(conn, project_id, None, "multi_driver_policy_changed",
                               {"multi_driver": multi_driver, "reason": reason,
                                "revision": expected_revision + 1, "actor": self.actor})
@@ -149,6 +153,47 @@ class StatePortfolio:
                          "updated_at=excluded.updated_at", (project_id, claim_enforcement, reason, self.actor, now()))
             self.store._event(conn, project_id, None, "claim_enforcement_policy_changed",
                               {"claim_enforcement": claim_enforcement, "reason": reason,
+                               "revision": expected_revision + 1, "actor": self.actor})
+            return project_policy(conn, project_id)
+
+    def set_review_independence(self, project_id, review_independence, expected_revision, reason):
+        """Owner/admin switch for advisory review-independence marking (P4, §7.2).
+
+        off (default): verify_node and its receipt are exactly as before.
+        advisory: verify_node still succeeds; a review criterion whose latest
+        evidence came from the attempt's current or former owner marks the
+        receipt provenance self_reviewed=true, counted by project_overview.
+        There is no `required` mode. Needs multi_driver=on; turning
+        multi_driver off resets it (set_multi_driver above).
+        """
+        from core.state_claims import ClaimError
+        if not getattr(self.service, "is_admin", False):
+            raise ClaimError("admin_required", "only the owner or an admin driver changes review_independence")
+        if not isinstance(review_independence, str) or review_independence not in {"off", "advisory"}:
+            raise StateGraphError("review_independence must be off or advisory")
+        integer(expected_revision, "expected_revision", 0)
+        reason = text(reason, "review_independence reason", 4000)
+        with self.store.transaction(write=True) as conn:
+            self.store._project(conn, project_id)
+            old = project_policy(conn, project_id)
+            if old["revision"] != expected_revision:
+                raise StateConflict("project policy revision changed")
+            if review_independence == "advisory" and old.get("multi_driver") != "on":
+                raise ClaimError("multi_driver_off", "turn multi_driver on before advisory review marking")
+            conn.execute("INSERT INTO state_project_policy(project_id,revision,dispatch,reason,actor,updated_at,"
+                         "multi_driver) VALUES(?,?,?,?,?,?,?) ON CONFLICT(project_id) DO UPDATE SET "
+                         "revision=excluded.revision,reason=excluded.reason,"
+                         "actor=excluded.actor,updated_at=excluded.updated_at",
+                         (project_id, expected_revision + 1, old["dispatch"], reason, self.actor, now(),
+                          old.get("multi_driver", "off")))
+            conn.execute("INSERT INTO state_project_enforcement(project_id,claim_enforcement,reason,actor,updated_at,"
+                         "review_independence) VALUES(?,?,?,?,?,?) ON CONFLICT(project_id) DO UPDATE SET "
+                         "review_independence=excluded.review_independence,reason=excluded.reason,"
+                         "actor=excluded.actor,updated_at=excluded.updated_at",
+                         (project_id, old.get("claim_enforcement", "off"), reason, self.actor, now(),
+                          review_independence))
+            self.store._event(conn, project_id, None, "review_independence_policy_changed",
+                              {"review_independence": review_independence, "reason": reason,
                                "revision": expected_revision + 1, "actor": self.actor})
             return project_policy(conn, project_id)
 
@@ -290,8 +335,11 @@ class StatePortfolio:
                 entry["claims"] = claims.get(n["node_key"], [])
                 nodes.append(entry)
             seq = conn.execute("SELECT COALESCE(MAX(seq),0) FROM state_events WHERE project_id=?", (project_id,)).fetchone()[0]
+            # P4 §7.2: receipts marked self_reviewed under review_independence=advisory.
+            from core.state_review_independence import self_reviewed_count
             return {"project": view["project"], "source": self._source(conn, view["project"]),
                     "policy": project_policy(conn, project_id), "nodes": nodes,
+                    "self_reviewed_receipts": self_reviewed_count(conn, project_id),
                     "counts": dict(Counter(n["status"] for n in nodes)),
                     "readiness_counts": dict(Counter(n["readiness"] for n in nodes)),
                     "ready_action_counts": ready_action_counts(nodes),

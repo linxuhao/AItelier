@@ -276,8 +276,8 @@ def checkpoint_controller(db, run_id, driver_id, is_admin, actor) -> dict:
     project. A run no State attempt binds, a project that does not enforce, or
     an attempt with no owner (legacy) is not constrained. An admin passes with
     ``break_glass`` recorded in a ``checkpoint_break_glass`` event. Ownership
-    moving between this check and the engine call is an accepted, documented
-    gap (checkpoint answers are rare and human-paced).
+    moving between this check and the engine call is an accepted gap, named
+    in docs/driver-claims.md (checkpoint answers are rare and human-paced).
     """
     from core.state_graph import StateGraphStore
     if not run_id:

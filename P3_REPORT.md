@@ -392,3 +392,135 @@ or rebuild code changed, so the rehearsal was not repeated.
 - Full suite on HEAD `5c1eb7641`, one container, 30:14: **361 failed, 6481 passed, 13 skipped, 23 errors** —
   failure-ID set IDENTICAL to base `53daff7ff2` (361F; `comm` new = 0, fixed = 0); +3 passed = the round-5
   regression tests. Logs: `/tmp/p3-logs/head_full7.log`, `/tmp/p3-logs/oldcheck5.log`.
+
+## Rebase onto main `5b8e374d7` (2026-10-10, branch `grok/multi-driver-p3-rebased`)
+
+Owner-approved preparation, reversible: `grok/multi-driver-p3` (HEAD `9512e51bc`, base `53daff7ff2`) is
+untouched; this branch is its 14 commits replayed onto `origin/main` `5b8e374d7` (38 new commits: P1
+claims already in the base, plus P2 — driver inbox `core/driver_inbox.py`, private driver notebooks,
+project-inbox `at_least_n`/`broadcast` acks — and the Godot/playtest/native-starvation batches). Nothing
+merged, pushed or deployed. Worktree `/home/linxuhao/AItelier-worktrees/multi-driver-p3-rebased`.
+
+### Conflicts and resolutions (`git rebase origin/main`, 14 commits, 2 stopped)
+
+| commit | file | conflict | resolution |
+|---|---|---|---|
+| `29a981e9` → `8b815fc0` (P3 core modules) | `core/state_commands.py` | P2 inserted its request models (`SendDriverMessage`, `ListDriverMessages`, `WaitForDriverInbox`, `DriverDeliveryTransition`) at the same spot where P3 inserted its 16 models (`SetClaimEnforcement` … `ListDriverNotices`) | both blocks kept, P2 first then P3; the `WRITE_REQUESTS`/`READ_REQUESTS`/`_handlers` tables auto-merged (an AST scan found no duplicate action key) |
+| same | `core/state_service.py` | P2 constructs `self.driver_inbox = DriverInbox(...)` where P3 constructs `recovery`/`subagents`/`handoffs`/`notices`/`guard` | both kept: inbox first, then the five P3 components. P3's move of `self.is_admin` above `ExternalAttempts(... is_admin=)` auto-merged |
+| `f0fbfb8c` → `57acaea6` (fix round 3) | `core/state_commands.py` | (a) P2 added `_director_schema(service)` (v2/v3 reply schema) at the same place P3 added `_owns_inherited_subagent`; (b) in `execute`, P2 changed the `DirectorMessageError("invalid_request")` after a `check_director_identity` failure to carry `_director_schema(service)` and added the `driver_id`-on-untrusted `ProjectPrivate` check; P3 wrapped the same failure in `if not _owns_inherited_subagent(...)` (an inherited worker keeps its origin prefix) | (a) both helpers kept; (b) P3's wrapper kept with P2's schema-carrying error inside it, P2's `ProjectPrivate` check kept after it |
+
+The other 12 commits applied cleanly (auto-merges in `core/state_changes.py` — P3's `abandoned` in the
+`wait_disposition` terminal set next to P2's inbox options —, `core/state_privacy.py`,
+`core/state_driver_guide.py`, `docs/state-agent-driver.md`, `design/multi-driver-coop.md`,
+`tests/support/state_canaries.py`, `tests/unit/test_write_opening_coverage.py`,
+`tests/unit/test_private_read_verdict_at_execution.py`). No P2 or P3 test was dropped: the P2 files
+(`test_driver_p2.py`, `test_driver_p2_scope_boundaries.py`, `test_private_director_ack_tables.py`, …) and
+the six P3 files (`test_state_p3_enforced_claims.py`, `test_state_p3_fix_round1..5.py`) are all present.
+
+Two P2 test pins were semantically (not textually) in conflict with P3 and are reconciled in one
+commit on top of the replay (`0cdce82e5`):
+- `tests/unit/test_private_director_ack_tables.py` asserted that the private-table set grew by EXACTLY the
+  two ack tables since main `f367c46f`; P3 classifies `state_handoffs` and `state_subagent_contexts` private
+  and `state_project_enforcement` public. The test now names those three as P3's additions and still asserts
+  that nothing was removed from either set and no private table is public.
+- `tests/unit/test_private_read_verdict_at_execution.py`: P2 made the trusted control service a registered
+  driver (`execpoint`), so P3's argument `list_driver_notices(driver_id="seeder-driver")` was refused with
+  `not_notice_target` for the trusted caller. The argument now names `execpoint` (a driver reads its own
+  notices); the anonymous path is still refused by `writer_only_read` as before.
+
+Semantic checks after the replay: `python -m compileall` clean; both P3 doors still derive from the action
+tables (`test_write_opening_coverage`, `test_private_read_verdict_at_execution` pass); P2's inbox `refs`
+validation names `driver_subagents` (`subagent_id`) and `state_node_claims` (`claim_id`), both of which P3
+provides, so an inbox message may now reference a real claim or subagent.
+
+### Inbox wiring decision: wired (commit `a42272c02`)
+
+The P3 notifier (`core/driver_notices.py`) already had the connection-sharing seam
+`set_inbox_adapter(deliver=, resolve=)` plus `inbox_message()` (the P2 keyword normalization). With P2 on
+main the adapter is small and testable through the real API, so it is wired as the DEFAULT:
+- `core/driver_inbox.py:deliver_notice(conn, message, notice)` writes the rows `send_driver_message` writes
+  after validation — one `driver_inbox_messages` row (thread = message, `sender_driver_id` from the notice,
+  NULL for system notices), one `driver_inbox_deliveries` row (`seq` = target's max+1, `unread`, version 1)
+  — on the CALLER's connection, inside the ownership transaction; a rolled-back write leaves no message.
+  The idempotency row `driver_inbox_requests(actor='system', operation='send', request_key=notice_id)` is
+  also the correlation notice → message (no new column anywhere).
+- `core/driver_inbox.py:resolve_notices(conn, notices, reason)` marks the notice's deliveries `resolved`
+  (version +1, from `unread` or `acknowledged`) and records `('system','resolved',notice_id)` with the
+  reason, so a settled offer / orphan stops being an open standing item (`active_standing`) without the
+  target's acknowledgement.
+- `driver_notices._inbox_hook` returns the installed override or the real inbox; `set_inbox_adapter()`
+  with no arguments restores the default (the round-2/3 tests' doubles still work and their autouse reset
+  now means "real inbox").
+- Kinds/refs follow `inbox_message`: `override_notice`/`break_glass` → `lease_notice` with a `[kind]` body
+  prefix (P2's `kind` CHECK has no code for them), refs reduced to `attempt_id|claim_id|subagent_id|node_key`
+  (the handoff id survives on the `driver_notices` row and in the correlation, which is how resolution finds
+  the delivery).
+- The inbox is keyed to the P0 registry (`driver_inbox_deliveries.target_driver_id REFERENCES drivers`,
+  `PRAGMA foreign_keys=ON` on every store transaction). A notice addressed to a driver id that is NOT
+  registered — every P3 unit fixture that skips the registry, and a legacy owner id — keeps the
+  `driver_notices` row and the `driver_notice` event and returns `inbox: {"skipped": "unregistered_driver"}`
+  in the write's `notified` entry; a missing inbox schema returns `{"skipped": "inbox_unavailable"}`. Returned,
+  never swallowed.
+- Not changed: the `driver_notices` table and `list_driver_notices` stay (they carry the full refs, the
+  resolution reason and the project scope the inbox message does not); `wait_for_state_change` keeps waking
+  on the `driver_notice` event. Docs: `docs/driver-claims.md` "Notices", driver guide ("Claims and leases"),
+  the module header; the `delivery` string of `list_driver_notices` names the inbox reads.
+
+Regression test `tests/unit/test_state_p3_inbox_wiring.py` (4 tests, all through `execute`):
+`offer_handoff` → the receiver's `list_driver_messages`/`wait_for_driver_inbox` show one `handoff_offer`
+from `codex` with the attempt/node refs, the sender's inbox is empty, the receiver acknowledges it through
+`acknowledge_driver_message` (version 2), `accept_handoff` resolves notice AND delivery (version 3,
+`active_standing` 0); a takeover's `takeover_notice` and an admin's `break_glass` arrive with no sender
+(`lease_notice` + prefix); unregistered target → skip + row; a write that fails after delivery leaves no
+inbox or notice row.
+
+### Test results
+Throwaway containers only (`docker run --rm --network none --cpus 2 -m 2g --user 1000:1000 -v <tree>:/src:ro
+-v ~/AItelier/.git:~/AItelier/.git:ro -w /src aitelier:latest python -m pytest -p no:cacheprovider -q -rfE`,
+two at once, never the production containers). The `.git` read-only mount is NEW this round: a worktree's
+`.git` is a pointer into the main checkout, and without it the tests that shell out to `git show`
+(P2's migration test, the ack-table pin, the banned-phrase scan) fail as "not a git repository".
+
+| run | tree | result | log |
+|---|---|---|---|
+| baseline | `origin/main` `5b8e374d7` (detached worktree, since removed) | **284 failed, 7117 passed, 12 skipped, 2 errors** (35:07) | `/tmp/p3rebase/base_full.log`, IDs `base_fail.txt` (286) |
+| rebased HEAD | `a42272c02` (replay + reconciliation + inbox wiring) | **286 failed, 7241 passed, 12 skipped, 2 errors** (43:50) | `/tmp/p3rebase/head_full.log`, IDs `head_fail.txt` (288) |
+
+Failure-ID diff (`comm`): fixed = 0; **new = 2**, both
+`tests/integration/test_no_unfalsifiable_guarantees.py::test_a_round_file_carries_no_lie_keeping_phrase[...]`
+for `P3_REPORT.md` and `core/state_enforcement.py`. That scan bans five phrases in every file changed since
+`9c79f11f`. The earlier P3 rounds never exercised it: their containers had no git, so the scan's own scope
+test failed identically on base and head (`head_full7.log` shows it; zero per-file cases ran) and the sets
+compared equal. With git mounted the scan runs on both sides; main's own six hits (`api/config_routers.py`,
+`api/project_routers.py`, `api/run_routers.py`, `core/ai_router.py`, `tests/unit/test_ai_router.py`,
+`tests/unit/test_godot_retention_corrections.py`) are in the baseline set, and the two P3 hits were one word
+in `assert_decision_open`'s docstring and four places in this report. Reworded in `97ec44586` (prose only, no
+behaviour); targeted rerun on that commit (`/tmp/p3rebase/targeted3.log`): the scan + `test_state_p3_fix_round4/5`
++ `test_state_p3_enforced_claims` + the wiring test = **420 passed, 6 failed**, the 6 being exactly main's
+six baseline hits. So on `97ec44586` the failure set is the baseline set: new = 0.
+
++124 passed on HEAD = the 87 P3 tests (33 + 19 + 14 + 11 + 7 + 3 in the six P3 files, `pytest --collect-only`),
+the 4 wiring tests, and 33 new parametrizations of the derived suites (exhaustive doors, mutation gate,
+argument table, P3 files in the banned-phrase scan).
+
+P3 tests explicitly, after the rebase (`/tmp/p3rebase/targeted1.log`, `targeted2.log`, `targeted3.log`):
+`test_state_p3_enforced_claims.py`, `test_state_p3_fix_round1..5.py`, `test_state_p3_inbox_wiring.py`, plus
+P2's `test_driver_p2.py`, `test_driver_p2_scope_boundaries.py`, `test_private_director_ack_tables.py`,
+`test_private_read_verdict_at_execution.py`, `test_write_opening_coverage.py`, `test_state_claims.py`,
+`test_state_driver_guide.py`, `test_postcompact_driver_hook.py` — all pass (335 + 29 + 420 across the three
+runs; the only failures ever seen were the two pins above before their reconciliation and two of my own
+wiring tests before their fix, both recorded in `smoke2.log` / `targeted1.log`).
+
+### Commits on this branch beyond the replay
+- `0cdce82e5` Rebase onto main 5b8e374d7: reconcile two P2 test pins with P3
+- `a42272c02` P3 notices delivered to the P2 driver inbox (default adapter)
+- `97ec44586` Reword a banned phrase in state_enforcement and P3_REPORT
+- (this section)
+
+### Still open after the rebase
+- The stale lines at the top of this report ("deliberately uncommitted", "HEAD = `200b73c3`") describe the
+  first round; the branch history is the record.
+- Known gap 11 above ("P2 inbox not on main") is closed by the wiring; gaps 1–10 stand.
+- `wait_for_state_change` does not wake on an inbox-only change for a notice without `project_id` (none of
+  P3's notices today); the inbox wait re-polls every second regardless.
+- Not done here, as instructed: no merge, no push, no deploy, `grok/multi-driver-p3` untouched.

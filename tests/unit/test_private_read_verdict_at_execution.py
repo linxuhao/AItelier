@@ -69,7 +69,7 @@ def _settle(value):
 def _services(tmp_path):
     db = C.new_database(tmp_path, "execpoint.sqlite")
     from core.drivers import DriverRegistry
-    registry = DriverRegistry(db, "owned-execution-point-pepper")
+    registry = DriverRegistry(db, "owned-execution-point-pepper-not-a-secret")
     registry.register("execpoint", "Owned reader", actor="fixture")
     registry.set_membership(C.OPEN, "execpoint", "member", 0, "owned fixture", actor="fixture")
     trusted = StateService(db, actor="driver:execpoint", driver_id="execpoint",

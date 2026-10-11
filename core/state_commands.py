@@ -1121,7 +1121,8 @@ def execute(service, action: str, arguments: dict, *, allow_write: bool = False)
     if not isinstance(arguments, dict):
         if director_action:
             from core.director_messaging_protocol import DirectorMessageError
-            return DirectorMessageError("invalid_request", _director_schema(service)).as_dict()
+            return DirectorMessageError("invalid_request", _director_schema(service),
+                                        message="arguments: must be an object").as_dict()
         raise StateGraphError("arguments must be an object")
     if director_action:
         setter = getattr(getattr(service,"director_messages",None),"_set_reply_schema",None)
@@ -1171,7 +1172,16 @@ def execute(service, action: str, arguments: dict, *, allow_write: bool = False)
     except ValidationError as exc:
         if director_action:
             from core.director_messaging_protocol import DirectorMessageError
-            return DirectorMessageError("invalid_request", _director_schema(service)).as_dict()
+            # Locations are limited to declared fields: extra keys, input values
+            # and validator messages/context can contain caller secrets.
+            fields = REQUESTS[action].model_fields
+            reasons = []
+            for error in exc.errors(include_input=False, include_context=False)[:10]:
+                location = error["loc"]
+                field = location[0] if location and location[0] in fields else "unexpected field"
+                reasons.append(f"{field}: {error['type']}")
+            return DirectorMessageError("invalid_request", _director_schema(service),
+                                        message="; ".join(reasons)).as_dict()
         # Bounded validation errors without echoing whole inputs into logs.
         details = [{"field": ".".join(map(str, e["loc"])), "error": e["msg"]} for e in exc.errors(include_input=False)[:10]]
         raise StateGraphError(str(details)) from exc
@@ -1186,7 +1196,8 @@ def execute(service, action: str, arguments: dict, *, allow_write: bool = False)
         except DriverError as exc:
             if director_action:
                 from core.director_messaging_protocol import DirectorMessageError
-                return DirectorMessageError("invalid_request", _director_schema(service)).as_dict()
+                return DirectorMessageError("invalid_request", _director_schema(service),
+                                            message="director_identity: use the authenticated driver id or its <id>/<label>").as_dict()
             raise StateGraphError(str(exc)) from exc
     if args.get("driver_id") and not service.project_read_trusted:
         raise ProjectPrivate()

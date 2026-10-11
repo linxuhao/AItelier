@@ -52,6 +52,17 @@ def test_v1_vector_scenarios_are_preserved_before_v2_delta_vectors():
         "aitelier.director-messaging.conformance.v1",
         "aitelier.director-messaging.conformance.v2").replace(
         "aitelier.director-messaging.v1", "aitelier.director-messaging.v2"))
+    # Only these two human explanations evolved; the literal requests, closed
+    # error codes, outcomes and every other v1 scenario remain identical.
+    explanations = {
+        "bad-mode": "target_project_id / broadcast / reply_to_delivery_id: choose exactly one destination; replies omit target_project_id",
+        "bad-first": "subject: must contain 1 to 200 characters after NFC normalization",
+    }
+    for scenario in transformed["scenarios"]:
+        for step in scenario["steps"]:
+            key = step["arguments"].get("request_key")
+            if key in explanations:
+                step["expect"]["detail"]["message"] = explanations[key]
     assert v2["project_ids"] == transformed["project_ids"]
     assert v2["scenarios"][:len(transformed["scenarios"])] == transformed["scenarios"]
     assert len(v2["scenarios"]) == len(transformed["scenarios"]) + 1

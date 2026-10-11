@@ -76,8 +76,8 @@ def test_101_owned_roots_four_patterns_charge_each_directory_once(monkeypatch, t
         shutil.rmtree(home)
     manifest = _assert_bytes(out, corr)
     assert len({(r["pass"], r["user_path"]) for r in manifest["files"]}) == 2020
-    shutil.copytree(out['retained_dir'], '/review/union-101-owned-evidence', dirs_exist_ok=True)
-    Path('/review/union-101-roots.json').write_text(json.dumps(
+    shutil.copytree(out['retained_dir'], tmp_path / 'union-101-owned-evidence', dirs_exist_ok=True)
+    (tmp_path / 'union-101-roots.json').write_text(json.dumps(
         {"owned_roots": 101, "patterns": PATTERNS, "unique_entries": 2222,
          "directory_scans": len(scans), "files": len(out["files"]),
          "complete_raw_streams": len(out["raw_logs"]), "manifest": manifest}, indent=2))
@@ -211,9 +211,9 @@ def test_normal_http_script_and_playtest_retain_real_child_outputs(monkeypatch, 
                     assert row['size'] > 6000
             assert all(not home.exists() for home in homes)
             manifests.append((Path(out['manifest']), Path(out['manifest']).read_bytes()))
-            shutil.copytree(out['retained_dir'], '/review/normal-union-' + route[1:] + '-evidence',
+            shutil.copytree(out['retained_dir'], tmp_path / ('normal-union-' + route[1:] + '-evidence'),
                             dirs_exist_ok=True)
-            Path('/review/normal-union-' + route[1:] + '.json').write_text(json.dumps(
+            (tmp_path / ('normal-union-' + route[1:] + '.json')).write_text(json.dumps(
                 {'route': route, 'child_processes': passes, 'retained_files': len(out['files']),
                  'complete_raw_streams': len(out['raw_logs']), 'manifest': manifest}, indent=2))
         assert manifests[0][0] != manifests[1][0]

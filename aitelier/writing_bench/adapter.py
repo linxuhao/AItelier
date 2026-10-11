@@ -5,6 +5,9 @@ only by a registered versioned graph with framework-injected run identity.
 """
 from __future__ import annotations
 
+import sys as _bench_identity_sys
+__bench_implementation_code__ = _bench_identity_sys._getframe().f_code
+
 import importlib.util
 from pathlib import Path
 import uuid

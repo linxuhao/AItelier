@@ -43,6 +43,9 @@ No database: the skillflow engine owns workflow enforcement, git owns audit.
 
 from __future__ import annotations
 
+import sys as _bench_identity_sys
+__bench_implementation_code__ = _bench_identity_sys._getframe().f_code
+
 import copy
 import json
 import re

@@ -5,6 +5,9 @@ judgements, never a copied author manuscript or a second copy of its ledger.
 """
 from __future__ import annotations
 
+import sys as _bench_identity_sys
+__bench_implementation_code__ = _bench_identity_sys._getframe().f_code
+
 from dataclasses import dataclass
 import copy
 import os
@@ -28,10 +31,8 @@ LISTS = ("events", "appearances", "locations", "thread_updates", "arc_updates")
 
 
 def engine_identity() -> str:
-    root = Path(__file__).resolve().parents[2]
-    files = sorted(Path(__file__).parent.glob("*.py")) + [Path(ns.__file__),
-            root / "core/dpe_pipeline.py", root / "core/ai_router.py"]
-    return sha(encode({str(p.relative_to(root)): sha(p.read_bytes()) for p in files}))
+    from .identity import executing_identity
+    return executing_identity()
 
 
 def validate_ledger(value: dict, chapter: int, title: str) -> None:

@@ -6,6 +6,9 @@ host owns certificates; models can read materials and write judgments, not proof
 """
 from __future__ import annotations
 
+import sys as _bench_identity_sys
+__bench_implementation_code__ = _bench_identity_sys._getframe().f_code
+
 from dataclasses import dataclass
 import json
 from pathlib import Path

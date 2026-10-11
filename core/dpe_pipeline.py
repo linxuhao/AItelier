@@ -1,3 +1,6 @@
+
+import sys as _bench_identity_sys
+__bench_implementation_code__ = _bench_identity_sys._getframe().f_code
 # core/dpe_pipeline.py
 # [修复说明] 修正了 Gate 物理拦截时的文件相对路径，并加入了 [DPE Debug] 控制台转播。
 # [变更] step_id 从 int 改为 str；支持多 action 产出；新增 subtask 循环逻辑；

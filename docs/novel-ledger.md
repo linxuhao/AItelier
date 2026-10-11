@@ -55,3 +55,15 @@ ledger_query(kind="characters", name="尹骁", field="右臂", chapter_from=8)
 - **replay** (auto when the repo has the `novel-genesis` tag — every scaffolded book): resets the replay-managed paths to the genesis bible and re-books every `chapters/*/events.yaml` with the current code (the same `replay_chapter` the writing bench's replay guard uses), so the result is byte-identical to a bench replay by construction. If the replayed current state differs from the old bible (bible edited outside the journal), it refuses and lists the differences; `--force` accepts the replayed values, `--mode strip` keeps the old values.
 - **strip** (no genesis tag): removes history blocks and 本章* keys in place and derives the ledger from the journals. Current state is correct, but files are **not** guaranteed byte-identical to a replay, so such books cannot use the writing bench's replay guard.
 - One transaction (failure rolls back); re-running after success is a no-op. `--stale-after N` is opt-in and breaks replay equality.
+
+
+Writing Bench readiness refuses an accepted book with nonempty legacy in-bible
+history before literary review. It does not migrate the book. From the AItelier
+checkout, run `python scripts/novel_ledger.py migrate <novel_repo> --mode replay
+--dry-run`; inspect `replay_warnings` and `drift`, resolving differences before
+running the same command without `--dry-run`. Review `git diff` and explicitly
+commit the result, then submit a new request based on that commit. Replay mode
+requires the existing `novel-genesis` tag; strip mode does not establish Bench
+replay equality. Do not bypass a reported difference with force or stale-state
+pruning. A modern book's accepted replay drift remains a separate conclusive
+refusal and is not labelled migration-needed.

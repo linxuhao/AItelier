@@ -16,6 +16,7 @@ import tempfile
 import yaml
 
 from aitelier import novel_state as ns
+from aitelier.novel_ledger_migrate import has_legacy_history
 from .context import assemble, read_frozen
 from .reading import (PROTOCOL, Material, frame, material_identity, validate_certificate, validate_targets)
 from .storage import (BenchError, BenchReplayRefused, TREE_LIMIT, checked_root, checkout, clean_head,
@@ -359,8 +360,17 @@ class Bench:
 
     def _replay_guard(self, revision: str, genesis_files: dict[str, bytes]) -> None:
         with checkout(self.policy.repo, revision, self.root / "scratch") as wt:
+            if has_legacy_history(wt):
+                raise BenchReplayRefused(
+                    "legacy in-bible history: Writing Bench requires replay migration. "
+                    "From the AItelier checkout run: python scripts/novel_ledger.py migrate "
+                    "<novel_repo> --mode replay --dry-run. Inspect replay_warnings and drift; "
+                    "resolve any differences before running the same command without --dry-run. "
+                    "Review git diff and explicitly commit the migration, then submit a new "
+                    "request at that commit. No book data has been migrated by readiness.")
             self._reset_replay(wt, genesis_files)
-            require(not git(wt, "diff", "--name-only", revision, "--", *MANAGED), "accepted replay drift")
+            if git(wt, "diff", "--name-only", revision, "--", *MANAGED):
+                raise BenchReplayRefused("accepted replay drift")
             require(not git(wt, "ls-files", "--others", "--exclude-standard"), "untracked replay state")
 
     def replay_candidate(self, run_id: str) -> dict:

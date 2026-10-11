@@ -54,7 +54,7 @@ def test_live_selected_pin_prevents_unlink_recreate_inode_reuse(monkeypatch, tmp
     assert _fd_count() == before
     for fd in pins:
         _closed(fd)
-    Path("/review/actual-selected-pin-inode-lifetime.json").write_text(json.dumps(
+    (tmp_path / "actual-selected-pin-inode-lifetime.json").write_text(json.dumps(
         {"selected_replacement_inode_pairs": identities, "pins": pins,
          "selected_original_bytes_read_from_live_fd": True,
          "replacement_not_copied": True, "result": out,

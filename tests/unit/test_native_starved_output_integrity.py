@@ -196,3 +196,66 @@ def test_unique_batch_ids_and_cross_turn_reuse_still_finish(budget_case, partial
     assert eng._exec_tool.call_count == int(partial) + 2
     assert nat.gateway.max_output_tokens == 8192
     assert not [p for _, ev, p in traces if ev == "output_starvation_invalid_correction"]
+
+
+def malformed_quote_turn():
+    return _turn(tool_calls=[{
+        "id": "malformed", "function": {"name": "edit",
+        "arguments": '{"reason": "synthetic "quoted" finding"}'}}])
+
+
+def test_malformed_correction_gets_one_syntax_retry_inside_existing_turn_budget(budget_case):
+    eng, ws, draft, traces = budget_case
+    invalid = malformed_quote_turn()
+    nat, calls, emitted = script_case(budget_case, [
+        _turn(truncated=True), invalid,
+        _turn(tool_calls=[_tc("edit", {"reason": 'synthetic "quoted" finding'}),
+                          _tc("finish_step", cid="finish")])], cap=8192, budget=3)
+    assert _run(eng, ws) is True
+    assert len(calls) == 3 and eng._exec_tool.call_count == 2
+    assert nat.gateway.max_output_tokens == 8192
+    nat.gateway.escalate_output_cap.assert_not_called()
+    retained = [p for _, ev, p in traces if ev == "output_starvation_invalid_correction"]
+    assert len(retained) == 1 and retained[0]["tool_calls"] == invalid.tool_calls
+    retry = [p for _, ev, p in traces if ev == "output_starvation_syntax_retry"]
+    assert len(retry) == 1 and retry[0]["remaining_turns"] == 1
+    assert "escape" in calls[-1]["messages"][-1]["content"].lower()
+
+
+@pytest.mark.parametrize("budget,responses", [
+    (2, [_turn(truncated=True), malformed_quote_turn()]),
+    (4, [_turn(truncated=True), malformed_quote_turn(), malformed_quote_turn()]),
+])
+def test_last_turn_or_second_malformed_correction_fails_without_effects(budget_case, budget, responses):
+    eng, ws, draft, traces = budget_case
+    nat, calls, emitted = script_case(budget_case, responses, cap=8192, budget=budget)
+    with pytest.raises(NativeOutputCapExhausted):
+        _run(eng, ws)
+    assert_retained_incomplete(budget_case, nat, emitted, partial=False, calls=len(responses))
+    eng._exec_tool.assert_not_called()
+    assert nat.gateway.max_output_tokens == 8192
+
+
+def test_create_verdict_style_quote_repair_executes_only_valid_subsequent_batch(budget_case):
+    eng, ws, draft, traces = budget_case
+    invalid = _turn(tool_calls=[{"id": "bad-verdict", "function": {
+        "name": "create_verdict", "arguments":
+        '{"passed": true, "read_complete": true, "findings": [{"reason": "synthetic "quoted" finding"}]}'}}])
+    corrected = {"passed": True, "read_complete": True,
+                 "findings": [{"reason": 'synthetic "quoted" finding'}]}
+    nat, calls, emitted = script_case(budget_case, [
+        _turn(truncated=True), invalid,
+        _turn(tool_calls=[_tc("create_verdict", corrected), _tc("finish_step", cid="finish")])],
+        cap=8192, budget=3)
+    schemas = {"create_verdict": {"type": "object", "properties": {
+        "passed": {"type": "boolean"}, "read_complete": {"type": "boolean"},
+        "findings": {"type": "array"}}}}
+    assert eng.run_step(task_id=1, step_id="t_impl", workspace=ws,
+                        project_id="default", agent_config_name="bench_literary_v2",
+                        tool_schemas=schemas) is True
+    assert eng._exec_tool.call_count == 2
+    assert eng._exec_tool.call_args_list[0].args[0]["params"] == corrected
+    assert len(calls) == 3
+    assert invalid.tool_calls[0]["function"]["arguments"] in json.loads(
+        calls[-1]["messages"][-1]["content"].split("Unexecuted batch: ", 1)[1])[0]["function"]["arguments"]
+    nat.gateway.escalate_output_cap.assert_not_called()

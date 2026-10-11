@@ -205,3 +205,22 @@ def test_new_owned_instance_does_not_inherit_another_instances_pending_recovery(
     assert (root / "partial.py").read_text() == "OWNED=1\n"
     assert not e._resume_from_trace("p", 2)["starved_recovery_pending"]
     sf._conn.close()
+
+
+def test_reclaim_does_not_reset_consumed_syntax_retry(tmp_path, monkeypatch):
+    sf, rid, claim, root = f.run_fixture(tmp_path, monkeypatch)
+    malformed = SimpleNamespace(text="", reasoning_content="", truncated=False,
+        tool_calls=[{"id": "bad", "function": {"name": "create",
+                     "arguments": '{"content": "synthetic "quoted" text"}'}}])
+    seed_crash(sf, rid, claim, root, 6, script=[
+        f.response("create", file="partial.py", content="OWNED=1\n"),
+        starve(), malformed, KeyboardInterrupt("crash after syntax retry")])
+    assert len(payloads(sf, "output_starvation_syntax_retry")) == 1
+    calls = []
+    restored, ws = traced_host(sf, rid, claim, root, [malformed], calls, 6)
+    with pytest.raises(NativeOutputCapExhausted):
+        f.execute(restored, ws, rid, claim)
+    assert len(calls) == 1
+    assert len(payloads(sf, "output_starvation_syntax_retry")) == 1
+    assert len(payloads(sf, "output_starvation_invalid_correction")) == 2
+    assert (root / "partial.py").read_text() == "OWNED=1\n"

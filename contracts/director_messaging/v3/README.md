@@ -17,3 +17,9 @@ Private driver inbox and dnote notebooks are separate private actions. They are
 never projected into a public project read. Existing project note arguments keep
 their in_force schema; state_graph_help publishes driver_arguments for each
 private notebook action, allowing informational (default) and in_force.
+
+Error `code` remains the closed machine-readable enum. `detail.message` is bounded
+to 1000 characters and may explain a declared field and stable validation kind or
+authorization requirement. It never echoes submitted values, unknown field names,
+validator context, message body, credentials or the supplied director identity.
+An explanation does not relax request validation or grant membership.

@@ -79,6 +79,9 @@ services:
       GODOT_BUILDER_URL: "http://godot-builder:8080"
       AITELIER_HOME: "${HOME}/.AItelier"
       AITELIER_ZVEC_LIFECYCLE: "1"
+      # A run's first semantic_search waits this long for its index build
+      # (measured ready 14-37s after run start when the 10s default failed).
+      AITELIER_ZVEC_PREPARE_WAIT_SECONDS: "60"
       ZVEC_GREP_SERVER_URL: "http://zvec-grep:7998/mcp"
       # The readability gate (godot_vision) shows the frames the play-test
       # already rendered to a vision model and fails when the game is

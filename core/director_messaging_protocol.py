@@ -23,14 +23,14 @@ V3_ERROR_CODES = ERROR_CODES | {"use_driver_inbox", "ack_quorum_unreachable"}
 class DirectorMessageError(Exception):
     """Stable protocol error, represented by its closed JSON object."""
 
-    def __init__(self, code: str, schema=SCHEMA_ID):
+    def __init__(self, code: str, schema=SCHEMA_ID, *, message=None):
         if code not in V3_ERROR_CODES:
             raise ValueError(f"unknown director message error code: {code}")
         self.code = code
         self.envelope = {
             "schema": schema,
             "code": code,
-            "detail": {"message": code},
+            "detail": {"message": code if message is None else message[:1000]},
         }
         super().__init__(code)
 

@@ -141,3 +141,9 @@ both this fake and the real provider.
 Guidance for this protocol is **agent-neutral**. Codex, Claude, a workflow, and
 an external harness are transport examples only. None owns the protocol,
 supplies authorization through its name, or changes these rules.
+
+Error `code` remains the closed machine-readable enum. `detail.message` is bounded
+to 1000 characters and may explain a declared field and stable validation kind or
+authorization requirement. It never echoes submitted values, unknown field names,
+validator context, message body, credentials or the supplied director identity.
+An explanation does not relax request validation or grant membership.

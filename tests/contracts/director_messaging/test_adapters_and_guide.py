@@ -35,8 +35,9 @@ def test_state_command_vocabulary_and_closed_envelopes(tmp_path):
         "unread", "acknowledged", "resolved"}
     invalid = execute(service, "send_director_message", {"sender_project_id": "alpha"},
                       allow_write=True)
-    assert invalid == {"schema": "aitelier.director-messaging.v2",
-                       "code": "invalid_request", "detail": {"message": "invalid_request"}}
+    assert invalid["schema"] == "aitelier.director-messaging.v2"
+    assert invalid["code"] == "invalid_request"
+    assert "director_identity: missing" in invalid["detail"]["message"]
     sent = execute(service, "send_director_message", {
         "sender_project_id": "alpha", "director_identity": "director", "request_key": "one",
         "subject": "subject", "body": "", "target_project_id": "beta"}, allow_write=True)
@@ -234,9 +235,12 @@ def test_mcp_wire_authorized_malformed_nested_body_is_closed_invalid_request(
             "name": "state_graph_write", "arguments": outer}}, headers=headers)
     result = response.json()["result"]
     assert result.get("isError") is not True
-    assert json.loads(result["content"][0]["text"])["result"] == {
-        "schema": "aitelier.director-messaging.v2", "code": "invalid_request",
-        "detail": {"message": "invalid_request"}}
+    envelope = json.loads(result["content"][0]["text"])["result"]
+    assert set(envelope) == {"schema", "code", "detail"}
+    assert envelope["schema"] == "aitelier.director-messaging.v2"
+    assert envelope["code"] == "invalid_request"
+    assert set(envelope["detail"]) == {"message"}
+    assert envelope["detail"]["message"] != "invalid_request"
 
 
 def test_mcp_tools_list_keeps_generic_state_arguments_required_objects(client):

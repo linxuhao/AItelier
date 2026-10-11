@@ -280,7 +280,8 @@ def _install_director_call_guard(mcp: FastMCP) -> None:
                                                convert_result=convert_result)
                     code = "invalid_request"
                 from core.director_messaging_protocol import DirectorMessageError
-                result = {"result": DirectorMessageError(code).as_dict()}
+                result = {"result": DirectorMessageError(
+                    code, message="arguments: must be an object" if code == "invalid_request" else None).as_dict()}
                 if convert_result:
                     tool = manager.get_tool(name)
                     return tool.fn_metadata.convert_result(result)

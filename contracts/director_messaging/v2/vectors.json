@@ -403,7 +403,7 @@
             "schema": "aitelier.director-messaging.v2",
             "code": "invalid_request",
             "detail": {
-              "message": "invalid_request"
+              "message": "target_project_id / broadcast / reply_to_delivery_id: choose exactly one destination; replies omit target_project_id"
             }
           }
         },
@@ -460,7 +460,7 @@
             "schema": "aitelier.director-messaging.v2",
             "code": "invalid_request",
             "detail": {
-              "message": "invalid_request"
+              "message": "subject: must contain 1 to 200 characters after NFC normalization"
             }
           }
         },

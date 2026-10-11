@@ -29,17 +29,19 @@ ERROR_CODES = frozenset({
 class DirectorMessageError(_V1Error):
     """The v1 error vocabulary with the v2 closed wire envelope."""
 
-    def __init__(self, code: str):
+    def __init__(self, code: str, *, message=None):
         super().__init__(code)
         self.envelope["schema"] = SCHEMA_ID
+        if message is not None:
+            self.envelope["detail"]["message"] = message[:1000]
 
 __all__ = [
     "ACTIONS", "DirectorMessageError", "ERROR_CODES", "InMemoryDirectorMessaging",
 ]
 
 
-def _invalid() -> None:
-    raise DirectorMessageError("invalid_request")
+def _invalid(message=None) -> None:
+    raise DirectorMessageError("invalid_request", message=message)
 
 
 def _db_id(value) -> str:
@@ -48,12 +50,12 @@ def _db_id(value) -> str:
     return value
 
 
-def _nfc_text(value, minimum: int, maximum: int) -> str:
+def _nfc_text(value, minimum: int, maximum: int, field=None) -> str:
     if not isinstance(value, str):
         _invalid()
     value = unicodedata.normalize("NFC", value)
     if not minimum <= len(value) <= maximum:
-        _invalid()
+        _invalid(f"{field}: must contain {minimum} to {maximum} characters after NFC normalization" if field else None)
     return value
 
 
@@ -164,7 +166,7 @@ class InMemoryDirectorMessaging:
         sender_project_id = _db_id(sender_project_id)
         director_identity = _nfc_text(director_identity, 1, 320)
         request_key = _nfc_text(request_key, 1, 320)
-        subject = _nfc_text(subject, 1, 200)
+        subject = _nfc_text(subject, 1, 200, "subject")
         body = _nfc_text(body, 0, 8000)
         if type(broadcast) is not bool:
             _invalid()
@@ -180,7 +182,7 @@ class InMemoryDirectorMessaging:
             not broadcast and target_project_id is None and reply_to_delivery_id is not None,
         )
         if sum(modes) != 1:
-            _invalid()
+            _invalid("target_project_id / broadcast / reply_to_delivery_id: choose exactly one destination; replies omit target_project_id")
 
         payload = {
             "body": body, "broadcast": broadcast, "director_identity": director_identity,

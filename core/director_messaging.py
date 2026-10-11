@@ -24,7 +24,8 @@ def _message_errors(method):
             code = exc.code
             if self.reply_schema == SCHEMA_ID and code not in ERROR_CODES:
                 code = "invalid_request"
-            raise DirectorMessageError(code, self.reply_schema) from exc
+            raise DirectorMessageError(code, self.reply_schema,
+                                       message=exc.envelope["detail"]["message"] if code == exc.code else None) from exc
     return invoke
 
 
@@ -76,22 +77,22 @@ CREATE TABLE IF NOT EXISTS state_director_idempotency (
 """
 
 
-def _invalid():
-    raise DirectorMessageError("invalid_request")
+def _invalid(message=None):
+    raise DirectorMessageError("invalid_request", message=message)
 
 
-def _db_id(value):
+def _db_id(value, field=None):
     if not isinstance(value, str) or not 1 <= len(unicodedata.normalize("NFC", value)) <= 320:
-        _invalid()
+        _invalid(f"{field}: must be text of 1 to 320 characters" if field else None)
     return value
 
 
-def _nfc(value, minimum, maximum):
+def _nfc(value, minimum, maximum, field=None):
     if not isinstance(value, str):
-        _invalid()
+        _invalid(f"{field}: must be text" if field else None)
     value = unicodedata.normalize("NFC", value)
     if not minimum <= len(value) <= maximum:
-        _invalid()
+        _invalid(f"{field}: must contain {minimum} to {maximum} characters after NFC normalization" if field else None)
     return value
 
 
@@ -230,7 +231,7 @@ class SQLiteDirectorMessaging:
 
     def _set_reply_schema(self, protocol_version, extended=False):
         if protocol_version not in ("v2","v3"):
-            _invalid()
+            _invalid("protocol_version: must be v2 or v3")
         self.reply_schema = V3_SCHEMA_ID if protocol_version=="v3" or extended else SCHEMA_ID
         if protocol_version=="v3" or extended:
             self.v3 = True
@@ -254,10 +255,12 @@ class SQLiteDirectorMessaging:
         if self.actor.startswith("owner:"):
             return "owner"
         if not self.driver_id or self.driver_id not in members(conn, project_id):
-            raise DirectorMessageError("unauthorized", V3_SCHEMA_ID)
+            raise DirectorMessageError("unauthorized", V3_SCHEMA_ID,
+                                       message="project membership: requires an active registered member driver or owner")
         row = conn.execute("SELECT status FROM drivers WHERE driver_id=?", (self.driver_id,)).fetchone()
         if row is None or row["status"] != "active":
-            raise DirectorMessageError("unauthorized", V3_SCHEMA_ID)
+            raise DirectorMessageError("unauthorized", V3_SCHEMA_ID,
+                                       message="project membership: requires an active registered member driver or owner")
         return self.driver_id
 
     @staticmethod
@@ -282,24 +285,24 @@ class SQLiteDirectorMessaging:
         self._set_reply_schema(protocol_version, ack_mode is not None or ack_quorum is not None)
         if ack_mode is not None or ack_quorum is not None:
             self.v3 = True
-        sender_project_id = _db_id(sender_project_id)
-        director_identity = _nfc(director_identity, 1, 320)
-        request_key = _nfc(request_key, 1, 320)
-        subject = _nfc(subject, 1, 200)
-        body = _nfc(body, 0, 8000)
+        sender_project_id = _db_id(sender_project_id, "sender_project_id")
+        director_identity = _nfc(director_identity, 1, 320, "director_identity")
+        request_key = _nfc(request_key, 1, 320, "request_key")
+        subject = _nfc(subject, 1, 200, "subject")
+        body = _nfc(body, 0, 8000, "body")
         if type(broadcast) is not bool:
             _invalid()
         if target_project_id is not None:
-            target_project_id = _db_id(target_project_id)
+            target_project_id = _db_id(target_project_id, "target_project_id")
         if reply_to_delivery_id is not None:
-            reply_to_delivery_id = _db_id(reply_to_delivery_id)
+            reply_to_delivery_id = _db_id(reply_to_delivery_id, "reply_to_delivery_id")
         if delivery_mode not in ("transient", "standing"):
             _invalid()
         targeted = not broadcast and target_project_id is not None and reply_to_delivery_id is None
         broadcasting = broadcast and target_project_id is None and reply_to_delivery_id is None
         replying = not broadcast and target_project_id is None and reply_to_delivery_id is not None
         if sum((targeted, broadcasting, replying)) != 1:
-            _invalid()
+            _invalid("target_project_id / broadcast / reply_to_delivery_id: choose exactly one destination; replies omit target_project_id")
         if targeted and target_project_id == sender_project_id:
             if self.reply_schema == V3_SCHEMA_ID:
                 raise DirectorMessageError("use_driver_inbox", V3_SCHEMA_ID)

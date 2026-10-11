@@ -218,7 +218,7 @@
           "type": "object",
           "additionalProperties": false,
           "required": ["message"],
-          "properties": {"message": {"$ref": "#/$defs/errorCode"}}
+          "properties": {"message": {"type": "string", "minLength": 1, "maxLength": 1000}}
         }
       }
     },

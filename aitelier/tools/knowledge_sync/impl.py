@@ -395,6 +395,7 @@ def _migrate_tracked_knowledge(repo: Path,
     temp_index = None
     lock_path = index_path.with_name(index_path.name + ".lock")
     lock_fd = None
+    lock_identity = None
     knowledge_changed = False
     try:
         index_before = index_path.read_bytes()
@@ -441,6 +442,8 @@ def _migrate_tracked_knowledge(repo: Path,
             raise RuntimeError("repository index changed while migration was prepared")
         lock_fd = os.open(
             lock_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        lock_stat = os.fstat(lock_fd)
+        lock_identity = (lock_stat.st_dev, lock_stat.st_ino)
         os.fchmod(lock_fd, index_mode)
         with os.fdopen(lock_fd, "wb") as lock_handle:
             lock_fd = None
@@ -456,6 +459,7 @@ def _migrate_tracked_knowledge(repo: Path,
             raise RuntimeError("repository HEAD changed while migration was prepared")
         try:
             os.replace(lock_path, index_path)
+            lock_identity = None
         except OSError as exc:
             rolled_back = _git(repo, "update-ref", "HEAD",
                                before_head.stdout.strip(), commit)
@@ -489,9 +493,15 @@ def _migrate_tracked_knowledge(repo: Path,
                 os.close(lock_fd)
             except OSError:
                 pass
-        for cleanup in (lock_path, temp_index):
-            if cleanup is not None:
-                _safe_unlink(cleanup)
+        if lock_identity is not None:
+            try:
+                lock_stat = lock_path.stat()
+                if (lock_stat.st_dev, lock_stat.st_ino) == lock_identity:
+                    _safe_unlink(lock_path)
+            except OSError:
+                pass
+        if temp_index is not None:
+            _safe_unlink(temp_index)
 
 
 def _ensure_excluded(repo: Path) -> None:

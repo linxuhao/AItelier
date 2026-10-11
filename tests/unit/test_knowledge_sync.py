@@ -8,6 +8,8 @@ no-artifacts / non-repo graceful no-ops.
 
 import json
 import subprocess
+
+import pytest
 from pathlib import Path
 
 from aitelier.tools.knowledge_sync import impl as knowledge_impl
@@ -460,3 +462,53 @@ def test_linked_worktree_uses_common_git_exclude(tmp_path):
     common = _git(linked, "rev-parse", "--git-common-dir").stdout.strip()
     common_dir = Path(common) if Path(common).is_absolute() else (linked / common).resolve()
     assert (common_dir / "info" / "exclude").read_text().count(".aitelier/") == 1
+
+
+@pytest.mark.parametrize("linked", [False, True])
+@pytest.mark.parametrize("after_publication", [False, True])
+def test_foreign_index_lock_is_preserved(tmp_path, monkeypatch, linked,
+                                         after_publication):
+    repo, ws, path = _tracked_generated_fixture(tmp_path)
+    if linked:
+        primary = repo
+        repo = tmp_path / "linked"
+        assert _git(primary, "worktree", "add", "-q", "-b", "foreign-lock",
+                    str(repo)).returncode == 0
+        path = repo / ".aitelier" / "knowledge.md"
+    index_result = _git(repo, "rev-parse", "--git-path", "index")
+    assert index_result.returncode == 0
+    index = Path(index_result.stdout.strip())
+    if not index.is_absolute():
+        index = repo / index
+    lock = index.with_name(index.name + ".lock")
+    foreign = b"other writer owns this lock\n"
+    before_head = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    before_index = index.read_bytes()
+    before_knowledge = path.read_bytes()
+    real_replace = knowledge_impl.os.replace
+
+    if after_publication:
+        def publish_then_foreign_lock(source, destination):
+            result = real_replace(source, destination)
+            if Path(source) == lock and Path(destination) == index:
+                lock.write_bytes(foreign)
+            return result
+        monkeypatch.setattr(knowledge_impl.os, "replace", publish_then_foreign_lock)
+    else:
+        lock.write_bytes(foreign)
+
+    result = _call(repo, ws, "legacy")
+
+    assert lock.read_bytes() == foreign
+    assert not list(index.parent.glob("index.aitelier-*"))
+    if after_publication:
+        assert result["written"] is True
+        assert _git(repo, "rev-parse", "HEAD^").stdout.strip() == before_head
+        assert _git(repo, "diff-tree", "--no-commit-id", "--name-status", "-r",
+                    "HEAD").stdout == "D\t.aitelier/knowledge.md\n"
+        assert _git(repo, "status", "--porcelain=v1", "--untracked-files=all").stdout == ""
+    else:
+        assert result["written"] is False and "publication refused" in result["error"]
+        assert _git(repo, "rev-parse", "HEAD").stdout.strip() == before_head
+        assert index.read_bytes() == before_index
+        assert path.read_bytes() == before_knowledge

@@ -231,7 +231,7 @@ class SQLiteDirectorMessaging:
 
     def _set_reply_schema(self, protocol_version, extended=False):
         if protocol_version not in ("v2","v3"):
-            _invalid()
+            _invalid("protocol_version: must be v2 or v3")
         self.reply_schema = V3_SCHEMA_ID if protocol_version=="v3" or extended else SCHEMA_ID
         if protocol_version=="v3" or extended:
             self.v3 = True

@@ -114,3 +114,28 @@ def test_actual_mcp_membership_refusal_and_valid_ack_preserve_lifecycle(wire, mo
     accepted = call(args, "acknowledge_director_message")
     assert accepted["schema"] == "aitelier.director-messaging." + version
     assert accepted["result"]["delivery"]["status"] == "resolved"
+
+
+@pytest.mark.parametrize("action", ["send_director_message", "list_director_messages",
+    "acknowledge_director_message", "resolve_director_message"])
+@pytest.mark.parametrize("protocol", ["synthetic-invalid", None,
+    {"secret": "SECRET_DO_NOT_REFLECT"}, ["SECRET_DO_NOT_REFLECT"]])
+def test_actual_mcp_prevalidation_protocol_refusal(wire, action, protocol):
+    db, call = wire
+    if action == "send_director_message":
+        args = request()
+        # Extended options must not cause an invalid protocol to escape refusal.
+        args.update(ack_mode="broadcast")
+    elif action == "list_director_messages":
+        args = dict(project_id="beta", needs_my_ack=True)
+    else:
+        args = dict(project_id="beta", delivery_id="not-a-delivery",
+                    expected_version=1, request_key="refused")
+    args["protocol_version"] = protocol
+    before = snapshot(db)
+    refused = call(args, action)
+    assert refused["code"] == "invalid_request"
+    assert refused["schema"] == "aitelier.director-messaging.v2"
+    assert refused["detail"]["message"] == "protocol_version: must be v2 or v3"
+    assert "SECRET_DO_NOT_REFLECT" not in json.dumps(refused)
+    assert snapshot(db) == before

@@ -30,3 +30,10 @@ read_complete只是你的声明，宿主另核验实际呈现覆盖；缺页时�
 使用create_verdict/write_verdict写完整报告；改报告也重新写完整JSON，不使用片段编辑。
 报告须含原有review_key/passed/read_complete/feedback/findings和上述reviewed_chapters。
 无法读全可以诚实输出passed=false、read_complete=false；不得把失败改成通过来省步骤。
+
+## 每轮工具交付协议
+每次响应都必须调用当前提供的材料读取工具或完整裁决工具，不能仅输出思考或普通文本。
+需要补读证据时调用novel_bench_read；证据足够时调用当前提供的create_verdict/write_verdict提交完整报告。
+保持独立判断和全部阅读要求，避免重复自由推演；已完整呈现的部分不必重读，需要核对的证据仍须读取。
+工具参数必须是合法JSON：字符串用半角双引号包围，字符串内的半角双引号、反斜杠和换行必须正确转义。
+引用原文时可用中文引号表达引述关系，但不得改变引文含义、事实或裁决；发现格式错误就修正完整参数后再提交。

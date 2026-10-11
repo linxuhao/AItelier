@@ -1,3 +1,6 @@
+
+import sys as _bench_identity_sys
+__bench_implementation_code__ = _bench_identity_sys._getframe().f_code
 # core/ai_router.py
 # 引入本地 Provider 注册表。通过拦截自定义前缀并强制转译为 openai/ 协议，彻底接管网关路由。
 # v2: 新增 native tool calling 支持 (generate_native)。

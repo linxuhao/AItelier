@@ -1,3 +1,6 @@
+
+import sys as _bench_identity_sys
+__bench_implementation_code__ = _bench_identity_sys._getframe().f_code
 # core/dpe_pipeline.py
 # [修复说明] 修正了 Gate 物理拦截时的文件相对路径，并加入了 [DPE Debug] 控制台转播。
 # [变更] step_id 从 int 改为 str；支持多 action 产出；新增 subtask 循环逻辑；
@@ -1836,6 +1839,8 @@ class PipelineEngine:
                 "tool_failures": tool_failures,
                 "expansion_requests": expansion_requests,
                 "starved_recovery_pending": recovery_pending,
+                "starvation_syntax_retry_used": any(
+                    event == "output_starvation_syntax_retry" for event, _ in rows),
                 "output_budget": output_budget}
 
     def _resume_from_trace(self, project_id: str, max_turns: int) -> dict | None:
@@ -4278,6 +4283,8 @@ class PipelineEngine:
                 # verdict: nudge once, then trust the next one.
                 resume_nudges_left = 1
             starved_recovery_pending = bool(attempt == 1 and _resumed.get("starved_recovery_pending"))
+            starvation_syntax_retry_used = bool(
+                attempt == 1 and _resumed.get("starvation_syntax_retry_used"))
             def fail_starved_output(detail):
                 cap = int(getattr(agent.gateway, "max_output_tokens", 0) or 0)
                 failure = _budget_failure_report(
@@ -4634,6 +4641,38 @@ class PipelineEngine:
                             "correction_error": f"{type(exc).__name__}: {exc}",
                         }
                         self._trace("response", "output_starvation_invalid_correction", detail)
+                        # A concrete malformed batch is different from absent
+                        # output. Retry JSON syntax once, only inside the ordinary
+                        # turn budget; never execute any part of this batch.
+                        if (isinstance(exc, json.JSONDecodeError)
+                                and not starvation_syntax_retry_used
+                                and turn_count < current_max_turns - 1):
+                            starvation_syntax_retry_used = True
+                            messages.append({
+                                "role": "assistant", "content": None,
+                            })
+                            messages.append({
+                                "role": "user",
+                                "content": (
+                                    "[Invalid tool arguments; no calls executed] "
+                                    f"{type(exc).__name__}: {exc}. Re-emit the intended "
+                                    "tool batch with valid JSON objects. Escape embedded "
+                                    "double quotes and backslashes in JSON strings. "
+                                    "This is one syntax correction within the unchanged "
+                                    "turn and output budget. Do not repeat prior "
+                                    "successful actions; finish only when work and "
+                                    "checks are complete. Unexecuted batch: "
+                                    + json.dumps(result.tool_calls, ensure_ascii=False)
+                                ),
+                            })
+                            self._trace_prompt_deltas(messages, turn_count + 1)
+                            self._trace("step", "output_starvation_syntax_retry", {
+                                "step_id": step_id, "attempt": attempt,
+                                "turn": turn_count + 1,
+                                "remaining_turns": current_max_turns - turn_count - 1,
+                                "action": "reemit_json_within_existing_budget",
+                            })
+                            continue
                         fail_starved_output(detail)
 
                 # Record trace — store the full response (free text + every

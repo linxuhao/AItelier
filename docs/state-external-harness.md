@@ -112,18 +112,19 @@ After all relevant workers and artifact writes settle, submit:
 ```
 
 These placeholders are illustrative; send the actual returned IDs and hashes.
-`report_ref` must be an **absolute** local path (or a `file://` URL with an empty
-or `localhost` host) to a regular file the State server can read; a relative
-path is refused. The bytes must hash to `report_sha256`.
+For ordinary `running`, `paused` and `unknown` observations, `report_ref` is
+bounded text and `report_sha256` records the claimed digest. The reference may
+be relative or unavailable; the bytes are not inspected.
 
-For `running`, `paused` and `unknown`, the reference and hash are recorded as the
-observation's immutable identity; the bytes are not inspected. For a terminal
-`candidate` or `failed` report, the bytes must be a structured JSON envelope that
-explicitly declares `"status"` (`"candidate"` for a candidate observation,
-`"failed"` for a failed one), `"settled": true` and `"usable": true`; a report
-missing those flags is rejected instead of being trusted by default. A quiescent
-late report on an abandoned attempt is retained as hash-verified bytes without
-this envelope check. A terminal candidate envelope has this shape:
+For terminal `candidate` or `failed` reports, `report_ref` must be an **absolute**
+local path (or a `file://` URL with an empty or `localhost` host) to a regular
+file the State server can read. A relative path is refused, and the bytes must
+hash to `report_sha256`. The bytes must be a structured JSON envelope declaring
+`"status"` (`"candidate"` or `"completed"` for a candidate observation,
+`"failed"` for a failed one), `"settled": true` and `"usable": true`; missing
+flags are rejected. A quiescent late report on an abandoned attempt requires
+the same absolute-path and hash verification, without the terminal envelope
+check. A terminal candidate envelope has this shape:
 
 ```json
 {
@@ -186,11 +187,13 @@ This is the **same** `record_evidence` command as for a workflow attempt:
 
 The criterion `report_ref` is likewise an **absolute** local path (or `file://`
 URL) whose bytes hash to `report_sha256`. Its JSON envelope must declare
-`"status": "completed"`, `"settled": true` and `"usable": true`, and must carry
-the exact `criterion_id`, `artifact` and `verdict` matching this evidence row;
-`status=candidate` is refused for criterion evidence. `status` and the
-`artifact`/`verdict` fields are cross-checked against the evidence row before
-the bytes are retained. A criterion report file has this shape:
+`"status": "completed"`, `"settled": true` and `"usable": true`;
+`status=candidate` is refused for criterion evidence. The command arguments
+`criterion_id`, `artifact` and `verdict` are required. Include those fields in
+the report JSON too, matching the evidence row, to make its scope explicit.
+The current semantic validator compares these payload fields when present;
+omitting one from the report payload does not itself cause rejection. A
+criterion report file with all scoped fields has this shape:
 
 ```json
 {

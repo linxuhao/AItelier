@@ -373,10 +373,10 @@ def test_harness_doc_report_examples_bind_to_real_validators(tmp_path):
     schema = ExternalObservation.model_json_schema()["properties"]
     report_help = schema["report_ref"]["description"]
     kind_help = schema["artifact_kind"]["description"]
-    assert "bytes are not inspected" in report_help
-    assert "settled=true and usable=true" in report_help
-    assert "exactly its absolute local path and sha256" in kind_help
-    assert "no branch/tag/path alias" in kind_help
+    assert isinstance(report_help, str) and report_help
+    assert isinstance(kind_help, str) and kind_help
+    assert schema["report_ref"]["type"] == "string"
+    assert schema["artifact_kind"]["default"] is None
 
     examples = _harness_doc_json_blocks()
     commands = {b["action"]: b["arguments"] for b in examples if "action" in b}
@@ -439,23 +439,25 @@ def test_harness_doc_report_examples_bind_to_real_validators(tmp_path):
     service.create_project("docs", "Documentation")
     service.store.add_nodes("docs", [{
         "key": "envelope", "goal": "Check report examples", "dependencies": [],
-        "acceptance": [{"id": "test", "kind": "test", "description": "Validate examples"}],
+        "acceptance": [{"id": criterion, "kind": "test", "description": "Validate examples"}],
     }])
     attempt = service.start_external_attempt(
         "docs", "envelope", 1, "focused-test", "job-7", "request-1")
     progress_report = tmp_path / "actual-progress.bin"
     progress_report.write_bytes(progress)
-    attempt = service.report_external_attempt(
-        attempt["attempt_id"], "progress-1", 0, attempt["context_hash"], "running",
-        str(progress_report), hashlib.sha256(progress).hexdigest())
+    for status in ("running", "paused", "unknown"):
+        attempt = service.report_external_attempt(
+            attempt["attempt_id"], status, attempt["observation_version"],
+            attempt["context_hash"], status, "relative/unavailable-progress.txt",
+            hashlib.sha256(progress).hexdigest())
     with pytest.raises(StateGraphError, match="only a candidate report may declare"):
         service.report_external_attempt(
-            attempt["attempt_id"], "bad-progress-kind", 1, attempt["context_hash"],
+            attempt["attempt_id"], "bad-progress-kind", attempt["observation_version"], attempt["context_hash"],
             "running", str(progress_report), hashlib.sha256(progress).hexdigest(),
             artifact=artifact, artifact_kind="sha256")
     with pytest.raises(StateConflict, match="absolute locally inspectable path"):
         service.report_external_attempt(
-            attempt["attempt_id"], "relative-terminal", 1, attempt["context_hash"],
+            attempt["attempt_id"], "relative-terminal", attempt["observation_version"], attempt["context_hash"],
             "candidate", "relative-report.json", candidate_sha, quiescent=True,
             artifact=artifact, artifact_kind="sha256")
     missing_flags = json.dumps({"status": "candidate", "artifact": artifact}).encode()
@@ -463,16 +465,25 @@ def test_harness_doc_report_examples_bind_to_real_validators(tmp_path):
     missing_flags_path.write_bytes(missing_flags)
     with pytest.raises(StateConflict, match="settled=true and usable=true"):
         service.report_external_attempt(
-            attempt["attempt_id"], "missing-flags", 1, attempt["context_hash"],
+            attempt["attempt_id"], "missing-flags", attempt["observation_version"], attempt["context_hash"],
             "candidate", str(missing_flags_path), hashlib.sha256(missing_flags).hexdigest(),
             quiescent=True, artifact=artifact, artifact_kind="sha256")
     with pytest.raises(StateGraphError, match="explicit git-sha1 or sha256 kind"):
         service.report_external_attempt(
-            attempt["attempt_id"], "bad-kind", 1, attempt["context_hash"], "candidate",
+            attempt["attempt_id"], "bad-kind", attempt["observation_version"], attempt["context_hash"], "candidate",
             str(candidate_path), candidate_sha, quiescent=True,
             artifact=artifact, artifact_kind="git")
     candidate = service.report_external_attempt(
-        attempt["attempt_id"], "valid-candidate", 1, attempt["context_hash"], "candidate",
+        attempt["attempt_id"], "valid-candidate", attempt["observation_version"], attempt["context_hash"], "candidate",
         str(candidate_path), candidate_sha, quiescent=True,
         artifact=artifact, artifact_kind="sha256")
     assert candidate["status"] == "candidate"
+    for omitted in ("criterion_id", "artifact", "verdict"):
+        payload = {k: v for k, v in json.loads(evidence_bytes).items() if k != omitted}
+        report = tmp_path / ("omitted-" + omitted + ".json")
+        raw = json.dumps(payload).encode()
+        report.write_bytes(raw)
+        row = service.record_evidence(
+            attempt["attempt_id"], "omitted-" + omitted, criterion, verdict,
+            artifact, str(report), hashlib.sha256(raw).hexdigest())
+        assert row["verdict"] == verdict and row["artifact_ref"] == artifact

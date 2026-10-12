@@ -503,13 +503,19 @@ def ensure_for_run(db, *, run_id: str, project_id: str, config_name: str,
                                              or (read_source_repo is not None and not same_git_repository(
                                                  existing["source_repo"], read_source_repo))):
                 raise IsolationUnavailable("existing review snapshot differs from the requested candidate")
-            return _resume_existing(db, existing, run_id, project_id,
-                                    config_name)
-        return _provision_for_run(
-            db, run_id=run_id, project_id=project_id,
-            config_name=config_name, repo_mode=repo_mode,
-            requested_mode=requested_mode, read_base_sha=read_base_sha,
-            read_source_repo=read_source_repo)
+            rec = _resume_existing(db, existing, run_id, project_id,
+                                   config_name)
+        else:
+            rec = _provision_for_run(
+                db, run_id=run_id, project_id=project_id,
+                config_name=config_name, repo_mode=repo_mode,
+                requested_mode=requested_mode, read_base_sha=read_base_sha,
+                read_source_repo=read_source_repo)
+    # Publish demand after provisioning's identity/ownership fence, without
+    # making index availability a condition of isolation or changing its base.
+    from core.run_resources import prepare
+    prepare(rec)
+    return rec
 
 
 
@@ -1268,6 +1274,8 @@ def reconcile_all_leases(db, sf) -> dict:
     revisit, and the operator sees a checkout nobody is using and everything
     refusing to touch it.
     """
+    from core.run_resources import reconcile
+    index_resources = reconcile(db, sf)
     with db.get_connection() as conn:
         run_ids = [r["run_id"] for r in conn.execute(
             "SELECT run_id FROM checkout_leases ORDER BY acquired_at").fetchall()]
@@ -1276,7 +1284,8 @@ def reconcile_all_leases(db, sf) -> dict:
         ok, why = reconcile_run_lease(db, sf, rid)
         (released.append(rid) if ok
          else retained.append({"run_id": rid, "reason": why}))
-    return {"released": released, "retained": retained}
+    return {"released": released, "retained": retained,
+            "index_resources": index_resources}
 
 
 def _source_current_ref(rec: dict) -> tuple[str | None, str]:
@@ -1296,103 +1305,178 @@ def _source_current_ref(rec: dict) -> tuple[str | None, str]:
 
 
 def _remove_run_worktree(rec: dict) -> tuple[bool, str]:
-    """Remove exactly the recorded run worktree through the owning repository.
-
-    Refuses direct/no-tree records and any path outside AItelier's worktree root.
-    Branches/commits are preserved; only the checkout is removed.
-    """
-    if rec.get("mode") != MODE_WORKTREE or not rec.get("worktree_path"):
+    """Remove only the structurally verified managed checkout; preserve refs."""
+    if rec.get("mode") not in (MODE_WORKTREE, MODE_READ_SNAPSHOT):
         return False, "run does not own a disposable worktree"
-    path = Path(rec["worktree_path"]).resolve()
-    root = datadir.worktrees_dir().resolve()
+    from core.semantic_index_control import validate_checkout
     try:
-        path.relative_to(root)
-    except ValueError:
-        return False, f"recorded worktree is outside managed root {root}"
-    source = Path(rec.get("source_repo") or "")
-    if not source.is_dir():
-        return False, "source checkout is unavailable"
-    if not path.exists():
-        return True, "worktree already absent"
-    out = _git(source, "worktree", "remove", str(path))
-    if out.returncode != 0:
-        detail = (out.stderr or out.stdout).strip()[:300]
-        return False, f"git worktree remove refused: {detail}"
-    return True, f"removed {path}"
+        path = validate_checkout(rec, datadir.worktrees_dir())
+    except Exception as exc:
+        return False, f"ownership validation failed: {exc}"
+    out = _git(rec["source_repo"], "worktree", "remove", str(path))
+    if out.returncode:
+        return False, f"git worktree remove refused: {(out.stderr or out.stdout).strip()[:300]}"
+    return True, f"removed {path}; branch and commits preserved"
 
 
-def reap_released_worktrees(db, sf) -> dict:
-    """Reap released isolated worktrees only when losslessness is provable.
+def _reap_intent(disposition: str) -> tuple[bool, str | None] | None:
+    """Decode the durable decision written immediately before Git removal."""
+    if disposition == "reaping_discarded":
+        return True, None
+    prefix = "reaping_merged_into:"
+    if disposition.startswith(prefix) and disposition[len(prefix):]:
+        return False, disposition[len(prefix):]
+    return None
 
-    The scheduler calls this after lease reconciliation. A released record is
-    eligible only when its engine run is terminal and has no admitted operation.
-    For normal completion/failure, the run branch must be merged into the source
-    checkout's CURRENT branch as visible locally. `discarded` is the sole explicit
-    operator override: it still requires terminal, quiet and a clean tree, but no
-    merge proof. Push/PR creation alone records neither condition and therefore
-    retains the tree.
+
+def _missing_reap_is_owned(rec: dict, *, discarded: bool,
+                           target: str | None) -> tuple[bool, str]:
+    """Prove a pending reap names the exact tree Git has already removed."""
+    path = Path(rec.get("worktree_path") or "")
+    managed = datadir.worktrees_dir().absolute()
+    expected = managed / rec["run_id"]
+    if (rec.get("mode") not in (MODE_WORKTREE, MODE_READ_SNAPSHOT)
+            or not path.is_absolute() or path != expected
+            or managed.resolve() != managed or os.path.lexists(path)):
+        return False, "pending reap no longer has an exact absent managed path"
+    listed = _git(rec.get("source_repo") or "", "worktree", "list", "--porcelain")
+    if listed.returncode:
+        return False, "source Git worktree inventory is unavailable"
+    paths = [line[len("worktree "):] for line in listed.stdout.splitlines()
+             if line.startswith("worktree ")]
+    if str(path) in paths:
+        return False, "source Git still records the pending worktree"
+    if not discarded:
+        branch = rec.get("branch")
+        if rec.get("mode") == MODE_WORKTREE:
+            exists = _git(rec["source_repo"], "show-ref", "--verify",
+                          f"refs/heads/{branch}")
+            if not branch or exists.returncode:
+                return False, "the preserved run branch is unavailable"
+            tip = branch
+        else:
+            tip = rec.get("base_sha")
+            exists = _git(rec["source_repo"], "cat-file", "-e", f"{tip}^{{commit}}")
+            if not tip or exists.returncode:
+                return False, "the recorded snapshot commit is unavailable"
+        merged = _git(rec["source_repo"], "merge-base", "--is-ancestor", tip, target)
+        if not target or merged.returncode:
+            return False, f"preserved run history is not merged into {target}"
+    return True, f"reconciled removed {path}; branch and commits preserved"
+
+
+def reap_released_worktrees(db, sf, *, min_idle_seconds: float | None = None,
+                           now: float | None = None) -> dict:
+    """Reclaim quiet, integrated/discarded, idle roots after index release.
+
+    A clock never grants discard. Resource + control locks fence concurrent
+    readers, sidecar jobs and host preparation. No force removal or branch
+    deletion is performed. Any unclassified ignored files retain the checkout.
     """
+    from contextlib import ExitStack
+    from core import run_resources as resources
     removed, kept = [], []
-    for rec in retained(db):
-        rid = rec["run_id"]
-        if rec.get("mode") != MODE_WORKTREE or not rec.get("released_at"):
+    for initial in retained(db):
+        rid = initial["run_id"]
+        if initial.get("mode") not in (MODE_WORKTREE, MODE_READ_SNAPSHOT) or not initial.get("released_at"):
             continue
-        if (rec.get("disposition") or "").startswith("reaped_"):
+        if (initial.get("disposition") or "").startswith("reaped_"):
             continue
         try:
-            row = sf.get_run(rid)
+            with ExitStack() as stack:
+                ctl = resources.control() if resources.enabled() else None
+                if ctl:
+                    stack.enter_context(ctl.lock(rid))
+                    stack.enter_context(ctl.lock(timeout=2))
+                rec = record(db, rid)
+                row, why = resources.terminal_quiet(sf, rid)
+                if row is None:
+                    raise ValueError(why)
+                intent = _reap_intent(rec.get("disposition") or "")
+                if intent:
+                    discarded, target = intent
+                else:
+                    discarded = rec.get("disposition") == "discarded"
+                    target = None
+                    if not discarded:
+                        target, why = _source_current_ref(rec)
+                        if not target:
+                            raise ValueError(why)
+                if intent and not os.path.lexists(rec["worktree_path"]):
+                    with db.get_connection() as conn:
+                        admissions = conn.execute(
+                            "SELECT COUNT(*) FROM checkout_write_admissions WHERE canonical_checkout=?",
+                            (rec["worktree_path"],)).fetchone()[0]
+                    if admissions:
+                        raise ValueError("host write admissions have not retired")
+                    ledger = ctl.get(rid) if ctl else None
+                    if ctl and ledger is not None and not ctl.settled(ledger, "released"):
+                        raise ValueError("semantic release is not positively acknowledged")
+                    ok, why = _missing_reap_is_owned(
+                        rec, discarded=discarded, target=target)
+                    if not ok:
+                        raise ValueError(why)
+                    if ctl and ledger is not None:
+                        ctl.forget(rid)
+                    final = ("reaped_discarded" if discarded
+                             else f"reaped_merged_into:{target}")
+                    with db.get_connection() as conn:
+                        conn.execute(
+                            "UPDATE run_isolation SET disposition=?,note=? WHERE run_id=?",
+                            (final, why[:500], rid))
+                        conn.commit()
+                    removed.append({"run_id": rid, "reason": why})
+                    continue
+                ok, why = is_disposable(db, rid, run_status=row["status"], admitted_ops=0,
+                                        integration_ref=target, require_merge=not discarded)
+                if not ok:
+                    raise ValueError(why)
+                with db.get_connection() as conn:
+                    admissions = conn.execute(
+                        "SELECT COUNT(*) FROM checkout_write_admissions WHERE canonical_checkout=?",
+                        (rec["worktree_path"],)).fetchone()[0]
+                if admissions:
+                    raise ValueError("host write admissions have not retired")
+                ledger = ctl.get(rid) if ctl else None
+                if ctl and not ctl.settled(ledger, "released"):
+                    raise ValueError("semantic release is not positively acknowledged")
+                if not ctl and (Path(rec["worktree_path"])/".zvec-grep").exists():
+                    raise ValueError("index exists but its lifecycle is disabled; release unknown")
+                if ctl and any((Path(rec["worktree_path"])/".zvec-grep"/name).exists()
+                               for name in ("manifest.json", "files.zvec", "index.zvec")):
+                    raise ValueError("index storage reappeared after release")
+                ok, why = resources.idle_eligible(rec, row, ledger, now=now, minimum=min_idle_seconds)
+                if not ok:
+                    raise ValueError(why)
+                ignored = _git(rec["worktree_path"], "ls-files", "--others", "--ignored", "--exclude-standard", "-z")
+                if ignored.returncode:
+                    raise ValueError("cannot inspect ignored files")
+                if any(ignored.stdout.split("\0")):
+                    raise ValueError("unclassified ignored files retained; they may contain evidence")
+                # Recheck the engine after filesystem observations, not only at
+                # the beginning of the maintenance pass.
+                fresh, why = resources.terminal_quiet(sf, rid)
+                if fresh is None:
+                    raise ValueError(why)
+                pending = ("reaping_discarded" if discarded
+                           else f"reaping_merged_into:{target}")
+                with db.get_connection() as conn:
+                    conn.execute("UPDATE run_isolation SET disposition=? WHERE run_id=?",
+                                 (pending, rid))
+                    conn.commit()
+                ok, why = _remove_run_worktree(rec)
+                if not ok:
+                    raise ValueError(why)
+                if ctl:
+                    ctl.forget(rid)
+                with db.get_connection() as conn:
+                    conn.execute("UPDATE run_isolation SET disposition=?,note=? WHERE run_id=?",
+                                 ("reaped_discarded" if discarded else f"reaped_merged_into:{target}",
+                                  why[:500], rid))
+                    conn.commit()
+                removed.append({"run_id": rid, "reason": why})
         except Exception as exc:
-            kept.append({"run_id": rid, "reason": f"engine lookup failed: {type(exc).__name__}: {exc}"})
-            continue
-        if row is None:
-            kept.append({"run_id": rid, "reason": "run is unknown to the engine"})
-            continue
-        status = (row.get("status") if isinstance(row, dict) else row["status"]) or ""
-        try:
-            audit = sf.audit_operation_owners(rid) or {}
-            admitted = len(audit.get("lost") or []) + len(audit.get("unknown") or []) + int(audit.get("alive") or 0)
-        except Exception as exc:
-            kept.append({"run_id": rid, "reason": f"operation audit failed: {type(exc).__name__}: {exc}"})
-            continue
-
-        discarded = rec.get("disposition") == "discarded"
-        integration_ref = None
-        if not discarded:
-            integration_ref, why = _source_current_ref(rec)
-            if not integration_ref:
-                kept.append({"run_id": rid, "reason": why})
-                continue
-        ok, why = is_disposable(db, rid, run_status=status, admitted_ops=admitted,
-                                integration_ref=integration_ref,
-                                require_merge=not discarded)
-        if not ok:
-            kept.append({"run_id": rid, "reason": why})
-            continue
-        # The checkout is the native index's identity.  Never remove it while
-        # its derived resource is ready, pending release, busy, or unknown.
-        # When lifecycle management is disabled there is no registered native
-        # resource and the existing worktree policy remains unchanged.
-        from core import run_resources
-        ctl = None
-        if run_resources.enabled():
-            ctl = run_resources.control()
-            resource = ctl.get(rid)
-            if not ctl.settled(resource, "released"):
-                kept.append({"run_id": rid,
-                             "reason": "native index release is not settled"})
-                continue
-        ok, why = _remove_run_worktree(rec)
-        if not ok:
-            kept.append({"run_id": rid, "reason": why})
-            continue
-        with db.get_connection() as conn:
-            conn.execute("UPDATE run_isolation SET disposition = ?, note = ? WHERE run_id = ?",
-                         (("reaped_discarded" if discarded else f"reaped_merged_into:{integration_ref}"),
-                          why[:500], rid))
-            conn.commit()
-        if ctl is not None:
-            ctl.forget(rid)
-        removed.append({"run_id": rid, "reason": why})
+            kept.append({"run_id": rid, "reason": str(exc)[:500]})
     return {"removed": removed, "retained": kept}
 
 
@@ -1425,7 +1509,6 @@ def is_disposable(db, run_id: str, *, run_status: str, admitted_ops: int,
                            MODE_READ_SNAPSHOT):
         return False, (f"isolation mode {rec['mode']!r} is not a decision this "
                        f"deployment makes; there is no tree to dispose of")
-
     if not rec["worktree_path"]:
         return True, "this run owns no tree"
     if run_status not in ("completed", "failed"):
@@ -1437,14 +1520,31 @@ def is_disposable(db, run_id: str, *, run_status: str, admitted_ops: int,
     path = Path(rec["worktree_path"])
     if not path.is_dir():
         return False, "the recorded tree is already gone; nothing to decide"
-    if _git(path, "status", "--porcelain").stdout.strip():
+    from core.semantic_index_control import validate_checkout
+    try:
+        validate_checkout(rec, datadir.worktrees_dir())
+    except Exception as exc:
+        return False, f"ownership validation failed: {exc}"
+    status = _git(path, "status", "--porcelain", "--untracked-files=all")
+    if status.returncode:
+        return False, "Git status failed; clean state is unknown"
+    if status.stdout.strip():
         return False, "uncommitted work in the tree"
+    actual = _git(path, "symbolic-ref", "--quiet", "--short", "HEAD")
+    head = _git(path, "rev-parse", "HEAD")
+    if head.returncode or not head.stdout.strip():
+        return False, "worktree HEAD is unknown"
+    if rec.get("mode") == MODE_READ_SNAPSHOT:
+        if actual.returncode != 1 or head.stdout.strip() != rec.get("base_sha"):
+            return False, "read snapshot changed from its recorded detached base"
+        tip = rec["base_sha"]
+    else:
+        if actual.returncode or actual.stdout.strip() != rec.get("branch"):
+            return False, "worktree branch differs from its recorded owner"
+        tip = head.stdout.strip()
     if integration_ref:
-        branch = rec.get("branch") or ""
-        if not branch:
-            return False, "run has no branch to prove integrated"
         merged = _git(rec["source_repo"], "merge-base", "--is-ancestor",
-                      branch, integration_ref)
+                      tip, integration_ref)
         if merged.returncode != 0:
             return False, (f"branch {rec['branch']} is unmerged into "
                            f"{integration_ref}")

@@ -469,7 +469,7 @@ def test_reaper_removes_after_local_main_contains_the_run_branch(db, home, tmp_p
     subprocess.run(["git", "merge", "--ff-only", branch], cwd=src, check=True,
                    capture_output=True, text=True)
     report = ri.reap_released_worktrees(
-        db, _ReapSF({"run-reap-merged": {"status": "completed"}}))
+        db, _ReapSF({"run-reap-merged": {"status": "completed"}}), min_idle_seconds=0)
     assert not wt.exists()
     assert [x["run_id"] for x in report["removed"]] == ["run-reap-merged"]
     final = ri.record(db, "run-reap-merged")
@@ -514,7 +514,7 @@ def test_reaper_allows_explicit_discard_only_after_terminal_quiet_clean(db, home
     _release_for_reap(db, "run-discard", disposition="discarded")
 
     report = ri.reap_released_worktrees(
-        db, _ReapSF({"run-discard": {"status": "failed"}}))
+        db, _ReapSF({"run-discard": {"status": "failed"}}), min_idle_seconds=0)
 
     assert not wt.exists()
     assert [x["run_id"] for x in report["removed"]] == ["run-discard"]

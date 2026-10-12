@@ -641,11 +641,12 @@ class ExternalObservation(Attempt):
     context_hash: str
     status: str
     report_ref: str = Field(description=(
-        "Absolute local path (or file:// URL with empty or localhost host) to the "
-        "report bytes, a locally inspectable regular file whose SHA-256 matches "
-        "report_sha256. candidate and failed require a structured JSON envelope with "
-        "an explicit terminal status, settled=true and usable=true; running, paused "
-        "and unknown keep the same absolute-path/hash shape."))
+        "Report reference: an absolute local path, or a file:// URL with an empty or localhost host, "
+        "to a regular file whose bytes hash to report_sha256. For running, paused and unknown the "
+        "reference and hash are recorded and the bytes are not inspected. For a terminal candidate or "
+        "failed report the file must be a structured JSON envelope that explicitly declares the matching "
+        "status, settled=true and usable=true; a relative path or a missing flag is refused. A quiescent "
+        "late report on an abandoned attempt is retained the same way."))
     report_sha256: str
     quiescent: bool = False
     artifact: str | None = None

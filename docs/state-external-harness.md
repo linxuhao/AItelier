@@ -114,11 +114,25 @@ After all relevant workers and artifact writes settle, submit:
 These placeholders are illustrative; send the actual returned IDs and hashes.
 `report_ref` must be an **absolute** local path (or a `file://` URL with an empty
 or `localhost` host) to a regular file the State server can read; a relative
-path is refused. The bytes must hash to `report_sha256`. A terminal report —
-`candidate` or `failed` — must be a structured JSON envelope that explicitly
-declares an accepted terminal `status` (`"status": "candidate"` for this
-observation), `"settled": true` and `"usable": true`; a report missing those
-flags is rejected instead of being trusted by default.
+path is refused. The bytes must hash to `report_sha256`.
+
+For `running`, `paused` and `unknown`, the reference and hash are recorded as the
+observation's immutable identity; the bytes are not inspected. For a terminal
+`candidate` or `failed` report, the bytes must be a structured JSON envelope that
+explicitly declares `"status"` (`"candidate"` for a candidate observation,
+`"failed"` for a failed one), `"settled": true` and `"usable": true`; a report
+missing those flags is rejected instead of being trusted by default. A quiescent
+late report on an abandoned attempt is retained as hash-verified bytes without
+this envelope check. A terminal candidate envelope has this shape:
+
+```json
+{
+  "status": "candidate",
+  "settled": true,
+  "usable": true,
+  "artifact": "REPLACE_WITH_EXACT_ARTIFACT_DIGEST"
+}
+```
 
 `artifact_kind=git-sha1` requires a 40-hex commit — never a branch, tag or
 path label — and the report JSON must carry a self-contained `git_bundle`
@@ -161,6 +175,7 @@ This is the **same** `record_evidence` command as for a workflow attempt:
     "attempt_id": "attempt-REPLACE_WITH_RETURNED_ID",
     "evidence_id": "job-7-persistence-check",
     "criterion_id": "persistence",
+    "verdict": "pass",
     "artifact": "REPLACE_WITH_THE_SAME_CANDIDATE_DIGEST",
     "report_ref": "/var/harness/immutable-reports/job-7/persistence.json",
     "report_sha256": "REPLACE_WITH_ACTUAL_REPORT_SHA256",
@@ -175,7 +190,18 @@ URL) whose bytes hash to `report_sha256`. Its JSON envelope must declare
 the exact `criterion_id`, `artifact` and `verdict` matching this evidence row;
 `status=candidate` is refused for criterion evidence. `status` and the
 `artifact`/`verdict` fields are cross-checked against the evidence row before
-the bytes are retained.
+the bytes are retained. A criterion report file has this shape:
+
+```json
+{
+  "status": "completed",
+  "settled": true,
+  "usable": true,
+  "criterion_id": "persistence",
+  "artifact": "REPLACE_WITH_THE_SAME_CANDIDATE_DIGEST",
+  "verdict": "pass"
+}
+```
 
 Repeat for every required test/review/human/integration criterion. Reports from
 the director's subagents may be used here, including to validate a SkillFlow

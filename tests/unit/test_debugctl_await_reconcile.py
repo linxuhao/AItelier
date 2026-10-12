@@ -92,7 +92,8 @@ class _Json:
 
 
 def _install(monkeypatch, *, lines=None, run_row=None, keep_open=True,
-             stream_error=None, streams=None, run_rows=None):
+             stream_error=None, streams=None, run_rows=None, request_log=None,
+             reject_status=None):
     """Patch urlopen for both URLs and return the ordered call record.
 
     `streams` / `run_rows` script SUCCESSIVE connections and status reads (the
@@ -102,7 +103,17 @@ def _install(monkeypatch, *, lines=None, run_row=None, keep_open=True,
     scripted = list(streams) if streams is not None else [lines]
     rows = list(run_rows) if run_rows is not None else [run_row]
 
-    def fake_urlopen(url, timeout=None):
+    def fake_urlopen(request, timeout=None):
+        url = getattr(request, "full_url", request)
+        if request_log is not None:
+            request_log.append({
+                "url": url,
+                "headers": {key.lower(): value for key, value in
+                            getattr(request, "header_items", lambda: [])()},
+            })
+        if reject_status is not None:
+            from urllib.error import HTTPError
+            raise HTTPError(url, reject_status, "denied", {}, None)
         if "/api/events/stream" in url:
             order.append("stream-open")
             nth = sum(1 for o in order if o == "stream-open")
@@ -136,6 +147,65 @@ def _run_await(args):
     with pytest.raises(SystemExit) as exc:
         debugctl.cmd_await(args)
     return exc.value.code
+
+
+def _clear_credentials(monkeypatch):
+    for name in ("AITELIER_DRIVER_TOKEN", "AITELIER_DRIVER_TOKEN_FILE",
+                 "AITELIER_DRIVER_ID", "AITELIER_ADMIN_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+
+
+# ── the caller's existing CLI identity reaches both HTTP paths ───────────
+
+def test_await_sends_its_own_driver_credential_to_stream_and_snapshot(
+        monkeypatch, capsys):
+    _clear_credentials(monkeypatch)
+    monkeypatch.setenv("AITELIER_DRIVER_TOKEN", "driver-token-redacted")
+    requests = []
+    _install(monkeypatch, lines=[PRESENCE], run_row=_row("completed"),
+             request_log=requests)
+
+    assert _run_await(_args()) == 0
+    assert [item["url"] for item in requests] == [
+        "http://localhost:4444/api/events/stream",
+        f"http://localhost:4444/api/runs/{RUN}",
+    ]
+    assert all(item["headers"] == {
+        "x-aitelier-driver-token": "driver-token-redacted"
+    } for item in requests)
+    assert "COMPLETED" in capsys.readouterr().out
+
+
+def test_await_preserves_the_legacy_admin_credential_fallback(monkeypatch):
+    _clear_credentials(monkeypatch)
+    monkeypatch.setenv("AITELIER_ADMIN_TOKEN", "admin-token-redacted")
+    requests = []
+    _install(monkeypatch, lines=[PRESENCE], run_row=_row("completed"),
+             request_log=requests)
+
+    assert _run_await(_args()) == 0
+    assert all(item["headers"] == {
+        "x-aitelier-admin-token": "admin-token-redacted"
+    } for item in requests)
+
+
+@pytest.mark.parametrize("token,status", [(None, 401), ("invalid", 403)])
+def test_missing_or_invalid_credentials_never_look_like_a_healthy_watch(
+        monkeypatch, capsys, token, status):
+    _clear_credentials(monkeypatch)
+    if token is not None:
+        monkeypatch.setenv("AITELIER_DRIVER_TOKEN", token)
+    requests = []
+    _install(monkeypatch, streams=[], run_row=None,
+             request_log=requests, reject_status=status)
+
+    assert _run_await(_args(timeout=30)) == 4
+    captured = capsys.readouterr()
+    output = captured.out + captured.err
+    assert "STREAM UNREACHABLE" in output and "NOT WATCHING" in output
+    assert not any(word in output for word in ("COMPLETED", "FAILED", "CHECKPOINT"))
+    expected = ({"x-aitelier-driver-token": "invalid"} if token else {})
+    assert requests and all(item["headers"] == expected for item in requests)
 
 
 # ── the defect ────────────────────────────────────────────────────────────
@@ -460,10 +530,11 @@ def test_a_definitively_missing_run_exits_at_first_reconciliation(
     installed = urllib.request.urlopen
     requested = []
 
-    def exact_lookup(url, timeout=None):
+    def exact_lookup(request, timeout=None):
+        url = getattr(request, "full_url", request)
         if "/api/runs/" in url:
             requested.append(url)
-        return installed(url, timeout=timeout)
+        return installed(request, timeout=timeout)
 
     monkeypatch.setattr(urllib.request, "urlopen", exact_lookup)
     started = time.monotonic()

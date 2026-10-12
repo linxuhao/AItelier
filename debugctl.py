@@ -344,6 +344,14 @@ _RUN_TERMINAL_STATUSES = frozenset({"completed", "failed"})
 _RUN_NOT_FOUND = object()
 
 
+def _authenticated_request(url: str):
+    """Build one stdlib request with the caller's configured CLI identity."""
+    import urllib.request
+    from core.driver_credentials import auth_headers
+
+    return urllib.request.Request(url, headers=auth_headers())
+
+
 def _run_snapshot(base_url: str, run_id: str, timeout: float = 10.0):
     """ONE bounded read of a single run's row. Never a loop, never a poll.
 
@@ -360,7 +368,7 @@ def _run_snapshot(base_url: str, run_id: str, timeout: float = 10.0):
     import urllib.error
     url = f"{base_url.rstrip('/')}/api/runs/{run_id}"
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as r:
+        with urllib.request.urlopen(_authenticated_request(url), timeout=timeout) as r:
             body = r.read().decode("utf-8", "replace")
         return _json.loads(body)
     except urllib.error.HTTPError as e:
@@ -571,7 +579,8 @@ def cmd_await(args):
         nonlocal resp, backoff, fails
         while time.time() < deadline:
             try:
-                resp = urllib.request.urlopen(url, timeout=min(args.timeout, 300))
+                resp = urllib.request.urlopen(
+                    _authenticated_request(url), timeout=min(args.timeout, 300))
                 if fails:
                     print(f"RECONNECTED to {url}", flush=True)
                 backoff, fails = 1.0, 0

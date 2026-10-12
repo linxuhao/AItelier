@@ -1059,6 +1059,9 @@ class StateService:
         draft without a write call."""
         attempt = self.attempts.get(attempt_id)
         if attempt["status"] == "failed" and attempt["execution_kind"] == "skillflow":
+            # Transport services bind the existing host runtime lazily; the
+            # retained-output inventory needs it before reading the run graph.
+            self._components()
             return self._with_refusals({**attempt, "relay_inventory": self._relay_inventory(attempt)})
         if attempt["execution_kind"] == "external" and attempt["artifact_kind"] == "git-sha1":
             with self.store.transaction() as conn:

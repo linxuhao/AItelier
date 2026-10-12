@@ -1,6 +1,7 @@
 """Real MCP prompt/resource discovery and tool fallback share one protocol."""
 import hashlib
 import json
+from pathlib import Path
 from fastapi.testclient import TestClient
 from api.state_only import create_app
 from core.state_driver_guide import (GUIDE_SECTIONS, STATE_DRIVER_GUIDE,
@@ -342,3 +343,95 @@ def test_criterion_envelope_matches_real_validators():
     with pytest.raises(StateConflict, match="evidence report status is not completed"):
         validate_evidence_semantics(candidate, criterion, verdict, artifact)
     validate_external_semantics(candidate, "candidate", artifact)
+
+
+def _harness_doc_json_blocks() -> list[dict]:
+    """Parse the fenced JSON command examples out of the external harness guide."""
+    doc = (Path(__file__).resolve().parents[2] / "docs" / "state-external-harness.md").read_text()
+    blocks = []
+    for chunk in doc.split("```json")[1:]:
+        text = chunk.split("\n```", 1)[0]
+        try:
+            value = json.loads(text)
+        except ValueError:
+            continue
+        if isinstance(value, dict) and isinstance(value.get("arguments"), dict):
+            blocks.append(value)
+    return blocks
+
+
+def test_harness_doc_report_examples_bind_to_real_validators(tmp_path):
+    """The documented candidate/evidence envelopes pass the current integrity
+    validators once their placeholders are bound to owned temp files; the
+    documented refusals (relative report_ref, missing settled/usable, bad
+    git_bundle descriptor) refuse through the same real code paths."""
+    import pytest
+    from core.state_graph import StateConflict
+    from core.state_report_integrity import (
+        _structured_terminal, retain_report, validate_evidence_semantics,
+        validate_external_semantics)
+    from core.state_git_artifacts import retain_candidate
+
+    blocks = {b["action"]: b["arguments"] for b in _harness_doc_json_blocks()}
+    assert set(blocks) >= {"report_external_attempt", "record_evidence"}
+
+    # Positive: the documented candidate example, with report_ref bound to an
+    # owned absolute temp file and a real report envelope inside it.
+    artifact = hashlib.sha256(b"documented candidate bytes").hexdigest()
+    report = {"status": "candidate", "settled": True, "usable": True,
+              "artifact_ref": artifact}
+    report_bytes = (json.dumps(report) + "\n").encode()
+    report_path = tmp_path / "immutable-reports" / "job-7" / "final.json"
+    report_path.parent.mkdir(parents=True)
+    report_path.write_bytes(report_bytes)
+    report_sha = hashlib.sha256(report_bytes).hexdigest()
+    candidate_args = dict(blocks["report_external_attempt"])
+    candidate_args["report_ref"] = str(report_path)
+    candidate_args["report_sha256"] = report_sha
+    assert candidate_args["artifact_kind"] == "sha256"
+    assert Path(candidate_args["report_ref"]).is_absolute()
+
+    retained_ref, retained_bytes = retain_report(
+        candidate_args["report_ref"], candidate_args["report_sha256"],
+        completed=True)
+    assert retained_bytes == report_bytes
+    _structured_terminal(retained_bytes)
+    validate_external_semantics(retained_bytes, "candidate", artifact)
+
+    # Positive: the documented criterion evidence example against the same
+    # artifact, with a completed/settled/usable criterion report.
+    evidence_args = dict(blocks["record_evidence"])
+    criterion = evidence_args["criterion_id"]
+    verdict = evidence_args["verdict"]
+    evidence_args["report_ref"] = str(tmp_path / "persistence.json")
+    evidence_bytes = (json.dumps({
+        "status": "completed", "settled": True, "usable": True,
+        "criterion_id": criterion, "artifact": artifact,
+        "verdict": verdict}) + "\n").encode()
+    Path(evidence_args["report_ref"]).write_bytes(evidence_bytes)
+    evidence_args["report_sha256"] = hashlib.sha256(evidence_bytes).hexdigest()
+    assert evidence_args["artifact"] == "REPLACE_WITH_THE_SAME_CANDIDATE_DIGEST"
+    evidence_args["artifact"] = artifact
+    retain_report(evidence_args["report_ref"], evidence_args["report_sha256"],
+                  completed=True)
+    validate_evidence_semantics(evidence_bytes, criterion, verdict, artifact)
+
+    # Negative: a relative report_ref is refused by the real retention path.
+    with pytest.raises(StateConflict, match="absolute locally inspectable path"):
+        retain_report("immutable-reports/job-7/final.json", report_sha,
+                      completed=True)
+
+    # Negative: a terminal report missing settled/usable is refused.
+    for drop in ("settled", "usable"):
+        incomplete = {k: v for k, v in report.items() if k != drop}
+        with pytest.raises(StateConflict,
+                           match="settled=true and usable=true"):
+            _structured_terminal(json.dumps(incomplete).encode())
+
+    # Negative: a git-sha1 candidate whose git_bundle descriptor is not
+    # exactly {path, sha256} is refused by the real git artifact validator.
+    bad_bundle = (json.dumps({**report, "git_bundle": {
+        "path": str(report_path), "sha256": "0" * 64, "ref": "main"}}) + "\n").encode()
+    with pytest.raises(StateConflict,
+                       match="git_bundle with absolute local path and sha256"):
+        retain_candidate(bad_bundle, "0" * 40)

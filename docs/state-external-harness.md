@@ -103,7 +103,7 @@ After all relevant workers and artifact writes settle, submit:
     "status": "candidate",
     "artifact": "REPLACE_WITH_EXACT_ARTIFACT_DIGEST",
     "artifact_kind": "sha256",
-    "report_ref": "immutable-reports/job-7/final.json",
+    "report_ref": "/var/harness/immutable-reports/job-7/final.json",
     "report_sha256": "REPLACE_WITH_ACTUAL_64_HEX_REPORT_HASH",
     "quiescent": true,
     "detail": "Implementation and verifier workers finished; output bytes are immutable."
@@ -112,8 +112,19 @@ After all relevant workers and artifact writes settle, submit:
 ```
 
 These placeholders are illustrative; send the actual returned IDs and hashes.
-`artifact_kind=git-sha1` requires a 40-hex commit; `sha256` requires a 64-hex
-artifact/bundle digest. Do not label a branch name or a mutable path as a digest.
+`report_ref` must be an **absolute** local path (or a `file://` URL with an empty
+or `localhost` host) to a regular file the State server can read; a relative
+path is refused. The bytes must hash to `report_sha256`. A terminal report —
+`candidate` or `failed` — must be a structured JSON envelope that explicitly
+declares an accepted terminal `status` (`"status": "candidate"` for this
+observation), `"settled": true` and `"usable": true`; a report missing those
+flags is rejected instead of being trusted by default.
+
+`artifact_kind=git-sha1` requires a 40-hex commit — never a branch, tag or
+path label — and the report JSON must carry a self-contained `git_bundle`
+object with exactly `{"path": <absolute local .bundle path>, "sha256": <64-hex
+bundle digest>}`; `artifact_kind=sha256` requires a 64-hex artifact/bundle
+digest. Do not label a branch name or a mutable path as a digest.
 The final report should identify the exact source/artifact and the dependency
 receipts its checker used. For a repository outside AItelier, the external
 harness is responsible for proving the code actually includes those dependencies;
@@ -150,14 +161,21 @@ This is the **same** `record_evidence` command as for a workflow attempt:
     "attempt_id": "attempt-REPLACE_WITH_RETURNED_ID",
     "evidence_id": "job-7-persistence-check",
     "criterion_id": "persistence",
-    "verdict": "pass",
     "artifact": "REPLACE_WITH_THE_SAME_CANDIDATE_DIGEST",
-    "report_ref": "immutable-reports/job-7/persistence.json",
+    "report_ref": "/var/harness/immutable-reports/job-7/persistence.json",
     "report_sha256": "REPLACE_WITH_ACTUAL_REPORT_SHA256",
     "detail": "Actual test output from the harness's persistence-check subagent."
   }
 }
 ```
+
+The criterion `report_ref` is likewise an **absolute** local path (or `file://`
+URL) whose bytes hash to `report_sha256`. Its JSON envelope must declare
+`"status": "completed"`, `"settled": true` and `"usable": true`, and must carry
+the exact `criterion_id`, `artifact` and `verdict` matching this evidence row;
+`status=candidate` is refused for criterion evidence. `status` and the
+`artifact`/`verdict` fields are cross-checked against the evidence row before
+the bytes are retained.
 
 Repeat for every required test/review/human/integration criterion. Reports from
 the director's subagents may be used here, including to validate a SkillFlow

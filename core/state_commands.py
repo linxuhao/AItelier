@@ -640,11 +640,20 @@ class ExternalObservation(Attempt):
     expected_version: int
     context_hash: str
     status: str
-    report_ref: str
+    report_ref: str = Field(description=(
+        "Absolute local path (or file:// URL with empty or localhost host) to the "
+        "report bytes, a locally inspectable regular file whose SHA-256 matches "
+        "report_sha256. candidate and failed require a structured JSON envelope with "
+        "an explicit terminal status, settled=true and usable=true; running, paused "
+        "and unknown keep the same absolute-path/hash shape."))
     report_sha256: str
     quiescent: bool = False
     artifact: str | None = None
-    artifact_kind: str | None = None
+    artifact_kind: str | None = Field(default=None, description=(
+        "Only a candidate report may declare the artifact. 'git-sha1' means a 40-hex "
+        "commit (no branch/tag/path alias) and requires a self-contained git_bundle "
+        "in the report carrying exactly its absolute local path and sha256; 'sha256' "
+        "means a 64-hex artifact or bundle digest. Omit for running/paused/unknown/failed."))
     detail: str = ""
     fence: int | None = Field(default=None, ge=0, description=(
         "The attempt's owner_fence you hold. Required in an enforced project (fence_required); a fence "

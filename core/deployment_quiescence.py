@@ -1176,6 +1176,20 @@ def _readonly_waiting_shell(proc: Path, words: list[str], comm: str, ppid: str) 
         return False
 
 
+
+def _remote_command_mode(line: str) -> bool:
+    """tailscaled's SSH child launches commands, rather than reading argv data.
+
+    This is an opacity signal, never a transport exemption. Unknown child
+    lineage cannot prove that an otherwise neutral command is unrelated.
+    """
+    fields = line.strip().split(None, 2)
+    if len(fields) != 3 or not all(field.isdecimal() for field in fields[:2]):
+        return False
+    words = fields[2].split(None, 3)
+    return len(words) >= 3 and Path(words[0]).name == "tailscaled" and words[1:3] == ["be-child", "ssh"]
+
+
 def _measurement_subject(line: str) -> str:
     """Scan launched code rather than corroborated argument data.
 
@@ -1231,6 +1245,8 @@ def _native_program(line: str) -> str | None:
     """
     fields = line.strip().split(None, 2)
     if len(fields) != 3 or not all(field.isdecimal() for field in fields[:2]):
+        return None
+    if _remote_command_mode(line):
         return None
     proc = PROC_ROOT / fields[0]
     try:
@@ -1350,9 +1366,9 @@ def external_owners(*, runner: Callable[[list[str]], subprocess.CompletedProcess
             # These are already enumerated shared services or kernel
             # threads, not an unknown evaluator worker whose ownership
             # needs State admission.
-            unknown_measurement = (measurement_name
+            unknown_measurement = (_remote_command_mode(line) or (measurement_name
                                    and not _kernel_thread(line)
-                                   and not _resident_service_identity(line))
+                                   and not _resident_service_identity(line)))
             if native_render or any(needle in subject for needle in needles) or unknown_measurement or matched:
                 active = native_render or any(token in subject for token in (
                     "godot --", "godot --headless", "xvfb-run",

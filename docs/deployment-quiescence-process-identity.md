@@ -68,3 +68,16 @@ by single pipeline or sequence separators. Grouped punctuation such as `||`,
 conditional or background controls, redirections, substitutions and incomplete
 pipelines remain opaque, even when the currently waiting child is a reader.
 A reader child cannot prove that a later conditional runtime command is safe.
+
+
+The `tailscaled be-child ssh` action is an opaque command launcher. Its
+corroborated native executable identifies the transport, not the code launched
+by `--cmd`. That action remains an unknown process owner even when the command
+has a neutral name or contains service-like argument prose. The full original
+command and registered identities are retained. Missing child lineage supplies
+no read-only exemption; ordinary tailscaled daemon invocations are unchanged.
+
+The exited media-export PID observed on 2026-10-13 has no retained executable,
+cwd or descendant proof. Its past effects remain uncorroborated. Native argv
+narrowing in the earlier accepted Source addresses filename prose separately;
+it is not proof that this command-launch action was unrelated or quiescent.

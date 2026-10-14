@@ -221,7 +221,7 @@ def test_fixed_refusals_leave_the_issue_untouched(svc):
     with pytest.raises(StateConflict, match="exact artifact"):
         execute(svc, "resolve_issue", base | {"receipt_id": "receipt-same", "artifact": "d" * 40},
                 allow_write=True)
-    with pytest.raises(StateConflict, match="unresolved"):
+    with pytest.raises(StateConflict, match="no resolved evidence"):
         execute(svc, "resolve_issue", base | {"receipt_id": "receipt-empty", "artifact": "c" * 40},
                 allow_write=True)
     with pytest.raises(StateGraphError):

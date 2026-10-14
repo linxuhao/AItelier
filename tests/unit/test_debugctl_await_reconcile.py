@@ -462,8 +462,9 @@ def test_a_definitively_missing_run_exits_at_first_reconciliation(
     requested = []
 
     def exact_lookup(url, timeout=None):
-        if "/api/runs/" in url:
-            requested.append(url)
+        request_url = getattr(url, "full_url", url)
+        if "/api/runs/" in request_url:
+            requested.append(request_url)
         return installed(url, timeout=timeout)
 
     monkeypatch.setattr(urllib.request, "urlopen", exact_lookup)

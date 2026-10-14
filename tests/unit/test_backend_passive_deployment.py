@@ -91,8 +91,8 @@ def test_audit_scope_cannot_grant_trusted_caller_scope(tmp_path):
 
 
 @pytest.mark.parametrize("change", [
-    {"owner_driver_id": None}, {"project_id": "foreign"},
-    {"node_key": "research.cutover-name"}, {"status": "unknown"},
+    {"owner_driver_id": ""}, {"owner_driver_id": 1}, {"project_id": "foreign"},
+    {"node_key": "research.cutover-name"}, {"status": "settled"},
 ])
 def test_controller_identity_is_exact_and_authority_is_not_a_name(tmp_path, change):
     observation = packet()
@@ -119,17 +119,31 @@ def test_explicit_state_settlement_is_passive(tmp_path, status, kind, settled):
 @pytest.mark.parametrize("status,kind,settled", [
     ("paused", None, None), ("abandoned", "unknown", "2026-10-01T00:00:00+00:00"),
     ("abandoned", "confirmed_stopped", None), ("settled", None, None),
-    ("unknown", None, None), ("active", None, None),
+    ("unknown", None, None),
     ("settled", None, "malformed"), ("settled", None, "2100-01-01T00:00:00+00:00"),
     ("abandoned", "confirmed_stopped", "2026-10-01T00:00:00"),
 ])
-def test_uncertain_recovery_or_foreign_active_is_still_authoritative(tmp_path, status, kind, settled):
+@pytest.mark.parametrize("acknowledge", [False, True])
+def test_uncertain_recovery_is_unknown_and_acknowledgement_is_explicit(tmp_path, status, kind, settled, acknowledge):
     observation = packet()
     row = {"attempt_id": "foreign-recovery", "status": status,
            "abandon_kind": kind, "settled_at": settled}
     observation["registered_external_owners"].append(row)
     seal(observation)
-    event = refuse(tmp_path, observation, match="authoritative")
+    authoritative, unknowns = dq._classify_blockers(
+        observation, backend_only=True, deployment_attempt_id="deployment-current",
+        actor="driver:director")
+    assert row not in authoritative.get("registered_external_owners", [])
+    assert row in unknowns
+    override = decision(observation, acknowledge_unknown=acknowledge)
+    if acknowledge:
+        result = dq.authorize("restart", observation, journal=tmp_path / "journal.json",
+                              override=override, backend_only=True)
+        event = result["event"]
+        assert event["audit"]["override_scope"] == "unknown_ownership"
+        assert row in event["audit"]["affected_ownership"]
+    else:
+        event = refuse(tmp_path, observation, override=override, match="acknowledge unknown")
     assert row in event["blockers"]["registered_external_owners"]
 
 
@@ -195,3 +209,86 @@ def test_backend_scope_without_noise_still_cannot_override_active_owner(tmp_path
     seal(observation)
     refuse(tmp_path, observation, override=decision(observation, acknowledge_unknown=False),
            match="authoritative")
+
+
+@pytest.mark.parametrize("missing", ["absent", "null"])
+@pytest.mark.parametrize("acknowledge", [False, True])
+@pytest.mark.parametrize("process_noise", [False, True])
+def test_missing_controller_owner_is_unknown_not_proved_own(tmp_path, missing, acknowledge, process_noise):
+    observation = packet()
+    if not process_noise:
+        observation["external_owners"].clear()
+        observation["errors"].clear()
+    controller = observation["registered_external_owners"][0]
+    if missing == "absent":
+        controller.pop("owner_driver_id")
+    else:
+        controller["owner_driver_id"] = None
+    seal(observation)
+    before = deepcopy(observation)
+    authoritative, unknowns = dq._classify_blockers(
+        observation, backend_only=True, deployment_attempt_id="deployment-current",
+        actor="driver:director")
+    assert controller not in authoritative.get("registered_external_owners", [])
+    assert controller in unknowns
+    override = decision(observation, acknowledge_unknown=acknowledge)
+    if acknowledge:
+        event = dq.authorize("restart", observation, journal=tmp_path / "journal.json",
+                             override=override, backend_only=True)["event"]
+        assert event["audit"]["deployment_attempt_id"] == "deployment-current"
+        assert event["audit"]["deployment_controller_identity"] == "unknown"
+        assert event["audit"]["override_scope"] == "unknown_ownership"
+        assert controller in event["audit"]["affected_ownership"]
+    else:
+        event = refuse(tmp_path, observation, override=override, match="acknowledge unknown")
+    assert event["blockers"] == observation["blockers"]
+    assert event["inventory_digest"] == observation["digest"] and observation == before
+
+
+@pytest.mark.parametrize("status,abandon", [("paused", None), ("abandoned", "unknown")])
+@pytest.mark.parametrize("effect", ["child", "operation", "error"])
+def test_acknowledged_recovery_unknown_cannot_bypass_physical_effects(tmp_path, status, abandon, effect):
+    observation = packet()
+    observation["registered_external_owners"].append(
+        {"attempt_id": "recovery", "status": status, "abandon_kind": abandon, "settled_at": None})
+    if effect == "child":
+        observation["external_owners"].append(
+            {"kind": "process", "command": "ssh host bash -s < work", "active": True,
+             "ownership": "registered", "attempt_id": "recovery"})
+    elif effect == "operation":
+        row = {"run_id": "work", "project_id": "foreign", "status": "running",
+               "active_operations": 1, "audit": {"alive": 1, "lost": [], "unknown": []}}
+        observation["runs"].append(row)
+        observation["blockers"]["active_runs"] = [row]
+        observation["blockers"]["active_operations"] = [row]
+    else:
+        observation["errors"].append("recovery effect inventory unavailable")
+    seal(observation)
+    refuse(tmp_path, observation, match="authoritative")
+
+
+def test_foreign_active_registry_is_not_recovery_uncertainty(tmp_path):
+    observation = packet()
+    observation["registered_external_owners"].append(
+        {"attempt_id": "actual-active-foreign", "status": "active"})
+    seal(observation)
+    refuse(tmp_path, observation, match="authoritative")
+
+
+@pytest.mark.parametrize("status,abandon", [("paused", None), ("abandoned", "unknown")])
+@pytest.mark.parametrize("acknowledge", [False, True])
+def test_recovery_uncertainty_requires_ack_without_process_noise(tmp_path, status, abandon, acknowledge):
+    observation = packet()
+    observation["external_owners"].clear()
+    observation["errors"].clear()
+    row = {"attempt_id": "recovery", "status": status, "abandon_kind": abandon}
+    observation["registered_external_owners"].append(row)
+    seal(observation)
+    override = decision(observation, acknowledge_unknown=acknowledge)
+    if acknowledge:
+        event = dq.authorize("restart", observation, journal=tmp_path / "journal.json",
+                             override=override, backend_only=True)["event"]
+        assert event["audit"]["affected_ownership"] == [row]
+        assert event["audit"]["override_scope"] == "unknown_ownership"
+    else:
+        refuse(tmp_path, observation, override=override, match="acknowledge unknown")

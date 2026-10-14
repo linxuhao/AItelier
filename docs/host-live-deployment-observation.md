@@ -53,8 +53,10 @@ The host backend gate supplies `authorize(..., backend_only=True)` only after
 the existing local-admin runtime observation and backend namespace checks. An
 operator decision may request `backend_only: true` and, when the current
 deployment controller is present, its exact `deployment_attempt_id`. The
-controller must be an AItelier deployment attempt whose recorded
-`owner_driver_id` matches the audited `driver:<id>` actor. The action, inventory
+controller must name an exact AItelier deployment attempt. A present recorded
+`owner_driver_id` must match the audited `driver:<id>` actor. Missing owner
+metadata is disclosed as unknown ownership, never a proven own-controller
+exemption; only explicit unknown acknowledgement can handle it. The action, inventory
 digest, expiry, backend scope and controller identity remain in the journal.
 Actor/reason/ticket strings record the decision; they are not authentication.
 The local CLI/API authority remains the trust boundary, and direct Python
@@ -66,10 +68,19 @@ settlement timestamp) as passive metadata. It does not remove these rows or
 change the measured quiescent flag. The acknowledged-unknown decision can then
 coexist with passive metadata. Physical operations, known external processes,
 render owners, writes, leases and inventory errors still refuse an unknown-only
-override. Paused or abandoned-unknown recovery is not settled merely because a
-PID is absent or a timestamp exists. A caller changing shared services cannot
+override. Paused, unknown or abandoned recovery without positive settlement
+remains unknown: the same inventory refuses without acknowledgement and may
+authorize with it. This decision does not establish that effects stopped or
+that recovery is settled. A PID's absence or a timestamp cannot prove that. A caller changing shared services cannot
 claim backend-only scope from an override file; unscoped behavior is unchanged.
 
 This source contract does not certify source compatibility, recovery, or current
 production quiet. A real cutover still requires fresh supported host and runtime
 observations and coordination with the affected owners.
+
+
+Backend-only acknowledgement authorizes only the backend action named in the
+held decision. It does not authorize changing the shared source checkout or
+promoting another artifact. Its journal distinguishes a declared controller
+with unknown owner metadata from a recorded owner match, and includes uncertain
+recovery rows in affected_ownership rather than claiming they are settled.

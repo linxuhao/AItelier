@@ -2034,7 +2034,7 @@ def _classify_blockers(observation: dict, *, backend_only: bool = False,
         return {"measurement_failure": [{"reason": "blocker inventory is malformed"}]}, []
 
     authoritative: dict[str, Any] = {}
-    unknown_processes: list[dict] = []
+    unknown_owners: list[dict] = []
     for name, rows in blockers.items():
         if not rows:
             continue
@@ -2044,14 +2044,24 @@ def _classify_blockers(observation: dict, *, backend_only: bool = False,
                 and row.get("revision") == row.get("done_revision")
                 and row.get("error") == "")]
         elif backend_only and name == "registered_external_owners" and isinstance(rows, list):
-            rows = [row for row in rows if not (
-                _settled_external_owner(row, observation.get("observed_at"))
-                or (row.get("attempt_id") == deployment_attempt_id
-                    and row.get("project_id") == "aitelier"
-                    and str(row.get("node_key", "")).startswith("deployment.")
-                    and row.get("status") in {"active", "paused"}
-                    and _nonempty_string(row.get("owner_driver_id"))
-                    and actor == "driver:" + row["owner_driver_id"]))]
+            known_rows = []
+            for row in rows:
+                own_controller = (row.get("attempt_id") == deployment_attempt_id
+                                  and row.get("project_id") == "aitelier"
+                                  and str(row.get("node_key", "")).startswith("deployment."))
+                if (_settled_external_owner(row, observation.get("observed_at"))
+                        or (own_controller and row.get("status") in {"active", "paused"}
+                            and _nonempty_string(row.get("owner_driver_id"))
+                            and actor == "driver:" + row["owner_driver_id"])):
+                    continue
+                if (row.get("status") in {"paused", "unknown", "abandoned", "settled"}
+                        or (own_controller and row.get("owner_driver_id") is None)):
+                    # This is disclosed uncertainty, not proof of physical activity
+                    # or quiescence. Known processes/operations remain separate vetoes.
+                    unknown_owners.append(row)
+                else:
+                    known_rows.append(row)
+            rows = known_rows
         if not rows:
             continue
         if name != "external_active" or not isinstance(rows, list):
@@ -2060,7 +2070,7 @@ def _classify_blockers(observation: dict, *, backend_only: bool = False,
         known_rows = []
         for row in rows:
             if _unknown_process_noise(row):
-                unknown_processes.append(row)
+                unknown_owners.append(row)
             else:
                 known_rows.append(row)
         if known_rows:
@@ -2068,7 +2078,7 @@ def _classify_blockers(observation: dict, *, backend_only: bool = False,
 
     expected_unknown_errors = {
         UNKNOWN_PROCESS_ERROR_PREFIX + str(row.get("command", ""))[:500]
-        for row in unknown_processes
+        for row in unknown_owners if _unknown_process_noise(row)
     }
     errors = observation.get("errors", [])
     if not isinstance(errors, list):
@@ -2079,7 +2089,7 @@ def _classify_blockers(observation: dict, *, backend_only: bool = False,
                         or error not in expected_unknown_errors]
         if known_errors:
             authoritative["measurement_errors"] = known_errors
-    return authoritative, unknown_processes
+    return authoritative, unknown_owners
 
 
 def _valid_override(action: str, observation: dict, override: dict | None, *,
@@ -2114,17 +2124,18 @@ def _valid_override(action: str, observation: dict, override: dict | None, *,
         if (not requested_scope or not _nonempty_string(controller) or len(matches) != 1
                 or matches[0].get("project_id") != "aitelier"
                 or not str(matches[0].get("node_key", "")).startswith("deployment.")
-                or matches[0].get("status") not in {"active", "paused"}
-                or not _nonempty_string(matches[0].get("owner_driver_id"))
-                or override["actor"] != "driver:" + matches[0]["owner_driver_id"]):
+                or matches[0].get("status") not in {"active", "paused", "unknown"}
+                or (matches[0].get("owner_driver_id") is not None
+                    and (not _nonempty_string(matches[0]["owner_driver_id"])
+                         or override["actor"] != "driver:" + matches[0]["owner_driver_id"]))):
             return False, "deployment controller must match the exact recorded owner and audited actor"
-    authoritative, unknown_processes = _classify_blockers(
+    authoritative, unknown_owners = _classify_blockers(
         observation, backend_only=requested_scope, deployment_attempt_id=controller,
         actor=override["actor"])
     if (requested_scope or override.get("acknowledge_unknown") is True) and authoritative:
-        return False, ("unknown-process override cannot bypass authoritative active owners: "
+        return False, ("unknown-ownership override cannot bypass authoritative active owners: "
                        + ", ".join(sorted(authoritative)))
-    if (unknown_processes or observation.get("errors")) \
+    if (unknown_owners or observation.get("errors")) \
             and override.get("acknowledge_unknown") is not True:
         return False, "override must acknowledge unknown measurement errors"
     return True, "audited override accepted"
@@ -2185,7 +2196,7 @@ def authorize(action: str, observation: dict, *, journal: Path | str | None = No
                 action, observation_value, override_value, backend_only=backend_only)
         if valid:
             scoped_backend = override_value.get("backend_only") is True
-            authoritative, unknown_processes = _classify_blockers(
+            authoritative, unknown_owners = _classify_blockers(
                 observation_value, backend_only=scoped_backend,
                 deployment_attempt_id=override_value.get("deployment_attempt_id"),
                 actor=override_value["actor"])
@@ -2197,13 +2208,24 @@ def authorize(action: str, observation: dict, *, journal: Path | str | None = No
                                                  "reason": override_value["reason"],
                                                  "ticket": override_value["ticket"],
                                                  **({"backend_only": True,
-                                                     "deployment_attempt_id": override_value.get("deployment_attempt_id")}
+                                                     "deployment_attempt_id": override_value.get("deployment_attempt_id"),
+                                                     "deployment_controller_identity": (
+                                                         "recorded_owner" if any(
+                                                             row.get("attempt_id") == override_value.get("deployment_attempt_id")
+                                                             and row.get("status") in {"active", "paused"}
+                                                             and _nonempty_string(row.get("owner_driver_id"))
+                                                             and override_value["actor"] == "driver:" + row["owner_driver_id"]
+                                                             for row in observation_value["registered_external_owners"])
+                                                         else "unknown" if override_value.get("deployment_attempt_id")
+                                                         else "not_declared")}
                                                     if scoped_backend else {}),
                                                  "override_scope": (
-                                                     "unknown_process_noise" if unknown_scope
+                                                     "unknown_ownership" if unknown_scope and any(
+                                                         not _unknown_process_noise(row) for row in unknown_owners)
+                                                     else "unknown_process_noise" if unknown_scope
                                                      else "authoritative_blockers"),
                                                  "affected_ownership": (
-                                                     unknown_processes if unknown_scope
+                                                     unknown_owners if unknown_scope
                                                      else authoritative)},
                                        "inventory_digest": observation_value["digest"],
                                        "blockers": observation_value["blockers"],

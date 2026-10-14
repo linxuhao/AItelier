@@ -11,6 +11,10 @@ it, so "fixed" is checkable rather than asserted:
              reported (the contract changed in response to it);
 - promoted:  a node whose first revision was created after the report;
 - duplicate: another issue, or an existing node that already covers it;
+- fixed:     an existing verified acceptance receipt in THIS project, named with
+             its exact artifact and reason; no node is created, revised or
+             verified by this closure, and the receipt metadata is a structural
+             reference only (semantic relevance stays the director's call);
 - rejected:  a reason only.
 
 An OPEN defect linked to a VERIFIED or CANDIDATE node contradicts that
@@ -25,7 +29,7 @@ from core.state_graph import StateConflict, StateGraphError, StateNotFound, cano
 from core.state_privacy import UntrustedDatabase
 
 KINDS = ("defect", "gap", "handoff", "question")
-RESOLUTIONS = ("absorbed", "promoted", "duplicate", "rejected")
+RESOLUTIONS = ("absorbed", "promoted", "duplicate", "fixed", "rejected")
 MAX_LINKS = 20
 
 SCHEMA = """
@@ -38,7 +42,7 @@ CREATE TABLE IF NOT EXISTS state_issues (
     title TEXT NOT NULL,
     body TEXT NOT NULL,
     source TEXT,
-    status TEXT NOT NULL CHECK(status IN ('open','absorbed','promoted','duplicate','rejected')),
+    status TEXT NOT NULL CHECK(status IN ('open','absorbed','promoted','duplicate','fixed','rejected')),
     version INTEGER NOT NULL CHECK(version > 0),
     resolution_json TEXT,
     reported_by_actor TEXT NOT NULL,
@@ -61,11 +65,38 @@ CREATE INDEX IF NOT EXISTS state_issue_nodes_node ON state_issue_nodes(project_i
 """
 
 
+def _issues_table_template() -> str:
+    """The state_issues CREATE TABLE from SCHEMA, as a ``{name}`` rebuild template."""
+    return SCHEMA.split(";", 1)[0].replace(
+        "CREATE TABLE IF NOT EXISTS state_issues", "CREATE TABLE {name}")
+
+
+def _widen_status_check(conn) -> None:
+    """Add the ``fixed`` status to an existing table's CHECK, preserving rows.
+
+    ``fixed`` widens a CHECK constraint, which SQLite cannot alter in place, so
+    a pre-existing database is rebuilt with the same preserving helper the
+    attempt tables use: every row, index and trigger survives and a damaged
+    table fails the copy instead of being normalized. A fresh table already
+    carries ``fixed`` and skips this.
+    """
+    row = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='state_issues'").fetchone()
+    if row and "'fixed'" not in (row["sql"] or ""):
+        from core.state_attempt_schema import _rebuild
+        conn.execute("PRAGMA foreign_keys=OFF")
+        try:
+            _rebuild(conn, "state_issues", _issues_table_template(), ("state_issue_nodes",))
+        finally:
+            conn.execute("PRAGMA foreign_keys=ON")
+
+
 def initialize(db) -> None:
-    """Create the issue tables on a real handle (the leaf's own, or the one an
-    untrusted store runs ``initialize_state_schema`` on before dropping it)."""
+    """Create or migrate the issue tables on a real handle (the leaf's own, or
+    the one an untrusted store runs ``initialize_state_schema`` on before
+    dropping it)."""
     with db.get_connection() as conn:
         conn.executescript(SCHEMA)
+        _widen_status_check(conn)
         conn.commit()
 
 
@@ -223,16 +254,18 @@ class StateIssues:
 
     def resolve(self, project_id: str, issue_id: str, expected_version: int, resolution: str,
                 reason: str, director_identity: str, node_key: str | None = None,
-                node_revision: int | None = None, duplicate_of: str | None = None) -> dict:
+                node_revision: int | None = None, duplicate_of: str | None = None,
+                receipt_id: str | None = None, artifact: str | None = None) -> dict:
         project_id = key(project_id, "project_id")
         if resolution not in RESOLUTIONS:
             raise StateGraphError(f"resolution must be one of {', '.join(RESOLUTIONS)}")
         reason = text(reason, "reason", 4000)
         director_identity = text(director_identity, "director_identity", 320)
         shape = {"absorbed": {"node_key", "node_revision"}, "promoted": {"node_key"},
-                 "rejected": set()}.get(resolution)
+                 "fixed": {"receipt_id", "artifact"}, "rejected": set()}.get(resolution)
         given = {n for n, v in (("node_key", node_key), ("node_revision", node_revision),
-                                ("duplicate_of", duplicate_of)) if v is not None}
+                                ("duplicate_of", duplicate_of), ("receipt_id", receipt_id),
+                                ("artifact", artifact)) if v is not None}
         if resolution == "duplicate":
             if len(given) != 1 or given == {"node_revision"}:
                 raise StateGraphError("duplicate takes exactly one of duplicate_of (an issue) or node_key")
@@ -261,6 +294,25 @@ class StateIssues:
                 record["node_key"] = node["node_key"]
                 conn.execute("INSERT OR IGNORE INTO state_issue_nodes VALUES(?,?,?)",
                              (row["issue_id"], project_id, node["node_key"]))
+            if resolution == "fixed":
+                receipt = conn.execute("SELECT * FROM state_acceptances WHERE receipt_id=?",
+                                        (key(receipt_id, "receipt_id"),)).fetchone()
+                if receipt is None:
+                    raise StateNotFound(f"acceptance receipt {receipt_id!r} not found")
+                if receipt["project_id"] != project_id:
+                    raise StateConflict("that acceptance receipt was issued for a different project")
+                if not receipt["artifact_ref"]:
+                    raise StateConflict("that acceptance receipt has no artifact; its evidence is unresolved")
+                if artifact != receipt["artifact_ref"]:
+                    raise StateConflict("artifact must be the receipt's exact artifact")
+                if not json.loads(receipt["evidence_ids"]):
+                    raise StateConflict("that acceptance receipt has no resolved evidence")
+                record["receipt_id"] = receipt["receipt_id"]
+                record["artifact_ref"] = receipt["artifact_ref"]
+                record["node_key"] = receipt["node_key"]
+                record["node_revision"] = receipt["node_revision"]
+                conn.execute("INSERT OR IGNORE INTO state_issue_nodes VALUES(?,?,?)",
+                             (row["issue_id"], project_id, receipt["node_key"]))
             if duplicate_of is not None:
                 if duplicate_of == row["issue_id"]:
                     raise StateGraphError("an issue cannot duplicate itself")

@@ -63,7 +63,7 @@ For positive director waits, workflow recovery precedes idle/checkpoint decision
 - verify_node is separate explicit acceptance. Corrected evidence or changed goal/dependencies can invalidate acceptance and downstream nodes. Retain historical reports; never sign a new revision or artifact with old evidence.
 
 ## Issues: observations are not nodes
-Report defects, gaps, cross-project hand-offs and questions with report_issue, not add_nodes; issues never change node status/readiness and are never dispatched. resolve_issue names what took the issue: absorbed (node revision after the report), promoted (node created after the report), duplicate (issue or existing node) or rejected. Open defects on VERIFIED/CANDIDATE nodes appear in contradicts_acceptance. Full protocol: state_graph_help driver_guide.
+Report defects, gaps, cross-project hand-offs and questions with report_issue, not add_nodes; issues never change node status/readiness and are never dispatched. resolve_issue names what took the issue: absorbed (node revision after the report), promoted (node created after the report), duplicate (issue or existing node), fixed (an existing verified acceptance receipt in this project, named with its exact artifact) or rejected. Open defects on VERIFIED/CANDIDATE nodes appear in contradicts_acceptance. Full protocol: state_graph_help driver_guide.
 
 ## Director notebook: context, not a second State database
 Each State project has one built-in driver note made only of entries, and every

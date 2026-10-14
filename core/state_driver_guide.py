@@ -84,6 +84,7 @@ Triage with resolve_issue(expected_version, resolution, reason, director_identit
 - absorbed: node_key + node_revision of a revise_node made AFTER the report (typically a new acceptance criterion; the node goes STALE, which is the correct effect of a confirmed defect);
 - promoted: node_key of a node created after the report (add_nodes/split_node first);
 - duplicate: duplicate_of another issue, or node_key of an existing node that already covers it;
+- fixed: receipt_id + artifact of an EXISTING verified acceptance receipt in this project (the issue was already fixed under an existing contract; no node is created, revised or verified by this closure, and the receipt metadata is a structural reference only — semantic relevance stays your judgment);
 - rejected: reason only.
 Resolution is terminal; report a new issue instead of reopening. Refused resolutions name the fix. get_node returns open_issues for that node; project_overview returns issue_counts and per-node open_issue_count. An open defect linked to a VERIFIED or CANDIDATE node is listed in contradicts_acceptance: triage it, do not leave an accepted node standing over a known defect. A cross-project hand-off arrives as a director message; the receiving director records it as a handoff issue with source=<delivery_id> and resolves the message, rather than creating a node directly. Read with list_issues (bounded summaries, statuses/kinds/node_key filters, next_after cursor) and get_issue (full body and resolution).
 

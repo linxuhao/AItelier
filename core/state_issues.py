@@ -261,13 +261,17 @@ class StateIssues:
             raise StateGraphError(f"resolution must be one of {', '.join(RESOLUTIONS)}")
         reason = text(reason, "reason", 4000)
         director_identity = text(director_identity, "director_identity", 320)
+        # receipt_id/artifact are provenance fields of the fixed resolution only;
+        # a legacy resolution naming them must be refused before anything is read.
+        if resolution != "fixed" and (receipt_id is not None or artifact is not None):
+            raise StateGraphError("receipt_id and artifact are only accepted for the fixed resolution")
         shape = {"absorbed": {"node_key", "node_revision"}, "promoted": {"node_key"},
                  "fixed": {"receipt_id", "artifact"}, "rejected": set()}.get(resolution)
         given = {n for n, v in (("node_key", node_key), ("node_revision", node_revision),
                                 ("duplicate_of", duplicate_of), ("receipt_id", receipt_id),
                                 ("artifact", artifact)) if v is not None}
         if resolution == "duplicate":
-            if len(given) != 1 or given == {"node_revision"}:
+            if given not in ({"duplicate_of"}, {"node_key"}):
                 raise StateGraphError("duplicate takes exactly one of duplicate_of (an issue) or node_key")
         elif given != shape:
             raise StateGraphError(f"{resolution} takes exactly: {', '.join(sorted(shape)) or 'reason only'}")

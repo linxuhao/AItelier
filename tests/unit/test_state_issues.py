@@ -160,3 +160,115 @@ def test_rest_issue_reads_serve_the_ui(tmp_path):
         assert client.get(f"/api/state/projects/p/issues/{made['issue_id']}", headers=auth).json()["body"] == "b"
         assert client.get("/api/state/projects/p/issues/iss-missing", headers=auth).status_code == 404
         assert client.get("/api/state/projects/p/issues", headers={}).status_code == 401
+
+
+def _acceptance(svc, receipt_id, project_id="p", node_key="a", artifact="a" * 40,
+                evidence_ids='["ev-1"]'):
+    """Disposable fixture: one attempt row plus one verification receipt.
+
+    Only the resolve path is under test, so the receipt is inserted directly
+    (the real verify path needs a launched workflow); the receipt is an
+    append-only fact the resolve command must treat as read-only."""
+    attempt_id = "att-" + receipt_id
+    with svc.store.transaction(write=True) as conn:
+        conn.execute(
+            "INSERT INTO state_attempts(attempt_id,project_id,node_key,node_revision,contract_hash,"
+            "dependency_snapshot,context_json,request_key,request_hash,workflow,execution_project_id,"
+            "status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (attempt_id, "p", node_key, 1, "c" * 64, "{}", "{}", "rk-" + attempt_id, "rh", "wf",
+             "exec-" + attempt_id, "candidate", "now", "now"))
+        conn.execute(
+            "INSERT INTO state_acceptances(receipt_id,project_id,node_key,node_revision,attempt_id,"
+            "artifact_ref,contract_hash,dependency_snapshot,evidence_ids,reviewer,created_at,provenance_json) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            (receipt_id, project_id, node_key, 1, attempt_id, artifact, "c" * 64, "{}",
+             evidence_ids, "rev", "now", "{}"))
+
+
+def test_fixed_closes_with_a_receipt_and_its_exact_artifact_without_touching_the_node(svc):
+    _acceptance(svc, "receipt-fixed", artifact="a" * 40)
+    issue = _report(svc)
+    before = _node_row(svc)
+    done = execute(svc, "resolve_issue", {
+        "project_id": "p", "issue_id": issue["issue_id"], "expected_version": 1,
+        "resolution": "fixed", "reason": "already fixed under an accepted contract",
+        "director_identity": "wuxia", "receipt_id": "receipt-fixed", "artifact": "a" * 40},
+        allow_write=True)
+    assert done["status"] == "fixed"
+    assert done["resolution"]["receipt_id"] == "receipt-fixed"
+    assert done["resolution"]["artifact_ref"] == "a" * 40
+    assert [n["node_key"] for n in done["nodes"]] == ["a"]
+    # A fixed closure creates, revises and verifies nothing.
+    assert _node_row(svc) == before
+    types = [e["event_type"] for e in svc.store.events("p")]
+    assert "issue_resolved" in types and "node_verified" not in types and "node_revised" not in types
+
+
+def test_fixed_refusals_leave_the_issue_untouched(svc):
+    _acceptance(svc, "receipt-other", project_id="q", artifact="b" * 40)
+    _acceptance(svc, "receipt-same", artifact="e" * 40)
+    _acceptance(svc, "receipt-empty", artifact="c" * 40, evidence_ids="[]")
+    issue = _report(svc, node_keys=["a"])
+    base = {"project_id": "p", "issue_id": issue["issue_id"], "expected_version": 1,
+            "resolution": "fixed", "reason": "r", "director_identity": "wuxia"}
+    with pytest.raises(StateNotFound):
+        execute(svc, "resolve_issue", base | {"receipt_id": "receipt-missing", "artifact": "a" * 40},
+                allow_write=True)
+    with pytest.raises(StateConflict, match="different project"):
+        execute(svc, "resolve_issue", base | {"receipt_id": "receipt-other", "artifact": "b" * 40},
+                allow_write=True)
+    # A same-project receipt whose declared artifact differs is refused on the artifact.
+    with pytest.raises(StateConflict, match="exact artifact"):
+        execute(svc, "resolve_issue", base | {"receipt_id": "receipt-same", "artifact": "d" * 40},
+                allow_write=True)
+    with pytest.raises(StateConflict, match="no resolved evidence"):
+        execute(svc, "resolve_issue", base | {"receipt_id": "receipt-empty", "artifact": "c" * 40},
+                allow_write=True)
+    with pytest.raises(StateGraphError):
+        execute(svc, "resolve_issue", base | {"receipt_id": "receipt-other"}, allow_write=True)
+    # Every refusal rolled back: still open at version 1 with no resolution event.
+    fresh = execute(svc, "get_issue", {"project_id": "p", "issue_id": issue["issue_id"]})
+    assert fresh["status"] == "open" and fresh["version"] == 1 and fresh["resolution"] is None
+    assert "issue_resolved" not in [e["event_type"] for e in svc.store.events("p")]
+
+
+def test_legacy_resolutions_reject_receipt_fields_and_refuse_without_mutation(svc):
+    """Regression: duplicate once accepted a sole receipt_id or artifact and
+    mutated the issue; a legacy resolution naming fixed-only provenance must be
+    refused before anything is read, in both actual mutating shapes."""
+    _acceptance(svc, "receipt-legacy", artifact="f" * 40)
+    issue = _report(svc)
+    base = {"project_id": "p", "issue_id": issue["issue_id"], "expected_version": 1,
+            "resolution": "duplicate", "reason": "r", "director_identity": "d"}
+    with pytest.raises(StateGraphError, match="only accepted for the fixed resolution"):
+        execute(svc, "resolve_issue", base | {"receipt_id": "receipt-legacy"}, allow_write=True)
+    with pytest.raises(StateGraphError, match="only accepted for the fixed resolution"):
+        execute(svc, "resolve_issue", base | {"artifact": "f" * 40}, allow_write=True)
+    with pytest.raises(StateGraphError, match="only accepted for the fixed resolution"):
+        execute(svc, "resolve_issue", base | {"duplicate_of": issue["issue_id"],
+                                              "receipt_id": "receipt-legacy",
+                                              "artifact": "f" * 40}, allow_write=True)
+    # Other legacy resolutions are equally strict.
+    with pytest.raises(StateGraphError, match="only accepted for the fixed resolution"):
+        execute(svc, "resolve_issue", base | {"resolution": "rejected",
+                                              "receipt_id": "receipt-legacy"}, allow_write=True)
+    # Every refusal rolled back: still open at version 1, no resolution stored.
+    fresh = execute(svc, "get_issue", {"project_id": "p", "issue_id": issue["issue_id"]})
+    assert fresh["status"] == "open" and fresh["version"] == 1 and fresh["resolution"] is None
+    assert "issue_resolved" not in [e["event_type"] for e in svc.store.events("p")]
+    counts = execute(svc, "list_issues", {"project_id": "p"})["status_counts"]
+    assert counts == {"open": 1}
+
+
+def test_fixed_is_a_distinct_status_and_the_four_existing_semantics_still_resolve(svc):
+    # The read filter and typed command expose fixed beside the four originals.
+    execute(svc, "list_issues", {"project_id": "p", "statuses": ["fixed"]})
+    with pytest.raises(StateGraphError):
+        execute(svc, "list_issues", {"project_id": "p", "statuses": ["closed"]})
+    # rejected is still reason-only and still terminal.
+    issue = _report(svc)
+    done = execute(svc, "resolve_issue", {"project_id": "p", "issue_id": issue["issue_id"],
+                                           "expected_version": 1, "resolution": "rejected",
+                                           "reason": "not a defect", "director_identity": "wuxia"},
+                    allow_write=True)
+    assert done["status"] == "rejected"

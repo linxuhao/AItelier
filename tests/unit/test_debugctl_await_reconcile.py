@@ -103,6 +103,7 @@ def _install(monkeypatch, *, lines=None, run_row=None, keep_open=True,
     rows = list(run_rows) if run_rows is not None else [run_row]
 
     def fake_urlopen(url, timeout=None):
+        url = getattr(url, "full_url", url)
         if "/api/events/stream" in url:
             order.append("stream-open")
             nth = sum(1 for o in order if o == "stream-open")

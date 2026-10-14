@@ -353,10 +353,9 @@ def _authed_request(url: str):
     with the same configured caller identity `cli.client` already uses
     (core/driver_credentials: per-driver token, else the legacy admin token).
     No new token file, no separate auth path, no token is ever printed; the
-    headers are chosen by the existing helper, not duplicated here. Bare
-    `urlopen(url)` produced anonymous requests and a 403 the caller could only
-    report as an unreachable server.
+    headers are chosen by the existing helper, not duplicated here.
     """
+    import urllib.request
     from cli.client import _auth_headers
     return urllib.request.Request(url, headers=_auth_headers())
 

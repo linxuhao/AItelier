@@ -386,7 +386,7 @@ def _require_deployment_clearance(
                     override = override_decision(action, dq._plain_json_snapshot(observation))
                 except Exception as exc:
                     override = {"_invalid_override": f"operator decision failed: {type(exc).__name__}: {exc}"}
-        clearance = dq.authorize(action, observation, override=override)
+        clearance = dq.authorize(action, observation, override=override, backend_only=True)
         clearance["_cutover_fence"] = fence
         return clearance
     except BaseException as exc:

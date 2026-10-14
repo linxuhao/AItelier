@@ -46,3 +46,30 @@ decline. It receives a private snapshot; the same original measurement is consum
 by existing `authorize`, effect and `finalize` without another hidden measurement.
 The callback does not modify facts or release owners; backend defaults, Godot
 Source/CID/image and configuration rechecks, and quota bounds remain unchanged.
+
+## Backend-only audited decisions
+
+The host backend gate supplies `authorize(..., backend_only=True)` only after
+the existing local-admin runtime observation and backend namespace checks. An
+operator decision may request `backend_only: true` and, when the current
+deployment controller is present, its exact `deployment_attempt_id`. The
+controller must be an AItelier deployment attempt whose recorded
+`owner_driver_id` matches the audited `driver:<id>` actor. The action, inventory
+digest, expiry, backend scope and controller identity remain in the journal.
+Actor/reason/ticket strings record the decision; they are not authentication.
+The local CLI/API authority remains the trust boundary, and direct Python
+authorization is a trusted local API.
+
+This scope treats matching ready/ready semantic demand with no row error and
+explicit State settlement (settled, or confirmed-stopped abandonment, with a
+settlement timestamp) as passive metadata. It does not remove these rows or
+change the measured quiescent flag. The acknowledged-unknown decision can then
+coexist with passive metadata. Physical operations, known external processes,
+render owners, writes, leases and inventory errors still refuse an unknown-only
+override. Paused or abandoned-unknown recovery is not settled merely because a
+PID is absent or a timestamp exists. A caller changing shared services cannot
+claim backend-only scope from an override file; unscoped behavior is unchanged.
+
+This source contract does not certify source compatibility, recovery, or current
+production quiet. A real cutover still requires fresh supported host and runtime
+observations and coordination with the affected owners.

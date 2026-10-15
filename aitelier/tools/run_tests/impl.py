@@ -2260,6 +2260,9 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
             stdout, stderr = done.stdout, done.stderr
             if done.import_error:
                 report["import_error"] = done.import_error
+            if getattr(done, "git", None) is not None:
+                # What Git metadata the container had (`private_git`).
+                report["git_metadata"] = done.git
             out = ((stdout or "") + "\n" + (stderr or "")).strip()
             report["stdout"], report["stderr"] = stdout or "", stderr or ""
             report["returncode"] = done.returncode

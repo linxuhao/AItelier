@@ -31,6 +31,7 @@ import sqlite3
 import stat
 import socket
 import subprocess
+import tempfile
 import threading
 import time
 from urllib.parse import quote
@@ -85,7 +86,7 @@ def _validate_config(cfg: dict) -> None:
         raise LaunchRefused("node_executor_image must be an immutable sha256 digest")
 
 
-def _run_binding(cfg: dict, run_id: str) -> tuple[Path, Path, str]:
+def _run_binding(cfg: dict, run_id: str) -> tuple[Path, Path, str, str]:
     if not isinstance(run_id, str) or not run_id:
         raise LaunchRefused("existing normal run_id is required")
     uri = "file:" + quote(str(Path(cfg["state_db"]).resolve()), safe="/") + "?mode=ro"
@@ -102,7 +103,7 @@ def _run_binding(cfg: dict, run_id: str) -> tuple[Path, Path, str]:
     repo = _resolve_inside(source or "", cfg["allowed_roots"], "owned repository")
     report_root = (Path(cfg["aitelier_home"]).resolve() / "gate-reports" /
                    hashlib.sha256(run_id.encode()).hexdigest())
-    return repo, report_root, row["project_id"]
+    return repo, report_root, row["project_id"], row["source_repo"] or ""
 
 
 def _resolve_inside(path: str, roots: list[str], what: str) -> Path:
@@ -144,7 +145,7 @@ def validate_request(cfg: dict, request: dict) -> dict:
                "profile", "workdir", "npm_cache"}
     if set(request) - allowed:
         raise LaunchRefused("unsupported request fields; mounts/image come from host policy")
-    owned_repo, report_root, project_id = _run_binding(cfg, request.get("run_id"))
+    owned_repo, report_root, project_id, source_repo = _run_binding(cfg, request.get("run_id"))
     repo = _resolve_inside(request.get("repo", ""), cfg["allowed_roots"], "repo")
     if repo != owned_repo or not repo.is_dir():
         raise LaunchRefused("repo does not match the existing run's owned repository")
@@ -216,7 +217,8 @@ def validate_request(cfg: dict, request: dict) -> dict:
     return {"repo": str(repo), "args": args, "timeout": timeout,
             "writable_dirs": writable, "relay_socket": relay_socket,
             "import_module": module, "pytest_timeout": request.get("pytest_timeout") is True,
-            "report_dir": report_dir, "run_id": request["run_id"], "project_id": project_id}
+            "report_dir": report_dir, "run_id": request["run_id"], "project_id": project_id,
+            "git_common": str(Path(source_repo) / ".git") if source_repo else ""}
 
 
 def _validate_command_form(repo: Path, args: list[str], request: dict) -> None:
@@ -266,8 +268,8 @@ def docker_command(cfg: dict, fields: dict, name: str) -> list[str]:
                "--user", f"{os.getuid()}:{os.getgid()}", "--name", name,
                "--label", "aitelier.run_id=" + fields["run_id"],
                "--label", "aitelier.project_id=" + fields["project_id"],
-               "-v", f"{repo}:{repo}:ro", "-v", f"{entry}:/executor.py:ro",
-               "-w", repo]
+               "-v", f"{repo}:{repo}:ro", *fields.get("git_mounts", ()),
+               "-v", f"{entry}:/executor.py:ro", "-w", repo]
     for directory in fields["writable_dirs"]:
         command += ["-v", f"{directory}:{directory}:rw"]
     if fields["relay_socket"]:
@@ -355,14 +357,28 @@ def handle_request(cfg: dict, raw: bytes, conn: socket.socket | None = None) -> 
         request = json.loads(raw)
     except ValueError:
         return {"ok": False, "error": "request is not valid JSON"}
-    from core.repository_executor import _slot, IsolationUnavailable
+    from core.repository_executor import _slot, IsolationUnavailable, private_git
+    git = None
     try:
         fields = validate_request(cfg, request)
         with _slot(Path(cfg["aitelier_home"]) / "cpu-test-slots"):
-            result = _run_docker(cfg, fields, conn)
+            if fields.get("profile"):
+                result = _run_docker(cfg, fields, conn)
+            else:
+                # The repository's own Git metadata is the run's; the
+                # container gets a private copy (`private_git`), removed here.
+                root = Path(cfg["aitelier_home"]) / "cpu-git"
+                root.mkdir(mode=0o700, parents=True, exist_ok=True)
+                directory = Path(tempfile.mkdtemp(prefix="git-", dir=root))
+                try:
+                    mounts, git = private_git(Path(fields["repo"]), directory,
+                                              fields["git_common"] or None)
+                    result = _run_docker(cfg, {**fields, "git_mounts": mounts}, conn)
+                finally:
+                    shutil.rmtree(directory, ignore_errors=True)
     except (LaunchRefused, IsolationUnavailable, OSError, subprocess.TimeoutExpired) as exc:
         return {"ok": False, "error": str(exc)}
-    return {"ok": True, "result": result}
+    return {"ok": True, "result": result, "git": git}
 
 
 def _serve_connection(conn: socket.socket, cfg: dict, lock: threading.Semaphore) -> None:

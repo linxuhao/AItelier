@@ -16,10 +16,9 @@ import re
 import signal
 import subprocess
 import sys
-import threading
 from pathlib import Path
 
-from core import env_scrub
+from core import env_scrub, repository_executor
 from aitelier.tools.godot_playtest_scenario.impl import (
     godot_playtest_scenario as _run_godot_scenario,
 )
@@ -117,85 +116,61 @@ def _base(kind: str, root: Path, timeout: int, command: list[str], *,
 
 def _pytest(root: Path, targets: list[str], timeout: int, *,
             run_id: str, step_id: str) -> dict:
+    if any(not isinstance(value, str) or not value.strip()
+           for value in (run_id, step_id)):
+        raise ValueError("pytest requires injected run and step identity")
     command = [
-        sys.executable, "-m", "pytest", "-q", "-s", "--maxfail=1",
+        "python3", "-m", "pytest", "-q", "-s", "--maxfail=1",
         "-p", "no:cacheprovider", "--rootdir", str(root), *targets,
     ]
     base = _base("pytest", root, timeout, command,
                  run_id=run_id, step_id=step_id)
     timed_out = False
-    exit_status = -1
-    kept = bytearray()
-    output_bytes = 0
-    output_lock = threading.Lock()
-
-    def drain(stream) -> None:
-        nonlocal output_bytes
-        try:
-            while True:
-                chunk = stream.read(8192)
-                if not chunk:
-                    break
-                with output_lock:
-                    output_bytes += len(chunk)
-                    remaining = _OUTPUT_LIMIT_BYTES - len(kept)
-                    if remaining > 0:
-                        kept.extend(chunk[:remaining])
-        except OSError:
-            return
-
+    exit_status = None
+    stdout = stderr = ""
+    error = ""
     try:
-        process = subprocess.Popen(
-            command,
-            cwd=root,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            env=env_scrub.scrubbed_env(
-                PYTHONPATH=str(root), PYTHONDONTWRITEBYTECODE="1",
-                PYTEST_ADDOPTS="",
-            ),
-            start_new_session=True,
-        )
-        reader = threading.Thread(target=drain, args=(process.stdout,), daemon=True)
-        reader.start()
-        try:
-            process.wait(timeout=timeout)
-            exit_status = int(process.returncode)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            process.wait()
-            exit_status = -9
-        # A test must not detach a descendant and leave it running after the
-        # focused probe itself exits.  The group may already be gone.
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        reader.join(timeout=2)
-        if reader.is_alive() and process.stdout is not None:
-            process.stdout.close()
-            reader.join(timeout=1)
-    except OSError as exc:
-        message = f"{type(exc).__name__}: pytest could not start".encode()
-        kept.extend(message[:_OUTPUT_LIMIT_BYTES])
-        output_bytes = len(message)
-    with output_lock:
-        output, _, _ = _clip(bytes(kept))
-        truncated = output_bytes > len(kept)
-    return {
+        # The same owned disposable CPU transport as run_tests and authored
+        # gates. The host launcher validates run_id against existing ownership;
+        # this tool never starts repository Python in the backend namespace.
+        result = repository_executor.execute(root, command, timeout, run_id=run_id)
+        if (type(result.returncode) is not int
+                or not isinstance(result.stdout, str)
+                or not isinstance(result.stderr, str)):
+            raise repository_executor.IsolationUnavailable("malformed CPU executor result")
+        exit_status = result.returncode
+        stdout, stderr = result.stdout, result.stderr
+    except subprocess.TimeoutExpired as exc:
+        timed_out = True
+        stdout, stderr = exc.stdout or "", exc.stderr or ""
+        error = "isolated pytest exceeded its wall-clock deadline"
+    except (repository_executor.IsolationUnavailable, OSError) as exc:
+        error = f"{type(exc).__name__}: {exc}"
+    # Cancellation deliberately propagates: the existing transport closes its
+    # connection/removes only its own container in its cleanup path. Never retry
+    # locally, invent a return code, or convert cancellation into a pass.
+    def encoded(value: str | bytes) -> bytes:
+        return value if isinstance(value, bytes) else value.encode("utf-8")
+
+    out_bytes, err_bytes = encoded(stdout), encoded(stderr)
+    out, _, _ = _clip(out_bytes)
+    remaining = _OUTPUT_LIMIT_BYTES - len(out.encode("utf-8"))
+    err = err_bytes[:remaining].decode("utf-8", errors="ignore")
+    output_bytes = len(out_bytes) + len(err_bytes)
+    result = {
         **base,
-        "passed": exit_status == 0 and not timed_out,
+        "passed": exit_status == 0 and not timed_out and not error,
         "exit_status": exit_status,
         "timed_out": timed_out,
-        "output": output,
+        "stdout": out,
+        "stderr": err,
+        "output": out + err,
         "output_bytes": output_bytes,
-        "output_truncated": truncated,
+        "output_truncated": output_bytes > len((out + err).encode("utf-8")),
     }
+    if error:
+        result["error"] = error
+    return result
 
 
 def _godot_child(send, kwargs: dict) -> None:

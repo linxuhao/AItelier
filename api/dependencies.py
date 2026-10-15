@@ -494,16 +494,18 @@ def get_config_registry():
 def get_tool_loader():
     """FastAPI dependency injection: get the ToolLoader singleton.
 
-    Searches skillflow native tools first, then AItelier custom tools.
+    Searches skillflow native tools first, then AItelier custom tools. The
+    loader is the host subclass, so host routes (`core.tool_routes`) apply to
+    every engine dispatch of a routed name and survive cache reloads.
     """
     global _tool_loader_instance
     if _tool_loader_instance is None:
-        from skillflow.tool_loader import ToolLoader
+        from core.tool_routes import AItelierToolLoader
         from pathlib import Path
 
         import skillflow
         skillflow_tools = Path(skillflow.__file__).parent / "tools"
-        loader = ToolLoader(skillflow_tools)
+        loader = AItelierToolLoader(skillflow_tools)
         # AItelier custom tools
         custom = Path(__file__).resolve().parent.parent / "aitelier" / "tools"
         if custom.exists():

@@ -597,11 +597,34 @@ def _active_standing_projection(envelope: dict[str, Any], limit: int = MAX_STAND
     """Render whole, redacted v2 inbox lines inside the contract's hard cap."""
     if envelope.get("schema") == "aitelier.driver-guidance.v1":
         projection = envelope.get("projection")
+        omitted = envelope.get("omitted")
         if (envelope.get("project_id") != PROJECT_ID or not isinstance(projection,str)
                 or len(projection)>3000 or type(envelope.get("included")) is not int
-                or not 0<=envelope["included"]<=8):
+                or not 0<=envelope["included"]<=8
+                or type(omitted) is not int or omitted < 0):
             raise SourceUnavailable("private guidance bounds mismatch")
-        return projection
+        if not omitted:
+            return projection
+        # The v1 producer already redacted the rows, bounded whole serialized
+        # rows to 3000 chars, and reported how many active notices it could not
+        # include. The hook must show that count too. Its own omission marker can
+        # push the projection past the hard cap, so whole producer-delimited rows
+        # are dropped (the newest first, the same tail the producer trims) and the
+        # exact local removal count is carried into the reported omission. Rows
+        # are never truncated: every line stays a complete serialized row.
+        rows = projection.split("\n") if projection else []
+        if len(rows) != envelope["included"]:
+            raise SourceUnavailable("private guidance row count mismatch")
+        included = len(rows)
+
+        while True:
+            parts = rows[:included]
+            parts.append(f"[omitted_active_standing={omitted + len(rows) - included}]")
+            rendered = "\n".join(parts)
+            if len(rendered) <= limit or included <= 0:
+                return rendered
+            included -= 1
+
     if envelope.get("schema") != "aitelier.director-messaging.v2":
         raise SourceUnavailable("director inbox schema mismatch")
     result = envelope.get("result")

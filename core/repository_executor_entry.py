@@ -18,6 +18,21 @@ def run(payload):
            "PYTHONDONTWRITEBYTECODE": "1"}
     if payload.get("report_dir"):
         env["GATE_REPORT_DIR"] = payload["report_dir"]
+    if payload.get("npm_cache"):
+        # Node profiles: the pinned npm first on PATH (never the image's own
+        # npm), the ticket's own cache; HOME stays /tmp in the container.
+        env["PATH"] = payload["node_bin"] + ":" + env["PATH"]
+        env["npm_config_cache"] = payload["npm_cache"]
+        env["npm_config_update_notifier"] = "false"
+        try:
+            found = subprocess.run(["npm", "--version"], cwd=repo, env=env, capture_output=True,
+                                   text=True, timeout=60).stdout.strip()
+        except (OSError, subprocess.SubprocessError) as exc:
+            found = f"none ({type(exc).__name__})"
+        if found != payload["expect_npm"]:
+            return {"returncode": -1, "stdout": "", "stderr": "", "timed_out": False,
+                    "import_error": "", "unavailable":
+                    f"pinned npm {payload['expect_npm']} not in this image (found {found[:80]})"}
     relay = None
     if payload.get("relay_socket"):
         class Handler(BaseHTTPRequestHandler):

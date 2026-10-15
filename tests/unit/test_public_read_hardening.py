@@ -431,9 +431,12 @@ class TestTheEnvScrubCoversTheUnattendedPath:
 
     def test_both_subprocess_paths_in_run_tests_use_it(self):
         """pytest and `npm ci` are two separate spawns; the node one passed no
-        env= at all, so it inherited everything."""
+        env= at all, so it inherited everything. The node one is now no local
+        spawn at all: it reaches only the bounded CPU transport, whose entry
+        builds its own fixed environment."""
         import aitelier.tools.run_tests.impl as impl
-        assert "env_scrub.scrubbed_env" in inspect.getsource(impl._run_node_cmd)
+        node = inspect.getsource(impl._run_node_cmd)
+        assert "Popen" not in node and "repository_executor.execute" in node
         assert inspect.getsource(impl).count("env_scrub.scrubbed_env") >= 2
 
 

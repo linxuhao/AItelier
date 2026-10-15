@@ -1395,3 +1395,133 @@ def test_tracked_binding_complete_size_boundary(tmp_path, state_server, characte
         assert "session binding recovery required" in output.get("systemMessage", "")
         assert StateStub.requests == []
         assert not (tmp_path / "codex-home" / "project-handoff-pending").exists()
+
+
+# ---------------------------------------------------------------------------
+# driver-guidance.v1 omission display. The producer already redacts every row,
+# serializes whole rows newline-delimited and bounds them to 3000 chars, and it
+# reports how many active notices it could not include. The standing section
+# must display that count without breaking the cap or inventing notices.
+
+
+def _v1_marker(count):
+    return f"[omitted_active_standing={count}]"
+
+
+def _tracked_standing_section(tmp_path, state_server, envelope):
+    """Run the actual tracked entry and return the standing section verbatim."""
+    StateStub.operations = {"driver_postcompact_guidance": STANDING_ONLY_OPERATION}
+    StateStub.guidance = envelope
+    context = invoke(tmp_path, state_server, tracked=True)["hookSpecificOutput"]["additionalContext"]
+    assert "recovery required" not in context
+    assert "## Active standing director guidance (bounded, read-only)\n" in context
+    return context.split("## Active standing director guidance (bounded, read-only)\n", 1)[1]
+
+
+def _real_v1_envelope(tmp_path, standing=12, subject="s" * 60, body="界" * 320):
+    """Run the real v1 producer over a real store: redacted whole JSON rows,
+    newline-delimited, bounded to 3000 chars, carrying its own omission count."""
+    from core.drivers import DriverRegistry
+    from core.state_commands import execute
+    from core.state_database import StateDatabase
+    from core.state_service import StateService
+
+    db = StateDatabase(str(tmp_path / "guidance-producer.sqlite"))
+    seed = StateService(db, actor="fixture", project_read_trusted=True)
+    seed.create_project("alpha", "alpha")
+    seed.create_project("aitelier", "aitelier")
+    registry = DriverRegistry(db, "test-only-pepper-not-a-production-secret")
+    for driver_id in ("ada", "bob"):
+        registry.register(driver_id, driver_id, actor="test")
+    registry.set_membership("alpha", "ada", "member", 0, "fixture", actor="test")
+    registry.set_membership("aitelier", "bob", "member", 0, "fixture", actor="test")
+    ada = StateService(db, actor="driver:ada", driver_id="ada", project_read_trusted=True)
+    bob = StateService(db, actor="driver:bob", driver_id="bob", project_read_trusted=True)
+    for index in range(standing):
+        execute(ada, "send_director_message", {
+            "sender_project_id": "alpha", "target_project_id": "aitelier",
+            "protocol_version": "v3", "director_identity": "ada",
+            "request_key": f"standing-{index}", "subject": subject, "body": body,
+            "delivery_mode": "standing"}, allow_write=True)
+    # Ordinary/private driver mail and broadcast transients must stay out of the
+    # standing section: they are read elsewhere, never injected here.
+    execute(ada, "send_director_message", {
+        "sender_project_id": "alpha", "target_project_id": "aitelier",
+        "protocol_version": "v3", "director_identity": "ada",
+        "request_key": "broadcast-1", "subject": "TRANSIENT-BROADCAST",
+        "body": "broadcast body", "ack_mode": "broadcast"}, allow_write=True)
+    bob.driver_inbox.send_driver_message("ada", "ORDINARY-PRIVATE", "ordinary body",
+                                         target_driver_id="bob")
+    return execute(bob, "driver_postcompact_guidance",
+                   {"project_id": "aitelier", "standing_only": True})
+
+
+def test_guidance_v1_omission_count_reaches_the_tracked_entry_with_one_whole_row_drop(
+    tmp_path, state_server
+):
+    envelope = _real_v1_envelope(tmp_path)
+    rows = envelope["projection"].split("\n")
+    assert envelope["schema"] == "aitelier.driver-guidance.v1"
+    assert envelope["standing_only"] is True
+    assert envelope["included"] == len(rows) == 5
+    assert envelope["omitted"] == 7
+    # The producer's own bound leaves less room than the omission marker needs,
+    # so exactly one whole producer row must go for the section to fit.
+    assert len(envelope["projection"]) + 1 + len(_v1_marker(envelope["omitted"])) > 3000
+
+    section = _tracked_standing_section(tmp_path, state_server, envelope)
+    assert len(section) <= 3000
+    lines = section.splitlines()
+    kept, marker = lines[:-1], lines[-1]
+    assert len(kept) == len(rows) - 1
+    assert kept == rows[:len(kept)]  # whole leading rows, byte for byte
+    assert marker == _v1_marker(envelope["omitted"] + 1)
+    for line in kept:
+        assert json.loads(line)["body_excerpt"] == "界" * 320  # no truncated row
+    assert "TRANSIENT-BROADCAST" not in section
+    assert "ORDINARY-PRIVATE" not in section
+    names = [request["params"]["name"] for request in StateStub.requests]
+    assert "driver_whoami" in names
+
+
+def test_guidance_v1_zero_omission_is_not_falsely_marked(tmp_path, state_server):
+    section = _tracked_standing_section(tmp_path, state_server, GUIDANCE_V1)
+    assert section == GUIDANCE_V1["projection"]
+    assert "[omitted_active_standing=" not in section
+
+
+def test_guidance_v1_all_omitted_projection_still_reports_the_count(tmp_path, state_server):
+    envelope = {
+        "schema": "aitelier.driver-guidance.v1", "project_id": "aitelier",
+        "driver_id": "stub", "standing_only": True,
+        "projection": "", "included": 0, "omitted": 5,
+    }
+    section = _tracked_standing_section(tmp_path, state_server, envelope)
+    assert section.splitlines() == [_v1_marker(5)]
+
+
+@pytest.mark.parametrize("omitted", [None, "0", -1, True])
+def test_guidance_v1_invalid_omission_counter_fails_closed(tmp_path, state_server, omitted):
+    StateStub.operations = {"driver_postcompact_guidance": STANDING_ONLY_OPERATION}
+    envelope = {key: value for key, value in GUIDANCE_V1.items() if key != "omitted"}
+    if omitted is not None:
+        envelope["omitted"] = omitted
+    StateStub.guidance = envelope
+    context = invoke(tmp_path, state_server, tracked=True)["hookSpecificOutput"]["additionalContext"]
+    # An unreadable omission count is refused outright, never silently dropped.
+    assert "recovery required" in context
+    assert "STANDING-ONLY-PROJECT-LINE" not in context
+
+
+def test_guidance_v1_row_count_beyond_included_fails_closed(tmp_path, state_server):
+    StateStub.operations = {"driver_postcompact_guidance": STANDING_ONLY_OPERATION}
+    StateStub.guidance = {
+        "schema": "aitelier.driver-guidance.v1", "project_id": "aitelier",
+        "driver_id": "stub", "standing_only": True,
+        "projection": '{"a": 1}\n{"a": 2}', "included": 1, "omitted": 3,
+    }
+    context = invoke(tmp_path, state_server, tracked=True)["hookSpecificOutput"]["additionalContext"]
+    # More rows than the counted notices: refuse rather than show what was not counted.
+    assert "recovery required" in context
+
+

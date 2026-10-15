@@ -43,7 +43,7 @@ def env(monkeypatch, tmp_path):
     monkeypatch.setattr(sc, "_detached_tick_owners", {})
     monkeypatch.setattr(sc, "_sweep_ended_leases", lambda: None)
     monkeypatch.setattr(sc, "_sweep_ended_leases_async",
-                        lambda: asyncio.sleep(0))
+                        lambda *, wait=True: asyncio.sleep(0))
     monkeypatch.setattr(sc, "_lease_sweep_future", None)
     monkeypatch.setattr(sc, "_scheduler_instance", None)   # no wake date jobs
 

@@ -1,3 +1,4 @@
+import hashlib
 import importlib.util
 import json
 import os
@@ -20,7 +21,12 @@ def load_hook_module():
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    # The subprocess binds PROJECT_ID from the session's binding file (the
+    # fixtures below bind "aitelier"); module-level marker helpers must agree
+    # with that bound path or they would address a different marker file.
+    module.PROJECT_ID = "aitelier"
     return module
+
 
 
 class StateStub(BaseHTTPRequestHandler):
@@ -32,6 +38,12 @@ class StateStub(BaseHTTPRequestHandler):
     guide = None
     nodes = None
     standing = None
+    operations = None  # state_graph_help advertisement; None = an older server
+    identity = None  # driver_whoami response
+    guidance = None  # driver_postcompact_guidance v1 envelope
+    driver_tokens = None  # X-AItelier-Driver-Token seen per request
+    credentials = None  # every credential-bearing header seen, per request
+    project = "aitelier"  # the project this stub serves; every read must name it
 
     def log_message(self, *_args):
         pass
@@ -40,9 +52,17 @@ class StateStub(BaseHTTPRequestHandler):
         size = int(self.headers.get("Content-Length", "0"))
         body = json.loads(self.rfile.read(size))
         StateStub.requests.append(body)
+        if StateStub.driver_tokens is not None:
+            StateStub.driver_tokens.append(self.headers.get("X-AItelier-Driver-Token"))
+        if StateStub.credentials is not None:
+            StateStub.credentials.append(sorted(
+                (k.lower(), v) for k, v in self.headers.items()
+                if k.lower() in {"authorization", "x-aitelier-admin-token", "x-aitelier-driver-token"}))
         params = body["params"]
         name, args = params["name"], params["arguments"]
-        if name == "state_graph_help":
+        if name == "driver_whoami":
+            result = StateStub.identity or {"actor": "driver:stub", "driver_id": "stub"}
+        elif name == "state_graph_help":
             result = {
                 "driver_resource": "aitelier://state/driver-guide",
                 "driver_guide": StateStub.guide or """# State DAG director protocol
@@ -64,21 +84,26 @@ Select the note by project_id.
 DO_NOT_INCLUDE_UNSELECTED_GUIDE_SECTION
 """,
             }
+            if StateStub.operations is not None:
+                result["operations"] = StateStub.operations
+        elif args.get("action") == "driver_postcompact_guidance":
+            assert args["arguments"] == {"project_id": StateStub.project, "standing_only": True}
+            result = StateStub.guidance
         elif args["action"] == "get_driver_note":
-            assert args["arguments"] == {"project_id": "aitelier"}
+            assert args["arguments"] == {"project_id": StateStub.project}
             lines = StateStub.lines or [
                 f"rule revision {StateStub.revision} [in force]",
                 "fresh rule; Authorization: Bearer forbidden-secret [in force]"]
             index = StateStub.items or [
-                {"address": f"note://aitelier/{n:012x}", "index_line": line}
+                {"address": f"note://{StateStub.project}/{n:012x}", "index_line": line}
                 for n, line in enumerate(lines)]
             result = {
-                "project_id": "aitelier", "revision": StateStub.revision, "index": index,
+                "project_id": StateStub.project, "revision": StateStub.revision, "index": index,
                 "entry_count": len(index), "listed_count": len(index), "delisted_count": 0,
                 **(StateStub.extra or {}),
             }
         elif args["action"] == "project_overview":
-            assert args == {"action": "project_overview", "arguments": {"project_id": "aitelier"}}
+            assert args == {"action": "project_overview", "arguments": {"project_id": StateStub.project}}
             result = {
                 "event_seq": 57,
                 "nodes": StateStub.nodes or [
@@ -89,11 +114,11 @@ DO_NOT_INCLUDE_UNSELECTED_GUIDE_SECTION
             }
         else:
             assert args == {"action": "list_director_messages", "arguments": {
-                "project_id": "aitelier", "after": 0, "limit": 8,
+                "project_id": StateStub.project, "after": 0, "limit": 8,
                 "delivery_mode": "standing", "statuses": ["unread", "acknowledged"]}}
             result = StateStub.standing or {
                 "schema": "aitelier.director-messaging.v2",
-                "result": {"project_id": "aitelier", "items": [], "matched_total": 0,
+                "result": {"project_id": StateStub.project, "items": [], "matched_total": 0,
                            "has_more": False, "next_after": 0},
             }
         text = json.dumps({"result": result})
@@ -111,6 +136,10 @@ def state_server():
     StateStub.requests = []
     StateStub.lines = StateStub.extra = StateStub.items = StateStub.guide = StateStub.nodes = None
     StateStub.standing = None
+    StateStub.operations = StateStub.identity = StateStub.guidance = None
+    StateStub.driver_tokens = []
+    StateStub.credentials = []
+    StateStub.project = "aitelier"
     server = ThreadingHTTPServer(("127.0.0.1", 0), StateStub)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -121,11 +150,26 @@ def state_server():
         thread.join(timeout=2)
 
 
+def write_binding(codex_home, session_id, project_id="aitelier", payload=None):
+    """Write the explicit session->project binding; the hook never infers one."""
+    directory = codex_home / "director-project-bindings"
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    key = hashlib.sha256(session_id.encode("utf-8")).hexdigest()
+    body = payload if payload is not None else json.dumps(
+        {"session_id": session_id, "project_id": project_id})
+    path = directory / f"{key}.json"
+    path.write_text(body)
+    return path
+
+
 def invoke(
-    tmp_path, url, cwd=None, event="SessionStart", session_id="session-a", source="compact"
+    tmp_path, url, cwd=None, event="SessionStart", session_id="session-a", source="compact",
+    bind=True, project_id="aitelier", tracked=False, env=None,
 ):
     codex_home = tmp_path / "codex-home"
     codex_home.mkdir(exist_ok=True)
+    if bind:
+        write_binding(codex_home, session_id, project_id=project_id)
     helper = tmp_path / "headers"
     if not helper.exists():
         helper.write_text("#!/bin/sh\nprintf '%s' '{\"X-AItelier-Admin-Token\":\"helper-secret\"}'\n")
@@ -153,10 +197,17 @@ def invoke(
             "turn_id": "turn-compact", "permission_mode": "never",
             "stop_hook_active": False, "last_assistant_message": "continuing",
         })
+    command, run_cwd = [str(HOOK)], cwd or tmp_path
+    if tracked:
+        # The actual tracked entry chain: the command Codex runs from the
+        # checked-in hooks.json, resolved through `git rev-parse` in the checkout.
+        config = json.loads((REPO / ".codex" / "hooks.json").read_text())
+        command, run_cwd = config["hooks"][event][0]["hooks"][0]["command"], REPO
     result = subprocess.run(
-        [str(HOOK)], input=json.dumps(hook_input),
-        text=True, capture_output=True, cwd=cwd or tmp_path,
-        env={**os.environ, "CODEX_HOME": str(codex_home)}, timeout=10, check=False,
+        command, input=json.dumps(hook_input), shell=tracked,
+        text=True, capture_output=True, cwd=run_cwd,
+        env={**os.environ, "CODEX_HOME": str(codex_home), **(env or {})},
+        timeout=10, check=False,
     )
     assert result.returncode == 0, result.stderr
     assert result.stderr == ""
@@ -211,8 +262,12 @@ def test_hook_projects_only_bounded_redacted_active_standing_without_mutation(tm
     context = invoke(tmp_path, state_server)["hookSpecificOutput"]["additionalContext"]
     section = context.split("## Active standing director guidance (bounded, read-only)\n", 1)[1]
     assert len(section) <= 3000
+    # No guidance operation advertised (an older server): the honest notice
+    # leads, then whole inbox lines, then the omission marker.
+    lines = section.splitlines()
+    assert lines[0].startswith(f"- {OWN_STANDING_UNAVAILABLE}: server does not advertise ")
     assert section.splitlines()[-1].startswith("[omitted_active_standing=")
-    for line in section.splitlines()[:-1]:
+    for line in lines[1:-1]:
         json.loads(line)
     assert "abcdefghijklmnopqrstuvwxyz" not in section
     assert StateStub.standing == before
@@ -248,8 +303,10 @@ def test_unreachable_state_still_emits_bounded_recovery_context(tmp_path):
 
 
 def test_postcompact_marker_failure_never_blocks_and_is_actionable(tmp_path, state_server):
-    blocked_home = tmp_path / "not-a-directory"
-    blocked_home.write_text("file blocks marker directory")
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir(mode=0o700)
+    (codex_home / "project-handoff-pending").write_text("file blocks marker directory")
+    write_binding(codex_home, "session-marker-failure")
     hook_input = {
         "session_id": "session-marker-failure",
         "turn_id": "turn-compact",
@@ -263,7 +320,7 @@ def test_postcompact_marker_failure_never_blocks_and_is_actionable(tmp_path, sta
         [str(HOOK)], input=json.dumps(hook_input), text=True, capture_output=True,
         cwd=tmp_path, env={
             **os.environ,
-            "CODEX_HOME": str(blocked_home),
+            "CODEX_HOME": str(codex_home),
             "AITELIER_MCP_URL": state_server,
         }, timeout=10, check=False,
     )
@@ -912,3 +969,429 @@ def test_lapsed_lease_stays_listed_as_active_ownership():
     assert "owner_driver_id=grok lease_state=expired" in summary
     legacy = next(line for line in summary.splitlines() if line.startswith("- legacy:"))
     assert legacy.endswith("checkpoint_id=none")
+
+
+# ---------------------------------------------------------------------------
+# Session-bound project isolation (owner ruling 2026-10-15): the hook is a
+# no-op for any event of an unbound session, and a malformed binding fails
+# closed with an honest repair notice. Both leave ZERO State queries and no
+# pending marker.
+
+
+def test_unbound_session_performs_zero_state_queries_for_every_event(tmp_path, state_server):
+    pending_root = tmp_path / "codex-home" / "project-handoff-pending"
+    for event in ("PostCompact", "SessionStart", "UserPromptSubmit", "Stop"):
+        before = len(StateStub.requests)
+        output = invoke(tmp_path, state_server, event=event, bind=False)
+        assert output == {"continue": True}
+        assert len(StateStub.requests) == before
+    assert not pending_root.exists()
+
+
+def test_malformed_binding_fails_closed_with_honest_repair_notice(tmp_path, state_server):
+    codex_home = tmp_path / "codex-home"
+    for payload in (
+        "{not json at all}",
+        json.dumps({"session_id": "other-session", "project_id": "aitelier"}),
+    ):
+        session_id = f"malformed-binding-{len(payload)}"
+        assert write_binding(codex_home, session_id, payload=payload).exists()
+        for event in ("PostCompact", "SessionStart", "UserPromptSubmit", "Stop"):
+            before = len(StateStub.requests)
+            output = invoke(tmp_path, state_server, event=event, session_id=session_id, bind=False)
+            assert output["continue"] is True
+            message = output.get("systemMessage", "")
+            assert "session binding recovery required" in message
+            assert "No State was queried" in message
+            assert len(message) <= 12_000
+            assert len(StateStub.requests) == before
+    assert not list((codex_home / "project-handoff-pending").glob("*.json"))
+
+
+def test_binding_selection_separates_platform_and_wuxia_projects(tmp_path, monkeypatch):
+    module = load_hook_module()
+    codex_home = tmp_path / "codex-home"
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    write_binding(codex_home, "session-a", project_id="aitelier")
+    write_binding(codex_home, "session-b", project_id="wuxia-myth")
+    assert module._read_binding({"session_id": "session-a"}) == ("bound", "aitelier")
+    assert module._read_binding({"session_id": "session-b"}) == ("bound", "wuxia-myth")
+    assert module._read_binding({"session_id": "never-bound-session"}) == ("missing", None)
+    module.PROJECT_ID = "aitelier"
+    platform_marker = module._pending_path({"session_id": "session-a"})
+    module.PROJECT_ID = "wuxia-myth"
+    wuxia_marker = module._pending_path({"session_id": "session-b"})
+    module.PROJECT_ID = None
+    assert platform_marker is not None and wuxia_marker is not None
+    assert platform_marker != wuxia_marker
+    assert platform_marker.parent == wuxia_marker.parent
+
+
+def test_binding_validation_boundaries_fail_closed(tmp_path, monkeypatch):
+    module = load_hook_module()
+    codex_home = tmp_path / "codex-home"
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    assert module._read_binding({}) == ("missing", None)
+    assert module._read_binding({"session_id": "   "}) == ("missing", None)
+    assert module._read_binding({"session_id": "x" * 129}) == ("missing", None)
+    write_binding(codex_home, "long-ok", project_id="p" * 128)
+    assert module._read_binding({"session_id": "long-ok"}) == ("bound", "p" * 128)
+    write_binding(codex_home, "too-long", project_id="p" * 129)
+    assert module._read_binding({"session_id": "too-long"}) == ("malformed", None)
+    write_binding(codex_home, "blank-project", project_id="   ")
+    assert module._read_binding({"session_id": "blank-project"}) == ("malformed", None)
+    write_binding(codex_home, "whitespace-session", payload=json.dumps(
+        {"session_id": "whitespace-session", "project_id": "  aitelier  "}))
+    assert module._read_binding({"session_id": "whitespace-session"}) == ("bound", "aitelier")
+
+
+# ---------------------------------------------------------------------------
+# Owner standing-only selection: the hook asks for standing_only=true only when
+# the server advertises the typed selector and the identity check answers; any
+# other case falls back to bounded project standing with an honest notice and
+# never calls the unfiltered aggregator.
+
+
+STANDING_ONLY_OPERATION = {
+    "mutates": False,
+    "arguments": {
+        "type": "object",
+        "properties": {
+            "project_id": {"type": "string", "minLength": 1, "maxLength": 128},
+            "standing_only": {"type": "boolean", "default": False},
+        },
+        "required": ["project_id"],
+    },
+}
+LEGACY_OPERATION = {
+    "mutates": False,
+    "arguments": {
+        "type": "object",
+        "properties": {"project_id": {"type": "string", "minLength": 1, "maxLength": 128}},
+        "required": ["project_id"],
+    },
+}
+GUIDANCE_V1 = {
+    "schema": "aitelier.driver-guidance.v1",
+    "project_id": "aitelier",
+    "driver_id": "stub",
+    "projection": "- STANDING-ONLY-PROJECT-LINE\n- STANDING-ONLY-DRIVER-LINE",
+    "included": 2,
+    "omitted": 0,
+}
+
+
+def test_hook_uses_standing_only_selector_when_advertised_and_authenticated(tmp_path, state_server):
+    StateStub.operations = {"driver_postcompact_guidance": STANDING_ONLY_OPERATION}
+    StateStub.guidance = GUIDANCE_V1
+    context = invoke(tmp_path, state_server)["hookSpecificOutput"]["additionalContext"]
+    assert "STANDING-ONLY-PROJECT-LINE" in context and "STANDING-ONLY-DRIVER-LINE" in context
+    assert "own standing driver notices unavailable" not in context
+    assert "Active standing director guidance" in context
+    names = [request["params"]["name"] for request in StateStub.requests]
+    assert "driver_whoami" in names
+    guidance_calls = [
+        request for request in StateStub.requests
+        if request["params"]["name"] == "state_graph_read"
+        and request["params"]["arguments"]["action"] == "driver_postcompact_guidance"
+    ]
+    assert len(guidance_calls) == 1
+    assert guidance_calls[0]["params"]["arguments"]["arguments"] == {
+        "project_id": "aitelier", "standing_only": True}
+
+
+def test_hook_never_calls_unfiltered_aggregator_when_selector_unadvertised(tmp_path, state_server):
+    StateStub.operations = {"driver_postcompact_guidance": LEGACY_OPERATION}
+    context = invoke(tmp_path, state_server)["hookSpecificOutput"]["additionalContext"]
+    assert "own standing driver notices unavailable" in context
+    assert "server does not advertise the standing_only selector" in context
+    assert "STANDING-ONLY-PROJECT-LINE" not in context
+    assert "Active standing director guidance" in context
+    assert "driver_postcompact_guidance" not in json.dumps(StateStub.requests)
+
+
+def test_hook_falls_back_with_honest_notice_when_identity_not_established(tmp_path, state_server):
+    StateStub.operations = {"driver_postcompact_guidance": STANDING_ONLY_OPERATION}
+    StateStub.identity = {"actor": "anonymous"}
+    context = invoke(tmp_path, state_server)["hookSpecificOutput"]["additionalContext"]
+    assert "driver identity not established" in context
+    assert "driver_postcompact_guidance" not in json.dumps(StateStub.requests)
+
+
+def test_driver_token_file_fallback_authenticates_without_helper_or_admin_token(tmp_path, state_server):
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir(mode=0o700)
+    (codex_home / "config.toml").write_text(f'[mcp_servers.aitelier]\nurl = "{state_server}"\n')
+    token_file = tmp_path / "driver.token"
+    token_file.write_text("driver-file-token")
+    token_file.chmod(0o600)
+    write_binding(codex_home, "file-fallback-session")
+    hook_input = {
+        "session_id": "file-fallback-session",
+        "transcript_path": str(tmp_path / "rollout.jsonl"),
+        "cwd": str(tmp_path),
+        "hook_event_name": "SessionStart",
+        "source": "startup",
+        "permission_mode": "never",
+    }
+    result = subprocess.run(
+        [str(HOOK)], input=json.dumps(hook_input), text=True, capture_output=True,
+        cwd=tmp_path, env={
+            **os.environ,
+            "CODEX_HOME": str(codex_home),
+            "AITELIER_DRIVER_TOKEN_FILE": str(token_file),
+        }, timeout=10, check=False,
+    )
+    assert result.returncode == 0 and result.stderr == ""
+    context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert "driver_note_revision=1" in context
+    assert StateStub.requests
+    assert StateStub.driver_tokens == ["driver-file-token"] * len(StateStub.requests)
+
+
+OWN_STANDING_UNAVAILABLE = "own standing driver notices unavailable"
+
+
+@pytest.mark.parametrize("operations", [
+    None,  # an older server: state_graph_help carries no operations at all
+    {},  # operations present, driver_postcompact_guidance absent
+    {"get_driver_note": STANDING_ONLY_OPERATION},
+    {"driver_postcompact_guidance": "advertised"},  # malformed advertisement
+    ["driver_postcompact_guidance"],  # malformed operations table
+])
+def test_unadvertised_guidance_falls_back_with_honest_notice_on_tracked_entry(
+    tmp_path, state_server, operations
+):
+    StateStub.operations = operations
+    StateStub.guidance = GUIDANCE_V1
+    context = invoke(tmp_path, state_server, tracked=True)["hookSpecificOutput"]["additionalContext"]
+    assert "driver_note_revision=1" in context
+    section = context.split("## Active standing director guidance (bounded, read-only)\n", 1)[1]
+    assert section.startswith(f"- {OWN_STANDING_UNAVAILABLE}: ")
+    assert "server does not advertise driver_postcompact_guidance" in section
+    assert "only the bounded project standing below was projected" in section
+    assert "STANDING-ONLY-PROJECT-LINE" not in context
+    # Project-standing-only fallback: the four baseline reads, no identity probe
+    # and never the unfiltered aggregator.
+    assert [(r["params"]["name"], r["params"]["arguments"].get("action")) for r in StateStub.requests] == [
+        ("state_graph_read", "get_driver_note"), ("state_graph_read", "project_overview"),
+        ("state_graph_help", None), ("state_graph_read", "list_director_messages")]
+
+
+@pytest.mark.parametrize("arguments", [
+    {"type": "object", "properties": ["project_id", "standing_only"]},
+    {"type": "object", "properties": "standing_only"},
+    {"type": "object", "properties": {"standing_only": "boolean"}},
+    {"type": "object", "properties": {"standing_only": {"type": "string"}}},
+    "standing_only",
+])
+def test_malformed_standing_only_selector_is_not_treated_as_advertised(
+    tmp_path, state_server, arguments
+):
+    StateStub.operations = {"driver_postcompact_guidance": {"mutates": False, "arguments": arguments}}
+    StateStub.guidance = GUIDANCE_V1
+    context = invoke(tmp_path, state_server, tracked=True)["hookSpecificOutput"]["additionalContext"]
+    assert "server does not advertise the standing_only selector" in context
+    assert "STANDING-ONLY-PROJECT-LINE" not in context
+    assert "driver_postcompact_guidance" not in json.dumps(StateStub.requests)
+
+
+def _large_standing_items(count=8):
+    items = []
+    for index in range(count):
+        message_id = f"00000000-0000-4000-8000-{index:012d}"
+        items.append({
+            "message": {
+                "message_id": message_id, "thread_id": message_id,
+                "sender_project_id": "other", "director_identity": "director",
+                "actor": "actor", "subject": f"standing {index}",
+                "body": "界" * 500, "created_at": "2026-09-14T00:00:00.000000Z",
+                "reply_to_delivery_id": None, "delivery_mode": "standing"},
+            "delivery": {
+                "delivery_id": f"10000000-0000-4000-8000-{index:012d}", "message_id": message_id,
+                "target_project_id": "aitelier", "delivery_seq": index + 1,
+                "status": "unread", "version": 1},
+        })
+    return items
+
+
+@pytest.mark.parametrize("case", ["absent", "legacy", "anonymous"])
+def test_fallback_notice_stays_inside_the_standing_cap_with_truthful_omissions(
+    tmp_path, state_server, case
+):
+    StateStub.operations = {
+        "absent": None,
+        "legacy": {"driver_postcompact_guidance": LEGACY_OPERATION},
+        "anonymous": {"driver_postcompact_guidance": STANDING_ONLY_OPERATION},
+    }[case]
+    StateStub.identity = {"actor": "anonymous"} if case == "anonymous" else None
+    StateStub.standing = {
+        "schema": "aitelier.director-messaging.v2",
+        "result": {"project_id": "aitelier", "items": _large_standing_items(), "matched_total": 11,
+                   "has_more": True, "next_after": 8},
+    }
+    context = invoke(tmp_path, state_server, tracked=True)["hookSpecificOutput"]["additionalContext"]
+    assert len(context) <= 12_000
+    section = context.split("## Active standing director guidance (bounded, read-only)\n", 1)[1]
+    lines = section.splitlines()
+    assert len(section) <= 3000
+    assert lines[0].startswith(f"- {OWN_STANDING_UNAVAILABLE}: ")
+    inbox_lines = [json.loads(line) for line in lines[1:-1]]
+    assert 1 <= len(inbox_lines) < 8
+    assert lines[-1] == f"[omitted_active_standing={11 - len(inbox_lines)}]"
+    assert "driver_postcompact_guidance" not in json.dumps(StateStub.requests[-1])
+
+
+@pytest.mark.parametrize("identity,selected", [
+    ({"actor": "driver:stub", "driver_id": "stub"}, True),
+    ({"actor": "owner:human", "driver_id": None}, True),
+    ({"actor": "legacy:admin", "driver_id": None}, False),
+    ({"driver_id": None}, False),  # whoami answered without any identity
+    ({"actor": "driver:spoofed-without-id", "driver_id": ""}, False),
+])
+def test_authenticated_versus_absent_identity_on_tracked_entry(
+    tmp_path, state_server, identity, selected
+):
+    StateStub.operations = {"driver_postcompact_guidance": STANDING_ONLY_OPERATION}
+    StateStub.identity = identity
+    StateStub.guidance = GUIDANCE_V1
+    context = invoke(tmp_path, state_server, tracked=True)["hookSpecificOutput"]["additionalContext"]
+    called = "driver_postcompact_guidance" in json.dumps(StateStub.requests)
+    assert called is selected
+    assert ("STANDING-ONLY-DRIVER-LINE" in context) is selected
+    assert (OWN_STANDING_UNAVAILABLE in context) is not selected
+    if not selected:
+        assert "driver identity not established" in context
+
+
+def test_platform_and_wuxia_bindings_query_only_their_own_project_on_tracked_entry(
+    tmp_path, state_server
+):
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    write_binding(codex_home, "platform-session", project_id="aitelier")
+    write_binding(codex_home, "wuxia-session", project_id="wuxia-myth")
+    StateStub.operations = {"driver_postcompact_guidance": STANDING_ONLY_OPERATION}
+    for session, project in (("wuxia-session", "wuxia-myth"), ("platform-session", "aitelier")):
+        StateStub.project = project
+        StateStub.guidance = {**GUIDANCE_V1, "project_id": project}
+        before = len(StateStub.requests)
+        context = invoke(tmp_path, state_server, session_id=session, bind=False,
+                         tracked=True)["hookSpecificOutput"]["additionalContext"]
+        assert f"project_id={project} (fixed project isolation)" in context
+        assert "STANDING-ONLY-PROJECT-LINE" in context
+        reads = [r["params"]["arguments"] for r in StateStub.requests[before:]
+                 if r["params"]["name"] == "state_graph_read"]
+        assert len(reads) == 4
+        assert {read["arguments"]["project_id"] for read in reads} == {project}
+    # A guidance envelope for the other project is refused, never injected.
+    StateStub.guidance = {**GUIDANCE_V1, "project_id": "wuxia-myth"}
+    write_binding(codex_home, "platform-session-2", project_id="aitelier")
+    context = invoke(tmp_path, state_server, session_id="platform-session-2", bind=False,
+                     tracked=True)["hookSpecificOutput"]["additionalContext"]
+    assert "recovery required" in context and "STANDING-ONLY-PROJECT-LINE" not in context
+
+
+def test_lapsed_lease_ownership_reaches_the_tracked_entry_context(tmp_path, state_server):
+    StateStub.nodes = [
+        {"node_key": "lapsed", "status": "OPEN", "readiness": "in_progress_lease_expired",
+         "next_action": None, "latest_attempt": {
+             "attempt_id": "attempt-l", "status": "running", "reporting_actor": "driver:grok",
+             "owner_driver_id": "grok", "lease_state": "expired"}},
+    ]
+    context = invoke(tmp_path, state_server, tracked=True)["hookSpecificOutput"]["additionalContext"]
+    assert "- lapsed: attempt_id=attempt-l" in context
+    assert "owner_driver_id=grok lease_state=expired" in context
+    assert "whoami (driver_whoami must answer driver:<your id>) -> claim_node" in context
+
+
+def _credential_case(tmp_path, url, case):
+    """Write one credential layout; return the env overlay for the hook."""
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir(exist_ok=True)
+    helper = tmp_path / "headers"
+    lines = [f'[mcp_servers.aitelier]\nurl = "{url}"\n']
+    if case == "helper_wins":
+        helper.write_text("#!/bin/sh\nprintf '%s' '{\"X-AItelier-Admin-Token\":\"helper-secret\"}'\n")
+        helper.chmod(0o700)
+        lines.append(f'http_headers_helper = "{helper}"\n')
+    (codex_home / "config.toml").write_text("".join(lines))
+    env = {"AITELIER_DRIVER_TOKEN": "", "AITELIER_DRIVER_TOKEN_FILE": "",
+           "AITELIER_DRIVER_ID": "", "AITELIER_ADMIN_TOKEN": "", "AITELIER_MCP_URL": "",
+           "HOME": str(tmp_path / "home")}
+    token_file = tmp_path / "driver.token"
+    token_file.write_text("driver-file-token\n")
+    if case == "helper_wins":
+        env.update(AITELIER_DRIVER_TOKEN="env-driver-token", AITELIER_ADMIN_TOKEN="env-admin-token")
+    elif case == "env_driver_beats_admin":
+        env.update(AITELIER_DRIVER_TOKEN="env-driver-token", AITELIER_ADMIN_TOKEN="env-admin-token",
+                   AITELIER_DRIVER_TOKEN_FILE=str(token_file))
+        token_file.chmod(0o600)
+    elif case == "file_0600":
+        env.update(AITELIER_DRIVER_TOKEN_FILE=str(token_file), AITELIER_ADMIN_TOKEN="env-admin-token")
+        token_file.chmod(0o600)
+    elif case == "file_0644_falls_back_to_admin":
+        env.update(AITELIER_DRIVER_TOKEN_FILE=str(token_file), AITELIER_ADMIN_TOKEN="env-admin-token")
+        token_file.chmod(0o644)
+    elif case == "driver_id_home_file":
+        drivers = tmp_path / "home" / ".aitelier-drivers"
+        drivers.mkdir(parents=True)
+        (drivers / "grok.token").write_text("home-driver-token")
+        (drivers / "grok.token").chmod(0o600)
+        env.update(AITELIER_DRIVER_ID="grok", AITELIER_ADMIN_TOKEN="env-admin-token")
+    return env
+
+
+@pytest.mark.parametrize("case,expected", [
+    ("helper_wins", [("x-aitelier-admin-token", "helper-secret")]),
+    ("env_driver_beats_admin", [("x-aitelier-driver-token", "env-driver-token")]),
+    ("file_0600", [("x-aitelier-driver-token", "driver-file-token")]),
+    ("file_0644_falls_back_to_admin", [("x-aitelier-admin-token", "env-admin-token")]),
+    ("driver_id_home_file", [("x-aitelier-driver-token", "home-driver-token")]),
+])
+@pytest.mark.parametrize("advertised", [False, True])
+def test_credential_priority_without_driver_admin_mixing_on_every_tracked_read(
+    tmp_path, state_server, case, expected, advertised
+):
+    if advertised:
+        StateStub.operations = {"driver_postcompact_guidance": STANDING_ONLY_OPERATION}
+        StateStub.guidance = GUIDANCE_V1
+    env = _credential_case(tmp_path, state_server, case)
+    context = invoke(tmp_path, state_server, tracked=True, env=env)["hookSpecificOutput"]["additionalContext"]
+    assert "driver_note_revision=1" in context
+    # note, overview, help, standing (+ whoami, guidance when advertised)
+    reads = 6 if advertised else 4
+    assert len(StateStub.requests) == reads
+    assert StateStub.credentials == [expected] * reads
+    for secret in ("helper-secret", "env-driver-token", "env-admin-token",
+                   "driver-file-token", "home-driver-token"):
+        assert secret not in context
+
+
+@pytest.mark.parametrize("event", ["PostCompact", "SessionStart", "UserPromptSubmit", "Stop"])
+def test_tracked_binding_rejects_malformed_tail_beyond_read_cap(tmp_path, state_server, event):
+    session = "binding-with-unread-tail"
+    payload = json.dumps({"session_id": session, "project_id": "aitelier"})
+    payload = payload.ljust(4097) + "MALFORMED-TRAILING-GARBAGE"
+    write_binding(tmp_path / "codex-home", session, payload=payload)
+    output = invoke(tmp_path, state_server, event=event, session_id=session,
+                    bind=False, tracked=True, source="startup")
+    assert "session binding recovery required" in output.get("systemMessage", "")
+    assert StateStub.requests == []
+    assert not (tmp_path / "codex-home" / "project-handoff-pending").exists()
+
+
+@pytest.mark.parametrize("characters", [4096, 4097])
+def test_tracked_binding_complete_size_boundary(tmp_path, state_server, characters):
+    session = "binding-size-boundary"
+    payload = json.dumps({"session_id": session, "project_id": "aitelier"}).ljust(characters)
+    write_binding(tmp_path / "codex-home", session, payload=payload)
+    output = invoke(tmp_path, state_server, session_id=session, bind=False,
+                    tracked=True, source="startup")
+    if characters == 4096:
+        assert "driver_note_revision=1" in output["hookSpecificOutput"]["additionalContext"]
+        assert StateStub.requests
+    else:
+        assert "session binding recovery required" in output.get("systemMessage", "")
+        assert StateStub.requests == []
+        assert not (tmp_path / "codex-home" / "project-handoff-pending").exists()

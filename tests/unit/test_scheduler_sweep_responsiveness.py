@@ -59,7 +59,7 @@ def test_slow_actual_sweep_allows_control_work_and_real_hung_claim_check(mainten
         poll=asyncio.create_task(sc.poll_and_execute())
         try:
             await _entered(entered)
-            assert not poll.done() and not finished.is_set()
+            assert poll.done() and not finished.is_set()
             progress=[]
             async def control():
                 await asyncio.sleep(0);progress.append('control-request')
@@ -70,7 +70,7 @@ def test_slow_actual_sweep_allows_control_work_and_real_hung_claim_check(mainten
             assert row['status']=='claimed' and row['retry_count']==0
             assert not finished.is_set() and calls[0]!=threading.get_ident()
         finally:
-            release.set();await poll
+            release.set();await poll;await sc.settle_scheduler_maintenance()
     asyncio.run(scenario())
 
 
@@ -81,8 +81,10 @@ def test_overlapping_scheduler_entries_share_one_actual_sweep(maintenance):
         try:
             await _entered(entered);await asyncio.sleep(0.03)
             assert len(calls)==1 and not finished.is_set()
-            assert all(not t.done() for t in tasks)
-        finally:release.set();await asyncio.gather(*tasks)
+            assert all(t.done() for t in tasks)
+        finally:
+            release.set();await asyncio.gather(*tasks)
+            await sc.settle_scheduler_maintenance()
         assert len(calls)==1 and finished.is_set()
     asyncio.run(scenario())
 
@@ -90,7 +92,7 @@ def test_overlapping_scheduler_entries_share_one_actual_sweep(maintenance):
 def test_repeated_poll_cancellation_keeps_sweep_owned_until_real_completion(maintenance):
     async def scenario():
         sf,entered,release,finished,calls=maintenance
-        poll=asyncio.create_task(sc.poll_and_execute())
+        poll=asyncio.create_task(sc._sweep_ended_leases_async())
         await _entered(entered);future=sc._lease_sweep_future
         poll.cancel();await asyncio.sleep(0.02);poll.cancel();await asyncio.sleep(0.02)
         assert not poll.done() and sc._lease_sweep_future is future and not future.done()
@@ -98,7 +100,7 @@ def test_repeated_poll_cancellation_keeps_sweep_owned_until_real_completion(main
         assert len(calls)==1 and not finished.is_set()
         release.set()
         with pytest.raises(asyncio.CancelledError):await poll
-        await other
+        await other;await sc.settle_scheduler_maintenance()
         assert finished.is_set() and sc._lease_sweep_future is None
     asyncio.run(scenario())
 
@@ -127,7 +129,7 @@ def test_cancelled_sweep_retains_unexpected_worker_error(maintenance,monkeypatch
         def failing():
             entered.set();release.wait(3);finished.set();raise RuntimeError('owned maintenance failure')
         monkeypatch.setattr(sc,'_sweep_ended_leases',failing)
-        poll=asyncio.create_task(sc.poll_and_execute());await _entered(entered);poll.cancel();await asyncio.sleep(0.02)
+        poll=asyncio.create_task(sc._sweep_ended_leases_async());await _entered(entered);poll.cancel();await asyncio.sleep(0.02)
         assert not poll.done() and sc._lease_sweep_future is not None
         release.set()
         with pytest.raises(asyncio.CancelledError):await poll

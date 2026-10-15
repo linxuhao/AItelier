@@ -16,7 +16,14 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-PROJECT_ID = "aitelier"
+# Session-bound project isolation: PROJECT_ID is bound in main() ONLY after the
+# hook input parsed and the session binding under
+# CODEX_HOME/director-project-bindings/<sha256(session_id)>.json validated. Before
+# that the hook is unbound: every event answers {"continue": true} with ZERO State
+# queries and no pending marker. No cwd inference, ever.
+PROJECT_ID: str | None = None
+BINDING_DIR_NAME = "director-project-bindings"
+MAX_BINDING_CHARS = 4_096
 # 20_000, not 12_000, since 2026-09-21: the durable assertions this hook must
 # re-inject live in the note's ENTRY INDEX, and since 2026-10-06 the index is the
 # whole notebook (the free-text sections are closed and get_driver_note no longer
@@ -69,6 +76,59 @@ def _pending_path(hook_input: dict[str, Any]) -> Path | None:
     checkout = str(Path(__file__).resolve().parents[2])
     key = _sha256(f"{PROJECT_ID}\0{checkout}\0{session_id}")
     return codex_home / PENDING_DIR_NAME / f"{key}.json"
+
+
+def _read_binding(hook_input: dict[str, Any]) -> tuple[str, str | None]:
+    """Resolve the session's project binding, failing closed on any doubt.
+
+    CODEX_HOME/director-project-bindings/<sha256(session_id)>.json must hold
+    exactly the session_id it is named by and the project_id it binds, each a
+    1..128 character trimmed string; the file itself is capped at
+    MAX_BINDING_CHARS. "missing" = never bound (silent no-op); "malformed" =
+    present but untrustworthy (the same zero-access fail-close plus an honest
+    repair notice). The key is the hash of the session id, so the file name
+    never carries the session, the project or the checkout path.
+    """
+    session_id = hook_input.get("session_id")
+    if not isinstance(session_id, str):
+        return "missing", None
+    session = session_id.strip()
+    if not 1 <= len(session) <= 128:
+        return "missing", None
+    codex_home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))).expanduser()
+    path = codex_home / BINDING_DIR_NAME / f"{_sha256(session)}.json"
+    try:
+        binding_stat = path.lstat()
+        if not stat.S_ISREG(binding_stat.st_mode) or binding_stat.st_uid != os.getuid():
+            return "malformed", None
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(path, flags)
+        with os.fdopen(fd, "r", encoding="utf-8") as handle:
+            raw = handle.read(MAX_BINDING_CHARS + 1)
+        # The extra character proves completeness; a valid prefix is not a
+        # valid binding when the bounded file continues beyond it.
+        if len(raw) > MAX_BINDING_CHARS:
+            return "malformed", None
+        payload = json.loads(raw)
+    except FileNotFoundError:
+        return "missing", None
+    except (OSError, UnicodeDecodeError, ValueError):
+        return "malformed", None
+    if not isinstance(payload, dict):
+        return "malformed", None
+    bound_session = payload.get("session_id")
+    project_id = payload.get("project_id")
+    if not isinstance(bound_session, str) or bound_session.strip() != session:
+        return "malformed", None
+    if not isinstance(project_id, str) or not 1 <= len(project_id.strip()) <= 128:
+        return "malformed", None
+    return "bound", project_id.strip()
+
+
+def _binding_recovery_context() -> str:
+    return _bounded_section(f"""# AItelier session binding recovery required
+The session's project binding file under CODEX_HOME/{BINDING_DIR_NAME}/ is malformed, unreadable, or names a different session_id. No State was queried, no project context was injected and no handoff marker was written for this session.
+Repair the binding file (exact session_id and project_id, 1..128 characters each) before any director work. Do not infer a project from the working directory.""", MAX_CONTEXT_CHARS)
 
 
 def _acquire_marker(hook_input: dict[str, Any]) -> tuple[Path | None, int | None]:
@@ -476,7 +536,7 @@ def _mcp_call(url: str, headers: dict[str, str], name: str, arguments: dict[str,
     return decoded.get("result", decoded)
 
 
-def _read_sources() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+def _read_sources() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], str]:
     url, headers = _connection()
     note = _mcp_call(url, headers, "state_graph_read", {
         "action": "get_driver_note", "arguments": {"project_id": PROJECT_ID},
@@ -497,18 +557,43 @@ def _read_sources() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dic
             "statuses": ["unread", "acknowledged"],
         },
     })
-    private_guidance = standing.get("schema") == "aitelier.director-messaging.v3"
-    if "driver_postcompact_guidance" in guide.get("operations", {}):
+    # Owner standing-only selection: the private aggregate is called ONLY when
+    # the server advertises the typed standing_only selector AND the baseline
+    # identity check establishes the caller. Anything else falls back to the
+    # bounded project-standing query above with an honest notice — an older API
+    # is never handed an unfiltered aggregator call, silently or otherwise.
+    # A server that does not advertise the operation at all (or advertises it in
+    # a shape we cannot trust) is the older API too: same fallback, same notice.
+    reason = "server does not advertise driver_postcompact_guidance"
+    operations = guide.get("operations")
+    operation = operations.get("driver_postcompact_guidance") if isinstance(operations, dict) else None
+    if isinstance(operation, dict):
         identity = _mcp_call(url, headers, "driver_whoami", {})
-        private_guidance = bool(identity.get("driver_id") or str(identity.get("actor","")).startswith("owner:"))
-    if private_guidance:
-        standing = _mcp_call(url, headers, "state_graph_read", {
-            "action": "driver_postcompact_guidance", "arguments": {"project_id": PROJECT_ID},
-        })
-    return note, overview, guide, standing
+        authenticated = bool(
+            identity.get("driver_id")
+            or str(identity.get("actor", "")).startswith("owner:")
+        )
+        arguments = operation.get("arguments")
+        properties = arguments.get("properties") if isinstance(arguments, dict) else None
+        selector = properties.get("standing_only") if isinstance(properties, dict) else None
+        advertised = isinstance(selector, dict) and selector.get("type") == "boolean"
+        if authenticated and advertised:
+            standing = _mcp_call(url, headers, "state_graph_read", {
+                "action": "driver_postcompact_guidance",
+                "arguments": {"project_id": PROJECT_ID, "standing_only": True},
+            })
+            reason = ""
+        else:
+            reason = ("driver identity not established" if not authenticated
+                      else "server does not advertise the standing_only selector")
+    own_notice = (
+        f"- own standing driver notices unavailable: {reason}; "
+        "only the bounded project standing below was projected."
+    ) if reason else ""
+    return note, overview, guide, standing, own_notice
 
 
-def _active_standing_projection(envelope: dict[str, Any]) -> str:
+def _active_standing_projection(envelope: dict[str, Any], limit: int = MAX_STANDING_CONTEXT_CHARS) -> str:
     """Render whole, redacted v2 inbox lines inside the contract's hard cap."""
     if envelope.get("schema") == "aitelier.driver-guidance.v1":
         projection = envelope.get("projection")
@@ -563,7 +648,7 @@ def _active_standing_projection(envelope: dict[str, Any]) -> str:
         if omitted:
             parts.append(f"[omitted_active_standing={omitted}]")
         projection = "\n".join(parts)
-        if len(projection) <= MAX_STANDING_CONTEXT_CHARS:
+        if len(projection) <= limit:
             return projection
         included -= 1
 
@@ -642,8 +727,10 @@ Then reconcile referenced nodes/attempts using their exact IDs and current revis
 
 def build_context() -> str:
     try:
-        note, overview, help_payload, standing_envelope = _read_sources()
-        standing = _active_standing_projection(standing_envelope)
+        note, overview, help_payload, standing_envelope, own_notice = _read_sources()
+        # The fallback notice leads the section and shares its 3000-char cap.
+        standing = _active_standing_projection(
+            standing_envelope, MAX_STANDING_CONTEXT_CHARS - (len(own_notice) + 1 if own_notice else 0))
     except Exception:
         return _recovery_context()
     guide = str(help_payload.get("driver_guide", ""))
@@ -666,14 +753,14 @@ entry_count={note.get('entry_count', 'unknown')} listed={note.get('listed_count'
 
 ## Multi-driver loop (bounded reminder; guide://driver-loop-whoami-claim-dispatch-heartbeat)
 whoami (driver_whoami must answer driver:<your id>) -> claim_node(implement|review) on a ready node -> start_*attempt with claim_id+fence (register_subagent records your workers) -> heartbeat(claims, attempts, subagents) every 20-30 min from the client wait loop while you supervise -> record_evidence, verify_node, release_claim or offer_handoff. Lapsed leases are reclaimable by any member; never renew unattended.
-Two inboxes: project inbox = send_director_message (ack means "I take this"; ack_mode=at_least_n default, ack_mode=broadcast needs every member's ack; distinct from the cross-project broadcast flag). Driver inbox = send_driver_message / list_driver_messages / wait_for_driver_inbox (private; system notices land here). Your private notebook dnote://<your id> is fetched by address with driver_id, never injected here. The standing section below is driver_postcompact_guidance: project standing, your unacked broadcast transients, your standing driver notices.
+Two inboxes: project inbox = send_director_message (ack means "I take this"; ack_mode=at_least_n default, ack_mode=broadcast needs every member's ack; distinct from the cross-project broadcast flag). Driver inbox = send_driver_message / list_driver_messages / wait_for_driver_inbox (private; system notices land here). Your private notebook dnote://<your id> is fetched by address with driver_id, never injected here. The standing section below is driver_postcompact_guidance in its standing-only selection: the current project standing and your own standing driver notices; unacked broadcast transients are read from the project inbox, not injected here.
 
 ## Stable State driver guidance selected from the live MCP response
 {_guide_sections(guide)}
 
 This is a bounded resume aid, not the full DAG, note history, trace, or evidence. Reconcile exact State records before dispatch, acceptance, push, or deployment."""
     standing_section = "\n\n## Active standing director guidance (bounded, read-only)\n" + (
-        standing or "- none")
+    "\n".join(part for part in (own_notice, standing) if part) or "- none")
     return (_bounded_section(context, MAX_CONTEXT_CHARS - len(standing_section))
             + standing_section)
 
@@ -760,6 +847,18 @@ def main() -> int:
     except json.JSONDecodeError:
         hook_input = {}
     event = hook_input.get("hook_event_name")
+    # Session binding gate: without a valid session->project binding every
+    # event is a no-op — zero State queries and no pending marker. A malformed
+    # binding answers with an honest fail-closed repair notice instead.
+    binding_status, project_id = _read_binding(hook_input)
+    global PROJECT_ID
+    if binding_status != "bound":
+        output = {"continue": True}
+        if binding_status == "malformed":
+            output["systemMessage"] = _binding_recovery_context()
+        _write_output(output)
+        return 0
+    PROJECT_ID = project_id
     # PostCompact has no model-context output. Queue the next supported
     # SessionStart/UserPromptSubmit delivery, with Stop's supported continuation
     # prompt as the same-turn fallback. The marker records an at-most-once

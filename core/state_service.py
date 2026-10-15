@@ -197,15 +197,22 @@ class StateService:
                                                           project_read_trusted=project_read_trusted, driver_id=driver_id)
 
     @writer_only_read('driver_postcompact_guidance')
-    def driver_postcompact_guidance(self, project_id):
+    def driver_postcompact_guidance(self, project_id, standing_only: bool = False):
         from core.state_driver_notes import _redact
         if not self.project_read_trusted or not (self.driver_id or self.actor.startswith("owner:")):
             raise StateGraphError("private_guidance")
         standing = self.director_messages.list_director_messages(project_id,limit=8,
                        delivery_mode="standing",statuses=["unread","acknowledged"],protocol_version="v3")["result"]
-        transient = self.director_messages.list_director_messages(project_id,limit=8,
-                       delivery_mode="transient",ack_mode="broadcast",needs_my_ack=True,
-                       statuses=["unread","acknowledged"],protocol_version="v3")["result"]
+        if standing_only:
+            # Owner standing-only selection: skip the broadcast transient query
+            # and its count entirely; only the current project standing and the
+            # authenticated driver's own standing notices project. The typed
+            # optional default False preserves the original aggregate exactly.
+            transient = {"items": [], "matched_total": 0}
+        else:
+            transient = self.director_messages.list_director_messages(project_id,limit=8,
+                           delivery_mode="transient",ack_mode="broadcast",needs_my_ack=True,
+                           statuses=["unread","acknowledged"],protocol_version="v3")["result"]
         mail = {"items":standing["items"]+transient["items"]}
         total = standing["matched_total"]+transient["matched_total"]
         rows = []
@@ -232,7 +239,8 @@ class StateService:
                 break
             kept.pop()
         return {"schema":"aitelier.driver-guidance.v1","project_id":project_id,
-                "driver_id":self.driver_id,"projection":text,"included":len(kept),
+                "driver_id":self.driver_id,"standing_only":standing_only,
+                "projection":text,"included":len(kept),
                 "omitted":total-len(kept)}
 
     @writer_only_read('list_driver_notebooks')

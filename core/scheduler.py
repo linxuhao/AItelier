@@ -2643,11 +2643,10 @@ def _sweep_ended_leases() -> None:
         from api.dependencies import get_skillflow
         sf = get_skillflow()
         report = run_isolation.reconcile_all_leases(db, sf)
-        # Index demand follows the same terminal + operation-audit boundary as
-        # checkout ownership.  Publish release before asking the worktree
-        # reaper; the sidecar settles it asynchronously.
-        from core import run_resources
-        resource_report = run_resources.reconcile(db, sf)
+        # Lease reconciliation already publishes index demand before the
+        # worktree reaper runs. Reuse that report rather than scan every
+        # retained root a second time in this same maintenance pass.
+        resource_report = report["index_resources"]
     except Exception:
         import logging
         logging.getLogger("aitelier.scheduler").warning(
@@ -2712,12 +2711,24 @@ async def _await_lease_sweep(future: asyncio.Future, *, cancelled: bool = False)
             _lease_sweep_future = None
 
 
-async def _sweep_ended_leases_async() -> None:
+def _on_lease_sweep_done(future: asyncio.Future) -> None:
+    """Observe an unawaited poll's worker and free ownership only when done."""
+    global _lease_sweep_future
+    if _lease_sweep_future is future:
+        _lease_sweep_future = None
+    if not future.cancelled() and future.exception() is not None:
+        logging.getLogger("aitelier.scheduler").error(
+            "lease sweep failed", exc_info=future.exception())
+
+
+async def _sweep_ended_leases_async(*, wait: bool = True) -> None:
     global _lease_sweep_future
     if _lease_sweep_future is None:
         _lease_sweep_future = asyncio.get_running_loop().run_in_executor(
             None, _sweep_ended_leases)
-    await _await_lease_sweep(_lease_sweep_future)
+        _lease_sweep_future.add_done_callback(_on_lease_sweep_done)
+    if wait:
+        await _await_lease_sweep(_lease_sweep_future)
 
 
 async def settle_scheduler_maintenance(*, exit_error: BaseException | None = None) -> None:
@@ -2781,7 +2792,10 @@ async def poll_and_execute():
     """
     loop = asyncio.get_running_loop()
 
-    await _sweep_ended_leases_async()
+    # Maintenance owns its Future until completion; it must not own the APS
+    # admission job (max_instances=1) while hundreds of retained roots are
+    # checked. Lifespan shutdown still drains it before closing dependencies.
+    await _sweep_ended_leases_async(wait=False)
 
     # Every in-flight project may be among the rows, so ask for enough to still
     # find a full cap's worth of free ones behind them.
@@ -2984,7 +2998,7 @@ async def poll_and_execute_demo():
     """
     loop = asyncio.get_running_loop()
 
-    await _sweep_ended_leases_async()
+    await _sweep_ended_leases_async(wait=False)
 
     projects = db.get_active_projects(
         fifo=True, limit=MAX_CONCURRENT_PROJECTS + len(_detached_ticks))
@@ -3004,7 +3018,7 @@ async def poll_and_execute_owner(owner_email: str):
     """
     loop = asyncio.get_running_loop()
 
-    await _sweep_ended_leases_async()
+    await _sweep_ended_leases_async(wait=False)
 
     projects = db.get_active_projects(
         owner_email=owner_email,

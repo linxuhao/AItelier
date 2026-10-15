@@ -68,6 +68,7 @@ async def test_real_db_concurrent_hungcheck_shared_then_new_invocation(env,monke
     finally:
         await cleanup(e,poll);await twin
     await sc.poll_and_execute_demo()
+    await sc.settle_scheduler_maintenance()
     assert len(e.calls)==2 and sc._lease_sweep_future is None
     print('actual worker/main DB connections:',e.connections,mainconn,'hung recovery threads',seen)
 
@@ -77,7 +78,7 @@ async def test_multiple_waiter_cancellation_error_and_fresh_failure(env,monkeypa
     def fail():
         e.entered.set();assert e.release.wait(5);e.finished.set();raise RuntimeError('independent-worker-error')
     monkeypatch.setattr(sc,'_sweep_ended_leases',fail)
-    p=asyncio.create_task(sc.poll_and_execute());await entered(e)
+    p=asyncio.create_task(sc._sweep_ended_leases_async());await entered(e)
     drain=asyncio.create_task(sc.settle_scheduler_maintenance());await asyncio.sleep(.01)
     for _ in range(3):p.cancel();drain.cancel();await asyncio.sleep(.01)
     try:
@@ -86,7 +87,7 @@ async def test_multiple_waiter_cancellation_error_and_fresh_failure(env,monkeypa
         results=await asyncio.gather(p,drain,return_exceptions=True)
         assert all(isinstance(x,asyncio.CancelledError) for x in results)
         assert 'independent-worker-error' in caplog.text and sc._lease_sweep_future is None
-        with pytest.raises(RuntimeError,match='independent-worker-error'):await sc.poll_and_execute()
+        with pytest.raises(RuntimeError,match='independent-worker-error'):await sc._sweep_ended_leases_async()
     finally:await cleanup(e,p);await asyncio.gather(drain,return_exceptions=True)
 
 class Endpoint:
@@ -198,7 +199,7 @@ async def test_original_body_error_retained_after_worker_error(env,monkeypatch,k
         # Returning False from __aexit__ preserves exact original object for its caller.
         assert e.finished.is_set() and sc._lease_sweep_future is None
         assert 'distinct-worker-failure' in caplog.text and 'lease sweep failed during lifespan exit' in caplog.text
-        with pytest.raises(RuntimeError,match='distinct-worker-failure'):await poll
+        assert await poll == [], 'poll admission returns before maintenance failure'
     finally:
         await cleanup(e,poll);await asyncio.gather(exiting,return_exceptions=True)
 

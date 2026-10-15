@@ -239,6 +239,7 @@ async def test_a_lease_survives_the_drain_and_is_released_by_a_later_tick(live,
         "retiring the operation must not itself release the lease"
 
     await sc.poll_and_execute()
+    await sc.settle_scheduler_maintenance()
 
     assert ri.lease_holder(live["db"], canonical) is None, (
         "an ordinary tick after the drain completed did not release the lease "
@@ -273,6 +274,7 @@ async def test_the_sweep_runs_while_other_projects_are_busy(live, monkeypatch):
 
     # The poller returns once it has STARTED the ticks; wait for them.
     await asyncio.gather(*await sc.poll_and_execute())
+    await sc.settle_scheduler_maintenance()
 
     assert ticked == ["busy"], f"the busy project stopped being advanced: {ticked}"
     assert ri.lease_holder(live["db"], canonical) is None, (
@@ -290,11 +292,13 @@ async def test_the_sweep_is_bounded_and_not_run_on_every_tick(live, monkeypatch)
     calls = []
     monkeypatch.setattr(ri, "reconcile_all_leases",
                         lambda *a, **k: calls.append(1) or {"released": [],
-                                                            "retained": []})
+                                                            "retained": [],
+                                                            "index_resources": {"retained": []}})
     monkeypatch.setattr(sc.db, "get_active_projects", lambda **kw: [])
     await sc.poll_and_execute()
     await sc.poll_and_execute()
     await sc.poll_and_execute()
+    await sc.settle_scheduler_maintenance()
     assert calls == [1], f"the sweep ran {len(calls)} times inside its interval"
 
 
@@ -316,6 +320,7 @@ async def test_every_scheduler_entry_sweeps(live, monkeypatch, entry):
 
     fn = getattr(sc, entry)
     await (fn("someone@example.com") if entry.endswith("owner") else fn())
+    await sc.settle_scheduler_maintenance()
     assert ri.lease_holder(live["db"], canonical) is None, entry
 
 
@@ -350,6 +355,7 @@ async def test_the_sweep_fails_closed_on_everything_it_cannot_verify(live,
     ri._acquire_lease(db, repos["lostowner"], lost_rid, "serial")
 
     await sc.poll_and_execute()
+    await sc.settle_scheduler_maintenance()
 
     for name in ("paused", "unknown", "lostowner"):
         assert ri.lease_holder(db, repos[name]) is not None, (

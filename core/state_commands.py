@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_serializer, model_validator
 from starlette.exceptions import HTTPException
 
 from core.state_driver_guide import guide_section
@@ -200,6 +200,26 @@ class ClaimRef(Project):
     claim_id: str
 
 
+def _omit_null_default(schema: dict) -> None:
+    schema.pop("default", None)
+
+
+class MessageRefs(BaseModel):
+    """The `refs` keys core/driver_inbox.py resolves for send_driver_message, each
+    an existing record id; the service refuses any other key. Typed `str` with an
+    unvalidated None default: an omitted key stays absent, while an explicit null
+    (or bytes, under strict) is refused rather than silently dropped or coerced."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    node_key: str = Field(default=None, min_length=1, json_schema_extra=_omit_null_default,
+                          description="Existing node in project_id (requires project_id).")
+    attempt_id: str = Field(default=None, min_length=1, json_schema_extra=_omit_null_default)
+    issue_id: str = Field(default=None, min_length=1, json_schema_extra=_omit_null_default)
+    claim_id: str = Field(default=None, min_length=1, json_schema_extra=_omit_null_default)
+    subagent_id: str = Field(default=None, min_length=1, json_schema_extra=_omit_null_default)
+
+
 class SendDriverMessage(Request):
     request_key: str = Field(min_length=1, max_length=320)
     subject: str = Field(min_length=1, max_length=200)
@@ -209,8 +229,21 @@ class SendDriverMessage(Request):
     project_id: str | None = None
     kind: Literal["note", "request", "review_request", "handoff_offer", "handoff_reply"] = "note"
     delivery_mode: Literal["transient", "standing"] = "transient"
-    refs: dict = Field(default_factory=dict)
+    refs: MessageRefs = Field(default_factory=MessageRefs, description=(
+        "Optional: node_key (requires project_id), attempt_id, issue_id, claim_id, "
+        "subagent_id, each a nonempty string naming an existing record."))
     reply_to_message_id: str | None = None
+
+    @field_serializer("refs")
+    def _set_refs_only(self, refs: MessageRefs) -> dict:
+        # The service still receives a plain dict holding only the keys sent.
+        return refs.model_dump(exclude_none=True)
+
+    @model_validator(mode="after")
+    def node_key_needs_project(self):
+        if self.refs.node_key is not None and not self.project_id:
+            raise ValueError("refs.node_key requires project_id")
+        return self
 
 class ListDriverMessages(Request):
     driver_id: str | None = None
@@ -822,8 +855,17 @@ class CheckDesignMarkdown(DesignBaseline):
     markdown: str
 
 
+class DriverPostcompactGuidance(Project):
+    # Owner standing-only selector (2026-10-15): True skips the broadcast
+    # transient query and its count and returns only the current project
+    # standing plus the authenticated driver's own standing notices. The typed
+    # optional default False preserves the original aggregate behavior, bounds
+    # and authorization exactly.
+    standing_only: bool = False
+
+
 READ_REQUESTS = {
-    "driver_postcompact_guidance": Project,
+    "driver_postcompact_guidance": DriverPostcompactGuidance,
     "list_driver_notebooks": Request,
     "list_driver_messages": ListDriverMessages, "wait_for_driver_inbox": WaitForDriverInbox,
     "design_catalog": Project, "get_design_revision": DesignRevision,

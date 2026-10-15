@@ -27,15 +27,28 @@ _QUOTA_RESET_RE = re.compile(
     r"reset(?:s)?\s+at\s+(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})\s*([+-]\d{4})?")
 
 
+# Observed Ollama wording: "You reached your Pro 5-hour limit". A named
+# window alone says nothing about exhaustion: a burst response can also mention
+# a daily allowance or say that a five-hour limit has NOT been reached.
+_SPENT_WINDOW_RE = re.compile(
+    r"\byou (?:have )?(?:reached|exceeded) your (?:\w+ )?"
+    r"(?:\d+[- ]?hours?|hourly|daily|weekly|monthly)\s+(?:usage\s+)?limit\b")
+
+
 def is_quota_exhausted(err) -> bool:
     """Is this a spent usage window (vs. burst throttling)?
 
-    Keyed on the message, not the class: providers report both as
-    RateLimitError, and only the prose distinguishes them.
+    Providers report both as RateLimitError; the prose distinguishes them.
+    For window-limit wording, exceptions must also carry HTTP 429 provenance:
+    the scheduler receives arbitrary application/tool errors as well. Plain
+    strings support message inspection without importing the gateway/SDK.
     """
     msg = str(err).lower()
-    return "quota" in msg and ("exceed" in msg or "exhaust" in msg
-                              or "reset" in msg)
+    if "quota" in msg and ("exceed" in msg or "exhaust" in msg or "reset" in msg):
+        return True
+    if not isinstance(err, str) and getattr(err, "status_code", None) != 429:
+        return False
+    return _SPENT_WINDOW_RE.search(msg) is not None
 
 
 def quota_reset_at(err) -> "datetime.datetime | None":

@@ -645,7 +645,7 @@ def _run_node_cmd(pkg_dir: Path, args: list[str], timeout: int,
                 "output": f"{type(e).__name__}: {e}"}
 
 
-def _run_node_checks(repo: Path) -> dict | None:
+def _run_node_checks(repo: Path, *, run_id: str = "") -> dict | None:
     """npm install/build/test gate for the repo's node project (if any).
 
     Mirrors the pytest gate's skip semantics: no node project → None (no
@@ -675,17 +675,41 @@ def _run_node_checks(repo: Path) -> dict | None:
     except Exception:
         scripts = {}
 
-    # npm ci needs a lockfile; fall back to install without one.
-    install_cmd = ["npm", "ci"] if (pkg_dir / "package-lock.json").exists() \
-        else ["npm", "install"]
-    node["checks"]["install"] = _run_node_cmd(pkg_dir, install_cmd, timeout=600)
-    if node["checks"]["install"]["passed"]:
-        if "build" in scripts:
-            node["checks"]["build"] = _run_node_cmd(
-                pkg_dir, ["npm", "run", "build"], timeout=300)
-        if "test" in scripts:
-            node["checks"]["test"] = _run_node_cmd(
-                pkg_dir, ["npm", "test"], timeout=300)
+    # npm writes its cache (and its logs, which live inside it) under $HOME/.npm.
+    # In the backend container HOME is a root-owned directory the running uid
+    # cannot write to, so every install died with `EACCES mkdir /home/<user>/.npm`
+    # before it read package.json (coding_impl f3560860, rc 243). The cache is
+    # therefore the gate's own: a directory under this run's gate-reports/ — the
+    # same owned, mounted, outside-the-repo boundary the junit report uses —
+    # created for this gate and removed when it ends. It is set only through the
+    # scrubbed env, never by chown or a global HOME change.
+    cache_root = (datadir.aitelier_home() / "gate-reports" /
+                  hashlib.sha256(run_id.encode()).hexdigest())
+    try:
+        cache_root.mkdir(parents=True, exist_ok=True)
+        cache_dir = tempfile.mkdtemp(prefix="npm-cache-", dir=cache_root)
+    except OSError as e:
+        node["checks"]["install"] = {
+            "passed": False, "returncode": -1, "runner_error": True,
+            "output": f"cannot create the run-owned npm cache under {cache_root}: {e}"}
+        node["passed"] = False
+        return node
+    env = {"npm_config_cache": cache_dir}
+    try:
+        # npm ci needs a lockfile; fall back to install without one.
+        install_cmd = ["npm", "ci"] if (pkg_dir / "package-lock.json").exists() \
+            else ["npm", "install"]
+        node["checks"]["install"] = _run_node_cmd(
+            pkg_dir, install_cmd, timeout=600, env_overrides=env)
+        if node["checks"]["install"]["passed"]:
+            if "build" in scripts:
+                node["checks"]["build"] = _run_node_cmd(
+                    pkg_dir, ["npm", "run", "build"], timeout=300, env_overrides=env)
+            if "test" in scripts:
+                node["checks"]["test"] = _run_node_cmd(
+                    pkg_dir, ["npm", "test"], timeout=300, env_overrides=env)
+    finally:
+        shutil.rmtree(cache_dir, ignore_errors=True)
 
     node["passed"] = all(c["passed"] for c in node["checks"].values())
     return node
@@ -2130,7 +2154,7 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
     # 5_review loops frontend breakage back through the goal-loop exactly
     # like pytest failures.
     if repo is not None and repo.exists():
-        node = _run_node_checks(repo)
+        node = _run_node_checks(repo, run_id=run_id)
         if node is not None:
             report["node"] = node
             executed.node_gate_ran = not node.get("skipped")

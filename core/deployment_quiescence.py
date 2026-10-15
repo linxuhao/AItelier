@@ -106,6 +106,19 @@ AUTHORITATIVE_IDENTITY_FIELDS = frozenset({
     "attempt_id", "run_id", "operation_id", "owner_id", "project_id",
     "external_id", "id", "owner", "node_key", "harness",
 })
+# Owners a backend-only decision may name as coordinated, keyed by the identity
+# the operator names them by. Only an ACTIVE row of these kinds; every other
+# blocker kind (runs, operations, leases, sidecar demand, known processes,
+# measurement errors) and every unknown row stays a veto.
+COORDINATED_OWNER_IDENTITY = {
+    "registered_external_owners": "attempt_id",
+    "godot_render_owners": "owner_id",
+}
+# Decision fields that restrict or refuse an action instead of permitting it.
+# A quiescent inventory needs no permission, but it must still honor these.
+RESTRICTING_OVERRIDE_FIELDS = frozenset({
+    "_invalid_override", "backend_only", "deployment_attempt_id", "coordinated_owners",
+})
 OWNER_INVENTORY_BLOCKERS = {
     "runs": ("active_runs", "active_operations"),
     "sidecar_owners": ("sidecar_owners",),
@@ -2092,11 +2105,51 @@ def _classify_blockers(observation: dict, *, backend_only: bool = False,
     return authoritative, unknown_owners
 
 
+def _coordinated_cover_refusal(coordinated: Any, authoritative: dict, *,
+                               scoped: bool) -> str | None:
+    """Exact cover of the remaining authoritative owners by named coordination.
+
+    Each record is the local operator's audited assertion that the named owner
+    agreed its effects are outside this backend-only action. The scope_ref is
+    an audit reference, not authentication or proof; the trust boundary is the
+    local backend caller. Anything but an exact cover of ACTIVE nameable rows
+    refuses, so an owner nobody named still vetoes.
+    """
+    if not scoped:
+        return "coordinated owners require the trusted backend caller and backend-only scope"
+    if not isinstance(coordinated, list) or not coordinated:
+        return "coordinated_owners must be a non-empty list"
+    named = set()
+    for record in coordinated:
+        if (not isinstance(record, dict) or set(record) != {"kind", "id", "scope_ref"}
+                or not all(_nonempty_string(record[key]) for key in ("kind", "id", "scope_ref"))):
+            return "coordinated owner records need exactly non-empty kind, id and scope_ref"
+        if record["kind"] not in COORDINATED_OWNER_IDENTITY:
+            return f"coordinated owner kind {record['kind']!r} cannot be named"
+        if (record["kind"], record["id"]) in named:
+            return "coordinated owner is named twice"
+        named.add((record["kind"], record["id"]))
+    remaining = set()
+    for kind, rows in authoritative.items():
+        field = COORDINATED_OWNER_IDENTITY.get(kind)
+        for row in rows if isinstance(rows, list) else [rows]:
+            if (field is None or not isinstance(row, dict) or row.get("status") != "active"
+                    or not _nonempty_string(row.get(field))
+                    or (kind, row[field]) in remaining):
+                return ("coordinated owners cannot bypass non-nameable authoritative owners: "
+                        + kind)
+            remaining.add((kind, row[field]))
+    if named != remaining:
+        return ("coordinated owners must exactly cover the remaining authoritative owners: "
+                f"unnamed={sorted(remaining - named)} not_remaining={sorted(named - remaining)}")
+    return None
+
+
 def _valid_override(action: str, observation: dict, override: dict | None, *,
                     backend_only: bool = False) -> tuple[bool, str]:
     if not isinstance(override, dict):
         return False, "no audited override supplied"
-    if override.get("_invalid_override"):
+    if "_invalid_override" in override:  # a reserved refusal: presence, never truthiness
         return False, f"override is malformed: {override['_invalid_override']}"
     required = ("action", "actor", "reason", "ticket", "inventory_digest", "expires_at")
     if any(not isinstance(override.get(key), str) or not override[key].strip()
@@ -2132,7 +2185,13 @@ def _valid_override(action: str, observation: dict, override: dict | None, *,
     authoritative, unknown_owners = _classify_blockers(
         observation, backend_only=requested_scope, deployment_attempt_id=controller,
         actor=override["actor"])
-    if (requested_scope or override.get("acknowledge_unknown") is True) and authoritative:
+    if "coordinated_owners" in override:
+        refusal = _coordinated_cover_refusal(
+            override["coordinated_owners"], authoritative,
+            scoped=requested_scope and backend_only)
+        if refusal is not None:
+            return False, refusal
+    elif (requested_scope or override.get("acknowledge_unknown") is True) and authoritative:
         return False, ("unknown-ownership override cannot bypass authoritative active owners: "
                        + ", ".join(sorted(authoritative)))
     if (unknown_owners or observation.get("errors")) \
@@ -2178,10 +2237,14 @@ def authorize(action: str, observation: dict, *, journal: Path | str | None = No
                                "inventory_digest": latest.get("inventory_digest")})
         validation_error = (observation_snapshot_error
                             or _validate_observation(observation_value))
+        quiet = validation_error is None and observation_value["quiescent"] is True
+        restricting = override_value is not None and (
+            not isinstance(override_value, dict)
+            or not RESTRICTING_OVERRIDE_FIELDS.isdisjoint(override_value))
         if validation_error is not None:
             reason = f"observation is malformed: {validation_error}"
             valid = False
-        elif observation_value["quiescent"] is True:
+        elif quiet and not restricting:
             event = _append_to(state, {"action": action, "status": "authorized",
                                        "pending": True, "usable": False,
                                        "replayed": False,
@@ -2201,7 +2264,9 @@ def authorize(action: str, observation: dict, *, journal: Path | str | None = No
                 deployment_attempt_id=override_value.get("deployment_attempt_id"),
                 actor=override_value["actor"])
             unknown_scope = override_value.get("acknowledge_unknown") is True
-            event = _append_to(state, {"action": action, "status": "overridden",
+            coordinated = override_value.get("coordinated_owners")
+            event = _append_to(state, {"action": action,
+                                       "status": "authorized" if quiet else "overridden",
                                        "pending": True, "usable": False,
                                        "replayed": False,
                                        "audit": {"actor": override_value["actor"],
@@ -2219,6 +2284,16 @@ def authorize(action: str, observation: dict, *, journal: Path | str | None = No
                                                          else "unknown" if override_value.get("deployment_attempt_id")
                                                          else "not_declared")}
                                                     if scoped_backend else {}),
+                                                 **({"override_scope": "quiescent_restriction",
+                                                     "affected_ownership": []}
+                                                    if quiet else
+                                                    {"coordinated_owners": coordinated,
+                                                     "acknowledge_unknown": unknown_scope,
+                                                     "override_scope": "coordinated_owners",
+                                                     "affected_ownership": [
+                                                         row for rows in authoritative.values()
+                                                         for row in rows] + unknown_owners}
+                                                    if coordinated is not None else {
                                                  "override_scope": (
                                                      "unknown_ownership" if unknown_scope and any(
                                                          not _unknown_process_noise(row) for row in unknown_owners)
@@ -2226,7 +2301,7 @@ def authorize(action: str, observation: dict, *, journal: Path | str | None = No
                                                      else "authoritative_blockers"),
                                                  "affected_ownership": (
                                                      unknown_owners if unknown_scope
-                                                     else authoritative)},
+                                                     else authoritative)})},
                                        "inventory_digest": observation_value["digest"],
                                        "blockers": observation_value["blockers"],
                                        "resumable_runs": _resumable_runs(observation_value),

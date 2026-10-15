@@ -307,16 +307,20 @@ def _warn_if_edge_network_is_alone() -> None:
         pass                        # a diagnostic must never break the start
 
 
-def _compose_up():
-    """Start (building on first run) the backend container."""
+def _compose_up(*, no_deps: bool = False):
+    """Start (building on first run) the backend container.
+
+    ``no_deps`` is set by a backend-only decision: that decision covers the
+    backend service alone, so compose must not start or recreate zvec-grep.
+    """
     _ensure_host_dirs()
-    rebuild = []
+    rebuild = ["--no-deps"] if no_deps else []
     if not _image_exists():
         print("Building AItelier image (first run — this may take a few minutes)...")
     elif _image_deps_are_stale():
         print("Dependencies changed since the image was built — rebuilding "
               "(the source is mounted, but its packages are not).")
-        rebuild = ["--build"]
+        rebuild += ["--build"]
     # Inherit stdout/stderr so build + startup progress is visible.
     res = _compose("up", "-d", *rebuild, _COMPOSE_SERVICE)
     if res.returncode != 0:
@@ -356,8 +360,14 @@ def _live_runtime_observation(base_url: str) -> dict:
 
 def _require_deployment_clearance(
         action: str, *, base_url: str = _DEFAULT_URL,
-        override_decision: Callable[[str, dict], dict | None] | None = None) -> dict:
-    """Measure every project and external owner before changing the backend."""
+        override_decision: Callable[[str, dict], dict | None] | None = None,
+        backend_service: bool = False) -> dict:
+    """Measure every project and external owner before changing the backend.
+
+    Only the backend service actions pass ``backend_service``: a backend-only
+    decision, and owners named as coordinated under it, cover that service's
+    effect and never another service's.
+    """
     from core import datadir
     from core import deployment_quiescence as dq
 
@@ -375,7 +385,9 @@ def _require_deployment_clearance(
                 f"{type(exc).__name__}: {exc}")
         override_file = os.environ.get("AITELIER_DEPLOY_OVERRIDE_FILE")
         override = dq.load_override(override_file)
-        if override_decision is not None and observation.get("quiescent") is not True:
+        # A supplied decision is resolved once, before the quiet/override branch:
+        # a quiet inventory needs no permission but may not erase a restriction.
+        if override_decision is not None:
             if override_file:
                 # A fresh decision must never rescue a stale pre-bound file.
                 override = {"_invalid_override": "choose a file override or a fresh operator decision"}
@@ -386,6 +398,13 @@ def _require_deployment_clearance(
                     override = override_decision(action, dq._plain_json_snapshot(observation))
                 except Exception as exc:
                     override = {"_invalid_override": f"operator decision failed: {type(exc).__name__}: {exc}"}
+                if override is None:
+                    override = {"_invalid_override": "operator declined the decision"}
+        if (not backend_service and isinstance(override, dict)
+                and override.get("backend_only", False) is not False):
+            # Coordinated owners need backend_only, so this refuses them too.
+            override = {"_invalid_override":
+                        "backend-only decisions are honored only for the backend service action"}
         clearance = dq.authorize(action, observation, override=override, backend_only=True)
         clearance["_cutover_fence"] = fence
         return clearance
@@ -394,6 +413,12 @@ def _require_deployment_clearance(
         if isinstance(exc, dq.DeploymentBlocked):
             raise RuntimeError(str(exc)) from exc
         raise
+
+
+def _backend_only_clearance(clearance: dict) -> bool:
+    """True when the journaled decision authorized the backend service alone."""
+    audit = ((clearance or {}).get("event") or {}).get("audit") or {}
+    return audit.get("backend_only") is True
 
 
 def _finish_deployment(clearance: dict, *, success: bool,
@@ -421,9 +446,10 @@ def _ensure_docker_backend(base_url: str, max_wait: int) -> bool:
     # A stopped or unhealthy container is a redeploy boundary.  The gate is
     # deliberately after Docker availability checks and before compose changes
     # anything, so an unreadable runtime inventory cannot turn into a replay.
-    clearance = _require_deployment_clearance("redeploy", base_url=base_url)
+    clearance = _require_deployment_clearance("redeploy", base_url=base_url,
+                                               backend_service=True)
     try:
-        _compose_up()
+        _compose_up(**({"no_deps": True} if _backend_only_clearance(clearance) else {}))
         if not _wait_healthy(client, max_wait):
             raise RuntimeError(
                 f"Docker backend did not become healthy within {max_wait}s "
@@ -463,10 +489,12 @@ def restart_server(
     """Restart the Docker backend."""
     _require_docker()
     clearance = _require_deployment_clearance("restart", base_url=base_url,
+                                               backend_service=True,
                                                **({"override_decision": override_decision}
                                                   if override_decision is not None else {}))
     try:
-        restarted = _compose("restart", _COMPOSE_SERVICE)
+        restarted = _compose("restart", *(["--no-deps"] if _backend_only_clearance(clearance)
+                                          else []), _COMPOSE_SERVICE)
         if restarted.returncode != 0:
             raise RuntimeError(
                 f"`docker compose restart {_COMPOSE_SERVICE}` failed with exit "

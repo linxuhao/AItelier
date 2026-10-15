@@ -292,3 +292,220 @@ def test_recovery_uncertainty_requires_ack_without_process_noise(tmp_path, statu
         assert event["audit"]["override_scope"] == "unknown_ownership"
     else:
         refuse(tmp_path, observation, override=override, match="acknowledge unknown")
+
+
+def coordinated_packet(*, foreign=True):
+    """Current-shaped mix: two coordinated owners and their render, an
+    uncoordinated foreign active owner, recovery uncertainty and SSH noise."""
+    observation = packet()
+    registered = observation["registered_external_owners"]
+    registered += [{"attempt_id": "coordinated-a", "status": "active"},
+                   {"attempt_id": "coordinated-b", "status": "active"},
+                   {"attempt_id": "recovery", "status": "paused", "abandon_kind": None}]
+    if foreign:
+        registered.append({"attempt_id": "uncoordinated", "status": "active"})
+    render = {"owner_id": "render-a", "status": "active"}
+    observation["godot_render_owners"] = [render]
+    observation["blockers"]["godot_render_owners"] = [render]
+    return seal(observation)
+
+
+def named(*extra, omit=()):
+    rows = [{"kind": "registered_external_owners", "id": "coordinated-a", "scope_ref": "inbox seq 12"},
+            {"kind": "registered_external_owners", "id": "coordinated-b", "scope_ref": "inbox seq 13"},
+            {"kind": "godot_render_owners", "id": "render-a", "scope_ref": "inbox seq 14"}]
+    return [row for row in rows if row["id"] not in omit] + list(extra)
+
+
+@pytest.mark.parametrize("change", [{}, {"acknowledge_unknown": False},
+                                    {"backend_only": False}, {"backend_only": False,
+                                                              "acknowledge_unknown": False}])
+def test_without_coordinated_owners_active_owners_keep_vetoing(tmp_path, change):
+    observation = coordinated_packet(foreign=False)
+    refuse(tmp_path, observation, override=decision(observation, **change))
+
+
+def test_exact_coordinated_cover_is_journaled_without_changing_facts(tmp_path):
+    observation = coordinated_packet(foreign=False)
+    before = deepcopy(observation)
+    clearance = dq.authorize("restart", observation, journal=tmp_path / "journal.json",
+                             override=decision(observation, coordinated_owners=named()),
+                             backend_only=True)
+    event = clearance["event"]
+    assert clearance["allowed"] is True and event["status"] == "overridden"
+    audit = event["audit"]
+    assert audit["override_scope"] == "coordinated_owners" and audit["backend_only"] is True
+    assert audit["coordinated_owners"] == named() and audit["acknowledge_unknown"] is True
+    affected = audit["affected_ownership"]
+    for attempt in ("coordinated-a", "coordinated-b", "recovery"):
+        assert any(row.get("attempt_id") == attempt for row in affected)
+    assert observation["godot_render_owners"][0] in affected
+    assert all(row in affected for row in observation["external_owners"])
+    assert event["blockers"] == observation["blockers"] and event["errors"] == observation["errors"]
+    assert event["inventory_digest"] == observation["digest"]
+    assert observation == before and observation["quiescent"] is False
+    dq.finalize(clearance, success=False, error="CPU decision only; no deployment",
+                journal=tmp_path / "journal.json")
+
+
+@pytest.mark.parametrize("coordinated,match", [
+    (named(), "exactly cover"),                       # uncoordinated foreign owner still vetoes
+    (named({"kind": "registered_external_owners", "id": "uncoordinated", "scope_ref": ""}),
+     "non-empty kind, id and scope_ref"),
+])
+def test_uncoordinated_active_owner_still_blocks(tmp_path, coordinated, match):
+    observation = coordinated_packet()
+    refuse(tmp_path, observation, override=decision(observation, coordinated_owners=coordinated),
+           match=match)
+
+
+@pytest.mark.parametrize("coordinated,match", [
+    (named(omit=("render-a",)), "exactly cover"),
+    (named({"kind": "registered_external_owners", "id": "stale", "scope_ref": "r"}), "exactly cover"),
+    (named({"kind": "registered_external_owners", "id": "recovery", "scope_ref": "r"}), "exactly cover"),
+    (named({"kind": "registered_external_owners", "id": "coordinated-a", "scope_ref": "again"}), "twice"),
+    (named({"kind": "external_active", "id": "x", "scope_ref": "r"}), "cannot be named"),
+    (named({"kind": "active_runs", "id": "x", "scope_ref": "r"}), "cannot be named"),
+    (named({"kind": "godot_render_owners", "id": "render-a ", "scope_ref": " "}), "non-empty"),
+    (named({"kind": "godot_render_owners", "id": "r", "scope_ref": "r", "proof": "x"}), "exactly"),
+    (named(["registered_external_owners", "coordinated-a", "r"]), "exactly"),
+    ([], "non-empty list"), (None, "non-empty list"), ({"kind": "x"}, "non-empty list"),
+])
+def test_malformed_or_inexact_coordination_refuses(tmp_path, coordinated, match):
+    observation = coordinated_packet(foreign=False)
+    refuse(tmp_path, observation, override=decision(observation, coordinated_owners=coordinated),
+           match=match)
+
+
+@pytest.mark.parametrize("change,backend_only,match", [
+    ({"backend_only": False, "deployment_attempt_id": None}, True,
+     "trusted backend caller and backend-only scope"),
+    ({}, False, "trusted backend caller"),
+    ({"acknowledge_unknown": False}, True, "acknowledge unknown"),
+    ({"expires_at": "2000-01-01T00:00:00+00:00"}, True, "expired"),
+    ({"inventory_digest": "0" * 64}, True, "digest"),
+    ({"action": "redeploy"}, True, "not 'restart'"),
+])
+def test_coordination_keeps_every_existing_decision_check(tmp_path, change, backend_only, match):
+    observation = coordinated_packet(foreign=False)
+    override = decision(observation, coordinated_owners=named(), **change)
+    refuse(tmp_path, observation, override=override, backend_only=backend_only, match=match)
+
+
+def test_coordination_with_nothing_left_to_cover_is_stale(tmp_path):
+    observation = packet()
+    refuse(tmp_path, observation, override=decision(observation, coordinated_owners=named()),
+           match="exactly cover")
+
+
+@pytest.mark.parametrize("effect", ["operation", "lease", "measurement-failure", "process",
+                                    "pending-sidecar", "render-lost", "error"])
+def test_non_nameable_effects_veto_an_exact_cover(tmp_path, effect):
+    observation = coordinated_packet(foreign=False)
+    if effect == "operation":
+        row = {"run_id": "real", "project_id": "foreign", "status": "running",
+               "active_operations": 1, "audit": {"alive": 1, "lost": [], "unknown": []}}
+        observation["runs"] = [row]
+        observation["blockers"]["active_runs"] = [row]
+        observation["blockers"]["active_operations"] = [row]
+    elif effect == "lease":
+        observation["blockers"]["checkout_leases"] = [{"run_id": "w", "owner": "writer",
+                                                       "canonical_checkout": "/source"}]
+    elif effect == "measurement-failure":
+        observation["blockers"]["measurement_failure"] = [{"reason": "inventory unavailable"}]
+        observation["errors"].append("inventory unavailable")
+    elif effect == "process":
+        observation["external_owners"].append(
+            {"kind": "process", "command": "python /source/benchmark.py", "active": True,
+             "ownership": "registered", "attempt_id": "coordinated-a"})
+    elif effect == "pending-sidecar":
+        observation["sidecar_owners"][0]["outcome"] = "pending"
+    elif effect == "render-lost":
+        lost = {"owner_id": "render-lost", "status": "owner_lost"}
+        observation["godot_render_owners"].append(lost)
+        observation["blockers"]["godot_render_owners"].append(lost)
+    else:
+        observation["errors"].append("process inventory failed: unavailable")
+    seal(observation)
+    coordinated = named(*([{"kind": "godot_render_owners", "id": "render-lost", "scope_ref": "r"}]
+                          if effect == "render-lost" else []))
+    refuse(tmp_path, observation, override=decision(observation, coordinated_owners=coordinated),
+           match="non-nameable authoritative owners")
+
+
+def quiet_packet():
+    observation = coordinated_packet(foreign=False)
+    for name in ("runs", "sidecar_owners", "external_owners", "registered_external_owners",
+                 "godot_render_owners"):
+        observation[name] = []
+    observation["blockers"], observation["errors"], observation["quiescent"] = {}, [], True
+    return seal(observation)
+
+
+@pytest.mark.parametrize("record", [None, [], [{"kind": "godot_render_owners", "id": "stale-owner",
+                                                "scope_ref": "backend-only scope"}]])
+def test_quiescent_inventory_does_not_rescue_stale_or_malformed_coordination(tmp_path, record):
+    # Independent review regression (attempt-3d37…): quiet used to return before validation.
+    observation = quiet_packet()
+    refuse(tmp_path, observation, match="coordinated_owners must be|exactly cover",
+           override=decision(observation, coordinated_owners=record, deployment_attempt_id=None))
+
+
+@pytest.mark.parametrize("override,match", [
+    ({"_invalid_override": "coordinated owners are honored only for the backend service action"},
+     "honored only for the backend service action"),
+    ({"_invalid_override": "Expecting value: line 1 column 1 (char 0)"}, "malformed"),
+    ([], "no audited override"),
+])
+def test_quiescent_inventory_does_not_ignore_an_explicit_refusal(tmp_path, override, match):
+    observation = quiet_packet()
+    refuse(tmp_path, observation, override=override, match=match)
+
+
+@pytest.mark.parametrize("change,match", [
+    ({"backend_only": "true"}, "trusted backend caller"),
+    ({"inventory_digest": "0" * 64}, "digest"),
+    ({"expires_at": "2000-01-01T00:00:00+00:00"}, "expired"),
+    ({"deployment_attempt_id": "deployment-current"}, "exact recorded owner"),
+])
+def test_quiescent_scoped_decision_is_still_validated(tmp_path, change, match):
+    observation = quiet_packet()
+    override = decision(observation, **{"deployment_attempt_id": None, **change})
+    refuse(tmp_path, observation, override=override, match=match)
+
+
+def test_quiescent_backend_only_scope_is_journaled_on_the_authorization(tmp_path):
+    observation = quiet_packet()
+    before = deepcopy(observation)
+    clearance = dq.authorize("restart", observation, journal=tmp_path / "journal.json",
+                             override=decision(observation, deployment_attempt_id=None),
+                             backend_only=True)
+    event = clearance["event"]
+    assert clearance["allowed"] is True and event["status"] == "authorized"
+    assert event["audit"]["backend_only"] is True and event["audit"]["actor"] == "driver:director"
+    assert event["blockers"] == {} and event["errors"] == [] and observation == before
+    dq.finalize(clearance, success=False, error="CPU decision only; no deployment",
+                journal=tmp_path / "journal.json")
+
+
+@pytest.mark.parametrize("override", [None, "unscoped"])
+def test_quiescent_inventory_without_a_restriction_keeps_its_plain_authorization(tmp_path, override):
+    observation = quiet_packet()
+    if override == "unscoped":
+        override = decision(observation, deployment_attempt_id=None, inventory_digest="0" * 64)
+        for key in ("backend_only", "deployment_attempt_id"):
+            override.pop(key)
+    clearance = dq.authorize("restart", observation, journal=tmp_path / "journal.json",
+                             override=override, backend_only=True)
+    assert clearance["event"]["status"] == "authorized" and "audit" not in clearance["event"]
+
+
+@pytest.mark.parametrize("quiet", [True, False])
+@pytest.mark.parametrize("marker", [False, None, "", 0, [], {}])
+def test_a_present_refusal_marker_refuses_whatever_its_value(tmp_path, quiet, marker):
+    # Independent review regression (attempt-a048…): the marker was read by truthiness.
+    observation = quiet_packet() if quiet else coordinated_packet(foreign=False)
+    coordinated = {} if quiet else {"coordinated_owners": named()}
+    override = decision(observation, deployment_attempt_id=None, _invalid_override=marker,
+                        **coordinated)
+    refuse(tmp_path, observation, override=override, match="override is malformed")

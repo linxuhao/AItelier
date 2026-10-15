@@ -240,3 +240,219 @@ def test_cli_acknowledgement_exposes_only_decision_projection(monkeypatch, capsy
     assert result["inventory_digest"] == "owned-digest" and result["acknowledge_unknown"] is True
     assert "not-in-display" not in json.dumps(output)
 
+
+
+def test_coordinated_owners_are_refused_outside_the_backend_service(normal):
+    def decide(action, snapshot):
+        return override(action, snapshot, backend_only=True, coordinated_owners=[
+            {"kind": "godot_render_owners", "id": "render", "scope_ref": "ref"}])
+    with pytest.raises(RuntimeError, match="honored only for the backend service action"):
+        server._require_deployment_clearance("redeploy", override_decision=decide)
+    event = latest()
+    assert event["status"] == "aborted" and event["usable"] is False
+    assert event["blockers"]["external_active"] and event["errors"]
+    assert normal[1] == []
+    # The backend service path hands the same field to the guard's exact-cover rule.
+    with pytest.raises(RuntimeError, match="exactly cover"):
+        server._require_deployment_clearance("redeploy", override_decision=decide,
+                                             backend_service=True)
+    assert normal[1] == []
+
+
+@pytest.mark.parametrize("scoped", [False, True])
+def test_restart_effect_follows_the_journaled_backend_scope(normal, monkeypatch, scoped):
+    observer = server.httpx.Client
+    # Only the health client lacks the admin headers the observation client carries.
+    monkeypatch.setattr(server.httpx, "Client", lambda *a, **k: observer(*a, **k)
+                        if "headers" in k else SimpleNamespace())
+    monkeypatch.setattr(server, "_wait_healthy", lambda *_a: True)
+    decide = lambda action, snapshot: override(action, snapshot, **({"backend_only": True} if scoped else {}))
+    assert server.restart_server(override_decision=decide) is True
+    assert normal[1] == [("restart", "--no-deps", "aitelier") if scoped else ("restart", "aitelier")]
+    events = json.loads(dq.evidence_path().read_text())["events"]
+    assert [event["status"] for event in events[-2:]] == ["overridden", "completed"]
+    assert events[-2]["audit"].get("backend_only") is (True if scoped else None)
+
+
+def quiet_measurement(monkeypatch):
+    real_measure = dq.measure
+    def quiet(**kwargs):
+        observation = real_measure(**kwargs, command_runner=lambda command: SimpleNamespace(
+            returncode=0, stdout="", stderr=""))
+        assert observation["quiescent"] is True and dq._validate_observation(observation) is None
+        return observation
+    monkeypatch.setattr(dq, "measure", quiet)
+    return quiet(runtime_facts=server._live_runtime_observation(server._DEFAULT_URL))
+
+
+def quiet_redeploy_host(monkeypatch):
+    observer = server.httpx.Client
+    monkeypatch.setattr(server.httpx, "Client", lambda *a, **k: observer(*a, **k)
+                        if "headers" in k else SimpleNamespace())
+    monkeypatch.setattr(server, "_container_running", lambda: False)
+    monkeypatch.setattr(server, "_wait_healthy", lambda *_a: True)
+    monkeypatch.setattr(server, "_ensure_host_dirs", lambda: None)
+    monkeypatch.setattr(server, "_warn_if_edge_network_is_alone", lambda: None)
+    monkeypatch.setattr(server, "_image_exists", lambda: True)
+    monkeypatch.setattr(server, "_image_deps_are_stale", lambda: False)
+
+
+@pytest.mark.parametrize("coordinated", [False, True])
+def test_quiescent_backend_only_file_never_broadens_redeploy_effect(normal, tmp_path, monkeypatch,
+                                                                     coordinated):
+    # Independent review regression (attempt-3d37…): quiet dropped the file's backend-only scope.
+    snapshot = quiet_measurement(monkeypatch)
+    names = {"coordinated_owners": [{"kind": "godot_render_owners", "id": "stale-owner",
+                                     "scope_ref": "backend-only assertion"}]} if coordinated else {}
+    path = tmp_path / "scope.json"
+    path.write_text(json.dumps(override("redeploy", snapshot, backend_only=True, **names)))
+    monkeypatch.setenv("AITELIER_DEPLOY_OVERRIDE_FILE", str(path))
+    quiet_redeploy_host(monkeypatch)
+    if coordinated:
+        with pytest.raises(RuntimeError, match="exactly cover"):
+            server._ensure_docker_backend(server._DEFAULT_URL, 1)
+        assert normal[1] == [] and latest()["status"] == "aborted"
+        return
+    assert server._ensure_docker_backend(server._DEFAULT_URL, 1) is True
+    assert normal[1] == [("up", "-d", "--no-deps", "aitelier")]
+    events = json.loads(dq.evidence_path().read_text())["events"]
+    assert [event["status"] for event in events[-2:]] == ["authorized", "completed"]
+    assert events[-2]["audit"]["backend_only"] is True
+
+
+def test_quiescent_redeploy_without_a_file_keeps_default_dependencies(normal, monkeypatch):
+    quiet_measurement(monkeypatch)
+    quiet_redeploy_host(monkeypatch)
+    assert server._ensure_docker_backend(server._DEFAULT_URL, 1) is True
+    assert normal[1] == [("up", "-d", "aitelier")]
+
+
+def test_quiescent_godot_file_cannot_ignore_explicit_backend_only_coordination(normal, bound, tmp_path,
+                                                                               monkeypatch):
+    # Independent review regression (attempt-3d37…): quiet ignored the Godot-path refusal.
+    manifest, binding, _ = bound
+    quota = tmp_path / "quota.json"
+    quota.write_text(json.dumps({"services": {"godot-builder": {"environment": QUOTAS}}}))
+    snapshot = quiet_measurement(monkeypatch)
+    path = tmp_path / "scope.json"
+    path.write_text(json.dumps(override("redeploy", snapshot, backend_only=True, coordinated_owners=[
+        {"kind": "godot_render_owners", "id": "stale-render", "scope_ref": "backend-only assertion"}])))
+    monkeypatch.setenv("AITELIER_DEPLOY_OVERRIDE_FILE", str(path))
+    monkeypatch.setattr(server, "_godot_identity",
+                        lambda: pytest.fail("Godot owner inspection after forbidden clearance"))
+    report = tmp_path / "receipt.json"
+    with pytest.raises(RuntimeError, match="honored only for the backend service action"):
+        server.recreate_godot_builder(override_file=str(quota), binding_file=str(manifest),
+                                      expected_cid="b" * 64, expected_pid=123,
+                                      expected_image="sha256:" + "c" * 64,
+                                      target_image="sha256:" + "e" * 64, report_file=str(report))
+    assert normal[1] == [] and not report.exists()
+    assert latest()["status"] == "aborted" and latest()["usable"] is False
+
+
+@pytest.mark.parametrize("quiet", [False, True])
+def test_godot_recreation_refuses_a_backend_only_decision(normal, bound, tmp_path, monkeypatch, quiet):
+    # An accepted backend-only scope may only select the backend service effect.
+    manifest, binding, _ = bound
+    quota = tmp_path / "quota.json"
+    quota.write_text(json.dumps({"services": {"godot-builder": {"environment": QUOTAS}}}))
+    snapshot = quiet_measurement(monkeypatch) if quiet else observe()
+    path = tmp_path / "scope.json"
+    path.write_text(json.dumps(override("redeploy", snapshot, backend_only=True)))
+    monkeypatch.setenv("AITELIER_DEPLOY_OVERRIDE_FILE", str(path))
+    monkeypatch.setattr(server, "_godot_identity",
+                        lambda: pytest.fail("Godot owner inspection after forbidden clearance"))
+    report = tmp_path / "receipt.json"
+    with pytest.raises(RuntimeError, match="backend-only decisions are honored only"):
+        server.recreate_godot_builder(override_file=str(quota), binding_file=str(manifest),
+                                      expected_cid="b" * 64, expected_pid=123,
+                                      expected_image="sha256:" + "c" * 64,
+                                      target_image="sha256:" + "e" * 64, report_file=str(report))
+    assert normal[1] == [] and not report.exists()
+    assert latest()["status"] == "aborted" and latest()["usable"] is False
+
+
+def quiet_restart_host(monkeypatch):
+    observer = server.httpx.Client
+    monkeypatch.setattr(server.httpx, "Client", lambda *a, **k: observer(*a, **k)
+                        if "headers" in k else SimpleNamespace())
+    monkeypatch.setattr(server, "_wait_healthy", lambda *_a: True)
+
+
+@pytest.mark.parametrize("scoped", [False, True])
+def test_quiescent_restart_still_resolves_a_supplied_decision_once(normal, monkeypatch, scoped):
+    # Independent review regression (attempt-a048…): quiet never called the callback.
+    quiet_measurement(monkeypatch)
+    quiet_restart_host(monkeypatch)
+    seen = []
+    def decide(action, snapshot):
+        assert_fence_held()
+        seen.append(snapshot)
+        return override(action, snapshot, **({"backend_only": True} if scoped else {}))
+    assert server.restart_server(override_decision=decide) is True
+    assert len(seen) == 1 and seen[0]["quiescent"] is True
+    assert normal[1] == [("restart", "--no-deps", "aitelier") if scoped else ("restart", "aitelier")]
+    events = json.loads(dq.evidence_path().read_text())["events"]
+    assert [event["status"] for event in events[-2:]] == ["authorized", "completed"]
+    assert (events[-2].get("audit") or {}).get("backend_only") is (True if scoped else None)
+
+
+@pytest.mark.parametrize("case,match", [
+    ("refusal", "operator refuses effects"),
+    ("false-refusal", "override is malformed: False"),
+    ("malformed-coordination", "coordinated_owners must be a non-empty list"),
+    ("decision-error", "operator decision failed"),
+    ("declined", "operator declined"),
+    ("non-object", "no audited override"),
+    ("file-and-callback", "choose a file override or a fresh operator decision"),
+])
+def test_quiescent_restart_refuses_what_the_supplied_decision_refuses(normal, tmp_path, monkeypatch,
+                                                                      case, match):
+    snapshot = quiet_measurement(monkeypatch)
+    quiet_restart_host(monkeypatch)
+    seen = []
+    def decide(action, observed):
+        assert_fence_held()
+        seen.append(observed)
+        if case == "decision-error":
+            raise ValueError("owned decision failure")
+        if case == "refusal":
+            return {"_invalid_override": "operator refuses effects"}
+        if case == "false-refusal":
+            return override(action, observed, backend_only=True, _invalid_override=False)
+        if case == "declined":
+            return None
+        if case == "non-object":
+            return ["not", "a", "decision"]
+        return override(action, observed, backend_only=True, coordinated_owners=[])
+    if case == "file-and-callback":
+        path = tmp_path / "plain.json"
+        path.write_text(json.dumps(override("restart", snapshot)))
+        monkeypatch.setenv("AITELIER_DEPLOY_OVERRIDE_FILE", str(path))
+    with pytest.raises(RuntimeError, match=match):
+        server.restart_server(override_decision=decide)
+    assert len(seen) == (0 if case == "file-and-callback" else 1)
+    assert normal[1] == [] and latest()["status"] == "aborted" and latest()["usable"] is False
+
+
+def test_quiescent_godot_callback_restriction_is_evaluated_before_effect(normal, bound, tmp_path,
+                                                                         monkeypatch):
+    manifest, binding, _ = bound
+    quota = tmp_path / "quota.json"
+    quota.write_text(json.dumps({"services": {"godot-builder": {"environment": QUOTAS}}}))
+    quiet_measurement(monkeypatch)
+    seen = []
+    def decide(action, snapshot):
+        seen.append(snapshot)
+        return override(action, snapshot, backend_only=True)
+    monkeypatch.setattr(server, "_godot_identity",
+                        lambda: pytest.fail("Godot owner inspection after forbidden clearance"))
+    report = tmp_path / "receipt.json"
+    with pytest.raises(RuntimeError, match="backend-only decisions are honored only"):
+        server.recreate_godot_builder(override_file=str(quota), binding_file=str(manifest),
+                                      expected_cid="b" * 64, expected_pid=123,
+                                      expected_image="sha256:" + "c" * 64,
+                                      target_image="sha256:" + "e" * 64, report_file=str(report),
+                                      override_decision=decide)
+    assert len(seen) == 1 and normal[1] == [] and not report.exists()
+    assert latest()["status"] == "aborted"

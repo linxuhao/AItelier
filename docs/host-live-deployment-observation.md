@@ -42,7 +42,11 @@ Headless Python callers can pass `override_decision(action, observation)` to
 `restart_server` or `recreate_godot_builder`. The callback must inspect the fresh
 owner identities/blockers against the operator's authorized scope before
 returning an ordinary audited override with that snapshot's digest, or `None` to
-decline. It receives a private snapshot; the same original measurement is consumed
+decline. A supplied callback is called exactly once under the fence, on a
+quiescent observation too, because its answer may restrict or refuse. Declining,
+raising, or combining it with an override file refuses the action even when
+nothing blocks it. Callers that pass no callback keep the plain quiescent
+authorization; there is no new prompt. It receives a private snapshot; the same original measurement is consumed
 by existing `authorize`, effect and `finalize` without another hidden measurement.
 The callback does not modify facts or release owners; backend defaults, Godot
 Source/CID/image and configuration rechecks, and quota bounds remain unchanged.
@@ -78,6 +82,56 @@ This source contract does not certify source compatibility, recovery, or current
 production quiet. A real cutover still requires fresh supported host and runtime
 observations and coordination with the affected owners.
 
+
+## Coordinated owners in a backend-only decision
+
+Without this field, a backend-only decision refuses any authoritative owner, and
+an unscoped decision cannot acknowledge unknowns while authoritative owners are
+present. Owners who stated their work is unaffected therefore had no way to be
+recorded. A backend-only decision may add `coordinated_owners`, a list of
+`{"kind", "id", "scope_ref"}` records with non-empty strings and no other keys.
+`kind` is `registered_external_owners` (named by `attempt_id`) or
+`godot_render_owners` (named by `owner_id`), and the named row must be `active`.
+
+Each record is the local operator's audited assertion that the owner authorized
+an unaffected scope for this backend-only action, obtained outside the payload.
+`scope_ref` points at that authorization; neither it nor the ticket is
+authentication or proof, and nothing reads or verifies it. The trust boundary
+is unchanged: only the local backend restart/redeploy path honors the field.
+The Godot-only recreation refuses it, and also refuses any `backend_only`
+decision, because a backend-only scope covers the backend service effect only.
+Even on the backend path, it is honored only when that trusted caller passes
+`backend_only=True` and the decision itself requests `backend_only: true`.
+
+The records must exactly cover the remaining authoritative owners of the held
+inventory. A missing, extra, stale, duplicate, malformed or unknown-row name
+refuses. Run, operation, checkout lease, non-ready semantic demand, known
+process, `owner_lost` render, measurement-failure and inventory-error blockers
+cannot be named and still refuse. Unknown owners and process noise still need
+`acknowledge_unknown`. Action, actor, ticket, expiry and digest checks are
+unchanged. The journal records the original blockers, errors and digest, plus
+`override_scope: coordinated_owners`, the records with their scope_refs and
+every affected coordinated and unknown row. It marks nothing settled.
+
+A quiescent inventory needs no permission, so a plain decision supplied with it
+is still ignored and the action is authorized as before. A decision that
+restricts or refuses is not ignored. That means one carrying `backend_only`,
+`deployment_attempt_id`, `coordinated_owners` or an `_invalid_override`
+refusal, or one that is not an object. It is fully validated first. This holds
+whether the decision came from a file or from a callback. `_invalid_override`
+is a reserved refusal: its presence refuses, whatever its value (`false`,
+`null`, empty or `0` included). If it is
+malformed, stale or refused, the action is refused even though nothing blocks
+it. If it is accepted, the `authorized` event carries its audit with
+`override_scope: quiescent_restriction`, so the backend-only effect selection
+below still applies. A coordinated record can never be accepted on a quiescent
+inventory, because there is nothing left for it to cover.
+
+A backend-only decision operates only the backend service: the trusted CLI uses
+`docker compose restart --no-deps aitelier` or `up -d --no-deps aitelier`, so
+zvec-grep (its `depends_on`) and godot-builder are not started, restarted or
+recreated. Unscoped startup and restart keep compose's default dependency
+behavior. Neither the field nor the scope promotes the shared Source checkout.
 
 Backend-only acknowledgement authorizes only the backend action named in the
 held decision. It does not authorize changing the shared source checkout or

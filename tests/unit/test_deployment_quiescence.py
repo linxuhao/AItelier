@@ -1785,8 +1785,8 @@ def test_server_redeploy_gate_runs_before_compose(monkeypatch):
     monkeypatch.setattr(server, "_container_running", lambda: False)
     monkeypatch.setattr(server, "_find_server_pid", lambda port: None)
 
-    def gate(action, *, base_url):
-        assert base_url == "http://localhost:4444"
+    def gate(action, *, base_url, backend_service=False):
+        assert base_url == "http://localhost:4444" and backend_service is True
         events.append(("gate", action))
         return {}
 
@@ -1810,8 +1810,8 @@ def test_server_redeploy_never_kills_a_listener_before_gate(monkeypatch):
     monkeypatch.setattr(server.os, "kill",
                         lambda *args: events.append(("kill", *args)))
 
-    def gate(action, *, base_url):
-        assert base_url == "http://localhost:4444"
+    def gate(action, *, base_url, backend_service=False):
+        assert base_url == "http://localhost:4444" and backend_service is True
         events.append(("gate", action))
         return {}
 
@@ -1834,8 +1834,8 @@ def test_server_restart_gate_runs_before_restart(monkeypatch):
     monkeypatch.setattr(server.httpx, "Client", Client)
     monkeypatch.setattr(server, "_require_docker", lambda: events.append(("docker",)))
 
-    def gate(action, *, base_url):
-        assert base_url == "http://localhost:4444"
+    def gate(action, *, base_url, backend_service=False):
+        assert base_url == "http://localhost:4444" and backend_service is True
         events.append(("gate", action))
         return {}
 
@@ -1885,8 +1885,8 @@ def test_restart_exit_137_is_aborted_even_if_old_health_still_answers(tmp_path, 
 
     events = []
     monkeypatch.setattr(server, "_require_docker", lambda: None)
-    def gate(_action, *, base_url):
-        assert base_url == "http://localhost:4444"
+    def gate(_action, *, base_url, backend_service=False):
+        assert base_url == "http://localhost:4444" and backend_service is True
         return {"event": {"event_id": "gate"}}
 
     monkeypatch.setattr(server, "_require_deployment_clearance", gate)
@@ -1950,3 +1950,48 @@ def test_runtime_facts_schema_version_must_be_exact_int(bad_schema_version, monk
 def test_runtime_facts_exact_int_schema_version_is_accepted():
     facts = _valid_runtime_facts()
     assert dq._validated_runtime_facts(facts) == facts
+
+
+@pytest.mark.parametrize("scoped", [False, True])
+def test_backend_only_restart_never_restarts_dependencies(monkeypatch, scoped):
+    from cli import server
+
+    events = []
+    monkeypatch.setattr(server, "_require_docker", lambda: None)
+    clearance = {"event": {"event_id": "gate", "audit": {"backend_only": True}}} if scoped else {}
+    monkeypatch.setattr(server, "_require_deployment_clearance",
+                        lambda _action, *, base_url, backend_service=False: clearance)
+    monkeypatch.setattr(server, "_compose",
+                        lambda *args, **kwargs: events.append(args) or SimpleNamespace(returncode=0))
+    monkeypatch.setattr(server, "_wait_healthy", lambda *_a: True)
+    monkeypatch.setattr(server, "_finish_deployment", lambda c, *, success, error=None: c)
+    assert server.restart_server("http://localhost:4444", 1) is True
+    assert events == [("restart", "--no-deps", "aitelier") if scoped else ("restart", "aitelier")]
+
+
+@pytest.mark.parametrize("stale", [False, True])
+@pytest.mark.parametrize("scoped", [False, True])
+def test_backend_only_redeploy_never_starts_dependencies(monkeypatch, scoped, stale):
+    from cli import server
+
+    events = []
+    class Client:
+        def __init__(self, *args, **kwargs):
+            pass
+    monkeypatch.setattr(server.httpx, "Client", Client)
+    monkeypatch.setattr(server, "_container_running", lambda: False)
+    clearance = {"event": {"event_id": "gate", "audit": {"backend_only": True}}} if scoped else {}
+    monkeypatch.setattr(server, "_require_deployment_clearance",
+                        lambda _action, *, base_url, backend_service=False: clearance)
+    monkeypatch.setattr(server, "_ensure_host_dirs", lambda: None)
+    monkeypatch.setattr(server, "_image_exists", lambda: True)
+    monkeypatch.setattr(server, "_image_deps_are_stale", lambda: stale)
+    monkeypatch.setattr(server, "_warn_if_edge_network_is_alone", lambda: None)
+    monkeypatch.setattr(server, "_compose",
+                        lambda *args, **kwargs: events.append(args) or SimpleNamespace(returncode=0))
+    monkeypatch.setattr(server, "_wait_healthy", lambda client, max_wait: True)
+    monkeypatch.setattr(server, "_finish_deployment", lambda c, *, success, error=None: c)
+    assert server._ensure_docker_backend("http://localhost:4444", 1) is True
+    expected = ["up", "-d", *(["--no-deps"] if scoped else []), *(["--build"] if stale else []),
+                "aitelier"]
+    assert events == [tuple(expected)]

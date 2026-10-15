@@ -361,9 +361,13 @@ def test_a_declared_absence_is_unmeasured_whatever_the_exit_code_was():
     assert rt._repo_gate_outcome(gate) == rt.REPO_GATE_UNMEASURED
 
 
-def test_a_killed_gate_is_unmeasured_and_its_returncode_is_not_why(tmp_path):
-    gate = rt._run_node_cmd(Path(str(tmp_path)), ["bash", "-c", "sleep 3"],
-                            timeout=1)
+def test_a_killed_gate_is_unmeasured_and_its_returncode_is_not_why(tmp_path, monkeypatch):
+    import subprocess
+    def killed(repo, args, timeout, **kw):
+        raise subprocess.TimeoutExpired(args, timeout)
+    monkeypatch.setattr(rt.repository_executor, "execute", killed)
+    gate = rt._run_node_cmd(Path(str(tmp_path)), ["bash", "run_tests.sh"], timeout=1,
+                            env_overrides={"GATE_REPORT_DIR": str(tmp_path)})
     assert gate["returncode"] == -1
     assert gate["timed_out"] is True
     # Same value the bare exit-code scan above reads as a MEASURED failure —
@@ -371,9 +375,13 @@ def test_a_killed_gate_is_unmeasured_and_its_returncode_is_not_why(tmp_path):
     assert rt._repo_gate_outcome(gate) == rt.REPO_GATE_UNMEASURED
 
 
-def test_a_runner_that_cannot_start_is_unmeasured():
+def test_a_runner_that_cannot_start_is_unmeasured(monkeypatch):
+    def unavailable(*a, **k):
+        raise rt.repository_executor.IsolationUnavailable("isolated container exited 125")
+    monkeypatch.setattr(rt.repository_executor, "execute", unavailable)
     gate = rt._run_node_cmd(Path("/nonexistent-dir-aitelier"),
-                            ["bash", "-c", "true"], timeout=5)
+                            ["bash", "run_tests.sh"], timeout=5,
+                            env_overrides={"GATE_REPORT_DIR": "/nonexistent-dir-aitelier"})
     assert gate["runner_error"] is True
     assert rt._repo_gate_outcome(gate) == rt.REPO_GATE_UNMEASURED
 

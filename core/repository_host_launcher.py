@@ -5,6 +5,17 @@ operator-configured existing State storage (read-only, no runtime/schema init)
 and permits only that exact repository plus that run's report tickets. Socket
 permissions/UID trust the backend, not arbitrary untrusted same-UID programs;
 repository containers receive neither the launcher nor Docker socket.
+
+Normal Node gate requests carry ``profile`` (``node_fetch``/``node_run``),
+``workdir`` and ``npm_cache`` and are validated by
+`core.repository_executor.validate_node_request`: the container mounts only
+the run's own ``node-`` ticket (the full snapshot, npm cache and the gate's
+npm user config) and runs the image named by the optional
+``node_executor_image`` key (an immutable digest of an image carrying the
+pinned npm; the pytest ``test_image`` is never used for Node). Without it every
+Node request is refused. ``node_fetch`` is the one launch with a network, and
+only when the optional ``node_fetch_network`` key names one (an existing Docker
+network; never ``host``/``none``). A refusal is reported as unmeasured.
 """
 from __future__ import annotations
 from contextlib import closing
@@ -62,6 +73,16 @@ def _validate_config(cfg: dict) -> None:
     uids = cfg.get("allowed_uids")
     if not isinstance(uids, list) or not uids or any(type(u) is not int or u < 0 for u in uids):
         raise LaunchRefused("allowed_uids must explicitly name trusted backend UIDs")
+    network = cfg.get("node_fetch_network")
+    if network is not None and (not isinstance(network, str)
+                                or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", network)
+                                or network in ("host", "none")):
+        raise LaunchRefused("node_fetch_network must name an existing Docker network "
+                            "(not host/none)")
+    node_image = cfg.get("node_executor_image")
+    if node_image is not None and (not isinstance(node_image, str) or not re.fullmatch(
+            r"(?:[A-Za-z0-9._:/-]+@)?sha256:[0-9a-f]{64}", node_image)):
+        raise LaunchRefused("node_executor_image must be an immutable sha256 digest")
 
 
 def _run_binding(cfg: dict, run_id: str) -> tuple[Path, Path, str]:
@@ -119,13 +140,32 @@ def validate_request(cfg: dict, request: dict) -> dict:
     if not isinstance(request, dict) or request.get("op") != "launch":
         raise LaunchRefused("unsupported operation")
     allowed = {"op", "repo", "run_id", "args", "timeout", "writable_dirs",
-               "report_dir", "relay_socket", "import_module", "pytest_timeout"}
+               "report_dir", "relay_socket", "import_module", "pytest_timeout",
+               "profile", "workdir", "npm_cache"}
     if set(request) - allowed:
         raise LaunchRefused("unsupported request fields; mounts/image come from host policy")
     owned_repo, report_root, project_id = _run_binding(cfg, request.get("run_id"))
     repo = _resolve_inside(request.get("repo", ""), cfg["allowed_roots"], "repo")
     if repo != owned_repo or not repo.is_dir():
         raise LaunchRefused("repo does not match the existing run's owned repository")
+    if "profile" in request:
+        # The repo above only binds the request to its run; a Node container
+        # never mounts it (`docker_command`).
+        from core.repository_executor import NodeRefused, validate_node_request
+        try:
+            node = validate_node_request(report_root, request,
+                                         cfg.get("node_fetch_network") or "",
+                                         cfg.get("node_executor_image") or "")
+        except (NodeRefused, OSError) as exc:
+            raise LaunchRefused(str(exc)) from exc
+        timeout = request.get("timeout")
+        if type(timeout) is not int or not 1 <= timeout <= 7200:
+            raise LaunchRefused("timeout must be an integer within 1..7200")
+        return {**node, "repo": str(repo), "timeout": timeout, "writable_dirs": [node["ticket"]],
+                "relay_socket": "", "import_module": "", "pytest_timeout": False,
+                "report_dir": "", "run_id": request["run_id"], "project_id": project_id}
+    if "workdir" in request or "npm_cache" in request:
+        raise LaunchRefused("workdir/npm_cache belong to a node profile")
     directories = request.get("writable_dirs", [])
     if not isinstance(directories, list) or len(directories) > 1:
         raise LaunchRefused("only one owned report ticket may be writable")
@@ -208,6 +248,18 @@ def docker_command(cfg: dict, fields: dict, name: str) -> list[str]:
         raise LaunchRefused("Docker execution facility is unavailable on the host")
     repo = fields["repo"]
     entry = str(cfg["executor_entry"])
+    if fields.get("profile"):
+        from core.repository_executor import node_mount_args, node_payload
+        return [docker, "run", "--rm", "--init", "--network", fields["network"],
+                "--cpus", "2", "--memory", "2g", "--pids-limit", "512",
+                "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+                "--user", f"{os.getuid()}:{os.getgid()}", "--name", name,
+                "--label", "aitelier.run_id=" + fields["run_id"],
+                "--label", "aitelier.project_id=" + fields["project_id"],
+                *node_mount_args(fields),
+                "-v", f"{entry}:/executor.py:ro", "-w", fields["workdir"],
+                "--entrypoint", "python3", fields["image"],
+                "/executor.py", json.dumps(node_payload(fields, fields["timeout"]))]
     command = [docker, "run", "--rm", "--init", "--network", "none",
                "--cpus", "2", "--memory", "2g", "--pids-limit", "512",
                "--cap-drop", "ALL", "--security-opt", "no-new-privileges",

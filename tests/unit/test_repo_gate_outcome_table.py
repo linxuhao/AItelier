@@ -449,7 +449,7 @@ def _drive_row(tmp_path, monkeypatch, row_id):
             monkeypatch.setattr(rt, "PYTEST_WALL_SECONDS", 3)
         if row.leg == "node_unavailable":
             monkeypatch.setattr(rt, "_run_node_checks",
-                                lambda _repo: dict(NODE_SKIPPED))
+                                lambda _repo, **_kw: dict(NODE_SKIPPED))
         if row.leg == "gate_timeout":
             monkeypatch.setattr(rt, "REPO_GATE_TIMEOUT", 3)
         if row.leg == "pytest_unavailable":

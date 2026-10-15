@@ -7,14 +7,24 @@ backend itself holds neither the Docker CLI nor the Docker socket, and a
 host-launcher failure is an honest non-pass with no local fallback.
 Otherwise (host-local operator runs), the direct Docker adapter below is
 used. Repository commands never fall back to the host Python.
+
+The normal Node gate uses the same transport through two closed profiles,
+``node_fetch`` and ``node_run`` (`validate_node_request`): the container sees
+only the gate's own ticket (a snapshot of the repository plus an npm cache),
+never the repository, runs the operator's node executor image, and its argv
+comes from a fixed table.
 """
 from __future__ import annotations
 from contextlib import contextmanager
+import errno
 import fcntl
+import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+import re
 import shutil
+import stat
 import subprocess
 import uuid
 
@@ -22,6 +32,198 @@ HOST_LAUNCHER_ENV = "AITELIER_HOST_LAUNCHER_SOCKET"
 
 class IsolationUnavailable(RuntimeError):
     pass
+
+
+class NodeRefused(IsolationUnavailable):
+    """A Node request outside the closed profiles: nothing was executed."""
+
+
+# ── normal Node gate profiles ──────────────────────────────────────────────
+#
+# Both profiles run the PINNED upstream npm (NODE_NPM_VERSION under
+# NODE_BIN_DIR) from the operator's separate node executor image, never the
+# npm 9 the pytest image ships, and mount the gate's own ticket — the full
+# private snapshot, its npm cache and the gate-owned npm user config.
+#
+# `node_fetch` is the only container that gets a network (the operator's,
+# not egress-filtered). It runs only that npm, and the gate's command line —
+# which npm ranks above the project's own .npmrc — turns off every lifecycle
+# script and every git or URL dependency: measured on npm 12.2.0, `npm ci
+# --ignore-scripts` runs no hook, including `prepare` of packed directory and
+# git dependencies (npm 9 still ran those), but `--ignore-scripts` ALONE let a
+# project .npmrc `git=` run a program from the repository, which
+# `--allow-git=none --git=/bin/false` stops. npm, pacote and tar still parse
+# registry data and the project's own files with that network.
+#
+# `node_run` is the real install, build and test with `--network none`. Its
+# install allows every dependency script (`--dangerously-allow-all-scripts`,
+# npm 9's behaviour): npm 12 otherwise SKIPS unapproved dependency scripts
+# with only a warning, and this container is already the boundary for the
+# project's own arbitrary build and test code.
+NODE_PROFILES = ("node_fetch", "node_run")
+NODE_TICKET_PREFIX = "node-"
+NODE_FETCH_NETWORK_ENV = "AITELIER_NODE_FETCH_NETWORK"
+NODE_EXECUTOR_IMAGE_ENV = "AITELIER_NODE_EXECUTOR_IMAGE"
+NODE_NPM_VERSION = "12.2.0"
+NODE_BIN_DIR = "/opt/aitelier-node/bin"
+NODE_USERCONFIG = "npmrc"           # in the ticket; written by the gate
+NODE_USERCONFIG_TEXT = "install-links=true\n"
+NODE_RUN_FORMS = frozenset({("npm", "ci", "--offline"), ("npm", "install", "--offline"),
+                            ("npm", "run", "build"), ("npm", "test")})
+NODE_FETCH_COMMANDS = frozenset({("npm", "ci"), ("npm", "install")})
+NODE_FETCH_FLAGS = ("--ignore-scripts", "--allow-git=none", "--git=/bin/false",
+                    "--allow-remote=none")
+NODE_INSTALL_RUN_FLAGS = ("--dangerously-allow-all-scripts",)
+NODE_COMMON_FLAGS = ("--globalconfig=/dev/null", "--no-audit", "--no-fund",
+                     "--update-notifier=false")
+NODE_MANIFEST_CAP = 1 << 20
+NODE_LOCK_CAP = 64 << 20
+NODE_LOCKFILES = ("npm-shrinkwrap.json", "package-lock.json")
+_NETWORK_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
+IMAGE_DIGEST = re.compile(r"(?:[A-Za-z0-9._:/-]+@)?sha256:[0-9a-f]{64}")
+
+
+def read_regular(root: Path, rel, cap: int) -> bytes | None:
+    """Bytes of ``root/rel`` without following a link at ANY component.
+
+    None when the final file is absent. A link, a non-regular file or a file
+    over ``cap`` is refused, and the refusal names the path only, never bytes.
+    """
+    parts = PurePosixPath(str(rel)).parts
+    if not parts or ".." in parts or PurePosixPath(str(rel)).is_absolute():
+        raise NodeRefused(f"{rel} is not a contained relative path")
+    flags = os.O_RDONLY | os.O_NOFOLLOW
+    fd = os.open(root, flags | os.O_DIRECTORY)
+    try:
+        for part in parts[:-1]:
+            try:
+                nxt = os.open(part, flags | os.O_DIRECTORY, dir_fd=fd)
+            except FileNotFoundError:
+                return None
+            except OSError as exc:
+                raise NodeRefused(f"{rel}: a parent is a link or not a directory") from exc
+            os.close(fd)
+            fd = nxt
+        try:
+            f = os.open(parts[-1], flags | os.O_NONBLOCK, dir_fd=fd)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                raise NodeRefused(f"{rel} must be a regular file, not a link") from exc
+            raise
+        try:
+            info = os.fstat(f)
+            if not stat.S_ISREG(info.st_mode):
+                raise NodeRefused(f"{rel} must be a regular file")
+            if info.st_size > cap:
+                raise NodeRefused(f"{rel} exceeds {cap} bytes")
+            with os.fdopen(f, "rb", closefd=False) as stream:
+                data = stream.read(cap + 1)
+            if len(data) > cap:
+                raise NodeRefused(f"{rel} exceeds {cap} bytes")
+            return data
+        finally:
+            os.close(f)
+    finally:
+        os.close(fd)
+
+
+def _real_dir(path: Path) -> None:
+    info = os.lstat(path)
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise NodeRefused(f"{path} must be a real directory, not a link")
+
+
+def node_report_root(aitelier_home, run_id: str) -> Path:
+    return Path(aitelier_home) / "gate-reports" / hashlib.sha256(run_id.encode()).hexdigest()
+
+
+def validate_node_request(report_root: Path, request: dict, network: str, image: str) -> dict:
+    """The one validator for both Node profiles (launcher and direct adapter).
+
+    The ticket must be a ``node-`` direct child of the run's report root and
+    hold ``src/`` (the snapshot, where both profiles work), ``cache/`` and the
+    gate's npm user config. ``image`` is the operator's node executor image;
+    without one nothing runs. Returns the fields the Docker argv is built
+    from; anything else is `NodeRefused`.
+    """
+    profile = request.get("profile")
+    if profile not in NODE_PROFILES:
+        raise NodeRefused(f"unknown node profile {profile!r}")
+    if not image or not IMAGE_DIGEST.fullmatch(image):
+        raise NodeRefused("no node executor image (an immutable sha256 digest) is configured "
+                          "(node_executor_image)")
+    if (request.get("report_dir") or request.get("relay_socket")
+            or request.get("import_module") or request.get("pytest_timeout")):
+        raise NodeRefused("node profiles take no report_dir/relay/import/pytest fields")
+    dirs = request.get("writable_dirs")
+    if not isinstance(dirs, list) or len(dirs) != 1 or not isinstance(dirs[0], str):
+        raise NodeRefused("node profiles take exactly the gate's own node ticket")
+    ticket = Path(dirs[0])
+    if (not ticket.is_absolute() or str(ticket) != os.path.normpath(str(ticket))
+            or ticket.parent != Path(report_root)
+            or not ticket.name.startswith(NODE_TICKET_PREFIX)):
+        raise NodeRefused("writable dir is not a node ticket of this run")
+    src, cache = ticket / "src", ticket / "cache"
+    for directory in (ticket, src, cache):
+        _real_dir(directory)
+    if read_regular(ticket, NODE_USERCONFIG, 4096) != NODE_USERCONFIG_TEXT.encode():
+        raise NodeRefused("the ticket's npm user config is not the gate's")
+    if request.get("npm_cache") != str(cache):
+        raise NodeRefused("npm_cache must be the ticket's own cache")
+    workdir = request.get("workdir")
+    if not isinstance(workdir, str) or os.path.normpath(workdir) != workdir:
+        raise NodeRefused("workdir must be a normalized absolute path")
+    try:
+        rel = Path(workdir).relative_to(src)
+    except ValueError as exc:
+        raise NodeRefused("workdir must lie inside the ticket's src/") from exc
+    current = src
+    for part in rel.parts:
+        current = current / part
+        _real_dir(current)
+    if read_regular(src, PurePosixPath(rel.as_posix()) / "package.json", NODE_MANIFEST_CAP) is None:
+        raise NodeRefused("workdir has no package.json")
+    args = request.get("args")
+    if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
+        raise NodeRefused("args must be a list of strings")
+    config = (f"--userconfig={ticket / NODE_USERCONFIG}",) + NODE_COMMON_FLAGS
+    if profile == "node_run":
+        if tuple(args) not in NODE_RUN_FORMS:
+            raise NodeRefused(f"node_run command not allow-listed: {args[:4]!r}")
+        argv, net = list(args), "none"
+        if args[1] in ("ci", "install"):
+            argv += [*NODE_INSTALL_RUN_FLAGS, *config]
+    else:
+        if tuple(args) not in NODE_FETCH_COMMANDS:
+            raise NodeRefused(f"node_fetch command not allow-listed: {args[:4]!r}")
+        if not network:
+            raise NodeRefused("networked dependency fetch is not enabled by the operator "
+                              "(node_fetch_network)")
+        if (not _NETWORK_NAME.fullmatch(network) or network in ("host", "none")):
+            raise NodeRefused("operator node_fetch_network is not an allowed network name")
+        argv, net = list(args) + [*NODE_FETCH_FLAGS, *config], network
+    return {"profile": profile, "ticket": str(ticket), "workdir": workdir,
+            "npm_cache": str(cache), "network": net, "args": argv, "image": image}
+
+
+def node_mount_args(node: dict) -> list[str]:
+    return ["-v", f"{node['ticket']}:{node['ticket']}:rw"]
+
+
+def node_payload(node: dict, timeout: int) -> dict:
+    """Executor-entry payload: cwd is the snapshot workdir, never the repo."""
+    return {"args": node["args"], "timeout": timeout, "repo": node["workdir"],
+            "npm_cache": node["npm_cache"], "node_bin": NODE_BIN_DIR,
+            "expect_npm": NODE_NPM_VERSION, "relay_socket": "", "import_module": "",
+            "pytest_timeout": False, "report_dir": ""}
+
+
+def _node_unavailable(result: dict) -> None:
+    """The entry found no pinned npm: nothing was measured."""
+    if result.get("unavailable"):
+        raise IsolationUnavailable(str(result["unavailable"])[:500])
 
 
 @contextmanager
@@ -54,7 +256,8 @@ def execute(*args, **kwargs):
 
 def _launch_via_host(socket_path: str, repo: Path, args: list[str], timeout: int, *,
                      writable_dirs=(), relay_socket: str = "", import_module: str = "",
-                     pytest_timeout: bool = False, report_dir: str = "", run_id: str = ""):
+                     pytest_timeout: bool = False, report_dir: str = "", run_id: str = "",
+                     profile: str = "", workdir: str = "", npm_cache: str = ""):
     """Send one validated launch request to the trusted host launcher.
 
     No in-backend Docker or pytest fallback: any failure is reported as
@@ -65,6 +268,10 @@ def _launch_via_host(socket_path: str, repo: Path, args: list[str], timeout: int
                "writable_dirs": [str(d) for d in writable_dirs],
                "relay_socket": relay_socket, "import_module": import_module,
                "pytest_timeout": pytest_timeout, "report_dir": report_dir, "run_id": run_id}
+    if profile:
+        # Only a Node request carries these, so a launcher without the Node
+        # profiles refuses it and every pytest/gate request stays byte-identical.
+        request.update(profile=profile, workdir=str(workdir), npm_cache=str(npm_cache))
     payload = (json.dumps(request) + "\n").encode()
     if len(payload) > MAX_REQUEST_BYTES:
         raise IsolationUnavailable("launch request exceeds host launcher limit")
@@ -96,6 +303,7 @@ def _launch_via_host(socket_path: str, repo: Path, args: list[str], timeout: int
     if not isinstance(result, dict) or type(result.get("returncode")) is not int or not all(
             isinstance(result.get(k), str) for k in ("stdout", "stderr")):
         raise IsolationUnavailable("host CPU launcher returned a malformed result")
+    _node_unavailable(result)
     if result.get("timed_out"):
         raise subprocess.TimeoutExpired(args, timeout,
                                         result.get("stdout"), result.get("stderr"))
@@ -108,28 +316,44 @@ def _launch_via_host(socket_path: str, repo: Path, args: list[str], timeout: int
 
 def _execute(repo: Path, args: list[str], timeout: int, *,
             writable_dirs=(), relay_socket: str = "", import_module: str = "",
-            pytest_timeout: bool = False, report_dir: str = "", run_id: str = "") -> subprocess.CompletedProcess:
+            pytest_timeout: bool = False, report_dir: str = "", run_id: str = "",
+            profile: str = "", workdir: str = "", npm_cache: str = "") -> subprocess.CompletedProcess:
     docker = shutil.which("docker")
     if not docker:
         raise IsolationUnavailable("Docker CPU execution facility is unavailable; local execution refused")
     repo = Path(repo).resolve()
     name = "aitelier-cpu-" + uuid.uuid4().hex
     entry = Path(__file__).with_name("repository_executor_entry.py")
-    payload = {"args": args, "timeout": timeout, "repo": str(repo),
-               "relay_socket": relay_socket, "import_module": import_module,
-               "pytest_timeout": pytest_timeout, "report_dir": report_dir}
-    command = [docker, "run", "--rm", "--init", "--network", "none",
+    if profile:
+        from core import datadir
+        node = validate_node_request(
+            node_report_root(datadir.aitelier_home(), run_id),
+            {"profile": profile, "writable_dirs": [str(d) for d in writable_dirs],
+             "workdir": str(workdir), "npm_cache": str(npm_cache), "args": list(args),
+             "relay_socket": relay_socket, "import_module": import_module,
+             "pytest_timeout": pytest_timeout, "report_dir": report_dir},
+            os.environ.get(NODE_FETCH_NETWORK_ENV, ""), os.environ.get(NODE_EXECUTOR_IMAGE_ENV, ""))
+        args, payload = node["args"], node_payload(node, timeout)
+        network, mounts = node["network"], node_mount_args(node)
+        workdir_arg, image = node["workdir"], node["image"]
+    else:
+        payload = {"args": args, "timeout": timeout, "repo": str(repo),
+                   "relay_socket": relay_socket, "import_module": import_module,
+                   "pytest_timeout": pytest_timeout, "report_dir": report_dir}
+        network, mounts, workdir_arg = "none", ["-v", f"{repo}:{repo}:ro"], str(repo)
+        image = os.environ.get("AITELIER_TEST_IMAGE", "aitelier:latest")
+    command = [docker, "run", "--rm", "--init", "--network", network,
                "--cpus", "2", "--memory", "2g", "--pids-limit", "512",
                "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
                "--user", f"{os.getuid()}:{os.getgid()}", "--name", name,
-               "-v", f"{repo}:{repo}:ro", "-v", f"{entry}:/executor.py:ro",
-               "-w", str(repo)]
-    for directory in writable_dirs:
+               *mounts, "-v", f"{entry}:/executor.py:ro",
+               "-w", workdir_arg]
+    for directory in (() if profile else writable_dirs):
         path = str(Path(directory).resolve())
         command += ["-v", f"{path}:{path}:rw"]
-    if relay_socket:
+    if relay_socket and not profile:
         command += ["-v", f"{relay_socket}:{relay_socket}:ro"]
-    command += ["--entrypoint", "python3", os.environ.get("AITELIER_TEST_IMAGE", "aitelier:latest"),
+    command += ["--entrypoint", "python3", image,
                 "/executor.py", json.dumps(payload)]
     proc = None
     try:
@@ -142,6 +366,7 @@ def _execute(repo: Path, args: list[str], timeout: int, *,
             result = json.loads(stdout)
         except ValueError as exc:
             raise IsolationUnavailable("isolated executor returned no result") from exc
+        _node_unavailable(result)
         if result.get("timed_out"):
             raise subprocess.TimeoutExpired(args, timeout, result.get("stdout"), result.get("stderr"))
         completed = subprocess.CompletedProcess(args, result["returncode"],

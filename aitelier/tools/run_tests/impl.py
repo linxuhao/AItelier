@@ -23,7 +23,7 @@ import json
 import os
 import re
 import shutil
-import signal
+import stat
 import struct
 import subprocess
 
@@ -45,27 +45,6 @@ import time
 import urllib.parse
 from pathlib import Path
 from typing import NamedTuple
-
-
-def _kill_group(proc) -> None:
-    """SIGKILL the process's whole session/group, then reap it.
-
-    pytest spawns child processes (e.g. git subprocesses from the project's own
-    test suite). subprocess timeout only kills the direct child, leaving the
-    grandchildren orphaned → reparented to PID 1 → zombies. Launching pytest with
-    start_new_session=True puts it in its own process group so we can take the
-    whole tree down here.
-    """
-    if proc is None:
-        return
-    try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-    except (ProcessLookupError, PermissionError):
-        pass
-    try:
-        proc.wait(timeout=10)
-    except Exception:
-        pass
 
 
 def _lead_with_install_error(report: dict) -> str:
@@ -575,38 +554,39 @@ def _gate_feedback(gate: dict) -> str:
 
 
 def _run_node_cmd(pkg_dir: Path, args: list[str], timeout: int,
-                  env_overrides: dict | None = None, *, run_id: str = "") -> dict:
-    """Run one npm command in its own process group; kill the tree on timeout.
+                  env_overrides: dict | None = None, *, run_id: str = "",
+                  node: dict | None = None) -> dict:
+    """Run one repository command in the bounded CPU container; never locally.
+
+    Two callers. The repository gate passes ``GATE_REPORT_DIR`` (its ticket)
+    and its relay socket. The normal Node gate passes ``node`` — its profile,
+    ticket, snapshot workdir and npm cache — and then ``pkg_dir`` is the run's
+    OWNED repository, which binds the request to the run and is not mounted.
+    Anything else is refused: there is no host-process fallback.
 
     `output` is a bounded tail. Diagnostics, case records and declarations
     are scanned from the complete capture; a repository gate also retains
-    that capture under its existing ticket with a hash. `timed_out` and
-    `runner_error` are the framework OBSERVING
+    that capture under its existing ticket with a hash. `timed_out`,
+    `runner_error` and `isolation_unavailable` are the framework OBSERVING
     that nothing was measured — never inferred from `returncode`.
     """
-    proc = None
-    # `npm ci` runs whatever `postinstall` the generated package.json names.
-    # With no env= it inherited everything this process holds. The overrides
-    # are the caller's own values (the repository gate's relay URL and report
-    # directory), applied after the scrub.
-    env = env_scrub.scrubbed_env()
-    env.update(env_overrides or {})
     try:
-        if (env_overrides or {}).get("GATE_REPORT_DIR"):
+        if node is not None:
+            done = repository_executor.execute(
+                pkg_dir, args, timeout, writable_dirs=[Path(node["ticket"])],
+                run_id=run_id, profile=node["profile"], workdir=str(node["workdir"]),
+                npm_cache=str(node["npm_cache"]))
+        elif (env_overrides or {}).get("GATE_REPORT_DIR"):
             done = repository_executor.execute(
                 pkg_dir, args, timeout,
                 writable_dirs=[Path(env_overrides["GATE_REPORT_DIR"])],
                 relay_socket=env_overrides.get("AITELIER_GATE_RELAY_SOCKET", ""),
                 report_dir=env_overrides["GATE_REPORT_DIR"], run_id=run_id)
-            stdout, stderr = done.stdout, done.stderr
-            returncode = done.returncode
         else:
-            proc = subprocess.Popen(
-                args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                cwd=str(pkg_dir), start_new_session=True, env=env,
-            )
-            stdout, stderr = proc.communicate(timeout=timeout)
-            returncode = proc.returncode
+            raise repository_executor.IsolationUnavailable(
+                "no bounded execution profile for this command; local execution refused")
+        stdout, stderr = done.stdout, done.stderr
+        returncode = done.returncode
         out = ((stdout or "") + "\n" + (stderr or "")).strip()
         context, context_truncated = _failure_context(out)
         result = {"passed": returncode == 0,
@@ -636,60 +616,315 @@ def _run_node_cmd(pkg_dir: Path, args: list[str], timeout: int,
                 result["output_retention_error"] = str(e)
         return result
     except subprocess.TimeoutExpired:
-        _kill_group(proc)
         return {"passed": False, "returncode": -1, "timed_out": True,
                 "output": f"timed out after {timeout}s: {' '.join(args)}"}
+    except repository_executor.IsolationUnavailable as e:
+        return {"passed": False, "returncode": -1, "runner_error": True,
+                "isolation_unavailable": True, "output": f"{type(e).__name__}: {e}"}
     except Exception as e:
-        _kill_group(proc)
         return {"passed": False, "returncode": -1, "runner_error": True,
                 "output": f"{type(e).__name__}: {e}"}
 
 
-def _run_node_checks(repo: Path) -> dict | None:
+# The node gate's command budgets, unchanged from the local runner they replace.
+NODE_INSTALL_TIMEOUT = 600
+NODE_SCRIPT_TIMEOUT = 300
+# The snapshot the node gate runs on. Over either cap the gate is unmeasured.
+SNAPSHOT_MAX_ENTRIES = 50_000
+SNAPSHOT_MAX_BYTES = 1 << 30
+SNAPSHOT_EXCLUDED = (".git", "node_modules")
+GIT_META_MAX_BYTES = 256 << 20
+
+SNAPSHOT_CHUNK = 1 << 20     # the backend never holds more than this of one file
+
+
+class SnapshotRefused(Exception):
+    """The working tree cannot be snapshotted as a supported input."""
+
+
+def _snapshot_tree(repo: Path, dest: Path) -> dict:
+    """Copy ``repo``'s current working tree into ``dest`` without following links.
+
+    Every directory and file is opened relative to its parent's fd with
+    O_NOFOLLOW, so nothing the repository names can redirect a read outside
+    it. ``.git`` and ``node_modules`` are not copied (no gitdir pointer or
+    object store reaches a container; the install is clean). A link is copied
+    as a link when it stays inside the repository and refused otherwise; a
+    hard-linked file is refused; FIFOs/sockets/devices are skipped and
+    counted. Returns the identity: report evidence only, never an
+    authorization.
+    """
+    state = {"entries": 0, "bytes": 0, "skipped_special": 0}
+    digest = hashlib.sha256()
+    nofollow = os.O_RDONLY | os.O_NOFOLLOW
+
+    def walk(fd: int, rel: str) -> None:
+        with os.scandir(fd) as it:
+            names = sorted(e.name for e in it)
+        for name in names:
+            if name in SNAPSHOT_EXCLUDED:
+                continue
+            path = f"{rel}/{name}" if rel else name
+            state["entries"] += 1
+            if state["entries"] > SNAPSHOT_MAX_ENTRIES:
+                raise SnapshotRefused(f"more than {SNAPSHOT_MAX_ENTRIES} entries")
+            info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            target = dest / path
+            if stat.S_ISLNK(info.st_mode):
+                link = os.readlink(name, dir_fd=fd)
+                inside = os.path.normpath(os.path.join(os.path.dirname(path), link))
+                if os.path.isabs(link) or inside == ".." or inside.startswith("../"):
+                    raise SnapshotRefused(f"link {path} points outside the repository; "
+                                          "unsupported input")
+                os.symlink(link, target)
+                digest.update(b"L\0" + path.encode() + b"\0" + link.encode() + b"\0")
+            elif stat.S_ISDIR(info.st_mode):
+                child = os.open(name, nofollow | os.O_DIRECTORY, dir_fd=fd)
+                try:
+                    target.mkdir(mode=0o700)
+                    digest.update(b"D\0" + path.encode() + b"\0")
+                    walk(child, path)
+                finally:
+                    os.close(child)
+            elif stat.S_ISREG(info.st_mode):
+                if info.st_nlink > 1:
+                    raise SnapshotRefused(f"{path} is hard-linked; unsupported input")
+                if state["bytes"] + info.st_size > SNAPSHOT_MAX_BYTES:
+                    raise SnapshotRefused(f"more than {SNAPSHOT_MAX_BYTES} bytes")
+                f = os.open(name, nofollow | os.O_NONBLOCK, dir_fd=fd)
+                try:
+                    if not stat.S_ISREG(os.fstat(f).st_mode):
+                        raise SnapshotRefused(f"{path} changed type while copied")
+                    out = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                                  0o700 if info.st_mode & 0o111 else 0o600)
+                    content = hashlib.sha256()
+                    try:
+                        # Streamed: every chunk is charged as it is read, so a
+                        # file that grows while it is copied is still bounded.
+                        while chunk := os.read(f, SNAPSHOT_CHUNK):
+                            state["bytes"] += len(chunk)
+                            if state["bytes"] > SNAPSHOT_MAX_BYTES:
+                                raise SnapshotRefused(f"more than {SNAPSHOT_MAX_BYTES} bytes")
+                            content.update(chunk)
+                            view = memoryview(chunk)
+                            while view:
+                                view = view[os.write(out, view):]
+                    finally:
+                        os.close(out)
+                finally:
+                    os.close(f)
+                digest.update(b"F\0" + path.encode() + b"\0" + oct(info.st_mode & 0o777).encode()
+                              + b"\0" + content.digest())
+            else:
+                state["skipped_special"] += 1
+
+    dest.mkdir(mode=0o700)
+    root = os.open(repo, nofollow | os.O_DIRECTORY)
+    try:
+        walk(root, "")
+    finally:
+        os.close(root)
+    return {**state, "tree_sha256": digest.hexdigest(), "excluded": list(SNAPSHOT_EXCLUDED)}
+
+
+def _snapshot_git(repo: Path, src: Path) -> dict:
+    """Self-contained, shallow Git metadata of the source HEAD inside ``src``.
+
+    Builds that stamp a version (`git rev-parse`, `describe --always`) keep
+    working without any source `.git` pointer, common dir, hooks, config,
+    remotes or credentials reaching a container: a fresh repository with no
+    template, the one HEAD commit fetched by depth 1 and no tags, an index of
+    that commit over the captured working tree, FETCH_HEAD removed. `dirty`
+    is that index compared with the captured files, computed in the fresh
+    repository (whose config is ours). Any failure leaves no metadata and says
+    why; it never fails the gate.
+    """
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(src.parent),
+           "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+           "GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C",
+           # A tree without its own .git must not borrow an enclosing repository's HEAD.
+           "GIT_CEILING_DIRECTORIES": str(repo.parent)}
+
+    def git(*args, cwd=src):
+        return subprocess.run(["git", "-c", "core.fsmonitor=false", *args], cwd=cwd, env=env,
+                              capture_output=True, text=True, timeout=120)
+
+    meta = src / ".git"
+    try:
+        head = git("rev-parse", "--verify", "-q", "HEAD^{commit}", cwd=repo)
+        if head.returncode:
+            return {"provided": False, "reason": "source has no HEAD commit"}
+        sha = head.stdout.strip()
+        for step in (("init", "-q", "--template=", "--initial-branch=snapshot", str(src)),
+                     ("-c", "core.logAllRefUpdates=false", "fetch", "-q", "--no-tags",
+                      "--depth=1", "--no-recurse-submodules", f"file://{repo}", sha),
+                     ("-c", "core.logAllRefUpdates=false", "update-ref",
+                      "refs/heads/snapshot", sha),
+                     ("read-tree", sha)):
+            done = git(*step)
+            if done.returncode:
+                raise RuntimeError(f"git {step[0] if step[0] != '-c' else step[2]} failed: "
+                                   f"{done.stderr.strip()[-300:]}")
+        (meta / "FETCH_HEAD").unlink(missing_ok=True)
+        size = sum(p.stat().st_size for p in meta.rglob("*") if p.is_file() and not p.is_symlink())
+        if size > GIT_META_MAX_BYTES:
+            raise RuntimeError(f"shallow metadata is {size} bytes (> {GIT_META_MAX_BYTES})")
+        status = git("status", "--porcelain=v1", "-z", "--untracked-files=normal")
+        if status.returncode:
+            raise RuntimeError(f"git status failed: {status.stderr.strip()[-300:]}")
+        changed = [e for e in status.stdout.split("\0") if e]
+        return {"provided": True, "head": sha, "shallow": True, "tags": False,
+                "dirty": bool(changed), "changed_entries": len(changed),
+                "metadata_bytes": size}
+    except (OSError, RuntimeError, subprocess.SubprocessError) as e:
+        if meta.is_dir() and not meta.is_symlink():
+            shutil.rmtree(meta, ignore_errors=True)
+        return {"provided": False, "reason": str(e)[:500]}
+
+
+def _write_new(path: Path, data: bytes) -> None:
+    """Create ``path`` (never through a link, never over an existing file)."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "wb") as stream:
+        stream.write(data)
+
+
+def _remove_owned(ticket: Path) -> None:
+    """Remove this gate's own ticket once its containers have exited.
+
+    A run may leave directories without owner write/search permission; each
+    real directory (lstat, never a link) is given 0700 before the removal.
+    rmtree does not follow links.
+    """
+    for dirpath, dirnames, _ in os.walk(ticket):
+        for name in dirnames:
+            path = os.path.join(dirpath, name)
+            try:
+                if stat.S_ISDIR(os.lstat(path).st_mode):
+                    os.chmod(path, 0o700)
+            except OSError:
+                pass
+    shutil.rmtree(ticket, ignore_errors=True)
+
+
+def _run_node_checks(repo: Path, *, run_id: str = "") -> dict | None:
     """npm install/build/test gate for the repo's node project (if any).
 
     Mirrors the pytest gate's skip semantics: no node project → None (no
-    section in the report); npm binary unavailable → skipped=True (a missing
-    runner must never masquerade as failing tests). Otherwise install deps,
-    then run the build and test scripts that package.json actually declares —
-    the BUILD is what catches compile-level breakage (e.g. Svelte template
-    errors) that unit tests alone never see.
+    section in the report); no measurement possible → skipped=True with the
+    reason (an absence must never masquerade as passing or failing tests).
+    Otherwise install deps, then run the build and test scripts that
+    package.json actually declares — the BUILD is what catches compile-level
+    breakage (e.g. Svelte template errors) that unit tests alone never see.
+
+    Nothing of the repository executes in this process. Every npm command runs
+    in the bounded CPU container on a snapshot under the gate's own ticket
+    ``gate-reports/<sha256(run_id)>/node-*/`` (``src/`` + ``cache/``), so
+    the candidate is never written (no node_modules, no lockfile) and a build
+    script sees the ticket and nothing else:
+
+    1. ``node_fetch`` (only when there are dependencies): the pinned npm, with
+       the operator's network, in the snapshot itself — so that container
+       holds the full private snapshot — and with no lifecycle script, git or
+       URL dependency (`repository_executor.NODE_FETCH_FLAGS`), fills the
+       cache. A fetch that fails is the install check's measured failure; a
+       lockfile it writes is reported as ``generated_lock``.
+    2. ``node_run`` with ``--network none``: the same ``ci``/``install`` as
+       before plus ``--offline`` and every dependency script allowed (npm 9's
+       behaviour), then build and test. Both phases read the gate's own npm
+       user config (``install-links=true``, so a lock npm 9 wrote for a
+       ``file:`` directory installs unchanged) and the ticket's npm cache: the
+       backend HOME is not writable by the running uid (coding_impl f3560860,
+       rc 243).
     """
     pkg_dir = _find_node_project(repo)
     if pkg_dir is None:
         return None
+    rel = pkg_dir.relative_to(repo)
+    node: dict = {"passed": True, "dir": str(rel) or ".", "checks": {}}
 
-    node: dict = {"passed": True, "dir": str(pkg_dir.relative_to(repo)) or ".",
-                  "checks": {}}
-
-    if shutil.which("npm") is None:
-        node.update(passed=True, skipped=True,
-                    summary="npm not available — node gate skipped "
-                            "(install nodejs+npm in the backend image).")
+    def unmeasured(reason: str) -> dict:
+        node.update(passed=True, skipped=True, unmeasured_reason=reason,
+                    summary=f"node gate not measured: {reason}")
         return node
 
+    root = repository_executor.node_report_root(datadir.aitelier_home(), run_id)
     try:
-        scripts = json.loads(
-            (pkg_dir / "package.json").read_text(encoding="utf-8")
-        ).get("scripts", {})
-    except Exception:
-        scripts = {}
+        root.mkdir(parents=True, exist_ok=True)
+        ticket = Path(tempfile.mkdtemp(prefix=repository_executor.NODE_TICKET_PREFIX, dir=root))
+    except OSError as e:
+        return unmeasured(f"cannot create the run-owned node ticket under {root}: {e}")
+    try:
+        src, cache = ticket / "src", ticket / "cache"
+        cache.mkdir(mode=0o700)
+        try:
+            identity = _snapshot_tree(repo, src)
+        except (SnapshotRefused, OSError) as e:
+            return unmeasured(f"repository snapshot refused: {e}")
+        identity["git"] = _snapshot_git(repo, src)
+        identity["source"] = str(repo)
+        node["snapshot"] = identity
+        workdir = src / rel
+        rel_posix = rel.as_posix()               # "." reads as the snapshot root
+        read = repository_executor.read_regular
+        try:
+            manifest = json.loads(read(src, f"{rel_posix}/package.json",
+                                       repository_executor.NODE_MANIFEST_CAP) or b"{}")
+            has_lock = any(read(src, f"{rel_posix}/{name}", repository_executor.NODE_LOCK_CAP)
+                           is not None for name in repository_executor.NODE_LOCKFILES)
+        except (repository_executor.NodeRefused, ValueError) as e:
+            return unmeasured(f"package.json/lockfile not readable as plain files: {e}")
+        _write_new(ticket / repository_executor.NODE_USERCONFIG,
+                   repository_executor.NODE_USERCONFIG_TEXT.encode())
+        scripts = manifest.get("scripts", {}) if isinstance(manifest, dict) else {}
+        scripts = scripts if isinstance(scripts, dict) else {}
+        install = "ci" if has_lock else "install"
+        node["isolation"] = {"fetch": "skipped", "run_network": "none"}
 
-    # npm ci needs a lockfile; fall back to install without one.
-    install_cmd = ["npm", "ci"] if (pkg_dir / "package-lock.json").exists() \
-        else ["npm", "install"]
-    node["checks"]["install"] = _run_node_cmd(pkg_dir, install_cmd, timeout=600)
-    if node["checks"]["install"]["passed"]:
-        if "build" in scripts:
-            node["checks"]["build"] = _run_node_cmd(
-                pkg_dir, ["npm", "run", "build"], timeout=300)
-        if "test" in scripts:
-            node["checks"]["test"] = _run_node_cmd(
-                pkg_dir, ["npm", "test"], timeout=300)
+        def run(label, args, timeout, profile, where):
+            result = _run_node_cmd(repo, args, timeout, run_id=run_id,
+                                   node={"ticket": ticket, "workdir": where,
+                                         "npm_cache": cache, "profile": profile})
+            result["phase"] = label
+            return result
+
+        # npm installs peers and workspace members' dependencies too.
+        if has_lock or isinstance(manifest, dict) and any(manifest.get(f) for f in (
+                "dependencies", "devDependencies", "optionalDependencies",
+                "peerDependencies", "workspaces")):
+            fetch = run("fetch", ["npm", install], NODE_INSTALL_TIMEOUT, "node_fetch", workdir)
+            if fetch.get("isolation_unavailable"):
+                node["isolation"]["fetch"] = "refused"
+                node["checks"]["install"] = fetch
+                return unmeasured(fetch["output"])
+            node["isolation"]["fetch"] = "operator_network"
+            if not fetch["passed"]:
+                node["checks"]["install"] = fetch
+                node["passed"] = False
+                return node
+            if not has_lock:
+                # Written in place by the trusted fetch; the offline install uses it.
+                data = read(workdir, "package-lock.json", repository_executor.NODE_LOCK_CAP)
+                if data is not None:
+                    node["generated_lock"] = {"path": "package-lock.json", "by": "node_fetch",
+                                              "sha256": hashlib.sha256(data).hexdigest()}
+        node["checks"]["install"] = run("install", ["npm", install, "--offline"],
+                                        NODE_INSTALL_TIMEOUT, "node_run", workdir)
+        if node["checks"]["install"].get("isolation_unavailable"):
+            return unmeasured(node["checks"]["install"]["output"])
+        if node["checks"]["install"]["passed"]:
+            for name, args in (("build", ["npm", "run", "build"]), ("test", ["npm", "test"])):
+                if name in scripts:
+                    node["checks"][name] = run(name, args, NODE_SCRIPT_TIMEOUT, "node_run", workdir)
+                    if node["checks"][name].get("isolation_unavailable"):
+                        return unmeasured(node["checks"][name]["output"])
+    except (OSError, repository_executor.NodeRefused) as e:
+        return unmeasured(f"node ticket could not be prepared: {type(e).__name__}: {e}")
+    finally:
+        _remove_owned(ticket)
 
     node["passed"] = all(c["passed"] for c in node["checks"].values())
     return node
-
 
 
 REPO_GATE_SCRIPT = "run_tests.sh"
@@ -2130,7 +2365,7 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
     # 5_review loops frontend breakage back through the goal-loop exactly
     # like pytest failures.
     if repo is not None and repo.exists():
-        node = _run_node_checks(repo)
+        node = _run_node_checks(repo, run_id=run_id)
         if node is not None:
             report["node"] = node
             executed.node_gate_ran = not node.get("skipped")

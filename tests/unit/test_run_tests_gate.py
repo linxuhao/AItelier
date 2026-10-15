@@ -151,20 +151,26 @@ def _node_repo(tmp_path, subdir="web", scripts=None, lockfile=True):
 
 
 def _fake_npm(tmp_path, monkeypatch, exit_codes=None):
-    """Put a fake `npm` on PATH that logs its args and exits per-command."""
-    import os
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
+    """Stand in for the bounded CPU transport: log each npm argv, exit per-command.
+
+    npm never runs in the backend process; every node command is a Node
+    profile launch (see test_node_gate_executor_boundary.py). A launch without
+    a profile (pytest here) stays what it is in this container: unavailable.
+    """
+    import subprocess
     log = tmp_path / "npm_calls.log"
     codes = exit_codes or {}
-    script = ["#!/bin/bash", f'echo "$@" >> "{log}"']
-    for key, code in codes.items():
-        script.append(f'[[ "$*" == "{key}"* ]] && exit {code}')
-    script.append("exit 0")
-    npm = bin_dir / "npm"
-    npm.write_text("\n".join(script) + "\n")
-    npm.chmod(0o755)
-    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+
+    def execute(repo, args, timeout, **kw):
+        if not kw.get("profile"):
+            raise rt.repository_executor.IsolationUnavailable("no Docker in this test")
+        line = " ".join(args[1:])
+        with log.open("a") as stream:
+            stream.write(line + "\n")
+        code = next((c for key, c in codes.items() if line.startswith(key)), 0)
+        return subprocess.CompletedProcess(args, code, "", "")
+
+    monkeypatch.setattr(rt.repository_executor, "execute", execute)
     return log
 
 
@@ -186,12 +192,15 @@ def test_node_gate_absent_without_package_json(tmp_path):
     assert rt._run_node_checks(repo) is None
 
 
-def test_node_gate_skips_without_npm(tmp_path, monkeypatch):
+def test_node_gate_skips_without_the_bounded_runner(tmp_path, monkeypatch):
     repo, _ = _node_repo(tmp_path)
-    monkeypatch.setattr(rt.shutil, "which", lambda name: None)
+    def unavailable(*a, **k):
+        raise rt.repository_executor.IsolationUnavailable("no CPU executor")
+    monkeypatch.setattr(rt.repository_executor, "execute", unavailable)
     node = rt._run_node_checks(repo)
     assert node["skipped"] is True
     assert node["passed"] is True  # missing runner must not fail the gate
+    assert "no CPU executor" in node["unmeasured_reason"]
 
 
 def test_node_build_failure_fails_report(tmp_path, monkeypatch):

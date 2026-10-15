@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 from skillflow.core import SkillFlow, StepResult
 from skillflow.graph import PipelineGraph, StepNode, Transition
 
+from api.dependencies import get_skillflow as host_get_skillflow, get_config_registry as host_get_config_registry
 from core.config_registry import ConfigRegistry
 from core.db_manager import DBManager
 from core.state_graph import StateConflict, StateGraphError
@@ -1588,3 +1589,102 @@ def test_review_host_admission_refuses_before_framework_claim_or_cost_tools(live
     assert report["passed"] is False and report["required"] == check["expected"]
     assert report["actual"]["items"][0]["sha256"] != check["expected"]["items"][0]["sha256"]
     assert report["phase"] == ("advance" if entrypoint == "advance_run" else "claim")
+
+
+@pytest.mark.parametrize("live", ["host"], indirect=True)
+def test_mcp_failed_attempt_read_binds_existing_runtime_without_reconciliation(live, client, monkeypatch):
+    """A fresh transport service must reuse DI before reading retained outputs."""
+    from api import mcp_router
+    from core.state_attempts import StateAttempts
+    from api import dependencies as deps
+
+    failed = failed_code_attempt(live)
+    # Exercise the real initialized singleton accessors, not a substitute runtime.
+    monkeypatch.setattr(deps, "_skillflow_instance", live.sf)
+    monkeypatch.setattr(deps, "_config_registry_instance", live.registry)
+    monkeypatch.setattr(deps, "get_skillflow", host_get_skillflow)
+    monkeypatch.setattr(deps, "get_config_registry", host_get_config_registry)
+    before = {"attempt": live.service.attempts.get(failed["attempt_id"]),
+              "run": live.sf.get_run(failed["run_id"]),
+              "trace": live.sf.get_trace(failed["run_id"]),
+              "attached": list(live.attached), "runs": live.sf.list_runs()}
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("a State read must not construct, reconcile or execute")
+
+    monkeypatch.setattr(SkillFlow, "__init__", forbidden)
+    monkeypatch.setattr(DBManager, "__init__", forbidden)
+    monkeypatch.setattr(StateAttempts, "reconcile", forbidden)
+    for name in ("create_run", "start_run", "advance_run", "claim_next_step", "fail_run"):
+        monkeypatch.setattr(live.sf, name, forbidden)
+    monkeypatch.setattr(mcp_router.authz, "gate_enabled", lambda: True)
+    monkeypatch.setattr(mcp_router.authz, "request_can_write", lambda request: True)
+    result = rpc(client, "tools/call", {"name": "state_graph_read", "arguments": {
+        "action": "get_attempt", "arguments": {"attempt_id": failed["attempt_id"]}}}).json()["result"]
+    assert not result.get("isError"), result
+    observed = json.loads(result["content"][0]["text"])["result"]
+    assert observed["run_id"] == failed["run_id"] and observed["status"] == "failed"
+    assert observed["error"] == failed["error"]
+    assert observed["relay_inventory"] == failed["relay_inventory"]
+    inventory = observed["relay_inventory"]
+    assert inventory["commits"][0]["subject"] == "retained implementation"
+    assert inventory["staged_files"]["work"]["partial.txt"] == hashlib.sha256(
+        b"retained artifact draft\n").hexdigest()
+    assert inventory["original_first_failure"]["run_id"] == failed["run_id"]
+    assert inventory["remaining_delivery"] == ["finish the focused test", "submit the immutable report"]
+    assert len(inventory["digest"]) == 64
+    assert before == {"attempt": live.service.attempts.get(failed["attempt_id"]),
+                      "run": live.sf.get_run(failed["run_id"]),
+                      "trace": live.sf.get_trace(failed["run_id"]),
+                      "attached": live.attached, "runs": live.sf.list_runs()}
+
+
+@pytest.mark.parametrize("live", ["host"], indirect=True)
+def test_mcp_existing_runtime_read_preserves_completed_and_external_attempts(live, client, monkeypatch):
+    from api import mcp_router
+
+    completed = finish(live, start(live))
+    live.service.store.add_nodes("game", [spec("external")])
+    external = live.service.start_external_attempt("game", "external", 1, "offline-worker", "read-existing",
+                                                   "external-read")
+    monkeypatch.setattr(mcp_router.authz, "gate_enabled", lambda: True)
+    monkeypatch.setattr(mcp_router.authz, "request_can_write", lambda request: True)
+    for expected in (completed, external):
+        before = live.service.get_attempt(expected["attempt_id"])
+        result = rpc(client, "tools/call", {"name": "state_graph_read", "arguments": {
+            "action": "get_attempt", "arguments": {"attempt_id": expected["attempt_id"]}}}).json()["result"]
+        assert not result.get("isError"), result
+        assert json.loads(result["content"][0]["text"])["result"] == before
+    assert live.sf.get_run(completed["run_id"])["status"] == "completed"
+    assert len(live.sf.list_runs()) == 1
+
+
+@pytest.mark.parametrize("live", ["host"], indirect=True)
+def test_failed_attempt_read_preserves_private_and_unavailable_refusals(live, monkeypatch):
+    from starlette.requests import Request
+    from api import state_graph_routers as routes
+    from core.state_commands import execute, ProjectPrivate
+
+    failed = failed_code_attempt(live)
+    calls = []
+
+    def unavailable():
+        calls.append(1)
+        raise RuntimeError("executor unavailable")
+
+    monkeypatch.setattr(routes, "get_skillflow", unavailable)
+    monkeypatch.setattr(routes, "may_read_private", lambda request: False)
+    request = Request({"type": "http", "headers": []})
+    untrusted = routes.get_service(request, live.db, live.ws)
+    with pytest.raises(ProjectPrivate):
+        execute(untrusted, "get_attempt", {"attempt_id": failed["attempt_id"]})
+    assert calls == []
+    monkeypatch.setattr(routes, "may_read_private", lambda request: True)
+    trusted = routes.get_service(request, live.db, live.ws)
+    with pytest.raises(StateConflict, match="workflow runtime is unavailable: RuntimeError"):
+        execute(trusted, "get_attempt", {"attempt_id": failed["attempt_id"]})
+    assert calls == [1]
+    with pytest.raises(StateGraphError, match="attempt .* not found"):
+        execute(trusted, "get_attempt", {"attempt_id": "missing-attempt"})
+    assert calls == [1]
+    assert live.service.attempts.get(failed["attempt_id"])["status"] == "failed"

@@ -103,7 +103,7 @@ After all relevant workers and artifact writes settle, submit:
     "status": "candidate",
     "artifact": "REPLACE_WITH_EXACT_ARTIFACT_DIGEST",
     "artifact_kind": "sha256",
-    "report_ref": "immutable-reports/job-7/final.json",
+    "report_ref": "/var/harness/immutable-reports/job-7/final.json",
     "report_sha256": "REPLACE_WITH_ACTUAL_64_HEX_REPORT_HASH",
     "quiescent": true,
     "detail": "Implementation and verifier workers finished; output bytes are immutable."
@@ -112,8 +112,34 @@ After all relevant workers and artifact writes settle, submit:
 ```
 
 These placeholders are illustrative; send the actual returned IDs and hashes.
-`artifact_kind=git-sha1` requires a 40-hex commit; `sha256` requires a 64-hex
-artifact/bundle digest. Do not label a branch name or a mutable path as a digest.
+For ordinary `running`, `paused` and `unknown` observations, `report_ref` is
+bounded text and `report_sha256` records the claimed digest. The reference may
+be relative or unavailable; the bytes are not inspected.
+
+For terminal `candidate` or `failed` reports, `report_ref` must be an **absolute**
+local path (or a `file://` URL with an empty or `localhost` host) to a regular
+file the State server can read. A relative path is refused, and the bytes must
+hash to `report_sha256`. The bytes must be a structured JSON envelope declaring
+`"status"` (`"candidate"` or `"completed"` for a candidate observation,
+`"failed"` for a failed one), `"settled": true` and `"usable": true`; missing
+flags are rejected. A quiescent late report on an abandoned attempt requires
+the same absolute-path and hash verification, without the terminal envelope
+check. A terminal candidate envelope has this shape:
+
+```json
+{
+  "status": "candidate",
+  "settled": true,
+  "usable": true,
+  "artifact": "REPLACE_WITH_EXACT_ARTIFACT_DIGEST"
+}
+```
+
+`artifact_kind=git-sha1` requires a 40-hex commit — never a branch, tag or
+path label — and the report JSON must carry a self-contained `git_bundle`
+object with exactly `{"path": <absolute local .bundle path>, "sha256": <64-hex
+bundle digest>}`; `artifact_kind=sha256` requires a 64-hex artifact/bundle
+digest. Do not label a branch name or a mutable path as a digest.
 The final report should identify the exact source/artifact and the dependency
 receipts its checker used. For a repository outside AItelier, the external
 harness is responsible for proving the code actually includes those dependencies;
@@ -152,10 +178,31 @@ This is the **same** `record_evidence` command as for a workflow attempt:
     "criterion_id": "persistence",
     "verdict": "pass",
     "artifact": "REPLACE_WITH_THE_SAME_CANDIDATE_DIGEST",
-    "report_ref": "immutable-reports/job-7/persistence.json",
+    "report_ref": "/var/harness/immutable-reports/job-7/persistence.json",
     "report_sha256": "REPLACE_WITH_ACTUAL_REPORT_SHA256",
     "detail": "Actual test output from the harness's persistence-check subagent."
   }
+}
+```
+
+The criterion `report_ref` is likewise an **absolute** local path (or `file://`
+URL) whose bytes hash to `report_sha256`. Its JSON envelope must declare
+`"status": "completed"`, `"settled": true` and `"usable": true`;
+`status=candidate` is refused for criterion evidence. The command arguments
+`criterion_id`, `artifact` and `verdict` are required. Include those fields in
+the report JSON too, matching the evidence row, to make its scope explicit.
+The current semantic validator compares these payload fields when present;
+omitting one from the report payload does not itself cause rejection. A
+criterion report file with all scoped fields has this shape:
+
+```json
+{
+  "status": "completed",
+  "settled": true,
+  "usable": true,
+  "criterion_id": "persistence",
+  "artifact": "REPLACE_WITH_THE_SAME_CANDIDATE_DIGEST",
+  "verdict": "pass"
 }
 ```
 

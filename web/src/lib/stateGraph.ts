@@ -36,14 +36,15 @@ export interface StateOverview {
 /** An observation beside the DAG. Linking never changes a node; only a resolution names one. */
 export interface StateIssueSummary {
   issue_id: string; project_id: string; kind: 'defect' | 'gap' | 'handoff' | 'question'; title: string;
-  status: 'open' | 'absorbed' | 'promoted' | 'duplicate' | 'rejected'; version: number;
+  status: 'open' | 'absorbed' | 'promoted' | 'duplicate' | 'fixed' | 'rejected'; version: number;
   nodes: { node_key: string; status: string | null }[]; contradicts_acceptance: string[];
   created_at: string; updated_at: string;
 }
 export interface StateIssue extends StateIssueSummary {
   body: string; source: string | null;
   resolution: { resolution: string; reason: string; director_identity: string; node_key?: string;
-                node_revision?: number; duplicate_of?: string } | null;
+                node_revision?: number; duplicate_of?: string; receipt_id?: string;
+                artifact_ref?: string } | null;
   reported_by: { actor: string; director_identity: string };
 }
 export interface HistoryReference {

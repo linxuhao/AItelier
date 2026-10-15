@@ -53,7 +53,9 @@ the issue body, not in a node goal (revising a goal invalidates dependents).
 
 `resolve_issue` is terminal and must name what absorbed the issue:
 `absorbed` (a node revision created after the report), `promoted` (a node created
-after the report), `duplicate` (another issue, or an existing node) or `rejected`.
+after the report), `duplicate` (another issue, or an existing node), `fixed` (an
+existing verified acceptance receipt in this project, named with its exact
+artifact) or `rejected`.
 `get_node` returns the node's `open_issues`; `project_overview` returns
 `issue_counts` and per-node `open_issue_count`. An open defect linked to a VERIFIED
 or CANDIDATE node is reported in `contradicts_acceptance`. Storage:

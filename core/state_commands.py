@@ -511,7 +511,7 @@ class IssueRef(Project):
 
 
 class ListIssues(Project):
-    statuses: list[Literal["open", "absorbed", "promoted", "duplicate", "rejected"]] | None = Field(
+    statuses: list[Literal["open", "absorbed", "promoted", "duplicate", "fixed", "rejected"]] | None = Field(
         default=None, min_length=1)
     kinds: list[Literal["defect", "gap", "handoff", "question"]] | None = Field(default=None, min_length=1)
     node_key: str | None = None
@@ -527,15 +527,22 @@ class LinkIssue(IssueRef):
 
 class ResolveIssue(IssueRef):
     expected_version: int = Field(ge=1)
-    resolution: Literal["absorbed", "promoted", "duplicate", "rejected"] = Field(description=(
+    resolution: Literal["absorbed", "promoted", "duplicate", "fixed", "rejected"] = Field(description=(
         "absorbed: node_key+node_revision of a revision created after the report; "
         "promoted: node_key of a node created after the report; "
-        "duplicate: exactly one of duplicate_of (issue) or node_key; rejected: reason only."))
+        "duplicate: exactly one of duplicate_of (issue) or node_key; "
+        "fixed: receipt_id+artifact of an existing verified acceptance receipt in this "
+        "project (the issue was already fixed under an existing contract; no node is "
+        "created, revised or verified by this closure); rejected: reason only."))
     reason: str = Field(min_length=1, max_length=4000)
     director_identity: str = Field(min_length=1, max_length=320)
     node_key: str | None = None
     node_revision: int | None = Field(default=None, ge=1)
     duplicate_of: str | None = None
+    receipt_id: str | None = Field(default=None, max_length=128, description=(
+        "fixed only: an existing acceptance receipt (state_acceptances.receipt_id) in this project."))
+    artifact: str | None = Field(default=None, max_length=128, description=(
+        "fixed only: the receipt's exact artifact_ref."))
 
 
 class Attempt(Request):
@@ -640,11 +647,22 @@ class ExternalObservation(Attempt):
     expected_version: int
     context_hash: str
     status: str
-    report_ref: str
+    report_ref: str = Field(description=(
+        "For ordinary running, paused and unknown observations, a bounded text reference and "
+        "report_sha256 are recorded without inspecting bytes; the reference may be relative or unavailable. "
+        "Terminal candidate/failed reports and quiescent late reports on abandoned attempts require an "
+        "absolute local path, or a file:// URL with an empty or localhost host, to a regular file whose "
+        "bytes hash to report_sha256. Terminal reports require structured JSON with settled=true and "
+        "usable=true, and status candidate/completed for candidate or failed for failed. Quiescent late "
+        "reports are hash-verified without the terminal envelope check."))
     report_sha256: str
     quiescent: bool = False
     artifact: str | None = None
-    artifact_kind: str | None = None
+    artifact_kind: str | None = Field(default=None, description=(
+        "Only a candidate report may declare the artifact. 'git-sha1' means a 40-hex "
+        "commit (no branch/tag/path alias) and requires a self-contained git_bundle "
+        "in the report carrying exactly its absolute local path and sha256; 'sha256' "
+        "means a 64-hex artifact or bundle digest. Omit for running/paused/unknown/failed."))
     detail: str = ""
     fence: int | None = Field(default=None, ge=0, description=(
         "The attempt's owner_fence you hold. Required in an enforced project (fence_required); a fence "

@@ -18,8 +18,11 @@ import logging
 from typing import Any
 
 from skillflow import SkillFlow
-from skillflow.exceptions import StaleClaimFenced, TerminalRunFenced
+from skillflow.exceptions import (GraphValidationError, StaleClaimFenced,
+                                  TerminalRunFenced, ToolArgumentsUnavailable)
 from skillflow.identity import owner_is_dead, worker_identity
+
+from core.tool_routes import EXECUTOR_TOOLS, graph_identity_violations, spoofed_slot_keys
 
 
 class AItelierSkillFlow(SkillFlow):
@@ -40,6 +43,16 @@ class AItelierSkillFlow(SkillFlow):
                            step_id: str = "", project_root: str = "") -> dict:
         """Preserve the owning project identity for host-registered tools."""
         bound = dict(params or {})
+        if name in EXECUTOR_TOOLS:
+            # These tools hand run_id and a repository root to the owned
+            # executor, whose launcher binds the run to the tree it owns. The
+            # SDK fills these fields with setdefault() AFTER the caller's
+            # params, so a caller naming another run and its worktree would be
+            # bound to that run. Strip caller values on every host ingress,
+            # including callers outside PipelineEngine._exec_tool.
+            for keyword in ("run_id", "step_id", "project_id", "operation_id",
+                            "config_name", "project_root", "workspace_root"):
+                bound.pop(keyword, None)
         if run_id:
             for keyword in self.HOST_INJECTED_KEYWORDS:
                 if not self._tool_accepts_keyword(name, keyword):
@@ -55,6 +68,46 @@ class AItelierSkillFlow(SkillFlow):
         return super()._execute_tool_impl(
             name, bound, run_id=run_id, step_id=step_id,
             project_root=project_root)
+
+    def register_graph(self, graph):
+        """Refuse a graph whose dispatch slots claim host-owned identity.
+
+        Tool steps, tool hooks and validation specs pass their literal params
+        to the tool, and the engine adds the run's identity with setdefault —
+        so a literal `run_id` (or another run's root for an executor tool)
+        would win. This is the one ingress every graph crosses (boot scan,
+        generated pipelines, edits); refusing raises the engine's own
+        GraphValidationError for THAT graph, which the boot scan already
+        treats as a per-file skip.
+        """
+        problems = graph_identity_violations(graph)
+        if problems:
+            raise GraphValidationError(problems)
+        return super().register_graph(graph)
+
+    def _execute_tool_inline(self, tool_node, *, run_id: str = "",
+                             graph_name: str = "") -> dict:
+        # The same rule at dispatch, for a run pinned to graph content that was
+        # registered before the rule existed.
+        bad = spoofed_slot_keys(tool_node.tool_name or "", tool_node.tool_params or {})
+        if bad:
+            raise ToolArgumentsUnavailable(
+                f"{tool_node.tool_name}: tool_params set host-owned "
+                f"{', '.join(bad)}; refusing to dispatch with identity the run "
+                f"does not own.")
+        return super()._execute_tool_inline(tool_node, run_id=run_id,
+                                            graph_name=graph_name)
+
+    def _execute_tool_hook(self, token, node, hook_name: str, hook_spec: dict) -> dict:
+        tool = hook_spec.get("tool", "") if isinstance(hook_spec, dict) else ""
+        bad = spoofed_slot_keys(tool, (hook_spec or {}).get("params", {})
+                                if isinstance(hook_spec, dict) else {})
+        if bad:
+            return {"passed": False,
+                    "error": (f"{hook_name} hook {tool}: params set host-owned "
+                              f"{', '.join(bad)}; refusing to dispatch with "
+                              f"identity the run does not own.")}
+        return super()._execute_tool_hook(token, node, hook_name, hook_spec)
 
     def _tool_accepts_keyword(self, name: str, keyword: str) -> bool:
         """Return whether a host-owned keyword survives to the tool's body.

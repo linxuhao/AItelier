@@ -590,6 +590,13 @@ def _validated_registration(config_name: str, yaml_text: str,
     if ownership_error:
         raise ValueError(ownership_error)
     graph = _pipeline_graph()._from_dict(data)
+    # Host identity in a dispatch slot is refused by AItelierSkillFlow.register_graph
+    # too; checking here keeps a boot scan skipping THAT file instead of the
+    # refusal surfacing inside the shared registration transaction.
+    from core.tool_routes import graph_identity_violations
+    identity_problems = graph_identity_violations(graph)
+    if identity_problems:
+        raise ValueError("; ".join(identity_problems))
     # Derive the hints BEFORE registering. `_gen_hints` reads the graph's shape and
     # can raise on a malformed one (a generated `validation:` written as a mapping
     # did exactly that); deriving afterwards left the graph live with the caller

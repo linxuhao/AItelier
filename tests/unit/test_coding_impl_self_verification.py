@@ -33,6 +33,28 @@ def _repo(tmp_path: Path) -> Path:
     return repo
 
 
+@pytest.fixture
+def entry_transport(monkeypatch):
+    """Exercise real pytest via the real entry inside this disposable test job.
+
+    The transport is substituted because untrusted test jobs receive no Docker
+    or launcher socket. This is entry/adapter contract evidence, not proof of a
+    normal owned host-launcher invocation.
+    """
+    from core import repository_executor, repository_executor_entry
+
+    def execute(root, args, timeout, *, run_id):
+        assert run_id
+        result = repository_executor_entry.run(
+            {"repo": str(root), "args": args, "timeout": timeout})
+        if result["timed_out"]:
+            raise subprocess.TimeoutExpired(args, timeout, result["stdout"], result["stderr"])
+        return subprocess.CompletedProcess(args, result["returncode"],
+                                           result["stdout"], result["stderr"])
+
+    monkeypatch.setattr(repository_executor, "execute", execute)
+
+
 def test_live_no_runner_shape_is_fixed_by_discoverable_tool_at_reviewed_budget() -> None:
     observed = json.loads(FIXTURE.read_text(encoding="utf-8"))
     assert observed["reported_constraint"] == "no command runner"
@@ -58,7 +80,7 @@ def test_focused_pytest_is_installed_in_the_runtime_image() -> None:
 
 
 def test_pytest_check_is_scoped_scrubbed_bounded_and_identified(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, entry_transport
 ) -> None:
     repo = _repo(tmp_path)
     test_file = repo / "tests/test_probe.py"
@@ -95,7 +117,7 @@ def test_pytest_check_is_scoped_scrubbed_bounded_and_identified(
     assert result["attempt_scope"] == "run-identity:implement"
 
 
-def test_timeout_kills_the_focused_process_group(tmp_path: Path) -> None:
+def test_timeout_kills_the_focused_process_group(tmp_path: Path, entry_transport) -> None:
     repo = _repo(tmp_path)
     target = repo / "tests/test_slow.py"
     target.parent.mkdir()
@@ -111,7 +133,7 @@ def test_timeout_kills_the_focused_process_group(tmp_path: Path) -> None:
     )
     assert result["passed"] is False
     assert result["timed_out"] is True
-    assert result["exit_status"] == -9
+    assert result["exit_status"] is None  # transport timeout has no bare exit code
 
 
 def test_game_probe_uses_the_same_bounds_and_trace_identity(
@@ -241,7 +263,7 @@ def test_escape_and_host_control_requests_fail_closed(
 
 
 def test_one_focused_check_cannot_hide_unrelated_full_suite_regression(
-    tmp_path: Path,
+    tmp_path: Path, entry_transport,
 ) -> None:
     repo = _repo(tmp_path)
     tests = repo / "tests"
@@ -296,7 +318,7 @@ def _turn(*calls: tuple[str, dict, str]):
 
 
 def test_representative_native_implement_traces_repo_and_game_checks_before_finish(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, entry_transport
 ) -> None:
     repo = _repo(tmp_path)
     tests = repo / "tests"

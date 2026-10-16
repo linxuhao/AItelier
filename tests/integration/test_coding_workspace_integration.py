@@ -27,6 +27,13 @@ import pytest
 
 FIXTURE = os.environ.get("CODING_WORKSPACE_FIXTURE")
 pytestmark = pytest.mark.skipif(not FIXTURE, reason="requires an owned disposable fixture root")
+# The data root is fixed at IMPORT, before any later-collected module composes
+# the app: its DB singletons bind to AITELIER_HOME at their own import. A root
+# another conftest already chose (app already imported) is adopted as is.
+if FIXTURE and "api.dependencies" not in sys.modules:
+    _HOME = Path(FIXTURE) / ("h-" + uuid.uuid4().hex[:8])
+    _HOME.mkdir(parents=True, exist_ok=True)
+    os.environ["AITELIER_HOME"] = str(_HOME)
 RAW = Path(os.environ.get("CODING_WORKSPACE_RAW", "/raw"))
 SCRIPTS: dict[str, list] = {}
 PALETTES: list[dict] = []
@@ -51,14 +58,8 @@ def evidence(name, obj):
 
 @pytest.fixture(scope="session")
 def env():
-    if "api.dependencies" in sys.modules:
-        # Another conftest already composed the app on its own data root; the
-        # DB singletons are bound to it, so every record must agree with it.
-        home = Path(os.environ["AITELIER_HOME"])
-    else:
-        home = Path(FIXTURE) / ("h-" + uuid.uuid4().hex[:8])
-        home.mkdir(parents=True)
-        os.environ["AITELIER_HOME"] = str(home)
+    from core import datadir
+    home = datadir.aitelier_home()  # the root the DB singletons were bound to
     os.environ["AITELIER_ZVEC_LIFECYCLE"] = "0"
     os.environ.pop("AITELIER_HOST_LAUNCHER_SOCKET", None)
     from fastapi.testclient import TestClient

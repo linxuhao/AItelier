@@ -110,8 +110,11 @@ def test_actual_rw_shell_git_metadata_pytest_and_namespace(runtime):
 w=pathlib.Path.cwd()
 assert os.getuid()==1000
 assert not pathlib.Path(SOURCE).exists()
-for p in (OUTSIDE,DB,ENGINE,LAUNCHER,'/var/run/docker.sock','/run/aitelier-secrets'):
+for p in (SOURCE+'/seed.txt',SOURCE+'/.git/config',OUTSIDE,DB,ENGINE,LAUNCHER,'/var/run/docker.sock','/run/aitelier-secrets'):
  assert not pathlib.Path(p).exists(),p
+ try:pathlib.Path(p).read_bytes()
+ except OSError:pass
+ else:raise AssertionError('foreign bytes accessible '+p)
 assert not {'ROOT_TEST_SECRET','AITELIER_ADMIN_TOKEN','OPENAI_API_KEY'} & os.environ.keys()
 fds=[]
 for fd in os.listdir('/proc/self/fd'):

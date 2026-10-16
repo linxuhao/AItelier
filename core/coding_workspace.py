@@ -1089,8 +1089,6 @@ def _ts(value) -> float:
     return dt.replace(tzinfo=UTC).timestamp() if dt.tzinfo is None else dt.timestamp()
 
 
-# ── governing plan state ─────────────────────────────────────────────
-
 def _handoff_intents(rd: Path) -> list[tuple[Path, dict]]:
     hdir = rd / "handoffs"
     out = []
@@ -1100,6 +1098,8 @@ def _handoff_intents(rd: Path) -> list[tuple[Path, dict]]:
             out.append((hd, intent))
     return out
 
+
+# ── governing plan state ─────────────────────────────────────────────
 
 def _decisions(rd: Path) -> list[dict]:
     out = []
@@ -1628,8 +1628,8 @@ class Handoff:
         """Retire the row of a durably settled handoff, then record that it is retired.
 
         Absence of the exact row is the expected outcome of an earlier
-        retirement whose record did not persist; a row under a reused id that
-        is not this handoff's is never touched.
+        retirement whose record did not persist; a row that is not exactly
+        this handoff's is never touched.
         """
         from core import run_isolation as ri
         if self.intent.get("state") != "settled":

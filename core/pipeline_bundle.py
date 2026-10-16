@@ -365,19 +365,26 @@ def import_pipeline(sf, registry, bundle: dict, *, name: str | None = None,
         baseline_dest.unlink(missing_ok=True)
         pr._unarchive(config_name)
 
-    try:
-        pr._commit_registration(
-            sf, registry, config_name, parsed,
-            pr._gen_hints(parsed, roles, config_name), roles=roles,
-            paths=[yaml_dest, roles_dest, baseline_dest,
-                   cdir / "_archived",
-                   *(tdir / tname for tname in to_write)],
-            persist=persist)
-    except RuntimeError:
-        # ConfigRegistry failures historically surfaced directly to host callers.
-        raise
-    except Exception as e:
-        raise BundleError(f"bundle's graph was rejected: {e}") from e
+    from core import pipeline_frozen_bundle as fb
+    with fb.exclusion(sf):
+        # A recorded bundle's files serve its pinned runs; import never
+        # replaces one (nor a seal) in place.
+        refusal = fb.edit_block(cdir, config_name)
+        if refusal:
+            raise BundleError(f"not imported, nothing written: {refusal}")
+        try:
+            pr._commit_registration(
+                sf, registry, config_name, parsed,
+                pr._gen_hints(parsed, roles, config_name), roles=roles,
+                paths=[yaml_dest, roles_dest, baseline_dest,
+                       cdir / "_archived",
+                       *(tdir / tname for tname in to_write)],
+                persist=persist)
+        except RuntimeError:
+            # ConfigRegistry failures historically surfaced directly to host callers.
+            raise
+        except Exception as e:
+            raise BundleError(f"bundle's graph was rejected: {e}") from e
 
     return {
         "config_name": config_name,

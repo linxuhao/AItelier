@@ -24,6 +24,9 @@ run (resume, checkpoint approve/reject, reactivate, advance, claim; see
 ``AItelierSkillFlow``) go through ``launch_block`` with the live ``sf``, which
 admits a recorded unit or seal only while ``whole_state`` verifies it, its
 manifest included: with no ConfigRegistry paired to ``sf`` it refuses.
+The descriptor or seal keeps identifying a recorded unit when its bytes stop
+verifying (mixed, never ordinary), and the generated-config editors refuse
+to rewrite one in place (``edit_block``): it changes only by adoption.
 """
 from __future__ import annotations
 
@@ -848,18 +851,72 @@ _SETTLED_SIDE = {"adopted": "new", "reconciled_new": "new",
 
 
 def recorded_hints(config_dir, target: str, unit: dict | None = None) -> dict | None:
-    """Manifest hints a settled adoption descriptor recorded for *target*'s
-    CURRENT whole unit, or None when the target's files are not that recorded
-    unit (never adopted, or since replaced by an ordinary edit). Boot, reload,
-    publication and ``whole_state`` all apply these, so a recorded bundle's
-    scheduler ownership, checkpoint policy and labels survive a restart."""
+    """Manifest hints the adoption descriptor recorded for *target*'s CURRENT
+    whole unit (or *unit*), or None for a never-adopted target or a recorded
+    side that kept no manifest. Boot, reload, publication and ``whole_state``
+    all apply these, so a recorded bundle's scheduler ownership, checkpoint
+    policy and labels survive a restart.
+
+    The descriptor stays the identity authority: a recorded target whose
+    files are not a unit it recorded (a settled side; either side while
+    pending, which only reconciliation verifies) refuses as mixed. It never
+    becomes an ordinary config because its bytes stopped verifying."""
     desc = read_descriptor(config_dir, target)
-    side = desc and desc.get(_SETTLED_SIDE.get(desc.get("state"), ""))
-    if not isinstance(side, dict) or not isinstance(side.get("hints"), dict):
+    if desc is None:
         return None
-    if unit_identity(unit or read_unit(config_dir, target)) != side.get("identity"):
+    sides = ([desc.get("old"), desc.get("new")] if desc.get("state") == "pending"
+             else [_settled_side(desc, target)])
+    have = unit_identity(unit or read_unit(config_dir, target))
+    for side in sides:
+        if isinstance(side, dict) and side.get("identity") == have:
+            hints = side.get("hints")
+            return hints if isinstance(hints, dict) else None
+    raise BundleRefused(f"{target!r} is not the whole bundle its adoption recorded "
+                        f"(current {have[:12]}); reconcile it to the recorded bundle")
+
+
+def _settled_side(desc: dict, target: str) -> dict:
+    """The recorded side a settled descriptor says *target* IS; any other
+    state or a malformed side refuses (never read as 'not recorded')."""
+    side = desc.get(_SETTLED_SIDE.get(desc.get("state"), ""))
+    if (not isinstance(side, dict) or not isinstance(side.get("graph_yaml"), str)
+            or "roles_text" not in side):
+        raise BundleRefused(f"adoption descriptor for {target!r} records no settled "
+                            f"whole bundle (state {desc.get('state')!r}); reconcile it")
+    return side
+
+
+def edit_block(config_dir, stem: str) -> str | None:
+    """Why generated *stem* may not be changed in place, or None for an
+    ordinary mutable config.
+
+    A sealed bundle and a target with an adoption descriptor (any state; an
+    unreadable one included) are recorded whole units. Pinned runs resolve
+    their retained and bundle-specific roles live by name, and the recorded
+    manifest is their policy, so an in-place write of graph, roles or
+    manifest would rewrite what those runs execute. Such a unit changes only
+    as a NEW immutable unit (``capture`` -> ``derive_candidate`` -> ``seal``
+    -> ``adopt_bundle``). Editors check this under the registration/launch
+    exclusion (``sf._lock``) before writing anything."""
+    if is_sealed_name(stem):
+        return (f"{stem!r} is a sealed bundle; its bytes are immutable (derive, "
+                f"seal and adopt a candidate instead)")
+    try:
+        desc = read_descriptor(config_dir, stem)
+    except BundleRefused as exc:
+        return str(exc)
+    if desc is None:
         return None
-    return side["hints"]
+    return (f"{stem!r} is a recorded whole bundle (adoption {desc.get('state')}): its "
+            f"graph, retained roles and manifest serve pinned runs and are not edited "
+            f"in place; derive a candidate, seal it and adopt it instead")
+
+
+def exclusion(sf):
+    """The registration/launch exclusion adoption, reconciliation and run
+    admission hold (``sf._lock``, re-entrant); a no-op for host doubles."""
+    import contextlib
+    return getattr(sf, "_lock", None) or contextlib.nullcontext()
 
 
 def boot_gate(config_dir, stem: str):
@@ -919,21 +976,24 @@ def adoption_block(config_dir, target: str) -> str | None:
 
 def recorded_unit(config_dir, stem: str) -> dict | None:
     """The whole unit (with its manifest hints) generated *stem* must be served
-    as, or None for an ordinary config: a sealed bundle, or a target whose
-    files are exactly a whole unit a settled adoption recorded."""
+    as, or None for an ordinary config (not sealed, no adoption descriptor).
+
+    A sealed bundle, or the side a settled descriptor recorded, taken from the
+    descriptor's own bytes whatever the target's files now hold: changed or
+    missing files are a mismatch of that unit (``whole_state``), not an
+    ordinary config. A descriptor with no settled side refuses."""
     if is_sealed_name(stem):
         sealed = verify_sealed(config_dir, stem)
         return {"graph_yaml": sealed["graph_yaml"],
                 "roles_text": roles_text(sealed["roles"]),
                 "hints": sealed.get("hints") or {}}
     desc = read_descriptor(config_dir, stem)
-    side = desc and desc.get(_SETTLED_SIDE.get(desc.get("state"), ""))
-    gp = Path(config_dir) / f"{stem}.yaml"
-    if not isinstance(side, dict) or not (gp.exists() or gp.is_symlink()):
+    if desc is None:
         return None
-    unit = read_unit(config_dir, stem)
+    side = _settled_side(desc, stem)
+    unit = {"graph_yaml": side["graph_yaml"], "roles_text": side["roles_text"]}
     if unit_identity(unit) != side.get("identity"):
-        return None
+        raise BundleRefused(f"recorded bundle bytes of {stem!r} do not match their identity")
     return {**unit, "hints": side.get("hints")}
 
 
@@ -1281,14 +1341,17 @@ def adopt_bundle(sf, registry, target: str, phys: str, *, expected_current: str,
 
 def reconcile_adoption(sf, registry, target: str, *, to: str, config_dir=None) -> dict:
     """Restore a crashed/mixed target to the RECORDED old or new whole bundle
-    and clear the block only once ``whole_state`` verifies every provider."""
+    and clear the block only once ``whole_state`` verifies every provider.
+    A settled target that is not served as its recorded unit (e.g. its files
+    were changed outside the editors) is mixed too and reconciles the same way."""
     from core import pipeline_registry as pr
     if to not in ("old", "new"):
         raise BundleRefused("reconcile target must be 'old' or 'new'")
     d = Path(config_dir or pr.generated_configs_dir())
     with sf._lock:
         desc = read_descriptor(d, target)
-        if desc is None or desc.get("state") != "pending":
+        if desc is None or (desc.get("state") != "pending" and not whole_state(
+                sf, registry, d, target, recorded_unit(d, target))):
             raise BundleRefused(f"no pending adoption for {target!r}")
         side = desc[to]
         unit = {"graph_yaml": side["graph_yaml"], "roles_text": side["roles_text"],

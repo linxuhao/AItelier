@@ -649,9 +649,14 @@ def register_generated_pipeline(sf, registry, run_id: str, name: str) -> dict:
             # tombstone would make it disappear at the next boot scan.
             _unarchive(config_name)
 
-        _commit_registration(
-            sf, registry, config_name, graph, hints,
-            paths=[dest, generated_configs_dir() / "_archived"], persist=persist)
+        from core import pipeline_frozen_bundle as _fb
+        with _fb.exclusion(sf):
+            refusal = _fb.edit_block(generated_configs_dir(), config_name)
+            if refusal:
+                return {"error": f"not replaced: {refusal}"}
+            _commit_registration(
+                sf, registry, config_name, graph, hints,
+                paths=[dest, generated_configs_dir() / "_archived"], persist=persist)
     except Exception as e:
         return {"error": f"generated pipeline failed validation: {e}"}
     return {"config_name": config_name, "path": str(dest),
@@ -829,10 +834,17 @@ def register_forge_pipeline(sf, registry, run_id: str, name: str) -> dict:
             _unarchive(config_name)
             roles_dest.write_text(_json_dumps(roles), encoding="utf-8")
 
-        _commit_registration(
-            sf, registry, config_name, graph, hints, roles=roles,
-            paths=[dest, roles_dest, generated_configs_dir() / "_archived"],
-            persist=persist)
+        # Edit mode reuses the target's name: never over a recorded bundle,
+        # whose roles file also holds the roles its pinned runs still use.
+        from core import pipeline_frozen_bundle as _fb
+        with _fb.exclusion(sf):
+            refusal = _fb.edit_block(generated_configs_dir(), config_name)
+            if refusal:
+                return {"error": f"not replaced: {refusal}"}
+            _commit_registration(
+                sf, registry, config_name, graph, hints, roles=roles,
+                paths=[dest, roles_dest, generated_configs_dir() / "_archived"],
+                persist=persist)
     except Exception as e:
         return {"error": f"emitted pipeline failed registration: {e}"}
     return {"config_name": config_name, "path": str(dest),
@@ -861,8 +873,6 @@ def set_pipeline_capabilities(sf, registry, config_name: str,
     capability a config still offers cannot be deleted" enforceable rather than
     circular.
     """
-    import yaml
-
     if not config_name.startswith(GEN_PREFIX):
         return {"error": f"'{config_name}' is a built-in pipeline; its offer "
                          f"list lives in the repo (configs/{config_name}.yaml). "
@@ -876,6 +886,18 @@ def set_pipeline_capabilities(sf, registry, config_name: str,
     if unknown:
         return {"error": f"not registered on this deployment: {unknown}. "
                          f"Available: {sorted(known) or 'none'}."}
+
+    from core import pipeline_frozen_bundle as _fb
+    with _fb.exclusion(sf):
+        refusal = _fb.edit_block(generated_configs_dir(), config_name)
+        if refusal:
+            return {"error": f"{refusal} — nothing written"}
+        return _write_capabilities(sf, registry, config_name, add, remove)
+
+
+def _write_capabilities(sf, registry, config_name: str, add, remove) -> dict:
+    """The offer-list write + reload, under the caller's exclusion."""
+    import yaml
 
     f = generated_configs_dir() / f"{config_name}.yaml"
     if not f.exists():
@@ -976,7 +998,8 @@ def reload_generated_pipeline(sf, registry, config_name: str) -> dict:
             config_name, yaml_text, roles=roles, sf=sf)
         # Same gate and manifest as the boot scan: a sealed bundle re-verifies
         # and keeps its frozen hints, an unreconciled adoption target stays
-        # blocked, and a recorded whole unit keeps its recorded manifest.
+        # blocked, a recorded whole unit keeps its recorded manifest, and a
+        # recorded target whose files are not that unit refuses (mixed).
         from core import pipeline_frozen_bundle as _fb
         sealed, refusal = _fb.boot_gate(generated_configs_dir(), config_name)
         if refusal:
@@ -1193,24 +1216,25 @@ def load_generated_configs(sf, registry) -> list[str]:
             continue
     # Sealed RSI bundles and adoption targets: verify before ANY write or
     # registration. A bad seal / unreconciled adoption blocks only that name.
-    # A healthy seal, and a target that is exactly a whole unit a settled
-    # adoption recorded, are exempt from the in-place migrations: rewriting
-    # them would silently change a recorded bundle.
+    # A healthy seal and every recorded target are exempt from the in-place
+    # migrations: rewriting them would silently change a recorded bundle. A
+    # recorded target whose files are not its recorded unit is refused here
+    # (neither migrated nor registered) and verify_boot returns it to pending.
     from core import pipeline_frozen_bundle as _fb
     # Run admission verifies a recorded unit's manifest in this registry.
     _fb.pair_registry(sf, registry)
     sealed_ok: set[str] = set()
-    recorded: dict[str, dict] = {}
+    recorded: dict[str, dict | None] = {}
+    mixed: list[str] = []
     for path in sorted(config_dir.glob(f"{GEN_PREFIX}*.yaml")):
         sealed, refusal = _fb.boot_gate(config_dir, path.stem)
         if not refusal and sealed is None:
             try:
-                frozen = _fb.recorded_hints(config_dir, path.stem)
-            except _fb.BundleRefused as exc:
+                if _fb.recorded_unit(config_dir, path.stem) is not None:
+                    recorded[path.stem] = _fb.recorded_hints(config_dir, path.stem)
+            except _fb.BundleRefused as exc:       # a readable descriptor exists
                 refusal = str(exc)
-            else:
-                if frozen is not None:
-                    recorded[path.stem] = frozen
+                mixed.append(path.stem)
         if refusal:
             _log.warning("refusing %s at boot: %s", path.stem, refusal)
             unsafe_release_configs.add(path.stem)
@@ -1281,8 +1305,8 @@ def load_generated_configs(sf, registry) -> list[str]:
         out = []
     # Committed or rolled back, a recorded target must actually be served as
     # its recorded whole unit; otherwise it stays refused until reconciled.
-    if recorded:
+    if recorded or mixed:
         retired = archived_names()
         _fb.verify_boot(sf, registry, config_dir,
-                        [name for name in recorded if name not in retired])
+                        [name for name in [*recorded, *mixed] if name not in retired])
     return out

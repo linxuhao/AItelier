@@ -555,6 +555,11 @@ class CodingRequest:
             candidates = [r for r in sf.list_runs(project_id=self.project_id)
                           if r.get("graph_name") == GRAPH]
             rid = rec.get("run_id")
+            if rid and self._run_is_bound(rid):
+                # Interrupted between sealing the origin and marking the
+                # intent: the run IS bound; the origin decides, not the intent.
+                _write(path, {**rec, "state": "bound"})
+                continue
             if rid:
                 orphans = [r for r in candidates if r["id"] == rid]
             else:
@@ -618,6 +623,9 @@ class CodingRequest:
             return None
         if state not in ("ready", "handoff_pending", "closing"):
             raise Unavailable(f"workspace owner is in unknown state {state!r}")
+        run = self.sf.get_run(origin["run_id"])
+        if run is None or run.get("status") in ("completed", "failed"):
+            return self._resume_terminal(rd, origin, run)
         claimed = self._current_claim(rd, origin)
         ws = self._workspace_from(origin, claimed)
         self._validate(ws)
@@ -626,6 +634,26 @@ class CodingRequest:
             self._close(rd, ws, None)
             return None
         return ws
+
+    def _resume_terminal(self, rd: Path, origin: dict, run: dict | None) -> None:
+        """The engine ended R: reconcile Source first, then retire the owner.
+
+        A pending/partial handoff is Source work recorded with frozen blobs and
+        its own admission; it does not need the run's claim, and an engine
+        terminal status never clears it. Only after every handoff settled may
+        the owner close — W itself is retained as it is.
+        """
+        ws = self._workspace_from(origin, None)
+        self._recover_handoffs(rd, ws)
+        status = run.get("status") if run else "unknown"
+        if origin.get("state") == "closing" and status == "completed":
+            self._close(rd, ws, None)
+            return None
+        _claim_drop(origin["run_id"])
+        _write(rd / "origin.json", {**_read(rd / "origin.json"), "state": "abandoned",
+                                    "abandoned_reason": f"engine run is {status}; working "
+                                                        f"tree retained, Source reconciled"})
+        return None
 
     def _workspace_from(self, origin: dict, claimed) -> Workspace:
         iso = origin["isolation"]
@@ -840,14 +868,14 @@ class CodingRequest:
         finally:
             rid = (result or {}).get("run_id") if isinstance(result, dict) else None
             if not rid:
-                found = [r for r in self.sf.list_runs(project_id=self.project_id)
+                # No answer naming the run: never associate one by search and
+                # never start again. A run that may be ours keeps the plan
+                # state UNKNOWN (gating) until the user dismisses it.
+                found = [r["id"] for r in self.sf.list_runs(project_id=self.project_id)
                          if r.get("graph_name") == PLAN_GRAPH
-                         and _ts(r.get("created_at")) >= started_at - 1
-                         and r.get("status") in ("pending", "running", "paused")]
-                rid = found[0]["id"] if len(found) == 1 else None
-                if len(found) > 1:
-                    _write(rd / "plan.json", {**plan, "state": "unknown",
-                                              "candidates": [r["id"] for r in found]})
+                         and _ts(r.get("created_at")) >= started_at - 1]
+                if found:
+                    _write(rd / "plan.json", {**plan, "state": "unknown", "candidates": found})
             if rid:
                 _index_put(rid, role="plan", project_id=self.project_id,
                            session_id=self.session_id, owner_run=ws.run_id)
@@ -896,6 +924,12 @@ class CodingRequest:
     # -- handoff and closure --
     def finish(self, note: str = "") -> dict | None:
         """At a final successful response: hand W to Source, then close the owner."""
+        if self._lock is None:
+            # Records are atomic files: a lock-free look decides whether this
+            # session has anything to deliver before contending for the lock.
+            owner = _session_owner(self.project_id, self.session_id)
+            if (owner is None or owner[1].get("state") in CLOSED) and not self._creations():
+                return None
         self.acquire()
         self._settle_creations()
         owner = self._live_owner()
@@ -1092,9 +1126,11 @@ def decide_plan(db, *, session_id: str, writer: str, decision: str,
     lock = ProjectLock(origin["project_id"]).acquire()
     try:
         plan = _read(rd / "plan.json")
-        if not plan or plan.get("state") != "associated" or not plan.get("run_id"):
+        dismissible_unknown = decision == "dismiss" and plan and plan.get("state") in ("unknown", "starting")
+        if not dismissible_unknown and (not plan or plan.get("state") != "associated"
+                                        or not plan.get("run_id")):
             raise Unavailable("this session's workspace has no governing plan")
-        rid = plan["run_id"]
+        rid = plan.get("run_id") or "unknown-start"
         did = decision_id or uuid.uuid4().hex
         if not isinstance(did, str) or not _SAFE_ID.match(did):
             raise Unavailable("decision_id is not usable")
@@ -1135,11 +1171,19 @@ def decide_plan(db, *, session_id: str, writer: str, decision: str,
             _write(dpath, {**rec, "state": "applied" if ok else "refused", "result": res})
             return {"status": "applied" if ok else "refused", "decision_id": did,
                     "run_id": rid, "result": res}
+        unsettled = [hd.name for hd in sorted((rd / "handoffs").iterdir())
+                     if (_read(hd / "intent.json") or {}).get("state") not in Handoff.SETTLED
+                     ] if (rd / "handoffs").is_dir() else []
+        if unsettled or origin.get("state") not in ("ready", "bound"):
+            raise Unavailable("this workspace has an unsettled Source handoff; it is "
+                              "reconciled before the plan can be dismissed")
         rec = prior or _write(dpath, {"kind": "decision", "decision": "dismiss",
                                       "decision_id": did, "state": "pending",
                                       "writer": writer, "run_id": rid})
         with _trusted("decide"):
-            stopped = sf.stop_run(rid, "governing plan dismissed by the user")
+            # An unknown start names no run of ours to stop; nothing is guessed.
+            stopped = (sf.stop_run(rid, "governing plan dismissed by the user")
+                       if plan.get("state") == "associated" else {"outcome": "no associated run"})
             owner_run = sf.get_run(origin["run_id"])
             if owner_run and owner_run.get("status") in ("pending", "running", "paused"):
                 sf.stop_run(origin["run_id"], "coding workspace closed by plan dismissal; "

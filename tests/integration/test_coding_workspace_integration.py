@@ -887,3 +887,84 @@ def _drop_claims():
     with cw._CLAIMS_LOCK:
         _SAVED_CLAIMS.update(cw._CLAIMS)
         cw._CLAIMS.clear()
+
+
+# ── 14. engine-terminal run, unknown plan start, retained dirty tree ─────────
+
+def test_engine_terminal_run_still_reconciles_pending_handoff(env, project, monkeypatch):
+    pid, src = project()
+    sid = session(env)
+    turns = [[("read_code_file", {"path": "hello.py"}), ("read_code_file", {"path": "lib/util.py"})],
+             [("edit_file", {"path": "hello.py", "old_str": "helo", "new_str": "hello"}),
+              ("edit_file", {"path": "lib/util.py", "old_str": "2", "new_str": "22"})], "done"]
+    with monkeypatch.context() as m:
+        _crash_after_first_source_write(m, src)
+        chat(env, sid, pid, turns)
+    rd, origin = origin_of(env, sid)
+    from core import coding_workspace as cw, run_isolation as ri
+    # INJECTED engine failure of R (an engine-side terminal status, not a stop route).
+    with cw._trusted("test-injected-engine-failure"):
+        env["sf"].fail_run(origin["run_id"], "INJECTED engine failure")
+    assert env["sf"].get_run(origin["run_id"])["status"] == "failed"
+    assert len(ri.write_admissions(env["db"])) == 1  # terminal status removed nothing
+    ev = chat(env, sid, pid, ["after the engine failed"])
+    out = handoff(ev)
+    assert (src / "hello.py").read_text() == "print('hello world')\n"
+    assert (src / "lib/util.py").read_text() == "def two():\n    return 22\n"
+    assert ri.write_admissions(env["db"]) == []
+    _, after = origin_of(env, sid)
+    assert after["run_id"] == origin["run_id"] and after["state"] == "abandoned"
+    assert Path(after["isolation"]["worktree_path"]).is_dir()
+    evidence("t14-terminal", {"handoff": out, "origin": after})
+
+
+def test_unknown_plan_start_gates_until_dismissed(env, project, monkeypatch):
+    pid, src = project()
+    sid = session(env)
+    from skillflow.plugins.skill_runner import RunnerService
+    real = RunnerService.start
+
+    def lost_answer(self, graph, **kw):
+        real(self, graph, **kw)
+        raise ConnectionError("INJECTED: the start's answer was lost")
+    with monkeypatch.context() as m:
+        m.setattr(RunnerService, "start", lost_answer)
+        ev = chat(env, sid, pid, [[("runner_start", {"task": "x"})], "hm"])
+    assert "INJECTED" in results(ev)[0]["error"]
+    rd, _ = origin_of(env, sid)
+    plan = json.loads((rd / "plan.json").read_text())
+    assert plan["state"] == "unknown" and len(plan["candidates"]) == 1
+    ev2 = chat(env, sid, pid, [[("read_code_file", {"path": "hello.py"})],
+                               [("edit_file", {"path": "hello.py", "old_str": "helo", "new_str": "x"}),
+                                ("runner_start", {"task": "again"})], "blocked"])
+    assert results(ev2, "edit_file")[0]["status"] == "plan_gate"
+    assert results(ev2, "runner_start")[0]["status"] == "plan_gate"  # never started again
+    r = env["client"].post("/api/agent/coding/plan-decision",
+                           json={"session_id": sid, "decision": "dismiss"}).json()
+    assert r["status"] == "applied"
+    # The candidate run is not ours to stop by guess; it stays as it was.
+    assert env["sf"].get_run(plan["candidates"][0])["status"] in ("running", "paused")
+    evidence("t14-unknown-plan", {"plan": plan, "dismiss": r})
+
+
+def test_closed_dirty_tree_is_retained_by_ordinary_cleanup(env, project):
+    pid, src = project()
+    sid = session(env)
+    ev = chat(env, sid, pid, [[("read_code_file", {"path": "hello.py"})],
+                              [("edit_file", {"path": "hello.py", "old_str": "helo", "new_str": "hello"})],
+                              "done"])
+    assert handoff(ev)["status"] == "applied"
+    _, origin = origin_of(env, sid)
+    from core import run_isolation as ri, run_resources
+    w = Path(origin["isolation"]["worktree_path"])
+    branch_before = git(src, "rev-parse", origin["isolation"]["branch"]).stdout.strip()
+    run_resources.reconcile(env["db"], env["sf"], origin["run_id"])
+    reaped = ri.reap_released_worktrees(env["db"], env["sf"], min_idle_seconds=0)
+    assert w.is_dir() and (w / "hello.py").read_text() == "print('hello world')\n"
+    assert git(src, "rev-parse", origin["isolation"]["branch"]).stdout.strip() == branch_before
+    assert branch_before == origin["isolation"]["base_sha"]  # no hidden cleanup commit
+    kept = [k for k in reaped["retained"] if k["run_id"] == origin["run_id"]]
+    assert len(kept) == 1 and "uncommitted work" in kept[0]["reason"], reaped
+    assert origin["run_id"] not in [r.get("run_id") if isinstance(r, dict) else r
+                                    for r in reaped["removed"]]
+    evidence("t14-retained", {"reaped": reaped, "kept": kept})

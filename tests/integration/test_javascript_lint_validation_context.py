@@ -49,9 +49,9 @@ def repository(root):
     for args in [['init','-q'],['config','user.name','owned-fixture'],['config','user.email','fixture@test.invalid']]:
         subprocess.run(['git','-C',str(repo),*args],check=True)
     (repo/'baseline').write_text('fixture baseline')
-    subprocess.run(['git','-C',str(repo),'add','baseline'],check=True)
-    subprocess.run(['git','-C',str(repo),'commit','-qm','fixture'],check=True)
     (repo/'linter_manifest.json').write_text(json.dumps({'.js':'eslint','.mjs':'eslint','.cjs':'eslint'}))
+    subprocess.run(['git','-C',str(repo),'add','baseline','linter_manifest.json'],check=True)
+    subprocess.run(['git','-C',str(repo),'commit','-qm','fixture'],check=True)
     return repo
 
 
@@ -106,3 +106,21 @@ def test_real_native_lint_context_refusals_are_not_green(owned_root,attack):
     result=StepValidator(loader(),workspace,tool_context=context).validate([{'tool':'lint','files':['candidate.js'],'manifest_path':'linter_manifest.json','run_id':run,'step_id':'s','project_root':str(repo)}])
     assert result['passed'] is False,result
     assert 'unavailable' in str(result)
+
+
+def test_real_lint_ignores_hostile_project_authority_and_does_not_execute_js(owned_root):
+    repo=repository(owned_root);run='hostile-'+uuid.uuid4().hex;create_binding(owned_root,run,repo)
+    marker=owned_root/('outside-fake-'+uuid.uuid4().hex)
+    marker.write_text('parent-readable');assert marker.read_text()=='parent-readable'
+    marker.write_text('parent-writable');original=marker.read_bytes()
+    trap=owned_root/('executed-'+uuid.uuid4().hex)
+    # The project config, npm config, plugins and JavaScript are all hostile
+    # only to this disposable fixture's harmless files. None should execute.
+    (repo/'eslint.config.mjs').write_text(f"import fs from 'node:fs'; fs.writeFileSync({str(trap)!r}, 'config'); throw Error('project config executed');")
+    (repo/'.npmrc').write_text(f"onload-script={repo/'hostile-plugin.cjs'}\n")
+    (repo/'hostile-plugin.cjs').write_text(f"require('node:fs').writeFileSync({str(trap)!r}, 'plugin');")
+    (repo/'candidate.js').write_text(f"/* eslint no-undef: 'error' */\nimport fs from 'node:fs';\nfs.writeFileSync({str(marker)!r}, 'escaped');\nmissingName;\n")
+    result=StepValidator(loader(),repo,tool_context={'run_id':run,'step_id':'s','project_root':str(repo)}).validate([{'tool':'lint','files':['candidate.js'],'manifest_path':'linter_manifest.json'}])
+    assert result['passed'] is True,result
+    assert marker.read_bytes()==original and not trap.exists()
+    marker.unlink()

@@ -1,5 +1,6 @@
 """Genuine public SDK claims, existing host launcher, and actual owned containers."""
 import hashlib
+import importlib.metadata
 import json
 import os
 from pathlib import Path
@@ -55,6 +56,11 @@ def runtime():
            "executor_entry": os.environ["OWNED_SHELL_ENTRY"], "allowed_uids": [1000],
            "coding_shell_engine_db": str(home / "skillflow.db"),
            "coding_shell_entry_sha256": hashlib.sha256(entry.read_bytes()).hexdigest()}
+    assert importlib.metadata.version("skillflow-py") == "1.5.92"
+    (root / "runtime-identity.json").write_text(json.dumps({
+        "sdk": importlib.metadata.version("skillflow-py"), "sdk_core": __import__('skillflow.core', fromlist=['']).__file__,
+        "host_entry": cfg["executor_entry"], "entry_sha256": cfg["coding_shell_entry_sha256"],
+        "executor": ex.__file__, "grant_module": shell.__file__, "image": cfg["test_image"]}, indent=2))
     (root / "config.json").write_text(json.dumps(cfg))
     (root / "ready").touch()
     wait_file(root / "s")

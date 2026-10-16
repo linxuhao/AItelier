@@ -114,10 +114,16 @@ COORDINATED_OWNER_IDENTITY = {
     "registered_external_owners": "attempt_id",
     "godot_render_owners": "owner_id",
 }
+# A Godot-only decision recreates the render service itself, so its render owners
+# are never nameable: only registered external metadata owners may be coordinated.
+GODOT_COORDINATED_OWNER_IDENTITY = {
+    "registered_external_owners": "attempt_id",
+}
 # Decision fields that restrict or refuse an action instead of permitting it.
 # A quiescent inventory needs no permission, but it must still honor these.
 RESTRICTING_OVERRIDE_FIELDS = frozenset({
-    "_invalid_override", "backend_only", "deployment_attempt_id", "coordinated_owners",
+    "_invalid_override", "backend_only", "godot_only", "deployment_attempt_id",
+    "coordinated_owners",
 })
 OWNER_INVENTORY_BLOCKERS = {
     "runs": ("active_runs", "active_operations"),
@@ -2034,14 +2040,18 @@ def _settled_external_owner(row: dict, observed_at: str) -> bool:
 
 
 def _classify_blockers(observation: dict, *, backend_only: bool = False,
+                       godot_only: bool = False,
                        deployment_attempt_id: str | None = None,
                        actor: str | None = None) -> tuple[dict, list[dict]]:
     """Classify effects without removing any measured owner or error.
 
-    Backend-only scope is supplied by the trusted backend caller, never inferred
-    from a process name. Retained ready demand and settled recovery are passive
-    for that action; their physical effects still appear in the other inventories.
+    Backend-only scope is supplied by the trusted backend caller, and Godot-only
+    scope by the trusted Godot recreation caller, never inferred from a process
+    name. Neither action touches Source or the semantic sidecar, so retained ready
+    demand and settled recovery are passive for both; their physical effects still
+    appear in the other inventories.
     """
+    backend_only = backend_only or godot_only
     blockers = observation.get("blockers")
     if not isinstance(blockers, dict):
         return {"measurement_failure": [{"reason": "blocker inventory is malformed"}]}, []
@@ -2106,17 +2116,19 @@ def _classify_blockers(observation: dict, *, backend_only: bool = False,
 
 
 def _coordinated_cover_refusal(coordinated: Any, authoritative: dict, *,
-                               scoped: bool) -> str | None:
+                               scoped: bool,
+                               nameable: dict[str, str] = COORDINATED_OWNER_IDENTITY) -> str | None:
     """Exact cover of the remaining authoritative owners by named coordination.
 
     Each record is the local operator's audited assertion that the named owner
-    agreed its effects are outside this backend-only action. The scope_ref is
-    an audit reference, not authentication or proof; the trust boundary is the
-    local backend caller. Anything but an exact cover of ACTIVE nameable rows
+    agreed its effects are outside this scoped action. The scope_ref is an
+    audit reference, not authentication or proof; the trust boundary is the
+    local scoped caller. Anything but an exact cover of ACTIVE nameable rows
     refuses, so an owner nobody named still vetoes.
     """
     if not scoped:
-        return "coordinated owners require the trusted backend caller and backend-only scope"
+        return ("coordinated owners require the trusted backend caller and backend-only scope, "
+                "or the trusted Godot recreation caller and godot-only scope")
     if not isinstance(coordinated, list) or not coordinated:
         return "coordinated_owners must be a non-empty list"
     named = set()
@@ -2124,14 +2136,14 @@ def _coordinated_cover_refusal(coordinated: Any, authoritative: dict, *,
         if (not isinstance(record, dict) or set(record) != {"kind", "id", "scope_ref"}
                 or not all(_nonempty_string(record[key]) for key in ("kind", "id", "scope_ref"))):
             return "coordinated owner records need exactly non-empty kind, id and scope_ref"
-        if record["kind"] not in COORDINATED_OWNER_IDENTITY:
+        if record["kind"] not in nameable:
             return f"coordinated owner kind {record['kind']!r} cannot be named"
         if (record["kind"], record["id"]) in named:
             return "coordinated owner is named twice"
         named.add((record["kind"], record["id"]))
     remaining = set()
     for kind, rows in authoritative.items():
-        field = COORDINATED_OWNER_IDENTITY.get(kind)
+        field = nameable.get(kind)
         for row in rows if isinstance(rows, list) else [rows]:
             if (field is None or not isinstance(row, dict) or row.get("status") != "active"
                     or not _nonempty_string(row.get(field))
@@ -2146,7 +2158,7 @@ def _coordinated_cover_refusal(coordinated: Any, authoritative: dict, *,
 
 
 def _valid_override(action: str, observation: dict, override: dict | None, *,
-                    backend_only: bool = False) -> tuple[bool, str]:
+                    backend_only: bool = False, godot_only: bool = False) -> tuple[bool, str]:
     if not isinstance(override, dict):
         return False, "no audited override supplied"
     if "_invalid_override" in override:  # a reserved refusal: presence, never truthiness
@@ -2167,14 +2179,20 @@ def _valid_override(action: str, observation: dict, override: dict | None, *,
         return False, "override expiry must include a timezone"
     if expires <= datetime.now(UTC):
         return False, "override has expired"
+    if override.get("backend_only") is True and override.get("godot_only") is True:
+        return False, "backend-only and godot-only scopes are mutually exclusive"
     requested_scope = override.get("backend_only", False)
     if type(requested_scope) is not bool or (requested_scope and not backend_only):
         return False, "backend-only override requires the trusted backend caller"
+    requested_godot = override.get("godot_only", False)
+    if type(requested_godot) is not bool or (requested_godot and not godot_only):
+        return False, "godot-only override requires the trusted Godot recreation caller"
     controller = override.get("deployment_attempt_id")
     if controller is not None:
         matches = [row for row in observation.get("registered_external_owners", [])
                    if row.get("attempt_id") == controller]
-        if (not requested_scope or not _nonempty_string(controller) or len(matches) != 1
+        if (not (requested_scope or requested_godot) or not _nonempty_string(controller)
+                or len(matches) != 1
                 or matches[0].get("project_id") != "aitelier"
                 or not str(matches[0].get("node_key", "")).startswith("deployment.")
                 or matches[0].get("status") not in {"active", "paused", "unknown"}
@@ -2183,15 +2201,18 @@ def _valid_override(action: str, observation: dict, override: dict | None, *,
                          or override["actor"] != "driver:" + matches[0]["owner_driver_id"]))):
             return False, "deployment controller must match the exact recorded owner and audited actor"
     authoritative, unknown_owners = _classify_blockers(
-        observation, backend_only=requested_scope, deployment_attempt_id=controller,
-        actor=override["actor"])
+        observation, backend_only=requested_scope, godot_only=requested_godot,
+        deployment_attempt_id=controller, actor=override["actor"])
     if "coordinated_owners" in override:
         refusal = _coordinated_cover_refusal(
             override["coordinated_owners"], authoritative,
-            scoped=requested_scope and backend_only)
+            scoped=(requested_scope and backend_only) or (requested_godot and godot_only),
+            nameable=(GODOT_COORDINATED_OWNER_IDENTITY if requested_godot
+                      else COORDINATED_OWNER_IDENTITY))
         if refusal is not None:
             return False, refusal
-    elif (requested_scope or override.get("acknowledge_unknown") is True) and authoritative:
+    elif (requested_scope or requested_godot
+          or override.get("acknowledge_unknown") is True) and authoritative:
         return False, ("unknown-ownership override cannot bypass authoritative active owners: "
                        + ", ".join(sorted(authoritative)))
     if (unknown_owners or observation.get("errors")) \
@@ -2201,17 +2222,23 @@ def _valid_override(action: str, observation: dict, override: dict | None, *,
 
 
 def authorize(action: str, observation: dict, *, journal: Path | str | None = None,
-              override: dict | None = None, backend_only: bool = False) -> dict:
+              override: dict | None = None, backend_only: bool = False,
+              godot_only: bool = False) -> dict:
     """Authorize a deployment action, persisting every refusal or override.
 
     This is a trusted local API. Audit strings are not authentication. Only the
-    existing authenticated host backend path supplies backend_only=True; its
-    decision must also explicitly request that scope against this inventory.
+    existing authenticated host backend path supplies backend_only=True, and only
+    the Godot-only recreation path supplies godot_only=True; its decision must
+    also explicitly request that same scope against this inventory.
     """
     if action not in DEPLOY_ACTIONS:
         raise ValueError(f"unknown deployment action {action!r}")
     if type(backend_only) is not bool:
         raise ValueError("backend_only must be an explicit boolean")
+    if type(godot_only) is not bool:
+        raise ValueError("godot_only must be an explicit boolean")
+    if backend_only and godot_only:
+        raise ValueError("backend_only and godot_only callers are mutually exclusive")
     try:
         observation_value = _plain_json_snapshot(observation)
         observation_snapshot_error = None
@@ -2256,11 +2283,13 @@ def authorize(action: str, observation: dict, *, journal: Path | str | None = No
             return {"allowed": True, "replayed": False, "event": event}
         else:
             valid, reason = _valid_override(
-                action, observation_value, override_value, backend_only=backend_only)
+                action, observation_value, override_value, backend_only=backend_only,
+                godot_only=godot_only)
         if valid:
             scoped_backend = override_value.get("backend_only") is True
+            scoped_godot = override_value.get("godot_only") is True
             authoritative, unknown_owners = _classify_blockers(
-                observation_value, backend_only=scoped_backend,
+                observation_value, backend_only=scoped_backend, godot_only=scoped_godot,
                 deployment_attempt_id=override_value.get("deployment_attempt_id"),
                 actor=override_value["actor"])
             unknown_scope = override_value.get("acknowledge_unknown") is True
@@ -2272,7 +2301,8 @@ def authorize(action: str, observation: dict, *, journal: Path | str | None = No
                                        "audit": {"actor": override_value["actor"],
                                                  "reason": override_value["reason"],
                                                  "ticket": override_value["ticket"],
-                                                 **({"backend_only": True,
+                                                 **({("backend_only" if scoped_backend
+                                                      else "godot_only"): True,
                                                      "deployment_attempt_id": override_value.get("deployment_attempt_id"),
                                                      "deployment_controller_identity": (
                                                          "recorded_owner" if any(
@@ -2283,7 +2313,7 @@ def authorize(action: str, observation: dict, *, journal: Path | str | None = No
                                                              for row in observation_value["registered_external_owners"])
                                                          else "unknown" if override_value.get("deployment_attempt_id")
                                                          else "not_declared")}
-                                                    if scoped_backend else {}),
+                                                    if scoped_backend or scoped_godot else {}),
                                                  **({"override_scope": "quiescent_restriction",
                                                      "affected_ownership": []}
                                                     if quiet else

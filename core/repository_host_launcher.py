@@ -416,7 +416,7 @@ def handle_request(cfg: dict, raw: bytes, conn: socket.socket | None = None) -> 
                             raise LaunchRefused("coding shell requires its pinned self-contained private Git view")
                         fields = validate_request(cfg, request)
                     result = _run_docker(cfg, {**fields, "git_mounts": mounts}, conn)
-                except CleanupUnconfirmed:
+                except (CleanupUnconfirmed, OSError, subprocess.TimeoutExpired):
                     uncertain = True
                     raise
                 finally:
@@ -425,7 +425,7 @@ def handle_request(cfg: dict, raw: bytes, conn: socket.socket | None = None) -> 
     except (LaunchRefused, IsolationUnavailable, OSError, subprocess.TimeoutExpired) as exc:
         response = {"ok": False, "error": str(exc)}
         if shell:
-            response["physical_quiet"] = not isinstance(exc, CleanupUnconfirmed)
+            response["physical_quiet"] = not isinstance(exc, (CleanupUnconfirmed, OSError, subprocess.TimeoutExpired))
         return response
     response = {"ok": True, "result": result, "git": git}
     if shell:

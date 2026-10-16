@@ -16,6 +16,9 @@ from skillflow import PipelineGraph, SkillFlow
 from core import coding_shell as shell, repository_executor as ex, run_isolation as ri
 from core.db_manager import DBManager
 
+pytestmark = pytest.mark.skipif("OWNED_SHELL_FIXTURE" not in os.environ,
+                               reason="requires the owned stdlib-launcher test controller")
+
 
 def wait_file(path, timeout=30):
     deadline = time.monotonic() + timeout

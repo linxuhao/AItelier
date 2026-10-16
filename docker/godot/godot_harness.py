@@ -4144,13 +4144,19 @@ def check_gdscript(files: list[str], timeout: int = 120) -> dict:
 # hand-rolled GDScript runner prints. The exit code alone is NOT enough: Godot
 # exits 0 on an uncaught script error, so a suite that printed FAILED and died
 # would otherwise be recorded as a pass.
-_FAILURE_MARKERS = ("SCRIPT ERROR", "Stack frames", "--- Debugging parse error",
+_FAILURE_MARKERS = ("Stack frames", "--- Debugging parse error",
                     "FAILED:", "FAIL:", "ASSERT FAILED", "Assertion failed")
+# A SCRIPT ERROR is a RECORD the engine prints at the start of a line (the same
+# shape `_SCRIPT_ERR` parses), not a phrase: a passing suite whose explanation
+# quotes the rejected counterexample ("... raw error in suite process: SCRIPT
+# ERROR: ...") mentions it mid-line and must stay green.
+_SCRIPT_ERROR_RECORD = re.compile(r"^SCRIPT ERROR:", re.MULTILINE)
 
 
 def _has_failure_marker(out: str, err: str) -> bool:
     blob = (out or "") + (err or "")
-    return any(m in blob for m in _FAILURE_MARKERS)
+    return (any(m in blob for m in _FAILURE_MARKERS)
+            or any(_SCRIPT_ERROR_RECORD.search(stream or "") for stream in (out, err)))
 
 
 _GD_LITERALS = re.compile(

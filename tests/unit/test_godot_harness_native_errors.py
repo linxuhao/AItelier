@@ -28,6 +28,7 @@ its pass decision — not just the regex helper.
 import importlib.util
 import json
 import subprocess
+import pytest
 from pathlib import Path
 
 _HARNESS = Path(__file__).resolve().parents[2] / "docker" / "godot" / "godot_harness.py"
@@ -361,3 +362,50 @@ def test_the_playtest_summary_names_the_debt_it_is_not_gating_on():
 
     assert "Native engine errors (recorded, not gating)" in md
     assert "exit_leak" in md and "resources still in use at exit" in md
+
+
+# ── SCRIPT ERROR is a record, not a mention ────────────────────────────────
+# The c64 contract envelope: 27 cases PASS, rc 0, no engine error line — and
+# red, because its explanation quoted the rejected startup-error counterexample
+# with the literal words. Driven through run_script, the path the caller reads.
+_QUOTED = ("PASS contract case 27/27\n"
+           "PASS envelope: raw error in suite process: SCRIPT ERROR: was "
+           "correctly rejected as a counterexample\n")
+_RECORD = ("SCRIPT ERROR: Parse Error: Identifier \"foo\" not declared.\n"
+           "          at: GDScript::reload (res://tests/test_encounter.gd:12)\n")
+
+
+def test_a_quoted_script_error_in_a_passing_explanation_stays_green(monkeypatch, tmp_path):
+    report = _script_report(monkeypatch, tmp_path, "", stdout=_QUOTED)
+    result = report["results"][0]
+    assert result["returncode"] == 0 and result["errors"] == []
+    assert result["passed"] is True and report["passed"] is True
+    assert gh._has_failure_marker(_QUOTED, "") is False
+
+
+@pytest.mark.parametrize("where", ["stdout", "stderr"])
+def test_a_genuine_script_error_record_fails_even_with_rc_zero_and_pass(monkeypatch, tmp_path, where):
+    kw = ({"stdout": "PASS contract\n" + _RECORD} if where == "stdout"
+          else {"stderr": _RECORD})
+    report = _script_report(monkeypatch, tmp_path, kw.pop("stderr", ""), **kw)
+    result = report["results"][0]
+    assert result["returncode"] == 0
+    assert result["passed"] is False and report["passed"] is False
+
+
+def test_a_script_error_record_with_a_quoted_mention_beside_it_still_fails(monkeypatch, tmp_path):
+    report = _script_report(monkeypatch, tmp_path, _RECORD, stdout=_QUOTED)
+    assert report["results"][0]["passed"] is False
+
+
+def test_a_record_first_on_stderr_is_not_hidden_by_stdout_without_a_newline(monkeypatch, tmp_path):
+    report = _script_report(monkeypatch, tmp_path, _RECORD, stdout="PASS all")
+    assert report["results"][0]["passed"] is False
+
+
+def test_the_other_failure_markers_and_exit_code_are_unchanged(monkeypatch, tmp_path):
+    for out in ("FAILED: x\n", "FAIL: x\n", "ASSERT FAILED\n", "Assertion failed\n"):
+        assert gh._has_failure_marker(out, "") is True
+    assert gh._has_failure_marker("", "Stack frames\n") is True
+    assert gh._has_failure_marker("", "--- Debugging parse error\n") is True
+    assert _script_report(monkeypatch, tmp_path, "", rc=1)["results"][0]["passed"] is False

@@ -115,7 +115,7 @@ def test_actual_unretired_operations_never_allow_diagnostic_rows(live, monkeypat
         if case == "unknown":
             # Fault at the OS liveness observation only; actual SDK audit and
             # recorded admitted operation still supply the eligibility result.
-            monkeypatch.setattr("skillflow.core.owner_is_dead", lambda owner: None)
+            monkeypatch.setattr("skillflow.identity.owner_is_dead", lambda owner: None)
     try:
         result = live.sf.fail_run(rid, "owned operation has not retired")
         audit = live.sf.audit_operation_owners(rid)

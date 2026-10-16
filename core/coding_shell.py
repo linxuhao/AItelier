@@ -20,7 +20,7 @@ def _detail(binding):
 
 def _claim_binding(run, step, token, isolation):
     from core.repository_executor import IsolationUnavailable
-    if (not run or run.get("status") != "running" or not run.get("graph_version")
+    if (not run or run.get("status") != "running" or run.get("cancel_requested_at") or not run.get("graph_version")
             or not run.get("graph_digest") or not isolation
             or isolation.get("mode") != "worktree" or isolation.get("released_at")
             or isolation.get("project_id") != run.get("project_id")
@@ -156,7 +156,7 @@ def validate_host_grant(cfg, request, repo, project_id):
             raise ValueError("ambiguous/missing current run, claim, ownership or admission")
         run, step, isolation, adm = runs[0], steps[0], owned[0], admissions[0]
         # No SDK constructor/private operation API on the host service.
-        if (run["status"] != "running" or run["project_id"] != project_id
+        if (run["status"] != "running" or run["cancel_requested_at"] or run["project_id"] != project_id
                 or run["current_node"] != grant["step_id"]
                 or any(run[k] != grant[k] for k in ("graph_name", "graph_version", "graph_digest"))
                 or not run["graph_version"] or not run["graph_digest"]

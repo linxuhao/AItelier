@@ -104,6 +104,11 @@ assert not pathlib.Path(SOURCE).exists()
 for p in (OUTSIDE,DB,ENGINE,LAUNCHER,'/var/run/docker.sock','/run/aitelier-secrets'):
  assert not pathlib.Path(p).exists(),p
 assert not {'ROOT_TEST_SECRET','AITELIER_ADMIN_TOKEN','OPENAI_API_KEY'} & os.environ.keys()
+fds=[]
+for fd in os.listdir('/proc/self/fd'):
+ try:fds.append(os.readlink('/proc/self/fd/'+fd))
+ except FileNotFoundError:pass
+assert not any(link.startswith('socket:') for link in fds),fds
 assert pathlib.Path('/sys/fs/cgroup/memory.max').read_text().strip()=='2147483648'
 assert pathlib.Path('/sys/fs/cgroup/cpu.max').read_text().strip()=='200000 100000'
 assert pathlib.Path('/sys/fs/cgroup/pids.max').read_text().strip()=='512'
@@ -231,6 +236,10 @@ def test_actual_host_refuses_changed_scope_or_extra_authority(runtime):
                "args": ["/bin/sh", "-c", command], "timeout": 5,
                "profile": shell.PROFILE, "coding_grant": packet}
     cfg = json.loads((root / "config.json").read_text())
+    for changed_cfg in ({**cfg, "coding_shell_entry_sha256": "0" * 64},
+                        {k: v for k, v in cfg.items() if k != "coding_shell_engine_db"}):
+        with pytest.raises(host.LaunchRefused, match="operator|Source"):
+            host.validate_request(changed_cfg, request)
     cases = []
     for field in ("run_id", "project_id", "step_id", "step_instance_id", "claimed_by", "base_sha", "graph_digest", "admission_owner"):
         changed = json.loads(json.dumps(request))

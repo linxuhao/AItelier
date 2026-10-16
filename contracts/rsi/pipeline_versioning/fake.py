@@ -1,295 +1,231 @@
-"""Standalone loud fake of the pipeline-versioning contract (statement phase).
+"""Standalone loud fake of the r2 pipeline-versioning contract.
 
-Pure stdlib, no YAML, no filesystem, no registry, no model service. It states
-the contract in executable form; it does NOT establish real host behaviour and
-is not a substitute for the real provider. See README.md for the semantics.
+Pure stdlib, no YAML, filesystem, registry, SDK or model service. It states
+the contract in executable form for downstream tests; it does NOT establish
+real host behaviour and is not a substitute for the native binding.
+
+Two objects share one in-memory ``FakeHost``:
+
+* ``FakeVersions`` is the versioning API (capture/list/read/current/restore).
+  It has no run, pin or finish method.
+* ``FakeFixture`` models what the host does OUTSIDE the versioning API: tool
+  files, ordinary target registration, and the SDK run lifecycle (a run pins
+  the graph version current at its start and keeps that version's prompts).
+  The native conformance fixture performs the same actions through the real
+  ToolLoader, registry and SDK instead.
 """
 from __future__ import annotations
 
-import base64
 import copy
 import hashlib
 import json
-import re
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Optional
 
-SCHEMA = "rsi.pipeline_version.v1"
-_VERSION_ID_RE = re.compile(r"sha256:[0-9a-f]{64}")
-_UNSET = object()
+import contract as c
 
-
-class PipelineVersionError(Exception):
-    """Base of every loud refusal. `code` is the stable, vector-visible name."""
-
-    code = "PIPELINE_VERSION_ERROR"
+TOOL_FILES = ("tool.yaml", "impl.py", "README.md")
 
 
-def _err(code: str) -> type:
-    return type(code.title().replace("_", ""), (PipelineVersionError,), {"code": code})
+def _sha(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-MalformedBundle = _err("MALFORMED_BUNDLE")
-MalformedVersionId = _err("MALFORMED_VERSION_ID")
-UnknownVersion = _err("UNKNOWN_VERSION")
-TamperedVersion = _err("TAMPERED_VERSION")
-ToolUnavailable = _err("TOOL_UNAVAILABLE")
-ToolIdentityMismatch = _err("TOOL_IDENTITY_MISMATCH")
-Conflict = _err("CONFLICT")
-NoCurrentVersion = _err("NO_CURRENT_VERSION")
-UnknownRun = _err("UNKNOWN_RUN")
-DuplicateRun = _err("DUPLICATE_RUN")
+class FakeHost:
+    """The modelled host: installed tools, generated targets, runs, seals."""
 
-ERROR_CODES = (
-    "MALFORMED_BUNDLE", "MALFORMED_VERSION_ID", "UNKNOWN_VERSION",
-    "TAMPERED_VERSION", "TOOL_UNAVAILABLE", "TOOL_IDENTITY_MISMATCH",
-    "CONFLICT", "NO_CURRENT_VERSION", "UNKNOWN_RUN", "DUPLICATE_RUN",
-)
+    def __init__(self):
+        self.tools: Dict[str, Dict[str, str]] = {}
+        self.targets: Dict[str, Dict[str, Any]] = {}
+        self.runs: Dict[str, Dict[str, Any]] = {}
+        self.seals: Dict[str, Dict[str, Any]] = {}
+        self.writes = 0
 
+    def tool_identity(self, name: str) -> Dict[str, Any]:
+        files = self.tools.get(name)
+        if not files or "tool.yaml" not in files or "impl.py" not in files:
+            raise c.ProviderUnavailable(f"unresolved tool {name!r}: no provider serves it")
+        return {"native": False,
+                "files": {f: _sha(files[f]) for f in TOOL_FILES if f in files}}
 
-def _text_bytes(value: Any, path: str) -> bytes:
-    if not isinstance(value, str):
-        raise MalformedBundle(f"{path}: expected string")
-    try:
-        return value.encode("utf-8")
-    except UnicodeEncodeError as exc:
-        raise MalformedBundle(f"{path}: not valid UTF-8 text ({exc})")
+    def resolve(self, content: Dict[str, Any]) -> Dict[str, Any]:
+        """Content as captured now: tool identities re-read from installed tools."""
+        tools = {n: self.tool_identity(n) for n in sorted(content["tools"])}
+        return {**copy.deepcopy(content), "tools": tools}
 
+    def new_unit(self, target: str) -> str:
+        self.writes += 1
+        return hashlib.sha256(f"{target}\0{self.writes}".encode()).hexdigest()
 
-def _check_json(value: Any, path: str) -> None:
-    """Only null/bool/int/str/list/str-keyed dict. Floats and tuples refused."""
-    if value is None or isinstance(value, (bool, int)):
-        return
-    if isinstance(value, str):
-        _text_bytes(value, path)
-    elif isinstance(value, list):
-        for i, item in enumerate(value):
-            _check_json(item, f"{path}[{i}]")
-    elif isinstance(value, dict):
-        for key, item in value.items():
-            _text_bytes(key, f"{path}.<key>")
-            _check_json(item, f"{path}.{key}")
-    else:
-        raise MalformedBundle(f"{path}: unsupported value type {type(value).__name__}")
+    def publish(self, target: str, content: Dict[str, Any]) -> None:
+        t = self.targets[target]
+        t["content"] = copy.deepcopy(content)
+        t["unit"] = self.new_unit(target)
+        if repr(t["graphs"][-1]) != repr(content):
+            t["graphs"].append(copy.deepcopy(content))
 
 
-def _b64(value: Any, path: str) -> str:
-    return base64.b64encode(_text_bytes(value, path)).decode("ascii")
+class FakeVersions:
+    """In-memory provider of the r2 API. Every refusal precedes every change."""
 
+    def __init__(self, host: FakeHost):
+        self._host = host
 
-def _exact_keys(obj: Any, keys: set, path: str) -> None:
-    if not isinstance(obj, dict):
-        raise MalformedBundle(f"{path}: expected object")
-    if set(obj) != keys:
-        raise MalformedBundle(
-            f"{path}: keys must be exactly {sorted(keys)}, got {sorted(map(str, obj))}")
+    canonical_bytes = staticmethod(c.canonical_bytes)
+    version_id_of = staticmethod(c.version_id_of)
 
+    def _target(self, target: Any) -> Dict[str, Any]:
+        c.check_target(target)
+        found = self._host.targets.get(target)
+        if found is None:
+            raise c.UnknownTarget(f"{target!r} is not a registered generated target")
+        return found
 
-def _payload(bundle: Any) -> Dict[str, Any]:
-    """Validate a bundle and build the canonical hashing payload."""
-    _exact_keys(bundle, {"graph", "roles", "templates"}, "bundle")
-    _check_json(bundle["graph"], "graph")
-    if not isinstance(bundle["graph"], dict):
-        raise MalformedBundle("graph: expected object")
-    roles_in, roles = bundle["roles"], {}
-    if not isinstance(roles_in, dict):
-        raise MalformedBundle("roles: expected object")
-    for name, role in roles_in.items():
-        path = f"roles.{name}"
-        _text_bytes(name, path)
-        _exact_keys(role, {"settings", "tools", "prompt"}, path)
-        _check_json(role["settings"], f"{path}.settings")
-        if not isinstance(role["settings"], dict):
-            raise MalformedBundle(f"{path}.settings: expected object")
-        if not isinstance(role["tools"], list):
-            raise MalformedBundle(f"{path}.tools: expected list")
-        tools: Dict[str, str] = {}
-        for i, tool in enumerate(role["tools"]):
-            _exact_keys(tool, {"name", "identity"}, f"{path}.tools[{i}]")
-            for field in ("name", "identity"):
-                _text_bytes(tool[field], f"{path}.tools[{i}].{field}")
-                if not tool[field]:
-                    raise MalformedBundle(f"{path}.tools[{i}].{field}: empty")
-            if tool["name"] in tools:
-                raise MalformedBundle(f"{path}.tools: duplicate tool {tool['name']!r}")
-            tools[tool["name"]] = tool["identity"]
-        roles[name] = {
-            "prompt_b64": _b64(role["prompt"], f"{path}.prompt"),
-            "settings": role["settings"],
-            "tools": [{"identity": tools[n], "name": n} for n in sorted(tools)],
-        }
-    templates_in = bundle["templates"]
-    if not isinstance(templates_in, dict):
-        raise MalformedBundle("templates: expected object")
-    templates = {}
-    for name, text in templates_in.items():
-        _text_bytes(name, "templates.<key>")
-        templates[name] = _b64(text, f"templates.{name}")
-    return {"graph": bundle["graph"], "roles": roles, "schema": SCHEMA,
-            "templates": templates}
+    def _seal(self, version_id: Any) -> Dict[str, Any]:
+        c.check_version_id(version_id)
+        seal = self._host.seals.get(version_id)
+        if seal is None:
+            raise c.UnknownVersion(f"no seal holds logical version {version_id}")
+        if seal["tampered"]:
+            raise c.TamperedVersion(f"seal {seal['physical_name']} no longer verifies")
+        return seal
 
-
-def canonical_bytes(bundle: Any) -> bytes:
-    """Canonical JSON: sorted keys, no whitespace, ASCII-escaped, UTF-8 bytes."""
-    text = json.dumps(_payload(bundle), sort_keys=True, separators=(",", ":"),
-                      ensure_ascii=True)
-    return text.encode("ascii")
-
-
-def version_id_of(bundle: Any) -> str:
-    return "sha256:" + hashlib.sha256(canonical_bytes(bundle)).hexdigest()
-
-
-def _check_id(version_id: Any) -> str:
-    if not isinstance(version_id, str) or not _VERSION_ID_RE.fullmatch(version_id):
-        raise MalformedVersionId(f"not a version id: {version_id!r}")
-    return version_id
-
-
-def _check_run_id(run_id: Any) -> None:
-    _text_bytes(run_id, "run id")
-    if not run_id:
-        raise MalformedBundle("run id: expected non-empty string")
-
-
-class FakePipelineVersionStore:
-    """In-memory history + current selection + run pins.
-
-    The store owns history; callers own every object they pass in (copied on
-    entry) and every object returned (copied on exit). There is no delete or
-    overwrite API. Every refusal happens before any state change.
-    """
-
-    capabilities = frozenset({"tamper_hook"})
-
-    def __init__(self, available_tools: Mapping[str, str]):
-        self._tools: Dict[str, str] = {}
-        self.set_available_tools(available_tools)
-        self._versions: Dict[str, Dict[str, Any]] = {}
-        self._order: List[str] = []
-        self._current: Optional[str] = None
-        self._pins: Dict[str, Dict[str, str]] = {}
-
-    # -- pure helpers (exposed so conformance can compare them) -----------
-    def canonical_form(self, bundle: Any) -> bytes:
-        return canonical_bytes(bundle)
-
-    def version_id_of(self, bundle: Any) -> str:
-        return version_id_of(bundle)
-
-    # -- tool identity registry (stand-in for the host's tool inventory) --
-    def set_available_tools(self, tools: Mapping[str, str]) -> None:
-        if not isinstance(tools, Mapping) or not all(
-                isinstance(k, str) and k and isinstance(v, str) and v
-                for k, v in tools.items()):
-            raise MalformedBundle("available tools: expected {name: identity}")
-        for name, identity in tools.items():
-            _text_bytes(name, "available tools.<name>")
-            _text_bytes(identity, "available tools.<identity>")
-        self._tools = dict(tools)
-
-    def _require_tools(self, bundle: Mapping[str, Any]) -> None:
-        for role_name in sorted(bundle["roles"]):
-            for tool in sorted(bundle["roles"][role_name]["tools"],
-                               key=lambda t: t["name"]):
-                have = self._tools.get(tool["name"])
-                if have is None:
-                    raise ToolUnavailable(
-                        f"role {role_name!r}: tool {tool['name']!r} is not available")
-                if have != tool["identity"]:
-                    raise ToolIdentityMismatch(
-                        f"role {role_name!r}: tool {tool['name']!r} identity "
-                        f"{tool['identity']!r} != available {have!r}")
-
-    def _check_expected(self, expected: Any) -> None:
-        if expected is _UNSET:
-            return
-        if expected is not None:
-            _check_id(expected)
-        if expected != self._current:
-            raise Conflict(f"expected current {expected!r}, actual {self._current!r}")
-
-    def _load(self, version_id: Any) -> Dict[str, Any]:
-        _check_id(version_id)
-        entry = self._versions.get(version_id)
-        if entry is None:
-            raise UnknownVersion(f"unknown version {version_id}")
+    def _live_id(self, t: Dict[str, Any]) -> Optional[str]:
         try:
-            actual = version_id_of(entry["bundle"])
-        except PipelineVersionError:
-            actual = None
-        if actual != version_id:
-            raise TamperedVersion(f"stored content of {version_id} no longer hashes to it")
-        return entry
+            return c.version_id_of(self._host.resolve(t["content"]))
+        except c.VersioningError:
+            return None
 
-    # -- version API -------------------------------------------------------
-    def capture(self, bundle: Any, *, expected_current: Any = _UNSET) -> Dict[str, Any]:
-        """Order: validate bundle, expected_current, tools, tamper; then commit."""
-        vid = version_id_of(bundle)
-        self._check_expected(expected_current)
-        self._require_tools(bundle)
-        created = vid not in self._versions
-        if not created:
-            self._load(vid)
-        previous = self._current
-        if created:
-            self._versions[vid] = {"seq": len(self._order) + 1,
-                                   "bundle": copy.deepcopy(bundle)}
-            self._order.append(vid)
-        self._current = vid
-        return {"version_id": vid, "created": created,
-                "previous_version_id": previous, "current_version_id": vid}
+    def capture(self, target: Any) -> Dict[str, Any]:
+        """Order: target form, known target, providers, content domain, catalog."""
+        t = self._target(target)
+        content = self._host.resolve(t["content"])
+        vid = c.version_id_of(content)
+        if vid in self._host.seals:
+            seal = self._seal(vid)
+            return {"target": target, "version_id": vid, "created": False,
+                    "physical_name": seal["physical_name"]}
+        native = hashlib.sha256(f"{target}\0{t['unit']}\0{vid}".encode()).hexdigest()
+        phys = f"{c.SEAL_PREFIX}{c.seal_slug(vid)}_{native[:16]}"
+        self._host.seals[vid] = {"content": copy.deepcopy(content), "physical_name": phys,
+                                 "bundle_identity": native, "tampered": False}
+        return {"target": target, "version_id": vid, "created": True, "physical_name": phys}
 
-    def list_versions(self) -> List[Dict[str, Any]]:
-        return [{"version_id": v, "seq": self._versions[v]["seq"],
-                 "is_current": v == self._current} for v in self._order]
+    def list_versions(self) -> List[str]:
+        for vid in self._host.seals:
+            self._seal(vid)
+        return sorted(self._host.seals)
 
     def read(self, version_id: Any) -> Dict[str, Any]:
-        entry = self._load(version_id)
-        return {"version_id": version_id, "bundle": copy.deepcopy(entry["bundle"])}
+        seal = self._seal(version_id)
+        return {"version_id": version_id, "content": copy.deepcopy(seal["content"]),
+                "native": {"physical_name": seal["physical_name"],
+                           "bundle_identity": seal["bundle_identity"]}}
 
-    def current_version(self) -> Optional[str]:
-        return self._current
+    def current(self, target: Any) -> Dict[str, Any]:
+        t = self._target(target)
+        return {"target": target, "unit_identity": t["unit"],
+                "graph_version": len(t["graphs"])}
 
-    def restore(self, version_id: Any, *, expected_current: Any = _UNSET) -> Dict[str, Any]:
-        """Order: id form, unknown, tamper, expected_current, tools; then select."""
-        entry = self._load(version_id)
-        self._check_expected(expected_current)
-        self._require_tools(entry["bundle"])
-        previous = self._current
-        self._current = version_id  # selection only; history and pins untouched
-        return {"version_id": version_id, "previous_version_id": previous,
-                "changed": previous != version_id}
+    def restore(self, target: Any, version_id: Any, *, expected_current: Any) -> Dict[str, Any]:
+        """Order: version form, target form, CAS form, known target, known
+        version, tamper, CAS, no-op, providers; then one whole-unit change."""
+        c.check_version_id(version_id)
+        c.check_target(target)
+        c.check_unit_identity(expected_current)
+        t = self._target(target)
+        seal = self._seal(version_id)
+        if t["unit"] != expected_current:
+            raise c.Conflict(f"target {target!r} is {t['unit'][:12]}, "
+                             f"not expected {expected_current[:12]}")
+        previous = t["unit"]
+        if self._live_id(t) == version_id:
+            return {"target": target, "version_id": version_id, "changed": False,
+                    "previous_unit_identity": previous, "unit_identity": previous}
+        for name, want in seal["content"]["tools"].items():
+            if self._host.tool_identity(name) != want:
+                raise c.ProviderChanged(f"tool {name!r} changed since capture")
+        self._host.publish(target, seal["content"])
+        t["recorded"] = True
+        return {"target": target, "version_id": version_id, "changed": True,
+                "previous_unit_identity": previous, "unit_identity": t["unit"]}
 
-    # -- run pins ------------------------------------------------------------
-    def pin_run(self, run_id: Any) -> str:
-        _check_run_id(run_id)
-        if run_id in self._pins:
-            raise DuplicateRun(f"run {run_id!r} already pinned")
-        if self._current is None:
-            raise NoCurrentVersion("no version selected to pin")
-        self._pins[run_id] = {"version_id": self._current, "state": "running"}
-        return self._current
 
-    def finish_run(self, run_id: Any) -> None:
-        _check_run_id(run_id)
-        if run_id not in self._pins:
-            raise UnknownRun(f"unknown run {run_id!r}")
-        self._pins[run_id]["state"] = "finished"  # pin is retained, never removed
+class FakeFixture:
+    """Host actions outside the versioning API (tools, registration, runs)."""
 
-    def run_pin(self, run_id: Any) -> str:
-        _check_run_id(run_id)
-        if run_id not in self._pins:
-            raise UnknownRun(f"unknown run {run_id!r}")
-        return self._pins[run_id]["version_id"]
+    def __init__(self, host: FakeHost):
+        self._host = host
 
-    def list_pins(self) -> Dict[str, Dict[str, str]]:
-        return copy.deepcopy(self._pins)
+    def install_tool(self, name: str, files: Dict[str, str]) -> None:
+        self._host.tools[name] = dict(files)
 
-    # -- optional conformance capability "tamper_hook" ----------------------
-    def _tamper_for_test(self, version_id: str, bundle: Any) -> None:
-        """Replace with a valid bundle without re-keying (simulates corruption)."""
-        _check_id(version_id)
-        if version_id not in self._versions:
-            raise UnknownVersion(f"unknown version {version_id}")
-        _payload(bundle)
-        self._versions[version_id]["bundle"] = copy.deepcopy(bundle)
+    def remove_tool(self, name: str) -> None:
+        self._host.tools.pop(name)
+
+    def register(self, target: str, unit: Dict[str, Any], content: Dict[str, Any]) -> None:
+        """Ordinary generated-config registration. ``content`` is the vector's
+        statement of what registering ``unit`` resolves to; the native fixture
+        registers ``unit`` itself and conformance compares the capture."""
+        c.check_target(target)
+        t = self._host.targets.get(target)
+        if t is not None and t.get("recorded"):
+            raise AssertionError(f"{target} is a recorded whole bundle; not edited in place")
+        if t is None:
+            self._host.targets[target] = {
+                "graphs": [copy.deepcopy(content)], "recorded": False,
+                "content": copy.deepcopy(content), "unit": self._host.new_unit(target)}
+        else:
+            self._host.publish(target, content)
+
+    def start_run(self, run: str, target: str) -> int:
+        t = self._host.targets[target]
+        self._host.runs[run] = {"target": target, "status": "running",
+                                "graph_version": len(t["graphs"]),
+                                "content": copy.deepcopy(t["content"])}
+        return len(t["graphs"])
+
+    def pause_run(self, run: str) -> None:
+        self._host.runs[run]["status"] = "paused"
+
+    def complete_run(self, run: str) -> None:
+        self._host.runs[run]["status"] = "completed"
+
+    def observe_runs(self) -> Dict[str, Any]:
+        out = {}
+        for key, r in self._host.runs.items():
+            roles = r["content"]["roles"]
+            out[key] = {"status": r["status"], "graph_version": r["graph_version"],
+                        "prompts": {n: roles[n]["prompt"]
+                                    for n in sorted(set(c.agent_refs(r["content"]["graph"])))}}
+        return out
+
+    def claim_prompt(self, run: str) -> Dict[str, Any]:
+        r = self._host.runs[run]
+        if r["status"] not in ("running", "paused"):
+            raise AssertionError(f"run {run} is {r['status']}")
+        r["status"] = "running"
+        graph = r["content"]["graph"]
+        step = next(s for s in graph["steps"] if s["id"] == graph["begin"])
+        return {"step": step["id"],
+                "prompt": r["content"]["roles"][step["agent_config"]]["prompt"]}
+
+    def tamper_seal(self, version_id: str) -> None:
+        self._host.seals[version_id]["tampered"] = True
+
+    def snapshot(self) -> str:
+        return json.dumps({
+            "tools": self._host.tools,
+            "targets": {k: {"unit": t["unit"], "graphs": len(t["graphs"]),
+                            "content": repr(t["content"])}
+                        for k, t in self._host.targets.items()},
+            "runs": {k: [r["status"], r["graph_version"]] for k, r in self._host.runs.items()},
+            "seals": {k: [s["physical_name"], s["tampered"], repr(s["content"])]
+                      for k, s in self._host.seals.items()}}, sort_keys=True)
+
+    def close(self) -> None:
+        pass
+
+
+def make_fake_world():
+    host = FakeHost()
+    return FakeVersions(host), FakeFixture(host)

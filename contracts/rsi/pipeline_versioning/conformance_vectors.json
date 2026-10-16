@@ -1,267 +1,4268 @@
 {
-  "schema": "rsi.pipeline_versioning.vectors.v1",
-  "note": "Literal vectors. Ids are written as $id:<bundle> and resolved with the provider's own version_id_of; canonical_vectors pin the exact bytes and the sha256 independently. Ops and expectation grammar: README.md 'Vector grammar'. Statement only: not yet executed.",
-  "default_tools": {"focused_check": "tool:focused_check@1", "run_tests": "tool:run_tests@1"},
-  "bundles": {
-    "E": {"graph": {}, "roles": {}, "templates": {}},
-    "S": {"graph": {"nodes": ["a"]}, "roles": {"a": {"settings": {}, "tools": [], "prompt": "p"}}, "templates": {}},
-    "U": {"graph": {"note": "\u00e9"}, "roles": {}, "templates": {}},
-    "T": {"graph": {}, "roles": {"a": {"settings": {}, "tools": [{"name": "z", "identity": "i2"}, {"name": "b", "identity": "i1"}], "prompt": "p"}}, "templates": {}},
-    "A": {
-      "graph": {"nodes": ["plan", "implement"], "edges": [["plan", "implement"]]},
-      "roles": {
-        "implement": {"settings": {"max_turns": 200, "model": "sonnet-5.5"}, "tools": [{"name": "focused_check", "identity": "tool:focused_check@1"}, {"name": "run_tests", "identity": "tool:run_tests@1"}], "prompt": "You implement the plan.\n"},
-        "plan": {"settings": {"max_turns": 50, "model": "sonnet-5.5"}, "tools": [], "prompt": "You plan.\n"}
-      },
-      "templates": {"plan.md": "# Plan\n"}
-    },
-    "A_reordered": {
-      "templates": {"plan.md": "# Plan\n"},
-      "roles": {
-        "plan": {"prompt": "You plan.\n", "tools": [], "settings": {"model": "sonnet-5.5", "max_turns": 50}},
-        "implement": {"prompt": "You implement the plan.\n", "tools": [{"identity": "tool:run_tests@1", "name": "run_tests"}, {"identity": "tool:focused_check@1", "name": "focused_check"}], "settings": {"model": "sonnet-5.5", "max_turns": 200}}
-      },
-      "graph": {"edges": [["plan", "implement"]], "nodes": ["plan", "implement"]}
-    },
-    "A_prompt": {
-      "graph": {"nodes": ["plan", "implement"], "edges": [["plan", "implement"]]},
-      "roles": {
-        "implement": {"settings": {"max_turns": 200, "model": "sonnet-5.5"}, "tools": [{"name": "focused_check", "identity": "tool:focused_check@1"}, {"name": "run_tests", "identity": "tool:run_tests@1"}], "prompt": "You implement the plan.\n\n"},
-        "plan": {"settings": {"max_turns": 50, "model": "sonnet-5.5"}, "tools": [], "prompt": "You plan.\n"}
-      },
-      "templates": {"plan.md": "# Plan\n"}
-    },
-    "A_setting": {
-      "graph": {"nodes": ["plan", "implement"], "edges": [["plan", "implement"]]},
-      "roles": {
-        "implement": {"settings": {"max_turns": 201, "model": "sonnet-5.5"}, "tools": [{"name": "focused_check", "identity": "tool:focused_check@1"}, {"name": "run_tests", "identity": "tool:run_tests@1"}], "prompt": "You implement the plan.\n"},
-        "plan": {"settings": {"max_turns": 50, "model": "sonnet-5.5"}, "tools": [], "prompt": "You plan.\n"}
-      },
-      "templates": {"plan.md": "# Plan\n"}
-    },
-    "A_graph": {
-      "graph": {"nodes": ["plan", "implement"], "edges": []},
-      "roles": {
-        "implement": {"settings": {"max_turns": 200, "model": "sonnet-5.5"}, "tools": [{"name": "focused_check", "identity": "tool:focused_check@1"}, {"name": "run_tests", "identity": "tool:run_tests@1"}], "prompt": "You implement the plan.\n"},
-        "plan": {"settings": {"max_turns": 50, "model": "sonnet-5.5"}, "tools": [], "prompt": "You plan.\n"}
-      },
-      "templates": {"plan.md": "# Plan\n"}
-    },
-    "A_template": {
-      "graph": {"nodes": ["plan", "implement"], "edges": [["plan", "implement"]]},
-      "roles": {
-        "implement": {"settings": {"max_turns": 200, "model": "sonnet-5.5"}, "tools": [{"name": "focused_check", "identity": "tool:focused_check@1"}, {"name": "run_tests", "identity": "tool:run_tests@1"}], "prompt": "You implement the plan.\n"},
-        "plan": {"settings": {"max_turns": 50, "model": "sonnet-5.5"}, "tools": [], "prompt": "You plan.\n"}
-      },
-      "templates": {"plan.md": "# Plan v2\n"}
-    },
-    "A_tool_identity": {
-      "graph": {"nodes": ["plan", "implement"], "edges": [["plan", "implement"]]},
-      "roles": {
-        "implement": {"settings": {"max_turns": 200, "model": "sonnet-5.5"}, "tools": [{"name": "focused_check", "identity": "tool:focused_check@2"}, {"name": "run_tests", "identity": "tool:run_tests@1"}], "prompt": "You implement the plan.\n"},
-        "plan": {"settings": {"max_turns": 50, "model": "sonnet-5.5"}, "tools": [], "prompt": "You plan.\n"}
-      },
-      "templates": {"plan.md": "# Plan\n"}
-    },
-    "G": {"graph": {}, "roles": {"a": {"settings": {}, "tools": [{"name": "ghost_tool", "identity": "tool:ghost_tool@1"}], "prompt": "p"}}, "templates": {}},
-    "M_float": {"graph": {}, "roles": {"a": {"settings": {"temperature": 0.5}, "tools": [], "prompt": "p"}}, "templates": {}},
-    "M_pointer": {"graph": {}, "roles": {"a": {"settings": {}, "tools": [], "prompt_path": "prompts/a.md"}}, "templates": {}},
-    "M_no_templates": {"graph": {}, "roles": {}},
-    "M_extra_key": {"graph": {}, "roles": {}, "templates": {}, "notes": "x"},
-    "M_not_object": [],
-    "M_dup_tool": {"graph": {}, "roles": {"a": {"settings": {}, "tools": [{"name": "run_tests", "identity": "tool:run_tests@1"}, {"name": "run_tests", "identity": "tool:run_tests@1"}], "prompt": "p"}}, "templates": {}},
-    "M_graph_array": {"graph": [], "roles": {}, "templates": {}},
-    "M_roles_array": {"graph": {}, "roles": [], "templates": {}},
-    "M_role_null": {"graph": {}, "roles": {"r": null}, "templates": {}},
-    "M_settings_array": {"graph": {}, "roles": {"r": {"settings": [], "tools": [], "prompt": "p"}}, "templates": {}},
-    "M_tools_object": {"graph": {}, "roles": {"r": {"settings": {}, "tools": {}, "prompt": "p"}}, "templates": {}},
-    "M_tool_name_array": {"graph": {}, "roles": {"r": {"settings": {}, "tools": [{"name": [], "identity": "i"}], "prompt": "p"}}, "templates": {}},
-    "M_templates_array": {"graph": {}, "roles": {}, "templates": []},
-    "M_template_null": {"graph": {}, "roles": {}, "templates": {"t": null}},
-    "M_invalid_utf8": {"graph": {"value": "\ud800"}, "roles": {}, "templates": {}}
+ "schema": "rsi.pipeline_versioning.vectors.v2",
+ "note": "Literal r2 vectors shared verbatim by the standalone fake and the native binding. 'units' are what the fixture registers (outside the versioning API) as generated configs ($self = the target name); 'unit_contents' states the logical content each registration resolves to; 'ids' and 'canonical' pin the exact projection. Grammar: README.md.",
+ "tools": {
+  "fx_probe@1": {
+   "name": "fx_probe",
+   "files": {
+    "tool.yaml": "name: fx_probe\ndescription: versioning fixture probe\nparameters: {}\n",
+    "impl.py": "MESSAGE = 'fixture probe v1'\n\n\ndef fx_probe(**kw):\n    return {'content': MESSAGE}\n"
+   }
   },
-  "canonical_vectors": [
-    {"bundle": "E", "canonical": "{\"graph\":{},\"roles\":{},\"schema\":\"rsi.pipeline_version.v1\",\"templates\":{}}"},
-    {"bundle": "S", "canonical": "{\"graph\":{\"nodes\":[\"a\"]},\"roles\":{\"a\":{\"prompt_b64\":\"cA==\",\"settings\":{},\"tools\":[]}},\"schema\":\"rsi.pipeline_version.v1\",\"templates\":{}}"},
-    {"bundle": "U", "canonical": "{\"graph\":{\"note\":\"\\u00e9\"},\"roles\":{},\"schema\":\"rsi.pipeline_version.v1\",\"templates\":{}}"},
-    {"bundle": "T", "canonical": "{\"graph\":{},\"roles\":{\"a\":{\"prompt_b64\":\"cA==\",\"settings\":{},\"tools\":[{\"identity\":\"i1\",\"name\":\"b\"},{\"identity\":\"i2\",\"name\":\"z\"}]}},\"schema\":\"rsi.pipeline_version.v1\",\"templates\":{}}"}
-  ],
-  "zero_id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
-  "scenarios": [
-    {"name": "capture_creates_then_noop_creates_nothing", "steps": [
-      {"op": "capture", "bundle": "A", "expect": {"result_subset": {"version_id": "$id:A", "created": true, "previous_version_id": null, "current_version_id": "$id:A"}}},
-      {"op": "capture", "bundle": "A_reordered", "expect": {"result_subset": {"version_id": "$id:A", "created": false}}},
-      {"op": "capture", "bundle": "A", "expect": {"result_subset": {"created": false, "previous_version_id": "$id:A"}}},
-      {"op": "list", "expect": {"result": [{"version_id": "$id:A", "seq": 1, "is_current": true}]}}
-    ]},
-    {"name": "resolved_prompt_settings_graph_template_changes_make_versions", "steps": [
-      {"op": "capture", "bundle": "A", "expect": {"result_subset": {"created": true}}},
-      {"op": "capture", "bundle": "A_prompt", "expect": {"result_subset": {"created": true, "previous_version_id": "$id:A"}}},
-      {"op": "capture", "bundle": "A_setting", "expect": {"result_subset": {"created": true}}},
-      {"op": "capture", "bundle": "A_graph", "expect": {"result_subset": {"created": true}}},
-      {"op": "capture", "bundle": "A_template", "expect": {"result_subset": {"created": true}}},
-      {"op": "list", "expect": {"result": [
-        {"version_id": "$id:A", "seq": 1, "is_current": false},
-        {"version_id": "$id:A_prompt", "seq": 2, "is_current": false},
-        {"version_id": "$id:A_setting", "seq": 3, "is_current": false},
-        {"version_id": "$id:A_graph", "seq": 4, "is_current": false},
-        {"version_id": "$id:A_template", "seq": 5, "is_current": true}]}}
-    ]},
-    {"name": "read_and_inputs_cannot_mutate_history", "steps": [
-      {"op": "capture_then_mutate_input", "bundle": "A", "expect": {"result_subset": {"created": true}}},
-      {"op": "read", "version_id": "$id:A", "expect": {"result": {"version_id": "$id:A", "bundle": "$bundle:A"}}},
-      {"op": "mutate_read", "version_id": "$id:A"},
-      {"op": "read", "version_id": "$id:A", "expect": {"result": {"version_id": "$id:A", "bundle": "$bundle:A"}}},
-      {"op": "current", "expect": {"result": "$id:A"}}
-    ]},
-    {"name": "restore_selects_without_touching_history", "steps": [
-      {"op": "capture", "bundle": "A"},
-      {"op": "capture", "bundle": "A_prompt"},
-      {"op": "restore", "version_id": "$id:A", "expect": {"result": {"version_id": "$id:A", "previous_version_id": "$id:A_prompt", "changed": true}}},
-      {"op": "current", "expect": {"result": "$id:A"}},
-      {"op": "restore", "version_id": "$id:A", "expect": {"result": {"version_id": "$id:A", "previous_version_id": "$id:A", "changed": false}}},
-      {"op": "list", "expect": {"result": [{"version_id": "$id:A", "seq": 1, "is_current": true}, {"version_id": "$id:A_prompt", "seq": 2, "is_current": false}]}}
-    ]},
-    {"name": "unknown_and_malformed_version_refused", "steps": [
-      {"op": "capture", "bundle": "A"},
-      {"op": "restore", "version_id": "$zero", "expect": {"error": "UNKNOWN_VERSION"}},
-      {"op": "read", "version_id": "$zero", "expect": {"error": "UNKNOWN_VERSION"}},
-      {"op": "restore", "version_id": "not-a-version", "expect": {"error": "MALFORMED_VERSION_ID"}},
-      {"op": "read", "version_id": 123, "expect": {"error": "MALFORMED_VERSION_ID"}},
-      {"op": "restore", "version_id": null, "expect": {"error": "MALFORMED_VERSION_ID"}}
-    ]},
-    {"name": "missing_or_mismatched_tools_refuse_before_change", "steps": [
-      {"op": "capture", "bundle": "G", "expect": {"error": "TOOL_UNAVAILABLE"}},
-      {"op": "capture", "bundle": "A_tool_identity", "expect": {"error": "TOOL_IDENTITY_MISMATCH"}},
-      {"op": "list", "expect": {"result": []}},
-      {"op": "capture", "bundle": "A"},
-      {"op": "capture", "bundle": "S"},
-      {"op": "set_tools", "tools": {"focused_check": "tool:focused_check@1"}},
-      {"op": "restore", "version_id": "$id:A", "expect": {"error": "TOOL_UNAVAILABLE"}},
-      {"op": "set_tools", "tools": {"focused_check": "tool:focused_check@9", "run_tests": "tool:run_tests@1"}},
-      {"op": "restore", "version_id": "$id:A", "expect": {"error": "TOOL_IDENTITY_MISMATCH"}},
-      {"op": "current", "expect": {"result": "$id:S"}},
-      {"op": "read", "version_id": "$id:A", "expect": {"result_subset": {"version_id": "$id:A"}}}
-    ]},
-    {"name": "malformed_bundles_refused", "steps": [
-      {"op": "capture", "bundle": "M_float", "expect": {"error": "MALFORMED_BUNDLE"}},
-      {"op": "capture", "bundle": "M_pointer", "expect": {"error": "MALFORMED_BUNDLE"}},
-      {"op": "capture", "bundle": "M_no_templates", "expect": {"error": "MALFORMED_BUNDLE"}},
-      {"op": "capture", "bundle": "M_extra_key", "expect": {"error": "MALFORMED_BUNDLE"}},
-      {"op": "capture", "bundle": "M_not_object", "expect": {"error": "MALFORMED_BUNDLE"}},
-      {"op": "capture", "bundle": "M_dup_tool", "expect": {"error": "MALFORMED_BUNDLE"}},
-      {"op": "list", "expect": {"result": []}},
-      {"op": "current", "expect": {"result": null}}
-    ]},
-    {"name": "expected_current_conflict_refused", "steps": [
-      {"op": "capture", "bundle": "A"},
-      {"op": "capture", "bundle": "S", "expected_current": "$null", "expect": {"error": "CONFLICT"}},
-      {"op": "capture", "bundle": "S", "expected_current": "$id:A", "expect": {"result_subset": {"created": true}}},
-      {"op": "restore", "version_id": "$id:A", "expected_current": "$id:A", "expect": {"error": "CONFLICT"}},
-      {"op": "restore", "version_id": "$id:A", "expected_current": "bogus", "expect": {"error": "MALFORMED_VERSION_ID"}},
-      {"op": "restore", "version_id": "$id:A", "expected_current": "$id:S", "expect": {"result_subset": {"changed": true}}}
-    ]},
-    {"name": "tampered_version_refused", "requires": ["tamper_hook"], "steps": [
-      {"op": "capture", "bundle": "A"},
-      {"op": "capture", "bundle": "S"},
-      {"op": "tamper", "version_id": "$id:A", "bundle": "S"},
-      {"op": "read", "version_id": "$id:A", "expect": {"error": "TAMPERED_VERSION"}},
-      {"op": "restore", "version_id": "$id:A", "expect": {"error": "TAMPERED_VERSION"}},
-      {"op": "capture", "bundle": "A", "expect": {"error": "TAMPERED_VERSION"}},
-      {"op": "read", "version_id": "$id:S", "expect": {"result": {"version_id": "$id:S", "bundle": "$bundle:S"}}}
-    ]},
-    {"name": "restore_never_repins_running_runs", "steps": [
-      {"op": "pin_run", "run_id": "r0", "expect": {"error": "NO_CURRENT_VERSION"}},
-      {"op": "capture", "bundle": "A"},
-      {"op": "pin_run", "run_id": "r1", "expect": {"result": "$id:A"}},
-      {"op": "capture", "bundle": "A_prompt"},
-      {"op": "pin_run", "run_id": "r2", "expect": {"result": "$id:A_prompt"}},
-      {"op": "restore", "version_id": "$id:A"},
-      {"op": "run_pin", "run_id": "r1", "expect": {"result": "$id:A"}},
-      {"op": "run_pin", "run_id": "r2", "expect": {"result": "$id:A_prompt"}},
-      {"op": "restore", "version_id": "$id:A_prompt"},
-      {"op": "finish_run", "run_id": "r1"},
-      {"op": "run_pin", "run_id": "r1", "expect": {"result": "$id:A"}},
-      {"op": "list_pins", "expect": {"result": {"r1": {"version_id": "$id:A", "state": "finished"}, "r2": {"version_id": "$id:A_prompt", "state": "running"}}}},
-      {"op": "read", "version_id": "$id:A", "expect": {"result_subset": {"version_id": "$id:A"}}},
-      {"op": "pin_run", "run_id": "r1", "expect": {"error": "DUPLICATE_RUN"}},
-      {"op": "run_pin", "run_id": "nope", "expect": {"error": "UNKNOWN_RUN"}},
-      {"op": "finish_run", "run_id": "nope", "expect": {"error": "UNKNOWN_RUN"}}
-    ]},
-    {"name": "refused_restore_leaves_pins_and_selection", "steps": [
-      {"op": "capture", "bundle": "A"},
-      {"op": "pin_run", "run_id": "r1", "expect": {"result": "$id:A"}},
-      {"op": "capture", "bundle": "S"},
-      {"op": "set_tools", "tools": {}},
-      {"op": "restore", "version_id": "$id:A", "expect": {"error": "TOOL_UNAVAILABLE"}},
-      {"op": "current", "expect": {"result": "$id:S"}},
-      {"op": "run_pin", "run_id": "r1", "expect": {"result": "$id:A"}}
-    ]},
-    {"name": "malformed_run_ids_refuse_before_lookup", "steps": [
-      {"op": "capture", "bundle": "A"},
-      {"op": "pin_run", "run_id": "r-existing"},
-      {"op": "pin_run", "run_id": [], "expect": {"error": "MALFORMED_BUNDLE"}},
-      {"op": "pin_run", "run_id": {}, "expect": {"error": "MALFORMED_BUNDLE"}},
-      {"op": "pin_run", "run_id": null, "expect": {"error": "MALFORMED_BUNDLE"}},
-      {"op": "pin_run", "run_id": true, "expect": {"error": "MALFORMED_BUNDLE"}},
-      {"op": "pin_run", "run_id": 0, "expect": {"error": "MALFORMED_BUNDLE"}},
-      {"op": "pin_run", "run_id": "", "expect": {"error": "MALFORMED_BUNDLE"}},
-      {"op": "pin_run", "run_id": "\ud800", "expect": {"error": "MALFORMED_BUNDLE"}},
-      {"op": "run_pin", "run_id": [], "expect": {"error": "MALFORMED_BUNDLE"}},
-      {"op": "run_pin", "run_id": {}, "expect": {"error": "MALFORMED_BUNDLE"}},
-      {"op": "run_pin", "run_id": null, "expect": {"error": "MALFORMED_BUNDLE"}},
-      {"op": "run_pin", "run_id": true, "expect": {"error": "MALFORMED_BUNDLE"}},
-      {"op": "run_pin", "run_id": 0, "expect": {"error": "MALFORMED_BUNDLE"}},
-      {"op": "run_pin", "run_id": "", "expect": {"error": "MALFORMED_BUNDLE"}},
-      {"op": "run_pin", "run_id": "\ud800", "expect": {"error": "MALFORMED_BUNDLE"}},
-      {"op": "finish_run", "run_id": [], "expect": {"error": "MALFORMED_BUNDLE"}},
-      {"op": "finish_run", "run_id": {}, "expect": {"error": "MALFORMED_BUNDLE"}},
-      {"op": "finish_run", "run_id": null, "expect": {"error": "MALFORMED_BUNDLE"}},
-      {"op": "finish_run", "run_id": true, "expect": {"error": "MALFORMED_BUNDLE"}},
-      {"op": "finish_run", "run_id": 0, "expect": {"error": "MALFORMED_BUNDLE"}},
-      {"op": "finish_run", "run_id": "", "expect": {"error": "MALFORMED_BUNDLE"}},
-      {"op": "finish_run", "run_id": "\ud800", "expect": {"error": "MALFORMED_BUNDLE"}},
-      {"op": "run_pin", "run_id": "r-existing", "expect": {"result": "$id:A"}},
-      {"op": "list_pins", "expect": {"result": {"r-existing": {"version_id": "$id:A", "state": "running"}}}}
-    ]},
-    {"name": "whole_string_version_ids", "steps": [
-      {"op": "capture", "bundle": "A"},
-      {"op": "read", "version_id": "sha256:0000000000000000000000000000000000000000000000000000000000000000\n", "expect": {"error": "MALFORMED_VERSION_ID"}},
-      {"op": "restore", "version_id": "sha256:0000000000000000000000000000000000000000000000000000000000000000\n", "expect": {"error": "MALFORMED_VERSION_ID"}},
-      {"op": "read", "version_id": "sha256:0000000000000000000000000000000000000000000000000000000000000000x", "expect": {"error": "MALFORMED_VERSION_ID"}},
-      {"op": "restore", "version_id": "sha256:0000000000000000000000000000000000000000000000000000000000000000x", "expect": {"error": "MALFORMED_VERSION_ID"}},
-      {"op": "read", "version_id": " sha256:0000000000000000000000000000000000000000000000000000000000000000", "expect": {"error": "MALFORMED_VERSION_ID"}},
-      {"op": "restore", "version_id": " sha256:0000000000000000000000000000000000000000000000000000000000000000", "expect": {"error": "MALFORMED_VERSION_ID"}},
-      {"op": "read", "version_id": [], "expect": {"error": "MALFORMED_VERSION_ID"}},
-      {"op": "restore", "version_id": [], "expect": {"error": "MALFORMED_VERSION_ID"}},
-      {"op": "read", "version_id": {}, "expect": {"error": "MALFORMED_VERSION_ID"}},
-      {"op": "restore", "version_id": {}, "expect": {"error": "MALFORMED_VERSION_ID"}},
-      {"op": "read", "version_id": false, "expect": {"error": "MALFORMED_VERSION_ID"}},
-      {"op": "restore", "version_id": false, "expect": {"error": "MALFORMED_VERSION_ID"}},
-      {"op": "capture", "expected_current": "sha256:0000000000000000000000000000000000000000000000000000000000000000\n", "expect": {"error": "MALFORMED_VERSION_ID"}, "bundle": "S"},
-      {"op": "restore", "expected_current": "sha256:0000000000000000000000000000000000000000000000000000000000000000\n", "expect": {"error": "MALFORMED_VERSION_ID"}, "version_id": "$id:A"}
-    ]},
-    {"name": "tool_inventory_invalid_text_is_atomic", "steps": [
-      {"op": "capture", "bundle": "A"},
-      {"op": "set_tools", "tools": {"run_tests": "\ud800"}, "expect": {"error": "MALFORMED_BUNDLE"}},
-      {"op": "restore", "version_id": "$id:A", "expect": {"result_subset": {"changed": false}}}
-    ]},
-    {"name": "tamper_hook_input_domain", "requires": ["tamper_hook"], "steps": [
-      {"op": "capture", "bundle": "A"},
-      {"op": "tamper", "version_id": [], "bundle": "S", "expect": {"error": "MALFORMED_VERSION_ID"}},
-      {"op": "tamper", "version_id": "$id:A", "bundle": "M_not_object", "expect": {"error": "MALFORMED_BUNDLE"}},
-      {"op": "read", "version_id": "$id:A", "expect": {"result_subset": {"bundle": "$bundle:A"}}}
-    ]},
-    {"name": "malformed_json_bundle_shapes", "steps": [
-      {"op": "capture", "bundle": "M_graph_array", "expect": {"error": "MALFORMED_BUNDLE"}},
-      {"op": "capture", "bundle": "M_roles_array", "expect": {"error": "MALFORMED_BUNDLE"}},
-      {"op": "capture", "bundle": "M_role_null", "expect": {"error": "MALFORMED_BUNDLE"}},
-      {"op": "capture", "bundle": "M_settings_array", "expect": {"error": "MALFORMED_BUNDLE"}},
-      {"op": "capture", "bundle": "M_tools_object", "expect": {"error": "MALFORMED_BUNDLE"}},
-      {"op": "capture", "bundle": "M_tool_name_array", "expect": {"error": "MALFORMED_BUNDLE"}},
-      {"op": "capture", "bundle": "M_templates_array", "expect": {"error": "MALFORMED_BUNDLE"}},
-      {"op": "capture", "bundle": "M_template_null", "expect": {"error": "MALFORMED_BUNDLE"}},
-      {"op": "capture", "bundle": "M_invalid_utf8", "expect": {"error": "MALFORMED_BUNDLE"}}
-    ]}
+  "fx_probe@2": {
+   "name": "fx_probe",
+   "files": {
+    "tool.yaml": "name: fx_probe\ndescription: versioning fixture probe\nparameters: {}\n",
+    "impl.py": "MESSAGE = 'fixture probe v2'\n\n\ndef fx_probe(**kw):\n    return {'content': MESSAGE}\n"
+   }
+  }
+ },
+ "units": {
+  "U_A": {
+   "graph": {
+    "name": "$self",
+    "description": "versioning fixture pipeline",
+    "begin": "make",
+    "end_conditions": {
+     "combinator": "or",
+     "conditions": [
+      {
+       "type": "node_reached",
+       "node": "review",
+       "result": "completed"
+      }
+     ]
+    },
+    "steps": [
+     {
+      "id": "make",
+      "step_type": "agent",
+      "agent_config": "$self__maker",
+      "context": [
+       {
+        "source": {
+         "config": "$self",
+         "output": "task.md"
+        }
+       }
+      ],
+      "output": {
+       "mode": "content",
+       "fixed": {
+        "draft": "draft.md"
+       }
+      },
+      "transitions": [
+       {
+        "to": "review"
+       }
+      ]
+     },
+     {
+      "id": "review",
+      "step_type": "agent",
+      "agent_config": "$self__reviewer",
+      "output": {
+       "mode": "content",
+       "fixed": {
+        "verdict": "verdict.md"
+       }
+      },
+      "transitions": [
+       {
+        "to": null
+       }
+      ]
+     }
+    ]
+   },
+   "roles": {
+    "$self__maker": {
+     "model": "flash",
+     "tools": [
+      "fx_probe"
+     ],
+     "system_prompt": "OLD MAKER\n",
+     "temperature": 0.7,
+     "thinking": {
+      "enable": true,
+      "effort": "high"
+     },
+     "max_tool_turns": 11
+    },
+    "$self__reviewer": {
+     "model": "pro",
+     "tools": [],
+     "system_prompt": "REVIEWER\n",
+     "temperature": 0.2,
+     "thinking": {
+      "enable": true
+     }
+    }
+   }
+  },
+  "U_A_prompt": {
+   "graph": {
+    "name": "$self",
+    "description": "versioning fixture pipeline",
+    "begin": "make",
+    "end_conditions": {
+     "combinator": "or",
+     "conditions": [
+      {
+       "type": "node_reached",
+       "node": "review",
+       "result": "completed"
+      }
+     ]
+    },
+    "steps": [
+     {
+      "id": "make",
+      "step_type": "agent",
+      "agent_config": "$self__maker",
+      "context": [
+       {
+        "source": {
+         "config": "$self",
+         "output": "task.md"
+        }
+       }
+      ],
+      "output": {
+       "mode": "content",
+       "fixed": {
+        "draft": "draft.md"
+       }
+      },
+      "transitions": [
+       {
+        "to": "review"
+       }
+      ]
+     },
+     {
+      "id": "review",
+      "step_type": "agent",
+      "agent_config": "$self__reviewer",
+      "output": {
+       "mode": "content",
+       "fixed": {
+        "verdict": "verdict.md"
+       }
+      },
+      "transitions": [
+       {
+        "to": null
+       }
+      ]
+     }
+    ]
+   },
+   "roles": {
+    "$self__maker": {
+     "model": "flash",
+     "tools": [
+      "fx_probe"
+     ],
+     "system_prompt": "NEW MAKER\n",
+     "temperature": 0.7,
+     "thinking": {
+      "enable": true,
+      "effort": "high"
+     },
+     "max_tool_turns": 11
+    },
+    "$self__reviewer": {
+     "model": "pro",
+     "tools": [],
+     "system_prompt": "REVIEWER\n",
+     "temperature": 0.2,
+     "thinking": {
+      "enable": true
+     }
+    }
+   }
+  },
+  "U_A_graph": {
+   "graph": {
+    "name": "$self",
+    "description": "versioning fixture pipeline v2",
+    "begin": "make",
+    "end_conditions": {
+     "combinator": "or",
+     "conditions": [
+      {
+       "type": "node_reached",
+       "node": "review",
+       "result": "completed"
+      }
+     ]
+    },
+    "steps": [
+     {
+      "id": "make",
+      "step_type": "agent",
+      "agent_config": "$self__maker",
+      "context": [
+       {
+        "source": {
+         "config": "$self",
+         "output": "task.md"
+        }
+       }
+      ],
+      "output": {
+       "mode": "content",
+       "fixed": {
+        "draft": "draft.md"
+       }
+      },
+      "transitions": [
+       {
+        "to": "review"
+       }
+      ]
+     },
+     {
+      "id": "review",
+      "step_type": "agent",
+      "agent_config": "$self__reviewer",
+      "output": {
+       "mode": "content",
+       "fixed": {
+        "verdict": "verdict.md"
+       }
+      },
+      "transitions": [
+       {
+        "to": null
+       }
+      ]
+     }
+    ]
+   },
+   "roles": {
+    "$self__maker": {
+     "model": "flash",
+     "tools": [
+      "fx_probe"
+     ],
+     "system_prompt": "OLD MAKER\n",
+     "temperature": 0.7,
+     "thinking": {
+      "enable": true,
+      "effort": "high"
+     },
+     "max_tool_turns": 11
+    },
+    "$self__reviewer": {
+     "model": "pro",
+     "tools": [],
+     "system_prompt": "REVIEWER\n",
+     "temperature": 0.2,
+     "thinking": {
+      "enable": true
+     }
+    }
+   }
+  },
+  "U_B": {
+   "graph": {
+    "name": "$self",
+    "description": "versioning fixture pipeline",
+    "begin": "make",
+    "end_conditions": {
+     "combinator": "or",
+     "conditions": [
+      {
+       "type": "node_reached",
+       "node": "review",
+       "result": "completed"
+      }
+     ]
+    },
+    "steps": [
+     {
+      "id": "make",
+      "step_type": "agent",
+      "agent_config": "$self__maker",
+      "context": [
+       {
+        "source": {
+         "config": "$self",
+         "output": "task.md"
+        }
+       }
+      ],
+      "output": {
+       "mode": "content",
+       "fixed": {
+        "draft": "draft.md"
+       }
+      },
+      "transitions": [
+       {
+        "to": "review"
+       }
+      ]
+     },
+     {
+      "id": "review",
+      "step_type": "agent",
+      "agent_config": "$self__reviewer",
+      "output": {
+       "mode": "content",
+       "fixed": {
+        "verdict": "verdict.md"
+       }
+      },
+      "transitions": [
+       {
+        "to": null
+       }
+      ]
+     }
+    ]
+   },
+   "roles": {
+    "$self__maker": {
+     "model": "flash",
+     "tools": [],
+     "system_prompt": "B MAKER\n",
+     "temperature": 0.5,
+     "thinking": {
+      "enable": true
+     }
+    },
+    "$self__reviewer": {
+     "model": "pro",
+     "tools": [],
+     "system_prompt": "REVIEWER\n",
+     "temperature": 0.2,
+     "thinking": {
+      "enable": true
+     }
+    }
+   }
+  },
+  "U_int": {
+   "graph": {
+    "name": "$self",
+    "description": "versioning fixture pipeline",
+    "begin": "make",
+    "end_conditions": {
+     "combinator": "or",
+     "conditions": [
+      {
+       "type": "node_reached",
+       "node": "review",
+       "result": "completed"
+      }
+     ]
+    },
+    "steps": [
+     {
+      "id": "make",
+      "step_type": "agent",
+      "agent_config": "$self__maker",
+      "context": [
+       {
+        "source": {
+         "config": "$self",
+         "output": "task.md"
+        }
+       }
+      ],
+      "output": {
+       "mode": "content",
+       "fixed": {
+        "draft": "draft.md"
+       }
+      },
+      "transitions": [
+       {
+        "to": "review"
+       }
+      ]
+     },
+     {
+      "id": "review",
+      "step_type": "agent",
+      "agent_config": "$self__reviewer",
+      "output": {
+       "mode": "content",
+       "fixed": {
+        "verdict": "verdict.md"
+       }
+      },
+      "transitions": [
+       {
+        "to": null
+       }
+      ]
+     }
+    ]
+   },
+   "roles": {
+    "$self__maker": {
+     "model": "flash",
+     "tools": [],
+     "system_prompt": "B MAKER\n",
+     "temperature": 1,
+     "thinking": {
+      "enable": true
+     }
+    },
+    "$self__reviewer": {
+     "model": "pro",
+     "tools": [],
+     "system_prompt": "REVIEWER\n",
+     "temperature": 0.2,
+     "thinking": {
+      "enable": true
+     }
+    }
+   }
+  },
+  "U_float": {
+   "graph": {
+    "name": "$self",
+    "description": "versioning fixture pipeline",
+    "begin": "make",
+    "end_conditions": {
+     "combinator": "or",
+     "conditions": [
+      {
+       "type": "node_reached",
+       "node": "review",
+       "result": "completed"
+      }
+     ]
+    },
+    "steps": [
+     {
+      "id": "make",
+      "step_type": "agent",
+      "agent_config": "$self__maker",
+      "context": [
+       {
+        "source": {
+         "config": "$self",
+         "output": "task.md"
+        }
+       }
+      ],
+      "output": {
+       "mode": "content",
+       "fixed": {
+        "draft": "draft.md"
+       }
+      },
+      "transitions": [
+       {
+        "to": "review"
+       }
+      ]
+     },
+     {
+      "id": "review",
+      "step_type": "agent",
+      "agent_config": "$self__reviewer",
+      "output": {
+       "mode": "content",
+       "fixed": {
+        "verdict": "verdict.md"
+       }
+      },
+      "transitions": [
+       {
+        "to": null
+       }
+      ]
+     }
+    ]
+   },
+   "roles": {
+    "$self__maker": {
+     "model": "flash",
+     "tools": [],
+     "system_prompt": "B MAKER\n",
+     "temperature": 1.0,
+     "thinking": {
+      "enable": true
+     }
+    },
+    "$self__reviewer": {
+     "model": "pro",
+     "tools": [],
+     "system_prompt": "REVIEWER\n",
+     "temperature": 0.2,
+     "thinking": {
+      "enable": true
+     }
+    }
+   }
+  },
+  "U_nan": {
+   "graph": {
+    "name": "$self",
+    "description": "versioning fixture pipeline",
+    "begin": "make",
+    "end_conditions": {
+     "combinator": "or",
+     "conditions": [
+      {
+       "type": "node_reached",
+       "node": "review",
+       "result": "completed"
+      }
+     ]
+    },
+    "steps": [
+     {
+      "id": "make",
+      "step_type": "agent",
+      "agent_config": "$self__maker",
+      "context": [
+       {
+        "source": {
+         "config": "$self",
+         "output": "task.md"
+        }
+       }
+      ],
+      "output": {
+       "mode": "content",
+       "fixed": {
+        "draft": "draft.md"
+       }
+      },
+      "transitions": [
+       {
+        "to": "review"
+       }
+      ]
+     },
+     {
+      "id": "review",
+      "step_type": "agent",
+      "agent_config": "$self__reviewer",
+      "output": {
+       "mode": "content",
+       "fixed": {
+        "verdict": "verdict.md"
+       }
+      },
+      "transitions": [
+       {
+        "to": null
+       }
+      ]
+     }
+    ]
+   },
+   "roles": {
+    "$self__maker": {
+     "model": "flash",
+     "tools": [],
+     "system_prompt": "B MAKER\n",
+     "temperature": {
+      "$float": "nan"
+     },
+     "thinking": {
+      "enable": true
+     }
+    },
+    "$self__reviewer": {
+     "model": "pro",
+     "tools": [],
+     "system_prompt": "REVIEWER\n",
+     "temperature": 0.2,
+     "thinking": {
+      "enable": true
+     }
+    }
+   }
+  },
+  "U_ghost": {
+   "graph": {
+    "name": "$self",
+    "description": "versioning fixture pipeline",
+    "begin": "make",
+    "end_conditions": {
+     "combinator": "or",
+     "conditions": [
+      {
+       "type": "node_reached",
+       "node": "review",
+       "result": "completed"
+      }
+     ]
+    },
+    "steps": [
+     {
+      "id": "make",
+      "step_type": "agent",
+      "agent_config": "$self__maker",
+      "context": [
+       {
+        "source": {
+         "config": "$self",
+         "output": "task.md"
+        }
+       }
+      ],
+      "output": {
+       "mode": "content",
+       "fixed": {
+        "draft": "draft.md"
+       }
+      },
+      "transitions": [
+       {
+        "to": "review"
+       }
+      ]
+     },
+     {
+      "id": "review",
+      "step_type": "agent",
+      "agent_config": "$self__reviewer",
+      "output": {
+       "mode": "content",
+       "fixed": {
+        "verdict": "verdict.md"
+       }
+      },
+      "transitions": [
+       {
+        "to": null
+       }
+      ]
+     }
+    ]
+   },
+   "roles": {
+    "$self__maker": {
+     "model": "flash",
+     "tools": [
+      "fx_ghost"
+     ],
+     "system_prompt": "B MAKER\n",
+     "temperature": 0.5,
+     "thinking": {
+      "enable": true
+     }
+    },
+    "$self__reviewer": {
+     "model": "pro",
+     "tools": [],
+     "system_prompt": "REVIEWER\n",
+     "temperature": 0.2,
+     "thinking": {
+      "enable": true
+     }
+    }
+   }
+  }
+ },
+ "unit_contents": {
+  "U_A": "C_A",
+  "U_A_prompt": "C_A_prompt",
+  "U_A_graph": "C_A_graph",
+  "U_B": "C_B",
+  "U_int": "C_int",
+  "U_float": "C_float",
+  "U_nan": "C_nan",
+  "U_ghost": "C_ghost"
+ },
+ "contents": {
+  "C_A": {
+   "graph": {
+    "name": "$self",
+    "description": "versioning fixture pipeline",
+    "begin": "make",
+    "end_conditions": {
+     "combinator": "or",
+     "conditions": [
+      {
+       "type": "node_reached",
+       "node": "review",
+       "result": "completed"
+      }
+     ]
+    },
+    "steps": [
+     {
+      "id": "make",
+      "step_type": "agent",
+      "agent_config": "maker",
+      "context": [
+       {
+        "source": {
+         "config": "$self",
+         "output": "task.md"
+        }
+       }
+      ],
+      "output": {
+       "mode": "content",
+       "fixed": {
+        "draft": "draft.md"
+       }
+      },
+      "transitions": [
+       {
+        "to": "review"
+       }
+      ]
+     },
+     {
+      "id": "review",
+      "step_type": "agent",
+      "agent_config": "reviewer",
+      "output": {
+       "mode": "content",
+       "fixed": {
+        "verdict": "verdict.md"
+       }
+      },
+      "transitions": [
+       {
+        "to": null
+       }
+      ]
+     }
+    ]
+   },
+   "roles": {
+    "maker": {
+     "model": "flash",
+     "tools": [
+      "fx_probe"
+     ],
+     "prompt": "OLD MAKER\n",
+     "settings": {
+      "temperature": 0.7,
+      "thinking": {
+       "enable": true,
+       "effort": "high"
+      },
+      "max_tool_turns": 11
+     }
+    },
+    "reviewer": {
+     "model": "pro",
+     "tools": [],
+     "settings": {
+      "temperature": 0.2,
+      "thinking": {
+       "enable": true
+      }
+     },
+     "prompt": "REVIEWER\n"
+    }
+   },
+   "tools": {
+    "fx_probe": {
+     "native": false,
+     "files": {
+      "impl.py": "759360efcfb284bcd38732dcd12c1fa3a62c2ca58cb8fb8b827866e998426d8e",
+      "tool.yaml": "b73ecbc4dee1d89eac4ac7d3c7b2fd0676c5bf66849e360d19d6d4ca36630818"
+     }
+    }
+   }
+  },
+  "C_A_prompt": {
+   "graph": {
+    "name": "$self",
+    "description": "versioning fixture pipeline",
+    "begin": "make",
+    "end_conditions": {
+     "combinator": "or",
+     "conditions": [
+      {
+       "type": "node_reached",
+       "node": "review",
+       "result": "completed"
+      }
+     ]
+    },
+    "steps": [
+     {
+      "id": "make",
+      "step_type": "agent",
+      "agent_config": "maker",
+      "context": [
+       {
+        "source": {
+         "config": "$self",
+         "output": "task.md"
+        }
+       }
+      ],
+      "output": {
+       "mode": "content",
+       "fixed": {
+        "draft": "draft.md"
+       }
+      },
+      "transitions": [
+       {
+        "to": "review"
+       }
+      ]
+     },
+     {
+      "id": "review",
+      "step_type": "agent",
+      "agent_config": "reviewer",
+      "output": {
+       "mode": "content",
+       "fixed": {
+        "verdict": "verdict.md"
+       }
+      },
+      "transitions": [
+       {
+        "to": null
+       }
+      ]
+     }
+    ]
+   },
+   "roles": {
+    "maker": {
+     "model": "flash",
+     "tools": [
+      "fx_probe"
+     ],
+     "prompt": "NEW MAKER\n",
+     "settings": {
+      "temperature": 0.7,
+      "thinking": {
+       "enable": true,
+       "effort": "high"
+      },
+      "max_tool_turns": 11
+     }
+    },
+    "reviewer": {
+     "model": "pro",
+     "tools": [],
+     "settings": {
+      "temperature": 0.2,
+      "thinking": {
+       "enable": true
+      }
+     },
+     "prompt": "REVIEWER\n"
+    }
+   },
+   "tools": {
+    "fx_probe": {
+     "native": false,
+     "files": {
+      "impl.py": "759360efcfb284bcd38732dcd12c1fa3a62c2ca58cb8fb8b827866e998426d8e",
+      "tool.yaml": "b73ecbc4dee1d89eac4ac7d3c7b2fd0676c5bf66849e360d19d6d4ca36630818"
+     }
+    }
+   }
+  },
+  "C_A_graph": {
+   "graph": {
+    "name": "$self",
+    "description": "versioning fixture pipeline v2",
+    "begin": "make",
+    "end_conditions": {
+     "combinator": "or",
+     "conditions": [
+      {
+       "type": "node_reached",
+       "node": "review",
+       "result": "completed"
+      }
+     ]
+    },
+    "steps": [
+     {
+      "id": "make",
+      "step_type": "agent",
+      "agent_config": "maker",
+      "context": [
+       {
+        "source": {
+         "config": "$self",
+         "output": "task.md"
+        }
+       }
+      ],
+      "output": {
+       "mode": "content",
+       "fixed": {
+        "draft": "draft.md"
+       }
+      },
+      "transitions": [
+       {
+        "to": "review"
+       }
+      ]
+     },
+     {
+      "id": "review",
+      "step_type": "agent",
+      "agent_config": "reviewer",
+      "output": {
+       "mode": "content",
+       "fixed": {
+        "verdict": "verdict.md"
+       }
+      },
+      "transitions": [
+       {
+        "to": null
+       }
+      ]
+     }
+    ]
+   },
+   "roles": {
+    "maker": {
+     "model": "flash",
+     "tools": [
+      "fx_probe"
+     ],
+     "prompt": "OLD MAKER\n",
+     "settings": {
+      "temperature": 0.7,
+      "thinking": {
+       "enable": true,
+       "effort": "high"
+      },
+      "max_tool_turns": 11
+     }
+    },
+    "reviewer": {
+     "model": "pro",
+     "tools": [],
+     "settings": {
+      "temperature": 0.2,
+      "thinking": {
+       "enable": true
+      }
+     },
+     "prompt": "REVIEWER\n"
+    }
+   },
+   "tools": {
+    "fx_probe": {
+     "native": false,
+     "files": {
+      "impl.py": "759360efcfb284bcd38732dcd12c1fa3a62c2ca58cb8fb8b827866e998426d8e",
+      "tool.yaml": "b73ecbc4dee1d89eac4ac7d3c7b2fd0676c5bf66849e360d19d6d4ca36630818"
+     }
+    }
+   }
+  },
+  "C_A_tool2": {
+   "graph": {
+    "name": "$self",
+    "description": "versioning fixture pipeline",
+    "begin": "make",
+    "end_conditions": {
+     "combinator": "or",
+     "conditions": [
+      {
+       "type": "node_reached",
+       "node": "review",
+       "result": "completed"
+      }
+     ]
+    },
+    "steps": [
+     {
+      "id": "make",
+      "step_type": "agent",
+      "agent_config": "maker",
+      "context": [
+       {
+        "source": {
+         "config": "$self",
+         "output": "task.md"
+        }
+       }
+      ],
+      "output": {
+       "mode": "content",
+       "fixed": {
+        "draft": "draft.md"
+       }
+      },
+      "transitions": [
+       {
+        "to": "review"
+       }
+      ]
+     },
+     {
+      "id": "review",
+      "step_type": "agent",
+      "agent_config": "reviewer",
+      "output": {
+       "mode": "content",
+       "fixed": {
+        "verdict": "verdict.md"
+       }
+      },
+      "transitions": [
+       {
+        "to": null
+       }
+      ]
+     }
+    ]
+   },
+   "roles": {
+    "maker": {
+     "model": "flash",
+     "tools": [
+      "fx_probe"
+     ],
+     "prompt": "OLD MAKER\n",
+     "settings": {
+      "temperature": 0.7,
+      "thinking": {
+       "enable": true,
+       "effort": "high"
+      },
+      "max_tool_turns": 11
+     }
+    },
+    "reviewer": {
+     "model": "pro",
+     "tools": [],
+     "settings": {
+      "temperature": 0.2,
+      "thinking": {
+       "enable": true
+      }
+     },
+     "prompt": "REVIEWER\n"
+    }
+   },
+   "tools": {
+    "fx_probe": {
+     "native": false,
+     "files": {
+      "impl.py": "64067c027ac4a563db849c5ef7c873b43083ef6a7a8e0896c46e56887c06fc73",
+      "tool.yaml": "b73ecbc4dee1d89eac4ac7d3c7b2fd0676c5bf66849e360d19d6d4ca36630818"
+     }
+    }
+   }
+  },
+  "C_B": {
+   "graph": {
+    "name": "$self",
+    "description": "versioning fixture pipeline",
+    "begin": "make",
+    "end_conditions": {
+     "combinator": "or",
+     "conditions": [
+      {
+       "type": "node_reached",
+       "node": "review",
+       "result": "completed"
+      }
+     ]
+    },
+    "steps": [
+     {
+      "id": "make",
+      "step_type": "agent",
+      "agent_config": "maker",
+      "context": [
+       {
+        "source": {
+         "config": "$self",
+         "output": "task.md"
+        }
+       }
+      ],
+      "output": {
+       "mode": "content",
+       "fixed": {
+        "draft": "draft.md"
+       }
+      },
+      "transitions": [
+       {
+        "to": "review"
+       }
+      ]
+     },
+     {
+      "id": "review",
+      "step_type": "agent",
+      "agent_config": "reviewer",
+      "output": {
+       "mode": "content",
+       "fixed": {
+        "verdict": "verdict.md"
+       }
+      },
+      "transitions": [
+       {
+        "to": null
+       }
+      ]
+     }
+    ]
+   },
+   "roles": {
+    "maker": {
+     "model": "flash",
+     "tools": [],
+     "prompt": "B MAKER\n",
+     "settings": {
+      "temperature": 0.5,
+      "thinking": {
+       "enable": true
+      }
+     }
+    },
+    "reviewer": {
+     "model": "pro",
+     "tools": [],
+     "settings": {
+      "temperature": 0.2,
+      "thinking": {
+       "enable": true
+      }
+     },
+     "prompt": "REVIEWER\n"
+    }
+   },
+   "tools": {}
+  },
+  "C_int": {
+   "graph": {
+    "name": "$self",
+    "description": "versioning fixture pipeline",
+    "begin": "make",
+    "end_conditions": {
+     "combinator": "or",
+     "conditions": [
+      {
+       "type": "node_reached",
+       "node": "review",
+       "result": "completed"
+      }
+     ]
+    },
+    "steps": [
+     {
+      "id": "make",
+      "step_type": "agent",
+      "agent_config": "maker",
+      "context": [
+       {
+        "source": {
+         "config": "$self",
+         "output": "task.md"
+        }
+       }
+      ],
+      "output": {
+       "mode": "content",
+       "fixed": {
+        "draft": "draft.md"
+       }
+      },
+      "transitions": [
+       {
+        "to": "review"
+       }
+      ]
+     },
+     {
+      "id": "review",
+      "step_type": "agent",
+      "agent_config": "reviewer",
+      "output": {
+       "mode": "content",
+       "fixed": {
+        "verdict": "verdict.md"
+       }
+      },
+      "transitions": [
+       {
+        "to": null
+       }
+      ]
+     }
+    ]
+   },
+   "roles": {
+    "maker": {
+     "model": "flash",
+     "tools": [],
+     "prompt": "B MAKER\n",
+     "settings": {
+      "temperature": 1,
+      "thinking": {
+       "enable": true
+      }
+     }
+    },
+    "reviewer": {
+     "model": "pro",
+     "tools": [],
+     "settings": {
+      "temperature": 0.2,
+      "thinking": {
+       "enable": true
+      }
+     },
+     "prompt": "REVIEWER\n"
+    }
+   },
+   "tools": {}
+  },
+  "C_float": {
+   "graph": {
+    "name": "$self",
+    "description": "versioning fixture pipeline",
+    "begin": "make",
+    "end_conditions": {
+     "combinator": "or",
+     "conditions": [
+      {
+       "type": "node_reached",
+       "node": "review",
+       "result": "completed"
+      }
+     ]
+    },
+    "steps": [
+     {
+      "id": "make",
+      "step_type": "agent",
+      "agent_config": "maker",
+      "context": [
+       {
+        "source": {
+         "config": "$self",
+         "output": "task.md"
+        }
+       }
+      ],
+      "output": {
+       "mode": "content",
+       "fixed": {
+        "draft": "draft.md"
+       }
+      },
+      "transitions": [
+       {
+        "to": "review"
+       }
+      ]
+     },
+     {
+      "id": "review",
+      "step_type": "agent",
+      "agent_config": "reviewer",
+      "output": {
+       "mode": "content",
+       "fixed": {
+        "verdict": "verdict.md"
+       }
+      },
+      "transitions": [
+       {
+        "to": null
+       }
+      ]
+     }
+    ]
+   },
+   "roles": {
+    "maker": {
+     "model": "flash",
+     "tools": [],
+     "prompt": "B MAKER\n",
+     "settings": {
+      "temperature": 1.0,
+      "thinking": {
+       "enable": true
+      }
+     }
+    },
+    "reviewer": {
+     "model": "pro",
+     "tools": [],
+     "settings": {
+      "temperature": 0.2,
+      "thinking": {
+       "enable": true
+      }
+     },
+     "prompt": "REVIEWER\n"
+    }
+   },
+   "tools": {}
+  },
+  "C_nan": {
+   "graph": {
+    "name": "$self",
+    "description": "versioning fixture pipeline",
+    "begin": "make",
+    "end_conditions": {
+     "combinator": "or",
+     "conditions": [
+      {
+       "type": "node_reached",
+       "node": "review",
+       "result": "completed"
+      }
+     ]
+    },
+    "steps": [
+     {
+      "id": "make",
+      "step_type": "agent",
+      "agent_config": "maker",
+      "context": [
+       {
+        "source": {
+         "config": "$self",
+         "output": "task.md"
+        }
+       }
+      ],
+      "output": {
+       "mode": "content",
+       "fixed": {
+        "draft": "draft.md"
+       }
+      },
+      "transitions": [
+       {
+        "to": "review"
+       }
+      ]
+     },
+     {
+      "id": "review",
+      "step_type": "agent",
+      "agent_config": "reviewer",
+      "output": {
+       "mode": "content",
+       "fixed": {
+        "verdict": "verdict.md"
+       }
+      },
+      "transitions": [
+       {
+        "to": null
+       }
+      ]
+     }
+    ]
+   },
+   "roles": {
+    "maker": {
+     "model": "flash",
+     "tools": [],
+     "prompt": "B MAKER\n",
+     "settings": {
+      "temperature": {
+       "$float": "nan"
+      },
+      "thinking": {
+       "enable": true
+      }
+     }
+    },
+    "reviewer": {
+     "model": "pro",
+     "tools": [],
+     "settings": {
+      "temperature": 0.2,
+      "thinking": {
+       "enable": true
+      }
+     },
+     "prompt": "REVIEWER\n"
+    }
+   },
+   "tools": {}
+  },
+  "C_ghost": {
+   "graph": {
+    "name": "$self",
+    "description": "versioning fixture pipeline",
+    "begin": "make",
+    "end_conditions": {
+     "combinator": "or",
+     "conditions": [
+      {
+       "type": "node_reached",
+       "node": "review",
+       "result": "completed"
+      }
+     ]
+    },
+    "steps": [
+     {
+      "id": "make",
+      "step_type": "agent",
+      "agent_config": "maker",
+      "context": [
+       {
+        "source": {
+         "config": "$self",
+         "output": "task.md"
+        }
+       }
+      ],
+      "output": {
+       "mode": "content",
+       "fixed": {
+        "draft": "draft.md"
+       }
+      },
+      "transitions": [
+       {
+        "to": "review"
+       }
+      ]
+     },
+     {
+      "id": "review",
+      "step_type": "agent",
+      "agent_config": "reviewer",
+      "output": {
+       "mode": "content",
+       "fixed": {
+        "verdict": "verdict.md"
+       }
+      },
+      "transitions": [
+       {
+        "to": null
+       }
+      ]
+     }
+    ]
+   },
+   "roles": {
+    "maker": {
+     "model": "flash",
+     "tools": [
+      "fx_ghost"
+     ],
+     "prompt": "B MAKER\n",
+     "settings": {
+      "temperature": 0.5,
+      "thinking": {
+       "enable": true
+      }
+     }
+    },
+    "reviewer": {
+     "model": "pro",
+     "tools": [],
+     "settings": {
+      "temperature": 0.2,
+      "thinking": {
+       "enable": true
+      }
+     },
+     "prompt": "REVIEWER\n"
+    }
+   },
+   "tools": {
+    "fx_ghost": {
+     "native": false,
+     "files": {}
+    }
+   }
+  },
+  "C_A_reordered": {
+   "tools": {
+    "fx_probe": {
+     "files": {
+      "impl.py": "759360efcfb284bcd38732dcd12c1fa3a62c2ca58cb8fb8b827866e998426d8e",
+      "tool.yaml": "b73ecbc4dee1d89eac4ac7d3c7b2fd0676c5bf66849e360d19d6d4ca36630818"
+     },
+     "native": false
+    }
+   },
+   "roles": {
+    "maker": {
+     "model": "flash",
+     "prompt": "OLD MAKER\n",
+     "settings": {
+      "max_tool_turns": 11,
+      "temperature": 0.7,
+      "thinking": {
+       "effort": "high",
+       "enable": true
+      }
+     },
+     "tools": [
+      "fx_probe"
+     ]
+    },
+    "reviewer": {
+     "model": "pro",
+     "prompt": "REVIEWER\n",
+     "settings": {
+      "temperature": 0.2,
+      "thinking": {
+       "enable": true
+      }
+     },
+     "tools": []
+    }
+   },
+   "graph": {
+    "begin": "make",
+    "description": "versioning fixture pipeline",
+    "end_conditions": {
+     "combinator": "or",
+     "conditions": [
+      {
+       "node": "review",
+       "result": "completed",
+       "type": "node_reached"
+      }
+     ]
+    },
+    "name": "$self",
+    "steps": [
+     {
+      "agent_config": "maker",
+      "context": [
+       {
+        "source": {
+         "config": "$self",
+         "output": "task.md"
+        }
+       }
+      ],
+      "id": "make",
+      "output": {
+       "fixed": {
+        "draft": "draft.md"
+       },
+       "mode": "content"
+      },
+      "step_type": "agent",
+      "transitions": [
+       {
+        "to": "review"
+       }
+      ]
+     },
+     {
+      "agent_config": "reviewer",
+      "id": "review",
+      "output": {
+       "fixed": {
+        "verdict": "verdict.md"
+       },
+       "mode": "content"
+      },
+      "step_type": "agent",
+      "transitions": [
+       {
+        "to": null
+       }
+      ]
+     }
+    ]
+   }
+  }
+ },
+ "ids": {
+  "C_A": "sha256:f6a83c5e654f0f63f8e5b4f3f7570dbc6f7613b21ea1dd72ba433885d2fca3a2",
+  "C_A_prompt": "sha256:f947521d23337872e5098e8acaf6cf489e9f39759e47a81dd3aa51ca93c09e70",
+  "C_A_graph": "sha256:94cb5b104b29cd9ac296df4eaa9b617f378947b775f1d8585c29f7c0c9aee83f",
+  "C_A_tool2": "sha256:89b962b21a3eb8efdd621c7072e6e58405a2d1f6ea1ca9c9325c6ed8d4339b77",
+  "C_B": "sha256:8847719d163c112dc865bbb18c1119221cc420bc07cc2cfb2ce795d91f03cd22",
+  "C_int": "sha256:de2a21de4492b9afe9f1e5d157ca93235232dfc7567bc71f87e49dea4f760fb1",
+  "C_float": "sha256:3865974bb699867b21729a536a216ce79617f3241a7c3f6d82e5c76df6e86d72",
+  "C_A_reordered": "sha256:f6a83c5e654f0f63f8e5b4f3f7570dbc6f7613b21ea1dd72ba433885d2fca3a2"
+ },
+ "canonical": {
+  "C_A": "{\"graph\":{\"begin\":\"make\",\"description\":\"versioning fixture pipeline\",\"end_conditions\":{\"combinator\":\"or\",\"conditions\":[{\"node\":\"review\",\"result\":\"completed\",\"type\":\"node_reached\"}]},\"name\":\"$self\",\"steps\":[{\"agent_config\":\"maker\",\"context\":[{\"source\":{\"config\":\"$self\",\"output\":\"task.md\"}}],\"id\":\"make\",\"output\":{\"fixed\":{\"draft\":\"draft.md\"},\"mode\":\"content\"},\"step_type\":\"agent\",\"transitions\":[{\"to\":\"review\"}]},{\"agent_config\":\"reviewer\",\"id\":\"review\",\"output\":{\"fixed\":{\"verdict\":\"verdict.md\"},\"mode\":\"content\"},\"step_type\":\"agent\",\"transitions\":[{\"to\":null}]}]},\"roles\":{\"maker\":{\"model\":\"flash\",\"prompt\":\"OLD MAKER\\n\",\"settings\":{\"max_tool_turns\":11,\"temperature\":0.7,\"thinking\":{\"effort\":\"high\",\"enable\":true}},\"tools\":[\"fx_probe\"]},\"reviewer\":{\"model\":\"pro\",\"prompt\":\"REVIEWER\\n\",\"settings\":{\"temperature\":0.2,\"thinking\":{\"enable\":true}},\"tools\":[]}},\"schema\":\"rsi.pipeline_version.v2\",\"tools\":{\"fx_probe\":{\"files\":{\"impl.py\":\"759360efcfb284bcd38732dcd12c1fa3a62c2ca58cb8fb8b827866e998426d8e\",\"tool.yaml\":\"b73ecbc4dee1d89eac4ac7d3c7b2fd0676c5bf66849e360d19d6d4ca36630818\"},\"native\":false}}}",
+  "C_B": "{\"graph\":{\"begin\":\"make\",\"description\":\"versioning fixture pipeline\",\"end_conditions\":{\"combinator\":\"or\",\"conditions\":[{\"node\":\"review\",\"result\":\"completed\",\"type\":\"node_reached\"}]},\"name\":\"$self\",\"steps\":[{\"agent_config\":\"maker\",\"context\":[{\"source\":{\"config\":\"$self\",\"output\":\"task.md\"}}],\"id\":\"make\",\"output\":{\"fixed\":{\"draft\":\"draft.md\"},\"mode\":\"content\"},\"step_type\":\"agent\",\"transitions\":[{\"to\":\"review\"}]},{\"agent_config\":\"reviewer\",\"id\":\"review\",\"output\":{\"fixed\":{\"verdict\":\"verdict.md\"},\"mode\":\"content\"},\"step_type\":\"agent\",\"transitions\":[{\"to\":null}]}]},\"roles\":{\"maker\":{\"model\":\"flash\",\"prompt\":\"B MAKER\\n\",\"settings\":{\"temperature\":0.5,\"thinking\":{\"enable\":true}},\"tools\":[]},\"reviewer\":{\"model\":\"pro\",\"prompt\":\"REVIEWER\\n\",\"settings\":{\"temperature\":0.2,\"thinking\":{\"enable\":true}},\"tools\":[]}},\"schema\":\"rsi.pipeline_version.v2\",\"tools\":{}}",
+  "C_int": "{\"graph\":{\"begin\":\"make\",\"description\":\"versioning fixture pipeline\",\"end_conditions\":{\"combinator\":\"or\",\"conditions\":[{\"node\":\"review\",\"result\":\"completed\",\"type\":\"node_reached\"}]},\"name\":\"$self\",\"steps\":[{\"agent_config\":\"maker\",\"context\":[{\"source\":{\"config\":\"$self\",\"output\":\"task.md\"}}],\"id\":\"make\",\"output\":{\"fixed\":{\"draft\":\"draft.md\"},\"mode\":\"content\"},\"step_type\":\"agent\",\"transitions\":[{\"to\":\"review\"}]},{\"agent_config\":\"reviewer\",\"id\":\"review\",\"output\":{\"fixed\":{\"verdict\":\"verdict.md\"},\"mode\":\"content\"},\"step_type\":\"agent\",\"transitions\":[{\"to\":null}]}]},\"roles\":{\"maker\":{\"model\":\"flash\",\"prompt\":\"B MAKER\\n\",\"settings\":{\"temperature\":1,\"thinking\":{\"enable\":true}},\"tools\":[]},\"reviewer\":{\"model\":\"pro\",\"prompt\":\"REVIEWER\\n\",\"settings\":{\"temperature\":0.2,\"thinking\":{\"enable\":true}},\"tools\":[]}},\"schema\":\"rsi.pipeline_version.v2\",\"tools\":{}}",
+  "C_float": "{\"graph\":{\"begin\":\"make\",\"description\":\"versioning fixture pipeline\",\"end_conditions\":{\"combinator\":\"or\",\"conditions\":[{\"node\":\"review\",\"result\":\"completed\",\"type\":\"node_reached\"}]},\"name\":\"$self\",\"steps\":[{\"agent_config\":\"maker\",\"context\":[{\"source\":{\"config\":\"$self\",\"output\":\"task.md\"}}],\"id\":\"make\",\"output\":{\"fixed\":{\"draft\":\"draft.md\"},\"mode\":\"content\"},\"step_type\":\"agent\",\"transitions\":[{\"to\":\"review\"}]},{\"agent_config\":\"reviewer\",\"id\":\"review\",\"output\":{\"fixed\":{\"verdict\":\"verdict.md\"},\"mode\":\"content\"},\"step_type\":\"agent\",\"transitions\":[{\"to\":null}]}]},\"roles\":{\"maker\":{\"model\":\"flash\",\"prompt\":\"B MAKER\\n\",\"settings\":{\"temperature\":1.0,\"thinking\":{\"enable\":true}},\"tools\":[]},\"reviewer\":{\"model\":\"pro\",\"prompt\":\"REVIEWER\\n\",\"settings\":{\"temperature\":0.2,\"thinking\":{\"enable\":true}},\"tools\":[]}},\"schema\":\"rsi.pipeline_version.v2\",\"tools\":{}}"
+ },
+ "same_id": [
+  [
+   "C_A",
+   "C_A_reordered"
   ]
+ ],
+ "distinct_ids": [
+  [
+   "C_A",
+   "C_A_prompt",
+   "C_A_graph",
+   "C_A_tool2",
+   "C_B",
+   "C_int",
+   "C_float"
+  ]
+ ],
+ "domain_refusals": [
+  {
+   "name": "nan_setting",
+   "content": {
+    "graph": {
+     "name": "$self",
+     "description": "versioning fixture pipeline",
+     "begin": "make",
+     "end_conditions": {
+      "combinator": "or",
+      "conditions": [
+       {
+        "type": "node_reached",
+        "node": "review",
+        "result": "completed"
+       }
+      ]
+     },
+     "steps": [
+      {
+       "id": "make",
+       "step_type": "agent",
+       "agent_config": "maker",
+       "context": [
+        {
+         "source": {
+          "config": "$self",
+          "output": "task.md"
+         }
+        }
+       ],
+       "output": {
+        "mode": "content",
+        "fixed": {
+         "draft": "draft.md"
+        }
+       },
+       "transitions": [
+        {
+         "to": "review"
+        }
+       ]
+      },
+      {
+       "id": "review",
+       "step_type": "agent",
+       "agent_config": "reviewer",
+       "output": {
+        "mode": "content",
+        "fixed": {
+         "verdict": "verdict.md"
+        }
+       },
+       "transitions": [
+        {
+         "to": null
+        }
+       ]
+      }
+     ]
+    },
+    "roles": {
+     "maker": {
+      "model": "flash",
+      "tools": [],
+      "prompt": "B MAKER\n",
+      "settings": {
+       "temperature": {
+        "$float": "nan"
+       },
+       "thinking": {
+        "enable": true
+       }
+      }
+     },
+     "reviewer": {
+      "model": "pro",
+      "tools": [],
+      "settings": {
+       "temperature": 0.2,
+       "thinking": {
+        "enable": true
+       }
+      },
+      "prompt": "REVIEWER\n"
+     }
+    },
+    "tools": {}
+   },
+   "error": "MALFORMED_CONTENT"
+  },
+  {
+   "name": "infinity_setting",
+   "content": {
+    "graph": {
+     "name": "$self",
+     "description": "versioning fixture pipeline",
+     "begin": "make",
+     "end_conditions": {
+      "combinator": "or",
+      "conditions": [
+       {
+        "type": "node_reached",
+        "node": "review",
+        "result": "completed"
+       }
+      ]
+     },
+     "steps": [
+      {
+       "id": "make",
+       "step_type": "agent",
+       "agent_config": "maker",
+       "context": [
+        {
+         "source": {
+          "config": "$self",
+          "output": "task.md"
+         }
+        }
+       ],
+       "output": {
+        "mode": "content",
+        "fixed": {
+         "draft": "draft.md"
+        }
+       },
+       "transitions": [
+        {
+         "to": "review"
+        }
+       ]
+      },
+      {
+       "id": "review",
+       "step_type": "agent",
+       "agent_config": "reviewer",
+       "output": {
+        "mode": "content",
+        "fixed": {
+         "verdict": "verdict.md"
+        }
+       },
+       "transitions": [
+        {
+         "to": null
+        }
+       ]
+      }
+     ]
+    },
+    "roles": {
+     "maker": {
+      "model": "flash",
+      "tools": [],
+      "prompt": "B MAKER\n",
+      "settings": {
+       "temperature": {
+        "$float": "inf"
+       },
+       "thinking": {
+        "enable": true
+       }
+      }
+     },
+     "reviewer": {
+      "model": "pro",
+      "tools": [],
+      "settings": {
+       "temperature": 0.2,
+       "thinking": {
+        "enable": true
+       }
+      },
+      "prompt": "REVIEWER\n"
+     }
+    },
+    "tools": {}
+   },
+   "error": "MALFORMED_CONTENT"
+  },
+  {
+   "name": "negative_infinity_in_graph",
+   "content": {
+    "graph": {
+     "name": "$self",
+     "description": "versioning fixture pipeline",
+     "begin": "make",
+     "end_conditions": {
+      "combinator": "or",
+      "conditions": [
+       {
+        "type": "node_reached",
+        "node": "review",
+        "result": "completed"
+       }
+      ]
+     },
+     "steps": [
+      {
+       "id": "make",
+       "step_type": "agent",
+       "agent_config": "maker",
+       "context": [
+        {
+         "source": {
+          "config": "$self",
+          "output": "task.md"
+         }
+        }
+       ],
+       "output": {
+        "mode": "content",
+        "fixed": {
+         "draft": "draft.md"
+        }
+       },
+       "transitions": [
+        {
+         "to": "review"
+        }
+       ]
+      },
+      {
+       "id": "review",
+       "step_type": "agent",
+       "agent_config": "reviewer",
+       "output": {
+        "mode": "content",
+        "fixed": {
+         "verdict": "verdict.md"
+        }
+       },
+       "transitions": [
+        {
+         "to": null
+        }
+       ]
+      }
+     ],
+     "weight": {
+      "$float": "-inf"
+     }
+    },
+    "roles": {
+     "maker": {
+      "model": "flash",
+      "tools": [],
+      "prompt": "B MAKER\n",
+      "settings": {
+       "temperature": 0.5,
+       "thinking": {
+        "enable": true
+       }
+      }
+     },
+     "reviewer": {
+      "model": "pro",
+      "tools": [],
+      "settings": {
+       "temperature": 0.2,
+       "thinking": {
+        "enable": true
+       }
+      },
+      "prompt": "REVIEWER\n"
+     }
+    },
+    "tools": {}
+   },
+   "error": "MALFORMED_CONTENT"
+  },
+  {
+   "name": "tuple_value",
+   "content": {
+    "graph": {
+     "name": "$self",
+     "description": "versioning fixture pipeline",
+     "begin": "make",
+     "end_conditions": {
+      "combinator": "or",
+      "conditions": [
+       {
+        "type": "node_reached",
+        "node": "review",
+        "result": "completed"
+       }
+      ]
+     },
+     "steps": [
+      {
+       "id": "make",
+       "step_type": "agent",
+       "agent_config": "maker",
+       "context": [
+        {
+         "source": {
+          "config": "$self",
+          "output": "task.md"
+         }
+        }
+       ],
+       "output": {
+        "mode": "content",
+        "fixed": {
+         "draft": "draft.md"
+        }
+       },
+       "transitions": [
+        {
+         "to": "review"
+        }
+       ]
+      },
+      {
+       "id": "review",
+       "step_type": "agent",
+       "agent_config": "reviewer",
+       "output": {
+        "mode": "content",
+        "fixed": {
+         "verdict": "verdict.md"
+        }
+       },
+       "transitions": [
+        {
+         "to": null
+        }
+       ]
+      }
+     ]
+    },
+    "roles": {
+     "maker": {
+      "model": "flash",
+      "tools": [],
+      "prompt": "B MAKER\n",
+      "settings": {
+       "temperature": 0.5,
+       "thinking": {
+        "enable": true
+       },
+       "pair": {
+        "$tuple": [
+         1,
+         2
+        ]
+       }
+      }
+     },
+     "reviewer": {
+      "model": "pro",
+      "tools": [],
+      "settings": {
+       "temperature": 0.2,
+       "thinking": {
+        "enable": true
+       }
+      },
+      "prompt": "REVIEWER\n"
+     }
+    },
+    "tools": {}
+   },
+   "error": "MALFORMED_CONTENT"
+  },
+  {
+   "name": "bytes_prompt",
+   "content": {
+    "graph": {
+     "name": "$self",
+     "description": "versioning fixture pipeline",
+     "begin": "make",
+     "end_conditions": {
+      "combinator": "or",
+      "conditions": [
+       {
+        "type": "node_reached",
+        "node": "review",
+        "result": "completed"
+       }
+      ]
+     },
+     "steps": [
+      {
+       "id": "make",
+       "step_type": "agent",
+       "agent_config": "maker",
+       "context": [
+        {
+         "source": {
+          "config": "$self",
+          "output": "task.md"
+         }
+        }
+       ],
+       "output": {
+        "mode": "content",
+        "fixed": {
+         "draft": "draft.md"
+        }
+       },
+       "transitions": [
+        {
+         "to": "review"
+        }
+       ]
+      },
+      {
+       "id": "review",
+       "step_type": "agent",
+       "agent_config": "reviewer",
+       "output": {
+        "mode": "content",
+        "fixed": {
+         "verdict": "verdict.md"
+        }
+       },
+       "transitions": [
+        {
+         "to": null
+        }
+       ]
+      }
+     ]
+    },
+    "roles": {
+     "maker": {
+      "model": "flash",
+      "tools": [],
+      "prompt": {
+       "$bytes": "B MAKER\n"
+      },
+      "settings": {
+       "temperature": 0.5,
+       "thinking": {
+        "enable": true
+       }
+      }
+     },
+     "reviewer": {
+      "model": "pro",
+      "tools": [],
+      "settings": {
+       "temperature": 0.2,
+       "thinking": {
+        "enable": true
+       }
+      },
+      "prompt": "REVIEWER\n"
+     }
+    },
+    "tools": {}
+   },
+   "error": "MALFORMED_CONTENT"
+  },
+  {
+   "name": "lone_surrogate_prompt",
+   "content": {
+    "graph": {
+     "name": "$self",
+     "description": "versioning fixture pipeline",
+     "begin": "make",
+     "end_conditions": {
+      "combinator": "or",
+      "conditions": [
+       {
+        "type": "node_reached",
+        "node": "review",
+        "result": "completed"
+       }
+      ]
+     },
+     "steps": [
+      {
+       "id": "make",
+       "step_type": "agent",
+       "agent_config": "maker",
+       "context": [
+        {
+         "source": {
+          "config": "$self",
+          "output": "task.md"
+         }
+        }
+       ],
+       "output": {
+        "mode": "content",
+        "fixed": {
+         "draft": "draft.md"
+        }
+       },
+       "transitions": [
+        {
+         "to": "review"
+        }
+       ]
+      },
+      {
+       "id": "review",
+       "step_type": "agent",
+       "agent_config": "reviewer",
+       "output": {
+        "mode": "content",
+        "fixed": {
+         "verdict": "verdict.md"
+        }
+       },
+       "transitions": [
+        {
+         "to": null
+        }
+       ]
+      }
+     ]
+    },
+    "roles": {
+     "maker": {
+      "model": "flash",
+      "tools": [],
+      "prompt": "\ud800",
+      "settings": {
+       "temperature": 0.5,
+       "thinking": {
+        "enable": true
+       }
+      }
+     },
+     "reviewer": {
+      "model": "pro",
+      "tools": [],
+      "settings": {
+       "temperature": 0.2,
+       "thinking": {
+        "enable": true
+       }
+      },
+      "prompt": "REVIEWER\n"
+     }
+    },
+    "tools": {}
+   },
+   "error": "MALFORMED_CONTENT"
+  },
+  {
+   "name": "extra_top_key",
+   "content": {
+    "graph": {
+     "name": "$self",
+     "description": "versioning fixture pipeline",
+     "begin": "make",
+     "end_conditions": {
+      "combinator": "or",
+      "conditions": [
+       {
+        "type": "node_reached",
+        "node": "review",
+        "result": "completed"
+       }
+      ]
+     },
+     "steps": [
+      {
+       "id": "make",
+       "step_type": "agent",
+       "agent_config": "maker",
+       "context": [
+        {
+         "source": {
+          "config": "$self",
+          "output": "task.md"
+         }
+        }
+       ],
+       "output": {
+        "mode": "content",
+        "fixed": {
+         "draft": "draft.md"
+        }
+       },
+       "transitions": [
+        {
+         "to": "review"
+        }
+       ]
+      },
+      {
+       "id": "review",
+       "step_type": "agent",
+       "agent_config": "reviewer",
+       "output": {
+        "mode": "content",
+        "fixed": {
+         "verdict": "verdict.md"
+        }
+       },
+       "transitions": [
+        {
+         "to": null
+        }
+       ]
+      }
+     ]
+    },
+    "roles": {
+     "maker": {
+      "model": "flash",
+      "tools": [],
+      "prompt": "B MAKER\n",
+      "settings": {
+       "temperature": 0.5,
+       "thinking": {
+        "enable": true
+       }
+      }
+     },
+     "reviewer": {
+      "model": "pro",
+      "tools": [],
+      "settings": {
+       "temperature": 0.2,
+       "thinking": {
+        "enable": true
+       }
+      },
+      "prompt": "REVIEWER\n"
+     }
+    },
+    "tools": {},
+    "templates": {}
+   },
+   "error": "MALFORMED_CONTENT"
+  },
+  {
+   "name": "missing_tools_key",
+   "content": {
+    "graph": {
+     "name": "$self",
+     "description": "versioning fixture pipeline",
+     "begin": "make",
+     "end_conditions": {
+      "combinator": "or",
+      "conditions": [
+       {
+        "type": "node_reached",
+        "node": "review",
+        "result": "completed"
+       }
+      ]
+     },
+     "steps": [
+      {
+       "id": "make",
+       "step_type": "agent",
+       "agent_config": "maker",
+       "context": [
+        {
+         "source": {
+          "config": "$self",
+          "output": "task.md"
+         }
+        }
+       ],
+       "output": {
+        "mode": "content",
+        "fixed": {
+         "draft": "draft.md"
+        }
+       },
+       "transitions": [
+        {
+         "to": "review"
+        }
+       ]
+      },
+      {
+       "id": "review",
+       "step_type": "agent",
+       "agent_config": "reviewer",
+       "output": {
+        "mode": "content",
+        "fixed": {
+         "verdict": "verdict.md"
+        }
+       },
+       "transitions": [
+        {
+         "to": null
+        }
+       ]
+      }
+     ]
+    },
+    "roles": {
+     "maker": {
+      "model": "flash",
+      "tools": [],
+      "prompt": "B MAKER\n",
+      "settings": {
+       "temperature": 0.5,
+       "thinking": {
+        "enable": true
+       }
+      }
+     },
+     "reviewer": {
+      "model": "pro",
+      "tools": [],
+      "settings": {
+       "temperature": 0.2,
+       "thinking": {
+        "enable": true
+       }
+      },
+      "prompt": "REVIEWER\n"
+     }
+    }
+   },
+   "error": "MALFORMED_CONTENT"
+  },
+  {
+   "name": "prompt_pointer_not_bytes",
+   "content": {
+    "graph": {
+     "name": "$self",
+     "description": "versioning fixture pipeline",
+     "begin": "make",
+     "end_conditions": {
+      "combinator": "or",
+      "conditions": [
+       {
+        "type": "node_reached",
+        "node": "review",
+        "result": "completed"
+       }
+      ]
+     },
+     "steps": [
+      {
+       "id": "make",
+       "step_type": "agent",
+       "agent_config": "maker",
+       "context": [
+        {
+         "source": {
+          "config": "$self",
+          "output": "task.md"
+         }
+        }
+       ],
+       "output": {
+        "mode": "content",
+        "fixed": {
+         "draft": "draft.md"
+        }
+       },
+       "transitions": [
+        {
+         "to": "review"
+        }
+       ]
+      },
+      {
+       "id": "review",
+       "step_type": "agent",
+       "agent_config": "reviewer",
+       "output": {
+        "mode": "content",
+        "fixed": {
+         "verdict": "verdict.md"
+        }
+       },
+       "transitions": [
+        {
+         "to": null
+        }
+       ]
+      }
+     ]
+    },
+    "roles": {
+     "maker": {
+      "model": "flash",
+      "tools": [],
+      "prompt": "B MAKER\n",
+      "settings": {
+       "temperature": 0.5,
+       "thinking": {
+        "enable": true
+       }
+      },
+      "prompt_path": "prompts/maker.md"
+     },
+     "reviewer": {
+      "model": "pro",
+      "tools": [],
+      "settings": {
+       "temperature": 0.2,
+       "thinking": {
+        "enable": true
+       }
+      },
+      "prompt": "REVIEWER\n"
+     }
+    },
+    "tools": {}
+   },
+   "error": "MALFORMED_CONTENT"
+  },
+  {
+   "name": "prompt_not_text",
+   "content": {
+    "graph": {
+     "name": "$self",
+     "description": "versioning fixture pipeline",
+     "begin": "make",
+     "end_conditions": {
+      "combinator": "or",
+      "conditions": [
+       {
+        "type": "node_reached",
+        "node": "review",
+        "result": "completed"
+       }
+      ]
+     },
+     "steps": [
+      {
+       "id": "make",
+       "step_type": "agent",
+       "agent_config": "maker",
+       "context": [
+        {
+         "source": {
+          "config": "$self",
+          "output": "task.md"
+         }
+        }
+       ],
+       "output": {
+        "mode": "content",
+        "fixed": {
+         "draft": "draft.md"
+        }
+       },
+       "transitions": [
+        {
+         "to": "review"
+        }
+       ]
+      },
+      {
+       "id": "review",
+       "step_type": "agent",
+       "agent_config": "reviewer",
+       "output": {
+        "mode": "content",
+        "fixed": {
+         "verdict": "verdict.md"
+        }
+       },
+       "transitions": [
+        {
+         "to": null
+        }
+       ]
+      }
+     ]
+    },
+    "roles": {
+     "maker": {
+      "model": "flash",
+      "tools": [],
+      "prompt": 7,
+      "settings": {
+       "temperature": 0.5,
+       "thinking": {
+        "enable": true
+       }
+      }
+     },
+     "reviewer": {
+      "model": "pro",
+      "tools": [],
+      "settings": {
+       "temperature": 0.2,
+       "thinking": {
+        "enable": true
+       }
+      },
+      "prompt": "REVIEWER\n"
+     }
+    },
+    "tools": {}
+   },
+   "error": "MALFORMED_CONTENT"
+  },
+  {
+   "name": "model_not_text",
+   "content": {
+    "graph": {
+     "name": "$self",
+     "description": "versioning fixture pipeline",
+     "begin": "make",
+     "end_conditions": {
+      "combinator": "or",
+      "conditions": [
+       {
+        "type": "node_reached",
+        "node": "review",
+        "result": "completed"
+       }
+      ]
+     },
+     "steps": [
+      {
+       "id": "make",
+       "step_type": "agent",
+       "agent_config": "maker",
+       "context": [
+        {
+         "source": {
+          "config": "$self",
+          "output": "task.md"
+         }
+        }
+       ],
+       "output": {
+        "mode": "content",
+        "fixed": {
+         "draft": "draft.md"
+        }
+       },
+       "transitions": [
+        {
+         "to": "review"
+        }
+       ]
+      },
+      {
+       "id": "review",
+       "step_type": "agent",
+       "agent_config": "reviewer",
+       "output": {
+        "mode": "content",
+        "fixed": {
+         "verdict": "verdict.md"
+        }
+       },
+       "transitions": [
+        {
+         "to": null
+        }
+       ]
+      }
+     ]
+    },
+    "roles": {
+     "maker": {
+      "model": null,
+      "tools": [],
+      "prompt": "B MAKER\n",
+      "settings": {
+       "temperature": 0.5,
+       "thinking": {
+        "enable": true
+       }
+      }
+     },
+     "reviewer": {
+      "model": "pro",
+      "tools": [],
+      "settings": {
+       "temperature": 0.2,
+       "thinking": {
+        "enable": true
+       }
+      },
+      "prompt": "REVIEWER\n"
+     }
+    },
+    "tools": {}
+   },
+   "error": "MALFORMED_CONTENT"
+  },
+  {
+   "name": "settings_array",
+   "content": {
+    "graph": {
+     "name": "$self",
+     "description": "versioning fixture pipeline",
+     "begin": "make",
+     "end_conditions": {
+      "combinator": "or",
+      "conditions": [
+       {
+        "type": "node_reached",
+        "node": "review",
+        "result": "completed"
+       }
+      ]
+     },
+     "steps": [
+      {
+       "id": "make",
+       "step_type": "agent",
+       "agent_config": "maker",
+       "context": [
+        {
+         "source": {
+          "config": "$self",
+          "output": "task.md"
+         }
+        }
+       ],
+       "output": {
+        "mode": "content",
+        "fixed": {
+         "draft": "draft.md"
+        }
+       },
+       "transitions": [
+        {
+         "to": "review"
+        }
+       ]
+      },
+      {
+       "id": "review",
+       "step_type": "agent",
+       "agent_config": "reviewer",
+       "output": {
+        "mode": "content",
+        "fixed": {
+         "verdict": "verdict.md"
+        }
+       },
+       "transitions": [
+        {
+         "to": null
+        }
+       ]
+      }
+     ]
+    },
+    "roles": {
+     "maker": {
+      "model": "flash",
+      "tools": [],
+      "prompt": "B MAKER\n",
+      "settings": []
+     },
+     "reviewer": {
+      "model": "pro",
+      "tools": [],
+      "settings": {
+       "temperature": 0.2,
+       "thinking": {
+        "enable": true
+       }
+      },
+      "prompt": "REVIEWER\n"
+     }
+    },
+    "tools": {}
+   },
+   "error": "MALFORMED_CONTENT"
+  },
+  {
+   "name": "role_tool_without_identity",
+   "content": {
+    "graph": {
+     "name": "$self",
+     "description": "versioning fixture pipeline",
+     "begin": "make",
+     "end_conditions": {
+      "combinator": "or",
+      "conditions": [
+       {
+        "type": "node_reached",
+        "node": "review",
+        "result": "completed"
+       }
+      ]
+     },
+     "steps": [
+      {
+       "id": "make",
+       "step_type": "agent",
+       "agent_config": "maker",
+       "context": [
+        {
+         "source": {
+          "config": "$self",
+          "output": "task.md"
+         }
+        }
+       ],
+       "output": {
+        "mode": "content",
+        "fixed": {
+         "draft": "draft.md"
+        }
+       },
+       "transitions": [
+        {
+         "to": "review"
+        }
+       ]
+      },
+      {
+       "id": "review",
+       "step_type": "agent",
+       "agent_config": "reviewer",
+       "output": {
+        "mode": "content",
+        "fixed": {
+         "verdict": "verdict.md"
+        }
+       },
+       "transitions": [
+        {
+         "to": null
+        }
+       ]
+      }
+     ]
+    },
+    "roles": {
+     "maker": {
+      "model": "flash",
+      "tools": [
+       "fx_probe"
+      ],
+      "prompt": "B MAKER\n",
+      "settings": {
+       "temperature": 0.5,
+       "thinking": {
+        "enable": true
+       }
+      }
+     },
+     "reviewer": {
+      "model": "pro",
+      "tools": [],
+      "settings": {
+       "temperature": 0.2,
+       "thinking": {
+        "enable": true
+       }
+      },
+      "prompt": "REVIEWER\n"
+     }
+    },
+    "tools": {}
+   },
+   "error": "MALFORMED_CONTENT"
+  },
+  {
+   "name": "role_not_in_graph",
+   "content": {
+    "graph": {
+     "name": "$self",
+     "description": "versioning fixture pipeline",
+     "begin": "make",
+     "end_conditions": {
+      "combinator": "or",
+      "conditions": [
+       {
+        "type": "node_reached",
+        "node": "review",
+        "result": "completed"
+       }
+      ]
+     },
+     "steps": [
+      {
+       "id": "make",
+       "step_type": "agent",
+       "agent_config": "maker",
+       "context": [
+        {
+         "source": {
+          "config": "$self",
+          "output": "task.md"
+         }
+        }
+       ],
+       "output": {
+        "mode": "content",
+        "fixed": {
+         "draft": "draft.md"
+        }
+       },
+       "transitions": [
+        {
+         "to": "review"
+        }
+       ]
+      },
+      {
+       "id": "review",
+       "step_type": "agent",
+       "agent_config": "reviewer",
+       "output": {
+        "mode": "content",
+        "fixed": {
+         "verdict": "verdict.md"
+        }
+       },
+       "transitions": [
+        {
+         "to": null
+        }
+       ]
+      }
+     ]
+    },
+    "roles": {
+     "maker": {
+      "model": "flash",
+      "tools": [],
+      "prompt": "B MAKER\n",
+      "settings": {
+       "temperature": 0.5,
+       "thinking": {
+        "enable": true
+       }
+      }
+     },
+     "reviewer": {
+      "model": "pro",
+      "tools": [],
+      "settings": {
+       "temperature": 0.2,
+       "thinking": {
+        "enable": true
+       }
+      },
+      "prompt": "REVIEWER\n"
+     },
+     "extra": {
+      "model": "flash",
+      "tools": [],
+      "prompt": "B MAKER\n",
+      "settings": {
+       "temperature": 0.5,
+       "thinking": {
+        "enable": true
+       }
+      }
+     }
+    },
+    "tools": {}
+   },
+   "error": "MALFORMED_CONTENT"
+  },
+  {
+   "name": "graph_role_missing",
+   "content": {
+    "graph": {
+     "name": "$self",
+     "description": "versioning fixture pipeline",
+     "begin": "make",
+     "end_conditions": {
+      "combinator": "or",
+      "conditions": [
+       {
+        "type": "node_reached",
+        "node": "review",
+        "result": "completed"
+       }
+      ]
+     },
+     "steps": [
+      {
+       "id": "make",
+       "step_type": "agent",
+       "agent_config": "maker",
+       "context": [
+        {
+         "source": {
+          "config": "$self",
+          "output": "task.md"
+         }
+        }
+       ],
+       "output": {
+        "mode": "content",
+        "fixed": {
+         "draft": "draft.md"
+        }
+       },
+       "transitions": [
+        {
+         "to": "review"
+        }
+       ]
+      },
+      {
+       "id": "review",
+       "step_type": "agent",
+       "agent_config": "reviewer",
+       "output": {
+        "mode": "content",
+        "fixed": {
+         "verdict": "verdict.md"
+        }
+       },
+       "transitions": [
+        {
+         "to": null
+        }
+       ]
+      }
+     ]
+    },
+    "roles": {
+     "maker": {
+      "model": "flash",
+      "tools": [],
+      "prompt": "B MAKER\n",
+      "settings": {
+       "temperature": 0.5,
+       "thinking": {
+        "enable": true
+       }
+      }
+     }
+    },
+    "tools": {}
+   },
+   "error": "MALFORMED_CONTENT"
+  },
+  {
+   "name": "graph_not_object",
+   "content": {
+    "graph": [],
+    "roles": {
+     "maker": {
+      "model": "flash",
+      "tools": [],
+      "prompt": "B MAKER\n",
+      "settings": {
+       "temperature": 0.5,
+       "thinking": {
+        "enable": true
+       }
+      }
+     },
+     "reviewer": {
+      "model": "pro",
+      "tools": [],
+      "settings": {
+       "temperature": 0.2,
+       "thinking": {
+        "enable": true
+       }
+      },
+      "prompt": "REVIEWER\n"
+     }
+    },
+    "tools": {}
+   },
+   "error": "MALFORMED_CONTENT"
+  },
+  {
+   "name": "not_an_object",
+   "content": [],
+   "error": "MALFORMED_CONTENT"
+  },
+  {
+   "name": "r1_generic_graph_shape",
+   "content": {
+    "graph": {
+     "nodes": [
+      "plan",
+      "implement"
+     ],
+     "edges": [
+      [
+       "plan",
+       "implement"
+      ]
+     ]
+    },
+    "roles": {},
+    "templates": {}
+   },
+   "error": "MALFORMED_CONTENT"
+  }
+ ],
+ "zero_id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+ "scenarios": [
+  {
+   "name": "capture_is_content_addressed_and_unchanged_content_seals_nothing",
+   "steps": [
+    {
+     "op": "install_tool",
+     "tool": "fx_probe@1"
+    },
+    {
+     "op": "register",
+     "target": "gen_vt",
+     "unit": "U_A"
+    },
+    {
+     "op": "capture",
+     "target": "gen_vt",
+     "expect": {
+      "result_subset": {
+       "version_id": "$id:C_A",
+       "created": true
+      }
+     }
+    },
+    {
+     "op": "capture",
+     "target": "gen_vt",
+     "unchanged": true,
+     "expect": {
+      "result_subset": {
+       "version_id": "$id:C_A",
+       "created": false
+      }
+     }
+    },
+    {
+     "op": "register",
+     "target": "gen_vt_copy",
+     "unit": "U_A"
+    },
+    {
+     "op": "capture",
+     "target": "gen_vt_copy",
+     "unchanged": true,
+     "expect": {
+      "result_subset": {
+       "version_id": "$id:C_A",
+       "created": false
+      }
+     }
+    },
+    {
+     "op": "list",
+     "unchanged": true,
+     "expect": {
+      "result": [
+       "$id:C_A"
+      ]
+     }
+    },
+    {
+     "op": "read",
+     "version_id": "$id:C_A",
+     "unchanged": true,
+     "expect": {
+      "result_subset": {
+       "version_id": "$id:C_A",
+       "content": "$content:C_A"
+      }
+     }
+    },
+    {
+     "op": "mutate_read",
+     "version_id": "$id:C_A"
+    },
+    {
+     "op": "read",
+     "version_id": "$id:C_A",
+     "unchanged": true,
+     "expect": {
+      "result_subset": {
+       "version_id": "$id:C_A",
+       "content": "$content:C_A"
+      }
+     }
+    },
+    {
+     "op": "current",
+     "target": "gen_vt",
+     "unchanged": true,
+     "expect": {
+      "result_subset": {
+       "target": "gen_vt"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "name": "prompt_graph_setting_number_and_tool_changes_make_distinct_versions",
+   "steps": [
+    {
+     "op": "install_tool",
+     "tool": "fx_probe@1"
+    },
+    {
+     "op": "register",
+     "target": "gen_vt",
+     "unit": "U_A"
+    },
+    {
+     "op": "capture",
+     "target": "gen_vt",
+     "expect": {
+      "result_subset": {
+       "version_id": "$id:C_A",
+       "created": true
+      }
+     }
+    },
+    {
+     "op": "register",
+     "target": "gen_vp",
+     "unit": "U_A_prompt"
+    },
+    {
+     "op": "capture",
+     "target": "gen_vp",
+     "expect": {
+      "result_subset": {
+       "version_id": "$id:C_A_prompt",
+       "created": true
+      }
+     }
+    },
+    {
+     "op": "register",
+     "target": "gen_vg",
+     "unit": "U_A_graph"
+    },
+    {
+     "op": "capture",
+     "target": "gen_vg",
+     "expect": {
+      "result_subset": {
+       "version_id": "$id:C_A_graph",
+       "created": true
+      }
+     }
+    },
+    {
+     "op": "register",
+     "target": "gen_vi",
+     "unit": "U_int"
+    },
+    {
+     "op": "capture",
+     "target": "gen_vi",
+     "expect": {
+      "result_subset": {
+       "version_id": "$id:C_int",
+       "created": true
+      }
+     }
+    },
+    {
+     "op": "register",
+     "target": "gen_vf",
+     "unit": "U_float"
+    },
+    {
+     "op": "capture",
+     "target": "gen_vf",
+     "expect": {
+      "result_subset": {
+       "version_id": "$id:C_float",
+       "created": true
+      }
+     }
+    },
+    {
+     "op": "install_tool",
+     "tool": "fx_probe@2"
+    },
+    {
+     "op": "capture",
+     "target": "gen_vt",
+     "expect": {
+      "result_subset": {
+       "version_id": "$id:C_A_tool2",
+       "created": true
+      }
+     }
+    },
+    {
+     "op": "list",
+     "unchanged": true,
+     "expect": {
+      "result": [
+       "$id:C_float",
+       "$id:C_A_tool2",
+       "$id:C_A_graph",
+       "$id:C_int",
+       "$id:C_A",
+       "$id:C_A_prompt"
+      ]
+     }
+    },
+    {
+     "op": "read",
+     "version_id": "$id:C_float",
+     "expect": {
+      "result_subset": {
+       "content": "$content:C_float"
+      }
+     }
+    },
+    {
+     "op": "read",
+     "version_id": "$id:C_A_tool2",
+     "expect": {
+      "result_subset": {
+       "content": "$content:C_A_tool2"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "name": "restore_changes_only_the_target_and_preserves_existing_runs",
+   "steps": [
+    {
+     "op": "install_tool",
+     "tool": "fx_probe@1"
+    },
+    {
+     "op": "register",
+     "target": "gen_vt",
+     "unit": "U_A"
+    },
+    {
+     "op": "capture",
+     "target": "gen_vt",
+     "expect": {
+      "result_subset": {
+       "version_id": "$id:C_A",
+       "created": true
+      }
+     }
+    },
+    {
+     "op": "register",
+     "target": "gen_vsrc",
+     "unit": "U_A_prompt"
+    },
+    {
+     "op": "capture",
+     "target": "gen_vsrc",
+     "expect": {
+      "result_subset": {
+       "version_id": "$id:C_A_prompt",
+       "created": true
+      }
+     }
+    },
+    {
+     "op": "start_run",
+     "run": "R_paused",
+     "target": "gen_vt"
+    },
+    {
+     "op": "pause_run",
+     "run": "R_paused"
+    },
+    {
+     "op": "start_run",
+     "run": "R_running",
+     "target": "gen_vt"
+    },
+    {
+     "op": "start_run",
+     "run": "R_done",
+     "target": "gen_vt"
+    },
+    {
+     "op": "complete_run",
+     "run": "R_done"
+    },
+    {
+     "op": "observe_runs",
+     "expect": {
+      "result": {
+       "R_paused": {
+        "status": "paused",
+        "graph_version": "$pin:R_paused",
+        "prompts": {
+         "maker": "OLD MAKER\n",
+         "reviewer": "REVIEWER\n"
+        }
+       },
+       "R_running": {
+        "status": "running",
+        "graph_version": "$pin:R_running",
+        "prompts": {
+         "maker": "OLD MAKER\n",
+         "reviewer": "REVIEWER\n"
+        }
+       },
+       "R_done": {
+        "status": "completed",
+        "graph_version": "$pin:R_done",
+        "prompts": {
+         "maker": "OLD MAKER\n",
+         "reviewer": "REVIEWER\n"
+        }
+       }
+      }
+     }
+    },
+    {
+     "op": "current",
+     "target": "gen_vt",
+     "record": {
+      "cas0": "unit_identity"
+     }
+    },
+    {
+     "op": "restore",
+     "target": "gen_vt",
+     "version_id": "$id:C_A_prompt",
+     "expected_current": "$rec:cas0",
+     "expect": {
+      "result_subset": {
+       "version_id": "$id:C_A_prompt",
+       "changed": true,
+       "previous_unit_identity": "$rec:cas0"
+      }
+     }
+    },
+    {
+     "op": "capture",
+     "target": "gen_vt",
+     "unchanged": true,
+     "expect": {
+      "result_subset": {
+       "version_id": "$id:C_A_prompt",
+       "created": false
+      }
+     }
+    },
+    {
+     "op": "observe_runs",
+     "expect": {
+      "result": {
+       "R_paused": {
+        "status": "paused",
+        "graph_version": "$pin:R_paused",
+        "prompts": {
+         "maker": "OLD MAKER\n",
+         "reviewer": "REVIEWER\n"
+        }
+       },
+       "R_running": {
+        "status": "running",
+        "graph_version": "$pin:R_running",
+        "prompts": {
+         "maker": "OLD MAKER\n",
+         "reviewer": "REVIEWER\n"
+        }
+       },
+       "R_done": {
+        "status": "completed",
+        "graph_version": "$pin:R_done",
+        "prompts": {
+         "maker": "OLD MAKER\n",
+         "reviewer": "REVIEWER\n"
+        }
+       }
+      }
+     }
+    },
+    {
+     "op": "current",
+     "target": "gen_vt",
+     "record": {
+      "cas1": "unit_identity"
+     }
+    },
+    {
+     "op": "restore",
+     "target": "gen_vt",
+     "version_id": "$id:C_A_prompt",
+     "expected_current": "$rec:cas1",
+     "unchanged": true,
+     "expect": {
+      "result": {
+       "target": "gen_vt",
+       "version_id": "$id:C_A_prompt",
+       "changed": false,
+       "previous_unit_identity": "$rec:cas1",
+       "unit_identity": "$rec:cas1"
+      }
+     }
+    },
+    {
+     "op": "restore",
+     "target": "gen_vt",
+     "version_id": "$id:C_A",
+     "expected_current": "$rec:cas0",
+     "expect": {
+      "error": "CONFLICT"
+     }
+    },
+    {
+     "op": "start_run",
+     "run": "R_new",
+     "target": "gen_vt"
+    },
+    {
+     "op": "restore",
+     "target": "gen_vt",
+     "version_id": "$id:C_A",
+     "expected_current": "$rec:cas1",
+     "expect": {
+      "result_subset": {
+       "version_id": "$id:C_A",
+       "changed": true,
+       "previous_unit_identity": "$rec:cas1"
+      }
+     }
+    },
+    {
+     "op": "capture",
+     "target": "gen_vt",
+     "unchanged": true,
+     "expect": {
+      "result_subset": {
+       "version_id": "$id:C_A",
+       "created": false
+      }
+     }
+    },
+    {
+     "op": "list",
+     "unchanged": true,
+     "expect": {
+      "result": [
+       "$id:C_A",
+       "$id:C_A_prompt"
+      ]
+     }
+    },
+    {
+     "op": "observe_runs",
+     "expect": {
+      "result": {
+       "R_paused": {
+        "status": "paused",
+        "graph_version": "$pin:R_paused",
+        "prompts": {
+         "maker": "OLD MAKER\n",
+         "reviewer": "REVIEWER\n"
+        }
+       },
+       "R_running": {
+        "status": "running",
+        "graph_version": "$pin:R_running",
+        "prompts": {
+         "maker": "OLD MAKER\n",
+         "reviewer": "REVIEWER\n"
+        }
+       },
+       "R_done": {
+        "status": "completed",
+        "graph_version": "$pin:R_done",
+        "prompts": {
+         "maker": "OLD MAKER\n",
+         "reviewer": "REVIEWER\n"
+        }
+       },
+       "R_new": {
+        "status": "running",
+        "graph_version": "$pin:R_new",
+        "prompts": {
+         "maker": "NEW MAKER\n",
+         "reviewer": "REVIEWER\n"
+        }
+       }
+      }
+     }
+    },
+    {
+     "op": "claim_prompt",
+     "run": "R_paused",
+     "expect": {
+      "result": {
+       "step": "make",
+       "prompt": "OLD MAKER\n"
+      }
+     }
+    },
+    {
+     "op": "claim_prompt",
+     "run": "R_running",
+     "expect": {
+      "result": {
+       "step": "make",
+       "prompt": "OLD MAKER\n"
+      }
+     }
+    },
+    {
+     "op": "claim_prompt",
+     "run": "R_new",
+     "expect": {
+      "result": {
+       "step": "make",
+       "prompt": "NEW MAKER\n"
+      }
+     }
+    },
+    {
+     "op": "observe_runs",
+     "expect": {
+      "result": {
+       "R_paused": {
+        "status": "running",
+        "graph_version": "$pin:R_paused",
+        "prompts": {
+         "maker": "OLD MAKER\n",
+         "reviewer": "REVIEWER\n"
+        }
+       },
+       "R_running": {
+        "status": "running",
+        "graph_version": "$pin:R_running",
+        "prompts": {
+         "maker": "OLD MAKER\n",
+         "reviewer": "REVIEWER\n"
+        }
+       },
+       "R_done": {
+        "status": "completed",
+        "graph_version": "$pin:R_done",
+        "prompts": {
+         "maker": "OLD MAKER\n",
+         "reviewer": "REVIEWER\n"
+        }
+       },
+       "R_new": {
+        "status": "running",
+        "graph_version": "$pin:R_new",
+        "prompts": {
+         "maker": "NEW MAKER\n",
+         "reviewer": "REVIEWER\n"
+        }
+       }
+      }
+     }
+    }
+   ]
+  },
+  {
+   "name": "missing_changed_provider_domain_and_unknown_refuse_before_effects",
+   "steps": [
+    {
+     "op": "install_tool",
+     "tool": "fx_probe@1"
+    },
+    {
+     "op": "register",
+     "target": "gen_vt",
+     "unit": "U_B"
+    },
+    {
+     "op": "capture",
+     "target": "gen_vt",
+     "expect": {
+      "result_subset": {
+       "version_id": "$id:C_B",
+       "created": true
+      }
+     }
+    },
+    {
+     "op": "register",
+     "target": "gen_vsrc",
+     "unit": "U_A"
+    },
+    {
+     "op": "capture",
+     "target": "gen_vsrc",
+     "expect": {
+      "result_subset": {
+       "version_id": "$id:C_A",
+       "created": true
+      }
+     }
+    },
+    {
+     "op": "start_run",
+     "run": "R_paused",
+     "target": "gen_vt"
+    },
+    {
+     "op": "pause_run",
+     "run": "R_paused"
+    },
+    {
+     "op": "current",
+     "target": "gen_vt",
+     "record": {
+      "cas": "unit_identity"
+     }
+    },
+    {
+     "op": "restore",
+     "target": "gen_vt",
+     "version_id": "$zero",
+     "expected_current": "$rec:cas",
+     "expect": {
+      "error": "UNKNOWN_VERSION"
+     }
+    },
+    {
+     "op": "read",
+     "version_id": "$zero",
+     "expect": {
+      "error": "UNKNOWN_VERSION"
+     }
+    },
+    {
+     "op": "restore",
+     "target": "gen_absent",
+     "version_id": "$id:C_A",
+     "expected_current": "$rec:cas",
+     "expect": {
+      "error": "UNKNOWN_TARGET"
+     }
+    },
+    {
+     "op": "remove_tool",
+     "name": "fx_probe"
+    },
+    {
+     "op": "restore",
+     "target": "gen_vt",
+     "version_id": "$id:C_A",
+     "expected_current": "$rec:cas",
+     "expect": {
+      "error": "PROVIDER_UNAVAILABLE"
+     }
+    },
+    {
+     "op": "capture",
+     "target": "gen_vsrc",
+     "expect": {
+      "error": "PROVIDER_UNAVAILABLE"
+     }
+    },
+    {
+     "op": "read",
+     "version_id": "$id:C_A",
+     "unchanged": true,
+     "expect": {
+      "result_subset": {
+       "content": "$content:C_A"
+      }
+     }
+    },
+    {
+     "op": "install_tool",
+     "tool": "fx_probe@2"
+    },
+    {
+     "op": "restore",
+     "target": "gen_vt",
+     "version_id": "$id:C_A",
+     "expected_current": "$rec:cas",
+     "expect": {
+      "error": "PROVIDER_CHANGED"
+     }
+    },
+    {
+     "op": "install_tool",
+     "tool": "fx_probe@1"
+    },
+    {
+     "op": "register",
+     "target": "gen_vnan",
+     "unit": "U_nan"
+    },
+    {
+     "op": "capture",
+     "target": "gen_vnan",
+     "expect": {
+      "error": "MALFORMED_CONTENT"
+     }
+    },
+    {
+     "op": "register",
+     "target": "gen_vghost",
+     "unit": "U_ghost"
+    },
+    {
+     "op": "capture",
+     "target": "gen_vghost",
+     "expect": {
+      "error": "PROVIDER_UNAVAILABLE"
+     }
+    },
+    {
+     "op": "list",
+     "unchanged": true,
+     "expect": {
+      "result": [
+       "$id:C_B",
+       "$id:C_A"
+      ]
+     }
+    },
+    {
+     "op": "observe_runs",
+     "expect": {
+      "result": {
+       "R_paused": {
+        "status": "paused",
+        "graph_version": "$pin:R_paused",
+        "prompts": {
+         "maker": "B MAKER\n",
+         "reviewer": "REVIEWER\n"
+        }
+       }
+      }
+     }
+    },
+    {
+     "op": "restore",
+     "target": "gen_vt",
+     "version_id": "$id:C_A",
+     "expected_current": "$rec:cas",
+     "expect": {
+      "result_subset": {
+       "version_id": "$id:C_A",
+       "changed": true
+      }
+     }
+    },
+    {
+     "op": "capture",
+     "target": "gen_vt",
+     "unchanged": true,
+     "expect": {
+      "result_subset": {
+       "version_id": "$id:C_A",
+       "created": false
+      }
+     }
+    },
+    {
+     "op": "observe_runs",
+     "expect": {
+      "result": {
+       "R_paused": {
+        "status": "paused",
+        "graph_version": "$pin:R_paused",
+        "prompts": {
+         "maker": "B MAKER\n",
+         "reviewer": "REVIEWER\n"
+        }
+       }
+      }
+     }
+    },
+    {
+     "op": "claim_prompt",
+     "run": "R_paused",
+     "expect": {
+      "result": {
+       "step": "make",
+       "prompt": "B MAKER\n"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "name": "tampered_seal_refuses_every_path_and_leaves_others_usable",
+   "steps": [
+    {
+     "op": "install_tool",
+     "tool": "fx_probe@1"
+    },
+    {
+     "op": "register",
+     "target": "gen_vt",
+     "unit": "U_A"
+    },
+    {
+     "op": "capture",
+     "target": "gen_vt",
+     "expect": {
+      "result_subset": {
+       "version_id": "$id:C_A",
+       "created": true
+      }
+     }
+    },
+    {
+     "op": "register",
+     "target": "gen_vsrc",
+     "unit": "U_A_prompt"
+    },
+    {
+     "op": "capture",
+     "target": "gen_vsrc",
+     "expect": {
+      "result_subset": {
+       "version_id": "$id:C_A_prompt",
+       "created": true
+      }
+     }
+    },
+    {
+     "op": "current",
+     "target": "gen_vt",
+     "record": {
+      "cas": "unit_identity"
+     }
+    },
+    {
+     "op": "tamper_seal",
+     "version_id": "$id:C_A_prompt"
+    },
+    {
+     "op": "read",
+     "version_id": "$id:C_A_prompt",
+     "expect": {
+      "error": "TAMPERED_VERSION"
+     }
+    },
+    {
+     "op": "restore",
+     "target": "gen_vt",
+     "version_id": "$id:C_A_prompt",
+     "expected_current": "$rec:cas",
+     "expect": {
+      "error": "TAMPERED_VERSION"
+     }
+    },
+    {
+     "op": "capture",
+     "target": "gen_vsrc",
+     "expect": {
+      "error": "TAMPERED_VERSION"
+     }
+    },
+    {
+     "op": "list",
+     "expect": {
+      "error": "TAMPERED_VERSION"
+     }
+    },
+    {
+     "op": "read",
+     "version_id": "$id:C_A",
+     "unchanged": true,
+     "expect": {
+      "result_subset": {
+       "content": "$content:C_A"
+      }
+     }
+    },
+    {
+     "op": "restore",
+     "target": "gen_vt",
+     "version_id": "$id:C_A",
+     "expected_current": "$rec:cas",
+     "unchanged": true,
+     "expect": {
+      "result_subset": {
+       "changed": false
+      }
+     }
+    }
+   ]
+  },
+  {
+   "name": "malformed_identifiers_refuse_before_lookup",
+   "steps": [
+    {
+     "op": "install_tool",
+     "tool": "fx_probe@1"
+    },
+    {
+     "op": "register",
+     "target": "gen_vt",
+     "unit": "U_A"
+    },
+    {
+     "op": "capture",
+     "target": "gen_vt",
+     "expect": {
+      "result_subset": {
+       "version_id": "$id:C_A",
+       "created": true
+      }
+     }
+    },
+    {
+     "op": "current",
+     "target": "gen_vt",
+     "record": {
+      "cas": "unit_identity"
+     }
+    },
+    {
+     "op": "read",
+     "version_id": "sha256:0000000000000000000000000000000000000000000000000000000000000000\n",
+     "expect": {
+      "error": "MALFORMED_VERSION_ID"
+     }
+    },
+    {
+     "op": "read",
+     "version_id": "sha256:0000000000000000000000000000000000000000000000000000000000000000x",
+     "expect": {
+      "error": "MALFORMED_VERSION_ID"
+     }
+    },
+    {
+     "op": "read",
+     "version_id": " sha256:0000000000000000000000000000000000000000000000000000000000000000",
+     "expect": {
+      "error": "MALFORMED_VERSION_ID"
+     }
+    },
+    {
+     "op": "read",
+     "version_id": "SHA256:0000000000000000000000000000000000000000000000000000000000000000",
+     "expect": {
+      "error": "MALFORMED_VERSION_ID"
+     }
+    },
+    {
+     "op": "read",
+     "version_id": "sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+     "expect": {
+      "error": "MALFORMED_VERSION_ID"
+     }
+    },
+    {
+     "op": "read",
+     "version_id": "0000000000000000000000000000000000000000000000000000000000000000",
+     "expect": {
+      "error": "MALFORMED_VERSION_ID"
+     }
+    },
+    {
+     "op": "read",
+     "version_id": [],
+     "expect": {
+      "error": "MALFORMED_VERSION_ID"
+     }
+    },
+    {
+     "op": "read",
+     "version_id": {},
+     "expect": {
+      "error": "MALFORMED_VERSION_ID"
+     }
+    },
+    {
+     "op": "read",
+     "version_id": false,
+     "expect": {
+      "error": "MALFORMED_VERSION_ID"
+     }
+    },
+    {
+     "op": "read",
+     "version_id": 123,
+     "expect": {
+      "error": "MALFORMED_VERSION_ID"
+     }
+    },
+    {
+     "op": "read",
+     "version_id": null,
+     "expect": {
+      "error": "MALFORMED_VERSION_ID"
+     }
+    },
+    {
+     "op": "restore",
+     "target": "gen_vt",
+     "version_id": "sha256:0000000000000000000000000000000000000000000000000000000000000000\n",
+     "expected_current": "$rec:cas",
+     "expect": {
+      "error": "MALFORMED_VERSION_ID"
+     }
+    },
+    {
+     "op": "restore",
+     "target": "gen_vt",
+     "version_id": "not-a-version",
+     "expected_current": "$rec:cas",
+     "expect": {
+      "error": "MALFORMED_VERSION_ID"
+     }
+    },
+    {
+     "op": "restore",
+     "target": "gen_vt",
+     "version_id": null,
+     "expected_current": "$rec:cas",
+     "expect": {
+      "error": "MALFORMED_VERSION_ID"
+     }
+    },
+    {
+     "op": "restore",
+     "target": "gen_vt",
+     "version_id": [],
+     "expected_current": "$rec:cas",
+     "expect": {
+      "error": "MALFORMED_VERSION_ID"
+     }
+    },
+    {
+     "op": "capture",
+     "target": [],
+     "expect": {
+      "error": "MALFORMED_TARGET"
+     }
+    },
+    {
+     "op": "capture",
+     "target": null,
+     "expect": {
+      "error": "MALFORMED_TARGET"
+     }
+    },
+    {
+     "op": "capture",
+     "target": "",
+     "expect": {
+      "error": "MALFORMED_TARGET"
+     }
+    },
+    {
+     "op": "capture",
+     "target": 7,
+     "expect": {
+      "error": "MALFORMED_TARGET"
+     }
+    },
+    {
+     "op": "capture",
+     "target": "toy",
+     "expect": {
+      "error": "MALFORMED_TARGET"
+     }
+    },
+    {
+     "op": "capture",
+     "target": "gen_",
+     "expect": {
+      "error": "MALFORMED_TARGET"
+     }
+    },
+    {
+     "op": "capture",
+     "target": "gen_Vt",
+     "expect": {
+      "error": "MALFORMED_TARGET"
+     }
+    },
+    {
+     "op": "capture",
+     "target": "gen_vt\n",
+     "expect": {
+      "error": "MALFORMED_TARGET"
+     }
+    },
+    {
+     "op": "capture",
+     "target": " gen_vt",
+     "expect": {
+      "error": "MALFORMED_TARGET"
+     }
+    },
+    {
+     "op": "capture",
+     "target": "../gen_vt",
+     "expect": {
+      "error": "MALFORMED_TARGET"
+     }
+    },
+    {
+     "op": "capture",
+     "target": "gen_v-t",
+     "expect": {
+      "error": "MALFORMED_TARGET"
+     }
+    },
+    {
+     "op": "capture",
+     "target": "gen_rsi_v0_0123456789abcdef",
+     "expect": {
+      "error": "MALFORMED_TARGET"
+     }
+    },
+    {
+     "op": "capture",
+     "target": "gen_rsi_anything",
+     "expect": {
+      "error": "MALFORMED_TARGET"
+     }
+    },
+    {
+     "op": "capture",
+     "target": {
+      "nodes": [
+       "plan",
+       "implement"
+      ],
+      "edges": [
+       [
+        "plan",
+        "implement"
+       ]
+      ]
+     },
+     "expect": {
+      "error": "MALFORMED_TARGET"
+     }
+    },
+    {
+     "op": "capture",
+     "target": "gen_absent",
+     "expect": {
+      "error": "UNKNOWN_TARGET"
+     }
+    },
+    {
+     "op": "current",
+     "target": "gen_absent",
+     "expect": {
+      "error": "UNKNOWN_TARGET"
+     }
+    },
+    {
+     "op": "current",
+     "target": "toy",
+     "expect": {
+      "error": "MALFORMED_TARGET"
+     }
+    },
+    {
+     "op": "restore",
+     "target": "toy",
+     "version_id": "$id:C_A",
+     "expected_current": "$rec:cas",
+     "expect": {
+      "error": "MALFORMED_TARGET"
+     }
+    },
+    {
+     "op": "restore",
+     "target": "gen_vt",
+     "version_id": "$id:C_A",
+     "expected_current": null,
+     "expect": {
+      "error": "MALFORMED_EXPECTED_CURRENT"
+     }
+    },
+    {
+     "op": "restore",
+     "target": "gen_vt",
+     "version_id": "$id:C_A",
+     "expected_current": "",
+     "expect": {
+      "error": "MALFORMED_EXPECTED_CURRENT"
+     }
+    },
+    {
+     "op": "restore",
+     "target": "gen_vt",
+     "version_id": "$id:C_A",
+     "expected_current": "bogus",
+     "expect": {
+      "error": "MALFORMED_EXPECTED_CURRENT"
+     }
+    },
+    {
+     "op": "restore",
+     "target": "gen_vt",
+     "version_id": "$id:C_A",
+     "expected_current": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+     "expect": {
+      "error": "MALFORMED_EXPECTED_CURRENT"
+     }
+    },
+    {
+     "op": "restore",
+     "target": "gen_vt",
+     "version_id": "$id:C_A",
+     "expected_current": "0000000000000000000000000000000000000000000000000000000000000000\n",
+     "expect": {
+      "error": "MALFORMED_EXPECTED_CURRENT"
+     }
+    },
+    {
+     "op": "restore",
+     "target": "gen_vt",
+     "version_id": "$id:C_A",
+     "expected_current": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+     "expect": {
+      "error": "MALFORMED_EXPECTED_CURRENT"
+     }
+    },
+    {
+     "op": "restore",
+     "target": "gen_vt",
+     "version_id": "$id:C_A",
+     "expected_current": 0,
+     "expect": {
+      "error": "MALFORMED_EXPECTED_CURRENT"
+     }
+    },
+    {
+     "op": "restore",
+     "target": "gen_vt",
+     "version_id": "$id:C_A",
+     "expected_current": [],
+     "expect": {
+      "error": "MALFORMED_EXPECTED_CURRENT"
+     }
+    },
+    {
+     "op": "list",
+     "unchanged": true,
+     "expect": {
+      "result": [
+       "$id:C_A"
+      ]
+     }
+    }
+   ]
+  }
+ ]
 }

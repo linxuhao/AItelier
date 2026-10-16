@@ -1,110 +1,144 @@
-# Pipeline versioning contract (v1, statement phase)
+# Pipeline versioning contract (r2)
 
-Status: SOURCE CORRECTION CANDIDATE. Existing acceptance-only readback@r1 is
-retained; test results belong to the Source report. Real-provider conformance is still
-unmeasured. The standalone fake does not register, boot, roll back or touch any real
-pipeline; it is not a substitute for the real provider.
+Status: SOURCE CANDIDATE for `rsi.pipeline-versioning.contract` r2. Acceptance
+needs a fresh nonauthor readback@r2; the r1 readback does not carry over.
 
 ## Goal
-A registered pipeline version is an immutable, content-addressed bundle of graph, roles
-and templates that can be listed, read and restored.
+A registered pipeline version is an immutable, content-addressed unit of graph,
+resolved roles/settings and actual prompt/template bytes, which can be listed,
+read and restored. `fake.py` is a standalone fake for downstream tests;
+`native_provider.py` binds the same API to the accepted native frozen-bundle
+provider (`core/pipeline_frozen_bundle.py`, ea100a7).
 
-## Bundle (input to `capture`, output of `read`)
-Exactly three keys, no others:
-- `graph`: object. Whole pipeline graph as pure data.
-- `roles`: object `{role_name: {settings, tools, prompt}}`.
-  - `settings`: object holding every *resolved* setting (defaults already applied).
-  - `tools`: list of `{name, identity}`; names unique within a role; `identity` is an opaque
-    frozen reference to the tool (for example a content digest or pinned tag).
-  - `prompt`: the actual prompt text. Pointers/paths are refused (`MALFORMED_BUNDLE`).
-- `templates`: object `{template_name: text}` (actual text, not paths).
+## Why r1 was re-derived
+r1 (statement 1f469ef, retained with its 67 native diagnostics in the
+`rsi-versioning-real-provider-proof-sol-20261016` evidence) declared a domain
+the real host does not have: a caller-supplied generic `{nodes, edges}` graph
+(the actual `PipelineGraph` parser raised `KeyError('name')` before any
+effect), integer-only settings (actual resolved roles carry floats such as
+`temperature: 0.7`), an append `seq` ledger, one global "current", and
+`pin_run`/`finish_run` that would fabricate runs. r2 corrects the domain:
 
-Values may be null, bool, int, string, list, or string-keyed object. Floats, tuples and
-anything else are refused (`MALFORMED_BUNDLE`), as are non-UTF-8-encodable strings.
-No YAML is involved; callers parse YAML elsewhere. The domain is acyclic JSON data,
-not arbitrary Python objects. Tool inventory names/identities and run IDs must also
-be UTF-8-encodable strings; inventory names/identities and run IDs must be nonempty.
+| r1 | r2 |
+|---|---|
+| caller passes a bundle dict | `capture(target)` reads an actually registered generated target |
+| generic graph | the target's actual graph file (valid `PipelineGraph` schema) |
+| integers only | finite JSON: finite floats admitted exactly, NaN/Infinity refused |
+| `seq` insertion ledger | catalog = verified filesystem seals, ordered by version id |
+| one global current, logical CAS | per-target whole-unit identity CAS (native) |
+| `pin_run`/`finish_run`/`list_pins` | none: runs belong to the SDK; restore must preserve them |
+| tool inventory set by caller | identities served by the actual ToolLoader |
+| optional tamper hook | tampering is an on-disk fixture action for every provider |
 
-## Version id
-`version_id = "sha256:" + hex(sha256(canonical_bytes(bundle)))`.
+## Identities (all distinct)
+- **logical version id**: `"sha256:" + sha256(canonical_bytes(content))`. Content
+  only; independent of target name, provenance, time and storage.
+- **native bundle identity**: the frozen-bundle `identity`; also covers provenance
+  (source paths/hashes, manifest hints, parent graph version/digest,
+  `derived_from`, capabilities, tool-loader served code). Shown by `read` only.
+- **physical seal name**: `gen_rsi_v<first 31 hex of logical id>_<first 16 hex of
+  native identity>`; the native seal triple `<name>.yaml/.roles.json/.bundle.json`.
+- **unit identity**: native `unit_identity` of a target's graph+roles files; the
+  `expected_current` compare-and-swap token for `restore`. Not a version id.
+- **graph version**: the SDK's integer content version of a registered graph;
+  existing runs pin it. Not a version id.
 
-`canonical_bytes` is the ASCII bytes of `json.dumps(payload, sort_keys=True,
-separators=(",", ":"), ensure_ascii=True)` where
-`payload = {"schema": "rsi.pipeline_version.v1", "graph": graph, "roles": R, "templates": T}`;
-`R[role] = {"prompt_b64": base64(prompt UTF-8 bytes), "settings": settings,
-"tools": [{"identity", "name"} sorted by name]}`; `T[name] = base64(text UTF-8 bytes)`.
-Consequences: key order and tool order never matter; any byte change to a prompt, template,
-setting, graph value or tool identity changes the id; prompts are hashed as bytes, never by
-pointer. Exact bytes for four bundles are pinned in `conformance_vectors.json`.
+## Logical content (result of `read`)
+Exactly `{"graph", "roles", "tools"}`:
+- `graph`: the target's graph mapping with only physical naming removed: its
+  `name` and its own-config `steps[*].context[*].source.config` references (the
+  scope native compile/adoption renames) become `"$self"`, and every
+  `agent_config` its logical role name. `"$self"` is reserved.
+- `roles`: `{logical_role: {"model", "tools", "settings", "prompt"}}` for exactly
+  the roles the graph references; `settings` are all other resolved config
+  values; `prompt` is the actual resolved text (template bytes or inline
+  prompt) or `null`. Logical role name = physical name minus `<own name>__` and
+  any number of adoption tags `rsi<16 hex>_`.
+- `tools`: `{name: identity}` for every tool the unit depends on, identity as the
+  actual ToolLoader serves it (for a directory tool `{"native": bool, "files":
+  {file: sha256}}`).
+
+Domain: null, bool, int, finite float, UTF-8 string, list, string-keyed object.
+No coercion: `1`, `1.0` and `true` are different values; NaN, ±Infinity,
+tuples, bytes and other objects refuse `MALFORMED_CONTENT`.
+
+`canonical_bytes(content)` = UTF-8 of `json.dumps({"schema":
+"rsi.pipeline_version.v2", **content}, sort_keys=True, separators=(",", ":"),
+ensure_ascii=False, allow_nan=False)`; floats use Python's shortest round-trip
+`repr`. Key order never matters; list order does. Exact bytes and ids are pinned
+in `conformance_vectors.json`.
 
 ## API (provider object)
 | call | result |
 |---|---|
-| `capture(bundle, *, expected_current=<unset>)` | `{version_id, created, previous_version_id, current_version_id}` |
-| `list_versions()` | `[{version_id, seq, is_current}]` in creation order, `seq` from 1 |
-| `read(version_id)` | `{version_id, bundle}` |
-| `restore(version_id, *, expected_current=<unset>)` | `{version_id, previous_version_id, changed}` |
-| `current_version()` | version id or `None` |
-| `pin_run(run_id)` / `finish_run(run_id)` / `run_pin(run_id)` / `list_pins()` | run pinning, below |
-| `version_id_of(bundle)`, `canonical_form(bundle)` | pure; used by vectors |
-| `set_available_tools({name: identity})` | fake/test seam for the host tool inventory |
+| `capture(target)` | `{target, version_id, created, physical_name}` |
+| `list_versions()` | sorted list of logical version ids in the catalog |
+| `read(version_id)` | `{version_id, content, native}` |
+| `current(target)` | `{target, unit_identity, graph_version}` |
+| `restore(target, version_id, *, expected_current)` | `{target, version_id, changed, previous_unit_identity, unit_identity}` |
+| `canonical_bytes(content)`, `version_id_of(content)` | pure |
 
-`expected_current` (optional): a version id or `None` (meaning "nothing selected yet").
-If given and it differs from the actual current, the call refuses `CONFLICT`.
+There is deliberately no create/pin/finish/run API.
 
 ## Behaviour
-- **No-op edit creates no version.** `capture` of a bundle whose id already exists
-  returns `created=false`, adds no entry and keeps `seq`. It still selects that version as
-  current (equal to current means no change at all). Reordered keys/tools are no-ops.
-- **History is append-only.** There is no delete or overwrite. A version's content never
-  changes after capture.
-- **Restore selects only.** `restore` changes the current selection; it does not create a
-  version, edit history, or touch any run pin. Restoring the current version is allowed and
-  returns `changed=false`.
-- **Pins.** `pin_run` records the current version for a run (`NO_CURRENT_VERSION` if none,
-  `DUPLICATE_RUN` if reused). A pin never changes afterwards: capture, restore and
-  `finish_run` leave it as is (finish only sets `state` to `finished`; the pin is retained).
-  `list_pins()` returns `{run_id: {version_id, state}}`; `state` is `running|finished`.
-- **Tools.** `capture` and `restore` require every tool in every role to exist with the
-  same identity: otherwise `TOOL_UNAVAILABLE` / `TOOL_IDENTITY_MISMATCH`. Reading a stored
-  version does not require tools (history stays inspectable).
-- **Integrity.** Every `read`/`restore`/duplicate `capture` re-hashes stored content;
-  mismatch refuses `TAMPERED_VERSION`.
+- **capture** catalogs what an owned generated target serves now. If a seal of
+  that logical id exists it returns `created=false` and writes nothing (no new
+  physical seal even when native provenance differs, e.g. after a restore).
+  Otherwise it seals once through native `seal`. It never changes the target.
+- **list/read** re-verify seals (native `verify_sealed` + projection + naming);
+  results are fresh copies that callers own. Reading needs no live tools.
+- **restore** changes only the named target, only through native
+  `adopt_bundle` (CAS + before-change descriptor + one registration
+  transaction). If the target already serves that logical content it returns
+  `changed=false` and changes nothing. A change never creates history, never
+  touches other targets, and keeps every existing paused/running/completed run
+  on its SDK graph-version pin with its old resolved prompt bytes (adoption
+  retains old roles beside the new bundle-specific roles).
+- **history is immutable**: no delete, overwrite or re-key.
 
-## Errors (loud refusal)
-Every refusal is an exception with a stable string attribute `code`; no silent default,
-no partial effect: a refused call leaves versions, current selection and pins unchanged.
-`MALFORMED_BUNDLE`, `MALFORMED_VERSION_ID` (not `sha256:` + 64 lowercase hex, or not a
-string, including any leading/trailing character or final newline), `UNKNOWN_VERSION`, `TAMPERED_VERSION`, `TOOL_UNAVAILABLE`,
-`TOOL_IDENTITY_MISMATCH`, `CONFLICT`, `NO_CURRENT_VERSION`, `UNKNOWN_RUN`, `DUPLICATE_RUN`.
+## Refusals (loud, before any effect)
+Every refusal is an exception with a stable `code`; a refused call leaves seals,
+targets, registrations, graph versions, manifests and runs unchanged.
+`MALFORMED_CONTENT`, `MALFORMED_VERSION_ID` (whole string `sha256:` + 64
+lowercase hex), `MALFORMED_TARGET` (whole string `gen_[a-z0-9][a-z0-9_]{0,59}`,
+not `gen_rsi_*`), `MALFORMED_EXPECTED_CURRENT` (64 lowercase hex),
+`UNKNOWN_TARGET`, `UNKNOWN_VERSION`, `TAMPERED_VERSION`, `PROVIDER_UNAVAILABLE`,
+`PROVIDER_CHANGED`, `CONFLICT`, `UNSUPPORTED_CONTENT` (a unit whose native
+seal/adoption would not reproduce its logical content), `NATIVE_REFUSED` (any
+other native refusal, message preserved).
 
-Malformed run IDs are `MALFORMED_BUNDLE` for all three pin methods, before
-dictionary lookup; a well-formed absent ID is `UNKNOWN_RUN`. Pin IDs are opaque
-nonempty text (not silently stripped or normalized). The optional tamper hook validates
-the exact version-ID form, checks existence, then accepts only an otherwise valid
-bundle; malformed hook payloads are `MALFORMED_BUNDLE` without changing history.
-
-Check order for `restore`: id form, unknown, tamper, expected_current, tools. For `capture`:
-bundle validity, expected_current, tools, tamper (when the id exists).
+Order. capture: target form, known target, providers, content domain, catalog
+integrity (tampered), seal. restore: version form, target form, CAS form, known
+target, known version, tamper, CAS, no-op, adoption reproduces content,
+providers, adoption. `list_versions` refuses `TAMPERED_VERSION` if any catalog
+seal fails verification; `read` of another version still works.
 
 ## Ownership
-- The store owns history. Callers own what they pass in (deep-copied on entry) and what
-  they get back (deep-copied on exit); mutating either never alters stored history.
-- Run pins belong to the run that created them; restore cannot repin a running run.
-- The host owns the tool inventory; versions only hold frozen tool references.
+- Host-owned (outside this API): tools, ordinary target registration, runs and
+  their lifecycle, the SDK graph-version pins.
+- Provider-owned: seals it writes (immutable once written) and the adoption it
+  performs on the named target. The native binding keeps no state beyond its
+  host objects: no version, pin, run or sequence ledger.
 
 ## Conformance
-`conformance_vectors.json` holds literal bundles, exact canonical bytes and scenarios.
-Grammar: bundle keys name entries in `bundles`; `$id:K` = provider id of bundle K,
-`$bundle:K` = that bundle, `$zero` = `zero_id`, `$null` = null. `expect` is `{error: CODE}`,
-`{result: X}` (exact) or `{result_subset: X}` (dict subset); no `expect` means "must succeed".
-Ops: capture, capture_then_mutate_input, mutate_read, list, read, current, restore,
-set_tools, tamper, pin_run, finish_run, run_pin, list_pins. A scenario with `requires:
-["tamper_hook"]` is skipped by providers lacking that capability (skipped, not passed).
-A real provider passes the same vectors by calling
-`test_contract.run_conformance(factory)`, `factory(available_tools) -> provider`; it
-returns a list of failure strings, empty meaning conforming.
+`test_contract.run_conformance(make_world)`; `make_world() -> (api, fixture)`.
+The fixture performs host actions outside the API: `install_tool`,
+`remove_tool`, `register` (ordinary generated config; the vector also states the
+content it resolves to, which only the fake uses), `start_run`, `pause_run`,
+`complete_run`, `observe_runs` (status, pinned graph version, resolved prompts),
+`claim_prompt`, `tamper_seal` and `snapshot` (all observable host state).
+Vectors: `units` (registered input, `$self` = target), `contents`, pinned
+`ids`/`canonical`, `same_id`, `distinct_ids`, `domain_refusals`, `scenarios`.
+Step grammar: `expect` is `{error}`, `{result}` (exact, typed) or
+`{result_subset}`; `unchanged: true` requires an identical snapshot; `record`
+saves a result field as `$rec:<name>`; `$id:K`, `$content:K`, `$pin:<run>`,
+`$zero`; `{"$float": "nan"|"inf"|"-inf"}`, `{"$tuple": [...]}`,
+`{"$bytes": "..."}` encode non-JSON values. Every refusal is snapshot-checked.
+There are no optional scenarios: the same vectors run on every provider.
 
 ## Not covered
-Real registration/adoption/restart, filesystem or registry storage, YAML parsing, boot and
-rollback safety, concurrency, persistence across processes.
+Concurrency beyond the native `sf._lock` exclusion, boot/restart of the
+catalog, candidate derivation (`derive_candidate`), builtin (non-generated)
+targets, retirement/deletion, normal runtime/deployment, model or evaluator
+execution. Fixture proof is SDK 1.5.92 in an isolated container, not the
+critical SDK 1.5.94 runtime.

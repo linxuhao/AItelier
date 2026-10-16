@@ -27,6 +27,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import time
 import uuid
 
 HOST_LAUNCHER_ENV = "AITELIER_HOST_LAUNCHER_SOCKET"
@@ -265,7 +266,6 @@ def node_payload(node: dict, timeout: int) -> dict:
 # refused (`GitEntryRefused`) and nothing runs.
 GIT_META_MAX_BYTES = 256 << 20
 GIT_PREP_DEADLINE = 120
-GIT_CREATE_TIMEOUT = 30
 GIT_CONTAINER_DIR = "/aitelier-git"   # a linked worktree's pointer names it
 _REFNAME = re.compile(r"refs/(?!.*\.\.)(?!.*//)[A-Za-z0-9._/+-]+")
 _PER_WORKTREE_REFS = ("refs/bisect/", "refs/worktree/", "refs/rewritten/")
@@ -358,30 +358,160 @@ echo "$used"
 '''
 
 
-def _run_prep(create: list[str], docker: str, name: str, conn=None) -> str:
-    """Create, then run, the preparation container within GIT_PREP_DEADLINE; stdout.
+class CleanupUnconfirmed(IsolationUnavailable):
+    """An owned container's absence could not be established: never a pass."""
 
-    ``create`` is its `docker create` argv. Creation runs to completion first
-    (bounded by GIT_CREATE_TIMEOUT, not by the deadline): a `docker run`
-    client killed while its create request is in flight lets the daemon
-    create the container after the removal has already run (measured: left
-    `created`). Once create returns, the container exists under ``name``, so
-    the removal by name that ends every exit from here finds it. The deadline
-    and cancellation (``conn``, the launcher's client socket, becoming
-    readable, as in the launcher's own wait) apply to `docker start -a`.
+
+# ── owned container lifecycle ──────────────────────────────────────────────
+#
+# Every container here (Git preparation, direct repository command, host
+# launcher command) is created by its own UUID name and started separately:
+# `docker create`, then `docker start -a`. Killing a Docker client does not
+# cancel a request the daemon already holds, so a removal issued while a
+# create is in flight can run first and the daemon then creates the
+# container (measured on a `docker run` and on a `docker create` killed by
+# KeyboardInterrupt: left `created`/`running` after their removal). Only a
+# create client that EXITED reports the daemon's answer: rc 0 and an ID mean
+# it was created, a refusal that it was not (a daemon that drops the
+# connection mid-create is not covered: that exit is taken as a refusal). So
+# the create client is never killed by cancellation: it runs until it
+# answers or CREATE_TIMEOUT. A main-thread SIGINT (direct Ctrl-C) arriving while a
+# client is spawned or a create is awaited is held (`_HeldInterrupt`) and
+# delivered once the client's handle is recorded and the create has
+# answered, before START, so a cancelled launch never starts its command.
+# Launcher cancellation (the client socket) is checked at the same point.
+# Only a create that never answers is unknown: its client is then killed, the
+# name removed, and the result is `CleanupUnconfirmed`, since the daemon may
+# still create it. Once a create has answered, `docker rm -f NAME` exiting 0
+# is final (it is 0 when the name is already gone, and nothing re-creates
+# it); a removal that does not succeed within REMOVE_DEADLINE is
+# `CleanupUnconfirmed`. Removal waits for the start client to be killed and
+# reaped first, and is itself protected from a held SIGINT.
+CREATE_TIMEOUT = 30
+REMOVE_DEADLINE = 30
+
+
+class _HeldInterrupt:
+    """Hold a main-thread SIGINT for the block; deliver it on exit.
+
+    Only the Python-level handler is replaced (no signal mask is changed, so
+    nothing is inherited by the clients spawned inside). Outside the main
+    thread no signal is delivered as an exception and nothing is changed.
     """
-    import select
-    import time
-    deadline = time.monotonic() + GIT_PREP_DEADLINE
+
+    def __enter__(self):
+        import signal
+        import threading
+        self.previous = self.pending = None
+        if threading.current_thread() is threading.main_thread():
+            current = signal.getsignal(signal.SIGINT)
+            if callable(current):
+                self.previous = signal.signal(signal.SIGINT, self._hold)
+        return self
+
+    def _hold(self, signum, frame):
+        if self.pending is None:
+            self.pending = (signum, frame)
+
+    def __exit__(self, *exc):
+        import signal
+        if self.previous is not None:
+            signal.signal(signal.SIGINT, self.previous)
+            if self.pending is not None:
+                self.previous(*self.pending)   # KeyboardInterrupt, by default
+        return False
+
+
+def _remove_owned(docker: str, name: str, answered: bool) -> None:
+    deadline = time.monotonic() + REMOVE_DEADLINE
+    while True:
+        try:
+            done = subprocess.run([docker, "rm", "-f", name], stdin=subprocess.DEVNULL,
+                                  capture_output=True, text=True, timeout=10)
+            removed, why = done.returncode == 0, done.stderr.strip()[-300:]
+        except subprocess.TimeoutExpired:
+            removed, why = False, "docker rm did not answer within 10s"
+        if removed and answered:
+            return
+        if removed or time.monotonic() > deadline:
+            break
+        time.sleep(0.2)
+    if not answered:
+        raise CleanupUnconfirmed(f"owned container {name}: its create was not answered within "
+                                 f"{CREATE_TIMEOUT}s, so the daemon may still create it after "
+                                 "the removal; its absence is not confirmed")
+    raise CleanupUnconfirmed(f"owned container {name} could not be removed within "
+                             f"{REMOVE_DEADLINE}s: {why}")
+
+
+@contextmanager
+def owned_container(create: list[str], docker: str, name: str, *, cancelled=None,
+                    text: bool = False):
+    """Create ``name`` with the ``create`` argv, start it, yield its `start -a` client.
+
+    ``cancelled`` (optional) is called after the create has answered and
+    before START; it raises to cancel. Every exit kills and reaps the start
+    client, then removes ``name`` (`_remove_owned`). A refused create raises
+    `IsolationUnavailable` ("not created").
+    """
+    answered = True
+    sent = False
     proc = None
     try:
-        made = subprocess.run(create, stdin=subprocess.DEVNULL, capture_output=True, text=True,
-                              timeout=GIT_CREATE_TIMEOUT)
-        if made.returncode:
-            raise RuntimeError(f"Git metadata preparation not created: {made.stderr.strip()[-300:]}")
-        proc = subprocess.Popen([docker, "start", "-a", name], stdin=subprocess.DEVNULL,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                                start_new_session=True)
+        with _HeldInterrupt():
+            made = subprocess.Popen(create, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, text=True, start_new_session=True)
+            sent = True
+            try:
+                _, err = made.communicate(timeout=CREATE_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                answered = False
+                made.kill()
+                made.communicate()
+                raise IsolationUnavailable(f"owned container {name} was not created within "
+                                           f"{CREATE_TIMEOUT}s")
+            if made.returncode:
+                raise IsolationUnavailable(f"owned container not created: {err.strip()[-300:]}")
+        # A SIGINT held during the create was delivered above: START is never reached.
+        if cancelled is not None:
+            cancelled()
+        with _HeldInterrupt():
+            proc = subprocess.Popen([docker, "start", "-a", name], stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=text,
+                                    start_new_session=True)
+        yield proc
+    finally:
+        with _HeldInterrupt():
+            try:
+                if proc is not None:
+                    if proc.poll() is None:
+                        proc.kill()
+                    proc.wait(timeout=10)
+                    proc.stdout.close()
+                    proc.stderr.close()
+            finally:
+                if sent:
+                    _remove_owned(docker, name, answered)
+
+
+def _run_prep(create: list[str], docker: str, name: str, conn=None) -> str:
+    """Run the preparation container (`owned_container`); its stdout.
+
+    ``create`` is its `docker create` argv. GIT_PREP_DEADLINE is measured
+    from entry, so the create's own time counts against it, but the create
+    is bounded only by CREATE_TIMEOUT and is not interrupted by the deadline
+    or by cancellation. Cancellation (``conn``, the launcher's client socket,
+    becoming readable, as in the launcher's own wait) is checked once the
+    create has answered and while `docker start -a` runs; the deadline only
+    while it runs.
+    """
+    import select
+    deadline = time.monotonic() + GIT_PREP_DEADLINE
+
+    def cancelled():
+        if conn is not None and select.select([conn], [], [], 0)[0]:
+            raise PreparationCancelled("client disconnected during Git metadata preparation")
+    with owned_container(create, docker, name, cancelled=cancelled, text=True) as proc:
         while True:
             try:
                 stdout, stderr = proc.communicate(timeout=0.1)
@@ -390,32 +520,24 @@ def _run_prep(create: list[str], docker: str, name: str, conn=None) -> str:
                 if time.monotonic() > deadline:
                     raise RuntimeError(f"Git metadata preparation exceeded its "
                                        f"{GIT_PREP_DEADLINE}s deadline")
-                if conn is not None and select.select([conn], [], [], 0)[0]:
-                    raise PreparationCancelled("client disconnected during Git metadata preparation")
+                cancelled()
         if proc.returncode:
             raise RuntimeError(f"Git metadata preparation failed: {stderr.strip()[-300:]}")
         return stdout
-    finally:
-        try:
-            if proc is not None and proc.poll() is None:
-                proc.kill()
-                proc.wait(timeout=10)
-        finally:
-            subprocess.run([docker, "rm", "-f", name], stdout=subprocess.DEVNULL,
-                           stderr=subprocess.DEVNULL, timeout=10)
 
 
 def private_git(repo: Path, dest: Path, common: Path | None = None, *, image: str,
                 docker: str = "docker", conn=None) -> tuple[list[str], dict]:
     """Docker mounts giving ``repo`` its private Git metadata, built in ``dest``.
 
-    Raises `PreparationCancelled` (the launch must not go on) and
-    `GitEntryRefused` (a `.git` that cannot be covered: the command must not
-    run). Otherwise, when no metadata can be provided, ``info`` says why and
-    the mounts still cover the repository's own `.git` (an empty directory
-    over a directory, a pointer to an unmounted path over a file), so git in
-    the container answers "not a git repository". A repository without any
-    `.git` entry gets nothing and stays one.
+    Raises `PreparationCancelled` (the launch must not go on),
+    `CleanupUnconfirmed` (the preparation container may remain: nothing
+    goes on) and `GitEntryRefused` (a `.git` that cannot be covered: the
+    command must not run). Otherwise, when no metadata can be provided,
+    ``info`` says why and the mounts still cover the repository's own `.git`
+    (an empty directory over a directory, a pointer to an unmounted path over
+    a file), so git in the container answers "not a git repository". A
+    repository without any `.git` entry gets nothing and stays one.
     """
     dot = Path(repo) / ".git"
     try:
@@ -455,7 +577,7 @@ def private_git(repo: Path, dest: Path, common: Path | None = None, *, image: st
             raise RuntimeError(f"private metadata is {size} bytes (> {budget})")
         info = {"provided": True, "head": sha, "branch": branch,
                 "object_bytes": int(used.split()[-1]), "metadata_bytes": size}
-    except PreparationCancelled:
+    except (PreparationCancelled, CleanupUnconfirmed):
         raise
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
         shutil.rmtree(private, ignore_errors=True)
@@ -598,32 +720,29 @@ def _execute(repo: Path, args: list[str], timeout: int, *,
         git_root.mkdir(mode=0o700, parents=True, exist_ok=True)
         image = os.environ.get("AITELIER_TEST_IMAGE", "aitelier:latest")
         git_dir = Path(tempfile.mkdtemp(prefix="git-", dir=git_root))
-        try:
-            git_mounts, git_info = private_git(repo, git_dir, image=image, docker=docker)
-        except BaseException:
-            # Cancelled while preparing: the launch's own finally is not reached yet.
-            shutil.rmtree(git_dir, ignore_errors=True)
-            raise
-        network, mounts = "none", ["-v", f"{repo}:{repo}:ro", *git_mounts]
-        workdir_arg = str(repo)
-    command = [docker, "run", "--rm", "--init", "--network", network,
-               "--cpus", "2", "--memory", "2g", "--pids-limit", "512",
-               "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
-               "--user", f"{os.getuid()}:{os.getgid()}", "--name", name,
-               *mounts, "-v", f"{entry}:/executor.py:ro",
-               "-w", workdir_arg]
-    for directory in (() if profile else writable_dirs):
-        path = str(Path(directory).resolve())
-        command += ["-v", f"{path}:{path}:rw"]
-    if relay_socket and not profile:
-        command += ["-v", f"{relay_socket}:{relay_socket}:ro"]
-    command += ["--entrypoint", "python3", image,
-                "/executor.py", json.dumps(payload)]
-    proc = None
     try:
-        proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                text=True, start_new_session=True)
-        stdout, stderr = proc.communicate(timeout=timeout + 15)
+        if git_dir is not None:
+            git_mounts, git_info = private_git(repo, git_dir, image=image, docker=docker)
+            network, mounts = "none", ["-v", f"{repo}:{repo}:ro", *git_mounts]
+            workdir_arg = str(repo)
+        command = [docker, "create", "--rm", "--init", "--network", network,
+                   "--cpus", "2", "--memory", "2g", "--pids-limit", "512",
+                   "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+                   "--user", f"{os.getuid()}:{os.getgid()}", "--name", name,
+                   *mounts, "-v", f"{entry}:/executor.py:ro",
+                   "-w", workdir_arg]
+        for directory in (() if profile else writable_dirs):
+            path = str(Path(directory).resolve())
+            command += ["-v", f"{path}:{path}:rw"]
+        if relay_socket and not profile:
+            command += ["-v", f"{relay_socket}:{relay_socket}:ro"]
+        command += ["--entrypoint", "python3", image,
+                    "/executor.py", json.dumps(payload)]
+        # The create's time counts against the launch's bound (`owned_container`).
+        deadline = time.monotonic() + timeout + 15
+        # UUID names are created by this invocation only. Never prune or kill peers.
+        with owned_container(command, docker, name, text=True) as proc:
+            stdout, stderr = proc.communicate(timeout=deadline - time.monotonic())
         if proc.returncode != 0:
             raise IsolationUnavailable(f"isolated container exited {proc.returncode}: {stderr[-2000:]}")
         try:
@@ -639,13 +758,5 @@ def _execute(repo: Path, args: list[str], timeout: int, *,
         completed.git = git_info
         return completed
     finally:
-        # UUID names are created by this invocation only. Never prune or kill peers.
-        try:
-            subprocess.run([docker, "rm", "-f", name], stdout=subprocess.DEVNULL,
-                           stderr=subprocess.DEVNULL, timeout=10)
-        finally:
-            if proc is not None and proc.poll() is None:
-                proc.kill()
-                proc.wait(timeout=10)
-            if git_dir is not None:
-                shutil.rmtree(git_dir, ignore_errors=True)
+        if git_dir is not None:
+            shutil.rmtree(git_dir, ignore_errors=True)

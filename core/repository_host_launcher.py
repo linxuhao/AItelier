@@ -25,6 +25,7 @@ import json
 import os
 from pathlib import Path
 import re
+import select
 import selectors
 import shutil
 import sqlite3
@@ -243,7 +244,10 @@ def _validate_command_form(repo: Path, args: list[str], request: dict) -> None:
 
 
 def docker_command(cfg: dict, fields: dict, name: str) -> list[str]:
-    """Build the one and only Docker argv the host service will run."""
+    """Build the one and only Docker create argv the host service will run.
+
+    It is started, and removed, by `core.repository_executor.owned_container`.
+    """
     _validate_config(cfg)
     docker = shutil.which("docker")
     if not docker:
@@ -252,7 +256,7 @@ def docker_command(cfg: dict, fields: dict, name: str) -> list[str]:
     entry = str(cfg["executor_entry"])
     if fields.get("profile"):
         from core.repository_executor import node_mount_args, node_payload
-        return [docker, "run", "--rm", "--init", "--network", fields["network"],
+        return [docker, "create", "--rm", "--init", "--network", fields["network"],
                 "--cpus", "2", "--memory", "2g", "--pids-limit", "512",
                 "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
                 "--user", f"{os.getuid()}:{os.getgid()}", "--name", name,
@@ -262,7 +266,7 @@ def docker_command(cfg: dict, fields: dict, name: str) -> list[str]:
                 "-v", f"{entry}:/executor.py:ro", "-w", fields["workdir"],
                 "--entrypoint", "python3", fields["image"],
                 "/executor.py", json.dumps(node_payload(fields, fields["timeout"]))]
-    command = [docker, "run", "--rm", "--init", "--network", "none",
+    command = [docker, "create", "--rm", "--init", "--network", "none",
                "--cpus", "2", "--memory", "2g", "--pids-limit", "512",
                "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
                "--user", f"{os.getuid()}:{os.getgid()}", "--name", name,
@@ -285,14 +289,24 @@ def docker_command(cfg: dict, fields: dict, name: str) -> list[str]:
 
 
 def _run_docker(cfg: dict, fields: dict, conn: socket.socket | None = None) -> dict:
+    from core.repository_executor import owned_container
     name = "aitelier-cpu-" + uuid.uuid4().hex
     command = docker_command(cfg, fields, name)
-    proc = None
-    try:
-        proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                start_new_session=True)
+
+    def client_left():
+        # Protocol is one complete request followed by a reply;
+        # EOF/write-half-close is cancellation, not a second RPC.
+        if not conn.recv(1, socket.MSG_PEEK):
+            raise LaunchRefused("client disconnected during owned execution")
+        raise LaunchRefused("unexpected data after launch request")
+
+    def cancelled():
+        if conn is not None and select.select([conn], [], [], 0)[0]:
+            client_left()
+    # The create's time counts against this bound (`owned_container`).
+    deadline = time.monotonic() + fields["timeout"] + 15
+    with owned_container(command, command[0], name, cancelled=cancelled) as proc:
         output = {"stdout": bytearray(), "stderr": bytearray()}
-        deadline = time.monotonic() + fields["timeout"] + 15
         with selectors.DefaultSelector() as selector:
             selector.register(proc.stdout, selectors.EVENT_READ, "stdout")
             selector.register(proc.stderr, selectors.EVENT_READ, "stderr")
@@ -308,11 +322,7 @@ def _run_docker(cfg: dict, fields: dict, conn: socket.socket | None = None) -> d
                     raise LaunchRefused("host launcher timed out waiting for the container")
                 for key, _ in ready:
                     if key.data == "client":
-                        # Protocol is one complete request followed by a reply;
-                        # EOF/write-half-close is cancellation, not a second RPC.
-                        if not conn.recv(1, socket.MSG_PEEK):
-                            raise LaunchRefused("client disconnected during owned execution")
-                        raise LaunchRefused("unexpected data after launch request")
+                        client_left()
                     chunk = os.read(key.fileobj.fileno(), 65536)
                     if not chunk:
                         selector.unregister(key.fileobj)
@@ -320,33 +330,17 @@ def _run_docker(cfg: dict, fields: dict, conn: socket.socket | None = None) -> d
                     else:
                         output[key.data].extend(chunk)
         proc.wait(timeout=max(.1, deadline - time.monotonic()))
-        stderr = output["stderr"].decode(errors="replace")
-        if proc.returncode != 0:
-            raise LaunchRefused(f"isolated container exited {proc.returncode}: {stderr[-2000:]}")
-        try:
-            result = json.loads(output["stdout"])
-        except ValueError as exc:
-            raise LaunchRefused("isolated executor returned no result") from exc
-        if not isinstance(result, dict) or type(result.get("returncode")) is not int or not all(
-                isinstance(result.get(k), str) for k in ("stdout", "stderr")):
-            raise LaunchRefused("isolated executor returned a malformed result")
-        return result
-    finally:
-        try:
-            active = proc is not None and proc.poll() is None
-            removed = subprocess.run(["docker", "rm", "-f", name], stdout=subprocess.DEVNULL,
-                                     stderr=subprocess.DEVNULL, timeout=10)
-            if active and removed.returncode != 0:
-                raise LaunchRefused("owned container cleanup could not be confirmed")
-            # A successfully completed --rm invocation removed itself. A live
-            # cancelled invocation must instead have a successful owned rm.
-        finally:
-            if proc is not None and proc.poll() is None:
-                proc.kill()
-                proc.wait(timeout=10)
-            if proc is not None:
-                proc.stdout.close()
-                proc.stderr.close()
+    stderr = output["stderr"].decode(errors="replace")
+    if proc.returncode != 0:
+        raise LaunchRefused(f"isolated container exited {proc.returncode}: {stderr[-2000:]}")
+    try:
+        result = json.loads(output["stdout"])
+    except ValueError as exc:
+        raise LaunchRefused("isolated executor returned no result") from exc
+    if not isinstance(result, dict) or type(result.get("returncode")) is not int or not all(
+            isinstance(result.get(k), str) for k in ("stdout", "stderr")):
+        raise LaunchRefused("isolated executor returned a malformed result")
+    return result
 
 
 def handle_request(cfg: dict, raw: bytes, conn: socket.socket | None = None) -> dict:
@@ -404,7 +398,7 @@ def _serve_connection(conn: socket.socket, cfg: dict, lock: threading.Semaphore)
         conn.sendall(json.dumps(response).encode() + b"\n")
     except OSError:
         # Client disconnect before the reply: the container cleanup in
-        # _run_docker has already run; nothing of ours is left behind.
+        # _run_docker has already run (an unconfirmed one is an error reply).
         pass
     finally:
         conn.close()

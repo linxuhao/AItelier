@@ -95,7 +95,12 @@ def test_actual_entry_timeout_captures_partial_and_reaps_owned_child(tmp_path):
 @pytest.mark.parametrize("failure", [subprocess.TimeoutExpired(["docker"],1), KeyboardInterrupt()])
 def test_adapter_timeout_cancel_cleanup_is_name_scoped(monkeypatch, tmp_path, failure):
     calls=[]
+    class Created:
+        returncode = 0
+        def communicate(self, timeout):
+            return "container-id\n", ""
     class Client:
+        stdout = stderr = None
         def communicate(self, timeout):
             raise failure
         def poll(self):
@@ -103,15 +108,27 @@ def test_adapter_timeout_cancel_cleanup_is_name_scoped(monkeypatch, tmp_path, fa
         def kill(self):
             calls.append(["client-kill"])
         def wait(self, timeout):
+            calls.append(["client-reaped"])
             return 0
+    def popen(command, **kwargs):
+        calls.append(command)
+        if command[1] == "create":
+            return Created()
+        client = Client()
+        client.stdout, client.stderr = tempfile.TemporaryFile(), tempfile.TemporaryFile()
+        return client
     monkeypatch.setattr(executor.shutil,"which",lambda _name:"/trusted/docker")
-    monkeypatch.setattr(executor.subprocess,"Popen",lambda command,**kwargs:(calls.append(command) or Client()))
-    monkeypatch.setattr(executor.subprocess,"run",lambda command,**kwargs:calls.append(command))
+    monkeypatch.setattr(executor.subprocess,"Popen",popen)
+    monkeypatch.setattr(executor.subprocess,"run",lambda command,**kwargs:(
+        calls.append(command) or subprocess.CompletedProcess(command, 0, "", "")))
     with pytest.raises(type(failure)):
         executor._execute(tmp_path,["python3","-m","pytest"],1)
-    launch,remove=calls[:2]
+    launch,start,kill,reaped,remove=calls
     name=launch[launch.index("--name")+1]
-    assert name.startswith("aitelier-cpu-")
+    assert name.startswith("aitelier-cpu-") and launch[:2] == ["/trusted/docker","create"]
+    assert start == ["/trusted/docker","start","-a",name]
+    # Own client stopped and reaped before the name-scoped removal.
+    assert kill == ["client-kill"] and reaped == ["client-reaped"]
     assert remove == ["/trusted/docker","rm","-f",name]
     for flag,value in [("--network","none"),("--cpus","2"),("--memory","2g"),("--pids-limit","512")]:
         assert launch[launch.index(flag)+1] == value

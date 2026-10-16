@@ -157,17 +157,46 @@ def test_four_actual_host_kernel_slots_refuse_fifth_and_release(owned):
         pass
 
 
-def controlled_child(monkeypatch, code):
+CREATE_START_SHIM = """#!{python}
+import json, os, sys
+args = sys.argv[1:]
+store = {store!r}
+if args[0] == "create":
+    at = args.index("--entrypoint")
+    with open(os.path.join(store, args[args.index("--name") + 1]), "w") as stream:
+        json.dump([args[at + 1]] + args[at + 3:], stream)
+    sys.exit(0)
+if args[:2] == ["start", "-a"]:
+    with open(os.path.join(store, args[2])) as stream:
+        command = json.load(stream)
+    os.execvp(command[0], command)
+sys.exit(2)
+"""
+
+
+def create_start_shim(tmp_path):
+    """A `docker` whose create records a container and whose start -a runs it."""
+    store = tmp_path / 'containers'
+    store.mkdir()
+    shim = tmp_path / 'docker-shim'
+    shim.write_text(CREATE_START_SHIM.format(python=sys.executable, store=str(store)))
+    shim.chmod(0o755)
+    return str(shim)
+
+
+def controlled_child(monkeypatch, code, tmp_path):
     calls = []
     original_run = subprocess.run
     def cleanup(args, **kwargs):
-        if args[:3] == ['docker', 'rm', '-f']:
+        if args[1:3] == ['rm', '-f']:
             calls.append(args)
-            return subprocess.CompletedProcess(args, 0)
+            return subprocess.CompletedProcess(args, 0, '', '')
         return original_run(args, **kwargs)
     monkeypatch.setattr(host.subprocess, 'run', cleanup)
+    shim = create_start_shim(tmp_path)
     monkeypatch.setattr(host, 'docker_command', lambda cfg, fields, name:
-                        [sys.executable, '-c', code])
+                        [shim, 'create', '--name', name, '--entrypoint', sys.executable,
+                         'image', '-c', code])
     return calls
 
 
@@ -176,7 +205,7 @@ def test_live_disconnect_promptly_stops_own_child_and_keeps_peer(owned, monkeypa
     fields = host.validate_request(cfg, req)
     started = tmp_path / 'started'
     calls = controlled_child(monkeypatch, 'from pathlib import Path;import time;'
-                             f'Path({str(started)!r}).write_text("ready");time.sleep(60)')
+                             f'Path({str(started)!r}).write_text("ready");time.sleep(60)', tmp_path)
     peer = subprocess.Popen([sys.executable, '-c', 'import time;time.sleep(60)'])
     client, server = socket.socketpair()
     result = []
@@ -207,11 +236,11 @@ def test_live_disconnect_promptly_stops_own_child_and_keeps_peer(owned, monkeypa
 
 
 @pytest.mark.parametrize('rc', [0, 1])
-def test_controlled_launch_preserves_real_result_rc_stdout_stderr(owned, monkeypatch, rc):
+def test_controlled_launch_preserves_real_result_rc_stdout_stderr(owned, monkeypatch, rc, tmp_path):
     cfg, req, *_ = owned
     fields = host.validate_request(cfg, req)
     result = {'returncode': rc, 'stdout': 'actual child stdout', 'stderr': 'actual child stderr', 'timed_out': False}
-    calls = controlled_child(monkeypatch, 'import json;print(' + repr(json.dumps(result)) + ')')
+    calls = controlled_child(monkeypatch, 'import json;print(' + repr(json.dumps(result)) + ')', tmp_path)
     assert host._run_docker(cfg, fields) == result
     assert len(calls) == 1
 
@@ -283,16 +312,18 @@ def test_four_simultaneous_real_socket_handlers_and_fifth_share_host_kernel_slot
     commands = []
     real_run = subprocess.run
     def remove(args, **kwargs):
-        if args[:3] == ['docker', 'rm', '-f']:
+        if args[1:3] == ['rm', '-f']:
             cleanup.append(args[-1])
-            return subprocess.CompletedProcess(args, 0)
+            return subprocess.CompletedProcess(args, 0, '', '')
         return real_run(args, **kwargs)
     monkeypatch.setattr(host.subprocess, 'run', remove)
+    shim = create_start_shim(tmp_path)
     def child(cfg, fields, name):
         marker = tmp_path / name
         commands.append(name)
         data = json.dumps({'returncode': 0, 'stdout': name, 'stderr': ''})
-        return [sys.executable, '-c', 'from pathlib import Path;import time;'
+        return [shim, 'create', '--name', name, '--entrypoint', sys.executable, 'image',
+                '-c', 'from pathlib import Path;import time;'
                 f'Path({str(marker)!r}).write_text("ready");time.sleep(1);print({data!r})']
     monkeypatch.setattr(host, 'docker_command', child)
     clients = []

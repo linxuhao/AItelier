@@ -396,7 +396,31 @@ def test_client_disconnect_cancels_preparation(tmp_path, docker):
                             "30"], docker, "prep-y", server)
     server.close()
     assert time.monotonic() - started < 3
-    assert docker_calls(tmp_path)[1:] == [["start", "-a", "prep-y"], ["rm", "-f", "prep-y"]]
+    # Cancelled once the create answered: the preparation is never started.
+    assert docker_calls(tmp_path)[1:] == [["rm", "-f", "prep-y"]]
+
+
+def test_client_disconnect_while_preparation_runs_stops_it(tmp_path, docker):
+    import socket
+    import threading
+    import time
+    client, server = socket.socketpair()
+    marker = tmp_path / "pid"
+    def leave():
+        while not marker.exists():
+            time.sleep(0.01)
+        client.close()
+    threading.Thread(target=leave, daemon=True).start()
+    started = time.monotonic()
+    with pytest.raises(executor.PreparationCancelled):
+        executor._run_prep([docker, "create", "--name", "prep-w", "--entrypoint", "sh", "image",
+                            "-c", f"echo $$ > {marker}.tmp; mv {marker}.tmp {marker}; exec sleep 30"],
+                           docker, "prep-w", server)
+    server.close()
+    assert time.monotonic() - started < 5
+    with pytest.raises(ProcessLookupError):
+        os.kill(int(marker.read_text()), 0)
+    assert docker_calls(tmp_path)[1:] == [["start", "-a", "prep-w"], ["rm", "-f", "prep-w"]]
 
 
 def test_detached_head_stays_detached(source, tmp_path, docker):
@@ -515,6 +539,22 @@ def test_launcher_refuses_an_uncoverable_git_entry(tmp_path, monkeypatch, docker
     assert list((Path(cfg["aitelier_home"]) / "cpu-git").iterdir()) == []
 
 
+class TestContainer:
+    """The `docker start -a` client of a repository container that passed."""
+    returncode = 0
+    def communicate(self, timeout):
+        return json.dumps({"returncode": 0, "stdout": "", "stderr": ""}), ""
+    def poll(self): return 0
+    def wait(self, timeout=None): return 0
+    def __init__(self):
+        import io
+        self.stdout, self.stderr = io.StringIO(), io.StringIO()
+
+
+def _starts_test_container(command):
+    return command[1:3] == ["start", "-a"] and command[3].startswith("aitelier-cpu-")
+
+
 def test_direct_adapter_still_runs_a_repository_without_git(tmp_path, monkeypatch, docker):
     from core import datadir
     monkeypatch.setattr(datadir, "aitelier_home", lambda: tmp_path / "home")
@@ -523,16 +563,12 @@ def test_direct_adapter_still_runs_a_repository_without_git(tmp_path, monkeypatc
     repo.mkdir(parents=True)
     launched = []
 
-    class Proc:
-        returncode = 0
-        def communicate(self, timeout):
-            return json.dumps({"returncode": 0, "stdout": "", "stderr": ""}), ""
-        def poll(self): return 0
     real_popen = subprocess.Popen
     monkeypatch.setattr(executor.subprocess, "Popen", lambda c, **k: (
-        launched.append(c) or Proc()) if "python3" in c else real_popen(c, **k))
+        launched.append(c) or TestContainer()) if _starts_test_container(c) else real_popen(c, **k))
     done = executor._execute(repo, ["python3", "-m", "pytest"], 5)
     assert done.returncode == 0 and len(launched) == 1
+    assert [c[0] for c in docker_calls(tmp_path)] == ["create", "rm"]
     assert done.git == {"provided": False, "reason": "repository has no .git"}
 
 
@@ -541,20 +577,17 @@ def test_direct_adapter_mounts_private_git_and_removes_it(source, tmp_path, monk
     monkeypatch.setattr(datadir, "aitelier_home", lambda: tmp_path / "home")
     seen = {}
 
-    class Proc:
-        returncode = 0
-        def communicate(self, timeout):
-            return json.dumps({"returncode": 0, "stdout": "", "stderr": ""}), ""
-        def poll(self): return 0
     monkeypatch.setattr(executor.shutil, "which", lambda _: docker)
     real_popen = subprocess.Popen
     def popen(command, **kwargs):
-        if "python3" not in command:
-            return real_popen(command, **kwargs)  # the preparation container (shim)
-        target = next(v for v in command if v.endswith(f":{source / '.git'}:ro"))
+        if not _starts_test_container(command):
+            return real_popen(command, **kwargs)  # creates, and the preparation (shim)
+        create = next(c for c in docker_calls(tmp_path)
+                      if c[0] == "create" and command[-1] in c and "python3" in c)
+        target = next(v for v in create if v.endswith(f":{source / '.git'}:ro"))
         seen["private"] = Path(target.split(":")[0])
         seen["head"] = (seen["private"] / "HEAD").read_text()
-        return Proc()
+        return TestContainer()
     monkeypatch.setattr(executor.subprocess, "Popen", popen)
     done = executor._execute(source, ["python3", "-m", "pytest"], 5)
     assert done.git["head"] == git(source, "rev-parse", "HEAD")

@@ -265,6 +265,9 @@ def test_new_caller_keeps_simulated_unanswered_create_but_retires_definite_refus
     root, db, sf, make = runtime
     grant, work, _ = make()
     cfg = json.loads((root / "config.json").read_text())
+    # This modeled handler runs in the client namespace; the real launcher
+    # continues using its operator-configured host path to these exact bytes.
+    cfg["executor_entry"] = str(Path(ex.__file__).with_name("repository_executor_entry.py"))
     path = root / ("known-refusal.sock" if quiet else "unknown-create.sock")
     listener = socket.socket(socket.AF_UNIX)
     listener.bind(str(path)); path.chmod(0o600); listener.listen(1)
@@ -314,6 +317,7 @@ def test_actual_host_refuses_changed_scope_or_extra_authority(runtime):
                "args": ["/bin/sh", "-c", command], "timeout": 5,
                "profile": shell.PROFILE, "coding_grant": packet}
     cfg = json.loads((root / "config.json").read_text())
+    cfg["executor_entry"] = str(Path(ex.__file__).with_name("repository_executor_entry.py"))
     for changed_cfg in ({**cfg, "coding_shell_entry_sha256": "0" * 64},
                         {k: v for k, v in cfg.items() if k != "coding_shell_engine_db"}):
         with pytest.raises(host.LaunchRefused, match="operator|Source"):

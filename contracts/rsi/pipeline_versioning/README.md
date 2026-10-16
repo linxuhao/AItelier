@@ -86,7 +86,12 @@ There is deliberately no create/pin/finish/run API.
   physical seal even when native provenance differs, e.g. after a restore).
   Otherwise it seals once through native `seal`. It never changes the target.
 - **list/read** re-verify seals (native `verify_sealed` + projection + naming);
-  results are fresh copies that callers own. Reading needs no live tools.
+  results are fresh copies that callers own. Reading needs no live tools. The
+  catalog is exactly the seals named `gen_rsi_v<31 hex>_<16 hex>` in the
+  provider's generated-config directory; native seals with other slugs (e.g.
+  hand-derived candidates) are not versions of this catalog. Should several
+  such seals hold one logical id, all must verify and `read` reports the first
+  by name.
 - **restore** changes only the named target, only through native
   `adopt_bundle` (CAS + before-change descriptor + one registration
   transaction). If the target already serves that logical content it returns
@@ -107,8 +112,9 @@ not `gen_rsi_*`), `MALFORMED_EXPECTED_CURRENT` (64 lowercase hex),
 seal/adoption would not reproduce its logical content), `NATIVE_REFUSED` (any
 other native refusal, message preserved).
 
-Order. capture: target form, known target, providers, content domain, catalog
-integrity (tampered), seal. restore: version form, target form, CAS form, known
+Order. capture: target form, known target, native capture (providers, then
+content domain), projection, catalog integrity (tampered), sealed form
+reproduces content, seal. restore: version form, target form, CAS form, known
 target, known version, tamper, CAS, no-op, adoption reproduces content,
 providers, adoption. `list_versions` refuses `TAMPERED_VERSION` if any catalog
 seal fails verification; `read` of another version still works.

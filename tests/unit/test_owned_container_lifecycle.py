@@ -18,7 +18,7 @@ import pytest
 from core import repository_executor as executor
 
 SHIM = """#!{python}
-import json, os, sys, time
+import hashlib, json, os, sys, time
 args = sys.argv[1:]
 root = {root!r}
 behaviour = json.load(open(os.path.join(root, "behaviour.json")))
@@ -35,8 +35,17 @@ if args[0] == "create":
     name = args[args.index("--name") + 1]
     at = args.index("--entrypoint")
     json.dump([args[at + 1]] + args[at + 3:], open(os.path.join(root, name), "w"))
+    exit_as = behaviour.get("exit_as")      # the daemon created it; the client says otherwise
+    if exit_as == "killed":
+        log(answer="killed")
+        os.kill(os.getpid(), 9)
+    if exit_as:
+        log(answer=exit_as)
+        print(behaviour["stderr"], file=sys.stderr)
+        print(behaviour.get("stdout", ""))
+        sys.exit(behaviour["rc"])
     log(answer="created")
-    print("0123456789ab")
+    print(hashlib.sha256(name.encode()).hexdigest())
     sys.exit(0)
 if args[:2] == ["start", "-a"]:
     log()
@@ -253,3 +262,34 @@ def test_outside_the_main_thread_no_handler_is_touched(docker):
     thread.join(10)
     assert seen == [True]
     assert [c["args"][0] for c in calls()] == ["create", "start", "rm"]
+
+
+EOF_TEXT = 'error during connect: Post "http://%2Fd.sock/v1.56/containers/create?name=x": EOF'
+
+
+@pytest.mark.parametrize("exit_as", [
+    {"exit_as": "eof", "rc": 1, "stderr": EOF_TEXT},                       # transport EOF
+    {"exit_as": "killed"},                                                  # signal-killed client
+    {"exit_as": "blank", "rc": 1, "stderr": ""},                            # nonzero, nothing said
+    {"exit_as": "late", "rc": 1, "stderr": "Error response from daemon: x\n" + EOF_TEXT},
+    {"exit_as": "no-id", "rc": 0, "stderr": "", "stdout": "not an id"},     # rc 0 without the ID
+])
+def test_a_create_exit_without_the_daemons_answer_is_unconfirmed(docker, spawned, exit_as):
+    shim, behave, calls, root = docker
+    behave(**exit_as)
+    with pytest.raises(executor.CleanupUnconfirmed, match="no answer from the daemon") as raised:
+        with executor.owned_container(_create(shim, "own-12", "sleep", "30"), shim, "own-12"):
+            pytest.fail("an unanswered create was started")
+    assert raised.value.name == "own-12"                 # kept for reconciliation
+    assert [a[0] for a in spawned] == ["create", "rm"]  # never started
+    assert [c["args"][0] for c in calls()] == ["create", "rm"]
+
+
+def test_the_daemons_refusal_is_the_only_negative_answer():
+    answer = executor._create_answer
+    assert answer(0, "a" * 64 + "\n", "") == "created"
+    assert answer(1, "", "Unable to find image 'x' locally\nError response from daemon: no such\n") == "refused"
+    assert answer(1, "", EOF_TEXT) is None
+    assert answer(-9, "", "Error response from daemon: x") is None     # killed: no answer
+    assert answer(1, "", "") is None
+    assert answer(0, "", "") is None

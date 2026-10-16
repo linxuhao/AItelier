@@ -98,7 +98,7 @@ def test_adapter_timeout_cancel_cleanup_is_name_scoped(monkeypatch, tmp_path, fa
     class Created:
         returncode = 0
         def communicate(self, timeout):
-            return "container-id\n", ""
+            return "c" * 64 + "\n", ""
     class Client:
         stdout = stderr = None
         def communicate(self, timeout):

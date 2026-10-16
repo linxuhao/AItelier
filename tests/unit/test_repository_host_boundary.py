@@ -165,6 +165,7 @@ if args[0] == "create":
     at = args.index("--entrypoint")
     with open(os.path.join(store, args[args.index("--name") + 1]), "w") as stream:
         json.dump([args[at + 1]] + args[at + 3:], stream)
+    print("c" * 64)
     sys.exit(0)
 if args[:2] == ["start", "-a"]:
     with open(os.path.join(store, args[2])) as stream:

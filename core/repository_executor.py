@@ -359,7 +359,14 @@ echo "$used"
 
 
 class CleanupUnconfirmed(IsolationUnavailable):
-    """An owned container's absence could not be established: never a pass."""
+    """An owned container's absence could not be established: never a pass.
+
+    ``name`` is the own UUID name, kept so the container can be reconciled.
+    """
+
+    def __init__(self, message: str, name: str = ""):
+        super().__init__(message)
+        self.name = name
 
 
 # ── owned container lifecycle ──────────────────────────────────────────────
@@ -370,19 +377,25 @@ class CleanupUnconfirmed(IsolationUnavailable):
 # cancel a request the daemon already holds, so a removal issued while a
 # create is in flight can run first and the daemon then creates the
 # container (measured on a `docker run` and on a `docker create` killed by
-# KeyboardInterrupt: left `created`/`running` after their removal). Only a
-# create client that EXITED reports the daemon's answer: rc 0 and an ID mean
-# it was created, a refusal that it was not (a daemon that drops the
-# connection mid-create is not covered: that exit is taken as a refusal). So
-# the create client is never killed by cancellation: it runs until it
-# answers or CREATE_TIMEOUT. A main-thread SIGINT (direct Ctrl-C) arriving while a
+# KeyboardInterrupt: left `created`/`running` after their removal). So the
+# create client is never killed by cancellation: it runs until it exits or
+# CREATE_TIMEOUT. Its exit is an answer only when it carries the daemon's
+# reply (`_create_answer`): rc 0 with the container ID (created), or rc > 0
+# whose last stderr line is the CLI's rendering of the daemon's own error
+# reply, "Error response from daemon: ..." (refused). Any other exit (the
+# client killed by a signal, a transport EOF such as "error during connect:
+# ... EOF", a nonzero rc with anything else) is NOT a refusal: the daemon may
+# still be creating the container (measured: removal answered 404, then the
+# create 201 about a second later), so it is handled like a create that never
+# answered. A main-thread SIGINT (direct Ctrl-C) arriving while a
 # client is spawned or a create is awaited is held (`_HeldInterrupt`) and
 # delivered once the client's handle is recorded and the create has
 # answered, before START, so a cancelled launch never starts its command.
 # Launcher cancellation (the client socket) is checked at the same point.
-# Only a create that never answers is unknown: its client is then killed, the
-# name removed, and the result is `CleanupUnconfirmed`, since the daemon may
-# still create it. Once a create has answered, `docker rm -f NAME` exiting 0
+# An unanswered create is unknown: its client is killed (on CREATE_TIMEOUT),
+# the name removed, and the result is `CleanupUnconfirmed` naming it, since
+# the daemon may still create it; nothing is started and `private_git`
+# propagates it, so no repository command follows. Once a create has answered, `docker rm -f NAME` exiting 0
 # is final (it is 0 when the name is already gone, and nothing re-creates
 # it); a removal that does not succeed within REMOVE_DEADLINE is
 # `CleanupUnconfirmed`. Removal waits for the start client to be killed and
@@ -437,11 +450,29 @@ def _remove_owned(docker: str, name: str, answered: bool) -> None:
             break
         time.sleep(0.2)
     if not answered:
-        raise CleanupUnconfirmed(f"owned container {name}: its create was not answered within "
-                                 f"{CREATE_TIMEOUT}s, so the daemon may still create it after "
-                                 "the removal; its absence is not confirmed")
+        raise CleanupUnconfirmed(f"owned container {name}: its create got no answer from the "
+                                 "daemon, so the daemon may still create it after the removal; "
+                                 "its absence is not confirmed", name)
     raise CleanupUnconfirmed(f"owned container {name} could not be removed within "
-                             f"{REMOVE_DEADLINE}s: {why}")
+                             f"{REMOVE_DEADLINE}s: {why}", name)
+
+
+_DAEMON_REFUSAL = re.compile(r"(?:docker: )?Error response from daemon: ")
+_CONTAINER_ID = re.compile(r"[0-9a-f]{64}")
+
+
+def _create_answer(returncode: int, stdout: str, stderr: str) -> str | None:
+    """The daemon's answer carried by a create client's exit: created, refused or None.
+
+    None (unknown) unless the exit carries that reply: a signal, a transport
+    error or any other text is never taken as a refusal.
+    """
+    if returncode == 0 and _CONTAINER_ID.fullmatch(stdout.strip()):
+        return "created"
+    lines = [line for line in stderr.splitlines() if line.strip()]
+    if returncode > 0 and lines and _DAEMON_REFUSAL.match(lines[-1]):
+        return "refused"
+    return None
 
 
 @contextmanager
@@ -451,10 +482,11 @@ def owned_container(create: list[str], docker: str, name: str, *, cancelled=None
 
     ``cancelled`` (optional) is called after the create has answered and
     before START; it raises to cancel. Every exit kills and reaps the start
-    client, then removes ``name`` (`_remove_owned`). A refused create raises
-    `IsolationUnavailable` ("not created").
+    client, then removes ``name`` (`_remove_owned`). A create the daemon
+    refused raises `IsolationUnavailable` ("not created"); one without the
+    daemon's answer ends in `CleanupUnconfirmed`.
     """
-    answered = True
+    answered = False
     sent = False
     proc = None
     try:
@@ -463,14 +495,19 @@ def owned_container(create: list[str], docker: str, name: str, *, cancelled=None
                                     stderr=subprocess.PIPE, text=True, start_new_session=True)
             sent = True
             try:
-                _, err = made.communicate(timeout=CREATE_TIMEOUT)
+                out, err = made.communicate(timeout=CREATE_TIMEOUT)
             except subprocess.TimeoutExpired:
-                answered = False
                 made.kill()
                 made.communicate()
                 raise IsolationUnavailable(f"owned container {name} was not created within "
                                            f"{CREATE_TIMEOUT}s")
-            if made.returncode:
+            answer = _create_answer(made.returncode, out, err)
+            answered = answer is not None
+            if answer is None:
+                raise IsolationUnavailable(f"owned container {name}: create client exited "
+                                           f"{made.returncode} without the daemon's answer: "
+                                           f"{err.strip()[-300:]}")
+            if answer == "refused":
                 raise IsolationUnavailable(f"owned container not created: {err.strip()[-300:]}")
         # A SIGINT held during the create was delivered above: START is never reached.
         if cancelled is not None:

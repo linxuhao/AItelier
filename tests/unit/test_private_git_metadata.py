@@ -110,7 +110,7 @@ def view_of(repo: Path, mounts: list[str], tmp_path: Path) -> Path:
 
 
 SHIM = """#!/usr/bin/env python3
-import json, os, sys
+import hashlib, json, os, signal, sys
 args = sys.argv[1:]
 log = os.environ["DOCKER_SHIM_LOG"]
 with open(log, "a") as stream:
@@ -119,10 +119,23 @@ store = log + ".containers"
 if args[:2] == ["rm", "-f"]:
     sys.exit(0)
 if args[0] == "create":
+    name = args[args.index("--name") + 1]
+    how = os.environ.get("DOCKER_SHIM_CREATE", "")
+    target = name.startswith(os.environ.get("DOCKER_SHIM_TARGET", "aitelier-"))
+    if how == "refuse" and target:     # the daemon's own error reply, as the CLI renders it
+        print("Error response from daemon: No such image: x", file=sys.stderr)
+        sys.exit(1)
     os.makedirs(store, exist_ok=True)
     at = args.index("--entrypoint")
-    with open(os.path.join(store, args[args.index("--name") + 1]), "w") as stream:
+    with open(os.path.join(store, name), "w") as stream:
         json.dump([args[at + 1]] + args[at + 3:], stream)
+    if how == "eof" and target:        # the daemon creates it; the client lost the reply
+        print('error during connect: Post "http://%2Fd.sock/v1.56/containers/create": EOF',
+              file=sys.stderr)
+        sys.exit(1)
+    if how == "killed" and target:
+        os.kill(os.getpid(), signal.SIGKILL)
+    print(hashlib.sha256(name.encode()).hexdigest())
     sys.exit(0)
 if args[:2] == ["start", "-a"]:
     with open(os.path.join(store, args[2])) as stream:
@@ -366,9 +379,20 @@ def test_preparation_container_is_removed_by_name(source, tmp_path, docker):
 
 
 def test_failed_create_is_still_removed_by_name(tmp_path, docker):
-    with pytest.raises(RuntimeError, match="not created"):
+    # Exit 2 without the daemon's reply: no answer, so absence is not claimed.
+    with pytest.raises(executor.CleanupUnconfirmed, match="no answer from the daemon"):
         executor._run_prep([docker, "unknown-subcommand"], docker, "prep-z")
     assert docker_calls(tmp_path)[-1] == ["rm", "-f", "prep-z"]
+
+
+def test_create_refused_by_the_daemon_is_not_created_and_removed_by_name(tmp_path, docker,
+                                                                         monkeypatch):
+    monkeypatch.setenv("DOCKER_SHIM_CREATE", "refuse")
+    with pytest.raises(RuntimeError, match="not created") as raised:
+        executor._run_prep([docker, "create", "--name", "aitelier-git-z", "--entrypoint", "sh",
+                            "image"], docker, "aitelier-git-z")
+    assert not isinstance(raised.value, executor.CleanupUnconfirmed)
+    assert docker_calls(tmp_path)[-1] == ["rm", "-f", "aitelier-git-z"]
 
 
 def test_preparation_deadline_stops_and_removes_it(tmp_path, docker, monkeypatch):
@@ -597,3 +621,77 @@ def test_direct_adapter_mounts_private_git_and_removes_it(source, tmp_path, monk
     done = executor._execute(source, ["python3", "-m", "pytest"], 5)
     assert done.git["head"] == git(source, "rev-parse", "HEAD")
     assert seen["head"] == "ref: refs/heads/main\n" and not seen["private"].exists()
+
+
+def _spawn_log(monkeypatch):
+    spawned = []
+    real_popen = subprocess.Popen
+    monkeypatch.setattr(executor.subprocess, "Popen", lambda c, *a, **k: (
+        spawned.append([str(x) for x in c]) or real_popen(c, *a, **k)))
+    return spawned
+
+
+@pytest.mark.parametrize("how", ["eof", "killed"])
+def test_unanswered_preparation_create_stops_the_direct_launch(source, tmp_path, monkeypatch,
+                                                               docker, how):
+    from core import datadir
+    monkeypatch.setattr(datadir, "aitelier_home", lambda: tmp_path / "home")
+    monkeypatch.setattr(executor.shutil, "which", lambda _: docker)
+    monkeypatch.setenv("DOCKER_SHIM_CREATE", how)
+    monkeypatch.setenv("DOCKER_SHIM_TARGET", "aitelier-git-")
+    spawned = _spawn_log(monkeypatch)
+    with pytest.raises(executor.CleanupUnconfirmed) as raised:
+        executor._execute(source, ["python3", "-m", "pytest"], 5)
+    assert raised.value.name.startswith("aitelier-git-")
+    assert raised.value.name in str(raised.value)
+    # Nothing after the unanswered preparation: no repository container, no START.
+    assert [c[1] for c in spawned] == ["create", "rm"]
+    assert not any(c[1] == "create" and c[c.index("--name") + 1].startswith("aitelier-cpu-")
+                   for c in docker_calls(tmp_path) if "--name" in c)
+    assert list((tmp_path / "home" / "cpu-git").iterdir()) == []
+
+
+def test_unanswered_preparation_create_refuses_the_launcher_request(linked, source, tmp_path,
+                                                                    monkeypatch, docker):
+    cfg, request = _launcher(tmp_path, linked, "worktree", source)
+    monkeypatch.setattr(host.shutil, "which", lambda _: docker)
+    monkeypatch.setenv("DOCKER_SHIM_CREATE", "eof")
+    monkeypatch.setenv("DOCKER_SHIM_TARGET", "aitelier-git-")
+    monkeypatch.setattr(host, "_run_docker", lambda *a, **k: pytest.fail("command launched"))
+    response = host.handle_request(cfg, json.dumps(request).encode())
+    assert response["ok"] is False and "no answer from the daemon" in response["error"]
+    assert "aitelier-git-" in response["error"]
+    assert list((Path(cfg["aitelier_home"]) / "cpu-git").iterdir()) == []
+
+
+def test_daemon_refused_preparation_runs_the_command_without_metadata(source, tmp_path,
+                                                                     monkeypatch, docker):
+    """The one negative answer: the daemon refused, so no preparation container exists."""
+    from core import datadir
+    monkeypatch.setattr(datadir, "aitelier_home", lambda: tmp_path / "home")
+    monkeypatch.setattr(executor.shutil, "which", lambda _: docker)
+    monkeypatch.setenv("DOCKER_SHIM_CREATE", "refuse")
+    monkeypatch.setenv("DOCKER_SHIM_TARGET", "aitelier-git-")
+    real_popen = subprocess.Popen
+    monkeypatch.setattr(executor.subprocess, "Popen", lambda c, **k: (
+        TestContainer() if _starts_test_container(c) else real_popen(c, **k)))
+    done = executor._execute(source, ["python3", "-m", "pytest"], 5)
+    assert done.returncode == 0 and done.git["provided"] is False
+    assert "not created: Error response from daemon" in done.git["reason"]
+
+
+@pytest.mark.parametrize("how", ["eof", "killed"])
+def test_unanswered_command_create_is_unconfirmed_and_never_started(tmp_path, monkeypatch,
+                                                                    docker, how):
+    from core import datadir
+    monkeypatch.setattr(datadir, "aitelier_home", lambda: tmp_path / "home")
+    monkeypatch.setattr(executor.shutil, "which", lambda _: docker)
+    monkeypatch.setenv("DOCKER_SHIM_CREATE", how)
+    monkeypatch.setenv("DOCKER_SHIM_TARGET", "aitelier-cpu-")
+    repo = tmp_path / "projects" / "plain"
+    repo.mkdir(parents=True)
+    spawned = _spawn_log(monkeypatch)
+    with pytest.raises(executor.CleanupUnconfirmed) as raised:
+        executor._execute(repo, ["python3", "-m", "pytest"], 5)
+    assert raised.value.name.startswith("aitelier-cpu-")
+    assert [c[1] for c in spawned] == ["create", "rm"]

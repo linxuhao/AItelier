@@ -264,7 +264,8 @@ class PipelineVersions(NativeVersions):
                     raise c.UnsupportedContent('adoption would not serve logical content')
                 existing = json.loads(unit['roles_text']) if unit['roles_text'] else {}
                 proposed = json.loads(preview['roles_text'])
-                if any(proposed.get(k) != v for k, v in existing.items()):
+                if any(k not in proposed or fb.canonical(proposed[k]) != fb.canonical(v)
+                       for k, v in existing.items()):
                     raise c.UnsupportedContent('adoption would change a retained role')
                 pr._validated_registration(target, preview['graph_yaml'],
                                            roles=proposed, sf=self._sf)

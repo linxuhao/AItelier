@@ -11,7 +11,7 @@ import json
 from fractions import Fraction
 from typing import Annotated, Literal, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator, field_validator
 
 Digest = Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")]
 Name = Annotated[str, Field(pattern=r"^[a-z0-9][a-z0-9._-]{0,63}$")]
@@ -159,6 +159,12 @@ class EvaluationRequest(Frozen):
     budget: Budget
     holdout_selection: Digest | None  # sealed selection record; trusted lookup required
 
+    @field_validator("repetitions", mode="before")
+    @classmethod
+    def exact_repetitions(cls, value):
+        require(type(value) is int and value == 3, "fixed integer repetitions")
+        return value
+
     @model_validator(mode="after")
     def fixed_plan(self):
         arms = [s.arm for s in self.selections]
@@ -195,6 +201,9 @@ class PhysicalAttempt(Frozen):
 
     @model_validator(mode="after")
     def accounting(self):
+        require(self.reservation.requests == 1, "one reservation per physical attempt")
+        if self.settlement == "known":
+            require(self.observed_send is True and self.measured is not None and self.measured.requests == 1, "known send count")
         if self.settlement == "unknown":
             require(self.measured is None, "unknown is never zero")
         else:
@@ -283,6 +292,12 @@ class Refusal(Frozen):
     execution: None
     scoreboard_mutated: Literal[False]
     retryable: Literal[False]
+
+
+    @model_validator(mode="after")
+    def refused_reason(self):
+        require(self.reason != "NONE", "refusal needs reason")
+        return self
 
 
 class PublicCell(Frozen):

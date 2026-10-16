@@ -6,7 +6,7 @@ Handles are trusted host objects and are never deserialized from optimizer JSON.
 from typing import Literal, Protocol
 from .contract import (Amount, Benchmark, Cell, CellReceipt, Digest, Envelope,
                        EvaluationRequest, Execution, Frozen, Name, PhysicalAttempt,
-                       Runtime, Selection)
+                       Runtime, Selection, Nonnegative)
 
 
 class ProviderIdentity(Frozen):
@@ -41,9 +41,9 @@ class PhysicalRequest(Frozen):
     runtime: Runtime  # final effective kwargs, not route alias before binding
     cause: Literal["initial", "retry", "fallback", "format_repair", "transport_retry"]
     upper: Amount
-    elapsed_cell_ms: int
-    elapsed_round_ms: int
-    elapsed_campaign_ms: int
+    elapsed_cell_ms: Nonnegative
+    elapsed_round_ms: Nonnegative
+    elapsed_campaign_ms: Nonnegative
 
 
 class Reservation(Frozen):

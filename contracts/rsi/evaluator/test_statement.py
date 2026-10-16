@@ -58,7 +58,7 @@ def test_literal_sdk_schema_and_existing_version_codec(tmp_path):
 def test_strict_request_refusals_before_any_effect():
     fixture=FakeFixture(); request=fixture.prepare()
     payload=request.model_dump(mode="json")
-    mutations=[{"max_parallel":3},{"max_parallel":True},{"repetitions":2},
+    mutations=[{"max_parallel":3},{"max_parallel":True},{"repetitions":2},{"repetitions":3.0},
                {"unknown":"private-material"},{"cells":payload["cells"][:-1]},
                {"cells":payload["cells"]+payload["cells"][:1]},
                {"cells":list(reversed(payload["cells"]))},
@@ -176,3 +176,29 @@ def test_export_exact_wire_schemas():
               (EvaluationRequest, EvaluationResult, CellReceipt, Refusal, TrainProjection)}
     assert schema["EvaluationRequest"]["additionalProperties"] is False
     evidence("wire-schemas",schema)
+
+
+def test_source_concrete_profile_matches_public_host_configuration():
+    from core.model_routes import ModelRoutes
+    source=Path(__file__).parents[3]
+    examples=json.loads((source/"llm_providers.example.json").read_text())
+    fixture=FakeFixture(); request=fixture.prepare()
+    model=request.runtime.requested_model
+    assert ModelRoutes(source/"model_routes.example.json").resolve(model)==[model]
+    assert request.runtime.endpoint.provider in examples
+    role=load_fixture()["unit"]["roles"]["gen_eval_fixture__investigator"]
+    assert role["model"]==model
+    assert role["thinking"]["effort"]==request.runtime.effort
+    evidence("source-concrete-profile",{"requested_model":model,"endpoint":request.runtime.endpoint.model_dump(),
+              "source_profile_only":True,"live_availability_pricing_transport_verified":False})
+
+
+def test_literal_wire_examples():
+    fixture=FakeFixture(); request=fixture.prepare(); result=fixture.evaluate(request)
+    refused=FakeFixture(); refused_request=refused.prepare(); refused.set_fault("empty_grants")
+    refusal=refused.evaluate(refused_request)
+    evidence("wire-examples",{"evidence_kind":"simulation",
+             "request":request.model_dump(mode="json"),
+             "first_receipt":result.receipts[0].model_dump(mode="json"),
+             "refusal":refusal.model_dump(mode="json"),
+             "result_header":result.model_dump(mode="json",exclude={"receipts","receipt_catalog"})})

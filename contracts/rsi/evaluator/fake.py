@@ -94,8 +94,8 @@ class FakeFixture:
             sdk_wheel="sha256:dd403024cd5a893a71c852afdb2dcf175b9c91bf8eaec12f0544ad387ca62db9",
             routes=digest("fixture-routes"), pricing=digest("fixture-pricing-not-live"),
             policy=digest("finite-pilot-policy-v2"),
-            endpoint=Endpoint(provider="fixture", model="concrete-model", endpoint="offline-fixture"),
-            requested_model="fixture/concrete-model", effort="enabled", temperature_micros=200000,
+            endpoint=Endpoint(provider="ark", model="deepseek-v4-flash", endpoint="ark-coding-v3"),
+            requested_model="ark/deepseek-v4-flash", effort="high", temperature_micros=200000,
             max_output_tokens=8192, max_tool_turns=32, cell_timeout_ms=300000,
             transport_evidence=digest("simulation-no-real-transport-proof"))
         self.actual_runtime = runtime

@@ -1,0 +1,9 @@
+{
+  "schema": "rsi.evaluator.budget-vectors.v2",
+  "vectors": [
+    {"name": "concurrent_exact_boundary", "kind": "concurrent", "expected_admitted": 1, "expected_denied": 1, "expected_retained_requests": 1},
+    {"name": "unknown_closes_dispatch", "kind": "unknown", "expected_admitted": 1, "expected_denied": 1, "expected_retained_requests": 1},
+    {"name": "deadline_before_send", "kind": "deadline", "expected_admitted": 0, "expected_denied": 1, "expected_retained_requests": 0},
+    {"name": "positive_no_send_release", "kind": "no_send", "expected_admitted": 2, "expected_denied": 0, "expected_retained_requests": 0}
+  ]
+}

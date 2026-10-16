@@ -1,0 +1,222 @@
+{
+  "schema": "rsi.evaluator.scenarios.v2",
+  "evidence": "Source deterministic fixture, never actual model/billing",
+  "scenarios": [
+    {
+      "name": "complete_train",
+      "split": "train",
+      "fault": "none",
+      "status": "complete",
+      "physical_sends": 72,
+      "reason": null
+    },
+    {
+      "name": "complete_holdout",
+      "split": "holdout",
+      "fault": "none",
+      "status": "complete",
+      "physical_sends": 48,
+      "reason": null
+    },
+    {
+      "name": "settled_task_failure",
+      "split": "train",
+      "fault": "task_failure",
+      "status": "complete",
+      "physical_sends": 72,
+      "reason": null
+    },
+    {
+      "name": "missing_usage",
+      "split": "train",
+      "fault": "unknown_usage",
+      "status": "unknown",
+      "physical_sends": 1,
+      "reason": "UNKNOWN_ACCOUNTING"
+    },
+    {
+      "name": "live_timeout",
+      "split": "train",
+      "fault": "unknown_execution",
+      "status": "unknown",
+      "physical_sends": 1,
+      "reason": "UNKNOWN_EXECUTION"
+    },
+    {
+      "name": "external_envelope",
+      "split": "train",
+      "fault": "envelope",
+      "status": "invalid",
+      "physical_sends": 1,
+      "reason": "BUDGET_EXHAUSTED"
+    },
+    {
+      "name": "midcell_runtime",
+      "split": "train",
+      "fault": "runtime_midcell",
+      "status": "invalid",
+      "physical_sends": 1,
+      "reason": "RUNTIME_DRIFT"
+    },
+    {
+      "name": "incomparable_fallback",
+      "split": "train",
+      "fault": "fallback",
+      "status": "invalid",
+      "physical_sends": 1,
+      "reason": "RUNTIME_DRIFT"
+    },
+    {
+      "name": "repair_requests",
+      "split": "train",
+      "fault": "repair",
+      "status": "complete",
+      "physical_sends": 74,
+      "reason": null
+    },
+    {
+      "name": "model_retries",
+      "split": "train",
+      "fault": "retry",
+      "status": "complete",
+      "physical_sends": 74,
+      "reason": null
+    },
+    {
+      "name": "transport_retries",
+      "split": "train",
+      "fault": "transport_retry",
+      "status": "complete",
+      "physical_sends": 74,
+      "reason": null
+    },
+    {
+      "name": "checkpoint",
+      "split": "train",
+      "fault": "checkpoint",
+      "status": "invalid",
+      "physical_sends": 1,
+      "reason": "UNEXPECTED_CHECKPOINT"
+    },
+    {
+      "name": "preflight_runtime",
+      "split": "train",
+      "fault": "runtime_preflight",
+      "status": "refused",
+      "physical_sends": 0,
+      "reason": "RUNTIME_DRIFT"
+    },
+    {
+      "name": "empty_grants",
+      "split": "train",
+      "fault": "empty_grants",
+      "status": "refused",
+      "physical_sends": 0,
+      "reason": "POLICY_REFUSED"
+    },
+    {
+      "name": "missing_grants",
+      "split": "train",
+      "fault": "missing_grants",
+      "status": "refused",
+      "physical_sends": 0,
+      "reason": "POLICY_REFUSED"
+    },
+    {
+      "name": "hidden_source_tool",
+      "split": "train",
+      "fault": "hidden_source_tool",
+      "status": "refused",
+      "physical_sends": 0,
+      "reason": "POLICY_REFUSED"
+    },
+    {
+      "name": "private_sibling_root",
+      "split": "train",
+      "fault": "private_root",
+      "status": "refused",
+      "physical_sends": 0,
+      "reason": "POLICY_REFUSED"
+    },
+    {
+      "name": "cross_run_source",
+      "split": "train",
+      "fault": "cross_run",
+      "status": "refused",
+      "physical_sends": 0,
+      "reason": "POLICY_REFUSED"
+    },
+    {
+      "name": "dynamic_capability",
+      "split": "train",
+      "fault": "dynamic_capability",
+      "status": "refused",
+      "physical_sends": 0,
+      "reason": "POLICY_REFUSED"
+    },
+    {
+      "name": "unrecognized_hook",
+      "split": "train",
+      "fault": "hook",
+      "status": "refused",
+      "physical_sends": 0,
+      "reason": "POLICY_REFUSED"
+    },
+    {
+      "name": "extra_template",
+      "split": "train",
+      "fault": "extra_template",
+      "status": "refused",
+      "physical_sends": 0,
+      "reason": "POLICY_REFUSED"
+    },
+    {
+      "name": "tool_provider_drift",
+      "split": "train",
+      "fault": "provider_changed",
+      "status": "refused",
+      "physical_sends": 0,
+      "reason": "PROVIDER_CHANGED"
+    },
+    {
+      "name": "public_fixture_drift",
+      "split": "train",
+      "fault": "fixture_changed",
+      "status": "refused",
+      "physical_sends": 0,
+      "reason": "INPUT_MISMATCH"
+    },
+    {
+      "name": "checker_package_drift",
+      "split": "train",
+      "fault": "checker_changed",
+      "status": "refused",
+      "physical_sends": 0,
+      "reason": "CHECKER_MISMATCH"
+    },
+    {
+      "name": "unknown_version",
+      "split": "train",
+      "fault": "unknown_version",
+      "status": "refused",
+      "physical_sends": 0,
+      "reason": "UNKNOWN_ID"
+    },
+    {
+      "name": "provider_absent",
+      "split": "train",
+      "fault": "provider_absent",
+      "status": "refused",
+      "physical_sends": 0,
+      "reason": "PROVIDER_UNAVAILABLE"
+    },
+    {
+      "name": "unsafe_process_resume",
+      "split": "train",
+      "fault": "unsafe_resume",
+      "status": "refused",
+      "physical_sends": 0,
+      "reason": "UNSAFE_RESUME"
+    }
+  ]
+}

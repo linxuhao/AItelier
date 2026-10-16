@@ -1,0 +1,659 @@
+{
+  "header": {
+    "schema": "rsi.benchmark.v1",
+    "benchmark_id": "evaluator-fixture",
+    "version": 1,
+    "arms": [
+      "reference",
+      "candidate"
+    ],
+    "families": [
+      "family-a",
+      "family-b",
+      "family-c",
+      "family-d"
+    ],
+    "cases": {
+      "train-01": {
+        "partition": "train",
+        "family": "family-a"
+      },
+      "train-02": {
+        "partition": "train",
+        "family": "family-b"
+      },
+      "train-03": {
+        "partition": "train",
+        "family": "family-c"
+      },
+      "train-04": {
+        "partition": "train",
+        "family": "family-d"
+      },
+      "train-05": {
+        "partition": "train",
+        "family": "family-a"
+      },
+      "train-06": {
+        "partition": "train",
+        "family": "family-b"
+      },
+      "train-07": {
+        "partition": "train",
+        "family": "family-c"
+      },
+      "train-08": {
+        "partition": "train",
+        "family": "family-d"
+      },
+      "train-09": {
+        "partition": "train",
+        "family": "family-a"
+      },
+      "train-10": {
+        "partition": "train",
+        "family": "family-b"
+      },
+      "train-11": {
+        "partition": "train",
+        "family": "family-c"
+      },
+      "train-12": {
+        "partition": "train",
+        "family": "family-d"
+      },
+      "holdout-01": {
+        "partition": "holdout",
+        "family": "family-a"
+      },
+      "holdout-02": {
+        "partition": "holdout",
+        "family": "family-b"
+      },
+      "holdout-03": {
+        "partition": "holdout",
+        "family": "family-c"
+      },
+      "holdout-04": {
+        "partition": "holdout",
+        "family": "family-d"
+      },
+      "holdout-05": {
+        "partition": "holdout",
+        "family": "family-a"
+      },
+      "holdout-06": {
+        "partition": "holdout",
+        "family": "family-b"
+      },
+      "holdout-07": {
+        "partition": "holdout",
+        "family": "family-c"
+      },
+      "holdout-08": {
+        "partition": "holdout",
+        "family": "family-d"
+      }
+    },
+    "point_total": 200,
+    "normalization": {
+      "min": 0,
+      "max": 100
+    }
+  },
+  "public": {
+    "train-01": {
+      "prompt": "PUBLIC_TRAIN_01: What constant is exported by sample.txt?",
+      "files": {
+        "sample.txt": "PUBLIC_FIXTURE_train-01 = 1\n"
+      }
+    },
+    "train-02": {
+      "prompt": "PUBLIC_TRAIN_02: What constant is exported by sample.txt?",
+      "files": {
+        "sample.txt": "PUBLIC_FIXTURE_train-02 = 2\n"
+      }
+    },
+    "train-03": {
+      "prompt": "PUBLIC_TRAIN_03: What constant is exported by sample.txt?",
+      "files": {
+        "sample.txt": "PUBLIC_FIXTURE_train-03 = 3\n"
+      }
+    },
+    "train-04": {
+      "prompt": "PUBLIC_TRAIN_04: What constant is exported by sample.txt?",
+      "files": {
+        "sample.txt": "PUBLIC_FIXTURE_train-04 = 4\n"
+      }
+    },
+    "train-05": {
+      "prompt": "PUBLIC_TRAIN_05: What constant is exported by sample.txt?",
+      "files": {
+        "sample.txt": "PUBLIC_FIXTURE_train-05 = 5\n"
+      }
+    },
+    "train-06": {
+      "prompt": "PUBLIC_TRAIN_06: What constant is exported by sample.txt?",
+      "files": {
+        "sample.txt": "PUBLIC_FIXTURE_train-06 = 6\n"
+      }
+    },
+    "train-07": {
+      "prompt": "PUBLIC_TRAIN_07: What constant is exported by sample.txt?",
+      "files": {
+        "sample.txt": "PUBLIC_FIXTURE_train-07 = 7\n"
+      }
+    },
+    "train-08": {
+      "prompt": "PUBLIC_TRAIN_08: What constant is exported by sample.txt?",
+      "files": {
+        "sample.txt": "PUBLIC_FIXTURE_train-08 = 8\n"
+      }
+    },
+    "train-09": {
+      "prompt": "PUBLIC_TRAIN_09: What constant is exported by sample.txt?",
+      "files": {
+        "sample.txt": "PUBLIC_FIXTURE_train-09 = 9\n"
+      }
+    },
+    "train-10": {
+      "prompt": "PUBLIC_TRAIN_10: What constant is exported by sample.txt?",
+      "files": {
+        "sample.txt": "PUBLIC_FIXTURE_train-10 = 10\n"
+      }
+    },
+    "train-11": {
+      "prompt": "PUBLIC_TRAIN_11: What constant is exported by sample.txt?",
+      "files": {
+        "sample.txt": "PUBLIC_FIXTURE_train-11 = 11\n"
+      }
+    },
+    "train-12": {
+      "prompt": "PUBLIC_TRAIN_12: What constant is exported by sample.txt?",
+      "files": {
+        "sample.txt": "PUBLIC_FIXTURE_train-12 = 12\n"
+      }
+    },
+    "holdout-01": {
+      "prompt": "PUBLIC_HOLDOUT_01: What constant is exported by sample.txt?",
+      "files": {
+        "sample.txt": "PUBLIC_FIXTURE_holdout-01 = 1\n"
+      }
+    },
+    "holdout-02": {
+      "prompt": "PUBLIC_HOLDOUT_02: What constant is exported by sample.txt?",
+      "files": {
+        "sample.txt": "PUBLIC_FIXTURE_holdout-02 = 2\n"
+      }
+    },
+    "holdout-03": {
+      "prompt": "PUBLIC_HOLDOUT_03: What constant is exported by sample.txt?",
+      "files": {
+        "sample.txt": "PUBLIC_FIXTURE_holdout-03 = 3\n"
+      }
+    },
+    "holdout-04": {
+      "prompt": "PUBLIC_HOLDOUT_04: What constant is exported by sample.txt?",
+      "files": {
+        "sample.txt": "PUBLIC_FIXTURE_holdout-04 = 4\n"
+      }
+    },
+    "holdout-05": {
+      "prompt": "PUBLIC_HOLDOUT_05: What constant is exported by sample.txt?",
+      "files": {
+        "sample.txt": "PUBLIC_FIXTURE_holdout-05 = 5\n"
+      }
+    },
+    "holdout-06": {
+      "prompt": "PUBLIC_HOLDOUT_06: What constant is exported by sample.txt?",
+      "files": {
+        "sample.txt": "PUBLIC_FIXTURE_holdout-06 = 6\n"
+      }
+    },
+    "holdout-07": {
+      "prompt": "PUBLIC_HOLDOUT_07: What constant is exported by sample.txt?",
+      "files": {
+        "sample.txt": "PUBLIC_FIXTURE_holdout-07 = 7\n"
+      }
+    },
+    "holdout-08": {
+      "prompt": "PUBLIC_HOLDOUT_08: What constant is exported by sample.txt?",
+      "files": {
+        "sample.txt": "PUBLIC_FIXTURE_holdout-08 = 8\n"
+      }
+    }
+  },
+  "private": {
+    "train-01": {
+      "refs": {
+        "rubric_ref": "fixture://rubric/train-01",
+        "checker_ref": "fixture://checker/v1",
+        "max_points": 10
+      },
+      "material": {
+        "expected_constant": 1,
+        "sentinel": "PRIVATE_CHECKER_train-01"
+      }
+    },
+    "train-02": {
+      "refs": {
+        "rubric_ref": "fixture://rubric/train-02",
+        "checker_ref": "fixture://checker/v1",
+        "max_points": 10
+      },
+      "material": {
+        "expected_constant": 2,
+        "sentinel": "PRIVATE_CHECKER_train-02"
+      }
+    },
+    "train-03": {
+      "refs": {
+        "rubric_ref": "fixture://rubric/train-03",
+        "checker_ref": "fixture://checker/v1",
+        "max_points": 10
+      },
+      "material": {
+        "expected_constant": 3,
+        "sentinel": "PRIVATE_CHECKER_train-03"
+      }
+    },
+    "train-04": {
+      "refs": {
+        "rubric_ref": "fixture://rubric/train-04",
+        "checker_ref": "fixture://checker/v1",
+        "max_points": 10
+      },
+      "material": {
+        "expected_constant": 4,
+        "sentinel": "PRIVATE_CHECKER_train-04"
+      }
+    },
+    "train-05": {
+      "refs": {
+        "rubric_ref": "fixture://rubric/train-05",
+        "checker_ref": "fixture://checker/v1",
+        "max_points": 10
+      },
+      "material": {
+        "expected_constant": 5,
+        "sentinel": "PRIVATE_CHECKER_train-05"
+      }
+    },
+    "train-06": {
+      "refs": {
+        "rubric_ref": "fixture://rubric/train-06",
+        "checker_ref": "fixture://checker/v1",
+        "max_points": 10
+      },
+      "material": {
+        "expected_constant": 6,
+        "sentinel": "PRIVATE_CHECKER_train-06"
+      }
+    },
+    "train-07": {
+      "refs": {
+        "rubric_ref": "fixture://rubric/train-07",
+        "checker_ref": "fixture://checker/v1",
+        "max_points": 10
+      },
+      "material": {
+        "expected_constant": 7,
+        "sentinel": "PRIVATE_CHECKER_train-07"
+      }
+    },
+    "train-08": {
+      "refs": {
+        "rubric_ref": "fixture://rubric/train-08",
+        "checker_ref": "fixture://checker/v1",
+        "max_points": 10
+      },
+      "material": {
+        "expected_constant": 8,
+        "sentinel": "PRIVATE_CHECKER_train-08"
+      }
+    },
+    "train-09": {
+      "refs": {
+        "rubric_ref": "fixture://rubric/train-09",
+        "checker_ref": "fixture://checker/v1",
+        "max_points": 10
+      },
+      "material": {
+        "expected_constant": 9,
+        "sentinel": "PRIVATE_CHECKER_train-09"
+      }
+    },
+    "train-10": {
+      "refs": {
+        "rubric_ref": "fixture://rubric/train-10",
+        "checker_ref": "fixture://checker/v1",
+        "max_points": 10
+      },
+      "material": {
+        "expected_constant": 10,
+        "sentinel": "PRIVATE_CHECKER_train-10"
+      }
+    },
+    "train-11": {
+      "refs": {
+        "rubric_ref": "fixture://rubric/train-11",
+        "checker_ref": "fixture://checker/v1",
+        "max_points": 10
+      },
+      "material": {
+        "expected_constant": 11,
+        "sentinel": "PRIVATE_CHECKER_train-11"
+      }
+    },
+    "train-12": {
+      "refs": {
+        "rubric_ref": "fixture://rubric/train-12",
+        "checker_ref": "fixture://checker/v1",
+        "max_points": 10
+      },
+      "material": {
+        "expected_constant": 12,
+        "sentinel": "PRIVATE_CHECKER_train-12"
+      }
+    },
+    "holdout-01": {
+      "refs": {
+        "rubric_ref": "fixture://rubric/holdout-01",
+        "checker_ref": "fixture://checker/v1",
+        "max_points": 10
+      },
+      "material": {
+        "expected_constant": 1,
+        "sentinel": "PRIVATE_CHECKER_holdout-01"
+      }
+    },
+    "holdout-02": {
+      "refs": {
+        "rubric_ref": "fixture://rubric/holdout-02",
+        "checker_ref": "fixture://checker/v1",
+        "max_points": 10
+      },
+      "material": {
+        "expected_constant": 2,
+        "sentinel": "PRIVATE_CHECKER_holdout-02"
+      }
+    },
+    "holdout-03": {
+      "refs": {
+        "rubric_ref": "fixture://rubric/holdout-03",
+        "checker_ref": "fixture://checker/v1",
+        "max_points": 10
+      },
+      "material": {
+        "expected_constant": 3,
+        "sentinel": "PRIVATE_CHECKER_holdout-03"
+      }
+    },
+    "holdout-04": {
+      "refs": {
+        "rubric_ref": "fixture://rubric/holdout-04",
+        "checker_ref": "fixture://checker/v1",
+        "max_points": 10
+      },
+      "material": {
+        "expected_constant": 4,
+        "sentinel": "PRIVATE_CHECKER_holdout-04"
+      }
+    },
+    "holdout-05": {
+      "refs": {
+        "rubric_ref": "fixture://rubric/holdout-05",
+        "checker_ref": "fixture://checker/v1",
+        "max_points": 10
+      },
+      "material": {
+        "expected_constant": 5,
+        "sentinel": "PRIVATE_CHECKER_holdout-05"
+      }
+    },
+    "holdout-06": {
+      "refs": {
+        "rubric_ref": "fixture://rubric/holdout-06",
+        "checker_ref": "fixture://checker/v1",
+        "max_points": 10
+      },
+      "material": {
+        "expected_constant": 6,
+        "sentinel": "PRIVATE_CHECKER_holdout-06"
+      }
+    },
+    "holdout-07": {
+      "refs": {
+        "rubric_ref": "fixture://rubric/holdout-07",
+        "checker_ref": "fixture://checker/v1",
+        "max_points": 10
+      },
+      "material": {
+        "expected_constant": 7,
+        "sentinel": "PRIVATE_CHECKER_holdout-07"
+      }
+    },
+    "holdout-08": {
+      "refs": {
+        "rubric_ref": "fixture://rubric/holdout-08",
+        "checker_ref": "fixture://checker/v1",
+        "max_points": 10
+      },
+      "material": {
+        "expected_constant": 8,
+        "sentinel": "PRIVATE_CHECKER_holdout-08"
+      }
+    }
+  },
+  "companion": {
+    "benchmark_id": "evaluator-fixture",
+    "version": 1,
+    "definition": "sha256:23de1b2e69fab08d008b42a48ffab47f48f6b89b42fc11738de096c5fc1fb875",
+    "public_package": "sha256:99e4779ef08e866011a9e4a0b1d88f54e6576e7ed964adf897f3eeb47c087ee8",
+    "private_package": "sha256:11284dfe1ff4711a59c4764b5eff38e3970e26a6f5245fd8916442e561e2efee",
+    "checker_code": "sha256:c53fefcb21651143e5867edbc064897398fed933b241068f353b85e4a0f2768f",
+    "checker_package": "sha256:543929ccabcba609fd29b36a16eb181a76ad7f5e17264fd5025ea12ee6ef0507",
+    "cases": [
+      {
+        "case_id": "train-01",
+        "split": "train",
+        "family": "family-a",
+        "prompt_identity": "sha256:331c388fe74e460382ea45ff8a3c4095922079c0866d4272e50dbccfab2156e1",
+        "fixture_tree": "sha256:a1b9a158f3039d1f046ae4f21a334ede6a7ef602ae4782b5fdec974e828111b5",
+        "scorer_ref_identity": "sha256:a3fc791019413bac3a888b1187228c3f8e430c10c58a742a3d3114be382e8e76",
+        "resolved_private_material": "sha256:40f84ecdf6c0fef2eb885443614c2474617a182a7966aab184adca6ff0d37598",
+        "max_points": 10
+      },
+      {
+        "case_id": "train-02",
+        "split": "train",
+        "family": "family-b",
+        "prompt_identity": "sha256:c31594384622967010d7c4969139e49dad333dfb8d1cb2a47a25b3ac0eba318a",
+        "fixture_tree": "sha256:174962cd224b58eb0857c91a9243459b183ae8571ffd60039512f9badcbc9c29",
+        "scorer_ref_identity": "sha256:88bd6f66d47198cd4fb1b4153efb5b36fd71a4a0f3cbe38888e37f51d2a48b5c",
+        "resolved_private_material": "sha256:ed3a30dabdfc1245e51e3bcb1baf4146a1254b4715ddafc4c9d603b3944f2c10",
+        "max_points": 10
+      },
+      {
+        "case_id": "train-03",
+        "split": "train",
+        "family": "family-c",
+        "prompt_identity": "sha256:a0debd1b52adbdc84912fd415a0c1b0c391a44c47c78de6ca93a4472ab17156a",
+        "fixture_tree": "sha256:210fe6affbad80f0562c30b34d8251e9dadae5dd7d5b5c1107693b29db6d5efb",
+        "scorer_ref_identity": "sha256:4bd695c47ce5232d291bfd39b5d3b0114c418fbae9af0d529ae6f6c5afaaad06",
+        "resolved_private_material": "sha256:237cc43bc6cdd7d8b5889ea6f2e8cdf00b51844b3ca0bd463484438f88baafa7",
+        "max_points": 10
+      },
+      {
+        "case_id": "train-04",
+        "split": "train",
+        "family": "family-d",
+        "prompt_identity": "sha256:fce94833b40f2450271e0a1dbefa00d12ee76beb7c7dbd6df9b36a28671c4d7a",
+        "fixture_tree": "sha256:c61300aee337332301b0fc5c59afb4697120e1fd911d4fc2a6d7a2ee12e7d105",
+        "scorer_ref_identity": "sha256:3c31cd3d5d27d2034ee1c6e700fa3b18af2e4d26f66c99cab1abbffdcbe36d6f",
+        "resolved_private_material": "sha256:81453956c88719f93fadaebc575e708d5478794b7881be827711799a7236afbc",
+        "max_points": 10
+      },
+      {
+        "case_id": "train-05",
+        "split": "train",
+        "family": "family-a",
+        "prompt_identity": "sha256:6aa585c4fee316fbb26920aef0aa125e360c44359a809dd8ffb601b1978fd885",
+        "fixture_tree": "sha256:15c90e14f982c23600e3eceabe490752e9fba85d956f6dabdf55c419c79081ed",
+        "scorer_ref_identity": "sha256:7daa4bf0dd3d58c2ce600ddb2520a548bb5f159764e8300af541114faec2db62",
+        "resolved_private_material": "sha256:0ad69aadf4db478f958a9dd53402540c2cd399d0ec4c65e44fedd4df98b50a07",
+        "max_points": 10
+      },
+      {
+        "case_id": "train-06",
+        "split": "train",
+        "family": "family-b",
+        "prompt_identity": "sha256:c552edebf0feebab4728dead69f37095b77c11b46543b5a7d04cd0de65e9a9ff",
+        "fixture_tree": "sha256:6e39daa10e8a74557332e672b8e379eebb15d770a244cc00854a10cb3ab06497",
+        "scorer_ref_identity": "sha256:5c508ff00197f7fd2ce33cab8e61fdfe34f0f9af52087991fff8b8417430b96d",
+        "resolved_private_material": "sha256:24ede035e1fc325d8f39775308bad192172d780c2b763124cb9215a1319a3cfe",
+        "max_points": 10
+      },
+      {
+        "case_id": "train-07",
+        "split": "train",
+        "family": "family-c",
+        "prompt_identity": "sha256:eddc982f777bd48bdedb6209b4488122cab6d06c464c9fe6c6046cdfb6513aa4",
+        "fixture_tree": "sha256:81e85ff28568b4cacec651c98cf8803fb2a56f521454824d270a13eb011c4f4d",
+        "scorer_ref_identity": "sha256:42a5ddd7cc6ab3765ebcf365617176e4b07b0e5364be9cfac8a22940a12da764",
+        "resolved_private_material": "sha256:4b6fbe0f6b4c1503beac97bdfd0b311efc449a0b934706c4020864393d6bd28e",
+        "max_points": 10
+      },
+      {
+        "case_id": "train-08",
+        "split": "train",
+        "family": "family-d",
+        "prompt_identity": "sha256:2d01257dc48da9304302e17cf2e3aaae3ec61ce5cb1f404a7d2b1cbb838d3323",
+        "fixture_tree": "sha256:653ec77d49e79f36279d89298aebe9d89dd28d4e4faba9c05d6e0ebfb48fdf48",
+        "scorer_ref_identity": "sha256:bd3a4526ac8f20d7345d9a15e6d50c1c64ab9cfa8edffdde0b54d608ad06ae59",
+        "resolved_private_material": "sha256:84b92538e4deefb6ba91de9a0f5c4e87c34a7615fbb8311d22067f290d569763",
+        "max_points": 10
+      },
+      {
+        "case_id": "train-09",
+        "split": "train",
+        "family": "family-a",
+        "prompt_identity": "sha256:6ea3c7a351741cd981e7166ea75152fcd38020ce394eeb0a576da49b934b7ca7",
+        "fixture_tree": "sha256:8742024ef9347e6dda3d117586a60d654e2ade8f1b41430bbd630875e6eb3f9a",
+        "scorer_ref_identity": "sha256:d189cdd2d86d46217687b45ea51d3940568dedc467870006ca340ca2e7f8820c",
+        "resolved_private_material": "sha256:4aa02c1f9e030b4222bb223498a15be3b1e112214e660cd1ed83760cbdf96e68",
+        "max_points": 10
+      },
+      {
+        "case_id": "train-10",
+        "split": "train",
+        "family": "family-b",
+        "prompt_identity": "sha256:c48175fd313e41bf9435e5d4caa2aaff8f8b51038ad11561a475b0013d78d27f",
+        "fixture_tree": "sha256:292b6298a4a784b899014309c0e15058b4abdae70676a3d449e6b3a52364f160",
+        "scorer_ref_identity": "sha256:ac7c3a9ce9fae51f900b2099b36b208b83ded5e950990ab4af3394b791bda063",
+        "resolved_private_material": "sha256:7f466148010010a616fbfc8e0b36ee890805b40daa621f23c4faa0a83d179d75",
+        "max_points": 10
+      },
+      {
+        "case_id": "train-11",
+        "split": "train",
+        "family": "family-c",
+        "prompt_identity": "sha256:a5fa58f23e8b39a94208e408a8a17947ca8f753c95769707a095bd19a02b65fe",
+        "fixture_tree": "sha256:e67236d15bf6506d196f10e1a0b11f88dabfa5bbd9ac25c4fdda7182c8c42c57",
+        "scorer_ref_identity": "sha256:c6e8a0eae86ff809320b87fe22cc8637c8e47c87d23b5432b8a687d2ad91dff8",
+        "resolved_private_material": "sha256:95ef1a9305ec9b3d359cbd54739b69d6c0b8f5a296a96fe27e341f5899a88663",
+        "max_points": 10
+      },
+      {
+        "case_id": "train-12",
+        "split": "train",
+        "family": "family-d",
+        "prompt_identity": "sha256:a47b29ff16edfe0b52abb7fe233582460401d5bcb6b3034e30da4d62746ddca4",
+        "fixture_tree": "sha256:83b9a2e37ca50315f9aa8398182684f84e418dfe54c42ab0d299c0fcb8992fc0",
+        "scorer_ref_identity": "sha256:d689367587f7a083c36f5c821e4e3c31d62a77e719654a402d24d40b48a633f9",
+        "resolved_private_material": "sha256:5d85c84499eb05be7395bbbeca1f1c703a172ac42e912f27d96ef6c850395e0a",
+        "max_points": 10
+      },
+      {
+        "case_id": "holdout-01",
+        "split": "holdout",
+        "family": "family-a",
+        "prompt_identity": "sha256:468c8181bd8d2828313d3e20e14f71f5d3db71d8e983f14d5dcf9f46cacc9166",
+        "fixture_tree": "sha256:b1b90ce68c6efce56511a2538f074949caeb97d3f1fe3d03ca3205f9b7958736",
+        "scorer_ref_identity": "sha256:85fcd8798d2beaf82970ba8d8e462ec713fe97051041de391ed84cb3de952537",
+        "resolved_private_material": "sha256:0f4b8682c9842443b50c4a635bfdd34a508fc3f4906b44f0f1f227bd6ae8e843",
+        "max_points": 10
+      },
+      {
+        "case_id": "holdout-02",
+        "split": "holdout",
+        "family": "family-b",
+        "prompt_identity": "sha256:ef31554c16a0c689b141638805a839c89f9e69e79894960487d960c9e984eeda",
+        "fixture_tree": "sha256:be0c669d78980903f841fd392eee83a253c3ac12c60963f5bd4af631eea01da7",
+        "scorer_ref_identity": "sha256:7e2306d27f69e67f286ccf05b210e5a18a81ba86c5447ce75507e52e29491e6c",
+        "resolved_private_material": "sha256:24289b29ed25dd410e7aea46dfb5bc87075b07d1e5f3521f91942e5086a15006",
+        "max_points": 10
+      },
+      {
+        "case_id": "holdout-03",
+        "split": "holdout",
+        "family": "family-c",
+        "prompt_identity": "sha256:5fd97c22a731197aaa55e0160448e0d9ce8a63f3050a639ae3dc84fef091b5d7",
+        "fixture_tree": "sha256:6d532f89faa3513bef6856809656dc0da617232989f3891551f1742503f5b0ca",
+        "scorer_ref_identity": "sha256:4021b448d4d9130506a5759ac8eef0c5a93ab51b498aa7fd9419f22fe7aefe2b",
+        "resolved_private_material": "sha256:ef37b1569ab13fd0b1dcdd6016717b0585610e3a08da57d7daafa4ce7f9f321a",
+        "max_points": 10
+      },
+      {
+        "case_id": "holdout-04",
+        "split": "holdout",
+        "family": "family-d",
+        "prompt_identity": "sha256:655be8ac272b3faae796273a9d5e2f4fe3b9713dab52553662491ea505b0d9ba",
+        "fixture_tree": "sha256:17746c954a3220f60cb50f83d551687d7d296843fb744097c38098a03c0b4452",
+        "scorer_ref_identity": "sha256:9d9b050d81cf66c0fe1b61ec5b2c9c3f0c7c8eb23d00256763f745627f34f586",
+        "resolved_private_material": "sha256:5b33f51ade0e9fb38b52808688a9929056fca1369209c2016a07b9057b203f1b",
+        "max_points": 10
+      },
+      {
+        "case_id": "holdout-05",
+        "split": "holdout",
+        "family": "family-a",
+        "prompt_identity": "sha256:493ac251bea7d3ce72ca42ea3ee71c067327e5ae47ca2a3d454f185f86bd0d79",
+        "fixture_tree": "sha256:39912686a9205c63267b9423e2cea7935799e3ca5545d5ad50b1565c62d74083",
+        "scorer_ref_identity": "sha256:6a24611ecda7c69d4d0148bebdb7ff159a6faec934ceef3657f69fd3a740c031",
+        "resolved_private_material": "sha256:3794de30baa19879956cb911def78f88d3776827c93e60318d77049826999033",
+        "max_points": 10
+      },
+      {
+        "case_id": "holdout-06",
+        "split": "holdout",
+        "family": "family-b",
+        "prompt_identity": "sha256:afbe37ed415d6c9406895e57b439864e1d57f869cf7dc7aa4cf7642c0d90e2ea",
+        "fixture_tree": "sha256:6ae23ef9906f2a49bf2631ddddec8d2451fd8c99441d8240ea58f8a43632ad44",
+        "scorer_ref_identity": "sha256:d08c2285808b667ba2e8135f63b5efdc006d14532bb407329afa7edc50eef508",
+        "resolved_private_material": "sha256:60109dc4b5b8e7d90e61ebc54f5c1dd89126fa93d1e6531308c5d68cf9421648",
+        "max_points": 10
+      },
+      {
+        "case_id": "holdout-07",
+        "split": "holdout",
+        "family": "family-c",
+        "prompt_identity": "sha256:f33d511a3c27dc3991e088fcc312aa15faadee0d1f9997f0641058e202bfad48",
+        "fixture_tree": "sha256:ee5059f447c1ad1034a566a80f8ee84ffd59af9a2f4532c5c728052b6b729d24",
+        "scorer_ref_identity": "sha256:0293a36094a4c022e7a2220ea4657f76c8a20d14b86fd4c015d871964ce98d6a",
+        "resolved_private_material": "sha256:188d89997faba4948348b189547774f96b34f4bc8daa923430d71f02897f82ac",
+        "max_points": 10
+      },
+      {
+        "case_id": "holdout-08",
+        "split": "holdout",
+        "family": "family-d",
+        "prompt_identity": "sha256:658b6bd8a7f364fe142e73b635aa2a15144b76bb9beafb6e8c8a857fce5829a2",
+        "fixture_tree": "sha256:13f6e81512620729ca3bd660a4f63200c22283ae70a40612b265df49ad86cfe2",
+        "scorer_ref_identity": "sha256:17c011e49dfa10bb55b42ab3ba722f6f7ceacf17a06905a9b469b668bb6bc774",
+        "resolved_private_material": "sha256:8d007b2f37a21e6d78038917fc15e70018cc5636ce9ff02bf83dc0e4a843492f",
+        "max_points": 10
+      }
+    ]
+  }
+}

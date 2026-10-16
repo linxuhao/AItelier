@@ -112,12 +112,23 @@ def view_of(repo: Path, mounts: list[str], tmp_path: Path) -> Path:
 SHIM = """#!/usr/bin/env python3
 import json, os, sys
 args = sys.argv[1:]
-with open(os.environ["DOCKER_SHIM_LOG"], "a") as log:
-    log.write(json.dumps(args) + "\\n")
+log = os.environ["DOCKER_SHIM_LOG"]
+with open(log, "a") as stream:
+    stream.write(json.dumps(args) + "\\n")
+store = log + ".containers"
 if args[:2] == ["rm", "-f"]:
     sys.exit(0)
-at = args.index("--entrypoint")
-os.execvp(args[at + 1], [args[at + 1]] + args[at + 3:])
+if args[0] == "create":
+    os.makedirs(store, exist_ok=True)
+    at = args.index("--entrypoint")
+    with open(os.path.join(store, args[args.index("--name") + 1]), "w") as stream:
+        json.dump([args[at + 1]] + args[at + 3:], stream)
+    sys.exit(0)
+if args[:2] == ["start", "-a"]:
+    with open(os.path.join(store, args[2])) as stream:
+        command = json.load(stream)
+    os.execvp(command[0], command)
+sys.exit(2)
 """
 
 
@@ -335,7 +346,7 @@ def test_history_over_the_budget_is_refused_before_transfer(tmp_path, docker, mo
 
 def test_preparation_container_is_bounded(source, tmp_path, docker):
     provision(source, tmp_path)
-    run = next(c for c in docker_calls(tmp_path) if c[0] == "run")
+    run = next(c for c in docker_calls(tmp_path) if c[0] == "create")
     for flag, value in [("--network", "none"), ("--cpus", "2"), ("--memory", "2g"),
                         ("--pids-limit", "512"), ("--cap-drop", "ALL"),
                         ("--ulimit", f"fsize={executor.GIT_META_MAX_BYTES}:"
@@ -351,7 +362,13 @@ def test_preparation_container_is_removed_by_name(source, tmp_path, docker):
     provision(source, tmp_path)
     calls = docker_calls(tmp_path)
     name = calls[0][calls[0].index("--name") + 1]
-    assert calls[1] == ["rm", "-f", name]
+    assert calls[0][0] == "create" and calls[1:] == [["start", "-a", name], ["rm", "-f", name]]
+
+
+def test_failed_create_is_still_removed_by_name(tmp_path, docker):
+    with pytest.raises(RuntimeError, match="not created"):
+        executor._run_prep([docker, "unknown-subcommand"], docker, "prep-z")
+    assert docker_calls(tmp_path)[-1] == ["rm", "-f", "prep-z"]
 
 
 def test_preparation_deadline_stops_and_removes_it(tmp_path, docker, monkeypatch):
@@ -360,11 +377,12 @@ def test_preparation_deadline_stops_and_removes_it(tmp_path, docker, monkeypatch
     marker = tmp_path / "pid"
     started = time.monotonic()
     with pytest.raises(RuntimeError, match="deadline"):
-        executor._run_prep(["sh", "-c", f"echo $$ > {marker}; exec sleep 30"], docker, "prep-x")
+        executor._run_prep([docker, "create", "--name", "prep-x", "--entrypoint", "sh", "image",
+                            "-c", f"echo $$ > {marker}; exec sleep 30"], docker, "prep-x")
     assert time.monotonic() - started < 3
     with pytest.raises(ProcessLookupError):
         os.kill(int(marker.read_text()), 0)
-    assert docker_calls(tmp_path) == [["rm", "-f", "prep-x"]]
+    assert docker_calls(tmp_path)[1:] == [["start", "-a", "prep-x"], ["rm", "-f", "prep-x"]]
 
 
 def test_client_disconnect_cancels_preparation(tmp_path, docker):
@@ -374,10 +392,11 @@ def test_client_disconnect_cancels_preparation(tmp_path, docker):
     client.close()
     started = time.monotonic()
     with pytest.raises(executor.PreparationCancelled):
-        executor._run_prep(["sleep", "30"], docker, "prep-y", server)
+        executor._run_prep([docker, "create", "--name", "prep-y", "--entrypoint", "sleep", "image",
+                            "30"], docker, "prep-y", server)
     server.close()
     assert time.monotonic() - started < 3
-    assert docker_calls(tmp_path) == [["rm", "-f", "prep-y"]]
+    assert docker_calls(tmp_path)[1:] == [["start", "-a", "prep-y"], ["rm", "-f", "prep-y"]]
 
 
 def test_detached_head_stays_detached(source, tmp_path, docker):

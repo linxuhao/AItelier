@@ -265,6 +265,7 @@ def node_payload(node: dict, timeout: int) -> dict:
 # refused (`GitEntryRefused`) and nothing runs.
 GIT_META_MAX_BYTES = 256 << 20
 GIT_PREP_DEADLINE = 120
+GIT_CREATE_TIMEOUT = 30
 GIT_CONTAINER_DIR = "/aitelier-git"   # a linked worktree's pointer names it
 _REFNAME = re.compile(r"refs/(?!.*\.\.)(?!.*//)[A-Za-z0-9._/+-]+")
 _PER_WORKTREE_REFS = ("refs/bisect/", "refs/worktree/", "refs/rewritten/")
@@ -357,21 +358,30 @@ echo "$used"
 '''
 
 
-def _run_prep(command: list[str], docker: str, name: str, conn=None) -> str:
-    """Run the preparation container within GIT_PREP_DEADLINE; stdout.
+def _run_prep(create: list[str], docker: str, name: str, conn=None) -> str:
+    """Create, then run, the preparation container within GIT_PREP_DEADLINE; stdout.
 
-    ``conn`` (the launcher's client socket) becoming readable is cancellation,
-    as in the launcher's own wait. Any exit from here removes the container
-    by its own name: killing the `docker run` client alone leaves it running,
-    and removing it before that client is gone can let the client go on to
-    create it afterwards — so the client is stopped first.
+    ``create`` is its `docker create` argv. Creation runs to completion first
+    (bounded by GIT_CREATE_TIMEOUT, not by the deadline): a `docker run`
+    client killed while its create request is in flight lets the daemon
+    create the container after the removal has already run (measured: left
+    `created`). Once create returns, the container exists under ``name``, so
+    the removal by name that ends every exit from here finds it. The deadline
+    and cancellation (``conn``, the launcher's client socket, becoming
+    readable, as in the launcher's own wait) apply to `docker start -a`.
     """
     import select
     import time
-    proc = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE, text=True, start_new_session=True)
     deadline = time.monotonic() + GIT_PREP_DEADLINE
+    proc = None
     try:
+        made = subprocess.run(create, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                              timeout=GIT_CREATE_TIMEOUT)
+        if made.returncode:
+            raise RuntimeError(f"Git metadata preparation not created: {made.stderr.strip()[-300:]}")
+        proc = subprocess.Popen([docker, "start", "-a", name], stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                start_new_session=True)
         while True:
             try:
                 stdout, stderr = proc.communicate(timeout=0.1)
@@ -387,7 +397,7 @@ def _run_prep(command: list[str], docker: str, name: str, conn=None) -> str:
         return stdout
     finally:
         try:
-            if proc.poll() is None:
+            if proc is not None and proc.poll() is None:
                 proc.kill()
                 proc.wait(timeout=10)
         finally:
@@ -430,7 +440,7 @@ def private_git(repo: Path, dest: Path, common: Path | None = None, *, image: st
         budget = GIT_META_MAX_BYTES
         name = "aitelier-git-" + uuid.uuid4().hex
         used = _run_prep(
-            [docker, "run", "--rm", "--init", "--network", "none",
+            [docker, "create", "--rm", "--init", "--network", "none",
              "--cpus", "2", "--memory", "2g", "--pids-limit", "512",
              "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
              "--read-only", "--tmpfs", "/tmp:size=16m", "--ulimit", f"fsize={budget}:{budget}",

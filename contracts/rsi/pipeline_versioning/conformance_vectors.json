@@ -1,0 +1,192 @@
+{
+  "schema": "rsi.pipeline_versioning.vectors.v1",
+  "note": "Literal vectors. Ids are written as $id:<bundle> and resolved with the provider's own version_id_of; canonical_vectors pin the exact bytes and the sha256 independently. Ops and expectation grammar: README.md 'Vector grammar'. Statement only: not yet executed.",
+  "default_tools": {"focused_check": "tool:focused_check@1", "run_tests": "tool:run_tests@1"},
+  "bundles": {
+    "E": {"graph": {}, "roles": {}, "templates": {}},
+    "S": {"graph": {"nodes": ["a"]}, "roles": {"a": {"settings": {}, "tools": [], "prompt": "p"}}, "templates": {}},
+    "U": {"graph": {"note": "\u00e9"}, "roles": {}, "templates": {}},
+    "T": {"graph": {}, "roles": {"a": {"settings": {}, "tools": [{"name": "z", "identity": "i2"}, {"name": "b", "identity": "i1"}], "prompt": "p"}}, "templates": {}},
+    "A": {
+      "graph": {"nodes": ["plan", "implement"], "edges": [["plan", "implement"]]},
+      "roles": {
+        "implement": {"settings": {"max_turns": 200, "model": "sonnet-5.5"}, "tools": [{"name": "focused_check", "identity": "tool:focused_check@1"}, {"name": "run_tests", "identity": "tool:run_tests@1"}], "prompt": "You implement the plan.\n"},
+        "plan": {"settings": {"max_turns": 50, "model": "sonnet-5.5"}, "tools": [], "prompt": "You plan.\n"}
+      },
+      "templates": {"plan.md": "# Plan\n"}
+    },
+    "A_reordered": {
+      "templates": {"plan.md": "# Plan\n"},
+      "roles": {
+        "plan": {"prompt": "You plan.\n", "tools": [], "settings": {"model": "sonnet-5.5", "max_turns": 50}},
+        "implement": {"prompt": "You implement the plan.\n", "tools": [{"identity": "tool:run_tests@1", "name": "run_tests"}, {"identity": "tool:focused_check@1", "name": "focused_check"}], "settings": {"model": "sonnet-5.5", "max_turns": 200}}
+      },
+      "graph": {"edges": [["plan", "implement"]], "nodes": ["plan", "implement"]}
+    },
+    "A_prompt": {
+      "graph": {"nodes": ["plan", "implement"], "edges": [["plan", "implement"]]},
+      "roles": {
+        "implement": {"settings": {"max_turns": 200, "model": "sonnet-5.5"}, "tools": [{"name": "focused_check", "identity": "tool:focused_check@1"}, {"name": "run_tests", "identity": "tool:run_tests@1"}], "prompt": "You implement the plan.\n\n"},
+        "plan": {"settings": {"max_turns": 50, "model": "sonnet-5.5"}, "tools": [], "prompt": "You plan.\n"}
+      },
+      "templates": {"plan.md": "# Plan\n"}
+    },
+    "A_setting": {
+      "graph": {"nodes": ["plan", "implement"], "edges": [["plan", "implement"]]},
+      "roles": {
+        "implement": {"settings": {"max_turns": 201, "model": "sonnet-5.5"}, "tools": [{"name": "focused_check", "identity": "tool:focused_check@1"}, {"name": "run_tests", "identity": "tool:run_tests@1"}], "prompt": "You implement the plan.\n"},
+        "plan": {"settings": {"max_turns": 50, "model": "sonnet-5.5"}, "tools": [], "prompt": "You plan.\n"}
+      },
+      "templates": {"plan.md": "# Plan\n"}
+    },
+    "A_graph": {
+      "graph": {"nodes": ["plan", "implement"], "edges": []},
+      "roles": {
+        "implement": {"settings": {"max_turns": 200, "model": "sonnet-5.5"}, "tools": [{"name": "focused_check", "identity": "tool:focused_check@1"}, {"name": "run_tests", "identity": "tool:run_tests@1"}], "prompt": "You implement the plan.\n"},
+        "plan": {"settings": {"max_turns": 50, "model": "sonnet-5.5"}, "tools": [], "prompt": "You plan.\n"}
+      },
+      "templates": {"plan.md": "# Plan\n"}
+    },
+    "A_template": {
+      "graph": {"nodes": ["plan", "implement"], "edges": [["plan", "implement"]]},
+      "roles": {
+        "implement": {"settings": {"max_turns": 200, "model": "sonnet-5.5"}, "tools": [{"name": "focused_check", "identity": "tool:focused_check@1"}, {"name": "run_tests", "identity": "tool:run_tests@1"}], "prompt": "You implement the plan.\n"},
+        "plan": {"settings": {"max_turns": 50, "model": "sonnet-5.5"}, "tools": [], "prompt": "You plan.\n"}
+      },
+      "templates": {"plan.md": "# Plan v2\n"}
+    },
+    "A_tool_identity": {
+      "graph": {"nodes": ["plan", "implement"], "edges": [["plan", "implement"]]},
+      "roles": {
+        "implement": {"settings": {"max_turns": 200, "model": "sonnet-5.5"}, "tools": [{"name": "focused_check", "identity": "tool:focused_check@2"}, {"name": "run_tests", "identity": "tool:run_tests@1"}], "prompt": "You implement the plan.\n"},
+        "plan": {"settings": {"max_turns": 50, "model": "sonnet-5.5"}, "tools": [], "prompt": "You plan.\n"}
+      },
+      "templates": {"plan.md": "# Plan\n"}
+    },
+    "G": {"graph": {}, "roles": {"a": {"settings": {}, "tools": [{"name": "ghost_tool", "identity": "tool:ghost_tool@1"}], "prompt": "p"}}, "templates": {}},
+    "M_float": {"graph": {}, "roles": {"a": {"settings": {"temperature": 0.5}, "tools": [], "prompt": "p"}}, "templates": {}},
+    "M_pointer": {"graph": {}, "roles": {"a": {"settings": {}, "tools": [], "prompt_path": "prompts/a.md"}}, "templates": {}},
+    "M_no_templates": {"graph": {}, "roles": {}},
+    "M_extra_key": {"graph": {}, "roles": {}, "templates": {}, "notes": "x"},
+    "M_not_object": [],
+    "M_dup_tool": {"graph": {}, "roles": {"a": {"settings": {}, "tools": [{"name": "run_tests", "identity": "tool:run_tests@1"}, {"name": "run_tests", "identity": "tool:run_tests@1"}], "prompt": "p"}}, "templates": {}}
+  },
+  "canonical_vectors": [
+    {"bundle": "E", "canonical": "{\"graph\":{},\"roles\":{},\"schema\":\"rsi.pipeline_version.v1\",\"templates\":{}}"},
+    {"bundle": "S", "canonical": "{\"graph\":{\"nodes\":[\"a\"]},\"roles\":{\"a\":{\"prompt_b64\":\"cA==\",\"settings\":{},\"tools\":[]}},\"schema\":\"rsi.pipeline_version.v1\",\"templates\":{}}"},
+    {"bundle": "U", "canonical": "{\"graph\":{\"note\":\"\\u00e9\"},\"roles\":{},\"schema\":\"rsi.pipeline_version.v1\",\"templates\":{}}"},
+    {"bundle": "T", "canonical": "{\"graph\":{},\"roles\":{\"a\":{\"prompt_b64\":\"cA==\",\"settings\":{},\"tools\":[{\"identity\":\"i1\",\"name\":\"b\"},{\"identity\":\"i2\",\"name\":\"z\"}]}},\"schema\":\"rsi.pipeline_version.v1\",\"templates\":{}}"}
+  ],
+  "zero_id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "scenarios": [
+    {"name": "capture_creates_then_noop_creates_nothing", "steps": [
+      {"op": "capture", "bundle": "A", "expect": {"result_subset": {"version_id": "$id:A", "created": true, "previous_version_id": null, "current_version_id": "$id:A"}}},
+      {"op": "capture", "bundle": "A_reordered", "expect": {"result_subset": {"version_id": "$id:A", "created": false}}},
+      {"op": "capture", "bundle": "A", "expect": {"result_subset": {"created": false, "previous_version_id": "$id:A"}}},
+      {"op": "list", "expect": {"result": [{"version_id": "$id:A", "seq": 1, "is_current": true}]}}
+    ]},
+    {"name": "resolved_prompt_settings_graph_template_changes_make_versions", "steps": [
+      {"op": "capture", "bundle": "A", "expect": {"result_subset": {"created": true}}},
+      {"op": "capture", "bundle": "A_prompt", "expect": {"result_subset": {"created": true, "previous_version_id": "$id:A"}}},
+      {"op": "capture", "bundle": "A_setting", "expect": {"result_subset": {"created": true}}},
+      {"op": "capture", "bundle": "A_graph", "expect": {"result_subset": {"created": true}}},
+      {"op": "capture", "bundle": "A_template", "expect": {"result_subset": {"created": true}}},
+      {"op": "list", "expect": {"result": [
+        {"version_id": "$id:A", "seq": 1, "is_current": false},
+        {"version_id": "$id:A_prompt", "seq": 2, "is_current": false},
+        {"version_id": "$id:A_setting", "seq": 3, "is_current": false},
+        {"version_id": "$id:A_graph", "seq": 4, "is_current": false},
+        {"version_id": "$id:A_template", "seq": 5, "is_current": true}]}}
+    ]},
+    {"name": "read_and_inputs_cannot_mutate_history", "steps": [
+      {"op": "capture_then_mutate_input", "bundle": "A", "expect": {"result_subset": {"created": true}}},
+      {"op": "read", "version_id": "$id:A", "expect": {"result": {"version_id": "$id:A", "bundle": "$bundle:A"}}},
+      {"op": "mutate_read", "version_id": "$id:A"},
+      {"op": "read", "version_id": "$id:A", "expect": {"result": {"version_id": "$id:A", "bundle": "$bundle:A"}}},
+      {"op": "current", "expect": {"result": "$id:A"}}
+    ]},
+    {"name": "restore_selects_without_touching_history", "steps": [
+      {"op": "capture", "bundle": "A"},
+      {"op": "capture", "bundle": "A_prompt"},
+      {"op": "restore", "version_id": "$id:A", "expect": {"result": {"version_id": "$id:A", "previous_version_id": "$id:A_prompt", "changed": true}}},
+      {"op": "current", "expect": {"result": "$id:A"}},
+      {"op": "restore", "version_id": "$id:A", "expect": {"result": {"version_id": "$id:A", "previous_version_id": "$id:A", "changed": false}}},
+      {"op": "list", "expect": {"result": [{"version_id": "$id:A", "seq": 1, "is_current": true}, {"version_id": "$id:A_prompt", "seq": 2, "is_current": false}]}}
+    ]},
+    {"name": "unknown_and_malformed_version_refused", "steps": [
+      {"op": "capture", "bundle": "A"},
+      {"op": "restore", "version_id": "$zero", "expect": {"error": "UNKNOWN_VERSION"}},
+      {"op": "read", "version_id": "$zero", "expect": {"error": "UNKNOWN_VERSION"}},
+      {"op": "restore", "version_id": "not-a-version", "expect": {"error": "MALFORMED_VERSION_ID"}},
+      {"op": "read", "version_id": 123, "expect": {"error": "MALFORMED_VERSION_ID"}},
+      {"op": "restore", "version_id": null, "expect": {"error": "MALFORMED_VERSION_ID"}}
+    ]},
+    {"name": "missing_or_mismatched_tools_refuse_before_change", "steps": [
+      {"op": "capture", "bundle": "G", "expect": {"error": "TOOL_UNAVAILABLE"}},
+      {"op": "capture", "bundle": "A_tool_identity", "expect": {"error": "TOOL_IDENTITY_MISMATCH"}},
+      {"op": "list", "expect": {"result": []}},
+      {"op": "capture", "bundle": "A"},
+      {"op": "capture", "bundle": "S"},
+      {"op": "set_tools", "tools": {"focused_check": "tool:focused_check@1"}},
+      {"op": "restore", "version_id": "$id:A", "expect": {"error": "TOOL_UNAVAILABLE"}},
+      {"op": "set_tools", "tools": {"focused_check": "tool:focused_check@9", "run_tests": "tool:run_tests@1"}},
+      {"op": "restore", "version_id": "$id:A", "expect": {"error": "TOOL_IDENTITY_MISMATCH"}},
+      {"op": "current", "expect": {"result": "$id:S"}},
+      {"op": "read", "version_id": "$id:A", "expect": {"result_subset": {"version_id": "$id:A"}}}
+    ]},
+    {"name": "malformed_bundles_refused", "steps": [
+      {"op": "capture", "bundle": "M_float", "expect": {"error": "MALFORMED_BUNDLE"}},
+      {"op": "capture", "bundle": "M_pointer", "expect": {"error": "MALFORMED_BUNDLE"}},
+      {"op": "capture", "bundle": "M_no_templates", "expect": {"error": "MALFORMED_BUNDLE"}},
+      {"op": "capture", "bundle": "M_extra_key", "expect": {"error": "MALFORMED_BUNDLE"}},
+      {"op": "capture", "bundle": "M_not_object", "expect": {"error": "MALFORMED_BUNDLE"}},
+      {"op": "capture", "bundle": "M_dup_tool", "expect": {"error": "MALFORMED_BUNDLE"}},
+      {"op": "list", "expect": {"result": []}},
+      {"op": "current", "expect": {"result": null}}
+    ]},
+    {"name": "expected_current_conflict_refused", "steps": [
+      {"op": "capture", "bundle": "A"},
+      {"op": "capture", "bundle": "S", "expected_current": "$null", "expect": {"error": "CONFLICT"}},
+      {"op": "capture", "bundle": "S", "expected_current": "$id:A", "expect": {"result_subset": {"created": true}}},
+      {"op": "restore", "version_id": "$id:A", "expected_current": "$id:A", "expect": {"error": "CONFLICT"}},
+      {"op": "restore", "version_id": "$id:A", "expected_current": "bogus", "expect": {"error": "MALFORMED_VERSION_ID"}},
+      {"op": "restore", "version_id": "$id:A", "expected_current": "$id:S", "expect": {"result_subset": {"changed": true}}}
+    ]},
+    {"name": "tampered_version_refused", "requires": ["tamper_hook"], "steps": [
+      {"op": "capture", "bundle": "A"},
+      {"op": "capture", "bundle": "S"},
+      {"op": "tamper", "version_id": "$id:A", "bundle": "S"},
+      {"op": "read", "version_id": "$id:A", "expect": {"error": "TAMPERED_VERSION"}},
+      {"op": "restore", "version_id": "$id:A", "expect": {"error": "TAMPERED_VERSION"}},
+      {"op": "capture", "bundle": "A", "expect": {"error": "TAMPERED_VERSION"}},
+      {"op": "read", "version_id": "$id:S", "expect": {"result": {"version_id": "$id:S", "bundle": "$bundle:S"}}}
+    ]},
+    {"name": "restore_never_repins_running_runs", "steps": [
+      {"op": "pin_run", "run_id": "r0", "expect": {"error": "NO_CURRENT_VERSION"}},
+      {"op": "capture", "bundle": "A"},
+      {"op": "pin_run", "run_id": "r1", "expect": {"result": "$id:A"}},
+      {"op": "capture", "bundle": "A_prompt"},
+      {"op": "pin_run", "run_id": "r2", "expect": {"result": "$id:A_prompt"}},
+      {"op": "restore", "version_id": "$id:A"},
+      {"op": "run_pin", "run_id": "r1", "expect": {"result": "$id:A"}},
+      {"op": "run_pin", "run_id": "r2", "expect": {"result": "$id:A_prompt"}},
+      {"op": "restore", "version_id": "$id:A_prompt"},
+      {"op": "finish_run", "run_id": "r1"},
+      {"op": "run_pin", "run_id": "r1", "expect": {"result": "$id:A"}},
+      {"op": "list_pins", "expect": {"result": {"r1": {"version_id": "$id:A", "state": "finished"}, "r2": {"version_id": "$id:A_prompt", "state": "running"}}}},
+      {"op": "read", "version_id": "$id:A", "expect": {"result_subset": {"version_id": "$id:A"}}},
+      {"op": "pin_run", "run_id": "r1", "expect": {"error": "DUPLICATE_RUN"}},
+      {"op": "run_pin", "run_id": "nope", "expect": {"error": "UNKNOWN_RUN"}},
+      {"op": "finish_run", "run_id": "nope", "expect": {"error": "UNKNOWN_RUN"}}
+    ]},
+    {"name": "refused_restore_leaves_pins_and_selection", "steps": [
+      {"op": "capture", "bundle": "A"},
+      {"op": "pin_run", "run_id": "r1", "expect": {"result": "$id:A"}},
+      {"op": "capture", "bundle": "S"},
+      {"op": "set_tools", "tools": {}},
+      {"op": "restore", "version_id": "$id:A", "expect": {"error": "TOOL_UNAVAILABLE"}},
+      {"op": "current", "expect": {"result": "$id:S"}},
+      {"op": "run_pin", "run_id": "r1", "expect": {"result": "$id:A"}}
+    ]}
+  ]
+}

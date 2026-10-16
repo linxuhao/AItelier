@@ -334,6 +334,15 @@ def test_governing_plan_gate_reload_reject_stale_and_exact_approval(env, project
                  lambda: sf.reject_checkpoint(plan_rid, "plan", "no")):
         with pytest.raises(SkillFlowError, match="Coding Mode"):
             call()
+    # The ordinary REST checkpoint routes (run- and project-keyed) cannot either.
+    from fastapi.testclient import TestClient
+    from api.main import app
+    raw = TestClient(app, raise_server_exceptions=False)
+    for url in (f"/api/runs/{plan_rid}/checkpoint/approve", f"/api/meta/{pid}/checkpoint/approve"):
+        r = raw.post(url, json={"checkpoint": "plan"})
+        assert r.status_code >= 400, (url, r.status_code, r.text)
+    assert sf.get_run(plan_rid)["status"] == "paused"
+    assert not [t for t in sf.get_trace(plan_rid, category="step") if t["event"] == "checkpoint_approved"]
     from skillflow.plugins.skill_runner import RunnerService
     fresh, _ = project()
     with pytest.raises(SkillFlowError, match="Coding Mode"):

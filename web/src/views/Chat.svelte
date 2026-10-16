@@ -1159,7 +1159,7 @@
         {/if}
         {#if codingFiles.length > 0}
           <ul class="coding-files">
-            {#each codingFiles.slice(0, 200) as f}
+            {#each codingFiles.slice(0, 200) as f (f)}
               <li><button class="link" onclick={() => _openCodingFile(f)}>{f}</button></li>
             {/each}
           </ul>
@@ -1304,6 +1304,46 @@
     flex-shrink: 0;
     font-size: 0.85rem;
     padding: 0.2rem 0.6rem;
+  }
+
+  .coding-session-view {
+    border: 1px solid var(--pico-muted-border-color, #ccc);
+    border-radius: 6px;
+    margin: 0.5rem 0;
+    padding: 0.5rem 0.75rem;
+    font-size: 0.85rem;
+    max-height: 40vh;
+    overflow: auto;
+  }
+  .coding-session-view header {
+    display: flex;
+    gap: 0.75rem;
+    align-items: baseline;
+    flex-wrap: wrap;
+  }
+  .coding-plan-text {
+    border-left: 3px solid var(--pico-primary, #36c);
+    padding-left: 0.5rem;
+    margin: 0.4rem 0;
+  }
+  .coding-files {
+    columns: 2;
+    margin: 0.4rem 0;
+  }
+  .coding-files button.link {
+    background: none;
+    border: none;
+    padding: 0;
+    color: var(--pico-primary, #36c);
+    cursor: pointer;
+    font-size: inherit;
+  }
+  .coding-preview {
+    max-height: 20vh;
+    overflow: auto;
+  }
+  .coding-commit {
+    max-width: 22rem;
   }
 
   .coding-mode-toggle {

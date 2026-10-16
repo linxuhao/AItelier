@@ -142,7 +142,9 @@ def test_only_the_trusted_godot_caller_honors_the_scope(tmp_path, trusted, match
 
 
 @pytest.mark.parametrize("change,match", [
-    ({"backend_only": True}, "backend-only override requires the trusted backend caller"),
+    ({"backend_only": True, "godot_only": False},
+     "backend-only override requires the trusted backend caller"),
+    ({"backend_only": True}, "mutually exclusive"),
     ({"godot_only": "true"}, "trusted Godot recreation caller"),
     ({"godot_only": 1}, "trusted Godot recreation caller"),
     ({"godot_only": None}, "trusted Godot recreation caller"),

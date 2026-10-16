@@ -70,6 +70,19 @@ def docker(tmp_path):
     return str(shim), behave, shim_calls, root
 
 
+@pytest.fixture
+def spawned(monkeypatch):
+    """Every argv spawned, recorded when Popen is called (a killed client may never log)."""
+    seen = []
+    real = subprocess.Popen
+
+    def popen(args, *a, **k):
+        seen.append([str(x) for x in args][1:3])
+        return real(args, *a, **k)
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    return seen
+
+
 def _create(docker, name, *command):
     return [docker, "create", "--name", name, "--entrypoint", command[0], "image", *command[1:]]
 
@@ -80,7 +93,7 @@ def _interrupt_after(seconds):
     return timer
 
 
-def test_sigint_during_create_is_honored_after_the_answer_and_before_start(docker):
+def test_sigint_during_create_is_honored_after_the_answer_and_before_start(docker, spawned):
     shim, behave, calls, root = docker
     behave(create_seconds=0.6)
     timer = _interrupt_after(0.2)
@@ -92,6 +105,7 @@ def test_sigint_during_create_is_honored_after_the_answer_and_before_start(docke
     assert [c["args"][0] for c in done] == ["create", "rm"]
     assert done[0]["answer"] == "created" and done[0]["at"] < done[1]["at"]
     assert not (root / "own-1").exists()                # removed after it existed
+    assert [a[0] for a in spawned] == ["create", "rm"]  # START was never spawned
     assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
 
 
@@ -138,7 +152,7 @@ def test_sigint_inside_start_spawn_stops_the_recorded_client(docker, monkeypatch
     assert calls()[-1]["args"] == ["rm", "-f", "own-3"]
 
 
-def test_cancellation_is_checked_after_the_answer_and_before_start(docker):
+def test_cancellation_is_checked_after_the_answer_and_before_start(docker, spawned):
     shim, behave, calls, root = docker
     behave(create_seconds=0.3)
     seen = []
@@ -152,6 +166,7 @@ def test_cancellation_is_checked_after_the_answer_and_before_start(docker):
             pytest.fail("the cancelled launch was started")
     assert seen == [["create"]]
     assert [c["args"][0] for c in calls()] == ["create", "rm"]
+    assert [a[0] for a in spawned] == ["create", "rm"]  # START was never spawned
 
 
 def test_create_that_never_answers_is_unconfirmed(docker, monkeypatch):

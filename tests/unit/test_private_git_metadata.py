@@ -385,9 +385,13 @@ def test_preparation_deadline_stops_and_removes_it(tmp_path, docker, monkeypatch
     assert docker_calls(tmp_path)[1:] == [["start", "-a", "prep-x"], ["rm", "-f", "prep-x"]]
 
 
-def test_client_disconnect_cancels_preparation(tmp_path, docker):
+def test_client_disconnect_cancels_preparation(tmp_path, docker, monkeypatch):
     import socket
     import time
+    spawned = []
+    real_popen = subprocess.Popen
+    monkeypatch.setattr(executor.subprocess, "Popen", lambda c, *a, **k: (
+        spawned.append(list(c)[1:2]) or real_popen(c, *a, **k)))
     client, server = socket.socketpair()
     client.close()
     started = time.monotonic()
@@ -398,6 +402,7 @@ def test_client_disconnect_cancels_preparation(tmp_path, docker):
     assert time.monotonic() - started < 3
     # Cancelled once the create answered: the preparation is never started.
     assert docker_calls(tmp_path)[1:] == [["rm", "-f", "prep-y"]]
+    assert spawned == [["create"], ["rm"]]
 
 
 def test_client_disconnect_while_preparation_runs_stops_it(tmp_path, docker):

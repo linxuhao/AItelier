@@ -378,6 +378,7 @@ def save_chat_message(
     )
     return {"status": "saved"}
 
+
 # ── Coding Mode: session working-tree view and plan decisions ──────────
 # The coding chat's file view is the SESSION's owned working tree, resolved
 # by the server from the session's sealed workspace binding. A caller run id

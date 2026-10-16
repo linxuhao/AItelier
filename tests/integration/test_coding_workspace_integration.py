@@ -977,3 +977,12 @@ def test_closed_dirty_tree_is_retained_by_ordinary_cleanup(env, project):
     assert origin["run_id"] not in [r.get("run_id") if isinstance(r, dict) else r
                                     for r in reaped["removed"]]
     evidence("t14-retained", {"reaped": reaped, "kept": kept})
+
+
+def test_coding_workspace_is_not_offered_as_a_pipeline(env):
+    from api.dependencies import get_config_registry
+    reg = get_config_registry()
+    assert reg.get("coding_workspace") is not None and reg.get("coding_workspace").listed is False
+    assert "coding_workspace" not in {e["config_name"] for e in reg.catalog(full=True)}
+    assert reg.describe("coding_workspace") == []
+    assert reg.get("coding_task").repo_mode == "none"

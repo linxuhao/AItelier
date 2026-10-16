@@ -21,6 +21,7 @@ x-aitelier:
   scheduler_owned: false
   repo_mode: "code"
   output_step: "work"
+  listed: false
 
 begin: "work"
 

@@ -361,16 +361,19 @@ def _live_runtime_observation(base_url: str) -> dict:
 def _require_deployment_clearance(
         action: str, *, base_url: str = _DEFAULT_URL,
         override_decision: Callable[[str, dict], dict | None] | None = None,
-        backend_service: bool = False) -> dict:
+        backend_service: bool = False, godot_service: bool = False) -> dict:
     """Measure every project and external owner before changing the backend.
 
-    Only the backend service actions pass ``backend_service``: a backend-only
-    decision, and owners named as coordinated under it, cover that service's
-    effect and never another service's.
+    Only the backend service actions pass ``backend_service``, and only the
+    Godot-only recreation passes ``godot_service``: a scoped decision, and owners
+    named as coordinated under it, cover that one service's effect and never
+    another service's.
     """
     from core import datadir
     from core import deployment_quiescence as dq
 
+    if backend_service and godot_service:
+        raise ValueError("a deployment clearance covers one service scope")
     fence = dq.acquire_cutover_fence()
     try:
         try:
@@ -402,10 +405,12 @@ def _require_deployment_clearance(
                     override = {"_invalid_override": "operator declined the decision"}
         if (not backend_service and isinstance(override, dict)
                 and override.get("backend_only", False) is not False):
-            # Coordinated owners need backend_only, so this refuses them too.
+            # A backend-only scope, and owners coordinated under it, cover only the
+            # backend effect; the Godot recreation has its own godot_only scope.
             override = {"_invalid_override":
                         "backend-only decisions are honored only for the backend service action"}
-        clearance = dq.authorize(action, observation, override=override, backend_only=True)
+        clearance = dq.authorize(action, observation, override=override,
+                                 backend_only=not godot_service, godot_only=godot_service)
         clearance["_cutover_fence"] = fence
         return clearance
     except BaseException as exc:
@@ -581,6 +586,7 @@ def recreate_godot_builder(*, override_file: str, binding_file: str,
         raise ValueError("a new absolute owned report path is required")
     _require_docker()
     clearance = _require_deployment_clearance("redeploy", base_url=base_url,
+                                               godot_service=True,
                                                **({"override_decision": override_decision}
                                                   if override_decision is not None else {}))
     receipt = {"service": "godot-builder", "override_sha256": override_sha,

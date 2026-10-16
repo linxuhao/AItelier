@@ -97,11 +97,12 @@ Each record is the local operator's audited assertion that the owner authorized
 an unaffected scope for this backend-only action, obtained outside the payload.
 `scope_ref` points at that authorization; neither it nor the ticket is
 authentication or proof, and nothing reads or verifies it. The trust boundary
-is unchanged: only the local backend restart/redeploy path honors the field.
-The Godot-only recreation refuses it, and also refuses any `backend_only`
-decision, because a backend-only scope covers the backend service effect only.
-Even on the backend path, it is honored only when that trusted caller passes
-`backend_only=True` and the decision itself requests `backend_only: true`.
+is unchanged: under `backend_only` only the local backend restart/redeploy path
+honors the field. The Godot-only recreation refuses any `backend_only`
+decision, because a backend-only scope covers the backend service effect only;
+it has its own `godot_only` scope (below). Even on the backend path, the field
+is honored only when that trusted caller passes `backend_only=True` and the
+decision itself requests `backend_only: true`.
 
 The records must exactly cover the remaining authoritative owners of the held
 inventory. A missing, extra, stale, duplicate, malformed or unknown-row name
@@ -138,3 +139,45 @@ held decision. It does not authorize changing the shared source checkout or
 promoting another artifact. Its journal distinguishes a declared controller
 with unknown owner metadata from a recorded owner match, and includes uncertain
 recovery rows in affected_ownership rather than claiming they are settled.
+
+
+## Godot-only audited decisions
+
+The backend-only scope above was earned by the backend-only effect, so it never
+authorizes recreating Godot. Before this scope, the normal Godot recreation had
+no way to record unaffected active registered owners next to unknown process
+noise: acknowledging the unknowns refused the authoritative owners, and omitting
+the acknowledgement refused the unknowns. That refusal is unchanged for every
+decision that does not request the scope below.
+
+`aitelier`'s `recreate_godot_builder` is the only caller that passes
+`authorize(..., godot_only=True)` (the CLI clearance's `godot_service`). Its
+decision may request `godot_only: true`. Requesting it from the backend
+restart/redeploy path or from an unscoped caller refuses, a decision requesting
+both `backend_only` and `godot_only` refuses, and a non-boolean value refuses.
+A trusted caller cannot pass both flags.
+
+The scope classifies the inventory as the backend-only scope does, because the
+recreation touches neither Source nor the semantic sidecar. Ready/ready demand
+at an equal revision with no error is passive. Explicit State settlement is
+passive. The exact own AItelier deployment controller is exempt metadata when
+`deployment_attempt_id` names it and its recorded `owner_driver_id` matches the
+audited `driver:<id>` actor. Missing owner metadata, and paused, unknown or
+unsettled recovery rows, stay disclosed unknowns and need `acknowledge_unknown`.
+
+`coordinated_owners` under this scope may name only `registered_external_owners`
+rows (by `attempt_id`, status `active`, each with its `scope_ref`). The exact
+cover rules, refusals and journal fields are those of the backend scope. Godot
+render owners cannot be named here, active or `owner_lost`, because this action
+recreates their service. Runs, operations, checkout leases and writes, known or
+registered processes, docker render owners, non-ready semantic demand,
+measurement failures and inventory errors cannot be named either. Unknown
+process noise still needs `acknowledge_unknown`.
+
+The journal records `godot_only: true`, the controller identity, the cover with
+its scope_refs, every affected coordinated and unknown row, and the original
+blockers, errors and digest. Nothing is settled or cleared. The cutover fence,
+CID/PID/image expectations, quota and Source binding rechecks, health/source
+checks and the `--no-deps --force-recreate` Godot-only effect are unchanged.
+This scope does not promote the shared Source, restart the backend or zvec-grep,
+or touch the GPU. It is a Source contract only and does not perform a recreation.

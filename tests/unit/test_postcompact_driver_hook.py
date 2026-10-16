@@ -294,12 +294,14 @@ def test_next_hook_invocation_reads_new_note_revision_without_cache(tmp_path, st
 
 def test_unreachable_state_still_emits_bounded_recovery_context(tmp_path):
     output = invoke(tmp_path, "http://127.0.0.1:1/mcp")
-    context = output["hookSpecificOutput"]["additionalContext"]
+    context = output["systemMessage"]
     assert len(context) <= 12_000
-    assert "recovery required" in context
-    assert 'get_driver_note' in context and '"project_id":"aitelier"' in context
+    assert "session driver recovery required" in context
+    assert "driver_id=stub, project_id=aitelier" in context
+    assert "No State, note or inbox was queried" in context
     assert "Do not use ~/.AItelier/DRIVER_STATE.md" in context
     assert "secret" not in context.lower()
+    assert not (tmp_path / "codex-home" / "project-handoff-pending").exists()
 
 
 def test_postcompact_marker_failure_never_blocks_and_is_actionable(tmp_path, state_server):
@@ -819,8 +821,8 @@ def test_exact_compact_event_pair_retains_middle_of_huge_history_paragraph(tmp_p
     # inject the same bootstrap a second time.
     assert invoke(tmp_path, state_server, event="UserPromptSubmit") == {"continue": True}
     assert [request["params"]["name"] for request in StateStub.requests] == [
-        "state_graph_read", "state_graph_read", "state_graph_help", "state_graph_read",
-        "state_graph_read", "state_graph_read", "state_graph_help", "state_graph_read",
+        "driver_whoami", "state_graph_read", "state_graph_read", "state_graph_help", "state_graph_read",
+        "driver_whoami", "state_graph_read", "state_graph_read", "state_graph_help", "state_graph_read",
     ]
 
 
@@ -1175,6 +1177,7 @@ def test_unadvertised_guidance_falls_back_with_honest_notice_on_tracked_entry(
     # Project-standing-only fallback: the four baseline reads, no identity probe
     # and never the unfiltered aggregator.
     assert [(r["params"]["name"], r["params"]["arguments"].get("action")) for r in StateStub.requests] == [
+        ("driver_whoami", None),
         ("state_graph_read", "get_driver_note"), ("state_graph_read", "project_overview"),
         ("state_graph_help", None), ("state_graph_read", "list_director_messages")]
 
@@ -1389,7 +1392,7 @@ def test_tracked_binding_rejects_malformed_tail_beyond_read_cap(tmp_path, state_
 @pytest.mark.parametrize("characters", [4096, 4097])
 def test_tracked_binding_complete_size_boundary(tmp_path, state_server, characters):
     session = "binding-size-boundary"
-    payload = json.dumps({"session_id": session, "project_id": "aitelier"}).ljust(characters)
+    payload = json.dumps({"session_id": session, "project_id": "aitelier", "driver_id":"stub"}).ljust(characters)
     write_binding(tmp_path / "codex-home", session, payload=payload)
     output = invoke(tmp_path, state_server, session_id=session, bind=False,
                     tracked=True, source="startup")
@@ -1589,3 +1592,11 @@ def test_quiet_bound_event_without_handoff_needs_no_credentials(tmp_path, state_
     assert output == {"continue":True}
     assert StateStub.requests == []
     assert not (tmp_path/"codex-home"/"project-handoff-pending").exists()
+
+
+@pytest.mark.parametrize("event", ["UserPromptSubmit", "Stop"])
+def test_completed_handoff_does_not_reauthenticate_on_quiet_events(tmp_path, state_server, event):
+    invoke(tmp_path,state_server,event="SessionStart")
+    StateStub.requests = []
+    assert invoke(tmp_path,state_server,event=event) == {"continue":True}
+    assert StateStub.requests == []

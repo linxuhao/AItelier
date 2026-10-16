@@ -911,9 +911,11 @@ def main() -> int:
     # Quiet prompt/stop events without a pending handoff need no credential or
     # network access. Active events authenticate before marker acquisition.
     pending = _pending_path(hook_input)
+    marker_state, marker = _read_marker(pending) if pending is not None else ("missing", None)
+    needs_handoff = marker_state == "invalid" or (marker is not None and marker["status"] == MARKER_PENDING)
     active = (event == "PostCompact"
               or (event == "SessionStart" and hook_input.get("source") in SESSION_BOOTSTRAP_SOURCES)
-              or (event in {"UserPromptSubmit", "Stop"} and pending is not None and pending.exists()))
+              or (event in {"UserPromptSubmit", "Stop"} and needs_handoff))
     if not active:
         _write_output({"continue": True})
         return 0
@@ -924,7 +926,9 @@ def main() -> int:
             "# AItelier session driver recovery required\n"
             "The hook could not authenticate as the bound session driver. "
             "No State, note or inbox was queried and no handoff marker was changed. "
-            "Check this session's driver binding and credential helper before director work.",
+            f"Expected driver_id={BOUND_DRIVER_ID}, project_id={PROJECT_ID}. "
+            "Check this session's driver binding and credential helper before director work. "
+            "Do not use ~/.AItelier/DRIVER_STATE.md.",
             MAX_CONTEXT_CHARS)})
         return 0
     # PostCompact has no model-context output. Queue the next supported

@@ -150,13 +150,13 @@ def state_server():
         thread.join(timeout=2)
 
 
-def write_binding(codex_home, session_id, project_id="aitelier", payload=None):
+def write_binding(codex_home, session_id, project_id="aitelier", payload=None, driver_id="stub"):
     """Write the explicit session->project binding; the hook never infers one."""
     directory = codex_home / "director-project-bindings"
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     key = hashlib.sha256(session_id.encode("utf-8")).hexdigest()
     body = payload if payload is not None else json.dumps(
-        {"session_id": session_id, "project_id": project_id})
+        {"session_id": session_id, "project_id": project_id, "driver_id": driver_id})
     path = directory / f"{key}.json"
     path.write_text(body)
     return path
@@ -164,12 +164,12 @@ def write_binding(codex_home, session_id, project_id="aitelier", payload=None):
 
 def invoke(
     tmp_path, url, cwd=None, event="SessionStart", session_id="session-a", source="compact",
-    bind=True, project_id="aitelier", tracked=False, env=None,
+    bind=True, project_id="aitelier", tracked=False, env=None, driver_id="stub",
 ):
     codex_home = tmp_path / "codex-home"
     codex_home.mkdir(exist_ok=True)
     if bind:
-        write_binding(codex_home, session_id, project_id=project_id)
+        write_binding(codex_home, session_id, project_id=project_id, driver_id=driver_id)
     helper = tmp_path / "headers"
     if not helper.exists():
         helper.write_text("#!/bin/sh\nprintf '%s' '{\"X-AItelier-Admin-Token\":\"helper-secret\"}'\n")
@@ -230,7 +230,7 @@ def test_hook_emits_legal_bounded_fresh_project_context_from_any_cwd(tmp_path, s
     assert "helper-secret" not in context and "forbidden-secret" not in context
     assert "[REDACTED]" in context
     assert "Active standing director guidance" in context
-    assert len(StateStub.requests) == 4
+    assert len([r for r in StateStub.requests if r["params"]["name"] != "driver_whoami"]) == 4
     wire = json.dumps(StateStub.requests)
     assert "aitelier" in wire and "wuxia-myth" not in wire and "DRIVER_STATE.md" not in wire
 
@@ -289,7 +289,7 @@ def test_next_hook_invocation_reads_new_note_revision_without_cache(tmp_path, st
     assert "driver_note_revision=2" in second
     assert "rule revision 2" in second
     assert first != second
-    assert len(StateStub.requests) == 8
+    assert len([r for r in StateStub.requests if r["params"]["name"] != "driver_whoami"]) == 8
 
 
 def test_unreachable_state_still_emits_bounded_recovery_context(tmp_path):
@@ -538,7 +538,7 @@ def test_recorded_postcompact_then_user_prompt_order_injects_fresh_context(tmp_p
 
     # The marker is consumed after the supported model-context event.
     assert invoke(tmp_path, state_server, event="UserPromptSubmit") == {"continue": True}
-    assert len(StateStub.requests) == 8
+    assert len([r for r in StateStub.requests if r["params"]["name"] != "driver_whoami"]) == 8
 
 
 def test_concurrent_user_prompt_fallbacks_atomically_inject_once(tmp_path, state_server):
@@ -556,7 +556,7 @@ def test_concurrent_user_prompt_fallbacks_atomically_inject_once(tmp_path, state
     noops = [output for output in outputs if output == {"continue": True}]
     assert len(injected) == len(noops) == 1
     assert injected[0]["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
-    assert len(StateStub.requests) == 8
+    assert len([r for r in StateStub.requests if r["params"]["name"] != "driver_whoami"]) == 8
 
 
 def test_user_prompt_then_late_compact_session_start_does_not_inject_twice(tmp_path, state_server):
@@ -567,7 +567,7 @@ def test_user_prompt_then_late_compact_session_start_does_not_inject_twice(tmp_p
     assert "systemMessage" in postcompact
     assert prompt["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
     assert late_start == {"continue": True}
-    assert len(StateStub.requests) == 8
+    assert len([r for r in StateStub.requests if r["params"]["name"] != "driver_whoami"]) == 8
 
 
 def test_actual_postcompact_lifecycle_uses_stop_continuation_without_later_prompt(
@@ -587,7 +587,7 @@ def test_actual_postcompact_lifecycle_uses_stop_continuation_without_later_promp
     # deliver or dispatch the same compact generation again.
     assert invoke(tmp_path, state_server, event="Stop") == {"continue": True}
     assert invoke(tmp_path, state_server, event="UserPromptSubmit") == {"continue": True}
-    assert len(StateStub.requests) == 8
+    assert len([r for r in StateStub.requests if r["params"]["name"] != "driver_whoami"]) == 8
 
 
 def test_concurrent_stop_session_and_prompt_fallbacks_deliver_once(tmp_path, state_server):
@@ -609,7 +609,7 @@ def test_concurrent_stop_session_and_prompt_fallbacks_deliver_once(tmp_path, sta
         assert delivered[0]["hookSpecificOutput"]["hookEventName"] in {
             "SessionStart", "UserPromptSubmit",
         }
-    assert len(StateStub.requests) == 8
+    assert len([r for r in StateStub.requests if r["params"]["name"] != "driver_whoami"]) == 8
 
 
 def test_compact_session_reordered_before_postcompact_does_not_double_deliver(
@@ -926,7 +926,7 @@ def test_reload_then_midturn_compact_uses_fresh_context_without_duplicate(
         event="UserPromptSubmit",
         session_id="recorded-long-session",
     ) == {"continue": True}
-    assert len(StateStub.requests) == 12
+    assert len([r for r in StateStub.requests if r["params"]["name"] != "driver_whoami"]) == 12
 
 
 @pytest.mark.parametrize("source", ["startup", "resume", "compact"])
@@ -1014,9 +1014,9 @@ def test_binding_selection_separates_platform_and_wuxia_projects(tmp_path, monke
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
     write_binding(codex_home, "session-a", project_id="aitelier")
     write_binding(codex_home, "session-b", project_id="wuxia-myth")
-    assert module._read_binding({"session_id": "session-a"}) == ("bound", "aitelier")
-    assert module._read_binding({"session_id": "session-b"}) == ("bound", "wuxia-myth")
-    assert module._read_binding({"session_id": "never-bound-session"}) == ("missing", None)
+    assert module._read_binding({"session_id": "session-a"}) == ("bound", "aitelier", "stub")
+    assert module._read_binding({"session_id": "session-b"}) == ("bound", "wuxia-myth", "stub")
+    assert module._read_binding({"session_id": "never-bound-session"}) == ("missing", None, None)
     module.PROJECT_ID = "aitelier"
     platform_marker = module._pending_path({"session_id": "session-a"})
     module.PROJECT_ID = "wuxia-myth"
@@ -1031,18 +1031,18 @@ def test_binding_validation_boundaries_fail_closed(tmp_path, monkeypatch):
     module = load_hook_module()
     codex_home = tmp_path / "codex-home"
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
-    assert module._read_binding({}) == ("missing", None)
-    assert module._read_binding({"session_id": "   "}) == ("missing", None)
-    assert module._read_binding({"session_id": "x" * 129}) == ("missing", None)
+    assert module._read_binding({}) == ("missing", None, None)
+    assert module._read_binding({"session_id": "   "}) == ("missing", None, None)
+    assert module._read_binding({"session_id": "x" * 129}) == ("missing", None, None)
     write_binding(codex_home, "long-ok", project_id="p" * 128)
-    assert module._read_binding({"session_id": "long-ok"}) == ("bound", "p" * 128)
+    assert module._read_binding({"session_id": "long-ok"}) == ("bound", "p" * 128, "stub")
     write_binding(codex_home, "too-long", project_id="p" * 129)
-    assert module._read_binding({"session_id": "too-long"}) == ("malformed", None)
+    assert module._read_binding({"session_id": "too-long"}) == ("malformed", None, None)
     write_binding(codex_home, "blank-project", project_id="   ")
-    assert module._read_binding({"session_id": "blank-project"}) == ("malformed", None)
+    assert module._read_binding({"session_id": "blank-project"}) == ("malformed", None, None)
     write_binding(codex_home, "whitespace-session", payload=json.dumps(
-        {"session_id": "whitespace-session", "project_id": "  aitelier  "}))
-    assert module._read_binding({"session_id": "whitespace-session"}) == ("bound", "aitelier")
+        {"session_id": "whitespace-session", "project_id": "  aitelier  ", "driver_id":"stub"}))
+    assert module._read_binding({"session_id": "whitespace-session"}) == ("bound", "aitelier", "stub")
 
 
 # ---------------------------------------------------------------------------
@@ -1110,12 +1110,13 @@ def test_hook_never_calls_unfiltered_aggregator_when_selector_unadvertised(tmp_p
     assert "driver_postcompact_guidance" not in json.dumps(StateStub.requests)
 
 
-def test_hook_falls_back_with_honest_notice_when_identity_not_established(tmp_path, state_server):
+def test_hook_refuses_all_protected_reads_when_identity_not_established(tmp_path, state_server):
     StateStub.operations = {"driver_postcompact_guidance": STANDING_ONLY_OPERATION}
     StateStub.identity = {"actor": "anonymous"}
-    context = invoke(tmp_path, state_server)["hookSpecificOutput"]["additionalContext"]
-    assert "driver identity not established" in context
-    assert "driver_postcompact_guidance" not in json.dumps(StateStub.requests)
+    output = invoke(tmp_path, state_server)
+    assert "session driver recovery required" in output["systemMessage"]
+    assert [r["params"]["name"] for r in StateStub.requests] == ["driver_whoami"]
+    assert not (tmp_path / "codex-home" / "project-handoff-pending").exists()
 
 
 def test_driver_token_file_fallback_authenticates_without_helper_or_admin_token(tmp_path, state_server):
@@ -1215,7 +1216,7 @@ def _large_standing_items(count=8):
     return items
 
 
-@pytest.mark.parametrize("case", ["absent", "legacy", "anonymous"])
+@pytest.mark.parametrize("case", ["absent", "legacy"])
 def test_fallback_notice_stays_inside_the_standing_cap_with_truthful_omissions(
     tmp_path, state_server, case
 ):
@@ -1244,7 +1245,7 @@ def test_fallback_notice_stays_inside_the_standing_cap_with_truthful_omissions(
 
 @pytest.mark.parametrize("identity,selected", [
     ({"actor": "driver:stub", "driver_id": "stub"}, True),
-    ({"actor": "owner:human", "driver_id": None}, True),
+    ({"actor": "owner:human", "driver_id": None}, False),
     ({"actor": "legacy:admin", "driver_id": None}, False),
     ({"driver_id": None}, False),  # whoami answered without any identity
     ({"actor": "driver:spoofed-without-id", "driver_id": ""}, False),
@@ -1255,13 +1256,17 @@ def test_authenticated_versus_absent_identity_on_tracked_entry(
     StateStub.operations = {"driver_postcompact_guidance": STANDING_ONLY_OPERATION}
     StateStub.identity = identity
     StateStub.guidance = GUIDANCE_V1
-    context = invoke(tmp_path, state_server, tracked=True)["hookSpecificOutput"]["additionalContext"]
+    output = invoke(tmp_path, state_server, tracked=True)
     called = "driver_postcompact_guidance" in json.dumps(StateStub.requests)
     assert called is selected
-    assert ("STANDING-ONLY-DRIVER-LINE" in context) is selected
-    assert (OWN_STANDING_UNAVAILABLE in context) is not selected
-    if not selected:
-        assert "driver identity not established" in context
+    if selected:
+        context = output["hookSpecificOutput"]["additionalContext"]
+        assert "STANDING-ONLY-DRIVER-LINE" in context
+        assert OWN_STANDING_UNAVAILABLE not in context
+    else:
+        assert "session driver recovery required" in output["systemMessage"]
+        assert [r["params"]["name"] for r in StateStub.requests] == ["driver_whoami"]
+        assert not (tmp_path / "codex-home" / "project-handoff-pending").exists()
 
 
 def test_platform_and_wuxia_bindings_query_only_their_own_project_on_tracked_entry(
@@ -1336,8 +1341,8 @@ def _credential_case(tmp_path, url, case):
     elif case == "driver_id_home_file":
         drivers = tmp_path / "home" / ".aitelier-drivers"
         drivers.mkdir(parents=True)
-        (drivers / "grok.token").write_text("home-driver-token")
-        (drivers / "grok.token").chmod(0o600)
+        (drivers / "stub.token").write_text("home-driver-token")
+        (drivers / "stub.token").chmod(0o600)
         env.update(AITELIER_DRIVER_ID="grok", AITELIER_ADMIN_TOKEN="env-admin-token")
     return env
 
@@ -1360,7 +1365,7 @@ def test_credential_priority_without_driver_admin_mixing_on_every_tracked_read(
     context = invoke(tmp_path, state_server, tracked=True, env=env)["hookSpecificOutput"]["additionalContext"]
     assert "driver_note_revision=1" in context
     # note, overview, help, standing (+ whoami, guidance when advertised)
-    reads = 6 if advertised else 4
+    reads = 6 if advertised else 5
     assert len(StateStub.requests) == reads
     assert StateStub.credentials == [expected] * reads
     for secret in ("helper-secret", "env-driver-token", "env-admin-token",
@@ -1525,3 +1530,62 @@ def test_guidance_v1_row_count_beyond_included_fails_closed(tmp_path, state_serv
     assert "recovery required" in context
 
 
+
+
+@pytest.mark.parametrize("event", ["PostCompact", "SessionStart", "UserPromptSubmit", "Stop"])
+@pytest.mark.parametrize("identity", [
+    {"actor":"driver:other", "driver_id":"other"},
+    {"actor":"owner:human"}, {"actor":"legacy:admin"},
+    {"actor":"driver:stub", "driver_id":"other"},
+])
+def test_bound_driver_mismatch_precedes_reads_and_marker_changes(tmp_path, state_server, event, identity):
+    # Establish a real pending handoff, then prove rejection preserves its bytes.
+    invoke(tmp_path, state_server, event="PostCompact")
+    root = tmp_path / "codex-home" / "project-handoff-pending"
+    before = {str(p.relative_to(root)):p.read_bytes() for p in root.iterdir() if p.is_file()}
+    StateStub.requests = []
+    StateStub.identity = identity
+    output = invoke(tmp_path, state_server, event=event, bind=False)
+    assert "session driver recovery required" in output["systemMessage"]
+    assert [r["params"]["name"] for r in StateStub.requests] == ["driver_whoami"]
+    assert {str(p.relative_to(root)):p.read_bytes() for p in root.iterdir() if p.is_file()} == before
+
+
+def test_stdin_bound_identity_overrides_stale_helper_environment_for_both_drivers(tmp_path, state_server):
+    helper = tmp_path / "headers"
+    seen = tmp_path / "helper-selection.json"
+    helper.write_text("#!/usr/bin/env python3\nimport os,json,pathlib\n"
+                      + f"pathlib.Path({str(seen)!r}).write_text(json.dumps([os.environ.get(k) for k in ['AITELIER_DRIVER_ID','CODEX_THREAD_ID','CODEX_SESSION_ID']]))\n"
+                      + "print(json.dumps({'X-AItelier-Driver-Token':os.environ['AITELIER_DRIVER_ID']}))\n")
+    helper.chmod(0o700)
+    for project, driver in [("aitelier","codex-aitelier"),("wuxia-myth","codex")]:
+        session = "bound-" + driver
+        StateStub.project = project
+        StateStub.identity = {"actor":"driver:"+driver,"driver_id":driver}
+        StateStub.requests = []; StateStub.driver_tokens = []
+        output = invoke(tmp_path, state_server, session_id=session, project_id=project, driver_id=driver,
+                        env={"AITELIER_DRIVER_ID":"wrong", "CODEX_THREAD_ID":"stale", "CODEX_SESSION_ID":"stale"})
+        assert "driver_note_revision=1" in output["hookSpecificOutput"]["additionalContext"]
+        assert json.loads(seen.read_text()) == [driver,session,session]
+        assert StateStub.driver_tokens == [driver] * len(StateStub.requests)
+        assert StateStub.requests[0]["params"]["name"] == "driver_whoami"
+        assert {r["params"]["arguments"].get("arguments",{}).get("project_id")
+                for r in StateStub.requests if r["params"]["name"] == "state_graph_read"} == {project}
+
+
+@pytest.mark.parametrize("driver", [None,"", "  ","../codex","bad/name", "a"*129, 1,"bad\nname"])
+def test_invalid_bound_driver_never_authenticates_or_mutates_markers(tmp_path, state_server, driver):
+    home = tmp_path / "codex-home"
+    write_binding(home,"bad-driver",payload=json.dumps({"session_id":"bad-driver","project_id":"aitelier","driver_id":driver}))
+    output = invoke(tmp_path,state_server,session_id="bad-driver",bind=False)
+    assert "session binding recovery required" in output["systemMessage"]
+    assert StateStub.requests == []
+    assert not (home/"project-handoff-pending").exists()
+
+
+@pytest.mark.parametrize("event", ["UserPromptSubmit", "Stop"])
+def test_quiet_bound_event_without_handoff_needs_no_credentials(tmp_path, state_server, event):
+    output = invoke(tmp_path,state_server,event=event)
+    assert output == {"continue":True}
+    assert StateStub.requests == []
+    assert not (tmp_path/"codex-home"/"project-handoff-pending").exists()

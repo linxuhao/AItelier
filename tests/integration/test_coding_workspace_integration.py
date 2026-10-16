@@ -999,28 +999,29 @@ from core import coding_workspace as cw
 from skillflow.graph import PipelineGraph, StepNode, Transition
 db, sf = get_db_manager(), get_skillflow()
 out = []
-for sid, pid in zip(sys.argv[2::2], sys.argv[3::2]):
+pairs, probe = sys.argv[2:-1], sys.argv[-1]
+for sid, pid in zip(pairs[0::2], pairs[1::2]):
     req = cw.CodingRequest(db, cw.authorize_entry(db, session_id=sid, project_id=pid, writer="child"))
     ws = req.workspace()
     cw.write_text(db, ws, "hello.py", f"print('old backend edit in {pid}')\n", create=False, detail="child")
     out.append({"project": pid, "run_id": ws.run_id, "claim": cw._token_dict(ws.claimed)})
     req.release()
-# An ordinary (non-Coding-Mode) run whose claim this child also leaves behind.
+# An ordinary (non-Coding-Mode) project run whose claim this child also leaves behind.
 sf.register_graph(PipelineGraph(name="recovery_probe", begin="a", steps=[
     StepNode(id="a", step_type="agent", transitions=[Transition(to=None)])]))
-rid = sf.create_run("recovery_probe")
+rid = sf.create_run("recovery_probe", project_id=probe)
 sf.start_run(rid); sf.advance_run(rid)
 assert sf.claim_next_step(rid) is not None
-out.append({"project": None, "run_id": rid})
+out.append({"project": probe, "run_id": rid})
 print(json.dumps(out), flush=True)
 os._exit(0)
 '''
 
 
-def _owners_left_by_dead_child(env, pairs):
+def _owners_left_by_dead_child(env, project, pairs):
     script = Path(FIXTURE) / f"two-owners-{uuid.uuid4().hex[:6]}.py"
     script.write_text(TWO_OWNERS)
-    args = [a for pair in pairs for a in pair]
+    args = [a for pair in pairs for a in pair] + [project(dirty=False)[0]]
     done = subprocess.run([sys.executable, str(script), str(env["home"]), *args],
                           capture_output=True, text=True, timeout=300, cwd="/src",
                           env={**os.environ, "AITELIER_HOME": str(env["home"])})
@@ -1067,7 +1068,7 @@ def test_resuming_one_workspace_never_recovers_another_runs_claim(env, project):
     pa, srca = project(dirty=False)
     pb, srcb = project(dirty=False)
     sa, sb = session(env), session(env)
-    a, b, c = _owners_left_by_dead_child(env, [(sa, pa), (sb, pb)])
+    a, b, c = _owners_left_by_dead_child(env, project, [(sa, pa), (sb, pb)])
     before_b, before_c = _engine_rows(env, b["run_id"]), _engine_rows(env, c["run_id"])
     ws_b = _workspace_state(env, sb)
     ev = chat(env, sa, pa, [[("read_code_file", {"path": "hello.py"})], "resumed A only"])
@@ -1105,7 +1106,7 @@ def test_missing_scoped_recovery_refuses_before_cross_run_effects(env, project, 
     pa, srca = project(dirty=False)
     pb, _ = project(dirty=False)
     sa, sb = session(env), session(env)
-    a, b, c = _owners_left_by_dead_child(env, [(sa, pa), (sb, pb)])
+    a, b, c = _owners_left_by_dead_child(env, project, [(sa, pa), (sb, pb)])
     before = {o["run_id"]: _engine_rows(env, o["run_id"]) for o in (a, b, c)}
     # INJECTED: the SDK facility probe answers "no run scope" (SDK 126e answers so for real).
     monkeypatch.setattr(cw, "scoped_recovery_available", lambda: False)

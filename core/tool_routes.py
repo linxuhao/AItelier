@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import hashlib
 from functools import wraps
+import inspect
 import re
 import subprocess
 import tempfile
@@ -46,7 +47,7 @@ HOST_IDENTITY_KEYWORDS: tuple[str, ...] = ("run_id", "step_id", "project_id",
 #: Tools that hand ``run_id`` and a repository root to the owned executor. Their
 #: caller-supplied identity and roots are replaced by the host's on the agent
 #: path, and a literal root in a graph slot must be resolver syntax.
-EXECUTOR_TOOLS: frozenset[str] = frozenset({"focused_check", "run_tests", "pytest"})
+EXECUTOR_TOOLS: frozenset[str] = frozenset({"focused_check", "run_tests", "pytest", "lint"})
 ROOT_KEYWORDS: tuple[str, ...] = ("project_root", "workspace_root")
 
 # Keys of a validation spec the validator consumes itself; every other key is
@@ -271,6 +272,37 @@ class AItelierToolLoader(ToolLoader):
                 if not result.get("results"):
                     return {**result, "all_passed": False, "unmeasured": True,
                             "error": "lint matched no files; no lint measurement was made"}
-                return result
+                context = inspect.signature(fn).bind_partial(*args, **kwargs).arguments
+                checked = []
+                for item in result["results"]:
+                    if Path(item.get("file", "")).suffix.lower() in {".js", ".mjs", ".cjs"}:
+                        details = item.get("details")
+                        receipt = details.get("aitelier_javascript_lint") if isinstance(details, dict) else None
+                        measured = (isinstance(receipt, dict)
+                                    and receipt.get("backend") == "eslint"
+                                    and receipt.get("measured") is True
+                                    and type(receipt.get("returncode")) is int
+                                    and receipt["returncode"] in (0, 1)
+                                    and (not item.get("passed") or receipt["returncode"] == 0)
+                                    and receipt.get("file") == item["file"]
+                                    and all(isinstance(receipt.get(key), str)
+                                            for key in ("stdout", "stderr"))
+                                    and isinstance(receipt.get("input_sha256"), str)
+                                    and re.fullmatch(r"[0-9a-f]{64}", receipt["input_sha256"])
+                                    and receipt.get("node_version") == "24.22.0"
+                                    and receipt.get("eslint_version") == "10.12.0"
+                                    and all(isinstance(context.get(key), str) and context[key]
+                                            and receipt.get(key) == context[key]
+                                            for key in ("run_id", "step_id", "project_root")))
+                        if not measured:
+                            item = {**item, "passed": False, "unmeasured": True,
+                                    "error_message": (item.get("error_message", "") + "; "
+                                                      if item.get("error_message") else "") +
+                                        "JavaScript syntax unmeasured: select owned 'eslint' "
+                                        "in the lint manifest and enable its reviewed runtime"}
+                    checked.append(item)
+                return {**result, "results": checked,
+                        "all_passed": bool(result.get("all_passed"))
+                                      and all(item.get("passed", False) for item in checked)}
             return measured_lint
         return fn

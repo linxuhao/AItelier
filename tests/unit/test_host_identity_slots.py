@@ -55,6 +55,8 @@ def test_agent_ingress_leaves_other_tools_params_alone(monkeypatch):
     ("run_tests", {"project_root": "/somebody/else"}, ["project_root"]),
     ("pytest", {"workspace_root": "$PROJECT_ROOT/../x"}, ["workspace_root"]),
     ("focused_check", {"project_root": "relative"}, ["project_root"]),
+    ("lint", {"workspace_root": "/foreign"}, ["workspace_root"]),
+    ("lint", {"project_root": "$PROJECT_ROOT"}, []),
     ("run_tests", {"project_root": "$PROJECT_ROOT", "out_dir": "$STEP_DIR"}, []),
     ("pytest", {"workspace_root": "$CONFIG_DIR/test"}, []),
     ("run_tests", {"project_root": ""}, []),

@@ -65,6 +65,21 @@ def eslint_backend(fp: Path, *, run_id: str = "", step_id: str = "",
     except (OSError, ValueError, repository_executor.IsolationUnavailable) as exc:
         result.update(returncode=-1, unavailable=True,
                       error_message=f"JavaScript lint unavailable: {exc}")
+    # This is result provenance, never an ownership token. Only the explicit
+    # context and the launcher's actual run binding grant execution authority.
+    for key in ("stdout", "stderr"):
+        if isinstance(result.get(key), bytes):
+            result[key] = result[key].decode("utf-8", errors="replace")
+    result["details"] = {"aitelier_javascript_lint": {
+        "backend": "eslint", "file": str(fp),
+        "measured": type(result.get("returncode")) is int
+                    and result["returncode"] in (0, 1)
+                    and not result.get("unavailable") and not result.get("timed_out"),
+        "returncode": result.get("returncode", -1),
+        "stdout": result.get("stdout", ""), "stderr": result.get("stderr", ""),
+        "input_sha256": result.get("input_sha256", ""),
+        "run_id": run_id, "step_id": step_id, "project_root": project_root,
+        "node_version": "24.22.0", "eslint_version": "10.12.0"}}
     return result
 
 

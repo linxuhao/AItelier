@@ -124,3 +124,21 @@ def test_real_lint_ignores_hostile_project_authority_and_does_not_execute_js(own
     assert result['passed'] is True,result
     assert marker.read_bytes()==original and not trap.exists()
     marker.unlink()
+
+
+def test_actual_host_ingress_replaces_malicious_lint_identity_and_roots(owned_root):
+    from core.skillflow_host import AItelierSkillFlow
+    repo=repository(owned_root)
+    (repo/'input.js').write_text('const answer=42;')
+    sf=AItelierSkillFlow(':memory:',tool_loader=loader())
+    node=StepNode(id='lint',step_type='tool',tool_name='lint',tool_params={'files':['input.js']},transitions=[Transition(to=None)])
+    sf.register_graph(PipelineGraph(name='owned_ingress',begin=node.id,steps=[node]))
+    run=sf.create_run('owned_ingress',{'project_id':'owned-js-fixture'},project_id='owned-js-fixture')
+    create_binding(owned_root,run,repo)
+    result=sf._execute_tool_impl('lint',{'files':['input.js'],'manifest_path':'linter_manifest.json',
+        'run_id':'foreign','step_id':'foreign','project_id':'foreign','operation_id':'foreign',
+        'project_root':'/outside','workspace_root':'/outside'},run_id=run,step_id=node.id,project_root=str(repo))
+    assert result['all_passed'] is True,result
+    receipt=result['results'][0]['details']['aitelier_javascript_lint']
+    assert receipt['measured'] is True and receipt['returncode']==0
+    assert receipt['run_id']==run and receipt['step_id']==node.id and receipt['project_root']==str(repo)

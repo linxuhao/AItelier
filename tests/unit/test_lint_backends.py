@@ -58,6 +58,11 @@ def test_input_bytes_owned_ticket_and_bare_result(candidate, monkeypatch, rc, ou
     assert res["passed"] is (rc == 0)
     assert (res["returncode"], res["stdout"], res["stderr"]) == (rc, out, err)
     assert res["input_sha256"] == hashlib.sha256(fp.read_bytes()).hexdigest()
+    receipt = res["details"]["aitelier_javascript_lint"]
+    assert receipt["measured"] is (rc in (0, 1))
+    assert receipt["returncode"] == rc and receipt["input_sha256"] == res["input_sha256"]
+    assert receipt["run_id"] == "own" and receipt["step_id"] == "validate"
+    assert receipt["project_root"] == str(repo)
     assert not seen[0].exists()
 
 
@@ -70,6 +75,7 @@ def test_unavailable_timeout_never_pass(candidate, monkeypatch, failure):
     monkeypatch.setattr(ex, "execute", execute)
     result = lint.eslint_backend(fp, run_id="own", step_id="s", project_root=str(repo))
     assert result["passed"] is False and result["returncode"] == -1
+    assert result["details"]["aitelier_javascript_lint"]["measured"] is False
     assert not list((Path(lint.datadir.aitelier_home()) / "gate-reports").rglob("lint-*"))
 
 

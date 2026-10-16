@@ -23,8 +23,10 @@ interaction. This module is that controller. It is not a runtime or a ledger:
 * **Real SDK lifecycle.** ``create_run``/``start_run``/``advance_run``/
   ``claim_next_step`` of the static graph produce the actual claim the owned
   shell grant requires. A restart never manufactures a claim: the same run is
-  reclaimed through the ordinary engine recovery only after positive old-writer
-  quiet, and the new epoch is sealed.
+  reclaimed through the SDK's run-scoped recovery only after positive
+  old-writer quiet, and the new epoch is sealed. No other recovery path
+  (scheduler sweep, other runs' traversal) recovers a workspace claim, and
+  without the SDK's run scope reclaim is refused rather than made global.
 * **Handoff.** The W delta relative to its seed B is frozen with raw blobs
   before an exclusive ``coding_workspace`` admission on C; each Source path is
   compared before/after under that exclusion, ``applying`` is persisted before
@@ -127,6 +129,70 @@ def fence_control(run_id: str, action: str) -> None:
             f"{action} of run {run_id} is refused: it is a Coding Mode "
             f"{role.get('role', 'governed')} run. Use the Coding Mode plan decision "
             f"controls of its session.")
+
+
+def scoped_recovery_available() -> bool:
+    """Whether the SDK can recover the claims of ONE selected run.
+
+    The SDK's run scope (``recover_stale_claims(..., run_id=...)``, also passed
+    by its own ``advance_run``) is the only facility that lets a workspace be
+    reclaimed without touching other runs' claims. Without it nothing here
+    falls back to a global recovery.
+    """
+    import inspect
+    from skillflow.core import SkillFlow
+    try:
+        p = inspect.signature(SkillFlow.recover_stale_claims).parameters.get("run_id")
+    except (TypeError, ValueError):
+        return False
+    return p is not None and p.kind is inspect.Parameter.KEYWORD_ONLY
+
+
+def _graph_of(sf, run_id: str) -> str | None:
+    with sf._ro() as conn:
+        row = conn.execute("SELECT graph_name FROM skillflow_runs WHERE id = ?",
+                           (run_id,)).fetchone()
+    return row["graph_name"] if row else None
+
+
+def fence_recovery(sf, recover, threshold: float, run_id: str | None) -> list[str]:
+    """Claim recovery never reaches a workspace claim outside its own controller.
+
+    A ``coding_workspace`` claim is held by the controller for the whole
+    interaction. Only that controller recovers it — the SAME run, under its
+    project request lock, after positive quiet of the old writer, its W
+    admissions and its engine operations — through the SDK's run scope. Every
+    other recovery (the scheduler sweep, another run's traversal, a startup
+    call) is computed per run with workspace runs left out, and a controller
+    operation never recovers any other run. Without the SDK's run scope a
+    global request that could reach a workspace claim is not made at all.
+    """
+    if run_id is not None:
+        if _TRUSTED.get() is None and _graph_of(sf, run_id) == GRAPH:
+            return []
+        return recover(threshold, run_id=run_id)
+    if _TRUSTED.get() is not None:
+        # An unscoped SDK traversal preamble inside a controller operation:
+        # the controller's own run needs no recovery there (fresh or held).
+        return []
+    with sf._ro() as conn:
+        claimed = conn.execute(
+            "SELECT DISTINCT s.run_id, r.graph_name FROM skillflow_steps s "
+            "LEFT JOIN skillflow_runs r ON r.id = s.run_id "
+            "WHERE s.status = 'claimed' ORDER BY s.run_id").fetchall()
+    if scoped_recovery_available():
+        out: list[str] = []
+        for row in claimed:
+            if row["graph_name"] != GRAPH:
+                out.extend(recover(threshold, run_id=row["run_id"]) or [])
+        return out
+    if any(row["graph_name"] == GRAPH for row in claimed):
+        import logging
+        logging.getLogger("aitelier.coding_workspace").warning(
+            "claim recovery skipped: Coding Mode workspace claims exist and this SDK "
+            "cannot recover other runs without recovering them too")
+        return []
+    return recover(threshold)
 
 
 # ── durable records ──────────────────────────────────────────────────
@@ -686,8 +752,11 @@ class CodingRequest:
             if not _owner_dead(latest.get("claimed_by") or "") is True:
                 raise Unavailable("the old workspace claim's owner is alive or unknown; "
                                   "reclaim needs positive quiet")
+            if not scoped_recovery_available():
+                raise Unavailable("this SDK cannot recover one run's claim without "
+                                  "recovering every other run's; the workspace is retained")
             with _trusted("recover"):
-                sf.recover_stale_claims(stale_threshold_seconds=10 ** 9)
+                sf.recover_stale_claims(stale_threshold_seconds=10 ** 9, run_id=rid)
         with _trusted("recover"):
             sf.advance_run(rid)
             claimed = sf.claim_next_step(rid)
@@ -959,9 +1028,8 @@ class CodingRequest:
         return Handoff(self, rd, ws).run()
 
     def _recover_handoffs(self, rd: Path, ws: Workspace) -> None:
-        for hd in sorted((rd / "handoffs").glob("*")) if (rd / "handoffs").is_dir() else []:
-            intent = _read(hd / "intent.json")
-            if intent and intent.get("state") not in Handoff.SETTLED:
+        for hd, intent in _handoff_intents(rd):
+            if Handoff.unsettled(intent):
                 h = Handoff(self, rd, ws, hd=hd, intent=intent)
                 h.recover()
                 self.recovered.append({k: h.intent.get(k) for k in
@@ -970,6 +1038,10 @@ class CodingRequest:
     def _close(self, rd: Path, ws: Workspace, receipt: dict | None, *, note: str = "") -> None:
         from skillflow.core import StepResult
         sf = self.sf
+        pending = [hd.name for hd, intent in _handoff_intents(rd) if Handoff.unsettled(intent)]
+        if pending:
+            raise Unavailable(f"handoff {pending[0]} has not settled with its admission "
+                              f"retired; closure stays pending")
         origin = _read(rd / "origin.json")
         if origin.get("state") != "closing":
             origin = _write(rd / "origin.json", {**origin, "state": "closing",
@@ -1018,6 +1090,16 @@ def _ts(value) -> float:
 
 
 # ── governing plan state ─────────────────────────────────────────────
+
+def _handoff_intents(rd: Path) -> list[tuple[Path, dict]]:
+    hdir = rd / "handoffs"
+    out = []
+    for hd in sorted(hdir.iterdir()) if hdir.is_dir() else []:
+        intent = _read(hd / "intent.json")
+        if intent:
+            out.append((hd, intent))
+    return out
+
 
 def _decisions(rd: Path) -> list[dict]:
     out = []
@@ -1171,9 +1253,7 @@ def decide_plan(db, *, session_id: str, writer: str, decision: str,
             _write(dpath, {**rec, "state": "applied" if ok else "refused", "result": res})
             return {"status": "applied" if ok else "refused", "decision_id": did,
                     "run_id": rid, "result": res}
-        unsettled = [hd.name for hd in sorted((rd / "handoffs").iterdir())
-                     if (_read(hd / "intent.json") or {}).get("state") not in Handoff.SETTLED
-                     ] if (rd / "handoffs").is_dir() else []
+        unsettled = [hd.name for hd, intent in _handoff_intents(rd) if Handoff.unsettled(intent)]
         if unsettled or origin.get("state") not in ("ready", "bound"):
             raise Unavailable("this workspace has an unsettled Source handoff; it is "
                               "reconciled before the plan can be dismissed")
@@ -1297,9 +1377,23 @@ def _same(a: dict, b: dict) -> bool:
 
 
 class Handoff:
-    """Freeze → admit → compare → applying → apply → applied → [commit] → settled."""
+    """Freeze → admit → compare → applying → apply → applied → [commit] → settled → retired.
+
+    The settled receipt is durable BEFORE the exclusive admission row is
+    retired, and the retirement is recorded afterwards (``admission_retired``).
+    Every interruption therefore leaves either an unsettled intent that still
+    holds its own row, or a settled intent whose row recovery retires; never an
+    unsettled intent without its exclusion.
+    """
 
     SETTLED = ("settled", "conflict", "abandoned", "no_changes")
+
+    @classmethod
+    def unsettled(cls, intent: dict) -> bool:
+        """Needs recovery: effects not settled, or settled with its row not yet retired."""
+        state = intent.get("state")
+        return state not in cls.SETTLED or (state == "settled"
+                                            and intent.get("admission_retired") is False)
 
     def __init__(self, req: CodingRequest, rd: Path, ws: Workspace, *, hd: Path | None = None,
                  intent: dict | None = None):
@@ -1434,23 +1528,31 @@ class Handoff:
             return
         if state in self.SETTLED:
             return
-        ri.mark_write_admission_pending(self.db, admission_id,
-                                        f"coding handoff {self.intent['handoff_id']} effects "
-                                        f"unknown: {type(exc).__name__}: {exc}")
-        self._save(interrupted=True, error=f"{type(exc).__name__}: {exc}"[:500])
+        held = self._own_row() is not None
+        if held:
+            ri.mark_write_admission_pending(self.db, admission_id,
+                                            f"coding handoff {self.intent['handoff_id']} effects "
+                                            f"unknown: {type(exc).__name__}: {exc}")
+        self._save(interrupted=True, error=f"{type(exc).__name__}: {exc}"[:500],
+                   **({} if held else {"admission_missing": True}))
         _write(self.rd / "origin.json", {**_read(self.rd / "origin.json"),
                                          "state": "handoff_pending"})
 
-    def _admission_row(self) -> dict:
+    def _own_row(self) -> dict | None:
+        """This handoff's exact admission row, or None (an id alone is not ownership)."""
         from core import run_isolation as ri
         adm = self.intent.get("admission") or {}
         rows = [r for r in ri.write_admissions(self.db, adm.get("canonical"))
-                if r["id"] == adm.get("id")]
-        if (len(rows) != 1 or rows[0]["owner"] != adm.get("owner")
-                or rows[0]["kind"] != "coding_workspace"
-                or f'"record": "{self.hd}"' not in rows[0]["detail"]):
+                if r["id"] == adm.get("id") and r["owner"] == adm.get("owner")
+                and r["kind"] == "coding_workspace"
+                and f'"record": "{self.hd}"' in (r["detail"] or "")]
+        return rows[0] if len(rows) == 1 else None
+
+    def _admission_row(self) -> dict:
+        row = self._own_row()
+        if row is None:
             raise Unavailable("the handoff's own exclusive Source admission is not held")
-        return rows[0]
+        return row
 
     def _effects(self) -> dict:
         from core import run_isolation as ri
@@ -1505,19 +1607,36 @@ class Handoff:
         return self._settle()
 
     def _settle(self) -> dict:
-        """After verified working bytes: optional commit under the same admission, then retire."""
-        from core import run_isolation as ri
+        """After verified working bytes: optional commit under the same admission, then settle.
+
+        The durable settled receipt comes first; only then is the row retired.
+        """
         commit = self.intent.get("commit")
         if self.intent.get("commit_requested") and commit is None:
             commit = self._commit()
             self._save(commit=commit)
-        ri.retire_write(self.db, self.intent["admission"]["id"])
-        self._save(state="settled", interrupted=False)
+        if self.intent.get("state") != "settled":
+            self._save(state="settled", interrupted=False, admission_retired=False)
+        self._retire_settled()
         _write(self.rd / "origin.json", {**_read(self.rd / "origin.json"), "state": "ready"})
         return {"status": "applied", "run_id": self.ws.run_id, "paths": self.intent["paths"],
                 "source_confirmed": True, "commit": commit,
                 "excluded_ignored_count": self.intent.get("excluded_ignored_count", 0),
                 "handoff_id": self.intent["handoff_id"]}
+
+    def _retire_settled(self) -> None:
+        """Retire the row of a durably settled handoff, then record that it is retired.
+
+        Absence of the exact row is the expected outcome of an earlier
+        retirement whose record did not persist; a row under a reused id that
+        is not this handoff's is never touched.
+        """
+        from core import run_isolation as ri
+        if self.intent.get("state") != "settled":
+            raise Unavailable("internal: only a settled handoff retires its admission")
+        if self._own_row() is not None:
+            ri.retire_write(self.db, self.intent["admission"]["id"])
+        self._save(admission_retired=True)
 
     @staticmethod
     def _parent_blocked(wt, rel: str) -> bool:
@@ -1609,6 +1728,11 @@ class Handoff:
             return
         if not _writer_quiet(self.intent.get("writer", "")):
             raise Unavailable("the interrupted handoff's writer is not positively quiet; retained")
+        if state == "settled":
+            # Source effects (and any commit) settled durably; only the row's
+            # retirement was interrupted.
+            self._retire_settled()
+            return
         adm = self.intent.get("admission") or {}
         rows = [r for r in ri.write_admissions(self.db) if r["id"] == adm.get("id")]
         if state == "admitted":

@@ -135,6 +135,15 @@ class AItelierSkillFlow(SkillFlow):
         fence_control(run_id, "repin")
         return super().repin_run(run_id, *args, **kwargs)
 
+    # Claim recovery is reached from the scheduler sweep, from every run's
+    # advance_run preamble and from explicit callers. A workspace claim is
+    # recovered only by its own controller, for that one run.
+    def recover_stale_claims(self, stale_threshold_seconds: float = 300, *,
+                             run_id: str | None = None) -> list[str]:
+        from core.coding_workspace import fence_recovery
+        return fence_recovery(self, super().recover_stale_claims,
+                              stale_threshold_seconds, run_id)
+
     def register_graph(self, graph):
         """Refuse a graph whose dispatch slots claim host-owned identity.
 

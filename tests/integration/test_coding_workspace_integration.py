@@ -987,3 +987,239 @@ def test_coding_workspace_is_not_offered_as_a_pipeline(env):
     assert "coding_workspace" not in {e["config_name"] for e in reg.catalog(full=True)}
     assert reg.describe("coding_workspace") == []
     assert reg.get("coding_task").repo_mode == "none"
+
+
+# ── 15. recovery reaches only the SAME run; settlement before row retirement ──
+
+TWO_OWNERS = r'''
+import json, os, sys
+os.environ["AITELIER_HOME"] = sys.argv[1]
+from api.dependencies import get_db_manager, get_skillflow
+from core import coding_workspace as cw
+from skillflow.graph import PipelineGraph, StepNode, Transition
+db, sf = get_db_manager(), get_skillflow()
+out = []
+for sid, pid in zip(sys.argv[2::2], sys.argv[3::2]):
+    req = cw.CodingRequest(db, cw.authorize_entry(db, session_id=sid, project_id=pid, writer="child"))
+    ws = req.workspace()
+    cw.write_text(db, ws, "hello.py", f"print('old backend edit in {pid}')\n", create=False, detail="child")
+    out.append({"project": pid, "run_id": ws.run_id, "claim": cw._token_dict(ws.claimed)})
+    req.release()
+# An ordinary (non-Coding-Mode) run whose claim this child also leaves behind.
+sf.register_graph(PipelineGraph(name="recovery_probe", begin="a", steps=[
+    StepNode(id="a", step_type="agent", transitions=[Transition(to=None)])]))
+rid = sf.create_run("recovery_probe")
+sf.start_run(rid); sf.advance_run(rid)
+assert sf.claim_next_step(rid) is not None
+out.append({"project": None, "run_id": rid})
+print(json.dumps(out), flush=True)
+os._exit(0)
+'''
+
+
+def _owners_left_by_dead_child(env, pairs):
+    script = Path(FIXTURE) / f"two-owners-{uuid.uuid4().hex[:6]}.py"
+    script.write_text(TWO_OWNERS)
+    args = [a for pair in pairs for a in pair]
+    done = subprocess.run([sys.executable, str(script), str(env["home"]), *args],
+                          capture_output=True, text=True, timeout=300, cwd="/src",
+                          env={**os.environ, "AITELIER_HOME": str(env["home"])})
+    assert done.returncode == 0, done.stderr[-3000:]
+    owners = json.loads(done.stdout.strip().splitlines()[-1])
+    from skillflow.identity import owner_is_dead
+    for o in owners:
+        steps = env["sf"].get_steps(o["run_id"])
+        assert [s["status"] for s in steps] == ["claimed"], steps
+        assert owner_is_dead(steps[0]["claimed_by"]) is True  # the child exited: positive quiet
+    return owners
+
+
+def _engine_rows(env, rid):
+    """Every SDK run/step/trace/operation row of R and every outbox event naming R."""
+    sf = env["sf"]
+    with sf._ro() as conn:
+        rows = {t: [dict(r) for r in conn.execute(
+                    f"SELECT * FROM {t} WHERE {k} = ? ORDER BY id", (rid,))]
+                for t, k in (("skillflow_runs", "id"), ("skillflow_steps", "run_id"),
+                             ("skillflow_trace", "run_id"), ("skillflow_active_ops", "run_id"))}
+        rows["outbox"] = [dict(r) for r in conn.execute(
+            "SELECT * FROM skillflow_outbox WHERE instr(payload_json, ?) > 0 ORDER BY id", (rid,))]
+    return rows
+
+
+def _recovery_view(rows):
+    # Outbox drain bookkeeping (status/drain_started_at) is delivery, not recovery:
+    # the events themselves must be identical.
+    return {**rows, "outbox": [(e["id"], e["event_type"], e["payload_json"], e["created_at"])
+                               for e in rows["outbox"]]}
+
+
+def _workspace_state(env, sid):
+    from core import run_isolation as ri
+    _, origin = origin_of(env, sid)
+    w = ri.canonical_checkout(origin["isolation"]["worktree_path"])
+    return {"origin": origin, "w_admissions": ri.write_admissions(env["db"], w),
+            "source_admissions": ri.write_admissions(env["db"], origin["isolation"]["source_repo"])}
+
+
+def test_resuming_one_workspace_never_recovers_another_runs_claim(env, project):
+    from core import scheduler as sc
+    pa, srca = project(dirty=False)
+    pb, srcb = project(dirty=False)
+    sa, sb = session(env), session(env)
+    a, b, c = _owners_left_by_dead_child(env, [(sa, pa), (sb, pb)])
+    before_b, before_c = _engine_rows(env, b["run_id"]), _engine_rows(env, c["run_id"])
+    ws_b = _workspace_state(env, sb)
+    ev = chat(env, sa, pa, [[("read_code_file", {"path": "hello.py"})], "resumed A only"])
+    assert "old backend edit" in results(ev)[0]["content"]  # the SAME W of A
+    _, origin_a = origin_of(env, sa)
+    assert origin_a["run_id"] == a["run_id"] and origin_a["claim_history"][-1] == a["claim"]
+    assert origin_a["claim"]["claim_epoch"] > a["claim"]["claim_epoch"]
+    assert handoff(ev)["status"] == "applied"
+    assert (srca / "hello.py").read_text() == f"print('old backend edit in {pa}')\n"
+    after_b, after_c = _engine_rows(env, b["run_id"]), _engine_rows(env, c["run_id"])
+    assert _recovery_view(after_b) == _recovery_view(before_b), "A's recovery changed B"
+    assert _recovery_view(after_c) == _recovery_view(before_c), "A's recovery changed C"
+    assert _workspace_state(env, sb) == ws_b
+    # The scheduler's periodic sweep (the actual job): the ordinary dead claim C is
+    # recovered as before; the workspace claim B is left to its own controller.
+    asyncio.run(sc._check_hung_claims())
+    swept_b, swept_c = _engine_rows(env, b["run_id"]), _engine_rows(env, c["run_id"])
+    assert _recovery_view(swept_b) == _recovery_view(before_b), "the sweep changed B"
+    assert [s["status"] for s in swept_c["skillflow_steps"]] == ["pending"]
+    # B's own session reclaims B under B's own exclusion and delivers it.
+    ev_b = chat(env, sb, pb, [[("read_code_file", {"path": "hello.py"})], "resumed B"])
+    _, origin_b = origin_of(env, sb)
+    assert origin_b["run_id"] == b["run_id"] and origin_b["claim_history"][-1] == b["claim"]
+    assert handoff(ev_b)["status"] == "applied"
+    assert (srcb / "hello.py").read_text() == f"print('old backend edit in {pb}')\n"
+    evidence("t15-same-run-recovery", {
+        "owners": [a, b, c], "b_before": before_b, "b_after_a": after_b, "b_after_sweep": swept_b,
+        "c_before": before_c, "c_after_a": after_c, "c_after_sweep": swept_c,
+        "b_workspace": ws_b, "a_origin": origin_a, "b_origin": origin_b,
+        "a_handoff": handoff(ev), "b_handoff": handoff(ev_b)})
+
+
+def test_missing_scoped_recovery_refuses_before_cross_run_effects(env, project, monkeypatch):
+    from core import coding_workspace as cw, scheduler as sc
+    pa, srca = project(dirty=False)
+    pb, _ = project(dirty=False)
+    sa, sb = session(env), session(env)
+    a, b, c = _owners_left_by_dead_child(env, [(sa, pa), (sb, pb)])
+    before = {o["run_id"]: _engine_rows(env, o["run_id"]) for o in (a, b, c)}
+    # INJECTED: the SDK facility probe answers "no run scope" (SDK 126e answers so for real).
+    monkeypatch.setattr(cw, "scoped_recovery_available", lambda: False)
+    ev = chat(env, sa, pa, [[("read_code_file", {"path": "hello.py"})], "x"])
+    refused = results(ev)[0]
+    assert refused["status"] == "unavailable" and "every other run" in refused["error"], refused
+    assert handoff(ev)["status"] == "unavailable"
+    assert (srca / "hello.py").read_text() == "print('helo world')\n"
+    asyncio.run(sc._check_hung_claims())  # a global request that would reach B is not made
+    after = {o["run_id"]: _engine_rows(env, o["run_id"]) for o in (a, b, c)}
+    for rid in before:
+        assert _recovery_view(after[rid]) == _recovery_view(before[rid]), rid
+    _, origin_a = origin_of(env, sa)
+    assert origin_a["claim"] == a["claim"] and "claim_history" not in origin_a
+    evidence("t15-missing-scope", {"refused": refused, "handoff": handoff(ev),
+                                   "before": before, "after": after})
+
+
+def _handoff_intent(env, sid):
+    rd, _ = origin_of(env, sid)
+    return json.loads(next((rd / "handoffs").glob("*/intent.json")).read_text())
+
+
+def test_settled_record_failure_keeps_exact_admission_and_next_request_settles(env, project,
+                                                                               monkeypatch):
+    from core import coding_workspace as cw, run_isolation as ri
+    from core.run_isolation import CheckoutLeased
+    pid, src = project(dirty=False)
+    sid = session(env)
+    real = cw.Handoff._save
+
+    def save(self, **kw):
+        if kw.get("state") == "settled":
+            raise OSError("INJECTED: final settled-record write failed")
+        return real(self, **kw)
+    with monkeypatch.context() as m:
+        m.setattr(cw.Handoff, "_save", save)
+        ev = chat(env, sid, pid, [[("read_code_file", {"path": "hello.py"})],
+                                  [("edit_file", {"path": "hello.py", "old_str": "helo",
+                                                  "new_str": "hello"})], "edited"])
+    out = handoff(ev)
+    assert out["status"] == "error" and "INJECTED" in out["error"]
+    intent = _handoff_intent(env, sid)
+    rows = ri.write_admissions(env["db"], str(src))
+    assert intent["state"] == "applied" and intent["interrupted"]
+    assert [r["id"] for r in rows] == [intent["admission"]["id"]]
+    assert rows[0]["owner"] == intent["admission"]["owner"] and "PENDING WRITERS" in rows[0]["detail"]
+    assert (src / "hello.py").read_text() == "print('hello world')\n"
+    with pytest.raises(CheckoutLeased):  # the exclusion is still held
+        ri.admit_write(env["db"], str(src), kind="repo_panel", detail="ordinary Source writer")
+    other = chat(env, session(env), pid, [[("read_code_file", {"path": "hello.py"})], "x"])
+    assert results(other)[0]["status"] == "busy"
+    retry = chat(env, sid, pid, [[("read_code_file", {"path": "hello.py"})], "resume settlement"])
+    settled = handoff(retry)
+    assert settled["status"] == "no_changes" and settled["recovered"][0]["state"] == "settled"
+    final = _handoff_intent(env, sid)
+    assert final["state"] == "settled" and final["admission_retired"] is True
+    assert ri.write_admissions(env["db"], str(src)) == []
+    _, origin = origin_of(env, sid)
+    assert origin["state"] == "closed"
+    evidence("t15-settled-record-failure", {"interrupted": out, "intent": intent, "row": rows[0],
+                                            "retry": settled, "final": final})
+
+
+@pytest.mark.parametrize("boundary", ["row_retirement", "retirement_record"])
+def test_interruption_after_durable_settlement_is_recovered(env, project, monkeypatch, boundary):
+    from core import coding_workspace as cw, run_isolation as ri
+    from core.run_isolation import CheckoutLeased
+    pid, src = project(dirty=False)
+    sid = session(env)
+    real_retire, real_save = ri.retire_write, cw.Handoff._save
+
+    def retire(db, admission_id):
+        row = [r for r in ri.write_admissions(db) if r["id"] == admission_id]
+        if row and '"purpose": "handoff"' in row[0]["detail"]:
+            raise OSError("INJECTED: interrupted before retiring the settled handoff's row")
+        return real_retire(db, admission_id)
+
+    def save(self, **kw):
+        if kw.get("admission_retired") is True:
+            raise OSError("INJECTED: retirement record write failed after the row was retired")
+        return real_save(self, **kw)
+    with monkeypatch.context() as m:
+        if boundary == "row_retirement":
+            m.setattr(ri, "retire_write", retire)
+        else:
+            m.setattr(cw.Handoff, "_save", save)
+        ev = chat(env, sid, pid, [[("read_code_file", {"path": "hello.py"})],
+                                  [("edit_file", {"path": "hello.py", "old_str": "helo",
+                                                  "new_str": "hello"})], "edited"])
+    out = handoff(ev)
+    assert out["status"] == "error" and "INJECTED" in out["error"]
+    intent = _handoff_intent(env, sid)
+    rows = ri.write_admissions(env["db"], str(src))
+    assert intent["state"] == "settled" and intent["admission_retired"] is False
+    assert (src / "hello.py").read_text() == "print('hello world')\n"
+    _, origin = origin_of(env, sid)
+    assert origin["state"] not in cw.CLOSED  # closure waits for the retirement
+    if boundary == "row_retirement":
+        assert [r["id"] for r in rows] == [intent["admission"]["id"]]
+        with pytest.raises(CheckoutLeased):
+            ri.admit_write(env["db"], str(src), kind="repo_panel", detail="ordinary Source writer")
+    else:
+        assert rows == []
+    other = chat(env, session(env), pid, [[("read_code_file", {"path": "hello.py"})], "x"])
+    assert results(other)[0]["status"] == "busy"
+    retry = chat(env, sid, pid, [[("read_code_file", {"path": "hello.py"})], "resume"])
+    done = handoff(retry)
+    assert done["status"] == "no_changes" and done["recovered"][0]["state"] == "settled"
+    final = _handoff_intent(env, sid)
+    assert final["admission_retired"] is True and ri.write_admissions(env["db"], str(src)) == []
+    _, origin = origin_of(env, sid)
+    assert origin["state"] == "closed"
+    later = chat(env, session(env), pid, [[("read_code_file", {"path": "hello.py"})], "later"])
+    assert "hello world" in results(later)[0]["content"]  # the project is free again
+    evidence(f"t15-after-settlement-{boundary}", {"interrupted": out, "intent": intent,
+                                                   "rows": rows, "retry": done, "final": final})

@@ -43,6 +43,10 @@ class PreparationCancelled(IsolationUnavailable):
     """The launch's client went away while its Git metadata was prepared."""
 
 
+class GitEntryRefused(IsolationUnavailable):
+    """The repository's `.git` can be neither normalized nor masked: nothing runs."""
+
+
 # ── normal Node gate profiles ──────────────────────────────────────────────
 #
 # Both profiles run the PINNED upstream npm (NODE_NPM_VERSION under
@@ -243,10 +247,22 @@ def node_payload(node: dict, timeout: int) -> dict:
 # anywhere else (a chained alternate, a promisor remote) is missing there and
 # preparation fails instead of reaching for it. GIT_META_MAX_BYTES bounds the
 # copy three times: HEAD's objects must fit before anything is transferred
-# (`rev-list --disk-usage`), no file written may exceed it (RLIMIT_FSIZE; the
-# fetch keeps one pack), and the finished metadata must fit. The whole
-# preparation has one deadline; on it, or on cancellation, its container is
-# removed.
+# (`rev-list --disk-usage`), no single file written may exceed it
+# (RLIMIT_FSIZE; the fetch keeps one pack), and the finished metadata must fit.
+# RLIMIT_FSIZE is per file, so while preparation runs the pack, its .idx and
+# the index can each approach the budget (about three budgets on disk at the
+# peak); only the finished total is held to one budget, and checked after it
+# is written. The whole preparation (`_run_prep`) has one deadline; on it, or
+# on cancellation, its container is removed.
+#
+# Whatever `.git` the repository holds must never reach a repository command
+# as it is. Presence is lexical (`lstat`: a dangling link is present, and
+# nothing is opened or followed). A real directory or a regular file is
+# replaced in the container by the private metadata or, when that cannot be
+# built, by an empty directory or a pointer to nowhere, so git answers "not a
+# git repository". Docker follows a link at a mount target, so any other entry
+# (a symlink, a FIFO, a device...) cannot be covered reliably: the command is
+# refused (`GitEntryRefused`) and nothing runs.
 GIT_META_MAX_BYTES = 256 << 20
 GIT_PREP_DEADLINE = 120
 GIT_CONTAINER_DIR = "/aitelier-git"   # a linked worktree's pointer names it
@@ -383,17 +399,27 @@ def private_git(repo: Path, dest: Path, common: Path | None = None, *, image: st
                 docker: str = "docker", conn=None) -> tuple[list[str], dict]:
     """Docker mounts giving ``repo`` its private Git metadata, built in ``dest``.
 
-    Raises only `PreparationCancelled` (the launch must not go on). When no
-    metadata can be provided, ``info`` says why, a
-    direct repository's own `.git` is still masked by an empty directory and
-    a linked worktree's pointer keeps leading nowhere, so git in the
-    container answers "not a git repository". A repository without `.git`
-    gets nothing and stays one.
+    Raises `PreparationCancelled` (the launch must not go on) and
+    `GitEntryRefused` (a `.git` that cannot be covered: the command must not
+    run). Otherwise, when no metadata can be provided, ``info`` says why and
+    the mounts still cover the repository's own `.git` (an empty directory
+    over a directory, a pointer to an unmounted path over a file), so git in
+    the container answers "not a git repository". A repository without any
+    `.git` entry gets nothing and stays one.
     """
+    dot = Path(repo) / ".git"
     try:
-        own_dir = stat.S_ISDIR(os.lstat(Path(repo) / ".git").st_mode)
+        mode = os.lstat(dot).st_mode
     except FileNotFoundError:
         return [], {"provided": False, "reason": "repository has no .git"}
+    except OSError as exc:
+        raise GitEntryRefused(f"repository .git cannot be inspected ({exc}); "
+                              "refusing to run against it") from exc
+    if not (stat.S_ISDIR(mode) or stat.S_ISREG(mode)):
+        raise GitEntryRefused(f"repository .git is neither a directory nor a regular file "
+                              f"(mode {stat.filemode(mode)}); it cannot be normalized or "
+                              "covered, so the command is refused")
+    own_dir = stat.S_ISDIR(mode)
     private = dest / "git"
     try:
         gitdir, source_common = _source_gitdirs(Path(repo), common)
@@ -424,14 +450,15 @@ def private_git(repo: Path, dest: Path, common: Path | None = None, *, image: st
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
         shutil.rmtree(private, ignore_errors=True)
         info = {"provided": False, "reason": str(exc)[:500]}
-        if not own_dir:
-            return [], info
-        private.mkdir(mode=0o700)
+        if own_dir:
+            private.mkdir(mode=0o700)
     if own_dir:
-        return ["-v", f"{private}:{Path(repo) / '.git'}:ro"], info
+        return ["-v", f"{private}:{dot}:ro"], info
     (dest / "pointer").write_text(f"gitdir: {GIT_CONTAINER_DIR}\n")
+    if not info["provided"]:
+        return ["-v", f"{dest / 'pointer'}:{dot}:ro"], info   # points at nothing mounted
     return ["-v", f"{private}:{GIT_CONTAINER_DIR}:ro",
-            "-v", f"{dest / 'pointer'}:{Path(repo) / '.git'}:ro"], info
+            "-v", f"{dest / 'pointer'}:{dot}:ro"], info
 
 
 def _node_unavailable(result: dict) -> None:

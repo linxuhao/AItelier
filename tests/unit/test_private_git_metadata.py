@@ -90,12 +90,21 @@ def view_of(repo: Path, mounts: list[str], tmp_path: Path) -> Path:
     pairs = dict(m.rsplit(":", 1)[0].split(":", 1)[::-1] for m in mounts[1::2])
     target = pairs.get(str(repo / ".git"))
     if target is None:
+        # Uncovered: the container sees the repository's own `.git` as it is.
+        dot = repo / ".git"
+        if dot.is_symlink():
+            (view / ".git").symlink_to(os.readlink(dot))
+        elif dot.is_file():
+            shutil.copy(dot, view / ".git")
+        elif dot.is_dir():
+            (view / ".git").symlink_to(dot)
         return view
     if Path(target).is_dir():
         (view / ".git").symlink_to(target)
     else:
         text = Path(target).read_text()
-        private = pairs[executor.GIT_CONTAINER_DIR]
+        # Not mounted when no metadata could be built: the pointer leads nowhere.
+        private = pairs.get(executor.GIT_CONTAINER_DIR, str(tmp_path / "unmounted"))
         (view / ".git").write_text(text.replace(executor.GIT_CONTAINER_DIR, private))
     return view
 
@@ -216,7 +225,11 @@ def test_forged_pointer_to_another_worktree_is_refused(linked, source, tmp_path,
     foreign = (other / ".git").read_text()
     (linked / ".git").write_text(foreign)
     mounts, info = provision(linked, tmp_path)
-    assert mounts == [] and info["provided"] is False and "own" in info["reason"]
+    assert info["provided"] is False and "own" in info["reason"]
+    assert mounts == ["-v", f"{tmp_path / 'dest' / 'pointer'}:{linked / '.git'}:ro"]
+    view = view_of(linked, mounts, tmp_path)
+    assert subprocess.run(["git", "rev-parse", "HEAD"], cwd=view, env=ENV,
+                          capture_output=True).returncode == 128
 
 
 def test_common_dir_must_be_the_run_source(linked, tmp_path, docker):
@@ -224,7 +237,54 @@ def test_common_dir_must_be_the_run_source(linked, tmp_path, docker):
     elsewhere.mkdir()
     git(elsewhere, "init", "-q")
     mounts, info = provision(linked, tmp_path, elsewhere / ".git")
-    assert mounts == [] and "source repository" in info["reason"]
+    assert "source repository" in info["reason"]
+    assert mounts == ["-v", f"{tmp_path / 'dest' / 'pointer'}:{linked / '.git'}:ro"]
+
+
+def moved_metadata(tmp_path):
+    """The independent review's layout: `.git` moved inside the checkout, with a secret."""
+    repo = tmp_path / "projects" / "moved"
+    repo.mkdir(parents=True)
+    git(repo, "init", "-q", "-b", "main")
+    commit(repo, "first", **{"value": "one\n"})
+    git(repo, "remote", "add", "origin", "https://user:MOVED-TOKEN@example.invalid/p.git")
+    git(repo, "branch", "foreign-private-ref")
+    (repo / ".git").rename(repo / "owned-metadata")
+    return repo
+
+
+def test_symlinked_git_entry_refuses_the_command(tmp_path, docker):
+    repo = moved_metadata(tmp_path)
+    (repo / ".git").symlink_to("owned-metadata", target_is_directory=True)
+    with pytest.raises(executor.GitEntryRefused, match="neither a directory nor a regular file"):
+        provision(repo, tmp_path)
+    assert docker_calls(tmp_path) == []
+
+
+def test_dangling_git_link_is_present_and_refused(tmp_path, docker):
+    repo = tmp_path / "projects" / "dangling"
+    repo.mkdir(parents=True)
+    (repo / ".git").symlink_to(tmp_path / "does-not-exist")
+    with pytest.raises(executor.GitEntryRefused):
+        provision(repo, tmp_path)
+
+
+def test_special_git_entry_is_refused_without_blocking(tmp_path, docker):
+    repo = tmp_path / "projects" / "fifo"
+    repo.mkdir(parents=True)
+    os.mkfifo(repo / ".git")  # opening it for reading would block
+    with pytest.raises(executor.GitEntryRefused, match="prw"):
+        provision(repo, tmp_path)
+
+
+def test_in_tree_forged_pointer_never_reaches_the_moved_metadata(tmp_path, docker):
+    repo = moved_metadata(tmp_path)
+    (repo / ".git").write_text("gitdir: owned-metadata\n")
+    mounts, info = provision(repo, tmp_path)
+    assert info["provided"] is False
+    view = view_of(repo, mounts, tmp_path)
+    probe = subprocess.run(["git", "remote", "-v"], cwd=view, env=ENV, capture_output=True, text=True)
+    assert probe.returncode == 128 and "MOVED-TOKEN" not in probe.stdout + probe.stderr
 
 
 def pinned_history(tmp_path, commits=61):
@@ -402,6 +462,59 @@ def test_host_reply_git_reaches_the_caller(monkeypatch):
     monkeypatch.setattr(socket, "socket", Sock)
     done = executor._launch_via_host("/s.sock", Path("/p"), ["python3", "-m", "pytest"], 5)
     assert done.git == replies["git"]
+
+
+def _no_test_container(monkeypatch):
+    real_popen = subprocess.Popen
+    def popen(command, **kwargs):
+        if "python3" in command:
+            pytest.fail("a repository command was launched")
+        return real_popen(command, **kwargs)
+    monkeypatch.setattr(executor.subprocess, "Popen", popen)
+
+
+def test_direct_adapter_refuses_an_uncoverable_git_entry(tmp_path, monkeypatch, docker):
+    from core import datadir
+    monkeypatch.setattr(datadir, "aitelier_home", lambda: tmp_path / "home")
+    monkeypatch.setattr(executor.shutil, "which", lambda _: docker)
+    _no_test_container(monkeypatch)
+    repo = moved_metadata(tmp_path)
+    (repo / ".git").symlink_to("owned-metadata", target_is_directory=True)
+    with pytest.raises(executor.IsolationUnavailable, match="refused"):
+        executor._execute(repo, ["python3", "-m", "pytest"], 5)
+    assert list((tmp_path / "home" / "cpu-git").iterdir()) == []
+
+
+def test_launcher_refuses_an_uncoverable_git_entry(tmp_path, monkeypatch, docker):
+    repo = moved_metadata(tmp_path)
+    (repo / ".git").symlink_to("owned-metadata", target_is_directory=True)
+    cfg, request = _launcher(tmp_path, repo, "direct", repo)
+    monkeypatch.setattr(host.shutil, "which", lambda _: docker)
+    monkeypatch.setattr(host, "_run_docker", lambda *a, **k: pytest.fail("test container started"))
+    response = host.handle_request(cfg, json.dumps(request).encode())
+    assert response["ok"] is False and "refused" in response["error"]
+    assert list((Path(cfg["aitelier_home"]) / "cpu-git").iterdir()) == []
+
+
+def test_direct_adapter_still_runs_a_repository_without_git(tmp_path, monkeypatch, docker):
+    from core import datadir
+    monkeypatch.setattr(datadir, "aitelier_home", lambda: tmp_path / "home")
+    monkeypatch.setattr(executor.shutil, "which", lambda _: docker)
+    repo = tmp_path / "projects" / "plain"
+    repo.mkdir(parents=True)
+    launched = []
+
+    class Proc:
+        returncode = 0
+        def communicate(self, timeout):
+            return json.dumps({"returncode": 0, "stdout": "", "stderr": ""}), ""
+        def poll(self): return 0
+    real_popen = subprocess.Popen
+    monkeypatch.setattr(executor.subprocess, "Popen", lambda c, **k: (
+        launched.append(c) or Proc()) if "python3" in c else real_popen(c, **k))
+    done = executor._execute(repo, ["python3", "-m", "pytest"], 5)
+    assert done.returncode == 0 and len(launched) == 1
+    assert done.git == {"provided": False, "reason": "repository has no .git"}
 
 
 def test_direct_adapter_mounts_private_git_and_removes_it(source, tmp_path, monkeypatch, docker):

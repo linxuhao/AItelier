@@ -1573,10 +1573,12 @@ CODING_TOOL_DEFINITIONS = [
             "name": "config_edit",
             "description": (
                 "Surgically edit a GENERATED pipeline's source — its graph YAML, its role "
-                "table, or one of its templates — and hot-reload it, so the next "
+                "table — through immutable whole-unit versioning, so the next "
                 "drive_pipeline runs the edited version. This is the repair half of the "
                 "generate → drive → fix loop. Read the file with config_read first; "
-                "old_str must appear exactly once. Only gen_* pipelines are editable."
+                "old_str must appear exactly once. Only active owned gen_* content is editable. "
+                "Seals, builtins, shared templates, historical/unreferenced roles and "
+                "x-aitelier host policy changes refuse. expected_current is optional whole-unit CAS."
             ),
             "parameters": {
                 "type": "object",
@@ -1584,7 +1586,8 @@ CODING_TOOL_DEFINITIONS = [
                     "config_name": {"type": "string", "description": "A gen_* pipeline name."},
                     "file": {"type": "string",
                              "description": "Omit for the graph YAML; 'roles' for the role "
-                                            "table; or a template path."},
+                                            "table. Shared template paths are refused."},
+                    "expected_current": {"type": "string", "description": "Whole-unit CAS from config_read."},
                     "old_str": {"type": "string", "description": "Exact text to replace."},
                     "new_str": {"type": "string", "description": "Replacement text."},
                 },
@@ -4358,7 +4361,9 @@ class MetaAgent:
                                              args.get("file") or "")
         if err:
             return {"error": err}
+        from api.mcp_router import _version_read_state
         return {"config_name": args.get("config_name"), "path": str(path),
+                **_version_read_state(args.get("config_name") or ""),
                 "content": path.read_text(encoding="utf-8", errors="replace")[:60000]}
 
     def _tool_config_search(self, args: dict) -> dict:
@@ -4388,82 +4393,19 @@ class MetaAgent:
         return {"query": query, "count": len(hits), "hits": hits}
 
     def _tool_config_edit(self, args: dict) -> dict:
-        """Surgically edit a generated pipeline's source, then hot-reload it."""
-        from api.dependencies import get_skillflow, get_config_registry
-        from core.pipeline_registry import generated_configs_dir, reload_generated_pipeline
-        config_name = (args.get("config_name") or "").strip()
-        old_str, new_str = args.get("old_str") or "", args.get("new_str") or ""
-        if not config_name:
-            return {"error": "config_name is required."}
-        if not old_str:
-            return {"error": "old_str is required (read the file with config_read first)."}
-        path, err = self._config_source_path(config_name, args.get("file") or "")
-        if err:
-            return {"error": err}
-        # Only generated pipelines are editable: the repo's own configs are code,
-        # and silently rewriting them from a chat session is not a repair loop.
-        if not str(path).startswith(str(Path(generated_configs_dir()).resolve()) + os.sep):
-            # Say which of the two reasons applies — "it's a built-in config" is
-            # simply false when the caller asked for a generated pipeline's template.
-            if config_name.startswith("gen_"):
-                return {"error": f"{path.name} is a repo template, not part of "
-                                 f"{config_name}'s own source, so it is not editable here "
-                                 f"(editing it would change every pipeline that uses it). "
-                                 f"A generated pipeline keeps its prompts in "
-                                 f"{config_name}.roles.json — edit that with file='roles'."}
-            return {"error": f"{config_name} is a built-in config — only gen_* pipelines "
-                             f"are editable here. Edit the repo file through the normal "
-                             f"code tools if that is really what you mean."}
-        from core import pipeline_frozen_bundle as fb
-        sf = get_skillflow()
-        # A recorded RSI bundle or seal is refused before anything is written,
-        # under the exclusion adoption holds: its roles serve pinned runs.
-        with fb.exclusion(sf):
-            refusal = (fb.edit_block(generated_configs_dir(), config_name)
-                       or fb.edit_block(generated_configs_dir(), path.name.split(".", 1)[0]))
-            if refusal:
-                return {"error": f"{refusal} — nothing written."}
-            text = path.read_text(encoding="utf-8")
-            occurrences = text.count(old_str)
-            if occurrences == 0:
-                return {"error": "old_str not found in the file (read it with config_read first)."}
-            if occurrences > 1:
-                return {"error": f"old_str appears {occurrences} times — include more context "
-                                 f"so it identifies exactly one place."}
-            path.write_text(text.replace(old_str, new_str), encoding="utf-8")
-            reloaded = reload_generated_pipeline(sf, get_config_registry(), config_name)
-        result = {"config_name": config_name, "path": str(path), "edited": True}
-        if reloaded.get("error"):
-            # The edit stands but the graph no longer loads — say so loudly; the
-            # next drive would otherwise run the last good version and look fine.
-            result["reload_error"] = reloaded["error"]
-            result["warning"] = ("Edited, but the pipeline no longer registers. Fix the file "
-                                 "before driving it — the registry still holds the previous "
-                                 "version.")
-        else:
-            result["reloaded"] = True
-            # A re-registration mints a content version only if the content
-            # actually changed, so this is the version the edit produced.
-            result["graph_version"] = self._config_version(config_name)
-            # Only when one was earned: pointing at a baseline that does not exist
-            # would read as "you broke something you never verified".
-            from core import baseline as bl
-            if bl.read(bl.KIND_PIPELINE, config_name) is not None:
-                result["next"] = (f"replay_baseline(target='{config_name}') checks this "
-                                  f"edit against the recorded baseline without a run.")
-            # Someone may already have diagnosed what this edit is groping at.
-            try:
-                from core import suggestions
-                n = suggestions.open_count(config_name)
-                if n:
-                    result["open_suggestions"] = n
-                    result["also"] = (
-                        f"{n} open suggestion(s) recorded against this config — "
-                        f"list_pipeline_suggestions(target='{config_name}'). If this "
-                        f"edit answers one, resolve it as applied.")
-            except Exception:                                    # noqa: BLE001
-                pass
-        return result
+        """Exact source edit via the common immutable normal-edit coordinator."""
+        from core.pipeline_versions import editor
+        config = (args.get("config_name") or "").strip()
+        which = args.get("file") or "graph"
+        if which not in ("graph", "roles"):
+            return {"error": "shared/unreferenced template source is not editable; use edit_template on an active role"}
+        out = editor().edit(config, {"kind": "source", "file": which,
+                                   "old_str": args.get("old_str") or "",
+                                   "new_str": args.get("new_str") or ""},
+                            expected_current=args.get("expected_current"))
+        if "error" not in out:
+            out.update(config_name=config, edited=out["changed"])
+        return out
 
     def _config_version(self, config_name: str) -> int | None:
         try:

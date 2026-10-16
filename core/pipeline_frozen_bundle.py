@@ -1124,6 +1124,13 @@ def adopted_unit(config_dir, target: str, phys: str) -> dict:
     specific immutable role names, old roles RETAINED beside them."""
     from core import pipeline_registry as pr
     sealed = verify_sealed(config_dir, phys)
+    return preview_adoption(target, read_unit(config_dir, target), sealed)
+
+
+def preview_adoption(target: str, old: dict, sealed: dict) -> dict:
+    """Detached form of adopted_unit, also used for before-effect edit validation."""
+    from core import pipeline_registry as pr
+    phys = sealed['physical_name']
     sep, tag = pr._ROLE_SEP, f"rsi{sealed['bundle_identity'][:16]}_"
     role_map = {}
     for role in sealed["roles"]:
@@ -1134,7 +1141,6 @@ def adopted_unit(config_dir, target: str, phys: str) -> dict:
     data["name"] = target
     for node, role in list(agent_refs(data)):
         node["agent_config"] = role_map[role]
-    old = read_unit(config_dir, target)
     roles = json.loads(old["roles_text"]) if old["roles_text"] else {}
     for role, cfg in sealed["roles"].items():
         roles[role_map[role]] = copy.deepcopy(cfg)

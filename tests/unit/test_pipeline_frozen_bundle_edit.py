@@ -8,8 +8,8 @@ classifier then read the changed target as ordinary, and the old pinned paused
 run resumed and claimed the edited prompt.
 
 The observer called the tool and drove the run; it asserted only the drive.
-The correction refuses the edit before any effect, so these cases also assert
-that refusal and that nothing moved: every file byte, the descriptor, each live
+The normal-edit integration creates a new immutable unit for healthy active
+content, while historical-only edits still refuse. All cases preserve: every file byte, the descriptor, each live
 role, the graph rows and pin and the entire manifest. They still drive the
 existing paused run to a claim of OLD MAKER. Setup is the same real helper
 (actual AItelierSkillFlow, production ToolLoader factory, paired singleton
@@ -99,7 +99,7 @@ EDITS = {
 
 
 @pytest.mark.parametrize("edit", sorted(EDITS))
-def test_supported_editors_refuse_a_recorded_target_before_any_effect(
+def test_supported_editors_version_active_content_and_preserve_old_claim(
         tmp_path, monkeypatch, record_property, edit):
     host, registry, gen, rid, _, _, _ = setup(tmp_path, monkeypatch, "healthy")
     pin = host.get_run(rid)["graph_version"]
@@ -108,8 +108,20 @@ def test_supported_editors_refuse_a_recorded_target_before_any_effect(
     assert before["roles"]["gen_toy__maker"][2]["system_prompt"] == "OLD MAKER"
     result = EDITS[edit](host, registry, gen)
     record_property("edit_result", json.dumps(result, default=str))
-    assert "recorded whole bundle" in result["error"], result
-    assert held(host, registry, gen, rid) == before            # nothing moved
+    if edit in ("config_edit_roles", "set_pipeline_capabilities"):
+        assert result.get("error"), result
+        assert held(host, registry, gen, rid) == before
+    elif edit == "config_edit_graph":
+        # The exact old observer inserts a duplicate YAML description before
+        # the existing one. YAML's last key wins: this is a true logical no-op.
+        assert "error" not in result and result["changed"] is False, result
+        assert held(host, registry, gen, rid) == before
+    else:
+        assert "error" not in result and result["changed"], result
+        after = held(host, registry, gen, rid)
+        assert after["versions"] > before["versions"]
+        for name, cfg in before["roles"].items():
+            assert after["roles"][name] == cfg
     desc = fb.read_descriptor(gen, "gen_toy")
     assert desc["state"] == "adopted"
     assert fb.whole_state(host, registry, gen, "gen_toy", desc["new"]) == []
@@ -151,16 +163,26 @@ def test_ordinary_generated_pipeline_stays_editable(tmp_path, monkeypatch):
     assert "gen_plain" in loaded
     tools = _edit_tools()
     out = tools["edit_template"](config="gen_plain", role="maker", template="PLAIN v2")
-    assert out == {"config": "gen_plain", "role": "gen_plain__maker", "chars": 8}, out
+    assert out["changed"] and out["chars"] == 8 and out["role"] != "gen_plain__maker", out
     out = tools["edit_role"](config="gen_plain", role="reviewer", temperature=0.5)
     assert out["value"]["temperature"] == 0.5, out
+    from core.pipeline_versions import resolve_active
+    path = gen / "gen_plain.roles.json"
+    old_source = path.read_text()
+    roles = json.loads(old_source)
+    reviewer = resolve_active("gen_plain", host._graphs["gen_plain"].to_dict(), "reviewer")
+    roles[reviewer]["system_prompt"] = "R v2"
     out = _meta_agent()._tool_config_edit(
-        {"config_name": "gen_plain", "file": "roles", "old_str": '"R"', "new_str": '"R v2"'})
+        {"config_name": "gen_plain", "file": "roles", "old_str": old_source,
+         "new_str": json.dumps(roles)})
     assert out.get("reloaded") and "reload_error" not in out, out
     roles = json.loads((gen / "gen_plain.roles.json").read_text())
-    assert roles["gen_plain__maker"]["system_prompt"] == "PLAIN v2"
-    assert roles["gen_plain__reviewer"]["system_prompt"] == "R v2"
-    assert host.agent_registry.get("gen_plain__maker").config["system_prompt"] == "PLAIN v2"
+    maker = resolve_active("gen_plain", host._graphs["gen_plain"].to_dict(), "maker")
+    reviewer = resolve_active("gen_plain", host._graphs["gen_plain"].to_dict(), "reviewer")
+    assert roles[maker]["system_prompt"] == "PLAIN v2"
+    assert roles[reviewer]["system_prompt"] == "R v2"
+    assert roles["gen_plain__maker"]["system_prompt"] == "PLAIN"  # historical bytes stay exact
+    assert host.agent_registry.get(maker).config["system_prompt"] == "PLAIN v2"
     plain = host.create_run("gen_plain", project_id="plain-gen")
     host.start_run(plain)
     host.pause_run(plain)

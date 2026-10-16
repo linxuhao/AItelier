@@ -22,7 +22,7 @@ import hashlib
 import json
 from typing import Any, Dict, List, Optional
 
-import contract as c
+from . import contract as c
 
 TOOL_FILES = ("tool.yaml", "impl.py", "README.md")
 

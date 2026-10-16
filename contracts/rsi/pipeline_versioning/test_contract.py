@@ -16,7 +16,7 @@ import unittest
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-import contract as c
+from . import contract as c
 
 HERE = Path(__file__).resolve().parent
 _FLOATS = {"nan": float("nan"), "inf": float("inf"), "-inf": float("-inf")}
@@ -279,7 +279,7 @@ def run_conformance(make_world: Callable, report: Optional[dict] = None) -> List
 
 class FakeConformanceTest(unittest.TestCase):
     def setUp(self):
-        import fake
+        from . import fake
         self.fake = fake
 
     def test_shared_vectors_pass_on_fake(self):

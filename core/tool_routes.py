@@ -8,11 +8,12 @@ sources. Only the agent path crosses the host override in
 ``core.skillflow_host``; the other four call the function directly. A route here
 is therefore the one place a host decision reaches every dispatch of a name.
 
-There is one route: SkillFlow's native ``pytest`` tool runs repository tests in
+SkillFlow's native ``pytest`` tool runs repository tests in
 the caller's own process with the caller's environment, so it is served by
 ``native_pytest`` below, which sends the same command to the owned disposable
 CPU executor (``core.repository_executor``) used by ``run_tests`` and
-``focused_check``.
+``focused_check``. Native ``lint`` retains its engine dispatch but rejects an
+empty result set rather than treating all([]) as a measured pass.
 
 The route is applied in ``load_fn`` on every call, AFTER the base loader's
 cache. That ordering is the point: ``ToolLoader.add_tools_dir`` (which
@@ -26,6 +27,7 @@ re-registration of the same name can displace it.
 from __future__ import annotations
 
 import hashlib
+from functools import wraps
 import re
 import subprocess
 import tempfile
@@ -262,4 +264,13 @@ class AItelierToolLoader(ToolLoader):
         route = NATIVE_ROUTES.get(name)
         if route is not None and self.is_native(name):
             return route
+        if name == "lint" and self.is_native(name):
+            @wraps(fn)
+            def measured_lint(*args, **kwargs):
+                result = fn(*args, **kwargs)
+                if not result.get("results"):
+                    return {**result, "all_passed": False, "unmeasured": True,
+                            "error": "lint matched no files; no lint measurement was made"}
+                return result
+            return measured_lint
         return fn

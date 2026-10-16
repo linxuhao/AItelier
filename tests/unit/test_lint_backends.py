@@ -1,85 +1,108 @@
-"""AItelier custom lint backends (aitelier/lint_backends.py).
-
-The eslint backend is registered into skillflow's lint registry at
-startup; a DPE linter_manifest.json can then map extensions to it.
-"""
-
-import subprocess
+"""The registered JavaScript backend requires explicit owned execution."""
+import hashlib
 from pathlib import Path
+import subprocess
 
 import pytest
+from aitelier import lint_backends as lint
+from core import repository_executor as ex
+from skillflow import lint_backends as registry
 
-from aitelier import lint_backends
-from skillflow import lint_backends as sf_registry
+
+@pytest.fixture(autouse=True)
+def registry_snapshot():
+    before = dict(registry._backends)
+    yield
+    registry._backends.clear()
+    registry._backends.update(before)
 
 
 @pytest.fixture
-def clean_registry():
-    yield
-    sf_registry._backends.pop("eslint", None)
+def candidate(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    fp = repo / "file.js"
+    fp.write_text("const café = 42;\n")
+    monkeypatch.setenv("AITELIER_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv(ex.HOST_LAUNCHER_ENV, "/own/test-fixture.sock")
+    return repo, fp
 
 
-def test_register_all_registers_eslint(clean_registry):
-    lint_backends.register_all()
-    assert sf_registry.get_backend("eslint") is lint_backends.eslint_backend
+def test_register_all_registers_owned_backend():
+    lint.register_all()
+    assert registry.get_backend("eslint") is lint.eslint_backend
 
 
-def test_eslint_skips_without_node_toolchain(monkeypatch, tmp_path):
-    monkeypatch.setattr(lint_backends, "_eslint_cmd", lambda: None)
-    fp = tmp_path / "app.js"
-    fp.write_text("console.log('hi');")
-    res = lint_backends.eslint_backend(fp)
-    assert res["passed"] is True
-    assert "unavailable" in res["error_message"]
+def test_missing_identity_is_not_a_skipped_pass(candidate, monkeypatch):
+    repo, fp = candidate
+    monkeypatch.setattr(ex, "execute", lambda *a, **k: pytest.fail("unbound execution"))
+    res = lint.eslint_backend(fp)
+    assert res["passed"] is False and res["unavailable"]
+    assert "explicit" in res["error_message"]
 
 
-def test_eslint_pass_and_fail(monkeypatch, tmp_path):
-    monkeypatch.setattr(lint_backends, "_eslint_cmd", lambda: ["eslint"])
-    fp = tmp_path / "app.js"
-    fp.write_text("console.log('hi');")
-
-    def fake_run(cmd, **kw):
-        assert cmd == ["eslint", "--no-config-lookup", "app.js"]
-        assert Path(kw["cwd"]) == tmp_path  # eslint ignores files outside cwd
-        return subprocess.CompletedProcess(cmd, returncode=fake_run.rc,
-                                           stdout=fake_run.out, stderr="")
-
-    monkeypatch.setattr(lint_backends.subprocess, "run", fake_run)
-
-    fake_run.rc, fake_run.out = 0, ""
-    assert lint_backends.eslint_backend(fp)["passed"] is True
-
-    fake_run.rc, fake_run.out = 1, "1:20 error Parsing error"
-    res = lint_backends.eslint_backend(fp)
-    assert res["passed"] is False
-    assert "Parsing error" in res["error_message"]
-
-
-def test_lint_tool_dispatches_manifest_to_eslint(
-        monkeypatch, tmp_path, clean_registry):
-    """End-to-end: manifest {'.js': 'eslint'} routes through skillflow's
-    lint tool into the registered AItelier backend.
-
-    Loads the tool via ToolLoader (spec_from_file_location, like
-    production) to prove the registry is shared across that boundary."""
-    import skillflow
-    from skillflow.tool_loader import ToolLoader
-
-    loader = ToolLoader(Path(skillflow.__file__).parent / "tools")
-    lint_tool = loader.load_fn("lint")
-
-    lint_backends.register_all()
+@pytest.mark.parametrize("rc,out,err", [(0, "", ""), (1, "Parsing error: Unexpected token", ""),
+                                      (2, "", "tool usage failure")])
+def test_input_bytes_owned_ticket_and_bare_result(candidate, monkeypatch, rc, out, err):
+    repo, fp = candidate
     seen = []
-    monkeypatch.setattr(
-        lint_backends, "_eslint_cmd", lambda: ["eslint"])
-    monkeypatch.setattr(
-        lint_backends.subprocess, "run",
-        lambda cmd, **kw: (seen.append(cmd),
-                           subprocess.CompletedProcess(cmd, 0, "", ""))[1])
+    def execute(root, args, timeout, **kw):
+        ticket = kw["writable_dirs"][0]
+        assert root == repo and args == ["file.js"] and timeout == 120
+        assert kw["run_id"] == "own" and kw["profile"] == ex.LINT_PROFILE
+        assert (ticket / "input.js").read_bytes() == fp.read_bytes()
+        seen.append(ticket)
+        return subprocess.CompletedProcess(args, rc, out, err)
+    monkeypatch.setattr(ex, "execute", execute)
+    res = lint.eslint_backend(fp, run_id="own", step_id="validate", project_root=str(repo))
+    assert res["passed"] is (rc == 0)
+    assert (res["returncode"], res["stdout"], res["stderr"]) == (rc, out, err)
+    assert res["input_sha256"] == hashlib.sha256(fp.read_bytes()).hexdigest()
+    assert not seen[0].exists()
 
-    (tmp_path / "linter_manifest.json").write_text('{".js": "eslint"}')
-    (tmp_path / "app.js").write_text("console.log('hello');")
-    r = lint_tool(["*.js"], workspace_root=str(tmp_path),
-                  manifest_path="linter_manifest.json")
-    assert r["all_passed"] is True
-    assert seen == [["eslint", "--no-config-lookup", "app.js"]]
+
+@pytest.mark.parametrize("failure", [ex.IsolationUnavailable("owned facility absent"),
+                                     subprocess.TimeoutExpired(["lint"], 120, "partial", "timeout")])
+def test_unavailable_timeout_never_pass(candidate, monkeypatch, failure):
+    repo, fp = candidate
+    def execute(*a, **kw):
+        raise failure
+    monkeypatch.setattr(ex, "execute", execute)
+    result = lint.eslint_backend(fp, run_id="own", step_id="s", project_root=str(repo))
+    assert result["passed"] is False and result["returncode"] == -1
+    assert not list((Path(lint.datadir.aitelier_home()) / "gate-reports").rglob("lint-*"))
+
+
+@pytest.mark.parametrize("kind", ["outside", "symlink", "parent-symlink", "hardlink", "fifo", "directory", "dash", "extension"])
+def test_target_refusal_precedes_transport(candidate, monkeypatch, tmp_path, kind):
+    repo, fp = candidate
+    outside = tmp_path / "outside.js"
+    outside.write_text("const outside = 1;")
+    target = fp
+    if kind == "outside": target = outside
+    elif kind == "symlink":
+        fp.unlink();fp.symlink_to(outside)
+    elif kind == "parent-symlink":
+        (repo / "alias").symlink_to(tmp_path, target_is_directory=True);target = repo / "alias/outside.js"
+    elif kind == "hardlink":
+        fp.unlink();fp.hardlink_to(outside)
+    elif kind == "fifo":
+        import os
+        fp.unlink();os.mkfifo(fp)
+    elif kind == "directory": fp.unlink();fp.mkdir()
+    elif kind == "dash": target = repo / "-file.js";target.write_text("let ok = 1")
+    else: target = repo / "file.ts";target.write_text("let ok = 1")
+    monkeypatch.setattr(ex, "execute", lambda *a, **kw: pytest.fail("refused input executed"))
+    result = lint.eslint_backend(target, run_id="own", step_id="s", project_root=str(repo))
+    assert result["passed"] is False and result["unavailable"]
+
+
+def test_no_direct_adapter_lint_fallback(candidate, monkeypatch):
+    repo, fp = candidate
+    monkeypatch.delenv(ex.HOST_LAUNCHER_ENV)
+    original_direct = ex._execute
+    monkeypatch.setattr(ex, "_execute", lambda *a, **kw: pytest.fail("local fallback"))
+    result = lint.eslint_backend(fp, run_id="own", step_id="s", project_root=str(repo))
+    assert result["passed"] is False
+    with pytest.raises(ex.IsolationUnavailable, match="owned host launcher"):
+        original_direct(repo, ["file.js"], 10, run_id="own", profile=ex.LINT_PROFILE)

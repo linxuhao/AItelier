@@ -93,7 +93,7 @@ _NETWORK_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
 IMAGE_DIGEST = re.compile(r"(?:[A-Za-z0-9._:/-]+@)?sha256:[0-9a-f]{64}")
 
 
-def read_regular(root: Path, rel, cap: int) -> bytes | None:
+def read_regular(root: Path, rel, cap: int, *, single_link: bool = False) -> bytes | None:
     """Bytes of ``root/rel`` without following a link at ANY component.
 
     None when the final file is absent. A link, a non-regular file or a file
@@ -126,6 +126,8 @@ def read_regular(root: Path, rel, cap: int) -> bytes | None:
             info = os.fstat(f)
             if not stat.S_ISREG(info.st_mode):
                 raise NodeRefused(f"{rel} must be a regular file")
+            if single_link and info.st_nlink != 1:
+                raise NodeRefused(f"{rel} must not share a hard-linked inode")
             if info.st_size > cap:
                 raise NodeRefused(f"{rel} exceeds {cap} bytes")
             with os.fdopen(f, "rb", closefd=False) as stream:
@@ -228,6 +230,59 @@ def node_payload(node: dict, timeout: int) -> dict:
             "npm_cache": node["npm_cache"], "node_bin": NODE_BIN_DIR,
             "expect_npm": NODE_NPM_VERSION, "relay_socket": "", "import_module": "",
             "pytest_timeout": False, "report_dir": ""}
+
+
+# One input, parsed by the baked official CLI. Only the host launcher may bind it.
+LINT_PROFILE = "javascript_lint"
+LINT_INPUT_CAP = 8 << 20
+LINT_NODE = "/opt/aitelier-node/bin/node"
+LINT_ESLINT = "/opt/aitelier-eslint/node_modules/eslint/bin/eslint.js"
+
+
+def lint_relative_file(value: str) -> str:
+    path = PurePosixPath(value)
+    if (not isinstance(value, str) or not value or str(path) != value
+            or path.is_absolute() or ".." in path.parts
+            or any(part.startswith("-") for part in path.parts)
+            or path.suffix.lower() not in {".js", ".mjs", ".cjs"}):
+        raise NodeRefused("lint requires one normalized relative .js/.mjs/.cjs file")
+    return "input" + path.suffix.lower()
+
+
+def validate_lint_request(repo: Path, report_root: Path, request: dict, image: str) -> dict:
+    if request.get("profile") != LINT_PROFILE or not image or not IMAGE_DIGEST.fullmatch(image):
+        raise NodeRefused("lint requires the operator's immutable Node/ESLint image")
+    if any(request.get(k) for k in ("report_dir", "relay_socket", "import_module",
+                                    "pytest_timeout", "workdir", "npm_cache")):
+        raise NodeRefused("lint takes no report/relay/import/npm execution fields")
+    args, dirs = request.get("args"), request.get("writable_dirs")
+    if not isinstance(args, list) or len(args) != 1 or not isinstance(args[0], str):
+        raise NodeRefused("lint takes exactly one owned source file")
+    filename = lint_relative_file(args[0])
+    if not isinstance(dirs, list) or len(dirs) != 1 or not isinstance(dirs[0], str):
+        raise NodeRefused("lint requires exactly one private input ticket")
+    ticket = Path(dirs[0])
+    if (not ticket.is_absolute() or str(ticket) != os.path.normpath(dirs[0])
+            or ticket.parent != report_root or not ticket.name.startswith("lint-")):
+        raise NodeRefused("lint input ticket does not belong to the existing run")
+    if (str(repo) != request.get("repo") or report_root.resolve(strict=True) != report_root
+            or ticket.resolve(strict=True) != ticket):
+        raise NodeRefused("lint source and ticket roots must not be aliases or symlinks")
+    _real_dir(ticket)
+    original = read_regular(repo, args[0], LINT_INPUT_CAP, single_link=True)
+    snapshot = read_regular(ticket, filename, LINT_INPUT_CAP, single_link=True)
+    if original is None or snapshot is None or original != snapshot:
+        raise NodeRefused("lint snapshot must equal the bound source file bytes")
+    return {"profile": LINT_PROFILE, "ticket": str(ticket), "image": image,
+            "lint_input": "/lint-input/" + filename,
+            "input_sha256": hashlib.sha256(snapshot).hexdigest(),
+            "args": [LINT_NODE, LINT_ESLINT, "--no-config-lookup", "--no-inline-config",
+                     "--stdin", "--stdin-filename", filename]}
+
+
+def lint_payload(fields: dict) -> dict:
+    return {"repo": "/tmp", "args": fields["args"], "timeout": fields["timeout"],
+            "lint_input": fields["lint_input"], "input_sha256": fields["input_sha256"]}
 
 
 # ── private Git metadata for repository commands ───────────────────────────
@@ -729,6 +784,8 @@ def _execute(repo: Path, args: list[str], timeout: int, *,
             writable_dirs=(), relay_socket: str = "", import_module: str = "",
             pytest_timeout: bool = False, report_dir: str = "", run_id: str = "",
             profile: str = "", workdir: str = "", npm_cache: str = "") -> subprocess.CompletedProcess:
+    if profile == LINT_PROFILE:
+        raise IsolationUnavailable("JavaScript lint requires the existing owned host launcher")
     docker = shutil.which("docker")
     if not docker:
         raise IsolationUnavailable("Docker CPU execution facility is unavailable; local execution refused")

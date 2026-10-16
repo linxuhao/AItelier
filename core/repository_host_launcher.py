@@ -153,11 +153,16 @@ def validate_request(cfg: dict, request: dict) -> dict:
     if "profile" in request:
         # The repo above only binds the request to its run; a Node container
         # never mounts it (`docker_command`).
-        from core.repository_executor import NodeRefused, validate_node_request
+        from core.repository_executor import (LINT_PROFILE, NodeRefused,
+                                               validate_lint_request, validate_node_request)
         try:
-            node = validate_node_request(report_root, request,
-                                         cfg.get("node_fetch_network") or "",
-                                         cfg.get("node_executor_image") or "")
+            if request["profile"] == LINT_PROFILE:
+                node = validate_lint_request(repo, report_root, request,
+                                             cfg.get("node_executor_image") or "")
+            else:
+                node = validate_node_request(report_root, request,
+                                             cfg.get("node_fetch_network") or "",
+                                             cfg.get("node_executor_image") or "")
         except (NodeRefused, OSError) as exc:
             raise LaunchRefused(str(exc)) from exc
         timeout = request.get("timeout")
@@ -254,6 +259,18 @@ def docker_command(cfg: dict, fields: dict, name: str) -> list[str]:
         raise LaunchRefused("Docker execution facility is unavailable on the host")
     repo = fields["repo"]
     entry = str(cfg["executor_entry"])
+    if fields.get("profile") == "javascript_lint":
+        from core.repository_executor import lint_payload
+        return [docker, "create", "--rm", "--init", "--network", "none",
+                "--cpus", "2", "--memory", "2g", "--pids-limit", "512",
+                "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+                "--user", f"{os.getuid()}:{os.getgid()}", "--name", name,
+                "--label", "aitelier.run_id=" + fields["run_id"],
+                "--label", "aitelier.project_id=" + fields["project_id"],
+                "-v", f"{fields['ticket']}:/lint-input:ro",
+                "-v", f"{entry}:/executor.py:ro", "-w", "/tmp",
+                "--entrypoint", "python3", fields["image"],
+                "/executor.py", json.dumps(lint_payload(fields))]
     if fields.get("profile"):
         from core.repository_executor import node_mount_args, node_payload
         return [docker, "create", "--rm", "--init", "--network", fields["network"],

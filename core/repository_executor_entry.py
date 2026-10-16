@@ -1,6 +1,8 @@
 """Container entry: capture actual command results, with no backend environment."""
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import importlib.util
+import hashlib
+import stat
 import json
 import os
 import select
@@ -33,6 +35,28 @@ def run(payload):
             return {"returncode": -1, "stdout": "", "stderr": "", "timed_out": False,
                     "import_error": "", "unavailable":
                     f"pinned npm {payload['expect_npm']} not in this image (found {found[:80]})"}
+    stdin_data = None
+    if payload.get("lint_input"):
+        try:
+            for command, expected in ((["/opt/aitelier-node/bin/node", "--version"], "v24.22.0"),
+                                      (["/opt/aitelier-node/bin/node",
+                                        "/opt/aitelier-eslint/node_modules/eslint/bin/eslint.js",
+                                        "--version"], "v10.12.0")):
+                found = subprocess.run(command, cwd="/tmp", env=env, capture_output=True,
+                                       text=True, timeout=min(10, payload["timeout"]))
+                if found.returncode or found.stdout.strip() != expected:
+                    raise ValueError(f"pinned lint runtime {expected} is unavailable")
+            descriptor = os.open(payload["lint_input"], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(descriptor, "rb") as stream:
+                info = os.fstat(stream.fileno())
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                    raise ValueError("lint input must be a single-link regular file")
+                stdin_data = stream.read((8 << 20) + 1)
+            if len(stdin_data) > (8 << 20) or hashlib.sha256(stdin_data).hexdigest() != payload["input_sha256"]:
+                raise ValueError("lint input changed after validation")
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            return {"returncode": -1, "stdout": "", "stderr": "", "timed_out": False,
+                    "import_error": "", "unavailable": f"JavaScript lint unavailable: {exc}"}
     relay = None
     if payload.get("relay_socket"):
         class Handler(BaseHTTPRequestHandler):
@@ -93,15 +117,21 @@ def run(payload):
             import_error = f"import {payload['import_module']} failed: {probe.stderr[-600:]}"
     proc = None
     try:
-        proc = subprocess.Popen(command, cwd=repo, env=env, text=True,
+        proc = subprocess.Popen(command, cwd=repo, env=env, text=stdin_data is None,
+                                stdin=subprocess.PIPE if stdin_data is not None else None,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
         timed_out = False
         try:
-            stdout, stderr = proc.communicate(timeout=payload["timeout"])
+            if stdin_data is None:
+                stdout, stderr = proc.communicate(timeout=payload["timeout"])
+            else:
+                stdout, stderr = proc.communicate(input=stdin_data, timeout=payload["timeout"])
         except subprocess.TimeoutExpired:
             timed_out = True
             os.killpg(proc.pid, signal.SIGKILL)
             stdout, stderr = proc.communicate()
+        if isinstance(stdout, bytes):
+            stdout, stderr = stdout.decode("utf-8", errors="replace"), stderr.decode("utf-8", errors="replace")
         return {"returncode": proc.returncode, "stdout": stdout, "stderr": stderr,
                 "timed_out": timed_out, "import_error": import_error}
     finally:

@@ -130,6 +130,7 @@ async def wait_for_state_change(service, project_id, after=0, node_keys=None, at
             if timeout_seconds > 0 and (service.sf is not None or service.runtime_factory is not None):
                 # One bounded page per observation cycle; rotated to prevent
                 # starvation. No executor is composed for State-only deployments.
+                recovery_ok = None  # Pending until this wait observes a recovery page.
                 remaining = deadline - loop.time()
                 if remaining > 0:
                     try:
@@ -139,7 +140,7 @@ async def wait_for_state_change(service, project_id, after=0, node_keys=None, at
                     except asyncio.TimeoutError:
                         return {"events": [], "next_after": cursor, **({"next_inbox_after": inbox_after, "driver_inbox": inbox["messages"]} if include_driver_inbox else {}), "timed_out": True}
 
-            if args.return_when_idle and not recovery_ok:
+            if args.return_when_idle and recovery_ok is False:
                 # Recovery failures cannot authorize a decision from cached state.
                 # Preserve actionable events committed by other rows in the page.
                 events, cursor = await asyncio.to_thread(
@@ -154,11 +155,11 @@ async def wait_for_state_change(service, project_id, after=0, node_keys=None, at
                 continue
             # Finish a bounded recovery sweep before interpreting cached status.
             # In particular a resumed checkpoint may still be projected paused.
-            if recovery_after:
+            if recovery_after and recovery_ok is not None:
                 if loop.time() >= deadline:
                     return {"events": [], "next_after": cursor, **({"next_inbox_after": inbox_after, "driver_inbox": inbox["messages"]} if include_driver_inbox else {}), "timed_out": True}
                 continue
-            if args.return_when_idle:
+            if args.return_when_idle and recovery_ok is not None:
                 outcome = await asyncio.to_thread(
                     wait_disposition, service.store, project_id, cursor, node_keys,
                     attempt_ids, note_after_revision, filter_mode, include_lease_events)
@@ -314,7 +315,8 @@ def recover_page(service, project_id, after, node_keys, attempt_ids, filter_mode
     identity = str(service.db.db_path)
     with _lock:
         if identity in _recovering:
-            return after, False
+            # Another observer is active; no fresh page or failure was observed.
+            return after, None
         _recovering.add(identity)
     try:
         return _recover_page(service, project_id, after, node_keys, attempt_ids, filter_mode)

@@ -1,0 +1,257 @@
+{
+  "schema": "rsi.benchmark.conformance.v1",
+  "note": "Invented synthetic literals only. STATEMENT CANDIDATE, UNRUN. Identities are computed by the fake from the fixture; the harness in test_contract.py resolves {\"$float\": \"nan|inf\"}, {\"$input_identity\": case}, {\"$checker_identity\": case}, and the dotted-path 'set'/'drop' edits. Expected stats are literal numbers.",
+  "owner": "owner-1",
+  "other_caller": "caller-2",
+  "arm_bundles": {
+    "baseline": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "candidate": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "runtime": {"route": "synthetic-route", "endpoints": ["endpoint-1", "endpoint-2"], "effort": "high"},
+  "row_defaults": {"validity": "VALID", "outcome": "scored", "raw_points": 5, "cost_usd": 0.5, "duration_s": 10},
+  "fixture": {
+    "header": {
+      "schema": "rsi.benchmark.v1",
+      "benchmark_id": "synthetic-bench",
+      "version": 1,
+      "arms": ["baseline", "candidate"],
+      "families": ["family-a", "family-b", "family-c", "family-d"],
+      "cases": {
+        "train-01": {"partition": "train", "family": "family-a"},
+        "train-02": {"partition": "train", "family": "family-b"},
+        "train-03": {"partition": "train", "family": "family-c"},
+        "train-04": {"partition": "train", "family": "family-d"},
+        "train-05": {"partition": "train", "family": "family-a"},
+        "train-06": {"partition": "train", "family": "family-b"},
+        "train-07": {"partition": "train", "family": "family-c"},
+        "train-08": {"partition": "train", "family": "family-d"},
+        "train-09": {"partition": "train", "family": "family-a"},
+        "train-10": {"partition": "train", "family": "family-b"},
+        "train-11": {"partition": "train", "family": "family-c"},
+        "train-12": {"partition": "train", "family": "family-d"},
+        "hold-01": {"partition": "holdout", "family": "family-a"},
+        "hold-02": {"partition": "holdout", "family": "family-b"},
+        "hold-03": {"partition": "holdout", "family": "family-c"},
+        "hold-04": {"partition": "holdout", "family": "family-d"},
+        "hold-05": {"partition": "holdout", "family": "family-a"},
+        "hold-06": {"partition": "holdout", "family": "family-b"},
+        "hold-07": {"partition": "holdout", "family": "family-c"},
+        "hold-08": {"partition": "holdout", "family": "family-d"}
+      },
+      "point_total": 100,
+      "normalization": {"min": 0, "max": 100}
+    },
+    "public_prompt_template": "Invented synthetic public prompt for {case}.",
+    "private_rubric_template": "opaque-rubric-{case}",
+    "private_checker_template": "opaque-checker-{case}",
+    "private_max_points": 5
+  },
+  "forbidden_public_substrings": ["rubric_ref", "checker_ref", "opaque-rubric", "opaque-checker", "max_points"],
+  "vectors": [
+    {
+      "id": "fixed-inventory-and-partition",
+      "setup": "published",
+      "steps": [
+        {"op": "get_definition", "expect_case_count": 20, "expect_paths": {
+          "status": "published", "repetitions": 3, "point_total": 100,
+          "normalization.min": 0, "normalization.max": 100,
+          "partition_counts.train": 12, "partition_counts.holdout": 8,
+          "arms": ["baseline", "candidate"],
+          "families": ["family-a", "family-b", "family-c", "family-d"]}}
+      ]
+    },
+    {
+      "id": "publication-immutability",
+      "setup": "none",
+      "steps": [
+        {"op": "draft", "caller": "$owner"},
+        {"op": "fill_inputs", "caller": "$owner"},
+        {"op": "publish", "caller": "$owner"},
+        {"op": "set_public", "caller": "$owner", "case_id": "train-01", "public_input": {"prompt": "changed"}, "expect_error": "immutable"},
+        {"op": "set_private", "caller": "$owner", "case_id": "train-01", "refs": {"rubric_ref": "x", "checker_ref": "y", "max_points": 5}, "expect_error": "immutable"},
+        {"op": "publish", "caller": "$owner", "expect_error": "immutable"},
+        {"op": "draft", "caller": "$owner", "expect_error": "duplicate"},
+        {"op": "draft", "caller": "$other", "expect_error": "duplicate"},
+        {"op": "list_benchmarks", "expect": [{"benchmark_id": "synthetic-bench", "version": 1, "status": "published"}]}
+      ]
+    },
+    {
+      "id": "publish-refuses-incomplete",
+      "setup": "none",
+      "steps": [
+        {"op": "draft", "caller": "$owner"},
+        {"op": "fill_inputs", "caller": "$owner", "skip_private": ["hold-08"]},
+        {"op": "publish", "caller": "$owner", "expect_error": "incomplete"},
+        {"op": "set_private", "caller": "$owner", "case_id": "hold-08", "refs": {"rubric_ref": "opaque-rubric-hold-08", "checker_ref": "opaque-checker-hold-08", "max_points": 4}},
+        {"op": "publish", "caller": "$owner", "expect_error": "incomplete"},
+        {"op": "set_private", "caller": "$owner", "case_id": "hold-08", "refs": {"rubric_ref": "opaque-rubric-hold-08", "checker_ref": "opaque-checker-hold-08", "max_points": 5}},
+        {"op": "publish", "caller": "$owner"},
+        {"op": "get_definition", "expect_paths": {"status": "published"}}
+      ]
+    },
+    {
+      "id": "draft-refuses-bad-format",
+      "setup": "none",
+      "steps": [
+        {"op": "draft", "caller": "$owner", "set": {"schema": "rsi.benchmark.v0"}, "expect_error": "unknown_schema"},
+        {"op": "draft", "caller": "$owner", "set": {"surprise": 1}, "expect_error": "unknown_field"},
+        {"op": "draft", "caller": "$owner", "set": {"cases.hold-08.partition": "train"}, "expect_error": "invalid_value"},
+        {"op": "draft", "caller": "$owner", "set": {"cases.hold-08.family": "family-z"}, "expect_error": "invalid_value"},
+        {"op": "draft", "caller": "$owner", "set": {"cases.hold-08.extra": 1}, "expect_error": "unknown_field"},
+        {"op": "draft", "caller": "$owner", "drop": ["cases.hold-08"], "expect_error": "invalid_value"},
+        {"op": "draft", "caller": "$owner", "set": {"families": ["family-a", "family-b"]}, "expect_error": "invalid_value"},
+        {"op": "draft", "caller": "$owner", "set": {"normalization": {"min": 0, "max": 1}}, "expect_error": "invalid_value"},
+        {"op": "draft", "caller": "$owner", "set": {"version": true}, "expect_error": "invalid_value"},
+        {"op": "draft", "caller": "$owner", "set": {"point_total": {"$float": "nan"}}, "expect_error": "invalid_value"},
+        {"op": "draft", "caller": "$owner", "set": {"arms": ["baseline", "baseline"]}, "expect_error": "invalid_value"},
+        {"op": "draft", "caller": "", "expect_error": "invalid_value"},
+        {"op": "list_benchmarks", "expect": []}
+      ]
+    },
+    {
+      "id": "public-private-separation",
+      "setup": "published",
+      "steps": [
+        {"op": "get_definition", "expect_no_private": true},
+        {"op": "snapshot", "expect_no_private": true},
+        {"op": "get_private", "caller": "$other", "expect_error": "ownership"},
+        {"op": "get_private", "caller": "$owner", "expect_private_cases": 20}
+      ]
+    },
+    {
+      "id": "draft-ownership",
+      "setup": "none",
+      "steps": [
+        {"op": "draft", "caller": "$owner"},
+        {"op": "set_public", "caller": "$other", "case_id": "train-01", "public_input": {"prompt": "p"}, "expect_error": "ownership"},
+        {"op": "set_public", "caller": "$owner", "case_id": "train-99", "public_input": {"prompt": "p"}, "expect_error": "unknown_case"},
+        {"op": "set_public", "caller": "$owner", "case_id": "train-01", "public_input": {"prompt": "p", "gold": "x"}, "expect_error": "unknown_field"},
+        {"op": "set_private", "caller": "$owner", "case_id": "train-01", "refs": {"rubric_ref": "r", "checker_ref": "c", "max_points": true}, "expect_error": "invalid_value"},
+        {"op": "publish", "caller": "$other", "expect_error": "ownership"},
+        {"op": "append", "row": {"case_id": "train-01", "repetition": 1, "arm": "baseline"}, "expect_error": "not_published"},
+        {"op": "aggregate", "expect_error": "not_published"}
+      ]
+    },
+    {
+      "id": "unknown-inputs-refused",
+      "setup": "published",
+      "steps": [
+        {"op": "append", "row": {"case_id": "train-01", "repetition": 1, "arm": "baseline", "set": {"schema": "rsi.benchmark.v2"}}, "expect_error": "unknown_schema"},
+        {"op": "append", "row": {"case_id": "train-01", "repetition": 1, "arm": "baseline", "set": {"benchmark_id": "other-bench"}}, "expect_error": "unknown_benchmark"},
+        {"op": "append", "row": {"case_id": "train-01", "repetition": 1, "arm": "baseline", "set": {"version": 2}}, "expect_error": "unknown_benchmark"},
+        {"op": "append", "row": {"case_id": "train-13", "repetition": 1, "arm": "baseline"}, "expect_error": "unknown_case"},
+        {"op": "append", "row": {"case_id": "train-01", "repetition": 1, "arm": "rival"}, "expect_error": "unknown_arm"},
+        {"op": "append", "row": {"case_id": "train-01", "repetition": 4, "arm": "baseline"}, "expect_error": "unknown_repetition"},
+        {"op": "append", "row": {"case_id": "train-01", "repetition": 0, "arm": "baseline"}, "expect_error": "unknown_repetition"},
+        {"op": "append", "row": {"case_id": "train-01", "repetition": true, "arm": "baseline"}, "expect_error": "invalid_value"},
+        {"op": "append", "row": {"case_id": "train-01", "repetition": 1, "arm": "baseline", "set": {"mystery": 1}}, "expect_error": "unknown_field"},
+        {"op": "append", "row": {"case_id": "train-01", "repetition": 1, "arm": "baseline", "drop": ["cost_usd"]}, "expect_error": "invalid_value"},
+        {"op": "append", "row": {"case_id": "train-01", "repetition": 1, "arm": "baseline", "set": {"validity": "MAYBE"}}, "expect_error": "invalid_value"},
+        {"op": "append", "row": {"case_id": "train-01", "repetition": 1, "arm": "baseline", "set": {"bundle_identity": "not-a-digest"}}, "expect_error": "invalid_value"},
+        {"op": "append", "row": {"case_id": "train-01", "repetition": 1, "arm": "baseline", "set": {"runtime.endpoints": []}}, "expect_error": "invalid_value"},
+        {"op": "append", "row": {"case_id": "train-01", "repetition": 1, "arm": "baseline", "set": {"runtime.extra": 1}}, "expect_error": "unknown_field"},
+        {"op": "get_definition_of", "benchmark_id": "other-bench", "version": 1, "expect_error": "unknown_benchmark"},
+        {"op": "snapshot", "expect_row_count": 0}
+      ]
+    },
+    {
+      "id": "fixed-identities-enforced",
+      "setup": "published",
+      "steps": [
+        {"op": "append", "row": {"case_id": "train-01", "repetition": 1, "arm": "baseline", "set": {"input_identity": "sha256:0000000000000000000000000000000000000000000000000000000000000000"}}, "expect_error": "identity_mismatch"},
+        {"op": "append", "row": {"case_id": "train-01", "repetition": 1, "arm": "baseline", "set": {"checker_identity": {"$checker_identity": "train-02"}}}, "expect_error": "identity_mismatch"},
+        {"op": "append", "row": {"case_id": "train-01", "repetition": 1, "arm": "baseline"}, "expect_seq": 1}
+      ]
+    },
+    {
+      "id": "append-only-and-duplicates",
+      "setup": "published",
+      "steps": [
+        {"op": "append", "row": {"case_id": "train-01", "repetition": 1, "arm": "baseline"}, "expect_seq": 1},
+        {"op": "snapshot", "save_as": "after-one", "expect_row_count": 1},
+        {"op": "append", "row": {"case_id": "train-02", "repetition": 1, "arm": "baseline", "set": {"run_receipt_id": "run-baseline-train-01-1"}}, "expect_error": "duplicate_run_receipt"},
+        {"op": "append", "row": {"case_id": "train-01", "repetition": 1, "arm": "baseline", "set": {"run_receipt_id": "run-second-try", "raw_points": 0}}, "expect_error": "duplicate_cell"},
+        {"op": "append", "row": {"case_id": "train-01", "repetition": 2, "arm": "baseline"}, "expect_seq": 2},
+        {"op": "assert_prefix", "saved": "after-one", "expect_row_count": 2}
+      ]
+    },
+    {
+      "id": "finite-known-accounting",
+      "setup": "published",
+      "steps": [
+        {"op": "append", "row": {"case_id": "train-01", "repetition": 1, "arm": "baseline", "set": {"cost_usd": true}}, "expect_error": "invalid_value"},
+        {"op": "append", "row": {"case_id": "train-01", "repetition": 1, "arm": "baseline", "set": {"cost_usd": {"$float": "nan"}}}, "expect_error": "invalid_value"},
+        {"op": "append", "row": {"case_id": "train-01", "repetition": 1, "arm": "baseline", "set": {"duration_s": {"$float": "inf"}}}, "expect_error": "invalid_value"},
+        {"op": "append", "row": {"case_id": "train-01", "repetition": 1, "arm": "baseline", "set": {"duration_s": -1}}, "expect_error": "invalid_value"},
+        {"op": "append", "row": {"case_id": "train-01", "repetition": 1, "arm": "baseline", "set": {"cost_usd": "0.5"}}, "expect_error": "invalid_value"},
+        {"op": "append", "row": {"case_id": "train-01", "repetition": 1, "arm": "baseline", "set": {"raw_points": {"$float": "nan"}}}, "expect_error": "invalid_value"},
+        {"op": "append", "row": {"case_id": "train-01", "repetition": 1, "arm": "baseline", "set": {"raw_points": false}}, "expect_error": "invalid_value"},
+        {"op": "append", "row": {"case_id": "train-01", "repetition": 1, "arm": "baseline", "set": {"raw_points": 6}}, "expect_error": "invalid_value"},
+        {"op": "append", "row": {"case_id": "train-01", "repetition": 1, "arm": "baseline", "set": {"cost_usd": null}}, "expect_error": "invalid_value"},
+        {"op": "append", "row": {"case_id": "train-01", "repetition": 1, "arm": "baseline", "set": {"outcome": "none"}}, "expect_error": "invalid_value"},
+        {"op": "append", "row": {"case_id": "train-01", "repetition": 1, "arm": "baseline", "set": {"validity": "INFRASTRUCTURE"}}, "expect_error": "invalid_value"},
+        {"op": "snapshot", "expect_row_count": 0}
+      ]
+    },
+    {
+      "id": "incomplete-matrix-is-invalid-not-zero",
+      "setup": "published",
+      "steps": [
+        {"op": "fill_matrix", "skip": ["candidate/hold-08/3"]},
+        {"op": "snapshot", "expect_row_count": 119},
+        {"op": "aggregate", "expect_paths": {"status": "INVALID", "expected_cells": 120, "arms": null}, "expect_len": {"missing_cells": 1, "invalid_cells": 0}}
+      ]
+    },
+    {
+      "id": "invalid-infrastructure-unknown-retained-and-invalid",
+      "setup": "published",
+      "steps": [
+        {"op": "fill_matrix", "overrides": {
+          "baseline/train-01/1": {"validity": "INVALID", "outcome": "none", "raw_points": null, "cost_usd": 0.5, "duration_s": 10},
+          "baseline/train-02/1": {"validity": "INFRASTRUCTURE", "outcome": "none", "raw_points": null, "cost_usd": null, "duration_s": null},
+          "candidate/hold-01/2": {"validity": "UNKNOWN_ACCOUNTING", "outcome": "none", "raw_points": null, "cost_usd": null, "duration_s": 10}}},
+        {"op": "snapshot", "expect_row_count": 120},
+        {"op": "aggregate", "expect_paths": {"status": "INVALID", "arms": null}, "expect_len": {"missing_cells": 0, "invalid_cells": 3}}
+      ]
+    },
+    {
+      "id": "non-valid-row-shape-refused",
+      "setup": "published",
+      "steps": [
+        {"op": "append", "row": {"case_id": "train-01", "repetition": 1, "arm": "baseline", "set": {"validity": "INFRASTRUCTURE", "outcome": "scored", "raw_points": 0, "cost_usd": null, "duration_s": null}}, "expect_error": "invalid_value"},
+        {"op": "append", "row": {"case_id": "train-01", "repetition": 1, "arm": "baseline", "set": {"validity": "UNKNOWN_ACCOUNTING", "outcome": "none", "raw_points": 0, "cost_usd": null, "duration_s": null}}, "expect_error": "invalid_value"},
+        {"op": "append", "row": {"case_id": "train-01", "repetition": 1, "arm": "baseline", "set": {"outcome": "task_failure"}}, "expect_error": "invalid_value"}
+      ]
+    },
+    {
+      "id": "complete-matrix-statistics-and-genuine-failure-zero",
+      "setup": "published",
+      "steps": [
+        {"op": "fill_matrix", "overrides": {
+          "candidate/train-01/1": {"outcome": "task_failure", "raw_points": null}}},
+        {"op": "aggregate", "expect_paths": {
+          "status": "COMPLETE", "expected_cells": 120,
+          "arms.baseline.partitions.train.mean_normalized": 100.0,
+          "arms.baseline.partitions.holdout.mean_normalized": 100.0,
+          "arms.baseline.total_cost_usd": 30.0,
+          "arms.baseline.total_duration_s": 600.0,
+          "arms.candidate.partitions.train.cases": 12,
+          "arms.candidate.partitions.train.mean_normalized": 97.2222222222,
+          "arms.candidate.partitions.holdout.mean_normalized": 100.0}}
+      ]
+    },
+    {
+      "id": "aggregate-requires-exact-bundle-and-runtime-identity",
+      "setup": "published",
+      "steps": [
+        {"op": "fill_matrix"},
+        {"op": "aggregate", "expected_override": {"candidate": {"bundle_identity": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}}, "expect_paths": {"status": "INVALID", "arms": null}, "expect_len": {"missing_cells": 60, "invalid_cells": 0}},
+        {"op": "aggregate", "expected_override": {"baseline": {"runtime.effort": "low"}}, "expect_paths": {"status": "INVALID", "arms": null}, "expect_len": {"missing_cells": 60, "invalid_cells": 0}},
+        {"op": "aggregate", "expected_override": {"candidate": null}, "expect_error": "invalid_value"},
+        {"op": "aggregate", "expected_override": {"rival": {"bundle_identity": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "runtime": {"route": "r", "endpoints": ["e"], "effort": "high"}}}, "expect_error": "unknown_arm"},
+        {"op": "aggregate", "expect_paths": {"status": "COMPLETE"}}
+      ]
+    }
+  ]
+}
+

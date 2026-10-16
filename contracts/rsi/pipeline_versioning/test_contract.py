@@ -167,6 +167,8 @@ def _run_scenario(make_world: Callable, vectors: Dict[str, Any], scenario: Dict[
             op, expect = step["op"], step.get("expect")
             tag = f"{name}[{i}:{op}]"
             before = fx.snapshot()
+            scope = step.get("only_changes")
+            outside = fx.snapshot_outside(scope) if scope else None
             entry = {"step": i, "op": op, "args": {k: v for k, v in step.items()
                                                    if k not in ("op", "expect")}}
             try:
@@ -200,6 +202,10 @@ def _run_scenario(make_world: Callable, vectors: Dict[str, Any], scenario: Dict[
             fails.extend(_generic_checks(op, out, tag))
             if after is not None and after != before:
                 fails.append(f"{tag}: call that must change nothing changed state")
+            if scope and fx.snapshot_outside(scope, since=outside) != outside:
+                fails.append(f"{tag}: changed state outside target {scope!r}")
+            if scope and fx.snapshot() == before:
+                fails.append(f"{tag}: reported a change but no state changed")
             if expect is None:
                 continue
             if "error" in expect:
@@ -325,6 +331,20 @@ class FakeConformanceTest(unittest.TestCase):
                 return out
             api.restore = restore
         self.assertTrue(any("preserves_existing_runs" in f for f in self._mutant_fails(patch)))
+
+    def test_vectors_detect_restore_touching_other_state(self):
+        def patch(api, fx):
+            orig = api.restore
+
+            def restore(target, vid, **kw):
+                out = orig(target, vid, **kw)
+                if out["changed"]:
+                    for name, t in api._host.targets.items():
+                        if name != target:
+                            t["unit"] = api._host.new_unit(name)
+                return out
+            api.restore = restore
+        self.assertTrue(any("outside target" in f for f in self._mutant_fails(patch)))
 
     def test_vectors_detect_aliased_reads(self):
         def patch(api, fx):

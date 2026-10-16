@@ -149,7 +149,7 @@ class NativeFixture:
         for path in hit:                  # an on-disk corruption of sealed bytes
             path.write_text(path.read_text(encoding="utf-8") + " ", encoding="utf-8")
 
-    def snapshot(self):
+    def _state(self):
         files = {str(p.relative_to(self.root)): _sha(p.read_bytes())
                  for base in (self.gen, self.tools) for p in sorted(base.rglob("*"))
                  if p.is_file()}
@@ -161,8 +161,27 @@ class NativeFixture:
                  for n in sorted(self.sf.agent_registry.list_names())}
         manifests = {n: repr(fb.manifest_hints(self.registry.get(n)))
                      for n in sorted(self.sf._graphs) if self.registry.get(n) is not None}
-        return json.dumps({"files": files, "graphs": graphs, "runs": runs, "roles": roles,
-                           "manifests": manifests}, sort_keys=True)
+        return {"files": files, "graphs": graphs, "runs": runs, "roles": roles,
+                "manifests": manifests}
+
+    def snapshot(self):
+        return json.dumps(self._state(), sort_keys=True)
+
+    def snapshot_outside(self, target, since=None):
+        """Everything except the target's own files, graph and manifest, and
+        the target roles absent from *since* (new bundle-specific roles).
+        Runs (status and pins), seals, tools, other targets and every role
+        that existed before, the target's retained old roles included, stay in."""
+        state = self._state()
+        own = {f"gen/{target}{s}" for s in (".yaml", ".roles.json", ".adoption.json")}
+        state["files"] = {k: v for k, v in state["files"].items() if k not in own}
+        state["graphs"].pop(target, None)
+        state["manifests"].pop(target, None)
+        if since is not None:
+            existed = json.loads(since)["roles"]
+            state["roles"] = {k: v for k, v in state["roles"].items()
+                              if k in existed or not k.startswith(target + pr._ROLE_SEP)}
+        return json.dumps(state, sort_keys=True)
 
     def close(self):
         self.sf._conn.close()

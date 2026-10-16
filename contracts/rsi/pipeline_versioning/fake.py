@@ -212,15 +212,24 @@ class FakeFixture:
     def tamper_seal(self, version_id: str) -> None:
         self._host.seals[version_id]["tampered"] = True
 
-    def snapshot(self) -> str:
-        return json.dumps({
+    def _state(self) -> Dict[str, Any]:
+        return {
             "tools": self._host.tools,
             "targets": {k: {"unit": t["unit"], "graphs": len(t["graphs"]),
                             "content": repr(t["content"])}
                         for k, t in self._host.targets.items()},
-            "runs": {k: [r["status"], r["graph_version"]] for k, r in self._host.runs.items()},
+            "runs": {k: [r["status"], r["graph_version"], repr(r["content"])]
+                     for k, r in self._host.runs.items()},
             "seals": {k: [s["physical_name"], s["tampered"], repr(s["content"])]
-                      for k, s in self._host.seals.items()}}, sort_keys=True)
+                      for k, s in self._host.seals.items()}}
+
+    def snapshot(self) -> str:
+        return json.dumps(self._state(), sort_keys=True)
+
+    def snapshot_outside(self, target: str, since: Optional[str] = None) -> str:
+        state = self._state()
+        state["targets"].pop(target, None)
+        return json.dumps(state, sort_keys=True)
 
     def close(self) -> None:
         pass

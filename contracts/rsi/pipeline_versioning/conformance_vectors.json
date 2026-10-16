@@ -3344,6 +3344,7 @@
      "target": "gen_vt",
      "version_id": "$id:C_A_prompt",
      "expected_current": "$rec:cas0",
+     "only_changes": "gen_vt",
      "expect": {
       "result_subset": {
        "version_id": "$id:C_A_prompt",
@@ -3436,6 +3437,7 @@
      "target": "gen_vt",
      "version_id": "$id:C_A",
      "expected_current": "$rec:cas1",
+     "only_changes": "gen_vt",
      "expect": {
       "result_subset": {
        "version_id": "$id:C_A",
@@ -3754,6 +3756,7 @@
      "target": "gen_vt",
      "version_id": "$id:C_A",
      "expected_current": "$rec:cas",
+     "only_changes": "gen_vt",
      "expect": {
       "result_subset": {
        "version_id": "$id:C_A",

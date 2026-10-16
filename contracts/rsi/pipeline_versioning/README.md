@@ -126,11 +126,16 @@ The fixture performs host actions outside the API: `install_tool`,
 `remove_tool`, `register` (ordinary generated config; the vector also states the
 content it resolves to, which only the fake uses), `start_run`, `pause_run`,
 `complete_run`, `observe_runs` (status, pinned graph version, resolved prompts),
-`claim_prompt`, `tamper_seal` and `snapshot` (all observable host state).
+`claim_prompt`, `tamper_seal`, `snapshot` (all observable host state) and
+`snapshot_outside(target, since=None)` (all of it except the target's own
+files/graph/manifest and target roles absent from `since`).
 Vectors: `units` (registered input, `$self` = target), `contents`, pinned
 `ids`/`canonical`, `same_id`, `distinct_ids`, `domain_refusals`, `scenarios`.
 Step grammar: `expect` is `{error}`, `{result}` (exact, typed) or
-`{result_subset}`; `unchanged: true` requires an identical snapshot; `record`
+`{result_subset}`; `unchanged: true` requires an identical snapshot;
+`only_changes: <target>` requires an identical `snapshot_outside` (runs, seals,
+tools, other targets and every pre-existing role, retained old roles included)
+and a changed full snapshot; `record`
 saves a result field as `$rec:<name>`; `$id:K`, `$content:K`, `$pin:<run>`,
 `$zero`; `{"$float": "nan"|"inf"|"-inf"}`, `{"$tuple": [...]}`,
 `{"$bytes": "..."}` encode non-JSON values. Every refusal is snapshot-checked.

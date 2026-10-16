@@ -850,7 +850,7 @@ def test_context_retains_active_run_checkpoint_attempt_and_candidate_without_mut
     assert "attempt_id=attempt-candidate-8 artifact_ref=candidate-sha-8" in context
     assert (StateStub.lines, StateStub.nodes, StateStub.revision) == before
     assert {request["params"]["name"] for request in StateStub.requests} == {
-        "state_graph_read", "state_graph_help",
+        "state_graph_read", "state_graph_help", "driver_whoami",
     }
 
 

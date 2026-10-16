@@ -4414,16 +4414,25 @@ class MetaAgent:
             return {"error": f"{config_name} is a built-in config — only gen_* pipelines "
                              f"are editable here. Edit the repo file through the normal "
                              f"code tools if that is really what you mean."}
-        text = path.read_text(encoding="utf-8")
-        occurrences = text.count(old_str)
-        if occurrences == 0:
-            return {"error": "old_str not found in the file (read it with config_read first)."}
-        if occurrences > 1:
-            return {"error": f"old_str appears {occurrences} times — include more context "
-                             f"so it identifies exactly one place."}
-        path.write_text(text.replace(old_str, new_str), encoding="utf-8")
+        from core import pipeline_frozen_bundle as fb
+        sf = get_skillflow()
+        # A recorded RSI bundle or seal is refused before anything is written,
+        # under the exclusion adoption holds: its roles serve pinned runs.
+        with fb.exclusion(sf):
+            refusal = (fb.edit_block(generated_configs_dir(), config_name)
+                       or fb.edit_block(generated_configs_dir(), path.name.split(".", 1)[0]))
+            if refusal:
+                return {"error": f"{refusal} — nothing written."}
+            text = path.read_text(encoding="utf-8")
+            occurrences = text.count(old_str)
+            if occurrences == 0:
+                return {"error": "old_str not found in the file (read it with config_read first)."}
+            if occurrences > 1:
+                return {"error": f"old_str appears {occurrences} times — include more context "
+                                 f"so it identifies exactly one place."}
+            path.write_text(text.replace(old_str, new_str), encoding="utf-8")
+            reloaded = reload_generated_pipeline(sf, get_config_registry(), config_name)
         result = {"config_name": config_name, "path": str(path), "edited": True}
-        reloaded = reload_generated_pipeline(get_skillflow(), get_config_registry(), config_name)
         if reloaded.get("error"):
             # The edit stands but the graph no longer loads — say so loudly; the
             # next drive would otherwise run the last good version and look fine.
@@ -5446,6 +5455,11 @@ class MetaAgent:
             if not gy.exists():
                 return {"error": f"edit_target '{edit_target}' not found "
                                  f"(no {edit_target}.yaml). Generate it first."}
+            # Its registration would refuse anyway; say so before a forge run.
+            from core import pipeline_frozen_bundle as fb
+            refusal = fb.edit_block(generated_configs_dir(), edit_target)
+            if refusal:
+                return {"error": f"edit_target {refusal}"}
             # De-namespace the baseline so the forge edits in BARE role-name space;
             # the host re-applies the `<config>__` namespace exactly once at register
             # time. Feeding namespaced names back in makes the emitter echo them,

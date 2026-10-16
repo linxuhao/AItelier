@@ -19,8 +19,8 @@ from typing import Any
 
 from skillflow import SkillFlow
 from skillflow.exceptions import (GraphValidationError, IsolationUnavailable,
-                                  StaleClaimFenced, TerminalRunFenced,
-                                  ToolArgumentsUnavailable)
+                                  SkillFlowError, StaleClaimFenced,
+                                  TerminalRunFenced, ToolArgumentsUnavailable)
 from skillflow.identity import owner_is_dead, worker_identity
 
 from core.tool_routes import EXECUTOR_TOOLS, graph_identity_violations, spoofed_slot_keys
@@ -159,6 +159,64 @@ class AItelierSkillFlow(SkillFlow):
         if problems:
             raise GraphValidationError(problems)
         return super().register_graph(graph)
+
+    def create_run(self, graph_name: str, *args, **kwargs) -> str:
+        """Refuse a new run of a target whose bundle adoption is unreconciled,
+        or of a recorded whole bundle this process does not actually serve.
+
+        Every driver (launcher, scheduler, meta agent) creates runs here, under
+        the same lock adopt_bundle/reconcile_adoption hold, so a pending or
+        unreadable adoption descriptor, or a recorded unit left on defaults or
+        missing its frozen roles, blocks that target at this one ingress.
+        """
+        from core.pipeline_frozen_bundle import launch_block
+        with self._lock:
+            blocked = launch_block(graph_name, sf=self)
+            if blocked:
+                raise SkillFlowError(blocked)
+            return super().create_run(graph_name, *args, **kwargs)
+
+    def _refuse_unserved_bundle(self, run_id: str, action: str) -> None:
+        """Refuse to re-admit an EXISTING run of a recorded whole bundle that
+        this process does not actually serve, before any effect on the run.
+
+        The same ``launch_block`` as ``create_run``, for the run's own graph.
+        A pinned run keeps its graph version but its roles and manifest are
+        resolved live, so a target left mixed (a boot rolled back to build
+        defaults without its frozen roles, a pending adoption, a drifted
+        manifest) would otherwise hand a paused run a claim with no role. The
+        run, its pin and its step rows stay exactly as they are until reload or
+        ``reconcile_adoption`` serves a recorded whole bundle. Takes the
+        registration/launch exclusion; callers that must keep it through their
+        own state change hold ``self._lock`` around both.
+        """
+        import contextlib
+        from core.pipeline_frozen_bundle import launch_block
+        with getattr(self, "_lock", None) or contextlib.nullcontext():
+            run = self.get_run(run_id)
+            blocked = run and launch_block(run.get("graph_name") or "", sf=self)
+        if blocked:
+            raise SkillFlowError(f"{action} of run {run_id} refused: {blocked}")
+
+    def resume_run(self, run_id: str) -> None:
+        with self._lock:
+            self._refuse_unserved_bundle(run_id, "resume")
+            super().resume_run(run_id)
+
+    def approve_checkpoint(self, run_id: str) -> str:
+        with self._lock:
+            self._refuse_unserved_bundle(run_id, "checkpoint approval")
+            return super().approve_checkpoint(run_id)
+
+    def reject_checkpoint(self, run_id: str, *args, **kwargs) -> None:
+        with self._lock:
+            self._refuse_unserved_bundle(run_id, "checkpoint rejection")
+            return super().reject_checkpoint(run_id, *args, **kwargs)
+
+    def reactivate_run(self, run_id: str) -> None:
+        with self._lock:
+            self._refuse_unserved_bundle(run_id, "reactivation")
+            return super().reactivate_run(run_id)
 
     def _execute_tool_inline(self, tool_node, *, run_id: str = "",
                              graph_name: str = "") -> dict:
@@ -745,6 +803,9 @@ class AItelierSkillFlow(SkillFlow):
         return True
 
     def advance_run(self, run_id: str):
+        # First, before input tracing, isolation, stale-claim recovery or an
+        # inline tool: a caller that never called resume_run gets no bypass.
+        self._refuse_unserved_bundle(run_id, "advance")
         from core.review_input_bundle import guard_run_inputs
         guard_run_inputs(self, run_id, "advance")
         self._admit_source_identity(run_id)
@@ -762,9 +823,15 @@ class AItelierSkillFlow(SkillFlow):
         return super().advance_run(run_id)
 
     def claim_next_step(self, run_id: str):
+        self._refuse_unserved_bundle(run_id, "claim")       # before any effect
         from core.review_input_bundle import guard_run_inputs
         guard_run_inputs(self, run_id, "claim")
         self._admit_source_identity(run_id)
         if self._operation_blocks_reentry(run_id, "claim_before_admission"):
             return None
-        return super().claim_next_step(run_id)
+        # SkillFlow binds the step's role inside one transaction under this
+        # lock; checking again under it leaves no adoption between the check
+        # and the role the claim carries.
+        with self._lock:
+            self._refuse_unserved_bundle(run_id, "claim")
+            return super().claim_next_step(run_id)

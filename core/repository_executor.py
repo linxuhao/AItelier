@@ -39,6 +39,10 @@ class NodeRefused(IsolationUnavailable):
     """A Node request outside the closed profiles: nothing was executed."""
 
 
+class PreparationCancelled(IsolationUnavailable):
+    """The launch's client went away while its Git metadata was prepared."""
+
+
 # ── normal Node gate profiles ──────────────────────────────────────────────
 #
 # Both profiles run the PINNED upstream npm (NODE_NPM_VERSION under
@@ -342,7 +346,9 @@ def _run_prep(command: list[str], docker: str, name: str, conn=None) -> str:
 
     ``conn`` (the launcher's client socket) becoming readable is cancellation,
     as in the launcher's own wait. Any exit from here removes the container
-    by its own name: killing the `docker run` client alone leaves it running.
+    by its own name: killing the `docker run` client alone leaves it running,
+    and removing it before that client is gone can let the client go on to
+    create it afterwards — so the client is stopped first.
     """
     import select
     import time
@@ -359,25 +365,26 @@ def _run_prep(command: list[str], docker: str, name: str, conn=None) -> str:
                     raise RuntimeError(f"Git metadata preparation exceeded its "
                                        f"{GIT_PREP_DEADLINE}s deadline")
                 if conn is not None and select.select([conn], [], [], 0)[0]:
-                    raise RuntimeError("client disconnected during Git metadata preparation")
+                    raise PreparationCancelled("client disconnected during Git metadata preparation")
         if proc.returncode:
             raise RuntimeError(f"Git metadata preparation failed: {stderr.strip()[-300:]}")
         return stdout
     finally:
         try:
-            subprocess.run([docker, "rm", "-f", name], stdout=subprocess.DEVNULL,
-                           stderr=subprocess.DEVNULL, timeout=10)
-        finally:
             if proc.poll() is None:
                 proc.kill()
                 proc.wait(timeout=10)
+        finally:
+            subprocess.run([docker, "rm", "-f", name], stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=10)
 
 
 def private_git(repo: Path, dest: Path, common: Path | None = None, *, image: str,
                 docker: str = "docker", conn=None) -> tuple[list[str], dict]:
     """Docker mounts giving ``repo`` its private Git metadata, built in ``dest``.
 
-    Never raises: when no metadata can be provided, ``info`` says why, a
+    Raises only `PreparationCancelled` (the launch must not go on). When no
+    metadata can be provided, ``info`` says why, a
     direct repository's own `.git` is still masked by an empty directory and
     a linked worktree's pointer keeps leading nowhere, so git in the
     container answers "not a git repository". A repository without `.git`
@@ -412,6 +419,8 @@ def private_git(repo: Path, dest: Path, common: Path | None = None, *, image: st
             raise RuntimeError(f"private metadata is {size} bytes (> {budget})")
         info = {"provided": True, "head": sha, "branch": branch,
                 "object_bytes": int(used.split()[-1]), "metadata_bytes": size}
+    except PreparationCancelled:
+        raise
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
         shutil.rmtree(private, ignore_errors=True)
         info = {"provided": False, "reason": str(exc)[:500]}

@@ -313,7 +313,7 @@ def test_client_disconnect_cancels_preparation(tmp_path, docker):
     client, server = socket.socketpair()
     client.close()
     started = time.monotonic()
-    with pytest.raises(RuntimeError, match="client disconnected"):
+    with pytest.raises(executor.PreparationCancelled):
         executor._run_prep(["sleep", "30"], docker, "prep-y", server)
     server.close()
     assert time.monotonic() - started < 3
@@ -366,6 +366,20 @@ def test_launcher_mounts_private_git_and_removes_it(linked, source, tmp_path, mo
     assert f"{seen['dir'] / 'pointer'}:{linked / '.git'}:ro" in argv
     assert f"{seen['dir'] / 'git'}:{executor.GIT_CONTAINER_DIR}:ro" in argv
     assert seen["existed"] and not seen["dir"].exists()
+
+
+def test_launcher_cancelled_preparation_starts_no_test_container(linked, source, tmp_path,
+                                                                  monkeypatch, docker):
+    cfg, request = _launcher(tmp_path, linked, "worktree", source)
+    monkeypatch.setattr(host.shutil, "which", lambda _: docker)
+
+    def cancelled(*args, **kwargs):
+        raise executor.PreparationCancelled("client disconnected during Git metadata preparation")
+    monkeypatch.setattr(executor, "_run_prep", cancelled)
+    monkeypatch.setattr(host, "_run_docker", lambda *a, **k: pytest.fail("test container started"))
+    response = host.handle_request(cfg, json.dumps(request).encode())
+    assert response == {"ok": False, "error": "client disconnected during Git metadata preparation"}
+    assert list((Path(cfg["aitelier_home"]) / "cpu-git").iterdir()) == []
 
 
 def test_host_reply_git_reaches_the_caller(monkeypatch):

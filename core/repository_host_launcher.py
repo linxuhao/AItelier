@@ -154,7 +154,7 @@ def validate_request(cfg: dict, request: dict) -> dict:
         from core.coding_shell import validate_host_grant
         if type(request.get("timeout")) is not int or not 1 <= request["timeout"] <= 7200:
             raise LaunchRefused("timeout must be an integer within1..7200")
-        return validate_host_grant(cfg, request, repo, project_id)
+        return validate_host_grant(cfg, request, repo, project_id, LaunchRefused)
     if "coding_grant" in request:
         raise LaunchRefused("coding grant is only valid for the closed coding shell profile")
     if "profile" in request:

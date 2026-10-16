@@ -126,31 +126,30 @@ def _read_rows(path, sql, args):
         return [dict(r) for r in conn.execute(sql, args).fetchall()]
 
 
-def validate_host_grant(cfg, request, repo, project_id):
+def validate_host_grant(cfg, request, repo, project_id, refusal):
     """Read existing ledgers only. The socket already authenticates backend UID."""
-    from core.repository_host_launcher import LaunchRefused
     fields = {"run_id", "project_id", "graph_name", "graph_version", "graph_digest", "step_id",
               "step_instance_id", "claim_epoch", "version", "claimed_by", "repo", "source_repo",
               "base_sha", "command_sha256", "admission_id", "admission_owner"}
     grant = request.get("coding_grant")
     if not isinstance(grant, dict) or set(grant) != fields:
-        raise LaunchRefused("coding shell requires a complete host grant")
+        raise refusal("coding shell requires a complete host grant")
     engine = cfg.get("coding_shell_engine_db")
     expected_entry = cfg.get("coding_shell_entry_sha256")
     if not isinstance(engine, str) or not Path(engine).is_absolute() or not expected_entry:
-        raise LaunchRefused("coding shell requires operator-pinned engine DB and entry Source")
+        raise refusal("coding shell requires operator-pinned engine DB and entry Source")
     if hashlib.sha256(Path(cfg["executor_entry"]).read_bytes()).hexdigest() != expected_entry:
-        raise LaunchRefused("coding shell entry Source differs from operator pin")
+        raise refusal("coding shell entry Source differs from operator pin")
     args = request.get("args")
     if (not isinstance(args, list) or len(args) != 3 or args[:2] != ["/bin/sh", "-c"]
             or not isinstance(args[2], str) or not args[2] or "\0" in args[2]
             or len(args[2].encode()) > 65536
             or hashlib.sha256(args[2].encode()).hexdigest() != grant["command_sha256"]):
-        raise LaunchRefused("coding shell command differs from its host admission")
+        raise refusal("coding shell command differs from its host admission")
     if (request.get("writable_dirs") or request.get("relay_socket") or request.get("report_dir")
             or request.get("import_module") or request.get("pytest_timeout")
             or "workdir" in request or "npm_cache" in request):
-        raise LaunchRefused("coding shell accepts no caller mounts, relay, environment or workdir")
+        raise refusal("coding shell accepts no caller mounts, relay, environment or workdir")
     try:
         runs = _read_rows(engine, "SELECT id,status,project_id,current_node,graph_name,graph_version,graph_digest,cancel_requested_at "
                           "FROM skillflow_runs WHERE id=?", (request["run_id"],))
@@ -188,7 +187,7 @@ def validate_host_grant(cfg, request, repo, project_id):
                 or adm["kind"] != ADMISSION_KIND or adm["detail"] != _detail(detail)):
             raise ValueError("coding shell host admission is absent, pending or foreign")
     except (sqlite3.Error, OSError, KeyError, ValueError, TypeError) as exc:
-        raise LaunchRefused("coding shell host grant unavailable: " + str(exc)) from exc
+        raise refusal("coding shell host grant unavailable: " + str(exc)) from exc
     return {"profile": PROFILE, "args": args, "run_id": request["run_id"],
             "project_id": project_id, "repo": str(repo), "base_sha": grant["base_sha"],
             "timeout": request["timeout"], "writable_dirs": [], "relay_socket": "",

@@ -169,6 +169,7 @@ def test_four_editors_roundtrip_and_real_old_new_claims(world):
     fx.mp.setattr(deps, '_skillflow_instance', fx.sf)
     fx.mp.setattr(deps, '_config_registry_instance', fx.registry)
     assert 'gen_vt' in pr.load_generated_configs(fx.sf, fx.registry)
+    api = PipelineVersions(fx.sf, fx.registry, fx.gen)
     assert claim(fx, 'A')['config']['system_prompt'] == 'OLD MAKER\n'
     assert claim(fx, 'B')['config']['system_prompt'] == '新版本\nλ\n'
     assert claim(fx, 'C')['model'] == 'pro'

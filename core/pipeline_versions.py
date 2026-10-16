@@ -42,6 +42,22 @@ def resolve_active(target, graph, role):
 class PipelineVersions(NativeVersions):
     """Application-owned coordinator; optimizer derive_candidate is unchanged."""
 
+    def list_versions(self):
+        # A removed marker must not turn corrupted catalog companions into an
+        # uncataloged target/no-op. Validate every member of the seal namespace,
+        # including incomplete triples, before selecting any success branch.
+        for suffix in ('.yaml', '.roles.json', '.bundle.json'):
+            for path in self._dir.glob(c.SEAL_PREFIX + 'v*' + suffix):
+                physical = path.name[:-len(suffix)]
+                if c.PHYSICAL_RE.fullmatch(physical):
+                    self._verified(physical)
+        return super().list_versions()
+
+    def capture(self, target):
+        with fb.exclusion(self._sf):
+            self.list_versions()
+            return super().capture(target)
+
     def _healthy(self, target):
         if fb.is_sealed_name(target):
             raise c.UnsupportedContent("sealed bundle is immutable")

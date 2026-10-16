@@ -12,7 +12,7 @@ This is a syntax check, not project-defined ESLint rules or formatting.
 TypeScript are not supported. An empty parsed program is valid. A glob that
 selects no files is unmeasured and fails at the host lint boundary.
 
-SkillFlow 1.5.91 supplies explicit `run_id`, `step_id`, and `project_root` to
+SkillFlow 1.5.92 supplies explicit `run_id`, `step_id`, and `project_root` to
 the backend through native lint and StepValidator. The host does not infer
 identity from a path or current session. Its existing launcher independently
 checks the configured read-only run ownership record, exact repository root,
@@ -36,9 +36,9 @@ project binary, network installer, backend subprocess or direct Docker fallback.
 
 The operator must supply an immutable `node_executor_image` containing that
 reviewed package and enable the existing owned launcher. A Source change or
-packaged tool does not activate a deployment. SDK 1.5.91 is an exact public
+packaged tool does not activate a deployment. SDK 1.5.92 is an exact public
 pin; the running SDK 1.5.90 deployment is not upgraded by this Source change.
-An optional SDK `details` result dictionary preserves the actual callback's
+The optional SDK 1.5.92 `details` result dictionary preserves the actual callback's
 `aitelier_javascript_lint` receipt, including bytes digest, bare result, runtime
 versions and explicit context. The host requires a completed parser receipt
 for a JavaScript pass. This is result provenance, never authorization. The
@@ -53,3 +53,10 @@ time guarantee. Existing acknowledged-container cleanup and disconnect
 handling are reused. An unknown CREATE acknowledgment remains non-pass and
 can leave a late container for observation; this change does not claim that
 such containers are impossible.
+
+The caller retains its declared failure policy: for example, an existing
+`on_failure: warn` may continue a pipeline after a measured lint failure.
+A syntax-only result is not project-specific ESLint rule validation or a
+whole-project/D4 acceptance result. Native file selection and JSON manifest
+reading remain in the SDK; only supported JavaScript parser execution is sent
+to the owned child. Other extensions are not claimed as these measurements.

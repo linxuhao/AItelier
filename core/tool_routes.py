@@ -13,7 +13,8 @@ the caller's own process with the caller's environment, so it is served by
 ``native_pytest`` below, which sends the same command to the owned disposable
 CPU executor (``core.repository_executor``) used by ``run_tests`` and
 ``focused_check``. Native ``lint`` retains its engine dispatch but rejects an
-empty result set rather than treating all([]) as a measured pass.
+empty result set rather than treating all([]) as a measured pass, and requires
+actual owned-parser result details for every JavaScript pass.
 
 The route is applied in ``load_fn`` on every call, AFTER the base loader's
 cache. That ordering is the point: ``ToolLoader.add_tools_dir`` (which

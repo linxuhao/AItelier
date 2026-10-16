@@ -22,7 +22,12 @@ never instructions:
   index settlement under an owned ``index.lock``;
 * config inspection and native operations on one repository serialise on a
   short kernel lock keyed by its validated common Git directory. Nested
-  trusted callers in the same thread reuse the held lock.
+  trusted callers in the same thread reuse the held lock. Transports, worktree
+  registration/removal and the backend's own remote-config writes refuse to
+  run unless the caller holds it;
+* a local transport's peer (the other repository's receive-pack/upload-pack)
+  runs with the same profile, named explicitly, because Git does not pass
+  command-line configuration to it.
 
 What cannot be done with that closed set and an allowed transport is refused
 explicitly (``GitRefused``); nothing falls back to the callback-capable
@@ -38,6 +43,7 @@ import hashlib
 import os
 import posixpath
 import re
+import shlex
 import shutil
 import stat
 import struct
@@ -56,11 +62,18 @@ class GitRefused(RuntimeError):
 _SAFE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 _GIT = shutil.which("git", path=_SAFE_PATH) or "git"
 _HOME = "/nonexistent-aitelier-closed-git-home"
+# Signing is never performed by the backend. Every signature program setting
+# names this nonexistent path, so even a signing or verification route the
+# switches below miss cannot reach a repository-selected program.
+_NO_SIGNER = f"{_HOME}/signing-is-never-performed-by-the-backend"
 
 # Command-line configuration is read after every repository file, so these win
 # over anything a checkout carries. `credential.helper=` empties the helper
 # list (including URL-scoped repository helpers); transport re-adds only the
-# host's own helper after it.
+# host's own helper after it. The program-valued keys of Git's own catalogue
+# (`git help --config`) are each either overridden here or reached only by
+# commands, transports or remote settings this module refuses; the derivation
+# is kept as a test (test_closed_backend_git_r2).
 _FIXED_CONFIG = (
     "core.hooksPath=/dev/null",
     "core.fsmonitor=false",
@@ -72,7 +85,14 @@ _FIXED_CONFIG = (
     "credential.helper=",
     "commit.gpgSign=false",
     "tag.gpgSign=false",
+    # Push certificates are signed by gpg.program too; --no-verify only skips pre-push.
+    "push.gpgSign=false",
     "log.showSignature=false",
+    f"gpg.program={_NO_SIGNER}",
+    f"gpg.openpgp.program={_NO_SIGNER}",
+    f"gpg.x509.program={_NO_SIGNER}",
+    f"gpg.ssh.program={_NO_SIGNER}",
+    f"gpg.ssh.defaultKeyCommand={_NO_SIGNER}",
     "diff.external=",
     "gc.auto=0",
     "maintenance.auto=false",
@@ -80,8 +100,18 @@ _FIXED_CONFIG = (
     "fetch.writeCommitGraph=false",
     "submodule.recurse=false",
     "push.recurseSubmodules=no",
+    # Negotiation would start a child fetch whose remote side gets no closed peer.
+    "push.negotiate=false",
     "protocol.allow=never",
 )
+
+# A local transport starts the OTHER repository's receive-pack/upload-pack via
+# the shell, and Git strips GIT_CONFIG_PARAMETERS from that child: the profile
+# above does not reach it, and the receiving repository's own hooks,
+# alternate-refs command and push-to-deploy checkout (its filters) would run.
+# The peer is therefore named explicitly with the same profile, never deploys
+# into a working tree and never starts gc.
+_LOCAL_PEER_CONFIG = ("receive.denyCurrentBranch=refuse", "receive.autogc=false")
 
 _TRANSPORT_PASSTHROUGH = (
     "AITELIER_GITHUB_TOKEN_FILE", "SSL_CERT_FILE", "SSL_CERT_DIR",
@@ -141,6 +171,25 @@ _RENDERING = ("-p", "-u", "--patch", "--stat", "--numstat", "--shortstat",
               "--name-status", "--name-only", "--cc", "-c", "-m")
 
 
+# Transport options that name a program, sign, or recurse into other repositories.
+_TRANSPORT_PROGRAM_OPTIONS = ("--receive-pack", "--upload-pack", "--exec", "--signed",
+                              "--sign", "--recurse-submodules", "--config", "--template")
+_BUILTIN_FORMATS = frozenset({"oneline", "short", "medium", "full", "fuller",
+                              "reference", "email", "raw", "mboxrd"})
+
+
+def _format_is_safe(value: str) -> bool:
+    """A --pretty/--format value that cannot verify a signature.
+
+    `%G` placeholders verify signatures through gpg.program; a name that is not
+    a built-in format is looked up in repository `pretty.<name>` aliases.
+    """
+    if "%G" in value:
+        return False
+    return (value.startswith(("format:", "tformat:")) or "%" in value
+            or value in _BUILTIN_FORMATS)
+
+
 def _validate(args: tuple[str, ...], *, transport: bool) -> None:
     if not args:
         raise GitRefused("empty Git command")
@@ -149,6 +198,11 @@ def _validate(args: tuple[str, ...], *, transport: bool) -> None:
     if sub in _TRANSPORT:
         if not transport:
             raise GitRefused(f"git {sub} is a transport; use the closed transport entry")
+        for a in rest:
+            if (a in ("-c", "-u") or (a.startswith(_TRANSPORT_PROGRAM_OPTIONS)
+                                      and a not in ("--no-recurse-submodules", "--template="))):
+                raise GitRefused(f"git {sub} {a.split('=', 1)[0]} names a program, signs or "
+                                 f"recurses; the closed transport sets these itself")
         return
     if sub not in _METADATA:
         raise GitRefused(
@@ -158,6 +212,16 @@ def _validate(args: tuple[str, ...], *, transport: bool) -> None:
         for a in rest:
             if a in _RENDERING or any(a.startswith(p + "=") for p in _RENDERING if p.startswith("--")):
                 raise GitRefused(f"git {sub} {a} renders content through configurable programs")
+        formats = [a.split("=", 1)[1] for a in rest if a.startswith(("--pretty=", "--format="))]
+        if "--pretty" in rest or "--format" in rest or not all(map(_format_is_safe, formats)):
+            raise GitRefused(f"git {sub}: this format can verify signatures through a "
+                             f"configured program")
+        if sub == "log" and not formats and "--oneline" not in rest:
+            raise GitRefused("git log needs an explicit format: repository format.pretty "
+                             "could select signature verification")
+    elif sub == "cat-file":
+        if any(a in ("--textconv", "--filters") or a.startswith("--path") for a in rest):
+            raise GitRefused("git cat-file may only read raw objects (no textconv/filters)")
     elif sub == "hash-object":
         if "--no-filters" not in rest or any(a.startswith("--path") for a in rest):
             raise GitRefused("git hash-object must hash raw bytes (--no-filters, no --path)")
@@ -207,15 +271,38 @@ def _argv(args, *, git_dir=None, work_tree=None, extra_config=()) -> list[str]:
     return argv + list(args)
 
 
+def _local_peer(program: str) -> str:
+    """The shell command a local transport runs in the other repository."""
+    return shlex.join(_argv((program,), extra_config=_LOCAL_PEER_CONFIG))
+
+
+def _needs_held_lock(args) -> bool:
+    """Native operations whose safety rests on a configuration preflight, and the
+    backend's own writers of the configuration those preflights read."""
+    sub, verb = args[0], (args[1] if len(args) > 1 else "")
+    return (sub in ("push", "fetch") or (sub == "remote" and verb in ("add", "set-url"))
+            or (sub == "worktree" and verb in ("add", "remove")))
+
+
 def run(cwd, *args: str, check: bool = False, text: bool = True, input=None,
         stdin=None, git_dir=None, work_tree=None, index_file=None,
         identity: dict | None = None, timeout: float = 300,
         _transport: tuple[str, tuple[str, ...]] | None = None) -> subprocess.CompletedProcess:
     """Run ONE closed-profile Git command. Raises GitRefused before running anything else."""
     _validate(tuple(args), transport=_transport is not None)
+    if _needs_held_lock(args):
+        key = common_identity(cwd)
+        if key not in (getattr(_held, "keys", None) or {}):
+            raise GitRefused(
+                f"git {' '.join(args[:2])} writes or depends on configuration a preflight "
+                f"reads; it runs only inside repo_lock for {key[0]}")
     if _transport is not None:
         protocols, extra = _transport
         env = closed_env(protocols=protocols, transport=True)
+        if protocols == "file":
+            peer = ("--receive-pack=" + _local_peer("receive-pack") if args[0] == "push"
+                    else "--upload-pack=" + _local_peer("upload-pack"))
+            args = (args[0], peer, *args[1:])
     else:
         extra = ()
         env = closed_env()
@@ -588,6 +675,16 @@ def entry_from_stat(path: str, mode: int, sha: str, st: os.stat_result | None) -
         dev=st.st_dev, ino=st.st_ino, uid=st.st_uid, gid=st.st_gid, size=st.st_size)
 
 
+def _write_all(fd: int, data: bytes) -> None:
+    """Write every byte or raise; os.write may legitimately write fewer."""
+    view = memoryview(data)
+    while view:
+        n = os.write(fd, view)
+        if n <= 0:
+            raise OSError(errno.EIO, "write made no progress")
+        view = view[n:]
+
+
 class IndexLock:
     """An owned ``index.lock``: created exclusively, installed by rename, never stolen."""
 
@@ -605,6 +702,7 @@ class IndexLock:
         st = os.fstat(self.fd)
         self.identity = (st.st_dev, st.st_ino)
         self.done = False
+        self.staged = False
 
     def _ours(self) -> bool:
         try:
@@ -613,11 +711,23 @@ class IndexLock:
             return False
         return (st.st_dev, st.st_ino) == self.identity
 
-    def install(self, data: bytes) -> None:
-        os.write(self.fd, data)
+    def stage(self, data: bytes) -> None:
+        """Write the complete index into the lock and sync it, not yet visible.
+
+        A short or failed write raises here, so a caller that stages before
+        moving a ref refuses with the ref and the live index unchanged.
+        """
+        _write_all(self.fd, data)
         os.fsync(self.fd)
         os.close(self.fd)
         self.fd = None
+        self.staged = True
+
+    def install(self, data: bytes | None = None) -> None:
+        if data is not None:
+            self.stage(data)
+        if not self.staged:
+            raise RuntimeError("no complete index was staged; refusing to install the lock")
         if not self._ours():
             raise RuntimeError("index.lock was replaced while held; refusing to install it")
         os.rename(self.path, self.target)
@@ -901,10 +1011,7 @@ class WorkTree:
                 fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
                              0o755 if mode == 0o100755 else 0o644, dir_fd=pfd)
                 try:
-                    view = memoryview(data)
-                    while view:
-                        n = os.write(fd, view)
-                        view = view[n:]
+                    _write_all(fd, data)
                     os.fchmod(fd, 0o755 if mode == 0o100755 else 0o644)
                 finally:
                     os.close(fd)
@@ -1128,6 +1235,16 @@ def _cas_ref(top, ref: str, new: str, old: str | None, reason: str) -> None:
                            f"({res.stderr.strip()[:200]})")
 
 
+def _install_after_ref(lock: IndexLock, head: str) -> None:
+    """Rename the staged index into place after the ref moved; say so if that fails."""
+    try:
+        lock.install()
+    except (OSError, RuntimeError) as exc:
+        raise RuntimeError(
+            f"HEAD now names {head}, but the settled index could not be installed "
+            f"({exc}); the previous index is unchanged") from exc
+
+
 def commit_all(path, message: str) -> dict:
     """Stage the whole current working state and commit it, without any Git callback.
 
@@ -1204,9 +1321,12 @@ def commit_all(path, message: str) -> dict:
             commit = out(repo.top, "commit-tree", tree, *parents, "--no-gpg-sign",
                          input=msg, identity=commit_identity(repo.top))
             subject = msg.split("\n", 1)[0]
+            # The settled index is complete and synced BEFORE the ref moves: an
+            # incomplete write refuses here with HEAD and the live index unchanged.
+            lock.stage(new_index)
             _cas_ref(repo.top, "HEAD", commit,
                      head, f"commit{' (initial)' if head is None else ''}: {subject}")
-            lock.install(new_index)
+            _install_after_ref(lock, commit)
             return {"committed": True, "hash": commit}
         finally:
             lock.release()
@@ -1319,8 +1439,9 @@ def checkout_tree_raw(path, target: str, *, expected_head: str | None, reason: s
             else:
                 entries = materialize(repo.top, repo.top, target, prior={},
                                       replace_nondirs=True)
+            lock.stage(serialize_index(entries))
             _cas_ref(repo.top, "HEAD", target, head, reason)
-            lock.install(serialize_index(entries))
+            _install_after_ref(lock, target)
             return {"head": target, "previous": head}
         finally:
             lock.release()

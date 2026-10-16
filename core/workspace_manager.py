@@ -199,9 +199,21 @@ class WorkspaceManager:
 
     @staticmethod
     def _init_with_initial_commit(path: Path, message: str) -> None:
-        """`git init` + `.gitignore` + first commit, with no template, hook or filter."""
+        """`git init` + `.gitignore` + first commit, with no template, hook, filter or followed link.
+
+        A preexisting `.git` or `.gitignore` link is refused before anything is
+        created; the `.gitignore` itself is placed by the no-follow writer.
+        """
+        if (path / ".git").is_symlink():
+            raise closed_git.GitRefused(
+                f"{path / '.git'} is a symbolic link; the bootstrap never initialises through it")
+        ignore = path / ".gitignore"
+        if ignore.is_symlink() or (os.path.lexists(ignore) and not ignore.is_file()):
+            raise closed_git.GitRefused(
+                f"{ignore} is not a regular file; the bootstrap never writes through it")
         closed_git.init_repository(path)
-        (path / ".gitignore").write_text("__pycache__/\n*.pyc\n", encoding="utf-8")
+        with closed_git.WorkTree(path) as wt:
+            wt.write(".gitignore", 0o100644, b"__pycache__/\n*.pyc\n")
         closed_git.commit_all(path, message)
 
     @staticmethod
@@ -577,13 +589,17 @@ class WorkspaceManager:
                         name: str = "origin") -> dict:
         """Add the remote, or update its URL if it already exists."""
         code_path = self._mutation_target(project_id)
-        existing = closed_git.run(code_path, "remote").stdout.split()
-        if name in existing:
-            self._run_git_checked(code_path, "remote", "set-url", name, url)
-            action = "updated"
-        else:
-            self._run_git_checked(code_path, "remote", "add", name, url)
-            action = "added"
+        # The common configuration this writes is what push/pull/native-removal
+        # preflights read under the same lock; the generic admission does not
+        # exclude another generic admission, so it is not that exclusion.
+        with closed_git.repo_lock(code_path):
+            existing = closed_git.run(code_path, "remote").stdout.split()
+            if name in existing:
+                self._run_git_checked(code_path, "remote", "set-url", name, url)
+                action = "updated"
+            else:
+                self._run_git_checked(code_path, "remote", "add", name, url)
+                action = "added"
         return {"remote": name, "url": url, "action": action}
 
     @_guarded_mutation("repo_commit")

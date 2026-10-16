@@ -171,9 +171,11 @@ def test_actual_bare_failure_and_bounded_output(runtime):
     result = shell.execute_coding_shell(grant, "printf actual-out; printf actual-error >&2; exit 7", 10)
     assert (result.returncode, result.stdout, result.stderr) == (7, "actual-out", "actual-error")
     assert result.physical_quiet and not result.timed_out
+    (root / "bare-failure-result.json").write_text(json.dumps(vars(result), indent=2))
     result = shell.execute_coding_shell(grant, "python3 -c 'print(\"x\"*50000)'", 10)
     assert result.returncode == 0 and result.output_truncated
     assert len(result.stdout.encode()) + len(result.stderr.encode()) <= shell.OUTPUT_LIMIT
+    (root / "bounded-output-result.json").write_text(json.dumps(vars(result), indent=2))
 
 
 def test_actual_timeout_preserves_partial_effect_and_bare_status(runtime):
@@ -183,6 +185,7 @@ def test_actual_timeout_preserves_partial_effect_and_bare_status(runtime):
     assert result.timed_out and result.physical_quiet and result.returncode != 0
     assert result.stdout == "partial" and (work / "partial.txt").read_text() == "kept"
     assert ri.write_admissions(db, str(work)) == []
+    (root / "timeout-result.json").write_text(json.dumps(vars(result), indent=2))
 
 
 def test_client_disconnect_keeps_admission_until_real_destroy_observation(runtime):
@@ -211,6 +214,8 @@ def test_client_disconnect_keeps_admission_until_real_destroy_observation(runtim
     proof = json.loads(quiet.read_text())
     assert proof["action"] == "destroy" and proof["run_id"] == grant.binding["run_id"]
     assert (work / "disconnect-partial.txt").read_text() == "retained"
+    (root / "disconnect-result.json").write_text(json.dumps({"retained_admission": rows[0], "positive_quiet": proof,
+                                                            "partial_effect": "retained"}, indent=2))
     # Explicit fixture settlement AFTER actual owned destroy; no product auto-clear.
     ri.retire_write(db, rows[0]["id"])
 
@@ -262,6 +267,7 @@ def test_actual_host_refuses_changed_scope_or_extra_authority(runtime):
                          ("env", {"PATH": "/forged"}), ("image", "forged"),
                          ("network", "host"), ("workdir", str(source))):
         cases.append({**request, field: value})
+    denials = []
     for changed in cases:
         with socket.socket(socket.AF_UNIX) as conn:
             conn.connect(str(root / "s"))
@@ -271,10 +277,12 @@ def test_actual_host_refuses_changed_scope_or_extra_authority(runtime):
                 chunk = conn.recv(65536)
                 assert chunk
                 reply += chunk
-        assert json.loads(reply)["ok"] is False
+        parsed = json.loads(reply)
+        assert parsed["ok"] is False
+        denials.append({"request": changed, "response": parsed})
     assert not (work / "forged.txt").exists() and len(ri.write_admissions(db, str(work))) == 1
     ri.retire_write(db, adm["id"])
-    (root / "host-denials.json").write_text(json.dumps({"count": len(cases), "scope": binding}, indent=2))
+    (root / "host-denials.json").write_text(json.dumps({"count": len(cases), "scope": binding, "denials": denials}, indent=2))
 
 
 def test_exact_owned_source_identity():

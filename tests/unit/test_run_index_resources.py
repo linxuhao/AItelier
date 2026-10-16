@@ -327,12 +327,12 @@ def test_old_work_is_not_implicitly_discarded(rig, kind):
 def test_git_status_failure_is_not_a_clean_tree(rig, monkeypatch):
     rec = rig.run()
     finish(rig, rec)
-    original = ri._git
-    def fail(root, *args, **kwargs):
-        if args[0] == "status":
-            return subprocess.CompletedProcess(args, 128, "", "forced status failure")
-        return original(root, *args, **kwargs)
-    monkeypatch.setattr(ri, "_git", fail)
+    # Cleanliness is the raw no-callback comparison now (no `git status`);
+    # a comparison that cannot complete is still not a clean tree.
+    from core import closed_git
+    def fail(*args, **kwargs):
+        raise RuntimeError("forced status failure")
+    monkeypatch.setattr(closed_git, "clean_against_head", fail)
     result = ri.reap_released_worktrees(rig.db, rig.sf, min_idle_seconds=0)
     assert not result["removed"] and "status failed" in result["retained"][0]["reason"]
 

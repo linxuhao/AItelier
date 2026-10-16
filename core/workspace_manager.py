@@ -9,7 +9,6 @@
 import json
 import os
 import shutil
-import subprocess
 import functools
 import hashlib
 from contextlib import contextmanager
@@ -17,19 +16,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-# Force English locale for all git subprocess calls — prevents French
-# locale leakage in dashboard action result messages (res.detail).
-# GIT_OPTIONAL_LOCKS=0 because `repo_status` is an OPEN read that shells out
-# to `git status`, and `git status` takes .git/index.lock to write a refreshed
-# index. The pipeline commits into the same repo every few minutes, so on a
-# public hostname a flood of status reads is a way for a stranger to fail
-# repo_apply with "Unable to create '.git/index.lock'" — a read-only endpoint
-# breaking a paid run. With optional locks off, the read cannot contend.
-# NOTE the ordering: the overrides come AFTER the spread. They were before it,
-# which meant `**os.environ` won and the "force English" line above did
-# nothing whenever LC_ALL was actually set in the environment — i.e. exactly
-# in the case it was written for.
-_GIT_ENV = {**os.environ, "LC_ALL": "C", "GIT_OPTIONAL_LOCKS": "0"}
+# Every repository operation here goes through core.closed_git: the Source
+# repository can hold bytes a run delivered, so its hooks, filters, fsmonitor,
+# pager, signing and transport helpers are data, never programs the backend
+# runs. `_GIT_ENV` is that closed environment (English locale, optional locks
+# off so an open status read cannot contend with a running pipeline's
+# index.lock, no inherited GIT_* routing and no global/system configuration).
+# It is built from nothing inherited; there is no `**os.environ` spread to win.
+from core import closed_git
+_GIT_ENV = closed_git.closed_env()
 
 # 六步法步骤序列（string ID）
 STEP_SEQUENCE = ["1", "2", "3", "5"]
@@ -153,10 +148,7 @@ class WorkspaceManager:
 
         # 初始化 DPS Git 仓库 (事件溯源基座)
         if not (dps_path / ".git").exists():
-            subprocess.run(["git", "init"], cwd=dps_path, check=True, capture_output=True, env=_GIT_ENV)
-            (dps_path / ".gitignore").write_text("__pycache__/\n*.pyc\n", encoding="utf-8")
-            subprocess.run(["git", "add", "."], cwd=dps_path, check=True, env=_GIT_ENV)
-            subprocess.run(["git", "commit", "-m", "Initial commit: DPS Workspace Created"], cwd=dps_path, env=_GIT_ENV)
+            self._init_with_initial_commit(dps_path, "Initial commit: DPS Workspace Created")
 
         # 创建 DPS 目录结构
         (dps_path / "Global_Mount").mkdir(exist_ok=True)
@@ -182,10 +174,7 @@ class WorkspaceManager:
             code_path = self.projects_base / project_id
             code_path.mkdir(parents=True, exist_ok=True)
             if not (code_path / ".git").exists():
-                subprocess.run(["git", "init"], cwd=code_path, check=True, capture_output=True, env=_GIT_ENV)
-                (code_path / ".gitignore").write_text("__pycache__/\n*.pyc\n", encoding="utf-8")
-                subprocess.run(["git", "add", "."], cwd=code_path, check=True, env=_GIT_ENV)
-                subprocess.run(["git", "commit", "-m", "Initial commit: Project workspace"], cwd=code_path, env=_GIT_ENV)
+                self._init_with_initial_commit(code_path, "Initial commit: Project workspace")
 
         elif repo_type == "existing":
             if not repo_path:
@@ -201,15 +190,36 @@ class WorkspaceManager:
                 raise ValueError("repo_url is required for repo_type='clone'")
             code_path = self.projects_base / project_id
             if not code_path.exists():
-                subprocess.run(
-                    ["git", "clone", repo_url, str(code_path)],
-                    check=True, capture_output=True, env=_GIT_ENV
-                )
+                self._clone_without_checkout_programs(repo_url, code_path)
             elif not (code_path / ".git").exists():
                 raise ValueError(f"Clone target exists but is not a git repo: {code_path}")
 
         else:
             raise ValueError(f"Unknown repo_type: {repo_type}")
+
+    @staticmethod
+    def _init_with_initial_commit(path: Path, message: str) -> None:
+        """`git init` + `.gitignore` + first commit, with no template, hook or filter."""
+        closed_git.init_repository(path)
+        (path / ".gitignore").write_text("__pycache__/\n*.pyc\n", encoding="utf-8")
+        closed_git.commit_all(path, message)
+
+    @staticmethod
+    def _clone_without_checkout_programs(repo_url: str, code_path: Path) -> None:
+        """Clone over an allowed transport, then materialise HEAD as raw bytes.
+
+        `git clone` would check out through smudge filters and run the
+        post-checkout hook; here the transfer is `--no-checkout` and the files
+        and index come from the closed raw writer instead.
+        """
+        code_path.parent.mkdir(parents=True, exist_ok=True)
+        closed_git.clone_no_checkout(repo_url, code_path)
+        head = closed_git.resolve_commit(code_path, "HEAD")
+        if head:
+            repo = closed_git.discover(code_path)
+            with closed_git.repo_lock(code_path):
+                entries = closed_git.materialize(code_path, code_path, head)
+                closed_git.write_index_file(repo.git_dir, entries)
 
     # ── Draft write (graph_name-prefixed, skillflow layout) ───────────
 
@@ -365,18 +375,20 @@ class WorkspaceManager:
             # declares no repository has nothing to roll back.
             return False
         try:
-            subprocess.run(["git", "reset", "--hard", commit_hash], cwd=code_path, check=True, env=_GIT_ENV)
+            target = closed_git.resolve_commit(code_path, commit_hash)
+            if not target:
+                return False
+            closed_git.checkout_tree_raw(
+                code_path, target,
+                expected_head=closed_git.resolve_commit(code_path, "HEAD"),
+                reason=f"reset: moving to {commit_hash}", require_clean_paths=False)
             return True
-        except subprocess.CalledProcessError:
+        except (RuntimeError, OSError):
             return False
 
     def _get_git_hash(self, project_path: Path) -> str:
         """获取项目工作区的当前 Git Commit Hash。"""
-        res = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=project_path, capture_output=True, text=True, env=_GIT_ENV
-        )
-        return res.stdout.strip()
+        return closed_git.resolve_commit(project_path, "HEAD") or ""
 
     def repo_status(self, project_id: str, log_limit: int = 20) -> dict:
         """Read-only snapshot of the project code repo for the web UI.
@@ -394,10 +406,7 @@ class WorkspaceManager:
             return {"is_git": False, "path": None}
 
         def _git(*args: str) -> tuple[int, str]:
-            res = subprocess.run(
-                ["git", *args], cwd=code_path,
-                capture_output=True, text=True, env=_GIT_ENV,
-            )
+            res = closed_git.run(code_path, *args)
             return res.returncode, res.stdout.strip()
 
         rc, _ = _git("rev-parse", "--is-inside-work-tree")
@@ -405,8 +414,18 @@ class WorkspaceManager:
             return {"is_git": False, "path": str(code_path)}
 
         _, branch = _git("rev-parse", "--abbrev-ref", "HEAD")
-        _, porcelain = _git("status", "--porcelain")
-        dirty_files = [ln for ln in porcelain.splitlines() if ln.strip()]
+        # Working-file state from the raw index, HEAD tree and no-follow file
+        # bytes — never `git status`, which refreshes through configured clean
+        # filters and fsmonitor hooks.
+        notes: list[str] = []
+        try:
+            raw = closed_git.raw_status(code_path)
+            dirty_files = [f"{code} {path}" for path, code in raw.changes.items()]
+            dirty_files += [f"?? {path}" for path in raw.untracked]
+            notes = raw.notes
+        except (RuntimeError, OSError) as e:
+            dirty_files = []
+            notes = [f"working-tree state unavailable: {str(e)[:200]}"]
         _, remote_url = _git("remote", "get-url", "origin")
         # Never hand a credential-bearing remote to an open read.
         from core.git_ops import redact_url_credentials
@@ -427,9 +446,10 @@ class WorkspaceManager:
                     ahead, behind = int(parts[0]), int(parts[1])
 
         # Recent commits: hash | author | ISO date | subject (NUL-delimited).
+        # Metadata only: signature verification is off in the closed profile.
         commits: list[dict] = []
         log_rc, log_out = _git(
-            "log", f"-{max(1, log_limit)}",
+            "log", f"-{max(1, log_limit)}", "--no-show-signature",
             "--pretty=format:%h%x1f%an%x1f%aI%x1f%s",
         )
         if log_rc == 0 and log_out:
@@ -452,6 +472,8 @@ class WorkspaceManager:
             "ahead": ahead,
             "behind": behind,
             "commits": commits,
+            "changes": dirty_files[:200],
+            "working_tree_notes": notes,
         }
 
     # ── Repo write operations (web UI repository panel) ───────────────
@@ -462,16 +484,12 @@ class WorkspaceManager:
     # docker/git-credential-helper.sh); these methods never handle tokens.
 
     def _run_git_checked(self, code_path: Path, *args: str) -> str:
-        """Run a git command, raising RuntimeError(stderr) on non-zero exit."""
-        res = subprocess.run(
-            ["git", *args], cwd=code_path, capture_output=True, text=True,
-            env=_GIT_ENV,
-        )
-        if res.returncode != 0:
-            raise RuntimeError(
-                (res.stderr or res.stdout or f"git {args[0]} failed").strip()
-            )
-        return res.stdout.strip()
+        """Run a CLOSED-profile git command, raising RuntimeError(stderr) on failure.
+
+        Only metadata/object/ref commands are accepted; a working-tree or
+        transport command raises `GitRefused` (a RuntimeError) before running.
+        """
+        return closed_git.out(code_path, *args)
 
     @contextmanager
     def _mutation(self, project_id: str, kind: str):
@@ -549,10 +567,7 @@ class WorkspaceManager:
         code_path = self.get_code_path(project_id)
         if code_path is None:
             raise RuntimeError("This project declares no code repository")
-        res = subprocess.run(
-            ["git", "rev-parse", "--is-inside-work-tree"],
-            cwd=code_path, capture_output=True, text=True, env=_GIT_ENV,
-        )
+        res = closed_git.run(code_path, "rev-parse", "--is-inside-work-tree")
         if res.returncode != 0:
             raise RuntimeError("Not a git repository")
         return code_path
@@ -562,10 +577,7 @@ class WorkspaceManager:
                         name: str = "origin") -> dict:
         """Add the remote, or update its URL if it already exists."""
         code_path = self._mutation_target(project_id)
-        existing = subprocess.run(
-            ["git", "remote"], cwd=code_path, capture_output=True, text=True,
-            env=_GIT_ENV,
-        ).stdout.split()
+        existing = closed_git.run(code_path, "remote").stdout.split()
         if name in existing:
             self._run_git_checked(code_path, "remote", "set-url", name, url)
             action = "updated"
@@ -576,17 +588,18 @@ class WorkspaceManager:
 
     @_guarded_mutation("repo_commit")
     def repo_commit(self, project_id: str, message: str) -> dict:
-        """Stage all changes and commit. No-op (not an error) when clean."""
+        """Stage all changes and commit. No-op (not an error) when clean.
+
+        "Commit current Source changes" as raw bytes: the actual working files
+        (index paths plus untracked nonignored files, read without following
+        links) form a private index and tree, a hook/signature-free commit
+        object moves HEAD by compare-and-swap, and the settled index is
+        installed from an owned index.lock. No `git add`/`git commit`, so a
+        delivered hook or filter never runs here; a repository whose configured
+        filters would change the stored bytes gets an explicit refusal.
+        """
         code_path = self._mutation_target(project_id)
-        self._run_git_checked(code_path, "add", "-A")
-        porcelain = subprocess.run(
-            ["git", "status", "--porcelain"],
-            cwd=code_path, capture_output=True, text=True, env=_GIT_ENV,
-        ).stdout.strip()
-        if not porcelain:
-            return {"committed": False, "message": "Nothing to commit"}
-        self._run_git_checked(code_path, "commit", "-m", message)
-        return {"committed": True, "hash": self._get_git_hash(code_path)}
+        return closed_git.commit_all(code_path, message)
 
     @_guarded_mutation("repo_push")
     def repo_push(self, project_id: str, branch: str | None = None,
@@ -596,11 +609,8 @@ class WorkspaceManager:
         if not branch:
             branch = self._run_git_checked(
                 code_path, "rev-parse", "--abbrev-ref", "HEAD")
-        args = ["push"]
-        if set_upstream:
-            args += ["--set-upstream"]
-        args += ["origin", branch]
-        out = self._run_git_checked(code_path, *args)
+        self._require_branch_name(code_path, branch)
+        out = self._push(code_path, branch, set_upstream)
         return {"pushed": True, "branch": branch, "detail": out}
 
     @_guarded_mutation("repo_push_head")
@@ -613,12 +623,25 @@ class WorkspaceManager:
         "push current work to a feature branch, then open a PR" flow.
         """
         code_path = self._mutation_target(project_id)
-        args = ["push"]
-        if set_upstream:
-            args += ["--set-upstream"]
-        args += ["origin", f"HEAD:refs/heads/{branch}"]
-        out = self._run_git_checked(code_path, *args)
+        self._require_branch_name(code_path, branch)
+        out = self._push(code_path, f"HEAD:refs/heads/{branch}", set_upstream)
         return {"pushed": True, "branch": branch, "detail": out}
+
+    @staticmethod
+    def _require_branch_name(code_path: Path, branch: str) -> None:
+        if (not branch or branch.startswith("-")
+                or closed_git.run(code_path, "check-ref-format", "--branch", branch).returncode):
+            raise RuntimeError(f"{branch!r} is not a valid branch name")
+
+    @staticmethod
+    def _push(code_path: Path, refspec: str, set_upstream: bool) -> str:
+        """Push to origin over an allowed transport, with no pre-push hook or helper program."""
+        with closed_git.repo_lock(code_path):
+            profile = closed_git.remote_transport(code_path, "origin", push=True)
+            args = ["push", "--no-verify"]
+            if set_upstream:
+                args += ["--set-upstream"]
+            return closed_git.transport(code_path, *args, "origin", refspec, profile=profile)
 
     @_guarded_mutation("repo_pull")
     def repo_pull(self, project_id: str) -> dict:
@@ -628,8 +651,34 @@ class WorkspaceManager:
         diverged — the user should use force-sync deliberately in that case.
         """
         code_path = self._mutation_target(project_id)
-        out = self._run_git_checked(code_path, "pull", "--ff-only")
-        return {"pulled": True, "detail": out}
+        with closed_git.repo_lock(code_path):
+            branch = closed_git.run(code_path, "symbolic-ref", "--quiet", "--short", "HEAD")
+            if branch.returncode or not branch.stdout.strip():
+                raise RuntimeError("You are not currently on a branch.")
+            name = branch.stdout.strip()
+            cfg = dict(closed_git.config_list(code_path))
+            remote = cfg.get(f"branch.{name}.remote") or ""
+            if not remote or remote == ".":
+                raise RuntimeError(
+                    f"There is no tracking information for the current branch {name}.")
+            profile = closed_git.remote_transport(code_path, remote, push=False)
+            detail = closed_git.transport(
+                code_path, "fetch", "--no-recurse-submodules", "--no-auto-gc",
+                remote, profile=profile)
+            head = closed_git.resolve_commit(code_path, "HEAD")
+            upstream = closed_git.resolve_commit(code_path, "@{upstream}")
+            if not upstream:
+                raise RuntimeError("the tracked upstream branch is unavailable after fetch")
+            if head == upstream:
+                return {"pulled": True, "detail": (detail + "\nAlready up to date.").strip()}
+            if head and closed_git.run(code_path, "merge-base", "--is-ancestor",
+                                       head, upstream).returncode:
+                raise RuntimeError("Not possible to fast-forward, aborting.")
+            closed_git.checkout_tree_raw(
+                code_path, upstream, expected_head=head,
+                reason=f"pull --ff-only: fast-forward to {upstream[:12]}",
+                require_clean_paths=True)
+        return {"pulled": True, "detail": (detail + f"\nFast-forward to {upstream[:12]}").strip()}
 
     @_guarded_mutation("repo_force_sync")
     def repo_force_sync(self, project_id: str, branch: str,
@@ -639,18 +688,28 @@ class WorkspaceManager:
         so the discarded state is recoverable.
         """
         code_path = self._mutation_target(project_id)
-        backup_ref = None
-        if backup:
-            stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-            backup_ref = f"backup/{stamp}"
-            # Best-effort: a repo with no commits yet can't be branched.
-            try:
-                self._run_git_checked(code_path, "branch", backup_ref)
-            except RuntimeError:
-                backup_ref = None
-        self._run_git_checked(code_path, "fetch", "origin", branch)
-        self._run_git_checked(
-            code_path, "reset", "--hard", f"origin/{branch}")
+        self._require_branch_name(code_path, branch)
+        with closed_git.repo_lock(code_path):
+            profile = closed_git.remote_transport(code_path, "origin", push=False)
+            head = closed_git.resolve_commit(code_path, "HEAD")
+            backup_ref = None
+            if backup and head:
+                stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+                backup_ref = f"backup/{stamp}"
+                # Best-effort, as before: an existing name leaves no backup.
+                made = closed_git.run(code_path, "update-ref", "-m", "force-sync backup",
+                                      f"refs/heads/{backup_ref}", head, closed_git.ZERO_SHA)
+                if made.returncode:
+                    backup_ref = None
+            closed_git.transport(code_path, "fetch", "--no-recurse-submodules",
+                                 "--no-auto-gc", "origin", branch, profile=profile)
+            target = closed_git.resolve_commit(code_path, f"refs/remotes/origin/{branch}") \
+                or closed_git.resolve_commit(code_path, "FETCH_HEAD")
+            if not target:
+                raise RuntimeError(f"origin/{branch} is unavailable after fetch")
+            closed_git.checkout_tree_raw(
+                code_path, target, expected_head=head,
+                reason=f"reset: moving to origin/{branch}", require_clean_paths=False)
         return {
             "synced": True,
             "branch": branch,

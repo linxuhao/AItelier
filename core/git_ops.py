@@ -3,23 +3,19 @@
 # workspace_manager (which owns local git) because this is the one repo action
 # that talks to the GitHub REST API and needs the GITHUB_TOKEN secret.
 
-import os
 import re
-import subprocess
 from pathlib import Path
 
 import httpx
 
 from core.ai_router import _read_secret
 
-# Force English locale for all git subprocess calls — prevents French
-# locale leakage in dashboard "Make PR" action result messages.
-# Override AFTER the spread. Written the other way round, `**os.environ`
-# wins and the forcing does nothing whenever LC_ALL is actually set —
-# and this is the copy whose comment says it exists for the "Make PR"
-# result messages, i.e. the user-visible one. workspace_manager had the
-# identical line and only that one was fixed first time round.
-_GIT_ENV = {**os.environ, "LC_ALL": "C"}
+from core import closed_git
+
+# The "Make PR" reads are metadata through the closed backend Git profile:
+# English locale, and nothing inherited (no `**os.environ` spread, no GIT_*
+# routing, no global/system config) that could make a read run a program.
+_GIT_ENV = closed_git.closed_env()
 
 
 def redact_url_credentials(url: str | None) -> str | None:
@@ -76,19 +72,13 @@ def create_github_pr(code_path: Path, title: str, body: str = "",
             "No GITHUB_TOKEN configured — add a fine-grained PAT at "
             "~/.aitelier-secrets/GITHUB_TOKEN (Pull requests: R/W).")
 
-    remote = subprocess.run(
-        ["git", "remote", "get-url", "origin"],
-        cwd=code_path, capture_output=True, text=True, env=_GIT_ENV,
-    )
+    remote = closed_git.run(code_path, "remote", "get-url", "origin")
     if remote.returncode != 0 or not remote.stdout.strip():
         raise RuntimeError("No 'origin' remote configured")
     owner, repo = parse_github_owner_repo(remote.stdout.strip())
 
     if not head:
-        head = subprocess.run(
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            cwd=code_path, capture_output=True, text=True, env=_GIT_ENV,
-        ).stdout.strip()
+        head = closed_git.run(code_path, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
     if head == base:
         raise RuntimeError(
             f"Head and base are the same branch ('{base}') — push a feature "

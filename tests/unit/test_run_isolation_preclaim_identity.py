@@ -267,15 +267,17 @@ def test_a_plain_directory_at_the_snapshot_path_is_refused(snapshot):
 
 
 def test_a_failed_git_inspection_is_refused_not_admitted(snapshot, monkeypatch):
-    real = ri._git
+    # The tracked-tree check is now a raw read of the snapshot's own index
+    # (no `git diff-index` refresh). An index that cannot be read is not clean.
+    from core import closed_git
+    real = closed_git.read_index
 
-    def only_head(cwd, *args, **kwargs):
-        if args and args[0] == "diff-index":
-            return subprocess.CompletedProcess(
-                ["git", *args], 128, "", "fatal: unable to read tree")
-        return real(cwd, *args, **kwargs)
+    def unreadable(git_dir):
+        if "run-snap" in str(git_dir):
+            raise RuntimeError("index checksum mismatch")
+        return real(git_dir)
 
-    monkeypatch.setattr(ri, "_git", only_head)
+    monkeypatch.setattr(closed_git, "read_index", unreadable)
     with pytest.raises(IsolationUnavailable, match="cannot be verified"):
         ri.resolve_for_resolver(snapshot.db, "run-snap")
 

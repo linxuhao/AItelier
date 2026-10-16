@@ -1,6 +1,6 @@
 """Standalone in-memory fake of the RSI pipeline-benchmark data interface.
 
-STATEMENT CANDIDATE, UNRUN. README.md is normative. Pure stdlib, no I/O, no
+SOURCE CORRECTION CANDIDATE. README.md is normative. Pure stdlib, no I/O, no
 providers, no import of any production scorer. It validates data shape only; it
 does not authenticate callers, prove privacy/truth/accounting, run any model,
 evaluator or checker, or grant eligibility, adoption or spend.
@@ -26,8 +26,8 @@ ROW_FIELDS = ("schema", "benchmark_id", "version", "bundle_identity", "runtime",
               "checker_identity", "validity", "outcome", "raw_points",
               "cost_usd", "duration_s")
 RUNTIME_FIELDS = ("route", "endpoints", "effort")
-_ID = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
-_SHA = re.compile(r"^sha256:[0-9a-f]{64}$")
+_ID = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
+_SHA = re.compile(r"sha256:[0-9a-f]{64}")
 
 
 class BenchmarkError(Exception):
@@ -45,6 +45,8 @@ def _refuse(code, message=""):
 def _exact(obj, fields, what):
     if not isinstance(obj, dict):
         _refuse("invalid_value", what + " must be an object")
+    if not all(isinstance(key, str) for key in obj):
+        _refuse("invalid_value", what + " must have string keys")
     extra = sorted(set(obj) - set(fields))
     if extra:
         _refuse("unknown_field", "%s has unknown fields %s" % (what, extra))
@@ -54,7 +56,7 @@ def _exact(obj, fields, what):
 
 
 def _id(value, what):
-    if not isinstance(value, str) or not _ID.match(value):
+    if not isinstance(value, str) or not _ID.fullmatch(value):
         _refuse("invalid_value", what + " must match " + _ID.pattern)
     return value
 
@@ -62,12 +64,17 @@ def _id(value, what):
 def _text(value, what):
     if not isinstance(value, str) or not value.strip():
         _refuse("invalid_value", what + " must be a non-empty string")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        _refuse("invalid_value", what + " must be UTF-8 text")
     return value
 
 
 def _int(value, what, low):
     if isinstance(value, bool) or not isinstance(value, int) or value < low:
         _refuse("invalid_value", "%s must be an integer >= %d" % (what, low))
+    _num(value, what)
     return value
 
 
@@ -75,20 +82,27 @@ def _num(value, what):
     """Finite non-negative real; bool/NaN/Inf/str refused."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         _refuse("invalid_value", what + " must be a number")
-    if not math.isfinite(value) or value < 0:
+    try:
+        finite = math.isfinite(value)
+    except OverflowError:
+        finite = False
+    if not finite or value < 0:
         _refuse("invalid_value", what + " must be finite and >= 0")
     return value
 
 
 def _sha(value, what):
-    if not isinstance(value, str) or not _SHA.match(value):
+    if not isinstance(value, str) or not _SHA.fullmatch(value):
         _refuse("invalid_value", what + " must be sha256:<64 hex>")
     return value
 
 
 def _digest(obj):
-    blob = json.dumps(obj, sort_keys=True, separators=(",", ":"), allow_nan=False)
-    return "sha256:" + hashlib.sha256(blob.encode("utf-8")).hexdigest()
+    try:
+        blob = json.dumps(obj, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        return "sha256:" + hashlib.sha256(blob.encode("utf-8")).hexdigest()
+    except (ValueError, OverflowError, UnicodeEncodeError):
+        _refuse("invalid_value", "data cannot be encoded as canonical UTF-8 JSON")
 
 
 class BenchmarkFake:
@@ -143,7 +157,7 @@ class BenchmarkFake:
         for cid, c in cases.items():
             _id(cid, "case_id")
             _exact(c, ("partition", "family"), "case " + cid)
-            if c["partition"] not in counts:
+            if not isinstance(c["partition"], str) or c["partition"] not in counts:
                 _refuse("invalid_value", "partition must be train or holdout")
             if c["family"] not in FAMILIES:
                 _refuse("invalid_value", "family outside fixed inventory")
@@ -151,7 +165,10 @@ class BenchmarkFake:
         if counts != {"train": TRAIN_COUNT, "holdout": HOLDOUT_COUNT}:
             _refuse("invalid_value", "need exactly 12 train and 8 holdout cases")
         _int(header["point_total"], "point_total", 1)
-        if header["normalization"] != NORMALIZATION:
+        norm = header["normalization"]
+        _exact(norm, ("min", "max"), "normalization")
+        if (any(type(norm[k]) is not int for k in ("min", "max"))
+                or norm != NORMALIZATION):
             _refuse("invalid_value", "normalization must be {min:0,max:100}")
         self._defs[(bid, ver)] = {
             "owner": caller, "status": "draft", "header": copy.deepcopy(header),
@@ -160,6 +177,7 @@ class BenchmarkFake:
 
     def set_public_input(self, caller, benchmark_id, version, case_id, public_input):
         d = self._own_draft(caller, benchmark_id, version)
+        _id(case_id, "case_id")
         if case_id not in d["header"]["cases"]:
             _refuse("unknown_case", str(case_id))
         _exact(public_input, ("prompt",), "public_input")
@@ -168,6 +186,7 @@ class BenchmarkFake:
 
     def set_private_refs(self, caller, benchmark_id, version, case_id, refs):
         d = self._own_draft(caller, benchmark_id, version)
+        _id(case_id, "case_id")
         if case_id not in d["header"]["cases"]:
             _refuse("unknown_case", str(case_id))
         _exact(refs, ("rubric_ref", "checker_ref", "max_points"), "refs")
@@ -189,10 +208,11 @@ class BenchmarkFake:
         total = sum(r["max_points"] for r in d["private"].values())
         if total != d["header"]["point_total"]:
             _refuse("incomplete", "per-case max_points must sum to point_total")
-        d["identities"] = {cid: {"input_identity": _digest(d["public"][cid]),
+        identities = {cid: {"input_identity": _digest(d["public"][cid]),
                                  "checker_identity": _digest(d["private"][cid])}
                            for cid in cases}
-        d["digest"] = _digest({"header": d["header"], "identities": d["identities"]})
+        digest = _digest({"header": d["header"], "identities": identities})
+        d["identities"], d["digest"] = identities, digest
         d["status"] = "published"
         return self.get_definition(benchmark_id, version)
 
@@ -232,10 +252,12 @@ class BenchmarkFake:
         _text(runtime["route"], "route")
         _text(runtime["effort"], "effort")
         eps = runtime["endpoints"]
-        if not isinstance(eps, list) or not eps or len(set(eps)) != len(eps):
+        if not isinstance(eps, list) or not eps:
             _refuse("invalid_value", "endpoints must be a non-empty unique list")
         for e in eps:
             _text(e, "endpoint")
+        if len(set(eps)) != len(eps):
+            _refuse("invalid_value", "endpoints must be a non-empty unique list")
 
     def append_receipt(self, caller, row):
         """Append one row. Never replaces, edits or deletes. Records the row
@@ -249,7 +271,7 @@ class BenchmarkFake:
             _refuse("not_published", "receipts need a published benchmark")
         _sha(row["bundle_identity"], "bundle_identity")
         self._check_runtime(row["runtime"])
-        cid = row["case_id"]
+        cid = _id(row["case_id"], "case_id")
         if cid not in d["header"]["cases"]:
             _refuse("unknown_case", str(cid))
         rep = row["repetition"]
@@ -257,9 +279,12 @@ class BenchmarkFake:
             _refuse("invalid_value", "repetition must be an integer")
         if not 1 <= rep <= REPETITIONS:
             _refuse("unknown_repetition", str(rep))
+        _id(row["arm"], "arm")
         if row["arm"] not in d["header"]["arms"]:
             _refuse("unknown_arm", str(row["arm"]))
         _id(row["run_receipt_id"], "run_receipt_id")
+        _sha(row["input_identity"], "input_identity")
+        _sha(row["checker_identity"], "checker_identity")
         ident = d["identities"][cid]
         if (row["input_identity"] != ident["input_identity"]
                 or row["checker_identity"] != ident["checker_identity"]):
@@ -321,6 +346,7 @@ class BenchmarkFake:
         if not isinstance(expected, dict):
             _refuse("invalid_value", "expected must be an object")
         for a in expected:
+            _id(a, "arm")
             if a not in arms:
                 _refuse("unknown_arm", str(a))
         for a in arms:
@@ -368,11 +394,11 @@ class BenchmarkFake:
                     vals = []
                     for rep in range(1, REPETITIONS + 1):
                         r = by_cell[(a, cid, rep)]
-                        cost += r["cost_usd"]
-                        dur += r["duration_s"]
+                        cost = _num(cost + r["cost_usd"], "total_cost_usd")
+                        dur = _num(dur + r["duration_s"], "total_duration_s")
                         # Known settled task failure is the ONLY fixed zero.
                         pts = 0.0 if r["outcome"] == "task_failure" else r["raw_points"]
-                        vals.append(100.0 * pts / mx)
+                        vals.append((pts / mx) * 100.0)
                     case_means.append(sum(vals) / len(vals))
                 parts[part] = {"cases": len(case_means),
                                "mean_normalized": sum(case_means) / len(case_means)}

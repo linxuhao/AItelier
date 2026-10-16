@@ -1,5 +1,6 @@
-"""Conformance harness for the standalone benchmark fake. UNRUN statement
-candidate. Stdlib unittest only; loads only the sibling literal vectors file.
+"""Shared conformance harness for a benchmark provider.
+`run_conformance(factory)` accepts a zero-argument provider factory.
+Stdlib unittest only; loads only the sibling literal vectors file.
 Never imports production code and never runs a model, evaluator or checker."""
 import copy
 import importlib.util
@@ -64,8 +65,8 @@ def _resolve(value, world):
 
 
 class World:
-    def __init__(self):
-        self.f = fake.BenchmarkFake()
+    def __init__(self, factory=None):
+        self.f = (factory or fake.BenchmarkFake)()
         self.saved = {}
         self.callers = {"$owner": DOC["owner"], "$other": DOC["other_caller"]}
 
@@ -73,6 +74,8 @@ class World:
         return self.callers.get(name, name)
 
     def header(self, step):
+        if "header" in step:
+            return _resolve(copy.deepcopy(step["header"]), self)
         h = copy.deepcopy(FIX["header"])
         for k, v in step.get("set", {}).items():
             _set_path(h, k, _resolve(v, self))
@@ -80,7 +83,7 @@ class World:
             _drop_path(h, k)
         return h
 
-    def fill_inputs(self, caller, skip_private=()):
+    def fill_inputs(self, caller, skip_private=(), max_points=None):
         for cid in CASES:
             self.f.set_public_input(caller, BID, VER, cid, {
                 "prompt": FIX["public_prompt_template"].format(case=cid)})
@@ -89,7 +92,7 @@ class World:
             self.f.set_private_refs(caller, BID, VER, cid, {
                 "rubric_ref": FIX["private_rubric_template"].format(case=cid),
                 "checker_ref": FIX["private_checker_template"].format(case=cid),
-                "max_points": FIX["private_max_points"]})
+                "max_points": FIX["private_max_points"] if max_points is None else max_points})
 
     def published(self):
         owner = DOC["owner"]
@@ -129,10 +132,12 @@ class World:
                     if key in skip:
                         continue
                     spec = {"arm": arm, "case_id": cid, "repetition": rep,
-                            "set": over.get(key, {})}
+                            "set": {**step.get("set", {}), **over.get(key, {})}}
                     self.f.append_receipt("recorder-1", self.row(spec))
 
     def expected(self, step):
+        if "expected" in step:
+            return _resolve(copy.deepcopy(step["expected"]), self)
         exp = {a: {"bundle_identity": DOC["arm_bundles"][a],
                    "runtime": copy.deepcopy(DOC["runtime"])} for a in ARMS}
         for arm, patch in step.get("expected_override", {}).items():
@@ -159,7 +164,7 @@ class ConformanceTest(unittest.TestCase):
         if op == "draft":
             return f.create_draft(caller, w.header(step))
         if op == "fill_inputs":
-            return w.fill_inputs(caller, step.get("skip_private", ()))
+            return w.fill_inputs(caller, step.get("skip_private", ()), step.get("max_points"))
         if op == "set_public":
             return f.set_public_input(caller, BID, VER, step["case_id"], step["public_input"])
         if op == "set_private":
@@ -174,6 +179,8 @@ class ConformanceTest(unittest.TestCase):
             return f.get_private_refs(caller, BID, VER)
         if op == "list_benchmarks":
             return f.list_benchmarks()
+        if op == "append" and "row_value" in step:
+            return f.append_receipt("recorder-1", _resolve(step["row_value"], w))
         if op == "append":
             return f.append_receipt("recorder-1", w.row(step["row"]))
         if op == "fill_matrix":
@@ -212,20 +219,30 @@ class ConformanceTest(unittest.TestCase):
             self.assertEqual(result["rows"][:len(old)], old, ctx + " rows were rewritten")
 
     def test_vectors(self):
-        self.assertTrue(DOC["vectors"])
-        for vec in DOC["vectors"]:
-            with self.subTest(vector=vec["id"]):
-                w = World()
-                if vec["setup"] == "published":
-                    w.published()
-                for i, step in enumerate(vec["steps"]):
-                    ctx = "%s[%d]%s " % (vec["id"], i, step["op"])
-                    if "expect_error" in step:
-                        with self.assertRaises(fake.BenchmarkError, msg=ctx) as cm:
-                            self.run_step(w, step)
-                        self.assertEqual(cm.exception.code, step["expect_error"], ctx)
-                    else:
-                        self.check(w, step, self.run_step(w, step), ctx)
+        self.assertEqual(run_conformance(fake.BenchmarkFake), [])
+
+    def test_vectors_detect_untyped_endpoint_hashing(self):
+        class UntypedEndpoints(fake.BenchmarkFake):
+            def _check_runtime(self, runtime):
+                if isinstance(runtime, dict) and isinstance(runtime.get("endpoints"), list):
+                    set(runtime["endpoints"])  # deliberately before element validation
+                return super()._check_runtime(runtime)
+
+        failures = run_conformance(UntypedEndpoints)
+        self.assertTrue(any("malformed-runtime-elements" in f for f in failures))
+
+    def test_vectors_detect_boolean_normalization_coercion(self):
+        class CoercedNormalization(fake.BenchmarkFake):
+            def create_draft(self, caller, header):
+                header = copy.deepcopy(header)
+                if isinstance(header, dict) and isinstance(header.get("normalization"), dict):
+                    norm = header["normalization"]
+                    if norm.get("min") is False:
+                        norm["min"] = 0
+                return super().create_draft(caller, header)
+
+        failures = run_conformance(CoercedNormalization)
+        self.assertTrue(any("explicit-normalization-types" in f for f in failures))
 
     def test_fixture_is_fixed_shape(self):
         cases = FIX["header"]["cases"]
@@ -245,6 +262,62 @@ class ConformanceTest(unittest.TestCase):
         view["cases"]["train-01"]["public_input"]["prompt"] = "mutated"
         again = w.f.get_definition(BID, VER)
         self.assertNotEqual(again["cases"]["train-01"]["public_input"]["prompt"], "mutated")
+
+
+def _snapshot(world):
+    """Public data only: refused calls cannot alter definitions or receipts."""
+    rows = world.f.list_benchmarks()
+    state = []
+    for row in rows:
+        bid, ver = row["benchmark_id"], row["version"]
+        try:
+            private = world.f.get_private_refs(DOC["owner"], bid, ver)
+        except Exception as exc:
+            if getattr(exc, "code", None) != "ownership":
+                raise
+            private = {"refusal": "ownership"}
+        state.append((row, world.f.get_definition(bid, ver), private,
+                      world.f.list_receipts(bid, ver)))
+    return state
+
+
+def run_conformance(factory):
+    """Run unchanged literal vectors against a fresh provider for each vector.
+
+    Refusals are portable exceptions with `.code`, not a fake-specific class.
+    An empty failure list covers these vectors only, not a real-provider binding.
+    """
+    failures = []
+    checker = ConformanceTest()
+    for vec in DOC["vectors"]:
+        world = World(factory)
+        try:
+            if vec["setup"] == "published":
+                world.published()
+        except Exception as exc:
+            failures.append("%s setup: %s" % (vec["id"], exc))
+            continue
+        for i, step in enumerate(vec["steps"]):
+            context = "%s[%d]%s" % (vec["id"], i, step["op"])
+            before = _snapshot(world)
+            try:
+                result = checker.run_step(world, step)
+            except Exception as exc:
+                expected = step.get("expect_error")
+                if expected is None or getattr(exc, "code", None) != expected:
+                    failures.append("%s: refusal %r != %r (%s)" % (
+                        context, getattr(exc, "code", None), expected, exc))
+                elif _snapshot(world) != before:
+                    failures.append(context + ": refused call changed state")
+                continue
+            if "expect_error" in step:
+                failures.append(context + ": expected refusal, call succeeded")
+                continue
+            try:
+                checker.check(world, step, result, context)
+            except AssertionError as exc:
+                failures.append(context + ": " + str(exc))
+    return failures
 
 
 if __name__ == "__main__":

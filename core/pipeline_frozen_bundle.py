@@ -17,6 +17,10 @@ a durable before-change descriptor that blocks boot/launch of that target
 until ``whole_state`` verifies one recorded bundle on every provider (files,
 live registries, SQLite rows, manifest values). The settled descriptor also
 records each side's manifest, which boot and reload re-apply to that unit.
+A settled descriptor records intent, not what is served: boot re-derives each
+recorded target's actual whole state (``verify_boot``) and returns one that is
+not served to ``pending``, and run creation (``launch_block`` with the live
+``sf``) admits a recorded unit or seal only while ``whole_state`` verifies it.
 """
 from __future__ import annotations
 
@@ -63,7 +67,9 @@ def roles_text(roles: dict) -> str:
 
 
 def safe_file(base: Path, rel: str) -> Path:
-    """A regular file strictly inside *base*; no symlink on any component."""
+    """A regular file strictly inside *base*; no symlink on any component of
+    *rel*. *base* must be the declared input root (configs dir, template root,
+    the loader's configured tools dir), never a directory derived from *rel*."""
     base = Path(base)
     parts = Path(rel).parts
     if not rel or Path(rel).is_absolute() or ".." in parts:
@@ -294,8 +300,11 @@ def _tool_identity(sf, name):
     tool_dir = loader._find_tool_dir(name)
     native = bool(loader.is_native(name))
     if tool_dir is not None:
-        tdir = Path(tool_dir) / name
-        raw = {f: safe_file(tdir, f).read_bytes()
+        # The boundary is the loader's configured tools dir the tool was found
+        # in: the tool's own directory is an input component like its files.
+        root = Path(tool_dir)
+        tdir = root / name
+        raw = {f: safe_file(root, f"{name}/{f}").read_bytes()
                for f in ("tool.yaml", "impl.py", "README.md")
                if (tdir / f).exists() or (tdir / f).is_symlink()}
         if "tool.yaml" not in raw:
@@ -331,7 +340,8 @@ def _tool_identity(sf, name):
                     f"from {tdir / 'tool.yaml'}; it must be reloaded before capture")
         if "impl.py" not in files and cached_fn is None:
             raise BundleRefused(f"unresolved tool {name!r}: no impl.py at {tdir}")
-        return ident, {"dir": str(tdir), "kind": "native" if native else "dir"}, schema
+        return ident, {"dir": str(tdir), "root": str(root),
+                       "kind": "native" if native else "dir"}, schema
     if cached_fn is not None:
         return ({"native": native, "files": {},
                  "callable": _served_identity(cached_fn, f"tool {name!r}"),
@@ -474,7 +484,7 @@ def capture(sf, registry, name: str, *, template_base=None, configs_dirs=None,
                        "prompt": key}
     tools, caps, where = resolve_providers(sf, graph, roles)
     for loc in where.values():
-        if loc["dir"] and Path(loc["dir"]).parent.resolve() == tools_dir.resolve():
+        if loc["dir"] and Path(loc["root"]).resolve() == tools_dir.resolve():
             loc["kind"] = "generated"
     manifest = registry.get(name) if registry is not None else None
     hints = manifest_hints(manifest) if isinstance(manifest, ConfigManifest) else {}
@@ -523,11 +533,12 @@ def verify_inputs(bundle: dict) -> None:
             raise BundleRefused(f"input {key!r} changed since capture")
     for name, ident in bundle["tools"].items():
         where = (loc.get("tools") or {}).get(name) or {}
-        if ident["files"] and not where.get("dir"):
+        if ident["files"] and not (where.get("dir") and where.get("root")):
             raise BundleRefused(f"tool {name!r} has no recorded provider location")
         if where.get("dir"):
-            tdir = Path(where["dir"])
-            have = {f: sha(safe_file(tdir, f).read_bytes()) for f in ident["files"]}
+            root = Path(where["root"])
+            have = {f: sha(safe_file(root, f"{name}/{f}").read_bytes())
+                    for f in ident["files"]}
             if have != ident["files"]:
                 raise BundleRefused(f"tool {name!r} changed since capture")
 
@@ -903,14 +914,112 @@ def adoption_block(config_dir, target: str) -> str | None:
     return None
 
 
-def launch_block(config_name: str, config_dir=None) -> str | None:
+def recorded_unit(config_dir, stem: str) -> dict | None:
+    """The whole unit (with its manifest hints) generated *stem* must be served
+    as, or None for an ordinary config: a sealed bundle, or a target whose
+    files are exactly a whole unit a settled adoption recorded."""
+    if is_sealed_name(stem):
+        sealed = verify_sealed(config_dir, stem)
+        return {"graph_yaml": sealed["graph_yaml"],
+                "roles_text": roles_text(sealed["roles"]),
+                "hints": sealed.get("hints") or {}}
+    desc = read_descriptor(config_dir, stem)
+    side = desc and desc.get(_SETTLED_SIDE.get(desc.get("state"), ""))
+    gp = Path(config_dir) / f"{stem}.yaml"
+    if not isinstance(side, dict) or not (gp.exists() or gp.is_symlink()):
+        return None
+    unit = read_unit(config_dir, stem)
+    if unit_identity(unit) != side.get("identity"):
+        return None
+    return {**unit, "hints": side.get("hints")}
+
+
+def launch_block(config_name: str, config_dir=None, *, sf=None,
+                 registry=None) -> str | None:
+    """Why a new run of *config_name* may not start, or None.
+
+    The durable gate (pending/unreadable descriptor, altered seal) needs no
+    live state. Given the live ``sf`` (and its ConfigRegistry), a recorded
+    whole unit is also admitted only while ``whole_state`` verifies it is what
+    is actually served: a settled descriptor records intent, so a target or
+    seal left on build defaults or without its frozen roles (e.g. by a rolled
+    back boot) is refused until reload or reconcile serves it whole."""
     from core import pipeline_registry as pr
     if not str(config_name).startswith(pr.GEN_PREFIX):
         return None                     # adopt_bundle only targets generated configs
+    d = Path(config_dir or pr.generated_configs_dir())
+    _, block = boot_gate(d, config_name)
+    if block or sf is None:
+        return block
     try:
-        return adoption_block(config_dir or pr.generated_configs_dir(), config_name)
-    except BundleRefused as exc:
-        return str(exc)
+        unit = recorded_unit(d, config_name)
+        problems = [] if unit is None else whole_state(
+            sf, registry if registry is not None else _served_registry(sf),
+            d, config_name, unit)
+    except Exception as exc:                                # noqa: BLE001
+        problems = [f"verification failed: {type(exc).__name__}: {exc}"]
+    if problems:
+        return (f"{config_name!r} is not served as its recorded whole bundle "
+                f"({', '.join(problems)}); reload or reconcile it first")
+    return None
+
+
+def _served_registry(sf):
+    """The ConfigRegistry this process built for *sf*, or None."""
+    try:
+        from api import dependencies as deps
+    except ImportError:
+        return None
+    if getattr(deps, "_skillflow_instance", None) is sf:
+        return getattr(deps, "_config_registry_instance", None)
+    return None
+
+
+def verify_boot(sf, registry, config_dir, targets) -> dict:
+    """After the boot registration settled (committed OR rolled back), derive
+    each recorded target's ACTUAL whole state. One not served as its recorded
+    unit (e.g. a sibling's failure rolled the scan back to build defaults) is
+    mixed: its descriptor returns to ``pending`` with the mismatches, so launch
+    and the next boot refuse it until ``reconcile_adoption`` verifies a
+    recorded whole bundle. Returns {target: mismatches}."""
+    import contextlib
+    failed = {}
+    for target in targets:
+        # The exclusion adopt/reconcile/launch hold (re-entrant).
+        with getattr(sf, "_lock", None) or contextlib.nullcontext():
+            problems = _verify_boot_target(sf, registry, config_dir, target)
+        if problems:
+            failed[target] = problems
+    return failed
+
+
+def _verify_boot_target(sf, registry, config_dir, target) -> list:
+    import logging
+    log = logging.getLogger(__name__)
+    try:
+        desc = read_descriptor(config_dir, target)
+    except BundleRefused:
+        return []                       # an unreadable descriptor already blocks
+    if desc is None or desc.get("state") not in _SETTLED_SIDE:
+        return []
+    try:
+        unit = recorded_unit(config_dir, target)
+        problems = [] if unit is None else whole_state(
+            sf, registry, config_dir, target, unit)
+    except Exception as exc:                                # noqa: BLE001
+        problems = [f"verification failed: {type(exc).__name__}: {exc}"]
+    if not problems:
+        return []
+    log.warning("recorded bundle %s not served after boot (%s); pending until "
+                "reconciled", target, ", ".join(problems))
+    record = {k: v for k, v in desc.items() if k != "digest"}
+    try:
+        write_descriptor(config_dir, target, {
+            **record, "state": "pending",
+            "boot_unverified": {"settled": desc["state"], "mismatches": problems}})
+    except Exception:                                       # noqa: BLE001
+        log.exception("could not record %s as pending; launch verifies it live", target)
+    return problems
 
 
 def read_unit(config_dir, target: str) -> dict:

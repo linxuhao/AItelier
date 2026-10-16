@@ -355,11 +355,12 @@ def start_config_run(db, ws, config_name: str, project_id: str, *,
         run_context["review_candidate"] = {"project_id": against_project,
                                            "run_id": against_run, "commit_sha": against_commit}
     # Same exclusion adopt_bundle/reconcile_adoption hold (sf._lock): a target
-    # with an unreconciled adoption descriptor cannot gain a run.
+    # with an unreconciled adoption descriptor, or a recorded whole bundle not
+    # actually served, cannot gain a run.
     import contextlib
     from core.pipeline_frozen_bundle import launch_block
     with getattr(sf, "_lock", None) or contextlib.nullcontext():
-        blocked = launch_block(config_name)
+        blocked = launch_block(config_name, sf=sf)
         if blocked:
             return {"status": "error", "project_id": project_id,
                     "config_name": config_name, "message": blocked}

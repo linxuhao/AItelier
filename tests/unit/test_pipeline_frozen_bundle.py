@@ -1,4 +1,4 @@
-"""Source conformance tests for core.pipeline_frozen_bundle (UNRUN by the author).
+"""Source conformance tests for core.pipeline_frozen_bundle.
 
 They use the REAL SkillFlow, AgentRegistry, ConfigRegistry/ConfigManifest,
 pipeline_registry registration + RegistrationTransaction and the boot scan —

@@ -1276,5 +1276,11 @@ def load_generated_configs(sf, registry) -> list[str]:
             boot_transaction.commit()
     except Exception as e:
         _log.warning("generated config boot registration rolled back: %s", e)
-        return []
+        out = []
+    # Committed or rolled back, a recorded target must actually be served as
+    # its recorded whole unit; otherwise it stays refused until reconciled.
+    if recorded:
+        retired = archived_names()
+        _fb.verify_boot(sf, registry, config_dir,
+                        [name for name in recorded if name not in retired])
     return out

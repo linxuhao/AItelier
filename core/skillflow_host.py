@@ -87,15 +87,17 @@ class AItelierSkillFlow(SkillFlow):
         return super().register_graph(graph)
 
     def create_run(self, graph_name: str, *args, **kwargs) -> str:
-        """Refuse a new run of a target whose bundle adoption is unreconciled.
+        """Refuse a new run of a target whose bundle adoption is unreconciled,
+        or of a recorded whole bundle this process does not actually serve.
 
         Every driver (launcher, scheduler, meta agent) creates runs here, under
         the same lock adopt_bundle/reconcile_adoption hold, so a pending or
-        unreadable adoption descriptor blocks that target at this one ingress.
+        unreadable adoption descriptor, or a recorded unit left on defaults or
+        missing its frozen roles, blocks that target at this one ingress.
         """
         from core.pipeline_frozen_bundle import launch_block
         with self._lock:
-            blocked = launch_block(graph_name)
+            blocked = launch_block(graph_name, sf=self)
             if blocked:
                 raise SkillFlowError(blocked)
             return super().create_run(graph_name, *args, **kwargs)

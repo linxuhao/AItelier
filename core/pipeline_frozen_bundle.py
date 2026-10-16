@@ -19,8 +19,11 @@ live registries, SQLite rows, manifest values). The settled descriptor also
 records each side's manifest, which boot and reload re-apply to that unit.
 A settled descriptor records intent, not what is served: boot re-derives each
 recorded target's actual whole state (``verify_boot``) and returns one that is
-not served to ``pending``, and run creation (``launch_block`` with the live
-``sf``) admits a recorded unit or seal only while ``whole_state`` verifies it.
+not served to ``pending``. Run creation AND every re-admission of an existing
+run (resume, checkpoint approve/reject, reactivate, advance, claim; see
+``AItelierSkillFlow``) go through ``launch_block`` with the live ``sf``, which
+admits a recorded unit or seal only while ``whole_state`` verifies it, its
+manifest included: with no ConfigRegistry paired to ``sf`` it refuses.
 """
 from __future__ import annotations
 
@@ -936,14 +939,19 @@ def recorded_unit(config_dir, stem: str) -> dict | None:
 
 def launch_block(config_name: str, config_dir=None, *, sf=None,
                  registry=None) -> str | None:
-    """Why a new run of *config_name* may not start, or None.
+    """Why a run of *config_name* may not be admitted, or None: a new run, or
+    an existing (paused, failed or running) run being resumed, advanced or
+    claimed. A pinned run keeps its graph version but resolves its roles live
+    by name, i.e. from the whole unit's retained roles, so the same check holds.
 
     The durable gate (pending/unreadable descriptor, altered seal) needs no
     live state. Given the live ``sf`` (and its ConfigRegistry), a recorded
     whole unit is also admitted only while ``whole_state`` verifies it is what
     is actually served: a settled descriptor records intent, so a target or
     seal left on build defaults or without its frozen roles (e.g. by a rolled
-    back boot) is refused until reload or reconcile serves it whole."""
+    back boot) is refused until reload or reconcile serves it whole. The
+    manifest is part of that unit, so a recorded unit with no ConfigRegistry
+    paired to ``sf`` is refused rather than verified without it."""
     from core import pipeline_registry as pr
     if not str(config_name).startswith(pr.GEN_PREFIX):
         return None                     # adopt_bundle only targets generated configs
@@ -953,9 +961,14 @@ def launch_block(config_name: str, config_dir=None, *, sf=None,
         return block
     try:
         unit = recorded_unit(d, config_name)
-        problems = [] if unit is None else whole_state(
-            sf, registry if registry is not None else _served_registry(sf),
-            d, config_name, unit)
+        if registry is None:
+            registry = _served_registry(sf)
+        if unit is None:
+            problems = []
+        elif registry is None:
+            problems = ["config manifest: no ConfigRegistry is paired with this SkillFlow"]
+        else:
+            problems = whole_state(sf, registry, d, config_name, unit)
     except Exception as exc:                                # noqa: BLE001
         problems = [f"verification failed: {type(exc).__name__}: {exc}"]
     if problems:
@@ -964,24 +977,34 @@ def launch_block(config_name: str, config_dir=None, *, sf=None,
     return None
 
 
+def pair_registry(sf, registry) -> None:
+    """Record *registry* as the ConfigRegistry *sf* serves its generated
+    configs' manifests through (the boot scan's pair)."""
+    if registry is not None:
+        sf._frozen_bundle_registry = registry
+
+
 def _served_registry(sf):
-    """The ConfigRegistry this process built for *sf*, or None."""
+    """The ConfigRegistry this process built for *sf* (the api.dependencies
+    singleton pair), else the one its boot scan paired with it, else None."""
     try:
         from api import dependencies as deps
     except ImportError:
-        return None
-    if getattr(deps, "_skillflow_instance", None) is sf:
-        return getattr(deps, "_config_registry_instance", None)
-    return None
+        deps = None
+    if deps is not None and getattr(deps, "_skillflow_instance", None) is sf:
+        registry = getattr(deps, "_config_registry_instance", None)
+        if registry is not None:
+            return registry
+    return getattr(sf, "_frozen_bundle_registry", None)
 
 
 def verify_boot(sf, registry, config_dir, targets) -> dict:
     """After the boot registration settled (committed OR rolled back), derive
     each recorded target's ACTUAL whole state. One not served as its recorded
     unit (e.g. a sibling's failure rolled the scan back to build defaults) is
-    mixed: its descriptor returns to ``pending`` with the mismatches, so launch
-    and the next boot refuse it until ``reconcile_adoption`` verifies a
-    recorded whole bundle. Returns {target: mismatches}."""
+    mixed: its descriptor returns to ``pending`` with the mismatches, so new
+    and existing runs and the next boot refuse it until ``reconcile_adoption``
+    verifies a recorded whole bundle. Returns {target: mismatches}."""
     import contextlib
     failed = {}
     for target in targets:

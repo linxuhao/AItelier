@@ -1197,6 +1197,8 @@ def load_generated_configs(sf, registry) -> list[str]:
     # adoption recorded, are exempt from the in-place migrations: rewriting
     # them would silently change a recorded bundle.
     from core import pipeline_frozen_bundle as _fb
+    # Run admission verifies a recorded unit's manifest in this registry.
+    _fb.pair_registry(sf, registry)
     sealed_ok: set[str] = set()
     recorded: dict[str, dict] = {}
     for path in sorted(config_dir.glob(f"{GEN_PREFIX}*.yaml")):

@@ -722,7 +722,8 @@ def execute(*args, **kwargs):
 def _launch_via_host(socket_path: str, repo: Path, args: list[str], timeout: int, *,
                      writable_dirs=(), relay_socket: str = "", import_module: str = "",
                      pytest_timeout: bool = False, report_dir: str = "", run_id: str = "",
-                     profile: str = "", workdir: str = "", npm_cache: str = ""):
+                     profile: str = "", workdir: str = "", npm_cache: str = "",
+                     coding_grant: dict | None = None):
     """Send one validated launch request to the trusted host launcher.
 
     No in-backend Docker or pytest fallback: any failure is reported as
@@ -733,7 +734,9 @@ def _launch_via_host(socket_path: str, repo: Path, args: list[str], timeout: int
                "writable_dirs": [str(d) for d in writable_dirs],
                "relay_socket": relay_socket, "import_module": import_module,
                "pytest_timeout": pytest_timeout, "report_dir": report_dir, "run_id": run_id}
-    if profile:
+    if profile == "coding_shell":
+        request.update(profile=profile, coding_grant=coding_grant)
+    elif profile:
         # Only a Node request carries these, so a launcher without the Node
         # profiles refuses it and every pytest/gate request stays byte-identical.
         request.update(profile=profile, workdir=str(workdir), npm_cache=str(npm_cache))
@@ -763,12 +766,24 @@ def _launch_via_host(socket_path: str, repo: Path, args: list[str], timeout: int
     if not isinstance(response, dict):
         raise IsolationUnavailable("host CPU launcher returned a malformed response")
     if not response.get("ok"):
-        raise IsolationUnavailable(f"host CPU launcher refused: {response.get('error', 'unknown')}")
+        refused = IsolationUnavailable(f"host CPU launcher refused: {response.get('error', 'unknown')}")
+        if profile == "coding_shell":
+            refused.physical_quiet = response.get("physical_quiet") is True
+        raise refused
     result = response.get("result")
     if not isinstance(result, dict) or type(result.get("returncode")) is not int or not all(
             isinstance(result.get(k), str) for k in ("stdout", "stderr")):
         raise IsolationUnavailable("host CPU launcher returned a malformed result")
     _node_unavailable(result)
+    if profile == "coding_shell":
+        if response.get("physical_quiet") is not True:
+            raise IsolationUnavailable("coding shell physical settlement is unknown")
+        completed = subprocess.CompletedProcess(args, result["returncode"], result["stdout"], result["stderr"])
+        completed.timed_out = result.get("timed_out") is True
+        completed.output_truncated = result.get("output_truncated") is True
+        completed.physical_quiet = True
+        completed.git = response.get("git")
+        return completed
     if result.get("timed_out"):
         raise subprocess.TimeoutExpired(args, timeout,
                                         result.get("stdout"), result.get("stderr"))
@@ -784,6 +799,8 @@ def _execute(repo: Path, args: list[str], timeout: int, *,
             writable_dirs=(), relay_socket: str = "", import_module: str = "",
             pytest_timeout: bool = False, report_dir: str = "", run_id: str = "",
             profile: str = "", workdir: str = "", npm_cache: str = "") -> subprocess.CompletedProcess:
+    if profile == "coding_shell":
+        raise IsolationUnavailable("coding shell requires a host-bound grant and the owned host launcher")
     if profile == LINT_PROFILE:
         raise IsolationUnavailable("JavaScript lint requires the existing owned host launcher")
     docker = shutil.which("docker")

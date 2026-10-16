@@ -40,6 +40,9 @@ import uuid
 
 
 MAX_REQUEST_BYTES = 1 << 20
+# JSON may escape each permitted output byte as six ASCII bytes.
+CODING_SHELL_OUTPUT_LIMIT = 12_000
+CODING_SHELL_WIRE_LIMIT = 6 * CODING_SHELL_OUTPUT_LIMIT + 4096
 
 
 class LaunchRefused(ValueError):
@@ -143,13 +146,20 @@ def validate_request(cfg: dict, request: dict) -> dict:
         raise LaunchRefused("unsupported operation")
     allowed = {"op", "repo", "run_id", "args", "timeout", "writable_dirs",
                "report_dir", "relay_socket", "import_module", "pytest_timeout",
-               "profile", "workdir", "npm_cache"}
+               "profile", "workdir", "npm_cache", "coding_grant"}
     if set(request) - allowed:
         raise LaunchRefused("unsupported request fields; mounts/image come from host policy")
     owned_repo, report_root, project_id, source_repo = _run_binding(cfg, request.get("run_id"))
     repo = _resolve_inside(request.get("repo", ""), cfg["allowed_roots"], "repo")
     if repo != owned_repo or not repo.is_dir():
         raise LaunchRefused("repo does not match the existing run's owned repository")
+    if request.get("profile") == "coding_shell":
+        from core.coding_shell import validate_host_grant
+        if type(request.get("timeout")) is not int or not 1 <= request["timeout"] <= 7200:
+            raise LaunchRefused("timeout must be an integer within1..7200")
+        return validate_host_grant(cfg, request, repo, project_id, LaunchRefused)
+    if "coding_grant" in request:
+        raise LaunchRefused("coding grant is only valid for the closed coding shell profile")
     if "profile" in request:
         # The repo above only binds the request to its run; a Node container
         # never mounts it (`docker_command`).
@@ -259,6 +269,19 @@ def docker_command(cfg: dict, fields: dict, name: str) -> list[str]:
         raise LaunchRefused("Docker execution facility is unavailable on the host")
     repo = fields["repo"]
     entry = str(cfg["executor_entry"])
+    if fields.get("profile") == "coding_shell":
+        return [docker, "create", "--rm", "--init", "--network", "none",
+                "--cpus", "2", "--memory", "2g", "--pids-limit", "512",
+                "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+                "--read-only", "--tmpfs", "/tmp:rw,nosuid,nodev,size=128m",
+                "--user", "1000:1000", "--name", name,
+                "--label", "aitelier.run_id=" + fields["run_id"],
+                "--label", "aitelier.project_id=" + fields["project_id"],
+                "-v", f"{repo}:{repo}:rw", *fields["git_mounts"],
+                "-v", f"{entry}:/executor.py:ro", "-w", repo,
+                "--entrypoint", "python3", str(cfg["test_image"]), "/executor.py",
+                json.dumps({"profile": "coding_shell", "args": fields["args"],
+                            "repo": repo, "timeout": fields["timeout"]})]
     if fields.get("profile") == "javascript_lint":
         from core.repository_executor import lint_payload
         return [docker, "create", "--rm", "--init", "--network", "none",
@@ -320,8 +343,11 @@ def _run_docker(cfg: dict, fields: dict, conn: socket.socket | None = None) -> d
     def cancelled():
         if conn is not None and select.select([conn], [], [], 0)[0]:
             client_left()
+        if fields.get("profile") == "coding_shell":
+            validate_request(cfg, fields["shell_request"])
     # The create's time counts against this bound (`owned_container`).
     deadline = time.monotonic() + fields["timeout"] + 15
+    coding_shell = fields.get("profile") == "coding_shell"
     with owned_container(command, command[0], name, cancelled=cancelled) as proc:
         output = {"stdout": bytearray(), "stderr": bytearray()}
         with selectors.DefaultSelector() as selector:
@@ -345,6 +371,8 @@ def _run_docker(cfg: dict, fields: dict, conn: socket.socket | None = None) -> d
                         selector.unregister(key.fileobj)
                         pipes -= 1
                     else:
+                        if coding_shell and sum(map(len, output.values())) + len(chunk) > CODING_SHELL_WIRE_LIMIT:
+                            raise LaunchRefused("coding shell executor exceeded its wire output limit")
                         output[key.data].extend(chunk)
         proc.wait(timeout=max(.1, deadline - time.monotonic()))
     stderr = output["stderr"].decode(errors="replace")
@@ -357,6 +385,13 @@ def _run_docker(cfg: dict, fields: dict, conn: socket.socket | None = None) -> d
     if not isinstance(result, dict) or type(result.get("returncode")) is not int or not all(
             isinstance(result.get(k), str) for k in ("stdout", "stderr")):
         raise LaunchRefused("isolated executor returned a malformed result")
+    if coding_shell:
+        try:
+            size = sum(len(result[k].encode("utf-8")) for k in ("stdout", "stderr"))
+        except UnicodeEncodeError as exc:
+            raise LaunchRefused("coding shell executor returned invalid UTF-8 output") from exc
+        if size > CODING_SHELL_OUTPUT_LIMIT:
+            raise LaunchRefused("coding shell executor exceeded its decoded output limit")
     return result
 
 
@@ -368,12 +403,13 @@ def handle_request(cfg: dict, raw: bytes, conn: socket.socket | None = None) -> 
         request = json.loads(raw)
     except ValueError:
         return {"ok": False, "error": "request is not valid JSON"}
-    from core.repository_executor import _slot, IsolationUnavailable, private_git
+    from core.repository_executor import _slot, IsolationUnavailable, private_git, CleanupUnconfirmed
     git = None
+    shell = isinstance(request, dict) and request.get("profile") == "coding_shell"
     try:
         fields = validate_request(cfg, request)
         with _slot(Path(cfg["aitelier_home"]) / "cpu-test-slots"):
-            if fields.get("profile"):
+            if fields.get("profile") and not shell:
                 result = _run_docker(cfg, fields, conn)
             else:
                 # The repository's own Git metadata is the run's; the
@@ -381,18 +417,33 @@ def handle_request(cfg: dict, raw: bytes, conn: socket.socket | None = None) -> 
                 root = Path(cfg["aitelier_home"]) / "cpu-git"
                 root.mkdir(mode=0o700, parents=True, exist_ok=True)
                 directory = Path(tempfile.mkdtemp(prefix="git-", dir=root))
+                uncertain = False
                 try:
                     mounts, git = private_git(Path(fields["repo"]), directory,
                                               fields["git_common"] or None,
                                               image=str(cfg["test_image"]),
                                               docker=shutil.which("docker") or "docker",
                                               conn=conn)
+                    if shell:
+                        if not git.get("provided") or git.get("head") != fields["base_sha"]:
+                            raise LaunchRefused("coding shell requires its pinned self-contained private Git view")
+                        fields = validate_request(cfg, request)
                     result = _run_docker(cfg, {**fields, "git_mounts": mounts}, conn)
+                except (CleanupUnconfirmed, OSError, subprocess.TimeoutExpired):
+                    uncertain = True
+                    raise
                 finally:
-                    shutil.rmtree(directory, ignore_errors=True)
+                    if not (shell and uncertain):
+                        shutil.rmtree(directory, ignore_errors=True)
     except (LaunchRefused, IsolationUnavailable, OSError, subprocess.TimeoutExpired) as exc:
-        return {"ok": False, "error": str(exc)}
-    return {"ok": True, "result": result, "git": git}
+        response = {"ok": False, "error": str(exc)}
+        if shell:
+            response["physical_quiet"] = not isinstance(exc, (CleanupUnconfirmed, OSError, subprocess.TimeoutExpired))
+        return response
+    response = {"ok": True, "result": result, "git": git}
+    if shell:
+        response["physical_quiet"] = True
+    return response
 
 
 def _serve_connection(conn: socket.socket, cfg: dict, lock: threading.Semaphore) -> None:

@@ -63,35 +63,34 @@ class TestModePlumbing:
 
     def test_coding_tool_definitions_shape(self):
         names = {td["function"]["name"] for td in CODING_TOOL_DEFINITIONS}
-        assert names == {"edit_file", "create_file", "bash",
-                         "runner_start", "runner_submit",
-                         "runner_approve", "runner_reject", "skillflow_tool",
-                         "web_search", "web_fetch",
-                         # generate_pipeline is coding-only so drive_pipeline,
-                         # its test-drive/fix loop, is always in reach.
-                         "generate_pipeline", "drive_pipeline",
-                         # replay_baseline is the cheap half of the same loop —
-                         # it writes the baseline file, so it sits beside the
-                         # tools that mutate a generated pipeline, not with the
-                         # butler's read-only inspection surface.
-                         "replay_baseline",
-                         "skillflow_docs_list", "skillflow_docs_search",
-                         "skillflow_docs_read",
-                         # editing a generated pipeline mutates it, so it lives
-                         # here; the config_read/search half is butler-visible.
-                         "config_edit",
-                         # retiring one is destructive — coding-mode only
-                         "archive_pipeline",
-                         # resolving a suggestion as `applied` asserts a config
-                         # was changed, so it sits with the tools that can
-                         # change one. Recording and listing them are
-                         # butler-visible (they touch no config, repo, or run).
-                         "resolve_pipeline_suggestion",
-                         # changes which graph a LIVE run executes — it belongs
-                         # with config_edit, not with the read-only surface
-                         "repin_run"}
+        # No model approval/rejection tool exists any more: a plan is decided
+        # only by the user through the authenticated decision endpoint.
+        assert not names & {"runner_approve", "runner_reject"}
         butler_names = {td["function"]["name"] for td in TOOL_DEFINITIONS}
         assert not names & butler_names
+
+    def test_coding_palette_is_fixed_and_excludes_escape_routes(self, coding_agent):
+        from core.meta_agent import CODING_PALETTE, CODING_PALETTE_DEFINITIONS
+        advertised = {d["function"]["name"] for d in coding_agent._tool_palette()}
+        assert advertised == set(CODING_PALETTE)
+        assert {d["function"]["name"] for d in CODING_PALETTE_DEFINITIONS} == set(CODING_PALETTE)
+        for escape in ("approve_checkpoint", "reject_checkpoint", "runner_approve",
+                       "start_config_run", "generate_pipeline", "drive_pipeline",
+                       "generate_addon", "config_edit", "repin_run", "replay_baseline",
+                       "tool_list", "stop_pipeline", "state_graph_write",
+                       "start_new_project", "update_project", "archive_pipeline"):
+            assert escape not in CODING_PALETTE
+        for repo_tool in ("read_code_file", "edit_file", "create_file", "bash",
+                          "list_code_tree", "search_code"):
+            props = next(d for d in CODING_PALETTE_DEFINITIONS
+                         if d["function"]["name"] == repo_tool)["function"]["parameters"]
+            assert "project_id" not in props.get("properties", {})
+
+    async def test_dispatch_refuses_names_outside_the_palette(self, coding_agent):
+        for name in ("approve_checkpoint", "start_config_run", "generate_pipeline",
+                     "state_graph_write", "config_edit", "runner_approve"):
+            result = await coding_agent._execute_tool(name, {})
+            assert "not available in Coding Mode" in result["error"], name
 
     def test_coding_system_prompt_uses_template(self, coding_agent, butler_agent):
         coding = coding_agent._build_system_prompt("proj-1")
@@ -112,138 +111,42 @@ class TestModePlumbing:
         assert "only available in coding mode" in result["error"]
 
 
-class TestEditFile:
-    async def test_edit_requires_prior_read(self, coding_agent):
-        result = await coding_agent._execute_tool(
-            "edit_file", {"project_id": "p", "path": "hello.py",
-                          "old_str": "'hello'", "new_str": "'hi'"})
-        assert "read" in result["error"]
+class TestRepositoryToolsNeedTheAuthenticatedScope:
+    """Without the authenticated entry scope there is no tree at all: the
+    Source checkout is never a fallback for Coding Mode file tools or shell."""
 
-    async def test_edit_after_read(self, coding_agent, repo):
-        read = await coding_agent._execute_tool(
-            "read_code_file", {"project_id": "p", "path": "hello.py"})
-        assert "error" not in read
-        result = await coding_agent._execute_tool(
-            "edit_file", {"project_id": "p", "path": "hello.py",
-                          "old_str": "'hello'", "new_str": "'hi'"})
-        assert result == {"edited": "hello.py"}
-        assert "return 'hi'" in (repo / "hello.py").read_text()
+    @pytest.mark.parametrize("name,args", [
+        ("read_code_file", {"path": "hello.py"}),
+        ("list_code_tree", {}),
+        ("search_code", {"pattern": "hello"}),
+        ("edit_file", {"path": "hello.py", "old_str": "'hello'", "new_str": "'hi'"}),
+        ("create_file", {"path": "pkg/new.py", "content": "a = 1\n"}),
+        ("bash", {"command": "echo hi > hi.txt"}),
+        ("runner_start", {"task": "x"}),
+        ("runner_submit", {"step_id": "plan", "result": {"plan": "p"}}),
+        ("plan_status", {}),
+    ])
+    async def test_unscoped_tool_is_unavailable(self, coding_agent, repo, name, args):
+        before = {p.name: p.read_bytes() for p in repo.iterdir() if p.is_file()}
+        result = await coding_agent._execute_tool(name, {"project_id": "p", **args})
+        assert "authenticated coding session" in result["error"], result
+        assert {p.name: p.read_bytes() for p in repo.iterdir() if p.is_file()} == before
 
-    async def test_edit_ambiguous_match_fails(self, coding_agent, repo):
-        (repo / "dup.py").write_text("x = 1\nx = 1\n", encoding="utf-8")
-        await coding_agent._execute_tool(
-            "read_code_file", {"project_id": "p", "path": "dup.py"})
-        result = await coding_agent._execute_tool(
-            "edit_file", {"project_id": "p", "path": "dup.py",
-                          "old_str": "x = 1", "new_str": "x = 2"})
-        assert "2 times" in result["error"]
-        assert (repo / "dup.py").read_text() == "x = 1\nx = 1\n"
+    async def test_bash_never_spawns_a_backend_subprocess(self, coding_agent, monkeypatch):
+        async def forbidden(*a, **k):
+            raise AssertionError("backend shell spawned")
+        monkeypatch.setattr("asyncio.create_subprocess_shell", forbidden)
+        monkeypatch.setattr("asyncio.create_subprocess_exec", forbidden)
+        result = await coding_agent._execute_tool("bash", {"command": "ls"})
+        assert "error" in result
 
-    async def test_edit_missing_snippet_fails(self, coding_agent):
-        await coding_agent._execute_tool(
-            "read_code_file", {"project_id": "p", "path": "hello.py"})
-        result = await coding_agent._execute_tool(
-            "edit_file", {"project_id": "p", "path": "hello.py",
-                          "old_str": "nonexistent", "new_str": "x"})
-        assert "not found" in result["error"]
-
-    async def test_edit_nonexistent_file(self, coding_agent):
-        result = await coding_agent._execute_tool(
-            "edit_file", {"project_id": "p", "path": "ghost.py",
-                          "old_str": "a", "new_str": "b"})
-        assert "does not exist" in result["error"]
-
-    async def test_edit_path_traversal_denied(self, coding_agent):
-        result = await coding_agent._execute_tool(
-            "edit_file", {"project_id": "p", "path": "../outside.py",
-                          "old_str": "a", "new_str": "b"})
-        assert "traversal" in result["error"].lower()
-
-    async def test_no_project_slash_stripping(self, coding_agent, repo):
-        # Unlike DPE's AT-9 normalization, a real project/ directory is honored.
-        (repo / "project").mkdir()
-        (repo / "project" / "real.py").write_text("v = 1\n", encoding="utf-8")
-        await coding_agent._execute_tool(
-            "read_code_file", {"project_id": "p", "path": "project/real.py"})
-        result = await coding_agent._execute_tool(
-            "edit_file", {"project_id": "p", "path": "project/real.py",
-                          "old_str": "v = 1", "new_str": "v = 2"})
-        assert result == {"edited": "project/real.py"}
-        assert (repo / "project" / "real.py").read_text() == "v = 2\n"
-
-
-class TestCreateFile:
-    async def test_create_new_file(self, coding_agent, repo):
-        result = await coding_agent._execute_tool(
-            "create_file", {"project_id": "p", "path": "pkg/new.py",
-                            "content": "a = 1\n"})
-        assert result["created"] == "pkg/new.py"
-        assert (repo / "pkg" / "new.py").read_text() == "a = 1\n"
-
-    async def test_create_refuses_existing(self, coding_agent):
-        result = await coding_agent._execute_tool(
-            "create_file", {"project_id": "p", "path": "hello.py",
-                            "content": "clobber"})
-        assert "already exists" in result["error"]
-
-    async def test_created_file_is_editable_without_read(self, coding_agent, repo):
-        await coding_agent._execute_tool(
-            "create_file", {"project_id": "p", "path": "fresh.py",
-                            "content": "n = 1\n"})
-        result = await coding_agent._execute_tool(
-            "edit_file", {"project_id": "p", "path": "fresh.py",
-                          "old_str": "n = 1", "new_str": "n = 2"})
-        assert result == {"edited": "fresh.py"}
-
-
-class TestBash:
-    async def test_bash_runs_in_repo_cwd(self, coding_agent):
-        result = await coding_agent._execute_tool(
-            "bash", {"project_id": "p", "command": "ls"})
-        assert result["exit_code"] == 0
-        assert "hello.py" in result["output"]
-
-    async def test_bash_nonzero_exit(self, coding_agent):
-        result = await coding_agent._execute_tool(
-            "bash", {"project_id": "p", "command": "exit 3"})
-        assert result["exit_code"] == 3
-
-    async def test_bash_timeout(self, coding_agent):
-        result = await coding_agent._execute_tool(
-            "bash", {"project_id": "p", "command": "sleep 5", "timeout": 1})
-        assert "timed out" in result["error"]
-
-    async def test_bash_env_scrubbed(self, coding_agent, monkeypatch):
-        monkeypatch.setenv("FAKE_API_KEY", "supersecret")
-        monkeypatch.setenv("MY_PASSWORD", "hunter2")
-        monkeypatch.setenv("PLAIN_VAR", "visible")
-        result = await coding_agent._execute_tool(
-            "bash", {"project_id": "p",
-                     "command": 'echo "k=${FAKE_API_KEY:-gone} '
-                                'p=${MY_PASSWORD:-gone} v=${PLAIN_VAR:-gone}"'})
-        assert "k=gone" in result["output"]
-        assert "p=gone" in result["output"]
-        assert "v=visible" in result["output"]
-
-    async def test_bash_env_scrub_spares_git_config_vars(self, coding_agent,
-                                                         monkeypatch):
-        # An unanchored _KEY match stripped GIT_CONFIG_KEY_0 but left
-        # GIT_CONFIG_COUNT, which makes every git command fail with
-        # "error: missing config key GIT_CONFIG_KEY_0".
-        monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
-        monkeypatch.setenv("GIT_CONFIG_KEY_0", "credential.helper")
-        monkeypatch.setenv("GIT_CONFIG_VALUE_0", "/x/helper.sh")
-        result = await coding_agent._execute_tool(
-            "bash", {"project_id": "p",
-                     "command": 'echo "key=${GIT_CONFIG_KEY_0:-gone}"'})
-        assert "key=credential.helper" in result["output"]
-
-    async def test_bash_output_truncated(self, coding_agent):
-        result = await coding_agent._execute_tool(
-            "bash", {"project_id": "p", "command": "yes x | head -c 20000"})
-        assert result["truncated"] is True
-        assert "truncated" in result["output"]
-        assert len(result["output"]) < 12000
+    def test_no_source_bound_write_or_backend_shell_remains(self):
+        import inspect
+        import core.meta_agent as ma
+        for gone in ("_tool_edit_file", "_tool_create_file", "_tool_bash",
+                     "_tool_runner_approve", "_tool_runner_reject", "_resolve_code_target"):
+            assert not hasattr(MetaAgent, gone), gone
+        assert "create_subprocess_shell" not in inspect.getsource(ma)
 
 
 class TestWebTools:
@@ -512,124 +415,10 @@ class TestCondenser:
 
 
 class TestCodingTaskRunner:
-    """Drive the plan-gated coding_task graph end-to-end through the butler's
-    runner tools (thin wrappers over skillflow's RunnerService — the same core
-    skillflow-mcp serves) against a real isolated engine — proving the engine
-    holds the implement step until the plan checkpoint is approved."""
-
-    @pytest.fixture
-    def runner_env(self, tmp_path, monkeypatch, mock_db, mock_ws):
-        from pathlib import Path as P
-        from skillflow.core import SkillFlow
-        from skillflow.graph import PipelineGraph
-        import yaml as _yaml
-
-        repo_root = P(__file__).resolve().parent.parent.parent
-        sf = SkillFlow(str(tmp_path / "sf.db"),
-                       workspace_base=str(tmp_path / "ws"),
-                       projects_base=str(tmp_path / "proj"))
-        for name, cfg in _yaml.safe_load(
-                (repo_root / "agent_configs" / "coding_task.yaml").read_text()).items():
-            sf.register_agent_config_from_dict(name, cfg)
-        sf.register_graph(PipelineGraph.from_yaml(repo_root / "configs" / "coding_task.yaml"))
-
-        import api.dependencies as deps
-        monkeypatch.setattr(deps, "get_skillflow", lambda: sf)
-
-        mock_db.get_project.return_value = {"project_id": "p1"}
-        agent = MetaAgent(mock_db, mock_ws, owner_email="t@local",
-                          session_id="sess-ct", mode="coding")
-        return agent, sf
-
-    async def test_full_plan_gate_flow(self, runner_env):
-        agent, sf = runner_env
-
-        # 1. start → plan step instruction (honest contract, no phantom tools)
-        resp = await agent._execute_tool(
-            "runner_start", {"project_id": "p1", "task": "add a modulo fn"})
-        assert resp["status"] == "in_progress"
-        assert resp["step"] == "plan"
-        assert "add a modulo fn" in resp["instruction"]  # seed reached context
-        assert "### write_plan" not in resp["instruction"]
-        assert "### finish_step" not in resp["instruction"]
-        run_id = resp["run_id"]
-
-        # 2. engine refuses a second concurrent run for the same project
-        dup = await agent._execute_tool(
-            "runner_start", {"project_id": "p1", "task": "another"})
-        assert "already live" in dup["error"]
-
-        # 3. submitting the WRONG step is rejected
-        wrong = await agent._execute_tool(
-            "runner_submit", {"run_id": run_id, "step_id": "implement",
-                              "result": {"summary": "nope"}})
-        assert "Current step is 'plan'" in wrong["error"]
-
-        # 4. submit the plan → run pauses at the checkpoint
-        resp = await agent._execute_tool(
-            "runner_submit", {"run_id": run_id, "step_id": "plan",
-                              "result": {"plan": "## Goal\nadd modulo"}})
-        assert resp["status"] == "paused"
-        assert "Plan Review" in resp["checkpoint_label"]
-        # THE GATE: engine state is paused — implement is not claimable
-        assert sf.get_run(run_id)["status"] == "paused"
-
-        # 5. reject with feedback → plan step re-runs, feedback in instruction
-        resp = await agent._execute_tool(
-            "runner_reject", {"run_id": run_id, "feedback": "add tests too"})
-        assert resp["status"] == "in_progress"
-        assert resp["step"] == "plan"
-        assert "add tests too" in resp["instruction"]
-
-        # 6. revised plan → paused again → approve → implement step released
-        resp = await agent._execute_tool(
-            "runner_submit", {"run_id": run_id, "step_id": "plan",
-                              "result": {"plan": "## Goal\nmodulo + tests"}})
-        assert resp["status"] == "paused"
-        resp = await agent._execute_tool(
-            "runner_approve", {"run_id": run_id})
-        assert resp["status"] == "in_progress"
-        assert resp["step"] == "implement"
-        # prior plan is in the implement step's context
-        assert "modulo + tests" in resp["instruction"]
-
-        # 7. submit implementation summary → run completes
-        resp = await agent._execute_tool(
-            "runner_submit", {"run_id": run_id, "step_id": "implement",
-                              "result": {"summary": "done, tests pass"}})
-        assert resp["status"] == "completed"
-        assert resp["outputs"]["implement"]["summary"] == "done, tests pass"
-
-        # plan artifact promoted to the workspace
-        plan_file = (sf._workspace.get_config_path("p1", "coding_task")
-                     / "plan" / "plan.md")
-        assert plan_file.exists()
-        assert "modulo + tests" in plan_file.read_text()
-
-    async def test_skillflow_tool_proxy(self, runner_env):
-        agent, sf = runner_env
-        resp = await agent._execute_tool(
-            "runner_start", {"project_id": "p1", "task": "t"})
-        run_id = resp["run_id"]
-
-        # write via the proxy, submit with no result — file already staged
-        staged = await agent._execute_tool(
-            "skillflow_tool", {"run_id": run_id, "step_id": "plan",
-                               "name": "write_plan",
-                               "params": {"content": "## staged"}})
-        assert staged.get("written")
-        resp = await agent._execute_tool(
-            "runner_submit", {"run_id": run_id, "step_id": "plan"})
-        assert resp["status"] == "paused"
-        plan_file = (sf._workspace.get_config_path("p1", "coding_task")
-                     / "plan" / "plan.md")
-        assert plan_file.read_text() == "## staged"
-
-        # host tools are redirected, not "not allowed"
-        bounced = await agent._execute_tool(
-            "skillflow_tool", {"run_id": run_id, "step_id": "plan",
-                               "name": "edit_file", "params": {}})
-        assert "not a skillflow tool" in bounced["error"]
+    """The real plan-gated flow (governing association, user-only approval with
+    the exact retained token, gate across requests) is exercised end to end
+    through the authenticated chat route in
+    tests/integration/test_coding_workspace_integration.py."""
 
     async def test_runner_tools_rejected_in_butler_mode(self, butler_agent):
         for name, args in (
@@ -638,19 +427,10 @@ class TestCodingTaskRunner:
             result = await butler_agent._execute_tool(name, args)
             assert "only available in coding mode" in result["error"]
 
-    async def test_start_requires_existing_project(self, runner_env):
-        agent, _ = runner_env
-        agent.db.get_project.return_value = None
-        result = await agent._execute_tool(
-            "runner_start", {"project_id": "ghost", "task": "x"})
-        assert "not found" in result["error"]
-
-    async def test_submit_validates_result_shape(self, runner_env):
-        agent, _ = runner_env
-        result = await agent._execute_tool(
-            "runner_submit", {"run_id": "r", "step_id": "plan",
-                              "result": "a string"})
-        assert "must be an object" in result["error"]
+    async def test_submit_validates_result_shape_before_any_scope(self, coding_agent):
+        result = await coding_agent._execute_tool(
+            "runner_submit", {"step_id": "plan", "result": "a string"})
+        assert "error" in result
 
 
 class TestStartConfigRunAgainstProject:
@@ -658,7 +438,7 @@ class TestStartConfigRunAgainstProject:
     project's repo (repo_path + repo_type=existing) — one generic param that
     replaces a per-config offload tool. Butler drives coding_impl this way."""
 
-    async def test_against_project_resolves_existing_repo(self, coding_agent,
+    async def test_against_project_resolves_existing_repo(self, butler_agent,
                                                           mock_db, monkeypatch):
         mock_db.get_project.return_value = {
             "project_id": "eval", "name": "Eval", "repo_path": "/repo/eval"}
@@ -674,7 +454,7 @@ class TestStartConfigRunAgainstProject:
         monkeypatch.setattr(rl, "start_config_run", fake_start)
         monkeypatch.setattr(rl, "generate_run_id", lambda c: f"{c}-xyz")
 
-        result = await coding_agent._execute_tool(
+        result = await butler_agent._execute_tool(
             "start_config_run", {"config_name": "coding_impl",
                                  "against_project": "eval",
                                  "seed_text": "## Goal\ndo it"})
@@ -684,9 +464,9 @@ class TestStartConfigRunAgainstProject:
                             "repo_type": "existing", "repo_path": "/repo/eval"}
         mock_db.link_run_to_session.assert_called_once_with("sess1", "impl-1")
 
-    async def test_against_project_unknown(self, coding_agent, mock_db):
+    async def test_against_project_unknown(self, butler_agent, mock_db):
         mock_db.get_project.return_value = None
-        result = await coding_agent._execute_tool(
+        result = await butler_agent._execute_tool(
             "start_config_run", {"config_name": "coding_impl",
                                  "against_project": "ghost"})
         assert "not found" in result["error"]
@@ -787,18 +567,11 @@ class TestPipelineCatalog:
         istep = next(n for n in inv.steps if n.id == "investigate")
         assert istep.output_mode == "content"
 
-    def test_catalog_block_pushed_into_coding_prompt(self, coding_agent, monkeypatch):
-        class _Reg:
-            def catalog(self, full=False):
-                return [{"config_name": "code_review",
-                         "description": "Adversarial review of a code diff",
-                         "drive": "inline"}]
-        import api.dependencies as deps
-        monkeypatch.setattr(deps, "get_config_registry", lambda: _Reg())
+    def test_catalog_not_pushed_into_coding_prompt(self, coding_agent):
+        # Coding Mode cannot start or drive pipelines, so it is not offered them.
         prompt = coding_agent._build_system_prompt("proj-1")
-        assert "code_review" in prompt
-        assert "[inline]" in prompt
-        assert "{pipeline_catalog}" not in prompt  # placeholder filled
+        assert "{pipeline_catalog}" not in prompt
+        assert "start_config_run" not in prompt and "coding_impl" not in prompt
 
 
 class TestBudgetPause:

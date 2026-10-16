@@ -385,6 +385,37 @@ export function sendChatMessage(
 }
 
 /**
+ * Coding Mode: the session's own working tree (NOT Source) and its governing
+ * plan. The server resolves the tree from the session's sealed binding; a
+ * run id passed back is only a fence that says the view moved.
+ */
+export function codingView(sessionId: string): Promise<Record<string, any>> {
+  return _get('/api/agent/coding/view?session_id=' + encodeURIComponent(sessionId));
+}
+
+export function codingTree(sessionId: string, runId?: string): Promise<Record<string, any>> {
+  return _get('/api/agent/coding/tree?session_id=' + encodeURIComponent(sessionId)
+    + (runId ? '&run_id=' + encodeURIComponent(runId) : ''));
+}
+
+export function codingFile(sessionId: string, path: string, runId?: string): Promise<Record<string, any>> {
+  return _get('/api/agent/coding/file?session_id=' + encodeURIComponent(sessionId)
+    + '&path=' + encodeURIComponent(path)
+    + (runId ? '&run_id=' + encodeURIComponent(runId) : ''));
+}
+
+/** The user's decision on the governing plan, bound to the exact rendered token. */
+export function codingPlanDecision(body: {
+  session_id: string;
+  decision: 'approve' | 'reject' | 'dismiss';
+  expected_checkpoint?: Record<string, unknown>;
+  decision_id?: string;
+  feedback?: string;
+}): Promise<Record<string, any>> {
+  return _post('/api/agent/coding/plan-decision', body);
+}
+
+/**
  * Create a new chat session and return its ID.
  * POST /api/agent/session/create
  */

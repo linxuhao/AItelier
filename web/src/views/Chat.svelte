@@ -8,6 +8,10 @@
     createSession,
     getChatHistory,
     listSessions,
+    codingView,
+    codingTree,
+    codingFile,
+    codingPlanDecision,
     ApiError,
     errorFromResponse,
     errorMessageKey,
@@ -80,6 +84,66 @@
   // server-side). budgetPaused surfaces the loop's budget_exhausted pause.
   let codingMode = $state(false);
   let budgetPaused = $state(false);
+
+  // Coding Mode session view: the SESSION's working tree (never relabelled
+  // Source), its governing plan and the last handoff. The plan token shown
+  // here is exactly what an approval sends back.
+  let codingInfo = $state<Record<string, any> | null>(null);
+  let codingFiles = $state<string[]>([]);
+  let codingPreview = $state<{ path: string; content: string } | null>(null);
+  let codingFeedback = $state('');
+  let codingCommitMessage = $state('');
+  let codingDecisionBusy = $state(false);
+
+  async function _refreshCodingView(): Promise<void> {
+    if (!codingMode || !sessionId) {
+      codingInfo = null;
+      return;
+    }
+    try {
+      codingInfo = await codingView(sessionId);
+      codingFiles = [];
+      if (codingInfo && codingInfo.view === 'working_tree') {
+        const tree = await codingTree(sessionId, codingInfo.run_id as string);
+        codingFiles = (tree.files as string[]) || [];
+      }
+    } catch {
+      codingInfo = null;
+    }
+  }
+
+  async function _openCodingFile(path: string): Promise<void> {
+    if (!sessionId || !codingInfo) return;
+    try {
+      const f = await codingFile(sessionId, path, codingInfo.run_id as string);
+      codingPreview = { path: f.path as string, content: f.content as string };
+    } catch {
+      await _refreshCodingView();
+    }
+  }
+
+  async function _decidePlan(decision: 'approve' | 'reject' | 'dismiss'): Promise<void> {
+    if (!sessionId || !codingInfo || codingDecisionBusy) return;
+    const checkpoint = codingInfo.plan?.checkpoint;
+    codingDecisionBusy = true;
+    try {
+      const res = await codingPlanDecision({
+        session_id: sessionId,
+        decision,
+        expected_checkpoint: decision === 'approve' ? checkpoint?.expected_checkpoint : undefined,
+        decision_id: Array.from(crypto.getRandomValues(new Uint8Array(12)),
+          (b) => b.toString(16).padStart(2, '0')).join(''),
+        feedback: decision === 'reject' ? codingFeedback : undefined,
+      });
+      messages = [...messages, { role: 'system', content: 'Plan ' + decision + ': ' + (res.status as string) }];
+      codingFeedback = '';
+    } catch (e) {
+      messages = [...messages, { role: 'error', content: String((e as Error).message || e) }];
+    } finally {
+      codingDecisionBusy = false;
+      await _refreshCodingView();
+    }
+  }
 
   // Slash completion state
   let completionMatches = $state<SlashCommand[]>([]);
@@ -221,6 +285,7 @@
 
       // Adopt the session's stored mode so the toggle reflects reality.
       codingMode = (response.mode as string) === 'coding';
+      if (codingMode) void _refreshCodingView();
 
       // Restore token usage from API
       if (typeof response.token_count === 'number') {
@@ -644,6 +709,25 @@
 
         currentAgentText = '';
         _loadSessionList(0, false);
+        void _refreshCodingView();
+        break;
+      }
+
+      case 'coding_handoff': {
+        const status = (event.status as string) || '?';
+        const detail = (event.error as string) || (event.reason as string)
+          || (Array.isArray(event.paths) ? (event.paths as string[]).join(', ') : '');
+        messages = [...messages, {
+          role: status === 'applied' || status === 'no_changes' || status === 'nothing_to_deliver'
+            ? 'system' : 'error',
+          content: t('chat.codingHandoff').replace('{status}', status) + (detail ? ' — ' + detail : ''),
+        }];
+        void _refreshCodingView();
+        break;
+      }
+
+      case 'coding_unavailable': {
+        messages = [...messages, { role: 'error', content: (event.message as string) || '' }];
         break;
       }
 
@@ -669,6 +753,7 @@
         // or on a transient model-connection interruption. The transcript is
         // persisted server-side, so "continue" resumes it.
         budgetPaused = true;
+        void _refreshCodingView();
         messages = [...messages, {
           role: 'system',
           content: (event.message as string) || 'Paused. Continue?',
@@ -721,7 +806,10 @@
       current_project: currentProject,
       session_id: sessionId || undefined,
       mode: codingMode ? 'coding' : 'butler',
+      // An explicit, authenticated user request; never a model field.
+      commit_message: codingMode && codingCommitMessage.trim() ? codingCommitMessage.trim() : undefined,
     };
+    codingCommitMessage = '';
     budgetPaused = false;
 
     agentStreaming = true;
@@ -1047,12 +1135,51 @@
       {/if}
     </div>
 
+    {#if codingMode && codingInfo && codingInfo.view !== 'none'}
+      <section class="coding-session-view" aria-label={t('chat.codingTree')}>
+        <header>
+          <strong>{codingInfo.view === 'working_tree' ? t('chat.codingTree') : (codingInfo.label as string)}</strong>
+          <small>{codingInfo.run_id}</small>
+          <a href={'#/projects/' + encodeURIComponent(codingInfo.project_id as string)}
+             onclick={(e) => { e.preventDefault(); push('#/projects/' + encodeURIComponent(codingInfo?.project_id as string)); }}>
+            {t('chat.codingSourceLink')}
+          </a>
+        </header>
+        {#if codingInfo.plan?.state === 'pending' && codingInfo.plan?.checkpoint}
+          <div class="coding-plan">
+            <strong>{t('chat.codingPlanPending')}</strong>
+            <!-- eslint-disable-next-line svelte/no-at-html-tags -->
+            <div class="coding-plan-text">{@html renderMarkdown(codingInfo.plan.checkpoint.plan as string)}</div>
+            <button onclick={() => _decidePlan('approve')} disabled={codingDecisionBusy || !canWrite}>{t('chat.codingApprove')}</button>
+            <input type="text" bind:value={codingFeedback} placeholder={t('chat.codingFeedback')} />
+            <button class="outline" onclick={() => _decidePlan('reject')}
+                    disabled={codingDecisionBusy || !canWrite || !codingFeedback.trim()}>{t('chat.codingReject')}</button>
+            <button class="outline" onclick={() => _decidePlan('dismiss')} disabled={codingDecisionBusy || !canWrite}>{t('chat.codingDismiss')}</button>
+          </div>
+        {/if}
+        {#if codingFiles.length > 0}
+          <ul class="coding-files">
+            {#each codingFiles.slice(0, 200) as f (f)}
+              <li><button class="link" onclick={() => _openCodingFile(f)}>{f}</button></li>
+            {/each}
+          </ul>
+        {/if}
+        {#if codingPreview}
+          <pre class="coding-preview" data-path={codingPreview.path}>{codingPreview.content}</pre>
+        {/if}
+      </section>
+    {/if}
+
     <!-- Input area -->
     <div class="chat-input-area">
       <label class="coding-mode-toggle" title={t('chat.codingModeTitle')}>
         <input type="checkbox" role="switch" bind:checked={codingMode} disabled={agentStreaming || sending} />
         {t('chat.codingMode')}
       </label>
+      {#if codingMode}
+        <input class="coding-commit" type="text" bind:value={codingCommitMessage}
+               placeholder={t('chat.codingCommit')} disabled={agentStreaming || sending} />
+      {/if}
       {#if completionVisible && completionMatches.length > 0}
         <ul class="slash-completion">
           {#each completionMatches as c, i}
@@ -1177,6 +1304,46 @@
     flex-shrink: 0;
     font-size: 0.85rem;
     padding: 0.2rem 0.6rem;
+  }
+
+  .coding-session-view {
+    border: 1px solid var(--pico-muted-border-color, #ccc);
+    border-radius: 6px;
+    margin: 0.5rem 0;
+    padding: 0.5rem 0.75rem;
+    font-size: 0.85rem;
+    max-height: 40vh;
+    overflow: auto;
+  }
+  .coding-session-view header {
+    display: flex;
+    gap: 0.75rem;
+    align-items: baseline;
+    flex-wrap: wrap;
+  }
+  .coding-plan-text {
+    border-left: 3px solid var(--pico-primary, #36c);
+    padding-left: 0.5rem;
+    margin: 0.4rem 0;
+  }
+  .coding-files {
+    columns: 2;
+    margin: 0.4rem 0;
+  }
+  .coding-files button.link {
+    background: none;
+    border: none;
+    padding: 0;
+    color: var(--pico-primary, #36c);
+    cursor: pointer;
+    font-size: inherit;
+  }
+  .coding-preview {
+    max-height: 20vh;
+    overflow: auto;
+  }
+  .coding-commit {
+    max-width: 22rem;
   }
 
   .coding-mode-toggle {

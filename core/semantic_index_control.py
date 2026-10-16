@@ -268,10 +268,30 @@ def _index_project_once(directory: Path, projects: Path, worktrees: Path, *,
         raise
 
 
+# Metadata reads only, in the same closed profile as core.closed_git (this file
+# is also copied standalone into the index sidecar, so it carries its own copy):
+# nothing inherited can route Git or inject configuration, global/system config
+# is suppressed, and hooks/fsmonitor/pagers/helpers are off.
+_GIT_CLOSED_CONFIG = ("core.hooksPath=/dev/null", "core.fsmonitor=false",
+                      "core.untrackedCache=false", "core.pager=cat",
+                      "core.alternateRefsCommand=", "credential.helper=",
+                      "log.showSignature=false", "diff.external=", "protocol.allow=never")
+_GIT_CLOSED_ENV = {
+    "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    "HOME": "/nonexistent-aitelier-closed-git-home", "LC_ALL": "C",
+    "GIT_OPTIONAL_LOCKS": "0", "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_CONFIG_SYSTEM": os.devnull, "GIT_CONFIG_GLOBAL": os.devnull,
+    "GIT_TERMINAL_PROMPT": "0", "GIT_NO_LAZY_FETCH": "1", "GIT_ALLOW_PROTOCOL": "",
+    "GIT_NO_REPLACE_OBJECTS": "1", "GIT_PAGER": "cat",
+}
+
+
 def git(root: Path | str, *args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", "-C", str(root), *args], capture_output=True, check=False,
-                          text=True, timeout=15, env={**os.environ, "LC_ALL": "C",
-                                                     "GIT_OPTIONAL_LOCKS": "0"})
+    argv = ["git", "--no-pager"]
+    for item in _GIT_CLOSED_CONFIG:
+        argv += ["-c", item]
+    return subprocess.run([*argv, "-C", str(root), *args], capture_output=True, check=False,
+                          text=True, timeout=15, env=dict(_GIT_CLOSED_ENV))
 
 
 def validate_checkout(rec: dict, managed_root: Path) -> Path:

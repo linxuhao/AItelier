@@ -1,0 +1,38 @@
+# configs/coding_workspace.yaml
+# The one owner of a Coding Mode session's working tree.
+#
+# A coding session's file tools, owned shell and session file view all work in
+# the worktree this run's isolation record owns. The run is HOST-HELD: the
+# trusted Coding Mode controller (core/coding_workspace.py) creates it, holds
+# its one `work` claim for the life of the interaction and confirms it with a
+# host-generated summary after the Source handoff settles. It is not a plan
+# gate: coding_task remains the explicit plan control flow, associated with
+# this workspace only when the controller starts it.
+#
+# Never started by the poller, the generic launch/runner routes or a model
+# tool: AItelierSkillFlow refuses to create a run of this graph outside the
+# controller's trusted creation context.
+
+name: "coding_workspace"
+description: "Host-held owner of one Coding Mode session's working tree"
+
+x-aitelier:
+  label: "Coding Workspace"
+  scheduler_owned: false
+  repo_mode: "code"
+  output_step: "work"
+  listed: false
+
+begin: "work"
+
+steps:
+  - id: "work"
+    step_type: "agent"
+    agent_config: "coding_workspace_worker"
+    timeout_seconds: 0
+    output:
+      mode: "content"
+      fixed:
+        summary: "summary.md"
+    transitions:
+      - to: null

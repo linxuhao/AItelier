@@ -16,6 +16,18 @@ def enabled() -> bool:
     return os.environ.get("AITELIER_ZVEC_LIFECYCLE", "0") == "1"
 
 
+# Initial policy: a Coding Mode working tree is never semantically indexed.
+# Its files change under an owned shell between any two searches, so the
+# background indexer must not own it. Search uses the bound tree's filesystem
+# fallback and is never reported as an index that is ready.
+NO_INDEX_CONFIGS = frozenset({"coding_workspace"})
+NO_INDEX_REASON = "semantic index disabled for coding_workspace; filesystem search of the bound tree"
+
+
+def index_disabled(rec: dict | None) -> bool:
+    return bool(rec) and rec.get("config_name") in NO_INDEX_CONFIGS
+
+
 def control() -> IndexControl:
     return IndexControl(datadir.semantic_index_control_dir(), datadir.worktrees_dir())
 
@@ -24,6 +36,8 @@ def prepare(rec: dict) -> None:
     """Publish demand; index outages degrade search, not run isolation/start."""
     if not enabled() or rec.get("mode") not in ("worktree", "read_snapshot"):
         return
+    if index_disabled(rec):
+        return  # no demand is ever published for a no-index tree
     try:
         from api.dependencies import get_skillflow
         run = get_skillflow().get_run(rec["run_id"])
@@ -76,8 +90,16 @@ def reconcile(db, sf, run_id: str | None = None) -> dict:
             if not isinstance(row, dict):
                 raise TypeError("run is unknown to the engine")
             if row.get("status") in ("pending", "running", "paused"):
-                if enabled():
+                if enabled() and not index_disabled(rec):
                     control().request(rec, "ready")
+                elif enabled() and (datadir.semantic_index_control_dir() / "control.sqlite3").is_file():
+                    # Unexpected prior demand for a no-index tree is released
+                    # through the ordinary acknowledged lifecycle, not ignored.
+                    ctl = IndexControl(datadir.semantic_index_control_dir(),
+                                       datadir.worktrees_dir(), initialize=False)
+                    prior = ctl.get(rid)
+                    if prior is not None and prior["desired"] != "released":
+                        ctl.request(rec, "released")
                 continue
             row, reason = terminal_quiet(sf, rid)
             if row is None:
@@ -156,13 +178,25 @@ def search_lease(root: str):
         raise ValueError("managed search path is a symlink or alias")
     path = resolved
     root = str(path)
-    if not enabled() or not path.is_relative_to(managed):
+    if not path.is_relative_to(managed):
         yield None
         return
     from api.dependencies import get_db_manager, get_skillflow
-    db, sf = get_db_manager(), get_skillflow()
+    db = get_db_manager()
     with db.get_connection() as conn:
         value = conn.execute("SELECT * FROM run_isolation WHERE worktree_path=?", (root,)).fetchone()
+    if value is not None and index_disabled(dict(value)):
+        # Degraded, never "ready", whether or not the index lifecycle is on:
+        # the caller searches this same bound tree on the filesystem. No demand
+        # is published and no lease is taken, because no index storage exists
+        # to be released under it.
+        validate_checkout(dict(value), managed)
+        yield NO_INDEX_REASON
+        return
+    if not enabled():
+        yield None
+        return
+    sf = get_skillflow()
     if value is None:
         raise ValueError("managed search root has no isolation owner")
     rec = dict(value)
@@ -204,6 +238,12 @@ def invalidate(root: str) -> None:
     """Missing index schedules repair without asking an agent to retry."""
     if not enabled() or not Path(root).is_relative_to(datadir.worktrees_dir().absolute()):
         return
+    from api.dependencies import get_db_manager
+    with get_db_manager().get_connection() as conn:
+        owner = conn.execute("SELECT * FROM run_isolation WHERE worktree_path=?",
+                             (str(root),)).fetchone()
+    if owner is not None and index_disabled(dict(owner)):
+        return  # never repaired into existence; prior demand settles via reconcile
     ctl = control()
     row = ctl.for_root(root)
     if row and row["desired"] == "ready":

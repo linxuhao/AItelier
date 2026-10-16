@@ -9,6 +9,7 @@ into a checkout a run was holding; and a routing fix had quietly acquired a
 remote branch push per run.
 """
 
+import asyncio
 import sqlite3
 import subprocess
 from pathlib import Path
@@ -364,27 +365,29 @@ def butler(db, home, tmp_path, monkeypatch):
     return MetaAgent(db, ws, owner_email="t@local", mode="coding"), src
 
 
-def test_butler_edit_and_create_refuse_on_a_leased_checkout(butler):
+def test_coding_edit_and_create_never_write_the_leased_source(butler):
+    """Coding Mode file tools write only a session's owned working tree; with no
+    authenticated session scope they reach nothing — never the Source checkout."""
     agent, src = butler
-    agent._files_read.add(("held", str(src / "file.txt")))
-    edited = agent._tool_edit_file({"project_id": "held", "path": "file.txt",
-                                    "old_str": "original", "new_str": "changed"})
-    assert "error" in edited and "run-holding" in edited["error"]
+    for name, args in (("edit_file", {"path": "file.txt", "old_str": "original",
+                                      "new_str": "changed"}),
+                       ("create_file", {"path": "new.txt", "content": "x"})):
+        out = asyncio.run(agent._execute_tool(name, {"project_id": "held", **args}))
+        assert "authenticated coding session" in out["error"], out
     assert (src / "file.txt").read_text() == "original\n"
-
-    created = agent._tool_create_file({"project_id": "held", "path": "new.txt",
-                                       "content": "x"})
-    assert "error" in created and "run-holding" in created["error"]
     assert not (src / "new.txt").exists()
 
 
 @pytest.mark.asyncio
-async def test_butler_bash_refuses_on_a_leased_checkout(butler):
-    """The whole call, on the checkout — not a guess about what the command does."""
+async def test_coding_bash_never_runs_on_the_backend(butler, monkeypatch):
+    """No backend subprocess, leased or not: the owned shell or unavailable."""
     agent, src = butler
-    res = await agent._tool_bash({"project_id": "held", "command": "echo hello"})
-    assert "error" in res and "run-holding" in res["error"]
-    assert "hello" not in str(res.get("stdout", ""))
+
+    async def forbidden(*a, **k):
+        raise AssertionError("a backend shell was spawned")
+    monkeypatch.setattr(asyncio, "create_subprocess_shell", forbidden)
+    res = await agent._execute_tool("bash", {"project_id": "held", "command": "echo hello"})
+    assert "error" in res and "hello" not in str(res.get("stdout", ""))
 
 
 def test_butler_reads_are_unaffected_by_a_lease(butler):

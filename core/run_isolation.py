@@ -55,13 +55,12 @@ from __future__ import annotations
 
 import os
 import re
-import stat
 import subprocess
 
 from contextlib import contextmanager
 from pathlib import Path
 
-from core import datadir
+from core import closed_git, datadir
 from skillflow.exceptions import IsolationUnavailable
 
 MODE_WORKTREE = "worktree"
@@ -72,7 +71,11 @@ MODE_READ_SNAPSHOT = "read_snapshot"
 
 BRANCH_PREFIX = "codex/run/"
 
-_GIT_ENV = {**os.environ, "LC_ALL": "C", "GIT_OPTIONAL_LOCKS": "0"}
+# The closed backend Git profile (core.closed_git): no inherited GIT_*
+# routing, no global/system config, hooks/fsmonitor/pager/signing off. The
+# source checkout can hold bytes a run delivered, so nothing here may run a
+# program that repository selects.
+_GIT_ENV = closed_git.closed_env()
 
 
 class CheckoutLeased(RuntimeError):
@@ -89,8 +92,8 @@ class CheckoutLeased(RuntimeError):
 # ── git ──────────────────────────────────────────────────────────────
 
 def _git(cwd, *args, check: bool = False) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", *args], cwd=str(cwd), capture_output=True,
-                          text=True, env=_GIT_ENV, check=check)
+    """One closed-profile Git command; a working-tree/transport command is refused."""
+    return closed_git.run(cwd, *args, check=check)
 
 
 def canonical_checkout(path) -> str:
@@ -130,9 +133,13 @@ def _is_worktree_of(path: Path, source_repo: str) -> bool:
     pointing into the source repository's admin directory, and both sides must
     agree on the same common dir. A plain directory left at the recorded path
     answers False, which is the point — the recorded path existing is not
-    evidence that the run's tree does.
+    evidence that the run's tree does. Neither the recorded path nor its
+    `.git` may be a link: `git worktree add` creates neither as one, and a
+    link would let the tree or its identity be served from elsewhere.
     """
-    if not path.is_dir() or not (path / ".git").is_file():
+    gitfile = path / ".git"
+    if (path.is_symlink() or not path.is_dir()
+            or gitfile.is_symlink() or not gitfile.is_file()):
         return False
     a = _git(path, "rev-parse", "--path-format=absolute", "--git-common-dir")
     b = _git(source_repo, "rev-parse", "--path-format=absolute", "--git-common-dir")
@@ -243,7 +250,7 @@ def _admit_write_under_fence(db, path, *, kind: str, detail: str = "") -> dict:
     the same database, so whichever reaches it first wins and the other is
     refused — in both orders, which is the whole property.
 
-    The transaction is short by construction: two statements, no I/O, and it is
+    The transaction is short database-only arbitration, and it is
     committed before the caller does any work. What outlives it is a ROW, and
     that is deliberate — the guard has to cover a `bash` that runs for minutes
     or an editor between read and write, and no transaction may be held across
@@ -267,6 +274,17 @@ def _admit_write_under_fence(db, path, *, kind: str, detail: str = "") -> dict:
                     f"{canonical} is held by run {lease['run_id']} "
                     f"(config {lease['config_name']}, since "
                     f"{lease['acquired_at']}); refusing {kind} {detail!r}.")
+            # Only coding_workspace is exclusive; generic writers still coexist.
+            existing = conn.execute(
+                "SELECT id, owner, kind, detail FROM checkout_write_admissions "
+                "WHERE canonical_checkout = ? "
+                "AND (? = 'coding_workspace' OR kind = 'coding_workspace') "
+                "ORDER BY id LIMIT 1", (canonical, kind)).fetchone()
+            if existing:
+                raise CheckoutLeased(
+                    f"{canonical} has write admission {existing['id']} "
+                    f"({existing['kind']} {existing['detail']!r}) by "
+                    f"{existing['owner']}; refusing {kind} {detail!r}.")
             cur = conn.execute(
                 "INSERT INTO checkout_write_admissions "
                 "(canonical_checkout, owner, kind, detail, admitted_at) "
@@ -802,9 +820,13 @@ def verify_served_tree(worktree_path, commit_sha: str, *, _report=None) -> dict:
     * the trusted side is the commit's TREE — `git ls-tree -r -z <commit>`,
       pure object-database reads, no index involved;
     * the served side is the disk — lstat type, pinned file bytes and modes, never the
-      index's opinion of them;
+      index's opinion of them — reached by descriptors from the snapshot root
+      without following a link at the root, at any parent directory or at the
+      entry itself, so identical bytes behind a substituted parent are not
+      the snapshot's bytes;
     * a tracked path whose bytes do not hash to its tree blob, whose
-      executable/symlink mode differs, or that is missing, refuses the review.
+      executable/symlink mode differs, that is missing, or that lies beyond a
+      link or non-directory parent, refuses the review.
 
     READONLY means readonly: nothing here runs `git update-index`,
     `git read-tree`, `git reset`, any `--refresh`, and nothing clears a
@@ -814,62 +836,52 @@ def verify_served_tree(worktree_path, commit_sha: str, *, _report=None) -> dict:
     if not isinstance(commit_sha, str) or not _SHA1.match(commit_sha):
         raise IsolationUnavailable("a served tree can only be verified against a 40-hex commit")
     root = Path(worktree_path)
-    if not root.is_dir():
-        raise IsolationUnavailable(f"review snapshot {root} does not exist to verify")
-    listing = _git(root, "ls-tree", "-r", "-z", commit_sha)
-    if listing.returncode != 0:
+    try:
+        tree = closed_git.WorkTree(root, follow_root=False)
+    except OSError as e:
         raise IsolationUnavailable(
-            f"cannot read tree {commit_sha} to verify the review snapshot: "
-            f"{(listing.stderr or listing.stdout).strip()[:300]}")
+            f"review snapshot {root} is not a directory to verify "
+            f"({e.strerror or e})") from e
     problems: list[str] = []
     checked = 0
-    for entry in listing.stdout.split("\0"):
-        if not entry:
-            continue
-        meta, _, path = entry.partition("\t")
-        mode, otype, blob_sha = meta.split(" ")
-        if otype != "blob":
-            continue  # a gitlink (submodule) has no served bytes to compare
-        checked += 1
-        target = root / path
-        try:
-            before = target.lstat()
-            if mode == "120000":
-                if not stat.S_ISLNK(before.st_mode):
-                    problems.append(f"{path}: tree says symlink, disk says otherwise")
-                    continue
-                served = os.readlink(target).encode()
-                after = target.lstat()
-                if (before.st_dev, before.st_ino, before.st_ctime_ns) != (
-                        after.st_dev, after.st_ino, after.st_ctime_ns):
-                    raise OSError("symlink changed while verifying its link text")
-                served_mode = "120000"
-            else:
-                if not stat.S_ISREG(before.st_mode):
-                    problems.append(f"{path}: tree says regular file, disk type differs")
-                    continue
-                fd = os.open(target, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-                with os.fdopen(fd, "rb") as stream:
-                    opened = os.fstat(stream.fileno())
-                    if (not stat.S_ISREG(opened.st_mode)
-                            or (before.st_dev, before.st_ino) != (
-                                opened.st_dev, opened.st_ino)):
-                        raise OSError("tracked object changed before verification")
-                    served = stream.read()
-                    after = os.fstat(stream.fileno())
-                    if (opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns) != (
-                            after.st_size, after.st_mtime_ns, after.st_ctime_ns):
-                        raise OSError("tracked bytes changed during verification")
-                served_mode = "100755" if opened.st_mode & 0o111 else "100644"
-        except OSError as e:
-            problems.append(f"{path}: tracked file unreadable ({e.strerror or e})")
-            continue
-        if served_mode != mode:
-            problems.append(f"{path}: tree mode {mode}, served mode {served_mode}")
-        if _blob_sha1(served) != blob_sha:
-            problems.append(f"{path}: served bytes do not hash to tree blob {blob_sha[:12]}")
-        if len(problems) >= 20:
-            break
+    with tree:
+        listing = _git(root, "ls-tree", "-r", "-z", commit_sha)
+        if listing.returncode != 0:
+            raise IsolationUnavailable(
+                f"cannot read tree {commit_sha} to verify the review snapshot: "
+                f"{(listing.stderr or listing.stdout).strip()[:300]}")
+        for entry in listing.stdout.split("\0"):
+            if not entry:
+                continue
+            meta, _, path = entry.partition("\t")
+            mode, otype, blob_sha = meta.split(" ")
+            if otype != "blob":
+                continue  # a gitlink (submodule) has no served bytes to compare
+            checked += 1
+            try:
+                served = tree.read(path, keep=True)
+            except closed_git.GitRefused as e:
+                problems.append(f"{path}: not a confined tracked path ({e})")
+                continue
+            except OSError as e:
+                problems.append(f"{path}: tracked file unreadable ({e.strerror or e})")
+                continue
+            if served.kind == "absent":
+                problems.append(f"{path}: missing, or beyond a link or non-directory parent")
+                continue
+            if mode == "120000" and served.kind != "link":
+                problems.append(f"{path}: tree says symlink, disk says otherwise")
+                continue
+            if mode != "120000" and served.kind != "file":
+                problems.append(f"{path}: tree says regular file, disk type differs")
+                continue
+            served_mode = f"{served.mode:o}"
+            if served_mode != mode:
+                problems.append(f"{path}: tree mode {mode}, served mode {served_mode}")
+            if _blob_sha1(served.data) != blob_sha:
+                problems.append(f"{path}: served bytes do not hash to tree blob {blob_sha[:12]}")
+            if len(problems) >= 20:
+                break
     if _report is not None:
         _report({"commit_sha": commit_sha, "tracked_entries": checked,
                  "problems": problems})
@@ -951,27 +963,114 @@ def _provision_tree(db, *, run_id, project_id, config_name, source, mode,
         raise IsolationUnavailable(
             f"{path} already exists and run {run_id} has no record naming it; "
             f"refusing to adopt a directory whose provenance is unknown")
-    if mode == MODE_WORKTREE:
-        branch = f"{BRANCH_PREFIX}{run_id}"
-        r = _git(source, "worktree", "add", "-b", branch, str(path), base)
-    else:
-        branch = None
-        r = _git(source, "worktree", "add", "--detach", str(path), base)
-    if r.returncode != 0:
-        raise IsolationUnavailable(
-            f"could not create the {mode} tree for run {run_id} from {source}: "
-            f"{(r.stderr or r.stdout).strip()[:400]}")
-    if mode == MODE_READ_SNAPSHOT and read_base_sha is not None:
-        # Exact-candidate ingress: before the run can be recorded against this
-        # snapshot, the tree actually served on disk is compared to the trusted
-        # candidate object — bytes and modes, index-independent, with no index
-        # refresh, reset, stage or flag clearing. A snapshot that does not
-        # serve the candidate is refused, and no record is written for it.
-        verify_served_tree(path, read_base_sha)
+    with closed_git.repo_lock(source):
+        _refuse_active_filters(source, base)
+        # Registration only: `--no-checkout` runs no checkout, smudge filter or
+        # post-checkout hook. The files and the owned index come from the raw
+        # writer below — for a read snapshot exactly as for a code worktree.
+        if mode == MODE_WORKTREE:
+            branch = f"{BRANCH_PREFIX}{run_id}"
+            r = _git(source, "worktree", "add", "--no-checkout", "-b", branch,
+                     str(path), base)
+        else:
+            branch = None
+            r = _git(source, "worktree", "add", "--no-checkout", "--detach",
+                     str(path), base)
+        if r.returncode != 0:
+            raise IsolationUnavailable(
+                f"could not create the {mode} tree for run {run_id} from {source}: "
+                f"{(r.stderr or r.stdout).strip()[:400]}")
+        try:
+            own = closed_git.discover(path)
+            entries = closed_git.materialize(source, path, base)
+            closed_git.write_index_file(own.git_dir, entries)
+        except Exception as exc:
+            # The registered, partially written tree stays for diagnosis; no
+            # record names it, so nothing resolves to it.
+            raise IsolationUnavailable(
+                f"could not materialise the {mode} tree for run {run_id} at {base} "
+                f"as raw bytes: {str(exc)[:400]}") from exc
+        # Before the run can be recorded against this tree, the tree actually
+        # served on disk is compared to the trusted commit — bytes and modes,
+        # index-independent, with no index refresh, reset, stage or flag
+        # clearing. A tree that does not serve its base is refused, and no
+        # record is written for it.
+        verify_served_tree(path, base)
     return _write_record(db, run_id=run_id, project_id=project_id,
                          config_name=config_name, mode=mode,
                          source_repo=source, worktree_path=str(path),
                          branch=branch, base_sha=base, note=note)
+
+
+def _refuse_active_filters(source, base: str) -> None:
+    """A tree whose attributes select a CONFIGURED filter driver cannot be served raw.
+
+    The backend never runs the driver, so a raw tree would not be what that
+    repository's own checkout produces. Refused explicitly rather than served
+    silently different; eol/ident/encoding conversion is not a program and the
+    raw committed bytes are served.
+    """
+    try:
+        repo = closed_git.discover(source)
+        cfg = closed_git.config_list(source)
+        tree = closed_git.ls_tree(source, base)
+        texts = []
+        with closed_git.CatFile(source) as cat:
+            for rel, t in tree.items():
+                if rel.rsplit("/", 1)[-1] == ".gitattributes" and t.type == "blob":
+                    texts.append(cat.read(t.sha)[1])
+        profile = closed_git.transform_profile(repo, cfg, texts)
+    except Exception as exc:
+        raise IsolationUnavailable(
+            f"cannot inspect {source} at {base} as data before provisioning: "
+            f"{str(exc)[:300]}") from exc
+    if profile.active_filters:
+        raise IsolationUnavailable(
+            f"{source} at {base[:12]} selects configured filter driver(s) "
+            f"{', '.join(sorted(profile.active_filters))}; the backend never runs "
+            f"repository filter programs, so this tree is unavailable")
+
+
+def seed_worktree_from_source(db, run_id: str, *, admission: dict) -> dict:
+    """Copy the source checkout's dirty working state into a fresh owned worktree.
+
+    H ∪ I ∪ U: every HEAD path, every index path (all stages, so force-staged
+    ignored and unmerged paths are included by name) and every untracked
+    nonignored file contributes its ACTUAL current working bytes/mode, or its
+    absence. The source index and refs are only read; the owned tree's own
+    index stays at its recorded base, so the dirty seed is visible as that
+    tree's working changes. Symlinks are copied as confined link data; gitlinks
+    and embedded repositories are refused.
+
+    The caller holds the exclusive `coding_workspace` admission on the source
+    checkout; this checks that exact row before any effect. The owned tree must
+    still serve its base unchanged, so nothing seeded overwrites run work.
+    """
+    rec = record(db, run_id)
+    if not rec or rec["mode"] != MODE_WORKTREE or not rec.get("worktree_path"):
+        raise IsolationUnavailable(f"run {run_id} owns no code worktree to seed")
+    source = rec["source_repo"]
+    canonical = canonical_checkout(source)
+    rows = [r for r in write_admissions(db, canonical)
+            if r["id"] == (admission or {}).get("id")]
+    if (len(rows) != 1 or rows[0]["kind"] != "coding_workspace"
+            or rows[0]["owner"] != admission.get("owner")):
+        raise IsolationUnavailable(
+            f"seeding {run_id} requires the caller's live exclusive coding_workspace "
+            f"admission on {canonical}")
+    path = Path(rec["worktree_path"])
+    if not _is_worktree_of(path, source):
+        raise IsolationUnavailable(f"{path} is not a live worktree of {source}")
+    with closed_git.repo_lock(source):
+        ok, why = closed_git.clean_against_head(path)
+        if not ok:
+            raise IsolationUnavailable(
+                f"run {run_id} tree is no longer its untouched base ({why}); refusing "
+                f"to seed over it")
+        try:
+            return closed_git.seed_working_state(source, path, rec["base_sha"])
+        except closed_git.GitRefused as exc:
+            raise IsolationUnavailable(str(exc)) from exc
 
 
 # ── resolution ───────────────────────────────────────────────────────
@@ -1059,10 +1158,11 @@ def _require_snapshot_binding(rec: dict, run_id: str, path) -> None:
       operator work, not the retained candidate, and serving it would hand the
       reviewer something other than B under B's identity.
 
-    ``git diff-index`` reads the index and working tree and writes neither, and
-    ``_git`` disables Git's optional locks, so the check never mutates the
-    snapshot. A check that cannot be RUN is not a clean check: a non-zero,
-    non-1 exit is refused rather than read as "no differences".
+    The index side is a raw comparison of the snapshot's own index file with
+    the commit tree (no Git refresh, filter or fsmonitor), and the disk side
+    is ``verify_served_tree``; neither writes. A check that cannot be RUN is
+    not a clean check: an unreadable index or tree is refused rather than read
+    as "no differences".
 
     Legacy unpinned snapshots record the HEAD they were pinned to, so the same
     checks keep them valid; nothing is fetched, checked out or moved.
@@ -1082,9 +1182,8 @@ def _require_snapshot_binding(rec: dict, run_id: str, path) -> None:
             f"{rec['base_sha']}, but the tree at {str(path)!r} is at HEAD "
             f"{actual[:12] or 'unknown'}; refusing to serve a substituted "
             f"snapshot before any review effect")
-    tracked = _git(path, "diff-index", "--quiet", "--ignore-submodules",
-                   "HEAD", "--")
-    if tracked.returncode == 0:
+    tracked, why = _index_matches_commit(path, rec["base_sha"])
+    if tracked == 0:
         # Index flags can conceal the served bytes/type/mode. Compare the disk
         # against the commit tree at EVERY resolution, including post-provision
         # preclaim and later read calls; leave both disk and index untouched.
@@ -1095,7 +1194,7 @@ def _require_snapshot_binding(rec: dict, run_id: str, path) -> None:
                 f"run {run_id} has a tracked review snapshot that differs from "
                 f"its candidate: {exc}") from exc
         return
-    if tracked.returncode == 1:
+    if tracked == 1:
         raise IsolationUnavailable(
             f"run {run_id} is a readonly review snapshot recorded at candidate "
             f"{rec['base_sha']}, but the tree at {str(path)!r} has tracked "
@@ -1105,8 +1204,28 @@ def _require_snapshot_binding(rec: dict, run_id: str, path) -> None:
     raise IsolationUnavailable(
         f"run {run_id} is a readonly review snapshot recorded at candidate "
         f"{rec['base_sha']}, but the tracked-tree check at {str(path)!r} could "
-        f"not be run ({(tracked.stderr or '').strip()[:200]}); refusing to serve "
+        f"not be run ({why[:200]}); refusing to serve "
         f"a snapshot whose bytes cannot be verified.")
+
+
+def _index_matches_commit(path, commit: str) -> tuple[int, str]:
+    """Raw index-vs-commit comparison: 0 equal, 1 different, 2 cannot tell.
+
+    Reads the snapshot's own index file and the commit tree as data. Unlike
+    `diff-index`, nothing stats working files through Git, so no refresh,
+    filter or fsmonitor hook is involved; the disk side is
+    `verify_served_tree`'s job.
+    """
+    try:
+        own = closed_git.discover(path)
+        idx = closed_git.read_index(own.git_dir)
+        tree = closed_git.ls_tree(path, commit)
+    except Exception as exc:  # noqa: BLE001 -- unknown is not clean
+        return 2, str(exc)
+    if idx.unmerged_paths():
+        return 1, "unmerged index entries"
+    stage0 = {p: (e.mode, e.sha) for p, e in idx.stage0().items()}
+    return (0, "") if stage0 == {p: (t.mode, t.sha) for p, t in tree.items()} else (1, "index differs")
 
 
 def require_recorded_identity(db, run_id: str, *,
@@ -1313,10 +1432,45 @@ def _remove_run_worktree(rec: dict) -> tuple[bool, str]:
         path = validate_checkout(rec, datadir.worktrees_dir())
     except Exception as exc:
         return False, f"ownership validation failed: {exc}"
-    out = _git(rec["source_repo"], "worktree", "remove", str(path))
-    if out.returncode:
-        return False, f"git worktree remove refused: {(out.stderr or out.stdout).strip()[:300]}"
-    return True, f"removed {path}; branch and commits preserved"
+    # Native removal runs its own cleanliness refresh in the tree. It is called
+    # only after a separate preflight proves, as data, that no filter driver,
+    # submodule or config include can make that refresh run a program — and
+    # never with --force. Anything else retains the tree with the reason.
+    return closed_git.native_remove(rec["source_repo"], path)
+
+
+def _index_storage_present(worktree, names) -> bool:
+    """Is the tree's `.zvec-grep` storage, or any of *names* inside it, present?
+
+    Observed through descriptors without following a link: a link or
+    non-directory where the storage directory belongs counts as present, and
+    so does a tree that cannot be opened, so an unknown answer never reads as
+    absent. With no *names*, the storage directory itself is asked about.
+    """
+    nofollow_dir = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    try:
+        root = os.open(worktree, nofollow_dir)
+    except OSError:
+        return True
+    try:
+        try:
+            cache = os.open(".zvec-grep", nofollow_dir, dir_fd=root)
+        except FileNotFoundError:
+            return False
+        except OSError:
+            return True
+        try:
+            for name in names:
+                try:
+                    os.lstat(name, dir_fd=cache)
+                    return True
+                except FileNotFoundError:
+                    continue
+            return not names
+        finally:
+            os.close(cache)
+    finally:
+        os.close(root)
 
 
 def _reap_intent(disposition: str) -> tuple[bool, str | None] | None:
@@ -1440,10 +1594,10 @@ def reap_released_worktrees(db, sf, *, min_idle_seconds: float | None = None,
                 ledger = ctl.get(rid) if ctl else None
                 if ctl and not ctl.settled(ledger, "released"):
                     raise ValueError("semantic release is not positively acknowledged")
-                if not ctl and (Path(rec["worktree_path"])/".zvec-grep").exists():
+                if not ctl and _index_storage_present(rec["worktree_path"], ()):
                     raise ValueError("index exists but its lifecycle is disabled; release unknown")
-                if ctl and any((Path(rec["worktree_path"])/".zvec-grep"/name).exists()
-                               for name in ("manifest.json", "files.zvec", "index.zvec")):
+                if ctl and _index_storage_present(
+                        rec["worktree_path"], ("manifest.json", "files.zvec", "index.zvec")):
                     raise ValueError("index storage reappeared after release")
                 ok, why = resources.idle_eligible(rec, row, ledger, now=now, minimum=min_idle_seconds)
                 if not ok:
@@ -1525,11 +1679,16 @@ def is_disposable(db, run_id: str, *, run_status: str, admitted_ops: int,
         validate_checkout(rec, datadir.worktrees_dir())
     except Exception as exc:
         return False, f"ownership validation failed: {exc}"
-    status = _git(path, "status", "--porcelain", "--untracked-files=all")
-    if status.returncode:
-        return False, "Git status failed; clean state is unknown"
-    if status.stdout.strip():
-        return False, "uncommitted work in the tree"
+    # Raw cleanliness: index equals HEAD, every tracked file hashes (no-follow,
+    # full bytes) to its blob, no untracked file. No `git status`: its refresh
+    # runs configured clean filters and fsmonitor hooks from delivered bytes.
+    try:
+        with closed_git.repo_lock(rec["source_repo"]):
+            clean, detail = closed_git.clean_against_head(path)
+    except Exception as exc:  # noqa: BLE001 -- unknown is not clean
+        return False, f"raw status failed; clean state is unknown ({str(exc)[:200]})"
+    if not clean:
+        return False, f"uncommitted work in the tree ({detail})"
     actual = _git(path, "symbolic-ref", "--quiet", "--short", "HEAD")
     head = _git(path, "rev-parse", "HEAD")
     if head.returncode or not head.stdout.strip():

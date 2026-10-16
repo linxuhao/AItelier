@@ -409,9 +409,12 @@ class TestTheEnvScrubCoversTheUnattendedPath:
         subprocess a human watches. The pipeline's test runner — which runs
         LLM-authored pytest and `npm ci` postinstall scripts unattended —
         passed os.environ through untouched."""
-        from core.env_scrub import ENV_SECRET_RE
+        # Coding Mode no longer spawns a backend shell at all (the owned
+        # executor runs it with a fixed environment), so MetaAgent holds no
+        # copy of the rule that could drift from this one.
+        from core.env_scrub import ENV_SECRET_RE  # noqa: F401 -- the one definition
         from core.meta_agent import MetaAgent
-        assert MetaAgent._ENV_SECRET_RE is ENV_SECRET_RE
+        assert not hasattr(MetaAgent, "_ENV_SECRET_RE")
 
     def test_secrets_are_dropped_and_ordinary_vars_kept(self, monkeypatch):
         from core.env_scrub import scrubbed_env
@@ -443,8 +446,10 @@ class TestTheEnvScrubCoversTheUnattendedPath:
 def test_the_code_path_jail_uses_component_containment():
     """`str(target).startswith(str(base))` admitted a SIBLING sharing the
     prefix — a project at .../projects/foo could read .../projects/foo-backup."""
-    import core.meta_agent as ma
-    src = inspect.getsource(ma.MetaAgent._resolve_code_target)
+    import core.coding_workspace as cw
+    # The Source-bound jail is gone with the Source-bound write tools; Coding
+    # Mode's jail is the session working tree's.
+    src = inspect.getsource(cw._w_path)
     # Comments stripped: the fix's own note explains what `startswith` did
     # wrong, and a naive substring check matched that explanation instead of
     # the code — the guard would have passed on a revert that kept the comment.
@@ -642,17 +647,26 @@ class TestTheCacheTablesAreBounded:
         assert len(rc._store) <= rc._MAX_KEYS
 
 
-def test_every_git_env_puts_its_overrides_after_the_spread():
+def test_every_git_env_puts_its_overrides_after_the_spread(monkeypatch):
     """Two modules define `_GIT_ENV`; the first pass fixed one of them. The one
     left behind is the copy whose comment says it exists for the user-visible
-    'Make PR' result messages."""
+    'Make PR' result messages. Both are now the closed backend Git environment,
+    built with NO `os.environ` spread at all, so an inherited LC_ALL or GIT_*
+    setting cannot win over the overrides in any module."""
+    import core.closed_git as cg
     import core.git_ops as go
+    import core.run_isolation as ri
     import core.workspace_manager as wm
-    for mod in (go, wm):
+    monkeypatch.setenv("LC_ALL", "fr_FR.UTF-8")
+    monkeypatch.setenv("GIT_OPTIONAL_LOCKS", "1")
+    monkeypatch.setenv("GIT_DIR", "/elsewhere")
+    for mod in (go, wm, ri):
         line = next(l for l in inspect.getsource(mod).splitlines()
                     if l.startswith("_GIT_ENV = "))
-        assert line.index("**os.environ") < line.index('"LC_ALL"'), (
-            f"{mod.__name__}: os.environ wins over the override — {line}")
+        assert "os.environ" not in line, f"{mod.__name__}: inherits the environment — {line}"
+        env = cg.closed_env()
+        assert env["LC_ALL"] == "C" and env["GIT_OPTIONAL_LOCKS"] == "0"
+        assert "GIT_DIR" not in env
 
 
 def test_the_third_endpoint_with_the_same_core_is_cached_too():

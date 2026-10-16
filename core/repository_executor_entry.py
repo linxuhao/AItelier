@@ -11,6 +11,63 @@ import socket
 import subprocess
 import sys
 import threading
+import selectors
+import time
+
+
+def _coding_shell(payload, env):
+    """Bound retained bytes while draining arbitrary shell output."""
+    limit = 12_000
+    output = {"stdout": bytearray(), "stderr": bytearray()}
+    kept, truncated, timed_out = 0, False, False
+    deadline = time.monotonic() + payload["timeout"]
+    proc = subprocess.Popen(payload["args"], cwd=payload["repo"], env=env,
+                            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, start_new_session=True, close_fds=True)
+
+    def kill():
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+    try:
+        with selectors.DefaultSelector() as selector:
+            selector.register(proc.stdout, selectors.EVENT_READ, "stdout")
+            selector.register(proc.stderr, selectors.EVENT_READ, "stderr")
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    timed_out = True
+                    kill()
+                    break
+                for key, _ in selector.select(remaining):
+                    chunk = os.read(key.fileobj.fileno(), 65536)
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        continue
+                    take = chunk[:max(0, limit - kept)]
+                    output[key.data].extend(take)
+                    kept += len(take)
+                    truncated = truncated or len(take) < len(chunk)
+        try:
+            proc.wait(timeout=max(.1, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            kill()
+            proc.wait(timeout=2)
+        rendered, remaining = {}, limit
+        for key, value in output.items():
+            encoded = bytes(value).decode("utf-8", errors="replace").encode("utf-8")
+            rendered[key] = encoded[:remaining].decode("utf-8", errors="ignore")
+            truncated = truncated or len(encoded) > remaining
+            remaining -= len(rendered[key].encode("utf-8"))
+        return {"returncode": proc.returncode, **rendered,
+                "timed_out": timed_out, "output_truncated": truncated, "import_error": ""}
+    finally:
+        kill()
+        proc.stdout.close()
+        proc.stderr.close()
 
 
 def run(payload):
@@ -18,6 +75,8 @@ def run(payload):
     env = {"HOME": "/tmp", "PATH": "/usr/local/bin:/usr/bin:/bin",
            "PYTHONPATH": os.pathsep.join([repo, repo + "/src"]),
            "PYTHONDONTWRITEBYTECODE": "1"}
+    if payload.get("profile") == "coding_shell":
+        return _coding_shell(payload, env)
     if payload.get("report_dir"):
         env["GATE_REPORT_DIR"] = payload["report_dir"]
     if payload.get("npm_cache"):

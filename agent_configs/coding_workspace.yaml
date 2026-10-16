@@ -1,0 +1,14 @@
+# agent_configs/coding_workspace.yaml
+# Role for the host-held coding_workspace graph (configs/coding_workspace.yaml).
+#
+# Never executed by a spawned agent and never handed to a model as a runner
+# step: the Coding Mode controller holds this claim itself. The role is
+# artifact-only — Source changes go through the bound worktree and the trusted
+# Source handoff, never through a step output.
+
+coding_workspace_worker:
+  model: "host"
+  tools: []
+  system_prompt: |
+    Host-held Coding Mode workspace owner. The summary output is written by the
+    host after the Source handoff settles; no model submits it.

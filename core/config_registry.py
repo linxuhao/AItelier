@@ -23,6 +23,7 @@ Declared keys (all optional; defaults in :data:`_DEFAULTS`):
     checkpoint_kind  default kind for every checkpoint ("file-review"|"conversational")
     checkpoint_kinds per-step override map {step_id: kind}
     labels           per-step display labels {step_id: label} (overrides node.name)
+    listed           False → host-internal graph, omitted from the pipeline catalog
 """
 
 from __future__ import annotations
@@ -51,6 +52,7 @@ _DEFAULTS: dict = {
     "manual_checkpoints_only": False,
     "checkpoint_kinds": {},
     "labels": {},
+    "listed": True,
 }  # NB: steps/labels/checkpoints/description are NOT here — derived from the graph.
 
 # Host-declared hints for framework-owned graphs registered from the skillflow
@@ -125,6 +127,9 @@ class ConfigManifest:
     checkpoint_kind: str = "file-review"
     manual_checkpoints_only: bool = field(default=False, kw_only=True)
     checkpoint_kinds: dict[str, str] = field(default_factory=dict)  # step_id -> kind
+    # A host-internal graph (e.g. coding_workspace, started only by its own
+    # controller) is not offered to drivers as a pipeline.
+    listed: bool = field(default=True, kw_only=True)
 
     def __post_init__(self):
         if self.seed_default is not None:
@@ -264,6 +269,7 @@ class ConfigRegistry:
             checkpoint_kind=hints.get("checkpoint_kind") or "file-review",
             manual_checkpoints_only=bool(hints.get("manual_checkpoints_only")),
             checkpoint_kinds=hints.get("checkpoint_kinds") or {},
+            listed=hints.get("listed", True) is not False,
         )
 
     @classmethod
@@ -325,7 +331,8 @@ class ConfigRegistry:
         """
         out = []
         for m in sorted(self._manifests.values(), key=lambda x: x.config_name):
-            out.append(self._entry(m, full=full))
+            if m.listed:
+                out.append(self._entry(m, full=full))
         return out
 
     @staticmethod
@@ -366,9 +373,9 @@ class ConfigRegistry:
         if not q:
             return []
         exact = self._manifests.get(q)
-        if exact is not None:
+        if exact is not None and exact.listed:
             return [self._entry(exact, full=True)]
         ql = q.lower()
         return [self._entry(m, full=True)
                 for m in sorted(self._manifests.values(), key=lambda x: x.config_name)
-                if ql in m.config_name.lower() or ql in (m.description or "").lower()]
+                if m.listed and (ql in m.config_name.lower() or ql in (m.description or "").lower())]

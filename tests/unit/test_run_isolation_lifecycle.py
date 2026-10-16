@@ -386,46 +386,21 @@ def test_a_run_the_engine_never_created_is_not_this_deployments_to_refuse(live):
 
 # ── S2: exclusion that is a mutex, in both orders ────────────────────
 
-def test_an_in_flight_interactive_write_excludes_a_direct_acquisition(live,
-                                                                     monkeypatch):
-    """The barrier: hold a real edit_file BETWEEN admission and mutation, and
-    try to take the checkout for a direct run from inside that window."""
+def test_an_in_flight_coding_source_write_excludes_a_direct_acquisition(live):
+    """Interactive Coding Mode edits no longer write the Source checkout; the
+    write that does — the seed/handoff — holds the exclusive coding_workspace
+    admission, and a direct run cannot take the checkout inside it."""
     from core.meta_agent import MetaAgent
-    from core.workspace_manager import WorkspaceManager
-    import skillflow.write_tools as wt
-
     src = live["src"]
-    (src / "file.txt").write_text("original\n")
-    ws = WorkspaceManager(str(live["tmp"] / "ws"),
-                          projects_base=str(live["tmp"] / "pb"))
-    agent = MetaAgent(live["db"], ws, owner_email="t@local", mode="coding")
-    agent._files_read.add(("p1", str((src / "file.txt").resolve())))
-
-    seen = {}
-    # The barrier sits where the tool does its surgical replace — inside the
-    # admission and before the file is written.
-    real_replace = wt._unique_replace
-
-    def _barrier(*args, **kwargs):
-        # Inside the admission, before the file is written.
-        try:
-            _direct_run(live, "p2")
-            seen["acquired"] = True
-        except CheckoutLeased as e:
-            seen["refused"] = str(e)
-        return real_replace(*args, **kwargs)
-
-    monkeypatch.setattr(wt, "_unique_replace", _barrier)
-    out = agent._tool_edit_file({"project_id": "p1", "path": "file.txt",
-                                 "old_str": "original", "new_str": "changed"})
-
-    assert out.get("edited") == "file.txt", out
-    assert "acquired" not in seen, (
-        "a direct run took the checkout while an interactive write was in flight")
-    assert "refused" in seen and "edit_file" in seen["refused"]
-    assert (src / "file.txt").read_text() == "changed\n"
-    # …and the admission is gone afterwards, so the next run may have it.
-    _direct_run(live, "p2")
+    adm = ri.admit_write(live["db"], src, kind="coding_workspace",
+                         detail='{"purpose": "handoff"}')
+    with pytest.raises(CheckoutLeased) as e:
+        _direct_run(live, "p2")
+    assert "coding_workspace" in str(e.value)
+    ri.retire_write(live["db"], adm["id"])
+    _direct_run(live, "p2")  # retired: the next run may have it
+    for gone in ("_tool_edit_file", "_tool_create_file", "_tool_bash"):
+        assert not hasattr(MetaAgent, gone), f"{gone} would write the Source checkout"
 
 
 def test_a_direct_lease_excludes_every_supported_write(live):
@@ -441,25 +416,24 @@ def test_a_direct_lease_excludes_every_supported_write(live):
 
     ws = WorkspaceManager(str(live["tmp"] / "ws"),
                           projects_base=str(live["tmp"] / "pb"))
+    # Coding Mode's own Source write (seed/handoff admission) is refused...
+    with pytest.raises(CheckoutLeased):
+        ri.admit_write(live["db"], src, kind="coding_workspace", detail="handoff")
+    # ...and a coding agent without the authenticated session scope reaches no
+    # tree at all: there is no Source fallback for edit/create/bash.
     agent = MetaAgent(live["db"], ws, owner_email="t@local", mode="coding")
-    agent._files_read.add(("p2", str((src / "file.txt").resolve())))
-
-    edited = agent._tool_edit_file({"project_id": "p2", "path": "file.txt",
-                                    "old_str": "original", "new_str": "x"})
-    assert "error" in edited
-    created = agent._tool_create_file({"project_id": "p2", "path": "new.txt",
-                                       "content": "x"})
-    assert "error" in created
-    bashed = asyncio.run(agent._tool_bash({"project_id": "p2",
-                                           "command": "echo hi"}))
-    assert "error" in bashed
+    for name, args in (("edit_file", {"path": "file.txt", "old_str": "original", "new_str": "x"}),
+                       ("create_file", {"path": "new.txt", "content": "x"}),
+                       ("bash", {"command": "echo hi > hi.txt"})):
+        out = asyncio.run(agent._execute_tool(name, {"project_id": "p2", **args}))
+        assert "authenticated coding session" in out["error"], out
     for call in (lambda: ws.repo_commit("p2", "m"),
                  lambda: ws.repo_pull("p2"),
                  lambda: ws.repo_set_remote("p2", "https://example.invalid/x")):
         with pytest.raises(CheckoutLeased):
             call()
     assert (src / "file.txt").read_text() == "original\n"
-    assert not (src / "new.txt").exists()
+    assert not (src / "new.txt").exists() and not (src / "hi.txt").exists()
 
 
 def test_an_admission_is_retired_even_when_the_write_raises(live):

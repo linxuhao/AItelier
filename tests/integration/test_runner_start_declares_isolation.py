@@ -6,10 +6,17 @@
 turn between those, so a declaration appended after `start` returns is too late
 for the first context read and the first code-path resolution.
 
-This drives the REAL `coding_task` graph through the REAL `RunnerService`, on a
-real `AItelierSkillFlow` wired with the deployment's own code-path resolver and
-a real `ConfigRegistry`. Only the three process singletons are redirected at the
-isolated fixtures. No model, provider or network is involved.
+This drives the REAL `coding_task` graph content through the REAL
+`RunnerService`, on a real `AItelierSkillFlow` wired with the deployment's own
+code-path resolver and a real `ConfigRegistry`. Only the three process
+singletons are redirected at the isolated fixtures. No model, provider or
+network is involved.
+
+`coding_task` itself is now an artifact-only plan (repo_mode none: Coding Mode
+code changes live in the session's coding_workspace tree), so the code-owning
+case registers the same graph content as `code_task_probe` with repo_mode code.
+The seam under test — declaration before the first claim — is the engine/host
+start path, not the Coding Mode tool that used to call it.
 """
 from __future__ import annotations
 
@@ -22,7 +29,7 @@ import api.dependencies as deps
 from core import run_isolation as ri
 from core.config_registry import ConfigRegistry
 from core.db_manager import DBManager
-from core.meta_agent import MetaAgent
+from skillflow.plugins.skill_runner import RunnerService
 from core.skillflow_host import AItelierSkillFlow
 from core.workspace_manager import WorkspaceManager
 from skillflow.exceptions import IsolationUnavailable
@@ -62,15 +69,17 @@ def world(tmp_path, monkeypatch):
         code_path_resolver=resolver)
     deps._load_and_register_agent_configs(sf)
     sf.register_graph(PipelineGraph.from_yaml(ROOT / "configs" / "coding_task.yaml"))
-    # The same graph as a repo-less config: the declared axis, not the shape.
+    # The same graph content under two declared axes: code-owning and repo-less.
     text = (ROOT / "configs" / "coding_task.yaml").read_text()
-    text = text.replace('"coding_task"', '"notes_task"')
-    notes = tmp_path / "notes_task.yaml"
-    notes.write_text(text)
-    sf.register_graph(PipelineGraph.from_yaml(notes))
+    for name in ("notes_task", "code_task_probe"):
+        copy = tmp_path / f"{name}.yaml"
+        copy.write_text(text.replace('"coding_task"', f'"{name}"'))
+        sf.register_graph(PipelineGraph.from_yaml(copy))
     registry = ConfigRegistry.build(sf)
     registry.register_one(sf, "notes_task", hint_overrides={"repo_mode": "none"})
-    assert registry.get("coding_task").repo_mode == "code"
+    registry.register_one(sf, "code_task_probe", hint_overrides={"repo_mode": "code"})
+    assert registry.get("coding_task").repo_mode == "none"   # artifact-only plan
+    assert registry.get("code_task_probe").repo_mode == "code"
     assert registry.get("notes_task").repo_mode == "none"
 
     monkeypatch.setattr(deps, "db_instance", db)
@@ -87,16 +96,20 @@ def world(tmp_path, monkeypatch):
     _git(source, "commit", "-qm", "base")
     db.ensure_project("code-p", repo_type="existing", repo_path=str(source))
     db.ensure_project("notes-p", repo_type="none")
-    session = db.create_session()
-    agent = MetaAgent(db, ws, owner_email="t@local", session_id=session, mode="coding")
-    yield type("W", (), dict(db=db, ws=ws, sf=sf, source=source, agent=agent,
-                             session=session, asked=asked, tmp=tmp_path))
+    yield type("W", (), dict(db=db, ws=ws, sf=sf, source=source,
+                             asked=asked, tmp=tmp_path))
     sf._conn.close()
 
 
-async def _start(w, project, graph="coding_task"):
-    return await w.agent._execute_tool(
-        "runner_start", {"project_id": project, "graph_name": graph, "task": "add a fn"})
+CODE = "code_task_probe"
+
+
+async def _start(w, project, graph=CODE):
+    try:
+        return RunnerService(w.sf).start(graph, project_id=project,
+                                         seeds={"task.md": "add a fn"})
+    except IsolationUnavailable as exc:
+        return {"error": str(exc)}
 
 
 async def test_code_graph_run_is_owned_before_its_first_claim_and_resolution(world):
@@ -108,7 +121,7 @@ async def test_code_graph_run_is_owned_before_its_first_claim_and_resolution(wor
 
     rec = ri.record(w.db, run_id)
     assert rec and rec["mode"] == ri.MODE_WORKTREE
-    assert rec["project_id"] == "code-p" and rec["config_name"] == "coding_task"
+    assert rec["project_id"] == "code-p" and rec["config_name"] == CODE
     tree = Path(rec["worktree_path"])
     assert tree != w.source and tree.is_dir()
     assert ri.resolve_for_resolver(w.db, run_id) == rec["worktree_path"]
@@ -116,8 +129,14 @@ async def test_code_graph_run_is_owned_before_its_first_claim_and_resolution(wor
     assert Path(w.ws.get_code_path("code-p", run_id=run_id)) == tree
     # Every resolution the engine made for this run saw the record already there.
     assert w.asked and all(had for _, had in w.asked), w.asked
-    # Ordinary session linking is preserved.
-    assert run_id in w.db.get_runs_for_session(w.session)
+
+
+async def test_the_coding_task_plan_gets_no_writable_tree(world):
+    w = world
+    resp = await _start(w, "code-p", graph="coding_task")
+    assert resp.get("status") == "in_progress", resp
+    rec = ri.record(w.db, resp["run_id"])
+    assert rec and rec["mode"] == ri.MODE_READ_SNAPSHOT and not rec["branch"]
 
 
 async def test_repo_less_graph_stays_repo_less(world):
@@ -142,10 +161,9 @@ async def test_declaration_refusal_is_reported_and_leaves_no_usable_run(world, m
     resp = await _start(w, "code-p")
     assert "error" in resp and "run_id" not in resp, resp
     assert "fixture: refuse to provision" in resp["error"]
-    # Nothing linked, nothing claimed, nothing resolved against a tree.
-    assert w.db.get_runs_for_session(w.session) == []
+    # Nothing claimed, nothing resolved against a tree.
     assert w.asked == []
-    dead = w.sf.get_run_by_project("code-p", "coding_task")
+    dead = w.sf.get_run_by_project("code-p", CODE)
     assert dead and dead["status"] == "failed", dead
     assert all(s["status"] == "pending" and not s.get("claim_epoch")
                for s in w.sf.get_steps(dead["id"]))
@@ -166,10 +184,9 @@ async def test_provisioning_refusal_is_reported_not_papered_over(world, monkeypa
         IsolationUnavailable("fixture: git worktree add failed")))
     resp = await _start(w, "code-p")
     assert "error" in resp and "git worktree add failed" in resp["error"], resp
-    assert w.db.get_runs_for_session(w.session) == []
     assert w.asked == []
     assert _git(w.source, "worktree", "list").count("\n") == 0   # only the main tree
-    dead = w.sf.get_run_by_project("code-p", "coding_task")
+    dead = w.sf.get_run_by_project("code-p", CODE)
     assert dead["status"] == "failed"
     assert ri.record(w.db, dead["id"]) is None
 
@@ -177,8 +194,8 @@ async def test_provisioning_refusal_is_reported_not_papered_over(world, monkeypa
 def test_a_run_that_already_holds_a_record_is_not_redeclared(world, monkeypatch):
     """The other creation paths declare first; the start seam must be a no-op for them."""
     w = world
-    rid = w.sf.create_run("coding_task", {"project_id": "code-p"}, project_id="code-p")
-    ri.ensure_for_run(w.db, run_id=rid, project_id="code-p", config_name="coding_task",
+    rid = w.sf.create_run(CODE, {"project_id": "code-p"}, project_id="code-p")
+    ri.ensure_for_run(w.db, run_id=rid, project_id="code-p", config_name=CODE,
                       repo_mode="code")
     calls = []
     monkeypatch.setattr(ri, "ensure_for_run", lambda *a, **kw: calls.append(kw))

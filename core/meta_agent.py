@@ -1504,44 +1504,6 @@ CODING_TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
-            "name": "runner_approve",
-            "description": (
-                "Approve a paused runner checkpoint and receive the next step. "
-                "Call ONLY after the user has explicitly approved in chat — the "
-                "checkpoint is for the user, never auto-approve."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "run_id": {"type": "string"},
-                },
-                "required": ["run_id"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "runner_reject",
-            "description": (
-                "Reject a paused runner checkpoint with the user's feedback — the "
-                "step re-runs with that feedback (e.g. you write a revised plan). "
-                "Use when the user asks for changes."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "run_id": {"type": "string"},
-                    "feedback": {"type": "string",
-                                 "description": "The user's requested changes, verbatim"},
-                },
-                "required": ["run_id", "feedback"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "skillflow_tool",
             "description": (
                 "Execute one of the CURRENT runner step's skillflow tools — the "
@@ -1968,153 +1930,28 @@ def _declare_isolation(db, run_id: str, project_id: str, config_name: str) -> No
 
 
 
-# ── owned process-group lifetime (the `bash` tool) ───────────────────
-# A tool call owns the SESSION it starts, and nothing else. `start_new_session`
-# puts the shell in its own process group, so the whole tree the command builds
-# can be signalled with one `killpg` — the pattern this repo already uses in
-# aitelier/tools/run_tests/impl.py, whose comment says why: killing the direct
-# child leaves the grandchildren running.
-#
-# Scope, honestly, and this sentence was WRONG in the previous round: a process
-# that calls `setsid` for itself LEAVES this group. The group then reads as
-# EMPTY — the strongest confirmation there is — and the admission is retired.
-# Such a process is not detected, not retained and not surfaced; it is simply
-# outside what one owned process group can see. The earlier claim that an escape
-# is "detected as cannot confirm" was the opposite of the behaviour, and an
-# operator clearing a retained admission would have been misled by it.
-#
-# What retention DOES cover: a group that is still present after SIGTERM and
-# SIGKILL, and a cancellation that landed before the handle was ours. Those are
-# real and are surfaced. This is not an OS-wide tracker and does not pretend to
-# be one; making it one is a scope decision nobody has asked for.
-_BASH_TERM_GRACE_S = 2.0     # after SIGTERM, before SIGKILL
-_BASH_KILL_WAIT_S = 3.0      # after SIGKILL, before giving up on confirmation
-_BASH_REAP_TIMEOUT_S = 2.0   # bounded: an orphan holding the pipes must not
-                             # make this wait forever
-_BASH_CLEANUP_AWAIT_ATTEMPTS = 64   # re-awaits of the owned cleanup task under
-                             # repeated cancellation; the task is itself bounded,
-                             # so this only stops a pathological cancel storm
-                             # from spinning
-
-
-def _owned_group_is_gone(pgid) -> bool:
-    """Is the process group this call started empty?
-
-    `killpg(pgid, 0)` is the question, and `ProcessLookupError` is the only
-    answer that means yes. `PermissionError` means somebody else's processes
-    are in it — which is not a group we own and not a confirmation.
-
-    Two things this answer does NOT mean, both worth knowing before trusting it:
-
-    * a process that called `setsid` has left this group, so "empty" can be true
-      while that process is still running and still writing. It is unseen here,
-      by scope, and no wording in this module should suggest otherwise;
-    * a process that has died but not been reaped is a ZOMBIE, and a zombie
-      still answers. The direct child of a `bash` call is ours to reap, which is
-      why cleanup reaps before it believes this function.
-    """
-    if not pgid:
-        return False
-    try:
-        os.killpg(pgid, 0)
-    except ProcessLookupError:
-        return True
-    except PermissionError:
-        return False
-    except OSError:
-        return False
-    return False
-
-
-def _signal_owned_group(pgid, sig) -> None:
-    """Signal ONLY the group we started. Never a broader target."""
-    if not pgid:
-        return
-    try:
-        os.killpg(pgid, sig)
-    except (ProcessLookupError, PermissionError, OSError):
-        pass
-
-
-async def _await_owned_group_gone(pgid, seconds: float) -> bool:
-    """Poll for the group to empty, yielding the loop between looks.
-
-    `await asyncio.sleep`, never `time.sleep`: this runs inside an ASGI process,
-    and the previous synchronous version stopped SSE heartbeats, the scheduler
-    tick and every other request for up to five seconds on every cancelled or
-    timed-out command.
-    """
-    deadline = time.monotonic() + max(0.0, seconds)
-    while True:
-        if _owned_group_is_gone(pgid):
-            return True
-        if time.monotonic() >= deadline:
-            return False
-        await asyncio.sleep(0.02)
-
-
-async def _reap_owned_child(proc, seconds: float) -> None:
-    """Reap the direct child, bounded. Its zombie answers `killpg` until we do.
-
-    `wait()`, not `communicate()`: an orphan holding the pipes must not be able
-    to make cleanup hang. A `CancelledError` raised in here is NOT swallowed —
-    it ends this cleanup task, and the caller records that a cancellation was
-    observed rather than returning a result.
-    """
-    if proc is None or proc.returncode is not None:
-        return
-    try:
-        await asyncio.wait_for(proc.wait(), timeout=max(0.0, seconds))
-    except (asyncio.TimeoutError, ProcessLookupError):
-        pass
-
-
-async def _end_owned_group_async(proc, pgid) -> bool:
-    """SIGTERM, reap, escalate to SIGKILL — bounded, and off the loop's back.
-
-    True only if the group is GONE. Two things the previous version got wrong:
-
-    * it slept synchronously, so the process stopped serving while it waited;
-    * it reaped LAST. The direct child of this call becomes a zombie the moment
-      it dies, a zombie still answers `killpg(pgid, 0)`, and so an ordinary
-      `sleep` that died on the very first SIGTERM still burned the whole budget
-      before the reap that would have settled it. Reaping first is what makes
-      the group check tell the truth.
-
-    A `setsid` escapee has left this group and is not covered — see
-    `_owned_group_is_gone`. This returns True in that case, because the group
-    really is empty; the escapee is unseen, by scope.
-
-    This coroutine is run as ONE task the caller owns and keeps awaiting under a
-    shield. It is bounded, so "keep awaiting" terminates; nothing here is left
-    running after the caller has decided about the admission.
-    """
-    if not pgid:
-        return False
-    deadline = time.monotonic() + _BASH_TERM_GRACE_S + _BASH_KILL_WAIT_S
-    _signal_owned_group(pgid, signal.SIGTERM)
-    await _reap_owned_child(proc, _BASH_TERM_GRACE_S)
-    if await _await_owned_group_gone(
-            pgid, min(_BASH_TERM_GRACE_S, deadline - time.monotonic())):
-        return True
-    _signal_owned_group(pgid, signal.SIGKILL)
-    await _reap_owned_child(proc, _BASH_REAP_TIMEOUT_S)
-    return await _await_owned_group_gone(pgid, deadline - time.monotonic())
-
-
 class MetaAgent:
     """Backend meta agent: tool-use loop over LiteLLM with streaming."""
 
     def __init__(self, db, ws, owner_email: str = "cli@local", session_id: str = None,
-                 mode: str = "butler", user_lang: str | None = None):
+                 mode: str = "butler", user_lang: str | None = None,
+                 coding_scope=None):
         self.db = db
         self.ws = ws
         self.owner_email = owner_email
         self.session_id = session_id
-        # butler = orchestration/inspection toolset only; coding = adds
-        # edit_file/create_file/bash. Set from the session (user-toggled),
-        # never by the model.
+        # butler = orchestration/inspection toolset only; coding = the fixed
+        # Coding Mode palette over the session's owned working tree. Set from
+        # the session (user-toggled), never by the model.
         self.mode = mode if mode in ("butler", "coding") else "butler"
+        # Coding Mode authority comes ONLY from the authenticated entry scope
+        # (core.coding_workspace.authorize_entry), fixed before sampling. No
+        # scope → the repository tools answer unavailable; there is no
+        # fallback to the Source checkout or to a backend shell.
+        self._coding = None
+        if self.mode == "coding" and coding_scope is not None:
+            from core.coding_workspace import CodingRequest
+            self._coding = CodingRequest(db, coding_scope)
         self.user_lang = user_lang
         # Set per-turn in chat(); lets the approve/answer tools resolve the run
         # by project even when the session→run link is empty (drifted session).
@@ -2361,6 +2198,11 @@ class MetaAgent:
                            "limit": limit,
                            "mode": self.mode,
                            **usage_stats(self._usage_totals)}
+                    if self._coding is not None:
+                        # A final successful response delivers the session's
+                        # working tree to Source first. Not a new approval; a
+                        # commit only if the authenticated user asked for one.
+                        yield {"type": "coding_handoff", **self._coding_finish(full_text)}
                     yield {"type": "done", "message": {"role": "assistant", "content": full_text}}
                     return
 
@@ -2455,6 +2297,22 @@ class MetaAgent:
 
         except Exception as e:
             yield {"type": "error", "message": f"Agent error: {e}"}
+        finally:
+            # Budget pause, interruption and completion all end the REQUEST:
+            # the project lock is released, the run and its tree are retained.
+            if self._coding is not None:
+                self._coding.release()
+
+    def _coding_finish(self, final_text: str) -> dict:
+        from core.coding_workspace import Unavailable
+        try:
+            outcome = self._coding.finish(note=final_text or "")
+        except Unavailable as exc:
+            return {"status": exc.status, "error": str(exc)}
+        except Exception as exc:  # noqa: BLE001 -- reported, never a silent success
+            self._log_error(f"coding handoff failed: {exc}")
+            return {"status": "error", "error": f"{type(exc).__name__}: {exc}"}
+        return outcome or {"status": "nothing_to_deliver"}
 
     def _persist_transcript(self, message: dict) -> None:
         """Persist one loop message (coding mode only, best-effort).
@@ -2658,12 +2516,16 @@ class MetaAgent:
                 self._log_error(f"compaction persistence failed: {e}")
         return [messages[0], summary_msg] + body[cut:]
 
+    def _tool_palette(self) -> list[dict]:
+        """The tool schemas this request may advertise, fixed before sampling."""
+        if self.mode == "coding":
+            return CODING_PALETTE_DEFINITIONS
+        return TOOL_DEFINITIONS
+
     async def _stream_llm(self, messages: list[dict]) -> AsyncGenerator[dict, None]:
         """Stream LLM response. Yields text_delta events in real-time,
         then a single 'collected' event with the full text and parsed tool_calls."""
-        tools = TOOL_DEFINITIONS
-        if self.mode == "coding":
-            tools = TOOL_DEFINITIONS + CODING_TOOL_DEFINITIONS
+        tools = self._tool_palette()
         kwargs = {
             "model": self.litellm_model,
             # strip loop-internal keys (_row_id, compaction_through) — some
@@ -2804,9 +2666,20 @@ class MetaAgent:
         # mode, but reject them here too in case a model hallucinates the call.
         if name in _CODING_TOOL_HANDLERS and self.mode != "coding":
             return {"error": f"Tool '{name}' is only available in coding mode."}
-        handler = _TOOL_HANDLERS.get(name)
+        if self.mode == "coding":
+            # The palette is enforced at dispatch, not only by omission from
+            # the advertised schemas: a model naming backend bash, an approval,
+            # config execution, tool creation or a Meta/State route gets a
+            # refusal, whatever the prompt said.
+            if name not in CODING_PALETTE:
+                return {"error": f"Tool '{name}' is not available in Coding Mode."}
+            handler = _CODING_PALETTE_HANDLERS[name]
+        else:
+            handler = _TOOL_HANDLERS.get(name)
         if not handler:
             return {"error": f"Unknown tool: {name}"}
+        if not isinstance(args, dict):
+            return {"error": f"Tool '{name}' arguments must be an object"}
         try:
             result = handler(self, args)
             if asyncio.iscoroutine(result):
@@ -3484,293 +3357,216 @@ class MetaAgent:
             "truncated": end_idx < total,
         }
 
-    # ── Coding-mode tools ──────────────────────────────────────────
-    # Direct in-place repo editing for the interactive coding agent. The
-    # surgical-edit safety core (_unique_replace) is shared with skillflow so
-    # the uniqueness rule lives in one place; path handling is butler-own
-    # (same jail as read_code_file — no staging dir, no AT-9 'project/' strip,
-    # which would mangle repos that really have a project/ directory).
+    # ── Coding Mode: the session's owned working tree ─────────────────
+    # Every repository tool below resolves the ONE tree the session's
+    # authentic coding_workspace run owns (core/coding_workspace.py). The
+    # project is fixed by the authenticated entry scope; a model-supplied
+    # project_id, run_id, path root or epoch selects nothing. There is no
+    # fallback to the Source checkout or to a backend subprocess.
 
-    @contextmanager
-    def _write_admission(self, base, kind: str, detail: str = ""):
-        """Hold an ADMISSION for the whole of an interactive write.
+    def _coding_workspace(self, args: dict):
+        from core.coding_workspace import Unavailable
+        if self._coding is None:
+            raise Unavailable("Coding Mode repository tools need an authenticated coding "
+                              "session with a selected project")
+        pid = args.get("project_id")
+        if pid not in (None, "", self._coding.project_id):
+            raise Unavailable("the project is fixed by the authenticated coding session; "
+                              "a tool argument cannot select another")
+        return self._coding.workspace()
 
-        `edit_file`, `create_file` and `bash` are the interactive write surface,
-        and an interactive write is MORE of an operator action than
-        `repo_commit` is — which already refuses. What changed since the last
-        round is that this is no longer a check followed by a write: the
-        admission and a direct run's lease acquisition arbitrate in one short
-        database transaction, so a run cannot take the checkout in the window
-        between the guard and the file being written, and a `bash` already
-        running keeps the checkout excluded until it exits.
-
-        The row is durable and is retired in `finally` — including on an
-        exception. A crash leaves it, and it blocks until an operator clears it
-        with evidence; nothing expires it by time.
-
-        What it does not cover, and cannot: a shell somebody runs outside this
-        application. `bash` HERE is an AItelier tool being refused on a checkout
-        somebody else holds — the refusal is about the TREE, not about parsing
-        the command to guess whether it writes, and it is not an OS-wide jail.
-        """
-        from core import run_isolation
-        from api.dependencies import get_db_manager
-        with run_isolation.write_admission(get_db_manager(), base, kind=kind,
-                                           detail=detail):
-            yield
-
-    def _resolve_code_target(self, pid: str, path: str):
-        """Resolve a repo-relative path inside the project's code jail.
-
-        Returns (base, target, None) or (None, None, error_dict).
-        """
+    def _coding_call(self, fn) -> dict:
+        from core.coding_workspace import Unavailable
         try:
-            base = self.ws.get_code_path(pid)
-        except Exception as e:
-            return None, None, {"error": f"Cannot resolve code path for '{pid}': {e}"}
-        if base is None:
-            return None, None, {
-                "error": f"Project '{pid}' declares no code repository"}
-        base = base.resolve()
-        if not base.is_dir():
-            return None, None, {"error": f"No code directory for project '{pid}'"}
-        target = (base / path).resolve()
-        # Component containment, not string prefix: `startswith` accepted a
-        # SIBLING whose name merely shares the prefix, so a project at
-        # `.../projects/foo` could read `.../projects/foo-backup`.
-        if not target.is_relative_to(base.resolve()):
-            return None, None, {"error": "Path traversal denied"}
-        return base, target, None
+            return fn()
+        except Unavailable as exc:
+            return {"error": str(exc), "status": exc.status}
 
-    def _tool_edit_file(self, args: dict) -> dict:
+    def _coding_list_code_tree(self, args: dict) -> dict:
+        def go():
+            ws = self._coding_workspace(args)
+            root = ws.root
+            base = Path(os.path.realpath(root / (args.get("subdir") or "")))
+            if not base.is_relative_to(root):
+                return {"error": "Path traversal denied"}
+            if not base.is_dir():
+                return {"error": f"Not a directory: {args.get('subdir')}"}
+            tree = []
+            for item in iter_visible_source_files(base):
+                rel = item.relative_to(root)
+                if ".git" in rel.parts or not Path(os.path.realpath(item)).is_relative_to(root):
+                    continue
+                if item.is_file():
+                    tree.append(str(item.relative_to(base)))
+            return {"view": "working_tree", "run_id": ws.run_id, "tree": tree[:200]}
+        return self._coding_call(go)
+
+    def _coding_read_code_file(self, args: dict) -> dict:
+        from core import coding_workspace as cw
+
+        def go():
+            ws = self._coding_workspace(args)
+            rel, content = cw.read_text(ws, args.get("path", ""))
+            lines = content.splitlines()
+            total = len(lines)
+            start, end = args.get("start_line"), args.get("end_line")
+            start_idx = min((start - 1) if isinstance(start, int) and start > 0 else 0, total)
+            end_idx = (min(end, total) if isinstance(end, int) and end > 0
+                       else min(start_idx + _MAX_READ_LINES, total))
+            body = "\n".join(f"{start_idx + i + 1}\t{ln}"
+                             for i, ln in enumerate(lines[start_idx:end_idx]))
+            self._files_read.add((ws.run_id, rel))
+            return {"path": rel, "view": "working_tree", "content": body,
+                    "start_line": start_idx + 1, "end_line": end_idx,
+                    "total_lines": total, "truncated": end_idx < total}
+        return self._coding_call(go)
+
+    def _coding_search_code(self, args: dict) -> dict:
+        from core import run_resources
+
+        def go():
+            ws = self._coding_workspace(args)
+            pattern = args.get("pattern") or ""
+            if not isinstance(pattern, str) or not pattern:
+                return {"error": "search_code: 'pattern' is required"}
+            try:
+                regex = re.compile(pattern, re.IGNORECASE)
+            except re.error:
+                regex = None
+            limit = args.get("max_results") or 100
+            limit = max(1, min(int(limit), 500)) if isinstance(limit, int) else 100
+            matches, truncated = [], False
+            # The no-index policy answers here: degraded, never "ready", and
+            # the search reads this same bound tree, never Source.
+            with run_resources.search_lease(str(ws.root)) as degraded:
+                for item in iter_visible_source_files(ws.root, args.get("glob")):
+                    rel = item.relative_to(ws.root)
+                    if (".git" in rel.parts or not item.is_file() or item.is_symlink()
+                            or item.suffix.lower() in _BINARY_SUFFIXES):
+                        continue
+                    try:
+                        text = item.read_text(encoding="utf-8", errors="replace")
+                    except OSError:
+                        continue
+                    for li, line in enumerate(text.splitlines(), 1):
+                        if (regex.search(line) if regex else pattern.lower() in line.lower()):
+                            matches.append({"file": str(rel), "line": li, "text": line.strip()[:200]})
+                            if len(matches) >= limit:
+                                truncated = True
+                                break
+                    if truncated:
+                        break
+            return {"view": "working_tree", "matches": matches, "truncated": truncated,
+                    "index": degraded or "ready"}
+        return self._coding_call(go)
+
+    def _coding_edit_file(self, args: dict) -> dict:
         from skillflow.write_tools import _unique_replace
+        from core import coding_workspace as cw
 
-        pid = args["project_id"]
-        path = args["path"]
-        old_str = args.get("old_str", "")
-        new_str = args.get("new_str", "")
-        if not isinstance(old_str, str) or not old_str:
-            return {"error": "edit_file: 'old_str' is required and must be non-empty"}
-        base, target, err = self._resolve_code_target(pid, path)
-        if err:
-            return err
-        if not target.is_file():
-            return {"error": f"edit_file: '{path}' does not exist — use create_file for new files"}
-        if (pid, str(target)) not in self._files_read:
-            return {"error": (f"edit_file: read '{path}' with read_code_file before "
-                              f"editing it — you must see the current content first.")}
-        try:
-            with self._write_admission(base, "edit_file", path):
-                content = target.read_text(encoding="utf-8")
-                updated, uerr = _unique_replace(content, old_str, new_str,
-                                                tool="edit_file", name=path)
-                if uerr:
-                    return uerr
-                target.write_text(updated, encoding="utf-8")
-        except CheckoutLeased as e:
-            return {"error": f"CheckoutLeased: {e}"}
-        return {"edited": path}
+        def go():
+            ws = self._coding_workspace(args)
+            self._coding.require_writable(ws)
+            path = args.get("path", "")
+            old_str, new_str = args.get("old_str", ""), args.get("new_str", "")
+            if not isinstance(old_str, str) or not old_str or not isinstance(new_str, str):
+                return {"error": "edit_file: 'old_str' (non-empty) and 'new_str' are required"}
+            rel, content = cw.read_text(ws, path)
+            if (ws.run_id, rel) not in self._files_read:
+                return {"error": (f"edit_file: read '{path}' with read_code_file before "
+                                  f"editing it — you must see the current content first.")}
+            updated, uerr = _unique_replace(content, old_str, new_str, tool="edit_file", name=path)
+            if uerr:
+                return uerr
+            try:
+                cw.write_text(self.db, ws, path, updated, create=False, detail=f"edit_file {rel}")
+            except CheckoutLeased as e:
+                return {"error": f"CheckoutLeased: {e}"}
+            return {"edited": rel, "view": "working_tree"}
+        return self._coding_call(go)
 
-    def _tool_create_file(self, args: dict) -> dict:
-        pid = args["project_id"]
-        path = args["path"]
-        base, target, err = self._resolve_code_target(pid, path)
-        if err:
-            return err
-        if target.exists():
-            return {"error": (f"create_file: '{path}' already exists — use edit_file "
-                              f"to change an existing file.")}
-        content = args.get("content", "")
-        if not isinstance(content, str):
-            content = json.dumps(content, ensure_ascii=False)
-        try:
-            with self._write_admission(base, "create_file", path):
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(content, encoding="utf-8")
-        except CheckoutLeased as e:
-            return {"error": f"CheckoutLeased: {e}"}
-        # A file we just authored is by definition "seen" — allow edits.
-        self._files_read.add((pid, str(target)))
-        return {"created": path, "size": len(content)}
+    def _coding_create_file(self, args: dict) -> dict:
+        from core import coding_workspace as cw
 
-    # Output cap for bash results: head + tail, so both the command banner and
-    # the (usually decisive) final lines survive in context.
-    _BASH_HEAD_CHARS = 8000
-    _BASH_TAIL_CHARS = 2000
-    # env vars matching this never reach coding-mode subprocesses. Anchored to
-    # the END of the name: secret conventions are suffixes (DEEPSEEK_API_KEY,
-    # GITHUB_TOKEN, MY_PASSWORD) — an unanchored _KEY also killed
-    # GIT_CONFIG_KEY_0 (the compose-wired credential helper) while leaving
-    # GIT_CONFIG_COUNT, which broke every git command in the container.
-    # Defined in core/env_scrub so the pipeline's test runner uses the SAME
-    # rule — it used to pass os.environ through unfiltered while this path was
-    # hardened.
-    _ENV_SECRET_RE = _env_scrub.ENV_SECRET_RE
+        def go():
+            ws = self._coding_workspace(args)
+            self._coding.require_writable(ws)
+            content = args.get("content", "")
+            if not isinstance(content, str):
+                content = json.dumps(content, ensure_ascii=False)
+            try:
+                rel = cw.write_text(self.db, ws, args.get("path", ""), content, create=True,
+                                    detail=f"create_file {args.get('path', '')}"[:300])
+            except CheckoutLeased as e:
+                return {"error": f"CheckoutLeased: {e}"}
+            self._files_read.add((ws.run_id, rel))
+            return {"created": rel, "size": len(content), "view": "working_tree"}
+        return self._coding_call(go)
 
-    async def _tool_bash(self, args: dict) -> dict:
-        pid = (args.get("project_id") or "").strip()
-        if not pid:
-            return {"error": "bash: 'project_id' is required — it selects the code "
-                             "directory the command runs in. Call list_projects if "
-                             "you do not have one."}
+    async def _coding_bash(self, args: dict) -> dict:
+        """The owned shell: the session's tree in the closed container profile."""
+        from core import coding_shell
+        from core.coding_workspace import Unavailable
+        from core.repository_executor import IsolationUnavailable
         command = args.get("command", "")
-        if not command.strip():
+        if not isinstance(command, str) or not command.strip():
             return {"error": "bash: 'command' is required"}
         timeout = args.get("timeout") or 120
-        timeout = max(1, min(int(timeout), 600))
+        timeout = max(1, min(int(timeout), 600)) if isinstance(timeout, int) else 120
         try:
-            base = self.ws.get_code_path(pid)
-        except Exception as e:
-            return {"error": f"Cannot resolve code path for '{pid}': {e}"}
-        if base is None:
-            return {"error": f"Project '{pid}' declares no code repository"}
-        base = base.resolve()
-        if not base.is_dir():
-            return {"error": f"No code directory for project '{pid}'"}
-
-        env = {k: v for k, v in os.environ.items()
-               if not self._ENV_SECRET_RE.search(k)}
-
-        # The admission is held for the WHOLE WRITE — not for the coroutine
-        # that started it, which is what the `with` block used to mean. A
-        # client disconnect raises CancelledError in a mid-tool await (see
-        # `chat`), and the old `finally` retired the admission there while the
-        # command kept running: a direct run could then take the checkout while
-        # an orphan was still writing into it. Same hole one level down on
-        # timeout, where `proc.kill()` ends /bin/sh and nothing else.
-        #
-        # So: no context manager here. The row is retired only after the
-        # process group this call owns has been ENDED and confirmed gone, and
-        # if it cannot be confirmed the admission is RETAINED with the reason
-        # attached — the same answer a crashed writer already gets, and never
-        # an expiry.
-        from core import run_isolation as _ri
-        from api.dependencies import get_db_manager as _gdb
+            ws = self._coding_workspace(args)
+            self._coding.require_writable(ws)
+            grant = self._coding.shell_grant(ws)
+        except Unavailable as exc:
+            return {"error": str(exc), "status": exc.status}
         try:
-            _db = _gdb()
-            adm = _ri.admit_write(_db, base, kind="bash", detail=command[:200])
-        except CheckoutLeased as e:
-            return {"error": f"CheckoutLeased: {e}"}
+            result = await asyncio.to_thread(coding_shell.execute_coding_shell, grant, command, timeout)
+        except IsolationUnavailable as exc:
+            return {"error": f"bash unavailable: {exc}", "status": "unavailable"}
+        return {"exit_code": result.returncode, "stdout": result.stdout, "stderr": result.stderr,
+                "timed_out": result.timed_out, "truncated": result.output_truncated,
+                "view": "working_tree"}
 
-        proc = None
-        pgid = None
-        out_bytes = b""
-        cancel_exc = None
-        timed_out = False
-        spawn_error = None
-        try:
-            try:
-                proc = await asyncio.create_subprocess_shell(
-                    command,
-                    cwd=str(base),
-                    env=env,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.STDOUT,
-                    # Its own session: one `killpg` can end the whole tree the
-                    # command builds, which `proc.kill()` cannot.
-                    start_new_session=True,
-                )
-            except (asyncio.CancelledError, GeneratorExit) as e:
-                # The fork may already have happened. We do not have the handle,
-                # so we cannot say whether a writer exists — and "cannot say" is
-                # not "no". Fall through to cleanup, which will retain.
-                cancel_exc = e
-            if proc is not None and cancel_exc is None:
-                pgid = proc.pid          # start_new_session ⇒ pgid == pid
-                try:
-                    out_bytes, _ = await asyncio.wait_for(
-                        proc.communicate(), timeout=timeout)
-                except asyncio.TimeoutError:
-                    timed_out = True
-                except (asyncio.CancelledError, GeneratorExit) as e:
-                    cancel_exc = e
-        except Exception as e:                       # spawn refused, cwd gone…
-            spawn_error = e
+    def _coding_runner_start(self, args: dict) -> dict:
+        graph = (args.get("graph_name") or self._DEFAULT_RUNNER_GRAPH).strip()
+        if graph != self._DEFAULT_RUNNER_GRAPH:
+            return {"error": "Coding Mode plans run only through coding_task"}
+        return self._coding_call(lambda: (self._coding_workspace(args),
+                                          self._coding.plan_start(args.get("task") or ""))[1])
 
-        # ── end the writers, THEN decide about the admission ──────────
-        # ONE task, owned here, awaited under a shield until it finishes. The
-        # shield is what makes a second cancellation unable to abandon the
-        # cleanup; re-awaiting is what makes it stay OURS rather than becoming a
-        # detached task that finishes after the admission has been released.
-        # Each cancellation seen is recorded and re-raised at the end — a
-        # cancelled call never returns a result, on any phase.
-        ended = False
-        if pgid:
-            cleanup = asyncio.ensure_future(_end_owned_group_async(proc, pgid))
-            for _ in range(_BASH_CLEANUP_AWAIT_ATTEMPTS):
-                try:
-                    ended = await asyncio.shield(cleanup)
-                    break
-                except (asyncio.CancelledError, GeneratorExit) as e:
-                    cancel_exc = cancel_exc or e
-                    if cleanup.done():
-                        # The cleanup itself ended on a cancellation (a reap
-                        # cancelled from underneath it). Nothing is left running
-                        # and nothing is confirmed.
-                        ended = False
-                        break
-                    continue
-                except Exception:
-                    ended = False
-                    break
-            else:
-                # Cancelled again and again without ever letting us observe the
-                # end. Do not leave the task unowned: end it, and treat the
-                # group as unconfirmed, which retains.
-                cleanup.cancel()
-                ended = False
+    def _coding_runner_submit(self, args: dict) -> dict:
+        def go():
+            ws = self._coding_workspace(args)
+            plan = self._coding.plan_record(ws) or {}
+            if args.get("run_id") not in (None, "", plan.get("run_id")):
+                return {"error": "runner_submit acts only on this workspace's governing plan"}
+            result = args.get("result")
+            if result is not None and not isinstance(result, dict):
+                return {"error": "runner_submit: 'result' must be an object"}
+            return self._coding.plan_submit(args.get("step_id", ""), result)
+        return self._coding_call(go)
 
-        if proc is None and cancel_exc is not None:
-            confirmed, why = False, ("cancelled during spawn: the command "
-                                     "handle was never ours, so whether a "
-                                     "process exists cannot be established")
-        elif proc is None:
-            confirmed, why = True, ""
-        elif ended:
-            confirmed, why = True, ""
-        else:
-            confirmed, why = False, (
-                f"the process group {pgid} started by this command was still "
-                f"present after SIGTERM and SIGKILL; command: {command[:160]!r}")
+    def _coding_skillflow_tool(self, args: dict) -> dict:
+        def go():
+            ws = self._coding_workspace(args)
+            plan = self._coding.plan_record(ws) or {}
+            if args.get("run_id") not in (None, "", plan.get("run_id")):
+                return {"error": "skillflow_tool acts only on this workspace's governing plan"}
+            name = (args.get("name") or "").strip()
+            if not name or not args.get("step_id"):
+                return {"error": "skillflow_tool: 'step_id' and 'name' are required"}
+            return self._coding.plan_tool(args["step_id"], name, args.get("params") or {})
+        return self._coding_call(go)
 
-        if confirmed:
-            _ri.retire_write(_db, adm["id"])
-        else:
-            _ri.mark_write_admission_pending(_db, adm["id"], why)
+    def _coding_plan_status(self, args: dict) -> dict:
+        def go():
+            ws = self._coding_workspace(args)
+            st = self._coding.plan_state(ws)
+            st.pop("checkpoint", None) if st.get("state") != "pending" else None
+            return {"workspace_run": ws.run_id, "plan": st,
+                    "note": "only the user approves a plan, in the Coding Mode UI"}
+        return self._coding_call(go)
 
-        if cancel_exc is not None:
-            # A cancellation is not a result. Re-raised only after the writers
-            # have been dealt with.
-            raise cancel_exc
-        if spawn_error is not None:
-            return {"error": f"bash: could not start the command: {spawn_error}",
-                    "command": command}
-        if timed_out:
-            res = {"error": f"bash: command timed out after {timeout}s",
-                   "command": command}
-            if not confirmed:
-                res["pending_writers"] = why
-            return res
-
-        output = out_bytes.decode("utf-8", errors="replace")
-        truncated = False
-        limit = self._BASH_HEAD_CHARS + self._BASH_TAIL_CHARS
-        if len(output) > limit:
-            output = (output[:self._BASH_HEAD_CHARS]
-                      + f"\n... [{len(output) - limit} chars truncated] ...\n"
-                      + output[-self._BASH_TAIL_CHARS:])
-            truncated = True
-        res = {
-            "exit_code": proc.returncode,
-            "output": output,
-            "truncated": truncated,
-        }
-        if not confirmed:
-            # Exit code 0 says the shell ended. It says nothing about what the
-            # shell started with `&` and stdout redirected away, so the caller
-            # is told rather than left to infer it from a code.
-            res["pending_writers"] = why
-        return res
 
     # ── Runner-mode pipelines (plan-gated coding_task & friends) ───
     # The butler drives runner-mode graphs through skillflow's RunnerService —
@@ -3788,89 +3584,6 @@ class MetaAgent:
         from api.dependencies import get_skillflow
         from skillflow.plugins.skill_runner import RunnerService
         return RunnerService(get_skillflow())
-
-    def _tool_runner_start(self, args: dict) -> dict:
-        pid = args["project_id"]
-        task = (args.get("task") or "").strip()
-        graph = (args.get("graph_name") or self._DEFAULT_RUNNER_GRAPH).strip()
-        if not task:
-            return {"error": "runner_start: 'task' is required"}
-        if not self.db.get_project(pid):
-            return {"error": f"Project '{pid}' not found — use list_projects, or "
-                             f"create_project for a new one."}
-        # Seed filename comes from the config manifest (x-aitelier.seed_file).
-        seed_file = "task.md"
-        try:
-            from api.dependencies import get_config_registry
-            manifest = get_config_registry().get(graph)
-            if manifest and manifest.seed_file:
-                seed_file = manifest.seed_file
-        except Exception:
-            pass
-        result = self._runner_service().start(
-            graph, project_id=pid, seeds={seed_file: task})
-        if result.get("run_id") and self.session_id:
-            try:
-                self.db.link_run_to_session(self.session_id, result["run_id"])
-            except Exception:
-                pass
-        return result
-
-    def _tool_runner_submit(self, args: dict) -> dict:
-        run_id = args.get("run_id", "")
-        step_id = args.get("step_id", "")
-        if not run_id or not step_id:
-            return {"error": "runner_submit: 'run_id' and 'step_id' are required"}
-        result = args.get("result")
-        if result is not None and not isinstance(result, dict):
-            return {"error": "runner_submit: 'result' must be an object with one "
-                             "key per output slot (or omitted if outputs were "
-                             "written via skillflow_tool)"}
-        return self._runner_service().submit(run_id, step_id, result)
-
-    def _tool_runner_approve(self, args: dict) -> dict:
-        run_id = args.get("run_id", "")
-        if not run_id:
-            return {"error": "runner_approve: 'run_id' is required"}
-        return self._runner_service().approve(run_id)
-
-    def _tool_runner_reject(self, args: dict) -> dict:
-        run_id = args.get("run_id", "")
-        feedback = (args.get("feedback") or "").strip()
-        if not run_id or not feedback:
-            return {"error": "runner_reject: 'run_id' and 'feedback' are required"}
-        return self._runner_service().reject(run_id, feedback)
-
-    def _tool_skillflow_tool(self, args: dict) -> dict:
-        run_id = args.get("run_id", "")
-        step_id = args.get("step_id", "")
-        name = (args.get("name") or "").strip()
-        if not run_id or not step_id or not name:
-            return {"error": "skillflow_tool: 'run_id', 'step_id' and 'name' "
-                             "are required"}
-        # Read/exploration tools receive the project's code repo as their root.
-        project_root = ""
-        try:
-            from api.dependencies import get_skillflow
-            pid = get_skillflow()._get_project_id(run_id)
-            if pid:
-                # "" (the initial value) when the project declares no repo —
-                # `str(None)` would be the relative path "None". "" is then
-                # handled by whatever skillflow release is installed: 1.5.52+
-                # consults its code_path_resolver and omits the argument, older
-                # releases forward "" into `project_root`/`workspace_root` where
-                # `Path("").resolve()` is the process CWD. The tools this proxy
-                # can reach refuse a non-absolute root themselves; see
-                # `core/dpe_pipeline.py:_exec_tool` for the same reasoning.
-                # …of THIS run: a runner step writes through this proxy, so
-                # resolving by project would put it in the shared checkout while
-                # its own run works in a worktree.
-                project_root = str(self.ws.get_code_path(pid, run_id=run_id) or "")
-        except Exception:
-            pass
-        return self._runner_service().execute_step_tool(
-            run_id, step_id, name, args.get("params") or {},
-            project_root=project_root)
 
     async def _tool_web_search(self, args: dict) -> dict:
         """Web search via core.web_tools (SearXNG). Sync httpx under the hood —
@@ -6024,8 +5737,9 @@ _TOOL_HANDLERS = {
     "list_pipeline_suggestions": MetaAgent._tool_list_pipeline_suggestions,
 }
 
-# Coding-mode-only tools — schema-visible and dispatchable only when the
-# session mode is "coding" (see _stream_llm / _execute_tool).
+# Coding-mode-only tools — never dispatchable in butler mode (see
+# _execute_tool). Coding Mode itself dispatches ONLY through the fixed palette
+# below; this map exists so butler mode can refuse these names explicitly.
 _CODING_TOOL_HANDLERS = {
     "skillflow_docs_list": MetaAgent._tool_skillflow_docs_list,
     "skillflow_docs_search": MetaAgent._tool_skillflow_docs_search,
@@ -6039,20 +5753,127 @@ _CODING_TOOL_HANDLERS = {
     "resolve_pipeline_suggestion": MetaAgent._tool_resolve_pipeline_suggestion,
     # Mutates a live run's execution target — coding mode, beside config_edit.
     "repin_run": MetaAgent._tool_repin_run,
-    "edit_file": MetaAgent._tool_edit_file,
-    "create_file": MetaAgent._tool_create_file,
-    "bash": MetaAgent._tool_bash,
-    "runner_start": MetaAgent._tool_runner_start,
-    "runner_submit": MetaAgent._tool_runner_submit,
-    "runner_approve": MetaAgent._tool_runner_approve,
-    "runner_reject": MetaAgent._tool_runner_reject,
-    "skillflow_tool": MetaAgent._tool_skillflow_tool,
+    "edit_file": MetaAgent._coding_edit_file,
+    "create_file": MetaAgent._coding_create_file,
+    "bash": MetaAgent._coding_bash,
+    "runner_start": MetaAgent._coding_runner_start,
+    "runner_submit": MetaAgent._coding_runner_submit,
+    "skillflow_tool": MetaAgent._coding_skillflow_tool,
+    "plan_status": MetaAgent._coding_plan_status,
     "web_search": MetaAgent._tool_web_search,
     "web_fetch": MetaAgent._tool_web_fetch,
     "config_edit": MetaAgent._tool_config_edit,
     "archive_pipeline": MetaAgent._tool_archive_pipeline,
 }
+
+# The Coding Mode repository-model palette: fixed before sampling (advertised
+# schemas) AND enforced at dispatch. Owned working-tree file/search/shell
+# tools, the constrained current-plan controls and read-only inspection. It
+# deliberately excludes backend bash, every approval/rejection/stop route,
+# config execution and editing, pipeline generation/driving (repository Python
+# on the backend), tool/capability creation, runner starts of arbitrary graphs,
+# provider/control mutation and State/Meta writes. Platform authoring is a
+# separately authorized controller scope, never a model-selected mode.
+_CODING_PALETTE_HANDLERS = {
+    "list_projects": MetaAgent._tool_list_projects,
+    "get_project": MetaAgent._tool_get_project,
+    "list_code_tree": MetaAgent._coding_list_code_tree,
+    "read_code_file": MetaAgent._coding_read_code_file,
+    "search_code": MetaAgent._coding_search_code,
+    "edit_file": MetaAgent._coding_edit_file,
+    "create_file": MetaAgent._coding_create_file,
+    "bash": MetaAgent._coding_bash,
+    "runner_start": MetaAgent._coding_runner_start,
+    "runner_submit": MetaAgent._coding_runner_submit,
+    "skillflow_tool": MetaAgent._coding_skillflow_tool,
+    "plan_status": MetaAgent._coding_plan_status,
+    "skillflow_docs_list": MetaAgent._tool_skillflow_docs_list,
+    "skillflow_docs_search": MetaAgent._tool_skillflow_docs_search,
+    "skillflow_docs_read": MetaAgent._tool_skillflow_docs_read,
+    "web_search": MetaAgent._tool_web_search,
+    "web_fetch": MetaAgent._tool_web_fetch,
+}
+CODING_PALETTE = frozenset(_CODING_PALETTE_HANDLERS)
 _TOOL_HANDLERS.update(_CODING_TOOL_HANDLERS)
+
+
+def _fn(name: str, description: str, properties: dict, required: list) -> dict:
+    return {"type": "function", "function": {
+        "name": name, "description": description,
+        "parameters": {"type": "object", "properties": properties, "required": required}}}
+
+
+_CODING_PALETTE_OVERRIDES = {
+    "bash": _fn(
+        "bash",
+        "Run a shell command in THIS session's working tree (cwd = its root) inside "
+        "the owned, offline, resource-bounded executor container. Use it for tests, "
+        "builds, ls/grep and read-only git (status/diff/log/show). Repository Git "
+        "metadata is read-only there; Source changes are delivered by the host after "
+        "your final answer, never by git in the shell. Output is bounded; the command "
+        "is killed at 'timeout' seconds. Unavailable while a governing plan awaits "
+        "the user's decision.",
+        {"command": {"type": "string"},
+         "timeout": {"type": "integer",
+                     "description": "Seconds before the command is killed (default 120, max 600)"}},
+        ["command"]),
+    "runner_start": _fn(
+        "runner_start",
+        "Start the plan-gated coding_task for THIS working tree. The plan becomes the "
+        "governing plan: file mutations, shell and the Source handoff stay blocked "
+        "until the USER approves exactly that plan in the Coding Mode UI. You cannot "
+        "approve, reject or stop it.",
+        {"task": {"type": "string",
+                  "description": "The task, verbatim from the user plus context you gathered"}},
+        ["task"]),
+    "runner_submit": _fn(
+        "runner_submit",
+        "Submit the governing plan run's current step. Plan step: result={\"plan\": "
+        "<the exact plan text the user will approve>}. Implement step (after the user "
+        "approved): result={\"summary\": <what changed and the test results>}. "
+        "status='paused' = tell the user the plan awaits their decision and stop.",
+        {"step_id": {"type": "string", "description": "plan or implement"},
+         "result": {"type": "object", "description": "One key per output slot"}},
+        ["step_id"]),
+    "skillflow_tool": _fn(
+        "skillflow_tool",
+        "Read-only skillflow tools named in the governing plan step's instruction "
+        "(read_*/list_*/search_*). Outputs are submitted with runner_submit, never "
+        "written here.",
+        {"step_id": {"type": "string"}, "name": {"type": "string"},
+         "params": {"type": "object"}},
+        ["step_id", "name"]),
+    "plan_status": _fn(
+        "plan_status",
+        "Show this working tree's governing plan state (none, pending, approved, "
+        "completed, unknown, stopped). Only the user decides a plan.",
+        {}, []),
+}
+_W_TOOLS = ("list_code_tree", "read_code_file", "search_code", "edit_file", "create_file")
+
+
+def _palette_definitions() -> list[dict]:
+    import copy
+    by_name = {d["function"]["name"]: d for d in TOOL_DEFINITIONS + CODING_TOOL_DEFINITIONS}
+    out = []
+    for name in _CODING_PALETTE_HANDLERS:
+        if name in _CODING_PALETTE_OVERRIDES:
+            out.append(_CODING_PALETTE_OVERRIDES[name])
+            continue
+        d = copy.deepcopy(by_name[name])
+        if name in _W_TOOLS:
+            params = d["function"].setdefault("parameters", {})
+            params.get("properties", {}).pop("project_id", None)
+            params["required"] = [r for r in params.get("required", []) if r != "project_id"]
+            d["function"]["description"] = (
+                d["function"].get("description", "") +
+                " Works on THIS session's working tree (not Source).")
+        out.append(d)
+    return out
+
+
+CODING_PALETTE_DEFINITIONS = _palette_definitions()
+assert {d["function"]["name"] for d in CODING_PALETTE_DEFINITIONS} == set(CODING_PALETTE)
 
 
 # State goals are persistent project data, not DPE task-step state. The same

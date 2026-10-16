@@ -48,7 +48,7 @@ def wire(stdout, stderr="", **extra):
 
 
 @pytest.mark.parametrize("stdout,stderr", [(b"x" * 160000, b""), (b"", b"x" * 160000),
-                                          (b"x" * 50000, b"y" * 50000)])
+                                          (b"x" * 50000, b"y" * 50000)], ids=["stdout", "stderr", "combined"])
 def test_oversized_wire_is_refused_before_unbounded_retention_and_settles(collect, stdout, stderr):
     run, state = collect
     with pytest.raises(host.LaunchRefused, match="wire output limit"):
@@ -58,7 +58,7 @@ def test_oversized_wire_is_refused_before_unbounded_retention_and_settles(collec
 
 
 @pytest.mark.parametrize("stdout,stderr", [("a" * 12001, ""), ("a" * 6000, "b" * 6001),
-                                          ("€" * 4001, "")])
+                                          ("€" * 4001, "")], ids=["ascii", "combined", "utf8"])
 def test_decoded_combined_utf8_limit_refuses_under_wire_limit(collect, stdout, stderr):
     run, state = collect
     data = wire(stdout, stderr)
@@ -69,7 +69,7 @@ def test_decoded_combined_utf8_limit_refuses_under_wire_limit(collect, stdout, s
 
 
 @pytest.mark.parametrize("stdout,stderr", [("a" * 6000, "b" * 6000), ("\x01" * 12000, ""),
-                                          ("€" * 4000, ""), ("😀" * 3000, "")])
+                                          ("€" * 4000, ""), ("😀" * 3000, "")], ids=["combined", "escaped", "utf8", "astral"])
 def test_exact_byte_boundary_and_json_expansion_preserve_bare_status(collect, stdout, stderr):
     run, state = collect
     expected = json.loads(wire(stdout, stderr))

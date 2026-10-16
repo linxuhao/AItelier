@@ -19,8 +19,8 @@ from typing import Any
 
 from skillflow import SkillFlow
 from skillflow.exceptions import (GraphValidationError, IsolationUnavailable,
-                                  StaleClaimFenced, TerminalRunFenced,
-                                  ToolArgumentsUnavailable)
+                                  SkillFlowError, StaleClaimFenced,
+                                  TerminalRunFenced, ToolArgumentsUnavailable)
 from skillflow.identity import owner_is_dead, worker_identity
 
 from core.tool_routes import EXECUTOR_TOOLS, graph_identity_violations, spoofed_slot_keys
@@ -85,6 +85,20 @@ class AItelierSkillFlow(SkillFlow):
         if problems:
             raise GraphValidationError(problems)
         return super().register_graph(graph)
+
+    def create_run(self, graph_name: str, *args, **kwargs) -> str:
+        """Refuse a new run of a target whose bundle adoption is unreconciled.
+
+        Every driver (launcher, scheduler, meta agent) creates runs here, under
+        the same lock adopt_bundle/reconcile_adoption hold, so a pending or
+        unreadable adoption descriptor blocks that target at this one ingress.
+        """
+        from core.pipeline_frozen_bundle import launch_block
+        with self._lock:
+            blocked = launch_block(graph_name)
+            if blocked:
+                raise SkillFlowError(blocked)
+            return super().create_run(graph_name, *args, **kwargs)
 
     def _execute_tool_inline(self, tool_node, *, run_id: str = "",
                              graph_name: str = "") -> dict:

@@ -152,12 +152,16 @@ def validate_host_grant(cfg, request, repo, project_id):
             or "workdir" in request or "npm_cache" in request):
         raise LaunchRefused("coding shell accepts no caller mounts, relay, environment or workdir")
     try:
-        runs = _read_rows(engine, "SELECT * FROM skillflow_runs WHERE id=?", (request["run_id"],))
+        runs = _read_rows(engine, "SELECT id,status,project_id,current_node,graph_name,graph_version,graph_digest,cancel_requested_at "
+                          "FROM skillflow_runs WHERE id=?", (request["run_id"],))
         history = _read_rows(engine, "SELECT digest FROM skillflow_graph_versions WHERE name=? AND version=?",
                              (grant["graph_name"], grant["graph_version"]))
-        steps = _read_rows(engine, "SELECT * FROM skillflow_steps WHERE id=?", (grant["step_instance_id"],))
-        owned = _read_rows(cfg["state_db"], "SELECT * FROM run_isolation WHERE run_id=?", (request["run_id"],))
-        admissions = _read_rows(cfg["state_db"], "SELECT * FROM checkout_write_admissions WHERE canonical_checkout=?", (str(repo),))
+        steps = _read_rows(engine, "SELECT id,status,run_id,step_id,version,claim_epoch,claimed_by "
+                           "FROM skillflow_steps WHERE id=?", (grant["step_instance_id"],))
+        owned = _read_rows(cfg["state_db"], "SELECT mode,released_at,project_id,worktree_path,source_repo,base_sha "
+                           "FROM run_isolation WHERE run_id=?", (request["run_id"],))
+        admissions = _read_rows(cfg["state_db"], "SELECT id,owner,kind,detail FROM checkout_write_admissions "
+                                "WHERE canonical_checkout=?", (str(repo),))
         if (len(runs) != 1 or len(history) != 1 or history[0]["digest"] != grant["graph_digest"]
                 or len(steps) != 1 or len(owned) != 1 or len(admissions) != 1):
             raise ValueError("ambiguous/missing current run, historical pin, claim, ownership or admission")
@@ -171,13 +175,13 @@ def validate_host_grant(cfg, request, repo, project_id):
                 or step["id"] != grant["step_instance_id"] or step["step_id"] != grant["step_id"]
                 or any(step[k] != grant[k] for k in ("version", "claim_epoch", "claimed_by"))
                 or not step["claim_epoch"] or not step["claimed_by"]
-                or isolation["mode"] != "worktree" or isolation["released_at"]
+                or isolation["mode"] != "worktree" or isolation["released_at"] or isolation["project_id"] != project_id
                 or isolation["worktree_path"] != str(repo) or grant["repo"] != str(repo)
                 or grant["run_id"] != request["run_id"] or grant["project_id"] != project_id
                 or isolation["source_repo"] != grant["source_repo"] or isolation["base_sha"] != grant["base_sha"]):
             raise ValueError("stale or foreign coding shell scope")
         source = Path(isolation["source_repo"]).resolve(strict=True)
-        if repo == source or repo in source.parents or source in repo.parents:
+        if str(source) != isolation["source_repo"] or repo == source or repo in source.parents or source in repo.parents:
             raise ValueError("owned worktree overlaps Source")
         detail = {k: v for k, v in grant.items() if k not in {"admission_id", "admission_owner"}}
         if (adm["id"] != grant["admission_id"] or adm["owner"] != grant["admission_owner"]

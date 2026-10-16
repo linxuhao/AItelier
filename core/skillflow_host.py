@@ -18,8 +18,9 @@ import logging
 from typing import Any
 
 from skillflow import SkillFlow
-from skillflow.exceptions import (GraphValidationError, StaleClaimFenced,
-                                  TerminalRunFenced, ToolArgumentsUnavailable)
+from skillflow.exceptions import (GraphValidationError, IsolationUnavailable,
+                                  StaleClaimFenced, TerminalRunFenced,
+                                  ToolArgumentsUnavailable)
 from skillflow.identity import owner_is_dead, worker_identity
 
 from core.tool_routes import EXECUTOR_TOOLS, graph_identity_violations, spoofed_slot_keys
@@ -602,6 +603,66 @@ class AItelierSkillFlow(SkillFlow):
         # local engine, decides whether this ledger declared a record-less run.
         # Exact review context still requires its record even for another engine.
         run_isolation.resolve_for_resolver(db, run_id, sf=self)
+
+    def _declare_unowned_run(self, run_id: str) -> None:
+        """Give a run of this deployment its isolation record before it starts.
+
+        Every host path that creates a run declares one itself, and does so
+        before ``start_run``. The runner path cannot: ``SkillTool`` (skillflow
+        1.5.90, behind ``RunnerService.start``) is ``create_run`` -> ``start_run``
+        -> ``advance_run`` -> claim -> resolve the step's context and tools in
+        ONE call, so there is no host turn between creation and the first
+        resolution. ``start_run`` is the last point in that sequence the engine
+        hands back to the host, and nothing can claim, advance or resolve a
+        pending run before it. A run that already holds a record (every other
+        path) is left exactly as it is.
+
+        Scope is the resolver's own, as in ``_admit_source_identity``: only a
+        run THIS deployment's engine owns. A harness driving a SkillFlow of its
+        own keeps its project-keyed answer.
+
+        A declaration that cannot be made fails the run it was made for. A
+        pending run counts as live to ``RunnerService`` (one live run per graph
+        and project), so leaving it would answer the next attempt with "already
+        live" for a run that can never be driven — and would never fall back to
+        the shared checkout it was refused.
+        """
+        if getattr(self, "_workspace", None) is None:
+            return
+        from api.dependencies import get_db_manager, get_skillflow
+        if get_skillflow() is not self:
+            return
+        from core import run_isolation
+        db = get_db_manager()
+        if run_isolation.record(db, run_id) is not None:
+            return
+        run = self.get_run(run_id)
+        if not run or not run.get("project_id"):
+            return
+        project_id, config_name = run["project_id"], run["graph_name"]
+        try:
+            from core.meta_agent import _declare_isolation
+            _declare_isolation(db, run_id, project_id, config_name)
+        except Exception as exc:
+            reason = (f"could not isolate run {run_id}: "
+                      f"{type(exc).__name__}: {exc}")
+            try:
+                from core.scheduler import _fail_unstarted_isolation_run
+                settled = _fail_unstarted_isolation_run(
+                    self, run_id, project_id, config_name,
+                    f"Isolation failed before start: {type(exc).__name__}: {exc}")
+            except Exception:
+                settled = False
+                logging.getLogger("aitelier.skillflow_host").warning(
+                    "could not settle isolation failure for run %s", run_id,
+                    exc_info=True)
+            if not settled:
+                reason += " (the run could not be settled and is left pending)"
+            raise IsolationUnavailable(reason) from exc
+
+    def start_run(self, run_id: str) -> None:
+        self._declare_unowned_run(run_id)
+        super().start_run(run_id)
 
     def _operation_blocks_reentry(self, run_id: str, trigger: str) -> bool:
         if not self.unsettled_operations(run_id):

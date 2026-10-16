@@ -55,7 +55,6 @@ from __future__ import annotations
 
 import os
 import re
-import stat
 import subprocess
 
 from contextlib import contextmanager
@@ -134,9 +133,13 @@ def _is_worktree_of(path: Path, source_repo: str) -> bool:
     pointing into the source repository's admin directory, and both sides must
     agree on the same common dir. A plain directory left at the recorded path
     answers False, which is the point — the recorded path existing is not
-    evidence that the run's tree does.
+    evidence that the run's tree does. Neither the recorded path nor its
+    `.git` may be a link: `git worktree add` creates neither as one, and a
+    link would let the tree or its identity be served from elsewhere.
     """
-    if not path.is_dir() or not (path / ".git").is_file():
+    gitfile = path / ".git"
+    if (path.is_symlink() or not path.is_dir()
+            or gitfile.is_symlink() or not gitfile.is_file()):
         return False
     a = _git(path, "rev-parse", "--path-format=absolute", "--git-common-dir")
     b = _git(source_repo, "rev-parse", "--path-format=absolute", "--git-common-dir")
@@ -806,9 +809,13 @@ def verify_served_tree(worktree_path, commit_sha: str, *, _report=None) -> dict:
     * the trusted side is the commit's TREE — `git ls-tree -r -z <commit>`,
       pure object-database reads, no index involved;
     * the served side is the disk — lstat type, pinned file bytes and modes, never the
-      index's opinion of them;
+      index's opinion of them — reached by descriptors from the snapshot root
+      without following a link at the root, at any parent directory or at the
+      entry itself, so identical bytes behind a substituted parent are not
+      the snapshot's bytes;
     * a tracked path whose bytes do not hash to its tree blob, whose
-      executable/symlink mode differs, or that is missing, refuses the review.
+      executable/symlink mode differs, that is missing, or that lies beyond a
+      link or non-directory parent, refuses the review.
 
     READONLY means readonly: nothing here runs `git update-index`,
     `git read-tree`, `git reset`, any `--refresh`, and nothing clears a
@@ -818,62 +825,52 @@ def verify_served_tree(worktree_path, commit_sha: str, *, _report=None) -> dict:
     if not isinstance(commit_sha, str) or not _SHA1.match(commit_sha):
         raise IsolationUnavailable("a served tree can only be verified against a 40-hex commit")
     root = Path(worktree_path)
-    if not root.is_dir():
-        raise IsolationUnavailable(f"review snapshot {root} does not exist to verify")
-    listing = _git(root, "ls-tree", "-r", "-z", commit_sha)
-    if listing.returncode != 0:
+    try:
+        tree = closed_git.WorkTree(root, follow_root=False)
+    except OSError as e:
         raise IsolationUnavailable(
-            f"cannot read tree {commit_sha} to verify the review snapshot: "
-            f"{(listing.stderr or listing.stdout).strip()[:300]}")
+            f"review snapshot {root} is not a directory to verify "
+            f"({e.strerror or e})") from e
     problems: list[str] = []
     checked = 0
-    for entry in listing.stdout.split("\0"):
-        if not entry:
-            continue
-        meta, _, path = entry.partition("\t")
-        mode, otype, blob_sha = meta.split(" ")
-        if otype != "blob":
-            continue  # a gitlink (submodule) has no served bytes to compare
-        checked += 1
-        target = root / path
-        try:
-            before = target.lstat()
-            if mode == "120000":
-                if not stat.S_ISLNK(before.st_mode):
-                    problems.append(f"{path}: tree says symlink, disk says otherwise")
-                    continue
-                served = os.readlink(target).encode()
-                after = target.lstat()
-                if (before.st_dev, before.st_ino, before.st_ctime_ns) != (
-                        after.st_dev, after.st_ino, after.st_ctime_ns):
-                    raise OSError("symlink changed while verifying its link text")
-                served_mode = "120000"
-            else:
-                if not stat.S_ISREG(before.st_mode):
-                    problems.append(f"{path}: tree says regular file, disk type differs")
-                    continue
-                fd = os.open(target, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-                with os.fdopen(fd, "rb") as stream:
-                    opened = os.fstat(stream.fileno())
-                    if (not stat.S_ISREG(opened.st_mode)
-                            or (before.st_dev, before.st_ino) != (
-                                opened.st_dev, opened.st_ino)):
-                        raise OSError("tracked object changed before verification")
-                    served = stream.read()
-                    after = os.fstat(stream.fileno())
-                    if (opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns) != (
-                            after.st_size, after.st_mtime_ns, after.st_ctime_ns):
-                        raise OSError("tracked bytes changed during verification")
-                served_mode = "100755" if opened.st_mode & 0o111 else "100644"
-        except OSError as e:
-            problems.append(f"{path}: tracked file unreadable ({e.strerror or e})")
-            continue
-        if served_mode != mode:
-            problems.append(f"{path}: tree mode {mode}, served mode {served_mode}")
-        if _blob_sha1(served) != blob_sha:
-            problems.append(f"{path}: served bytes do not hash to tree blob {blob_sha[:12]}")
-        if len(problems) >= 20:
-            break
+    with tree:
+        listing = _git(root, "ls-tree", "-r", "-z", commit_sha)
+        if listing.returncode != 0:
+            raise IsolationUnavailable(
+                f"cannot read tree {commit_sha} to verify the review snapshot: "
+                f"{(listing.stderr or listing.stdout).strip()[:300]}")
+        for entry in listing.stdout.split("\0"):
+            if not entry:
+                continue
+            meta, _, path = entry.partition("\t")
+            mode, otype, blob_sha = meta.split(" ")
+            if otype != "blob":
+                continue  # a gitlink (submodule) has no served bytes to compare
+            checked += 1
+            try:
+                served = tree.read(path, keep=True)
+            except closed_git.GitRefused as e:
+                problems.append(f"{path}: not a confined tracked path ({e})")
+                continue
+            except OSError as e:
+                problems.append(f"{path}: tracked file unreadable ({e.strerror or e})")
+                continue
+            if served.kind == "absent":
+                problems.append(f"{path}: missing, or beyond a link or non-directory parent")
+                continue
+            if mode == "120000" and served.kind != "link":
+                problems.append(f"{path}: tree says symlink, disk says otherwise")
+                continue
+            if mode != "120000" and served.kind != "file":
+                problems.append(f"{path}: tree says regular file, disk type differs")
+                continue
+            served_mode = f"{served.mode:o}"
+            if served_mode != mode:
+                problems.append(f"{path}: tree mode {mode}, served mode {served_mode}")
+            if _blob_sha1(served.data) != blob_sha:
+                problems.append(f"{path}: served bytes do not hash to tree blob {blob_sha[:12]}")
+            if len(problems) >= 20:
+                break
     if _report is not None:
         _report({"commit_sha": commit_sha, "tracked_entries": checked,
                  "problems": problems})
@@ -1431,6 +1428,40 @@ def _remove_run_worktree(rec: dict) -> tuple[bool, str]:
     return closed_git.native_remove(rec["source_repo"], path)
 
 
+def _index_storage_present(worktree, names) -> bool:
+    """Is the tree's `.zvec-grep` storage, or any of *names* inside it, present?
+
+    Observed through descriptors without following a link: a link or
+    non-directory where the storage directory belongs counts as present, and
+    so does a tree that cannot be opened, so an unknown answer never reads as
+    absent. With no *names*, the storage directory itself is asked about.
+    """
+    nofollow_dir = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    try:
+        root = os.open(worktree, nofollow_dir)
+    except OSError:
+        return True
+    try:
+        try:
+            cache = os.open(".zvec-grep", nofollow_dir, dir_fd=root)
+        except FileNotFoundError:
+            return False
+        except OSError:
+            return True
+        try:
+            for name in names:
+                try:
+                    os.lstat(name, dir_fd=cache)
+                    return True
+                except FileNotFoundError:
+                    continue
+            return not names
+        finally:
+            os.close(cache)
+    finally:
+        os.close(root)
+
+
 def _reap_intent(disposition: str) -> tuple[bool, str | None] | None:
     """Decode the durable decision written immediately before Git removal."""
     if disposition == "reaping_discarded":
@@ -1552,10 +1583,10 @@ def reap_released_worktrees(db, sf, *, min_idle_seconds: float | None = None,
                 ledger = ctl.get(rid) if ctl else None
                 if ctl and not ctl.settled(ledger, "released"):
                     raise ValueError("semantic release is not positively acknowledged")
-                if not ctl and (Path(rec["worktree_path"])/".zvec-grep").exists():
+                if not ctl and _index_storage_present(rec["worktree_path"], ()):
                     raise ValueError("index exists but its lifecycle is disabled; release unknown")
-                if ctl and any((Path(rec["worktree_path"])/".zvec-grep"/name).exists()
-                               for name in ("manifest.json", "files.zvec", "index.zvec")):
+                if ctl and _index_storage_present(
+                        rec["worktree_path"], ("manifest.json", "files.zvec", "index.zvec")):
                     raise ValueError("index storage reappeared after release")
                 ok, why = resources.idle_eligible(rec, row, ledger, now=now, minimum=min_idle_seconds)
                 if not ok:

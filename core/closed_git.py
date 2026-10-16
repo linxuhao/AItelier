@@ -480,8 +480,10 @@ def transform_profile(repo: Repo, cfg, attribute_texts) -> TransformProfile:
             texts.append(data)
     for key, value in cfg:
         if key == "core.attributesfile" and value:
-            data = _read_regular(Path(os.path.expanduser(value)) if value.startswith("~") else
-                                 (repo.top / value if not os.path.isabs(value) else Path(value)))
+            if value.startswith("~") or os.path.isabs(value):
+                data = _read_regular(Path(os.path.expanduser(value)))
+            else:
+                data = _worktree_attributes(repo.top, value)
             if data is not None:
                 texts.append(data)
     kinds = attribute_transforms(texts)
@@ -490,6 +492,33 @@ def transform_profile(repo: Repo, cfg, attribute_texts) -> TransformProfile:
         active_filters=kinds["filters"] & _filter_drivers(cfg),
         eol=kinds["eol"] or autocrlf in ("true", "input", "1", "yes", "on"),
         ident=kinds["ident"], encoding=kinds["encoding"])
+
+
+def _worktree_attributes(top, value: str, limit: int = 1 << 20) -> bytes | None:
+    """A relative ``core.attributesFile`` read as working data through no-follow parents.
+
+    Git would follow a link at any component; reading less than Git does would
+    silently miss a filter selection, so a link or non-directory parent, a link
+    file or a path leaving the tree refuses instead of being read or skipped.
+    """
+    rel = posixpath.normpath(value)
+    try:
+        parts = _parts(rel)
+    except GitRefused:
+        raise GitRefused(f"core.attributesFile {value!r} is not a confined working-tree "
+                         f"path; refusing to read it") from None
+    with WorkTree(top) as wt:
+        for depth in range(1, len(parts)):
+            st = wt.lstat("/".join(parts[:depth]))
+            if st is None:
+                return None
+            if not stat.S_ISDIR(st.st_mode):
+                raise GitRefused(f"core.attributesFile {value!r} lies beyond a link or file at "
+                                 f"{'/'.join(parts[:depth])!r}; refusing to read it")
+        got = wt.read(rel, keep=True)
+    if got.kind == "link":
+        raise GitRefused(f"core.attributesFile {value!r} is a link; refusing to read it")
+    return got.data[:limit] if got.kind == "file" else None
 
 
 def _read_regular(path: Path, limit: int = 1 << 20) -> bytes | None:
@@ -863,11 +892,16 @@ class WorkFile:
 
 
 class WorkTree:
-    """A working tree opened once; every path resolves under it without following links."""
+    """A working tree opened once; every path resolves under it without following links.
 
-    def __init__(self, root):
+    ``follow_root=False`` also refuses a root that is itself a link, for a
+    managed tree whose recorded path must be the directory it names.
+    """
+
+    def __init__(self, root, *, follow_root: bool = True):
         self.root = Path(root)
-        self.fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        self.fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+                          | (0 if follow_root else os.O_NOFOLLOW))
 
     def close(self):
         if self.fd is not None:
@@ -1583,7 +1617,7 @@ def native_remove_hazards(source, worktree) -> list[str]:
     idx = read_index(admin)
     if any(e.mode == S_IFGITLINK for e in idx.entries):
         reasons.append("the worktree index has submodule gitlinks")
-    with WorkTree(worktree) as wt:
+    with WorkTree(worktree, follow_root=False) as wt:
         if wt.lstat(".gitmodules") is not None:
             reasons.append(".gitmodules is present")
     return sorted(set(reasons))
@@ -1678,7 +1712,7 @@ def seed_working_state(source, dest, base_sha: str) -> dict:
                 if got.kind == "other":
                     raise GitRefused(f"{rel}: unsupported file type; not seeded")
                 captured[rel] = got
-        with WorkTree(dest) as dst:
+        with WorkTree(dest, follow_root=False) as dst:
             for rel, got in captured.items():
                 if got.kind in ("absent", "dir"):
                     dst.remove(rel)

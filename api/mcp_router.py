@@ -917,7 +917,7 @@ def _register_edit_tools(tool):
     def edit_pipeline(config: ConfigName, graph_yaml: str) -> dict:
         import yaml as _yaml
         from api.dependencies import get_config_registry, get_skillflow
-        from core import pipeline_registry as pr
+        from core import pipeline_frozen_bundle as fb, pipeline_registry as pr
         bad = bad_config_name(config)
         if bad:
             return {"error": bad}
@@ -935,54 +935,64 @@ def _register_edit_tools(tool):
         except Exception as e:
             return {"error": f"rejected, nothing written: {e}"}
 
-        prior = path.read_text(encoding="utf-8")
-        path.write_text(_yaml.safe_dump(data, sort_keys=False, allow_unicode=True),
-                        encoding="utf-8")
-        try:
-            result = pr.reload_generated_pipeline(
-                get_skillflow(), get_config_registry(), config)
-        except Exception as e:
-            path.write_text(prior, encoding="utf-8")   # put it back
-            return {"error": f"reload failed, reverted: {e}"}
-        if isinstance(result, dict) and result.get("error"):
-            path.write_text(prior, encoding="utf-8")
-            return {"error": f"reload failed, reverted: {result['error']}"}
+        sf = get_skillflow()
+        with fb.exclusion(sf):
+            refusal = fb.edit_block(pr.generated_configs_dir(), config)
+            if refusal:
+                return {"error": f"refused, nothing written: {refusal}"}
+            prior = path.read_text(encoding="utf-8")
+            path.write_text(_yaml.safe_dump(data, sort_keys=False, allow_unicode=True),
+                            encoding="utf-8")
+            try:
+                result = pr.reload_generated_pipeline(sf, get_config_registry(), config)
+            except Exception as e:
+                path.write_text(prior, encoding="utf-8")   # put it back
+                return {"error": f"reload failed, reverted: {e}"}
+            if isinstance(result, dict) and result.get("error"):
+                path.write_text(prior, encoding="utf-8")
+                return {"error": f"reload failed, reverted: {result['error']}"}
         return {"config": config, "reloaded": True, "path": str(path)}
 
     def _write_roles(config: str, roles: dict) -> dict:
         import json as _json
         from api.dependencies import get_config_registry, get_skillflow
-        from core import pipeline_registry as pr
+        from core import pipeline_frozen_bundle as fb, pipeline_registry as pr
         bad = bad_config_name(config)
         if bad:
             return {"error": bad}
         rj = pr.generated_configs_dir() / f"{config}.roles.json"
-        prior = rj.read_text(encoding="utf-8") if rj.exists() else None
-        rj.write_text(_json.dumps(roles, ensure_ascii=False, indent=2),
-                      encoding="utf-8")
-        def _revert():
-            if prior is None:
-                rj.unlink(missing_ok=True)
-            else:
-                rj.write_text(prior, encoding="utf-8")
+        sf = get_skillflow()
+        # Checked and written under the exclusion adoption holds, so a recorded
+        # bundle's retained roles are never rewritten, not merely un-admitted.
+        with fb.exclusion(sf):
+            refusal = fb.edit_block(pr.generated_configs_dir(), config)
+            if refusal:
+                return {"error": f"refused, nothing written: {refusal}"}
+            prior = rj.read_text(encoding="utf-8") if rj.exists() else None
+            rj.write_text(_json.dumps(roles, ensure_ascii=False, indent=2),
+                          encoding="utf-8")
+            def _revert():
+                if prior is None:
+                    rj.unlink(missing_ok=True)
+                else:
+                    rj.write_text(prior, encoding="utf-8")
 
-        # `reload_generated_pipeline` NEVER raises — its whole body is wrapped and it
-        # RETURNS {"error": ...}. Catching only an exception meant the revert was
-        # dead code and edit_role/edit_template reported success on a failed reload:
-        # roles.json held the new prompt, the live registry held the old one, and
-        # nothing said so. Worse for a built-in config, where reload always fails
-        # ("no persisted config"): the stray roles.json then SHADOWS the built-in
-        # agent_configs yaml in every later _load_roles read, so the edit looked
-        # applied forever while every run used the untouched original.
-        try:
-            result = pr.reload_generated_pipeline(
-                get_skillflow(), get_config_registry(), config)
-        except Exception as e:
-            _revert()
-            return {"error": f"reload failed, reverted: {e}"}
-        if isinstance(result, dict) and result.get("error"):
-            _revert()
-            return {"error": f"reload failed, reverted: {result['error']}"}
+            # `reload_generated_pipeline` NEVER raises — its whole body is wrapped and it
+            # RETURNS {"error": ...}. Catching only an exception meant the revert was
+            # dead code and edit_role/edit_template reported success on a failed reload:
+            # roles.json held the new prompt, the live registry held the old one, and
+            # nothing said so. Worse for a built-in config, where reload always fails
+            # ("no persisted config"): the stray roles.json then SHADOWS the built-in
+            # agent_configs yaml in every later _load_roles read, so the edit looked
+            # applied forever while every run used the untouched original.
+            try:
+                result = pr.reload_generated_pipeline(sf, get_config_registry(), config)
+            except Exception as e:
+                _revert()
+                return {"error": f"reload failed, reverted: {e}"}
+            if isinstance(result, dict) and result.get("error"):
+                _revert()
+                return {"error": f"reload failed, reverted: {result['error']}"}
         return {}
 
     @tool("edit_role", "write",

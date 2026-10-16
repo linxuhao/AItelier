@@ -238,6 +238,53 @@ def test_forged_grant_absent_facility_and_stale_real_epoch_refuse(runtime, monke
     assert not (work / "stale.txt").exists()
 
 
+@pytest.mark.parametrize("quiet", [False, True])
+def test_new_caller_keeps_simulated_unanswered_create_but_retires_definite_refusal(runtime, monkeypatch, quiet):
+    """Synthetic primitive outcome; actual grant, launcher handler and socket path.
+
+    This is NOT an actual delayed-daemon experiment or runtime lateCREATE proof.
+    """
+    from core import repository_host_launcher as host
+    root, db, sf, make = runtime
+    grant, work, _ = make()
+    cfg = json.loads((root / "config.json").read_text())
+    path = root / ("known-refusal.sock" if quiet else "unknown-create.sock")
+    listener = socket.socket(socket.AF_UNIX)
+    listener.bind(str(path)); path.chmod(0o600); listener.listen(1)
+    called = []
+    def primitive(*args, **kwargs):
+        called.append(True)
+        if quiet:
+            raise ex.IsolationUnavailable("simulated definitive daemon refusal before START")
+        raise ex.CleanupUnconfirmed("simulated unanswered CREATE: early rm-notfound does not confirm absence", "owned-simulated-name")
+    def serve_one():
+        conn, _ = listener.accept()
+        host._serve_connection(conn, cfg, threading.Semaphore(1))
+    with monkeypatch.context() as patch:
+        patch.setattr(ex, "private_git", primitive)
+        patch.setenv(ex.HOST_LAUNCHER_ENV, str(path))
+        worker = threading.Thread(target=serve_one); worker.start()
+        try:
+            with pytest.raises(ex.IsolationUnavailable) as error:
+                shell.execute_coding_shell(grant, "printf forbidden > simulated.txt", 5)
+        finally:
+            worker.join(10); listener.close(); path.unlink()
+    assert called == [True] and not worker.is_alive() and not (work / "simulated.txt").exists()
+    assert getattr(error.value, "physical_quiet", False) is quiet
+    rows = ri.write_admissions(db, str(work))
+    dirs = list((root / "h/cpu-git").iterdir())
+    assert len(rows) == (0 if quiet else 1)
+    assert len(dirs) == (0 if quiet else 1)
+    (root / ("simulated-definite-refusal.json" if quiet else "simulated-unanswered-create.json")).write_text(
+        json.dumps({"simulated_primitive_only": True, "error": str(error.value), "physical_quiet": quiet,
+                    "admissions": rows, "retained_private_git": [str(p) for p in dirs]}, indent=2))
+    if not quiet:
+        assert "PENDING WRITERS" in rows[0]["detail"] and work.exists()
+        # The injected primitive never dispatched any Docker operation.
+        ri.retire_write(db, rows[0]["id"])
+        dirs[0].rmdir()
+
+
 def test_actual_host_refuses_changed_scope_or_extra_authority(runtime):
     from core import repository_host_launcher as host
     root, db, sf, make = runtime

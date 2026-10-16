@@ -974,6 +974,16 @@ def reload_generated_pipeline(sf, registry, config_name: str) -> dict:
         yaml_text = f.read_text(encoding="utf-8")
         graph, hints = _validated_registration(
             config_name, yaml_text, roles=roles, sf=sf)
+        # Same gate and manifest as the boot scan: a sealed bundle re-verifies
+        # and keeps its frozen hints, an unreconciled adoption target stays
+        # blocked, and a recorded whole unit keeps its recorded manifest.
+        from core import pipeline_frozen_bundle as _fb
+        sealed, refusal = _fb.boot_gate(generated_configs_dir(), config_name)
+        if refusal:
+            return {"error": f"reload refused: {refusal}"}
+        hints = (_fb.sealed_hints(hints, sealed) if sealed is not None else
+                 _fb.frozen_hints(hints, _fb.recorded_hints(
+                     generated_configs_dir(), config_name)))
     except Exception as e:
         return {"error": f"reload failed: {e}"}
 
@@ -1182,18 +1192,29 @@ def load_generated_configs(sf, registry) -> list[str]:
         except (UnicodeError, yaml.YAMLError):
             continue
     # Sealed RSI bundles and adoption targets: verify before ANY write or
-    # registration. A bad seal / unreconciled adoption blocks only that name;
-    # a healthy seal is also exempt from the in-place migrations (immutable).
+    # registration. A bad seal / unreconciled adoption blocks only that name.
+    # A healthy seal, and a target that is exactly a whole unit a settled
+    # adoption recorded, are exempt from the in-place migrations: rewriting
+    # them would silently change a recorded bundle.
     from core import pipeline_frozen_bundle as _fb
     sealed_ok: set[str] = set()
+    recorded: dict[str, dict] = {}
     for path in sorted(config_dir.glob(f"{GEN_PREFIX}*.yaml")):
         sealed, refusal = _fb.boot_gate(config_dir, path.stem)
+        if not refusal and sealed is None:
+            try:
+                frozen = _fb.recorded_hints(config_dir, path.stem)
+            except _fb.BundleRefused as exc:
+                refusal = str(exc)
+            else:
+                if frozen is not None:
+                    recorded[path.stem] = frozen
         if refusal:
             _log.warning("refusing %s at boot: %s", path.stem, refusal)
             unsafe_release_configs.add(path.stem)
         elif sealed is not None:
             sealed_ok.add(path.stem)
-    migration_skip = unsafe_release_configs | sealed_ok
+    migration_skip = unsafe_release_configs | sealed_ok | set(recorded)
 
     from core.output_migration import migrate_generated_outputs
     from core.release_gate_migration import migrate_generated_release_gates
@@ -1235,6 +1256,14 @@ def load_generated_configs(sf, registry) -> list[str]:
                     if f.stem in sealed_ok:
                         hints = _fb.sealed_hints(
                             hints, _fb.verify_sealed(config_dir, f.stem))
+                    elif f.stem in recorded:
+                        # The recorded manifest of this exact whole unit, not
+                        # the generic generated-pipeline derivation.
+                        hints = _fb.frozen_hints(hints, _fb.recorded_hints(
+                            config_dir, f.stem, {"graph_yaml": yaml_text,
+                                                 "roles_text": roles_file.read_text(
+                                                     encoding="utf-8")
+                                                 if roles_file.exists() else None}))
                     plans.append((f, roles, graph, hints))
                 except Exception as e:
                     _log.warning(

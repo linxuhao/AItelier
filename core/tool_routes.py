@@ -259,10 +259,56 @@ NATIVE_ROUTES: dict[str, Callable[..., dict]] = {"pytest": native_pytest}
 
 
 class AItelierToolLoader(ToolLoader):
-    """The engine's loader, with host routes applied on every ``load_fn``."""
+    """The engine's loader, with host routes applied on every ``load_fn``.
+
+    It also records WHICH bytes each cached directory callable was compiled
+    from. The base loader keeps a callable after its ``impl.py`` is edited, so
+    the file's current name or bytes are no proof of what is served; the bundle
+    identity (``core.pipeline_frozen_bundle``) asks ``loaded_impl`` instead.
+    """
+
+    def __init__(self, *tools_dirs: Path):
+        super().__init__(*tools_dirs)
+        #: name -> (callable, impl path, sha256 of the exact bytes compiled)
+        self._loaded_impl: dict[str, tuple[Callable, str, str]] = {}
+
+    def loaded_impl(self, name: str) -> tuple[str, str] | None:
+        """(path, sha256) of the bytes the CACHED callable for *name* was
+        compiled from, or None when the cache holds no callable this loader
+        compiled (not loaded yet, evicted, or registered dynamically)."""
+        record = self._loaded_impl.get(name)
+        cached = self._cache.get(name, (None, None))[1]
+        if record is None or cached is None or record[0] is not cached:
+            return None
+        return record[1], record[2]
+
+    def _load_directory_fn(self, name: str) -> Callable:
+        """``ToolLoader.load_fn``, reading ``impl.py`` ONCE: the bytes hashed
+        are the bytes compiled (no second read, no stale bytecode cache)."""
+        cached = self._cache.get(name)
+        if cached is not None and cached[1] is not None:
+            return cached[1]
+        tool_dir = self._find_tool_dir(name)
+        impl_path = tool_dir / name / "impl.py" if tool_dir else None
+        if impl_path is None or not impl_path.exists():
+            return super().load_fn(name)                  # the base loader's errors
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(name, impl_path)
+        if spec is None or spec.loader is None:
+            return super().load_fn(name)
+        data = impl_path.read_bytes()
+        module = importlib.util.module_from_spec(spec)
+        exec(compile(data, str(impl_path), "exec", dont_inherit=True), module.__dict__)
+        fn = getattr(module, name, None)
+        if fn is None:
+            raise ImportError(f"Tool '{name}': impl.py must export function '{name}'")
+        schema = self._cache[name][0] if name in self._cache else None
+        self._cache[name] = (schema, fn)
+        self._loaded_impl[name] = (fn, str(impl_path), hashlib.sha256(data).hexdigest())
+        return fn
 
     def load_fn(self, name: str) -> Callable:
-        fn = super().load_fn(name)
+        fn = self._load_directory_fn(name)
         route = NATIVE_ROUTES.get(name)
         if route is not None and self.is_native(name):
             return route

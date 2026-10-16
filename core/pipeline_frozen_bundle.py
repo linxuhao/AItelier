@@ -4,7 +4,9 @@
 name; this module is the immutable RSI unit.) A graph version pin alone never
 froze prompts or roles. ``capture`` reads the ACTUAL graph file, the ACTUAL
 ``sf.agent_registry`` entries the graph's ``agent_config`` names resolve to,
-and the ACTUAL template bytes, and hashes all of them as one identity.
+and the ACTUAL template bytes, and hashes all of them as one identity, with
+the tools/capabilities it depends on identified as the runtime SERVES them
+(``_tool_identity``), and the complete config manifest as hints.
 ``compile_bundle`` rewrites that unit to private, bundle-specific physical
 graph/role names with the template text embedded; ``seal`` persists it beside
 the generated configs so the boot scan re-verifies and reloads it. Nothing
@@ -13,16 +15,19 @@ Adoption (``adopt_bundle``/``reconcile_adoption``) swaps a GENERATED target
 onto bundle-specific role names inside ONE registration transaction, guarded by
 a durable before-change descriptor that blocks boot/launch of that target
 until ``whole_state`` verifies one recorded bundle on every provider (files,
-live registries, SQLite rows, manifest).
+live registries, SQLite rows, manifest values). The settled descriptor also
+records each side's manifest, which boot and reload re-apply to that unit.
 """
 from __future__ import annotations
 
 import copy
+import functools
 import hashlib
-import inspect
+import io
 import json
 import os
 import re
+import types
 from pathlib import Path
 
 import yaml
@@ -32,16 +37,6 @@ ROOT = Path(__file__).resolve().parents[1]
 PREFIX = "gen_rsi_"
 NAME_RE = re.compile(r"^gen_rsi_(.+)_([0-9a-f]{16})$")
 _TARGET_RE = re.compile(r"^[a-z0-9][a-z0-9_]{0,31}$")
-# ConfigRegistry.register_one hint key -> ConfigManifest attribute.
-HINT_ATTRS = {
-    "label": "label", "has_task_loop": "has_task_loop",
-    "scheduler_owned": "scheduler_owned", "seed_file": "seed_file",
-    "seed_default": "seed_default", "output_step": "output_step",
-    "input_hint": "input_hint", "repo_mode": "repo_mode",
-    "preamble_steps": "preamble_steps", "labels": "label_overrides",
-    "checkpoint_kind": "checkpoint_kind",
-    "manual_checkpoints_only": "manual_checkpoints_only",
-    "checkpoint_kinds": "checkpoint_kinds"}
 # Roles marked ``_frozen`` are registered EXACTLY (no forge defaults, no forced
 # host-model substitution, no dropped keys): see pipeline_registry._register_forge_roles.
 
@@ -86,6 +81,22 @@ def safe_file(base: Path, rel: str) -> Path:
     if base.resolve() not in path.resolve().parents:
         raise BundleRefused(f"external file refused: {path}")
     return path
+
+
+def hint_attrs() -> dict:
+    """``register_one`` hint key -> ConfigManifest attribute, for EVERY declared
+    manifest field (only the derived graph views are not hints). Read from the
+    dataclass itself so a manifest field cannot be silently left unfrozen."""
+    from dataclasses import fields
+    from core.config_registry import ConfigManifest
+    return {("labels" if f.name == "label_overrides" else f.name): f.name
+            for f in fields(ConfigManifest)
+            if f.name not in ("config_name", "graph_provider")}
+
+
+def manifest_hints(manifest) -> dict:
+    """The complete hint set that reproduces *manifest* through register_one."""
+    return {k: copy.deepcopy(getattr(manifest, a)) for k, a in hint_attrs().items()}
 
 
 def agent_refs(node):
@@ -134,55 +145,221 @@ def _declared_capabilities(graph: dict) -> set:
     return names
 
 
-def _source_identity(fn, what: str) -> dict:
-    """Identity of a host callable by its defining source file, never by calling it."""
+# Upper bound on the objects one served-code identity may walk; beyond it the
+# provider is refused rather than partially identified.
+_SERVED_CODE_BUDGET = 200_000
+
+
+def _served_code(root) -> list:
+    """Canonical identity of a live host callable or class AS SERVED by this
+    process: its code objects (bytecode, constants, names, line table), defaults,
+    closure cells, and every global it names that its own module defines,
+    walked recursively through that module (functions, classes, constants,
+    route tables). Objects of other modules are named, not walked.
+
+    Read from the live objects only: nothing is called, imported or executed,
+    and no source file is consulted (a file edited after import is not what
+    the process serves)."""
+    inner = (root.func if isinstance(root, functools.partial) else
+             root.__func__ if isinstance(root, types.MethodType) else root)
+    home = getattr(inner, "__module__", None)
+    seen: set = set()
+    budget = [_SERVED_CODE_BUDGET]
+
+    def name_of(obj):
+        return f"{getattr(obj, '__module__', None)}:{getattr(obj, '__qualname__', None)}"
+
+    def code_names(code):
+        out = set(code.co_names)
+        for const in code.co_consts:
+            if isinstance(const, types.CodeType):
+                out |= code_names(const)
+        return out
+
+    def code(c, stack):
+        return ["code", c.co_qualname, c.co_code.hex(), [val(k, stack) for k in c.co_consts],
+                list(c.co_names), list(c.co_varnames), list(c.co_freevars),
+                list(c.co_cellvars), [c.co_argcount, c.co_posonlyargcount,
+                                      c.co_kwonlyargcount, c.co_flags, c.co_firstlineno],
+                c.co_linetable.hex(), c.co_exceptiontable.hex()]
+
+    def val(v, stack):
+        budget[0] -= 1
+        if budget[0] < 0:
+            raise BundleRefused(f"served code of {name_of(root)} is too large to identify")
+        if v is None or v is Ellipsis or isinstance(v, (bool, int, float, complex, str)):
+            return [type(v).__name__, repr(v)]
+        if isinstance(v, bytes):
+            return ["bytes", v.hex()]
+        if isinstance(v, types.CodeType):
+            return code(v, stack)
+        if isinstance(v, types.ModuleType):
+            return ["module", v.__name__]
+        if isinstance(v, re.Pattern):
+            return ["pattern", v.pattern if isinstance(v.pattern, str) else v.pattern.hex(),
+                    v.flags]
+        if id(v) in stack:
+            return ["cycle"]
+        stack = stack | {id(v)}
+        if isinstance(v, (tuple, list)):
+            return [type(v).__name__, [val(x, stack) for x in v]]
+        if isinstance(v, (set, frozenset)):
+            return [type(v).__name__, sorted((val(x, stack) for x in v), key=canonical)]
+        if isinstance(v, dict):
+            return ["dict", sorted(([val(k, stack), val(x, stack)] for k, x in v.items()),
+                                   key=lambda kv: canonical(kv[0]))]
+        if isinstance(v, (staticmethod, classmethod)):
+            return [type(v).__name__, val(v.__func__, stack)]
+        if isinstance(v, property):
+            return ["property", val(v.fget, stack), val(v.fset, stack), val(v.fdel, stack)]
+        if isinstance(v, functools.partial):
+            return ["partial", val(v.func, stack), val(v.args, stack), val(v.keywords, stack)]
+        if isinstance(v, types.MethodType):
+            return ["method", val(v.__func__, stack), ["object", name_of(type(v.__self__))]]
+        if isinstance(v, (types.FunctionType, type)):
+            if v.__module__ != home:
+                return ["ref", name_of(v)]
+            if id(v) in seen:
+                return ["seen", name_of(v)]
+            seen.add(id(v))
+            if isinstance(v, type):
+                return ["class", name_of(v), [name_of(b) for b in v.__bases__],
+                        [[k, val(x, stack)] for k, x in sorted(vars(v).items())
+                         if k not in ("__dict__", "__weakref__")]]
+            cells = []
+            for cell in v.__closure__ or ():
+                try:
+                    cells.append(val(cell.cell_contents, stack))
+                except ValueError:
+                    cells.append(["empty"])
+            refs = v.__globals__
+            return ["function", name_of(v), code(v.__code__, stack),
+                    val(v.__defaults__, stack), val(v.__kwdefaults__, stack), cells,
+                    [[n, val(refs[n], stack)] for n in sorted(code_names(v.__code__))
+                     if n in refs]]
+        return ["object", name_of(type(v))]
+
+    return val(root, frozenset())
+
+
+def _served_identity(obj, what: str) -> dict:
+    """Identity of a live in-process provider: its served code, never its file.
+    A provider whose code cannot be walked (a callable instance, a builtin) is
+    refused rather than identified by its type name alone."""
+    inner = (obj.func if isinstance(obj, functools.partial) else
+             obj.__func__ if isinstance(obj, types.MethodType) else obj)
+    if not isinstance(inner, (types.FunctionType, type)):
+        raise BundleRefused(f"{what} has no served code to identify "
+                            f"({type(obj).__qualname__})")
+    return {"qualname": getattr(obj, "__qualname__", type(obj).__qualname__),
+            "sha256": sha(_served_code(obj))}
+
+
+def _parse_tool_schema(data: bytes):
+    """``tool.yaml`` parsed exactly as ``ToolLoader.load_schema`` parses it
+    (text mode, universal newlines, ``yaml.safe_load``)."""
     try:
-        src = inspect.getsourcefile(fn)
-    except TypeError:
-        src = None
-    if not src or not Path(src).is_file():
-        raise BundleRefused(f"{what} has no resolvable source file")
-    return {"qualname": getattr(fn, "__qualname__", repr(fn)),
-            "sha256": sha(Path(src).read_bytes())}
+        return yaml.safe_load(io.TextIOWrapper(io.BytesIO(data), encoding="utf-8").read())
+    except (UnicodeError, yaml.YAMLError) as exc:
+        raise BundleRefused(f"tool schema is not readable YAML: {exc}") from exc
 
 
 def _tool_identity(sf, name):
-    """(identity, location) of *name* as SkillFlow's ToolLoader would serve it.
+    """(identity, location, served schema) of *name* as ``sf._tool_loader``
+    SERVES it now.
 
     The engine resolves agent tools, tool steps, validation/lifecycle tools and
-    ``{source: {tool: X}}`` context providers alike through ``sf._tool_loader``
-    (``load_fn``/``load_schema``): a dynamically registered callable first, else
-    the FIRST tools directory holding ``<name>/tool.yaml``. A name that loader
-    cannot serve is unresolved and refused. Files are hashed; nothing is
-    imported or called."""
+    ``{source: {tool: X}}`` context providers alike through that loader
+    (``load_fn``/``load_schema``): its cache first, else the FIRST tools
+    directory holding ``<name>/tool.yaml``. A directory tool's identity is its
+    files' bytes, and only when what the loader already holds is provably
+    those bytes:
+
+    * a cached schema must equal the current ``tool.yaml`` as the loader
+      parses it;
+    * a cached callable must be one the loader recorded compiling from the
+      current ``impl.py`` bytes (``AItelierToolLoader.loaded_impl``). A cached
+      callable from that file with no such record (the base SDK loader keeps
+      none) is unprovable: its file name or the file's current bytes are not
+      what was compiled. Refused, never assumed;
+    * a callable registered dynamically (from another file) is served instead
+      of the directory's: its live served code and its registered schema are
+      the identity.
+
+    Nothing is imported or called, and no loader cache is cleared or reloaded."""
     loader = getattr(sf, "_tool_loader", None)
     if loader is None:
         raise BundleRefused(f"unresolved tool {name!r}: no tool provider")
-    cached = getattr(loader, "_cache", {}).get(name, (None, None))
+    cached_schema, cached_fn = getattr(loader, "_cache", {}).get(name, (None, None))
     tool_dir = loader._find_tool_dir(name)
     native = bool(loader.is_native(name))
     if tool_dir is not None:
         tdir = Path(tool_dir) / name
-        files = {f: sha(safe_file(tdir, f).read_bytes())
-                 for f in ("tool.yaml", "impl.py", "README.md")
-                 if (tdir / f).exists() or (tdir / f).is_symlink()}
-        if "impl.py" not in files and cached[1] is None:
-            raise BundleRefused(f"unresolved tool {name!r}: no impl.py at {tdir}")
+        raw = {f: safe_file(tdir, f).read_bytes()
+               for f in ("tool.yaml", "impl.py", "README.md")
+               if (tdir / f).exists() or (tdir / f).is_symlink()}
+        if "tool.yaml" not in raw:
+            raise BundleRefused(f"unresolved tool {name!r}: no tool.yaml at {tdir}")
+        files = {f: sha(b) for f, b in raw.items()}
         ident = {"native": native, "files": files}
-        if cached[1] is not None:
-            try:
-                src = inspect.getsourcefile(cached[1])
-            except TypeError:
-                src = None
-            if not src or Path(src).resolve() != (tdir / "impl.py").resolve():
-                ident["callable"] = _source_identity(cached[1], f"tool {name!r}")
-        return ident, {"dir": str(tdir), "kind": "native" if native else "dir"}
-    if cached[1] is not None:
+        impl = tdir / "impl.py"
+        dynamic = False
+        if cached_fn is not None:
+            loaded = getattr(loader, "loaded_impl", lambda _n: None)(name)
+            if loaded is not None:
+                if Path(loaded[0]) != impl or loaded[1] != files.get("impl.py"):
+                    raise BundleRefused(
+                        f"tool {name!r}: the loader serves a callable compiled from "
+                        f"different bytes than {impl} holds now (sha256 "
+                        f"{loaded[1][:12]}); it must be reloaded before capture")
+            elif _defined_in(cached_fn, impl):
+                raise BundleRefused(
+                    f"tool {name!r}: the loader serves a cached callable from {impl} "
+                    f"but recorded no bytes it was compiled from; its identity "
+                    f"cannot be proven from the file")
+            else:
+                dynamic = True
+                ident["callable"] = _served_identity(cached_fn, f"tool {name!r}")
+        if dynamic and cached_schema is not None:
+            ident["schema_sha256"] = sha(cached_schema)
+            schema = cached_schema
+        else:
+            schema = _parse_tool_schema(raw["tool.yaml"])
+            if cached_schema is not None and cached_schema != schema:
+                raise BundleRefused(
+                    f"tool {name!r}: the loader serves a cached schema that differs "
+                    f"from {tdir / 'tool.yaml'}; it must be reloaded before capture")
+        if "impl.py" not in files and cached_fn is None:
+            raise BundleRefused(f"unresolved tool {name!r}: no impl.py at {tdir}")
+        return ident, {"dir": str(tdir), "kind": "native" if native else "dir"}, schema
+    if cached_fn is not None:
         return ({"native": native, "files": {},
-                 "callable": _source_identity(cached[1], f"tool {name!r}"),
-                 "schema_sha256": sha(cached[0]) if cached[0] is not None else None},
-                {"dir": None, "kind": "dynamic"})
+                 "callable": _served_identity(cached_fn, f"tool {name!r}"),
+                 "schema_sha256": sha(cached_schema) if cached_schema is not None else None},
+                {"dir": None, "kind": "dynamic"}, cached_schema)
     raise BundleRefused(f"unresolved tool {name!r}: no provider serves it")
+
+
+def _defined_in(fn, path: Path) -> bool:
+    code = getattr(fn, "__code__", None)
+    filename = getattr(code, "co_filename", None)
+    try:
+        return bool(filename) and Path(filename).resolve() == path.resolve()
+    except OSError:
+        return True
+
+
+def _role_schema_drift(sf, roles, schemas: dict) -> None:
+    """A role offers its tools through the schemas SkillFlow resolved into it
+    (``AgentConfig.tool_schemas``) at its last registration; those copies are
+    what a model is shown. Refuse when one differs from the loader's."""
+    for role in roles:
+        cfg = sf.agent_registry.get(role) if role in sf.agent_registry else None
+        for tool, schema in (getattr(cfg, "tool_schemas", None) or {}).items():
+            if tool in schemas and schema != schemas[tool]:
+                raise BundleRefused(
+                    f"role {role!r} serves a stale schema for tool {tool!r} "
+                    f"(resolved before the loader's current one); re-register it first")
 
 
 def _capability_identity(sf, name):
@@ -193,14 +370,16 @@ def _capability_identity(sf, name):
     return {"tools": list(cap.get("tools") or []), "owner": cap.get("owner"),
             "briefing_sha256": sha((cap.get("briefing") or "").encode("utf-8")),
             "context_provider": (None if provider is None else
-                                 _source_identity(provider, f"capability {name!r}"))}
+                                 _served_identity(provider, f"capability {name!r}"))}
 
 
 def _loader_identity(sf):
+    """The loader class as served: its methods and everything they reach in
+    their module, including the host route table and route callables."""
     loader = getattr(sf, "_tool_loader", None)
     if loader is None:
         return None
-    return _source_identity(type(loader), "tool loader")
+    return _served_identity(type(loader), "tool loader")
 
 
 def resolve_providers(sf, graph: dict, roles: dict):
@@ -213,15 +392,17 @@ def resolve_providers(sf, graph: dict, roles: dict):
                                           for r, c in roles.items()})
     names |= _extra_tool_names(graph)
     names |= {t for c in caps.values() for t in c["tools"]}
-    tools, where = {}, {}
+    tools, where, schemas = {}, {}, {}
     for n in sorted(names):
-        tools[n], where[n] = _tool_identity(sf, n)
+        tools[n], where[n], schemas[n] = _tool_identity(sf, n)
+    _role_schema_drift(sf, roles, schemas)
     return tools, caps, where
 
 
 def verify_providers(sf, unit: dict) -> None:
-    """Refuse when a tool/capability/loader the unit froze is now missing or
-    resolves to different bytes (checked before any registration)."""
+    """Refuse when a tool/capability/loader the unit froze is now missing,
+    resolves to different bytes or served code, or is served from a cache that
+    cannot be proven to hold them (checked before any registration)."""
     for name, want in (unit.get("tools") or {}).items():
         if _tool_identity(sf, name)[0] != want:
             raise BundleRefused(f"tool {name!r} changed since capture")
@@ -296,9 +477,7 @@ def capture(sf, registry, name: str, *, template_base=None, configs_dirs=None,
         if loc["dir"] and Path(loc["dir"]).parent.resolve() == tools_dir.resolve():
             loc["kind"] = "generated"
     manifest = registry.get(name) if registry is not None else None
-    hints = ({k: copy.deepcopy(getattr(manifest, a))
-              for k, a in HINT_ATTRS.items()}
-             if isinstance(manifest, ConfigManifest) else {})
+    hints = manifest_hints(manifest) if isinstance(manifest, ConfigManifest) else {}
     rows = sf.list_graph_versions(name)
     parent = {"version": rows[0]["version"] if rows else None, "digest": digest}
     steps = [s for s in graph.get("steps") or [] if isinstance(s, dict)]
@@ -637,10 +816,36 @@ def register_sealed(sf, registry, phys: str, config_dir=None):
     return registry.get(phys)
 
 
+def frozen_hints(hints: dict, frozen: dict | None) -> dict:
+    """Recorded manifest hints replace generated-pipeline derivation EXACTLY,
+    an explicit ``None`` (no seed file, no output step) included: the frozen
+    manifest is the captured one, not a blend with what a generated graph
+    would derive."""
+    return {**hints, **(frozen or {})}
+
+
 def sealed_hints(hints: dict, sealed: dict) -> dict:
-    """Frozen manifest hints win over generated-pipeline derivation."""
-    return {**hints, **{k: v for k, v in (sealed.get("hints") or {}).items()
-                        if v is not None}}
+    return frozen_hints(hints, sealed.get("hints"))
+
+
+# Settled descriptor state -> the recorded side the target now IS.
+_SETTLED_SIDE = {"adopted": "new", "reconciled_new": "new",
+                 "rolled_back": "old", "reconciled_old": "old"}
+
+
+def recorded_hints(config_dir, target: str, unit: dict | None = None) -> dict | None:
+    """Manifest hints a settled adoption descriptor recorded for *target*'s
+    CURRENT whole unit, or None when the target's files are not that recorded
+    unit (never adopted, or since replaced by an ordinary edit). Boot, reload,
+    publication and ``whole_state`` all apply these, so a recorded bundle's
+    scheduler ownership, checkpoint policy and labels survive a restart."""
+    desc = read_descriptor(config_dir, target)
+    side = desc and desc.get(_SETTLED_SIDE.get(desc.get("state"), ""))
+    if not isinstance(side, dict) or not isinstance(side.get("hints"), dict):
+        return None
+    if unit_identity(unit or read_unit(config_dir, target)) != side.get("identity"):
+        return None
+    return side["hints"]
 
 
 def boot_gate(config_dir, stem: str):
@@ -770,8 +975,7 @@ def _publish_unit(sf, registry, config_dir, target, unit, hints=None):
             raise BundleRefused("live graph differs from the intended bundle")
 
     pr._commit_registration(
-        sf, registry, target, graph, {**base, **{k: v for k, v in (hints or {}).items()
-                                                if v is not None}},
+        sf, registry, target, graph, frozen_hints(base, hints),
         roles=roles, paths=[gp, rp], persist=persist, require_manifest=True)
 
 
@@ -798,8 +1002,11 @@ def whole_state(sf, registry, config_dir, target: str, unit: dict) -> list:
     Covers each place a registration lands: the graph/roles files, the live
     graph and resolver, the persisted SQLite graph row and its version-history
     row (what a restart or an uncached resolver reads), the live role configs
-    and the config manifest."""
+    and the config manifest, value by value: the unit's recorded hints (else
+    the durable record of this unit, else what a generated config derives),
+    built through the real ``ConfigRegistry._make_manifest``."""
     from core import pipeline_registry as pr
+    from core.config_registry import ConfigRegistry, _read_host_hints
     from skillflow.core import canonical_graph_json, graph_digest
     problems = []
     try:
@@ -808,7 +1015,7 @@ def whole_state(sf, registry, config_dir, target: str, unit: dict) -> list:
     except BundleRefused as exc:
         problems.append(f"files: {exc}")
     roles = json.loads(unit["roles_text"]) if unit["roles_text"] else None
-    graph, _ = pr._validated_registration(target, unit["graph_yaml"], roles=roles, sf=sf)
+    graph, base = pr._validated_registration(target, unit["graph_yaml"], roles=roles, sf=sf)
     want, text = graph_digest(graph.to_dict()), canonical_graph_json(graph.to_dict())
     live = sf._graphs.get(target)
     if live is None or graph_digest(live.to_dict()) != want:
@@ -834,8 +1041,23 @@ def whole_state(sf, registry, config_dir, target: str, unit: dict) -> list:
     for node in graph.steps:
         if node.agent_config and node.agent_config not in sf.agent_registry:
             problems.append(f"live role {node.agent_config}")
-    if registry is not None and registry.get(target) is None:
-        problems.append("config manifest")
+    if registry is not None:
+        manifest = registry.get(target)
+        hints = unit.get("hints")
+        if hints is None:
+            try:
+                hints = recorded_hints(config_dir, target, unit)
+            except BundleRefused as exc:
+                problems.append(f"config manifest: {exc}")
+        expected = ConfigRegistry._make_manifest(
+            sf, target, _read_host_hints(), hint_overrides=frozen_hints(base, hints))
+        if manifest is None or expected is None:
+            problems.append("config manifest")
+        else:
+            have, need = manifest_hints(manifest), manifest_hints(expected)
+            changed = sorted(k for k in need if have.get(k) != need[k])
+            if changed:
+                problems.append(f"config manifest {', '.join(changed)}")
     return problems
 
 
@@ -885,10 +1107,15 @@ def adopt_bundle(sf, registry, target: str, phys: str, *, expected_current: str,
         if new_id == current:
             raise BundleRefused("adoption would not change the target")
         verify_providers(sf, verify_sealed(d, phys))
+        old = {**old, "hints": recorded_hints(d, target, old)}
         mixed = whole_state(sf, registry, d, target, old)
         if mixed:
             raise BundleRefused(f"target is registered mixed ({', '.join(mixed)}); "
                                 "reconcile first")
+        # The old side's COMPLETE manifest, as verified just above: a rollback,
+        # reconciliation or boot restores exactly this, not a re-derivation.
+        if registry is not None:
+            old["hints"] = manifest_hints(registry.get(target))
         record = {"schema": SCHEMA, "target": target, "sealed": phys,
                   "state": "pending", "expected_current": expected_current,
                   "old": {"identity": current, **old},
@@ -932,7 +1159,8 @@ def reconcile_adoption(sf, registry, target: str, *, to: str, config_dir=None) -
         if desc is None or desc.get("state") != "pending":
             raise BundleRefused(f"no pending adoption for {target!r}")
         side = desc[to]
-        unit = {"graph_yaml": side["graph_yaml"], "roles_text": side["roles_text"]}
+        unit = {"graph_yaml": side["graph_yaml"], "roles_text": side["roles_text"],
+                "hints": side.get("hints")}
         if unit_identity(unit) != side["identity"]:
             raise BundleRefused("recorded bundle bytes do not match their identity")
         _publish_unit(sf, registry, d, target, unit, side.get("hints"))

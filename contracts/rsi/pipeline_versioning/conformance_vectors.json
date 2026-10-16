@@ -69,7 +69,16 @@
     "M_no_templates": {"graph": {}, "roles": {}},
     "M_extra_key": {"graph": {}, "roles": {}, "templates": {}, "notes": "x"},
     "M_not_object": [],
-    "M_dup_tool": {"graph": {}, "roles": {"a": {"settings": {}, "tools": [{"name": "run_tests", "identity": "tool:run_tests@1"}, {"name": "run_tests", "identity": "tool:run_tests@1"}], "prompt": "p"}}, "templates": {}}
+    "M_dup_tool": {"graph": {}, "roles": {"a": {"settings": {}, "tools": [{"name": "run_tests", "identity": "tool:run_tests@1"}, {"name": "run_tests", "identity": "tool:run_tests@1"}], "prompt": "p"}}, "templates": {}},
+    "M_graph_array": {"graph": [], "roles": {}, "templates": {}},
+    "M_roles_array": {"graph": {}, "roles": [], "templates": {}},
+    "M_role_null": {"graph": {}, "roles": {"r": null}, "templates": {}},
+    "M_settings_array": {"graph": {}, "roles": {"r": {"settings": [], "tools": [], "prompt": "p"}}, "templates": {}},
+    "M_tools_object": {"graph": {}, "roles": {"r": {"settings": {}, "tools": {}, "prompt": "p"}}, "templates": {}},
+    "M_tool_name_array": {"graph": {}, "roles": {"r": {"settings": {}, "tools": [{"name": [], "identity": "i"}], "prompt": "p"}}, "templates": {}},
+    "M_templates_array": {"graph": {}, "roles": {}, "templates": []},
+    "M_template_null": {"graph": {}, "roles": {}, "templates": {"t": null}},
+    "M_invalid_utf8": {"graph": {"value": "\ud800"}, "roles": {}, "templates": {}}
   },
   "canonical_vectors": [
     {"bundle": "E", "canonical": "{\"graph\":{},\"roles\":{},\"schema\":\"rsi.pipeline_version.v1\",\"templates\":{}}"},
@@ -187,6 +196,72 @@
       {"op": "restore", "version_id": "$id:A", "expect": {"error": "TOOL_UNAVAILABLE"}},
       {"op": "current", "expect": {"result": "$id:S"}},
       {"op": "run_pin", "run_id": "r1", "expect": {"result": "$id:A"}}
+    ]},
+    {"name": "malformed_run_ids_refuse_before_lookup", "steps": [
+      {"op": "capture", "bundle": "A"},
+      {"op": "pin_run", "run_id": "r-existing"},
+      {"op": "pin_run", "run_id": [], "expect": {"error": "MALFORMED_BUNDLE"}},
+      {"op": "pin_run", "run_id": {}, "expect": {"error": "MALFORMED_BUNDLE"}},
+      {"op": "pin_run", "run_id": null, "expect": {"error": "MALFORMED_BUNDLE"}},
+      {"op": "pin_run", "run_id": true, "expect": {"error": "MALFORMED_BUNDLE"}},
+      {"op": "pin_run", "run_id": 0, "expect": {"error": "MALFORMED_BUNDLE"}},
+      {"op": "pin_run", "run_id": "", "expect": {"error": "MALFORMED_BUNDLE"}},
+      {"op": "pin_run", "run_id": "\ud800", "expect": {"error": "MALFORMED_BUNDLE"}},
+      {"op": "run_pin", "run_id": [], "expect": {"error": "MALFORMED_BUNDLE"}},
+      {"op": "run_pin", "run_id": {}, "expect": {"error": "MALFORMED_BUNDLE"}},
+      {"op": "run_pin", "run_id": null, "expect": {"error": "MALFORMED_BUNDLE"}},
+      {"op": "run_pin", "run_id": true, "expect": {"error": "MALFORMED_BUNDLE"}},
+      {"op": "run_pin", "run_id": 0, "expect": {"error": "MALFORMED_BUNDLE"}},
+      {"op": "run_pin", "run_id": "", "expect": {"error": "MALFORMED_BUNDLE"}},
+      {"op": "run_pin", "run_id": "\ud800", "expect": {"error": "MALFORMED_BUNDLE"}},
+      {"op": "finish_run", "run_id": [], "expect": {"error": "MALFORMED_BUNDLE"}},
+      {"op": "finish_run", "run_id": {}, "expect": {"error": "MALFORMED_BUNDLE"}},
+      {"op": "finish_run", "run_id": null, "expect": {"error": "MALFORMED_BUNDLE"}},
+      {"op": "finish_run", "run_id": true, "expect": {"error": "MALFORMED_BUNDLE"}},
+      {"op": "finish_run", "run_id": 0, "expect": {"error": "MALFORMED_BUNDLE"}},
+      {"op": "finish_run", "run_id": "", "expect": {"error": "MALFORMED_BUNDLE"}},
+      {"op": "finish_run", "run_id": "\ud800", "expect": {"error": "MALFORMED_BUNDLE"}},
+      {"op": "run_pin", "run_id": "r-existing", "expect": {"result": "$id:A"}},
+      {"op": "list_pins", "expect": {"result": {"r-existing": {"version_id": "$id:A", "state": "running"}}}}
+    ]},
+    {"name": "whole_string_version_ids", "steps": [
+      {"op": "capture", "bundle": "A"},
+      {"op": "read", "version_id": "sha256:0000000000000000000000000000000000000000000000000000000000000000\n", "expect": {"error": "MALFORMED_VERSION_ID"}},
+      {"op": "restore", "version_id": "sha256:0000000000000000000000000000000000000000000000000000000000000000\n", "expect": {"error": "MALFORMED_VERSION_ID"}},
+      {"op": "read", "version_id": "sha256:0000000000000000000000000000000000000000000000000000000000000000x", "expect": {"error": "MALFORMED_VERSION_ID"}},
+      {"op": "restore", "version_id": "sha256:0000000000000000000000000000000000000000000000000000000000000000x", "expect": {"error": "MALFORMED_VERSION_ID"}},
+      {"op": "read", "version_id": " sha256:0000000000000000000000000000000000000000000000000000000000000000", "expect": {"error": "MALFORMED_VERSION_ID"}},
+      {"op": "restore", "version_id": " sha256:0000000000000000000000000000000000000000000000000000000000000000", "expect": {"error": "MALFORMED_VERSION_ID"}},
+      {"op": "read", "version_id": [], "expect": {"error": "MALFORMED_VERSION_ID"}},
+      {"op": "restore", "version_id": [], "expect": {"error": "MALFORMED_VERSION_ID"}},
+      {"op": "read", "version_id": {}, "expect": {"error": "MALFORMED_VERSION_ID"}},
+      {"op": "restore", "version_id": {}, "expect": {"error": "MALFORMED_VERSION_ID"}},
+      {"op": "read", "version_id": false, "expect": {"error": "MALFORMED_VERSION_ID"}},
+      {"op": "restore", "version_id": false, "expect": {"error": "MALFORMED_VERSION_ID"}},
+      {"op": "capture", "expected_current": "sha256:0000000000000000000000000000000000000000000000000000000000000000\n", "expect": {"error": "MALFORMED_VERSION_ID"}, "bundle": "S"},
+      {"op": "restore", "expected_current": "sha256:0000000000000000000000000000000000000000000000000000000000000000\n", "expect": {"error": "MALFORMED_VERSION_ID"}, "version_id": "$id:A"}
+    ]},
+    {"name": "tool_inventory_invalid_text_is_atomic", "steps": [
+      {"op": "capture", "bundle": "A"},
+      {"op": "set_tools", "tools": {"run_tests": "\ud800"}, "expect": {"error": "MALFORMED_BUNDLE"}},
+      {"op": "restore", "version_id": "$id:A", "expect": {"result_subset": {"changed": false}}}
+    ]},
+    {"name": "tamper_hook_input_domain", "requires": ["tamper_hook"], "steps": [
+      {"op": "capture", "bundle": "A"},
+      {"op": "tamper", "version_id": [], "bundle": "S", "expect": {"error": "MALFORMED_VERSION_ID"}},
+      {"op": "tamper", "version_id": "$id:A", "bundle": "M_not_object", "expect": {"error": "MALFORMED_BUNDLE"}},
+      {"op": "read", "version_id": "$id:A", "expect": {"result_subset": {"bundle": "$bundle:A"}}}
+    ]},
+    {"name": "malformed_json_bundle_shapes", "steps": [
+      {"op": "capture", "bundle": "M_graph_array", "expect": {"error": "MALFORMED_BUNDLE"}},
+      {"op": "capture", "bundle": "M_roles_array", "expect": {"error": "MALFORMED_BUNDLE"}},
+      {"op": "capture", "bundle": "M_role_null", "expect": {"error": "MALFORMED_BUNDLE"}},
+      {"op": "capture", "bundle": "M_settings_array", "expect": {"error": "MALFORMED_BUNDLE"}},
+      {"op": "capture", "bundle": "M_tools_object", "expect": {"error": "MALFORMED_BUNDLE"}},
+      {"op": "capture", "bundle": "M_tool_name_array", "expect": {"error": "MALFORMED_BUNDLE"}},
+      {"op": "capture", "bundle": "M_templates_array", "expect": {"error": "MALFORMED_BUNDLE"}},
+      {"op": "capture", "bundle": "M_template_null", "expect": {"error": "MALFORMED_BUNDLE"}},
+      {"op": "capture", "bundle": "M_invalid_utf8", "expect": {"error": "MALFORMED_BUNDLE"}}
     ]}
   ]
 }

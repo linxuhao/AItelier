@@ -1,9 +1,9 @@
 # Pipeline versioning contract (v1, statement phase)
 
-Status: STATEMENT CANDIDATE. Nothing here has been compiled, executed or independently
-read back. The fake and vectors are unrun. The fake is intentionally standalone: it does
-not register, boot, roll back or touch any real pipeline, and it does not stand in for the
-real provider (the real `ConfigRegistry` is a dataclass, not a dict, and is not modelled).
+Status: SOURCE CORRECTION CANDIDATE. Existing acceptance-only readback@r1 is
+retained; test results belong to the Source report. Real-provider conformance is still
+unmeasured. The standalone fake does not register, boot, roll back or touch any real
+pipeline; it is not a substitute for the real provider.
 
 ## Goal
 A registered pipeline version is an immutable, content-addressed bundle of graph, roles
@@ -21,7 +21,9 @@ Exactly three keys, no others:
 
 Values may be null, bool, int, string, list, or string-keyed object. Floats, tuples and
 anything else are refused (`MALFORMED_BUNDLE`), as are non-UTF-8-encodable strings.
-No YAML is involved; callers parse YAML elsewhere.
+No YAML is involved; callers parse YAML elsewhere. The domain is acyclic JSON data,
+not arbitrary Python objects. Tool inventory names/identities and run IDs must also
+be UTF-8-encodable strings; inventory names/identities and run IDs must be nonempty.
 
 ## Version id
 `version_id = "sha256:" + hex(sha256(canonical_bytes(bundle)))`.
@@ -73,8 +75,14 @@ If given and it differs from the actual current, the call refuses `CONFLICT`.
 Every refusal is an exception with a stable string attribute `code`; no silent default,
 no partial effect: a refused call leaves versions, current selection and pins unchanged.
 `MALFORMED_BUNDLE`, `MALFORMED_VERSION_ID` (not `sha256:` + 64 lowercase hex, or not a
-string), `UNKNOWN_VERSION`, `TAMPERED_VERSION`, `TOOL_UNAVAILABLE`,
+string, including any leading/trailing character or final newline), `UNKNOWN_VERSION`, `TAMPERED_VERSION`, `TOOL_UNAVAILABLE`,
 `TOOL_IDENTITY_MISMATCH`, `CONFLICT`, `NO_CURRENT_VERSION`, `UNKNOWN_RUN`, `DUPLICATE_RUN`.
+
+Malformed run IDs are `MALFORMED_BUNDLE` for all three pin methods, before
+dictionary lookup; a well-formed absent ID is `UNKNOWN_RUN`. Pin IDs are opaque
+nonempty text (not silently stripped or normalized). The optional tamper hook validates
+the exact version-ID form, checks existence, then accepts only an otherwise valid
+bundle; malformed hook payloads are `MALFORMED_BUNDLE` without changing history.
 
 Check order for `restore`: id form, unknown, tamper, expected_current, tools. For `capture`:
 bundle validity, expected_current, tools, tamper (when the id exists).

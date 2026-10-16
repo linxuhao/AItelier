@@ -14,7 +14,7 @@ import re
 from typing import Any, Dict, List, Mapping, Optional
 
 SCHEMA = "rsi.pipeline_version.v1"
-_VERSION_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_VERSION_ID_RE = re.compile(r"sha256:[0-9a-f]{64}")
 _UNSET = object()
 
 
@@ -140,9 +140,15 @@ def version_id_of(bundle: Any) -> str:
 
 
 def _check_id(version_id: Any) -> str:
-    if not isinstance(version_id, str) or not _VERSION_ID_RE.match(version_id):
+    if not isinstance(version_id, str) or not _VERSION_ID_RE.fullmatch(version_id):
         raise MalformedVersionId(f"not a version id: {version_id!r}")
     return version_id
+
+
+def _check_run_id(run_id: Any) -> None:
+    _text_bytes(run_id, "run id")
+    if not run_id:
+        raise MalformedBundle("run id: expected non-empty string")
 
 
 class FakePipelineVersionStore:
@@ -176,6 +182,9 @@ class FakePipelineVersionStore:
                 isinstance(k, str) and k and isinstance(v, str) and v
                 for k, v in tools.items()):
             raise MalformedBundle("available tools: expected {name: identity}")
+        for name, identity in tools.items():
+            _text_bytes(name, "available tools.<name>")
+            _text_bytes(identity, "available tools.<identity>")
         self._tools = dict(tools)
 
     def _require_tools(self, bundle: Mapping[str, Any]) -> None:
@@ -253,8 +262,7 @@ class FakePipelineVersionStore:
 
     # -- run pins ------------------------------------------------------------
     def pin_run(self, run_id: Any) -> str:
-        if not isinstance(run_id, str) or not run_id:
-            raise MalformedBundle("run id: expected non-empty string")
+        _check_run_id(run_id)
         if run_id in self._pins:
             raise DuplicateRun(f"run {run_id!r} already pinned")
         if self._current is None:
@@ -263,11 +271,13 @@ class FakePipelineVersionStore:
         return self._current
 
     def finish_run(self, run_id: Any) -> None:
+        _check_run_id(run_id)
         if run_id not in self._pins:
             raise UnknownRun(f"unknown run {run_id!r}")
         self._pins[run_id]["state"] = "finished"  # pin is retained, never removed
 
     def run_pin(self, run_id: Any) -> str:
+        _check_run_id(run_id)
         if run_id not in self._pins:
             raise UnknownRun(f"unknown run {run_id!r}")
         return self._pins[run_id]["version_id"]
@@ -277,7 +287,9 @@ class FakePipelineVersionStore:
 
     # -- optional conformance capability "tamper_hook" ----------------------
     def _tamper_for_test(self, version_id: str, bundle: Any) -> None:
-        """Replace stored content without re-keying (simulates corruption)."""
+        """Replace with a valid bundle without re-keying (simulates corruption)."""
+        _check_id(version_id)
         if version_id not in self._versions:
             raise UnknownVersion(f"unknown version {version_id}")
+        _payload(bundle)
         self._versions[version_id]["bundle"] = copy.deepcopy(bundle)

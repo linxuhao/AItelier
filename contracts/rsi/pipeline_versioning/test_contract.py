@@ -1,4 +1,4 @@
-"""Conformance harness + tests for the pipeline-versioning contract (UNRUN).
+"""Conformance harness + tests for the pipeline-versioning contract.
 
 `run_conformance(factory)` is the entrypoint a real provider re-uses:
     factory(available_tools: dict) -> provider object exposing the API in README.md
@@ -213,6 +213,31 @@ class FakeConformanceTest(unittest.TestCase):
 
         failures = run_conformance(lambda tools: Leaky(tools))
         self.assertTrue(any("read_and_inputs_cannot_mutate_history" in f for f in failures))
+
+
+    def test_vectors_detect_untyped_run_lookup(self):
+        fake = self.fake
+
+        class UntypedRun(fake.FakePipelineVersionStore):
+            def run_pin(self, run_id):
+                if run_id not in self._pins:
+                    raise fake.UnknownRun("unknown run")
+                return self._pins[run_id]["version_id"]
+
+        failures = run_conformance(lambda tools: UntypedRun(tools))
+        self.assertTrue(any("malformed_run_ids" in f for f in failures))
+
+    def test_vectors_detect_silent_version_id_normalization(self):
+        fake = self.fake
+
+        class NormalizeId(fake.FakePipelineVersionStore):
+            def read(self, version_id):
+                if isinstance(version_id, str):
+                    version_id = version_id.rstrip("\n")
+                return super().read(version_id)
+
+        failures = run_conformance(lambda tools: NormalizeId(tools))
+        self.assertTrue(any("whole_string_version_ids" in f for f in failures))
 
 
 if __name__ == "__main__":

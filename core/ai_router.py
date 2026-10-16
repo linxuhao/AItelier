@@ -243,6 +243,23 @@ def _is_spent_credit(err) -> bool:
             and "credit balance is too low" in str(err).lower())
 
 
+def is_provider_failure(error: BaseException) -> bool:
+    """An endpoint failure escaping a public gateway call is not model output.
+
+    The gateway already owns transport retries and candidate failover. Preserve
+    its typed failures, including an authentication explanation's explicit cause,
+    without treating unsupported-native BadRequest errors as endpoint failures.
+    """
+    seen = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        if (isinstance(error, FAILOVER_EXCEPTIONS)
+                or is_quota_exhausted(error) or _is_spent_credit(error)):
+            return True
+        error = error.__cause__
+    return False
+
+
 def _endpoint_available(name: str) -> bool:
     import time as _t
     return _ENDPOINT_COOLDOWN.get(name, 0.0) <= _t.time()

@@ -1968,6 +1968,24 @@ class PipelineEngine:
                     "now incomplete for this step; further failures are silent",
                     type(e).__name__, e, category, event)
 
+    def _record_generation_error(self, error: Exception, event: str, **context):
+        # Keep the original type/message in the ordinary run/step trace. The
+        # existing trace summary reads `error`; the event bus alone is transient.
+        self._trace("error", event, {
+            "error": f"{type(error).__name__}: {error}",
+            "error_type": type(error).__name__, "original_error": str(error),
+            **context,
+        })
+
+    def _run_json_agent(self, agent, prompt):
+        from core.ai_router import is_provider_failure
+        try:
+            return agent.run(prompt)
+        except Exception as error:
+            if is_provider_failure(error):
+                self._record_generation_error(error, "provider_error", mode="json")
+            raise
+
     def _get_project_path(self, workspace: Any, project_id: str) -> Path:
         """获取 DPS workspace 路径 (Inbox/Outbox/Trace)"""
         return workspace._get_secure_path(project_id)
@@ -2314,7 +2332,7 @@ class PipelineEngine:
         self._emit("agent_call", {"agent_role": role, "model": agent.gateway.litellm_model,
                                   "preview": f"{role_label} (content)"})
         t0 = time.time()
-        response = agent.run(prompt)
+        response = self._run_json_agent(agent, prompt)
         elapsed = time.time() - t0
         self._emit("agent_response", {"agent_role": role, "elapsed_s": round(elapsed, 1),
                                       "chars": len(response), "preview": response[:300]})
@@ -2801,7 +2819,7 @@ class PipelineEngine:
                     "mode": "json", "role": role, "attempt": attempt,
                     "turn": tool_turn + 1, "user": prompt})
                 t0 = time.time()
-                response = agent.run(prompt)
+                response = self._run_json_agent(agent, prompt)
                 elapsed = time.time() - t0
                 self._emit("agent_response", {"agent_role": role, "elapsed_s": round(elapsed, 1),
                                               "chars": len(response), "preview": response[:300]})
@@ -3336,7 +3354,7 @@ class PipelineEngine:
                     "mode": "json", "role": role, "attempt": attempt,
                     "turn": tool_turn + 1, "user": prompt})
                 t0 = time.time()
-                response = agent.run(prompt)
+                response = self._run_json_agent(agent, prompt)
                 elapsed = time.time() - t0
                 self._emit("agent_response", {"agent_role": role, "elapsed_s": round(elapsed, 1),
                                               "chars": len(response), "preview": response[:300]})
@@ -4550,25 +4568,17 @@ class PipelineEngine:
                             tool_choice=tool_choice,
                         )
                     except Exception as e:
-                        # A SPENT QUOTA is not feedback for the agent — it is an
-                        # infrastructure condition, and the only correct response is
-                        # to stop asking. Swallowing it here is what defeated the
-                        # scheduler's quota hold: every DPE role is
-                        # native_tool_calling, so every LLM call arrives at this
-                        # handler, the RateLimitError became prose, `feedback` was
-                        # overwritten three lines later by the "No output produced"
-                        # message, and the loop re-called the spent endpoint once
-                        # per attempt until MaxRetriesExceeded — which the scheduler
-                        # catches BEFORE its quota check, and which carries none of
-                        # the provider's reset-time prose. A byte-for-byte replay of
-                        # the 2026-08-26 outage the hold was written to stop.
-                        #
-                        # With routing in place this only fires once EVERY candidate
-                        # for the model is spent, so it is genuinely the last resort.
-                        from core.llm_quota import is_quota_exhausted
-                        if is_quota_exhausted(e):
-                            raise
+                        from core.ai_router import is_provider_failure
+                        self._record_generation_error(
+                            e, "native_error", mode="native", step_id=step_id,
+                            attempt=attempt, turn=turn_count + 1,
+                        )
                         self._emit("native_error", {"error": str(e)[:200]})
+                        # The gateway has completed its own retries/failover.
+                        # Replaying this as missing output or JSON format repair
+                        # would restart those same exhausted provider attempts.
+                        if is_provider_failure(e):
+                            raise
                         if starved_recovery_pending:
                             fail_starved_output({
                                 "step_id": step_id, "attempt": attempt,
@@ -5447,25 +5457,11 @@ class PipelineEngine:
                     f"Native step '{step_id}' failed: {type(e).__name__}: {e}",
                     exc_info=True,
                 )
-                # A spent quota is not a native-tool-calling failure, and this
-                # `except` was quietly undoing the re-raise `_run_native_step`
-                # performs on purpose (see the `is_quota_exhausted` guard there
-                # and the outage it names). EVERY role sets
-                # `fallback_to_json_mode: true`, so the re-raise never once
-                # reached the scheduler through this path.
-                #
-                # Falling through costs more than a mislabel: the JSON path
-                # re-walks the same candidate list, and `_next_usable`
-                # deliberately degrades to "try it anyway" when every endpoint
-                # is parked — so it re-pays one real 429 per candidate against
-                # endpoints already known to be spent, on top of the walk the
-                # native path just finished. The scheduler's quota hold exists
-                # to stop exactly that.
-                from core.llm_quota import is_quota_exhausted
+                from core.ai_router import is_provider_failure
                 if isinstance(e, (NativeTurnBudgetExhausted,
                                   NativeOutputCapExhausted,
                                   NativeSideEffectsRetained,
-                                  NativeObservationUnavailable)) or is_quota_exhausted(e):
+                                  NativeObservationUnavailable)) or is_provider_failure(e):
                     raise
                 if getattr(self, "_native_side_effects_committed", False):
                     raise NativeSideEffectsRetained(

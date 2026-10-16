@@ -9,8 +9,9 @@ Two objects share one in-memory ``FakeHost``:
 * ``FakeVersions`` is the versioning API (capture/list/read/current/restore).
   It has no run, pin or finish method.
 * ``FakeFixture`` models what the host does OUTSIDE the versioning API: tool
-  files, ordinary target registration, and the SDK run lifecycle (a run pins
-  the graph version current at its start and keeps that version's prompts).
+  files, capability definitions, ordinary target registration, and the SDK run
+  lifecycle (a run pins the graph version current at its start and keeps that
+  version's prompts).
   The native conformance fixture performs the same actions through the real
   ToolLoader, registry and SDK instead.
 """
@@ -30,11 +31,26 @@ def _sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def declared_capabilities(graph: Dict[str, Any]) -> List[str]:
+    """Capability names a graph offers or a step (loop bodies included) holds."""
+    names = {n for n in graph.get("capabilities") or [] if n}
+
+    def walk(steps):
+        for step in steps or []:
+            cap = step.get("capability")
+            names.update(n for n in ([cap] if isinstance(cap, str) else cap or []) if n)
+            walk((step.get("loop") or {}).get("steps"))
+    walk(graph.get("steps"))
+    return sorted(names)
+
+
 class FakeHost:
-    """The modelled host: installed tools, generated targets, runs, seals."""
+    """The modelled host: installed tools, capability definitions, generated
+    targets, runs, seals."""
 
     def __init__(self):
         self.tools: Dict[str, Dict[str, str]] = {}
+        self.capabilities: Dict[str, Dict[str, Any]] = {}
         self.targets: Dict[str, Dict[str, Any]] = {}
         self.runs: Dict[str, Dict[str, Any]] = {}
         self.seals: Dict[str, Dict[str, Any]] = {}
@@ -47,10 +63,27 @@ class FakeHost:
         return {"native": False,
                 "files": {f: _sha(files[f]) for f in TOOL_FILES if f in files}}
 
+    def capability_identity(self, name: str) -> Dict[str, Any]:
+        """Native provider identity: NOT part of logical content (a graph's
+        reference to the capability is)."""
+        cap = self.capabilities.get(name)
+        if cap is None:
+            raise c.ProviderUnavailable(f"unresolved capability {name!r}: not registered")
+        return {"tools": list(cap["tools"]), "briefing_sha256": _sha(cap["briefing"])}
+
     def resolve(self, content: Dict[str, Any]) -> Dict[str, Any]:
         """Content as captured now: tool identities re-read from installed tools."""
         tools = {n: self.tool_identity(n) for n in sorted(content["tools"])}
         return {**copy.deepcopy(content), "tools": tools}
+
+    def verify_providers(self, seal: Dict[str, Any]) -> None:
+        """Every tool and capability the seal recorded is served as recorded."""
+        for name, want in seal["content"]["tools"].items():
+            if self.tool_identity(name) != want:
+                raise c.ProviderChanged(f"tool {name!r} changed since capture")
+        for name, want in seal["capabilities"].items():
+            if self.capability_identity(name) != want:
+                raise c.ProviderChanged(f"capability {name!r} changed since capture")
 
     def new_unit(self, target: str) -> str:
         self.writes += 1
@@ -99,6 +132,8 @@ class FakeVersions:
         """Order: target form, known target, providers, content domain, catalog."""
         t = self._target(target)
         content = self._host.resolve(t["content"])
+        caps = {n: self._host.capability_identity(n)
+                for n in declared_capabilities(content["graph"])}
         vid = c.version_id_of(content)
         if vid in self._host.seals:
             seal = self._seal(vid)
@@ -107,7 +142,8 @@ class FakeVersions:
         native = hashlib.sha256(f"{target}\0{t['unit']}\0{vid}".encode()).hexdigest()
         phys = f"{c.SEAL_PREFIX}{c.seal_slug(vid)}_{native[:16]}"
         self._host.seals[vid] = {"content": copy.deepcopy(content), "physical_name": phys,
-                                 "bundle_identity": native, "tampered": False}
+                                 "bundle_identity": native, "capabilities": caps,
+                                 "tampered": False}
         return {"target": target, "version_id": vid, "created": True, "physical_name": phys}
 
     def list_versions(self) -> List[str]:
@@ -128,7 +164,8 @@ class FakeVersions:
 
     def restore(self, target: Any, version_id: Any, *, expected_current: Any) -> Dict[str, Any]:
         """Order: version form, target form, CAS form, known target, known
-        version, tamper, CAS, no-op, providers; then one whole-unit change."""
+        version, tamper, CAS, recorded providers, no-op; then one whole-unit
+        change."""
         c.check_version_id(version_id)
         c.check_target(target)
         c.check_unit_identity(expected_current)
@@ -138,12 +175,10 @@ class FakeVersions:
             raise c.Conflict(f"target {target!r} is {t['unit'][:12]}, "
                              f"not expected {expected_current[:12]}")
         previous = t["unit"]
+        self._host.verify_providers(seal)
         if self._live_id(t) == version_id:
             return {"target": target, "version_id": version_id, "changed": False,
                     "previous_unit_identity": previous, "unit_identity": previous}
-        for name, want in seal["content"]["tools"].items():
-            if self._host.tool_identity(name) != want:
-                raise c.ProviderChanged(f"tool {name!r} changed since capture")
         self._host.publish(target, seal["content"])
         t["recorded"] = True
         return {"target": target, "version_id": version_id, "changed": True,
@@ -161,6 +196,21 @@ class FakeFixture:
 
     def remove_tool(self, name: str) -> None:
         self._host.tools.pop(name)
+
+    def define_capability(self, name: str, tools: List[str], briefing: str) -> None:
+        """Define or edit (same owner) a capability; edits change only its
+        native identity, never a graph that references it."""
+        for tool in tools:
+            self._host.tool_identity(tool)
+        self._host.capabilities[name] = {"tools": list(tools), "briefing": briefing}
+
+    def archive_capability(self, name: str) -> None:
+        """Retire a capability; refused while a registered target offers it."""
+        offered = [k for k, t in self._host.targets.items()
+                   if name in (t["content"]["graph"].get("capabilities") or [])]
+        if offered:
+            raise ValueError(f"capability {name!r} is still offered by {offered}")
+        self._host.capabilities.pop(name)
 
     def register(self, target: str, unit: Dict[str, Any], content: Dict[str, Any]) -> None:
         """Ordinary generated-config registration. ``content`` is the vector's
@@ -215,12 +265,14 @@ class FakeFixture:
     def _state(self) -> Dict[str, Any]:
         return {
             "tools": self._host.tools,
+            "capabilities": self._host.capabilities,
             "targets": {k: {"unit": t["unit"], "graphs": len(t["graphs"]),
                             "content": repr(t["content"])}
                         for k, t in self._host.targets.items()},
             "runs": {k: [r["status"], r["graph_version"], repr(r["content"])]
                      for k, r in self._host.runs.items()},
-            "seals": {k: [s["physical_name"], s["tampered"], repr(s["content"])]
+            "seals": {k: [s["physical_name"], s["tampered"], repr(s["content"]),
+                          repr(s["capabilities"])]
                       for k, s in self._host.seals.items()}}
 
     def snapshot(self) -> str:

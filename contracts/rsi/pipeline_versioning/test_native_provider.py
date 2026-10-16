@@ -2,7 +2,8 @@
 
 Native worlds use the accepted component's real host pieces: AItelierSkillFlow
 (SQLite), the production ToolLoader factory of ``api.dependencies`` (with the
-owned generated-tools dir), ConfigRegistry, ``reload_generated_pipeline`` for
+owned generated-tools dir), ConfigRegistry, ``capability_registry.define`` /
+``archive`` for capability definitions, ``reload_generated_pipeline`` for
 ordinary registration, and the normal SDK run lifecycle (create/start/pause,
 advance/claim/confirm to completion, claims released unexecuted). No product
 method is patched; no provider, tool or model body runs.
@@ -21,6 +22,7 @@ from skillflow.core import StepResult
 import contract as c
 import fake
 import native_provider
+from core import capability_registry
 from core import datadir
 from core import pipeline_frozen_bundle as fb
 from core import pipeline_registry as pr
@@ -80,6 +82,16 @@ class NativeFixture:
 
     def remove_tool(self, name):
         shutil.rmtree(self.tools / name)
+
+    def define_capability(self, name, tools, briefing):
+        """The host's one capability write path (RegistrationTransaction)."""
+        out = capability_registry.define(self.sf, name, tools=tools, briefing=briefing,
+                                         owner="owned-fixture")
+        assert out.get("ok"), out
+
+    def archive_capability(self, name):
+        out = capability_registry.archive(self.sf, name)
+        assert out.get("ok"), out
 
     def register(self, target, unit, content):
         """Ordinary generated-config files + the normal reload path. The
@@ -161,8 +173,10 @@ class NativeFixture:
                  for n in sorted(self.sf.agent_registry.list_names())}
         manifests = {n: repr(fb.manifest_hints(self.registry.get(n)))
                      for n in sorted(self.sf._graphs) if self.registry.get(n) is not None}
+        capabilities = {n: fb._capability_identity(self.sf, n)
+                        for n in sorted(self.sf._capabilities)}
         return {"files": files, "graphs": graphs, "runs": runs, "roles": roles,
-                "manifests": manifests}
+                "manifests": manifests, "capabilities": capabilities}
 
     def snapshot(self):
         return json.dumps(self._state(), sort_keys=True)

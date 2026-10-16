@@ -1,7 +1,7 @@
 # Pipeline versioning contract (r2)
 
-Status: SOURCE CANDIDATE for `rsi.pipeline-versioning.contract` r2. Acceptance
-needs a fresh nonauthor readback@r2; the r1 readback does not carry over.
+Status: SOURCE CANDIDATE for `rsi.pipeline-versioning.contract` r2. Root alone
+accepts; the r1 readback does not carry over.
 
 ## Goal
 A registered pipeline version is an immutable, content-addressed unit of graph,
@@ -83,19 +83,28 @@ There is deliberately no create/pin/finish/run API.
 ## Behaviour
 - **capture** catalogs what an owned generated target serves now. If a seal of
   that logical id exists it returns `created=false` and writes nothing (no new
-  physical seal even when native provenance differs, e.g. after a restore).
-  Otherwise it seals once through native `seal`. It never changes the target.
+  physical seal even when native provenance differs, e.g. after a restore or a
+  changed capability definition). Otherwise it seals once through native
+  `seal`. It never changes the target.
 - **list/read** re-verify seals (native `verify_sealed` + projection + naming);
-  results are fresh copies that callers own. Reading needs no live tools. The
+  results are fresh copies that callers own. Reading needs no live tools or
+  capabilities. The
   catalog is exactly the seals named `gen_rsi_v<31 hex>_<16 hex>` in the
   provider's generated-config directory; native seals with other slugs (e.g.
   hand-derived candidates) are not versions of this catalog. Should several
   such seals hold one logical id, all must verify and `read` reports the first
   by name.
-- **restore** changes only the named target, only through native
-  `adopt_bundle` (CAS + before-change descriptor + one registration
-  transaction). If the target already serves that logical content it returns
-  `changed=false` and changes nothing. A change never creates history, never
+- **restore** first requires every provider the version's seal recorded (each
+  tool, each referenced capability, the tool loader) to be served exactly as
+  recorded (native `verify_providers`), else `PROVIDER_UNAVAILABLE` /
+  `PROVIDER_CHANGED`. This holds for the no-op as for a change: those
+  identities are native, outside the logical id, so a capability definition
+  (tools, briefing, context provider) or the loader's served code can change
+  while the live logical id and the target CAS stay equal. It changes only the
+  named target, only through native `adopt_bundle` (CAS + before-change
+  descriptor + one registration transaction). If the target already serves
+  that logical content it returns `changed=false` and changes nothing. A change
+  never creates history, never
   touches other targets, and keeps every existing paused/running/completed run
   on its SDK graph-version pin with its old resolved prompt bytes (adoption
   retains old roles beside the new bundle-specific roles).
@@ -115,13 +124,13 @@ other native refusal, message preserved).
 Order. capture: target form, known target, native capture (providers, then
 content domain), projection, catalog integrity (tampered), sealed form
 reproduces content, seal. restore: version form, target form, CAS form, known
-target, known version, tamper, CAS, no-op, adoption reproduces content,
-providers, adoption. `list_versions` refuses `TAMPERED_VERSION` if any catalog
+target, known version, tamper, CAS, recorded providers, no-op, adoption
+reproduces content, adoption. `list_versions` refuses `TAMPERED_VERSION` if any catalog
 seal fails verification; `read` of another version still works.
 
 ## Ownership
-- Host-owned (outside this API): tools, ordinary target registration, runs and
-  their lifecycle, the SDK graph-version pins.
+- Host-owned (outside this API): tools, capability definitions, ordinary target
+  registration, runs and their lifecycle, the SDK graph-version pins.
 - Provider-owned: seals it writes (immutable once written) and the adoption it
   performs on the named target. The native binding keeps no state beyond its
   host objects: no version, pin, run or sequence ledger.
@@ -129,13 +138,16 @@ seal fails verification; `read` of another version still works.
 ## Conformance
 `test_contract.run_conformance(make_world)`; `make_world() -> (api, fixture)`.
 The fixture performs host actions outside the API: `install_tool`,
-`remove_tool`, `register` (ordinary generated config; the vector also states the
+`remove_tool`, `define_capability` / `archive_capability` (the host's
+capability definition path; archive is refused while a registered target
+offers the capability), `register` (ordinary generated config; the vector also states the
 content it resolves to, which only the fake uses), `start_run`, `pause_run`,
 `complete_run`, `observe_runs` (status, pinned graph version, resolved prompts),
 `claim_prompt`, `tamper_seal`, `snapshot` (all observable host state) and
 `snapshot_outside(target, since=None)` (all of it except the target's own
 files/graph/manifest and target roles absent from `since`).
-Vectors: `units` (registered input, `$self` = target), `contents`, pinned
+Vectors: `tools`, `capabilities` (definitions), `units` (registered input,
+`$self` = target), `contents`, pinned
 `ids`/`canonical`, `same_id`, `distinct_ids`, `domain_refusals`, `scenarios`.
 Step grammar: `expect` is `{error}`, `{result}` (exact, typed) or
 `{result_subset}`; `unchanged: true` requires an identical snapshot;
@@ -152,4 +164,6 @@ Concurrency beyond the native `sf._lock` exclusion, boot/restart of the
 catalog, candidate derivation (`derive_candidate`), builtin (non-generated)
 targets, retirement/deletion, normal runtime/deployment, model or evaluator
 execution. Fixture proof is SDK 1.5.92 in an isolated container, not the
-critical SDK 1.5.94 runtime.
+critical SDK 1.5.94 runtime. Tool-loader served-code drift is refused by the
+same native `verify_providers` call, but no vector drives it: changing the
+loader's served code would mean patching product code.

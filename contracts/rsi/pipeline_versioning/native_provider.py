@@ -242,6 +242,16 @@ class NativeVersions:
             if previous != expected_current:
                 raise c.Conflict(f"target {target!r} is {previous[:12]}, "
                                  f"not expected {expected_current[:12]}")
+            # Every tool, capability and the tool loader the version recorded
+            # must still be served as recorded, for a no-op as for a change:
+            # their native identities are outside the logical id, so an equal
+            # live id says nothing about them.
+            try:
+                fb.verify_providers(self._sf, sealed)
+            except fb.BundleRefused as exc:
+                err = (c.ProviderUnavailable if str(exc).startswith("unresolved ")
+                       else c.ProviderChanged)(str(exc))
+                raise err from exc
             if self._live_id(target) == version_id:
                 return {"target": target, "version_id": version_id, "changed": False,
                         "previous_unit_identity": previous, "unit_identity": previous}
@@ -251,12 +261,6 @@ class NativeVersions:
                 raise _classify(exc) from exc
             if project_unit(target, unit, sealed["tools"])[1] != version_id:
                 raise c.UnsupportedContent("adoption would not serve this logical content")
-            try:
-                fb.verify_providers(self._sf, sealed)
-            except fb.BundleRefused as exc:
-                err = (c.ProviderUnavailable if str(exc).startswith("unresolved ")
-                       else c.ProviderChanged)(str(exc))
-                raise err from exc
             try:
                 done = fb.adopt_bundle(self._sf, self._registry, target, physical,
                                        expected_current=expected_current,

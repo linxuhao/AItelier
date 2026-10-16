@@ -91,8 +91,9 @@ def _subset(expected: Any, actual: Any) -> bool:
     return _same(expected, actual)
 
 
-_FIXTURE_OPS = {"install_tool", "remove_tool", "register", "start_run", "pause_run",
-                "complete_run", "observe_runs", "claim_prompt", "tamper_seal"}
+_FIXTURE_OPS = {"install_tool", "remove_tool", "define_capability", "archive_capability",
+                "register", "start_run", "pause_run", "complete_run", "observe_runs",
+                "claim_prompt", "tamper_seal"}
 
 
 def _call(api: Any, fx: Any, ctx: _Ctx, step: Dict[str, Any]) -> Any:
@@ -126,6 +127,11 @@ def _call(api: Any, fx: Any, ctx: _Ctx, step: Dict[str, Any]) -> Any:
         return fx.install_tool(tool["name"], dict(tool["files"]))
     if op == "remove_tool":
         return fx.remove_tool(step["name"])
+    if op == "define_capability":
+        cap = v["capabilities"][step["capability"]]
+        return fx.define_capability(cap["name"], list(cap["tools"]), cap["briefing"])
+    if op == "archive_capability":
+        return fx.archive_capability(step["name"])
     if op == "register":
         key = step["unit"]
         return fx.register(step["target"], literal(v["units"][key]),
@@ -382,6 +388,25 @@ class FakeConformanceTest(unittest.TestCase):
             api._host.tool_identity = lambda name: {"native": False, "files": {}}
         fails = self._mutant_fails(patch2)
         self.assertTrue(any("PROVIDER_UNAVAILABLE" in f for f in fails))
+
+    def test_vectors_detect_noop_restore_skipping_recorded_providers(self):
+        """The e700d6a ordering: a no-op answered before the recorded
+        providers are verified."""
+        def patch(api, fx):
+            orig = api.restore
+
+            def restore(target, vid, *, expected_current):
+                c.check_version_id(vid)
+                t = api._target(target)
+                api._seal(vid)
+                if t["unit"] == expected_current and api._live_id(t) == vid:
+                    return {"target": target, "version_id": vid, "changed": False,
+                            "previous_unit_identity": t["unit"], "unit_identity": t["unit"]}
+                return orig(target, vid, expected_current=expected_current)
+            api.restore = restore
+        fails = self._mutant_fails(patch)
+        self.assertTrue(any("referenced_capability" in f and "PROVIDER_CHANGED" in f
+                            for f in fails), fails)
 
 
 if __name__ == "__main__":

@@ -65,6 +65,10 @@ class AgentChatRequest(BaseModel):
     # user-toggled via this request field ONLY — the model has no tool to
     # change it, so prompt injection cannot escalate to coding mode.
     mode: str | None = None
+    # Coding Mode: the authenticated user explicitly asks that a successful
+    # handoff of THIS interaction also be committed in Source with this
+    # message. Absent = deliver working bytes only (no user commit needed).
+    commit_message: str | None = None
 
     @field_validator("mode")
     @classmethod
@@ -145,8 +149,28 @@ async def agent_chat(
             if key not in client_keys:
                 history.append({"role": m["role"], "content": m["content"]})
 
+    # Coding Mode authority is fixed HERE, at the authenticated writer entry
+    # (router-level require_writer), before any model sampling: this session
+    # and this project. Model arguments, replayed messages and session_runs
+    # links are never this entry. Sessions carry no owner column, so this is
+    # the existing all-authenticated-writers bearer-session boundary, not a
+    # per-user tenant claim.
+    coding_scope, coding_refusal = None, None
+    if mode == "coding":
+        from core import coding_workspace
+        if request.current_project:
+            try:
+                coding_scope = coding_workspace.authorize_entry(
+                    db, session_id=session_id, project_id=request.current_project,
+                    writer=owner, commit_message=request.commit_message)
+            except coding_workspace.Unavailable as exc:
+                coding_refusal = str(exc)
+        else:
+            coding_refusal = ("select a project for this coding session; repository "
+                              "tools are unavailable without one")
+
     agent = MetaAgent(db, ws, owner_email=owner, session_id=session_id, mode=mode,
-                      user_lang=user.lang if user else None)
+                      user_lang=user.lang if user else None, coding_scope=coding_scope)
 
     async def event_stream():
         collected_events = []  # persist after streaming
@@ -154,6 +178,8 @@ async def agent_chat(
         # client can adopt it even if the stream later aborts.
         if minted:
             yield f"data: {json.dumps({'type': 'session', 'session_id': session_id})}\n\n"
+        if coding_refusal:
+            yield f"data: {json.dumps({'type': 'coding_unavailable', 'message': coding_refusal})}\n\n"
         # Persist the user message up-front: the backend is the single owner of
         # chat-history persistence (the frontend no longer fire-and-forgets a
         # duplicate save). Saving before the stream means it survives a
@@ -351,3 +377,66 @@ def save_chat_message(
         request.content,
     )
     return {"status": "saved"}
+
+# ── Coding Mode: session working-tree view and plan decisions ──────────
+# The coding chat's file view is the SESSION's owned working tree, resolved
+# by the server from the session's sealed workspace binding. A caller run id
+# is only a display fence (a mismatch says the view moved), never a selector.
+# The generic project Source view (RepoPanel) stays the Source checkout.
+
+
+class CodingPlanDecisionRequest(BaseModel):
+    session_id: str
+    decision: str
+    expected_checkpoint: dict | None = None
+    decision_id: str | None = None
+    feedback: str = ""
+
+
+def _coding_http(fn):
+    from core import coding_workspace as cw
+    try:
+        return fn()
+    except cw.Busy as exc:
+        raise HTTPException(status_code=409, detail={"status": "busy", "message": str(exc)})
+    except cw.Unavailable as exc:
+        raise HTTPException(status_code=409, detail={"status": exc.status, "message": str(exc)})
+
+
+@router.get("/coding/view")
+def coding_view(session_id: str, db: DBManager = Depends(get_db_manager)):
+    from core import coding_workspace as cw
+    return _coding_http(lambda: cw.session_view(db, session_id))
+
+
+@router.get("/coding/tree")
+def coding_tree(session_id: str, subdir: str = "", run_id: str | None = None,
+                db: DBManager = Depends(get_db_manager)):
+    from core import coding_workspace as cw
+    return _coding_http(lambda: cw.session_tree(db, session_id, subdir=subdir, run_fence=run_id))
+
+
+@router.get("/coding/file")
+def coding_file(session_id: str, path: str, run_id: str | None = None,
+                db: DBManager = Depends(get_db_manager)):
+    from core import coding_workspace as cw
+    return _coding_http(lambda: cw.session_file(db, session_id, path, run_fence=run_id))
+
+
+@router.post("/coding/plan-decision")
+def coding_plan_decision(body: CodingPlanDecisionRequest, http_request: Request,
+                         user: CurrentUser | None = Depends(get_optional_user),
+                         db: DBManager = Depends(get_db_manager)):
+    """The authenticated user's decision on the plan governing the session's tree.
+
+    Writer-gated like the whole router. Backend model tools cannot reach this
+    route; it is the only path that approves, rejects or dismisses a governing
+    coding_task, and an approval must carry the exact retained plan token the
+    view rendered.
+    """
+    from core import coding_workspace as cw
+    writer = user.email if user else (creator_email(http_request) or "cli@local")
+    return _coding_http(lambda: cw.decide_plan(
+        db, session_id=body.session_id, writer=writer, decision=body.decision,
+        expected_checkpoint=body.expected_checkpoint, decision_id=body.decision_id,
+        feedback=body.feedback))

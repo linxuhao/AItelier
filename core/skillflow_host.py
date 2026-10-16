@@ -70,6 +70,71 @@ class AItelierSkillFlow(SkillFlow):
             name, bound, run_id=run_id, step_id=step_id,
             project_root=project_root)
 
+    # Coding Mode owns two kinds of runs: the host-held coding_workspace run of
+    # a session, and the coding_task plan that governs it. Every ingress
+    # (REST, MCP, CLI, scheduler, model proxies) reaches the engine through
+    # these methods, so the fences sit here rather than on each route: such a
+    # run is created, approved, rejected, stopped or failed only inside the
+    # Coding Mode controller, which holds that project's request lock.
+
+    def create_run(self, graph_name: str, *args, **kwargs):
+        from core.coding_workspace import fence_create
+        fence_create(graph_name)
+        return super().create_run(graph_name, *args, **kwargs)
+
+    def approve_checkpoint(self, run_id: str, *args, **kwargs):
+        from core.coding_workspace import fence_control
+        fence_control(run_id, "approval")
+        return super().approve_checkpoint(run_id, *args, **kwargs)
+
+    def reject_checkpoint(self, run_id: str, *args, **kwargs):
+        from core.coding_workspace import fence_control
+        fence_control(run_id, "rejection")
+        return super().reject_checkpoint(run_id, *args, **kwargs)
+
+    def stop_run(self, run_id: str, *args, **kwargs):
+        from core.coding_workspace import fence_control
+        fence_control(run_id, "stop")
+        return super().stop_run(run_id, *args, **kwargs)
+
+    def fail_run(self, run_id: str, *args, **kwargs):
+        from core.coding_workspace import fence_control
+        fence_control(run_id, "failure")
+        return super().fail_run(run_id, *args, **kwargs)
+
+    # Generic state moves would carry a paused governing plan past its
+    # checkpoint (resume), reopen a dismissed one (reactivate/re_run) or move
+    # the pinned graph under a sealed binding (repin).
+    def resume_run(self, run_id: str, *args, **kwargs):
+        from core.coding_workspace import fence_control
+        fence_control(run_id, "resume")
+        return super().resume_run(run_id, *args, **kwargs)
+
+    def pause_run(self, run_id: str, *args, **kwargs):
+        from core.coding_workspace import fence_control
+        fence_control(run_id, "pause")
+        return super().pause_run(run_id, *args, **kwargs)
+
+    def reactivate_run(self, run_id: str, *args, **kwargs):
+        from core.coding_workspace import fence_control
+        fence_control(run_id, "reactivation")
+        return super().reactivate_run(run_id, *args, **kwargs)
+
+    def re_run(self, run_id: str, *args, **kwargs):
+        from core.coding_workspace import fence_control
+        fence_control(run_id, "re-run")
+        return super().re_run(run_id, *args, **kwargs)
+
+    def complete_run(self, run_id: str, *args, **kwargs):
+        from core.coding_workspace import fence_control
+        fence_control(run_id, "completion")
+        return super().complete_run(run_id, *args, **kwargs)
+
+    def repin_run(self, run_id: str, *args, **kwargs):
+        from core.coding_workspace import fence_control
+        fence_control(run_id, "repin")
+        return super().repin_run(run_id, *args, **kwargs)
+
     def register_graph(self, graph):
         """Refuse a graph whose dispatch slots claim host-owned identity.
 

@@ -19,12 +19,15 @@ x-aitelier:
   scheduler_owned: false          # driven by the butler via SkillTool, never the poller
   seed_file: "task.md"
   output_step: "implement"
+  # Artifact/control flow only. Code is edited in the Coding Mode session's
+  # owned coding_workspace tree; this run never gets a second writable tree.
+  repo_mode: "none"
   input_hint: >-
-    Plan-gated code change. Driven via runner_start(project_id, task), NOT
-    start_config_run: plan → engine-enforced user checkpoint → implement. task
-    = the change to make, verbatim. At the implement step, offload to a spawned
-    agent by starting the coding_impl pipeline (against_project) instead of
-    editing inline.
+    Plan-gated code change. Driven via runner_start(task) in Coding Mode, NOT
+    start_config_run: plan → user approval in the Coding Mode UI → implement in
+    the session's own working tree. task = the change to make, verbatim.
+    Offloading the implement step to coding_impl is unavailable until it can
+    deliver into the session's bound working tree.
 
 begin: "plan"
 

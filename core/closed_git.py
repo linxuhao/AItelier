@@ -1366,6 +1366,118 @@ def commit_all(path, message: str) -> dict:
             lock.release()
 
 
+def commit_delivered(path, *, expected_head: str, expected_index_sha256: str, deltas: dict,
+                     blob, message: str, journal) -> dict:
+    """Commit ONLY delivered path states onto the captured HEAD, without any Git callback.
+
+    The caller already holds the exclusive admission under which these working
+    bytes were delivered; this is not a second admission. The tree is HEAD's
+    tree plus *deltas* (path -> {"kind","mode","sha"} or {"kind":"absent"})
+    through a private index; unrelated staged entries are not committed and
+    stay staged. ``journal(**fields)`` must durably record the commit OID, old
+    HEAD and the owned ``index.lock`` identity BEFORE the ref moves, so an
+    interruption between ref CAS and index installation is reconcilable.
+    """
+    repo = discover(path)
+    with repo_lock(repo.top):
+        lock = IndexLock(repo.git_dir)
+        moved = False
+        try:
+            head = resolve_commit(repo.top, "HEAD")
+            if head != expected_head:
+                raise GitRefused(f"HEAD moved to {head}; the delivered commit is unavailable")
+            idx = read_index(repo.git_dir)
+            if idx.raw_sha256 != expected_index_sha256:
+                raise GitRefused("the Source index changed since the commit was evaluated; "
+                                 "nothing is overwritten")
+            tree = ls_tree(repo.top, head)
+            entries = {p: IndexEntry(path=p, mode=t.mode, sha=t.sha) for p, t in tree.items()}
+            for rel, st in deltas.items():
+                _parts(rel)
+                if st["kind"] == "absent":
+                    entries.pop(rel, None)
+                else:
+                    entries[rel] = IndexEntry(path=rel, mode=st["mode"], sha=st["sha"])
+            wanted = {st["sha"] for st in deltas.values() if st["kind"] != "absent"}
+            for sha in missing_objects(repo.top, wanted):
+                if _store_bytes(repo.top, blob(sha)) != sha:
+                    raise RuntimeError(f"raw blob {sha} could not be stored")
+            new_tree = _write_tree(repo.top, entries.values())
+            msg = clean_message(message)
+            commit = out(repo.top, "commit-tree", new_tree, "-p", head, "--no-gpg-sign",
+                         input=msg, identity=commit_identity(repo.top))
+            settled = [e for e in idx.entries if e.path not in deltas]
+            with WorkTree(repo.top) as wt:
+                for rel, st in deltas.items():
+                    if st["kind"] != "absent":
+                        settled.append(entry_from_stat(rel, st["mode"], st["sha"], wt.lstat(rel)))
+            data = serialize_index(settled)
+            lock.stage(data)
+            lst = os.lstat(lock.path)
+            journal(state="prepared", commit=commit, old_head=head, tree=new_tree,
+                    pre_index_sha256=idx.raw_sha256,
+                    staged_index_sha256=hashlib.sha256(data).hexdigest(),
+                    lock_identity=[lst.st_dev, lst.st_ino])
+            _cas_ref(repo.top, "HEAD", commit, head, "commit: " + msg.split("\n", 1)[0])
+            moved = True
+            journal(state="ref_moved")
+            _install_after_ref(lock, commit)
+            journal(state="index_settled")
+            return {"status": "committed", "commit": commit, "old_head": head, "tree": new_tree}
+        finally:
+            if moved and not lock.done:
+                # The ref already names the commit: the staged, synced lock is
+                # the journaled settlement evidence recovery installs. It is
+                # kept, never unlinked on the way out.
+                pass
+            else:
+                lock.release()
+
+
+def recover_commit_delivered(path, journal: dict) -> dict:
+    """Reconcile an interrupted ``commit_delivered`` from its journal; never roll back.
+
+    Only the two recorded identities are recognised: the ref still at the old
+    HEAD with the pre-index (the commit never landed; this operation's own
+    lock is removed) or the ref at the commit with the pre-index plus this
+    operation's own staged lock (installed now). Any third ref/index/lock state
+    is ambiguous and left exactly as found.
+    """
+    repo = discover(path)
+    with repo_lock(repo.top):
+        head = resolve_commit(repo.top, "HEAD")
+        current = read_index(repo.git_dir).raw_sha256
+        lockp = Path(repo.git_dir) / "index.lock"
+        commit, old = journal.get("commit"), journal.get("old_head")
+        staged, pre = journal.get("staged_index_sha256"), journal.get("pre_index_sha256")
+
+        def own_lock() -> bool:
+            try:
+                st = os.lstat(lockp)
+            except FileNotFoundError:
+                return False
+            if [st.st_dev, st.st_ino] != list(journal.get("lock_identity") or []):
+                return False
+            data = _read_regular(lockp, limit=1 << 30)
+            return data is not None and hashlib.sha256(data).hexdigest() == staged
+
+        if not commit or not old:
+            # Nothing was journaled as prepared: the ref cannot have moved.
+            return {"status": "not_committed", "reason": "interrupted before the commit was prepared"}
+        if head == commit and current == staged:
+            return {"status": "committed", "commit": commit, "old_head": old, "recovered": True}
+        if head == commit and current == pre and own_lock():
+            os.rename(lockp, Path(repo.git_dir) / "index")
+            return {"status": "committed", "commit": commit, "old_head": old,
+                    "recovered": True, "index_installed_on_recovery": True}
+        if head == old and current == pre:
+            if own_lock():
+                os.unlink(lockp)
+            return {"status": "not_committed", "reason": "interrupted before the ref moved"}
+        return {"status": "ambiguous", "head": head, "index_sha256": current,
+                "lock_present": lockp.exists(), "journal": journal}
+
+
 # ── materialising a commit as raw files ──────────────────────────────
 
 def materialize(top, root, commit: str, *, prior: dict | None = None,

@@ -409,9 +409,12 @@ class TestTheEnvScrubCoversTheUnattendedPath:
         subprocess a human watches. The pipeline's test runner — which runs
         LLM-authored pytest and `npm ci` postinstall scripts unattended —
         passed os.environ through untouched."""
-        from core.env_scrub import ENV_SECRET_RE
+        # Coding Mode no longer spawns a backend shell at all (the owned
+        # executor runs it with a fixed environment), so MetaAgent holds no
+        # copy of the rule that could drift from this one.
+        from core.env_scrub import ENV_SECRET_RE  # noqa: F401 -- the one definition
         from core.meta_agent import MetaAgent
-        assert MetaAgent._ENV_SECRET_RE is ENV_SECRET_RE
+        assert not hasattr(MetaAgent, "_ENV_SECRET_RE")
 
     def test_secrets_are_dropped_and_ordinary_vars_kept(self, monkeypatch):
         from core.env_scrub import scrubbed_env
@@ -443,8 +446,10 @@ class TestTheEnvScrubCoversTheUnattendedPath:
 def test_the_code_path_jail_uses_component_containment():
     """`str(target).startswith(str(base))` admitted a SIBLING sharing the
     prefix — a project at .../projects/foo could read .../projects/foo-backup."""
-    import core.meta_agent as ma
-    src = inspect.getsource(ma.MetaAgent._resolve_code_target)
+    import core.coding_workspace as cw
+    # The Source-bound jail is gone with the Source-bound write tools; Coding
+    # Mode's jail is the session working tree's.
+    src = inspect.getsource(cw._w_path)
     # Comments stripped: the fix's own note explains what `startswith` did
     # wrong, and a naive substring check matched that explanation instead of
     # the code — the guard would have passed on a revert that kept the comment.

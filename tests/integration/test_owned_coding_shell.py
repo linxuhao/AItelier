@@ -238,6 +238,20 @@ def test_forged_grant_absent_facility_and_stale_real_epoch_refuse(runtime, monke
     assert not (work / "stale.txt").exists()
 
 
+@pytest.mark.parametrize("historical", [None, {"digest": "foreign"}])
+def test_missing_or_mismatched_historical_pin_refuses_before_claim_resolver(runtime, monkeypatch, historical):
+    root, db, sf, make = runtime
+    grant, work, _ = make()
+    with monkeypatch.context() as patch:
+        patch.setattr(sf, "get_graph_version", lambda *args: historical)
+        def no_fallback(*args):
+            raise AssertionError("missing pin reached SDK resolver fallback")
+        patch.setattr(sf, "get_steps", no_fallback)
+        with pytest.raises(ex.IsolationUnavailable, match="historical graph pin"):
+            shell.execute_coding_shell(grant, "printf fallback > missing-pin.txt", 5)
+    assert not (work / "missing-pin.txt").exists() and ri.write_admissions(db, str(work)) == []
+
+
 @pytest.mark.parametrize("quiet", [False, True])
 def test_new_caller_keeps_simulated_unanswered_create_but_retires_definite_refusal(runtime, monkeypatch, quiet):
     """Synthetic primitive outcome; actual grant, launcher handler and socket path.

@@ -243,7 +243,7 @@ def _admit_write_under_fence(db, path, *, kind: str, detail: str = "") -> dict:
     the same database, so whichever reaches it first wins and the other is
     refused — in both orders, which is the whole property.
 
-    The transaction is short by construction: two statements, no I/O, and it is
+    The transaction is short database-only arbitration, and it is
     committed before the caller does any work. What outlives it is a ROW, and
     that is deliberate — the guard has to cover a `bash` that runs for minutes
     or an editor between read and write, and no transaction may be held across
@@ -267,6 +267,17 @@ def _admit_write_under_fence(db, path, *, kind: str, detail: str = "") -> dict:
                     f"{canonical} is held by run {lease['run_id']} "
                     f"(config {lease['config_name']}, since "
                     f"{lease['acquired_at']}); refusing {kind} {detail!r}.")
+            # Only coding_workspace is exclusive; generic writers still coexist.
+            existing = conn.execute(
+                "SELECT id, owner, kind, detail FROM checkout_write_admissions "
+                "WHERE canonical_checkout = ? "
+                "AND (? = 'coding_workspace' OR kind = 'coding_workspace') "
+                "ORDER BY id LIMIT 1", (canonical, kind)).fetchone()
+            if existing:
+                raise CheckoutLeased(
+                    f"{canonical} has write admission {existing['id']} "
+                    f"({existing['kind']} {existing['detail']!r}) by "
+                    f"{existing['owner']}; refusing {kind} {detail!r}.")
             cur = conn.execute(
                 "INSERT INTO checkout_write_admissions "
                 "(canonical_checkout, owner, kind, detail, admitted_at) "

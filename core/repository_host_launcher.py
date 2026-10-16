@@ -40,6 +40,9 @@ import uuid
 
 
 MAX_REQUEST_BYTES = 1 << 20
+# JSON may escape each permitted output byte as six ASCII bytes.
+CODING_SHELL_OUTPUT_LIMIT = 12_000
+CODING_SHELL_WIRE_LIMIT = 6 * CODING_SHELL_OUTPUT_LIMIT + 4096
 
 
 class LaunchRefused(ValueError):
@@ -344,6 +347,7 @@ def _run_docker(cfg: dict, fields: dict, conn: socket.socket | None = None) -> d
             validate_request(cfg, fields["shell_request"])
     # The create's time counts against this bound (`owned_container`).
     deadline = time.monotonic() + fields["timeout"] + 15
+    coding_shell = fields.get("profile") == "coding_shell"
     with owned_container(command, command[0], name, cancelled=cancelled) as proc:
         output = {"stdout": bytearray(), "stderr": bytearray()}
         with selectors.DefaultSelector() as selector:
@@ -367,6 +371,8 @@ def _run_docker(cfg: dict, fields: dict, conn: socket.socket | None = None) -> d
                         selector.unregister(key.fileobj)
                         pipes -= 1
                     else:
+                        if coding_shell and sum(map(len, output.values())) + len(chunk) > CODING_SHELL_WIRE_LIMIT:
+                            raise LaunchRefused("coding shell executor exceeded its wire output limit")
                         output[key.data].extend(chunk)
         proc.wait(timeout=max(.1, deadline - time.monotonic()))
     stderr = output["stderr"].decode(errors="replace")
@@ -379,6 +385,13 @@ def _run_docker(cfg: dict, fields: dict, conn: socket.socket | None = None) -> d
     if not isinstance(result, dict) or type(result.get("returncode")) is not int or not all(
             isinstance(result.get(k), str) for k in ("stdout", "stderr")):
         raise LaunchRefused("isolated executor returned a malformed result")
+    if coding_shell:
+        try:
+            size = sum(len(result[k].encode("utf-8")) for k in ("stdout", "stderr"))
+        except UnicodeEncodeError as exc:
+            raise LaunchRefused("coding shell executor returned invalid UTF-8 output") from exc
+        if size > CODING_SHELL_OUTPUT_LIMIT:
+            raise LaunchRefused("coding shell executor exceeded its decoded output limit")
     return result
 
 

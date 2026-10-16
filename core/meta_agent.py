@@ -3421,13 +3421,16 @@ class MetaAgent:
         base = self.ws.get_code_path(pid)
         if base is None:
             return {"error": f"Project '{pid}' declares no code repository"}
-        subdir = args.get("subdir")
-        if subdir:
-            base = base / subdir
+        root = base.resolve()
+        base = (root / (args.get("subdir") or "")).resolve()
+        if not base.is_relative_to(root):
+            return {"error": "Path traversal denied"}
         if not base.exists():
             return {"error": f"Code repo not found for {pid}"}
         tree = []
         for item in iter_visible_source_files(base):
+            if not item.resolve().is_relative_to(root):
+                continue
             if item.is_file() and "/.git/" not in f"/{item}":
                 tree.append(str(item.relative_to(base)))
         return {"project_id": pid, "tree": tree[:200]}
@@ -3448,7 +3451,7 @@ class MetaAgent:
             return {"error": f"Project '{pid}' declares no code repository"}
         base = base.resolve()
         target = (base / path).resolve()
-        if not str(target).startswith(str(base)):
+        if not target.is_relative_to(base):
             return {"error": "Path traversal denied"}
         if not target.is_file():
             return {"error": f"File not found: {path}"}
@@ -3922,6 +3925,8 @@ class MetaAgent:
         matches = []
         truncated = False
         for item in iter_visible_source_files(base, glob):
+            if not item.resolve().is_relative_to(base):
+                continue
             if not item.is_file() or "/.git/" in f"/{item}":
                 continue
             if item.suffix.lower() in _BINARY_SUFFIXES:
@@ -3997,13 +4002,16 @@ class MetaAgent:
     def _tool_list_workspace_tree(self, args: dict) -> dict:
         pid = args["project_id"]
         base = self.ws._get_secure_path(pid)
-        subdir = args.get("subdir")
-        if subdir:
-            base = base / subdir
+        root = base.resolve()
+        base = (root / (args.get("subdir") or "")).resolve()
+        if not base.is_relative_to(root):
+            return {"error": "Path traversal denied"}
         if not base.exists():
             return {"error": f"Workspace not found for {pid}"}
         tree = []
         for item in iter_visible_source_files(base):
+            if not item.resolve().is_relative_to(root):
+                continue
             if item.is_file():
                 rel = str(item.relative_to(base))
                 tree.append(rel)
@@ -4014,7 +4022,7 @@ class MetaAgent:
         path = args["path"]
         base = self.ws._get_secure_path(pid)
         target = (base / path).resolve()
-        if not str(target).startswith(str(base.resolve())):
+        if not target.is_relative_to(base.resolve()):
             return {"error": "Path traversal denied"}
         if not target.exists():
             return {"error": f"File not found: {path}"}

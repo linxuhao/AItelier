@@ -354,7 +354,16 @@ def start_config_run(db, ws, config_name: str, project_id: str, *,
     if against_commit:
         run_context["review_candidate"] = {"project_id": against_project,
                                            "run_id": against_run, "commit_sha": against_commit}
-    run_id = sf.get_or_create_run(config_name, project_id, run_context)
+    # Same exclusion adopt_bundle/reconcile_adoption hold (sf._lock): a target
+    # with an unreconciled adoption descriptor cannot gain a run.
+    import contextlib
+    from core.pipeline_frozen_bundle import launch_block
+    with getattr(sf, "_lock", None) or contextlib.nullcontext():
+        blocked = launch_block(config_name)
+        if blocked:
+            return {"status": "error", "project_id": project_id,
+                    "config_name": config_name, "message": blocked}
+        run_id = sf.get_or_create_run(config_name, project_id, run_context)
     # Past every launch refusal and before this run can execute.
     _reconcile_repo_type()
 

@@ -665,6 +665,13 @@ def _register_forge_roles(sf, config_name: str, roles: dict) -> None:
     for role, cfg in (roles or {}).items():
         if not isinstance(cfg, dict):
             continue
+        if cfg.get("_frozen") is True:
+            # Sealed RSI bundle role: registered EXACTLY as frozen (model,
+            # tools, prompt and every setting), no forge defaults and no
+            # host-model substitution.
+            sf.register_agent_config_from_dict(
+                role, {k: v for k, v in cfg.items() if k != "_frozen"})
+            continue
         role_config = {
             "model": cfg.get("model") or "host",
             "tools": (cfg["tools"] if isinstance(cfg.get("tools"), list)
@@ -1174,6 +1181,19 @@ def load_generated_configs(sf, registry) -> list[str]:
                 unsafe_release_configs.add(path.stem)
         except (UnicodeError, yaml.YAMLError):
             continue
+    # Sealed RSI bundles and adoption targets: verify before ANY write or
+    # registration. A bad seal / unreconciled adoption blocks only that name;
+    # a healthy seal is also exempt from the in-place migrations (immutable).
+    from core import pipeline_frozen_bundle as _fb
+    sealed_ok: set[str] = set()
+    for path in sorted(config_dir.glob(f"{GEN_PREFIX}*.yaml")):
+        sealed, refusal = _fb.boot_gate(config_dir, path.stem)
+        if refusal:
+            _log.warning("refusing %s at boot: %s", path.stem, refusal)
+            unsafe_release_configs.add(path.stem)
+        elif sealed is not None:
+            sealed_ok.add(path.stem)
+    migration_skip = unsafe_release_configs | sealed_ok
 
     from core.output_migration import migrate_generated_outputs
     from core.release_gate_migration import migrate_generated_release_gates
@@ -1191,11 +1211,11 @@ def load_generated_configs(sf, registry) -> list[str]:
                 paths=[config_dir, config_dir.parent / "migration_backups"]
                 ) as boot_transaction:
             for migration in migrate_generated_outputs(
-                    config_dir, skip_configs=unsafe_release_configs):
+                    config_dir, skip_configs=migration_skip):
                 _log.info("output target migration: %s (backup %s)",
                           migration["path"], migration["backup"])
             for migration in migrate_generated_release_gates(
-                    config_dir, skip_configs=unsafe_release_configs):
+                    config_dir, skip_configs=migration_skip):
                 _log.info("release fail-fast migration: %s (backup %s)",
                           migration["path"], migration["backup"])
 
@@ -1212,6 +1232,9 @@ def load_generated_configs(sf, registry) -> list[str]:
                     yaml_text = f.read_text(encoding="utf-8")
                     graph, hints = _validated_registration(
                         f.stem, yaml_text, roles=roles, sf=sf)
+                    if f.stem in sealed_ok:
+                        hints = _fb.sealed_hints(
+                            hints, _fb.verify_sealed(config_dir, f.stem))
                     plans.append((f, roles, graph, hints))
                 except Exception as e:
                     _log.warning(

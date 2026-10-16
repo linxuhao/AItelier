@@ -80,7 +80,9 @@ def test_native_name_resolves_to_the_host_route_and_others_are_untouched():
     assert loader.load_fn("pytest") is native_pytest
     plain = ToolLoader(NATIVE)
     assert loader.load_fn("lint") is not native_pytest
-    assert loader.load_fn("lint").__code__.co_filename == plain.load_fn("lint").__code__.co_filename
+    lint = loader.load_fn("lint")
+    assert lint.__wrapped__.__code__.co_filename == plain.load_fn("lint").__code__.co_filename
+    assert __import__("inspect").signature(lint) == __import__("inspect").signature(plain.load_fn("lint"))
     assert loader.load_fn("run_tests").__module__.endswith("run_tests")
 
 

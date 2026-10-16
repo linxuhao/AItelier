@@ -228,16 +228,23 @@ def node_payload(node: dict, timeout: int) -> dict:
 # common dir (absent in the container: `git rev-parse HEAD` exited 128), and a
 # direct repository's `.git` holds the source's config, hooks, remotes and
 # every other ref. The container instead gets a private repository holding
-# only HEAD and its last GIT_META_DEPTH commits, an index of HEAD (so status
-# and diff show the current tree against it) and git's own default config.
+# HEAD with ALL of its history, an index of HEAD (so status and diff show the
+# current tree against it) and git's own default config.
 #
-# No git process runs in the source repository, so none of its config,
-# hooks or helpers is read or executed with this host's authority: HEAD is
-# resolved by reading ref files, and the commits come from a staging
-# repository of ours whose only link to the source is an object alternate.
-GIT_META_DEPTH = 50
+# The host only reads HEAD's ref files; no git runs in the source repository,
+# so none of its config, hooks or helpers is read or executed. The history is
+# copied by git in a preparation container bounded like the test container
+# (no network, 2 CPU, 2 GiB, 512 pids, read-only root) that mounts nothing of
+# the source but its object directory, read-only: an object the source keeps
+# anywhere else (a chained alternate, a promisor remote) is missing there and
+# preparation fails instead of reaching for it. GIT_META_MAX_BYTES bounds the
+# copy three times: HEAD's objects must fit before anything is transferred
+# (`rev-list --disk-usage`), no file written may exceed it (RLIMIT_FSIZE; the
+# fetch keeps one pack), and the finished metadata must fit. The whole
+# preparation has one deadline; on it, or on cancellation, its container is
+# removed.
 GIT_META_MAX_BYTES = 256 << 20
-GIT_STEP_TIMEOUT = 60
+GIT_PREP_DEADLINE = 120
 GIT_CONTAINER_DIR = "/aitelier-git"   # a linked worktree's pointer names it
 _REFNAME = re.compile(r"refs/(?!.*\.\.)(?!.*//)[A-Za-z0-9._/+-]+")
 _PER_WORKTREE_REFS = ("refs/bisect/", "refs/worktree/", "refs/rewritten/")
@@ -298,7 +305,76 @@ def _source_head(gitdir: Path, common: Path) -> tuple[str, str]:
     raise ValueError("HEAD is a symbolic ref chain longer than 5")
 
 
-def private_git(repo: Path, dest: Path, common: Path | None = None) -> tuple[list[str], dict]:
+# Run by `sh -c` in the preparation container: $1 the source object directory
+# (mounted read-only, alone), $2 HEAD's commit, $3 its branch or "", $4 the
+# byte budget, $5 the gitdir to create. Prints the bytes HEAD's objects use.
+PREP_SCRIPT = r'''set -eu
+export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 LC_ALL=C HOME=/tmp
+out=$5
+stage=$(dirname "$out")/stage.git
+git init -q --bare --template= "$stage"
+mkdir -p "$stage/objects/info"
+printf '%s\n' "$1" > "$stage/objects/info/alternates"
+git --git-dir="$stage" rev-parse -q --verify "$2^{commit}" >/dev/null
+used=$(git --git-dir="$stage" rev-list --objects --disk-usage "$2")
+if [ "$used" -gt "$4" ]; then
+  echo "HEAD's history uses $used bytes of objects (budget $4)" >&2
+  exit 3
+fi
+git --git-dir="$stage" update-ref refs/heads/snapshot "$2"
+git init -q --bare --template= --initial-branch="${3:-snapshot}" "$out"
+git --git-dir="$out" -c protocol.file.allow=always -c fetch.unpackLimit=1 fetch -q --no-tags \
+  --no-write-fetch-head --no-recurse-submodules "file://$stage" refs/heads/snapshot
+if [ -n "$3" ]; then
+  git --git-dir="$out" update-ref "refs/heads/$3" "$2"
+else
+  git --git-dir="$out" update-ref --no-deref HEAD "$2"
+fi
+git --git-dir="$out" read-tree "$2"
+git --git-dir="$out" config core.bare false
+rm -rf "$stage"
+echo "$used"
+'''
+
+
+def _run_prep(command: list[str], docker: str, name: str, conn=None) -> str:
+    """Run the preparation container within GIT_PREP_DEADLINE; stdout.
+
+    ``conn`` (the launcher's client socket) becoming readable is cancellation,
+    as in the launcher's own wait. Any exit from here removes the container
+    by its own name: killing the `docker run` client alone leaves it running.
+    """
+    import select
+    import time
+    proc = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True, start_new_session=True)
+    deadline = time.monotonic() + GIT_PREP_DEADLINE
+    try:
+        while True:
+            try:
+                stdout, stderr = proc.communicate(timeout=0.1)
+                break
+            except subprocess.TimeoutExpired:
+                if time.monotonic() > deadline:
+                    raise RuntimeError(f"Git metadata preparation exceeded its "
+                                       f"{GIT_PREP_DEADLINE}s deadline")
+                if conn is not None and select.select([conn], [], [], 0)[0]:
+                    raise RuntimeError("client disconnected during Git metadata preparation")
+        if proc.returncode:
+            raise RuntimeError(f"Git metadata preparation failed: {stderr.strip()[-300:]}")
+        return stdout
+    finally:
+        try:
+            subprocess.run([docker, "rm", "-f", name], stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=10)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=10)
+
+
+def private_git(repo: Path, dest: Path, common: Path | None = None, *, image: str,
+                docker: str = "docker", conn=None) -> tuple[list[str], dict]:
     """Docker mounts giving ``repo`` its private Git metadata, built in ``dest``.
 
     Never raises: when no metadata can be provided, ``info`` says why, a
@@ -307,56 +383,41 @@ def private_git(repo: Path, dest: Path, common: Path | None = None) -> tuple[lis
     container answers "not a git repository". A repository without `.git`
     gets nothing and stays one.
     """
-    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(dest),
-           "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
-           "GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C"}
-
-    def git(gitdir: Path, *args):
-        done = subprocess.run(["git", "--git-dir", str(gitdir), *args], env=env, cwd=dest,
-                              capture_output=True, text=True, timeout=GIT_STEP_TIMEOUT)
-        if done.returncode:
-            raise RuntimeError(f"git {args[0]} failed: {done.stderr.strip()[-300:]}")
-        return done.stdout.strip()
-
     try:
         own_dir = stat.S_ISDIR(os.lstat(Path(repo) / ".git").st_mode)
     except FileNotFoundError:
         return [], {"provided": False, "reason": "repository has no .git"}
-    private, stage = dest / "git", dest / "stage.git"
+    private = dest / "git"
     try:
         gitdir, source_common = _source_gitdirs(Path(repo), common)
         sha, branch = _source_head(gitdir, source_common)
-        git(stage, "init", "-q", "--bare", "--template=")
-        (stage / "objects" / "info").mkdir(exist_ok=True)
-        (stage / "objects" / "info" / "alternates").write_text(f"{source_common / 'objects'}\n")
-        git(stage, "config", "pack.threads", "2")
-        git(stage, "rev-parse", "--verify", "-q", f"{sha}^{{commit}}")
-        git(stage, "update-ref", "refs/heads/snapshot", sha)
-        git(private, "init", "-q", "--bare", "--template=",
-            f"--initial-branch={branch or 'snapshot'}")
-        git(private, "-c", "protocol.file.allow=always", "fetch", "-q", "--no-tags",
-            "--no-write-fetch-head", f"--depth={GIT_META_DEPTH}", "--no-recurse-submodules",
-            f"file://{stage}", "refs/heads/snapshot")
-        if branch:
-            git(private, "update-ref", f"refs/heads/{branch}", sha)
-        else:
-            git(private, "update-ref", "--no-deref", "HEAD", sha)
-        git(private, "read-tree", sha)
-        git(private, "config", "core.bare", "false")
+        objects = source_common / "objects"
+        if not stat.S_ISDIR(os.lstat(objects).st_mode):
+            raise ValueError("the source object directory is not a real directory")
+        budget = GIT_META_MAX_BYTES
+        name = "aitelier-git-" + uuid.uuid4().hex
+        used = _run_prep(
+            [docker, "run", "--rm", "--init", "--network", "none",
+             "--cpus", "2", "--memory", "2g", "--pids-limit", "512",
+             "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+             "--read-only", "--tmpfs", "/tmp:size=16m", "--ulimit", f"fsize={budget}:{budget}",
+             "--user", f"{os.getuid()}:{os.getgid()}", "--name", name,
+             "-v", f"{objects}:{objects}:ro", "-v", f"{dest}:{dest}:rw",
+             "--entrypoint", "sh", image, "-c", PREP_SCRIPT, "prep",
+             str(objects), sha, branch, str(budget), str(private)],
+            docker, name, conn)
         size = sum(p.stat().st_size for p in private.rglob("*")
                    if p.is_file() and not p.is_symlink())
-        if size > GIT_META_MAX_BYTES:
-            raise RuntimeError(f"private metadata is {size} bytes (> {GIT_META_MAX_BYTES})")
-        info = {"provided": True, "head": sha, "branch": branch, "depth": GIT_META_DEPTH,
-                "shallow": (private / "shallow").exists(), "metadata_bytes": size}
+        if size > budget:
+            raise RuntimeError(f"private metadata is {size} bytes (> {budget})")
+        info = {"provided": True, "head": sha, "branch": branch,
+                "object_bytes": int(used.split()[-1]), "metadata_bytes": size}
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
         shutil.rmtree(private, ignore_errors=True)
         info = {"provided": False, "reason": str(exc)[:500]}
         if not own_dir:
             return [], info
         private.mkdir(mode=0o700)
-    finally:
-        shutil.rmtree(stage, ignore_errors=True)
     if own_dir:
         return ["-v", f"{private}:{Path(repo) / '.git'}:ro"], info
     (dest / "pointer").write_text(f"gitdir: {GIT_CONTAINER_DIR}\n")
@@ -489,11 +550,16 @@ def _execute(repo: Path, args: list[str], timeout: int, *,
         from core import datadir
         git_root = datadir.aitelier_home() / "cpu-git"
         git_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        image = os.environ.get("AITELIER_TEST_IMAGE", "aitelier:latest")
         git_dir = Path(tempfile.mkdtemp(prefix="git-", dir=git_root))
-        git_mounts, git_info = private_git(repo, git_dir)
+        try:
+            git_mounts, git_info = private_git(repo, git_dir, image=image, docker=docker)
+        except BaseException:
+            # Cancelled while preparing: the launch's own finally is not reached yet.
+            shutil.rmtree(git_dir, ignore_errors=True)
+            raise
         network, mounts = "none", ["-v", f"{repo}:{repo}:ro", *git_mounts]
         workdir_arg = str(repo)
-        image = os.environ.get("AITELIER_TEST_IMAGE", "aitelier:latest")
     command = [docker, "run", "--rm", "--init", "--network", network,
                "--cpus", "2", "--memory", "2g", "--pids-limit", "512",
                "--cap-drop", "ALL", "--security-opt", "no-new-privileges",

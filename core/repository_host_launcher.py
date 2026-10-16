@@ -372,7 +372,10 @@ def handle_request(cfg: dict, raw: bytes, conn: socket.socket | None = None) -> 
                 directory = Path(tempfile.mkdtemp(prefix="git-", dir=root))
                 try:
                     mounts, git = private_git(Path(fields["repo"]), directory,
-                                              fields["git_common"] or None)
+                                              fields["git_common"] or None,
+                                              image=str(cfg["test_image"]),
+                                              docker=shutil.which("docker") or "docker",
+                                              conn=conn)
                     result = _run_docker(cfg, {**fields, "git_mounts": mounts}, conn)
                 finally:
                     shutil.rmtree(directory, ignore_errors=True)

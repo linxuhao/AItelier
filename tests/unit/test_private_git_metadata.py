@@ -2,9 +2,15 @@
 
 The live failure: a linked worktree's `.git` points into the source repo's
 common dir, which the isolated container never mounts, so `git rev-parse HEAD`
-exited 128. `private_git` builds a self-contained copy holding HEAD only; these
-tests reproduce the container's overlay with a view directory (no Docker here)
+exited 128. `private_git` builds a self-contained copy of HEAD and its whole
+history; these tests reproduce the container's overlay with a view directory
 and run the actual git commands a test suite would run.
+
+There is no Docker here: a `docker` shim runs the preparation container's own
+command (the real `PREP_SCRIPT` and git) directly, at the same paths the
+container mounts. The container's bounds themselves (no network, rlimit,
+memory, the source object directory as its only source mount) are measured
+with real Docker by the operator controls, not here.
 """
 import json
 import os
@@ -94,13 +100,41 @@ def view_of(repo: Path, mounts: list[str], tmp_path: Path) -> Path:
     return view
 
 
+SHIM = """#!/usr/bin/env python3
+import json, os, sys
+args = sys.argv[1:]
+with open(os.environ["DOCKER_SHIM_LOG"], "a") as log:
+    log.write(json.dumps(args) + "\\n")
+if args[:2] == ["rm", "-f"]:
+    sys.exit(0)
+at = args.index("--entrypoint")
+os.execvp(args[at + 1], [args[at + 1]] + args[at + 3:])
+"""
+
+
+@pytest.fixture
+def docker(tmp_path, monkeypatch):
+    shim = tmp_path / "bin" / "docker"
+    shim.parent.mkdir()
+    shim.write_text(SHIM)
+    shim.chmod(0o755)
+    monkeypatch.setenv("DOCKER_SHIM_LOG", str(tmp_path / "docker.log"))
+    return str(shim)
+
+
+def docker_calls(tmp_path):
+    log = tmp_path / "docker.log"
+    return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+
+
 def provision(repo, tmp_path, common=None):
     dest = tmp_path / "dest"
     dest.mkdir()
-    return executor.private_git(repo, dest, common)
+    return executor.private_git(repo, dest, common, image="sha256:" + "b" * 64,
+                                docker=str(tmp_path / "bin" / "docker"))
 
 
-def test_linked_worktree_head_is_the_actual_run_head(linked, source, tmp_path):
+def test_linked_worktree_head_is_the_actual_run_head(linked, source, tmp_path, docker):
     expected = git(linked, "rev-parse", "HEAD")
     mounts, info = provision(linked, tmp_path, source / ".git")
     assert info["provided"] is True and info["head"] == expected
@@ -108,7 +142,7 @@ def test_linked_worktree_head_is_the_actual_run_head(linked, source, tmp_path):
     assert git(view, "rev-parse", "HEAD") == expected
 
 
-def test_linked_worktree_reads_head_file_ancestry_and_diff(linked, source, tmp_path):
+def test_linked_worktree_reads_head_file_ancestry_and_diff(linked, source, tmp_path, docker):
     mounts, _ = provision(linked, tmp_path, source / ".git")
     view = view_of(linked, mounts, tmp_path)
     assert git(view, "show", "HEAD:m.py") == "print(3)"
@@ -117,7 +151,7 @@ def test_linked_worktree_reads_head_file_ancestry_and_diff(linked, source, tmp_p
     assert git(view, "rev-parse", "--abbrev-ref", "HEAD") == "aitelier/run-1"
 
 
-def test_linked_worktree_status_is_the_current_tree(linked, source, tmp_path):
+def test_linked_worktree_status_is_the_current_tree(linked, source, tmp_path, docker):
     mounts, _ = provision(linked, tmp_path, source / ".git")
     view = view_of(linked, mounts, tmp_path)
     status = subprocess.run(["git", "status", "--porcelain=v1"], cwd=view, env=ENV, check=True,
@@ -125,7 +159,7 @@ def test_linked_worktree_status_is_the_current_tree(linked, source, tmp_path):
     assert sorted(status) == sorted([" M f.txt", "?? .gitattributes"])
 
 
-def test_private_metadata_has_no_source_config_refs_or_remotes(linked, source, tmp_path):
+def test_private_metadata_has_no_source_config_refs_or_remotes(linked, source, tmp_path, docker):
     mounts, _ = provision(linked, tmp_path, source / ".git")
     view = view_of(linked, mounts, tmp_path)
     assert git(view, "for-each-ref", "--format=%(refname)") == "refs/heads/aitelier/run-1"
@@ -140,12 +174,12 @@ def test_private_metadata_has_no_source_config_refs_or_remotes(linked, source, t
     assert b"config-identity" not in raw
 
 
-def test_provisioning_never_runs_source_programs(linked, source, tmp_path):
+def test_provisioning_never_runs_source_programs(linked, source, tmp_path, docker):
     provision(linked, tmp_path, source / ".git")
     assert sorted(p.name for p in (tmp_path / "markers").glob("*-RAN")) == []
 
 
-def test_direct_repository_git_dir_is_masked_by_private_copy(source, tmp_path):
+def test_direct_repository_git_dir_is_masked_by_private_copy(source, tmp_path, docker):
     hostile(source, tmp_path / "markers")
     expected = git(source, "rev-parse", "HEAD")
     mounts, info = provision(source, tmp_path, source / ".git")
@@ -157,7 +191,7 @@ def test_direct_repository_git_dir_is_masked_by_private_copy(source, tmp_path):
     assert sorted(p.name for p in (tmp_path / "markers").glob("*-RAN")) == []
 
 
-def test_direct_repository_failure_still_masks_source_git(tmp_path):
+def test_direct_repository_failure_still_masks_source_git(tmp_path, docker):
     repo = tmp_path / "projects" / "empty"
     repo.mkdir(parents=True)
     git(repo, "init", "-q")
@@ -168,7 +202,7 @@ def test_direct_repository_failure_still_masks_source_git(tmp_path):
     assert mounts[1].endswith(f":{repo / '.git'}:ro") and list(private.iterdir()) == []
 
 
-def test_repository_without_git_gets_no_metadata_and_no_enclosing_repo(source, tmp_path):
+def test_repository_without_git_gets_no_metadata_and_no_enclosing_repo(source, tmp_path, docker):
     inner = source / "subproject"
     inner.mkdir()
     (inner / "m.py").write_text("print(0)\n")
@@ -176,7 +210,7 @@ def test_repository_without_git_gets_no_metadata_and_no_enclosing_repo(source, t
     assert mounts == [] and info == {"provided": False, "reason": "repository has no .git"}
 
 
-def test_forged_pointer_to_another_worktree_is_refused(linked, source, tmp_path):
+def test_forged_pointer_to_another_worktree_is_refused(linked, source, tmp_path, docker):
     other = tmp_path / "worktrees" / "foreign"
     git(source, "worktree", "add", "-q", "-b", "foreign", str(other), "HEAD")
     foreign = (other / ".git").read_text()
@@ -185,7 +219,7 @@ def test_forged_pointer_to_another_worktree_is_refused(linked, source, tmp_path)
     assert mounts == [] and info["provided"] is False and "own" in info["reason"]
 
 
-def test_common_dir_must_be_the_run_source(linked, tmp_path):
+def test_common_dir_must_be_the_run_source(linked, tmp_path, docker):
     elsewhere = tmp_path / "projects" / "q"
     elsewhere.mkdir()
     git(elsewhere, "init", "-q")
@@ -193,19 +227,100 @@ def test_common_dir_must_be_the_run_source(linked, tmp_path):
     assert mounts == [] and "source repository" in info["reason"]
 
 
-def test_history_is_bounded_to_depth(tmp_path):
-    repo = tmp_path / "projects" / "deep"
+def pinned_history(tmp_path, commits=61):
+    """A small ordinary repository whose checked-in pin names its first commit."""
+    repo = tmp_path / "projects" / "pinned"
     repo.mkdir(parents=True)
     git(repo, "init", "-q", "-b", "main")
-    for i in range(executor.GIT_META_DEPTH + 5):
-        commit(repo, f"d{i}", **{"n.txt": f"{i}\n"})
-    mounts, info = provision(repo, tmp_path)
+    for n in range(commits):
+        if n == 1:
+            (repo / "pin.txt").write_text(git(repo, "rev-parse", "HEAD") + "\n")
+        commit(repo, f"revision {n}", **{"version.txt": f"{n}\n"})
+    (repo / "version.txt").write_text("dirty current tree\n")
+    return repo
+
+
+def test_checked_in_pin_to_the_first_commit_resolves(tmp_path, docker):
+    repo = pinned_history(tmp_path)
+    pin = (repo / "pin.txt").read_text().strip()
+    mounts, _ = provision(repo, tmp_path)
     view = view_of(repo, mounts, tmp_path)
-    assert info["shallow"] is True
-    assert len(git(view, "log", "--format=%H").splitlines()) == executor.GIT_META_DEPTH
+    assert subprocess.run(["git", "merge-base", "--is-ancestor", pin, "HEAD"],
+                          cwd=view, env=ENV).returncode == 0
+    assert git(view, "merge-base", pin, "HEAD") == pin
+    assert git(view, "show", f"{pin}:version.txt") == "0"
+    assert "version.txt" in git(view, "diff", "--name-only", pin, "HEAD").splitlines()
 
 
-def test_detached_head_stays_detached(source, tmp_path):
+def test_whole_head_history_is_present(tmp_path, docker):
+    repo = pinned_history(tmp_path)
+    mounts, _ = provision(repo, tmp_path)
+    view = view_of(repo, mounts, tmp_path)
+    assert git(view, "rev-list", "--count", "HEAD") == git(repo, "rev-list", "--count", "HEAD")
+    assert git(view, "rev-parse", "HEAD~55") == git(repo, "rev-parse", "HEAD~55")
+    assert not (Path(mounts[1].split(":")[0]) / "shallow").exists()
+
+
+def test_history_over_the_budget_is_refused_before_transfer(tmp_path, docker, monkeypatch):
+    repo = tmp_path / "projects" / "large"
+    repo.mkdir(parents=True)
+    git(repo, "init", "-q", "-b", "main")
+    (repo / "blob.bin").write_bytes(os.urandom(64 << 10))
+    commit(repo, "large")
+    monkeypatch.setattr(executor, "GIT_META_MAX_BYTES", 16 << 10)
+    mounts, info = provision(repo, tmp_path)
+    assert info["provided"] is False and "(budget 16384)" in info["reason"]
+    assert list(Path(mounts[1].split(":")[0]).iterdir()) == []  # masked, nothing fetched
+
+
+def test_preparation_container_is_bounded(source, tmp_path, docker):
+    provision(source, tmp_path)
+    run = next(c for c in docker_calls(tmp_path) if c[0] == "run")
+    for flag, value in [("--network", "none"), ("--cpus", "2"), ("--memory", "2g"),
+                        ("--pids-limit", "512"), ("--cap-drop", "ALL"),
+                        ("--ulimit", f"fsize={executor.GIT_META_MAX_BYTES}:"
+                                     f"{executor.GIT_META_MAX_BYTES}")]:
+        assert run[run.index(flag) + 1] == value
+    assert "--read-only" in run and "--rm" in run
+    objects = source / ".git" / "objects"
+    volumes = [run[i + 1] for i, a in enumerate(run) if a == "-v"]
+    assert volumes == [f"{objects}:{objects}:ro", f"{tmp_path / 'dest'}:{tmp_path / 'dest'}:rw"]
+
+
+def test_preparation_container_is_removed_by_name(source, tmp_path, docker):
+    provision(source, tmp_path)
+    calls = docker_calls(tmp_path)
+    name = calls[0][calls[0].index("--name") + 1]
+    assert calls[1] == ["rm", "-f", name]
+
+
+def test_preparation_deadline_stops_and_removes_it(tmp_path, docker, monkeypatch):
+    import time
+    monkeypatch.setattr(executor, "GIT_PREP_DEADLINE", 0.3)
+    marker = tmp_path / "pid"
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match="deadline"):
+        executor._run_prep(["sh", "-c", f"echo $$ > {marker}; exec sleep 30"], docker, "prep-x")
+    assert time.monotonic() - started < 3
+    with pytest.raises(ProcessLookupError):
+        os.kill(int(marker.read_text()), 0)
+    assert docker_calls(tmp_path) == [["rm", "-f", "prep-x"]]
+
+
+def test_client_disconnect_cancels_preparation(tmp_path, docker):
+    import socket
+    import time
+    client, server = socket.socketpair()
+    client.close()
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match="client disconnected"):
+        executor._run_prep(["sleep", "30"], docker, "prep-y", server)
+    server.close()
+    assert time.monotonic() - started < 3
+    assert docker_calls(tmp_path) == [["rm", "-f", "prep-y"]]
+
+
+def test_detached_head_stays_detached(source, tmp_path, docker):
     git(source, "checkout", "-q", "--detach", "HEAD~1")
     expected = git(source, "rev-parse", "HEAD")
     mounts, info = provision(source, tmp_path)
@@ -233,12 +348,13 @@ def _launcher(tmp_path, repo, mode, source_repo):
     return cfg, request
 
 
-def test_launcher_mounts_private_git_and_removes_it(linked, source, tmp_path, monkeypatch):
+def test_launcher_mounts_private_git_and_removes_it(linked, source, tmp_path, monkeypatch, docker):
     cfg, request = _launcher(tmp_path, linked, "worktree", source)
     seen = {}
 
+    monkeypatch.setattr(host.shutil, "which", lambda _: docker)
+
     def run(cfg_, fields, conn=None):
-        monkeypatch.setattr(host.shutil, "which", lambda _: "/controlled/docker")
         seen["argv"] = host.docker_command(cfg_, fields, "aitelier-cpu-x")
         seen["dir"] = Path(fields["git_mounts"][1].split(":")[0]).parent
         seen["existed"] = seen["dir"].is_dir()
@@ -274,7 +390,7 @@ def test_host_reply_git_reaches_the_caller(monkeypatch):
     assert done.git == replies["git"]
 
 
-def test_direct_adapter_mounts_private_git_and_removes_it(source, tmp_path, monkeypatch):
+def test_direct_adapter_mounts_private_git_and_removes_it(source, tmp_path, monkeypatch, docker):
     from core import datadir
     monkeypatch.setattr(datadir, "aitelier_home", lambda: tmp_path / "home")
     seen = {}
@@ -284,19 +400,16 @@ def test_direct_adapter_mounts_private_git_and_removes_it(source, tmp_path, monk
         def communicate(self, timeout):
             return json.dumps({"returncode": 0, "stdout": "", "stderr": ""}), ""
         def poll(self): return 0
-    monkeypatch.setattr(executor.shutil, "which", lambda _: "/trusted/docker")
+    monkeypatch.setattr(executor.shutil, "which", lambda _: docker)
     real_popen = subprocess.Popen
     def popen(command, **kwargs):
-        if command[0] != "/trusted/docker":
-            return real_popen(command, **kwargs)  # provisioning's own git
+        if "python3" not in command:
+            return real_popen(command, **kwargs)  # the preparation container (shim)
         target = next(v for v in command if v.endswith(f":{source / '.git'}:ro"))
         seen["private"] = Path(target.split(":")[0])
         seen["head"] = (seen["private"] / "HEAD").read_text()
         return Proc()
     monkeypatch.setattr(executor.subprocess, "Popen", popen)
-    real_run = subprocess.run
-    monkeypatch.setattr(executor.subprocess, "run", lambda c, **k: (
-        subprocess.CompletedProcess(c, 0) if c[1:3] == ["rm", "-f"] else real_run(c, **k)))
     done = executor._execute(source, ["python3", "-m", "pytest"], 5)
     assert done.git["head"] == git(source, "rev-parse", "HEAD")
     assert seen["head"] == "ref: refs/heads/main\n" and not seen["private"].exists()

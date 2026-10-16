@@ -707,11 +707,11 @@ class Evidence(Attempt):
     evidence_id: str
     criterion_id: str
     verdict: str = Field(description=(
-        "Evidence verdict. Failed external attempts accept only pass or fail; "
+        "Evidence verdict. Failed attempts accept only pass or fail; "
         "candidate evidence retains the general pass/fail/skip contract."))
     artifact: str = Field(description=(
         "Exact artifact reviewed. Candidate evidence must match the attempt artifact. "
-        "A terminal quiescent failed external attempt may retain criterion evidence "
+        "A terminal quiescent failed external or bound SkillFlow attempt may retain criterion evidence "
         "against one shared artifact, exactly once per criterion, but this never promotes "
         "the attempt or permits verification."))
     report_ref: str = Field(description=(

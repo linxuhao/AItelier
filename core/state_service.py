@@ -1273,7 +1273,7 @@ class StateService:
         validate_evidence_semantics(report_bytes, criterion_id, verdict, artifact)
         return self.attempts.record_evidence(attempt_id, evidence_id, criterion_id, verdict, artifact,
                                              report_ref, report_sha256, self.actor, detail,
-                                             report_bytes=report_bytes, director_identity=director_identity)
+                                             report_bytes=report_bytes, director_identity=director_identity, sf=self.sf)
 
     def verify_node(self, project_id, node_key, expected_revision, attempt_id):
         self.reconcile_attempt(attempt_id)

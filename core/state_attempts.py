@@ -698,33 +698,52 @@ class StateAttempts:
         if not latest or latest[0] != attempt["attempt_id"]:
             raise StateConflict("a newer attempt supersedes this candidate")
 
-    def _eligible_failed_external_evidence(self, conn, attempt, artifact):
-        """Validate evidence scope without turning a failed attempt into a candidate."""
-        if attempt["execution_kind"] != "external" or attempt["status"] != "failed":
+    def _eligible_failed_evidence(self, conn, attempt, artifact, sf=None):
+        """Validate diagnostic scope without turning failure into a candidate."""
+        if attempt["status"] != "failed":
             raise StateConflict("a completed candidate with a pinned artifact is required")
-        report = conn.execute(
-            "SELECT * FROM state_external_observations WHERE attempt_id=? AND observation_id=?",
-            (attempt["attempt_id"], attempt["terminal_observation_id"]),
-        ).fetchone()
-        owner = conn.execute(
-            "SELECT status,settled_at FROM state_external_owners WHERE attempt_id=?",
-            (attempt["attempt_id"],),
-        ).fetchone()
-        if (not report or report["status"] != "failed"
-                or report["resulting_status"] != "failed" or not report["quiescent"]
-                or not owner or owner["status"] != "settled" or not owner["settled_at"]):
-            raise StateConflict(
-                "failed external attempt lacks a complete scoped quiescent observation")
-        retained = conn.execute(
-            "SELECT report_bytes,retained_ref FROM state_external_report_blobs "
-            "WHERE report_sha256=?", (report["report_sha256"],),
-        ).fetchone()
-        report_bytes = bytes(retained["report_bytes"] if retained else b"")
-        if (not report_bytes
-                or hashlib.sha256(report_bytes).hexdigest() != report["report_sha256"]
-                or retained["retained_ref"] != report["report_ref"]):
-            raise StateConflict(
-                "failed external attempt lacks immutable validated report bytes")
+        if attempt["execution_kind"] == "skillflow":
+            if sf is None or not attempt["run_id"]:
+                raise StateConflict("failed workflow evidence requires its bound execution runtime")
+            row = self._engine_row(sf, attempt["run_id"], attempt)
+            if (row["status"] != "failed"
+                    or row["graph_version"] != attempt["graph_version"]
+                    or row["graph_digest"] != attempt["graph_digest"]):
+                raise StateConflict("failed workflow outcome or definition pin changed")
+            try:
+                audit = sf.audit_operation_owners(attempt["run_id"])
+            except Exception as exc:
+                raise StateConflict("cannot confirm failed workflow operation quiescence") from exc
+            if (not isinstance(audit, dict) or audit.get("lost") != []
+                    or audit.get("unknown") != [] or type(audit.get("alive")) is not int
+                    or audit["alive"] != 0):
+                raise StateConflict("failed workflow has unretired or unknown operations")
+        elif attempt["execution_kind"] == "external":
+            report = conn.execute(
+                "SELECT * FROM state_external_observations WHERE attempt_id=? AND observation_id=?",
+                (attempt["attempt_id"], attempt["terminal_observation_id"]),
+            ).fetchone()
+            owner = conn.execute(
+                "SELECT status,settled_at FROM state_external_owners WHERE attempt_id=?",
+                (attempt["attempt_id"],),
+            ).fetchone()
+            if (not report or report["status"] != "failed"
+                    or report["resulting_status"] != "failed" or not report["quiescent"]
+                    or not owner or owner["status"] != "settled" or not owner["settled_at"]):
+                raise StateConflict(
+                    "failed external attempt lacks a complete scoped quiescent observation")
+            retained = conn.execute(
+                "SELECT report_bytes,retained_ref FROM state_external_report_blobs "
+                "WHERE report_sha256=?", (report["report_sha256"],),
+            ).fetchone()
+            report_bytes = bytes(retained["report_bytes"] if retained else b"")
+            if (not report_bytes
+                    or hashlib.sha256(report_bytes).hexdigest() != report["report_sha256"]
+                    or retained["retained_ref"] != report["report_ref"]):
+                raise StateConflict(
+                    "failed external attempt lacks immutable validated report bytes")
+        else:
+            raise StateConflict("unsupported failed attempt execution kind")
         if not self._pins_current(conn, attempt):
             raise StateConflict(
                 "failed attempt inputs are stale; evidence must match the current contract")
@@ -749,7 +768,7 @@ class StateAttempts:
     def record_evidence(self, attempt_id: str, evidence_id: str, criterion_id: str, verdict: str,
                         artifact: str, report_ref: str, report_sha256: str, reviewer: str,
                         detail: str = "", *, report_bytes: bytes | None = None,
-                        director_identity: str | None = None) -> dict:
+                        director_identity: str | None = None, sf=None) -> dict:
         """Append a scoped verifier attestation, never infer it from agent prose."""
         director_identity = evidence_director_identity(director_identity)
         key(evidence_id, "evidence id")
@@ -779,13 +798,12 @@ class StateAttempts:
                     from core.state_report_integrity import store_report_blob
                     store_report_blob(conn, report_ref, report_sha256, report_bytes)
                 return dict(prior)
-            failed_external = (attempt["execution_kind"] == "external"
-                               and attempt["status"] == "failed")
-            if failed_external:
+            failed_attempt = attempt["status"] == "failed"
+            if failed_attempt:
                 if verdict not in {"pass", "fail"}:
                     raise StateGraphError(
                         "failed-attempt criterion evidence verdict must be pass or fail")
-                self._eligible_failed_external_evidence(conn, attempt, artifact)
+                self._eligible_failed_evidence(conn, attempt, artifact, sf)
                 duplicate = conn.execute(
                     "SELECT evidence_id FROM state_evidence WHERE attempt_id=? AND criterion_id=? LIMIT 1",
                     (attempt_id, criterion_id),
@@ -816,7 +834,7 @@ class StateAttempts:
                          (evidence_id, attempt_id, criterion_id, checks[criterion_id]["kind"], verdict, artifact,
                           report_ref, report_sha256, reviewer, detail, payload_hash, now(), director_identity))
             node = self.store._node(conn, attempt["project_id"], attempt["node_key"])
-            if node["verified_receipt"] and not failed_external:
+            if node["verified_receipt"] and not failed_attempt:
                 affected = self.store._invalidate(conn, attempt["project_id"], attempt["node_key"])
                 self.store._event(conn, attempt["project_id"], attempt["node_key"], "acceptance_invalidated",
                                   {"reason": "new evidence supersedes an accepted observation", "invalidated": affected})

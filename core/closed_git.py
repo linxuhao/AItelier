@@ -894,7 +894,7 @@ class WorkTree:
                     os.rmdir(name, dir_fd=pfd)
                 except OSError as e:
                     raise GitRefused(f"{rel}: a non-empty directory occupies this path") from e
-            tmp = f".{name}.aitelier-{os.getpid()}-{threading.get_ident()}.tmp"
+            tmp = f".aitelier-{os.getpid()}-{threading.get_ident()}.tmp"
             if mode == 0o120000:
                 os.symlink(os.fsdecode(data), tmp, dir_fd=pfd)
             else:
@@ -1160,7 +1160,7 @@ def commit_all(path, message: str) -> dict:
                     if old is not None and not is_attr and not old.intent_to_add:
                         st = wt.lstat(rel)
                         if _kind_mode(st) == old.mode and _stat_matches(old, st, idx.mtime_ns):
-                            entries.append(replace(old, assume_valid=False, skip_worktree=False))
+                            entries.append(old)
                             continue
                     got = wt.read(rel, keep=True)
                     if got.kind in ("absent", "dir"):

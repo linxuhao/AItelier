@@ -831,7 +831,7 @@ def test_the_markers_are_live_under_native_callback_capable_git(tmp_path, marker
     src = tmp_path / "src"
     init(src, {"a.txt": "one\n", ".gitattributes": "*.txt filter=evil\n"})
     make_hostile(src, markers)
-    add_filters(src, markers, attributes=False)
+    add_filters(src, markers)  # working-tree attributes now select the filter again
     native = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(tmp_path),
               "LC_ALL": "C", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, **_ID}
 

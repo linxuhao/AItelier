@@ -12,6 +12,7 @@ touching the original rows. Referenced evidence and immutable receipts stay
 byte-for-byte intact. No production path is resolved.
 """
 from __future__ import annotations
+import re
 import sqlite3
 
 ATTEMPT_TABLE = """
@@ -184,11 +185,55 @@ def _table_sql(conn, table: str) -> str | None:
 # Tables whose rows reference state_attempts; checked after any rebuild.
 _ATTEMPT_DEPENDENTS = ('state_evidence', 'state_acceptances', 'state_external_observations',
                        'state_external_owners', 'driver_subagents', 'state_handoffs')
+_EXECUTOR_NEUTRAL = {'execution_kind', 'harness', 'external_id', 'reporting_actor', 'observation_version',
+                     'artifact_kind', 'terminal_observation_id'}
+_LEASE_INDEX = ('CREATE INDEX IF NOT EXISTS state_attempts_lease ON state_attempts(project_id,lease_expires_at) '
+                'WHERE lease_expires_at IS NOT NULL')
+_CREATE = re.compile(r'\s*CREATE\s+(?:UNIQUE\s+)?(TABLE|INDEX|TRIGGER)\s+IF\s+NOT\s+EXISTS\s+(\w+)\s', re.I)
+
+
+def _current(conn, existing_schema: str) -> bool:
+    """Whether ``initialize`` would change nothing, judged in one READ transaction.
+
+    Every StateService - one per MCP/REST request, reads included - builds the
+    attempt store. Taking BEGIN IMMEDIATE for a no-op made every request queue
+    on SQLite's single write lock, behind each other and behind a legitimately
+    long write such as a candidate's Git-bundle BLOB, until a plain read failed
+    with "database is locked" after this function's 10 s busy timeout. Any
+    doubt answers False, and the locked path below re-checks everything itself.
+    """
+    conn.execute('BEGIN')
+    try:
+        columns = {r['name'] for r in conn.execute('PRAGMA table_info(state_attempts)')}
+        if not (_EXECUTOR_NEUTRAL | {c for c, _ in LEASE_COLUMNS} | {'abandon_kind'}) <= columns \
+                or "'abandoned'" not in (_table_sql(conn, 'state_attempts') or ''):
+            return False
+        objects = {(r['type'], r['name']) for r in conn.execute('SELECT type,name FROM sqlite_master')}
+        for statement in (_LEASE_INDEX, *_statements(existing_schema), *_statements(EXTRA_SCHEMA)):
+            found = _CREATE.match(statement)
+            if found is None or (found.group(1).lower(), found.group(2)) not in objects:
+                return False
+        if 'director_identity' not in {r['name'] for r in conn.execute('PRAGMA table_info(state_evidence)')} \
+                or 'provenance_json' not in {r['name'] for r in conn.execute('PRAGMA table_info(state_acceptances)')} \
+                or not {'late_after_abandon', 'fence'} <= {
+                    r['name'] for r in conn.execute('PRAGMA table_info(state_external_observations)')} \
+                or "'abandoned'" not in (_table_sql(conn, 'state_external_owners') or ''):
+            return False
+        if conn.execute("SELECT 1 FROM state_attempts a WHERE execution_kind='external' AND NOT EXISTS "
+                        "(SELECT 1 FROM state_external_owners o WHERE o.attempt_id=a.attempt_id) LIMIT 1").fetchone():
+            return False
+        # A violation is reported by the locked path, exactly as before.
+        return not any((('table', table) in objects) and conn.execute(f'PRAGMA foreign_key_check({table})').fetchone()
+                       for table in ('state_attempts', *_ATTEMPT_DEPENDENTS))
+    finally:
+        conn.rollback()
 
 
 def initialize(db, existing_schema: str) -> None:
     with db.get_connection() as conn:
         conn.execute('PRAGMA busy_timeout=10000')
+        if _current(conn, existing_schema):
+            return
         conn.execute('PRAGMA foreign_keys=OFF')
         conn.execute('BEGIN IMMEDIATE')
         try:
@@ -206,8 +251,7 @@ def initialize(db, existing_schema: str) -> None:
                 # the copy instead of being normalized.
                 _rebuild(conn, 'state_attempts', ATTEMPT_TABLE, _ATTEMPT_DEPENDENTS)
             columns_now = {r['name'] for r in conn.execute('PRAGMA table_info(state_attempts)')}
-            if not {'execution_kind','harness','external_id','reporting_actor','observation_version',
-                    'artifact_kind','terminal_observation_id'} <= columns_now:
+            if not _EXECUTOR_NEUTRAL <= columns_now:
                 raise sqlite3.IntegrityError('Incomplete executor-neutral attempt schema; refusing partial upgrade')
             # Multi-driver leases (design/multi-driver-coop.md §4.2, P1): additive
             # columns only. Existing rows keep NULL owner/lease = legacy_unleased,
@@ -221,8 +265,7 @@ def initialize(db, existing_schema: str) -> None:
                              "CHECK(abandon_kind IN ('confirmed_stopped','unknown'))")
             if "'abandoned'" not in (_table_sql(conn, 'state_attempts') or ''):
                 raise sqlite3.IntegrityError('state_attempts lacks the abandoned status after migration; refusing')
-            conn.execute('CREATE INDEX IF NOT EXISTS state_attempts_lease ON state_attempts(project_id,lease_expires_at) '
-                         'WHERE lease_expires_at IS NOT NULL')
+            conn.execute(_LEASE_INDEX)
             # Existing table creation is IF NOT EXISTS; keep its evidence/receipt
             # schema and triggers, indexes and explicit legacy compatibility.
             for statement in _statements(existing_schema):

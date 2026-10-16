@@ -91,7 +91,7 @@ def test_native_capture_seal_catalog_restore_and_real_pins(tmp_path, monkeypatch
         sf.resume_run(old_run)
         sf.advance_run(old_run)
         claim = sf.claim_next_step(old_run)
-        assert claim.inputs["_agent_config"]["system_prompt"] == "OLD MAKER"
+        assert claim.inputs["_agent_config"]["config"]["system_prompt"] == "OLD MAKER"
         sf.release_claim(claim.token, "phase2 useful positive, unexecuted")
         # A real SDK-created and genuinely completed fixture run: no forged run
         # id, pin dictionary, owner SQL or provider/model body.

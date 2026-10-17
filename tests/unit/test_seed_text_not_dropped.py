@@ -48,9 +48,12 @@ def _launch(tmp_path, *, seed_file, **kwargs):
     sf._workspace.get_project_path.return_value = tmp_path
     sf._workspace.get_config_path.return_value = tmp_path / "code_review"
     sf.get_run.return_value = {"status": "running"}
+    # This fixture has a mocked run/database, not a persisted isolation record.
+    # Keep isolation at that boundary; seed publication remains real.
     with patch("api.dependencies.get_skillflow", return_value=sf), \
          patch("api.dependencies.get_config_registry", return_value=registry), \
-         patch("core.scheduler.wake_scheduler"):
+         patch("core.scheduler.wake_scheduler"), \
+         patch("core.run_isolation.ensure_for_run", return_value=None):
         result = start_config_run(db, ws, "code_review", "pid_x", **kwargs)
     return result, sf
 

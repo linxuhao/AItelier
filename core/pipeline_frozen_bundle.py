@@ -1150,9 +1150,11 @@ def preview_adoption(target: str, old: dict, sealed: dict) -> dict:
     """Detached form of adopted_unit, also used for before-effect edit validation.
 
     Every adoption (native adopt_bundle, restore, normal edits) is built here,
-    so this is where retained roles are kept immutable: pinned runs resolve a
-    role by name, and an existing name may only be reused for a canonically
-    identical definition (canonical bytes, so true never equals 1 or 1.0)."""
+    so this is where persisted retained roles are kept immutable: pinned runs
+    resolve a role by name, and an existing name may only be reused for a
+    canonically identical definition (canonical bytes, so true never equals 1
+    or 1.0). Names that exist only in the live registry are checked against
+    this result by ``refuse_served_role_changes`` before any effect."""
     from core import pipeline_registry as pr
     phys = sealed['physical_name']
     sep, tag = pr._ROLE_SEP, f"rsi{sealed['bundle_identity'][:16]}_"
@@ -1222,6 +1224,42 @@ def _expected_roles(target: str, roles: dict | None) -> dict:
     return scratch.agent_registry._configs
 
 
+def _serves(have, cfg) -> bool:
+    """Live entry *have* is exactly the registration *cfg* (model, tools and
+    every config value, as accepted canonical values)."""
+    return have is not None and same_canonical(
+        [have.model, list(have.tools), have.config],
+        [cfg.model, list(cfg.tools), cfg.config])
+
+
+def served_role_conflicts(sf, target: str, unit: dict) -> list:
+    """Names publishing whole *unit* would re-register over a DIFFERENT live
+    definition ([] = none).
+
+    Publication registers every role of the unit by name, replacing whatever
+    the live AgentRegistry holds there, and pinned runs claim roles live by
+    name. The persisted roles are not every name an existing run resolves: a
+    name can exist only live (registered by the host, used by an older graph
+    version) and be one an adoption's alias would publish. So the complete
+    proposed registration, with the host's own normalization
+    (``_expected_roles``), is compared with every same-named live entry; an
+    identical one is reused, any other difference is a conflict."""
+    roles = json.loads(unit["roles_text"]) if unit["roles_text"] else None
+    return sorted(name for name, cfg in _expected_roles(target, roles).items()
+                  if name in sf.agent_registry
+                  and not _serves(sf.agent_registry.get(name), cfg))
+
+
+def refuse_served_role_changes(sf, target: str, unit: dict) -> None:
+    """The common preflight of every changing adoption (native adopt_bundle,
+    hence restore, and the normal editors before they catalog anything)."""
+    conflicts = served_role_conflicts(sf, target, unit)
+    if conflicts:
+        raise BundleRefused(
+            f"adoption would replace live role {', '.join(conflicts)}; its existing "
+            f"definition serves pinned runs and differs from the one proposed")
+
+
 def whole_state(sf, registry, config_dir, target: str, unit: dict) -> list:
     """Every provider where *target* differs from whole *unit* ([] = verified).
 
@@ -1264,10 +1302,7 @@ def whole_state(sf, registry, config_dir, target: str, unit: dict) -> list:
     # registration (with its legitimate defaults) serves, or an edit would
     # silently change what pinned runs claim under an unchanged graph pin.
     for role, cfg in _expected_roles(target, roles).items():
-        have = sf.agent_registry.get(role)
-        if have is None or not same_canonical(
-                [have.model, list(have.tools), have.config],
-                [cfg.model, list(cfg.tools), cfg.config]):
+        if not _serves(sf.agent_registry.get(role), cfg):
             problems.append(f"live role {role}")
     for node in graph.steps:
         if node.agent_config and node.agent_config not in sf.agent_registry:
@@ -1310,8 +1345,10 @@ def adopt_bundle(sf, registry, target: str, phys: str, *, expected_current: str,
     """Swap generated *target* onto sealed bundle *phys*, all-or-nothing.
 
     Under the registration lock (also taken by run creation): compare the
-    CURRENT whole-unit identity with ``expected_current`` and verify the target
-    is registered exactly as that unit on every provider, fsync a before-change
+    CURRENT whole-unit identity with ``expected_current``, verify the target
+    is registered exactly as that unit on every provider and that the new
+    unit's registration replaces no different live role
+    (``refuse_served_role_changes``), fsync a before-change
     descriptor holding old+new bytes, publish through the existing validated
     registration transaction, then record an outcome only once ``whole_state``
     verifies it. Any unverified outcome (crash, failed rollback, mixed state)
@@ -1343,6 +1380,7 @@ def adopt_bundle(sf, registry, target: str, phys: str, *, expected_current: str,
         if mixed:
             raise BundleRefused(f"target is registered mixed ({', '.join(mixed)}); "
                                 "reconcile first")
+        refuse_served_role_changes(sf, target, new)
         # The old side's COMPLETE manifest, as verified just above: a rollback,
         # reconciliation or boot restores exactly this, not a re-derivation.
         if registry is not None:

@@ -266,6 +266,8 @@ class PipelineVersions(NativeVersions):
                 proposed = json.loads(preview['roles_text'])
                 pr._validated_registration(target, preview['graph_yaml'],
                                            roles=proposed, sf=self._sf)
+                # The same live-role preflight adoption runs, before any seal.
+                fb.refuse_served_role_changes(self._sf, target, preview)
                 # Preparation starts here. Never catalog before complete preflight.
                 for version in (bundle, candidate):
                     native = fb.compile_bundle(version, c.seal_slug(project_capture(version)[1]))

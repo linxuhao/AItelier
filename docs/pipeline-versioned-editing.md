@@ -28,7 +28,11 @@ historical superset. Every adoption path (normal edits, restore and native
 adoption) reuses an existing role name only for a canonically identical
 definition (`true`, `1` and `1.0` stay distinct); a different existing definition
 refuses before any seal, descriptor, file, registry or history effect, because
-pinned runs resolve that name. Existing legacy roles that still name a shared template
+pinned runs resolve that name. "Existing" means the live role registry, not only
+roles.json: a name the host registered only live (for example one an older graph
+version references) is compared too, with the complete proposed registration as
+the host would serve it (its defaults applied); an identical one is reused.
+Existing legacy roles that still name a shared template
 continue to rely on that file remaining unchanged; normal editing never rewrites
 it. No run is repinned.
 

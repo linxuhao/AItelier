@@ -1,0 +1,25 @@
+{
+  "schema": "rsi.optimizer.native_profiles.v1",
+  "note": "Predeclared synthetic benchmark profiles of the NATIVE fixture. A profile is chosen when the world is created, before prepare/freeze/any send, and applies to both arms. It changes only per-case max_points of the synthetic package (and the point_total that publication requires); case ids, splits, families, prompts, public files, material, the checker and the scorer are unchanged. 'ordinary' is the first delivery's profile.",
+  "profiles": {
+    "ordinary": {
+      "point_total": 200,
+      "max_points": {},
+      "inclusive_margin_holdout_answers": null
+    },
+    "boundary": {
+      "point_total": 179,
+      "max_points": {
+        "holdout-01": 7, "holdout-02": 7, "holdout-03": 7, "holdout-04": 7,
+        "holdout-05": 7, "holdout-06": 7, "holdout-07": 7
+      },
+      "inclusive_margin_holdout_answers": {
+        "reference": ["cited_wrong", "cited_wrong", "cited_wrong"],
+        "candidate": ["value", "cited_wrong", "cited_wrong"]
+      }
+    }
+  },
+  "scenario_profiles": {
+    "inclusive_margin_and_statistical_rule": "boundary"
+  }
+}

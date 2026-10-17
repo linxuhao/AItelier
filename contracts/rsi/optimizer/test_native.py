@@ -17,9 +17,9 @@ from pathlib import Path
 
 import pytest
 
-from .conformance import SCENARIOS, run_scenario
+from .conformance import LITERAL, ROLES, SCENARIOS, edit_fixture, run_scenario
 from .contract import OptimizerError
-from .native_fixture import NativeRoundFactory
+from .native_fixture import PROFILES, REFERENCE, NativeRoundFactory
 
 
 def evidence(name, value):
@@ -39,6 +39,9 @@ def factory(tmp_path_factory):
 @pytest.mark.parametrize("vector", SCENARIOS, ids=lambda v: v["name"])
 def test_same_shared_round_scenarios_native(vector, factory):
     result, error = None, None
+    # Predeclared synthetic profile (fixtures/native_profiles.json), fixed before
+    # the world, its benchmark, prepare, freeze or any send exist.
+    factory.profile = PROFILES["scenario_profiles"].get(vector["name"], "ordinary")
     try:
         result = run_scenario(factory, vector)
     except BaseException as exc:                                    # noqa: BLE001
@@ -67,6 +70,188 @@ def test_same_shared_round_scenarios_native(vector, factory):
         assert native["provider_sends_by_split_arm"] == {"train/reference": 36}
     if not result["ports"]:
         assert native["provider_sends"] == native["evaluator_cell_launches"] == 0
+    # Per-selection policy is derived from exact sealed selections under the
+    # grant frozen at freeze; every other runtime input stays the frozen one.
+    for d in native["policy_derivations"]:
+        assert d["frozen_runtime_without_policy"] == d["request_runtime_without_policy"]
+    assert len({d["grant_tools"] for d in native["policy_derivations"]}) <= 1
+    for d in native["policy_derivations"]:
+        if d["arms"] == ["reference"]:
+            assert d["policy"] == native["request"]["runtime"]["policy"]
+    if vector.get("kind") == "builtin":
+        eq = native["builtin_equivalence"]
+        assert eq["equivalent"] and native["request"]["reference"]["logical_version"] == eq["shadow_version"]
+        assert native["request"]["runtime"]["requested_model"] == "flash"
+        if vector["name"] == "builtin_source_patch_only":
+            patch = json.loads(Path(native["source_patch_candidates"][0]).read_text())
+            assert list(patch["source_diff"]) == ["templates/investigate.md"] and patch["applied"] is False
+    if vector.get("adoption"):
+        assert native["adoption_intent"]["staged_before_candidate"] is True
+        if result["error"] != "ADOPTION_AUTHORITY":
+            assert native["adoption_records"]["reviewed"]["candidate_version"] == view["candidate_version"]
+
+
+def _payload(port, f, request, decision="candidate"):
+    if port == "freeze":
+        return request.model_dump(mode="json")
+    if port == "diagnose":
+        return {"observation": "Train feedback shows missing cited evidence.", "train_case_ids": ["train-01"]}
+    if port == "hypothesis":
+        return {"hypothesis_id": "one-hypothesis", "change": "Ask for explicit evidence citations.",
+                "falsifiable_prediction": "Mean normalized train score improves, with fixed settings and equal counts.",
+                "metric": "mean_normalized", "train_case_ids": ["train-01"]}
+    if port == "candidate":
+        return edit_fixture("useful")
+    if port == "holdout_seal":
+        return f.selection_authorization()
+    if port == "decision":
+        return {"action": decision, "review_ref": "reviewed", "owner_decision_ref": "owner-approved"}
+    if port == "stop":
+        return {"reason": f.round.view().stop_reason or "owner_stop"}
+    return {}
+
+
+def _drive(f, request, until, decision="candidate"):
+    """The conformance driver's order, up to (not including) port ``until``."""
+    for _ in range(24):
+        obs = f.observations()
+        if obs["pending_checkpoint"]:
+            f.actor = "owner"
+            f.approve_checkpoint()
+        port = f.observations()["view"]["phase"]
+        if port == until:
+            return
+        f.actor = ROLES[port]
+        f.invoke(port, _payload(port, f, request, decision))
+    raise AssertionError("did not reach " + until)
+
+
+def _write_mapping_claim(f):
+    """A b52-shaped claim: the literal generated unit asserted to BE the
+    builtin export, with the builtin's real identity and redundant condition."""
+    from .builtin_shadow import _redundant_end_conditions, capture_builtin
+    from .native_fixture import REPO
+    w = f.world
+    b = capture_builtin(w.sf, w.registry, REPO, "investigate")
+    claim = {"builtin": "investigate", "shadow": REFERENCE, "builtin_bundle_identity": b["identity"],
+             "prompts": {"template:investigate.md": f"inline:{REFERENCE}__investigator"},
+             "roles": {"investigator": f"{REFERENCE}__investigator"},
+             "dropped_redundant_end_conditions": _redundant_end_conditions(b["graph"])}
+    path = f.root / "private" / "optimizer" / "builtin-shadow" / f"{REFERENCE}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(claim))
+    return claim
+
+
+def test_builtin_export_equivalence_and_substitution_refusals(factory):
+    """The actual export is equivalent to the Source builtin under its explicit
+    mapping; the b52 substitution and a later mismatch of the export are refused
+    before any capture, freeze or send. The accepted evaluator then refuses the
+    faithful builtin's served runtime (unspecified effort): recorded, not patched."""
+    from contracts.rsi.pipeline_versioning import contract as vc
+    out = {}
+    f = factory()                                   # (a) b52 substitution
+    f.world.install_target("generated")
+    out["substitution_claim"] = _write_mapping_claim(f)
+    with pytest.raises(vc.UnsupportedContent) as exc:
+        f.round.trusted_request("builtin", effects=True)
+    out["substitution"] = {"refused": str(exc.value)[:600], "report": f.round.equivalence}
+    assert f.round.equivalence["equivalent"] is False
+    assert {d["field"] for d in f.round.equivalence["differences"]} >= {"graph", "roles"}
+    assert f.provider.received() == [] and not f.world.versions.list_versions()
+    f = factory()                                   # (b) actual export
+    mapping = f.world.install_target("builtin")
+    report = f.round._builtin_equivalence()
+    out["export_mapping"], out["export_report"] = mapping, report
+    assert report["equivalent"] is True, report
+    assert [d["condition"]["type"] for d in mapping["dropped_redundant_end_conditions"]] == ["max_total_steps"]
+    assert mapping["prompts"] == {"template:investigate.md": f"inline:{REFERENCE}__investigator"}
+    profile = report["effective_profiles"]["investigator"]
+    assert profile["builtin"] == profile["shadow"] and profile["builtin"]["internal_model"] == "flash"
+    with pytest.raises(Exception) as exc:           # accepted evaluator refusal
+        f.round.trusted_request("builtin", effects=True)
+    out["accepted_evaluator_refusal"] = {"type": type(exc.value).__name__, "detail": str(exc.value)[:800],
+                                         "effective_effort": profile["builtin"]["effort"]}
+    assert "effort" in str(exc.value) and profile["builtin"]["effort"] is None
+    assert f.provider.received() == []
+    edit = f.world.versions.edit(REFERENCE, {"kind": "role", "role": "investigator",   # (c) mismatch
+                                             "changes": {"temperature": 0.7}})
+    assert "error" not in edit, edit
+    out["mismatch"] = f.round._builtin_equivalence()
+    evidence("native-builtin-export-equivalence", out)
+    assert out["mismatch"]["equivalent"] is False
+    assert any(d["field"] == "roles" for d in out["mismatch"]["differences"])
+
+
+def test_diagnostic_builtin_round_under_route_declared_effort(factory):
+    """DIAGNOSTIC, not a shared-scenario result: the same literal builtin vector
+    in a world whose frozen route table DECLARES the flash endpoint's effort.
+    The unit is unchanged (equivalence still required); only the deployment
+    route differs, so this shows what remains once Root decides that input."""
+    vector = next(v for v in SCENARIOS if v["name"] == "builtin_source_patch_only")
+    factory.flash_route_effort = "high"
+    result, error = None, None
+    try:
+        result = run_scenario(factory, vector)
+    except BaseException:                                           # noqa: BLE001
+        error = traceback.format_exc()
+        raise
+    finally:
+        native = factory.made[0].native_evidence() if factory.made else None
+        evidence("diagnostic-builtin-route-declared-effort", {"result": result, "error": error,
+                                                              "native": native})
+    assert native["builtin_equivalence"]["equivalent"]
+    patch = json.loads(Path(native["source_patch_candidates"][0]).read_text())
+    assert list(patch["source_diff"]) == ["templates/investigate.md"] and patch["applied"] is False
+
+
+def test_adoption_record_for_another_candidate_is_refused(factory):
+    """Host records bound to another candidate (or to none) cannot adopt this
+    one; the same records rebound to the actual candidate adopt it."""
+    f = factory()
+    request = f.prepare()
+    f.approve_adoption()
+    _drive(f, request, "decision", decision="adopt")
+    r, out = f.round, {}
+    f._bind_adoption_records()
+    good = json.loads(json.dumps(f._assignment()["adoption"]))
+    decision = _payload("decision", f, request, "adopt")
+    for label, mutate in (("other_candidate", lambda rec: rec.update(candidate_version=request.reference.logical_version)),
+                          ("other_seal", lambda rec: rec.update(candidate_seal=request.reference.native_seal)),
+                          ("unbound_b52_shape", lambda rec: [rec.pop(k) for k in list(rec)
+                                                            if k.startswith(("candidate", "reference", "expected"))])):
+        records = json.loads(json.dumps(good))
+        for rec in records.values():
+            mutate(rec)
+        f._assignment()["adoption"] = records
+        before = f.snapshot()
+        with pytest.raises(OptimizerError) as exc:
+            r.invoke("decision", decision, actor="owner")
+        out[label] = exc.value.code
+        assert exc.value.code == "ADOPTION_AUTHORITY" and f.snapshot() == before
+    f._assignment()["adoption"] = good
+    r.invoke("decision", decision, actor="owner")
+    _drive(f, request, "stop", decision="adopt")
+    view = r.view()
+    out.update(final=view.model_dump(mode="json"), records=good, history=r.current_history)
+    evidence("native-adoption-candidate-binding", out)
+    assert view.stop_reason == "adopted" and view.current_version == view.candidate_version == r.candidate_vid
+    assert r.current_history == [r.candidate_vid]
+
+
+def test_grant_change_after_freeze_is_not_recompiled(factory):
+    """A host grant changed after freeze is refused at the next request, not
+    compiled into a new expected policy: no cell launches, no sends."""
+    f = factory()
+    request = f.prepare()
+    f.actor = "coordinator"
+    f.invoke("freeze", request.model_dump(mode="json"))
+    f.host.grants[request.budget.authorization_ref]["tools"]["agent"].append("read_file")
+    view = f.invoke("train_reference", {})
+    native = f.native_evidence()
+    evidence("native-grant-change-after-freeze", {"view": view.model_dump(mode="json"), "native": native})
+    assert view.stop_reason == "invalid" and native["provider_sends"] == native["evaluator_cell_launches"] == 0
+    assert "grant changed" in json.dumps(native["refusals"])
 
 
 def test_engine_dispatch_without_owning_invocation_does_nothing(factory):

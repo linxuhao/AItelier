@@ -42,14 +42,21 @@ from .native_binding import NativeRound, RoundHost, install
 
 ROUND = "optimizer-round-1"
 REPO = Path(__file__).resolve().parents[3]
+BUILTIN = "investigate"
+PROFILES = json.loads((Path(__file__).with_name("fixtures") / "native_profiles.json").read_text())
 _CEILING = {"requests": 1000, "input_tokens": 16000000, "output_tokens": 2000000,
             "usd_micros": 25000000, "elapsed_ms": 14400000}
-# Host-owned round assignment, stored in the existing host grant record.
+# Host-owned round assignment, stored in the existing host grant record. The
+# world holds ONE target named ``REFERENCE``: the literal generated unit for a
+# generated round, or the private generated shadow EXPORTED from the builtin
+# for a builtin round (the literal edit's prompt key names that namespace).
 ASSIGNMENT = {
     "rounds": {ROUND: 1}, "target": REFERENCE, "builtin_shadow": REFERENCE,
+    "builtin": BUILTIN,
     "builtin_sources": ["configs/investigate.yaml", "agent_configs/investigate.yaml",
                         "templates/investigate.md"],
-    "benchmark_id": "evaluator-fixture", "requested_model": "ark/deepseek-v4-flash",
+    "benchmark_id": "evaluator-fixture",
+    "requested_model": {"generated": "ark/deepseek-v4-flash", "builtin": "flash"},
     "envelopes": {"cell": {"requests": 8, "input_tokens": 128000, "output_tokens": 16000,
                            "usd_micros": 1000000, "elapsed_ms": 300000},
                   "round": dict(_CEILING), "campaign": dict(_CEILING)},
@@ -65,24 +72,78 @@ CELL_FAULT = {"unknown_execution": "unknown_execution", "unknown_accounting": "u
 
 
 class RoundWorld(NativeWorld):
-    """The evaluator's native world with only the reference target."""
+    """The evaluator's native world; its one target is installed at prepare."""
+
+    def __init__(self, root: Path, *, fresh: bool, profile: str = "ordinary",
+                 flash_route_effort: str | None = None):
+        self.profile = profile
+        self.flash_route_effort = flash_route_effort
+        super().__init__(root, fresh=fresh)
 
     def _create(self) -> None:
+        # Predeclared profile, applied before the synthetic benchmark is
+        # published (and so before prepare/freeze/any send), for both arms.
+        spec = PROFILES["profiles"][self.profile]
+        bench = self.fixture["benchmark"]
+        for cid, points in spec["max_points"].items():
+            bench["private"][cid]["refs"]["max_points"] = points
+        bench["header"]["point_total"] = spec["point_total"]
         super()._create()
         for suffix in (".yaml", ".roles.json"):
             (self.gen / f"{CANDIDATE}{suffix}").unlink()
+        # The literal generated unit is staged, unregistered, until a generated
+        # round is prepared; a builtin round installs the builtin's export.
+        staged = self.root / "staged-literal-unit"
+        staged.mkdir()
+        for suffix in (".yaml", ".roles.json"):
+            (self.gen / f"{REFERENCE}{suffix}").rename(staged / f"{REFERENCE}{suffix}")
+        # Frozen fixture route for the builtin's internal model name: the same
+        # concrete endpoint/fallback the fixture serves for its concrete name.
+        routes = self.root / "runtime" / "model_routes.json"
+        doc = json.loads(routes.read_text(encoding="utf-8"))
+        doc["flash"] = copy.deepcopy(doc["ark/deepseek-v4-flash"])
+        if self.flash_route_effort is not None:
+            # DIAGNOSTIC deployment variant only: the route table declares the
+            # endpoint's effort (as the shipped table does for `smart`).
+            doc["flash"]["effort"] = {"ark/deepseek-v4-flash": self.flash_route_effort}
+        routes.write_text(json.dumps(doc, indent=1), encoding="utf-8")
         path = self.root / "host.json"
         doc = json.loads(path.read_text(encoding="utf-8"))
         doc["grants"][AUTH]["optimizer"] = copy.deepcopy(ASSIGNMENT)
+        doc["benchmark_profile"] = {"name": self.profile, **spec}
+        doc["flash_route_effort"] = self.flash_route_effort
         path.write_text(json.dumps(doc, indent=1), encoding="utf-8")
 
+    def install_target(self, kind: str) -> dict | None:
+        """Trusted round preparation: install the round's one target."""
+        from core import pipeline_registry as pr
+        from .builtin_shadow import export_shadow
+        assert not (self.gen / f"{REFERENCE}.yaml").exists(), "target already installed"
+        if kind == "generated":
+            for suffix in (".yaml", ".roles.json"):
+                (self.root / "staged-literal-unit" / f"{REFERENCE}{suffix}").rename(
+                    self.gen / f"{REFERENCE}{suffix}")
+            out = pr.reload_generated_pipeline(self.sf, self.registry, REFERENCE)
+            assert "error" not in out, out
+            return None
+        mapping = export_shadow(self.sf, self.registry, self.gen, source_root=REPO,
+                                builtin=BUILTIN, shadow=REFERENCE)
+        target = self.root / "private" / "optimizer" / "builtin-shadow" / f"{REFERENCE}.json"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(mapping, indent=1, sort_keys=True), encoding="utf-8")
+        return mapping
+
     def _register(self) -> None:
-        """Boot-equivalent: ordinary registration of the target, then of every
+        """Boot-equivalent: the builtin config through the host's boot path,
+        ordinary registration of an installed generated target, then every
         catalog seal through the accepted sealed-registration path."""
         from core import pipeline_frozen_bundle as fb, pipeline_registry as pr
         from core.pipeline_benchmark import BenchmarkStore
-        out = pr.reload_generated_pipeline(self.sf, self.registry, REFERENCE)
-        assert "error" not in out, out
+        from .builtin_shadow import register_builtin
+        register_builtin(self.sf, REPO, BUILTIN)
+        if (self.gen / f"{REFERENCE}.yaml").exists():
+            out = pr.reload_generated_pipeline(self.sf, self.registry, REFERENCE)
+            assert "error" not in out, out
         cls, self.versions_impl = versions_class()
         self.versions = cls(self.sf, self.registry, self.gen)
         for vid in self.versions.list_versions():
@@ -108,13 +169,15 @@ class RoundTransport(DeterministicProvider):
 
     Answers derive from the PUBLIC package only. Quality levels, as the
     trusted checker scores them: ``full`` (value and cited file, 10/10),
-    ``value`` (value only, 6/10), ``cited_wrong`` (cited file, no value, 4/10).
+    ``value`` (value only, 6/10), ``cited_wrong`` (cited file, no value, 4/10);
+    on a max_points 7 case of the boundary profile 7/7, 4/7 and 3/7.
     One physical send per cell, so a (case, arm)'s n-th send is repetition n.
     """
 
-    def __init__(self, log_path, public, cases):
+    def __init__(self, log_path, public, cases, profile=None):
         super().__init__(log_path, public)
         self.cases = cases
+        self.profile = profile or PROFILES["profiles"]["ordinary"]
         self.script = "useful"
         self._local = threading.local()
 
@@ -123,9 +186,12 @@ class RoundTransport(DeterministicProvider):
         return super().respond(record, body)
 
     def quality(self, case, arm, rep):
+        holdout = self.cases[case]["partition"] == "holdout"
+        boundary = self.profile.get("inclusive_margin_holdout_answers")
+        if holdout and self.script == "inclusive_margin" and boundary:
+            return boundary[arm][rep - 1]
         if arm == "reference":
             return "value"
-        holdout = self.cases[case]["partition"] == "holdout"
         first_four = sorted(c for c, m in self.cases.items() if m["partition"] == "holdout")[:4]
         s = self.script
         if not holdout:
@@ -156,13 +222,20 @@ class NativeRoundFixture:
     """``conformance.Fixture`` over the genuine host (evidence: native)."""
     evidence_kind = "native"
 
-    def __init__(self, base: Path | None = None, *, root: Path | None = None):
+    def __init__(self, base: Path | None = None, *, root: Path | None = None,
+                 profile: str = "ordinary", flash_route_effort: str | None = None):
         fresh = root is None
         self.root = Path(tempfile.mkdtemp(prefix="round-world-", dir=base)) if fresh else Path(root)
-        self.world = w = RoundWorld(self.root, fresh=fresh)
+        if not fresh:
+            doc = json.loads((self.root / "host.json").read_text())
+            profile, flash_route_effort = doc["benchmark_profile"]["name"], doc["flash_route_effort"]
+        self.profile = profile
+        self.world = w = RoundWorld(self.root, fresh=fresh, profile=profile,
+                                    flash_route_effort=flash_route_effort)
         self.public = json.loads((self.root / "public-package" / "public.json").read_text())
         self.provider = RoundTransport(self.root / "provider-log.jsonl", self.public,
-                                       w.fixture["benchmark"]["header"]["cases"])
+                                       w.fixture["benchmark"]["header"]["cases"],
+                                       PROFILES["profiles"][profile])
         self.clock = HostClock()
         from core.rsi_evaluator import NativeEvaluator
         self.evaluator = NativeEvaluator(dataclasses.replace(w.host(self.provider), clock=self.clock))
@@ -180,17 +253,42 @@ class NativeRoundFixture:
         self.fault = "none"
         self.prepared_request = None
         self.fault_facts: dict = {}
+        self.adoption_intent = None
+        self.shadow_mapping = None
 
     def _assignment(self) -> dict:
         return self.host.grants[AUTH]["optimizer"]
 
     # -- Fixture protocol --------------------------------------------------
     def prepare(self, kind="generated"):
+        self.shadow_mapping = self.world.install_target(kind)
         self.prepared_request = self.round.trusted_request(kind, effects=True)
         return self.prepared_request
 
     def invoke(self, port, payload):
+        if port == "decision" and self.actor == "owner" and self.adoption_intent is not None:
+            self._bind_adoption_records()
         return self.round.invoke(port, payload, actor=self.actor)
+
+    def _bind_adoption_records(self):
+        """Host owner/reviewer records, written only once the actual candidate
+        exists, bound to its exact version/seal and to the round's frozen
+        reference and original-current scope. Not proposer payload authority,
+        and not the later nonauthor code review of this Source."""
+        r = self.round
+        if r.candidate_vid is None or self._assignment().get("adoption"):
+            return
+        sel = r.selections["candidate"]
+        scope = {"round_id": ROUND, "target": r.request.target.name,
+                 "candidate_version": r.candidate_vid, "candidate_seal": sel.native_seal,
+                 "candidate_physical": sel.physical_config, "reference_version": r.reference_vid,
+                 "expected_current": r.request.target.expected_current}
+        self._assignment()["adoption"] = {
+            "reviewed": {"kind": "nonauthor_review", "verdict": "approve",
+                         "reviewer": "fixture-synthetic-reviewer", **scope},
+            "owner-approved": {"kind": "owner_decision", "action": "adopt",
+                               "owner": "fixture-owner", **scope}}
+        self.adoption_intent["bound"] = {"at_port": "decision", **scope}
 
     def observations(self) -> dict:
         r = self.round
@@ -247,13 +345,9 @@ class NativeRoundFixture:
         return {"selection": self.round.selection_identity}
 
     def approve_adoption(self):
-        # Host-owned review and owner decision records for this round's target.
-        target = self.round.targets["generated"]
-        self._assignment()["adoption"] = {
-            "reviewed": {"kind": "nonauthor_review", "verdict": "approve", "round_id": ROUND,
-                         "target": target, "reviewer": "fixture-nonauthor-reviewer"},
-            "owner-approved": {"kind": "owner_decision", "action": "adopt", "round_id": ROUND,
-                               "target": target, "owner": "fixture-owner"}}
+        # Called before any candidate exists: stage the owner's INTENT only.
+        # Records that grant anything are bound later to the actual candidate.
+        self.adoption_intent = {"staged_before_candidate": self.round.candidate_vid is None}
 
     def configure_budget(self, requests):
         self._assignment()["envelopes"]["round"]["requests"] = requests
@@ -328,6 +422,21 @@ class NativeRoundFixture:
                 con.close()
         return rows
 
+    def _view_or_error(self):
+        try:
+            return self.round.view().model_dump(mode="json")
+        except Exception as exc:                                    # noqa: BLE001
+            return {"unavailable": f"{type(exc).__name__}: {exc}"}
+
+    def checker_points(self) -> list:
+        """Actual per-cell trusted checker outputs of every sealed result."""
+        return [{"evaluation_id": out.evaluation_id, "case": x.cell.case_id, "arm": x.cell.arm,
+                 "repetition": x.cell.repetition, "disposition": x.disposition,
+                 "raw_points": x.checker.raw_points if x.checker else None,
+                 "max_points": x.case.max_points,
+                 "output_snapshot": x.checker.output_snapshot if x.checker else None}
+                for _, out in self.round.results.values() for x in out.receipts]
+
     def native_evidence(self) -> dict:
         r, w = self.round, self.world
         sends = self.provider.received()
@@ -347,7 +456,7 @@ class NativeRoundFixture:
                 "scoreboard_rows": len(w.store.list_receipts("evaluator-fixture", 1)),
                 "catalog": w.versions.list_versions(),
                 "sdk": r.sdk_state(), "refusals": r.refusals, "numeric": copy.deepcopy(r.numeric),
-                "view": r.view().model_dump(mode="json"),
+                "view": self._view_or_error(), "checker_points": self.checker_points(),
                 "selections": {a: s.model_dump(mode="json") for a, s in r.selections.items()},
                 "request": r.request and r.request.model_dump(mode="json"),
                 "evaluations": [{"evaluation_id": q.evaluation_id, "status": out.status,
@@ -359,8 +468,12 @@ class NativeRoundFixture:
                                 for (q, out) in r.results.values()],
                 "fault": self.fault, "fault_facts": self.fault_facts,
                 "transport_script": self.provider.script, "transport_fault": self.provider.fault,
-                "versions_impl": w.versions_impl,
-                "source_patch_candidates": sorted(str(p) for p in (self.root / "private" / "optimizer").rglob("*.json")),
+                "versions_impl": w.versions_impl, "benchmark_profile": w.host_doc.get("benchmark_profile"),
+                "builtin_shadow_mapping": self.shadow_mapping, "builtin_equivalence": r.equivalence,
+                "adoption_intent": self.adoption_intent, "adoption_records": copy.deepcopy(
+                    (self.host.grants.get(AUTH) or {}).get("optimizer", {}).get("adoption")),
+                "policy_derivations": r.policy_derivations,
+                "source_patch_candidates": sorted(str(p) for p in (self.root / "private" / "optimizer" / "source-patch").glob("*.json")),
                 "holdout_consumed_markers": sorted(p.name for p in (self.root / "private" / "evaluator" / "holdout-consumed").glob("*.json"))}
 
     def close(self) -> None:
@@ -379,11 +492,14 @@ class NativeRoundFactory:
     def __init__(self, base: Path):
         self.base = Path(base)
         self.made: list[NativeRoundFixture] = []
+        self.profile = "ordinary"      # predeclared; set before the world exists
+        self.flash_route_effort = None  # diagnostic deployment variant only
 
     def __call__(self) -> NativeRoundFixture:
         for old in self.made:
             old.close()
-        fixture = NativeRoundFixture(self.base)
+        fixture = NativeRoundFixture(self.base, profile=self.profile,
+                                     flash_route_effort=self.flash_route_effort)
         self.made = [fixture]
         return fixture
 

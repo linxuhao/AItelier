@@ -140,6 +140,9 @@ class NativeRound:
         self.origin: float | None = None
         self.builtin_sources: dict | None = None
         self.decision = None
+        self.equivalence: dict | None = None
+        self.frozen_grant_tools: str | None = None
+        self.policy_derivations: list[dict] = []
         self.reference_vid: str | None = None
         self.recorded_tools: dict | None = None
         self._staged = None
@@ -240,6 +243,13 @@ class NativeRound:
         from core import pipeline_frozen_bundle as fb
         h, a = self.host, self._assignment()
         shadow = self._target_name(kind)
+        if kind == "builtin":
+            # Semantic reference equivalence BEFORE any capture, freeze or send.
+            self.equivalence = self._builtin_equivalence()
+            if not self.equivalence["equivalent"]:
+                raise vc.UnsupportedContent("builtin shadow is not the builtin: "
+                                            + json.dumps(self.equivalence.get("differences")
+                                                         or self.equivalence.get("refused"))[:1500])
         if effects:
             cap = h.versions.capture(shadow)
             if not h.sf.list_graph_versions(cap["physical_name"]):
@@ -247,10 +257,12 @@ class NativeRound:
             vid = cap["version_id"]
         else:
             vid = self._live_vid(shadow)
+        if kind == "builtin" and vid != self.equivalence["shadow_version"]:
+            raise vc.UnsupportedContent("measured reference is not the equivalence-checked shadow")
         reference = self._selection("reference", vid)
         benchmark = self._benchmark()
         policy, compiled, _ = h.evaluator.compile_for((reference,), self.authorization_ref,
-                                                      a["requested_model"], benchmark.public_package)
+                                                      a["requested_model"][kind], benchmark.public_package)
         runtime = h.evaluator.served_runtime(compiled, policy.identity)
         grant = self._grant()
         env = a["envelopes"]
@@ -271,6 +283,28 @@ class NativeRound:
             self.prepared = {"kind": kind, "reference_vid": vid, "shadow": shadow}
             self.recorded_tools = fb.verify_sealed(h.config_dir, reference.physical_config)["tools"]
         return request
+
+    def _shadow_mapping(self) -> dict | None:
+        path = Path(self.host.artifacts_root) / "builtin-shadow" / f"{self._target_name('builtin')}.json"
+        return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
+
+    def _builtin_equivalence(self) -> dict:
+        """The export/equivalence control (``builtin_shadow.equivalence``) on the
+        host's served builtin and the recorded private shadow."""
+        from .builtin_shadow import equivalence
+        h, mapping = self.host, self._shadow_mapping()
+        if mapping is None:
+            return {"equivalent": False, "refused": "no recorded builtin export mapping"}
+        try:
+            report = equivalence(h.sf, h.registry, h.evaluator, h.config_dir,
+                                 source_root=h.source_root, builtin=self._assignment()["builtin"],
+                                 shadow=self._target_name("builtin"), mapping=mapping)
+        except Exception as exc:                                    # noqa: BLE001
+            return {"equivalent": False, "refused": f"{type(exc).__name__}: {exc}", "mapping": mapping}
+        if report["builtin_bundle_identity"] != mapping.get("builtin_bundle_identity"):
+            report = {**report, "equivalent": False,
+                      "refused": "served builtin changed since the recorded export"}
+        return report
 
     # ── RoundBinding.invoke ──────────────────────────────────────────────
     def invoke(self, port: str, payload: dict, *, actor: str) -> RoundView:
@@ -436,6 +470,7 @@ class NativeRound:
         self.selections["reference"] = data.reference
         if data.target.kind == "builtin":
             self.builtin_sources = self._builtin_digests()
+        self.frozen_grant_tools = digest((self._grant() or {}).get("tools"))
         self.decided = "train_reference"
 
     def _do_train_reference(self, data, prepared):
@@ -559,15 +594,28 @@ class NativeRound:
         self._matrix("holdout")
         self.decided = "decision"
 
+    def adoption_scope(self) -> dict | None:
+        """What a host review/owner decision must name to authorize THIS
+        candidate: the exact cataloged version and seal, the frozen reference
+        and the original current CAS of this round's target."""
+        sel = self.selections.get("candidate")
+        if self.candidate_vid is None or sel is None:
+            return None
+        return {"round_id": self.round_id, "target": self.request.target.name,
+                "candidate_version": self.candidate_vid, "candidate_seal": sel.native_seal,
+                "candidate_physical": sel.physical_config, "reference_version": self.reference_vid,
+                "expected_current": self.request.target.expected_current}
+
     def _adoption_records(self, data) -> bool:
         records = self._assignment().get("adoption") or {}
         review = records.get(data.review_ref or "")
         owner = records.get(data.owner_decision_ref or "")
+        scope = self.adoption_scope()
+        bound = lambda rec: scope is not None and all(rec.get(k) == v for k, v in scope.items())
         return (isinstance(review, dict) and review.get("kind") == "nonauthor_review"
                 and review.get("verdict") == "approve" and isinstance(owner, dict)
                 and owner.get("kind") == "owner_decision" and owner.get("action") == "adopt"
-                and review.get("round_id") == owner.get("round_id") == self.round_id
-                and review.get("target") == owner.get("target") == self.request.target.name)
+                and bound(review) and bound(owner))
 
     def _late_check_decision(self, data):
         eligible = self.numeric["holdout"]["status"] == "eligible"
@@ -661,20 +709,36 @@ class NativeRound:
         self._verify_builtin()
 
     def _do_source_patch(self, data, prepared):
-        ref = self.host.versions.read(self.reference_vid)["content"]
-        cand = self.host.versions.read(self.candidate_vid)["content"]
-        diff = {}
-        for role, cfg in cand["roles"].items():
-            before = (ref["roles"].get(role) or {}).get("prompt") or ""
-            after = cfg.get("prompt") or ""
+        """Map the tested admissible edit back onto the builtin's real Source
+        files through the recorded export mapping. Private, never applied."""
+        mapping = self._shadow_mapping()
+        reverse = {inline: key for key, inline in mapping["prompts"].items()}
+        root = Path(self.host.source_root)
+        files, unmapped = {}, []
+        for key, after in self.candidate_bundle["prompts"].items():
+            source_key = reverse.get(key)
+            if source_key is None or not source_key.startswith("template:"):
+                unmapped.append(key)
+                continue
+            rel = "templates/" + source_key[len("template:"):]
+            before = (root / rel).read_text(encoding="utf-8")
             if before != after:
-                diff[role] = "".join(difflib.unified_diff(
-                    before.splitlines(True), after.splitlines(True),
-                    f"reference/{role}", f"candidate/{role}"))
-        record = {"schema": "rsi.optimizer.source_patch_candidate.v1", "target": "investigate",
+                files[rel] = "".join(difflib.unified_diff(
+                    before.splitlines(True), after.splitlines(True), f"a/{rel}", f"b/{rel}"))
+        reference_graph = self.host.versions.read(self.reference_vid)["content"]["graph"]
+        candidate_graph = self.host.versions.read(self.candidate_vid)["content"]["graph"]
+        graph_changes = None
+        if reference_graph != candidate_graph:
+            graph_changes = {"source_file": f"configs/{mapping['builtin']}.yaml",
+                             "reference": reference_graph, "candidate": candidate_graph,
+                             "note": "admitted description/public-context-order change; map by hand"}
+        if unmapped or not (files or graph_changes):
+            fail("POLICY_REFUSED", f"edit does not map back to builtin Source: {unmapped}")
+        record = {"schema": "rsi.optimizer.source_patch_candidate.v2", "target": mapping["builtin"],
                   "source_commit": self.request.target.source_commit,
                   "builtin_sources": self.builtin_sources, "reference_version": self.reference_vid,
-                  "candidate_version": self.candidate_vid, "prompt_diff": diff,
+                  "candidate_version": self.candidate_vid, "export_mapping": mapping,
+                  "source_diff": files, "graph_changes": graph_changes,
                   "decision": self.decision.model_dump(mode="json"), "applied": False,
                   "note": "private reviewed Source-patch CANDIDATE; never a runtime builtin override"}
         path = (Path(self.host.artifacts_root) / "source-patch"
@@ -739,11 +803,30 @@ class NativeRound:
     def evaluation_request(self, split, arms, *, evaluation_id, budget, holdout_selection=None):
         h, q = self.host, self.request
         selections = tuple(self.selections[a] for a in arms)
+        # The policy identity is DERIVED: core.rsi_policy.compile_policy digests
+        # the selected arms' physical graphs, effective templates and the host
+        # grant rows, so reference-only, candidate-only and paired requests
+        # legitimately differ. Every other input stays frozen: the host grant
+        # must be the one frozen at freeze, each selection is an exact sealed
+        # catalog version (compile_selection re-verifies its sealed tool
+        # providers), the reference-only derivation must reproduce the frozen
+        # request's own policy, and the evaluator's preflight independently
+        # re-derives and compares the full served runtime. A changed grant or
+        # provider is refused here, never recompiled into a new expectation.
+        tools = digest((self._grant() or {}).get("tools"))
+        if tools != self.frozen_grant_tools:
+            raise vc.ProviderChanged("host evaluator grant changed since freeze")
         policy, _, _ = h.evaluator.compile_for(selections, q.budget.authorization_ref,
                                                q.runtime.requested_model, q.benchmark.public_package)
-        # The frozen runtime, with the accepted compiled policy for exactly
-        # these arms; the evaluator's own preflight re-derives what it serves.
+        if tuple(arms) == ("reference",) and policy.identity != q.runtime.policy:
+            raise vc.ProviderChanged("reference policy no longer derives the frozen runtime policy")
         runtime = q.runtime.model_copy(update={"policy": policy.identity})
+        self.policy_derivations.append({
+            "evaluation_id": evaluation_id, "arms": list(arms), "policy": policy.identity,
+            "grant_tools": tools, "selections": {s.arm: [s.logical_version, s.native_seal, s.physical_config]
+                                                 for s in selections},
+            "frozen_runtime_without_policy": digest(q.runtime.model_dump(mode="json", exclude={"policy"})),
+            "request_runtime_without_policy": digest(runtime.model_dump(mode="json", exclude={"policy"}))})
         cells = tuple(Cell(case_id=c.case_id, arm=a, repetition=r)
                       for r in range(1, 4) for c in q.benchmark.cases if c.split == split for a in arms)
         data = dict(schema="rsi.evaluation.request.v2", evaluation_id=evaluation_id,

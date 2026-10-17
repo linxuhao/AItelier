@@ -280,16 +280,39 @@ candidate after reviewed owner adoption); `NativeEvaluator.evaluate` for 36
 reference train, 36 candidate train and 48 paired holdout cells; accepted
 `validate_result`, `scorer_receipt` and unchanged `evaluate_matrix`. Each
 request carries the frozen `Runtime` with the accepted compiled policy identity
-for exactly its arms (that identity covers the selected arm set), and the
+for exactly its arms. That identity is derived, not frozen: `compile_policy`
+digests the selected arms' physical graphs, effective templates and grant rows,
+so reference-only, candidate-only and paired requests legitimately differ.
+Every other input is frozen: the host grant must equal the one at freeze, each
+selection is an exact sealed catalog version whose tool providers
+`compile_selection` re-verifies, the reference-only derivation must reproduce
+the frozen request's own policy, and the evaluator preflight re-derives the full
+served runtime. A changed grant or provider is refused, never recompiled into a
+new expectation. Each request also carries the
 residual round/campaign `Budget`: original envelopes minus known usage and
 retained reservations of every sealed evaluator result of this round/campaign,
 and the original deadline minus host-clock time since freeze. An unresolved or
 unknown evaluation, or an expired deadline, dispatches nothing. Holdout needs
 the owner's host grant of the exact computed selection identity and refuses an
 evaluator consumption record for it. A round run without its live binding
-refuses `UNSAFE_RESUME`. Builtin targets use the private generated shadow as
-the measured reference, verify the builtin Source files unchanged and end in a
-private Source-patch CANDIDATE artifact.
+refuses `UNSAFE_RESUME`. Generated adoption needs host-owned
+review and owner-decision records naming THIS candidate's exact version, seal
+and physical config, the frozen reference and the original current CAS; records
+for another candidate, or naming none, refuse `ADOPTION_AUTHORITY`.
+
+Builtin targets (`builtin_shadow.py`): the host's boot path registers the exact
+Source builtin; `export_shadow` captures it (served graph, roles, actual template
+bytes, tool identities) into a private generated shadow, rewriting only what its
+explicit mapping records (graph and self-seed name, generated role namespace,
+template -> inline prompt, and `max_total_steps: 50`, proved unreachable because a
+single step with only terminal transitions holds one step row per run). The
+model name stays `flash`, resolved by the frozen route table; settings, tools,
+contexts, output and limits are copied. Before any capture, freeze or send, the
+`equivalence` control requires equal logical content under that mapping, equal
+tool identities and an equal effective gateway profile for the builtin role and
+the shadow role; the measured reference must be that checked shadow. A winner
+yields a private, unapplied Source-patch CANDIDATE whose diff is mapped back to
+the builtin's real `templates/` file; builtin Source must be unchanged.
 
 Graph correction found by the first native dispatch (SDK 1.5.94): a checkpoint
 TOOL step pauses only when no transition matches, and approval continues to the
@@ -301,12 +324,24 @@ adoption for a builtin target and routes `action: source_patch` on to
 `source_patch`. Nodes, tools, checkpoints, ports and resolver checks are
 unchanged.
 
-`native_fixture` builds a fresh accepted evaluator world per scenario with only
-the reference target; the candidate is always derived from the proposer's edit.
-The accepted deterministic transport answers under the real admission boundary;
-its answer script is fixture data scored by the trusted checker (reference
-value-only 6/10; candidate value+citation 10/10 on its first repetition, else
-6/10; fault scripts map the fake's better/equal/worse cells onto those levels).
-That checker's points are {0,4,6,10} of 10, so per-case holdout differences are
-multiples of 20/3: the literal `inclusive_margin` vector (difference exactly 5
-with all eight cases positive, p=1/256) cannot be produced natively.
+`native_fixture` builds a fresh accepted evaluator world per scenario. Its one
+target is installed at `prepare(kind)`: the literal generated unit, or the
+builtin's export. The candidate is always derived from the proposer's edit; the
+fixture stages an adoption intent early but binds review/decision records only
+once the actual candidate exists. The accepted deterministic transport answers
+under the real admission boundary; its answer script is fixture data scored by
+the trusted checker (reference value-only 6/10; candidate value+citation 10/10
+on its first repetition, else 6/10; fault scripts map the fake's
+better/equal/worse cells onto those levels).
+
+Benchmark profiles (`fixtures/native_profiles.json`) are predeclared and chosen
+before the world exists. `ordinary` is the max_points-10 profile; there,
+normalized cell scores are multiples of 20, so the literal `inclusive_margin`
+vector (difference exactly 5, p=1/256) is unreachable — the first delivery's
+measured failure. `boundary` gives seven holdout cases max_points 7 (point_total
+179); the unchanged checker then scores citation-only 3/7 and value-only 4/7.
+The scenario's holdout answers are reference [3,3,3] versus candidate [4,3,3] on
+the max-7 cases, and [4,4,4] versus [6,4,4] on the max-10 case: seven case
+differences of 100/21 and one of 20/3, mean 5, p=1/256. The fake keeps its own
+arithmetic model of the same literal (accepted evaluator fake points 5 vs 6 of
+10), which the accepted checker cannot emit on the ordinary profile.

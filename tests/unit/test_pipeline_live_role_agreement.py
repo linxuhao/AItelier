@@ -1,7 +1,7 @@
 """Native health compares each live role with what publication would serve.
 
-Publication re-registers EVERY persisted role, historical ones included, so a
-live definition that differs from that registration only in canonical type
+Publication covers EVERY persisted role, historical ones included, and reuses
+only an identical live definition, so a live one that differs only in canonical type
 (``true`` / ``1`` / ``1.0``, nested values too) is a mixed unit. Python ``==``
 calls such pairs equal; ``whole_state`` must not, or an admitted edit changes
 what an existing run claims under its unchanged graph pin. The host's own
@@ -135,7 +135,7 @@ def test_typed_live_role_drift_refuses_every_editor_and_adoption(world, case):
 
 
 def test_historical_role_drift_is_mixed_until_reloaded(world):
-    """An unreferenced historical role is re-registered by publication too."""
+    """An unreferenced historical role is checked by publication too."""
     fx, api = world
     register_with(fx, 'temperature', 1.0)
     fx.start_run('Old', 'gen_vt'); fx.pause_run('Old')
@@ -158,7 +158,14 @@ def test_historical_role_drift_is_mixed_until_reloaded(world):
                                  f'live role {MAKER}')
     assert fb.read_descriptor(fx.gen, 'gen_vt')['state'] == 'adopted'
     assert fb.launch_block('gen_vt', fx.gen, sf=fx.sf, registry=fx.registry) == block
-    # The host's ordinary reload serves the persisted unit again; editing resumes.
+    # A recorded unit never replaces a different live definition, an ordinary
+    # reload included: it refuses before effects and the unit stays blocked.
+    refused = pr.reload_generated_pipeline(fx.sf, fx.registry, 'gen_vt')
+    assert f'would replace live role {MAKER};' in refused.get('error', ''), refused
+    assert snapshot(fx) == before
+    assert fb.launch_block('gen_vt', fx.gen, sf=fx.sf, registry=fx.registry) == block
+    # The host re-registers its own name as recorded; reload reuses it, editing resumes.
+    drift_live(fx, MAKER, 'temperature', 1.0)
     assert 'error' not in pr.reload_generated_pipeline(fx.sf, fx.registry, 'gen_vt')
     assert fb.whole_state(fx.sf, fx.registry, fx.gen, 'gen_vt', unit) == []
     assert fb.canonical(claim(fx, 'Old')) == fb.canonical(old)

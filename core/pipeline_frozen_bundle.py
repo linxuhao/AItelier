@@ -55,6 +55,10 @@ class BundleRefused(ValueError):
     """An input is missing, symlinked, external, unresolved, changed or forbidden."""
 
 
+class LiveRoleConflict(BundleRefused):
+    """Publishing a recorded whole unit would replace a different live role."""
+
+
 def canonical(obj) -> bytes:
     try:
         return json.dumps(obj, sort_keys=True, separators=(",", ":"),
@@ -848,7 +852,7 @@ def register_sealed(sf, registry, phys: str, config_dir=None):
     graph, hints = pr._validated_registration(
         phys, sealed["graph_yaml"], roles=sealed["roles"], sf=sf)
     pr._commit_registration(sf, registry, phys, graph, sealed_hints(hints, sealed),
-                            roles=sealed["roles"], require_manifest=True)
+                            roles=sealed["roles"], require_manifest=True, config_dir=d)
     return registry.get(phys)
 
 
@@ -929,6 +933,14 @@ def edit_block(config_dir, stem: str) -> str | None:
     return (f"{stem!r} is a recorded whole bundle (adoption {desc.get('state')}): its "
             f"graph, retained roles and manifest serve pinned runs and are not edited "
             f"in place; derive a candidate, seal it and adopt it instead")
+
+
+def records_whole_unit(config_dir, stem: str) -> bool:
+    """Whether generated *stem* is a recorded whole unit: a sealed bundle, or a
+    target with an adoption descriptor in any state (an unreadable one
+    included). The classification ``edit_block`` uses; a read, no effect."""
+    path = descriptor_path(config_dir, stem)
+    return is_sealed_name(stem) or path.exists() or path.is_symlink()
 
 
 def exclusion(sf):
@@ -1204,7 +1216,8 @@ def _publish_unit(sf, registry, config_dir, target, unit, hints=None):
 
     pr._commit_registration(
         sf, registry, target, graph, frozen_hints(base, hints),
-        roles=roles, paths=[gp, rp], persist=persist, require_manifest=True)
+        roles=roles, paths=[gp, rp], persist=persist, require_manifest=True,
+        config_dir=d)
 
 
 def _expected_roles(target: str, roles: dict | None) -> dict:
@@ -1232,32 +1245,63 @@ def _serves(have, cfg) -> bool:
         [cfg.model, list(cfg.tools), cfg.config])
 
 
+def _role_conflicts(sf, target: str, roles: dict | None):
+    """(names whose live entry differs, expected registrations) for publishing
+    *roles*: what ``_register_forge_roles`` would register, with the host's
+    own normalization (``_expected_roles``), against every same-named live
+    entry, by exact canonical value."""
+    expected = _expected_roles(target, roles)
+    return sorted(name for name, cfg in expected.items()
+                  if name in sf.agent_registry
+                  and not _serves(sf.agent_registry.get(name), cfg)), expected
+
+
 def served_role_conflicts(sf, target: str, unit: dict) -> list:
-    """Names publishing whole *unit* would re-register over a DIFFERENT live
+    """Names publishing whole *unit* would find holding a DIFFERENT live
     definition ([] = none).
 
-    Publication registers every role of the unit by name, replacing whatever
-    the live AgentRegistry holds there, and pinned runs claim roles live by
-    name. The persisted roles are not every name an existing run resolves: a
-    name can exist only live (registered by the host, used by an older graph
-    version) and be one an adoption's alias would publish. So the complete
-    proposed registration, with the host's own normalization
-    (``_expected_roles``), is compared with every same-named live entry; an
+    Pinned runs claim roles live by name, and the persisted roles are not
+    every name an existing run resolves: a name can exist only live
+    (registered by the host, used by an older graph version or another
+    graph) and be one an adoption's alias would publish. So the complete
+    proposed registration is compared with every same-named live entry; an
     identical one is reused, any other difference is a conflict."""
     roles = json.loads(unit["roles_text"]) if unit["roles_text"] else None
-    return sorted(name for name, cfg in _expected_roles(target, roles).items()
-                  if name in sf.agent_registry
-                  and not _serves(sf.agent_registry.get(name), cfg))
+    return _role_conflicts(sf, target, roles)[0]
 
 
 def refuse_served_role_changes(sf, target: str, unit: dict) -> None:
-    """The common preflight of every changing adoption (native adopt_bundle,
-    hence restore, and the normal editors before they catalog anything)."""
+    """The early preflight of every changing adoption (native adopt_bundle,
+    hence restore, before its descriptor; the normal editors before they
+    catalog anything). Publication itself enforces the same rule
+    (``roles_to_publish``)."""
     conflicts = served_role_conflicts(sf, target, unit)
     if conflicts:
-        raise BundleRefused(
+        raise LiveRoleConflict(
             f"adoption would replace live role {', '.join(conflicts)}; its existing "
             f"definition serves pinned runs and differs from the one proposed")
+
+
+def roles_to_publish(sf, target: str, roles: dict | None) -> dict:
+    """The absent-or-exactly-equal rule of every publication of a recorded
+    whole unit; ``pipeline_registry._commit_registration`` evaluates it under
+    the registration exclusion before ANY role is installed.
+
+    A recorded unit (sealed bundle, adoption-recorded target, either side of
+    its descriptor) records the roles it needs, not authority over a name an
+    existing run may already resolve. Over the COMPLETE proposed set: an
+    absent name is installed, an identical one is reused as it is (no
+    replacement), and any different one refuses the whole publication with
+    nothing installed. Adoption, reconciliation, sealed registration, reload
+    and boot all publish through here; recovery has no exception. Returns the
+    entries of *roles* to install."""
+    conflicts, expected = _role_conflicts(sf, target, roles)
+    if conflicts:
+        raise LiveRoleConflict(
+            f"publishing {target!r} would replace live role {', '.join(conflicts)}; "
+            f"its existing definition differs from the recorded one and may serve "
+            f"existing runs; nothing was changed")
+    return {name: roles[name] for name in expected if name not in sf.agent_registry}
 
 
 def whole_state(sf, registry, config_dir, target: str, unit: dict) -> list:
@@ -1297,10 +1341,10 @@ def whole_state(sf, registry, config_dir, target: str, unit: dict) -> list:
         problems.append("persisted graph row")
     elif hist is None or hist["digest"] != want or hist["yaml_text"] != text:
         problems.append("persisted version history")
-    # Every persisted role, historical ones included: publication re-registers
-    # them all, so each live definition must already be exactly what that
-    # registration (with its legitimate defaults) serves, or an edit would
-    # silently change what pinned runs claim under an unchanged graph pin.
+    # Every persisted role, historical ones included: publication reuses only
+    # an identical live definition, so each must already be exactly what that
+    # registration (with its legitimate defaults) serves, or pinned runs would
+    # claim something else under an unchanged graph pin.
     for role, cfg in _expected_roles(target, roles).items():
         if not _serves(sf.agent_registry.get(role), cfg):
             problems.append(f"live role {role}")
@@ -1416,11 +1460,29 @@ def adopt_bundle(sf, registry, target: str, phys: str, *, expected_current: str,
         return {"target": target, "identity": new_id, "previous": current}
 
 
+def _served_new_side(desc: dict) -> bool:
+    """Whether the descriptor's NEW side was ever admitted as the target:
+    settled there, or returned to pending by boot from such a settlement.
+    A pending adoption that never settled never admitted a run on it."""
+    state = desc.get("state")
+    if state == "pending":
+        state = (desc.get("boot_unverified") or {}).get("settled")
+    return _SETTLED_SIDE.get(state) == "new"
+
+
 def reconcile_adoption(sf, registry, target: str, *, to: str, config_dir=None) -> dict:
     """Restore a crashed/mixed target to the RECORDED old or new whole bundle
     and clear the block only once ``whole_state`` verifies every provider.
     A settled target that is not served as its recorded unit (e.g. its files
-    were changed outside the editors) is mixed too and reconciles the same way."""
+    were changed outside the editors) is mixed too and reconciles the same way.
+
+    Publication completes the recorded side: absent roles are installed, but a
+    different live definition refuses with nothing changed
+    (``roles_to_publish``), and the target stays blocked. Settling on the OLD
+    side after the new one was served refuses too when the new side recorded
+    roles the old one lacks: runs admitted there resolve them by name, and
+    the old side's roles would not reload them on restart. Reconcile to new,
+    then restore the old version (an adoption retains every historical role)."""
     from core import pipeline_registry as pr
     if to not in ("old", "new"):
         raise BundleRefused("reconcile target must be 'old' or 'new'")
@@ -1430,6 +1492,15 @@ def reconcile_adoption(sf, registry, target: str, *, to: str, config_dir=None) -
         if desc is None or (desc.get("state") != "pending" and not whole_state(
                 sf, registry, d, target, recorded_unit(d, target))):
             raise BundleRefused(f"no pending adoption for {target!r}")
+        if to == "old" and _served_new_side(desc):
+            dropped = sorted(set(json.loads(desc["new"]["roles_text"] or "{}"))
+                             - set(json.loads(desc["old"]["roles_text"] or "{}")))
+            if dropped:
+                raise BundleRefused(
+                    f"{target!r} served its recorded new bundle; settling on the old "
+                    f"one would drop role {', '.join(dropped)} that runs admitted there "
+                    f"resolve, from its persisted roles. Reconcile to 'new', then "
+                    f"restore the old version; nothing was changed")
         side = desc[to]
         unit = {"graph_yaml": side["graph_yaml"], "roles_text": side["roles_text"],
                 "hints": side.get("hints")}

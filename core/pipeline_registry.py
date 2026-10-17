@@ -374,11 +374,15 @@ def _engine_has_table(sf, name: str) -> bool:
         return False
 
 
-def generated_configs_dir() -> Path:
-    """Where persisted generated configs live (override via env for tests)."""
+def _generated_configs_path() -> Path:
     d = os.getenv("AITELIER_GENERATED_CONFIGS_DIR")
     from core import datadir
-    base = Path(d) if d else datadir.configs_dir()
+    return Path(d) if d else datadir.configs_dir()
+
+
+def generated_configs_dir() -> Path:
+    """Where persisted generated configs live (override via env for tests)."""
+    base = _generated_configs_path()
     base.mkdir(parents=True, exist_ok=True)
     return base
 
@@ -545,13 +549,21 @@ def _register_text(sf, registry, config_name: str, yaml_text: str,
 
 def _commit_registration(sf, registry, config_name: str, graph, hints,
                          *, roles: dict | None = None, paths=(), persist=None,
-                         require_manifest: bool = False) -> None:
-    """Publish one fully validated graph and its files as one rollback unit."""
+                         require_manifest: bool = False, config_dir=None) -> None:
+    """Publish one fully validated graph and its files as one rollback unit.
+
+    A recorded whole unit (sealed bundle or adoption-recorded target in
+    *config_dir*, default the generated-configs dir) is classified and its
+    complete role set checked under the same exclusion as the effects, before
+    any of them: absent roles are installed, identical live ones reused, and
+    a different live one refuses with nothing changed
+    (``pipeline_frozen_bundle.roles_to_publish``). Ordinary configs keep
+    registering their roles as before."""
     from core.registration_transaction import RegistrationTransaction
 
-    def publish():
-        if roles is not None:
-            _register_forge_roles(sf, config_name, roles)
+    def publish(install):
+        if install is not None:
+            _register_forge_roles(sf, config_name, install)
         ensure_host_agents(sf, graph)
         sf.register_graph(graph)
         manifest = (registry.register_one(sf, config_name, hint_overrides=hints)
@@ -566,13 +578,20 @@ def _commit_registration(sf, registry, config_name: str, graph, hints,
     # Real SkillFlow owns the registries and SQLite state snapshotted here.
     if not all(hasattr(sf, attr) for attr in (
             "_lock", "_conn", "_graphs", "_resolvers", "agent_registry")):
-        publish()
+        publish(roles)
         return
 
-    with RegistrationTransaction(
-            sf, registry, config_names=[config_name], paths=paths) as transaction:
-        publish()
-        transaction.commit()
+    from core import pipeline_frozen_bundle as _fb
+    with sf._lock:                      # the lock RegistrationTransaction holds
+        install = roles
+        if roles and _fb.records_whole_unit(
+                _generated_configs_path() if config_dir is None else config_dir,
+                config_name):
+            install = _fb.roles_to_publish(sf, config_name, roles)
+        with RegistrationTransaction(
+                sf, registry, config_names=[config_name], paths=paths) as transaction:
+            publish(install)
+            transaction.commit()
 
 
 def _validated_registration(config_name: str, yaml_text: str,
@@ -1296,8 +1315,14 @@ def load_generated_configs(sf, registry) -> list[str]:
                         "skipping invalid generated config %s: %s", f.name, e)
 
             for f, roles, graph, hints in plans:
-                _commit_registration(
-                    sf, registry, f.stem, graph, hints, roles=roles)
+                try:
+                    _commit_registration(sf, registry, f.stem, graph, hints,
+                                         roles=roles, config_dir=config_dir)
+                except _fb.LiveRoleConflict as exc:
+                    # Refused before any effect: only this recorded unit stays
+                    # unserved (verify_boot / launch refuse it until reconciled).
+                    _log.warning("refusing %s at boot: %s", f.stem, exc)
+                    continue
                 out.append(f.stem)
             boot_transaction.commit()
     except Exception as e:

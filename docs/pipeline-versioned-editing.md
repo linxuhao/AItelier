@@ -24,7 +24,11 @@ into a new inline role; it never modifies the shared template file.
 logical graph, referenced settings/tools and UTF-8 prompts for future runs. All
 historical aliases and graph rows remain, so existing runs retain their original
 SDK graph pins and role definitions. Physical roles.json intentionally retains a
-historical superset. Existing legacy roles that still name a shared template
+historical superset. Every adoption path (normal edits, restore and native
+adoption) reuses an existing role name only for a canonically identical
+definition (`true`, `1` and `1.0` stay distinct); a different existing definition
+refuses before any seal, descriptor, file, registry or history effect, because
+pinned runs resolve that name. Existing legacy roles that still name a shared template
 continue to rely on that file remaining unchanged; normal editing never rewrites
 it. No run is repinned.
 

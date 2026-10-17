@@ -259,14 +259,11 @@ class PipelineVersions(NativeVersions):
                     compiled = self._sealed(vid)[1]
                 except c.UnknownVersion:
                     pass
+                # The common native construction refuses to change a retained role.
                 preview = fb.preview_adoption(target, unit, compiled)
                 if project_unit(target, preview, candidate['tools'])[1] != vid:
                     raise c.UnsupportedContent('adoption would not serve logical content')
-                existing = json.loads(unit['roles_text']) if unit['roles_text'] else {}
                 proposed = json.loads(preview['roles_text'])
-                if any(k not in proposed or fb.canonical(proposed[k]) != fb.canonical(v)
-                       for k, v in existing.items()):
-                    raise c.UnsupportedContent('adoption would change a retained role')
                 pr._validated_registration(target, preview['graph_yaml'],
                                            roles=proposed, sf=self._sf)
                 # Preparation starts here. Never catalog before complete preflight.

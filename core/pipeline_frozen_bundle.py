@@ -1128,7 +1128,12 @@ def adopted_unit(config_dir, target: str, phys: str) -> dict:
 
 
 def preview_adoption(target: str, old: dict, sealed: dict) -> dict:
-    """Detached form of adopted_unit, also used for before-effect edit validation."""
+    """Detached form of adopted_unit, also used for before-effect edit validation.
+
+    Every adoption (native adopt_bundle, restore, normal edits) is built here,
+    so this is where retained roles are kept immutable: pinned runs resolve a
+    role by name, and an existing name may only be reused for a canonically
+    identical definition (canonical bytes, so true never equals 1 or 1.0)."""
     from core import pipeline_registry as pr
     phys = sealed['physical_name']
     sep, tag = pr._ROLE_SEP, f"rsi{sealed['bundle_identity'][:16]}_"
@@ -1143,7 +1148,11 @@ def preview_adoption(target: str, old: dict, sealed: dict) -> dict:
         node["agent_config"] = role_map[role]
     roles = json.loads(old["roles_text"]) if old["roles_text"] else {}
     for role, cfg in sealed["roles"].items():
-        roles[role_map[role]] = copy.deepcopy(cfg)
+        name = role_map[role]
+        if name in roles and canonical(roles[name]) != canonical(cfg):
+            raise BundleRefused(f"adoption would change retained role {name!r}; "
+                                "its existing definition serves pinned runs")
+        roles[name] = copy.deepcopy(cfg)
     return {"graph_yaml": yaml.safe_dump(data, sort_keys=False, allow_unicode=True),
             "roles_text": roles_text(roles), "hints": sealed.get("hints") or {}}
 

@@ -162,12 +162,21 @@ class NativeEvaluator:
 
     def _gateway_profile(self, role_name: str):
         """Build the gateway the runner would build for this role, with the
-        frozen provider registry/route table, and read its effective settings.
-        Construction sends nothing."""
+        frozen provider registry/route table and the host's ONE concrete
+        endpoint bound passively (no rotation selection is taken), and read its
+        effective settings. Construction sends nothing."""
         from core.agents import AgentFactory
+        from core.model_routes import BindingRefused
+        entry = self.host.endpoints.get(self.host.endpoint_label)
+        if not isinstance(entry, dict):
+            raise _Refuse("PROVIDER_UNAVAILABLE", f"no endpoint {self.host.endpoint_label!r}")
         factory = AgentFactory(registry=self.host.sf.agent_registry)
         factory.gateway_paths = (str(self.host.providers_path), str(self.host.routes_path))
-        gateway = factory._build_gateway(role_name)
+        factory.gateway_endpoint = f"{entry['provider']}/{entry['model']}"
+        try:
+            gateway = factory._build_gateway(role_name)
+        except BindingRefused as exc:
+            raise _Refuse("RUNTIME_DRIFT", str(exc))
         return gateway, factory._get_config(role_name).get("config", {})
 
     def served_runtime(self, compiled: dict, policy_identity: str) -> Runtime:

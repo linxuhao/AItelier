@@ -28,6 +28,10 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
+class BindingRefused(RuntimeError):
+    """A frozen endpoint this route's ordinary scheduling never binds first."""
+
+
 def config_or_example(name: str) -> str:
     """`<name>` if the deployment has one, else the committed `<name>.example`.
 
@@ -197,6 +201,41 @@ class ModelRoutes:
             f"model '{model_name}' is neither a 'provider/model' nor a route in "
             f"{self._path}. Known routes: {known}. Add it there, or use a "
             f"concrete provider/model.")
+
+    def bound(self, model_name: str, endpoint: str) -> list[str]:
+        """Candidates for `model_name` with ONE frozen concrete `endpoint` first.
+
+        Passive: it reads the table and never advances the rotation counter,
+        so any number of identity reads and every gateway of one frozen
+        evaluation campaign see the same binding, while ordinary gateways keep
+        taking one selection each from `resolve(rotate=True)`. The order is
+        exactly what that rotation returns on the turn that lands on
+        `endpoint`: the rest of the pool behind it, the fallback tail last.
+
+        Only an endpoint ordinary scheduling can bind FIRST is accepted — a
+        rotate-pool member, the head of a plain preference list, or a concrete
+        name itself. A fallback member or a later preference is a failover
+        target, never a campaign's binding: `BindingRefused`, not promotion.
+        """
+        if model_name in self._routes:
+            lst = self._routes[model_name]
+            n = self._rot_n.get(model_name, 0)
+            heads = lst[:n] if n else lst[:1]
+            if endpoint not in heads:
+                raise BindingRefused(
+                    f"endpoint {endpoint!r} is not one route '{model_name}' "
+                    f"schedules first (rotate pool {heads}); a fallback member "
+                    f"or later preference is never a frozen binding")
+            if not n:
+                return list(lst)
+            k = lst.index(endpoint)
+            return lst[k:n] + lst[:k] + lst[n:]
+        if "/" in model_name:
+            if endpoint != model_name:
+                raise BindingRefused(
+                    f"endpoint {endpoint!r} cannot serve concrete model '{model_name}'")
+            return [model_name]
+        return self.resolve(model_name)     # raises the unknown-name error
 
     def names(self) -> list[str]:
         return sorted(self._routes)

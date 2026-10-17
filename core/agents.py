@@ -100,8 +100,12 @@ class AgentFactory:
         self._on_progress = on_progress
         # RSI evaluator cells only: the cell's physical-admission scope, and the
         # frozen provider registry / route table its gateways are built from.
+        # `gateway_endpoint` names the frozen concrete `provider/model` every
+        # gateway binds first without taking a rotation selection; a cell scope
+        # supplies its frozen runtime endpoint when it is not set.
         self.physical_scope = None
         self.gateway_paths = None
+        self.gateway_endpoint = None
         # Cause of the first physical send of the NEXT gateway built (e.g. the
         # engine's native -> JSON-mode fallback).
         self.next_cause = None
@@ -150,12 +154,17 @@ class AgentFactory:
         scope = self.physical_scope
         paths = self.gateway_paths or (
             (scope.providers_path, scope.routes_path) if scope is not None else None)
+        endpoint = self.gateway_endpoint
+        if endpoint is None and scope is not None:
+            frozen = scope.runtime.endpoint
+            endpoint = f"{frozen.provider}/{frozen.model}"
         gateway = AIGateway(
             model_name=model,
             enable_thinking=enable_thinking,
             thinking_effort=thinking_effort,
             temperature=temperature,
             max_output_tokens=max_output_tokens,
+            endpoint=endpoint,
             **({"config_path": paths[0], "routes_path": paths[1]} if paths else {}),
         )
         if self._on_progress is not None:

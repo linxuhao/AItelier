@@ -53,6 +53,30 @@ def test_plain_list_routes_are_untouched_by_the_flag(table):
     assert table.resolve("plain", rotate=True) == ["a/m1", "payg/m9"]
 
 
+def test_frozen_binding_is_the_rotation_turn_without_taking_it(table):
+    """Differential: bound(e) is exactly the order rotation returns on the turn
+    that lands on e, and reading it any number of times takes no turn."""
+    turns = {s[0]: s for s in (table.resolve("flash", rotate=True) for _ in range(3))}
+    counter = dict(mr._rot_counters)
+    for head, order in turns.items():
+        assert [table.bound("flash", head) for _ in range(3)] == [order] * 3
+    assert dict(mr._rot_counters) == counter
+    assert table.bound("solo", "a/m1") == table.resolve("solo", rotate=True)
+    assert table.bound("plain", "a/m1") == table.resolve("plain")
+    assert table.bound("x/concrete", "x/concrete") == ["x/concrete"]
+
+
+def test_frozen_binding_never_promotes_a_fallback_or_later_preference(table):
+    counter = dict(mr._rot_counters)
+    for name, endpoint in (("flash", "payg/m9"), ("solo", "payg/m9"), ("plain", "payg/m9"),
+                           ("flash", "z/unknown"), ("x/concrete", "y/other")):
+        with pytest.raises(mr.BindingRefused):
+            table.bound(name, endpoint)
+    with pytest.raises(RuntimeError, match="neither"):
+        table.bound("flsh", "a/m1")
+    assert dict(mr._rot_counters) == counter
+
+
 def test_malformed_rotation_form_is_refused(tmp_path):
     p = tmp_path / "r.json"
     p.write_text(json.dumps({"x": {"rotate": [], "fallback": ["a/b"]}}))

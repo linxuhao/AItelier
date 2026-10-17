@@ -420,7 +420,7 @@ class AIGateway:
     def __init__(self, model_name: str, config_path: str | None = None,
                  enable_thinking: bool = False, thinking_effort: str | None = None,
                  temperature: float = 0.2, max_output_tokens: int = 8192,
-                 routes_path: str | None = None):
+                 routes_path: str | None = None, endpoint: str | None = None):
         model_name = resolve_agent_model(model_name)
         self.enable_thinking = enable_thinking
         self.thinking_effort = thinking_effort
@@ -457,7 +457,13 @@ class AIGateway:
         from core.model_routes import get_routes
         self.internal_model = model_name
         self._routes_path = routes_path
-        self._candidates = get_routes(routes_path).resolve(model_name, rotate=True)
+        # Every ordinary gateway takes one rotation selection. A frozen
+        # concrete `endpoint` (an RSI evaluation campaign's, set by
+        # AgentFactory) is bound passively instead: reading its identity or
+        # building its cells' gateways never consumes the route's scheduling.
+        routes = get_routes(routes_path)
+        self._candidates = (routes.resolve(model_name, rotate=True) if endpoint is None
+                            else routes.bound(model_name, endpoint))
         self._failovers: list[tuple[str, str]] = []   # (from_model, why)
         # Cleared for good the first time an endpoint rejects the thinking-off
         # keys — see `_apply_binding`'s else branch and `_complete_prebuilt`.

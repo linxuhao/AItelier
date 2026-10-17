@@ -77,21 +77,6 @@ class AItelierSkillFlow(SkillFlow):
     # run is created, approved, rejected, stopped or failed only inside the
     # Coding Mode controller, which holds that project's request lock.
 
-    def create_run(self, graph_name: str, *args, **kwargs):
-        from core.coding_workspace import fence_create
-        fence_create(graph_name)
-        return super().create_run(graph_name, *args, **kwargs)
-
-    def approve_checkpoint(self, run_id: str, *args, **kwargs):
-        from core.coding_workspace import fence_control
-        fence_control(run_id, "approval")
-        return super().approve_checkpoint(run_id, *args, **kwargs)
-
-    def reject_checkpoint(self, run_id: str, *args, **kwargs):
-        from core.coding_workspace import fence_control
-        fence_control(run_id, "rejection")
-        return super().reject_checkpoint(run_id, *args, **kwargs)
-
     def stop_run(self, run_id: str, *args, **kwargs):
         from core.coding_workspace import fence_control
         fence_control(run_id, "stop")
@@ -105,20 +90,10 @@ class AItelierSkillFlow(SkillFlow):
     # Generic state moves would carry a paused governing plan past its
     # checkpoint (resume), reopen a dismissed one (reactivate/re_run) or move
     # the pinned graph under a sealed binding (repin).
-    def resume_run(self, run_id: str, *args, **kwargs):
-        from core.coding_workspace import fence_control
-        fence_control(run_id, "resume")
-        return super().resume_run(run_id, *args, **kwargs)
-
     def pause_run(self, run_id: str, *args, **kwargs):
         from core.coding_workspace import fence_control
         fence_control(run_id, "pause")
         return super().pause_run(run_id, *args, **kwargs)
-
-    def reactivate_run(self, run_id: str, *args, **kwargs):
-        from core.coding_workspace import fence_control
-        fence_control(run_id, "reactivation")
-        return super().reactivate_run(run_id, *args, **kwargs)
 
     def re_run(self, run_id: str, *args, **kwargs):
         from core.coding_workspace import fence_control
@@ -169,7 +144,9 @@ class AItelierSkillFlow(SkillFlow):
         unreadable adoption descriptor, or a recorded unit left on defaults or
         missing its frozen roles, blocks that target at this one ingress.
         """
+        from core.coding_workspace import fence_create
         from core.pipeline_frozen_bundle import launch_block
+        fence_create(graph_name)
         with self._lock:
             blocked = launch_block(graph_name, sf=self)
             if blocked:
@@ -198,25 +175,33 @@ class AItelierSkillFlow(SkillFlow):
         if blocked:
             raise SkillFlowError(f"{action} of run {run_id} refused: {blocked}")
 
-    def resume_run(self, run_id: str) -> None:
+    def resume_run(self, run_id: str, *args, **kwargs) -> None:
+        from core.coding_workspace import fence_control
+        fence_control(run_id, "resume")
         with self._lock:
             self._refuse_unserved_bundle(run_id, "resume")
-            super().resume_run(run_id)
+            return super().resume_run(run_id, *args, **kwargs)
 
-    def approve_checkpoint(self, run_id: str) -> str:
+    def approve_checkpoint(self, run_id: str, *args, **kwargs) -> str:
+        from core.coding_workspace import fence_control
+        fence_control(run_id, "approval")
         with self._lock:
             self._refuse_unserved_bundle(run_id, "checkpoint approval")
-            return super().approve_checkpoint(run_id)
+            return super().approve_checkpoint(run_id, *args, **kwargs)
 
     def reject_checkpoint(self, run_id: str, *args, **kwargs) -> None:
+        from core.coding_workspace import fence_control
+        fence_control(run_id, "rejection")
         with self._lock:
             self._refuse_unserved_bundle(run_id, "checkpoint rejection")
             return super().reject_checkpoint(run_id, *args, **kwargs)
 
-    def reactivate_run(self, run_id: str) -> None:
+    def reactivate_run(self, run_id: str, *args, **kwargs) -> None:
+        from core.coding_workspace import fence_control
+        fence_control(run_id, "reactivation")
         with self._lock:
             self._refuse_unserved_bundle(run_id, "reactivation")
-            return super().reactivate_run(run_id)
+            return super().reactivate_run(run_id, *args, **kwargs)
 
     def _execute_tool_inline(self, tool_node, *, run_id: str = "",
                              graph_name: str = "") -> dict:

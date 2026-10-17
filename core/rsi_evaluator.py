@@ -525,7 +525,7 @@ class NativeEvaluator:
         run_id = launch.get("run_id")
         if launch.get("status") != "started" or not run_id:
             if run_id:
-                return self._settle_cell(request, base, run_id, project_id, arm, scope,
+                return self._settle_cell(request, ctx, base, run_id, project_id, arm, scope,
                                          t_cell, launch_error=launch.get("message", ""))
             return self._not_started(request, index, cell, tag, "INFRASTRUCTURE")
         binding = CellBinding(scope=scope, policy=policy_mod.CellPolicy(ctx["policy"], arm),
@@ -540,10 +540,10 @@ class NativeEvaluator:
                                      auto_approve=False), binding)
         except Exception as exc:                                        # noqa: BLE001
             drive_error = f"{type(exc).__name__}: {exc}"
-        return self._settle_cell(request, base, run_id, project_id, arm, scope, t_cell,
+        return self._settle_cell(request, ctx, base, run_id, project_id, arm, scope, t_cell,
                                  drive_error=drive_error)
 
-    def _settle_cell(self, request, base, run_id, project_id, arm, scope, t_cell, *,
+    def _settle_cell(self, request, ctx, base, run_id, project_id, arm, scope, t_cell, *,
                      launch_error="", drive_error="") -> CellReceipt:
         h = self.host
         live = scope.abandon_pending("cell ended with the physical call still in flight")
@@ -631,11 +631,15 @@ class NativeEvaluator:
             os.replace(tmp, snap)
         if snap.read_bytes() != data:
             return final("invalid", "OUTPUT_MISMATCH")
-        private = self._private_case(base["case"].case_id)
+        # Score with the same decoded packages verified before this evaluation
+        # started, just as launch and the train projection consume ctx["public"].
+        # Host package paths may now contain a later version.
+        private = ctx["private"][base["case"].case_id]
+        public = ctx["public"][base["case"].case_id]
         try:
             points, diagnostic = checker.score_findings(
                 snap.read_bytes(), material=private["material"], refs=private["refs"],
-                public_files=tuple(sorted(self._public_case(base["case"].case_id)["files"])))
+                public_files=tuple(sorted(public["files"])))
         except checker.CheckerInputError:
             return final("invalid", "SCORER_ERROR")
         private_result = digest({"receipt": base["receipt_id"], "diagnostic": diagnostic})
@@ -649,8 +653,3 @@ class NativeEvaluator:
                               max_points=base["case"].max_points)
         return final("scored", "NONE", check)
 
-    def _private_case(self, case_id: str) -> dict:
-        return json.loads(Path(self.host.private_package).read_text(encoding="utf-8"))[case_id]
-
-    def _public_case(self, case_id: str) -> dict:
-        return json.loads(Path(self.host.public_package).read_text(encoding="utf-8"))[case_id]

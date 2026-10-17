@@ -2157,6 +2157,20 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
         from core import coding_impl_outcome as coding
         try:
             report["run_binding"] = coding.current_binding(run_id)
+            if prechange_capture:
+                # Inline native tool nodes do not resolve required context in
+                # the pinned engine. Reuse the existing published-seed guard
+                # before paying for this upfront measurement.
+                from api.dependencies import get_skillflow
+                from core.seed_publication import seed_dir, seed_is_published
+                try:
+                    ready, why = seed_is_published(seed_dir(
+                        get_skillflow(), report["run_binding"]["project_id"], "coding_impl"), "plan.md")
+                except Exception as exc:
+                    ready, why = False, "published seed unreadable: " + type(exc).__name__
+                if not ready:
+                    return {"written": None, "passed": False, "_error": True,
+                            "error": "coding_impl baseline requires published plan.md: " + why}
             prechange_before = coding.owned_snapshot(project_root, run_id, original=prechange_capture)
         except Exception as exc:
             report["prechange_unavailable"] = str(exc)[:300]

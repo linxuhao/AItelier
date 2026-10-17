@@ -387,3 +387,15 @@ def test_unmeasured_gate_cannot_retain_candidate(rig,mode):
             (repo/'test_app.py').write_text('')
     assert rig.drive(remove_tests)==('failed',1)
     assert not rig.report().get('coding_outcome')
+
+
+def test_missing_published_plan_refuses_before_any_cpu_gate(rig):
+    from core.seed_publication import seed_dir
+    from skillflow.exceptions import RequiredContextMissing
+    (seed_dir(rig.sf,'p','coding_impl')/'plan.md').unlink()
+    rig.sf.advance_run(rig.rid)
+    assert rig.calls==0
+    if rig.sf.get_run(rig.rid)['status']=='running':
+        with pytest.raises(RequiredContextMissing):
+            rig.sf.claim_next_step(rig.rid)
+    assert rig.calls==0

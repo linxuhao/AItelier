@@ -497,6 +497,8 @@ def summarise_run(sf, ws, registry, run_id: str) -> dict:
         return {"error": f"no run '{run_id}'"}
     config_name = run.get("graph_name") or ""
     project_id = run.get("project_id") or ""
+    from core.coding_impl_outcome import load_coding_outcome
+    coding_result = load_coding_outcome(sf, ws, run, registry)
 
     per_step, first_failure = [], None
     try:
@@ -634,4 +636,5 @@ def summarise_run(sf, ws, registry, run_id: str) -> dict:
         "refused_tool_calls": refused_tool_calls(sf, run_id),
         "final_outputs": outputs,
         "run_error": run.get("error_reason") or run.get("error"),
+        **coding_result,
     }

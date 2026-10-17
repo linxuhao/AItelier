@@ -332,6 +332,12 @@ def _run_docker(cfg: dict, fields: dict, conn: socket.socket | None = None) -> d
     from core.repository_executor import owned_container
     name = "aitelier-cpu-" + uuid.uuid4().hex
     command = docker_command(cfg, fields, name)
+    entry_before = None
+    if fields.get("pytest_timeout") and not fields.get("profile"):
+        try:
+            entry_before = hashlib.sha256(Path(cfg["executor_entry"]).read_bytes()).hexdigest()
+        except OSError:
+            pass
 
     def client_left():
         # Protocol is one complete request followed by a reply;
@@ -392,6 +398,15 @@ def _run_docker(cfg: dict, fields: dict, conn: socket.socket | None = None) -> d
             raise LaunchRefused("coding shell executor returned invalid UTF-8 output") from exc
         if size > CODING_SHELL_OUTPUT_LIMIT:
             raise LaunchRefused("coding shell executor exceeded its decoded output limit")
+    identity = result.get("execution_identity")
+    if fields.get("pytest_timeout") and not fields.get("profile") and isinstance(identity, dict):
+        try:
+            entry_after = hashlib.sha256(Path(cfg["executor_entry"]).read_bytes()).hexdigest()
+        except OSError:
+            entry_after = None
+        identity.update(transport="host_launcher", image=cfg["test_image"],
+                        run_id=fields["run_id"], project_id=fields["project_id"], repo=fields["repo"],
+                        comparable=bool(entry_before and entry_before == entry_after == identity.get("entry_sha256")))
     return result
 
 

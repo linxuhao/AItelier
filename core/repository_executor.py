@@ -791,6 +791,7 @@ def _launch_via_host(socket_path: str, repo: Path, args: list[str], timeout: int
                                             result["stdout"], result["stderr"])
     completed.import_error = result.get("import_error", "")
     completed.git = response.get("git")
+    completed.execution_identity = result.get("execution_identity")
     return completed
 
 

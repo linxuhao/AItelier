@@ -395,8 +395,11 @@ class CellScope:
             raise
         with self._lock:
             self.pending[reservation.reservation_id] = reservation
-        self._record("rsi_physical_send", {"attempt_id": attempt_id, "cause": cause,
-                                           "endpoint": label, "upper": upper.model_dump()})
+        self._record("rsi_physical_send", {
+            "attempt_id": attempt_id, "cause": cause, "endpoint": label,
+            "upper": upper.model_dump(),
+            # The effective identity this send actually carried (nonsecret).
+            "observed": {k: observed.get(k) for k in expected}})
         return reservation, {"key": key, "observed": observed}
 
     def settle(self, reservation: Reservation, settlement: str, measured: Amount | None,

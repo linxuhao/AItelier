@@ -53,6 +53,12 @@ _KNOWN_BODY_KEYS = frozenset({
     "tool_choice", "temperature", "thinking", "reasoning_effort",
 })
 _MAX_OBSERVED_BODY = 64 * 1024 * 1024
+# Runtime.effort pin for a served profile with thinking enabled and NO effort
+# transmitted (gateway ``_binding_effort()`` is None: neither role nor route
+# declares one). It names that omission only: it never claims a remote effort
+# level and is never sent. Its wire projection requires the reasoning_effort
+# key to be absent, so an explicit value (or an explicit null) is drift.
+PROVIDER_DEFAULT_EFFORT = "provider_default"
 
 
 class AdmissionDenied(openai.OpenAIError):
@@ -257,8 +263,21 @@ def expected_wire(runtime: Runtime, base_url: str) -> dict:
     """The exact request projection the frozen profile permits.
 
     With thinking enabled the gateway sends no temperature (it is popped), so
-    the projection says so instead of normalising the observed request."""
+    the projection says so instead of normalising the observed request. Under
+    the ``provider_default`` pin the reasoning_effort key must be absent."""
     thinking = runtime.effort != "disabled"
+    if thinking and runtime.effort == PROVIDER_DEFAULT_EFFORT:
+        return {
+            "url": base_url.rstrip("/") + "/chat/completions",
+            "model": runtime.endpoint.model,
+            "max_tokens": runtime.max_output_tokens,
+            "stream": True,
+            "thinking": {"type": "enabled"},
+            "reasoning_effort": None,
+            "reasoning_effort_present": False,
+            "temperature": None,
+            "unknown_keys": [],
+        }
     return {
         "url": base_url.rstrip("/") + "/chat/completions",
         "model": runtime.endpoint.model,
@@ -290,6 +309,7 @@ def observe_wire(request: httpx.Request) -> tuple[dict, bytes]:
         "stream": body.get("stream"),
         "thinking": body.get("thinking"),
         "reasoning_effort": body.get("reasoning_effort"),
+        "reasoning_effort_present": "reasoning_effort" in body,
         "temperature": body.get("temperature"),
         "unknown_keys": sorted(set(body) - _KNOWN_BODY_KEYS),
         "tools": len(body.get("tools") or []),

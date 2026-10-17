@@ -307,7 +307,10 @@ explicit mapping records (graph and self-seed name, generated role namespace,
 template -> inline prompt, and `max_total_steps: 50`, proved unreachable because a
 single step with only terminal transitions holds one step row per run). The
 model name stays `flash`, resolved by the frozen route table; settings, tools,
-contexts, output and limits are copied. Before any capture, freeze or send, the
+contexts, output and limits are copied. The builtin declares thinking without an
+effort, so it is served with no `reasoning_effort` sent; the evaluator pins that
+omission as `Runtime.effort="provider_default"` and denies any request that
+sends an effort under it. No effort is injected into the unit or its route. Before any capture, freeze or send, the
 `equivalence` control requires equal logical content under that mapping, equal
 tool identities and an equal effective gateway profile for the builtin role and
 the shadow role; the measured reference must be that checked shadow. A winner

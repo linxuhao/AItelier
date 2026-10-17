@@ -193,6 +193,11 @@ class NativeEvaluator:
             if gateway.active_model != concrete:
                 raise _Refuse("RUNTIME_DRIFT", f"gateway binds {gateway.active_model}, not {concrete}")
             effort = gateway._binding_effort() if gateway.enable_thinking else "disabled"
+            if effort == admission.PROVIDER_DEFAULT_EFFORT:
+                raise _Refuse("RUNTIME_DRIFT", "a configured effort may not spell the omission pin")
+            if gateway.enable_thinking and effort is None:
+                # Thinking on, no effort transmitted: pin that omission, never a level.
+                effort = admission.PROVIDER_DEFAULT_EFFORT
             temperature = cfg.get("temperature", 0.2)
             profiles.add(json.dumps({
                 "requested_model": gateway.internal_model, "effort": effort,

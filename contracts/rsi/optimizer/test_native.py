@@ -78,13 +78,22 @@ def test_same_shared_round_scenarios_native(vector, factory):
     for d in native["policy_derivations"]:
         if d["arms"] == ["reference"]:
             assert d["policy"] == native["request"]["runtime"]["policy"]
+    bodies = [x["body"] for x in factory.made[0].provider.received()]
     if vector.get("kind") == "builtin":
         eq = native["builtin_equivalence"]
         assert eq["equivalent"] and native["request"]["reference"]["logical_version"] == eq["shadow_version"]
         assert native["request"]["runtime"]["requested_model"] == "flash"
+        # Faithful omission: thinking enabled, reasoning_effort never sent.
+        assert native["request"]["runtime"]["effort"] == "provider_default"
+        assert bodies and all(b.get("thinking") == {"type": "enabled"} and "reasoning_effort" not in b
+                              for b in bodies)
         if vector["name"] == "builtin_source_patch_only":
             patch = json.loads(Path(native["source_patch_candidates"][0]).read_text())
             assert list(patch["source_diff"]) == ["templates/investigate.md"] and patch["applied"] is False
+    elif bodies:
+        # Explicit-effort profile unchanged: the literal unit's high effort is sent.
+        assert native["request"]["runtime"]["effort"] == "high"
+        assert all(b.get("reasoning_effort") == "high" for b in bodies)
     if vector.get("adoption"):
         assert native["adoption_intent"]["staged_before_candidate"] is True
         if result["error"] != "ADOPTION_AUTHORITY":
@@ -168,11 +177,10 @@ def test_builtin_export_equivalence_and_substitution_refusals(factory):
     assert mapping["prompts"] == {"template:investigate.md": f"inline:{REFERENCE}__investigator"}
     profile = report["effective_profiles"]["investigator"]
     assert profile["builtin"] == profile["shadow"] and profile["builtin"]["internal_model"] == "flash"
-    with pytest.raises(Exception) as exc:           # accepted evaluator refusal
-        f.round.trusted_request("builtin", effects=True)
-    out["accepted_evaluator_refusal"] = {"type": type(exc.value).__name__, "detail": str(exc.value)[:800],
-                                         "effective_effort": profile["builtin"]["effort"]}
-    assert "effort" in str(exc.value) and profile["builtin"]["effort"] is None
+    assert profile["builtin"]["effort"] is None             # nothing declared, nothing injected
+    request = f.round.trusted_request("builtin", effects=True)
+    out["pinned_runtime"] = request.runtime.model_dump(mode="json")
+    assert request.runtime.effort == "provider_default" and request.runtime.requested_model == "flash"
     assert f.provider.received() == []
     edit = f.world.versions.edit(REFERENCE, {"kind": "role", "role": "investigator",   # (c) mismatch
                                              "changes": {"temperature": 0.7}})
@@ -181,6 +189,39 @@ def test_builtin_export_equivalence_and_substitution_refusals(factory):
     evidence("native-builtin-export-equivalence", out)
     assert out["mismatch"]["equivalent"] is False
     assert any(d["field"] == "roles" for d in out["mismatch"]["differences"])
+
+
+def test_explicit_high_under_provider_default_pin_is_refused_before_send(factory):
+    """Under the faithful builtin's omission pin, an operator route edit while
+    cell 0 is in flight makes the engine's re-ask carry an explicit high effort:
+    the admission boundary denies it before the physical send."""
+    f = factory()
+    request = f.prepare("builtin")
+    assert request.runtime.effort == "provider_default"
+    f.actor = "coordinator"
+    f.invoke("freeze", request.model_dump(mode="json"))
+    routes = f.root / "runtime" / "model_routes.json"
+
+    def operator_edit(_record):
+        from core.model_routes import reset_cache
+        doc = json.loads(routes.read_text(encoding="utf-8"))
+        doc["flash"]["effort"] = {"ark/deepseek-v4-flash": "high"}
+        routes.write_text(json.dumps(doc, indent=1), encoding="utf-8")
+        reset_cache()
+    f.provider.first_cell = ("train-01", "reference")
+    f.provider.hooks["runtime_midcell"] = operator_edit
+    f.provider.fault = "runtime_midcell"        # first answer asks no tool: engine re-asks
+    view = f.invoke("train_reference", {})
+    sends = f.provider.received()
+    native = f.native_evidence()
+    evidence("native-provider-default-pin-drift", {"view": view.model_dump(mode="json"),
+                                                   "sent_bodies": [x["body"] for x in sends],
+                                                   "native": native})
+    denied = [d for d in native["trace_denials"] if d.get("reason") == "RUNTIME_DRIFT"]
+    assert len(sends) == 1 and "reasoning_effort" not in sends[0]["body"]
+    assert denied and denied[0]["observed"]["reasoning_effort"] == "high"
+    assert denied[0]["observed"]["reasoning_effort_present"] is True
+    assert view.stop_reason == "invalid" and view.known.requests == 1
 
 
 def test_diagnostic_builtin_round_under_route_declared_effort(factory):

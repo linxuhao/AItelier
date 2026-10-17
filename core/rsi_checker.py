@@ -15,34 +15,46 @@ Frozen rubric (synthetic offline pilot: "which constant does <file> export?"):
 * a findings text that contains the case's private sentinel scores 0 and is
   flagged as a custody failure (the tested pipeline never receives it).
 
-What counts as an assertion is a finite POSITIVE grammar, not a search for
-integers near "is"/"="/"exports". The text is cut into statements (see
-``_statements``); fenced code blocks, block quotes, inline code spans and
-double-quoted spans are quotation and never assert anything. Code formatting
-of a single grammar token (``sample.txt exports `1`.``) is formatting, not
-quotation: the grammar admits it; a code span or quotes around the claim
-itself (a backticked ``sample.txt exports 1``) are not. A statement asserts its integer
-only when the WHOLE statement, after an optional heading or list marker, is
-one of:
+What counts as an answer is a finite POSITIVE protocol over the WHOLE report,
+not a search for integers near "is"/"="/"exports" and not a reading of single
+sentences. Every line of the report must be one of:
 
-* ``[Answer:] <subject> (exports|is|equals)[:] <int> [<locator>][.|!]``, subject a
+* blank;
+* a heading ``#``..``######`` whose text is ``Findings``, ``Answer``, ``Result``
+  or ``Evidence`` (optional colon), or is a statement sequence;
+* a statement sequence, optionally after a list marker (``-``, ``*``, ``+``,
+  ``N.``, ``N)`` and one to four spaces),
+
+indented by at most three spaces (a tab or four spaces would make it code). A
+statement sequence is one or more statements, each ending in ``.``/``!`` and
+white space or at the end of the line. A statement is one of:
+
+* ``[Answer:] <subject> (exports|is|equals)[:] <int> [<locator>]``, subject a
   file path (``sample.txt``, ``src/constants.py``), an upper-case name
   (``VALUE``, ``EXPORTED_VALUE``) or ``the [exported|integer]
   constant|value|answer``;
-* ``[Answer:] [<path>: | <path> exports ]<NAME> = <int> [<locator>][.|!]``;
-* ``Answer: <int> [<locator>][.|!]``;
+* ``[Answer:] [<path>: | <path> exports ]<NAME> = <int> [<locator>]``;
+* ``Answer: <int> [<locator>]``;
+* a citation ``See``, ``Source(s)``, ``Evidence``, ``Reference(s)`` or
+  ``Citation(s)``, an optional colon and a place, more places after ``,``,
+  ``;`` or ``and``, a place being a path with optional ``:N``, ``[,] line N``
+  or ``(line N)``;
 
 where a path or name may be in backticks, ``<int>`` is ``-?digits`` optionally
 in backticks or ``**``, ``Answer:`` also takes ``**`` emphasis or a dash, and
 ``<locator>`` is ``(line N)``, ``(<path>[:N | , line N])``, ``(see ...)``,
-``at|on|in|from <path or line N>`` or ``: the line `<code>` defines it``.
-Anything else is not a claim and earns no value points, whatever integers it
-contains: negated, hedged, conditional, questioned, quoted or otherwise
-qualified statements fall outside the grammar rather than being recognized by
-a word list. Unsupported phrasings of a true answer earn no value points
-either (fail closed). Each statement is judged alone: a later statement that
-retracts an earlier supported claim is not understood. ``REPORT_FORMAT`` is the
-public declaration of this grammar that a benchmark puts in every case prompt.
+``at|on|in|from <path or line N>`` or ``: the line `<name> = <int>` defines it``
+(the quoted defining line, an assignment that asserts its integer too). The
+answer statements assert their integers; citations assert nothing.
+
+A report holding ANY other line asserts nothing at all, whatever its other
+lines say: explanations, caveats, corrections and retractions, negated, hedged,
+conditional or questioned statements, fenced or indented code, block quotes,
+a code span or quotes around a whole claim, tables, HTML. None of these is
+recognized by a word list; they are simply not in the protocol, so a supported
+answer beside them is not taken out of its context. Unsupported phrasings of a
+true answer earn no value points either (fail closed). ``REPORT_FORMAT`` is the
+public declaration of this protocol that a benchmark puts in every case prompt.
 
 Its identity is the served code of this module (``identity()``), recorded as
 the benchmark's ``checker_code``; ``package_identity`` binds that code to the
@@ -56,33 +68,41 @@ CHECKER_REF = "fixture://checker/v1"
 MAX_FINDINGS_BYTES = 256 * 1024
 
 # Public, case-independent: frozen verbatim into every case prompt (task.md) of
-# a benchmark scored by this checker, so both arms are told the same grammar.
+# a benchmark scored by this checker, so both arms are told the same protocol.
 REPORT_FORMAT = (
-    "Answer format (scored by a program): state the answer on its own line as one plain "
-    "sentence `<file path> exports <integer>.`, naming the file that defines the value; "
-    "`<file path>: <NAME> = <integer>` and `The constant is <integer>.` are also accepted, "
-    "optionally after `Answer:` and followed by a location such as `(line 3)`. Only such a "
-    "complete statement counts as an answer: negated, hedged, conditional, questioned or "
-    "quoted statements, statements in code blocks or block quotes, and statements with any "
-    "other added wording are not answers. State exactly one value.\n")
+    "Answer format (scored by a program that reads the whole report): write the report using "
+    "only these lines. An answer line `<file path> exports <integer>.` naming the file that "
+    "defines the value; `<file path>: <NAME> = <integer>` and `The constant is <integer>.` are "
+    "also accepted, optionally after `Answer:` and followed by a location such as `(line 3)`. "
+    "A citation line such as `See <file path>.` or `Source: <file path>, line 3.` A heading "
+    "`# Findings`, `# Answer`, `# Result` or `# Evidence`. Blank lines. Answer and citation lines "
+    "may start with a list marker `- ` or `1. `. If the whole report contains any other text "
+    "(an explanation, caveat or correction; a negated, hedged, conditional or questioned "
+    "statement; a code block, a line indented by four spaces or a tab, a block quote or a "
+    "quotation), it gives no answer, even beside an answer line. State exactly one value.\n")
 
-_PATH = r"`?(?:[\w-]+/)*[\w-]+(?:\.[\w-]+)+`?"
-_NAME = r"`?[A-Z][A-Z0-9]*(?:_[A-Za-z0-9-]+)*`?"
+_P = r"(?:[\w-]+/)*[\w-]+(?:\.[\w-]+)+"
+_N = r"[A-Z][A-Z0-9]*(?:_[A-Za-z0-9-]+)*"
+_PATH = rf"(?:`{_P}`|{_P})"
+_NAME = rf"(?:`{_N}`|{_N})"
 _SUBJECT = rf"(?:{_PATH}|{_NAME}|(?i:the\s+(?:exported\s+|integer\s+)?(?:constant|value|answer)))"
 _LABEL = r"(?:\*\*)?(?i:answer)(?:\*\*)?\s*[:—–-](?:\*\*)?\s*"
 _VALUE = r"(?P<q>`|\*\*)?(?P<value>-?\d{1,4000})(?(q)(?P=q))"
 _PLACE = rf"(?:{_PATH}(?::\d+|,?\s+(?i:line)\s+\d+)?|(?i:line)\s+\d+)"
-_LOCATOR = (rf"(?::\s+the\s+line\s+`[^`\n]+`\s+defines\s+it|\s*\(\s*(?:(?i:see)\s+)?{_PLACE}\s*\)"
+_DEFINED = r"`\s*[A-Za-z_][\w-]*\s*=\s*(?P<defined>-?\d{1,4000})\s*`"
+_LOCATOR = (rf"(?::\s+the\s+line\s+{_DEFINED}\s+defines\s+it|\s*\(\s*(?:(?i:see)\s+)?{_PLACE}\s*\)"
             rf"|\s+(?i:at|on|in|from)\s+{_PLACE})")
-_CLAIMS = tuple(re.compile(rf"{head}{_VALUE}(?:{_LOCATOR})?\s*[.!]?") for head in (
-    rf"(?:{_LABEL})?{_SUBJECT}\s+(?:exports|is|equals)\s*:?\s*",
-    rf"(?:{_LABEL})?(?:{_PATH}\s*:\s*|{_PATH}\s+exports\s+)?{_NAME}\s*==?\s*",
-    _LABEL,
+_CITED = rf"{_PATH}(?::\d+|,?\s+(?i:line)\s+\d+|\s*\(\s*(?i:line)\s+\d+\s*\))?"
+_END = r"\s*(?:[.!](?:\s+|\Z)|\Z)"
+_STATEMENTS = tuple(re.compile(body + _END) for body in (
+    rf"(?:{_LABEL})?{_SUBJECT}\s+(?:exports|is|equals)\s*:?\s*{_VALUE}(?:{_LOCATOR})?",
+    rf"(?:{_LABEL})?(?:{_PATH}\s*:\s*|{_PATH}\s+exports\s+)?{_NAME}\s*==?\s*{_VALUE}(?:{_LOCATOR})?",
+    rf"{_LABEL}{_VALUE}(?:{_LOCATOR})?",
+    rf"(?i:see|sources?|evidence|references?|citations?)\s*:?\s+{_CITED}"
+    rf"(?:(?:\s*[,;]\s*|\s+(?i:and)\s+){_CITED})*",
 ))
-_FENCE = re.compile(r" {0,3}(`{3,}|~{3,})")
-_BLOCK_QUOTE = re.compile(r" {0,3}>")
-_MARKER = re.compile(r"\s*(?:#{1,6}\s+|(?:[-*+]|\d{1,9}[.)])\s+)?")
-_CLOSING = {"`": "`", '"': '"', "“": "”"}
+_HEAD = re.compile(r" {0,3}(?:(?P<heading>#{1,6})[ \t]+|(?:[-*+]|\d{1,9}[.)]) {1,4})?(?=\S)")
+_TITLE = re.compile(r"(?i:findings|answer|result|evidence):?\s*")
 
 
 class CheckerInputError(ValueError):
@@ -103,61 +123,39 @@ def decode_findings(data: bytes) -> str:
     return text
 
 
-def _statements(text: str):
-    """Statements of *text* in order, quotation kept inside the statement holding it.
-
-    Lines of a fenced code block (an unclosed fence runs to the end) and of a
-    block quote (from its ``>`` line to the end of that paragraph) yield
-    nothing. A statement ends at ``.``, ``!`` or ``?`` followed by white space,
-    or at a line end; never inside an inline code span or a double-quoted span,
-    which instead carries the statement onto the next line until a blank line,
-    fence or block quote ends the paragraph. A statement holding a quoted span
-    cannot match the grammar, so text inside quotation is never a claim."""
-    fence, closer, quoting, buf = None, None, False, []
-    for line in text.splitlines():
-        opened = _FENCE.match(line)
-        if fence:
-            if opened and opened.group(1)[0] == fence[0] and len(opened.group(1)) >= len(fence) \
-                    and not line[opened.end():].strip():
-                fence = None
-            continue
-        if opened or not line.strip() or quoting or _BLOCK_QUOTE.match(line):
-            if buf:
-                yield "".join(buf).strip()
-            fence = opened.group(1) if opened else None
-            quoting = not opened and bool(line.strip())
-            closer, buf = None, []
-            continue
-        if buf:
-            buf.append(" ")
+def _line_values(line: str):
+    """Integers asserted by one line, or None when the line is not in the protocol."""
+    if not line.strip():
+        return set()
+    head = _HEAD.match(line)
+    if head is None:
+        return None
+    position = head.end()
+    if head.group("heading") and _TITLE.fullmatch(line, position):
+        return set()
+    values = set()
+    while position < len(line):
+        for statement in _STATEMENTS:
+            match = statement.match(line, position)
+            if match:
+                break
         else:
-            line = line[_MARKER.match(line).end():]
-        for index, char in enumerate(line):
-            buf.append(char)
-            if closer:
-                if char == closer:
-                    closer = None
-            elif char in _CLOSING:
-                closer = _CLOSING[char]
-            elif char in ".!?" and (index + 1 == len(line) or line[index + 1].isspace()):
-                yield "".join(buf).strip()
-                buf = []
-        if not closer and buf:
-            yield "".join(buf).strip()
-            buf = []
-    if buf:
-        yield "".join(buf).strip()
+            return None
+        groups = match.groupdict()
+        values.update(int(groups[name]) for name in ("value", "defined") if groups.get(name))
+        position = match.end()
+    return values
 
 
 def _asserted(text: str) -> set:
-    """Integers asserted by the statements of *text* that the grammar supports."""
+    """Integers asserted by *text*: those of its lines when EVERY line is in the
+    protocol; none when any line is not (the report is not a supported answer)."""
     values = set()
-    for statement in _statements(text):
-        for claim in _CLAIMS:
-            match = claim.fullmatch(statement)
-            if match:
-                values.add(int(match.group("value")))
-                break
+    for line in text.splitlines():
+        found = _line_values(line)
+        if found is None:
+            return set()
+        values |= found
     return values
 
 

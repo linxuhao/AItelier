@@ -1,1 +1,1 @@
-"""RSI contracts: benchmark, pipeline versioning and evaluator."""
+"""Pipeline versioning contract and native binding."""

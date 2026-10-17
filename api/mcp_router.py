@@ -547,6 +547,7 @@ def _register_read_tools(tool):
             "source": src["origin"],
             "editable": path is not None and not _is_builtin(path),
             "graph_yaml": text,
+            **_version_read_state(config),
             "steps": [{"id": s.get("id"), "type": s.get("step_type"),
                        "agent_config": s.get("agent_config"),
                        "tool_name": s.get("tool_name")}
@@ -573,13 +574,28 @@ def _register_read_tools(tool):
         roles, err = _roles_or_error(config)
         if err:
             return err
-        if role not in roles:
-            return {"error": f"no role '{role}' in '{config}'. "
+        role = _resolve_role(config, role, roles)
+        if role is None:
+            return {"error": f"no active role '{role}' in '{config}'. "
                              f"Have: {', '.join(sorted(roles))}"}
         return {"config": config, "role": role, "value": roles[role]}
 
 
 # ── Shared helpers ───────────────────────────────────────────────────────────
+
+def _version_read_state(config):
+    from core.pipeline_versions import editor, active_roles
+    import yaml
+    from core import pipeline_registry as pr
+    path = pr.generated_configs_dir() / f"{config}.yaml"
+    if not path.is_file():
+        return {}
+    try:
+        return {**editor().current(config),
+                "active_roles": active_roles(config, yaml.safe_load(path.read_text(encoding="utf-8")))}
+    except Exception as exc:
+        return {"version_error": str(exc)}
+
 
 def _repo_configs_dir():
     from pathlib import Path
@@ -910,122 +926,33 @@ def _is_wrapped_bundle(obj: dict) -> bool:
 def _register_edit_tools(tool):
 
     @tool("edit_pipeline", "write",
-          "Replace a generated pipeline's graph YAML and re-register it. The new "
-          "graph is parsed and validated BEFORE anything is written; on failure "
-          "nothing changes and the error explains why. Read it with get_pipeline "
-          "first — this replaces the whole file, it does not patch.")
-    def edit_pipeline(config: ConfigName, graph_yaml: str) -> dict:
-        import yaml as _yaml
-        from api.dependencies import get_config_registry, get_skillflow
-        from core import pipeline_frozen_bundle as fb, pipeline_registry as pr
-        bad = bad_config_name(config)
-        if bad:
-            return {"error": bad}
-        path = pr.generated_configs_dir() / f"{config}.yaml"
-        if not path.is_file():
-            return {"error": f"'{config}' is not a generated pipeline — only "
-                             f"gen_* pipelines are editable here."}
-        try:
-            from skillflow.graph import PipelineGraph
-            data = _yaml.safe_load(graph_yaml)
-            if not isinstance(data, dict) or not data.get("steps"):
-                return {"error": "graph_yaml is not a pipeline (no steps)"}
-            data["name"] = config          # the file name is the identity
-            PipelineGraph._from_dict(data)
-        except Exception as e:
-            return {"error": f"rejected, nothing written: {e}"}
-
-        sf = get_skillflow()
-        with fb.exclusion(sf):
-            refusal = fb.edit_block(pr.generated_configs_dir(), config)
-            if refusal:
-                return {"error": f"refused, nothing written: {refusal}"}
-            prior = path.read_text(encoding="utf-8")
-            path.write_text(_yaml.safe_dump(data, sort_keys=False, allow_unicode=True),
-                            encoding="utf-8")
-            try:
-                result = pr.reload_generated_pipeline(sf, get_config_registry(), config)
-            except Exception as e:
-                path.write_text(prior, encoding="utf-8")   # put it back
-                return {"error": f"reload failed, reverted: {e}"}
-            if isinstance(result, dict) and result.get("error"):
-                path.write_text(prior, encoding="utf-8")
-                return {"error": f"reload failed, reverted: {result['error']}"}
-        return {"config": config, "reloaded": True, "path": str(path)}
-
-    def _write_roles(config: str, roles: dict) -> dict:
-        import json as _json
-        from api.dependencies import get_config_registry, get_skillflow
-        from core import pipeline_frozen_bundle as fb, pipeline_registry as pr
-        bad = bad_config_name(config)
-        if bad:
-            return {"error": bad}
-        rj = pr.generated_configs_dir() / f"{config}.roles.json"
-        sf = get_skillflow()
-        # Checked and written under the exclusion adoption holds, so a recorded
-        # bundle's retained roles are never rewritten, not merely un-admitted.
-        with fb.exclusion(sf):
-            refusal = fb.edit_block(pr.generated_configs_dir(), config)
-            if refusal:
-                return {"error": f"refused, nothing written: {refusal}"}
-            prior = rj.read_text(encoding="utf-8") if rj.exists() else None
-            rj.write_text(_json.dumps(roles, ensure_ascii=False, indent=2),
-                          encoding="utf-8")
-            def _revert():
-                if prior is None:
-                    rj.unlink(missing_ok=True)
-                else:
-                    rj.write_text(prior, encoding="utf-8")
-
-            # `reload_generated_pipeline` NEVER raises — its whole body is wrapped and it
-            # RETURNS {"error": ...}. Catching only an exception meant the revert was
-            # dead code and edit_role/edit_template reported success on a failed reload:
-            # roles.json held the new prompt, the live registry held the old one, and
-            # nothing said so. Worse for a built-in config, where reload always fails
-            # ("no persisted config"): the stray roles.json then SHADOWS the built-in
-            # agent_configs yaml in every later _load_roles read, so the edit looked
-            # applied forever while every run used the untouched original.
-            try:
-                result = pr.reload_generated_pipeline(sf, get_config_registry(), config)
-            except Exception as e:
-                _revert()
-                return {"error": f"reload failed, reverted: {e}"}
-            if isinstance(result, dict) and result.get("error"):
-                _revert()
-                return {"error": f"reload failed, reverted: {result['error']}"}
-        return {}
+          "Version and replace a registered owned generated graph as one immutable unit. "
+          "Read get_pipeline first; expected_current is its whole-unit CAS. Builtins, "
+          "sealed bundles, shared/unreferenced roles/templates and x-aitelier policy "
+          "changes are refused. Historical roles and pinned runs retain their bytes.")
+    def edit_pipeline(config: ConfigName, graph_yaml: str, expected_current: str = None) -> dict:
+        from core.pipeline_versions import editor
+        return editor().edit(config, {"kind": "graph", "graph_yaml": graph_yaml},
+                             expected_current=expected_current)
 
     @tool("edit_role", "write",
-          "Change a role's model, tools, temperature or thinking settings. To change "
-          "its PROMPT use edit_template — the prompt is the role's template. Only the "
-          "fields you pass are changed.")
-    def edit_role(config: ConfigName, role: str, model: str = "",
-                  tools: list = None,
-                  temperature: float = None, thinking: dict = None) -> dict:
-        roles, err = _roles_or_error(config)
-        if err:
-            return err
-        # Separate name: assigning back to `role` made the failure message
-        # interpolate the RESOLUTION (None) instead of what the caller typed —
-        # "no role like 'None'" — destroying the input exactly where it is the
-        # whole diagnostic. get_template/edit_template already do it this way.
-        resolved = _resolve_role(config, role, roles)
-        if resolved is None:
-            return {"error": f"no role like '{role}' in '{config}'. "
-                             f"Have: {', '.join(sorted(roles))}"}
-        role = resolved
-        cfg = dict(roles.get(role) or {})
+          "Version changes to an ACTIVE generated role's model, tools, temperature or "
+          "thinking; bare names resolve through the current graph. Historical and "
+          "unreferenced roles, builtins and sealed bundles refuse. Use edit_template "
+          "for prompts. Optional expected_current is a whole-unit CAS.")
+    def edit_role(config: ConfigName, role: str, model: str = "", tools: list = None,
+                  temperature: float = None, thinking: dict = None,
+                  expected_current: str = None) -> dict:
+        from core.pipeline_versions import editor
+        changes = {}
         if model:
-            cfg["model"] = model
-        if tools is not None:
-            cfg["tools"] = list(tools)
-        if temperature is not None:
-            cfg["temperature"] = float(temperature)
-        if thinking is not None:
-            cfg["thinking"] = thinking
-        roles[role] = cfg
-        err = _write_roles(config, roles)
-        return err or {"config": config, "role": role, "value": cfg}
+            changes["model"] = model
+        for key, value in (("tools", tools), ("temperature", temperature), ("thinking", thinking)):
+            if value is not None:
+                changes[key] = value
+        out = editor().edit(config, {"kind": "role", "role": role, "changes": changes},
+                            expected_current=expected_current)
+        return out
 
     @tool("list_templates", "read",
           "List a pipeline's templates with the real size of each. A prompt is "
@@ -1060,27 +987,45 @@ def _register_edit_tools(tool):
                 "chars": len(text), "source": source}
 
     @tool("edit_template", "write",
-          "Replace one role's prompt template. This is the main way to change what a "
-          "generated pipeline's agent actually does. Replaces the whole prompt — read "
-          "it with get_template first. Only a GENERATED pipeline can be changed "
-          "here: a built-in role's prompt is a repo file (get_template's `source` "
-          "names it), so changing it is a repo edit, not an API call.")
-    def edit_template(config: ConfigName, role: str, template: str) -> dict:
-        if not (template or "").strip():
-            return {"error": "template is empty — a role with no prompt falls back "
-                             "to a generic one, which is almost never what you want"}
-        roles, err = _roles_or_error(config)
-        if err:
-            return err
-        resolved = _resolve_role(config, role, roles)
-        if resolved is None:
-            return {"error": f"no role like '{role}' in '{config}'. "
-                             f"Have: {', '.join(sorted(roles))}"}
-        cfg = dict(roles.get(resolved) or {})
-        cfg["system_prompt"] = template
-        roles[resolved] = cfg
-        err = _write_roles(config, roles)
-        return err or {"config": config, "role": resolved, "chars": len(template)}
+          "Version a currently referenced generated role's prompt, freezing exact UTF-8 "
+          "text into a new inline role. Shared template files remain unchanged. "
+          "Builtins, seals, historical/unreferenced roles refuse. Bare names resolve "
+          "through the current graph. Optional expected_current is a whole-unit CAS.")
+    def edit_template(config: ConfigName, role: str, template: str,
+                      expected_current: str = None) -> dict:
+        from core.pipeline_versions import editor
+        out = editor().edit(config, {"kind": "prompt", "role": role, "template": template},
+                            expected_current=expected_current)
+        if "error" not in out:
+            out.update(chars=len(template))
+        return out
+
+    @tool("list_pipeline_versions", "read", "List immutable logical graph/role/prompt versions; catalog uses native seals.")
+    def list_pipeline_versions() -> dict:
+        from core.pipeline_versions import editor
+        try:
+            return {"versions": editor().list_versions()}
+        except Exception as exc:
+            return {"error": str(exc)}
+
+    @tool("get_pipeline_version", "read", "Read an immutable logical version and its native provenance.")
+    def get_pipeline_version(version_id: str) -> dict:
+        from core.pipeline_versions import editor
+        try:
+            return editor().read(version_id)
+        except Exception as exc:
+            return {"error": str(exc)}
+
+    @tool("restore_pipeline_version", "write",
+          "Restore exact logical graph, active role settings and UTF-8 prompts under a "
+          "generated target; expected_current is mandatory whole-unit CAS. Retains all "
+          "historical aliases and SDK run pins. Pending/mixed targets require native reconciliation.")
+    def restore_pipeline_version(config: ConfigName, version_id: str, expected_current: str) -> dict:
+        from core.pipeline_versions import editor
+        try:
+            return editor().restore(config, version_id, expected_current=expected_current)
+        except Exception as exc:
+            return {"error": str(exc), "code": getattr(exc, "code", "NATIVE_REFUSED")}
 
     @tool("list_tools", "read",
           "List every tool the host can run, marking which are GENERATED (editable "
@@ -1176,9 +1121,9 @@ def _role_prompt(cfg: dict) -> tuple[str, str]:
     """
     cfg = cfg or {}
     inline = cfg.get("system_prompt") or ""
-    if inline:
-        return inline, "inline (system_prompt)"
     name = (cfg.get("template") or "").strip()
+    if inline and not name:
+        return inline, "inline (system_prompt)"
     if not name:
         return "", "none — this role declares neither system_prompt nor template"
     # The name comes from repo YAML, not from the caller, but it is joined onto a
@@ -1199,6 +1144,15 @@ def _resolve_role(config: str, role: str, roles: dict) -> str | None:
     an agent reading the graph or a human reading a report says `author`. Making
     the caller guess which spelling this tool wants is a needless failure.
     """
+    from core import pipeline_registry as pr
+    path = pr.generated_configs_dir() / f"{config}.yaml"
+    if path.is_file():
+        import yaml
+        from core.pipeline_versions import resolve_active
+        try:
+            return resolve_active(config, yaml.safe_load(path.read_text(encoding="utf-8")), role)
+        except Exception:
+            return None
     if role in roles:
         return role
     from core.pipeline_registry import _ROLE_SEP

@@ -19,9 +19,9 @@ import pytest
 import yaml
 from skillflow.core import StepResult
 
-import contract as c
-import fake
-import native_provider
+from . import contract as c
+from . import fake
+from . import native_provider
 from core import capability_registry
 from core import datadir
 from core import pipeline_frozen_bundle as fb
@@ -30,8 +30,8 @@ from core.config_registry import ConfigRegistry
 from core.db_manager import DBManager
 from core.run_graph_view import pinned_run_graph
 from core.skillflow_host import AItelierSkillFlow
-from native_provider import NativeVersions, logical_role
-from test_contract import literal, load_vectors, run_conformance, vectors_sha256
+from .native_provider import NativeVersions, logical_role
+from .test_contract import literal, load_vectors, run_conformance, vectors_sha256
 
 OUT = Path("/evidence")
 

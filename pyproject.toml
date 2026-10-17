@@ -71,4 +71,4 @@ dependencies = [
 aitelier = "cli.app:_entrypoint"
 
 [tool.setuptools.packages.find]
-include = ["cli*", "api*", "core*", "models*", "aitelier*"]
+include = ["cli*", "api*", "core*", "models*", "aitelier*", "contracts", "contracts.rsi*"]

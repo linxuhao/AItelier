@@ -153,12 +153,11 @@ class AItelierSkillFlow(SkillFlow):
         Every driver (launcher, scheduler, meta agent) creates runs here, under
         the same lock adopt_bundle/reconcile_adoption hold, so a pending or
         unreadable adoption descriptor, or a recorded unit left on defaults or
-        missing its frozen roles, blocks that target at this one ingress. The
-        Coding Mode create fence runs first, exactly as on its own.
+        missing its frozen roles, blocks that target at this one ingress.
         """
         from core.coding_workspace import fence_create
-        fence_create(graph_name)
         from core.pipeline_frozen_bundle import launch_block
+        fence_create(graph_name)
         with self._lock:
             blocked = launch_block(graph_name, sf=self)
             if blocked:
@@ -245,9 +244,6 @@ class AItelierSkillFlow(SkillFlow):
             raise SkillFlowError(
                 f"POLICY_REFUSED: {action} of evaluator cell run {run_id} refused: {why}")
 
-    # Each of these carries both fences: the Coding Mode controller fence
-    # first (as on its own), then the bundle-served refusal under the
-    # registration/launch exclusion.
     def resume_run(self, run_id: str, *args, **kwargs) -> None:
         from core.coding_workspace import fence_control
         fence_control(run_id, "resume")

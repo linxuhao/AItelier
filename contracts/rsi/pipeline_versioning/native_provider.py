@@ -22,7 +22,7 @@ from typing import Any, Callable, Dict, Tuple
 
 import yaml
 
-import contract as c
+from . import contract as c
 from core import pipeline_frozen_bundle as fb
 from core import pipeline_registry as pr
 

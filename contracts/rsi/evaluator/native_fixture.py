@@ -53,14 +53,7 @@ PILOT_GRANTS = {
 
 
 def versions_class():
-    """The accepted shared versioning application module.
-
-    ``RSI_INTERIM_VERSIONING=1`` (development probes only, never a proof run)
-    loads the accepted 5ebe binding from its own contract directory instead,
-    for use before the shared application module is composed."""
-    if os.environ.get("RSI_INTERIM_VERSIONING") == "1":
-        import native_provider
-        return native_provider.NativeVersions, "interim:native_provider.NativeVersions(5ebe)"
+    """The accepted shared versioning application module."""
     from core.pipeline_versions import PipelineVersions
     return PipelineVersions, "core.pipeline_versions.PipelineVersions"
 

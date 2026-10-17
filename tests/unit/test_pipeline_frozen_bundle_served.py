@@ -236,17 +236,14 @@ def test_in_process_providers_are_identified_by_served_code_not_their_file(
 
 
 # Every ConfigManifest hint field, each with a non-default value.
-WHOLE = {"label": "Frozen manual owner", "has_task_loop": True, "scheduler_owned": False,
+WHOLE = {"listed": False, "label": "Frozen manual owner", "has_task_loop": True, "scheduler_owned": False,
          "seed_file": "frozen_seed.md", "seed_default": "frozen default seed",
          "output_step": "make", "input_hint": "frozen input contract",
          "registers_generated_pipeline": True, "registers_generated_addon": True,
          "repo_mode": "none", "preamble_steps": ["make"], "labels": {"make": "Maker"},
          "checkpoint_kind": "conversational", "manual_checkpoints_only": True,
-         "checkpoint_kinds": {"review": "file-review"},
-         # c7 added ConfigManifest.listed (default True); composed, it is a
-         # manifest field like the others and so a frozen hint.
-         "listed": False}
-OTHER = {**WHOLE, "label": "Second owner", "scheduler_owned": True,
+         "checkpoint_kinds": {"review": "file-review"}}
+OTHER = {**WHOLE, "listed": True, "label": "Second owner", "scheduler_owned": True,
          "manual_checkpoints_only": False, "seed_file": None, "seed_default": None,
          "output_step": None, "checkpoint_kinds": {}}
 

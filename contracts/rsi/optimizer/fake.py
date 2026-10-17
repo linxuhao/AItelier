@@ -16,6 +16,7 @@ from contracts.rsi.evaluator.contract import (
 from contracts.rsi.pipeline_versioning.contract import VersioningError, version_id_of
 from core.pipeline_optimization import evaluate_matrix
 from .contract import (DESIGN, PORTS, ROLES, OptimizerError, RoundRequest, RoundView)
+from .profiles import rubric_points, spec
 
 F = Path(__file__).with_name('fixtures')
 
@@ -45,7 +46,10 @@ def normalized(graph):
 class FakeRound:
     evidence_kind = 'simulation'
 
-    def __init__(self):
+    def __init__(self, profile="ordinary"):
+        # Predeclared shared profile, fixed before prepare or any evaluation.
+        self.profile = profile
+        self.profile_spec = spec(profile)
         self.fixture = literal()
         self.phase = 'freeze'; self.actor = 'coordinator'
         self.request = None; self.proposal = self.candidate = None
@@ -58,8 +62,14 @@ class FakeRound:
         self.cas = self.fixture['target']['expected_current']
         self.current = self.fixture['reference_version']
 
+    def _evaluator(self):
+        e = EvaluationFake()
+        for case in e.fixture['benchmark']['companion']['cases']:
+            case['max_points'] = self.profile_spec['max_points'].get(case['case_id'], case['max_points'])
+        return e
+
     def prepare(self, kind='generated'):
-        e = EvaluationFake(); q = e.prepare('train', ('reference',))
+        e = self._evaluator(); q = e.prepare('train', ('reference',))
         b=q.budget
         b=b.model_copy(update={'round':b.round.model_copy(update={
             'upper':b.round.upper.model_copy(update={'requests':self.round_requests})})})
@@ -155,7 +165,7 @@ class FakeRound:
                             elapsed_ms=envelope.elapsed_ms-self.elapsed_ms)
         residual=original.model_copy(update={'round':remaining(original.round),
                                              'campaign':remaining(original.campaign)})
-        e = EvaluationFake()
+        e = self._evaluator()
         if self.candidate is not None:
             e.fixture['identity']['candidate'] = {'logical_version':self.candidate,
                                                  'logical_content':self.candidate_content}
@@ -177,8 +187,14 @@ class FakeRound:
         if isinstance(out,Refusal):
             self.stop_reason='invalid'; self.phase='stop'; return
         receipts=[]
+        boundary=self.profile_spec.get('inclusive_margin_holdout_answers')
         for i,r in enumerate(out.receipts):
-            if r.checker and r.cell.arm=='candidate':
+            if r.checker and split=='holdout' and self.fault=='inclusive_margin' and boundary:
+                # Both arms: the raw scores the shared answer script implies.
+                level=boundary[r.cell.arm][r.cell.repetition-1]
+                r=r.model_copy(update={'checker':r.checker.model_copy(update={
+                    'raw_points':rubric_points(level,r.checker.max_points)})})
+            elif r.checker and r.cell.arm=='candidate':
                 points=r.checker.raw_points
                 if self.fault=='no_train_improvement' or (split=='holdout' and self.fault=='holdout_rejected'): points=5
                 if split=='holdout' and self.fault=='target': points=10

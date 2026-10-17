@@ -19,7 +19,9 @@ import pytest
 
 from .conformance import LITERAL, ROLES, SCENARIOS, edit_fixture, run_scenario
 from .contract import OptimizerError
+from .fake import FakeRound
 from .native_fixture import PROFILES, REFERENCE, NativeRoundFactory
+from .profiles import PROFILES as SHARED_PROFILES, for_scenario
 
 
 def evidence(name, value):
@@ -41,7 +43,7 @@ def test_same_shared_round_scenarios_native(vector, factory):
     result, error = None, None
     # Predeclared synthetic profile (fixtures/native_profiles.json), fixed before
     # the world, its benchmark, prepare, freeze or any send exist.
-    factory.profile = PROFILES["scenario_profiles"].get(vector["name"], "ordinary")
+    factory.profile = for_scenario(vector["name"])
     try:
         result = run_scenario(factory, vector)
     except BaseException as exc:                                    # noqa: BLE001
@@ -94,10 +96,69 @@ def test_same_shared_round_scenarios_native(vector, factory):
         # Explicit-effort profile unchanged: the literal unit's high effort is sent.
         assert native["request"]["runtime"]["effort"] == "high"
         assert all(b.get("reasoning_effort") == "high" for b in bodies)
+    if SHARED_PROFILES["profiles"][factory.profile].get("inclusive_margin_holdout_answers"):
+        diff = boundary_differential(native, fake_boundary(vector, factory.profile))
+        evidence("native-fake-boundary-differential-" + vector["name"], diff)
+        assert diff["mismatched_cells"] == [] and diff["cells"] == 48 and diff["aggregate_equal"]
     if vector.get("adoption"):
         assert native["adoption_intent"]["staged_before_candidate"] is True
         if result["error"] != "ADOPTION_AUTHORITY":
             assert native["adoption_records"]["reviewed"]["candidate_version"] == view["candidate_version"]
+
+
+def fake_boundary(vector, profile):
+    """The fake's holdout cells and aggregate for the same vector and profile."""
+    made = []
+
+    def factory():
+        made.append(FakeRound(profile=profile))
+        return made[-1]
+    result = run_scenario(factory, vector)
+    _, out = made[-1].results[("holdout", ("reference", "candidate"))]
+    return {"profile": profile, "holdout": result["observations"]["numeric"]["holdout"],
+            "cells": [{"case": r.cell.case_id, "arm": r.cell.arm, "repetition": r.cell.repetition,
+                       "max_points": r.checker.max_points, "raw_points": r.checker.raw_points}
+                      for r in out.receipts]}
+
+
+AGGREGATE = ("status", "case_means", "case_differences", "overall_difference",
+             "family_mean_differences", "sign_flip_p", "rejection_reasons")
+
+
+def boundary_differential(native, fake):
+    """Per-cell (case, arm, repetition, max_points, raw_points) and exact
+    holdout aggregate: actual native checker outputs versus the fake."""
+    key = lambda c: (c["case"], c["arm"], c["repetition"])
+    n = {key(c): (c["max_points"], c["raw_points"]) for c in native["checker_points"]
+         if c["evaluation_id"].endswith(".holdout-reference-candidate")}
+    f = {key(c): (c["max_points"], c["raw_points"]) for c in fake["cells"]}
+    keys = sorted(set(n) | set(f))
+    agg = {k: {"native": native["numeric"]["holdout"].get(k), "fake": fake["holdout"].get(k)} for k in AGGREGATE}
+    return {"profile": fake["profile"], "cells": len(keys),
+            "mismatched_cells": [{"cell": k, "native": n.get(k), "fake": f.get(k)} for k in keys if n.get(k) != f.get(k)],
+            "per_cell": [{"cell": k, "native": n.get(k), "fake": f.get(k)} for k in keys],
+            "aggregate": agg, "aggregate_equal": all(v["native"] == v["fake"] for v in agg.values())}
+
+
+def test_fake_and_native_select_the_same_declared_profile():
+    """Mapping control: one profile file and one selection for both entrypoints;
+    the fake's ordinary-profile boundary cells are detectably NOT the shared ones."""
+    assert SHARED_PROFILES == PROFILES
+    names = {v["name"]: for_scenario(v["name"]) for v in SCENARIOS}
+    vector = next(v for v in SCENARIOS if v["name"] == "inclusive_margin_and_statistical_rule")
+    boundary, ordinary = fake_boundary(vector, "boundary"), fake_boundary(vector, "ordinary")
+    expect = SHARED_PROFILES["profiles"]["boundary"]
+    for c in boundary["cells"]:
+        assert c["max_points"] == expect["max_points"].get(c["case"], 10)
+    changed = [(a, b) for a, b in zip(boundary["cells"], ordinary["cells"]) if a != b]
+    evidence("profile-mapping-control", {"selection": names, "boundary_cells": boundary["cells"],
+                                         "ordinary_profile_cells_differing": len(changed),
+                                         "boundary_holdout": boundary["holdout"]})
+    assert names["inclusive_margin_and_statistical_rule"] == "boundary"
+    assert {n for k, n in names.items() if k != "inclusive_margin_and_statistical_rule"} == {"ordinary"}
+    assert boundary["holdout"]["overall_difference"]["exact"] == "5"
+    # Only holdout-08 candidate repetition 1 (6/10) coincides across the profiles.
+    assert boundary["holdout"]["sign_flip_p"]["exact"] == "1/256" and len(changed) == 47
 
 
 def _payload(port, f, request, decision="candidate"):

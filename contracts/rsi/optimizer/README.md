@@ -345,6 +345,10 @@ measured failure. `boundary` gives seven holdout cases max_points 7 (point_total
 179); the unchanged checker then scores citation-only 3/7 and value-only 4/7.
 The scenario's holdout answers are reference [3,3,3] versus candidate [4,3,3] on
 the max-7 cases, and [4,4,4] versus [6,4,4] on the max-10 case: seven case
-differences of 100/21 and one of 20/3, mean 5, p=1/256. The fake keeps its own
-arithmetic model of the same literal (accepted evaluator fake points 5 vs 6 of
-10), which the accepted checker cannot emit on the ordinary profile.
+differences of 100/21 and one of 20/3, mean 5, p=1/256. Fake and native consume
+the SAME profile (`profiles.py`): both entrypoints select it from the one
+`scenario_profiles` map before prepare; the fake applies its max_points and emits
+both arms' raw scores implied by the declared answer levels under the checker's
+rubric, and the native test compares every boundary cell (case, arm, repetition,
+max_points, raw_points) and the exact holdout aggregate with the actual checker
+outputs.

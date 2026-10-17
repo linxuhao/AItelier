@@ -13,6 +13,7 @@ from core.pipeline_optimization import evaluate_matrix
 from .contract import PORTS, ROLES, RoundRequest, RoundView, Hypothesis, Edit, OptimizerError, graph_result
 from .fake import FakeRound, literal
 from .conformance import SCENARIOS, run_scenario, edit_fixture
+from .profiles import for_scenario
 
 ROOT=Path(__file__).parent
 
@@ -23,7 +24,9 @@ def evidence(name,obj):
 
 @pytest.mark.parametrize('vector',SCENARIOS,ids=lambda v:v['name'])
 def test_shared_round_scenarios(vector):
-    evidence('scenario-'+vector['name'],run_scenario(FakeRound,vector))
+    # The same predeclared profile the native entrypoint selects, before prepare.
+    profile=for_scenario(vector['name'])
+    evidence('scenario-'+vector['name'],run_scenario(lambda:FakeRound(profile=profile),vector))
 
 
 def test_actual_sdk_graph_order_checkpoint_and_tool_ports():

@@ -1114,6 +1114,15 @@ def resolve_for_resolver(db, run_id: str,
                 if not same_git_repository(source, rec["source_repo"]):
                     raise IsolationUnavailable(
                         "the review snapshot repository differs from its producer declaration")
+            cell = context.get("_rsi_evaluation")
+            if cell is not None:
+                # An RSI evaluator cell reads exactly its public fixture commit.
+                if (not isinstance(cell, dict) or not rec or rec["mode"] != MODE_READ_SNAPSHOT
+                        or rec["base_sha"] != cell.get("public_commit")
+                        or rec["project_id"] != run.get("project_id")
+                        or rec["config_name"] != run.get("graph_name")):
+                    raise IsolationUnavailable(
+                        "the evaluator cell has no matching public fixture snapshot")
     if rec is None:
         return _no_record(db, run_id, run_created_at)
 

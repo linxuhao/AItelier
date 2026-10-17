@@ -43,6 +43,17 @@ class AItelierSkillFlow(SkillFlow):
     def _execute_tool_impl(self, name: str, params: dict, *, run_id: str = "",
                            step_id: str = "", project_root: str = "") -> dict:
         """Preserve the owning project identity for host-registered tools."""
+        marker, binding = self._evaluator_binding(run_id) if run_id else (None, None)
+        if marker is not None:
+            # Evaluator cell: exact (run, step, agent) membership. A missing
+            # binding, an unknown step or an empty grant denies EVERY tool --
+            # unlike the SDK allowlist below, whose empty set admits all.
+            why = binding.policy.dispatch(self, step_id, name) if binding else "no live evaluator scope"
+            if why:
+                self.trace(run_id, "rsi_admission", "dispatch_denied",
+                           {"tool": name, "step": step_id, "reason": why},
+                           step_id=step_id or None)
+                return {"error": f"Tool '{name}' is not granted to this evaluator cell ({why})."}
         bound = dict(params or {})
         if name in EXECUTOR_TOOLS:
             # These tools hand run_id and a repository root to the owned
@@ -176,6 +187,60 @@ class AItelierSkillFlow(SkillFlow):
         if blocked:
             raise SkillFlowError(f"{action} of run {run_id} refused: {blocked}")
 
+    # An RSI evaluator cell run (``_rsi_evaluation`` in its run context, set
+    # only by the evaluator's launch) is admitted only while the coordinator
+    # that launched it holds its live in-process binding (core.rsi_admission):
+    # compiled policy, physical-admission scope and grants. After process loss
+    # the binding is gone and every ingress refuses: no unsafe resume.
+    def _evaluator_marker(self, run_id: str):
+        run = self.get_run(run_id) if run_id else None
+        if not run:
+            return None, None
+        try:
+            context = json.loads(run.get("context_json") or "{}")
+        except ValueError:
+            context = {}
+        marker = context.get("_rsi_evaluation") if isinstance(context, dict) else None
+        return marker, run
+
+    def _evaluator_binding(self, run_id: str):
+        """(marker, binding) for an evaluator cell run; (None, None) otherwise.
+        A marker whose live binding is missing or different yields binding None."""
+        marker, run = self._evaluator_marker(run_id)
+        if marker is None:
+            return None, None
+        from core.rsi_admission import binding_for_run
+        binding = binding_for_run(run_id)
+        if binding is None or binding.marker != marker:
+            return marker, None
+        return marker, binding
+
+    def _admit_evaluator_run(self, run_id: str, action: str) -> None:
+        marker, run = self._evaluator_marker(run_id)
+        if marker is None:
+            return
+        from core.rsi_admission import binding_for_run
+        binding = binding_for_run(run_id)
+        if binding is None or binding.marker != marker:
+            self.trace(run_id, "rsi_admission", "ingress_refused",
+                       {"action": action, "reason": "UNSAFE_RESUME"})
+            raise SkillFlowError(
+                f"UNSAFE_RESUME: {action} of evaluator cell run {run_id} refused: no "
+                f"retained live evaluator scope (process loss or foreign driver)")
+        import threading
+        if action not in ("advance", "claim"):
+            why = f"an evaluator cell run takes no {action}; its coordinator decides the cell"
+        elif binding.driver is not None and threading.get_ident() != binding.driver:
+            why = "an evaluator cell run is driven only by its own coordinator"
+        else:
+            why = binding.policy.admits(self, run)
+        if why:
+            binding.ingress_denials.append({"action": action, "reason": why})
+            self.trace(run_id, "rsi_admission", "ingress_refused",
+                       {"action": action, "reason": "POLICY_REFUSED", "detail": why})
+            raise SkillFlowError(
+                f"POLICY_REFUSED: {action} of evaluator cell run {run_id} refused: {why}")
+
     # Each of these carries both fences: the Coding Mode controller fence
     # first (as on its own), then the bundle-served refusal under the
     # registration/launch exclusion.
@@ -184,6 +249,7 @@ class AItelierSkillFlow(SkillFlow):
         fence_control(run_id, "resume")
         with self._lock:
             self._refuse_unserved_bundle(run_id, "resume")
+            self._admit_evaluator_run(run_id, "resume")
             return super().resume_run(run_id, *args, **kwargs)
 
     def approve_checkpoint(self, run_id: str, *args, **kwargs) -> str:
@@ -191,6 +257,7 @@ class AItelierSkillFlow(SkillFlow):
         fence_control(run_id, "approval")
         with self._lock:
             self._refuse_unserved_bundle(run_id, "checkpoint approval")
+            self._admit_evaluator_run(run_id, "checkpoint approval")
             return super().approve_checkpoint(run_id, *args, **kwargs)
 
     def reject_checkpoint(self, run_id: str, *args, **kwargs) -> None:
@@ -198,6 +265,7 @@ class AItelierSkillFlow(SkillFlow):
         fence_control(run_id, "rejection")
         with self._lock:
             self._refuse_unserved_bundle(run_id, "checkpoint rejection")
+            self._admit_evaluator_run(run_id, "checkpoint rejection")
             return super().reject_checkpoint(run_id, *args, **kwargs)
 
     def reactivate_run(self, run_id: str, *args, **kwargs) -> None:
@@ -205,12 +273,18 @@ class AItelierSkillFlow(SkillFlow):
         fence_control(run_id, "reactivation")
         with self._lock:
             self._refuse_unserved_bundle(run_id, "reactivation")
+            self._admit_evaluator_run(run_id, "reactivation")
             return super().reactivate_run(run_id, *args, **kwargs)
 
     def _execute_tool_inline(self, tool_node, *, run_id: str = "",
                              graph_name: str = "") -> dict:
         # The same rule at dispatch, for a run pinned to graph content that was
         # registered before the rule existed.
+        marker, _ = self._evaluator_binding(run_id) if run_id else (None, None)
+        if marker is not None:
+            raise ToolArgumentsUnavailable(
+                f"{tool_node.tool_name}: tool nodes are never granted to an "
+                f"evaluator cell run")
         bad = spoofed_slot_keys(tool_node.tool_name or "", tool_node.tool_params or {})
         if bad:
             raise ToolArgumentsUnavailable(
@@ -222,6 +296,15 @@ class AItelierSkillFlow(SkillFlow):
 
     def _execute_tool_hook(self, token, node, hook_name: str, hook_spec: dict) -> dict:
         tool = hook_spec.get("tool", "") if isinstance(hook_spec, dict) else ""
+        marker, _ = self._evaluator_binding(getattr(token, "run_id", "")) \
+            if getattr(token, "run_id", "") else (None, None)
+        if marker is not None and not (hook_name == "after_validate" and tool == "step_commit"
+                                       and set(hook_spec) == {"tool"}):
+            # Only the SDK's built-in promotion of the step's own artifact slot
+            # is part of an evaluator cell's output path; every other hook is
+            # an ungranted invocation class.
+            return {"passed": False,
+                    "error": f"{hook_name} hook {tool!r} is not granted to an evaluator cell"}
         bad = spoofed_slot_keys(tool, (hook_spec or {}).get("params", {})
                                 if isinstance(hook_spec, dict) else {})
         if bad:
@@ -795,6 +878,7 @@ class AItelierSkillFlow(SkillFlow):
         # First, before input tracing, isolation, stale-claim recovery or an
         # inline tool: a caller that never called resume_run gets no bypass.
         self._refuse_unserved_bundle(run_id, "advance")
+        self._admit_evaluator_run(run_id, "advance")
         from core.review_input_bundle import guard_run_inputs
         guard_run_inputs(self, run_id, "advance")
         self._admit_source_identity(run_id)
@@ -813,6 +897,8 @@ class AItelierSkillFlow(SkillFlow):
 
     def claim_next_step(self, run_id: str):
         self._refuse_unserved_bundle(run_id, "claim")       # before any effect
+        # Before any context source tool can run inside the claim.
+        self._admit_evaluator_run(run_id, "claim")
         from core.review_input_bundle import guard_run_inputs
         guard_run_inputs(self, run_id, "claim")
         self._admit_source_identity(run_id)
@@ -823,4 +909,5 @@ class AItelierSkillFlow(SkillFlow):
         # and the role the claim carries.
         with self._lock:
             self._refuse_unserved_bundle(run_id, "claim")
+            self._admit_evaluator_run(run_id, "claim")
             return super().claim_next_step(run_id)

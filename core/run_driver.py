@@ -477,8 +477,10 @@ async def _step(sf, db, ws, run_id: str, auto_approve: bool, max_steps: int) -> 
             # would otherwise eat the whole step budget and report "did not
             # terminate", hiding the actual error.
             from core.dpe_pipeline import NativeTurnBudgetExhausted, NativeOutputCapExhausted
+            from core.rsi_admission import is_admission_denial
             sf.fail_step(claimed.token, str(e)[:300],
                          retryable=(not isinstance(e, (NativeTurnBudgetExhausted, NativeOutputCapExhausted))
+                                    and not is_admission_denial(e)
                                     and attempts[claimed.step_id] < 2))
     return (sf.get_run(run_id) or {}).get("status") or "running"
 

@@ -439,6 +439,14 @@ class AIGateway:
         # while a completion streams (see _call_llm). Runs on the LLM worker
         # thread; exceptions are swallowed there.
         self.on_progress = None
+        # RSI evaluator cells only (core.rsi_admission.CellScope, set by
+        # AgentFactory): every physical HTTP request of this gateway is then
+        # admitted by the scope's transport. `next_cause` lets the engine name
+        # a repair; `_call_failed` marks a re-entry after a failed call.
+        self.physical_scope = None
+        self.next_cause = None
+        self._call_failed = False
+        self._send_cause = "initial"
         from core.model_routes import config_or_example
         self._config_path = config_path or config_or_example("llm_providers.json")
 
@@ -806,6 +814,9 @@ class AIGateway:
         this worker thread and must never break the call — exceptions are
         swallowed. AITELIER_LLM_STREAM=0 reverts to the plain call.
         """
+        if self.physical_scope is not None:
+            self.physical_scope.begin_call(self._send_cause)
+            self.physical_scope.require_admitted_route(self, kwargs)
         if os.getenv("AITELIER_LLM_STREAM", "1") == "0" or kwargs.get("stream"):
             return litellm.completion(**kwargs)
         import time as _t
@@ -939,12 +950,36 @@ class AIGateway:
         Raises the LAST error once the candidates are exhausted, so the caller
         still sees a real provider error (and `_explain_auth` can still name the
         missing secret).
+
+        Under an RSI evaluator scope a physical-admission denial is raised as
+        recorded, before ANY handler below can fail over, repair or retry.
         """
+        self._send_cause = self._entry_cause()
+        try:
+            return self._complete_walk(kwargs)
+        except BaseException:
+            self._call_failed = True
+            raise
+
+    def _entry_cause(self) -> str:
+        cause, self.next_cause = self.next_cause, None
+        if cause is None:
+            cause = "retry" if self._call_failed else "initial"
+        self._call_failed = False
+        return cause
+
+    def _raise_admission_denial(self) -> None:
+        denied = self.physical_scope.denial() if self.physical_scope is not None else None
+        if denied is not None:
+            raise denied
+
+    def _complete_walk(self, kwargs: dict):
         while True:
             try:
                 response = self._completion_bounded(kwargs)
                 _raise_if_refused(response, self.active_model)
             except FAILOVER_EXCEPTIONS as e:
+                self._raise_admission_denial()
                 if not self._failover(e):
                     # Name the endpoints that would have to reopen. The escaping
                     # error is the LAST candidate's, and the scheduler parks on
@@ -963,18 +998,22 @@ class AIGateway:
                     exc._aitelier_candidates = list(self._candidates)
                     raise exc from e
                 self._apply_binding(kwargs)
+                self._send_cause = "fallback"
                 continue
             except litellm.exceptions.ContextWindowExceededError as e:
                 # Not an outage and not purely request-shaped — see
                 # _failover_context. Walk only to a bigger declared window;
                 # when there is none, this is a real request-shaped failure and
                 # raises like any other.
+                self._raise_admission_denial()
                 if not self._failover_context(
                         f"{type(e).__name__}: {str(e)[:200]}"):
                     raise self._explain_auth(e) from e
                 self._apply_binding(kwargs)
+                self._send_cause = "fallback"
                 continue
             except Exception as e:
+                self._raise_admission_denial()
                 # Anthropic reports spent credit as a 400, not a 429 — a fact
                 # about the ENDPOINT dressed as a request error. The plan credit
                 # the anthropic provider runs on is a monthly grant with an
@@ -986,6 +1025,7 @@ class AIGateway:
                         exc._aitelier_candidates = list(self._candidates)
                         raise exc from e
                     self._apply_binding(kwargs)
+                    self._send_cause = "fallback"
                     continue
                 # Request-shaped failure (bad params, unsupported args): every
                 # candidate would reject it identically.
@@ -1010,6 +1050,9 @@ class AIGateway:
                           f"once without them: {str(e)[:160]}", flush=True)
                     kwargs.pop("extra_body", None)
                     self._apply_binding(kwargs)
+                    # A parameter repair: under an evaluator scope its changed
+                    # request is refused at admission as runtime drift.
+                    self._send_cause = "format_repair"
                     continue
                 raise self._explain_auth(e) from e
             # Stamp WHICH endpoint answered onto the usage record. That record
@@ -1253,8 +1296,12 @@ class AIGateway:
         self._apply_session_headers(kwargs)
         kwargs["model"] = self.litellm_model
         for k in ("api_base", "api_key", "cache_control_injection_points",
-                  "reasoning_effort", "extra_body", "thinking"):
+                  "reasoning_effort", "extra_body", "thinking", "client"):
             kwargs.pop(k, None)
+        if self.physical_scope is not None:
+            # The evaluator scope's OpenAI client: its httpx transport admits
+            # every actual request this binding sends (core.rsi_admission).
+            kwargs["client"] = self.physical_scope.openai_client(self)
         if self.api_base:
             kwargs["api_base"] = self.api_base
         if self.api_key:

@@ -98,6 +98,13 @@ class AgentFactory:
         # Optional AIGateway.on_progress hook, applied to every gateway this
         # factory builds (LLM streaming liveness ticks).
         self._on_progress = on_progress
+        # RSI evaluator cells only: the cell's physical-admission scope, and the
+        # frozen provider registry / route table its gateways are built from.
+        self.physical_scope = None
+        self.gateway_paths = None
+        # Cause of the first physical send of the NEXT gateway built (e.g. the
+        # engine's native -> JSON-mode fallback).
+        self.next_cause = None
 
     def _get_config(self, name: str) -> dict:
         """Look up agent config from registry."""
@@ -140,15 +147,23 @@ class AgentFactory:
                 name, learned, max_output_tokens)
             max_output_tokens = learned
 
+        scope = self.physical_scope
+        paths = self.gateway_paths or (
+            (scope.providers_path, scope.routes_path) if scope is not None else None)
         gateway = AIGateway(
             model_name=model,
             enable_thinking=enable_thinking,
             thinking_effort=thinking_effort,
             temperature=temperature,
             max_output_tokens=max_output_tokens,
+            **({"config_path": paths[0], "routes_path": paths[1]} if paths else {}),
         )
         if self._on_progress is not None:
             gateway.on_progress = self._on_progress
+        if scope is not None:
+            gateway.physical_scope = scope
+        if self.next_cause:
+            gateway.next_cause, self.next_cause = self.next_cause, None
         return gateway
 
     def _load_template(self, template_file: str) -> str:

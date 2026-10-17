@@ -4245,6 +4245,7 @@ class PipelineEngine:
                 )
                 self._delta_attempt = attempt
                 messages.append({"role": "user", "content": nudge})
+                agent.gateway.next_cause = "retry"
                 self._trace("prompt", "user_prompt", {
                     "attempt": attempt, "mode": "native", "user": nudge,
                 })
@@ -4577,7 +4578,9 @@ class PipelineEngine:
                         # The gateway has completed its own retries/failover.
                         # Replaying this as missing output or JSON format repair
                         # would restart those same exhausted provider attempts.
-                        if is_provider_failure(e):
+                        # A physical-admission denial is never retried either.
+                        from core.rsi_admission import is_admission_denial
+                        if is_provider_failure(e) or is_admission_denial(e):
                             raise
                         if starved_recovery_pending:
                             fail_starved_output({
@@ -4676,6 +4679,7 @@ class PipelineEngine:
                                 ),
                             })
                             self._trace_prompt_deltas(messages, turn_count + 1)
+                            agent.gateway.next_cause = "format_repair"
                             self._trace("step", "output_starvation_syntax_retry", {
                                 "step_id": step_id, "attempt": attempt,
                                 "turn": turn_count + 1,
@@ -4748,6 +4752,7 @@ class PipelineEngine:
                             ),
                         })
                         starved_recovery_pending = True
+                        agent.gateway.next_cause = "format_repair"
                         self._trace("step", "output_starvation_correction", {
                             **starved, "remaining_turns": current_max_turns - turn_count - 1,
                             "action": "emit_next_tool_within_existing_budget",
@@ -4772,6 +4777,7 @@ class PipelineEngine:
                                     "if the card is complete."),
                     })
                     self._trace_prompt_deltas(messages, turn_count + 1)
+                    agent.gateway.next_cause = "format_repair"
                     self._trace("step", "resume_empty_reply_nudged", {"turn": turn_count + 1})
                     continue
                 if not result.tool_calls:
@@ -4809,6 +4815,7 @@ class PipelineEngine:
                                     "finish_step."
                                 ),
                             })
+                            agent.gateway.next_cause = "format_repair"
                             self._emit("exploration", {
                                 "turn": turn_count + 1, "mode": "native",
                                 "preview": "No tool call — nudging agent to write",
@@ -5410,6 +5417,10 @@ class PipelineEngine:
         self._run_id = run_id
         self._step_instance_id = step_instance_id
         self._claim_epoch = claim_epoch
+        # An RSI evaluator cell run carries its trusted physical-admission
+        # scope; every gateway this step builds then sends only through it.
+        from core.rsi_admission import scope_for_run
+        self.factory.physical_scope = scope_for_run(run_id)
         self._load_write_scope_receipt()
         if output_target == "code":
             if write_scope is None:
@@ -5458,10 +5469,12 @@ class PipelineEngine:
                     exc_info=True,
                 )
                 from core.ai_router import is_provider_failure
+                from core.rsi_admission import is_admission_denial
                 if isinstance(e, (NativeTurnBudgetExhausted,
                                   NativeOutputCapExhausted,
                                   NativeSideEffectsRetained,
-                                  NativeObservationUnavailable)) or is_provider_failure(e):
+                                  NativeObservationUnavailable)) or is_provider_failure(e) \
+                        or is_admission_denial(e):
                     raise
                 if getattr(self, "_native_side_effects_committed", False):
                     raise NativeSideEffectsRetained(
@@ -5470,6 +5483,7 @@ class PipelineEngine:
                         "would replay successful side effects") from e
                 if not self.factory.get_fallback_to_json(agent_config_name):
                     raise
+                self.factory.next_cause = "fallback"
                 # Fall through to JSON mode dispatch below
                 self._emit("native_fallback", {
                     "step_id": step_id,

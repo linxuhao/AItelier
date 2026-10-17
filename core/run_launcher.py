@@ -98,13 +98,21 @@ def start_config_run(db, ws, config_name: str, project_id: str, *,
                      repo_url: str | None = None,
                      repo_path: str | None = None,
                      against_project: str = "", against_run: str = "",
-                     against_commit: str = "") -> dict:
+                     against_commit: str = "",
+                     evaluation_cell: dict | None = None) -> dict:
     """Start a run of ``config_name`` keyed by ``project_id``.
 
     ``seed_text`` is written to the config's ``manifest.seed_file``; ``seed_inputs``
     is an optional ``{filename: content}`` map of extra seed files. For DPE, pass
     ``seed_inputs={"brief": <brief dict>}`` to take the proven brief→step-1 path.
     Returns ``{status, project_id, run_id, config_name, scheduler_owned}``.
+
+    ``evaluation_cell`` is the RSI evaluator coordinator's typed cell binding:
+    ``{marker, read_source_repo, read_base_sha}``. It requires a butler-driven
+    readonly config, records the nonsecret ``marker`` as ``_rsi_evaluation`` in
+    the run context (the host ingress then admits the run only while that
+    coordinator's live binding exists) and isolates the run as a read snapshot
+    of the cell's public fixture repository at exactly ``read_base_sha``.
     """
     from api.dependencies import get_skillflow, get_config_registry
     from core.scheduler import wake_scheduler
@@ -112,6 +120,33 @@ def start_config_run(db, ws, config_name: str, project_id: str, *,
     manifest = get_config_registry().get(config_name)
     if manifest is None:
         return {"status": "error", "message": f"Unknown config '{config_name}'"}
+
+    source = None
+    if evaluation_cell is not None:
+        try:
+            from core import run_isolation
+            if against_project or against_run or against_commit:
+                raise run_isolation.IsolationUnavailable(
+                    "an evaluator cell is not an exact producer review")
+            # The cell READS its public fixture and writes only artifact slots:
+            # a code-target step would need a worktree, which a cell never gets.
+            from skillflow.output_targets import has_target
+            if any(has_target(node, "code")
+                   for node in get_skillflow()._get_resolver(config_name).graph.steps):
+                raise run_isolation.IsolationUnavailable(
+                    "an evaluator cell config may not produce code outputs")
+            if (set(evaluation_cell) != {"marker", "read_source_repo", "read_base_sha"}
+                    or not isinstance(evaluation_cell["marker"], dict)
+                    or evaluation_cell["marker"].get("public_commit")
+                    != evaluation_cell["read_base_sha"]):
+                raise run_isolation.IsolationUnavailable("malformed evaluator cell binding")
+            run_isolation.validate_base_sha(evaluation_cell["read_base_sha"])
+            source = evaluation_cell["read_source_repo"]
+            if repo_path and not run_isolation.same_git_repository(repo_path, source):
+                raise run_isolation.IsolationUnavailable("cell repo_path is not its public fixture")
+            repo_type, repo_path = "existing", source
+        except Exception as exc:
+            return {"status": "error", "message": f"evaluator cell refused: {type(exc).__name__}: {exc}"}
 
     # Pin a readonly producer before project/workspace/seed/run effects. Legacy
     # callers without an exact candidate keep their existing path/HEAD policy.
@@ -354,6 +389,8 @@ def start_config_run(db, ws, config_name: str, project_id: str, *,
     if against_commit:
         run_context["review_candidate"] = {"project_id": against_project,
                                            "run_id": against_run, "commit_sha": against_commit}
+    if evaluation_cell is not None:
+        run_context["_rsi_evaluation"] = dict(evaluation_cell["marker"])
     # Same exclusion adopt_bundle/reconcile_adoption hold (sf._lock): a target
     # with an unreconciled adoption descriptor, or a recorded whole bundle not
     # actually served, cannot gain a run.
@@ -383,9 +420,11 @@ def start_config_run(db, ws, config_name: str, project_id: str, *,
         from core import run_isolation
         run_isolation.ensure_for_run(
             db, run_id=run_id, project_id=project_id, config_name=config_name,
-            repo_mode=manifest.repo_mode,
+            repo_mode="none" if evaluation_cell is not None else manifest.repo_mode,
             **({"read_base_sha": against_commit, "read_source_repo": source}
-               if against_commit else {}))
+               if against_commit else
+               {"read_base_sha": evaluation_cell["read_base_sha"], "read_source_repo": source}
+               if evaluation_cell is not None else {}))
     except Exception as e:
         return {"status": "error", "project_id": project_id, "run_id": run_id,
                 "message": f"could not isolate run {run_id}: "

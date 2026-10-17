@@ -109,6 +109,13 @@ def test_useful_native_cell_and_matrix_custody(factory):
                                "grants_authority"}
     text = json.dumps(projection)
     assert "PRIVATE_CHECKER" not in text and "HOLDOUT" not in text and "private_result" not in text
+    # Every admitted physical send carried the frozen effective identity.
+    sends = [r["payload"] for r in _trace(fixture) if r["event"] == "rsi_physical_send"]
+    assert len(sends) == 72 and all(s["observed"] == sends[0]["observed"] for s in sends)
+    assert {k: sends[0]["observed"][k] for k in ("model", "max_tokens", "reasoning_effort",
+                                                 "thinking", "temperature")} == {
+        "model": "deepseek-v4-flash", "max_tokens": 8192, "reasoning_effort": "high",
+        "thinking": {"type": "enabled"}, "temperature": None}
     rows = fixture.world.store.list_receipts("evaluator-fixture", 1)
     assert len(rows) == 72 and all(r["validity"] == "VALID" for r in rows)
     from core.pipeline_benchmark import ROW
@@ -136,6 +143,7 @@ def test_useful_native_cell_and_matrix_custody(factory):
         "stage": stage["status"], "difference": stage["public_summary"]["overall_difference"],
         "full_document_aggregate": aggregate["status"], "missing": len(aggregate["missing_cells"]),
         "snapshots": len(files), "provider_requests": len(sent),
+        "observed_send_identity": sends[0]["observed"],
         "first_receipt": first.model_dump(mode="json"), "projection_keys": sorted(projection)})
     assert stage["status"] == "train_complete"
     assert stage["public_summary"]["overall_difference"]["exact"] == "40"

@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from aitelier.tools.run_tests import impl as rt
@@ -10,13 +11,25 @@ STACK = '   [0] check (res://tests/test_internal_token_display.gd:46)'
 
 
 def capture(monkeypatch, tmp_path, text, rc=1):
-    class Proc:
-        returncode = rc
-        def communicate(self, timeout):
-            return text, ''
-    monkeypatch.setattr(rt.subprocess, 'Popen', lambda *a, **kw: Proc())
-    return rt._run_node_cmd(tmp_path, ['fake-gate'], 10,
+    from core import repository_executor_entry as entry
+
+    # Only the execution transport is replaced inside the disposable CPU job.
+    # The real entry produces stdout/exit status; run_tests still captures and
+    # parses the complete bytes before applying its normal display limits.
+    script = tmp_path / 'fixture-gate.sh'
+    script.write_text("python3 - <<'PY'\nimport sys\n"
+                      f"sys.stdout.write({text!r})\nsys.exit({rc})\nPY\n")
+
+    def execute(repo, args, timeout, **kwargs):
+        return SimpleNamespace(**entry.run({
+            'repo': str(repo), 'args': args, 'timeout': timeout,
+            'report_dir': kwargs.get('report_dir', ''),
+        }))
+
+    monkeypatch.setattr(rt.repository_executor, 'execute', execute)
+    return rt._run_node_cmd(tmp_path, ['bash', str(script)], 10,
                            env_overrides={'GATE_REPORT_DIR': str(tmp_path)})
+
 
 
 def test_early_failure_reaches_implement_report(monkeypatch, tmp_path):

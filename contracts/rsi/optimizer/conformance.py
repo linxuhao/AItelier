@@ -26,6 +26,7 @@ class Fixture(Protocol):
     def approve_checkpoint(self): ...
     def selection_authorization(self): ...
     def approve_adoption(self): ...
+    def configure_budget(self,requests): ...
 
 
 def edit_fixture(kind):
@@ -44,7 +45,9 @@ def edit_fixture(kind):
 
 
 def run_scenario(factory, vector):
-    f=factory();q=f.prepare(vector.get('kind','generated'));request=q.model_dump(mode='json')
+    f=factory()
+    if 'requests' in vector:f.configure_budget(vector['requests'])
+    q=f.prepare(vector.get('kind','generated'));request=q.model_dump(mode='json')
     if 'round_number' in vector: request['round_number']=vector['round_number']
     if 'usd_micros' in vector: request['budget']['round']['upper']['usd_micros']=vector['usd_micros']
     observed=f.observations();reference=observed['view']['reference_version']
@@ -90,13 +93,14 @@ def run_scenario(factory, vector):
         assert error is None and view['stopped'] and view['stop_reason']==vector['stop']
         if 'numeric' in vector:assert out['numeric']['holdout']['status']==vector['numeric']
         if vector['name']=='family_nonregression':assert 'family_regression' in out['numeric']['holdout']['rejection_reasons']
+        if 'known_requests' in vector:assert view['known']['requests']==vector['known_requests']
         if 'difference' in vector:
             assert out['numeric']['holdout']['overall_difference']['exact']==vector['difference']
             assert out['numeric']['holdout']['sign_flip_p']['exact']==vector['p']
         if vector.get('unknown'):
-            assert view['retained_unknown_usd_micros']>0 and not view['quiescent']
+            assert view['retained_unknown']['usd_micros']>0 and not view['quiescent']
             assert not out['holdout_consumed']
-        else:assert view['retained_unknown_usd_micros']==0 and view['quiescent']
+        else:assert not any(view['retained_unknown'].values()) and view['quiescent']
     current=vector.get('current','reference')
     if current=='reference':assert view['current_version']==reference and not out['current_history']
     elif current=='candidate':assert view['current_version']==view['candidate_version'] and out['current_history']==[view['candidate_version']]

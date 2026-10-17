@@ -9,9 +9,9 @@ import json
 from fractions import Fraction
 from pathlib import Path
 from pydantic import ValidationError
-from contracts.rsi.evaluator.fake import FakeFixture as EvaluationFake
+from contracts.rsi.evaluator.fake import FakeFixture as EvaluationFake, ZERO
 from contracts.rsi.evaluator.contract import (
-    EvaluationRequest, EvaluationResult, Refusal, digest, scorer_receipt, validate_result,
+    Amount, Envelope, EvaluationRequest, EvaluationResult, Refusal, digest, scorer_receipt, total, validate_result,
 )
 from contracts.rsi.pipeline_versioning.contract import VersioningError, version_id_of
 from core.pipeline_optimization import evaluate_matrix
@@ -50,7 +50,8 @@ class FakeRound:
         self.phase = 'freeze'; self.actor = 'coordinator'
         self.request = None; self.proposal = self.candidate = None
         self.public = None; self.results = {}; self.numeric = {}
-        self.stopped = False; self.stop_reason = None; self.unknown = 0
+        self.stopped = False; self.stop_reason = None
+        self.known=ZERO; self.retained_unknown=ZERO; self.elapsed_ms=0; self.round_requests=1000
         self.pending_checkpoint = None; self.holdout_consumed = False; self.authorized = True
         self.holdout_allowed = True; self.adoption_approved = False
         self.fault = 'none'; self.events = []; self.current_history = []
@@ -59,19 +60,23 @@ class FakeRound:
 
     def prepare(self, kind='generated'):
         e = EvaluationFake(); q = e.prepare('train', ('reference',))
+        b=q.budget
+        b=b.model_copy(update={'round':b.round.model_copy(update={
+            'upper':b.round.upper.model_copy(update={'requests':self.round_requests})})})
         target = dict(self.fixture['target'])
         if kind == 'builtin': target.update(kind='builtin',name='investigate',expected_current=None)
         return RoundRequest(schema='rsi.optimizer.round.v2',campaign_id='synthetic-campaign',
             round_id='synthetic-round-1',round_number=1,design=DESIGN,target=target,
-            reference=q.selections[0],benchmark=q.benchmark,runtime=q.runtime,budget=q.budget)
+            reference=q.selections[0],benchmark=q.benchmark,runtime=q.runtime,budget=b)
 
     def set_fault(self, name):
         allowed = {'none','no_authority','unsafe_resume','provider_changed','runtime_drift',
                    'no_train_improvement','holdout_rejected','family_regression',
                    'unknown_execution','unknown_accounting','budget','concurrent_edit',
-                   'holdout_reuse','inclusive_margin','target'}
+                   'holdout_reuse','inclusive_margin','target','deadline'}
         if name not in allowed: fail('UNKNOWN_INPUT')
         self.fault = name
+        if name == 'deadline': self.elapsed_ms=self.request.budget.round.elapsed_ms
         if name == 'no_authority': self.authorized = False
         if name == 'concurrent_edit':
             self.cas = 'f'*64; self.current = digest('foreign independently edited current')
@@ -81,7 +86,8 @@ class FakeRound:
         return RoundView(phase=self.phase,reference_version=self.fixture['reference_version'],
             candidate_version=self.candidate,current_version=self.current,public_train=self.public,
             stopped=self.stopped,stop_reason=self.stop_reason,
-            retained_unknown_usd_micros=self.unknown,quiescent=not bool(self.unknown),
+            known=self.known,retained_unknown=self.retained_unknown,
+            quiescent=not any(self.retained_unknown.model_dump().values()),
             action=('retain' if self.phase=='restore' else getattr(self,'adoption_action','candidate')))
 
     def observations(self):
@@ -100,6 +106,10 @@ class FakeRound:
     def snapshot(self):
         return copy.deepcopy((self.observations(),self.proposal,self.candidate,
                               getattr(self,'candidate_content',None),self.results))
+
+    def configure_budget(self, requests):
+        # Fixture control of the actual host grant/envelope, before prepare.
+        self.round_requests=requests
 
     def selection_authorization(self):
         return {'selection':self.selection_seal}
@@ -132,6 +142,19 @@ class FakeRound:
         return c
 
     def _evaluation(self, split, arms):
+        # Each accepted evaluator call has a fresh in-call PhysicalBudget. The
+        # NEW optimizer binding must narrow it to remaining amounts/deadlines
+        # under campaign ownership before every call; never reset to full caps.
+        used=total((self.known,self.retained_unknown))
+        original=self.request.budget
+        if any(self.retained_unknown.model_dump().values()) or self.elapsed_ms>=min(original.round.elapsed_ms,original.campaign.elapsed_ms):
+            self.stop_reason='unknown' if any(self.retained_unknown.model_dump().values()) else 'budget';self.phase='stop';return
+        def remaining(envelope):
+            return Envelope(upper=Amount(**{k:max(0,getattr(envelope.upper,k)-getattr(used,k))
+                                           for k in Amount.model_fields}),
+                            elapsed_ms=envelope.elapsed_ms-self.elapsed_ms)
+        residual=original.model_copy(update={'round':remaining(original.round),
+                                             'campaign':remaining(original.campaign)})
         e = EvaluationFake()
         if self.candidate is not None:
             e.fixture['identity']['candidate'] = {'logical_version':self.candidate,
@@ -140,7 +163,7 @@ class FakeRound:
         data=q.model_dump(mode='json')
         data.update(evaluation_id='sim-'+split+'-'+'-'.join(arms),
                     campaign_id=self.request.campaign_id,round_id=self.request.round_id,
-                    budget=self.request.budget.model_dump(mode='json'),
+                    budget=residual.model_dump(mode='json'),
                     holdout_selection=self.selection_seal if split=='holdout' else None)
         data['plan_identity']=digest({k:v for k,v in data.items() if k!='plan_identity'})
         q=EvaluationRequest.model_validate_json(json.dumps(data)); e.request=q
@@ -181,7 +204,9 @@ class FakeRound:
         self.events.append({'evaluation':split,'arms':list(arms),'status':out.status,
                             'provenance':'simulation','cells':len(out.receipts)})
         if split=='train': self.public=out.optimizer_projection
-        self.unknown += out.retained_unknown.usd_micros
+        self.known=total((self.known,out.known))
+        self.retained_unknown=total((self.retained_unknown,out.retained_unknown))
+        self.elapsed_ms+=sum(r.elapsed_ms or 0 for r in out.receipts)
         if out.status != 'complete':
             self.stop_reason=('unknown' if out.status=='unknown' else 'budget' if any(r.reason=='BUDGET_EXHAUSTED' for r in out.receipts) else 'invalid'); self.phase='stop'
 
@@ -226,7 +251,7 @@ class FakeRound:
         if port=='holdout_seal':
             if not self.holdout_allowed or data.selection!=self.selection_seal or self.holdout_consumed:
                 fail('HOLDOUT_AUTHORITY')
-        if port in ('adopt','restore') and self.request.target.kind=='generated':
+        if self.request is not None and port!='stop' and self.request.target.kind=='generated':
             if self.cas != self.request.target.expected_current: fail('CONFLICT')
         if port=='decision':
             eligible=self.numeric['holdout']['status']=='eligible'

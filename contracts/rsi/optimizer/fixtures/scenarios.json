@@ -220,6 +220,39 @@
       "stop": "target",
       "current": "reference",
       "numeric": "eligible"
+    },
+    {
+      "name": "cross_call_round_budget_is_residual",
+      "requests": 40,
+      "stop": "budget",
+      "current": "reference",
+      "known_requests": 40
+    },
+    {
+      "name": "original_deadline_does_not_restart",
+      "fault": "deadline",
+      "at": "train_candidate",
+      "stop": "budget",
+      "current": "reference",
+      "known_requests": 36
+    },
+    {
+      "name": "concurrent_edit_before_more_evaluation",
+      "fault": "concurrent_edit",
+      "at": "train_candidate",
+      "error": "CONFLICT",
+      "error_at": "train_candidate",
+      "current": "foreign"
+    },
+    {
+      "name": "concurrent_edit_before_adoption",
+      "fault": "concurrent_edit",
+      "at": "adopt",
+      "decision": "adopt",
+      "adoption": true,
+      "error": "CONFLICT",
+      "error_at": "adopt",
+      "current": "foreign"
     }
   ]
 }

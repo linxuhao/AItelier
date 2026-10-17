@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Annotated, Literal, Protocol
 from pydantic import Field, model_validator
 from contracts.rsi.evaluator.contract import (
-    Benchmark, Budget, Digest, Frozen, Name, Runtime, Selection, TrainProjection,
+    Amount, Benchmark, Budget, Digest, Frozen, Name, Runtime, Selection, TrainProjection,
     require,
 )
 
@@ -113,7 +113,8 @@ class RoundView(Frozen):
     public_train: TrainProjection | None
     stopped: bool
     stop_reason: str | None
-    retained_unknown_usd_micros: Annotated[int, Field(strict=True, ge=0)]
+    known: Amount
+    retained_unknown: Amount
     quiescent: bool
     action: Literal['candidate','retain','adopt','source_patch','stop'] = 'candidate'
     grants_authority: Literal[False] = False

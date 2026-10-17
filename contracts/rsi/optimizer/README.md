@@ -63,8 +63,18 @@ The request bounds cells to 8 physical requests/128k input/16k output/5min,
 round to 1000 requests/16M input/2M output/4h/$25, and campaign to at most three
 such envelopes/$75 (two train proposals plus separate final confirmation).
 Actual preflight must resolve conservative price bounds, feasibility, deadlines,
-existing host grant and consumed/reserved usage. These are **ceilings, not a spend
-grant**. Caller ordinal 1 is not proof of unused budget. Trusted campaign state
+existing host grant and consumed/reserved usage. The accepted NativeEvaluator
+creates a fresh PhysicalBudget and time origin per
+EvaluationRequest (`core/rsi_evaluator.py::_execute`); it does not by itself share
+a scope across reference-train, candidate-train and final holdout requests. The
+NEW trusted optimizer coordinator serializes those calls under existing campaign
+ownership, subtracts ALL prior settled usage and unresolved reservations from
+the original round/campaign envelopes, and passes the remaining amounts and
+ORIGINAL remaining deadlines to each call, retaining the same authorization/scope
+identity. It never resets clocks or mints a fresh full budget for each evaluation.
+The immutable accepted evaluation receipts are the accounting evidence; this
+requires no new budget service/operation database. A lost live scope or unknown
+settlement blocks the next call/restart rather than reconstructing zero usage. These are **ceilings, not a spend grant**. Caller ordinal 1 is not proof of unused budget. Trusted campaign state
 must count invalid/refused attempts as the design requires; renaming a round or
 restarting a process cannot reset its consumption. The graph executes one round;
 a host-controlled next round needs remaining campaign authority and an unconsumed
@@ -99,8 +109,8 @@ ungranted actor or malformed invocation refuses before effects. Trusted fixture
 controls may select caller contexts; they are not JSON authority fields.
 
 `RoundView` returns finite phase, reference/candidate/current logical versions,
-optional **accepted public TrainProjection**, stopped/reason, conservative unknown
-USD microdollars, quiescent and selected action; `grants_authority` is always false.
+optional **accepted public TrainProjection**, stopped/reason, exact accepted
+Amount totals for known usage and retained unknown reservations, quiescent and selected action; `grants_authority` is always false.
 Private checker material, full receipts, holdout prompts/results and checker
 traces are never included. Fixed numeric/status train feedback intentionally
 reveals performance information; no semantic noninference guarantee is claimed.
@@ -111,6 +121,19 @@ Trusted owner diagnostics may inspect retained immutable full receipts separatel
 `graph_result(view)` returns the exact `GraphResult` wire: flat `continue`,
 `action`, `view`. Those first two fields are SDK tool-result flags derived from
 trusted state, not candidate prose. No tool port may let a proposer set them.
+
+`OptimizerError(code, detail)` is the loud pre-effect exception. Exact codes are
+`UNKNOWN_PORT` (unbound tool), `UNKNOWN_INPUT` (unknown fixture fault), `AUTHORITY`
+(caller/spend grant), `STOPPED`, `CHECKPOINT`, `ORDER`, `MALFORMED_INPUT` (strict
+payload), `INPUT_MISMATCH` (request differs from trusted frozen inputs),
+`UNSAFE_RESUME`, `PROVIDER_CHANGED`, `CONTAMINATION`, `FORBIDDEN_EDIT`,
+`NO_ADMISSIBLE_EDIT`, `HOLDOUT_AUTHORITY`, `CONFLICT` (original whole-unit CAS),
+`NOT_ELIGIBLE`, `ADOPTION_AUTHORITY`, and `POLICY_REFUSED` (target/action mismatch).
+Every such refusal preserves the complete owned pre-call snapshot. Evaluator
+post-launch invalid/unknown/budget outcomes instead retain their accepted results,
+usage/reservations and a stopped RoundView; they are not rolled back into a
+no-effect exception. A normal tool adapter maps an entry exception to the graph's
+`tool_error -> stop` branch without claiming successful settlement.
 
 ## Existing edit path; current versus private shadow
 
@@ -165,6 +188,12 @@ before public diagnosis; candidate train adds the matching 36 cells. No subset,
 extra favorable retry or previous single-run baseline substitutes. Select at most
 one sealed train candidate before holdout. Holdout is eight cases, three repeats
 and **both fresh arms** (48 cells), interleaved by the accepted evaluator plan.
+The accepted `Selection` remains an arm identity, never a permission. The
+`holdout_selection` digest identifies the existing trusted host selection record;
+`HoldoutAuthorization.selection` references that same record. The optimizer may
+compute the frozen selection identity but cannot authorize it by hashing inputs.
+A trusted lookup must find the actual existing owner grant and exact frozen
+reference/candidate/campaign scope; it must not mint fresh authority per call.
 Only explicit host-owned one-use holdout authority allows launch. Its consumption
 survives unknown results/restarts; no second selection for the same campaign or
 feedback-driven holdout reuse. Unknown execution/accounting retains reservations,
@@ -218,7 +247,8 @@ executions or return expected counters. Refusals compare full owned snapshots.
 Literal cases include useful edit, manual/default versus approved adoption,
 builtin Source-only selection, exact inclusive margin/noise, family rejection,
 no improvement, grant/order/checkpoint denial, holdout one-use, unknown/budget/
-runtime stop, concurrent edit refusal, exact case-id/literal/topology/route/model
+runtime stop, residual cross-call budgets/original deadlines, concurrent edit
+refusal before more evaluation/adoption/restore, exact case-id/literal/topology/route/model
 refusal and ordinary common-token proposal success. All are synthetic.
 
 The statement test exports wire schemas, fake transcript, exact imports and actual

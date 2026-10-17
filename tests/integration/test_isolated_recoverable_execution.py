@@ -11,6 +11,9 @@ from __future__ import annotations
 import asyncio
 import json
 import multiprocessing
+import os
+import sqlite3
+from types import SimpleNamespace
 import threading
 import time
 from pathlib import Path
@@ -204,10 +207,64 @@ def test_parallel_runs_progress_but_competing_controllers_admit_one_owner(
     for label, repo in repos.items():
         repo.mkdir()
         gate = repo / "run_tests.sh"
+        (repo / "identity").write_text(label)
+        (repo / "test_identity.py").write_text(
+            "from pathlib import Path\ndef test_identity():\n"
+            f"    assert Path('identity').read_text() == {label!r}\n")
         gate.write_text(
-            f"#!/bin/bash\nset -eu\necho {label} >> {counter}\necho {label}\n",
-            encoding="utf-8")
+            "#!/bin/bash\nset -eu\npython3 - <<'PY'\n"
+            "import hashlib,json,os,subprocess\nfrom pathlib import Path\n"
+            f"label = {label!r}\n"
+            "assert Path('identity').read_text() == label\n"
+            f"with open({str(counter)!r}, 'a') as stream: stream.write(label + '\\n')\n"
+            "report = Path(os.environ['GATE_REPORT_DIR']) / 'identity'\n"
+            "report.mkdir()\n"
+            "scope = {'coverage':'full','all_scenarios':['identity'],"
+            "'selected_scenarios':['identity'],'unselected_scenarios':[],"
+            "'fallback_full':False,'selection_basis':{"
+            "'head_sha':subprocess.check_output(['git','rev-parse','HEAD']).decode().strip(),"
+            "'spec_sha256':hashlib.sha256(b'identity').hexdigest(),'method':'full_default'}}\n"
+            "(report/'manifest.json').write_text(json.dumps({'repo':str(Path.cwd()),"
+            "'stages':['identity'],'gate_coverage':scope}))\n"
+            "(report/'identity.json').write_text(json.dumps({'passed':True,'returncode':0}))\n"
+            "(report/'identity-findings.json').write_text('[]')\n"
+            "print(label)\nPY\n", encoding="utf-8")
         gate.chmod(0o755)
+        git(repo, "init", "-q")
+        git(repo, "add", ".")
+        git(repo, "commit", "-qm", "identity fixture")
+
+    # The outer disposable CPU job supplies isolation. Exercise the real closed
+    # request validator and container entry here, without a nested Docker daemon.
+    from core import datadir, repository_executor as executor
+    from core import repository_executor_entry as entry
+    from core import repository_host_launcher as launcher
+
+    home = tmp_path / "control"
+    home.mkdir()
+    monkeypatch.setattr(datadir, "aitelier_home", lambda: home)
+    binding_db = home / "bindings.db"
+    with sqlite3.connect(binding_db) as conn:
+        conn.execute("CREATE TABLE run_isolation(run_id,mode,worktree_path,source_repo,project_id)")
+    config = {"allowed_roots": [str(tmp_path)], "aitelier_home": str(home),
+              "state_db": str(binding_db), "test_image": "sha256:" + "a" * 64,
+              "executor_entry": entry.__file__, "allowed_uids": [os.getuid()]}
+    gate_overlap = threading.Barrier(2)
+    executed = []
+
+    def execute_owned_fixture(repo, args, timeout, **kwargs):
+        fields = launcher.validate_request(config, {
+            "op": "launch", "repo": str(repo), "args": args, "timeout": timeout,
+            **{key: [str(p) for p in value] if key == "writable_dirs" else value
+               for key, value in kwargs.items()},
+        })
+        if args[0] == "bash":
+            gate_overlap.wait(timeout=10)
+        result = entry.run(fields)
+        executed.append((fields["run_id"], args[0], result["returncode"]))
+        return SimpleNamespace(**result)
+
+    monkeypatch.setattr(executor, "execute", execute_owned_fixture)
 
     first = _engine(db_path, workspace, projects, repos)
     run_a = first.create_run(
@@ -216,6 +273,10 @@ def test_parallel_runs_progress_but_competing_controllers_admit_one_owner(
         "isolated_recovery", {"project_id": "b"}, project_id="b")
     first.start_run(run_a)
     first.start_run(run_b)
+    with sqlite3.connect(binding_db) as conn:
+        conn.executemany("INSERT INTO run_isolation VALUES(?,?,?,?,?)", [
+            (run_id, "direct", str(repos[label]), str(repos[label]), label)
+            for label, run_id in (("a", run_a), ("b", run_b))])
 
     start = threading.Barrier(2)
     parallel_outcomes = {}
@@ -247,6 +308,9 @@ def test_parallel_runs_progress_but_competing_controllers_admit_one_owner(
                for result in parallel_outcomes.values()), parallel_outcomes
     assert {result["run_id"] for result in parallel_outcomes.values()} == {
         run_a, run_b}
+    assert counter.exists(), {
+        label: json.loads((workspace / label / "isolated_recovery" / "effect" /
+                           "test_report.json").read_text()) for label in ("a", "b")}
     assert sorted(counter.read_text().splitlines()) == ["a", "b"]
     assert first.get_run(run_a)["status"] == "completed"
     assert first.get_run(run_b)["status"] == "completed"
@@ -258,6 +322,13 @@ def test_parallel_runs_progress_but_competing_controllers_admit_one_owner(
         (workspace / "b" / "isolated_recovery" / "effect" /
          "test_report.json").read_text())
     assert report_a["repo_gate"]["output"] == "a"
+    assert report_a["passed"] is True, report_a
+    assert report_b["passed"] is True, report_b
+    assert report_a["repo_gate"]["measured"] == "measured_pass"
+    assert report_b["repo_gate"]["measured"] == "measured_pass"
+    assert sorted(executed) == sorted([
+        (run_id, command, code) for run_id in (run_a, run_b)
+        for command, code in (("python3", 0), ("bash", 0))])
     assert report_b["repo_gate"]["output"] == "b"
 
     # A new run is raced by two independent controller objects. Force both past
@@ -285,11 +356,13 @@ def test_parallel_runs_progress_but_competing_controllers_admit_one_owner(
         second, "_operation_blocks_reentry",
         synchronized_preflight(second_real_preflight))
     admitted = threading.Event()
+    original_operation = {}
     first_real_admit = first._admit_op
     second_real_admit = second._admit_op
 
     def hold_first_after_admission(*args, **kwargs):
         operation_id = first_real_admit(*args, **kwargs)
+        original_operation.update(first.unsettled_operations(competing)[0])
         admitted.set()
         raise RuntimeError(f"controller disconnected after operation {operation_id}")
 
@@ -304,8 +377,9 @@ def test_parallel_runs_progress_but_competing_controllers_admit_one_owner(
     def drive(engine):
         try:
             outcomes.append(("return", engine.advance_run(competing)))
-        except RuntimeError as exc:
-            outcomes.append(("disconnect", str(exc)))
+        except BaseException as exc:
+            kind = "disconnect" if isinstance(exc, RuntimeError) else "exception"
+            outcomes.append((kind, f"{type(exc).__name__}: {exc}"))
 
     racers = [threading.Thread(target=drive, args=(engine,))
               for engine in (first, second)]
@@ -320,6 +394,7 @@ def test_parallel_runs_progress_but_competing_controllers_admit_one_owner(
     assert operations[0]["run_id"] == competing
     assert operations[0]["step_instance_id"] is not None
     assert operations[0]["owner"]
+    assert operations[0] == original_operation
     assert sorted(kind for kind, _ in outcomes) == ["disconnect", "return"]
     assert sorted(counter.read_text().splitlines()) == ["a", "b"]
     assert first.get_run(run_a)["status"] == "completed"

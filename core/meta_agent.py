@@ -3842,6 +3842,8 @@ class MetaAgent:
                                        f"approve_checkpoint or reject_checkpoint.",
                         }
                     elif status == "completed":
+                        from core.coding_impl_outcome import load_coding_outcome
+                        coding_result = load_coding_outcome(sf, self.ws, run, None)
                         # Gather final outputs
                         outputs = {}
                         for s in steps:
@@ -3875,6 +3877,7 @@ class MetaAgent:
                             "steps_completed": len([s for s in steps if s["status"] == "completed"]),
                             "outputs": outputs,
                             "message": "Pipeline completed successfully.",
+                            **coding_result,
                         }
                         # Configs flagged registers_generated_pipeline (pipeline_forge)
                         # produce a pipeline on completion — persist + live-register it
@@ -4068,6 +4071,8 @@ class MetaAgent:
                            f"approval before calling approve_checkpoint or reject_checkpoint.",
             }
         if status == "completed":
+            from core.coding_impl_outcome import load_coding_outcome
+            coding_result = load_coding_outcome(sf, self.ws, run, None)
             outputs = {}
             for s in steps:
                 if s["status"] == "completed":
@@ -4081,6 +4086,7 @@ class MetaAgent:
                 "steps_completed": len([s for s in steps if s["status"] == "completed"]),
                 "outputs": outputs,
                 "message": "Pipeline completed successfully.",
+                **coding_result,
             }
         if status == "failed":
             return {
@@ -4573,6 +4579,8 @@ class MetaAgent:
                     "message": f"Run is {status}, not completed — no final result yet.",
                     "hint": "trace_list(run, errors_only=true) shows why." if status == "failed"
                             else None}
+        from core.coding_impl_outcome import load_coding_outcome
+        coding_result = load_coding_outcome(sf, self.ws, run, get_config_registry())
         graph = run.get("graph_name") or "dpe_default"
         pid = run.get("project_id", "")
         manifest = get_config_registry().get(graph)
@@ -4590,7 +4598,7 @@ class MetaAgent:
                 except (ValueError, TypeError):
                     result[rel] = content
         return {"status": "completed", "run_id": run_id, "project_id": pid,
-                "output_step": output_step, "result": result}
+                "output_step": output_step, "result": result, **coding_result}
 
     async def _tool_wait_until_checkpoint(self, args: dict) -> dict:
         """Block until the run hits its next checkpoint / completes / fails.

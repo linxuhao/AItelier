@@ -107,3 +107,29 @@ def test_invalid_import_has_no_persistence_or_registration(runtime):
     assert registry.get("gen_imported") is None
     assert not sf.list_graphs()
     assert "gen_imported__reader" not in sf.agent_registry
+
+
+@pytest.mark.parametrize("renamed", [False, True])
+def test_declared_later_seed_normalizes_only_its_own_input(runtime, renamed):
+    sf, registry, configs, _ = runtime
+    candidate = bundle("task.md")
+    graph = yaml.safe_load(candidate["graph_yaml"])
+    graph["x-aitelier"] = {"seed_file": "task.md"}
+    graph["begin"] = "prepare"
+    graph["steps"].insert(0, {"id": "prepare", "step_type": "tool", "tool_name": "read_file",
+                              "tool_params": {"file": "unchanged.txt"},
+                              "transitions": [{"to": "investigate"}]})
+    graph["steps"][1]["context"][0]["required"] = True
+    graph["steps"][1]["context"].append({"source": {"config": "gen_foreign", "output": "task.md"}})
+    candidate["graph_yaml"] = yaml.safe_dump(graph)
+    result = pb.import_pipeline(sf, registry, candidate, **({"name": "later_renamed"} if renamed else {}))
+    name = result["config_name"]
+    persisted = yaml.safe_load((configs / f"{name}.yaml").read_text())
+    assert persisted["x-aitelier"]["seed_file"] == registry.get(name).seed_file == "seed_input.md"
+    assert persisted["steps"][0] == graph["steps"][0]
+    assert persisted["steps"][1]["context"] == [
+        {"source": {"config": name, "output": "seed_input.md"}, "required": True},
+        {"source": {"config": name, "output": "notes.md"}},
+        {"source": {"config": "gen_foreign", "output": "task.md"}}]
+    pb.import_pipeline(sf, registry, pb.export_pipeline(name))
+    assert yaml.safe_load((configs / f"{name}.yaml").read_text()) == persisted

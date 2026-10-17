@@ -90,7 +90,16 @@
           }
         },
         {
-          "to": "stop"
+          "to": "stop",
+          "match": {
+            "continue": false
+          }
+        },
+        {
+          "to": "stop",
+          "match": {
+            "_tool_error": true
+          }
         }
       ]
     },
@@ -170,7 +179,16 @@
           }
         },
         {
-          "to": "restore"
+          "to": "restore",
+          "match": {
+            "continue": false
+          }
+        },
+        {
+          "to": "restore",
+          "match": {
+            "_tool_error": true
+          }
         }
       ]
     },
@@ -289,7 +307,16 @@
           }
         },
         {
-          "to": "stop"
+          "to": "stop",
+          "match": {
+            "continue": false
+          }
+        },
+        {
+          "to": "stop",
+          "match": {
+            "_tool_error": true
+          }
         }
       ]
     },
@@ -301,6 +328,13 @@
       "max_retries": 0,
       "tool_error": "route",
       "transitions": [
+        {
+          "to": "source_patch",
+          "match": {
+            "action": "source_patch",
+            "continue": true
+          }
+        },
         {
           "to": "stop"
         }

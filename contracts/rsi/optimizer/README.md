@@ -255,3 +255,58 @@ The statement test exports wire schemas, fake transcript, exact imports and actu
 SDK compile/routing evidence. Future acceptance-only readback and native proof
 remain **SKIP** here. No benchmark/private gold/model spend, normal runtime
 adoption, deployment or general security/sandbox guarantee follows.
+
+## Native binding (PROOF)
+
+`native_binding.NativeRound` is the trusted `RoundBinding`; `install(sf, loader)`
+binds the 17 ports and this graph into the ONE host it is handed (never at import
+or boot). A round is an ordinary engine run of `round.graph.json` with a
+`_rsi_optimizer` run-context marker. `invoke(port, payload, actor=...)` checks,
+before any effect: port, host-supplied actor against ROLES, the run's actual
+terminal/paused state and current node, strict payload, port preconditions and
+the original target CAS. Only then does it stage the invocation and call the
+engine's `advance_run`, which claims and executes exactly that tool step; the
+port tool resolves the live binding by the engine-injected `run_id` and refuses
+(graph error branch, no effect) any dispatch without its owning invocation.
+Flags returned to the engine come from the binding's trusted decision. Owner
+checkpoint answers use the engine's `get_checkpoint`/`approve_checkpoint` CAS.
+
+Effects use accepted providers only: `PipelineVersions` capture/read/current/
+restore/whole-unit CAS; `derive_candidate` on the captured reference bundle,
+then `compile_bundle`/`seal` through the versioning catalog and
+`register_sealed` of the immutable physical candidate (no target is edited; the
+original serving target changes only through `restore` of the cataloged
+candidate after reviewed owner adoption); `NativeEvaluator.evaluate` for 36
+reference train, 36 candidate train and 48 paired holdout cells; accepted
+`validate_result`, `scorer_receipt` and unchanged `evaluate_matrix`. Each
+request carries the frozen `Runtime` with the accepted compiled policy identity
+for exactly its arms (that identity covers the selected arm set), and the
+residual round/campaign `Budget`: original envelopes minus known usage and
+retained reservations of every sealed evaluator result of this round/campaign,
+and the original deadline minus host-clock time since freeze. An unresolved or
+unknown evaluation, or an expired deadline, dispatches nothing. Holdout needs
+the owner's host grant of the exact computed selection identity and refuses an
+evaluator consumption record for it. A round run without its live binding
+refuses `UNSAFE_RESUME`. Builtin targets use the private generated shadow as
+the measured reference, verify the builtin Source files unchanged and end in a
+private Source-patch CANDIDATE artifact.
+
+Graph correction found by the first native dispatch (SDK 1.5.94): a checkpoint
+TOOL step pauses only when no transition matches, and approval continues to the
+FIRST `from: checkpoint` edge. The statement's unconditional fallbacks on
+`hypothesis`/`train_compare`/`adoption_review` were therefore taken without any
+pause. Fallbacks now match `continue: false` or `_tool_error: true`; the single
+approved continuation of `adoption_review` is `adopt`, which performs no runtime
+adoption for a builtin target and routes `action: source_patch` on to
+`source_patch`. Nodes, tools, checkpoints, ports and resolver checks are
+unchanged.
+
+`native_fixture` builds a fresh accepted evaluator world per scenario with only
+the reference target; the candidate is always derived from the proposer's edit.
+The accepted deterministic transport answers under the real admission boundary;
+its answer script is fixture data scored by the trusted checker (reference
+value-only 6/10; candidate value+citation 10/10 on its first repetition, else
+6/10; fault scripts map the fake's better/equal/worse cells onto those levels).
+That checker's points are {0,4,6,10} of 10, so per-case holdout differences are
+multiples of 20/3: the literal `inclusive_margin` vector (difference exactly 5
+with all eight cases positive, p=1/256) cannot be produced natively.

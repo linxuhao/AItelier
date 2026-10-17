@@ -64,6 +64,9 @@ def owned_snapshot(repo, run_id, *, original=False):
     if not clean or not head or original and head != rec["base_sha"]:
         raise ValueError("actual bytes are not the clean measured commit: " + why)
     tree = closed_git.ls_tree(repo, head)
+    config = tree.get("pytest.ini")
+    if not config or config.type != "blob" or config.mode not in (0o100644, 0o100755):
+        raise ValueError("effective pytest config is not a tracked regular root pytest.ini")
     return {**binding, "repo": str(Path(repo).resolve()), "base_sha": rec["base_sha"],
             "base_tree": closed_git.run(repo, "rev-parse", rec["base_sha"] + "^{tree}").stdout.strip(),
             "candidate_sha": head, "candidate_tree": closed_git.run(repo, "rev-parse", head + "^{tree}").stdout.strip(),

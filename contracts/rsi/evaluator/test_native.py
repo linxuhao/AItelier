@@ -13,14 +13,13 @@ import importlib.metadata
 import json
 import os
 import sqlite3
-from fractions import Fraction
 from pathlib import Path
 
 import pytest
 
 from .conformance import ADMISSION_SCENARIOS, SCENARIOS, run_admission_scenario, run_scenario
 from .contract import EvaluationResult, Refusal, benchmark_row, digest, scorer_receipt
-from .native_fixture import NativeFactory, NativeFixture, PILOT_GRANTS
+from .native_fixture import NativeFactory, NativeFixture
 
 
 def evidence(name, value):

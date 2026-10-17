@@ -43,7 +43,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from contracts.rsi.evaluator.contract import (
-    Amount, Cell, CellReceipt, CheckerResult, Endpoint, EvaluationRequest, EvaluationResult,
+    CellReceipt, CheckerResult, Endpoint, EvaluationRequest, EvaluationResult,
     Execution, PublicCell, Refusal, Runtime, TrainProjection, benchmark_row, digest, total,
     validate_result)
 from core import rsi_admission as admission
@@ -500,7 +500,7 @@ class NativeEvaluator:
         case, selection = base["case"], base["selection"]
         arm = ctx["compiled"][cell.arm]
         public = ctx["public"][cell.case_id]
-        cell_key = f"cell-{index}"
+        cell_key = admission.cell_scope(cell)
         b = request.budget
         budget.add_scope(cell_key, b.cell.upper, b.cell.elapsed_ms)
         t_cell = h.clock()
@@ -615,6 +615,8 @@ class NativeEvaluator:
         if not path.is_file() or path.is_symlink():
             return final("task_failure", "NONE")
         data = path.read_bytes()
+        if not data.strip():
+            return final("task_failure", "NONE")        # delivered nothing
         try:
             checker.decode_findings(data)
         except checker.CheckerInputError:

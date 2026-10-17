@@ -193,7 +193,11 @@ class AItelierSkillFlow(SkillFlow):
     # compiled policy, physical-admission scope and grants. After process loss
     # the binding is gone and every ingress refuses: no unsafe resume.
     def _evaluator_marker(self, run_id: str):
-        run = self.get_run(run_id) if run_id else None
+        if not run_id or getattr(self, "_conn", None) is None:
+            # A host double without the engine's run table owns no evaluator
+            # cell run (only start_config_run(evaluation_cell=...) makes one).
+            return None, None
+        run = self.get_run(run_id)
         if not run:
             return None, None
         try:

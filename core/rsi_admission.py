@@ -81,6 +81,11 @@ def is_admission_denial(error: BaseException | None) -> bool:
     return False
 
 
+def cell_scope(cell) -> str:
+    """Budget scope name of one planned cell."""
+    return f"cell.{cell.case_id}.{cell.arm}.{cell.repetition}"
+
+
 def _add(a: Amount, b: Amount, sign: int = 1) -> Amount:
     return Amount(**{k: getattr(a, k) + sign * getattr(b, k) for k in _FIELDS})
 
@@ -149,7 +154,11 @@ class PhysicalBudget:
     # -- PhysicalAdmission ------------------------------------------------
     def reserve(self, request: PhysicalRequest, scopes: tuple[str, ...] | None = None,
                 *, cell_key: str | None = None) -> Reservation:
-        names = tuple(scopes or ())
+        """Reserve ``request.upper`` on every scope at once, or nothing.
+
+        ``scopes`` defaults to the request's own cell, round and campaign."""
+        names = tuple(scopes) if scopes is not None else (
+            cell_scope(request.cell), "round", "campaign")
         elapsed = {"cell": request.elapsed_cell_ms, "round": request.elapsed_round_ms,
                    "campaign": request.elapsed_campaign_ms}
         with self._lock:
@@ -173,7 +182,7 @@ class PhysicalBudget:
                 raise AdmissionDenied("BUDGET_EXHAUSTED", f"no authorized envelope {missing}")
             for n in names:
                 scope = self._scopes[n]
-                kind = n.split(":", 1)[0] if ":" in n else n.split("-", 1)[0]
+                kind = n.split(".", 1)[0]
                 ms = elapsed.get(kind, elapsed["cell"])
                 if ms >= scope.elapsed_ms or not _fits(scope.used, request.upper, scope.upper):
                     why = "deadline" if ms >= scope.elapsed_ms else "envelope"
@@ -350,7 +359,8 @@ class CellScope:
         cause = self._next_cause()
         with self._lock:
             self._seq += 1
-            attempt_id = f"p-{self.cell_key}-{self._seq}"[:64]
+            attempt_id = (f"p-{self.cell.case_id}-{self.cell.arm}-"
+                          f"{self.cell.repetition}-{self._seq}")
         base = self.endpoints.get(self.runtime.endpoint.endpoint)
         expected = expected_wire(self.runtime, base or "")
         drift = sorted(k for k in expected if observed.get(k) != expected[k])

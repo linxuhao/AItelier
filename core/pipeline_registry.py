@@ -487,15 +487,27 @@ def _dedupe_context_sources(data: dict) -> list[str]:
 def _inject_seed_context(data: dict, config_name: str) -> None:
     """Bind declared self-seed readers to the host's canonical launch file.
 
-    A tool-first graph can read its seed in a later agent. Normalise those
-    explicit sources before the begin-agent convenience injection; otherwise
-    launch publishes seed_input.md while the later reader still asks for task.md.
+    Follow non-agent setup steps to the first agent readers. Later agents
+    may legitimately read a prior step's output with the old seed filename;
+    their sources and the setup tools' contracts must remain unchanged.
     """
     hints = data.get("x-aitelier") or {}
     declared = hints.get("seed_file")
     if declared and declared != SEED_FILE:
-        for step in data.get("steps", []):
-            if not isinstance(step, dict):
+        steps = {step.get("id"): step for step in data.get("steps", [])
+                 if isinstance(step, dict)}
+        pending, seen = [data.get("begin")], set()
+        while pending:
+            node = pending.pop()
+            if node in seen:
+                continue
+            seen.add(node)
+            step = steps.get(node)
+            if step is None:
+                continue
+            if step.get("step_type", "agent") != "agent":
+                pending.extend(t.get("to") for t in step.get("transitions", [])
+                               if isinstance(t, dict))
                 continue
             for c in step.get("context") or []:
                 inner = c.get("source", c) if isinstance(c, dict) else None

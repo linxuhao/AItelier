@@ -133,3 +133,38 @@ def test_declared_later_seed_normalizes_only_its_own_input(runtime, renamed):
         {"source": {"config": "gen_foreign", "output": "task.md"}}]
     pb.import_pipeline(sf, registry, pb.export_pipeline(name))
     assert yaml.safe_load((configs / f"{name}.yaml").read_text()) == persisted
+
+
+def test_later_self_output_named_like_original_seed_remains_an_output(runtime, monkeypatch):
+    from skillflow.core import StepResult
+    sf, registry, configs, _ = runtime
+    candidate = bundle("task.md")
+    graph = yaml.safe_load(candidate["graph_yaml"])
+    graph["x-aitelier"] = {"seed_file": "task.md"}
+    graph["steps"][0]["output"] = {"mode": "content", "fixed": {"task": "task.md"}}
+    graph["steps"][0]["transitions"] = [{"to": "consume"}]
+    graph["steps"].append({"id": "consume", "agent_config": "reader",
+                            "context": [{"source": {"config": "gen_imported", "output": "task.md"}, "required": True}],
+                            "transitions": [{"to": None}]})
+    candidate["graph_yaml"] = yaml.safe_dump(graph)
+    pb.import_pipeline(sf, registry, candidate)
+    persisted = yaml.safe_load((configs / "gen_imported.yaml").read_text())
+    assert persisted["steps"][1]["context"] == graph["steps"][1]["context"]
+    db, ws = MagicMock(), MagicMock()
+    db.get_project.return_value = None
+    monkeypatch.setattr("api.dependencies.get_skillflow", lambda: sf)
+    monkeypatch.setattr("api.dependencies.get_config_registry", lambda: registry)
+    monkeypatch.setattr("core.scheduler.wake_scheduler", lambda *a: None)
+    monkeypatch.setattr("core.run_isolation.ensure_for_run", lambda *a, **kw: None)
+    launch = start_config_run(db, ws, "gen_imported", "later-output", seed_text="ORIGINAL LAUNCH TASK")
+    assert launch["status"] == "started"
+    claim = sf.claim_next_step(launch["run_id"])
+    assert claim.step_id == "investigate"
+    reply = sf.execute_tool("create_task", {"initialContent": "LEGITIMATE LATER TASK OUTPUT"},
+                            run_id=claim.token.run_id, step_id=claim.step_id,
+                            step_instance_id=claim.token.step_instance_id, claim_epoch=claim.token.claim_epoch)
+    assert not reply.get("error"), reply
+    sf.confirm_step(claim.token, StepResult())
+    consume = sf.claim_next_step(launch["run_id"])
+    assert consume.step_id == "consume"
+    assert consume.inputs["_resolved_context"]["gen_imported/task.md"] == "LEGITIMATE LATER TASK OUTPUT"

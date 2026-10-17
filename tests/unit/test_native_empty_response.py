@@ -150,6 +150,13 @@ def test_real_stream_builder_blank_native_response_fails(wiring, monkeypatch):
 def test_actual_native_loop_preserves_named_failure_no_output_or_json_retry(call_case, wiring, monkeypatch, fallback):
     from core.agents import DPEAgentNative
     c = call_case
+    from core.prompt_assembler import PromptAssembler
+
+    # Keep the fixture prompt while retaining the real preamble API. A warmed
+    # config registry enables DPE preambles even in this controlled native call.
+    assembler = PromptAssembler()
+    assembler.assemble = c.engine.assembler.assemble
+    c.engine.assembler = assembler
     c.engine.factory.get_fallback_to_json.return_value = fallback
     gateway = gw(wiring, "pool")
     c.engine.factory.get_native_agent.return_value = DPEAgentNative(gateway, "owned fixture")

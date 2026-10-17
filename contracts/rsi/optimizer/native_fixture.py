@@ -61,7 +61,7 @@ ASSIGNMENT = {
                            "usd_micros": 1000000, "elapsed_ms": 300000},
                   "round": dict(_CEILING), "campaign": dict(_CEILING)},
     "adoption": {}}
-FAULTS = {"none", "no_authority", "unsafe_resume", "provider_changed", "runtime_drift",
+FAULTS = {"none", "no_authority", "unsafe_resume", "provider_changed", "runtime_drift", "store_race",
           "no_train_improvement", "holdout_rejected", "family_regression",
           "unknown_execution", "unknown_accounting", "budget", "concurrent_edit",
           "holdout_reuse", "inclusive_margin", "target", "deadline"}
@@ -248,12 +248,14 @@ class NativeRoundFixture:
             artifacts_root=self.root / "private" / "optimizer", source_root=REPO,
             deployment=w.host_doc["deployment"], graph_name=graph_name, clock=self.clock)
         self.round = NativeRound(self.host, authorization_ref=AUTH, round_id=ROUND)
+        self.rounds = {ROUND: self.round}
         self.actor = "coordinator"
         self.holdout_allowed = True
         self.fault = "none"
         self.prepared_request = None
         self.fault_facts: dict = {}
         self.adoption_intent = None
+        self.prepared_kind = None
         self.shadow_mapping = None
 
     def _assignment(self) -> dict:
@@ -261,7 +263,10 @@ class NativeRoundFixture:
 
     # -- Fixture protocol --------------------------------------------------
     def prepare(self, kind="generated"):
-        self.shadow_mapping = self.world.install_target(kind)
+        if self.prepared_kind is None:         # the world's one target, installed once
+            self.shadow_mapping = self.world.install_target(kind)
+            self.prepared_kind = kind
+        assert kind == self.prepared_kind, "one campaign, one target kind"
         self.prepared_request = self.round.trusted_request(kind, effects=True)
         return self.prepared_request
 
@@ -295,6 +300,7 @@ class NativeRoundFixture:
         target = r.targets["generated"]
         return {"evidence_kind": self.evidence_kind, "view": r.view().model_dump(mode="json"),
                 "events": copy.deepcopy(r.events), "current_history": list(r.current_history),
+                "reference_reused": bool(r.reused),
                 "holdout_consumed": r._consumed(r.selection_identity),
                 "pending_checkpoint": r.pending_checkpoint(),
                 "cas": self.world.versions.current(target)["unit_identity"],
@@ -351,6 +357,58 @@ class NativeRoundFixture:
 
     def configure_budget(self, requests):
         self._assignment()["envelopes"]["round"]["requests"] = requests
+        self._persist_assignment()
+
+    # -- campaign controls of the shared multiround driver -----------------
+    def _persist_assignment(self):
+        """The host grant record is host-owned durable config: a restarted or
+        second host process reads the same assignment."""
+        path = self.root / "host.json"
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        doc["grants"][AUTH]["optimizer"] = copy.deepcopy(self._assignment())
+        path.write_text(json.dumps(doc, indent=1), encoding="utf-8")
+
+    def configure_campaign(self, rounds, round_elapsed_ms, campaign_elapsed_ms):
+        """Both ordinals authorized BEFORE the campaign starts, one grant."""
+        a = self._assignment()
+        a["rounds"] = dict(rounds)
+        a["envelopes"]["round"]["elapsed_ms"] = round_elapsed_ms
+        a["envelopes"]["campaign"]["elapsed_ms"] = campaign_elapsed_ms
+        self._persist_assignment()
+
+    def begin_round(self, round_id):
+        """A new round of the SAME campaign on the SAME host; per-round
+        fixture faults (transport script/fault) start clean."""
+        if self.round.round_id != round_id or self.round.request is not None:
+            self.round = NativeRound(self.host, authorization_ref=AUTH, round_id=round_id)
+        self.rounds[round_id] = self.round
+        self.provider.script, self.provider.fault = "useful", "none"
+        self.provider.first_cell, self.provider.hooks = None, {}
+        with self.provider._lock:            # its n-th send of a (case, arm) is repetition n
+            self.provider._per_cell.clear()
+        self.fault = "none"
+
+    def campaign_control(self, name):
+        if name != "expire_campaign":
+            raise OptimizerError("UNKNOWN_INPUT", name)
+        self.clock.offset += self._assignment()["envelopes"]["campaign"]["elapsed_ms"] / 1000
+
+    def freeze_in_lost_host(self, request):
+        """A real second host process freezes this round and exits: the live
+        campaign scope it created is lost with it."""
+        self.prepared_request = request
+        self._fault_unsafe_resume()
+        self.fault_facts["lost_host_round"] = request.round_id
+
+    def campaign_observations(self) -> dict:
+        from contracts.rsi.evaluator.contract import total
+        views = [r.view() for r in self.rounds.values() if r.request is not None]
+        return {"evidence_kind": self.evidence_kind,
+                "known": total(v.known for v in views).model_dump(),
+                "retained_unknown": total(v.retained_unknown for v in views).model_dump(),
+                "unresolved": any(not v.quiescent for v in views),
+                "quiescent": all(v.quiescent for v in views), "rounds": sorted(self.rounds),
+                "provider_sends": len(self.provider.received())}
 
     # -- faults that change actual host inputs -----------------------------
     def _fault_none(self):
@@ -393,6 +451,29 @@ class NativeRoundFixture:
             "type": type(out).__name__, "status": getattr(out, "status", None),
             "reason": getattr(out, "reason", None),
             "launched": sum(1 for x in getattr(out, "receipts", ()) if x.execution is not None)}
+
+    def _fault_store_race(self):
+        """A concurrent scoreboard writer appends, through the accepted store,
+        a row for the SAME cell key while cell 0 of the round's reference train
+        is in flight: the evaluator's own append then refuses after the send."""
+        r, store = self.round, self.world.store
+        sel, runtime = r.request.reference, r.request.runtime
+        case = next(c for c in r.request.benchmark.cases if c.case_id == "train-01")
+
+        def concurrent_writer(_record):
+            store.append_receipt("concurrent-writer", {
+                "schema": "rsi.benchmark.v1", "benchmark_id": r.request.benchmark.benchmark_id,
+                "version": r.request.benchmark.version, "bundle_identity": sel.native_bundle,
+                "runtime": {"route": runtime.requested_model, "endpoints": [runtime.endpoint.endpoint],
+                            "effort": runtime.effort},
+                "case_id": "train-01", "repetition": 1, "arm": "reference",
+                "run_receipt_id": "concurrent-writer-0001", "input_identity": case.prompt_identity,
+                "checker_identity": case.scorer_ref_identity, "validity": "INFRASTRUCTURE",
+                "outcome": "none", "raw_points": None, "cost_usd": None, "duration_s": None})
+            self.fault_facts["store_race"] = "concurrent row appended during cell 0 send"
+        self.provider.first_cell = ("train-01", "reference")
+        self.provider.hooks["store_race"] = concurrent_writer
+        self.provider.fault = "store_race"
 
     def _fault_deadline(self):
         self.clock.offset += self.round.request.budget.round.elapsed_ms / 1000
@@ -477,7 +558,8 @@ class NativeRoundFixture:
                 "holdout_consumed_markers": sorted(p.name for p in (self.root / "private" / "evaluator" / "holdout-consumed").glob("*.json"))}
 
     def close(self) -> None:
-        self.round.close()
+        for r in self.rounds.values():
+            r.close()
         self.provider.close()
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline and any(

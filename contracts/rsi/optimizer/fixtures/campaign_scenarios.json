@@ -1,0 +1,60 @@
+{
+  "schema": "rsi.optimizer.campaign_scenarios.v1",
+  "note": "Literal multiround campaign scenarios shared by the fake and the native binding. Both rounds are authorized before the campaign starts under ONE unchanged grant: the campaign lifetime/amounts/reservations are the ORIGINAL campaign's across rounds; each round gets its own fresh round envelope. The accepted scoreboard cohort (BenchmarkStore cell key) is never re-measured.",
+  "campaign": {
+    "rounds": {"optimizer-round-1": 1, "optimizer-round-2": 2},
+    "round_elapsed_ms": 300000,
+    "campaign_elapsed_ms": 600000
+  },
+  "scenarios": [
+    {
+      "name": "expired_campaign_second_round_adds_no_send",
+      "steps": [
+        {"round": "optimizer-round-1", "owner_stop_at": "diagnose", "stop": "owner_stop", "known_requests": 36},
+        {"control": "expire_campaign"},
+        {"round": "optimizer-round-2", "stop": "budget", "known_requests": 0, "ports": ["freeze", "train_reference", "stop"]}
+      ],
+      "campaign_known_requests": 36, "quiescent": true
+    },
+    {
+      "name": "lost_original_campaign_scope_refuses",
+      "steps": [
+        {"round": "optimizer-round-1", "lost_host": true},
+        {"round": "optimizer-round-2", "error": "UNSAFE_RESUME", "error_at": "freeze"}
+      ],
+      "campaign_known_requests": 0, "quiescent": true
+    },
+    {
+      "name": "useful_second_round_reuses_campaign_reference",
+      "steps": [
+        {"round": "optimizer-round-1", "fault": "no_train_improvement", "at": "train_candidate", "stop": "no_train_improvement", "known_requests": 72},
+        {"round": "optimizer-round-2", "edit": "second_useful", "stop": "manual_candidate", "numeric": "eligible", "reference_reused": true, "known_requests": 84}
+      ],
+      "campaign_known_requests": 156, "quiescent": true
+    },
+    {
+      "name": "repeated_candidate_cohort_occupied",
+      "steps": [
+        {"round": "optimizer-round-1", "fault": "no_train_improvement", "at": "train_candidate", "stop": "no_train_improvement", "known_requests": 72},
+        {"round": "optimizer-round-2", "error": "NO_ADMISSIBLE_EDIT", "error_at": "admissibility", "reference_reused": true}
+      ],
+      "campaign_known_requests": 72, "quiescent": true
+    },
+    {
+      "name": "incomplete_reference_cohort_occupied",
+      "steps": [
+        {"round": "optimizer-round-1", "requests": 10, "stop": "budget", "known_requests": 10},
+        {"round": "optimizer-round-2", "stop": "invalid", "known_requests": 0, "ports": ["freeze", "train_reference", "stop"]}
+      ],
+      "campaign_known_requests": 10, "quiescent": true
+    },
+    {
+      "name": "post_effect_scoreboard_exception_retains_accounting",
+      "steps": [
+        {"round": "optimizer-round-1", "fault": "store_race", "at": "train_reference", "stop": "unknown", "known_requests": 1, "quiescent": false},
+        {"round": "optimizer-round-2", "stop": "unknown", "known_requests": 0, "ports": ["freeze", "train_reference", "stop"]}
+      ],
+      "campaign_known_requests": 1, "quiescent": false
+    }
+  ]
+}

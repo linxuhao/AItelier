@@ -11,8 +11,8 @@ from contracts.rsi.evaluator.contract import digest
 from contracts.rsi.pipeline_versioning.contract import version_id_of
 from core.pipeline_optimization import evaluate_matrix
 from .contract import PORTS, ROLES, RoundRequest, RoundView, Hypothesis, Edit, OptimizerError, graph_result
-from .fake import FakeRound, literal
-from .conformance import SCENARIOS, run_scenario, edit_fixture
+from .fake import FakeCampaignFixture, FakeRound, literal
+from .conformance import CAMPAIGN, SCENARIOS, run_campaign, run_scenario, edit_fixture
 from .profiles import for_scenario
 
 ROOT=Path(__file__).parent
@@ -27,6 +27,11 @@ def test_shared_round_scenarios(vector):
     # The same predeclared profile the native entrypoint selects, before prepare.
     profile=for_scenario(vector['name'])
     evidence('scenario-'+vector['name'],run_scenario(lambda:FakeRound(profile=profile),vector))
+
+
+@pytest.mark.parametrize('vector',CAMPAIGN['scenarios'],ids=lambda v:v['name'])
+def test_shared_campaign_scenarios(vector):
+    evidence('campaign-'+vector['name'],run_campaign(FakeCampaignFixture,vector))
 
 
 def test_actual_sdk_graph_order_checkpoint_and_tool_ports():

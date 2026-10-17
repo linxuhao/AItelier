@@ -13,6 +13,7 @@ from .contract import OptimizerError, ROLES
 ROOT=Path(__file__).parent
 SCENARIOS=json.loads((ROOT/'fixtures/scenarios.json').read_text())['scenarios']
 LITERAL=json.loads((ROOT/'fixtures/round.json').read_text())
+CAMPAIGN=json.loads((ROOT/'fixtures/campaign_scenarios.json').read_text())
 
 
 class Fixture(Protocol):
@@ -40,6 +41,7 @@ def edit_fixture(kind):
     elif kind=='model': e['prompts']={'model:investigator':'new model'}
     elif kind=='unknown': e['model']='changed'
     elif kind=='empty': e={}
+    elif kind=='second_useful': e['prompts'][key]+='Second proposal: quote the line that defines the answer.\n'
     elif kind!='useful': raise ValueError('unknown literal edit')
     return e
 
@@ -115,3 +117,65 @@ def run_scenario(factory, vector):
 
 def run_shared(factory):
     return [run_scenario(factory,v) for v in SCENARIOS]
+
+
+def _round_payload(f,port,view,step):
+    if port=='diagnose':return {'observation':'Train feedback shows missing cited evidence.','train_case_ids':['train-01']}
+    if port=='hypothesis':return {'hypothesis_id':'one-hypothesis','change':'Ask for explicit evidence citations.',
+        'falsifiable_prediction':'Mean normalized train score improves, with fixed settings and equal counts.',
+        'metric':'mean_normalized','train_case_ids':['train-01']}
+    if port=='candidate':return edit_fixture(step.get('edit','useful'))
+    if port=='holdout_seal':return f.selection_authorization()
+    if port=='decision':return {'action':'candidate','review_ref':None,'owner_decision_ref':None}
+    if port=='stop':return {'reason':view['stop_reason'] or 'owner_stop'}
+    return {}
+
+
+def run_campaign(factory, vector):
+    """SAME literal multiround campaign for fake and native: rounds share the
+    ORIGINAL campaign lifetime/amounts and the accepted scoreboard cohort."""
+    c=CAMPAIGN['campaign'];f=factory()
+    f.configure_campaign(c['rounds'],c['round_elapsed_ms'],c['campaign_elapsed_ms'])
+    rounds={}
+    for step in vector['steps']:
+        if 'control' in step:f.campaign_control(step['control']);continue
+        rid=step['round'];f.begin_round(rid)
+        if 'requests' in step:f.configure_budget(step['requests'])
+        q=f.prepare(step.get('kind','generated'));request=q.model_dump(mode='json')
+        assert q.round_id==rid and q.round_number==c['rounds'][rid]
+        if step.get('lost_host'):
+            f.freeze_in_lost_host(q);rounds[rid]={'lost_host':True};continue
+        ports=[];error=None
+        for _ in range(24):
+            observed=f.observations();view=observed['view'];port=view['phase']
+            if view['stopped']:break
+            if observed.get('pending_checkpoint'):f.actor='owner';f.approve_checkpoint()
+            if step.get('owner_stop_at')==port:port='stop'
+            f.actor=ROLES[port]
+            if step.get('at')==port:f.set_fault(step['fault'])
+            payload=request if port=='freeze' else _round_payload(f,port,view,step)
+            before=f.snapshot()
+            try:f.invoke(port,payload)
+            except OptimizerError as exc:
+                error=exc.code
+                assert step.get('error')==error and step['error_at']==port,(vector['name'],rid,port,error)
+                assert f.snapshot()==before,'refusal mutated owned state'
+                break
+            ports.append(port)
+        else:raise AssertionError('round did not stop in finite graph')
+        out=f.observations();view=out['view']
+        if 'error' in step:assert error==step['error'],(rid,error)
+        else:
+            assert error is None and view['stopped'] and view['stop_reason']==step['stop'],(vector['name'],rid,view['stop_reason'],error)
+            assert view['quiescent'] is step.get('quiescent',True)
+        if 'ports' in step:assert ports==step['ports'],(rid,ports)
+        if 'known_requests' in step:assert view['known']['requests']==step['known_requests'],(rid,view['known'])
+        if 'numeric' in step:assert out['numeric']['holdout']['status']==step['numeric']
+        if 'reference_reused' in step:assert out['reference_reused'] is step['reference_reused'],rid
+        assert not view['grants_authority'] and view['current_version']==view['reference_version']
+        rounds[rid]={'ports':ports,'error':error,'observations':out}
+    campaign=f.campaign_observations()
+    assert campaign['evidence_kind']==f.evidence_kind
+    assert campaign['known']['requests']==vector['campaign_known_requests'],campaign['known']
+    assert campaign['quiescent'] is vector['quiescent'],campaign
+    return {'scenario':vector['name'],'evidence_kind':f.evidence_kind,'rounds':rounds,'campaign':campaign}

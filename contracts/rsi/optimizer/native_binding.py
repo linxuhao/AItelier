@@ -34,7 +34,7 @@ import json
 import os
 import threading
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from fractions import Fraction
 from pathlib import Path
 from typing import Any, Callable
@@ -105,6 +105,23 @@ class RoundHost:
     deployment: dict              # app_source / image / sdk_wheel
     graph_name: str
     clock: Callable[[], float]
+    # Live campaign scopes this host owns, keyed (authorization_ref, campaign_id).
+    campaigns: dict = field(default_factory=dict)
+
+
+@dataclass
+class CampaignScope:
+    """Live, host-owned scope of ONE campaign across its authorized rounds: the
+    ORIGINAL lifetime origin, the frozen original budget, the campaign's sealed
+    complete reference train measurements and its one holdout. In-process like
+    the evaluator's live scopes; a host that lost it refuses UNSAFE_RESUME."""
+    campaign_id: str
+    authorization_ref: str
+    budget: Any                    # frozen original Budget of the campaign's grant
+    origin: float                  # host clock at the campaign's first round freeze
+    rounds: list = field(default_factory=list)
+    references: dict = field(default_factory=dict)   # reference version -> (request, result)
+    holdout_used: bool = False
 
 
 def _envelope(spec: dict) -> Envelope:
@@ -145,6 +162,10 @@ class NativeRound:
         self.policy_derivations: list[dict] = []
         self.reference_vid: str | None = None
         self.recorded_tools: dict | None = None
+        self.campaign: CampaignScope | None = None
+        self.reused: set = set()          # results reused from the campaign, not spent here
+        self.exceptional: list[dict] = [] # evaluations that raised after effects
+        self.unresolved = False
         self._staged = None
         self._outcome = None
         a = self._assignment()
@@ -444,6 +465,10 @@ class NativeRound:
                     or marker.get("round_number") == data.round_number):
                 fail("UNSAFE_RESUME", f"round already started by run {row['id']} without "
                                       "its live binding in this process")
+        scope = self.host.campaigns.get((data.budget.authorization_ref, data.campaign_id))
+        if scope is None and self._campaign_started(data.campaign_id):
+            fail("UNSAFE_RESUME", "original campaign scope lost: the campaign started in a host "
+                                  "process that no longer holds it; its lifetime cannot be restarted")
         vid = data.reference.logical_version
         try:
             sealed = fb.verify_sealed(self.host.config_dir,
@@ -460,11 +485,34 @@ class NativeRound:
             fail("INPUT_MISMATCH", f"{type(exc).__name__}: {exc}")
         if data != trusted:
             fail("INPUT_MISMATCH", "request differs from the trusted frozen inputs")
+        if scope is not None and scope.budget != data.budget:
+            fail("INPUT_MISMATCH", "not the campaign's original frozen grant")
         return {"reference_vid": vid, "tools": sealed["tools"]}
+
+    def _campaign_started(self, campaign_id) -> bool:
+        """Durable traces of this campaign: an optimizer round run, or an
+        evaluator result, already exists."""
+        for row in self.host.sf.list_runs():
+            if row.get("graph_name") == self.host.graph_name and (json.loads(
+                    row.get("context_json") or "{}").get(MARKER) or {}).get("campaign_id") == campaign_id:
+                return True
+        root = self.host.evaluator.host.artifacts_root / "evaluations"
+        for result in sorted(root.glob("*/result.json")) if root.is_dir() else ():
+            out = EvaluationResult.model_validate_json(result.read_text(encoding="utf-8"))
+            if out.receipts and out.receipts[0].campaign_id == campaign_id:
+                return True
+        return False
 
     def _do_freeze(self, data: RoundRequest, prepared):
         self.request = data
-        self.origin = self.host.clock()
+        self.origin = now = self.host.clock()
+        key = (data.budget.authorization_ref, data.campaign_id)
+        if key not in self.host.campaigns:     # the campaign's FIRST round: its origin
+            self.host.campaigns[key] = CampaignScope(campaign_id=data.campaign_id,
+                                                     authorization_ref=data.budget.authorization_ref,
+                                                     budget=data.budget, origin=now)
+        self.campaign = self.host.campaigns[key]
+        self.campaign.rounds.append(self.round_id)
         self.reference_vid = prepared["reference_vid"]
         self.recorded_tools = prepared["tools"]
         self.selections["reference"] = data.reference
@@ -475,7 +523,37 @@ class NativeRound:
 
     def _do_train_reference(self, data, prepared):
         self.decided = "diagnose"
+        budget, why = self._residual()
+        if budget is None:
+            self._not_dispatched("train", ("reference",), why)
+            return
+        key = ("train", ("reference",))
+        prior = self.campaign.references.get(self.reference_vid)
+        if prior is not None and self._reusable(*prior):
+            # Design s6: the campaign's first proposal round measured this exact
+            # reference; a later round reuses that sealed complete measurement
+            # (never re-sent into the occupied accepted scoreboard cohort, and
+            # never counted as this round's spend).
+            q, out = prior
+            self.results[key] = prior
+            self.reused.add(key)
+            self.public = out.optimizer_projection
+            self.events.append({"reference_reused": out.evaluation_id, "plan_identity": q.plan_identity,
+                                "provenance": "native"})
+            return
         self._evaluate("train", ("reference",))
+        done = self.results.get(key)
+        if done is not None and key not in self.reused and done[1].status == "complete":
+            self.campaign.references[self.reference_vid] = done
+
+    def _reusable(self, q, out) -> bool:
+        """Same reference/benchmark/frozen runtime, complete, and byte-equal to
+        the evaluator's immutable sealed result."""
+        if (q.selections != (self.request.reference,) or q.benchmark != self.request.benchmark
+                or q.runtime != self.request.runtime or out.status != "complete"):
+            return False
+        sealed = self.host.evaluator.host.artifacts_root / "evaluations" / q.evaluation_id / "result.json"
+        return sealed.is_file() and EvaluationResult.model_validate_json(sealed.read_text(encoding="utf-8")) == out
 
     def _train_ids(self) -> set:
         return {c.case_id for c in self.request.benchmark.cases if c.split == "train"}
@@ -530,6 +608,13 @@ class NativeRound:
         if vid == self.reference_vid:
             fail("NO_ADMISSIBLE_EDIT", "candidate reproduces the reference content")
         try:
+            bundle = "sha256:" + self.host.versions.read(vid)["native"]["bundle_identity"]
+        except vc.UnknownVersion:
+            bundle = "sha256:" + self.candidate_bundle["identity"]
+        if self._occupied("train", {"candidate": bundle}):
+            fail("NO_ADMISSIBLE_EDIT", "this candidate is already measured in the campaign's "
+                                       "accepted scoreboard cohort")
+        try:
             preview = fb.compile_bundle(self.candidate_bundle, vc.seal_slug(vid))
             if project_sealed(preview)[1] != vid:
                 fail("FORBIDDEN_EDIT", "sealed candidate would not reproduce its content")
@@ -579,7 +664,7 @@ class NativeRound:
         grant = self._grant() or {}
         if (self.selection_identity is None or data.selection != self.selection_identity
                 or data.selection not in (grant.get("holdout_selections") or ())
-                or self._consumed(data.selection)):
+                or self._consumed(data.selection) or self.campaign.holdout_used):
             fail("HOLDOUT_AUTHORITY", "no unconsumed owner grant for this exact selection")
 
     def _do_holdout_seal(self, data, prepared):
@@ -588,6 +673,7 @@ class NativeRound:
 
     def _do_holdout(self, data, prepared):
         self.decided = "compare"
+        self.campaign.holdout_used = True      # one holdout per campaign
         self._evaluate("holdout", ("reference", "candidate"))
 
     def _do_compare(self, data, prepared):
@@ -781,21 +867,24 @@ class NativeRound:
         return total(used), unresolved
 
     def _residual(self):
+        """Fresh ROUND envelope minus this round's usage and age; ORIGINAL
+        campaign envelope minus every campaign usage/reservation and the time
+        since the campaign's first freeze. Unresolved work dispatches nothing."""
         b = self.request.budget
-        outs = [out for _, out in self.results.values()]
-        round_used = total(x for o in outs for x in (o.known, o.retained_unknown))
+        known, unknown = self._known()
         campaign_used, unresolved = self._campaign_usage()
-        if unresolved or any(o.retained_unknown != ZERO for o in outs):
+        if unresolved or self.unresolved or unknown != ZERO:
             return None, "unknown"
-        elapsed = int((self.host.clock() - self.origin) * 1000)
+        now = self.host.clock()
 
-        def remaining(env: Envelope, used: Amount):
-            ms = env.elapsed_ms - elapsed
+        def remaining(env: Envelope, used: Amount, origin: float):
+            ms = env.elapsed_ms - int((now - origin) * 1000)
             if ms <= 0:
                 return None
             return Envelope(upper=Amount(**{k: max(0, getattr(env.upper, k) - getattr(used, k))
                                             for k in Amount.model_fields}), elapsed_ms=ms)
-        rnd, camp = remaining(b.round, round_used), remaining(b.campaign, campaign_used)
+        rnd = remaining(b.round, total((known, unknown)), self.origin)
+        camp = remaining(b.campaign, campaign_used, self.campaign.origin)
         if rnd is None or camp is None:
             return None, "budget"
         return b.model_copy(update={"round": rnd, "campaign": camp}), None
@@ -835,12 +924,43 @@ class NativeRound:
                     runtime=runtime, budget=budget, holdout_selection=holdout_selection)
         return EvaluationRequest(plan_identity=digest(data), **data)
 
+    def _not_dispatched(self, split, arms, why):
+        self.events.append({"evaluation_not_dispatched": [split, list(arms)], "reason": why,
+                            "provenance": "native"})
+        self.stop_reason, self.decided = why, "stop"
+
+    def _occupied(self, split, bundles: dict) -> list:
+        """Planned cells whose accepted scoreboard key (BenchmarkStore._cell over
+        the exact benchmark_row runtime projection) is already held."""
+        from core.pipeline_benchmark import BenchmarkStore
+        q, store = self.request, self.host.store
+        b, rt = q.benchmark, q.runtime
+        held = {BenchmarkStore._cell(r) for r in store.list_receipts(b.benchmark_id, b.version)}
+        runtime = {"route": rt.requested_model, "endpoints": [rt.endpoint.endpoint], "effort": rt.effort}
+        return [cell for cell in (BenchmarkStore._cell({
+                    "benchmark_id": b.benchmark_id, "version": b.version, "bundle_identity": bundle,
+                    "runtime": runtime, "arm": arm, "case_id": c.case_id, "repetition": r})
+                    for r in range(1, 4) for c in b.cases if c.split == split
+                    for arm, bundle in bundles.items()) if cell in held]
+
+    def _live_admission(self, evaluation_id) -> tuple[Amount, Amount]:
+        """Usage of an evaluation that raised after effects, from the evaluator's
+        own live per-cell admission scopes: settled measurements are known;
+        unknown settlements and still-pending reservations stay retained."""
+        attempts, pending = [], []
+        for binding in list(self.host.evaluator.bindings.values()):
+            if binding.marker.get("evaluation_id") == evaluation_id:
+                attempts += list(binding.scope.attempts)
+                pending += list(binding.scope.pending.values())
+        known = total(a.measured for a in attempts if a.measured is not None)
+        unknown = total([a.reservation for a in attempts if a.settlement == "unknown"]
+                        + [r.descriptor.upper for r in pending])
+        return known, unknown
+
     def _evaluate(self, split, arms):
         budget, why = self._residual()
         if budget is None:
-            self.events.append({"evaluation_not_dispatched": [split, list(arms)], "reason": why,
-                                "provenance": "native"})
-            self.stop_reason, self.decided = why, "stop"
+            self._not_dispatched(split, arms, why)
             return
         ev_id = f"{self.round_id}.{split}-{'-'.join(arms)}"
         try:
@@ -850,7 +970,27 @@ class NativeRound:
             self.refusals.append({"evaluation_id": ev_id, "compile": f"{type(exc).__name__}: {exc}"})
             self.stop_reason, self.decided = "invalid", "stop"
             return
-        out = self.host.evaluator.evaluate(q)
+        occupied = self._occupied(split, {s.arm: s.native_bundle for s in q.selections})
+        if occupied:
+            # The accepted scoreboard already holds this cohort: refuse before
+            # any launch rather than send and fail the accepted append.
+            self.events.append({"occupied_cohort": [split, list(arms)], "cells": len(occupied),
+                                "provenance": "native"})
+            self.stop_reason, self.decided = "invalid", "stop"
+            return
+        try:
+            out = self.host.evaluator.evaluate(q)
+        except Exception as exc:                                    # noqa: BLE001
+            # After effects: keep the truth, not an empty quiet view.
+            known, unknown = self._live_admission(ev_id)
+            self.exceptional.append({"evaluation_id": ev_id, "error": f"{type(exc).__name__}: {exc}",
+                                     "known": known, "retained_unknown": unknown})
+            self.unresolved = True
+            self.events.append({"evaluation_error": ev_id, "error": f"{type(exc).__name__}: {exc}"[:500],
+                                "known": known.model_dump(), "retained_unknown": unknown.model_dump(),
+                                "provenance": "native"})
+            self.stop_reason, self.decided = "unknown", "stop"
+            return
         if isinstance(out, Refusal):
             self.refusals.append({"evaluation_id": ev_id, "refusal": out.model_dump(mode="json")})
             self.events.append({"evaluation": split, "arms": list(arms), "refused": out.reason,
@@ -895,8 +1035,11 @@ class NativeRound:
 
     # ── views ────────────────────────────────────────────────────────────
     def _known(self):
-        outs = [out for _, out in self.results.values()]
-        return total(o.known for o in outs), total(o.retained_unknown for o in outs)
+        """This round's own usage: its sealed results (not reused campaign
+        measurements) and any evaluation that raised after effects."""
+        outs = [out for key, (_, out) in self.results.items() if key not in self.reused]
+        return (total([o.known for o in outs] + [e["known"] for e in self.exceptional]),
+                total([o.retained_unknown for o in outs] + [e["retained_unknown"] for e in self.exceptional]))
 
     def current_version(self) -> str:
         if self.request is not None and self.request.target.kind == "builtin":
@@ -919,7 +1062,7 @@ class NativeRound:
                          candidate_version=self.candidate_vid, current_version=self.current_version(),
                          public_train=self.public, stopped=self.stopped, stop_reason=self.stop_reason,
                          known=known, retained_unknown=unknown,
-                         quiescent=not any(unknown.model_dump().values()),
+                         quiescent=not any(unknown.model_dump().values()) and not self.unresolved,
                          action=("retain" if phase == "restore" else self.adoption_action))
 
     def view(self) -> RoundView:

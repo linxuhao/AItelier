@@ -291,11 +291,44 @@ served runtime. A changed grant or provider is refused, never recompiled into a
 new expectation. Each request also carries the
 residual round/campaign `Budget`: original envelopes minus known usage and
 retained reservations of every sealed evaluator result of this round/campaign,
-and the original deadline minus host-clock time since freeze. An unresolved or
-unknown evaluation, or an expired deadline, dispatches nothing. Holdout needs
-the owner's host grant of the exact computed selection identity and refuses an
-evaluator consumption record for it. A round run without its live binding
-refuses `UNSAFE_RESUME`. Generated adoption needs host-owned
+and the deadlines below. An unresolved or unknown evaluation, or an expired
+deadline, dispatches nothing. Holdout needs the owner's host grant of the exact
+computed selection identity and refuses an evaluator consumption record for it.
+A round run without its live binding refuses `UNSAFE_RESUME`.
+
+Campaign versus round lifetimes. A campaign's rounds are authorized up front in
+the one host grant (at most two ordinals, one shared original budget). The
+trusted host owns a live `CampaignScope` per (authorization, campaign): created at
+the campaign's FIRST round freeze, it fixes the campaign origin and frozen
+original budget, keeps the campaign's sealed complete reference train
+measurements and its one holdout. Each round gets a fresh round envelope aged
+from its own freeze; the campaign envelope is always the ORIGINAL one, aged from
+the campaign origin and reduced by every campaign usage/reservation in the
+evaluator's immutable results. A new round never renews the campaign: once the
+original campaign lifetime is spent, the round's first lifetime-consuming port
+stops `budget` with no dispatch. A later round's request must carry the same
+original budget (`INPUT_MISMATCH` otherwise). A campaign that already started
+durably (a round run or evaluator result exists) but whose live scope this host
+does not hold refuses `UNSAFE_RESUME` at freeze, before effects; its lifetime is
+never restarted. A second holdout in one campaign refuses `HOLDOUT_AUTHORITY`.
+
+Scoreboard cohort. The accepted `BenchmarkStore` keys a cell by benchmark,
+version, bundle, runtime projection, arm, case and repetition, not by round, and
+refuses a duplicate. The binding honors that BEFORE effects: every planned cell
+is keyed with `BenchmarkStore._cell` over the stored rows. As the design's first
+proposal round measures the reference, a later round with the same reference,
+benchmark and frozen runtime REUSES the campaign's sealed complete reference
+train result (provenance event; byte-equal to the evaluator's sealed result; not
+that round's spend). A candidate already measured in the campaign refuses
+`NO_ADMISSIBLE_EDIT` at admissibility; any other occupied cohort (e.g. an
+incomplete reference measurement) stops `invalid` with no dispatch. If the
+evaluator raises after effects (a concurrent writer can still occupy a cell),
+the round keeps the truth from the evaluator's live per-cell admission scopes
+(settled usage known, unknown and pending reservations retained), marks the
+evaluation unresolved (`quiescent=false`), stops `unknown`, and the campaign
+dispatches nothing further. `fixtures/campaign_scenarios.json` and
+`conformance.run_campaign` state these as SAME literal multiround scenarios for
+the fake (`FakeCampaignFixture`) and the native fixture. Generated adoption needs host-owned
 review and owner-decision records naming THIS candidate's exact version, seal
 and physical config, the frozen reference and the original current CAS; records
 for another candidate, or naming none, refuse `ADOPTION_AUTHORITY`.

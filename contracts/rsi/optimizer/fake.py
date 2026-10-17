@@ -43,13 +43,34 @@ def normalized(graph):
     return g
 
 
+class FakeCampaign:
+    """MODEL of the host-owned campaign scope and the accepted scoreboard cohort.
+
+    Rounds of one campaign share its ORIGINAL lifetime, amounts, unresolved
+    usage, one holdout and the scoreboard cells already measured (keyed like
+    BenchmarkStore cells, with the simulated logical version as bundle)."""
+
+    def __init__(self, rounds=None, round_elapsed_ms=None, campaign_elapsed_ms=None):
+        self.rounds = dict(rounds or {'synthetic-round-1': 1})
+        self.round_elapsed_ms, self.campaign_elapsed_ms = round_elapsed_ms, campaign_elapsed_ms
+        self.started = False; self.live = True; self.budget = None
+        self.elapsed_ms = 0; self.known = ZERO; self.retained_unknown = ZERO; self.unresolved = False
+        self.references = {}; self.cells = set(); self.holdout_used = False
+
+    def state(self):
+        return copy.deepcopy({k: v for k, v in vars(self).items()})
+
+
 class FakeRound:
     evidence_kind = 'simulation'
 
-    def __init__(self, profile="ordinary"):
+    def __init__(self, profile="ordinary", campaign=None, round_id='synthetic-round-1'):
         # Predeclared shared profile, fixed before prepare or any evaluation.
         self.profile = profile
         self.profile_spec = spec(profile)
+        self.campaign = campaign or FakeCampaign()
+        self.round_id = round_id
+        self.reused = set(); self.unresolved = False
         self.fixture = literal()
         self.phase = 'freeze'; self.actor = 'coordinator'
         self.request = None; self.proposal = self.candidate = None
@@ -73,17 +94,21 @@ class FakeRound:
         b=q.budget
         b=b.model_copy(update={'round':b.round.model_copy(update={
             'upper':b.round.upper.model_copy(update={'requests':self.round_requests})})})
+        c=self.campaign
+        if c.round_elapsed_ms is not None:
+            b=b.model_copy(update={'round':b.round.model_copy(update={'elapsed_ms':c.round_elapsed_ms}),
+                                   'campaign':b.campaign.model_copy(update={'elapsed_ms':c.campaign_elapsed_ms})})
         target = dict(self.fixture['target'])
         if kind == 'builtin': target.update(kind='builtin',name='investigate',expected_current=None)
         return RoundRequest(schema='rsi.optimizer.round.v2',campaign_id='synthetic-campaign',
-            round_id='synthetic-round-1',round_number=1,design=DESIGN,target=target,
+            round_id=self.round_id,round_number=self.campaign.rounds[self.round_id],design=DESIGN,target=target,
             reference=q.selections[0],benchmark=q.benchmark,runtime=q.runtime,budget=b)
 
     def set_fault(self, name):
         allowed = {'none','no_authority','unsafe_resume','provider_changed','runtime_drift',
                    'no_train_improvement','holdout_rejected','family_regression',
                    'unknown_execution','unknown_accounting','budget','concurrent_edit',
-                   'holdout_reuse','inclusive_margin','target','deadline'}
+                   'holdout_reuse','inclusive_margin','target','deadline','store_race'}
         if name not in allowed: fail('UNKNOWN_INPUT')
         self.fault = name
         if name == 'deadline': self.elapsed_ms=self.request.budget.round.elapsed_ms
@@ -97,12 +122,13 @@ class FakeRound:
             candidate_version=self.candidate,current_version=self.current,public_train=self.public,
             stopped=self.stopped,stop_reason=self.stop_reason,
             known=self.known,retained_unknown=self.retained_unknown,
-            quiescent=not any(self.retained_unknown.model_dump().values()),
+            quiescent=not any(self.retained_unknown.model_dump().values()) and not self.unresolved,
             action=('retain' if self.phase=='restore' else getattr(self,'adoption_action','candidate')))
 
     def observations(self):
         return {'evidence_kind':self.evidence_kind,'view':self.view().model_dump(mode='json'),
                 'events':copy.deepcopy(self.events),'current_history':list(self.current_history),
+                'reference_reused':bool(self.reused),
                 'holdout_consumed':self.holdout_consumed,'pending_checkpoint':self.pending_checkpoint,'cas':self.cas,
                 'numeric':copy.deepcopy(self.numeric)}
 
@@ -115,7 +141,7 @@ class FakeRound:
 
     def snapshot(self):
         return copy.deepcopy((self.observations(),self.proposal,self.candidate,
-                              getattr(self,'candidate_content',None),self.results))
+                              getattr(self,'candidate_content',None),self.results,self.campaign.state()))
 
     def configure_budget(self, requests):
         # Fixture control of the actual host grant/envelope, before prepare.
@@ -151,32 +177,67 @@ class FakeRound:
             c['graph']=g
         return c
 
+    def _gate(self):
+        """Residual budget for the next call, or None after a typed stop.
+        Round: this round's usage and age. Campaign: the ORIGINAL campaign's
+        usage, unresolved work and age across every round."""
+        c=self.campaign; original=self.request.budget
+        if (any(self.retained_unknown.model_dump().values()) or self.unresolved or c.unresolved
+                or any(c.retained_unknown.model_dump().values())):
+            self.stop_reason='unknown';self.phase='stop';return None
+        if self.elapsed_ms>=original.round.elapsed_ms or c.elapsed_ms>=original.campaign.elapsed_ms:
+            self.stop_reason='budget';self.phase='stop';return None
+        def remaining(envelope,used,elapsed):
+            return Envelope(upper=Amount(**{k:max(0,getattr(envelope.upper,k)-getattr(used,k))
+                                           for k in Amount.model_fields}),
+                            elapsed_ms=envelope.elapsed_ms-elapsed)
+        return original.model_copy(update={
+            'round':remaining(original.round,total((self.known,self.retained_unknown)),self.elapsed_ms),
+            'campaign':remaining(original.campaign,total((c.known,c.retained_unknown)),c.elapsed_ms)})
+
+    def _cohort(self, q):
+        sel={s.arm:s for s in q.selections}
+        return {(sel[x.arm].logical_version,x.arm,x.case_id,x.repetition) for x in q.cells}
+
+    def _train_reference(self):
+        if self._gate() is None: return
+        ref=self.campaign.references.get(self.request.reference.logical_version)
+        if ref is not None:
+            # The campaign's sealed complete reference train measurement: reused,
+            # not re-sent into an occupied scoreboard cohort, not this round's spend.
+            self.results[('train',('reference',))]=ref; self.reused.add(('train',('reference',)))
+            self.public=ref[1].optimizer_projection
+            self.events.append({'reference_reused':ref[1].evaluation_id,'provenance':'simulation'})
+            return
+        self._evaluation('train',('reference',))
+        done=self.results.get(('train',('reference',)))
+        if done is not None and done[1].status=='complete':
+            self.campaign.references[self.request.reference.logical_version]=done
+
     def _evaluation(self, split, arms):
         # Each accepted evaluator call has a fresh in-call PhysicalBudget. The
         # NEW optimizer binding must narrow it to remaining amounts/deadlines
         # under campaign ownership before every call; never reset to full caps.
-        used=total((self.known,self.retained_unknown))
-        original=self.request.budget
-        if any(self.retained_unknown.model_dump().values()) or self.elapsed_ms>=min(original.round.elapsed_ms,original.campaign.elapsed_ms):
-            self.stop_reason='unknown' if any(self.retained_unknown.model_dump().values()) else 'budget';self.phase='stop';return
-        def remaining(envelope):
-            return Envelope(upper=Amount(**{k:max(0,getattr(envelope.upper,k)-getattr(used,k))
-                                           for k in Amount.model_fields}),
-                            elapsed_ms=envelope.elapsed_ms-self.elapsed_ms)
-        residual=original.model_copy(update={'round':remaining(original.round),
-                                             'campaign':remaining(original.campaign)})
+        residual=self._gate()
+        if residual is None: return
+        c=self.campaign
         e = self._evaluator()
         if self.candidate is not None:
             e.fixture['identity']['candidate'] = {'logical_version':self.candidate,
                                                  'logical_content':self.candidate_content}
         q = e.prepare(split, arms)
         data=q.model_dump(mode='json')
-        data.update(evaluation_id='sim-'+split+'-'+'-'.join(arms),
+        data.update(evaluation_id='sim-'+self.round_id+'-'+split+'-'+'-'.join(arms),
                     campaign_id=self.request.campaign_id,round_id=self.request.round_id,
                     budget=residual.model_dump(mode='json'),
                     holdout_selection=self.selection_seal if split=='holdout' else None)
         data['plan_identity']=digest({k:v for k,v in data.items() if k!='plan_identity'})
         q=EvaluationRequest.model_validate_json(json.dumps(data)); e.request=q
+        cohort=self._cohort(q)
+        if cohort & c.cells:
+            # Accepted scoreboard cells already hold this cohort: no new send.
+            self.events.append({'occupied_cohort':split,'arms':list(arms),'provenance':'simulation'})
+            self.stop_reason='invalid'; self.phase='stop'; return
         # Existing evaluator types and ordering; ids below are short model receipt
         # references, NOT SDK run/pin/finish operations.
         if split=='train' and arms==('candidate',):
@@ -186,6 +247,16 @@ class FakeRound:
         out=e.evaluate(q)
         if isinstance(out,Refusal):
             self.stop_reason='invalid'; self.phase='stop'; return
+        if self.fault=='store_race':
+            # A concurrent writer occupies cell 0's scoreboard key during its
+            # send: the evaluator raises after that one send. MODEL of the
+            # retained truth: that send's usage, unresolved evaluation, typed stop.
+            first=out.receipts[0]
+            self.known=total((self.known,first.known)); c.known=total((c.known,first.known))
+            c.cells.add((q.selections[0].logical_version,first.cell.arm,first.cell.case_id,first.cell.repetition))
+            self.unresolved=c.unresolved=True
+            self.events.append({'evaluation_error':'duplicate_cell after send','provenance':'simulation'})
+            self.stop_reason='unknown'; self.phase='stop'; return
         receipts=[]
         boundary=self.profile_spec.get('inclusive_margin_holdout_answers')
         for i,r in enumerate(out.receipts):
@@ -222,7 +293,10 @@ class FakeRound:
         if split=='train': self.public=out.optimizer_projection
         self.known=total((self.known,out.known))
         self.retained_unknown=total((self.retained_unknown,out.retained_unknown))
-        self.elapsed_ms+=sum(r.elapsed_ms or 0 for r in out.receipts)
+        elapsed=sum(r.elapsed_ms or 0 for r in out.receipts)
+        self.elapsed_ms+=elapsed
+        c.known=total((c.known,out.known)); c.retained_unknown=total((c.retained_unknown,out.retained_unknown))
+        c.elapsed_ms+=elapsed; c.cells|=cohort
         if out.status != 'complete':
             self.stop_reason=('unknown' if out.status=='unknown' else 'budget' if any(r.reason=='BUDGET_EXHAUSTED' for r in out.receipts) else 'invalid'); self.phase='stop'
 
@@ -257,15 +331,24 @@ class FakeRound:
         if port=='freeze':
             if not self.authorized: fail('AUTHORITY')
             if self.fault=='unsafe_resume': fail('UNSAFE_RESUME')
+            if self.campaign.started and not self.campaign.live:
+                fail('UNSAFE_RESUME','original campaign scope lost')
             if self.fault=='provider_changed': fail('PROVIDER_CHANGED')
             if data != self.prepare(data.target.kind): fail('INPUT_MISMATCH')
+            if self.campaign.budget is not None and data.budget != self.campaign.budget:
+                fail('INPUT_MISMATCH','not the campaign original grant')
         if port in ('diagnose','hypothesis'):
             train={c.case_id for c in self.request.benchmark.cases if c.split=='train'}
             if not set(data.train_case_ids)<=train: fail('CONTAMINATION')
         if port=='candidate': content=self._check_edit(data)
-        if port=='admissibility' and version_id_of(self.candidate_content)==self.fixture['reference_version']: fail('NO_ADMISSIBLE_EDIT')
+        if port=='admissibility':
+            vid=version_id_of(self.candidate_content)
+            if vid==self.fixture['reference_version'] or any(
+                    v==vid and a=='candidate' for v,a,_,_ in self.campaign.cells):
+                fail('NO_ADMISSIBLE_EDIT')
         if port=='holdout_seal':
-            if not self.holdout_allowed or data.selection!=self.selection_seal or self.holdout_consumed:
+            if (not self.holdout_allowed or data.selection!=self.selection_seal or self.holdout_consumed
+                    or self.campaign.holdout_used):
                 fail('HOLDOUT_AUTHORITY')
         if self.request is not None and port!='stop' and self.request.target.kind=='generated':
             if self.cas != self.request.target.expected_current: fail('CONFLICT')
@@ -283,8 +366,10 @@ class FakeRound:
             'train_candidate':'train_compare','train_compare':'holdout_seal','holdout_seal':'holdout',
             'holdout':'compare','compare':'decision','adopt':'stop','restore':'stop','source_patch':'stop'}
         self.phase=next_port.get(port,'stop')
-        if port=='freeze': self.request=data
-        elif port=='train_reference': self._evaluation('train',('reference',))
+        if port=='freeze':
+            self.request=data; self.campaign.started=True
+            self.campaign.budget=self.campaign.budget or data.budget
+        elif port=='train_reference': self._train_reference()
         elif port=='hypothesis': self.pending_checkpoint='hypothesis'
         elif port=='candidate': self.proposal=data; self.candidate_content=content
         elif port=='admissibility':
@@ -299,7 +384,8 @@ class FakeRound:
                     [out.receipt_catalog for req,out in self.results.values()],self.numeric['train']])
                 self.pending_checkpoint='train_compare'
         elif port=='holdout':
-            self.holdout_consumed=True; self._evaluation('holdout',('reference','candidate'))
+            self.holdout_consumed=True; self.campaign.holdout_used=True
+            self._evaluation('holdout',('reference','candidate'))
         elif port=='compare': self._matrix('holdout')
         elif port=='decision':
             eligible=self.numeric['holdout']['status']=='eligible'
@@ -321,3 +407,61 @@ class FakeRound:
         elif port=='stop': self.stop_reason=data.reason; self.stopped=True
         self.events.append({'port':port,'phase':self.phase,'current':self.current})
         return self.view()
+
+
+class FakeCampaignFixture:
+    """Campaign controls of the shared multiround driver over the MODEL rounds."""
+    evidence_kind = 'simulation'
+
+    def __init__(self, profile='ordinary'):
+        self.profile = profile; self.campaign = FakeCampaign()
+        self.round = None; self.rounds = {}; self.actor = 'coordinator'; self.round_requests = None
+
+    def configure_campaign(self, rounds, round_elapsed_ms, campaign_elapsed_ms):
+        c = self.campaign
+        c.rounds, c.round_elapsed_ms, c.campaign_elapsed_ms = dict(rounds), round_elapsed_ms, campaign_elapsed_ms
+
+    def begin_round(self, round_id):
+        self.round = self.rounds[round_id] = FakeRound(self.profile, campaign=self.campaign, round_id=round_id)
+        if self.round_requests is not None:
+            self.round.round_requests = self.round_requests
+
+    def configure_budget(self, requests):
+        # The host grant's round envelope: the same for every round of the campaign.
+        self.round_requests = self.round.round_requests = requests
+
+    def campaign_control(self, name):
+        if name != 'expire_campaign': fail('UNKNOWN_INPUT')
+        self.campaign.elapsed_ms += self.campaign.campaign_elapsed_ms
+
+    def freeze_in_lost_host(self, request):
+        lost = FakeRound(self.profile, campaign=self.campaign, round_id=request.round_id)
+        lost.invoke('freeze', request.model_dump(mode='json'))
+        self.campaign.live = False    # the live campaign scope belonged to that host
+
+    def prepare(self, kind='generated'): return self.round.prepare(kind)
+
+    def invoke(self, port, payload):
+        self.round.actor = self.actor
+        return self.round.invoke(port, payload)
+
+    def observations(self): return self.round.observations()
+
+    def snapshot(self): return self.round.snapshot()
+
+    def set_fault(self, name): return self.round.set_fault(name)
+
+    def approve_checkpoint(self):
+        self.round.actor = self.actor
+        return self.round.approve_checkpoint()
+
+    def selection_authorization(self): return self.round.selection_authorization()
+
+    def approve_adoption(self): return self.round.approve_adoption()
+
+    def campaign_observations(self):
+        c = self.campaign
+        return {'evidence_kind': self.evidence_kind, 'known': c.known.model_dump(),
+                'retained_unknown': c.retained_unknown.model_dump(), 'unresolved': c.unresolved,
+                'quiescent': not any(c.retained_unknown.model_dump().values()) and not c.unresolved,
+                'rounds': sorted(self.rounds)}

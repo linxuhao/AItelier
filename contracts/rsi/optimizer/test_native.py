@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from .conformance import LITERAL, ROLES, SCENARIOS, edit_fixture, run_scenario
+from .conformance import CAMPAIGN, LITERAL, ROLES, SCENARIOS, edit_fixture, run_campaign, run_scenario
 from .contract import OptimizerError
 from .fake import FakeRound
 from .native_fixture import PROFILES, REFERENCE, NativeRoundFactory
@@ -354,6 +354,34 @@ def test_grant_change_after_freeze_is_not_recompiled(factory):
     evidence("native-grant-change-after-freeze", {"view": view.model_dump(mode="json"), "native": native})
     assert view.stop_reason == "invalid" and native["provider_sends"] == native["evaluator_cell_launches"] == 0
     assert "grant changed" in json.dumps(native["refusals"])
+
+
+@pytest.mark.parametrize("vector", CAMPAIGN["scenarios"], ids=lambda v: v["name"])
+def test_same_shared_campaign_scenarios_native(vector, factory):
+    """The SAME literal multiround campaign scenarios as the fake."""
+    result, error = None, None
+    try:
+        result = run_campaign(factory, vector)
+    except BaseException:                                           # noqa: BLE001
+        error = traceback.format_exc()
+        raise
+    finally:
+        f = factory.made[0] if factory.made else None
+        native = None
+        if f is not None:
+            native = {"campaign": f.campaign_observations(), "fault_facts": f.fault_facts,
+                      "provider_sends_by_split_arm": f.native_evidence()["provider_sends_by_split_arm"],
+                      "trace_physical_sends": f.native_evidence()["trace_physical_sends"],
+                      "rounds": {rid: {"view": r.view().model_dump(mode="json") if r.request else None,
+                                       "events": r.events, "refusals": r.refusals,
+                                       "sdk": r.sdk_state()} for rid, r in f.rounds.items()}}
+        evidence("native-campaign-" + vector["name"], {"vector": vector, "result": result,
+                                                       "error": error, "native": native})
+    campaign = native["campaign"]
+    # Every provider-side request was admitted and is in the campaign's
+    # known + retained-unknown requests: nothing sent outside the accounting.
+    assert native["trace_physical_sends"] == campaign["provider_sends"]
+    assert campaign["known"]["requests"] + campaign["retained_unknown"]["requests"] == campaign["provider_sends"]
 
 
 def test_engine_dispatch_without_owning_invocation_does_nothing(factory):

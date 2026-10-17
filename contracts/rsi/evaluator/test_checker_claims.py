@@ -139,6 +139,22 @@ def test_grammar_vectors(group, text, points):
     assert score(text)[0] == points, score(text)[1]
 
 
+FORMATTED_VS_QUOTED = [  # (code/emphasis on one token: claim, whole claim quoted: not)
+    ("sample.txt exports `1`.", "`sample.txt exports 1`.", 10, 4),
+    ("`sample.txt` exports `1`.", "`sample.txt exports 1.`", 10, 4),
+    ("`VALUE` = `1`", "`VALUE = 1`", 6, 0),
+    ("sample.txt: `VALUE` = 1", "sample.txt: `VALUE = 1`", 10, 4),
+    ("The constant is **1**.", "\"The constant is 1.\"", 6, 0),
+    ("Answer: `1`", "Answer: \"1\"", 6, 0),
+]
+
+
+@pytest.mark.parametrize("formatted,quoted,claim,nonclaim", FORMATTED_VS_QUOTED)
+def test_token_formatting_is_a_claim_but_a_quoted_claim_is_not(formatted, quoted, claim, nonclaim):
+    assert score(formatted)[0] == claim
+    assert score(quoted)[0] == nonclaim
+
+
 def test_diagnostic_names_exactly_the_asserted_values():
     assert score("sample.txt does not export 2. The constant is 1.")[1] == {
         "custody_violation": False, "value": True, "citation": True, "asserted": [1]}

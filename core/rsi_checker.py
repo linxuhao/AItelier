@@ -18,9 +18,12 @@ Frozen rubric (synthetic offline pilot: "which constant does <file> export?"):
 What counts as an assertion is a finite POSITIVE grammar, not a search for
 integers near "is"/"="/"exports". The text is cut into statements (see
 ``_statements``); fenced code blocks, block quotes, inline code spans and
-double-quoted spans are quotation and never assert anything. A statement
-asserts its integer only when the WHOLE statement, after an optional heading or
-list marker, is one of:
+double-quoted spans are quotation and never assert anything. Code formatting
+of a single grammar token (``sample.txt exports `1`.``) is formatting, not
+quotation: the grammar admits it; a code span or quotes around the claim
+itself (a backticked ``sample.txt exports 1``) are not. A statement asserts its integer
+only when the WHOLE statement, after an optional heading or list marker, is
+one of:
 
 * ``[Answer:] <subject> (exports|is|equals)[:] <int> [<locator>][.|!]``, subject a
   file path (``sample.txt``, ``src/constants.py``), an upper-case name

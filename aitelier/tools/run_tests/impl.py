@@ -2128,6 +2128,7 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
               evidence_cycle_start: bool = False,
               evidence_cycle_from: str = "",
               fail_fast_gates: str = "",
+              prechange_capture: bool = False, prechange_from: str = "",
               **kwargs) -> dict:
     """Run pytest over the consolidated repo; write test_report.json to out_dir.
 
@@ -2148,6 +2149,17 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
     # pytest killed at its wall, a node runner that is not installed). Every
     # other entry is a measured failure.
     unmeasured_entries: list[str] = []
+
+    prechange_before = prechange_cases = prechange_profile = None
+    retained_red_candidate = False
+    prechange_enabled = bool(prechange_capture or prechange_from)
+    if prechange_enabled:
+        from core import coding_impl_outcome as coding
+        try:
+            report["run_binding"] = coding.current_binding(run_id)
+            prechange_before = coding.owned_snapshot(project_root, run_id, original=prechange_capture)
+        except Exception as exc:
+            report["prechange_unavailable"] = str(exc)[:300]
 
     if fail_fast_gates:
         if not out_dir or not Path(out_dir).is_absolute():
@@ -2258,6 +2270,17 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
                 PYTEST_WALL_SECONDS, writable_dirs=[Path(junit_dir)],
                 import_module=_package_module(repo) or "", pytest_timeout=True, run_id=run_id)
             stdout, stderr = done.stdout, done.stderr
+            if prechange_enabled:
+                identity = getattr(done, "execution_identity", None)
+                report["execution_identity"] = identity
+                try:
+                    if prechange_before is None:
+                        raise ValueError("original owned bytes unavailable")
+                    prechange_cases = coding.junit_observations(junit_path, repo, prechange_before["files"])
+                    report["pytest_observations"] = prechange_cases
+                    prechange_profile = coding.execution_profile(identity, prechange_before, junit_dir)
+                except Exception as exc:
+                    report["prechange_unavailable"] = str(exc)[:300]
             if done.import_error:
                 report["import_error"] = done.import_error
             if getattr(done, "git", None) is not None:
@@ -2559,9 +2582,18 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
         stamp_report(report, run_id=run_id, out_dir=str(target_dir),
                      start_cycle=evidence_cycle_start,
                      cycle_from=evidence_cycle_from)
+    if prechange_enabled:
+        try:
+            after = coding.owned_snapshot(repo, run_id, original=prechange_capture)
+            retained_red_candidate = coding.finish_measurement(
+                report, target_dir, prechange_before, after, prechange_cases, prechange_profile,
+                capture=prechange_capture, source=prechange_from)
+        except Exception as exc:
+            report["prechange_unavailable"] = str(exc)[:300]
     (target_dir / "test_report.json").write_text(
         json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
     return {"written": "test_report.json", "passed": report["passed"],
+            "retained_red_candidate": retained_red_candidate,
             "release_evidence": release_disposition(report),
             "purpose": report.get("purpose"),
             "full_test_passed": False if report.get("purpose") == "provisional_round_feedback" else report.get("full_test_passed"),

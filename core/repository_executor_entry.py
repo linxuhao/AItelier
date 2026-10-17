@@ -167,6 +167,23 @@ def run(payload):
     command = list(payload["args"])
     if payload.get("pytest_timeout") and importlib.util.find_spec("pytest_timeout"):
         command += ["--timeout=120", "--timeout-method=thread"]
+    execution_identity = None
+    if payload.get("pytest_timeout") and not payload.get("profile"):
+        try:
+            from importlib import metadata
+            from pathlib import Path
+            distributions = sorted([d.metadata["Name"], d.version]
+                                   for d in metadata.distributions())
+            execution_identity = {
+                "schema": "pytest-execution/1", "effective_argv": command,
+                "entry_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+                "runtime": {"python_executable": sys.executable, "python_version": sys.version},
+                "distributions": distributions,
+                "distributions_digest": hashlib.sha256(json.dumps(
+                    distributions, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+                "env": dict(env)}
+        except Exception:
+            pass  # Optional diagnostics must never prevent the ordinary gate.
     import_error = ""
     if payload.get("import_module"):
         probe = subprocess.run([sys.executable, "-c", "import importlib,sys; importlib.import_module(sys.argv[1])",
@@ -192,7 +209,8 @@ def run(payload):
         if isinstance(stdout, bytes):
             stdout, stderr = stdout.decode("utf-8", errors="replace"), stderr.decode("utf-8", errors="replace")
         return {"returncode": proc.returncode, "stdout": stdout, "stderr": stderr,
-                "timed_out": timed_out, "import_error": import_error}
+                "timed_out": timed_out, "import_error": import_error,
+                **({"execution_identity": execution_identity} if execution_identity else {})}
     finally:
         if proc is not None:
             try:

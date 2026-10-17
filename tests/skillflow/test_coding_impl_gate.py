@@ -57,6 +57,8 @@ def _wire(tmp_path, test_results, *, tool_result=None, schema_failure=None,
     seq = list(test_results)
 
     def _run_tests(*args, out_dir="", **kwargs):
+        if kwargs.get("prechange_capture"):
+            return {"passed": False}  # no usable capture; preserve absolute-policy tests
         outcome = seq[min(calls["run_tests"], len(seq) - 1)]
         calls["run_tests"] += 1
         if isinstance(outcome, bool):

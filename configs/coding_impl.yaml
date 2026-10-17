@@ -24,12 +24,12 @@ x-aitelier:
     context — poll to completion, then report the summary + test_report. Use
     this to OFFLOAD implementation of an approved plan out of your context.
 
-begin: "implement"
+begin: "baseline"
 
 end_conditions:
   combinator: or
   conditions:
-    # Complete successfully ONLY at the dedicated `done` node, which is reached exclusively
+    # True-green completion uses the dedicated `done` node, reached exclusively
     # when the tests pass (test_outcome → done). `done` sits OUTSIDE the implement↔test
     # loop, so it is entered at most once.
     #
@@ -47,6 +47,9 @@ end_conditions:
       node: "done"
       result: "completed"
     - type: node_reached
+      node: "done_candidate_tests_failed"
+      result: "completed"
+    - type: node_reached
       node: "test_evidence_missing"
       result: "failed"
     - type: node_reached
@@ -54,6 +57,19 @@ end_conditions:
       result: "failed"
 
 steps:
+  - id: "baseline"
+    step_type: "tool"
+    tool_name: "run_tests"
+    capability: "stateful"
+    timeout_seconds: 4200
+    context:
+      - source: { config: "coding_impl", output: "plan.md", required: true }
+    tool_params:
+      out_dir: "$STEP_DIR"
+      prechange_capture: true
+    transitions:
+      - to: "implement"
+
   - id: "implement"
     step_type: "agent"
     agent_config: "offload_implementer"
@@ -120,6 +136,7 @@ steps:
     timeout_seconds: 4200
     tool_params:
       out_dir: "$STEP_DIR"
+      prechange_from: "baseline"
     # A failed tool invocation must not consume a report from a prior attempt.
     #
     # THE ABSENCE EDGE LIVES ON THIS STEP, which OWNS `test_report.json`.
@@ -179,6 +196,8 @@ steps:
         match: { field: "repo_gate_unattributable", value: true }
       - to: "test_gate_absent"
         match: { field: "repo_gate_absent", value: true }
+      - to: "failed_candidate_evidence"
+        match: { field: "retained_red_candidate", value: true }
       - to: "test_evidence"
         match: { written: "test_report.json" }
       - to: "test_evidence_missing"
@@ -274,3 +293,124 @@ steps:
     step_type: "gate"
     transitions:
       - to: null
+
+  # Execution stopped with a retained FAILED candidate; no test/release acceptance.
+  - id: failed_candidate_evidence
+    step_type: tool
+    tool_name: json_schema
+    tool_params:
+      workspace_root: $CONFIG_DIR/test
+      files:
+      - test_report.json
+      inline_schema:
+        type: object
+        required:
+        - passed
+        - summary
+        - failures
+        - coding_outcome
+        properties:
+          passed:
+            const: false
+          summary:
+            type: string
+            minLength: 1
+          failures:
+            type: array
+            minItems: 1
+            items:
+              type: string
+          skipped:
+            const: false
+          no_tests_collected:
+            const: false
+          coding_outcome:
+            type: object
+            required:
+            - schema
+            - disposition
+            - tests_passed
+            - release_passed
+            - cause_attribution
+            - reason
+            - measured
+            - comparable
+            - baseline_artifact_sha256
+            - run_id
+            - project_id
+            - config_name
+            - config_digest
+            - base_sha
+            - base_tree
+            - candidate_sha
+            - candidate_tree
+            - config_version
+            - unresolved_failures
+            - new_observed_failures
+            properties:
+              schema:
+                const: coding-outcome/1
+              disposition:
+                const: candidate_tests_failed
+              tests_passed:
+                const: false
+              release_passed:
+                const: false
+              cause_attribution:
+                const: undetermined
+              reason:
+                const: repeated_prechange_observations
+              measured:
+                const: true
+              comparable:
+                const: true
+              baseline_artifact_sha256:
+                type: string
+                minLength: 1
+              run_id:
+                type: string
+                minLength: 1
+              project_id:
+                type: string
+                minLength: 1
+              config_name:
+                type: string
+                minLength: 1
+              config_digest:
+                type: string
+                minLength: 1
+              base_sha:
+                type: string
+                minLength: 1
+              base_tree:
+                type: string
+                minLength: 1
+              candidate_sha:
+                type: string
+                minLength: 1
+              candidate_tree:
+                type: string
+                minLength: 1
+              config_version:
+                type: integer
+                minimum: 1
+              unresolved_failures:
+                type: array
+                minItems: 1
+                items:
+                  type: string
+              new_observed_failures:
+                type: array
+                maxItems: 0
+    transitions:
+    - to: test_evidence_missing
+      match:
+        _error: true
+    - to: done_candidate_tests_failed
+      match:
+        all_passed: true
+    - to: test_evidence_missing
+  - id: done_candidate_tests_failed
+    step_type: gate
+    transitions:
+    - to: null

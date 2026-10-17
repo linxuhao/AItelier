@@ -60,6 +60,14 @@ description: >
   table in `docs/repo-gate-unmeasured-protocol.md`, rendered from `ROWS` in
   `tests/unit/test_repo_gate_outcome_table.py`.
 parameters:
+  prechange_capture:
+    type: boolean
+    description: "Builtin coding_impl only: capture owned original-base observations before implementation."
+    required: false
+  prechange_from:
+    type: string
+    description: "Builtin coding_impl only: compare the delivered baseline observations; never a test PASS."
+    required: false
   project_root:
     type: string
     description: "Path to the project repo (auto-injected by the engine)"

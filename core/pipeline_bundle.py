@@ -275,6 +275,7 @@ def import_pipeline(sf, registry, bundle: dict, *, name: str | None = None,
     # under its own name is unchanged.
     graph, roles = _renamespace(graph, roles, src_name or config_name, config_name)
     graph["name"] = config_name
+    pr._inject_seed_context(graph, config_name)
 
     # ── Decide every tool BEFORE writing anything ──
     tdir = _generated_tools_dir()

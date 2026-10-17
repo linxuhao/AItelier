@@ -117,7 +117,7 @@ def test_typed_live_role_drift_refuses_every_editor_and_adoption(world, case):
     clean = api.capture('gen_vt')       # an ordinary catalog entry of the persisted unit
     drift_live(fx, MAKER, key, live)
     served = fx.sf.agent_registry.get(MAKER).config[key]
-    assert served == persisted and not fb.same_canonical(served, persisted)   # the == trap
+    assert served == persisted and fb.canonical(served) != fb.canonical(persisted)   # the == trap
     fx.start_run('Old', 'gen_vt'); fx.pause_run('Old')
     old = claim(fx, 'Old')
     assert fb.canonical(old['config'][key]) == fb.canonical(live)

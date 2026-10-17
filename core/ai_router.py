@@ -82,6 +82,33 @@ class ProviderRefusal(Exception):
     """
 
 
+class EmptyProviderResponse(Exception):
+    """A native completion contains neither output nor evidence of generation."""
+
+
+def _raise_if_empty_native(response, endpoint: str) -> None:
+    choice = response.choices[0]
+    msg = choice.message
+    # Length/reasoning starvation already has bounded recovery in the native
+    # loop. Do not turn that policy into endpoint failover.
+    if ((getattr(choice, "finish_reason", "") or "") == "length"
+            or (getattr(msg, "content", None) or "").strip()
+            or getattr(msg, "tool_calls", None)
+            or (getattr(msg, "reasoning_content", None) or "").strip()):
+        return
+    usage = getattr(response, "usage", None)
+    details = getattr(usage, "completion_tokens_details", None)
+    observed = (getattr(usage, "completion_tokens", None),
+                getattr(details, "reasoning_tokens", None))
+    if any(isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0
+           for v in observed):
+        return
+    # Missing/zero observed usage is not a claim about provider billing.
+    raise EmptyProviderResponse(
+        f"{endpoint}: empty native response (no text, tool calls or reasoning; "
+        "no positive observed output usage)")
+
+
 def _raise_if_refused(response, endpoint: str) -> None:
     try:
         choice = response.choices[0]
@@ -107,6 +134,7 @@ FAILOVER_EXCEPTIONS = (
     litellm.exceptions.Timeout,
     litellm.exceptions.NotFoundError,
     ProviderRefusal,
+    EmptyProviderResponse,
 )
 # ContextWindowExceededError is deliberately NOT here. It is not an endpoint
 # outage, so walking the list blindly would replay a doomed request at every
@@ -916,7 +944,7 @@ class AIGateway:
             # reproduce the exact hang this method exists to break.
             pool.shutdown(wait=False)
 
-    def _complete_prebuilt(self, kwargs: dict):
+    def _complete_prebuilt(self, kwargs: dict, *, native: bool = False):
         """One completion, walking this model's candidates on endpoint errors.
 
         STICKY, never round-robin. Once a candidate answers, the gateway stays
@@ -944,6 +972,8 @@ class AIGateway:
             try:
                 response = self._completion_bounded(kwargs)
                 _raise_if_refused(response, self.active_model)
+                if native:
+                    _raise_if_empty_native(response, self.active_model)
             except FAILOVER_EXCEPTIONS as e:
                 if not self._failover(e):
                     # Name the endpoints that would have to reopen. The escaping
@@ -1501,7 +1531,7 @@ class AIGateway:
             kwargs["messages"], kwargs.get("tools"), self.last_outbound,
             self.active_model)
         requested_endpoint = self.active_model
-        response = self._complete_prebuilt(kwargs)   # sets self.last_usage
+        response = self._complete_prebuilt(kwargs, native=True)  # sets self.last_usage
         # Trusted host callback sees the final successfully delivered messages,
         # after native-history projection and provider request sanitization.
         observer = getattr(self, "on_messages_presented", None)

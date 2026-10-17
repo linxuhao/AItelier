@@ -100,7 +100,10 @@ def test_a_refusal_with_nothing_left_raises_instead_of_returning_empty(wiring, m
 
 
 def test_an_ordinary_empty_stop_is_not_a_refusal(wiring, monkeypatch):
+    from core.ai_router import EmptyProviderResponse, _raise_if_refused
     g = gw(wiring, "pool")
-    monkeypatch.setattr(litellm, "completion", lambda **k: _resp("stop", content=""))
-    turn = g.generate_native(MSGS)
-    assert turn.text == "" and g.active_model == "anthropic/claude-sonnet-5-5"
+    response = _resp("stop", content="")
+    _raise_if_refused(response, g.active_model)
+    monkeypatch.setattr(litellm, "completion", lambda **k: response)
+    with pytest.raises(EmptyProviderResponse):
+        g.generate_native(MSGS)

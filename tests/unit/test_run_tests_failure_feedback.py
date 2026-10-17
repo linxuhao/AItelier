@@ -37,7 +37,7 @@ def test_early_failure_reaches_implement_report(monkeypatch, tmp_path):
     gate = capture(monkeypatch, tmp_path, text)
     assert gate['returncode'] == 1
     gate.update(script='run_tests.sh', measured=rt.REPO_GATE_MEASURED_FAIL)
-    monkeypatch.setattr(rt, '_acquire_repo_gate', lambda repo: gate)
+    monkeypatch.setattr(rt, '_acquire_repo_gate', lambda repo, **kwargs: gate)
     monkeypatch.setattr(rt, '_resolve_pytest_python', lambda repo, report: (None, None))
     out = tmp_path / 'ws' / 'coding_impl' / 'test'
     rt.run_tests(project_root=str(tmp_path), out_dir=str(out))

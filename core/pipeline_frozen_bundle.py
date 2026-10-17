@@ -63,6 +63,25 @@ def canonical(obj) -> bytes:
         raise BundleRefused(f"not canonically serialisable: {exc}") from exc
 
 
+def same_canonical(a, b) -> bool:
+    """Equal as accepted canonical values: ``true``, ``1`` and ``1.0`` differ,
+    also nested in lists/mappings, although Python ``==`` calls them equal. A
+    value with no canonical form equals nothing (it cannot be verified)."""
+    try:
+        return canonical(a) == canonical(b)
+    except BundleRefused:
+        return False
+
+
+def _same_schema(a, b) -> bool:
+    """Tool schemas compare as canonical values when they have that form; YAML
+    a loader may parse beyond it (e.g. dates) keeps plain equality."""
+    try:
+        return canonical(a) == canonical(b)
+    except BundleRefused:
+        return a == b
+
+
 def sha(data) -> str:
     return hashlib.sha256(data if isinstance(data, bytes)
                           else canonical(data)).hexdigest()
@@ -340,7 +359,7 @@ def _tool_identity(sf, name):
             schema = cached_schema
         else:
             schema = _parse_tool_schema(raw["tool.yaml"])
-            if cached_schema is not None and cached_schema != schema:
+            if cached_schema is not None and not _same_schema(cached_schema, schema):
                 raise BundleRefused(
                     f"tool {name!r}: the loader serves a cached schema that differs "
                     f"from {tdir / 'tool.yaml'}; it must be reloaded before capture")
@@ -372,7 +391,7 @@ def _role_schema_drift(sf, roles, schemas: dict) -> None:
     for role in roles:
         cfg = sf.agent_registry.get(role) if role in sf.agent_registry else None
         for tool, schema in (getattr(cfg, "tool_schemas", None) or {}).items():
-            if tool in schemas and schema != schemas[tool]:
+            if tool in schemas and not _same_schema(schema, schemas[tool]):
                 raise BundleRefused(
                     f"role {role!r} serves a stale schema for tool {tool!r} "
                     f"(resolved before the loader's current one); re-register it first")
@@ -1240,10 +1259,15 @@ def whole_state(sf, registry, config_dir, target: str, unit: dict) -> list:
         problems.append("persisted graph row")
     elif hist is None or hist["digest"] != want or hist["yaml_text"] != text:
         problems.append("persisted version history")
+    # Every persisted role, historical ones included: publication re-registers
+    # them all, so each live definition must already be exactly what that
+    # registration (with its legitimate defaults) serves, or an edit would
+    # silently change what pinned runs claim under an unchanged graph pin.
     for role, cfg in _expected_roles(target, roles).items():
         have = sf.agent_registry.get(role)
-        if have is None or (have.model, list(have.tools), have.config) != (
-                cfg.model, list(cfg.tools), cfg.config):
+        if have is None or not same_canonical(
+                [have.model, list(have.tools), have.config],
+                [cfg.model, list(cfg.tools), cfg.config]):
             problems.append(f"live role {role}")
     for node in graph.steps:
         if node.agent_config and node.agent_config not in sf.agent_registry:

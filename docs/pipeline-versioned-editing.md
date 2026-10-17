@@ -32,6 +32,18 @@ pinned runs resolve that name. Existing legacy roles that still name a shared te
 continue to rely on that file remaining unchanged; normal editing never rewrites
 it. No run is repinned.
 
+Before any editor or restore prepares anything (no-ops included), and before native
+adoption writes its descriptor, the target must be served exactly as its persisted
+whole unit. Publication re-registers every persisted role, historical ones
+included, so each live role's model, tools and settings must canonically equal
+what that registration serves: the host's own defaults for omitted fields apply,
+but `true`, `1` and `1.0` stay distinct, nested values included. A live role that
+differs (for example one re-registered by hand with `temperature: true` beside a
+persisted `1.0`) makes the target mixed: every editor refuses with no seal,
+catalog, descriptor, file, registry or history effect, and the runs keep claiming
+what they claim now. A recorded (adopted) target in that state is also refused at
+run admission until it is reloaded or reconciled.
+
 A true no-op returns `changed=false` and writes no catalog entry, seal, graph
 version, descriptor or file, even for an initially uncataloged target. Recorded
 providers are checked before either no-op or changing success. Preflight

@@ -1,0 +1,225 @@
+{
+  "schema": "rsi.optimizer.scenarios.v2",
+  "scenarios": [
+    {
+      "name": "useful_manual_default",
+      "stop": "manual_candidate",
+      "current": "reference",
+      "numeric": "eligible"
+    },
+    {
+      "name": "explicit_reviewed_generated_adoption",
+      "decision": "adopt",
+      "adoption": true,
+      "stop": "adopted",
+      "current": "candidate",
+      "numeric": "eligible"
+    },
+    {
+      "name": "builtin_source_patch_only",
+      "kind": "builtin",
+      "decision": "source_patch",
+      "stop": "source_patch",
+      "current": "reference",
+      "numeric": "eligible"
+    },
+    {
+      "name": "inclusive_margin_and_statistical_rule",
+      "stop": "manual_candidate",
+      "current": "reference",
+      "numeric": "eligible",
+      "fault": "inclusive_margin",
+      "at": "holdout",
+      "difference": "5",
+      "p": "1/256"
+    },
+    {
+      "name": "no_train_improvement",
+      "fault": "no_train_improvement",
+      "at": "train_candidate",
+      "stop": "no_train_improvement",
+      "current": "reference"
+    },
+    {
+      "name": "holdout_rejected",
+      "fault": "holdout_rejected",
+      "at": "holdout",
+      "stop": "holdout_rejected",
+      "current": "reference",
+      "numeric": "rejected"
+    },
+    {
+      "name": "family_nonregression",
+      "fault": "family_regression",
+      "at": "holdout",
+      "stop": "holdout_rejected",
+      "current": "reference",
+      "numeric": "rejected"
+    },
+    {
+      "name": "unknown_execution_retains",
+      "fault": "unknown_execution",
+      "at": "train_candidate",
+      "stop": "unknown",
+      "current": "reference",
+      "unknown": true
+    },
+    {
+      "name": "unknown_accounting_retains",
+      "fault": "unknown_accounting",
+      "at": "train_candidate",
+      "stop": "unknown",
+      "current": "reference",
+      "unknown": true
+    },
+    {
+      "name": "budget_stops",
+      "fault": "budget",
+      "at": "train_candidate",
+      "stop": "budget",
+      "current": "reference"
+    },
+    {
+      "name": "runtime_drift_stops",
+      "fault": "runtime_drift",
+      "at": "train_candidate",
+      "stop": "invalid",
+      "current": "reference"
+    },
+    {
+      "name": "no_spend_authority",
+      "fault": "no_authority",
+      "at": "freeze",
+      "error": "AUTHORITY",
+      "error_at": "freeze"
+    },
+    {
+      "name": "changed_provider",
+      "fault": "provider_changed",
+      "at": "freeze",
+      "error": "PROVIDER_CHANGED",
+      "error_at": "freeze"
+    },
+    {
+      "name": "unsafe_resume",
+      "fault": "unsafe_resume",
+      "at": "freeze",
+      "error": "UNSAFE_RESUME",
+      "error_at": "freeze"
+    },
+    {
+      "name": "exact_case_id",
+      "edit": "case_id",
+      "error": "CONTAMINATION",
+      "error_at": "candidate"
+    },
+    {
+      "name": "exact_case_literal",
+      "edit": "case_literal",
+      "error": "CONTAMINATION",
+      "error_at": "candidate"
+    },
+    {
+      "name": "topology_edit",
+      "edit": "topology",
+      "error": "FORBIDDEN_EDIT",
+      "error_at": "candidate"
+    },
+    {
+      "name": "route_edit",
+      "edit": "route",
+      "error": "FORBIDDEN_EDIT",
+      "error_at": "candidate"
+    },
+    {
+      "name": "unknown_model_target",
+      "edit": "model",
+      "error": "FORBIDDEN_EDIT",
+      "error_at": "candidate"
+    },
+    {
+      "name": "unknown_edit_field",
+      "edit": "unknown",
+      "error": "MALFORMED_INPUT",
+      "error_at": "candidate"
+    },
+    {
+      "name": "no_admissible_edit",
+      "edit": "empty",
+      "error": "NO_ADMISSIBLE_EDIT",
+      "error_at": "candidate"
+    },
+    {
+      "name": "early_holdout",
+      "early": true,
+      "error": "ORDER",
+      "error_at": "holdout"
+    },
+    {
+      "name": "unapproved_hypothesis",
+      "skip_checkpoint": true,
+      "error": "CHECKPOINT",
+      "error_at": "candidate"
+    },
+    {
+      "name": "ungranted_proposer_eval",
+      "wrong_actor": "train_candidate",
+      "error": "AUTHORITY",
+      "error_at": "train_candidate"
+    },
+    {
+      "name": "holdout_without_authority",
+      "deny_holdout": true,
+      "error": "HOLDOUT_AUTHORITY",
+      "error_at": "holdout_seal"
+    },
+    {
+      "name": "holdout_one_use",
+      "fault": "holdout_reuse",
+      "at": "holdout_seal",
+      "error": "HOLDOUT_AUTHORITY",
+      "error_at": "holdout_seal"
+    },
+    {
+      "name": "adoption_without_review",
+      "decision": "adopt",
+      "error": "ADOPTION_AUTHORITY",
+      "error_at": "decision"
+    },
+    {
+      "name": "concurrent_current_not_restored",
+      "decision": "retain",
+      "fault": "concurrent_edit",
+      "at": "restore",
+      "error": "CONFLICT",
+      "error_at": "restore",
+      "current": "foreign"
+    },
+    {
+      "name": "round_limit",
+      "round_number": 3,
+      "error": "MALFORMED_INPUT",
+      "error_at": "freeze"
+    },
+    {
+      "name": "budget_ceiling_not_permission",
+      "usd_micros": 25000001,
+      "error": "MALFORMED_INPUT",
+      "error_at": "freeze"
+    },
+    {
+      "name": "public_diagnosis_no_holdout",
+      "diagnosis_holdout": true,
+      "error": "CONTAMINATION",
+      "error_at": "diagnose"
+    },
+    {
+      "name": "target_stops_without_implicit_adoption",
+      "fault": "target",
+      "at": "holdout",
+      "stop": "target",
+      "current": "reference",
+      "numeric": "eligible"
+    }
+  ]
+}

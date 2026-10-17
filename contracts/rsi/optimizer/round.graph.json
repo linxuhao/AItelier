@@ -1,0 +1,355 @@
+{
+  "name": "rsi_optimizer_round_v2",
+  "description": "Dormant statement graph. New trusted tool ports require a separate native proof binding.",
+  "begin": "freeze",
+  "end_conditions": {
+    "combinator": "or",
+    "conditions": [
+      {
+        "type": "node_reached",
+        "node": "stop",
+        "result": "completed",
+        "require_completed": true
+      }
+    ]
+  },
+  "steps": [
+    {
+      "id": "freeze",
+      "step_type": "tool",
+      "tool_name": "rsi_opt_freeze",
+      "tool_params": {},
+      "max_retries": 0,
+      "tool_error": "route",
+      "transitions": [
+        {
+          "to": "train_reference",
+          "match": {
+            "continue": true
+          }
+        },
+        {
+          "to": "stop"
+        }
+      ]
+    },
+    {
+      "id": "train_reference",
+      "step_type": "tool",
+      "tool_name": "rsi_opt_train_reference",
+      "tool_params": {},
+      "max_retries": 0,
+      "tool_error": "route",
+      "transitions": [
+        {
+          "to": "diagnose",
+          "match": {
+            "continue": true
+          }
+        },
+        {
+          "to": "stop"
+        }
+      ]
+    },
+    {
+      "id": "diagnose",
+      "step_type": "tool",
+      "tool_name": "rsi_opt_diagnose",
+      "tool_params": {},
+      "max_retries": 0,
+      "tool_error": "route",
+      "transitions": [
+        {
+          "to": "hypothesis",
+          "match": {
+            "continue": true
+          }
+        },
+        {
+          "to": "stop"
+        }
+      ]
+    },
+    {
+      "id": "hypothesis",
+      "step_type": "tool",
+      "tool_name": "rsi_opt_hypothesis",
+      "tool_params": {},
+      "max_retries": 0,
+      "tool_error": "route",
+      "checkpoint": true,
+      "checkpoint_label": "Review one falsifiable hypothesis and candidate scope",
+      "transitions": [
+        {
+          "to": "candidate",
+          "match": {
+            "from": "checkpoint",
+            "value": "approved",
+            "continue": true
+          }
+        },
+        {
+          "to": "stop"
+        }
+      ]
+    },
+    {
+      "id": "candidate",
+      "step_type": "tool",
+      "tool_name": "rsi_opt_candidate",
+      "tool_params": {},
+      "max_retries": 0,
+      "tool_error": "route",
+      "transitions": [
+        {
+          "to": "admissibility",
+          "match": {
+            "continue": true
+          }
+        },
+        {
+          "to": "stop"
+        }
+      ]
+    },
+    {
+      "id": "admissibility",
+      "step_type": "tool",
+      "tool_name": "rsi_opt_admissibility",
+      "tool_params": {},
+      "max_retries": 0,
+      "tool_error": "route",
+      "transitions": [
+        {
+          "to": "train_candidate",
+          "match": {
+            "continue": true
+          }
+        },
+        {
+          "to": "stop"
+        }
+      ]
+    },
+    {
+      "id": "train_candidate",
+      "step_type": "tool",
+      "tool_name": "rsi_opt_train_candidate",
+      "tool_params": {},
+      "max_retries": 0,
+      "tool_error": "route",
+      "transitions": [
+        {
+          "to": "train_compare",
+          "match": {
+            "continue": true
+          }
+        },
+        {
+          "to": "stop"
+        }
+      ]
+    },
+    {
+      "id": "train_compare",
+      "step_type": "tool",
+      "tool_name": "rsi_opt_train_compare",
+      "tool_params": {},
+      "max_retries": 0,
+      "tool_error": "route",
+      "checkpoint": true,
+      "checkpoint_label": "Owner authorizes one sealed holdout selection; spend grant still required",
+      "transitions": [
+        {
+          "to": "holdout_seal",
+          "match": {
+            "from": "checkpoint",
+            "value": "approved",
+            "continue": true
+          }
+        },
+        {
+          "to": "restore"
+        }
+      ]
+    },
+    {
+      "id": "holdout_seal",
+      "step_type": "tool",
+      "tool_name": "rsi_opt_holdout_seal",
+      "tool_params": {},
+      "max_retries": 0,
+      "tool_error": "route",
+      "transitions": [
+        {
+          "to": "holdout",
+          "match": {
+            "continue": true
+          }
+        },
+        {
+          "to": "stop"
+        }
+      ]
+    },
+    {
+      "id": "holdout",
+      "step_type": "tool",
+      "tool_name": "rsi_opt_holdout",
+      "tool_params": {},
+      "max_retries": 0,
+      "tool_error": "route",
+      "transitions": [
+        {
+          "to": "compare",
+          "match": {
+            "continue": true
+          }
+        },
+        {
+          "to": "stop"
+        }
+      ]
+    },
+    {
+      "id": "compare",
+      "step_type": "tool",
+      "tool_name": "rsi_opt_compare",
+      "tool_params": {},
+      "max_retries": 0,
+      "tool_error": "route",
+      "transitions": [
+        {
+          "to": "decision",
+          "match": {
+            "continue": true
+          }
+        },
+        {
+          "to": "stop"
+        }
+      ]
+    },
+    {
+      "id": "decision",
+      "step_type": "tool",
+      "tool_name": "rsi_opt_decision",
+      "tool_params": {},
+      "max_retries": 0,
+      "tool_error": "route",
+      "transitions": [
+        {
+          "to": "adoption_review",
+          "match": {
+            "action": "adopt"
+          }
+        },
+        {
+          "to": "adoption_review",
+          "match": {
+            "action": "source_patch"
+          }
+        },
+        {
+          "to": "restore",
+          "match": {
+            "action": "retain"
+          }
+        },
+        {
+          "to": "stop"
+        }
+      ]
+    },
+    {
+      "id": "adoption_review",
+      "step_type": "tool",
+      "tool_name": "rsi_opt_adoption_review",
+      "tool_params": {},
+      "max_retries": 0,
+      "tool_error": "route",
+      "checkpoint": true,
+      "checkpoint_label": "Explicit reviewed owner decision before generated adoption or builtin Source patch candidate",
+      "transitions": [
+        {
+          "to": "adopt",
+          "match": {
+            "from": "checkpoint",
+            "value": "approved",
+            "action": "adopt"
+          }
+        },
+        {
+          "to": "source_patch",
+          "match": {
+            "from": "checkpoint",
+            "value": "approved",
+            "action": "source_patch"
+          }
+        },
+        {
+          "to": "stop"
+        }
+      ]
+    },
+    {
+      "id": "adopt",
+      "step_type": "tool",
+      "tool_name": "rsi_opt_adopt",
+      "tool_params": {},
+      "max_retries": 0,
+      "tool_error": "route",
+      "transitions": [
+        {
+          "to": "stop"
+        }
+      ]
+    },
+    {
+      "id": "restore",
+      "step_type": "tool",
+      "tool_name": "rsi_opt_restore",
+      "tool_params": {},
+      "max_retries": 0,
+      "tool_error": "route",
+      "transitions": [
+        {
+          "to": "stop"
+        }
+      ]
+    },
+    {
+      "id": "source_patch",
+      "step_type": "tool",
+      "tool_name": "rsi_opt_source_patch",
+      "tool_params": {},
+      "max_retries": 0,
+      "tool_error": "route",
+      "transitions": [
+        {
+          "to": "stop"
+        }
+      ]
+    },
+    {
+      "id": "stop",
+      "step_type": "tool",
+      "tool_name": "rsi_opt_stop",
+      "tool_params": {},
+      "max_retries": 0,
+      "tool_error": "route",
+      "transitions": [
+        {
+          "to": null
+        }
+      ]
+    }
+  ],
+  "x-aitelier": {
+    "repo_mode": "none",
+    "scheduler_owned": false,
+    "seed_file": "round.json",
+    "output_step": "stop"
+  }
+}

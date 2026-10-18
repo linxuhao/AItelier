@@ -144,8 +144,11 @@ def test_abandoned_worker_cannot_touch_replacement_progress(case, monkeypatch):
     seen = {}
     real_builder = litellm.stream_chunk_builder
     def builder(chunks, messages=None):
-        if chunks[0].choices[0].delta.content.startswith('old'):
+        delta = chunks[0].choices[0].delta
+        first_text = delta['content'] if isinstance(delta, dict) else delta.content
+        if first_text.startswith('old'):
             old_finished.set()         # old worker got past its (suppressed) llm_done
+
         return real_builder(chunks, messages=messages)
     calls = []
     def complete(**kw):

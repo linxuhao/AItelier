@@ -391,3 +391,140 @@ def test_current_provider_error_is_not_claimed_as_success_and_remains_leased(rig
     assert len(called) == 1 and called[0]["root"] == rec["worktree_path"]
     assert "INDEX_MISSING" in result["error"] and "content" not in result
     assert "mode" not in result and "hint" in result
+
+
+@pytest.mark.parametrize("veto", ["unmerged", "write-admission", "release-ack",
+                                  "index-storage", "idle", "ignored"])
+def test_ineligible_reaper_does_not_read_tracked_content(rig, monkeypatch, veto):
+    """Existing rejection evidence is enough; reading tracked bytes adds nothing."""
+    from core import closed_git
+    # A real tracked payload makes the observed byte work unambiguous.
+    (rig.source / "payload.bin").write_bytes(b"x" * (512 * 1024))
+    git(rig.source, "add", "payload.bin")
+    git(rig.source, "commit", "-qm", "tracked payload")
+    rec = rig.run()
+    root = Path(rec["worktree_path"])
+    if veto == "release-ack":
+        rig.ctl.process_once(execute=rig.execute)
+        rig.sf.stop_run(rec["run_id"], "fixture terminal")
+        resources.reconcile(rig.db, rig.sf)
+    else:
+        finish(rig, rec)
+    reason = {"unmerged": "unmerged", "write-admission": "write admissions",
+              "release-ack": "acknowledged", "index-storage": "storage reappeared",
+              "idle": "minimum", "ignored": "ignored"}[veto]
+    if veto == "unmerged":
+        (root / "delivery.txt").write_text("unmerged delivery")
+        git(root, "add", "delivery.txt")
+        git(root, "commit", "-qm", "unmerged")
+    elif veto == "write-admission":
+        with rig.db.get_connection() as conn:
+            conn.execute("INSERT INTO checkout_write_admissions "
+                         "(canonical_checkout,owner,kind) VALUES(?,?,?)",
+                         (str(root), "fixture-owner", "fixture-write"))
+            conn.commit()
+    elif veto == "index-storage":
+        (root / ".zvec-grep").mkdir(exist_ok=True)
+        (root / ".zvec-grep" / "manifest.json").write_text("reappeared")
+    elif veto == "ignored":
+        exclude = Path(git(root, "rev-parse", "--path-format=absolute",
+                           "--git-path", "info/exclude"))
+        exclude.write_text(exclude.read_text() + "\nevidence/\n")
+        (root / "evidence").mkdir()
+        (root / "evidence" / "keep.txt").write_text("valuable report")
+    hashed = []
+    original = closed_git.blob_sha1_stream
+
+    def observe(fh, size):
+        result = original(fh, size)
+        hashed.append(size)
+        return result
+
+    monkeypatch.setattr(closed_git, "blob_sha1_stream", observe)
+    result = ri.reap_released_worktrees(
+        rig.db, rig.sf, min_idle_seconds=86400 if veto == "idle" else 0)
+    assert not result["removed"] and root.exists()
+    assert reason in result["retained"][0]["reason"]
+    print(f"WORK_OBSERVATION veto={veto} full_hash_calls={len(hashed)} bytes={sum(hashed)}")
+    assert hashed == [], f"already ineligible {veto}: hashed {sum(hashed)} tracked bytes"
+
+
+@pytest.mark.parametrize("decision", ["merged", "discarded", "same-stat-dirty"])
+def test_eligible_reaper_still_hashes_full_bytes_before_removal(rig, monkeypatch, decision):
+    from core import closed_git
+    payload = b"x" * (512 * 1024)
+    (rig.source / "payload.bin").write_bytes(payload)
+    git(rig.source, "add", "payload.bin")
+    git(rig.source, "commit", "-qm", "tracked payload")
+    rec = rig.run()
+    root = Path(rec["worktree_path"])
+    finish(rig, rec)
+    if decision == "discarded":
+        (root / "delivery.txt").write_text("committed unwanted work")
+        git(root, "add", "delivery.txt")
+        git(root, "commit", "-qm", "explicitly unwanted")
+        ri.release(rig.db, rec["run_id"], disposition="discarded")
+    elif decision == "same-stat-dirty":
+        path = root / "payload.bin"
+        st = path.stat()
+        path.write_bytes(b"y" + payload[1:])
+        os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
+    hashed = []
+    original = closed_git.blob_sha1_stream
+
+    def observe(fh, size):
+        result = original(fh, size)
+        hashed.append(size)
+        return result
+
+    monkeypatch.setattr(closed_git, "blob_sha1_stream", observe)
+    result = ri.reap_released_worktrees(rig.db, rig.sf, min_idle_seconds=0)
+    print(f"WORK_OBSERVATION decision={decision} full_hash_calls={len(hashed)} bytes={sum(hashed)}")
+    assert sum(hashed) >= len(payload)
+    if decision == "same-stat-dirty":
+        assert not result["removed"] and root.exists()
+        assert "uncommitted" in result["retained"][0]["reason"]
+    else:
+        assert [row["run_id"] for row in result["removed"]] == [rec["run_id"]]
+        assert not root.exists()
+        assert git(rig.source, "show-ref", "--verify", "refs/heads/" + rec["branch"])
+
+
+@pytest.mark.parametrize("late_veto", ["write-admission", "ignored", "paused"])
+def test_reaper_rechecks_retention_after_full_content_work(rig, monkeypatch, late_veto):
+    """An early prefilter never replaces the final retention observations."""
+    from core import closed_git
+    rec = rig.run()
+    finish(rig, rec)
+    root = Path(rec["worktree_path"])
+    original = closed_git.clean_against_head
+    observed = []
+
+    def change_after_clean(*args, **kwargs):
+        result = original(*args, **kwargs)
+        assert result[0]
+        observed.append(True)
+        if late_veto == "write-admission":
+            with rig.db.get_connection() as conn:
+                conn.execute("INSERT INTO checkout_write_admissions "
+                             "(canonical_checkout,owner,kind) VALUES(?,?,?)",
+                             (str(root), "late-fixture-owner", "fixture-write"))
+                conn.commit()
+        elif late_veto == "ignored":
+            exclude = Path(git(root, "rev-parse", "--path-format=absolute",
+                               "--git-path", "info/exclude"))
+            exclude.write_text(exclude.read_text() + "\nlate-evidence\n")
+            (root / "late-evidence").write_text("preserve")
+        else:
+            get_run = rig.sf.get_run
+            monkeypatch.setattr(rig.sf, "get_run",
+                                lambda rid: {**get_run(rid), "status": "paused"})
+        return result
+
+    monkeypatch.setattr(closed_git, "clean_against_head", change_after_clean)
+    report = ri.reap_released_worktrees(rig.db, rig.sf, min_idle_seconds=0)
+    assert observed == [True]
+    assert not report["removed"] and root.exists()
+    expected = {"write-admission": "write admissions", "ignored": "ignored",
+                "paused": "not terminal"}[late_veto]
+    assert expected in report["retained"][0]["reason"]

@@ -13,6 +13,8 @@ description: >
   spelling.
   `search` is the right tool for an exact identifier, a quotation, a regex, or
   when you need EVERY occurrence: it is exhaustive where this is ranked.
+  Searches wait for the provider to incorporate completed edits. A freshness
+  wait timeout or an explicitly stale answer is an error, never current source.
   Errors (index missing, sidecar down) come back as {error, hint}; fall back
   to `search`/`read` — never treat an error as "nothing exists". A new
   project's index, including an isolated run worktree, is built automatically

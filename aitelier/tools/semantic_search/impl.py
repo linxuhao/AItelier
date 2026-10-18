@@ -101,7 +101,8 @@ def semantic_search(query: str, limit: int = 8, globs: list | None = None,
     except (TypeError, ValueError):
         lim = 8
     lim = max(1, min(lim, _MAX_LIMIT))
-    args = {"root": str(Path(project_root).resolve()), "query": q, "limit": lim}
+    args = {"root": str(Path(project_root).resolve()), "query": q, "limit": lim,
+            "freshness": "wait_for_fresh"}
     requested_globs = [str(g) for g in globs] if globs else []
     args["globs"] = requested_globs + [_INTERNAL_STORAGE_GLOB]
     if fts:
@@ -122,6 +123,11 @@ def semantic_search(query: str, limit: int = 8, globs: list | None = None,
         return {"error": f"semantic_search: {text}",
                 "hint": "index missing or query rejected — use `search`/`read`"}
     result = msg.get("result") or {}
+    # Official MCP may request authorization input before executing search;
+    # this is an incomplete result, not a successful empty search.
+    if result.get("resultType") == "input_required":
+        return {"error": "semantic_search: provider returned input_required before search",
+                "diagnostic": result, "hint": "use `search` (exact) and `read`"}
     parts = [c.get("text", "") for c in (result.get("content") or []) if c.get("type") == "text"]
     text = "\n".join(p for p in parts if p).strip()
     if result.get("isError"):
@@ -131,6 +137,14 @@ def semantic_search(query: str, limit: int = 8, globs: list | None = None,
         except Exception:
             pass
         return {"error": f"semantic_search: {text or 'tool error'}", "hint": "use `search`/`read`"}
+    # Official zg 0.2.2 prefixes compact text with its freshness status;
+    # structured content is optional. Stale snippets are not current source.
+    structured = result.get("structuredContent") or {}
+    if (text.splitlines()[:1] == ["freshness: possibly_stale"] or
+            (isinstance(structured, dict) and
+             structured.get("freshness") == "possibly_stale")):
+        return {"error": "semantic_search: index is possibly_stale after freshness wait",
+                "diagnostic": text, "hint": "use `search` (exact) and `read`"}
     answer = {"query": q, "root": args["root"], "limit": lim,
               "content": text or "(no results)"}
     if degraded:

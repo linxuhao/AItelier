@@ -92,7 +92,7 @@ class _Json:
 
 
 def _install(monkeypatch, *, lines=None, run_row=None, keep_open=True,
-             stream_error=None, streams=None, run_rows=None):
+             stream_error=None, streams=None, run_rows=None, checkpoint_row=None):
     """Patch urlopen for both URLs and return the ordered call record.
 
     `streams` / `run_rows` script SUCCESSIVE connections and status reads (the
@@ -111,6 +111,11 @@ def _install(monkeypatch, *, lines=None, run_row=None, keep_open=True,
                 raise stream_error
             body = scripted[min(nth, len(scripted)) - 1]
             return _Stream(body, order, keep_open=keep_open)
+        if url.endswith("/checkpoint"):
+            order.append("checkpoint-read")
+            if isinstance(checkpoint_row, Exception):
+                raise checkpoint_row
+            return _Json(checkpoint_row)
         if "/api/runs/" in url:
             order.append("status-read")
             nth = sum(1 for o in order if o == "status-read")
@@ -537,3 +542,108 @@ def test_a_nondefinitive_lookup_reaches_deadline_without_claiming_absence(
     assert "NOT VERIFIED" in output and "RUN NOT FOUND" not in output
     assert "COMPLETED" not in output and "FAILED" not in output
     assert order.count("status-read") == 2
+
+
+# A paused run points at the NEXT node, not at its checkpoint step.
+def _paused(instance=10949, **extra):
+    return _row("paused", current_node="task_loop", steps=[
+        {"id": instance, "step_id": "2", "status": "completed"}], **extra)
+
+
+def _pending(instance=10949, **extra):
+    body = {"checkpoint": "2", "step": "2", "checkpoint_instance": instance,
+            "project_id": PID, "label": "inspect setup"}
+    body.update(extra)
+    return body
+
+
+@pytest.mark.parametrize("follow", [False, True])
+def test_late_paused_attach_reports_current_checkpoint_before_waiting(
+        monkeypatch, capsys, follow):
+    order = _install(monkeypatch, lines=[PRESENCE, _completed()],
+                     run_row=_paused(), checkpoint_row=_pending())
+    code = _run_await(_args(follow=follow))
+    out = capsys.readouterr().out
+    assert code == 0, out
+    assert "CHECKPOINT" in out, out
+    assert "step=2 " in out and "step=task_loop" not in out
+    assert "reconciled at connect" in out and "10949" in out
+    assert order[:4] == ["stream-open", "stream-line", "status-read", "checkpoint-read"]
+    if follow:
+        assert out.index("CHECKPOINT") < out.index("COMPLETED")
+        assert order.count("stream-open") == 1
+    else:
+        assert "COMPLETED" not in out
+        assert order.count("stream-line") == 1
+
+
+def _instance_event(instance=10949):
+    return _sse({"type": "checkpoint_paused", "run_id": RUN, "project_id": PID,
+                 "step_id": "2", "label": "inspect setup", "next_node": "task_loop",
+                 "expected_checkpoint": {"step_instance_id": instance}})
+
+
+@pytest.mark.parametrize("snapshot_first", [True, False])
+def test_snapshot_event_race_and_reconnect_deduplicate_actual_instances(
+        monkeypatch, capsys, snapshot_first):
+    order = _install(
+        monkeypatch,
+        streams=[[PRESENCE, _instance_event(), TimeoutError("socket closed")],
+                 [PRESENCE, _instance_event(), _instance_event(10950),
+                  _instance_event(10950), _completed()]],
+        run_rows=[_paused() if snapshot_first else _row("running"), _paused()],
+        checkpoint_row=_pending())
+    assert _run_await(_args(follow=True)) == 0
+    out = capsys.readouterr().out
+    checkpoints = [line for line in out.splitlines() if line.startswith("CHECKPOINT ")]
+    assert len(checkpoints) == 2, out
+    assert all("step=2 " in line for line in checkpoints)
+    assert "COMPLETED" in out and "TIMEOUT" not in out
+    assert order.count("stream-open") == order.count("status-read") == 2
+    assert order.count("checkpoint-read") == (2 if snapshot_first else 1)
+
+
+@pytest.mark.parametrize("pending", [
+    None, [], "paused", {"checkpoint": "2"},
+    _pending(project_id="foreign-project"),
+    _pending(instance=10950), _pending(instance="10949"),
+    _pending(instance=0), _pending(instance=True),
+    _pending(step="task_loop"), _pending(checkpoint="task_loop", step="task_loop"),
+    OSError("checkpoint unavailable"), b"{malformed JSON",
+])
+def test_unknown_or_foreign_checkpoint_snapshot_cannot_authorize_a_decision(
+        monkeypatch, capsys, pending):
+    order = _install(monkeypatch, lines=[PRESENCE, _completed()],
+                     run_row=_paused(), checkpoint_row=pending)
+    assert _run_await(_args(follow=True)) == 0
+    out = capsys.readouterr().out
+    assert "STATUS UNKNOWN" in out and "COMPLETED" in out
+    assert "CHECKPOINT" not in out
+    assert order.count("checkpoint-read") == order.count("status-read") == 1
+
+
+@pytest.mark.parametrize("steps", [None, {}, [],
+    [{"id": 10949, "step_id": "2", "status": "running"}],
+    [{"id": 10949, "step_id": "foreign-step", "status": "completed"}],
+])
+def test_checkpoint_must_be_a_completed_instance_of_the_exact_snapshot(
+        monkeypatch, capsys, steps):
+    row = _paused()
+    row["steps"] = steps
+    _install(monkeypatch, lines=[PRESENCE, _completed()], run_row=row,
+             checkpoint_row=_pending())
+    assert _run_await(_args(follow=True)) == 0
+    assert "CHECKPOINT" not in capsys.readouterr().out
+
+
+def test_paused_timeout_does_not_repeat_the_same_checkpoint(monkeypatch, capsys):
+    order = _install(monkeypatch, lines=[PRESENCE],
+                     run_row=_paused(), checkpoint_row=_pending())
+    # Reach the deadline after the first body and bounded reconciliation.
+    ticks = iter([0, 0, 0, 2])
+    monkeypatch.setattr(debugctl.time, "time", lambda: next(ticks))
+    assert _run_await(_args(follow=True)) == 2
+    out = capsys.readouterr().out
+    assert out.count("CHECKPOINT ") == 1, out
+    assert "TIMEOUT" in out
+    assert order.count("status-read") == order.count("checkpoint-read") == 2

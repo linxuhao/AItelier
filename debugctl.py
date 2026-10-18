@@ -386,6 +386,18 @@ def _run_snapshot(base_url: str, run_id: str, timeout: float = 10.0):
         return None
 
 
+def _checkpoint_snapshot(base_url: str, run_id: str, timeout: float = 10.0):
+    """One bounded checkpoint read; its project-keyed answer needs run binding."""
+    import json as _json
+    import urllib.request
+    url = f"{base_url.rstrip('/')}/api/runs/{run_id}/checkpoint"
+    try:
+        with urllib.request.urlopen(_authed_request(url), timeout=timeout) as r:
+            return _json.loads(r.read().decode("utf-8", "replace"))
+    except Exception:
+        return None
+
+
 def _terminal_verdict(run, run_id: str, project_id: str = ""):
     """(message, exit_code) if `run` proves THIS run ended, else None.
 
@@ -432,12 +444,13 @@ def cmd_await(args):
     status: once the subscription is live (first byte of the body, not the
     response headers), on every reconnect, and once more before declaring a
     timeout, this reads `GET /api/runs/{run_id}` a single time and exits if the
-    run has already ended. Three bounded reads at boundaries, never a poll loop.
+    run has already ended or is paused at a checkpoint. A paused snapshot also
+    reads the existing checkpoint endpoint and binds its step instance to THIS
+    run. These are bounded reads at boundaries, never a poll loop.
     Without it, a watcher that attaches after the terminal event was pushed
     waits out its whole deadline and reports a timeout for a finished run —
-    observed live on 2026-09-05, 17ms late. A pre-attach CHECKPOINT is still not
-    reconciled (only terminal states are), which is harmless under `--follow`
-    since it would not exit there anyway.
+    observed live on 2026-09-05, 17ms late. A pre-attach checkpoint must also
+    be reported under `--follow`, so the director knows an answer is needed.
 
     Exits 0 on a checkpoint, 0 on completion, 1 on run failure or cancellation,
     2 on timeout, 3 on a definitively missing/invalid --run handle —
@@ -473,12 +486,27 @@ def cmd_await(args):
     deadline = time.time() + args.timeout
     want = {"checkpoint_paused", "run_completed", "run_failed", "pipeline_failed"}
     mismatch_warned = False
+    seen_checkpoints = set()
     # What the LAST status read established, so a timeout can say whether the
     # run was verified to be alive or merely not proven finished.
     last_read = {"outcome": "never", "status": None}
 
+    def _checkpoint(step, label, next_node, instance=None, when=""):
+        # Modern events identify the completed step instance. Step names repeat
+        # in loops, so deduplicating by step alone would hide a new decision.
+        if type(instance) is int and instance > 0:
+            key = (step, instance)
+            if key in seen_checkpoints:
+                return
+            seen_checkpoints.add(key)
+        suffix = f" [reconciled at {when}: checkpoint instance={instance}]" if when else ""
+        print(f"CHECKPOINT {pid} step={step} label={label!r} next={next_node}{suffix}",
+              flush=True)
+        if not args.follow:
+            sys.exit(0)
+
     def _reconcile(when: str):
-        """One bounded status read; exit if THIS run has ALREADY ended.
+        """One bounded reconciliation; report THIS run's current decision.
 
         Only with an exact `--run`. Without it there is nothing to reconcile
         AGAINST: the positional argument is a project, a project can have had
@@ -517,6 +545,29 @@ def cmd_await(args):
         last_read.update(outcome="read", status=run.get("status"))
         verdict = _terminal_verdict(run, args.run, pid)
         if verdict is None:
+            if run.get("status") != "paused":
+                return
+            pending = _checkpoint_snapshot(args.url, args.run)
+            # The existing run-keyed endpoint delegates to a project's latest
+            # run. Its response has no run_id: only an instance in this exact
+            # snapshot can bind it. current_node is the NEXT node, not identity.
+            if isinstance(pending, dict):
+                step = pending.get("checkpoint")
+                instance = pending.get("checkpoint_instance")
+                steps = run.get("steps")
+                if (pending.get("project_id") == pid
+                        and isinstance(step, str) and step
+                        and pending.get("step") == step
+                        and type(instance) is int and instance > 0
+                        and isinstance(steps, list)
+                        and any(isinstance(s, dict) and s.get("id") == instance
+                                and s.get("step_id") == step
+                                and s.get("status") == "completed" for s in steps)):
+                    _checkpoint(step, pending.get("label"), run.get("current_node"),
+                                instance, when)
+                    return
+            print(f"STATUS UNKNOWN at {when}: paused run {args.run} has no "
+                  f"run-bound checkpoint snapshot; still watching {pid}", flush=True)
             return
         msg, code = verdict
         # Say where the verdict came from. A reconciled ending is as true as a
@@ -678,11 +729,9 @@ def cmd_await(args):
                     _reconcile("unattributed-event")
                 continue
             if kind == "checkpoint_paused":
-                print(f"CHECKPOINT {pid} step={ev.get('step_id')} "
-                      f"label={ev.get('label')!r} next={ev.get('next_node')}",
-                      flush=True)
-                if not args.follow:
-                    sys.exit(0)
+                expected = ev.get("expected_checkpoint")
+                instance = expected.get("step_instance_id") if isinstance(expected, dict) else None
+                _checkpoint(ev.get("step_id"), ev.get("label"), ev.get("next_node"), instance)
                 continue
             if kind == "run_completed":
                 print(f"COMPLETED {pid}", flush=True)

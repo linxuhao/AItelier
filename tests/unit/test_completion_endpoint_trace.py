@@ -80,7 +80,7 @@ def observed(c, outcomes):
     assert len(ids) == len(set(ids))
     raw = json.dumps(rows)
     assert 'offline.invalid' not in raw and 'owned-offline-key' not in raw and 'private-prompt' not in raw
-    consumer = trace_list(c.sf, c.rid, order='asc')
+    consumer = trace_list(c.sf, c.rid, category='llm', order='asc')
     assert consumer['count'] == len(rows)
     assert all('one/model' in r['summary'] or 'two/model' in r['summary'] for r in consumer['entries'])
     # Full existing consumer must return the exact persisted payload.

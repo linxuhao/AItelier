@@ -177,3 +177,28 @@ def test_reconnect_loop_keeps_sending_credentials_after_failures(
     ]
     assert all(h.get("authorization") == TOKEN_HEADER["Authorization"]
                for h in rec.headers)
+
+
+def test_late_checkpoint_read_uses_existing_caller_credentials(
+        monkeypatch, synthetic_credentials, capsys):
+    paused = {"id": RUN, "project_id": PID, "status": "paused",
+              "current_node": "implement",
+              "steps": [{"id": 42, "step_id": "plan", "status": "completed"}]}
+    pending = {"project_id": PID, "checkpoint": "plan", "step": "plan",
+               "checkpoint_instance": 42, "label": "approve plan"}
+    rec = _Recorder([_Body(_sse({"type": "presence"}) + _completed()),
+                     _Body(json.dumps(paused).encode()),
+                     _Body(json.dumps(pending).encode())])
+    monkeypatch.setattr(urllib.request, "urlopen", rec)
+    with pytest.raises(SystemExit) as exc:
+        debugctl.cmd_await(_args())
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert out.index("CHECKPOINT") < out.index("COMPLETED")
+    assert [r.full_url for r in rec.requests] == [
+        "http://localhost:4444/api/events/stream",
+        f"http://localhost:4444/api/runs/{RUN}",
+        f"http://localhost:4444/api/runs/{RUN}/checkpoint",
+    ]
+    assert all(h.get("authorization") == TOKEN_HEADER["Authorization"]
+               for h in rec.headers)

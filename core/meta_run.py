@@ -13,7 +13,7 @@ deterministic requirements-gathering conversation:
     transcript ``meta/conversation.md`` (maintained by the butler), which the
     gather step reads as context.
   - Approving the brief (:func:`approve_meta`) resumes the checkpoint; the
-    gather step's ``approved → null`` transition completes the run, after which
+    gather step's approval releases the genuine finalize tool, after which
     the butler triggers DPE (``core/project_submit.seed_and_trigger``).
 
 No skillflow changes are required.
@@ -64,7 +64,7 @@ def approve_meta(sf, run_id: str, step_runner=None, *,
 
     Approving the gather checkpoint routes the run to the `finalize` tool step,
     which emits the project artifacts (project_brief.md, spec.md, step1_goals.json).
-    The graph's node_reached end-condition then completes the run.
+    The graph's require_completed end-condition then completes the run.
 
     The finalize tool is the SOLE producer of those artifacts, so this does NOT
     force-complete a stuck run — a meta run that fails to emit must surface that
@@ -125,3 +125,51 @@ def approve_meta(sf, run_id: str, step_runner=None, *,
                         f"meta run {run_id} step '{claimed.step_id}' failed: {e}") from e
 
     raise RuntimeError(f"meta run {run_id} did not finalize within the step budget")
+
+
+def retained_gather_state(sf, run_id: str, step_instance_id=None) -> dict:
+    """The SDK's canonical gather output, never a later mutable artifact file."""
+    rows = [row for row in sf.get_steps(run_id, include_payloads=True)
+            if row["step_id"] == GATHER_STEP and row["status"] == "completed"
+            and (step_instance_id is None or row["id"] == step_instance_id)]
+    if not rows:
+        raise ValueError("The reviewed gather instance does not belong to this run")
+    row = max(rows, key=lambda item: item["id"])
+    state = json.loads(row["outputs_json"]).get("gather_state") or {}
+    if isinstance(state, str):
+        state = json.loads(state)
+    if not isinstance(state, dict):
+        raise ValueError("The retained gather output is not an object")
+    return state
+
+
+def approve_and_submit_meta(sf, db, ws, run_id: str, *,
+                            expected_checkpoint=None, decision_id="") -> dict:
+    """Finish the approved pure-tool graph before enabling normal scheduling."""
+    from core.meta_conversation import format_brief_as_markdown
+    from core.project_submit import seed_and_trigger
+    from core.scheduler import _get_tick_lock
+
+    run = sf.get_run(run_id)
+    if not run or run.get("graph_name") != META_GRAPH:
+        raise ValueError("Expected the project's exact meta_conversation run")
+    pid = run["project_id"]
+    with _get_tick_lock(pid):
+        # The SDK still validates/replays the decision, including after completion.
+        approve_meta(sf, run_id, expected_checkpoint=expected_checkpoint,
+                     decision_id=decision_id)
+        state = retained_gather_state(sf, run_id,
+                                      expected_checkpoint["step_instance_id"])
+        brief = state.get("brief") or {}
+        project = db.get_project(pid) or {}
+        completed = project.get("completed_project_steps") or []
+        if isinstance(completed, str):
+            completed = json.loads(completed)
+        if (not (project.get("status") or "").startswith("failed:")
+                and not project.get("meta_state") and "1" in completed
+                and project.get("brief") == format_brief_as_markdown(brief)):
+            return {"status": "already_planned", "project_id": pid}
+        result = seed_and_trigger(db, ws, pid, brief)
+        if result.get("status") not in ("submitted", "already_planned"):
+            raise RuntimeError(result.get("message") or "The finalized build was not submitted")
+        return result

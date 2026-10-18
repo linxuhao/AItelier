@@ -894,6 +894,18 @@ def approve_checkpoint(
         # Do not read a fresh checkpoint here or gate on paused: the SDK must
         # compare the reviewed token atomically and replay identical decisions
         # even when this run has already advanced to another checkpoint/ending.
+        if run.get("graph_name") == "meta_conversation":
+            from core.meta_run import approve_and_submit_meta
+            try:
+                result = approve_and_submit_meta(
+                    sf, db, get_workspace_manager(), run_id,
+                    expected_checkpoint=request.expected_checkpoint,
+                    decision_id=request.decision_id)
+            except Exception as exc:
+                raise HTTPException(409, f"Brief approval/finalization not confirmed: {exc}") from exc
+            return {"status": "approved", "checkpoint": request.checkpoint,
+                    "run_id": run_id, "decision_id": request.decision_id,
+                    "finalized": True, "build_status": result["status"]}
         try:
             next_node = sf.approve_checkpoint(
                 run_id, expected_checkpoint=request.expected_checkpoint,

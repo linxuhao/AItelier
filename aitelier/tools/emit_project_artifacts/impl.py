@@ -12,11 +12,11 @@ host glue:
     output: step1_goals.json}`` cross-config context source.
 
 Pure, deterministic transform (no LLM): the brief comes from the gather step's
-``gather_state.json`` and the spec is the verbatim ``meta/conversation.md`` — so
+retained SDK output (or ``gather_state.json`` for direct utility calls) and the spec is the verbatim ``meta/conversation.md`` — so
 detailed requirements (e.g. game rules) survive un-summarized.
 
 Runs INLINE during ``advance_run`` (framework mode); the graph's
-``node_reached: finalize`` end condition then completes the meta run.
+``require_completed: true`` end condition then completes the meta run.
 """
 
 import json
@@ -29,7 +29,7 @@ from core.meta_conversation import (
 )
 
 
-def emit_project_artifacts(*, workspace_root: str = "", out_dir: str = "",
+def emit_project_artifacts(*, workspace_root: str = "", out_dir: str = "", run_id: str = "",
                            **kwargs) -> dict:
     """Write project_brief.md + spec.md + step1_goals.json. Returns {written, emitted}."""
     if not workspace_root or not Path(workspace_root).is_absolute():
@@ -48,10 +48,15 @@ def emit_project_artifacts(*, workspace_root: str = "", out_dir: str = "",
     # end-condition complete the meta run on garbage and start DPE brief-less.
     # Raising fails the step → the run cannot complete → the error surfaces.
     gs_path = ws / "meta_conversation" / "gather" / "gather_state.json"
-    if not gs_path.is_file():
+    if not run_id and not gs_path.is_file():
         raise ValueError(f"emit_project_artifacts: gather_state.json not found at {gs_path}")
     try:
-        data = json.loads(gs_path.read_text(encoding="utf-8")) or {}
+        if run_id:
+            from api.dependencies import get_skillflow
+            from core.meta_run import retained_gather_state
+            data = retained_gather_state(get_skillflow(), run_id)
+        else:
+            data = json.loads(gs_path.read_text(encoding="utf-8")) or {}
     except Exception as e:
         raise ValueError(f"emit_project_artifacts: gather_state.json is not valid JSON: {e}")
     brief = data.get("brief") or {}

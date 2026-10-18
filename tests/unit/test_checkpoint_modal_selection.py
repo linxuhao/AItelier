@@ -29,7 +29,9 @@ class _FakeResponse:
 
     def json(self):
         return {
-            "checkpoint": "2_review",
+            "checkpoint": "2_review", "step": "2_review", "run_id": "reviewed-run",
+            "decision_id": "same-decision", "expected_checkpoint": {"step_instance_id":42,
+                "version":3, "completion_seq":1, "outputs_sha256":"a"*64},
             "step_output": {"files": {"design.md": LONG_OUTPUT}},
         }
 
@@ -169,3 +171,25 @@ async def test_tab_and_left_right_cycle_the_selection():
             await pilot.press(key)
             await pilot.pause()
             assert modal._cursor == expected, f"after {key}"
+
+
+@pytest.mark.asyncio
+async def test_modal_retries_the_displayed_decision_after_a_lost_response():
+    import httpx
+    app = _Harness()
+    sent = []
+    async def post(url, json=None, timeout=None):
+        sent.append(json)
+        if len(sent) == 1:
+            raise httpx.ReadTimeout("response lost")
+        return _FakeResponse()
+    app.http.post = post
+    async with app.run_test(size=(100, 40)) as pilot:
+        modal, _ = await _open_modal(pilot, app)
+        await modal._do_approve().wait()
+        assert modal._mode == "select"
+        await modal._do_approve().wait()
+    assert len(sent) == 2 and sent[0] == sent[1]
+    assert sent[0]["run_id"] == "reviewed-run"
+    assert sent[0]["decision_id"] == "same-decision"
+    assert sent[0]["expected_checkpoint"] == _FakeResponse().json()["expected_checkpoint"]

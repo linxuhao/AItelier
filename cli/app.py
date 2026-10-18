@@ -382,6 +382,9 @@ def _monitor_checkpoints(project_id: str, client):
         if rejection_count > 0:
             console.print(f"[dim]This step has been revised {rejection_count} time(s).[/dim]")
 
+        if checkpoint.get("failed_rescue"):
+            console.print("[yellow]This is failed-run recovery. Approve explicitly resumes the failed run.[/yellow]")
+
         # Show interaction guidance from API
         _show_interaction_hint(checkpoint.get("interaction"))
         console.print("[dim]  [cyan]approve[/cyan] (or 'yes', 'y')  — accept this step[/dim]")
@@ -394,14 +397,14 @@ def _monitor_checkpoints(project_id: str, client):
             except (EOFError, KeyboardInterrupt):
                 console.print("[dim]Checkpoint auto-approved on exit.[/dim]")
                 try:
-                    client.approve_checkpoint(project_id, checkpoint["checkpoint"])
+                    client.approve_checkpoint(project_id, checkpoint)
                 except Exception:
                     pass
                 return
 
             if not answer or answer.lower() in ("y", "yes", "a", "approve", "/approve"):
                 try:
-                    client.approve_checkpoint(project_id, checkpoint["checkpoint"])
+                    client.approve_checkpoint(project_id, checkpoint)
                     console.print("[green]Checkpoint approved. Pipeline continuing...[/green]\n")
                 except Exception as e:
                     console.print(f"[red]Failed to approve: {e}[/red]")
@@ -419,7 +422,7 @@ def _monitor_checkpoints(project_id: str, client):
                     except (EOFError, KeyboardInterrupt):
                         console.print("[dim]Checkpoint auto-approved on exit.[/dim]")
                         try:
-                            client.approve_checkpoint(project_id, checkpoint["checkpoint"])
+                            client.approve_checkpoint(project_id, checkpoint)
                         except Exception:
                             pass
                         return
@@ -427,7 +430,8 @@ def _monitor_checkpoints(project_id: str, client):
                         console.print("[dim]Rejection reason is required. Please explain what needs to change.[/dim]")
 
                 try:
-                    client.reject_checkpoint(project_id, checkpoint["checkpoint"], feedback.strip())
+                    client.reject_checkpoint(project_id, checkpoint["checkpoint"], feedback.strip(),
+                                             run_id=checkpoint["run_id"])
                     console.print(f"[yellow]Checkpoint rejected with feedback. Pipeline will re-run step...[/yellow]\n")
                 except Exception as e:
                     console.print(f"[red]Failed to reject: {e}[/red]")
@@ -438,7 +442,7 @@ def _monitor_checkpoints(project_id: str, client):
                 if cmd in ("/quit", "/exit", "/q"):
                     console.print("[dim]Bye. Checkpoint auto-approved.[/dim]")
                     try:
-                        client.approve_checkpoint(project_id, checkpoint["checkpoint"])
+                        client.approve_checkpoint(project_id, checkpoint)
                     except Exception:
                         pass
                     raise SystemExit(0)

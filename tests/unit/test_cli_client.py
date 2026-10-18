@@ -282,3 +282,19 @@ def test_http_error_raises():
     client = _make_client(handler)
     with pytest.raises(httpx.HTTPStatusError):
         client.get_task(99999)
+
+
+def test_approval_sends_observed_identity_and_retries_the_same_decision():
+    import json
+    sent = []
+    def handler(request):
+        sent.append((request.url.path, json.loads(request.content)))
+        return httpx.Response(200, json={"status":"approved"})
+    client = _make_client(handler)
+    observed = {"checkpoint":"plan", "run_id":"reviewed-run", "decision_id":"same-decision",
+                "expected_checkpoint":{"step_instance_id":42,"version":3,"completion_seq":1,"outputs_sha256":"a"*64}}
+    client.approve_checkpoint("project", observed)
+    client.approve_checkpoint("project", observed)
+    assert sent[0] == sent[1]
+    assert sent[0][1] == {**observed, "project_id":"project", "rescue_failed":False}
+    assert all(path.endswith("/checkpoint/approve") for path, body in sent)

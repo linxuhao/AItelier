@@ -282,7 +282,7 @@ class APIClient:
             return None
         return data
 
-    def approve_checkpoint(self, project_id: str, checkpoint: str) -> dict:
+    def approve_checkpoint(self, project_id: str, checkpoint: dict) -> dict:
         """Approve a checkpoint and resume the pipeline.
 
         Carries no feedback: skillflow's approve_checkpoint(run_id) has no
@@ -291,17 +291,21 @@ class APIClient:
         """
         resp = self._client.post(
             f"/api/meta/{project_id}/checkpoint/approve",
-            json={"project_id": project_id, "checkpoint": checkpoint},
+            json={"project_id": project_id, "checkpoint": checkpoint["checkpoint"],
+                  "run_id": checkpoint["run_id"],
+                  "expected_checkpoint": checkpoint.get("expected_checkpoint"),
+                  "decision_id": checkpoint.get("decision_id", ""),
+                  "rescue_failed": checkpoint.get("failed_rescue", False)},
             timeout=30.0,
         )
         resp.raise_for_status()
         return resp.json()
 
-    def reject_checkpoint(self, project_id: str, checkpoint: str, feedback: str) -> dict:
+    def reject_checkpoint(self, project_id: str, checkpoint: str, feedback: str, *, run_id: str = "") -> dict:
         """Reject a checkpoint with feedback. Pipeline will re-run the step."""
         resp = self._client.post(
             f"/api/meta/{project_id}/checkpoint/reject",
-            json={"project_id": project_id, "checkpoint": checkpoint, "feedback": feedback},
+            json={"project_id": project_id, "checkpoint": checkpoint, "feedback": feedback, "run_id": run_id},
             timeout=30.0,
         )
         resp.raise_for_status()

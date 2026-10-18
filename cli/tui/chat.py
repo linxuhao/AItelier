@@ -195,6 +195,7 @@ class CheckpointModal(ModalScreen[bool]):
         self.checkpoint_step = checkpoint_step
         self._cursor = 0        # 0 = approve, 1 = reject
         self._mode = "select"   # "select" | "feedback"
+        self._observation = None
 
     def compose(self):
         yield Static(
@@ -259,11 +260,17 @@ class CheckpointModal(ModalScreen[bool]):
                 return
             if not data.get("checkpoint"):
                 self._dismiss_resolved()
+            elif self._observation and (
+                    data.get("run_id") != self._observation.get("run_id") or
+                    data.get("expected_checkpoint") != self._observation.get("expected_checkpoint")):
+                self._dismiss_resolved("Checkpoint changed — open it again to review")
 
     def _refresh_options(self):
         lines = ["What would you like to do?", ""]
         for i, (_, label) in enumerate(self._OPTIONS):
             cursor = "●" if i == self._cursor else "○"
+            if i == 0 and (self._observation or {}).get("failed_rescue"):
+                label = "Resume failed run — explicit recovery"
             lines.append(f"  {cursor} {label}")
         self.query_one("#cp-options-display").update("\n".join(lines))
 
@@ -357,6 +364,10 @@ class CheckpointModal(ModalScreen[bool]):
         if not data.get("checkpoint"):
             self._dismiss_resolved()
             return
+
+        self._observation = data
+        self.checkpoint_step = data["step"]
+        self._refresh_options()
 
         step_output = data.get("step_output", {}) or {}
         files = step_output.get("files", {}) if isinstance(step_output, dict) else {}
@@ -462,31 +473,21 @@ class CheckpointModal(ModalScreen[bool]):
         success = False
         error_msg = None
         url = f"/api/meta/{self.project_id}/checkpoint/approve"
-        body = {"project_id": self.project_id, "checkpoint": "", "feedback": ""}
+        observed = self._observation or {}
+        body = {"project_id": self.project_id, "checkpoint": observed.get("checkpoint", ""),
+                "run_id": observed.get("run_id", ""),
+                "expected_checkpoint": observed.get("expected_checkpoint"),
+                "decision_id": observed.get("decision_id", ""),
+                "rescue_failed": observed.get("failed_rescue", False)}
 
         try:
             resp = await self.app.http.post(url, json=body, timeout=45.0)
             resp.raise_for_status()
             success = True
         except Exception as e:
-            if isinstance(e, httpx.ReadTimeout):
-                # TUI-3: post timed out but backend may have accepted. Poll GET
-                # /api/meta/{pid}/checkpoint once; if no checkpoint is pending
-                # there, the approve went through and the backend has moved on.
-                try:
-                    ck = await self.app.http.get(
-                        f"/api/meta/{self.project_id}/checkpoint", timeout=10.0
-                    )
-                    if ck.status_code == 200 and (ck.json().get("checkpoint") or "") == "":
-                        # backend moved on (no checkpoint waiting). Approve went through.
-                        success = True
-                        error_msg = None
-                    else:
-                        error_msg = f"{type(e).__name__}: {e}"[:150]
-                except Exception:
-                    error_msg = f"{type(e).__name__}: {e}"[:150]
-            else:
-                error_msg = f"{type(e).__name__}: {e}"[:150]
+            # A lost response does not prove acceptance. The retained decision
+            # can safely be retried; never substitute another checkpoint view.
+            error_msg = f"{type(e).__name__}: {e}"[:150]
         if success:
             self.query_one("#cp-options-display").update("\n  ✓ Approved")
             self.query_one("#cp-hint").update("")
@@ -511,7 +512,9 @@ class CheckpointModal(ModalScreen[bool]):
     async def _do_reject(self, feedback: str):
         success = False
         url = f"/api/meta/{self.project_id}/checkpoint/reject"
-        body = {"project_id": self.project_id, "checkpoint": "", "feedback": feedback}
+        observed = self._observation or {}
+        body = {"project_id": self.project_id, "checkpoint": observed.get("checkpoint", ""),
+                "run_id": observed.get("run_id", ""), "feedback": feedback}
 
         try:
             resp = await self.app.http.post(url, json=body, timeout=45.0)
@@ -1322,23 +1325,8 @@ class ChatZone(Container):
             if isinstance(screen, CheckpointModal):
                 await screen._do_approve()
                 return
-        try:
-            resp = await self.app.http.post(
-                f"/api/meta/{self.current_project}/checkpoint/approve",
-                json={"project_id": self.current_project, "checkpoint": "", "feedback": ""},
-                timeout=5.0,
-            )
-            resp.raise_for_status()
-            pid = self.current_project
-            self._add_system(f"Checkpoint approved — {pid} pipeline resuming. Please wait...")
-            # Update FlashBar immediately
-            flash_bar = self.app.query_one("#flash-bar")
-            flash_bar.flash_immediate(f"{pid} checkpoint approved")
-            # Refresh dashboard
-            dashboard = self.app.query_one("#dashboard-zone")
-            dashboard._fetch_projects()
-        except Exception as e:
-            self._add_error(f"Failed to approve checkpoint: {e}")
+        self._show_checkpoint()
+        self._add_system("Review the checkpoint, then approve it in the modal.")
 
     @work(exclusive=True)
     async def _reject_checkpoint(self, feedback: str):

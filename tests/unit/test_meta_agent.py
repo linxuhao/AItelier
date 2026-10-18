@@ -600,9 +600,9 @@ class TestActiveMetaRunResolution:
     """#4: the agent must never have to search for the run_id — the approve/answer
     tools self-resolve the live meta run for this turn."""
 
-    def test_approve_and_answer_no_longer_require_run_id(self):
+    def test_approval_requires_reviewed_identity_but_answers_can_resolve_conversation(self):
         by_name = {td["function"]["name"]: td["function"] for td in TOOL_DEFINITIONS}
-        assert "run_id" not in by_name["approve_project_brief"]["parameters"]["required"]
+        assert {"run_id", "expected_checkpoint", "decision_id"} <= set(by_name["approve_project_brief"]["parameters"]["required"])
         assert by_name["answer_project_conversation"]["parameters"]["required"] == ["answer"]
 
     def _agent(self, mock_db, mock_ws):
@@ -654,17 +654,12 @@ class TestActiveMetaRunResolution:
 
 
 class TestResolvePipelineRun:
-    """The approve/reject/wait tools must resolve the run by the stable
-    project_id, so a stale/wrong run_id (e.g. the completed meta_conversation
-    run) self-corrects to the project's active build run instead of no-opping.
-    Regression for a live dpe_game drive where the butler approved the finished
-    meta run, saw no progress, and spawned a duplicate project.
-    """
+    """An observed decision keeps its exact run; project discovery is separate."""
 
     def _agent(self, mock_db, mock_ws):
         return MetaAgent(mock_db, mock_ws, owner_email="t@local")
 
-    def test_prefers_active_run_over_stale_run_id(self, mock_db, mock_ws):
+    def test_explicit_run_is_not_retargeted_to_a_newer_sibling(self, mock_db, mock_ws):
         agent = self._agent(mock_db, mock_ws)
         sf = MagicMock()
         sf.get_run.return_value = {"project_id": "flappy", "status": "completed"}
@@ -672,8 +667,9 @@ class TestResolvePipelineRun:
         with patch("api.dependencies.get_skillflow", return_value=sf):
             rid, note = agent._resolve_pipeline_run(
                 {"run_id": "meta-run-completed"})
-        assert rid == "dpe-run"
-        assert "meta-run-completed" in note  # flagged the correction
+        assert rid == "meta-run-completed"
+        assert note == ""
+        sf.get_run_by_project.assert_not_called()
 
     def test_resolves_from_project_id_alone(self, mock_db, mock_ws):
         agent = self._agent(mock_db, mock_ws)

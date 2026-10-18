@@ -34,6 +34,8 @@ second copy, but that edit is deliberately not made here.
 
 from __future__ import annotations
 
+from core.checkpoint_protocol import approve_current_checkpoint
+
 import asyncio
 import json
 
@@ -405,7 +407,7 @@ async def _watch(sf, run_id: str, auto_approve: bool, max_watch_s: float) -> str
             return
         if notification.event_type == "checkpoint_paused":
             try:
-                sf.approve_checkpoint(run_id)
+                approve_current_checkpoint(sf, run_id)
             except Exception:
                 pass          # a checkpoint answered by someone else is not an error
         elif notification.event_type in ("run_completed", "run_failed",
@@ -419,7 +421,7 @@ async def _watch(sf, run_id: str, auto_approve: bool, max_watch_s: float) -> str
         run = sf.get_run(run_id) or {}
         if run.get("status") == "paused":
             try:
-                sf.approve_checkpoint(run_id)
+                approve_current_checkpoint(sf, run_id)
             except Exception:
                 pass
         elif run.get("status") in _TERMINAL:
@@ -450,7 +452,7 @@ async def _step(sf, db, ws, run_id: str, auto_approve: bool, max_steps: int) -> 
         if status == "paused":
             if not auto_approve:
                 break                 # deliberately left for answer_checkpoint
-            sf.approve_checkpoint(run_id)
+            approve_current_checkpoint(sf, run_id)
             continue
         nxt = sf.advance_run(run_id)
         if (sf.get_run(run_id) or {}).get("status") in ("paused", *_TERMINAL):

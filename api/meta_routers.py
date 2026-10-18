@@ -475,6 +475,11 @@ def task_meta_force(
 # ── Checkpoint endpoints (DB-direct, no OrchestratorRegistry) ──
 
 class CheckpointResponse(BaseModel):
+    run_id: Optional[str] = None
+    expected_checkpoint: Optional[dict] = None
+    decision_id: Optional[str] = None
+    outputs: Optional[dict] = None
+    failed_rescue: bool = False
     checkpoint: Optional[str] = None
     label: Optional[str] = None
     step: Optional[str] = None
@@ -490,12 +495,17 @@ class CheckpointResponse(BaseModel):
 
 
 class CheckpointApprovalRequest(BaseModel):
+    run_id: str = ""
+    expected_checkpoint: Optional[dict] = None
+    decision_id: str = ""
+    rescue_failed: bool = False
     project_id: str = ""   # optional — defaults to URL path project_id
     checkpoint: str
     feedback: str = ""
 
 
 class CheckpointRejectionRequest(BaseModel):
+    run_id: str = ""
     project_id: str = ""   # optional — defaults to URL path project_id
     checkpoint: str
     feedback: str = Field(..., min_length=1, max_length=MAX_INTAKE_CHARS)
@@ -673,6 +683,10 @@ def _get_checkpoint_info(project_id: str,
     run = sf.get_run(run_id) if run_id else sf.get_run_by_project(project_id)
     if not run or run["status"] not in ("paused", "failed"):
         return "", "", "", "", 0
+    if run["status"] == "paused":
+        checkpoint = sf.get_checkpoint(run["id"])
+        return (checkpoint["step_id"], checkpoint["label"], run["id"],
+                run["graph_name"], checkpoint["expected_checkpoint"]["step_instance_id"])
     if _failed_on_routing(run):
         return "", "", "", "", 0
 
@@ -757,14 +771,32 @@ def get_pending_checkpoint(
     request: Request,
     user: CurrentUser | None = Depends(get_optional_user),
     db: DBManager = Depends(get_db_manager),
+    run_id: str = "",
 ):
-    """Get the current pending checkpoint for a project, if any."""
+    """Retained review context for the exact selected run (latest only if omitted)."""
     project = db.get_project(project_id)
     if not project:
         raise HTTPException(404, "Project not found")
     check_read_owner(user, request, project)
 
-    step_id, label, _run_id, _graph, _instance = _get_checkpoint_info(project_id)
+    sf = get_skillflow()
+    run = sf.get_run(run_id) if run_id else sf.get_run_by_project(project_id)
+    if run_id and (not run or run.get("project_id") != project_id):
+        raise HTTPException(404, "Exact run not found for project")
+    if run and run.get("status") == "paused":
+        from core.checkpoint_protocol import checkpoint_view
+        try:
+            observed = checkpoint_view(sf, run["id"])
+        except Exception as exc:
+            raise HTTPException(409, str(exc)) from exc
+        history = _read_rejection_rounds(project_id, observed["step"], run["graph_name"], run["id"])
+        observed["step_output"]["rejection_history"] = history
+        observed["rejection_count"] = len(history or [])
+        observed["interaction"] = for_checkpoint_waiting(
+            step_label=observed["label"], rejection_count=len(history or []))
+        return CheckpointResponse(**observed)
+
+    step_id, label, _run_id, _graph, _instance = _get_checkpoint_info(project_id, run_id)
     if not step_id:
         return CheckpointResponse()
 
@@ -773,6 +805,8 @@ def get_pending_checkpoint(
 
     return CheckpointResponse(
         checkpoint=step_id,
+        run_id=_run_id,
+        failed_rescue=True,
         label=label,
         step=step_id,
         checkpoint_instance=_instance,
@@ -842,45 +876,33 @@ def approve_checkpoint(
             f"before launching. Re-send as a rejection, or drop `feedback` if "
             f"you really do mean 'approve as-is'."))
 
-    _step_id, _label, run_id, _graph, _inst = _get_checkpoint_info(project_id)
-    if not run_id:
-        raise HTTPException(400, "Project is not waiting for approval")
-    state_checkpoint_controller(http_request, run_id, db)
-
-    # AT-7 idempotency guard: only act if the requested checkpoint is the one the
-    # run is actually paused at. A stale modal, double-click, or client retry that
-    # targets an already-passed checkpoint must NOT re-trigger reactivate/resume —
-    # that can re-traverse the pipeline (duplicate steps). Treat a mismatch as an
-    # idempotent no-op rather than acting on the wrong checkpoint.
-    if request.checkpoint and _step_id and request.checkpoint != _step_id:
-        return {"status": "already_advanced", "checkpoint": request.checkpoint,
-                "current_checkpoint": _step_id}
-
     sf = get_skillflow()
-    run = sf.get_run(run_id)
-    # Refuse to approve on a completed run — reactivate_run on a completed
-    # run is a no-op in skillflow (status stays completed), so the
-    # _get_or_create_skillflow_run scheduler path then sees "no active run"
-    # and creates a fresh run, restarting the entire pipeline from Step 1.
-    # The right path for an already-completed run is to use POST /projects/
-    # {id}/retry, not this endpoint.
-    if run and run["status"] == "completed":
-        raise HTTPException(400, "Run is already completed; use POST /projects/{id}/retry to re-run")
-
-    # SF-7: use skillflow's first-class approve_checkpoint for paused runs.
-    # The framework validates the checkpoint state, emits checkpoint_approved
-    # outbox event, and resumes the run in one atomic transaction.
-    # For failed runs (A3 rescue path), fall back to reactivate + resume.
-    next_node = ""
-    if run and run["status"] == "paused":
-        next_node = sf.approve_checkpoint(run_id)
-        # Sync the project status immediately so the scheduler picks it up.
-        # Without this, the aitelier DB still shows "checkpoint:..." and the
-        # scheduler's status filter (planning/executing/verifying/running)
-        # skips the project entirely.
+    run_id = request.run_id
+    run = sf.get_run(run_id) if run_id else None
+    if not run or run.get("project_id") != project_id:
+        raise HTTPException(409, "Approval requires the observed exact run_id for this project")
+    state_checkpoint_controller(http_request, run_id, db)
+    _step_id, _label = request.checkpoint, "Checkpoint"
+    if request.rescue_failed:
+        # Failure recovery is a different action, never a fallback from an SDK refusal.
+        if run.get("status") != "failed":
+            raise HTTPException(409, "Only a failed run can be explicitly rescued")
+        _step_id, _label, _rid, _graph, _inst = _get_checkpoint_info(project_id, run_id)
+        if not _step_id or request.checkpoint != _step_id:
+            raise HTTPException(409, "Failed-run rescue checkpoint changed")
+    else:
+        # Do not read a fresh checkpoint here or gate on paused: the SDK must
+        # compare the reviewed token atomically and replay identical decisions
+        # even when this run has already advanced to another checkpoint/ending.
+        try:
+            next_node = sf.approve_checkpoint(
+                run_id, expected_checkpoint=request.expected_checkpoint,
+                decision_id=request.decision_id)
+        except Exception as exc:
+            raise HTTPException(409, str(exc)) from exc
         from core.scheduler import _sync_project_status_to_db
         _sync_project_status_to_db(project_id)
-    elif run and run["status"] == "failed":
+    if request.rescue_failed:
         sf.reactivate_run(run_id)
         from core.run_driver import restore_retry_budget
         # Restoring the budget is best-effort; RESUMING is not. Unguarded, a
@@ -917,6 +939,12 @@ def approve_checkpoint(
     import asyncio, json, time, sys
     wake_scheduler()
 
+    if not request.rescue_failed:
+        # SDK95 publishes the committed checkpoint_approved event once. An
+        # identical retry must not emit a second resolution for a later pause.
+        return {"status": "approved", "checkpoint": request.checkpoint,
+                "run_id": run_id, "decision_id": request.decision_id}
+
     # Push the checkpoint_resolved SSE event as a short, non-blocking task.
     try:
         resolved_payload = json.dumps({
@@ -942,7 +970,7 @@ def approve_checkpoint(
         # Never let SSE bookkeeping affect the response — approval is recorded.
         print(f"[approve_checkpoint] SSE push error: {e}", file=sys.stderr)
 
-    return {"status": "approved", "checkpoint": request.checkpoint}
+    return {"status": "rescued", "checkpoint": request.checkpoint, "run_id": run_id}
 
 
 @router.post("/{project_id}/checkpoint/reject")
@@ -959,7 +987,11 @@ def reject_checkpoint(
         raise HTTPException(404, "Project not found")
     check_write_owner(user, project)
 
-    step_id, _label, run_id, _graph, _inst = _get_checkpoint_info(project_id)
+    if request.run_id:
+        selected = get_skillflow().get_run(request.run_id)
+        if not selected or selected.get("project_id") != project_id:
+            raise HTTPException(409, "Exact run does not belong to this project")
+    step_id, _label, run_id, _graph, _inst = _get_checkpoint_info(project_id, request.run_id)
     if not run_id or not step_id:
         raise HTTPException(400, "Project is not waiting for approval")
     state_checkpoint_controller(http_request, run_id, db)
@@ -967,8 +999,7 @@ def reject_checkpoint(
     # AT-7 idempotency guard (see approve_checkpoint): ignore a reject aimed at a
     # checkpoint the run is no longer paused at.
     if request.checkpoint and step_id and request.checkpoint != step_id:
-        return {"status": "already_advanced", "checkpoint": request.checkpoint,
-                "current_checkpoint": step_id}
+        raise HTTPException(409, "Checkpoint changed; read the selected run again")
 
     sf = get_skillflow()
     # Same guard as approve_checkpoint — refuse on completed run.

@@ -373,7 +373,7 @@
     if (!pid || !cp || actionLoading['cpApprove']) return;
     actionLoading = { ...actionLoading, cpApprove: true };
     try {
-      await approveCheckpoint(pid);
+      await approveCheckpoint(pid, cp);
       checkpoint = null;
     } catch (err: unknown) {
       error = err instanceof Error ? err.message : 'Failed to approve checkpoint';
@@ -398,8 +398,8 @@
     // the same step without a rejection — 5_review -> 3 pauses step 3's
     // checkpoint again with rejection_count unchanged, and without the instance
     // the key would be identical and a half-written rejection would carry over.
-    return [cp.checkpoint, cp.step, cp.rejection_count,
-            cp.checkpoint_instance].join('\u0000');
+    return [cp.run_id, cp.checkpoint, cp.step, cp.rejection_count,
+            cp.checkpoint_instance, JSON.stringify(cp.expected_checkpoint)].join('\u0000');
   }
 
   function startCheckpointReject(): void {
@@ -429,7 +429,7 @@
     }
     actionLoading = { ...actionLoading, cpReject: true };
     try {
-      await rejectCheckpoint(pid, feedback);
+      await rejectCheckpoint(pid, feedback, cp);
       checkpoint = null;
       checkpointRejectMode = false;
       checkpointFeedback = '';
@@ -754,7 +754,7 @@
                 onclick={handleCheckpointApprove}
                 disabled={actionLoading['cpApprove']}
               >
-                {actionLoading['cpApprove'] ? t('project.approving') : t('project.approve')}
+                {actionLoading['cpApprove'] ? t('project.approving') : checkpoint.failed_rescue ? 'Resume failed run' : t('project.approve')}
               </button>
               <button
                 class="contrast"

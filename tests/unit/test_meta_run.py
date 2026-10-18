@@ -38,8 +38,8 @@ def test_approve_meta_drives_finalize_then_self_completes():
     sf = MagicMock()
     seq = iter([{"status": "paused"}, {"status": "running"}, {"status": "completed"}])
     sf.get_run.side_effect = lambda rid: next(seq, {"status": "completed"})
-    meta_run.approve_meta(sf, "run-1")
-    sf.approve_checkpoint.assert_called_once_with("run-1")
+    meta_run.approve_meta(sf, "run-1", expected_checkpoint={"observed": 1}, decision_id="observed-decision")
+    sf.approve_checkpoint.assert_called_once_with("run-1", expected_checkpoint={"observed": 1}, decision_id="observed-decision")
     sf.advance_run.assert_called()              # drove the graph through finalize
     sf.complete_run.assert_not_called()         # graph self-terminated
 
@@ -47,7 +47,7 @@ def test_approve_meta_drives_finalize_then_self_completes():
 def test_approve_meta_idempotent_when_already_completed():
     sf = MagicMock()
     sf.get_run.return_value = {"status": "completed"}
-    meta_run.approve_meta(sf, "run-1")
+    meta_run.approve_meta(sf, "run-1", expected_checkpoint={"observed": 1}, decision_id="observed-decision")
     sf.approve_checkpoint.assert_not_called()
     sf.advance_run.assert_not_called()
     sf.complete_run.assert_not_called()
@@ -61,8 +61,8 @@ def test_approve_meta_raises_if_finalize_never_completes():
     sf = MagicMock()
     sf.get_run.return_value = {"status": "paused"}   # never becomes terminal
     with pytest.raises(RuntimeError):
-        meta_run.approve_meta(sf, "run-1")
-    sf.approve_checkpoint.assert_called_once_with("run-1")
+        meta_run.approve_meta(sf, "run-1", expected_checkpoint={"observed": 1}, decision_id="observed-decision")
+    sf.approve_checkpoint.assert_called_once_with("run-1", expected_checkpoint={"observed": 1}, decision_id="observed-decision")
     assert sf.advance_run.call_count >= 1
     sf.complete_run.assert_not_called()             # never force-completes
 
@@ -74,7 +74,7 @@ def test_approve_meta_raises_when_finalize_tool_errors():
     sf.get_run.return_value = {"status": "running"}
     sf.advance_run.side_effect = ValueError("brief has no user stories")
     with pytest.raises(RuntimeError):
-        meta_run.approve_meta(sf, "run-1")
+        meta_run.approve_meta(sf, "run-1", expected_checkpoint={"observed": 1}, decision_id="observed-decision")
     sf.complete_run.assert_not_called()
 
 
@@ -102,9 +102,9 @@ def test_approve_meta_with_step_runner_claims_and_executes_step():
     step_runner_result = {"written": ["project_brief.md"], "emitted": True}
     step_runner = MagicMock(return_value=step_runner_result)
 
-    meta_run.approve_meta(sf, "run-1", step_runner=step_runner)
+    meta_run.approve_meta(sf, "run-1", step_runner=step_runner, expected_checkpoint={"observed": 1}, decision_id="observed-decision")
 
-    sf.approve_checkpoint.assert_called_once_with("run-1")
+    sf.approve_checkpoint.assert_called_once_with("run-1", expected_checkpoint={"observed": 1}, decision_id="observed-decision")
     sf.advance_run.assert_called()
     sf.claim_next_step.assert_called_once_with("run-1")
     step_runner.assert_called_once_with(claimed)
@@ -147,8 +147,8 @@ def test_approve_meta_no_step_runner_preserves_backward_compat():
     sf = MagicMock()
     seq = iter([{"status": "paused"}, {"status": "running"}, {"status": "completed"}])
     sf.get_run.side_effect = lambda rid: next(seq, {"status": "completed"})
-    meta_run.approve_meta(sf, "run-1")
-    sf.approve_checkpoint.assert_called_once_with("run-1")
+    meta_run.approve_meta(sf, "run-1", expected_checkpoint={"observed": 1}, decision_id="observed-decision")
+    sf.approve_checkpoint.assert_called_once_with("run-1", expected_checkpoint={"observed": 1}, decision_id="observed-decision")
     sf.advance_run.assert_called()
     sf.claim_next_step.assert_not_called()
     sf.confirm_step.assert_not_called()

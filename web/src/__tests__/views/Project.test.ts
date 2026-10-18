@@ -449,6 +449,22 @@ describe('Project.svelte', () => {
 
   // ── Checkpoint card ──
 
+  it('approves the exact checkpoint already rendered and retains its decision on retry', async () => {
+    const observed = {...MOCK_CHECKPOINT, run_id:'exact-rendered-run', decision_id:'rendered-decision',
+      expected_checkpoint:{step_instance_id:42,version:3,completion_seq:1,outputs_sha256:'a'.repeat(64)}};
+    mockApi.getCheckpoint.mockResolvedValue(observed);
+    mockApi.approveCheckpoint.mockRejectedValueOnce(new Error('lost response')).mockResolvedValueOnce({status:'approved'});
+    const {container, findByText} = render(await import('../../views/Project.svelte'), {props:{params:{id:'test-project'}}});
+    await findByText(/Checkpoint pending/);
+    await fireEvent.click(container.querySelector('#checkpoint-card button.primary')!);
+    await waitFor(() => expect(mockApi.approveCheckpoint).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect((container.querySelector('#checkpoint-card button.primary') as HTMLButtonElement).disabled).toBe(false));
+    await fireEvent.click(container.querySelector('#checkpoint-card button.primary')!);
+    await waitFor(() => expect(mockApi.approveCheckpoint).toHaveBeenCalledTimes(2));
+    expect(mockApi.approveCheckpoint.mock.calls[0]).toEqual(['test-project',observed]);
+    expect(mockApi.approveCheckpoint.mock.calls[1]).toEqual(['test-project',observed]);
+  });
+
   it('shows checkpoint card when checkpoint is pending', async () => {
     mockApi.getCheckpoint.mockResolvedValue({ ...MOCK_CHECKPOINT });
 

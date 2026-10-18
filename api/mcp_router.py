@@ -1325,15 +1325,18 @@ def _register_run_tools(tool, mcp=None):
           "here rather than accepted and dropped. To attach binding instructions to "
           "work already done, reject with them; the step comes back changed. Only a "
           "run whose status is 'paused' has anything to answer — check with "
-          "wait_for_run or get_run_status first. " + _EITHER +
+          "get_run_status first, review its checkpoint outputs, and pass its "
+          "expected_checkpoint plus decision_id unchanged with the exact run_id. " + _EITHER +
           " This one MUTATES, so when a project id has several runs the reply also "
           "lists the siblings: a wrong target is visible in the answer rather than "
           "only in what happens next.")
     def answer_checkpoint(run_id: RunId, decision: str = "approve",
-                          feedback: str = "") -> dict:
+                          feedback: str = "", expected_checkpoint: dict | None = None,
+                          decision_id: str = "") -> dict:
         from api.dependencies import get_skillflow
         from core.trace_reader import resolve_run_ref
         sf = get_skillflow()
+        original_run_id = run_id
         run, resolved = resolve_run_ref(sf, run_id)
         if not run:
             return {"error": f"no run '{run_id}'"}
@@ -1388,7 +1391,9 @@ def _register_run_tools(tool, mcp=None):
             return {**echo, "error": exc.detail}
         if controller.get("break_glass"):
             echo = {**echo, "break_glass": True, "attempt_id": controller.get("attempt_id")}
-        if run.get("status") != "paused":
+        if decision == "approve" and run_id != str(original_run_id):
+            return {**echo, "error": "Approval requires the exact observed run_id"}
+        if decision != "approve" and run.get("status") != "paused":
             # A project id takes the NEWEST run, which is not always the one with
             # the checkpoint: a project can acquire a meta_conversation run AFTER
             # its build (jinyong-turn has exactly that shape), and then the newest
@@ -1406,7 +1411,8 @@ def _register_run_tools(tool, mcp=None):
                              f"there is no checkpoint to answer{extra}"}
         try:
             if decision == "approve":
-                sf.approve_checkpoint(run_id)
+                sf.approve_checkpoint(run_id, expected_checkpoint=expected_checkpoint,
+                                      decision_id=decision_id)
             else:
                 # `reject_checkpoint` needs the STEP the run is paused at, and
                 # resolving that from a run is exactly what the web/CLI path
@@ -1429,43 +1435,13 @@ def _register_run_tools(tool, mcp=None):
                     redirect_to=checkpoint_reject_target(
                         sf, run.get("graph_name") or _graph, step_id, run_id))
         except Exception as e:
-            # An exception is NOT proof the answer failed. skillflow can persist
-            # the state change and then raise on the way out — live, 2026-08-29,
-            # run 0fe350af: `approve_checkpoint` raised
-            # "cannot commit - no transaction is active" while the run had
-            # ALREADY moved from paused@1 to running@1_review and went on to
-            # execute the next step. Reporting that as "approve failed" is a
-            # verdict of failure over a mutation that happened, and the natural
-            # response to it — answer again — is a second answer to a checkpoint
-            # that is no longer there.
-            #
-            # So ask the run, not the exception. If it is no longer paused the
-            # answer landed; say so, and carry the exception text along so the
-            # underlying skillflow bug stays visible instead of being papered
-            # over by a success payload.
-            # `if after and …`, never `(… or {}).get(...)`: an unreadable run
-            # gives status None, which is also `!= "paused"`, so the shortcut
-            # would answer "it landed, do not send it again" about a run it
-            # could not read. That is this bug's own mirror image, and the worse
-            # half — a false failure is re-checked, a false success is not. When
-            # we cannot tell, report the exception we actually saw.
-            try:
-                after = sf.get_run(run_id)
-            except Exception:
-                after = None
-            if after and after.get("status") != "paused":
-                return {**echo, "run_id": run_id, "decision": decision,
-                        "status": after.get("status"),
-                        "current_node": after.get("current_node"),
-                        "warning": (f"{decision} raised {e!r} but the run left "
-                                    f"'paused', so the answer DID land — do not "
-                                    f"send it again. Report the exception: it is "
-                                    f"a defect in the commit path, not in this "
-                                    f"answer.")}
-            return {**echo, "error": f"{decision} failed: {e}"}
+            # Global run status cannot prove THIS decision landed. In particular
+            # a stale/colliding retry against a running run is still refused.
+            return {**echo, "error": f"{decision} not confirmed: {e}"}
         # Answering releases the run; whoever was driving it keeps going.
         after = sf.get_run(run_id) or {}
         return {**echo, "run_id": run_id, "decision": decision,
+                "decision_id": decision_id,
                 "status": after.get("status"), "current_node": after.get("current_node")}
 
     @tool("get_run_summary", "read",
@@ -1516,6 +1492,17 @@ def _register_run_tools(tool, mcp=None):
                "config": run.get("graph_name"), "project_id": run.get("project_id"),
                "current_node": run.get("current_node"),
                "paused": run.get("status") == "paused"}
+        if out["paused"]:
+            try:
+                request = _request_from(mcp.get_context()) if mcp is not None else None
+            except Exception:
+                request = None
+            if request is not None and _mcp_may_read_private(request):
+                from core.checkpoint_protocol import checkpoint_view
+                try:
+                    out["checkpoint"] = checkpoint_view(get_skillflow(), run["id"])
+                except Exception as exc:
+                    out["checkpoint_error"] = str(exc)
         if resolved:
             out["resolved"] = resolved
         return out
@@ -1647,10 +1634,9 @@ def _wait_result(run_id: str, run: dict, timed_out: bool, event: str | None,
         # answer_checkpoint". Sending them to the UI instead denied a capability
         # they were holding — measured against a live checkpoint approved through
         # this endpoint minutes after the message claimed it was impossible.
-        out["next"] = ("Paused at a checkpoint. Answer it here: "
-                       "answer_checkpoint(run_id, decision='approve'|'reject', "
-                       "feedback=…). The AItelier UI is the other way in, not the "
-                       "only one.")
+        out["next"] = ("Read get_run_status(run_id) for the retained checkpoint review "
+                       "and pass its expected_checkpoint and decision_id unchanged to "
+                       "answer_checkpoint with the exact run_id. Reject uses feedback.")
     elif status == "failed":
         out["error_reason"] = run.get("error_reason") or ""
     elif timed_out:

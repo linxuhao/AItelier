@@ -172,7 +172,7 @@ repo_path, initial_message)
 questions or brief. When the user replies, call \
 answer_project_conversation(run_id, answer=<their reply>).
 4. When a BRIEF is returned, present it and ask the user to approve. On approval \
-call approve_project_brief(run_id) — this starts the build pipeline. If they \
+call approve_project_brief with that brief_review's run_id, expected_checkpoint and decision_id — this starts the build pipeline. If they \
 want changes, call answer_project_conversation(run_id, answer=<their changes>).
    - PICK THE RIGHT PIPELINE via ADDONS: if the project is a GAME, the default \
 software pipeline is wrong — it has no runtime game gate. Before approving, call \
@@ -434,18 +434,19 @@ TOOL_DEFINITIONS = [
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "expected_checkpoint": {"type": "object", "description": "Exact token retained with the checkpoint shown to the user."},
+                    "decision_id": {"type": "string", "description": "Retain the observed decision_id unchanged on retries."},
                     "project_id": {"type": "string", "description": "Project whose brief to approve "
-                               "(preferred identity — the conversation run is resolved from it)."},
+                               "(metadata; the reviewed run_id remains authoritative)."},
                     "addons": {"type": "array", "items": {"type": "string"},
                                "description": "Addon NAMES from list_pipeline_addons to build with "
                                "(e.g. [\"game_harness\"]). Omit/empty for the default software "
                                "pipeline. One addon reuses its alias (dpe_game); several compose."},
-                    "run_id": {"type": "string", "description": "Conversation run_id (optional — "
-                               "resolved automatically from project_id / the active conversation)."},
+                    "run_id": {"type": "string", "description": "Exact conversation run_id from brief_review."},
                     "config_name": {"type": "string", "description": "DEPRECATED — a pre-registered "
                                "config name. Prefer `addons`. Omit for the default pipeline."},
                 },
-                "required": [],
+                "required": ["run_id", "expected_checkpoint", "decision_id"],
             },
         },
     },
@@ -648,17 +649,19 @@ TOOL_DEFINITIONS = [
             "name": "approve_checkpoint",
             "description": "Approve a pending checkpoint and continue the pipeline. "
                            "Only call when the user has indicated approval. Pass "
-                           "project_id (preferred — a project has one active build "
-                           "run, so this is unambiguous across turns); run_id also "
-                           "works. Do NOT use start_config_run to resume a "
+                           "the exact run_id, expected_checkpoint and decision_id "
+                           "from the checkpoint already shown to the user. "
+                           "Do NOT use start_config_run to resume a "
                            "paused build — that spawns a duplicate.",
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "expected_checkpoint": {"type": "object", "description": "Exact token retained with the checkpoint shown to the user."},
+                    "decision_id": {"type": "string", "description": "Retain the observed decision_id unchanged on retries."},
                     "project_id": {"type": "string", "description": "Project whose active build to approve (preferred)."},
-                    "run_id": {"type": "string", "description": "Run ID from the checkpoint (alternative to project_id)."},
+                    "run_id": {"type": "string", "description": "Exact run ID from the reviewed checkpoint."},
                 },
-                "required": [],
+                "required": ["run_id", "expected_checkpoint", "decision_id"],
             },
         },
     },
@@ -2103,7 +2106,9 @@ class MetaAgent:
                     f"answer=<the user's message>). Do NOT start a new conversation.")
         return (f"[ACTIVE PROJECT CONVERSATION] run_id=\"{rid}\", project=\"{pid}\" — a brief "
                 f"is ready for review. If the user approves it, call "
-                f"approve_project_brief(run_id=\"{rid}\"). Otherwise treat their message as "
+                f"approve_project_brief with the run_id, expected_checkpoint and decision_id "
+                f"retained in the brief_review message. If unavailable, show a fresh review first. "
+                f"Otherwise treat their message as "
                 f"requested changes and call answer_project_conversation(run_id=\"{rid}\", "
                 f"answer=<the user's message>). Do NOT start a new conversation.")
 
@@ -3108,21 +3113,10 @@ class MetaAgent:
         from core.project_submit import seed_and_trigger
 
         sf = get_skillflow()
-        # Self-resolve the run: the model may omit/lose the run_id (it lives in a
-        # transient relay note). Fall back to the active meta run for this turn so
-        # approval never has to search for the run_id.
         run_id = args.get("run_id")
         run = sf.get_run(run_id) if run_id else None
         if not run:
-            active = self._active_meta_run(pid_hint=args.get("project_id"))
-            if active:
-                run_id = active["run_id"]
-                run = sf.get_run(run_id)
-        if not run:
-            return {"status": "error",
-                    "message": f"Conversation '{run_id}' not found — "
-                               "the conversation may have already ended. "
-                               "Check the project list."}
+            return {"status": "error", "message": "Provide the exact reviewed meta run_id."}
         pid = run.get("project_id", "")
 
         # Config selection — COMPOSITION-NATIVE. The butler expresses the build
@@ -3144,7 +3138,24 @@ class MetaAgent:
         # skip approve_meta — the artifacts have been emitted.
         run_already_completed = run.get("status") == "completed"
 
-        gs = read_gather_state(self.ws, pid) or {}
+        if run_already_completed:
+            gs = read_gather_state(self.ws, pid) or {}
+        else:
+            # Read the retained row NAMED BY THE REVIEWED TOKEN, including on
+            # retry after approval advanced the run. Never obtain a new token
+            # from the run's current checkpoint inside this manual action.
+            expected = args.get("expected_checkpoint")
+            try:
+                if not isinstance(expected, dict):
+                    raise ValueError("The reviewed checkpoint identity is required")
+                rows = sf.get_steps(run_id, include_payloads=True)
+                retained = next(s for s in rows if s["id"] == expected.get("step_instance_id")
+                                and s["step_id"] == "gather" and s["status"] == "completed")
+                gs = json.loads(retained["outputs_json"]).get("gather_state") or {}
+                if isinstance(gs, str):
+                    gs = json.loads(gs)
+            except Exception as exc:
+                return {"status": "error", "message": f"Cannot bind reviewed brief: {exc}"}
         brief = gs.get("brief") or {}
         stories = brief.get("user_stories")
         if not (isinstance(stories, list) and any(str(s).strip() for s in stories)):
@@ -3173,7 +3184,9 @@ class MetaAgent:
                     )
                     return await runner.execute(claimed)
 
-                approve_meta(sf, run_id, step_runner=_run_step)
+                approve_meta(sf, run_id, step_runner=_run_step,
+                             expected_checkpoint=args.get("expected_checkpoint"),
+                             decision_id=args.get("decision_id", ""))
             except Exception as e:
                 self._log_error(f"approve_meta failed for {run_id}: {e}")
                 return {"status": "error", "project_id": pid,
@@ -3219,7 +3232,11 @@ class MetaAgent:
                     run = sf.get_run(run_id)
                     status = run["status"]
                     if status == "paused":
-                        gs = read_gather_state(self.ws, project_id) or {}
+                        from core.checkpoint_protocol import checkpoint_view
+                        observed = checkpoint_view(sf, run_id)
+                        gs = observed["outputs"].get("gather_state") or {}
+                        if isinstance(gs, str):
+                            gs = json.loads(gs)
                         if gs.get("need_input"):
                             return {"status": "question", "run_id": run_id,
                                     "project_id": project_id,
@@ -3228,7 +3245,7 @@ class MetaAgent:
                                     "message": "Relay this question to the user VERBATIM and then "
                                                "stop — do not call any tool until the user replies."}
                         brief = gs.get("brief") or {}
-                        return {"status": "brief_review", "run_id": run_id,
+                        return {**observed, "status": "brief_review", "run_id": run_id,
                                 "project_id": project_id, "brief": brief,
                                 "brief_markdown": self._format_brief_md(brief),
                                 "message": "Present this brief to the user and ask them to approve "
@@ -3797,50 +3814,7 @@ class MetaAgent:
                     status = run["status"]
                     steps = sf.get_steps(run_id)
                     if status == "paused":
-                        # Checkpoint — surface to user via the agent
-                        label = run.get("current_node", "Checkpoint")
-                        # Find the checkpoint step (last completed with checkpoint=True)
-                        resolver = sf._get_resolver_for_run(run_id)
-                        checkpoint_step_id = ""
-                        checkpoint_data = None
-                        for s in reversed(steps):
-                            if s["status"] == "completed":
-                                node = resolver.get_node(s["step_id"])
-                                if node and node.checkpoint:
-                                    checkpoint_step_id = s["step_id"]
-                                    label = node.checkpoint_label or s["step_id"]
-                                    # Grab step output for user review
-                                    try:
-                                        out_dir = self.ws.get_final_path(
-                                            run.get("project_id", ""), s["step_id"],
-                                            run.get("graph_name") or "dpe_default",
-                                        )
-                                        if out_dir.exists():
-                                            checkpoint_data = {}
-                                            for f in sorted(out_dir.rglob("*")):
-                                                if f.is_file() and f.name != "_snapshot.json":
-                                                    rel = str(f.relative_to(out_dir))
-                                                    try:
-                                                        content = f.read_text(
-                                                            encoding="utf-8", errors="replace"
-                                                        )[:3000]
-                                                        checkpoint_data[rel] = content
-                                                    except Exception:
-                                                        pass
-                                    except Exception:
-                                        pass
-                                    break
-                        return {
-                            "status": "checkpoint",
-                            "run_id": run_id,
-                            "project_id": run.get("project_id", ""),
-                            "step_id": checkpoint_step_id,
-                            "label": label,
-                            "data": checkpoint_data,
-                            "message": f"Pipeline paused at checkpoint: {label}. "
-                                       f"Wait for user approval before calling "
-                                       f"approve_checkpoint or reject_checkpoint.",
-                        }
+                        return self._summarize_run_state(run_id)
                     elif status == "completed":
                         from core.coding_impl_outcome import load_coding_outcome
                         coding_result = load_coding_outcome(sf, self.ws, run, None)
@@ -4044,32 +4018,11 @@ class MetaAgent:
         steps = sf.get_steps(run_id)
 
         if status == "paused":
-            label = run.get("current_node", "Checkpoint")
-            checkpoint_step_id = ""
-            checkpoint_data = None
-            try:
-                resolver = sf._get_resolver_for_run(run_id)
-            except Exception:
-                resolver = None
-            for s in reversed(steps):
-                if s["status"] == "completed" and resolver:
-                    node = resolver.get_node(s["step_id"])
-                    if node and node.checkpoint:
-                        checkpoint_step_id = s["step_id"]
-                        label = node.checkpoint_label or s["step_id"]
-                        checkpoint_data = self._read_final_dir(
-                            pid, s["step_id"], graph, cap=3000) or None
-                        break
-            return {
-                "status": "checkpoint",
-                "run_id": run_id,
-                "project_id": pid,
-                "step_id": checkpoint_step_id,
-                "label": label,
-                "data": checkpoint_data,
-                "message": f"Pipeline paused at checkpoint: {label}. Wait for user "
-                           f"approval before calling approve_checkpoint or reject_checkpoint.",
-            }
+            from core.checkpoint_protocol import checkpoint_view
+            observed = checkpoint_view(sf, run_id)
+            return {**observed, "status": "checkpoint", "data": observed["outputs"],
+                    "message": "Review these retained outputs with the user. On approval pass "
+                               "run_id, expected_checkpoint and decision_id unchanged."}
         if status == "completed":
             from core.coding_impl_outcome import load_coding_outcome
             coding_result = load_coding_outcome(sf, self.ws, run, None)
@@ -4711,63 +4664,32 @@ class MetaAgent:
         return result
 
     def _resolve_pipeline_run(self, args: dict) -> tuple[str, str]:
-        """Resolve which run the approve/reject/wait tools should drive.
-
-        The butler juggles more than one run_id across turns — a project carries
-        a completed ``meta_conversation`` run AND its live ``dpe_*`` run. Passing
-        the stale/wrong one made ``approve_checkpoint`` no-op on the completed
-        meta run while the real DPE run stayed paused, and the butler then
-        floundered (spawning a duplicate build via ``start_config_run``). So
-        resolve by the stable ``project_id``: prefer the project's active
-        (non-completed) run. The given ``run_id`` is a fallback / a way to derive
-        the project. Returns ``(run_id, note)``; ``run_id`` is "" if nothing
-        resolvable.
-        """
-        from api.dependencies import get_skillflow
-        sf = get_skillflow()
+        """An explicit run is authoritative; project lookup is for discovery only."""
         run_id = (args.get("run_id") or "").strip()
+        if run_id:
+            return run_id, ""
+        from api.dependencies import get_skillflow
         project_id = (args.get("project_id") or "").strip()
-        if not project_id and run_id:
-            r = sf.get_run(run_id)
-            if r:
-                project_id = r.get("project_id") or ""
-        note = ""
-        if project_id:
-            active = sf.get_run_by_project(project_id)
-            if active and active.get("id"):
-                if run_id and active["id"] != run_id:
-                    note = (f"(note: '{run_id}' was not this project's active run; "
-                            f"resolved to {active['id']} via project_id="
-                            f"'{project_id}')")
-                run_id = active["id"]
-        return run_id, note
+        active = get_skillflow().get_run_by_project(project_id) if project_id else None
+        return (active["id"] if active else ""), ""
 
     async def _tool_approve_checkpoint(self, args: dict) -> dict:
         """Approve a checkpoint and continue the pipeline."""
         from api.dependencies import get_skillflow
 
-        run_id, _note = self._resolve_pipeline_run(args)
+        run_id = args.get("run_id")
+        _note = None
         if not run_id:
-            return {"error": "Provide project_id (preferred) or run_id."}
+            return {"error": "Provide the exact run_id from the reviewed checkpoint."}
         sf = get_skillflow()
-
         run = sf.get_run(run_id)
         if not run:
             return {"error": f"Run '{run_id}' not found"}
-
-        if run["status"] == "completed":
-            return {"status": "already_completed", "run_id": run_id,
-                    "message": "Pipeline already completed."}
-
-        if run["status"] != "paused":
-            return {"error": f"Run is not paused (status: {run['status']}). "
-                             f"Use get_pipeline_status to check."}
-
-        # Approve and continue
         try:
-            sf.approve_checkpoint(run_id)
+            sf.approve_checkpoint(run_id, expected_checkpoint=args.get("expected_checkpoint"),
+                                  decision_id=args.get("decision_id", ""))
         except Exception as e:
-            return {"error": f"Failed to approve checkpoint: {e}"}
+            return {"error": f"Checkpoint approval not confirmed: {e}"}
 
         # Clear meta_state so scheduler can also pick it up
         project_id = run.get("project_id", "")
@@ -4866,6 +4788,9 @@ class MetaAgent:
         run = sf.get_run(run_id)
         if not run:
             return {"error": f"Run '{run_id}' not found"}
+
+        if run["status"] == "paused":
+            return self._summarize_run_state(run_id)
 
         steps = sf.get_steps(run_id)
         completed = [s["step_id"] for s in steps if s["status"] == "completed"]
@@ -5337,30 +5262,10 @@ class MetaAgent:
         base = {"status": status, "run_id": run_id,
                 "steps_completed": len([s for s in steps if s["status"] == "completed"])}
         if status == "paused":
-            resolver = sf._get_resolver_for_run(run_id)
-            checkpoint_step_id, label, data = "", run.get("current_node", "Checkpoint"), None
-            for s in reversed(steps):
-                if s["status"] == "completed":
-                    node = resolver.get_node(s["step_id"]) if resolver else None
-                    if node and node.checkpoint:
-                        checkpoint_step_id = s["step_id"]
-                        label = node.checkpoint_label or s["step_id"]
-                        try:
-                            out_dir = self.ws.get_final_path(run.get("project_id", ""),
-                                s["step_id"], run.get("graph_name") or "pipeline_forge")
-                            if out_dir.exists():
-                                data = {}
-                                for f in sorted(out_dir.rglob("*")):
-                                    if f.is_file() and f.name != "_snapshot.json":
-                                        data[str(f.relative_to(out_dir))] = f.read_text(
-                                            encoding="utf-8", errors="replace")[:6000]
-                        except Exception:
-                            pass
-                        break
-            base.update({"checkpoint": True, "checkpoint_step_id": checkpoint_step_id,
-                         "checkpoint_label": label, "checkpoint_data": data,
-                         "message": (f"Reached checkpoint '{label}'. Review, then "
-                                     f"approve_checkpoint or reject_checkpoint.")})
+            observed = self._summarize_run_state(run_id)
+            base.update(observed)
+            base.update(checkpoint=True, checkpoint_step_id=observed["step_id"],
+                        checkpoint_label=observed["label"], checkpoint_data=observed["outputs"])
         elif status == "completed":
             base["message"] = "Pipeline completed."
         elif status == "failed":

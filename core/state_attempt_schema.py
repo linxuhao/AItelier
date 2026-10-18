@@ -63,6 +63,8 @@ CREATE TABLE {name} (
 """
 
 EXTRA_SCHEMA = """
+CREATE INDEX IF NOT EXISTS state_attempts_executor_key ON state_attempts(execution_kind,attempt_id);
+CREATE INDEX IF NOT EXISTS state_acceptances_attempt_key ON state_acceptances(attempt_id);
 CREATE TABLE IF NOT EXISTS state_git_artifacts (
     commit_sha TEXT PRIMARY KEY, tree_sha TEXT NOT NULL,
     bundle_sha256 TEXT NOT NULL, retained_ref TEXT NOT NULL,
@@ -192,6 +194,44 @@ _LEASE_INDEX = ('CREATE INDEX IF NOT EXISTS state_attempts_lease ON state_attemp
 _CREATE = re.compile(r'\s*CREATE\s+(?:UNIQUE\s+)?(TABLE|INDEX|TRIGGER)\s+IF\s+NOT\s+EXISTS\s+(\w+)\s', re.I)
 
 
+def _foreign_key_violation(conn, table: str) -> bool:
+    """Check the same references as SQLite, scanning covering keys, not payloads.
+
+    Initialization runs for each control request. foreign_key_check walks the
+    child table even when an index covers its references; retained context and
+    report rows made that a repeated large read. Keep SQLite's constraint
+    validation at preparation, then ask only for the reference keys. Migration
+    still uses the original full foreign_key_check before committing.
+    """
+    def quote(name):
+        return '"' + name.replace('"', '""') + '"'
+
+    child = quote(table)
+    # Preparation detects malformed/mismatched references without executing
+    # the table walk, including the parent's required unique-key/collation.
+    conn.execute(f'EXPLAIN PRAGMA foreign_key_check({child})').fetchone()
+    groups = {}
+    for row in conn.execute(f'PRAGMA foreign_key_list({child})'):
+        groups.setdefault(row['id'], []).append(row)
+    for rows in groups.values():
+        rows.sort(key=lambda row: row['seq'])
+        parent = quote(rows[0]['table'])
+        targets = [row['to'] for row in rows]
+        if targets[0] is None:
+            targets = [row['name'] for row in sorted(
+                (r for r in conn.execute(f'PRAGMA table_info({parent})') if r['pk']),
+                key=lambda row: row['pk'])]
+        present = ' AND '.join('c.' + quote(row['from']) + ' IS NOT NULL' for row in rows)
+        # Parent affinity and collation govern SQLite FK equality. Unary +
+        # removes the child's affinity so it cannot override the parent's.
+        equal = ' AND '.join('p.' + quote(target) + '=+c.' + quote(row['from'])
+                             for row, target in zip(rows, targets, strict=True))
+        if conn.execute(f'SELECT 1 FROM {child} c WHERE {present} AND NOT EXISTS '
+                        f'(SELECT 1 FROM {parent} p WHERE {equal}) LIMIT 1').fetchone():
+            return True
+    return False
+
+
 def _current(conn, existing_schema: str) -> bool:
     """Whether ``initialize`` would change nothing, judged in one READ transaction.
 
@@ -223,7 +263,7 @@ def _current(conn, existing_schema: str) -> bool:
                         "(SELECT 1 FROM state_external_owners o WHERE o.attempt_id=a.attempt_id) LIMIT 1").fetchone():
             return False
         # A violation is reported by the locked path, exactly as before.
-        return not any((('table', table) in objects) and conn.execute(f'PRAGMA foreign_key_check({table})').fetchone()
+        return not any((('table', table) in objects) and _foreign_key_violation(conn, table)
                        for table in ('state_attempts', *_ATTEMPT_DEPENDENTS))
     finally:
         conn.rollback()

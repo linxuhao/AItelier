@@ -74,8 +74,12 @@ def live_implement_claim(conn, project_id, node_key, current=None):
     return row, None
 
 
-def dispatch_claim(conn, project_id, node_key, driver_id, is_admin, claim_id=None, fence=None, current=None):
-    """The live implement claim a dispatch rides on.
+def dispatch_claim(conn, project_id, node_key, driver_id, is_admin, claim_id=None, fence=None, current=None,
+                   *, allow_review=False):
+    """The live claim a dispatch rides on.
+
+    Only an explicitly permitted external candidate review may name a review
+    claim; workflow/implicit dispatch keeps the implement-only policy.
 
     Returns ``(claim_row_or_None, break_glass)``. Outside an enforced project
     nothing is required and nothing is bound unless the caller NAMED a claim
@@ -84,6 +88,23 @@ def dispatch_claim(conn, project_id, node_key, driver_id, is_admin, claim_id=Non
     (``break_glass``).
     """
     live, lapsed = live_implement_claim(conn, project_id, node_key, current)
+    if allow_review and claim_id is not None:
+        review = conn.execute("SELECT * FROM state_node_claims WHERE claim_id=? AND project_id=? "
+                              "AND node_key=? AND purpose=?", (claim_id, project_id, node_key, "review")).fetchone()
+        if review is not None:
+            review = dict(review)
+            if review["driver_id"] != driver_id:
+                raise ClaimError("not_claim_owner", "review claim belongs to another driver")
+            if fence is None or fence != review["fence"]:
+                raise ClaimError("stale_fence", "external review needs its exact claim fence")
+            if (review["status"] != "live" or
+                    lease_state(review["lease_expires_at"], current or now_stamp()) == "reclaimable"):
+                raise ClaimError("claim_required", "external review needs a live review claim")
+            revision = conn.execute("SELECT revision FROM state_nodes WHERE project_id=? AND node_key=?",
+                                    (project_id, node_key)).fetchone()[0]
+            if review["node_revision"] != revision:
+                raise ClaimError("stale_fence", "review claim targets an earlier node revision")
+            return review, False
     if claim_id is not None:
         if live is None or live["claim_id"] != claim_id:
             if lapsed is not None and lapsed["claim_id"] == claim_id:

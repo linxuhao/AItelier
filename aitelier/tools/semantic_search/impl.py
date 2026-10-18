@@ -123,6 +123,11 @@ def semantic_search(query: str, limit: int = 8, globs: list | None = None,
         return {"error": f"semantic_search: {text}",
                 "hint": "index missing or query rejected — use `search`/`read`"}
     result = msg.get("result") or {}
+    # Official MCP may request authorization input before executing search;
+    # this is an incomplete result, not a successful empty search.
+    if result.get("resultType") == "input_required":
+        return {"error": "semantic_search: provider returned input_required before search",
+                "diagnostic": result, "hint": "use `search` (exact) and `read`"}
     parts = [c.get("text", "") for c in (result.get("content") or []) if c.get("type") == "text"]
     text = "\n".join(p for p in parts if p).strip()
     if result.get("isError"):

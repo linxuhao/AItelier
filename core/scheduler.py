@@ -1810,6 +1810,14 @@ _TICK_STUCK_HEARTBEAT_S = 60
 _tick_last_stuck: dict[tuple, float] = {}
 _tick_last_hold = 0.0
 _tick_last_brief = 0.0
+# Paused terminal ticks are a per-project repeater too: an unchanged paused run
+# is reported on every poll (20 identical lines in 95s observed live), and at
+# 5s that is 17k lines a day for a project that is not going to move by itself.
+# The signature keeps every real change — run, status, reason or detail —
+# immediately visible, and any other outcome clears the entry so a pause that
+# follows real progress is never hidden behind the old heartbeat window.
+_TICK_PAUSED_HEARTBEAT_S = 60
+_tick_last_paused: dict[str, tuple[tuple, float]] = {}
 
 
 def _get_tick_logger():
@@ -1849,6 +1857,10 @@ def tick_log(project_id: str, outcome: str, **detail) -> None:
     `idle`, `quota_hold` and `awaiting_brief` are coalesced to one heartbeat a
     minute: all repeat at tick cadence and carry no new information, and at 5s
     any one of them alone fills the rotation window with lines nobody needs.
+    A `terminal` line for a `paused` run coalesces PER PROJECT the same way:
+    unchanged pauses repeat the same run/status/detail on every poll, while any
+    change in that signature emits at once. Any other outcome for the project
+    clears the entry, so a pause after real progress is never hidden.
 
     `wedged` and `no_claim` coalesce too, but PER PROJECT. They repeat for the
     same reason and at the same cadence — a wedge that claiming cannot resolve
@@ -1862,6 +1874,13 @@ def tick_log(project_id: str, outcome: str, **detail) -> None:
     """
     global _tick_last_idle, _tick_last_hold, _tick_last_skip, _tick_last_brief
     try:
+        paused_key = project_id or "-"
+        is_paused = outcome == "terminal" and detail.get("status") == "paused"
+        if not is_paused:
+            # Any other outcome is a transition away from paused. Forget the
+            # old heartbeat so a later pause is emitted immediately instead of
+            # waiting out a window that started before real progress.
+            _tick_last_paused.pop(paused_key, None)
         if outcome == "idle":
             now = _time.time()
             if now - _tick_last_idle < _TICK_IDLE_HEARTBEAT_S:
@@ -1877,6 +1896,16 @@ def tick_log(project_id: str, outcome: str, **detail) -> None:
             if now - _tick_last_brief < _TICK_HOLD_HEARTBEAT_S:
                 return
             _tick_last_brief = now
+        elif is_paused:
+            now = _time.time()
+            signature = tuple(sorted(
+                (k, str(v)) for k, v in detail.items()
+                if v not in (None, "")))
+            previous = _tick_last_paused.get(paused_key)
+            if (previous is not None and previous[0] == signature
+                    and now - previous[1] < _TICK_PAUSED_HEARTBEAT_S):
+                return
+            _tick_last_paused[paused_key] = (signature, now)
         elif outcome == "tick_skipped":
             # Same repeater shape as `idle`: a tool step that owns the interval
             # job for its whole duration (godot_compile declares 3900s) makes

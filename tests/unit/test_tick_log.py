@@ -32,6 +32,7 @@ def caplines(monkeypatch):
     lg.setLevel(logging.INFO)
     monkeypatch.setattr(scheduler, "_get_tick_logger", lambda: lg)
     monkeypatch.setattr(scheduler, "_tick_last_idle", 0.0)
+    monkeypatch.setattr(scheduler, "_tick_last_paused", {})
     return lines
 
 
@@ -130,3 +131,141 @@ class TestATerminalTickSaysWhy:
         line = next(l for l in caplines if "outcome=terminal" in l)
         assert "status=completed" in line
         assert "reason=" not in line
+
+
+class _FakeClock:
+    """Deterministic clock: no sleeps and no wall-clock races in these tests."""
+
+    def __init__(self, now: float = 10_000.0):
+        self.now = now
+
+    def time(self) -> float:
+        return self.now
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+    def __getattr__(self, name):
+        # Other scheduler paths use strftime/gmtime through the same alias.
+        return getattr(time, name)
+
+
+@pytest.fixture
+def fake_clock(monkeypatch):
+    clock = _FakeClock()
+    monkeypatch.setattr(scheduler, "_time", clock)
+    monkeypatch.setattr(scheduler, "_tick_last_paused", {})
+    return clock
+
+
+class TestPausedTicksHeartbeatPerProject:
+    """Observed live: two unchanged paused runs each wrote 20 identical
+    `outcome=terminal status=paused` lines in 95s — 40 lines of rotation
+    pressure that said nothing new. An unchanged pause now says it once, then
+    at most once per 60s PER PROJECT; every real change (run, status, reason,
+    detail) and every pause that follows another outcome stays immediate.
+    """
+
+    @staticmethod
+    def _paused(project="p1", run="run1", **detail):
+        scheduler.tick_log(project, "terminal", run=run, status="paused",
+                           **detail)
+
+    def test_the_first_paused_line_is_logged_at_once(self, caplines, fake_clock):
+        self._paused()
+        assert len(caplines) == 1
+        assert "project=p1 outcome=terminal" in caplines[0]
+        assert "status=paused" in caplines[0]
+
+    def test_unchanged_repeats_inside_the_window_collapse(
+            self, caplines, fake_clock):
+        for _ in range(10):
+            self._paused()
+            fake_clock.advance(5)
+        assert len(caplines) == 1, "the old code wrote one line per tick"
+
+    def test_the_observed_95s_window_no_longer_floods(
+            self, caplines, fake_clock):
+        # 20 ticks at 5s: the exact window and shape of FIRST-OBSERVATION.json.
+        for i in range(20):
+            self._paused()
+            if i < 19:
+                fake_clock.advance(5)
+        assert len(caplines) == 2, "one first line plus the t=60 heartbeat"
+
+    def test_the_heartbeat_fires_at_the_boundary_and_not_before(
+            self, caplines, fake_clock):
+        self._paused()
+        fake_clock.advance(scheduler._TICK_PAUSED_HEARTBEAT_S - 1)
+        self._paused()
+        assert len(caplines) == 1
+        fake_clock.advance(1)
+        self._paused()
+        assert len(caplines) == 2
+
+    def test_projects_do_not_suppress_each_other(self, caplines, fake_clock):
+        self._paused(project="p1")
+        self._paused(project="p2")
+        self._paused(project="p1")
+        self._paused(project="p2")
+        assert [line.split()[0] for line in caplines] == [
+            "project=p1", "project=p2"]
+
+    def test_a_changed_run_is_logged_immediately(self, caplines, fake_clock):
+        self._paused(run="run1")
+        self._paused(run="run2")
+        assert len(caplines) == 2
+        assert "run=run2" in caplines[1]
+
+    def test_a_changed_status_is_logged_immediately(
+            self, caplines, fake_clock):
+        self._paused(run="run1")
+        scheduler.tick_log("p1", "terminal", run="run1", status="completed")
+        assert len(caplines) == 2
+        assert "status=completed" in caplines[1]
+
+    def test_a_changed_reason_is_logged_immediately(
+            self, caplines, fake_clock):
+        self._paused(run="run1", reason="waiting for input")
+        self._paused(run="run1", reason="waiting for review")
+        assert len(caplines) == 2
+        assert "reason=waiting for review" in caplines[1]
+
+    def test_a_changed_detail_is_logged_immediately(
+            self, caplines, fake_clock):
+        self._paused(run="run1", node="5_review")
+        self._paused(run="run1", node="6_final")
+        assert len(caplines) == 2
+        assert "node=6_final" in caplines[1]
+
+    def test_a_pause_after_real_progress_is_never_hidden(
+            self, caplines, fake_clock):
+        self._paused(run="run1")
+        scheduler.tick_log("p1", "advanced", run="run1", step="s1")
+        self._paused(run="run1")
+        assert len(caplines) == 3, "a naive timer would hide the second pause"
+        assert "outcome=advanced" in caplines[1]
+        assert "status=paused" in caplines[2]
+
+    def test_completed_and_failed_are_never_coalesced(
+            self, caplines, fake_clock):
+        for _ in range(3):
+            scheduler.tick_log("p1", "terminal", run="run1",
+                               status="completed")
+            scheduler.tick_log("p1", "terminal", run="run1",
+                               status="failed", reason="boom")
+        assert len(caplines) == 6
+
+    async def test_the_real_tick_path_heartbeats_a_paused_run(
+            self, caplines, fake_clock, monkeypatch):
+        TestATerminalTickSaysWhy._stub(
+            monkeypatch, {"status": "paused", "error_reason": None})
+        await scheduler._run_skillflow_tick("p1", None)
+        await scheduler._run_skillflow_tick("p1", None)
+        assert len([l for l in caplines if "status=paused" in l]) == 1
+        fake_clock.advance(scheduler._TICK_PAUSED_HEARTBEAT_S)
+        await scheduler._run_skillflow_tick("p1", None)
+        assert len([l for l in caplines if "status=paused" in l]) == 2

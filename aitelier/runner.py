@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from core.workspace_manager import DPE_GRAPH_NAME
 
+import json
 import time as _time
 from pathlib import Path
 
@@ -49,6 +50,55 @@ class AgentStepRunner:
             return ac["name"]
         # Fallback: from graph's step_config
         return step.step_config.get("agent_config", "")
+
+    def _task_closeout(self, step, sf, scope):
+        """Bind review to this item's completed producer, using existing SDK facts."""
+        from aitelier.tools.closeout_gate.impl import closeout_gate
+        from core import run_isolation
+
+        if scope is None:
+            raise ValueError("current task authority is unavailable")
+        rows = sf.get_steps(step.token.run_id)
+        reviewer = next((r for r in rows if r["id"] == step.token.step_instance_id), None)
+        if (not reviewer or reviewer["run_id"] != step.token.run_id
+                or reviewer["step_id"] != step.step_id or reviewer["status"] != "claimed"
+                or reviewer["claim_epoch"] != step.token.claim_epoch
+                or reviewer["loop_item"] != scope.task):
+            raise ValueError("current reviewer run/item/claim does not match")
+        producers = [r for r in rows if r["run_id"] == step.token.run_id
+                     and r["step_id"] == "t_impl" and r["loop_item"] == scope.task]
+        completed = [r for r in producers if r["status"] == "completed"
+                     and isinstance(r.get("completion_seq"), int) and r["completion_seq"] > 0]
+        if not completed:
+            raise ValueError("current item has no completed producer")
+        producer = max(completed, key=lambda r: r["completion_seq"])
+        if any(r["status"] in ("pending", "claimed") and r["id"] >= producer["id"]
+               for r in producers):
+            raise ValueError("current item has a newer unfinished producer")
+        artifact_dir = Path(step.inputs.get("_artifact_dir", ""))
+        if not artifact_dir.is_absolute():
+            raise ValueError("review artifact directory is unavailable")
+        item_dir = artifact_dir.parent.parent / "t_impl" / _sanitize_item(scope.task)
+        receipt = json.loads((item_dir / "code_changes.json").read_text(encoding="utf-8"))
+        authority = json.loads((item_dir / "write_scope_receipt.json").read_text(encoding="utf-8"))
+        if (receipt.get("target") != "code" or receipt.get("run_id") != step.token.run_id
+                or receipt.get("step_instance_id") != producer["id"]):
+            raise ValueError("code receipt does not match the current producing instance")
+        expected_claim = {"step_instance_id": producer["id"], "claim_epoch": producer["claim_epoch"]}
+        if (authority.get("run_id") != step.token.run_id or authority.get("step_id") != "t_impl"
+                or authority.get("task") != scope.task
+                or authority.get("allowed_scope") != scope.allowed()
+                or not authority.get("claim_history")
+                or authority["claim_history"][-1] != expected_claim):
+            raise ValueError("write-scope receipt does not match the current producing item/claim")
+        result = closeout_gate(
+            project_root=str(run_isolation.resolve_for_resolver(self._db, step.token.run_id) or ""),
+            owns=list(scope.owns), shared_hotspots=list(scope.shared_hotspots),
+            task_name=scope.task, scope_violations=authority.get("violations", []),
+            code_receipt=receipt)
+        if not result.get("attribution_valid"):
+            raise ValueError(result.get("error", "code attribution is unavailable"))
+        return result
 
     # ── StepRunner protocol ──────────────────────────────────────
 
@@ -154,28 +204,15 @@ class AgentStepRunner:
         # closeout_gate originally saw only a git diff.  Re-run it with the
         # structured card and the implementer's durable refusal receipt so the
         # reviewer sees both actual and attempted scope violations.
-        if (resolved_scope is not None and isinstance(resolved_context, dict)
-                and "[closeout_gate]" in resolved_context):
+        if (step_id == "t_impl_review" and isinstance(resolved_context, dict)
+                and (resolved_scope is not None or "[closeout_gate]" in resolved_context)):
             try:
-                from aitelier.tools.closeout_gate.impl import closeout_gate
-                from core import run_isolation
-                code_root = run_isolation.resolve_for_resolver(self._db, run_id)
-                receipt = {}
-                review_artifact = Path(step.inputs.get("_artifact_dir", ""))
-                receipt_path = (review_artifact.parent.parent / "t_impl"
-                                / _sanitize_item(resolved_scope.task) / "write_scope_receipt.json")
-                if receipt_path.is_file():
-                    import json
-                    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-                result = closeout_gate(
-                    project_root=str(code_root or ""), owns=list(resolved_scope.owns),
-                    shared_hotspots=list(resolved_scope.shared_hotspots),
-                    task_name=resolved_scope.task,
-                    scope_violations=receipt.get("violations", []))
+                result = self._task_closeout(step, sf, resolved_scope)
                 resolved_context["[closeout_gate]"] = result["content"]
             except Exception as exc:
-                resolved_context["[closeout_gate]"] += (
-                    f"\n[write_scope] unable to evaluate task scope: {exc}; depth: deep")
+                step.trace("step", "review_attribution_refused", {
+                    "passed": False, "attribution_valid": False, "error": str(exc)})
+                raise RuntimeError(f"Task review attribution blocked: {exc}") from exc
         if step.inputs.get("_has_code_output"):
             from core import run_isolation
             from skillflow.exceptions import IsolationUnavailable

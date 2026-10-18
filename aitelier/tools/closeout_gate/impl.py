@@ -1,9 +1,8 @@
 """closeout_gate — what did this card deliver, and how hard must the review look?
 
-Runs as a CONTEXT SOURCE of t_impl_review, right after the item's on_deliver
-commit(s). It reads the commits at HEAD whose subject carries `t_impl` (the
-delivery and, if any, the queued-deletion commit that follows it), diffs them
-against their base, and reports files, +/- lines and protected paths touched.
+The normal reviewer binds a committed per-item receipt before calling this
+helper. Its complete base-to-commit tree diff reports paths and scope; receipt
+file lists cannot hide changes. Non-receipt callers retain legacy depth context.
 
 Depth is a ratchet, never a skip:
   standard — small diff, no protected path, no deletion commit
@@ -12,8 +11,10 @@ Depth is a ratchet, never a skip:
 The reviewer's template says what each depth demands. A gate that could say
 "skip" would be the pass-on-absence defect with a new name.
 """
-import subprocess
+import re
 from pathlib import Path
+
+from skillflow import closed_git
 
 PROTECTED = ("playtest/", "tests/", "design/90_decisions.md", "design/99_changelog.md",
              "design/01_process.md", "design/00_roadmap.md", ".github/", "project.godot",
@@ -23,7 +24,7 @@ _DEEP_FILES = 8
 
 
 def _git(repo: Path, *args: str) -> str:
-    r = subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True)
+    r = closed_git.run(repo, *args, check=False)
     if r.returncode != 0:
         raise RuntimeError((r.stderr or r.stdout).strip())
     return r.stdout
@@ -35,7 +36,7 @@ def _is_protected(path: str) -> bool:
 
 def closeout_gate(*, project_root: str = "", owns=None,
                   shared_hotspots=None, task_name: str = "",
-                  scope_violations=None, **kwargs) -> dict:
+                  scope_violations=None, code_receipt=None, **kwargs) -> dict:
     attempted = list(scope_violations or [])
     attempted_detail = ", ".join(
         f"{item.get('tool', '?')} {item.get('requested_path', '?')}"
@@ -49,6 +50,64 @@ def closeout_gate(*, project_root: str = "", owns=None,
                 "summary": "[closeout_gate] no repository root injected → depth: deep" + attempted_note,
                 "content": "[closeout_gate] no repository root injected → depth: deep" + attempted_note}
     repo = Path(project_root)
+    attributed = code_receipt is not None
+    if attributed:
+        try:
+            if not isinstance(code_receipt, dict) or code_receipt.get("target") != "code":
+                raise ValueError("missing code output receipt")
+            base, commit = (code_receipt.get(k) for k in ("base_commit", "commit"))
+            if any(not isinstance(s, str) or not re.fullmatch(r"[0-9a-f]{40}", s)
+                   for s in (base, commit)):
+                raise ValueError("receipt requires exact commit SHAs")
+            for sha in (base, commit):
+                if _git(repo, "rev-parse", "--verify", sha + "^{commit}").strip() != sha:
+                    raise ValueError("receipt does not name a commit")
+            if _git(repo, "rev-parse", "HEAD").strip() != commit:
+                raise ValueError("receipt commit is not the current review HEAD")
+            from core.closed_git import clean_against_head
+            clean, why = clean_against_head(repo)
+            if not clean:
+                raise ValueError("current review Source is not the committed receipt: " + why)
+            _git(repo, "merge-base", "--is-ancestor", base, commit)
+            options = ("--no-ext-diff", "--no-textconv", "--no-renames")
+            records = _git(repo, "diff", *options, "--name-status", "-z", base, commit, "--").split("\0")
+            if records[-1] != "" or len(records[:-1]) % 2:
+                raise ValueError("invalid NUL-delimited diff")
+            # Key by path, not status: several additions/deletions may coexist.
+            statuses = {records[i + 1]: records[i] for i in range(0, len(records) - 1, 2)}
+            numstat = _git(repo, "diff", *options, "--numstat", "-z", base, commit, "--")
+            files, added, deleted = [], 0, 0
+            for record in numstat.split("\0"):
+                if not record:
+                    continue
+                a, dl, path = record.split("\t", 2)
+                binary = a == "-" or dl == "-"
+                a, dl = int(a) if a.isdigit() else 0, int(dl) if dl.isdigit() else 0
+                item = {"path": path, "added": a, "deleted": dl,
+                        "status": statuses[path], "binary": binary}
+                if statuses[path] == "D":
+                    raw = closed_git.run(repo, "show", f"{base}:{path}", text=False).stdout
+                    item["base_content"] = None if binary else raw[:24000].decode("utf-8", errors="replace")
+                    item["base_content_truncated"] = not binary and len(raw) > 24000
+                files.append(item)
+                added += a
+                deleted += dl
+            if set(statuses) != {f["path"] for f in files}:
+                raise ValueError("diff path inventories disagree")
+            head = [(commit, "current item receipt")]
+        except Exception as exc:
+            return {"passed": False, "attribution_valid": False, "depth": "deep",
+                    "error": f"closeout attribution: {exc}", "scope_violations": attempted}
+    else:
+        return _legacy_closeout(repo, owns, shared_hotspots, task_name, attempted)
+    return _summarize(files, added, deleted, head, owns, shared_hotspots,
+                      task_name, attempted, base_commit=base,
+                      commit=commit, attribution_valid=True, no_changes=not files)
+
+
+def _legacy_closeout(repo, owns, shared_hotspots, task_name, attempted):
+    """Non-receipt callers keep their legacy depth-only context."""
+    attempted_note = f"; {len(attempted)} attempted out-of-scope mutation(s)" if attempted else ""
     try:
         rows = [ln.split("\t", 1) for ln in _git(repo, "log", "-6", "--format=%H%x09%s").splitlines() if ln]
     except Exception as e:
@@ -85,6 +144,10 @@ def closeout_gate(*, project_root: str = "", owns=None,
         dl = int(dl) if dl.isdigit() else 0
         added += a; deleted += dl
         files.append({"path": path, "added": a, "deleted": dl})
+    return _summarize(files, added, deleted, head, owns, shared_hotspots, task_name, attempted)
+
+
+def _summarize(files, added, deleted, head, owns, shared_hotspots, task_name, attempted, **metadata):
     protected = [f["path"] for f in files if _is_protected(f["path"])]
     outside = []
     if owns is not None:
@@ -92,12 +155,12 @@ def closeout_gate(*, project_root: str = "", owns=None,
         scope = WriteScope(str(task_name or "code-task"), tuple(owns or ()),
                            tuple(shared_hotspots or ()))
         outside = out_of_scope((f["path"] for f in files), scope)
-    deletion_commit = any("delete" in subj for _, subj in head)
+    deletion_commit = any(f.get("status") == "D" for f in files) or any("delete" in subj for _, subj in head)
     reasons = []
     if protected:
         reasons.append(f"touches protected path(s): {', '.join(protected)}")
     if deletion_commit:
-        reasons.append("a queued-deletion commit landed with this card")
+        reasons.append("a deletion landed with this card")
     if added + deleted > _DEEP_LINES:
         reasons.append(f"{added + deleted} changed lines > {_DEEP_LINES}")
     if len(files) > _DEEP_FILES:
@@ -114,6 +177,11 @@ def closeout_gate(*, project_root: str = "", owns=None,
     for f in files:
         flag = "  ⚠ protected" if f["path"] in protected else ""
         lines.append(f"  - {f['path']}  (+{f['added']} / -{f['deleted']}){flag}")
+        if f.get("status") == "D":
+            lines.append(f"    base Source ({metadata.get('base_commit', '')}): " +
+                         ("binary" if f.get("binary") else f["base_content"]))
+            if f.get("base_content_truncated"):
+                lines.append("    [base Source truncated at 24000 bytes; full deletion review still required]")
     if attempted:
         lines.append("attempted scope violations (refused before mutation):")
         for item in attempted:
@@ -124,7 +192,7 @@ def closeout_gate(*, project_root: str = "", owns=None,
             lines.append(
                 f"  - {item.get('tool', '?')} {item.get('requested_path', '?')}"
                 + provenance)
-    return {"depth": depth, "reasons": reasons, "commits": [s for s, _ in head],
+    return {**metadata, "depth": depth, "reasons": reasons, "commits": [s for s, _ in head],
             "files": files, "protected": protected, "added": added, "deleted": deleted,
             "out_of_scope": outside, "scope_violations": attempted,
             "summary": "\n".join(lines), "content": "\n".join(lines)}

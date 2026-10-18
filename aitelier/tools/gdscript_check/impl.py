@@ -211,14 +211,20 @@ def gdscript_check(files: list[str] | None = None, workspace_root: str = "",
     """Parse-check every .gd file matching `files` under `workspace_root`.
 
     Returns StepValidator's shape: {all_passed, results: [{file, passed,
-    error_message}]}. An empty match set passes — a step that wrote no
-    GDScript has nothing to parse.
+    error_message}]}. Empty glob discovery passes — a step that wrote no
+    GDScript has nothing to parse. Explicit literal targets must exist.
     """
     root = Path(workspace_root or ".").resolve()
     paths: list[Path] = []
+    missing: list[dict] = []
     for pattern in (files or ["*.gd"]):
         matches = sorted(root.rglob(pattern)) if "*" in pattern else [root / pattern]
+        if pattern and not any(c in pattern for c in "*?[") and not (root / pattern).is_file():
+            missing.append({"file": pattern, "passed": False,
+                            "error_message": "Required GDScript file is missing: " + pattern})
         paths.extend(p for p in matches if p.is_file())
+    if missing:
+        return {"all_passed": False, "results": missing}
     if not paths:
         return {"all_passed": True, "results": []}
 

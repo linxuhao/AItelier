@@ -9,10 +9,12 @@ neighbour's work.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import multiprocessing
 import os
 import sqlite3
+import subprocess
 from types import SimpleNamespace
 import threading
 import time
@@ -83,10 +85,128 @@ def _engine(db_path: Path, workspace: Path, projects: Path,
     return sf
 
 
+# The recovery gate keeps EVERY mutable file (active/started/release/effect
+# counter/overlap marker and the structured report) inside the entry
+# directory it creates first under its own report ticket. The repository is
+# never written. A replacement invocation would get a different ticket, so the
+# test looks across every ticket of the run for a second effect or overlap.
+_RECOVERY_GATE = """#!/bin/bash
+set -eu
+entry="$GATE_REPORT_DIR/effect"
+mkdir "$entry"
+if ! mkdir "$entry/active"; then touch "$entry/OVERLAP"; exit 91; fi
+trap 'rmdir "$entry/active"' EXIT
+touch "$entry/started"
+while [ ! -f "$entry/release" ]; do sleep 0.02; done
+echo logical-operation >> "$entry/logical-effects"
+python3 - "$entry" <<'PY'
+import hashlib, json, subprocess, sys
+from pathlib import Path
+entry = Path(sys.argv[1])
+head = subprocess.check_output(['git', 'rev-parse', 'HEAD']).decode().strip()
+scope = {'coverage': 'full', 'all_scenarios': ['effect'],
+         'selected_scenarios': ['effect'], 'unselected_scenarios': [],
+         'fallback_full': False, 'selection_basis': {
+             'head_sha': head,
+             'spec_sha256': hashlib.sha256(b'effect').hexdigest(),
+             'method': 'full_default'}}
+(entry / 'manifest.json').write_text(json.dumps({
+    'repo': str(Path.cwd()),
+    'stages': {'effect': {'report': 'effect.json'}},
+    'gate_coverage': scope}))
+(entry / 'effect.json').write_text(json.dumps({'passed': True, 'returncode': 0}))
+(entry / 'effect-findings.json').write_text('[]')
+PY
+"""
+
+
+def _owned_executor(home: Path, allowed_root: Path):
+    """The current closed validator + container entry, inside the outer sandbox.
+
+    The enclosing disposable CPU job supplies isolation; there is no nested
+    Docker daemon, socket mount or host fallback. Every request still passes
+    `validate_request` against a real run binding, then runs the real entry.
+    """
+    from core import repository_executor_entry as entry
+    from core import repository_host_launcher as launcher
+
+    config = {"allowed_roots": [str(allowed_root)], "aitelier_home": str(home),
+              "state_db": str(home / "bindings.db"),
+              "test_image": "sha256:" + "a" * 64,
+              "executor_entry": entry.__file__, "allowed_uids": [os.getuid()]}
+
+    def execute_owned(repo, args, timeout, **kwargs):
+        fields = launcher.validate_request(config, {
+            "op": "launch", "repo": str(repo), "args": args, "timeout": timeout,
+            **{key: [str(p) for p in value] if key == "writable_dirs" else value
+               for key, value in kwargs.items()},
+        })
+        return SimpleNamespace(**entry.run(fields))
+
+    return execute_owned
+
+
+def _provision_bindings(home: Path) -> None:
+    home.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(home / "bindings.db") as conn:
+        conn.execute("CREATE TABLE IF NOT EXISTS run_isolation("
+                     "run_id,mode,worktree_path,source_repo,project_id)")
+
+
+def _bind_run(home: Path, run_id: str, repo: Path, project_id: str) -> None:
+    with sqlite3.connect(home / "bindings.db") as conn:
+        conn.execute("INSERT INTO run_isolation VALUES(?,?,?,?,?)",
+                     (run_id, "direct", str(repo), str(repo), project_id))
+
+
 def _drive_gate(db_path: str, workspace: str, projects: str, repo: str,
-                run_id: str) -> None:
+                run_id: str, home: str, allowed_root: str) -> None:
+    # A spawned worker shares no module state: it provisions its own isolated
+    # home and its own closed validator/entry before it can reach the gate.
+    os.environ["AITELIER_HOME"] = home
+    from core import repository_executor as executor
+    executor.execute = _owned_executor(Path(home), Path(allowed_root))
     sf = _engine(Path(db_path), Path(workspace), Path(projects), Path(repo))
     sf.advance_run(run_id)
+
+
+def _gate_entries(home: Path, run_id: str) -> list[Path]:
+    root = home / "gate-reports" / hashlib.sha256(run_id.encode()).hexdigest()
+    return sorted(root.glob("rt-*/effect"))
+
+
+def _wait_for_started(home: Path, run_id: str, timeout: float = 15) -> Path:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        for entry in _gate_entries(home, run_id):
+            if (entry / "started").exists():
+                return entry
+        time.sleep(0.02)
+    raise AssertionError(f"timed out waiting for the gate start marker under {home}")
+
+
+def _logical_effects(home: Path, run_id: str) -> list[str]:
+    lines: list[str] = []
+    for entry in _gate_entries(home, run_id):
+        if (entry / "logical-effects").exists():
+            lines += (entry / "logical-effects").read_text().splitlines()
+    return lines
+
+
+def _overlap_markers(home: Path, run_id: str) -> list[Path]:
+    return [entry / "OVERLAP" for entry in _gate_entries(home, run_id)
+            if (entry / "OVERLAP").exists()]
+
+
+def _source_state(repo: Path):
+    files = {str(path.relative_to(repo)): path.read_bytes()
+             for path in sorted(repo.rglob("*"))
+             if ".git" not in path.relative_to(repo).parts and path.is_file()}
+
+    def git_out(*args):
+        return subprocess.run(["git", "-C", str(repo), *args], check=True,
+                              capture_output=True, text=True).stdout
+    return files, git_out("rev-parse", "HEAD").strip(), git_out("status", "--porcelain")
 
 
 def _wait_for(path: Path, timeout: float = 15) -> None:
@@ -406,26 +526,30 @@ def test_parallel_runs_progress_but_competing_controllers_admit_one_owner(
     "worker-loss-requires-manual-settlement",
 ])
 def test_recovery_preserves_operation_identity_and_one_logical_effect(
-        tmp_path, interrupt_worker):
+        tmp_path, monkeypatch, interrupt_worker):
     """A replacement controller observes the old identity and never replays it."""
+    # A valid Git source holding only the authored gate; every mutable marker
+    # lives in the gate's report-ticket entry directory, never in the source.
     repo = tmp_path / "repo"
     repo.mkdir()
-    active = repo / "active"
-    started = repo / "started"
-    release = repo / "release"
-    counter = repo / "logical-effects"
-    overlap = repo / "OVERLAP"
     gate = repo / "run_tests.sh"
-    gate.write_text(
-        "#!/bin/bash\n"
-        "set -eu\n"
-        f"if ! mkdir {active}; then touch {overlap}; exit 91; fi\n"
-        f"trap 'rmdir {active}' EXIT\n"
-        f"touch {started}\n"
-        f"while [ ! -f {release} ]; do sleep 0.02; done\n"
-        f"echo logical-operation >> {counter}\n",
-        encoding="utf-8")
+    gate.write_text(_RECOVERY_GATE, encoding="utf-8")
     gate.chmod(0o755)
+    (repo / "test_fixture.py").write_text(
+        "def test_fixture():\n    assert True\n", encoding="utf-8")
+    git(repo, "init", "-q")
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "recovery fixture")
+    source_before = _source_state(repo)
+
+    # Isolated home + binding DB inside the enclosing disposable sandbox; the
+    # controller process and the spawned worker both use the current closed
+    # request validator and container entry (no host fallback, no Docker socket).
+    from core import repository_executor as executor
+    home = tmp_path / "h"
+    _provision_bindings(home)
+    monkeypatch.setenv("AITELIER_HOME", str(home))
+    monkeypatch.setattr(executor, "execute", _owned_executor(home, tmp_path))
 
     db_path, workspace, projects = (
         tmp_path / "sf.db", tmp_path / "ws", tmp_path / "projects")
@@ -433,12 +557,15 @@ def test_recovery_preserves_operation_identity_and_one_logical_effect(
     run_id = setup.create_run(
         "isolated_recovery", {"project_id": "p"}, project_id="p")
     setup.start_run(run_id)
+    _bind_run(home, run_id, repo, "p")
     worker = multiprocessing.get_context("spawn").Process(
         target=_drive_gate,
-        args=(str(db_path), str(workspace), str(projects), str(repo), run_id))
+        args=(str(db_path), str(workspace), str(projects), str(repo), run_id,
+              str(home), str(tmp_path)))
     worker.start()
     try:
-        _wait_for(started)
+        entry = _wait_for_started(home, run_id)
+        release = entry / "release"
         observer = _engine(db_path, workspace, projects, repo)
         original = observer.unsettled_operations(run_id)
         assert len(original) == 1
@@ -460,17 +587,18 @@ def test_recovery_preserves_operation_identity_and_one_logical_effect(
         assert recovered.advance_run(run_id) is None
         still_owned = recovered.unsettled_operations(run_id)
         assert [{key: row[key] for key in identity} for row in still_owned] == [identity]
-        assert not counter.exists()
-        assert not overlap.exists()
+        assert _logical_effects(home, run_id) == []
+        assert _overlap_markers(home, run_id) == []
+        assert _gate_entries(home, run_id) == [entry]
 
         release.touch()
         deadline = time.monotonic() + 10
-        while active.exists() and time.monotonic() < deadline:
+        while (entry / "active").exists() and time.monotonic() < deadline:
             time.sleep(0.02)
-        assert not active.exists()
+        assert not (entry / "active").exists()
 
         if interrupt_worker:
-            assert counter.read_text().splitlines() == ["logical-operation"]
+            assert _logical_effects(home, run_id) == ["logical-operation"]
             # The worker could not retire its durable admission. Observation of
             # the effect does not authorize another invocation: manual evidence
             # is still required and the exact original identity remains held.
@@ -479,12 +607,16 @@ def test_recovery_preserves_operation_identity_and_one_logical_effect(
         else:
             worker.join(timeout=10)
             assert worker.exitcode == 0
-            assert counter.read_text().splitlines() == ["logical-operation"]
+            assert _logical_effects(home, run_id) == ["logical-operation"]
             assert recovered.unsettled_operations(run_id) == []
             assert recovered.get_run(run_id)["status"] == "completed"
-        assert not overlap.exists()
+        assert _gate_entries(home, run_id) == [entry]
+        assert _overlap_markers(home, run_id) == []
+        # The authored source is unchanged: the gate mutated only its ticket.
+        assert _source_state(repo) == source_before
     finally:
-        release.touch(exist_ok=True)
+        for stale in _gate_entries(home, run_id):
+            (stale / "release").touch(exist_ok=True)
         if worker.is_alive():
             worker.kill()
             worker.join(timeout=5)

@@ -162,6 +162,24 @@ def approve_and_submit_meta(sf, db, ws, run_id: str, *,
                                       expected_checkpoint["step_instance_id"])
         brief = state.get("brief") or {}
         project = db.get_project(pid) or {}
+        # Match the scheduler's lifecycle owner: an active run wins; otherwise
+        # prefer the project's primary config, then the most recent run. An old
+        # meta decision must not rewrite a later build's pause/progress cache.
+        owner = sf.get_run_by_project(pid)
+        if not owner:
+            runs = sf.list_runs(pid)
+            primary = project.get("config_name") or "dpe_default_v2"
+            owner = next((r for r in runs if r["graph_name"] == primary),
+                         runs[0] if runs else None)
+        if owner and owner["id"] != run_id:
+            if owner["status"] == "failed":
+                raise RuntimeError("The project's failed run needs an explicit retry")
+            return {"status": "already_planned", "project_id": pid}
+        # These labels can be the real paused/completed meta projection. Only
+        # the exact completed meta owner may turn them into build readiness.
+        status = project.get("status") or ""
+        if status.startswith("checkpoint:") or status == "completed":
+            db.update_project(pid, status="planning")
         completed = project.get("completed_project_steps") or []
         if isinstance(completed, str):
             completed = json.loads(completed)

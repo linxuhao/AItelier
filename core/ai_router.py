@@ -10,6 +10,7 @@ import re
 import json
 import hashlib
 import uuid
+import threading
 from dataclasses import dataclass, field
 from typing import Optional
 from concurrent.futures import ThreadPoolExecutor
@@ -249,6 +250,9 @@ _COOLDOWN_FALLBACK_S = 300      # provider named no reset instant
 # In-place retries of a burst 429 before it is allowed to cost us the preferred
 # endpoint. tenacity gives 3 attempts, so 2 leaves one for the failover itself.
 _BURST_TOLERANCE = 2
+
+# Sentinel: "no per-invocation capture supplied" for AIGateway._call_llm.
+_UNSET_CAPTURE = object()
 
 
 def endpoint_cooldowns() -> dict[str, float]:
@@ -820,7 +824,8 @@ class AIGateway:
                 n += len(getattr(fn, "arguments", None) or "")
         return n
 
-    def _call_llm(self, kwargs: dict):
+    def _call_llm(self, kwargs: dict, *, endpoint=_UNSET_CAPTURE,
+                  progress=_UNSET_CAPTURE, stop=None):
         """The provider call itself, on the bounded worker thread.
 
         Streams by default — not to show tokens, but because chunk arrival is
@@ -836,7 +841,22 @@ class AIGateway:
         small dict every ~_PROGRESS_EVERY_S while chunks arrive. It runs on
         this worker thread and must never break the call — exceptions are
         swallowed. AITELIER_LLM_STREAM=0 reverts to the plain call.
+
+        `endpoint` / `progress` / `stop` are the per-invocation capture made by
+        `_completion_bounded` BEFORE this worker was submitted: the endpoint
+        this attempt was dispatched to, the progress callback in force then,
+        and an Event the controller sets once it stops waiting. This worker
+        may outlive its controller (the wall cap abandons it, it is never
+        joined) while failover rebinds `self.active_model` and the host may
+        swap `self.on_progress` for the replacement attempt — so a late chunk
+        or `llm_done` must neither read those mutable fields nor emit once the
+        controller is gone. Called directly (no capture given), the values
+        are read once at entry.
         """
+        if endpoint is _UNSET_CAPTURE:
+            endpoint = self.active_model
+        if progress is _UNSET_CAPTURE:
+            progress = getattr(self, "on_progress", None)
         if os.getenv("AITELIER_LLM_STREAM", "1") == "0" or kwargs.get("stream"):
             return litellm.completion(**kwargs)
         import time as _t
@@ -847,38 +867,33 @@ class AIGateway:
         chars = 0
         t0 = _t.monotonic()
         next_note = 0.0     # first chunk ticks immediately → "it's alive"
-        if self.on_progress is not None:
-            # Dispatch announcement: between here and the first chunk the
-            # server is queueing + prefilling (26:1 prefill:decode on this
-            # workload — tens of seconds on a cache miss), and without this
-            # tick that whole window shows as unexplained blank.
+
+        def emit(payload: dict) -> None:
+            if progress is None or (stop is not None and stop.is_set()):
+                return
             try:
-                self.on_progress({"phase": "llm_start",
-                                  "served_by": self.active_model})
+                progress({**payload, "served_by": endpoint})
             except Exception:
                 pass
+
+        # Dispatch announcement: between here and the first chunk the
+        # server is queueing + prefilling (26:1 prefill:decode on this
+        # workload — tens of seconds on a cache miss), and without this
+        # tick that whole window shows as unexplained blank.
+        emit({"phase": "llm_start"})
         for chunk in litellm.completion(**skwargs):
             chunks.append(chunk)
             chars += self._chunk_len(chunk)
             now = _t.monotonic()
-            if self.on_progress is not None and now >= next_note:
+            if now >= next_note:
                 next_note = now + self._PROGRESS_EVERY_S
-                try:
-                    self.on_progress({"phase": "llm", "chars": chars,
-                                      "elapsed": round(now - t0, 1),
-                                      "served_by": self.active_model})
-                except Exception:
-                    pass
-        if self.on_progress is not None:
-            # The stream ended — tell watchers to clear the line NOW instead
-            # of letting a stale "generating" linger through tool execution
-            # until the client-side expiry.
-            try:
-                self.on_progress({"phase": "llm_done", "chars": chars,
-                                  "elapsed": round(_t.monotonic() - t0, 1),
-                                  "served_by": self.active_model})
-            except Exception:
-                pass
+                emit({"phase": "llm", "chars": chars,
+                      "elapsed": round(now - t0, 1)})
+        # The stream ended — tell watchers to clear the line NOW instead of
+        # letting a stale "generating" linger through tool execution until the
+        # client-side expiry.
+        emit({"phase": "llm_done", "chars": chars,
+              "elapsed": round(_t.monotonic() - t0, 1)})
         if not chunks:
             # A stream that opened and closed with zero chunks is an endpoint
             # failure — route it like one (APIConnectionError is in
@@ -886,7 +901,7 @@ class AIGateway:
             raise litellm.exceptions.APIConnectionError(
                 message="stream closed before the first chunk",
                 llm_provider=str(self.provider or ""),
-                model=str(self.active_model or ""),
+                model=str(endpoint or ""),
             )
         return litellm.stream_chunk_builder(chunks,
                                             messages=kwargs.get("messages"))
@@ -925,9 +940,16 @@ class AIGateway:
         unbounded wait costs the whole run.
         """
         cap = self._WALL_CAP_S
+        # Capture this attempt's identity BEFORE the worker exists, so a worker
+        # still queued when failover rebinds the gateway cannot pick up the
+        # replacement's endpoint or callback.
+        endpoint = self.active_model
+        progress = getattr(self, "on_progress", None)
+        stop = threading.Event()
         pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="llm-call")
         try:
-            future = pool.submit(self._call_llm, kwargs)
+            future = pool.submit(self._call_llm, kwargs, endpoint=endpoint,
+                                 progress=progress, stop=stop)
             try:
                 return future.result(timeout=cap)
             except _FutureTimeout as e:
@@ -938,10 +960,13 @@ class AIGateway:
                         f"is the READ timeout (max gap between bytes) and cannot "
                         f"catch a response that trickles without ever going "
                         f"quiet. Abandoned; failing over."),
-                    model=str(self.active_model or kwargs.get("model") or ""),
+                    model=str(endpoint or kwargs.get("model") or ""),
                     llm_provider="aitelier-deadline",
                 ) from e
         finally:
+            # This controller is done waiting: whatever the worker still emits
+            # belongs to an attempt nobody is watching any more.
+            stop.set()
             # NEVER wait: the point of the cap is not to block on the thread we
             # just gave up on. `with ThreadPoolExecutor(...)` would join it and
             # reproduce the exact hang this method exists to break.

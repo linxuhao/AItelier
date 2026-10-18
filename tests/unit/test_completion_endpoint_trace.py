@@ -116,6 +116,123 @@ def test_wall_timeout_is_attributed_before_failover_and_late_return(case, monkey
         release.set()
 
 
+
+MSGS = [{'role': 'user', 'content': 'private-prompt'}]
+
+
+def _delta(text, finish=None):
+    usage = {'prompt_tokens': 3, 'completion_tokens': 2, 'total_tokens': 5} if finish else None
+    kw = {'usage': usage} if usage else {}
+    return litellm.ModelResponse(stream=True, model='offline', choices=[{'index': 0,
+        'delta': {'role': 'assistant', 'content': text}, 'finish_reason': finish}], **kw)
+
+
+def test_abandoned_worker_cannot_touch_replacement_progress(case, monkeypatch):
+    """Late chunks and llm_done from a worker abandoned by the wall cap must not
+    be attributed to, or clear, the replacement attempt's progress."""
+    c = case
+    monkeypatch.setenv('AITELIER_LLM_STREAM', '1')
+    c.g._WALL_CAP_S = 0.3
+    c.g._PROGRESS_EVERY_S = 0          # every chunk ticks, so late ones would show
+    events, lock = [], threading.Lock()
+    def progress(ev):
+        with lock:
+            events.append((ev['phase'], ev['served_by']))
+    c.g.on_progress = progress
+    old_may_continue, old_finished = threading.Event(), threading.Event()
+    replacement_live = threading.Event()
+    seen = {}
+    real_builder = litellm.stream_chunk_builder
+    def builder(chunks, messages=None):
+        if chunks[0].choices[0].delta.content.startswith('old'):
+            old_finished.set()         # old worker got past its (suppressed) llm_done
+        return real_builder(chunks, messages=messages)
+    calls = []
+    def complete(**kw):
+        calls.append(kw['model'])
+        if len(calls) == 1:
+            def old():
+                yield _delta('old-1')
+                old_may_continue.wait(5)
+                yield _delta('old-2')
+                yield _delta('', 'stop')
+            return old()
+        def new():
+            yield _delta('new-1')
+            replacement_live.set()
+            old_may_continue.set()                 # old worker resumes mid-replacement
+            seen['old_finished'] = old_finished.wait(5)
+            with lock:
+                seen['during'] = list(events)
+            yield _delta('new-2')
+            yield _delta('', 'stop')
+        return new()
+    monkeypatch.setattr(litellm, 'completion', complete)
+    monkeypatch.setattr(litellm, 'stream_chunk_builder', builder)
+    try:
+        turn = c.native.turn([{'role': 'user', 'content': 'private-prompt'}])
+    finally:
+        old_may_continue.set()
+    assert turn.text == 'new-1new-2' and len(calls) == 2
+    assert replacement_live.is_set() and seen['old_finished'] is True
+    assert c.g.active_model == 'two/model'
+    # While the replacement ran, the old worker's late chunk and llm_done added nothing.
+    with lock:
+        final = list(events)
+    during = seen['during']
+    assert ('llm_start', 'two/model') in during and ('llm', 'two/model') in during
+    assert ('llm_done', 'two/model') not in during
+    assert final[:len(during)] == during
+    assert final[len(during):] == [('llm', 'two/model'), ('llm', 'two/model'), ('llm_done', 'two/model')]
+    # Pre-timeout old events (if any landed) belong to the old endpoint only.
+    start = during.index(('llm_start', 'two/model'))
+    assert all(s == 'one/model' for _, s in during[:start])
+    assert all(s == 'two/model' for _, s in during[start:])
+    assert [e for e in final if e[0] == 'llm_done'] == [('llm_done', 'two/model')]
+    observed(c, ['timeout', 'completed'])
+
+
+def test_endpoint_and_callback_captured_before_worker_submission(monkeypatch):
+    """A worker still queued when failover rebinds the gateway keeps the identity
+    of the attempt that submitted it."""
+    monkeypatch.setenv('AITELIER_LLM_STREAM', '1')
+    first, second = [], []
+
+    class Gate(AIGateway):
+        def __init__(self):
+            self.active_model = 'one/model'
+            self.provider = 'test'
+            self.on_progress = lambda ev: first.append(ev)
+
+    g = Gate()
+    class Rebinding(ai_router.ThreadPoolExecutor):
+        def submit(self, fn, *a, **kw):
+            # Failover/host swap lands after capture but before the worker runs.
+            g.active_model = 'two/model'
+            g.on_progress = lambda ev: second.append(ev)
+            return super().submit(fn, *a, **kw)
+    monkeypatch.setattr(ai_router, 'ThreadPoolExecutor', Rebinding)
+    monkeypatch.setattr(litellm, 'completion', lambda **kw: iter([_delta('x'), _delta('', 'stop')]))
+    assert g._completion_bounded({'model': 'm', 'messages': MSGS}).choices[0].message.content == 'x'
+    assert second == []
+    assert [e['phase'] for e in first] == ['llm_start', 'llm', 'llm_done']
+    assert {e['served_by'] for e in first} == {'one/model'}
+
+
+def test_progress_callback_exception_never_breaks_completion(monkeypatch):
+    monkeypatch.setenv('AITELIER_LLM_STREAM', '1')
+
+    class Gate(AIGateway):
+        def __init__(self):
+            self.active_model = 'one/model'
+            self.provider = 'test'
+            def boom(ev): raise RuntimeError('progress sink down')
+            self.on_progress = boom
+
+    monkeypatch.setattr(litellm, 'completion', lambda **kw: iter([_delta('ok'), _delta('', 'stop')]))
+    assert Gate()._completion_bounded({'model': 'm', 'messages': MSGS}).choices[0].message.content == 'ok'
+
+
 def test_empty_native_exhaustion_records_each_actual_endpoint(case, monkeypatch):
     c = case; calls = []
     monkeypatch.setattr(litellm, 'completion', lambda **kw: calls.append(kw['model']) or reply(''))

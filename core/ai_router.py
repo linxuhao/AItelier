@@ -467,6 +467,9 @@ class AIGateway:
         # while a completion streams (see _call_llm). Runs on the LLM worker
         # thread; exceptions are swallowed there.
         self.on_progress = None
+        # Low-frequency invocation boundaries, persisted by the host trace.
+        # Unlike streaming progress, these run on the waiting controller.
+        self.on_completion = None
         from core.model_routes import config_or_example
         self._config_path = config_path or config_or_example("llm_providers.json")
 
@@ -944,6 +947,45 @@ class AIGateway:
             # reproduce the exact hang this method exists to break.
             pool.shutdown(wait=False)
 
+    def _observed_completion(self, kwargs: dict, *, native: bool):
+        """Observe one bounded endpoint attempt, including native validation.
+
+        Capture identity before failover. An abandoned worker may still return,
+        but only this controller records its terminal wait outcome; timeout is
+        not a claim that the provider request was cancelled.
+        """
+        import time as _t
+        identity = {"invocation_id": uuid.uuid4().hex,
+                    "model_route": self.internal_model,
+                    "served_by": self.active_model,
+                    "wall_cap_s": self._WALL_CAP_S,
+                    "native": native}
+        observer = getattr(self, "on_completion", None)
+
+        def note(event, **fields):
+            if observer is not None:
+                try:
+                    observer(event, {**identity, **fields})
+                except Exception:
+                    pass
+
+        t0 = _t.monotonic()
+        note("completion_started", outcome="started")
+        try:
+            response = self._completion_bounded(kwargs)
+            _raise_if_refused(response, identity["served_by"])
+            if native:
+                _raise_if_empty_native(response, identity["served_by"])
+        except BaseException as exc:
+            note("completion_finished",
+                 outcome="timeout" if isinstance(exc, litellm.exceptions.Timeout) else "error",
+                 elapsed_s=round(_t.monotonic() - t0, 3),
+                 error_type=type(exc).__name__, error=type(exc).__name__)
+            raise
+        note("completion_finished", outcome="completed",
+             elapsed_s=round(_t.monotonic() - t0, 3))
+        return response
+
     def _complete_prebuilt(self, kwargs: dict, *, native: bool = False):
         """One completion, walking this model's candidates on endpoint errors.
 
@@ -970,10 +1012,7 @@ class AIGateway:
         """
         while True:
             try:
-                response = self._completion_bounded(kwargs)
-                _raise_if_refused(response, self.active_model)
-                if native:
-                    _raise_if_empty_native(response, self.active_model)
+                response = self._observed_completion(kwargs, native=native)
             except FAILOVER_EXCEPTIONS as e:
                 if not self._failover(e):
                     # Name the endpoints that would have to reopen. The escaping

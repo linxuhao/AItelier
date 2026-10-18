@@ -90,7 +90,8 @@ class AgentFactory:
     DEFAULT_MAX_TOOL_TURNS = 10
 
     def __init__(self, *, registry=None,
-                 template_base: Path | None = None, on_progress=None):
+                 template_base: Path | None = None, on_progress=None,
+                 on_completion=None):
         self._registry = registry
         self._template_base = template_base or (
             Path(__file__).parent.parent / "templates"
@@ -98,6 +99,7 @@ class AgentFactory:
         # Optional AIGateway.on_progress hook, applied to every gateway this
         # factory builds (LLM streaming liveness ticks).
         self._on_progress = on_progress
+        self._on_completion = on_completion
 
     def _get_config(self, name: str) -> dict:
         """Look up agent config from registry."""
@@ -149,6 +151,8 @@ class AgentFactory:
         )
         if self._on_progress is not None:
             gateway.on_progress = self._on_progress
+        if self._on_completion is not None:
+            gateway.on_completion = self._on_completion
         return gateway
 
     def _load_template(self, template_file: str) -> str:

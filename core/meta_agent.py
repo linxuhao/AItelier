@@ -140,8 +140,9 @@ points the pipeline at the project's existing repo.
 
 4. **DRIVE** — Call wait_until_next_checkpoint_or_completion(run_id) to block \
 until a checkpoint or completion. RELAY checkpoints to the user verbatim; \
-call approve_checkpoint(run_id) or reject_checkpoint(run_id, feedback) \
-as the user decides.
+call approve_checkpoint(run_id, expected_checkpoint=<reviewed token>, \
+decision_id=<reviewed decision id>) or reject_checkpoint(run_id, feedback) \
+as the user decides. Retain the same approval identity on retries.
 
 5. **REPORT** — Call get_pipeline_result(run_id) and summarize the result \
 for the user.
@@ -210,8 +211,8 @@ user wants a cross-cutting GATE or STAGE layered onto an *existing base pipeline
 review stage — call generate_addon(description=<the capability>, base=<base \
 pipeline, default dpe_default_v2>). It runs addon_converter and returns an Overlay \
 Review checkpoint (with the addon run's project_id) — relay it. On approval, call \
-approve_checkpoint(project_id=<that project_id>) — do NOT call generate_addon \
-again (that starts a duplicate authoring run). Approval COMPOSE-VALIDATES the \
+approve_checkpoint(run_id=<reviewed run_id>, expected_checkpoint=<reviewed token>, \
+decision_id=<reviewed decision id>) — do NOT call generate_addon again (that starts a duplicate authoring run). Approval COMPOSE-VALIDATES the \
 overlay against the real base (composition is the acceptance test) and \
 AUTO-REGISTERS the addon (reported as `registered_addon`, and a runnable \
 `registered_config` if it has an alias). Then apply it with \
@@ -3109,7 +3110,7 @@ class MetaAgent:
     async def _tool_approve_project_brief(self, args: dict) -> dict:
         """Approve the reviewed brief, complete the meta run, and trigger DPE."""
         from api.dependencies import get_skillflow
-        from core.meta_run import approve_meta, read_gather_state
+        from core.meta_run import approve_meta
         from core.project_submit import seed_and_trigger
 
         sf = get_skillflow()
@@ -3119,43 +3120,22 @@ class MetaAgent:
             return {"status": "error", "message": "Provide the exact reviewed meta run_id."}
         pid = run.get("project_id", "")
 
-        # Config selection — COMPOSITION-NATIVE. The butler expresses the build
-        # pipeline as a list of ADDONS (from list_pipeline_addons), not a baked
-        # config-name string: none → base dpe_default_v2; one → reuse the addon's
-        # alias (e.g. game_harness → "dpe_game"); many → an emergent composed name
-        # (register_addon_combo, the same path start_addon_run uses). The composed
-        # config is registered live and stored on the project row so the scheduler
-        # and the in-chat driver build with it. `config_name` stays accepted as a
-        # deprecated escape hatch (a pre-registered name), but the butler should
-        # pass `addons`.
-        build_config, cfg_err = self._resolve_build_config(sf, args)
-        if cfg_err:
-            return {"status": "error", "message": cfg_err}
-        if build_config != "dpe_default_v2":
-            self.db.update_project(pid, config_name=build_config)
-
-        # AT-1: If the run is already completed (its finalize step already ran),
-        # skip approve_meta — the artifacts have been emitted.
-        run_already_completed = run.get("status") == "completed"
-
-        if run_already_completed:
-            gs = read_gather_state(self.ws, pid) or {}
-        else:
-            # Read the retained row NAMED BY THE REVIEWED TOKEN, including on
-            # retry after approval advanced the run. Never obtain a new token
-            # from the run's current checkpoint inside this manual action.
-            expected = args.get("expected_checkpoint")
-            try:
-                if not isinstance(expected, dict):
-                    raise ValueError("The reviewed checkpoint identity is required")
-                rows = sf.get_steps(run_id, include_payloads=True)
-                retained = next(s for s in rows if s["id"] == expected.get("step_instance_id")
-                                and s["step_id"] == "gather" and s["status"] == "completed")
-                gs = json.loads(retained["outputs_json"]).get("gather_state") or {}
-                if isinstance(gs, str):
-                    gs = json.loads(gs)
-            except Exception as exc:
-                return {"status": "error", "message": f"Cannot bind reviewed brief: {exc}"}
+        # The reviewed instance remains authoritative after completion too.
+        # Do not substitute mutable gather files or fetch a new checkpoint token.
+        expected = args.get("expected_checkpoint")
+        try:
+            if not isinstance(expected, dict):
+                raise ValueError("The reviewed checkpoint identity is required")
+            rows = sf.get_steps(run_id, include_payloads=True)
+            retained = next((s for s in rows if s["id"] == expected.get("step_instance_id")
+                             and s["step_id"] == "gather" and s["status"] == "completed"), None)
+            if retained is None:
+                raise ValueError("The reviewed gather instance does not belong to this run")
+            gs = json.loads(retained["outputs_json"]).get("gather_state") or {}
+            if isinstance(gs, str):
+                gs = json.loads(gs)
+        except Exception as exc:
+            return {"status": "error", "message": f"Cannot bind reviewed brief: {exc}"}
         brief = gs.get("brief") or {}
         stories = brief.get("user_stories")
         if not (isinstance(stories, list) and any(str(s).strip() for s in stories)):
@@ -3168,31 +3148,35 @@ class MetaAgent:
         # the project artifacts (project_brief.md, spec.md, step1_goals.json). If
         # it fails to emit, do NOT start DPE (it would run brief-less); surface the
         # error so the user can retry. Only trigger DPE once finalize has emitted.
-        if run_already_completed:
-            self._log_error(f"Meta run {run_id} was already completed when approving brief — "
-                           "this is expected if the checkpoint was approved via the CLI")
-        else:
-            try:
-                from aitelier.runner import AgentStepRunner
-                from core.event_bus import event_bus
+        try:
+            from aitelier.runner import AgentStepRunner
+            from core.event_bus import event_bus
 
-                async def _run_step(claimed):
-                    runner = AgentStepRunner(
-                        db_manager=self.db, workspace_manager=self.ws,
-                        agent_factory=None, prompt_assembler=None,
-                        event_bus=event_bus,
-                    )
-                    return await runner.execute(claimed)
+            async def _run_step(claimed):
+                runner = AgentStepRunner(
+                    db_manager=self.db, workspace_manager=self.ws,
+                    agent_factory=None, prompt_assembler=None,
+                    event_bus=event_bus,
+                )
+                return await runner.execute(claimed)
 
-                approve_meta(sf, run_id, step_runner=_run_step,
-                             expected_checkpoint=args.get("expected_checkpoint"),
-                             decision_id=args.get("decision_id", ""))
-            except Exception as e:
-                self._log_error(f"approve_meta failed for {run_id}: {e}")
-                return {"status": "error", "project_id": pid,
-                        "message": "I couldn't finalize the brief — the requirements "
-                                   "artifacts weren't produced, so I did not start the "
-                                   "build. Please try approving again or adjust the brief."}
+            approve_meta(sf, run_id, step_runner=_run_step,
+                         expected_checkpoint=expected,
+                         decision_id=args.get("decision_id", ""))
+        except Exception as e:
+            self._log_error(f"approve_meta failed for {run_id}: {e}")
+            return {"status": "error", "project_id": pid,
+                    "message": f"Brief approval/finalization not confirmed: {e}. "
+                               "The build was not started; retain the same reviewed decision on retry."}
+
+        # Config composition can register a graph and update the project. Keep
+        # those effects after SDK validation/replay and successful finalization.
+        # A config error can be corrected using the same already-approved brief.
+        build_config, cfg_err = self._resolve_build_config(sf, args)
+        if cfg_err:
+            return {"status": "error", "message": cfg_err}
+        if build_config != "dpe_default_v2":
+            self.db.update_project(pid, config_name=build_config)
 
         res = seed_and_trigger(self.db, self.ws, pid, brief)
         if res.get("status") not in ("submitted", "already_planned"):

@@ -81,13 +81,12 @@ def approve_meta(sf, run_id: str, step_runner=None, *,
             state, preserving existing behavior.
     """
     run = sf.get_run(run_id)
-    if run and run.get("status") == "completed":
-        return
-
-    # Let the SDK replay the SAME observed decision even after it advanced;
-    # run.status cannot establish whether this caller's approval was recorded.
+    # Completion does not prove THIS decision was recorded. Validate/replay
+    # the original identity before returning, even when finalize already ran.
     sf.approve_checkpoint(run_id, expected_checkpoint=expected_checkpoint,
                           decision_id=decision_id)
+    if run and run.get("status") == "completed":
+        return
 
     # Drive the now-running graph to terminal. The 2-step path (approve →
     # finalize → complete) needs only a couple advances; the budget is a stall

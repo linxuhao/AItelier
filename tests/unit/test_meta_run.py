@@ -44,11 +44,11 @@ def test_approve_meta_drives_finalize_then_self_completes():
     sf.complete_run.assert_not_called()         # graph self-terminated
 
 
-def test_approve_meta_idempotent_when_already_completed():
+def test_approve_meta_replays_observed_decision_before_returning_completed():
     sf = MagicMock()
     sf.get_run.return_value = {"status": "completed"}
     meta_run.approve_meta(sf, "run-1", expected_checkpoint={"observed": 1}, decision_id="observed-decision")
-    sf.approve_checkpoint.assert_not_called()
+    sf.approve_checkpoint.assert_called_once_with("run-1", expected_checkpoint={"observed": 1}, decision_id="observed-decision")
     sf.advance_run.assert_not_called()
     sf.complete_run.assert_not_called()
 

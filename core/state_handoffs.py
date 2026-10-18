@@ -65,6 +65,7 @@ CREATE TABLE IF NOT EXISTS state_handoffs (
     FOREIGN KEY(claim_id) REFERENCES state_node_claims(claim_id)
 );
 CREATE INDEX IF NOT EXISTS state_handoffs_project ON state_handoffs(project_id, status, created_at);
+CREATE INDEX IF NOT EXISTS state_handoffs_reference_keys ON state_handoffs(project_id,attempt_id,claim_id);
 CREATE TRIGGER IF NOT EXISTS state_handoffs_no_delete BEFORE DELETE ON state_handoffs
 BEGIN SELECT RAISE(ABORT,'handoffs are decided or expire, never deleted'); END;
 """

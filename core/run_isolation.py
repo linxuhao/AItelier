@@ -1519,6 +1519,34 @@ def _missing_reap_is_owned(rec: dict, *, discarded: bool,
     return True, f"reconciled removed {path}; branch and commits preserved"
 
 
+def _require_reap_retention(db, rec, row, ctl, *, now, minimum):
+    """Reject cheaply, then recheck the same observations after content work."""
+    from core import run_resources as resources
+    rid = rec["run_id"]
+    with db.get_connection() as conn:
+        admissions = conn.execute(
+            "SELECT COUNT(*) FROM checkout_write_admissions WHERE canonical_checkout=?",
+            (rec["worktree_path"],)).fetchone()[0]
+    if admissions:
+        raise ValueError("host write admissions have not retired")
+    ledger = ctl.get(rid) if ctl else None
+    if ctl and not ctl.settled(ledger, "released"):
+        raise ValueError("semantic release is not positively acknowledged")
+    if not ctl and _index_storage_present(rec["worktree_path"], ()):
+        raise ValueError("index exists but its lifecycle is disabled; release unknown")
+    if ctl and _index_storage_present(
+            rec["worktree_path"], ("manifest.json", "files.zvec", "index.zvec")):
+        raise ValueError("index storage reappeared after release")
+    ok, why = resources.idle_eligible(rec, row, ledger, now=now, minimum=minimum)
+    if not ok:
+        raise ValueError(why)
+    ignored = _git(rec["worktree_path"], "ls-files", "--others", "--ignored", "--exclude-standard", "-z")
+    if ignored.returncode:
+        raise ValueError("cannot inspect ignored files")
+    if any(ignored.stdout.split("\0")):
+        raise ValueError("unclassified ignored files retained; they may contain evidence")
+
+
 def reap_released_worktrees(db, sf, *, min_idle_seconds: float | None = None,
                            now: float | None = None) -> dict:
     """Reclaim quiet, integrated/discarded, idle roots after index release.
@@ -1581,32 +1609,16 @@ def reap_released_worktrees(db, sf, *, min_idle_seconds: float | None = None,
                         conn.commit()
                     removed.append({"run_id": rid, "reason": why})
                     continue
+                _require_reap_retention(
+                    db, rec, row, ctl, now=now, minimum=min_idle_seconds)
+                # Cheap retention vetoes above cannot grant removal. Only a
+                # candidate that survives them needs the full raw-byte proof.
                 ok, why = is_disposable(db, rid, run_status=row["status"], admitted_ops=0,
                                         integration_ref=target, require_merge=not discarded)
                 if not ok:
                     raise ValueError(why)
-                with db.get_connection() as conn:
-                    admissions = conn.execute(
-                        "SELECT COUNT(*) FROM checkout_write_admissions WHERE canonical_checkout=?",
-                        (rec["worktree_path"],)).fetchone()[0]
-                if admissions:
-                    raise ValueError("host write admissions have not retired")
-                ledger = ctl.get(rid) if ctl else None
-                if ctl and not ctl.settled(ledger, "released"):
-                    raise ValueError("semantic release is not positively acknowledged")
-                if not ctl and _index_storage_present(rec["worktree_path"], ()):
-                    raise ValueError("index exists but its lifecycle is disabled; release unknown")
-                if ctl and _index_storage_present(
-                        rec["worktree_path"], ("manifest.json", "files.zvec", "index.zvec")):
-                    raise ValueError("index storage reappeared after release")
-                ok, why = resources.idle_eligible(rec, row, ledger, now=now, minimum=min_idle_seconds)
-                if not ok:
-                    raise ValueError(why)
-                ignored = _git(rec["worktree_path"], "ls-files", "--others", "--ignored", "--exclude-standard", "-z")
-                if ignored.returncode:
-                    raise ValueError("cannot inspect ignored files")
-                if any(ignored.stdout.split("\0")):
-                    raise ValueError("unclassified ignored files retained; they may contain evidence")
+                _require_reap_retention(
+                    db, rec, row, ctl, now=now, minimum=min_idle_seconds)
                 # Recheck the engine after filesystem observations, not only at
                 # the beginning of the maintenance pass.
                 fresh, why = resources.terminal_quiet(sf, rid)
@@ -1679,34 +1691,35 @@ def is_disposable(db, run_id: str, *, run_status: str, admitted_ops: int,
         validate_checkout(rec, datadir.worktrees_dir())
     except Exception as exc:
         return False, f"ownership validation failed: {exc}"
-    # Raw cleanliness: index equals HEAD, every tracked file hashes (no-follow,
-    # full bytes) to its blob, no untracked file. No `git status`: its refresh
-    # runs configured clean filters and fsmonitor hooks from delivered bytes.
     try:
         with closed_git.repo_lock(rec["source_repo"]):
+            actual = _git(path, "symbolic-ref", "--quiet", "--short", "HEAD")
+            head = _git(path, "rev-parse", "HEAD")
+            if head.returncode or not head.stdout.strip():
+                return False, "worktree HEAD is unknown"
+            if rec.get("mode") == MODE_READ_SNAPSHOT:
+                if actual.returncode != 1 or head.stdout.strip() != rec.get("base_sha"):
+                    return False, "read snapshot changed from its recorded detached base"
+                tip = rec["base_sha"]
+            else:
+                if actual.returncode or actual.stdout.strip() != rec.get("branch"):
+                    return False, "worktree branch differs from its recorded owner"
+                tip = head.stdout.strip()
+            if integration_ref:
+                merged = _git(rec["source_repo"], "merge-base", "--is-ancestor",
+                              tip, integration_ref)
+                if merged.returncode != 0:
+                    return False, (f"branch {rec['branch']} is unmerged into "
+                                   f"{integration_ref}")
+            # Ownership/branch/integration rejection needs no tracked-content reads.
+            # Raw cleanliness: index equals HEAD, every tracked file hashes (no-follow,
+            # full bytes) to its blob, no untracked file. No `git status`: its refresh
+            # runs configured clean filters and fsmonitor hooks from delivered bytes.
             clean, detail = closed_git.clean_against_head(path)
+            if not clean:
+                return False, f"uncommitted work in the tree ({detail})"
+            return True, "terminal, quiet, clean" + (
+                f", merged into {integration_ref}" if integration_ref else
+                ", merge not checked (no integration_ref supplied)")
     except Exception as exc:  # noqa: BLE001 -- unknown is not clean
         return False, f"raw status failed; clean state is unknown ({str(exc)[:200]})"
-    if not clean:
-        return False, f"uncommitted work in the tree ({detail})"
-    actual = _git(path, "symbolic-ref", "--quiet", "--short", "HEAD")
-    head = _git(path, "rev-parse", "HEAD")
-    if head.returncode or not head.stdout.strip():
-        return False, "worktree HEAD is unknown"
-    if rec.get("mode") == MODE_READ_SNAPSHOT:
-        if actual.returncode != 1 or head.stdout.strip() != rec.get("base_sha"):
-            return False, "read snapshot changed from its recorded detached base"
-        tip = rec["base_sha"]
-    else:
-        if actual.returncode or actual.stdout.strip() != rec.get("branch"):
-            return False, "worktree branch differs from its recorded owner"
-        tip = head.stdout.strip()
-    if integration_ref:
-        merged = _git(rec["source_repo"], "merge-base", "--is-ancestor",
-                      tip, integration_ref)
-        if merged.returncode != 0:
-            return False, (f"branch {rec['branch']} is unmerged into "
-                           f"{integration_ref}")
-    return True, "terminal, quiet, clean" + (
-        f", merged into {integration_ref}" if integration_ref else
-        ", merge not checked (no integration_ref supplied)")

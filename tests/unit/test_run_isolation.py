@@ -444,7 +444,7 @@ def test_reaper_keeps_a_clean_pushed_but_unmerged_run(db, home, tmp_path):
     _release_for_reap(db, "run-reap-push")
 
     report = ri.reap_released_worktrees(
-        db, _ReapSF({"run-reap-push": {"status": "completed"}}))
+        db, _ReapSF({"run-reap-push": {"status": "completed"}}), min_idle_seconds=0)
 
     assert wt.exists(), "an unmerged/open-PR-shaped delivery was reaped"
     assert report["removed"] == []
@@ -491,7 +491,7 @@ def test_reaper_keeps_paused_and_dirty_work(db, home, tmp_path):
 
     sf = _ReapSF({"run-paused": {"status": "paused"},
                   "run-dirty": {"status": "completed"}})
-    report = ri.reap_released_worktrees(db, sf)
+    report = ri.reap_released_worktrees(db, sf, min_idle_seconds=0)
 
     assert Path(ri.record(db, "run-paused")["worktree_path"]).exists()
     assert Path(ri.record(db, "run-dirty")["worktree_path"]).exists()

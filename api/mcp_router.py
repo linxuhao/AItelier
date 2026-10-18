@@ -229,7 +229,8 @@ def _wrap(mcp: FastMCP, fn: Callable, name: str) -> Callable:
     @functools.wraps(fn)
     async def _inner(*args, **kwargs):
         try:
-            _authorize(name, mcp.get_context())
+            await anyio.to_thread.run_sync(
+                _authorize, name, mcp.get_context())
         except ToolDenied as e:
             action = kwargs.get("action")
             if action is None and args:
@@ -250,8 +251,9 @@ def _wrap(mcp: FastMCP, fn: Callable, name: str) -> Callable:
             # inline pinned the uvicorn loop for their whole duration — SSE streams
             # stopped flushing, the web UI hung, and the scheduler's cross-thread
             # notification callbacks queued unexecuted. One MCP call could freeze the
-            # entire control plane. Authorization stays on the loop above (it reads a
-            # request-scoped contextvar); only the body moves off it.
+            # entire control plane. Auth also runs off-loop above: credential lookup
+            # may write SQLite diagnostics. Capture the request context before dispatch;
+            # AnyIO propagates contextvars to both authorization and body workers.
             if inspect.iscoroutinefunction(fn):
                 return await fn(*args, **kwargs)
             return await anyio.to_thread.run_sync(
@@ -271,7 +273,7 @@ def _install_director_call_guard(mcp: FastMCP) -> None:
             action = arguments.get("action")
             if action in _DIRECTOR_ACTIONS:
                 try:
-                    _authorize(name, context)
+                    await anyio.to_thread.run_sync(_authorize, name, context)
                 except ToolDenied:
                     code = "unauthorized"
                 else:

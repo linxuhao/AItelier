@@ -193,7 +193,9 @@ class StateAttempts:
         claim_enforcement=on (P3, design §7.3 rule 1) the caller must hold the
         node's live implement claim (``claim_required``); a supplied
         ``claim_id``/``fence`` must name it (``stale_fence``), and the claim is
-        bound to the new attempt. An admin passes without a claim; the event
+        bound to the new attempt. External review of a CANDIDATE may instead
+        explicitly name an own live review claim and fence, frozen in context.
+        An admin passes without a claim; the event
         then carries ``break_glass``. After an ``abandon_kind=unknown`` the
         node's next attempt must declare ``base_sha`` and ride a claim whose
         workspace differs from the abandoned attempt's (two possibly live
@@ -248,6 +250,15 @@ class StateAttempts:
                     from core.state_claims import ClaimError
                     raise ClaimError("not_attempt_owner", f"attempt {old['attempt_id']} belongs to driver "
                                      f"{old['owner_driver_id']}", owner_driver_id=old["owner_driver_id"])
+                review_pin = json.loads(old["context_json"]).get("review_claim")
+                if review_pin is not None:
+                    from core.state_claims import ClaimError
+                    if claim_id != review_pin["claim_id"] or fence != review_pin["fence"]:
+                        raise ClaimError("stale_fence", "review replay must name its original claim and fence")
+                    if old["status"] not in ACTIVE:
+                        # Returning a settled receipt authorizes no new work;
+                        # its original claim was released by terminal reporting.
+                        return _public(dict(old))
                 if claim_id is not None or fence is not None:
                     # A replay that names a claim OR a fence is judged on the live
                     # claim now: a released or lapsed one is stale, whatever the
@@ -256,7 +267,8 @@ class StateAttempts:
                     from core.state_enforcement import dispatch_claim
                     from core import state_claims
                     named, _ = dispatch_claim(conn, project_id, node_key, owner_driver_id, is_admin, claim_id=claim_id,
-                                              fence=fence, current=state_claims.now_stamp())
+                                              fence=fence, current=state_claims.now_stamp(),
+                                              allow_review=external is not None and review_pin is not None)
                     if named is not None and old["status"] in ACTIVE and named["attempt_id"] in (None, old["attempt_id"]):
                         conn.execute("UPDATE state_node_claims SET attempt_id=?,updated_at=? WHERE claim_id=?",
                                      (old["attempt_id"], now(), named["claim_id"]))
@@ -272,12 +284,15 @@ class StateAttempts:
             from core import state_claims
             current = state_claims.now_stamp()
             claim, break_glass = dispatch_claim(conn, project_id, node_key, owner_driver_id, is_admin,
-                                                claim_id=claim_id, fence=fence, current=current)
+                                                claim_id=claim_id, fence=fence, current=current,
+                                                allow_review=external is not None and node["status"] == "CANDIDATE")
             if enforced(conn, project_id):
                 self._after_unknown_abandon(conn, project_id, node_key, claim, base_sha, is_admin)
             ctx = {"state_project_id": project_id, "node_key": node_key, "revision": expected_revision,
                    "goal": node["goal"], "acceptance": json.loads(node["contract_json"]),
                    "contract_hash": node["contract_hash"], "dependencies": deps, "instruction": instruction}
+            if claim is not None and claim["purpose"] == "review":
+                ctx["review_claim"] = {"claim_id": claim["claim_id"], "fence": claim["fence"], "purpose": "review"}
             if base_sha is not None:
                 ctx["base_sha"] = base_sha
             if frozen_prerequisites is not None:

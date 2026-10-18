@@ -8,11 +8,12 @@ description: >
   *.gd, so a syntax error is caught by the step that wrote it and re-asked of
   the same implementer, instead of surviving the whole task loop and surfacing
   at 5_compile. No-ops (passes) when the step wrote no .gd files, and degrades
-  to a LOUD skip if the builder is unreachable.
+  to a LOUD skip if the builder is unreachable. Explicit literal file targets
+  must exist and fail before contacting the builder when missing.
 parameters:
   files:
     type: array
-    description: "Glob patterns relative to workspace_root (defaults to *.gd)"
+    description: "Glob patterns or required literal paths relative to workspace_root (defaults to *.gd)"
     required: false
   workspace_root:
     type: string

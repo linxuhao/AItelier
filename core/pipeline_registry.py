@@ -485,9 +485,36 @@ def _dedupe_context_sources(data: dict) -> list[str]:
 
 
 def _inject_seed_context(data: dict, config_name: str) -> None:
-    """Ensure the begin step reads the seed file (so start_config_run's seed_text
-    actually reaches the generated pipeline). No-op if begin isn't an agent step or
-    the seed source is already present."""
+    """Bind declared self-seed readers to the host's canonical launch file.
+
+    Follow non-agent setup steps to the first agent readers. Later agents
+    may legitimately read a prior step's output with the old seed filename;
+    their sources and the setup tools' contracts must remain unchanged.
+    """
+    hints = data.get("x-aitelier") or {}
+    declared = hints.get("seed_file")
+    if declared and declared != SEED_FILE:
+        steps = {step.get("id"): step for step in data.get("steps", [])
+                 if isinstance(step, dict)}
+        pending, seen = [data.get("begin")], set()
+        while pending:
+            node = pending.pop()
+            if node in seen:
+                continue
+            seen.add(node)
+            step = steps.get(node)
+            if step is None:
+                continue
+            if step.get("step_type", "agent") != "agent":
+                pending.extend(t.get("to") for t in step.get("transitions", [])
+                               if isinstance(t, dict))
+                continue
+            for c in step.get("context") or []:
+                inner = c.get("source", c) if isinstance(c, dict) else None
+                if (isinstance(inner, dict) and inner.get("config") == config_name
+                        and "step" not in inner and inner.get("output") == declared):
+                    inner["output"] = SEED_FILE
+        hints["seed_file"] = SEED_FILE
     begin = data.get("begin")
     for step in data.get("steps", []):
         if not isinstance(step, dict) or step.get("id") != begin:

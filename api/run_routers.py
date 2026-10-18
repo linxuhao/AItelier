@@ -437,9 +437,9 @@ from api.meta_routers import (  # noqa: E402  (avoids a module-load cycle)
 
 
 def _run_to_project_id(run_id: str) -> str:
-    run = _resolve_run(run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail="Run not found")
+    run = get_skillflow().get_run(run_id)
+    if not run or run.get("id") != run_id:
+        raise HTTPException(status_code=404, detail="Exact run not found")
     return run["project_id"]
 
 
@@ -453,7 +453,7 @@ def get_run_checkpoint(
 ):
     """Pending checkpoint for a run (delegates to the project-keyed handler)."""
     from api.meta_routers import get_pending_checkpoint
-    return get_pending_checkpoint(_run_to_project_id(run_id), request, user, db)
+    return get_pending_checkpoint(_run_to_project_id(run_id), request, user, db, run_id=run_id)
 
 
 @router.post("/runs/{run_id}/checkpoint/approve")
@@ -466,7 +466,9 @@ def approve_run_checkpoint(
 ):
     """Approve a run's checkpoint (delegates to the project-keyed handler)."""
     from api.meta_routers import approve_checkpoint
-    return approve_checkpoint(_run_to_project_id(run_id), body, request, user, db)
+    if body.run_id and body.run_id != run_id:
+        raise HTTPException(409, "Body run_id differs from the exact route")
+    return approve_checkpoint(_run_to_project_id(run_id), body.model_copy(update={"run_id": run_id}), request, user, db)
 
 
 @router.post("/runs/{run_id}/checkpoint/reject")
@@ -479,7 +481,9 @@ def reject_run_checkpoint(
 ):
     """Reject a run's checkpoint (delegates to the project-keyed handler)."""
     from api.meta_routers import reject_checkpoint
-    return reject_checkpoint(_run_to_project_id(run_id), body, request, user, db)
+    if body.run_id and body.run_id != run_id:
+        raise HTTPException(409, "Body run_id differs from the exact route")
+    return reject_checkpoint(_run_to_project_id(run_id), body.model_copy(update={"run_id": run_id}), request, user, db)
 
 
 @router.get("/runs/{run_id}/graph")

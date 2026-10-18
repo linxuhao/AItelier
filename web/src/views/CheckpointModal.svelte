@@ -185,7 +185,8 @@
     }
 
     for (const fname of fileKeys) {
-      const fcontent = String(files[fname] || '');
+      const value = files[fname];
+      const fcontent = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
       html += renderFileSection(fname, fcontent);
     }
 
@@ -267,12 +268,12 @@
   // ── Handlers ──────────────────────────────────────────────────────
 
   async function handleApprove(): Promise<void> {
-    if (submitting || !projectId) return;
+    if (submitting || !projectId || !contentData) return;
 
     submitting = true;
     errorMsg = '';
     try {
-      const data = await approveCheckpoint(projectId) as any;
+      const data = await approveCheckpoint(projectId, contentData!) as any;
       if (data && data.status === 'already_advanced') {
         stopStalePolling();
         hideCheckpoint();
@@ -319,7 +320,7 @@
     submitting = true;
     errorMsg = '';
     try {
-      const data = await rejectCheckpoint(projectId, fb) as any;
+      const data = await rejectCheckpoint(projectId, fb, contentData!) as any;
       if (data && data.status === 'already_advanced') {
         stopStalePolling();
         hideCheckpoint();
@@ -421,7 +422,7 @@
           onclick={handleApprove}
           disabled={submitting}
         >
-          {submitting ? t('modal.approving') : t('modal.approve')}
+          {submitting ? t('modal.approving') : contentData?.failed_rescue ? 'Resume failed run' : t('modal.approve')}
         </button>
         <button
           id="cp-reject"

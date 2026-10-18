@@ -11,6 +11,8 @@ import { get } from 'svelte/store';
 import { authStore, setAuth } from '../src/stores/auth';
 import { connectionStore } from '../src/stores/connection';
 import {
+  approveCheckpoint,
+  rejectCheckpoint,
   listProjects,
   createProject,
   getProject,
@@ -282,5 +284,25 @@ describe('errorMessageKey', () => {
     expect(errorMessageKey(new ApiError(0, 'Network error'))).toBe('error.network');
     expect(errorMessageKey(new TypeError('Failed to fetch'))).toBe('error.network');
     expect(errorMessageKey(new ApiError(500, 'boom'))).toBe('error.requestFailed');
+  });
+});
+
+
+describe('normal checkpoint observed decision contract', () => {
+  it('carries the displayed identity unchanged and retries the same decision', async () => {
+    const observed = { run_id: 'exact-run', checkpoint: 'plan', decision_id: 'rendered-decision',
+      expected_checkpoint: {step_instance_id: 42, version: 3, completion_seq: 1, outputs_sha256: 'a'.repeat(64)}};
+    mockFetch.mockImplementation(() => mockResponse({status:'approved'}));
+    await approveCheckpoint('project', observed);
+    await approveCheckpoint('project', observed);
+    const bodies = mockFetch.mock.calls.map(call => JSON.parse(call[1].body));
+    expect(bodies[0]).toEqual({...observed, project_id:'project', rescue_failed:false});
+    expect(bodies[1]).toEqual(bodies[0]);
+    expect(mockFetch.mock.calls.every(call => call[0].endsWith('/checkpoint/approve'))).toBe(true);
+  });
+  it('keeps rejection feedback bound to the selected run', async () => {
+    mockFetch.mockImplementation(() => mockResponse({status:'rejected'}));
+    await rejectCheckpoint('project', 'revise this plan', {run_id:'exact-run', checkpoint:'plan'});
+    expect(JSON.parse(mockFetch.mock.calls[0][1].body)).toEqual({project_id:'project', run_id:'exact-run', checkpoint:'plan', feedback:'revise this plan'});
   });
 });

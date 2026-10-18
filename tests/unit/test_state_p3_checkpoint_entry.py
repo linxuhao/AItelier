@@ -53,9 +53,9 @@ def _rest(client, monkeypatch, project_id, status):
     database = app.dependency_overrides[get_db_manager]()
     _bind_state_attempt(database)
     sf = MagicMock()
-    sf.get_run.return_value = {"status": status}
+    sf.get_run.return_value = {"status": status, "id": "run-1", "project_id": project_id}
     monkeypatch.setattr(mr, "get_skillflow", lambda: sf)
-    monkeypatch.setattr(mr, "_get_checkpoint_info", lambda pid: INFO)
+    monkeypatch.setattr(mr, "_get_checkpoint_info", lambda pid, rid=None: INFO)
     monkeypatch.setattr(run_driver, "checkpoint_reject_target", lambda *a: None)
     return sf, database
 
@@ -63,7 +63,7 @@ def _rest(client, monkeypatch, project_id, status):
 def test_rest_checkpoint_routes_refuse_a_non_owner_at_entry(client, monkeypatch, clock):
     sf, database = _rest(client, monkeypatch, "cp-entry-proj", "paused")
     _as(monkeypatch, "grok")
-    for verb, body in (("approve", {"checkpoint": "gather", "feedback": ""}),
+    for verb, body in (("approve", {"checkpoint": "gather", "feedback": "", "run_id": "run-1", "rescue_failed": True}),
                        ("reject", {"checkpoint": "gather", "feedback": "redo"})):
         resp = client.post(f"/api/meta/cp-entry-proj/checkpoint/{verb}", json=body)
         assert resp.status_code == 409 and "not_attempt_owner" in resp.text, resp.text
@@ -71,7 +71,7 @@ def test_rest_checkpoint_routes_refuse_a_non_owner_at_entry(client, monkeypatch,
     sf.reject_checkpoint.assert_not_called()
     _as(monkeypatch, "codex")
     assert client.post("/api/meta/cp-entry-proj/checkpoint/reject",
-                       json={"checkpoint": "gather", "feedback": "redo"}).status_code == 200
+                       json={"checkpoint": "gather", "feedback": "redo", "run_id": "run-1"}).status_code == 200
     sf.reject_checkpoint.assert_called_once()
     with database.get_connection() as conn:
         assert not conn.execute("SELECT 1 FROM sqlite_master WHERE name='driver_checkpoint_decisions'").fetchone()
@@ -83,14 +83,14 @@ def test_failed_run_rescue_is_checked_once_at_entry_too(client, monkeypatch, clo
     monkeypatch.setattr(rr, "_run_to_project_id", lambda run_id: "cp-rescue-proj")
     _as(monkeypatch, "grok")
     for path in ("/api/meta/cp-rescue-proj/checkpoint/approve", "/api/runs/run-1/checkpoint/approve"):
-        resp = client.post(path, json={"checkpoint": "gather", "feedback": ""})
+        resp = client.post(path, json={"checkpoint": "gather", "feedback": "", "run_id": "run-1", "rescue_failed": True})
         assert resp.status_code == 409 and "not_attempt_owner" in resp.text, (path, resp.text)
     sf.reactivate_run.assert_not_called()
     sf.resume_run.assert_not_called()
     _as(monkeypatch, "owner-cli")                       # an admin passes, recorded as break glass
     from api import state_graph_routers as routers
     monkeypatch.setattr(routers, "authenticated_is_admin", lambda request: True)
-    resp = client.post("/api/meta/cp-rescue-proj/checkpoint/approve", json={"checkpoint": "gather", "feedback": ""})
+    resp = client.post("/api/meta/cp-rescue-proj/checkpoint/approve", json={"checkpoint": "gather", "feedback": "", "run_id": "run-1", "rescue_failed": True})
     assert resp.status_code == 200, resp.text
     sf.reactivate_run.assert_called_once_with("run-1")
     sf.resume_run.assert_called_once_with("run-1")

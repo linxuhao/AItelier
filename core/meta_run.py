@@ -58,7 +58,8 @@ def request_brief_changes(sf, run_id: str, feedback: str) -> None:
                          redirect_to=GATHER_STEP)
 
 
-def approve_meta(sf, run_id: str, step_runner=None) -> None:
+def approve_meta(sf, run_id: str, step_runner=None, *,
+                 expected_checkpoint=None, decision_id="") -> None:
     """Approve the brief and drive the run through its `finalize` tool step.
 
     Approving the gather checkpoint routes the run to the `finalize` tool step,
@@ -80,11 +81,12 @@ def approve_meta(sf, run_id: str, step_runner=None) -> None:
             state, preserving existing behavior.
     """
     run = sf.get_run(run_id)
+    # Completion does not prove THIS decision was recorded. Validate/replay
+    # the original identity before returning, even when finalize already ran.
+    sf.approve_checkpoint(run_id, expected_checkpoint=expected_checkpoint,
+                          decision_id=decision_id)
     if run and run.get("status") == "completed":
         return
-
-    if run and run.get("status") == "paused":
-        sf.approve_checkpoint(run_id)
 
     # Drive the now-running graph to terminal. The 2-step path (approve →
     # finalize → complete) needs only a couple advances; the budget is a stall

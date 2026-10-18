@@ -10,7 +10,7 @@
  * client half of that fix is pinned to what the server actually sends.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, waitFor } from '@testing-library/svelte';
+import { render, waitFor, fireEvent } from '@testing-library/svelte';
 import { showCheckpoint, hideCheckpoint } from '../../stores/checkpoint';
 import { t } from '../../lib/i18n.svelte';
 import { langStore } from '../../stores/i18n';
@@ -88,4 +88,23 @@ describe('CheckpointModal rejection banner', () => {
       expect(note?.textContent).toContain(FEEDBACK);
     });
   });
+});
+
+
+it('approval retains the displayed token and decision after a lost response', async () => {
+  const observed = {...live, run_id:'exact-reviewed-run', decision_id:'observed-modal-decision',
+    expected_checkpoint:{step_instance_id:42,version:3,completion_seq:1,outputs_sha256:'a'.repeat(64)}};
+  hideCheckpoint();
+  langStore.set('en');
+  mockApi.getCheckpoint.mockResolvedValue(observed);
+  mockApi.approveCheckpoint.mockRejectedValueOnce(new Error('response lost')).mockResolvedValueOnce({status:'approved'});
+  const {container} = render(CheckpointModal);
+  showCheckpoint('greet', null);
+  await waitFor(() => expect(container.querySelector('.cp-revision-note')).not.toBeNull());
+  await fireEvent.click(container.querySelector('#cp-approve')!);
+  await waitFor(() => expect(container.textContent).toContain('response lost'));
+  await fireEvent.click(container.querySelector('#cp-approve')!);
+  await waitFor(() => expect(mockApi.approveCheckpoint).toHaveBeenCalledTimes(2));
+  expect(mockApi.approveCheckpoint.mock.calls[0]).toEqual(['greet', observed]);
+  expect(mockApi.approveCheckpoint.mock.calls[1]).toEqual(['greet', observed]);
 });

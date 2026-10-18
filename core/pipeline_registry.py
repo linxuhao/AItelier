@@ -512,7 +512,7 @@ def _inject_seed_context(data: dict, config_name: str) -> None:
             for c in step.get("context") or []:
                 inner = c.get("source", c) if isinstance(c, dict) else None
                 if (isinstance(inner, dict) and inner.get("config") == config_name
-                        and inner.get("output") == declared):
+                        and "step" not in inner and inner.get("output") == declared):
                     inner["output"] = SEED_FILE
         hints["seed_file"] = SEED_FILE
     begin = data.get("begin")

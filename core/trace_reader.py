@@ -69,6 +69,14 @@ def resolve_run_row(sf, ref: str) -> dict | None:
 
 def trace_summary(payload: dict, cap: int = 220) -> str:
     """The one line of a trace payload worth reading in a list view."""
+    if payload.get("invocation_id") and payload.get("outcome"):
+        text = (f"{payload.get('model_route')} via {payload.get('served_by')}: "
+                f"{payload['outcome']}")
+        if "elapsed_s" in payload:
+            text += f" after {payload['elapsed_s']}s"
+        if payload.get("error_type"):
+            text += f" ({payload['error_type']})"
+        return text[:cap]
     bits: list[str] = []
     if payload.get("passed") is False:
         bits.append("passed=false")

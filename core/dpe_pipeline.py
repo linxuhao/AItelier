@@ -1028,7 +1028,9 @@ class PipelineEngine:
         # builds (see AIGateway.on_progress): ticks every few seconds while a
         # completion streams, so a watcher can tell a long response from a
         # wedged one.
-        self.factory = AgentFactory(registry=registry, on_progress=llm_progress)
+        self.factory = AgentFactory(
+            registry=registry, on_progress=llm_progress,
+            on_completion=lambda event, payload: self._trace("llm", event, payload))
         self.assembler = PromptAssembler(repo_type=repo_type, user_lang=user_lang)
         # Kept on the engine too: tool-phase ticks ("running run_tests") come
         # from the tool-execution loop, not from a gateway.

@@ -54,7 +54,8 @@ def live(tmp_path, monkeypatch, request):
     from core.skillflow_host import AItelierSkillFlow
     runtime = AItelierSkillFlow if getattr(request, "param", None) == "host" else SkillFlow
     sf = runtime(str(tmp_path / "skillflow.sqlite"), workspace_base=str(tmp_path / "ws"),
-                   projects_base=str(tmp_path / "projects"))
+                   projects_base=str(tmp_path / "projects"),
+                   code_path_resolver=deps._existing_repo_code_path)
     registry = ConfigRegistry()
     for name, mode in [("state_fixture", "none"), ("state_code_fixture", "code")]:
         graph = PipelineGraph(name=name, begin="work", steps=[StepNode(id="work", context=[
@@ -1753,7 +1754,10 @@ def test_reserved_explicit_base_override_recovers_same_attempt_on_selected_commi
     assert request["base_sha"] == selected and reserved["attempt_id"] in request["note"]
     rec = isolation.record(live.db, recovered["run_id"])
     assert rec["base_sha"] == selected
-    for path, expected in [(rec["worktree_path"], selected), (repo, original)]:
+    sdk_root = live.sf._workspace.get_project_code_path(
+        recovered["execution_project_id"], run_id=recovered["run_id"])
+    assert Path(sdk_root).resolve() == Path(rec["worktree_path"]).resolve()
+    for path, expected in [(sdk_root, selected), (repo, original)]:
         assert subprocess.run(["git", "rev-parse", "HEAD"], cwd=path, check=True,
                               capture_output=True, text=True).stdout.strip() == expected
     assert (Path(rec["worktree_path"]) / "dependency.txt").read_text() == "accepted dependency\n"

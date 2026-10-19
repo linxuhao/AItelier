@@ -2413,13 +2413,82 @@ class PipelineEngine:
             return refusal
         return None
 
+    def _install_relay_acknowledgement(self, relay: dict | None) -> None:
+        if relay and "acknowledge_relay" not in self._tool_schemas:
+            retained = ", ".join(
+                f"{name}={size} bytes"
+                for name, size in sorted(relay["retained_files"].items())
+            ) or "no code files"
+            self._tool_schemas["acknowledge_relay"] = {
+                "name": "acknowledge_relay",
+                "description": (
+                    "Required first action for a continued State attempt. "
+                    f"Acknowledge retained code exactly ({retained}; total "
+                    f"{relay['retained_bytes']} bytes) and restate the "
+                    "known incomplete work from the relay instruction."
+                ),
+                "parameters": {
+                    "retained_bytes": {"type": "integer", "required": True},
+                    "incomplete_items": {
+                        "type": "array", "required": True,
+                        "items": {"type": "string"},
+                    },
+                },
+            }
+
+    def _acknowledge_json_relay(self, params: dict) -> dict:
+        if not isinstance(params, dict):
+            return {"error": "acknowledge_relay parameters must be an object"}
+        acknowledged, result = _relay_acknowledgement(self._json_relay_progress, params)
+        if acknowledged and not self._json_relay_acknowledged:
+            self._trace("step", "relay_progress_acknowledged", {
+                "retained_bytes": self._json_relay_progress["retained_bytes"],
+                "retained_files": self._json_relay_progress["retained_files"],
+                "incomplete_items": params.get("incomplete_items"),
+                "first_failure_run_id": self._json_relay_progress.get("first_failure_run_id"),
+            })
+        self._json_relay_acknowledged = acknowledged
+        return result
+
+    def _json_relay_guard(self, payload) -> dict | None:
+        """A JSON batch must acknowledge before any of its operations can run.
+
+        Host controls are not SDK tool grants. Validate the leading ack locally,
+        before JSON's read/write buckets can reorder it behind a repository call.
+        `files` is processed before actions, so it cannot precede the first ack.
+        """
+        relay = getattr(self, "_json_relay_progress", None)
+        if not relay or self._json_relay_acknowledged:
+            return None
+        actions = payload.get("actions") or [] if isinstance(payload, dict) else []
+        first = actions[0] if isinstance(actions, list) and actions else {}
+        if (isinstance(payload, dict) and not payload.get("files") and isinstance(first, dict)
+                and first.get("tool") == "acknowledge_relay"):
+            result = self._acknowledge_json_relay(first.get("params") or {})
+            if self._json_relay_acknowledged:
+                return None
+        else:
+            result = {"error": "relay acknowledgement required before repository operations",
+                      "expected_retained_bytes": relay["retained_bytes"],
+                      "incomplete_items": relay["incomplete_items"]}
+        self._trace("step", "relay_operation_refused_before_ack", {
+            "tool": first.get("tool") if isinstance(first, dict) else "files",
+            "retained_bytes": relay["retained_bytes"], "error": result["error"]})
+        return result
+
     def _exec_tool(self, action: dict) -> dict:
-        """Execute a tool action via skillflow. All tool execution is delegated.
+        """Execute a tool action; host controls stay local, repository tools use skillflow.
 
         Host-level step-control tools (ask_more_turns) are handled here as
         no-ops; the runner detects them in the turn loop and acts accordingly.
         """
         tool_name = action.get("tool", "")
+        if (getattr(self, "_json_relay_progress", None)
+                and getattr(self, "_scope_mode", "").startswith("json")):
+            if tool_name == "acknowledge_relay":
+                return self._acknowledge_json_relay(action.get("params") or {})
+            if not self._json_relay_acknowledged:
+                return {"error": "relay acknowledgement required before repository operations"}
         if tool_name == "ask_more_turns":
             return {"status": "granted", "turns": action.get("params", {}).get("turns", 3)}
         if tool_name == "recall_observation":
@@ -3155,6 +3224,13 @@ class PipelineEngine:
                 # refusal cause is pending) BEFORE any dependent file/tool runs.
                 self._scope_json_commit(scope_closure, response, payload)
 
+                relay_refusal = self._json_relay_guard(payload)
+                if relay_refusal is not None:
+                    feedback = json.dumps(relay_refusal, ensure_ascii=False)
+                    tool_results.append(feedback)
+                    tool_turn += 1
+                    continue
+
                 # Check for final output (files dict or list)
                 files_data = payload.get("files")
                 if files_data:
@@ -3715,6 +3791,12 @@ class PipelineEngine:
                 if isinstance(payload, list):
                     payload = {"thoughts": "", "actions": payload}
 
+                relay_refusal = self._json_relay_guard(payload)
+                if relay_refusal is not None:
+                    feedback = json.dumps(relay_refusal, ensure_ascii=False)
+                    tool_results.append(feedback)
+                    continue
+
                 actions = payload.get("actions", [])
                 if not actions:
                     # Costs a TURN, not the step. This used to `break`, so one
@@ -4273,27 +4355,7 @@ class PipelineEngine:
                             "description": "Character offset to end the slice at"},
                 },
             }
-        if relay_progress and "acknowledge_relay" not in self._tool_schemas:
-            retained = ", ".join(
-                f"{name}={size} bytes"
-                for name, size in sorted(relay_progress["retained_files"].items())
-            ) or "no code files"
-            self._tool_schemas["acknowledge_relay"] = {
-                "name": "acknowledge_relay",
-                "description": (
-                    "Required first action for a continued State attempt. "
-                    f"Acknowledge retained code exactly ({retained}; total "
-                    f"{relay_progress['retained_bytes']} bytes) and restate the "
-                    "known incomplete work from the relay instruction."
-                ),
-                "parameters": {
-                    "retained_bytes": {"type": "integer", "required": True},
-                    "incomplete_items": {
-                        "type": "array", "required": True,
-                        "items": {"type": "string"},
-                    },
-                },
-            }
+        self._install_relay_acknowledgement(relay_progress)
         write_tool_names = {
             name for name in self._tool_schemas
             if self._is_mutation_tool(name, self._tool_schemas)
@@ -5837,6 +5899,13 @@ class PipelineEngine:
                 "Unchanged artifacts are preserved. Write only additions or changes. "
                 "Use the artifact delete tool for removals and update the manifest. "
                 "Validation and publication use this same complete candidate.")
+
+        # The relay control belongs to this host execution, not the SDK's
+        # globally registered tool catalog. Both selected protocols must offer
+        # it; JSON dispatch handles it locally just as the native loop does.
+        self._json_relay_progress = _relay_progress_context(self._resolved_context)
+        self._json_relay_acknowledged = not bool(self._json_relay_progress)
+        self._install_relay_acknowledgement(self._json_relay_progress)
 
         # Prefer native tool calling if agent config enables it
         if self.factory.is_native(agent_config_name):

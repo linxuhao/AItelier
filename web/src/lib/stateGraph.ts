@@ -155,7 +155,7 @@ export function stemOf(node:{node_key:string; facet?:string|null}):string {
 }
 
 /**
- * Collapse each goal's contract / test / implementation into one node.
+ * Collapse a goal's lanes only when that contraction preserves the DAG.
  *
  * Faceting tripled the card count — the same goal now occupies three boxes and
  * the edges between them are internal bookkeeping, not structure a reader needs.
@@ -168,21 +168,55 @@ export function stemOf(node:{node_key:string; facet?:string|null}):string {
  * with no lanes.
  */
 export function groupFacets(nodes:StateNodeSummary[]):StateGroup[] {
+  // Keep invalid input intact so stateLayout reports it inside the UI error
+  // boundary. In particular, grouping must not hide a cycle within one family.
+  try { stateTopology(nodes); }
+  catch { return nodes.map(n => ({ ...n, lanes: [], members: [n.node_key] })); }
   const byKey = new Map(nodes.map(n => [n.node_key, n]));
-  const stem = (key:string) => { const n = byKey.get(key); return n ? stemOf(n) : key; };
-  const members = new Map<string, StateNodeSummary[]>();
+  const families = new Map<string, StateNodeSummary[]>();
+  const owner = new Map(nodes.map(n => [n.node_key, n.node_key]));
   for (const node of nodes) {
-    const s = stemOf(node);
-    if (!members.has(s)) members.set(s, []);
-    members.get(s)!.push(node);
+    const key = stemOf(node);
+    if (!families.has(key)) families.set(key, []);
+    families.get(key)!.push(node);
+  }
+  // A DAG can acquire a cycle when several vertices become one. Admit each
+  // family against the current quotient, in stable order: individually safe
+  // families can also conflict with each other when both are contracted.
+  for (const [key, family] of [...families].sort(([a], [b]) => a.localeCompare(b))) {
+    if (family.length < 2) continue;
+    // A frame has one actionable control per lane; never merge two real
+    // nodes into the same lane, even when their spelling shares a stem.
+    const roles = family.map(n => n.facet === 'contract' || n.facet === 'test' ? n.facet : 'content');
+    if (new Set(roles).size !== family.length) continue;
+    const ownKeys = new Set(family.map(n => n.node_key));
+    // An expanded parent may still own this stem as a real node. Reuse an
+    // actual member identity rather than capturing that unrelated owner.
+    const occupied = nodes.some(n => !ownKeys.has(n.node_key) && owner.get(n.node_key) === key);
+    const groupKey = occupied ? [...ownKeys].sort()[0] : key;
+    for (const n of family) owner.set(n.node_key, groupKey);
+    const deps = new Map<string, Set<string>>([...new Set(owner.values())].map(k => [k, new Set()]));
+    for (const n of nodes) for (const d of n.dependencies) {
+      if (owner.get(d) !== owner.get(n.node_key)) deps.get(owner.get(n.node_key)!)!.add(owner.get(d)!);
+    }
+    try { stateTopology([...deps].map(([node_key, dependencies]) => ({ node_key, dependencies: [...dependencies] }))); }
+    catch { for (const n of family) owner.set(n.node_key, n.node_key); }
+  }
+  const stem = (key:string) => owner.get(key) ?? key;
+  const members = new Map<string, StateNodeSummary[]>();
+  for (const n of nodes) {
+    const key = stem(n.node_key);
+    if (!members.has(key)) members.set(key, []);
+    members.get(key)!.push(n);
   }
   const groups:StateGroup[] = [];
   for (const [key, group] of members) {
+    const familyKey = stemOf(group[0]);
     const lane = (facet:StateLane['facet']) => group.find(n =>
-      facet === 'content' ? n.node_key === key && n.facet !== 'contract' && n.facet !== 'test' : n.facet === facet);
+      facet === 'content' ? n.node_key === familyKey && n.facet !== 'contract' && n.facet !== 'test' : n.facet === facet);
     const lanes:StateLane[] = LANE_ORDER.map(facet => {
       const node = lane(facet);
-      return { facet, node_key: node?.node_key ?? `${key}${facet === 'content' ? '' : '.' + facet}`,
+      return { facet, node_key: node?.node_key ?? `${familyKey}${facet === 'content' ? '' : '.' + facet}`,
                status: node?.status ?? '', readiness: node?.readiness ?? '',
                revision: node?.revision ?? 0, present: !!node };
     });
@@ -206,11 +240,8 @@ export function groupFacets(nodes:StateNodeSummary[]):StateGroup[] {
 }
 
 
-/** `perRow` wraps a wide rank onto several rows: dozens of independent root goals
- *  in one rank otherwise make a strip no zoom level can show. Ranks still stack in
- *  dependency order, so every edge keeps pointing downward. */
-export function stateLayout(nodes: StateNodeSummary[], domain = '', focus = '', query = '', maximum = 400,
-                            perRow = Number.POSITIVE_INFINITY) {
+/** Validate the original identities and all edges before filtering or grouping. */
+function stateTopology(nodes: Pick<StateNodeSummary, 'node_key' | 'dependencies'>[]) {
   const keys = new Set<string>();
   for (const node of nodes) {
     if (keys.has(node.node_key)) throw new Error('Duplicate state node identity');
@@ -225,6 +256,16 @@ export function stateLayout(nodes: StateNodeSummary[], domain = '', focus = '', 
   }
   const whole = layoutGraph(nodes.map(n => ({ id: n.node_key, transitions: outgoing.get(n.node_key)!.map(to => ({ to })) })), nodes[0]?.node_key ?? '');
   if (whole.edges.some(e => e.back)) throw new Error('State dependency cycle; cannot display it as a DAG');
+  return { whole, outgoing };
+}
+
+
+/** `perRow` wraps a wide rank onto several rows: dozens of independent root goals
+ *  in one rank otherwise make a strip no zoom level can show. Ranks still stack in
+ *  dependency order, so every edge keeps pointing downward. */
+export function stateLayout(nodes: StateNodeSummary[], domain = '', focus = '', query = '', maximum = 400,
+                            perRow = Number.POSITIVE_INFINITY) {
+  const { whole, outgoing } = stateTopology(nodes);
   const related = focus ? new Set([focus, ...(nodes.find(n => n.node_key === focus)?.dependencies ?? []), ...(outgoing.get(focus) ?? [])]) : null;
   const search = query.trim().toLocaleLowerCase();
   const visible = nodes.filter(n => (!domain || n.domain === domain) && (!related || related.has(n.node_key))

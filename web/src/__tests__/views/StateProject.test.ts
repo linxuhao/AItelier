@@ -366,3 +366,73 @@ describe('Faceted goals render as nested lane cards', () => {
     await waitFor(() => expect(api.stateNode).toHaveBeenCalledWith('game', 'growth.progress.contract'));
   });
 });
+
+
+describe('Unsafe facet families remain actionable in the graph', () => {
+  const nodes = () => [
+    goal('work.contract', [], {facet:'contract', title:'Work contract'}),
+    goal('design.bridge', ['work.contract'], {facet:'design', title:'Bridge'}),
+    goal('work.test', ['design.bridge'], {facet:'test', title:'Work test'}),
+    goal('work', ['work.contract', 'work.test'], {facet:'content', title:'Work content'}),
+    goal('safe.contract', [], {facet:'contract', title:'Safe contract'}),
+    goal('safe', ['safe.contract'], {facet:'content', title:'Safe content'}),
+  ];
+  it('selects and focuses the actual expanded test lane and retains safe lane clicks', async () => {
+    const select = vi.fn();
+    const view = render(StateGraph, {nodes:nodes(), selected:'work.test', onselect:select});
+    expect(view.queryByRole('alert')).toBeNull();
+    expect(view.container.querySelectorAll('g.goal')).toHaveLength(5);
+    expect(view.container.querySelector('.goal.selected .goal-key')?.textContent).toBe('work.test');
+    await fireEvent.click(view.getByRole('button', {name:/^Work contract:/}));
+    expect(select).toHaveBeenLastCalledWith('work.contract');
+    await fireEvent.keyDown(view.getByRole('button', {name:/^Work test:/}), {key:'Enter'});
+    expect(select).toHaveBeenLastCalledWith('work.test');
+    await fireEvent.click(view.getByRole('button', {name:'safe.contract: OPEN'}));
+    expect(select).toHaveBeenLastCalledWith('safe.contract');
+    await fireEvent.click(view.getByRole('checkbox', {name:'Selected goal + neighbours'}));
+    expect([...view.container.querySelectorAll('.goal-key')].map(n=>n.textContent).sort())
+      .toEqual(['design.bridge', 'work', 'work.test']);
+    expect(view.container.querySelectorAll('path.dependency')).toHaveLength(2);
+    await fireEvent.click(view.getByRole('checkbox', {name:'Group contract / test / implementation'}));
+    expect(view.container.querySelector('.goal.selected .goal-key')?.textContent).toBe('work.test');
+  });
+  it('resolves selection by actual membership when another group key matches a lane name', () => {
+    const nested = [
+      goal('x.test.contract', [], {facet:'contract'}),
+      goal('x.test.test', ['x.test.contract'], {facet:'test'}),
+      goal('x', [], {facet:'content'}),
+      goal('x.test', ['x'], {facet:'test'}),
+    ];
+    const view = render(StateGraph, {nodes:nested, selected:'x.test', onselect:vi.fn()});
+    expect(view.queryByRole('alert')).toBeNull();
+    expect(view.container.querySelector('.goal.selected .goal-key')?.textContent).toBe('x');
+  });
+  it.each([
+    ['Duplicate', [goal('a.contract', [], {facet:'contract'}), goal('a.contract', [], {facet:'contract'})]],
+    ['Missing', [goal('a.contract', ['a'], {facet:'contract'})]],
+    ['cycle', [goal('a.contract', ['a'], {facet:'contract'}), goal('a', ['a.contract'], {facet:'content'})]],
+  ])('renders the raw %s error inside the UI boundary', (error, nodes) => {
+    const view = render(StateGraph, {nodes, selected:'', onselect:vi.fn()});
+    expect(view.getByRole('alert').textContent).toContain(error);
+    expect(view.container.querySelector('svg')).toBeNull();
+  });
+  it.each([false, true])('keeps nested lane keyboard/click/focus identities after unsafe expansion, reverse=%s', async reverse => {
+    const raw = nodes().filter(n=>!n.node_key.startsWith('safe'));
+    raw.push(goal('work.test.contract', [], {facet:'contract'}),
+      goal('work.test.test', ['work.test.contract'], {facet:'test'}));
+    const select = vi.fn();
+    const view = render(StateGraph, {nodes:reverse ? raw.reverse() : raw,
+      selected:'work.test.test', onselect:select});
+    expect(view.queryByRole('alert')).toBeNull();
+    const test = view.getByRole('button', {name:'work.test.test: OPEN'});
+    expect(test.closest('.goal.selected')).not.toBeNull();
+    await fireEvent.keyDown(test, {key:'Enter'});
+    expect(select).toHaveBeenLastCalledWith('work.test.test');
+    await fireEvent.click(view.getByRole('button', {name:'work.test.contract: OPEN'}));
+    expect(select).toHaveBeenLastCalledWith('work.test.contract');
+    await fireEvent.click(view.getByRole('checkbox', {name:'Selected goal + neighbours'}));
+    expect(view.container.querySelectorAll('g.goal')).toHaveLength(1);
+    expect(view.getByRole('button', {name:'work.test.test: OPEN'})).toBeTruthy();
+  });
+
+});

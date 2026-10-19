@@ -85,6 +85,46 @@ def validate_witness(witness) -> dict:
 
 
 
+
+def validate_positions(mode: str, positions) -> None:
+    """Validate the actual producer syntax, not model/tool semantic validity.
+
+    JSON action tool values are opaque model JSON (including None); file paths
+    are stringified by json_positions and may be empty. Skipped non-dict model
+    entries legitimately leave gaps in JSON indices.
+    """
+    if not isinstance(positions, list) or not positions:
+        raise ValueError("scope response witness positions are missing")
+    native_batch = None
+    last_json_index = {"actions": -1, "files": -1}
+    files_started = False
+    for i, position in enumerate(positions):
+        if not isinstance(position, dict):
+            raise ValueError("scope response witness position is malformed")
+        if mode == "native":
+            if (set(position) != {"segment", "assistant_index", "call_index", "tool"}
+                    or any(type(position[k]) is not int or position[k] < 0
+                           for k in ("segment", "assistant_index", "call_index"))
+                    or position["call_index"] != i
+                    or (position["tool"] is not None and not isinstance(position["tool"], str))):
+                raise ValueError("native scope witness position is malformed")
+            batch = (position["segment"], position["assistant_index"])
+            if native_batch is not None and batch != native_batch:
+                raise ValueError("native scope witness spans different assistant batches")
+            native_batch = batch
+        else:
+            kind = position.get("kind")
+            if (kind not in ("actions", "files")
+                    or set(position) != {"kind", "index", "tool" if kind == "actions" else "path"}
+                    or type(position["index"]) is not int or position["index"] < 0
+                    or position["index"] <= last_json_index[kind]
+                    or (kind == "files" and not isinstance(position["path"], str))
+                    or (kind == "actions" and files_started)):
+                raise ValueError("JSON scope witness position is malformed")
+            last_json_index[kind] = position["index"]
+            files_started |= kind == "files"
+
+
 def load_progress(payload, violations, claims):
     """Legacy raw ledgers may migrate; incomplete versioned state may not."""
     fields = {"scope_progress_version", "scope_cause", "response_witness"}
@@ -137,12 +177,12 @@ def load_progress(payload, violations, claims):
                 or type(origin["claim_epoch"]) is not int
                 or {k: origin[k] for k in ("step_instance_id", "claim_epoch")} not in claims
                 or witness["carry_match"] is not True
-                or not isinstance(witness["positions"], list) or not witness["positions"]
-                or not all(isinstance(x, dict) for x in witness["positions"])
                 or not isinstance(witness["invocation_id"], str) or not witness["invocation_id"]
                 or not all(isinstance(witness[k], str) and len(witness[k]) == 64
+                           and all(c in "0123456789abcdef" for c in witness[k])
                            for k in ("presented_sha256", "response_digest"))):
             raise ValueError("scope response witness provenance is malformed")
+        validate_positions(origin["mode"], witness["positions"])
     return cause, witness
 
 

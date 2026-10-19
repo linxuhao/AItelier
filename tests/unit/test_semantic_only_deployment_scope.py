@@ -17,6 +17,7 @@ def semantic_packet():
         {'attempt_id': 'abandoned-unknown', 'status': 'abandoned', 'abandon_kind': 'unknown', 'settled_at': None}]
     row = deepcopy(obs['sidecar_owners'][0]); row['run_id'] = 'other-ready'; row['root'] = '/other'
     obs['sidecar_owners'].append(row)
+    obs['blockers']['sidecar_owners'] = obs['sidecar_owners']
     return seal(obs)
 
 
@@ -195,3 +196,22 @@ def test_malformed_frozen_measurement_cannot_be_overridden(tmp_path, malformed):
     with pytest.raises(dq.DeploymentBlocked, match='malformed'):
         dq.authorize('redeploy', obs, journal=tmp_path/'journal.json', override=decision(obs), semantic_only=True)
     assert obs == before
+
+
+@pytest.mark.parametrize('trusted', [False, True])
+def test_quiet_inventory_still_requires_matching_trusted_semantic_scope(tmp_path, trusted):
+    obs = semantic_packet()
+    obs.update(runs=[], sidecar_owners=[], external_owners=[], registered_external_owners=[],
+               godot_render_owners=[], blockers={}, errors=[], quiescent=True)
+    seal(obs)
+    exact = decision(obs)
+    exact.pop('deployment_attempt_id'); exact.pop('coordinated_owners')
+    if not trusted:
+        with pytest.raises(dq.DeploymentBlocked, match='trusted semantic caller'):
+            dq.authorize('redeploy', obs, journal=tmp_path/'journal.json', override=exact)
+    else:
+        clearance = dq.authorize('redeploy', obs, journal=tmp_path/'journal.json',
+                                 override=exact, semantic_only=True)
+        assert clearance['event']['audit']['semantic_only'] is True
+        assert clearance['event']['audit']['override_scope'] == 'quiescent_restriction'
+        assert dq.finalize(clearance, success=True, journal=tmp_path/'journal.json')['event']['usable']

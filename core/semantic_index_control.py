@@ -4,6 +4,8 @@ This module uses only the standard library so the same implementation runs in
 AItelier and in its zvec sidecar. Only immediate projects are auto-discovered.
 The ledger contains one small row per retained run, not index data. A fixed lock
 shard set bounds lock-file growth; a hash collision delays work, never mixes roots.
+Temporary SQLite contention retains demand for the resident worker's next tick;
+one-shot inspection fails visibly when the ledger or admission is unavailable.
 """
 from __future__ import annotations
 
@@ -23,6 +25,12 @@ from contextlib import contextmanager
 from pathlib import Path
 
 _RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
+
+
+def _sqlite_contention(exc: BaseException) -> bool:
+    code = getattr(exc, "sqlite_errorcode", None)
+    return (isinstance(exc, sqlite3.OperationalError) and type(code) is int
+            and code & 0xff in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED))
 
 
 @contextmanager
@@ -494,6 +502,8 @@ class IndexControl:
                 # subprocess.TimeoutExpired and follows the unknown/error path.
                 results.append({"run_id": rid, "outcome": "busy", "error": str(exc)})
             except Exception as exc:  # noqa: BLE001 -- retain/degrade on unknown provider or I/O failures
+                if _sqlite_contention(exc):
+                    raise  # the ledger is unavailable, not a failed index command
                 error = _failure_error(self.directory, exc)
                 self._finish(job, "error", error, retry_seconds)
                 results.append({"run_id": rid, "outcome": "error", "error": error})
@@ -509,12 +519,39 @@ class IndexControl:
 
     @staticmethod
     def _exclude_storage(root: Path):
+        if not root.is_absolute() or root.resolve() != root or (root / ".git").is_symlink():
+            raise ValueError("index storage root must not redirect")
+        top = git(root, "rev-parse", "--show-toplevel")
+        tracked = git(root, "ls-files", "--", ".zvec-grep")
+        common = git(root, "rev-parse", "--path-format=absolute", "--git-common-dir")
+        if (top.returncode or top.stdout.strip() != str(root)
+                or tracked.returncode or tracked.stdout.strip()
+                or common.returncode or not common.stdout.strip()):
+            raise ValueError("index storage ownership is unavailable or tracked")
+        common_dir = Path(common.stdout.strip())
         result = git(root, "rev-parse", "--path-format=absolute", "--git-path", "info/exclude")
         if result.returncode or not result.stdout.strip():
             raise RuntimeError("cannot resolve Git's common exclude file")
         path = Path(result.stdout.strip())
+        cache = root / ".zvec-grep"
+        if (not common_dir.is_absolute() or common_dir.resolve() != common_dir
+                or path != common_dir / "info/exclude" or path.resolve() != path
+                or cache.is_symlink() or (cache.exists() and not cache.is_dir())
+                or any((cache / name).is_symlink() for name in
+                       ("manifest.json", "files.zvec", "index.zvec", "locks"))):
+            raise ValueError("index or Git exclusion storage must not redirect")
+        if path.exists():
+            if not path.is_file() or path.stat().st_nlink != 1:
+                raise ValueError("Git exclusion must be one regular owned file")
+            if ".zvec-grep/" in path.read_text(encoding="utf-8").splitlines():
+                effective = git(root, "-c", "core.excludesFile=/dev/null",
+                                "check-ignore", "-q", "--", ".zvec-grep/")
+                if effective.returncode:
+                    raise RuntimeError("existing index storage exclusion is not effective")
+                return  # validated existing rule; do not open read-only Source for writing
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a+", encoding="utf-8") as stream:
+        fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "a+", encoding="utf-8") as stream:
             fcntl.flock(stream, fcntl.LOCK_EX)
             stream.seek(0)
             text = stream.read()
@@ -552,13 +589,17 @@ def main():
     # Only host owner demand creates indexes rows. Project operations have a
     # separate durable marker because they retain their baseline after indexing.
     with service_lock(directory, "worker.lock"):
+        reported_contention = False
         while True:
             try:
                 with deployment_admission(directory), service_lock(directory, "operation.lock"):
                     if (directory / "control.sqlite3").exists():
                         control = IndexControl(directory, args.worktrees_root, initialize=False)
-                        for result in control.process_once(timeout=timeout, embedding=embedding):
+                        results = control.process_once(timeout=timeout, embedding=embedding)
+                        for result in results:
                             print(f"[zg-lifecycle] {result}", flush=True)
+                        if args.once and any(r["outcome"] in {"error", "busy"} for r in results):
+                            raise RuntimeError("semantic index demand remains incomplete")
                     if args.projects_root:
                         try:
                             _index_project_once(directory, Path(args.projects_root),
@@ -566,8 +607,23 @@ def main():
                                                embedding=embedding)
                         except Exception as exc:
                             print(f"[zg-project] retained for repair: {exc}", flush=True)
+                            if args.once:
+                                raise
             except BlockingIOError:
+                if args.once:
+                    raise
                 pass  # cutover or another actual operation owns the boundary
+            except sqlite3.OperationalError as exc:
+                if not _sqlite_contention(exc):
+                    raise
+                if not reported_contention:
+                    print(f"[zg-control] ledger unavailable; retrying without settling demand: {exc}",
+                          flush=True)
+                reported_contention = True
+                if args.once:
+                    raise
+            else:
+                reported_contention = False
             if args.once:
                 return
             time.sleep(1)

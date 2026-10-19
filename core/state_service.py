@@ -417,39 +417,67 @@ class StateService:
             return requested["base_sha"]
         return attempt["context"].get("base_sha") or "HEAD"
 
-    def _preflight_review_inputs(self, attempt, source, prepared):
+    def _preflight_review_inputs(self, attempt, source, prepared, manifest=None):
         """Refuse a false portable-input producer/receipt binding before any launch effect.
 
         Pure State reads plus in-memory decoding: no Git I/O, no hashing under a
         write transaction, no base import, relay or claim mutation. Returns None
         when the attempt may proceed (filling `prepared` with decoded bundles),
-        otherwise the failed attempt recorded through the existing preflight path."""
+        otherwise the failed attempt recorded through the existing preflight path.
+
+        The decoded identity is compared with the ACTUAL frozen check `expected`
+        (producer, items and optional acceptance), never with a manifest rebuilt
+        from the supplied arguments. The one-bundle limit and the receiver's
+        own-seed constraint are judged here too, at the same side-effect-free
+        boundary, using the existing graph predicate."""
         spec = attempt["context"].get("frozen_prerequisites")
-        checks = [c for c in (spec or {}).get("checks", []) if c.get("probe") == "review_input_bundle"]
+        checks = [c for c in (spec or {}).get("checks", [])
+                  if isinstance(c, dict) and c.get("probe") == "review_input_bundle"]
         if not checks:
             return None
         from core import review_input_bundle as bundle
+
+        def refuse(check, required, actual, exc):
+            # Retain precise expected/actual evidence in the existing
+            # preflight failure machinery; nothing has launched.
+            reason = str(exc)[:1000]
+            report = {"version": 1, "passed": False, "error": f"{type(exc).__name__}: {reason}"[:1000],
+                      "checks": [{"id": check.get("id"), "probe": "review_input_bundle",
+                                  "required": required, "actual": actual,
+                                  "passed": False, "error": reason}]}
+            return self.attempts.record_preflight(
+                attempt["attempt_id"], report, f"frozen prerequisite refusal: {reason}")
+
+        if len(checks) > 1:
+            return refuse(checks[1], checks[1].get("expected"), None,
+                          StateConflict("an attempt may declare exactly one review input bundle"))
+        if manifest is not None:
+            try:
+                from core.seed_publication import reads_own_seed
+                own = reads_own_seed(self.sf._get_resolver(attempt["workflow"]).graph,
+                                     attempt["workflow"], manifest.seed_file)
+            except Exception as exc:  # unresolvable receiver graph: fail closed
+                return refuse(checks[0], checks[0].get("expected"), None,
+                              StateConflict(f"review input receiver graph is unavailable: {type(exc).__name__}"))
+            if not own:
+                return refuse(checks[0], checks[0].get("expected"), None,
+                              StateConflict("review input workflows must read their published seed"))
         for check in checks:
             arguments = check.get("arguments")
-            expected = actual = files = None
+            # The actual frozen required identity, retained verbatim on refusal.
+            required = check.get("expected")
+            actual = files = None
             try:
-                expected = bundle.manifest(arguments)
                 actual, files = bundle.decode(arguments)
-                if actual != expected:
-                    raise ValueError("required review input bytes differ or are unavailable")
-                self._check_review_input_binding(attempt, expected)
+                if not isinstance(required, dict) or actual != required:
+                    raise ValueError("required review input identity differs from the frozen expected identity "
+                                     "or its bytes are unavailable")
+                self._check_review_input_binding(attempt, required)
             except (ValueError, StateConflict, StateGraphError) as exc:
-                # Retain precise expected/actual evidence in the existing
-                # preflight failure machinery; nothing has launched.
-                reason = str(exc)[:1000]
-                report = {"version": 1, "passed": False, "error": f"{type(exc).__name__}: {reason}"[:1000],
-                          "checks": [{"id": check.get("id"), "probe": "review_input_bundle",
-                                      "required": expected, "actual": actual,
-                                      "passed": False, "error": reason}]}
-                return self.attempts.record_preflight(
-                    attempt["attempt_id"], report, f"frozen prerequisite refusal: {reason}")
+                return refuse(check, required, actual, exc)
             prepared[json.dumps(arguments, sort_keys=True, separators=(",", ":"), ensure_ascii=False)] = (actual, files)
         return None
+
 
 
     def _check_review_input_binding(self, attempt, expected):
@@ -656,7 +684,8 @@ class StateService:
         # before any base import, relay mutation or execution claim. The decoded
         # bytes are reused by the normal frozen-prerequisite materialization.
         prepared_inputs = {}
-        early = self._preflight_review_inputs(attempt, source, prepared_inputs)
+        early = self._preflight_review_inputs(attempt, source, prepared_inputs, manifest)
+
         if early is not None:
             return early
         from core import run_isolation

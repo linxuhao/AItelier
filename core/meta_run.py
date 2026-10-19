@@ -158,8 +158,9 @@ def approve_and_submit_meta(sf, db, ws, run_id: str, *,
     if not run or run.get("graph_name") != META_GRAPH:
         raise ValueError("Expected the project's exact meta_conversation run")
     pid = run["project_id"]
-    checkpoint_phase("project_lock_wait")
-    with _get_tick_lock(pid):
+    lock = _get_tick_lock(pid)
+    checkpoint_phase("project_lock_wait", project_lock=lock)
+    with lock:
         # The SDK still validates/replays the decision, including after completion.
         approve_meta(sf, run_id, expected_checkpoint=expected_checkpoint,
                      decision_id=decision_id)

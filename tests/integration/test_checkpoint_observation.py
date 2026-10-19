@@ -3,6 +3,8 @@ import json
 import asyncio
 import logging
 import traceback
+import importlib.metadata
+import skillflow
 import threading
 from pathlib import Path
 
@@ -42,7 +44,8 @@ def records(monkeypatch, normal, tmp_path):
                 (raw/(tmp_path.name+'-asgi.json')).write_text(json.dumps(failures, indent=2))
                 raise
     monkeypatch.setattr(client, 'app', ObservedASGI())
-    topology = {'sdk_db_path': sf._db_path, 'trace_db_path': sf._trace_db_path,
+    topology = {'sdk_module': skillflow.__file__, 'sdk_version': importlib.metadata.version('skillflow-py'),
+                'sdk_db_path': sf._db_path, 'trace_db_path': sf._trace_db_path,
                 'trace_uses_engine_connection': sf._trace_db_path is None,
                 'engine_connection_id': id(sf._conn), 'engine_lock_type': type(sf._lock).__name__,
                 'shared_testclient_portal': client.portal is not None}

@@ -39,8 +39,11 @@ def checkpoint_failure(exc, *, translated=False):
             chain.append({"type": type(current).__module__ + "." + type(current).__qualname__,
                           "frames": frames})
             current = current.__cause__ or (None if current.__suppress_context__ else current.__context__)
-        record = {**observation, "thread_id": threading.get_ident(),
-                  "translated": translated, "exceptions": chain}
+        record = {k: v for k, v in observation.items() if k != "project_lock"}
+        lock = observation.get("project_lock")
+        record["project_lock_locked"] = lock.locked() if lock is not None else None
+        record.update({"thread_id": threading.get_ident(),
+                  "translated": translated, "exceptions": chain})
         # The default text formatter must retain the coordinates too.
         logger.error("checkpoint_failure %s", json.dumps(record),
                      extra={"checkpoint_observation": record})

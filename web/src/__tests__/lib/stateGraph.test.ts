@@ -225,3 +225,37 @@ describe('facet contraction preserves State topology', () => {
   });
 
 });
+
+
+describe('group identities and actionable lanes compose safely', () => {
+  const nested = (prefix: string) => [
+    goal(prefix + '.contract', [], {facet:'contract'}),
+    goal('design.bridge', [prefix + '.contract'], {facet:'design'}),
+    goal(prefix + '.test', ['design.bridge'], {facet:'test'}),
+    goal(prefix, [prefix + '.contract', prefix + '.test'], {facet:'content'}),
+    goal(prefix + '.test.contract', [], {facet:'contract'}),
+    goal(prefix + '.test.test', [prefix + '.test.contract'], {facet:'test'}),
+  ];
+  it.each(['x', 'other.family'])('preserves every actionable node/edge for nested %s in input order variations', prefix => {
+    const raw = nested(prefix);
+    for (const input of [raw, [...raw].reverse(), [...raw.slice(2), ...raw.slice(0,2)]]) {
+      const groups = groupFacets(input);
+      const owner = new Map(groups.flatMap(g=>g.members.map(m=>[m,g.node_key] as const)));
+      const actions = groups.flatMap(g=>g.lanes.length ? g.lanes.filter(l=>l.present).map(l=>l.node_key) : g.members);
+      expect(actions).toHaveLength(raw.length);
+      expect(new Set(actions)).toEqual(new Set(raw.map(n=>n.node_key)));
+      expect(groups.find(g=>g.members.includes(prefix+'.test'))!.members).toEqual([prefix+'.test']);
+      expect(groups.find(g=>g.members.includes(prefix+'.test.test'))!.members)
+        .toEqual([prefix+'.test.contract',prefix+'.test.test']);
+      const expected = new Set(raw.flatMap(n=>n.dependencies.filter(d=>owner.get(d)!==owner.get(n.node_key))
+        .map(d=>owner.get(d)+'>'+owner.get(n.node_key))));
+      expect(new Set(stateLayout(groups).edges.map(e=>e.from+'>'+e.to))).toEqual(expected);
+    }
+  });
+  it('leaves a family expanded when its real nodes cannot fit distinct lane controls', () => {
+    const raw = [goal('work', [], {facet:'test'}), goal('work.test', ['work'], {facet:'test'})];
+    const groups = groupFacets(raw);
+    expect(groups.map(g=>g.members).sort()).toEqual([['work'],['work.test']]);
+    expect(stateLayout(groups).edges.map(e=>[e.from,e.to])).toEqual([['work','work.test']]);
+  });
+});

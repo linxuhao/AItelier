@@ -416,4 +416,23 @@ describe('Unsafe facet families remain actionable in the graph', () => {
     expect(view.getByRole('alert').textContent).toContain(error);
     expect(view.container.querySelector('svg')).toBeNull();
   });
+  it.each([false, true])('keeps nested lane keyboard/click/focus identities after unsafe expansion, reverse=%s', async reverse => {
+    const raw = nodes().filter(n=>!n.node_key.startsWith('safe'));
+    raw.push(goal('work.test.contract', [], {facet:'contract'}),
+      goal('work.test.test', ['work.test.contract'], {facet:'test'}));
+    const select = vi.fn();
+    const view = render(StateGraph, {nodes:reverse ? raw.reverse() : raw,
+      selected:'work.test.test', onselect:select});
+    expect(view.queryByRole('alert')).toBeNull();
+    const test = view.getByRole('button', {name:'work.test.test: OPEN'});
+    expect(test.closest('.goal.selected')).not.toBeNull();
+    await fireEvent.keyDown(test, {key:'Enter'});
+    expect(select).toHaveBeenLastCalledWith('work.test.test');
+    await fireEvent.click(view.getByRole('button', {name:'work.test.contract: OPEN'}));
+    expect(select).toHaveBeenLastCalledWith('work.test.contract');
+    await fireEvent.click(view.getByRole('checkbox', {name:'Selected goal + neighbours'}));
+    expect(view.container.querySelectorAll('g.goal')).toHaveLength(1);
+    expect(view.getByRole('button', {name:'work.test.test: OPEN'})).toBeTruthy();
+  });
+
 });

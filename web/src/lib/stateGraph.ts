@@ -185,7 +185,16 @@ export function groupFacets(nodes:StateNodeSummary[]):StateGroup[] {
   // families can also conflict with each other when both are contracted.
   for (const [key, family] of [...families].sort(([a], [b]) => a.localeCompare(b))) {
     if (family.length < 2) continue;
-    for (const n of family) owner.set(n.node_key, key);
+    // A frame has one actionable control per lane; never merge two real
+    // nodes into the same lane, even when their spelling shares a stem.
+    const roles = family.map(n => n.facet === 'contract' || n.facet === 'test' ? n.facet : 'content');
+    if (new Set(roles).size !== family.length) continue;
+    const ownKeys = new Set(family.map(n => n.node_key));
+    // An expanded parent may still own this stem as a real node. Reuse an
+    // actual member identity rather than capturing that unrelated owner.
+    const occupied = nodes.some(n => !ownKeys.has(n.node_key) && owner.get(n.node_key) === key);
+    const groupKey = occupied ? [...ownKeys].sort()[0] : key;
+    for (const n of family) owner.set(n.node_key, groupKey);
     const deps = new Map<string, Set<string>>([...new Set(owner.values())].map(k => [k, new Set()]));
     for (const n of nodes) for (const d of n.dependencies) {
       if (owner.get(d) !== owner.get(n.node_key)) deps.get(owner.get(n.node_key)!)!.add(owner.get(d)!);
@@ -202,11 +211,12 @@ export function groupFacets(nodes:StateNodeSummary[]):StateGroup[] {
   }
   const groups:StateGroup[] = [];
   for (const [key, group] of members) {
+    const familyKey = stemOf(group[0]);
     const lane = (facet:StateLane['facet']) => group.find(n =>
-      facet === 'content' ? n.node_key === key && n.facet !== 'contract' && n.facet !== 'test' : n.facet === facet);
+      facet === 'content' ? n.node_key === familyKey && n.facet !== 'contract' && n.facet !== 'test' : n.facet === facet);
     const lanes:StateLane[] = LANE_ORDER.map(facet => {
       const node = lane(facet);
-      return { facet, node_key: node?.node_key ?? `${key}${facet === 'content' ? '' : '.' + facet}`,
+      return { facet, node_key: node?.node_key ?? `${familyKey}${facet === 'content' ? '' : '.' + facet}`,
                status: node?.status ?? '', readiness: node?.readiness ?? '',
                revision: node?.revision ?? 0, present: !!node };
     });

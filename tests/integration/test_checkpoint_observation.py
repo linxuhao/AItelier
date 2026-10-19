@@ -1,6 +1,7 @@
 """Controlled observer conformance, never a historical failure reproduction."""
 import json
 import asyncio
+import logging
 import traceback
 import threading
 from pathlib import Path
@@ -46,9 +47,17 @@ def records(monkeypatch, normal, tmp_path):
                 'engine_connection_id': id(sf._conn), 'engine_lock_type': type(sf._lock).__name__,
                 'shared_testclient_portal': client.portal is not None}
     (raw/(tmp_path.name+'-topology.json')).write_text(json.dumps(topology, indent=2))
-    monkeypatch.setattr(observation.logger, 'error',
-                        lambda message, **kw: rows.append(kw['extra']['checkpoint_observation']))
-    return rows
+    class Retain(logging.Handler):
+        def emit(self, record):
+            row = record.checkpoint_observation
+            assert json.loads(record.getMessage().split(' ', 1)[1]) == row
+            assert 'SECRET' not in record.getMessage()
+            rows.append(row)
+            (raw/(tmp_path.name+'-records.json')).write_text(json.dumps(rows, indent=2))
+    handler = Retain()
+    observation.logger.addHandler(handler)
+    yield rows
+    observation.logger.removeHandler(handler)
 
 
 @pytest.mark.parametrize('route,phase', [('run', 'route_run_lookup'), ('project', 'run_lookup')])
@@ -95,7 +104,7 @@ def test_real_finalize_refusal_logs_cause_without_changing_409(normal, records):
     assert len(records) == 1 and records[0]['translated']
     assert records[0]['phase'] == 'advance_finalize'
     assert any(e['type'].endswith('IsADirectoryError') for e in records[0]['exceptions'])
-    assert any(f['function'] == 'execute' for e in records[0]['exceptions'] for f in e['frames'])
+    assert any(f['function'] == 'emit_project_artifacts' for e in records[0]['exceptions'] for f in e['frames'])
 
 
 @pytest.mark.parametrize('sink_failure', [False, True])

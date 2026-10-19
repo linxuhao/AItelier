@@ -1,6 +1,7 @@
 """Request-local checkpoint failure coordinates; never log exception text or locals."""
 from contextvars import ContextVar
 from functools import wraps
+import json
 import logging
 import threading
 import uuid
@@ -38,9 +39,11 @@ def checkpoint_failure(exc, *, translated=False):
             chain.append({"type": type(current).__module__ + "." + type(current).__qualname__,
                           "frames": frames})
             current = current.__cause__ or (None if current.__suppress_context__ else current.__context__)
-        logger.error("checkpoint_failure", extra={"checkpoint_observation": {
-            **observation, "thread_id": threading.get_ident(),
-            "translated": translated, "exceptions": chain}})
+        record = {**observation, "thread_id": threading.get_ident(),
+                  "translated": translated, "exceptions": chain}
+        # The default text formatter must retain the coordinates too.
+        logger.error("checkpoint_failure %s", json.dumps(record),
+                     extra={"checkpoint_observation": record})
     except BaseException:
         pass  # Observation must never replace the product exception.
 

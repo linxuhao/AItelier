@@ -162,3 +162,11 @@ def test_git_or_alias_ambiguity_keeps_cache_named_bytes_protected(tmp_path,unsaf
     elif unsafe=='linked-payload':os.link(root/'manifest.json',tmp_path/'external-alias')
     assert call(repo,out,'before')['passed'];(root/'manifest.json').write_text('changed ambiguous bytes\n')
     result=call(repo,out,'after');assert not result['passed'] and result.get('changed_paths'),result
+
+
+def test_unreadable_storage_cannot_turn_unknown_into_an_empty_payload(tmp_path):
+    repo,out=world(tmp_path);root=cache(repo);assert call(repo,out,'before')['passed']
+    (root/'scratch').chmod(0)
+    try:
+        result=call(repo,out,'after');assert not result['passed'] and result.get('error'),result
+    finally:(root/'scratch').chmod(0o755)

@@ -55,6 +55,10 @@ def _file_hash(path: Path) -> tuple[int, str]:
     return size, digest.hexdigest()
 
 
+def _walk_error(error):
+    raise error
+
+
 def _derived_index(path: Path, repo: Path) -> bool:
     """Only untracked, ignored, nonredirected Git-owned index storage is derived."""
     if path.is_symlink() or (repo / ".git").is_symlink():
@@ -85,9 +89,7 @@ def _derived_index(path: Path, repo: Path) -> bool:
             return False
         # A redirect or unsupported object inside the directory is payload (or
         # a normal snapshot error), never a reason to skip the whole subtree.
-        def unreadable(error):
-            raise error
-        for current, directories, files in os.walk(path, followlinks=False, onerror=unreadable):
+        for current, directories, files in os.walk(path, followlinks=False, onerror=_walk_error):
             for name in directories + files:
                 info = (Path(current) / name).lstat()
                 mode = info.st_mode
@@ -101,7 +103,7 @@ def _derived_index(path: Path, repo: Path) -> bool:
 
 def _snapshot(repo: Path) -> dict:
     entries: list[dict] = []
-    for current, directories, files in os.walk(repo, topdown=True, followlinks=False):
+    for current, directories, files in os.walk(repo, topdown=True, followlinks=False, onerror=_walk_error):
         current_path = Path(current)
         relative_dir = current_path.relative_to(repo)
         if relative_dir == Path("."):

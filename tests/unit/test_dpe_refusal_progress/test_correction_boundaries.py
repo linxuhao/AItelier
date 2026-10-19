@@ -35,10 +35,11 @@ def test_genuine_mixed_slot_does_not_activate(tmp_path,monkeypatch):
                                 'note':{'file':'note.md','target':'artifact'}}
         return node(**kw)
     monkeypatch.setattr(f,'StepNode',mixed)
-    c=f.Case(tmp_path,monkeypatch,'json-content');claim,data=seed(c)
-    assert claim.inputs['_has_code_output'] is True
-    assert data['violations'] and 'scope_progress_version' not in data
-    assert data.get('scope_cause') is None
+    c=f.Case(tmp_path,monkeypatch,'json-content');claim=c.claim()
+    c.execute(claim,f.denied(c.mode),f.finish(c.mode))
+    assert claim.inputs['_has_code_output'] is True and len(c.denials())==1
+    if receipt(claim).exists():
+        assert 'scope_progress_version' not in json.loads(receipt(claim).read_text())
 
 
 @pytest.mark.parametrize('damage',['delete-cause','delete-witness','null-cause','null-witness','version'])

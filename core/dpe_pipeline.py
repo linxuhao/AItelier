@@ -1602,6 +1602,7 @@ class PipelineEngine:
         last_starved_row = -1
         position_rows = {}
         message_turns = {}
+        response_origins = {}
         output_budget = {}
         for row_index, (event, payload) in enumerate(rows):
             if not isinstance(payload, dict):
@@ -1660,6 +1661,7 @@ class PipelineEngine:
             by_position[(segment, idx)] = m
             position_rows[(segment, idx)] = row_index
             message_turns[id(m)] = int(payload.get("turn") or 0)
+            response_origins[id(m)] = payload.get("scope_response_origin")
         if not by_position:
             return None
         latest_segment = max(segment for segment, _ in by_position)
@@ -1690,6 +1692,7 @@ class PipelineEngine:
                 # call. Do not ask a model to guess which mutations ran.
                 recovery_turn = {
                     "assistant": messages[last_a],
+                    "scope_response_origin": response_origins.get(id(messages[last_a])),
                     "turn": message_turns.get(id(messages[last_a]), 0),
                     "index": sorted(key[1] for key in by_position
                                     if key[0] == latest_segment)[last_a],
@@ -1906,7 +1909,7 @@ class PipelineEngine:
                     "retained native conversation is unreadable; refusing fresh replay") from exc
             return None
 
-    def _trace_prompt_deltas(self, messages: list, turn: int) -> None:
+    def _trace_prompt_deltas(self, messages: list, turn: int, *, scope_response_origin=None) -> None:
         """Trace every message appended since the last call, in FULL.
 
         The native loop's conversation only ever grows by appending (the
@@ -1937,6 +1940,9 @@ class PipelineEngine:
                        "content": content,
                        "attempt": getattr(self, "_delta_attempt", 1),
                        "segment": getattr(self, "_context_segment", 0)}
+            if (scope_response_origin is not None and m.get("role") == "assistant"
+                    and i == len(messages) - 1):
+                payload["scope_response_origin"] = scope_response_origin
             if content_null:
                 payload["content_null"] = True    # an assistant tool-call turn: content None
             persist = getattr(self, "_persist_native_observation", None)
@@ -2097,9 +2103,11 @@ class PipelineEngine:
         if not artifact_dir:
             return
         target = Path(artifact_dir) / "write_scope_receipt.json"
-        if not target.is_file():
-            return
         policy = self._scope_policy_active()
+        if not target.is_file():
+            if policy and self._scope_history_observed():
+                self._scope_history_error = "required item receipt is missing after recorded history"
+            return
         try:
             payload = json.loads(target.read_text(encoding="utf-8"))
             if not isinstance(payload, dict):
@@ -2123,17 +2131,15 @@ class PipelineEngine:
             cause = witness = None
             if policy:
                 from core import scope_refusal as _sr
-                cause = payload.get("scope_cause")
-                witness = payload.get("response_witness")
-                if cause is not None:
-                    _sr.validate_cause(cause)
-                if witness is not None:
-                    _sr.validate_witness(witness)
+                cause, witness = _sr.load_progress(payload, violations, claims)
+                if ("scope_progress_version" in payload and witness is None
+                        and self._scope_history_observed(witness_only=True, cause=cause)):
+                    raise ValueError("required successful response witness is missing")
             self._scope_violations = violations
             self._scope_claim_history = claims
             self._scope_cause = cause
             self._scope_witness = witness
-        except (OSError, ValueError, json.JSONDecodeError) as exc:
+        except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
             # A damaged ledger is absence of trustworthy scope evidence, never
             # a clean attempt. Surface it through the same reviewer-visible
             # violations channel instead of overwriting it with an empty list.
@@ -2149,10 +2155,54 @@ class PipelineEngine:
                 **self._scope_claim_record(),
             }]
 
+    def _scope_history_observed(self, *, witness_only=False, cause=None) -> bool:
+        """Bounded corroboration, never reconstruction or an absence proof.
+
+        A matching committed code receipt establishes an earlier producer's
+        required item ledger. Recent actual trace facts also detect deletion
+        before confirmation. No claim is made when neither fact is available.
+        """
+        instances = {getattr(self, "_step_instance_id", None)}
+        if isinstance(cause, dict):
+            instances.add((cause.get("origin") or {}).get("step_instance_id"))
+        try:
+            code = json.loads((Path(self._artifact_dir) / "code_changes.json").read_text())
+            if code.get("target") == "code" and code.get("run_id") == self._run_id:
+                from api.dependencies import get_skillflow
+                rows = get_skillflow().get_steps(self._run_id)
+                producer = next((r for r in rows if r["id"] == code.get("step_instance_id")
+                                 and r["step_id"] == "t_impl"
+                                 and r.get("loop_item") == self._write_scope.task), None)
+                if producer:
+                    instances.add(producer["id"])
+                    if not witness_only:
+                        return True
+        except (OSError, ValueError, TypeError):
+            pass
+        try:
+            from api.dependencies import get_skillflow
+            sf = get_skillflow()
+            for iid in instances - {None}:
+                rows = sf.get_trace(self._run_id, step_instance_id=iid,
+                                    category="step", order="desc", limit=64)
+                for row in rows:
+                    if row.get("step_id") != "t_impl":
+                        continue
+                    event, payload = row.get("event"), row.get("payload") or {}
+                    if event == "scope_response_witness":
+                        return True
+                    if (not witness_only and event == "write_scope_violation"
+                            and payload.get("task") == self._write_scope.task):
+                        return True
+        except Exception:
+            pass
+        return False
+
     def _persist_write_scope_receipt(self, required: bool = True) -> None:
         """Expose the claim-independent refusal ledger to the next reviewer."""
         artifact_dir = getattr(self, "_artifact_dir", "")
-        if not artifact_dir or getattr(self, "_output_target", "artifact") != "code":
+        if not artifact_dir or (getattr(self, "_output_target", "artifact") != "code"
+                                and not self._scope_policy_active()):
             return
         scope = getattr(self, "_write_scope", None)
         claim = self._scope_claim_record()
@@ -2254,7 +2304,7 @@ class PipelineEngine:
             "invocation_id": evidence["invocation_id"],
             "response_digest": digest, "positions": len(positions)})
 
-    def _scope_recovered_batch(self, digest: str, positions: list) -> None:
+    def _scope_recovered_batch(self, digest: str, positions: list, origin=None) -> None:
         """A recovered native batch never calls the gateway: only a saved
         witness matching the ORIGINAL response may supply its relation."""
         self._scope_batch = {"cause": None, "witness": None, "created": False}
@@ -2262,7 +2312,8 @@ class PipelineEngine:
             return
         saved = getattr(self, "_scope_witness", None)
         if (isinstance(saved, dict) and saved.get("response_digest") == digest
-                and saved.get("positions") == positions):
+                and saved.get("positions") == positions
+                and isinstance(origin, dict) and saved.get("origin") == origin):
             self._scope_batch = {"cause": saved.get("cause"), "witness": saved,
                                  "created": False}
 
@@ -2320,8 +2371,12 @@ class PipelineEngine:
             # cause; later same-batch denials are ordinary errors.
             origin = {**self._scope_origin(), "position": position,
                       "response_digest": (batch.get("witness") or {}).get("response_digest")}
-            self._scope_cause = _sr.make_cause(
-                index, tool_name, targets, authority, dict(refusal), origin)
+            pending = getattr(self, "_scope_cause", None)
+            if not (isinstance(pending, dict) and pending["tool"] == tool_name
+                    and pending["denied_targets"] == targets
+                    and pending["authority"] == authority):
+                self._scope_cause = _sr.make_cause(
+                    index, tool_name, targets, authority, dict(refusal), origin)
             batch["created"] = True
             self._scope_batch = batch
         self._persist_write_scope_receipt()
@@ -5107,7 +5162,11 @@ class PipelineEngine:
                 # Eager: a restart between here and the next model call must
                 # find this turn's messages in the trace (resume drops an
                 # incomplete turn, so the tool results below are traced too).
-                self._trace_prompt_deltas(messages, turn_count + 1)
+                scope_response_origin = (
+                    recovering_batch.get("scope_response_origin") if recovering_batch
+                    else self._scope_origin()) if self._scope_policy_active() else None
+                self._trace_prompt_deltas(messages, turn_count + 1,
+                                          scope_response_origin=scope_response_origin)
 
                 called_finish = False
                 correction_tool_failed = False
@@ -5132,7 +5191,8 @@ class PipelineEngine:
                     scope_digest = _sr.native_response_digest(
                         result.text, result.tool_calls)
                     if recovering_batch:
-                        self._scope_recovered_batch(scope_digest, scope_positions)
+                        self._scope_recovered_batch(scope_digest, scope_positions,
+                                                    scope_response_origin)
                     else:
                         # Persist the successful response witness BEFORE any
                         # dependent tool is dispatched.
@@ -5346,8 +5406,15 @@ class PipelineEngine:
                                 "effect": effect,
                             })
 
+                    # Only this exact host-created admission result proves no
+                    # mutation was dispatched. A tool's lookalike error cannot
+                    # settle an actually begun effect or bypass its fences.
+                    settled_scope_refusal = (
+                        self._scope_policy_active() and not mutated
+                        and tool_result.get("scope_violation") is True
+                        and any(tool_result is item for item in self._scope_violations))
                     failed_required_action = (
-                        _is_failed_tool_result(result_str)
+                        _is_failed_tool_result(result_str) and not settled_scope_refusal
                         and (tool_name not in _REPOSITORY_READ_TOOLS | {"ask_more_turns"}
                              or tool_name not in self._tool_schemas or mutated))
                     if (recovering_batch and observed_result is None
@@ -5700,8 +5767,10 @@ class PipelineEngine:
         # Default dpe_default_v2 code-only resolved t_impl loop item, final
         # item-bound artifact directory only. Everything else keeps its
         # existing refusal semantics.
+        from skillflow.output_targets import has_target
+        destinations = SimpleNamespace(output_target=output_target, output_fixed=output_fixed or {})
         self._scope_policy = bool(
-            output_target == "code" and not output_fixed
+            has_target(destinations, "code") and not has_target(destinations, "artifact")
             and write_scope is not None and step_id == "t_impl"
             and config_name == DPE_GRAPH_NAME and artifact_dir)
         self._scope_mode = ""
@@ -5713,7 +5782,7 @@ class PipelineEngine:
             raise ScopeObservationUnavailable(
                 "write-scope refusal history for this item is unavailable: "
                 f"{self._scope_history_error}")
-        if output_target == "code":
+        if output_target == "code" or self._scope_policy:
             if write_scope is None:
                 # Standalone code workflows (for example coding_impl) have one
                 # writer in their isolated worktree and no task-card siblings.

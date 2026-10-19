@@ -84,6 +84,65 @@ def validate_witness(witness) -> dict:
     return witness
 
 
+
+def load_progress(payload, violations, claims):
+    """Legacy raw ledgers may migrate; incomplete versioned state may not."""
+    fields = {"scope_progress_version", "scope_cause", "response_witness"}
+    present = fields & payload.keys()
+    if not present:
+        cause = None
+        if violations:
+            # Preserve the original raw pointer on a trustworthy legacy ledger.
+            error = violations[0]
+            allowed = error.get("allowed_scope") or {}
+            authority = {"policy": error.get("policy", payload.get("policy")),
+                         "task": error.get("task"),
+                         "owns": sorted(set(allowed.get("owns", []))),
+                         "shared_hotspots": sorted(set(allowed.get("shared_hotspots", [])))}
+            if not (error.get("scope_violation") is True and isinstance(error.get("tool"), str)
+                    and isinstance(error.get("requested_path"), str)):
+                raise ValueError("legacy refusal authority is unavailable")
+            from core.write_scope import normalize_path
+            cause = make_cause(0, error["tool"], [normalize_path(error["requested_path"])],
+                               authority, dict(error),
+                               {"mode": "legacy", "step_instance_id": error.get("step_instance_id"),
+                                "claim_epoch": error.get("claim_epoch")})
+        return cause, None
+    if present != fields or payload["scope_progress_version"] != 1:
+        raise ValueError("required versioned scope progress fields are missing or unsupported")
+    cause, witness = payload["scope_cause"], payload["response_witness"]
+    def linked(value):
+        validate_cause(value)
+        i = value["index"]
+        if (type(i) is not int or not 0 <= i < len(violations)
+                or value["error"] != violations[i]
+                or value["authority"].get("task") != payload.get("task")):
+            raise ValueError("scope cause does not link to its original item refusal")
+    if cause is not None:
+        linked(cause)
+    elif violations:
+        raise ValueError("versioned scope refusal history has no pending cause")
+    if witness is not None:
+        validate_witness(witness)
+        if witness["cause"] is None:
+            raise ValueError("scope response witness has no original cause")
+        linked(witness["cause"])
+        origin = witness["origin"]
+        if (set(origin) != {"mode", "step_instance_id", "claim_epoch"}
+                or origin["mode"] not in {"native", "json-content", "json-tools"}
+                or type(origin["step_instance_id"]) is not int
+                or type(origin["claim_epoch"]) is not int
+                or {k: origin[k] for k in ("step_instance_id", "claim_epoch")} not in claims
+                or witness["carry_match"] is not True
+                or not isinstance(witness["positions"], list) or not witness["positions"]
+                or not all(isinstance(x, dict) for x in witness["positions"])
+                or not isinstance(witness["invocation_id"], str) or not witness["invocation_id"]
+                or not all(isinstance(witness[k], str) and len(witness[k]) == 64
+                           for k in ("presented_sha256", "response_digest"))):
+            raise ValueError("scope response witness provenance is malformed")
+    return cause, witness
+
+
 def carry_text(cause: dict) -> str:
     """Bounded host-authored block: exact raw error plus compared authority."""
     return "\n".join([

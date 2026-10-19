@@ -373,20 +373,26 @@ def _failed_with_published_architecture(world, revision=1, design_pattern="appro
     pid=a['execution_project_id'];rid=sf.create_run('feature',project_id=pid)
     sf.start_run(rid);attempts.bind_run(a['attempt_id'],rid,sf)
     db.ensure_project(pid,name=pid,repo_type='existing',repo_path=str(world['src']))
-    ri.ensure_for_run(db,run_id=rid,project_id=pid,config_name='feature',repo_mode='code')
+    rec=ri.ensure_for_run(db,run_id=rid,project_id=pid,config_name='feature',repo_mode='code')
     sf.advance_run(rid);claimed=sf.claim_next_step(rid)
     assert claimed.step_id=='architecture'
-    out=ws._get_secure_path(pid)/'feature'/'architecture';out.mkdir(parents=True)
-    from skillflow.write_tools import execute_write
-    fixed=sf._get_resolver_for_run(rid).graph.steps[0].output_fixed
-    written=execute_write('design',fixed,{'id':design_id,'content':
-        'owner approved revision'+str(revision)+': real consumer UI, journal budget, growth receipt\n'},str(out))
-    assert 'error' not in written
-    design=out/written['written']
-    (out/'linter_manifest.json').write_text('{}')
+    # Exercise SDK destination routing and its code ownership journal. A
+    # checkpoint validates staging artifacts and the real worktree code slot.
+    binding=dict(run_id=rid,step_id=claimed.step_id,
+        step_instance_id=claimed.token.step_instance_id,claim_epoch=claimed.token.claim_epoch)
+    written=sf.execute_tool('write_design',{'id':design_id,'content':
+        'owner approved revision'+str(revision)+': real consumer UI, journal budget, growth receipt\n'},**binding)
+    assert 'error' not in written, written
+    linter=sf.execute_tool('write_linter',{'content':'{}'},**binding)
+    assert 'error' not in linter, linter
+    assert (Path(rec['worktree_path'])/'linter_manifest.json').read_text()=='{}'
     sf.confirm_step(claimed.token,StepResult(outputs={'design':written['written']},flags={}))
     sf.advance_run(rid);assert sf.get_run(rid)['status']=='paused'
-    sf.approve_checkpoint(rid);sf.advance_run(rid)
+    design=ws.get_final_path(pid,'architecture','feature')/written['written']
+    observed=sf.get_checkpoint(rid)
+    sf.approve_checkpoint(rid,expected_checkpoint=observed['expected_checkpoint'],
+                          decision_id='fixture-approval-'+rid)
+    sf.advance_run(rid)
     ws.write_draft(pid,'implementation','unfinished.md','pending correction\n',graph_name='feature')
     sf.fail_run(rid,'Step implementation: native turn budget exhausted (32/32)')
     a=attempts.reconcile(a['attempt_id'],sf)

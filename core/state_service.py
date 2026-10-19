@@ -411,12 +411,11 @@ class StateService:
         """
         if relay is not None:
             return relay["base_sha"]
-        chosen = attempt["context"].get("base_sha")
-        if chosen:
-            return chosen
         from core import run_isolation
         requested = run_isolation.requested_base(self.db, attempt["execution_project_id"])
-        return requested["base_sha"] if requested else "HEAD"
+        if requested:
+            return requested["base_sha"]
+        return attempt["context"].get("base_sha") or "HEAD"
 
     def start_external_attempt(self, project_id, node_key, expected_revision, harness, external_id,
                                request_key, instruction="", base_sha=None, claim_id=None, fence=None):
@@ -587,8 +586,10 @@ class StateService:
         if attempt["status"] != "reserved":
             return attempt
         from core import run_isolation
-        base_sha = attempt["context"].get("base_sha") or (
-            run_isolation.requested_base(self.db, attempt["execution_project_id"]) or {}).get("base_sha")
+        # The supported request is the current selection; context preserves the
+        # original intent and must not reset a later director override on recovery.
+        selected = self._dependency_ref(attempt, None)
+        base_sha = None if selected == "HEAD" else selected
         if base_sha:
             try:
                 self.request_attempt_base(aid, base_sha)
@@ -623,7 +624,7 @@ class StateService:
                 source_checks = [c for c in report["checks"]
                                  if c.get("probe") == "source_head"]
                 if (source_checks and manifest.repo_mode == "code"
-                        and not attempt["context"].get("base_sha")):
+                        and not base_sha):
                     if len(source_checks) != 1:
                         raise StateConflict("a code attempt may freeze exactly one source_head")
                     from core import run_isolation

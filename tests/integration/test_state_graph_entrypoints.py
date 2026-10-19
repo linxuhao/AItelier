@@ -54,7 +54,8 @@ def live(tmp_path, monkeypatch, request):
     from core.skillflow_host import AItelierSkillFlow
     runtime = AItelierSkillFlow if getattr(request, "param", None) == "host" else SkillFlow
     sf = runtime(str(tmp_path / "skillflow.sqlite"), workspace_base=str(tmp_path / "ws"),
-                   projects_base=str(tmp_path / "projects"))
+                   projects_base=str(tmp_path / "projects"),
+                   code_path_resolver=deps._existing_repo_code_path)
     registry = ConfigRegistry()
     for name, mode in [("state_fixture", "none"), ("state_code_fixture", "code")]:
         graph = PipelineGraph(name=name, begin="work", steps=[StepNode(id="work", context=[
@@ -1688,3 +1689,78 @@ def test_failed_attempt_read_preserves_private_and_unavailable_refusals(live, mo
         execute(trusted, "get_attempt", {"attempt_id": "missing-attempt"})
     assert calls == [1]
     assert live.service.attempts.get(failed["attempt_id"])["status"] == "failed"
+
+
+@pytest.mark.parametrize("explicit", [True, False])
+@pytest.mark.parametrize("selection", ["accepted", "nonancestor", "unavailable", "frozen-drift"])
+def test_reserved_explicit_base_override_recovers_same_attempt_on_selected_commit(live, explicit, selection):
+    """A refused A reservation must recover on supported B, retaining frozen A."""
+    from core import run_isolation as isolation
+    repo, original = _code_state_project(live, "reserved-override")
+    live.service.store.add_nodes("reserved-override", [spec("dependency"), spec("consumer", ["dependency"])])
+    dependency = live.service.start_attempt(
+        "reserved-override", "dependency", 1, "state_code_fixture", "dependency")
+    dep_tree = Path(isolation.record(live.db, dependency["run_id"])["worktree_path"])
+    (dep_tree / "dependency.txt").write_text("accepted dependency\n")
+    subprocess.run(["git", "add", "dependency.txt"], cwd=dep_tree, check=True)
+    subprocess.run(["git", "commit", "-qm", "accepted dependency"], cwd=dep_tree, check=True)
+    dependency = finish(live, dependency)
+    selected = dependency["artifact_ref"]
+    assert len(selected) == 40 and selected != original
+    evidence(live, dependency, "behaviour")
+    evidence(live, dependency, "review")
+    live.service.verify_node("reserved-override", "dependency", 1, dependency["attempt_id"])
+    with pytest.raises(StateConflict, match="accepted dependency commit is not in the source"):
+        live.service.start_attempt("reserved-override", "consumer", 1, "state_code_fixture",
+                                   "consumer", base_sha=original if explicit else None,
+                                   frozen_prerequisites=_frozen(_required("head", "source_head", original)))
+    reserved = live.service.attempts.list("reserved-override", "consumer")[0]
+    assert reserved["status"] == "reserved" and reserved["run_id"] is None
+    frozen, context_hash = reserved["context"], reserved["context_hash"]
+    assert frozen.get("base_sha") == (original if explicit else None)
+    assert live.sf.list_runs(project_id=reserved["execution_project_id"]) == []
+    selected = {"accepted": selected, "nonancestor": original, "unavailable": "f" * 40,
+                "frozen-drift": selected}[selection]
+    chosen = live.service.request_attempt_base(reserved["attempt_id"], selected)
+    assert chosen["base_sha"] == selected
+    if selection == "frozen-drift":
+        (repo / "drift.txt").write_text("canonical source changed after selection\n")
+        subprocess.run(["git", "add", "drift.txt"], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-qm", "source drift"], cwd=repo, check=True)
+        refused = live.service.recover_attempt(reserved["attempt_id"])
+        assert refused["status"] == "failed" and refused["run_id"] is None
+        assert refused["context"] == frozen and refused["context_hash"] == context_hash
+        assert live.sf.list_runs(project_id=reserved["execution_project_id"]) == []
+        assert isolation.requested_base(live.db, reserved["execution_project_id"])["base_sha"] == selected
+        event = [e for e in live.service.store.events("reserved-override")
+                 if e["event_type"] == "attempt_preflight_failed"][-1]
+        check = event["payload"]["report"]["checks"][0]
+        assert check["required"] == original and check["actual"] != original
+        return
+    if selection != "accepted":
+        with pytest.raises(StateConflict, match="accepted dependency commit is not in the source"):
+            live.service.recover_attempt(reserved["attempt_id"])
+        assert live.sf.list_runs(project_id=reserved["execution_project_id"]) == []
+        unchanged = live.service.attempts.get(reserved["attempt_id"])
+        assert unchanged["status"] == "reserved" and unchanged["run_id"] is None
+        assert unchanged["context"] == frozen and unchanged["context_hash"] == context_hash
+        assert isolation.requested_base(live.db, reserved["execution_project_id"])["base_sha"] == selected
+        return
+    recovered = live.service.recover_attempt(reserved["attempt_id"])
+    assert recovered["attempt_id"] == reserved["attempt_id"]
+    assert recovered["status"] == "running" and recovered["run_id"]
+    assert recovered["context"] == frozen and recovered["context_hash"] == context_hash
+    request = isolation.requested_base(live.db, reserved["execution_project_id"])
+    assert request["base_sha"] == selected and reserved["attempt_id"] in request["note"]
+    rec = isolation.record(live.db, recovered["run_id"])
+    assert rec["base_sha"] == selected
+    sdk_root = live.sf._workspace.get_project_code_path(
+        recovered["execution_project_id"], run_id=recovered["run_id"])
+    assert Path(sdk_root).resolve() == Path(rec["worktree_path"]).resolve()
+    for path, expected in [(sdk_root, selected), (repo, original)]:
+        assert subprocess.run(["git", "rev-parse", "HEAD"], cwd=path, check=True,
+                              capture_output=True, text=True).stdout.strip() == expected
+    assert (Path(rec["worktree_path"]) / "dependency.txt").read_text() == "accepted dependency\n"
+    again = live.service.recover_attempt(reserved["attempt_id"])
+    assert again["run_id"] == recovered["run_id"]
+    assert len(live.sf.list_runs(project_id=reserved["execution_project_id"])) == 1

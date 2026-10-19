@@ -20,7 +20,7 @@ from skillflow.tool_loader import ToolLoader
 from aitelier.runner import AgentStepRunner
 from core import run_isolation
 from core.db_manager import DBManager
-from core.dpe_pipeline import MaxRetriesExceeded
+from core.dpe_pipeline import MaxRetriesExceeded, PipelineEngine
 from core.workspace_manager import WorkspaceManager
 
 
@@ -66,9 +66,10 @@ class Case:
             max_tool_turns=8)
         producer = StepNode(id='t_impl', agent_config='producer',
             output_mode='content' if mode == 'json-content' else 'write',
-            output_target='code', output_allow_full_write=True,
+            output_target='code', output_allow_full_write=(mode != 'json-tool'),
             output_fixed={'file': {'file': '*.py', 'target': 'code'}} if mode == 'json-content' else {},
-            context=[{'from': 'repository', 'mode': 'tool'}],
+            context=[{'from': 'repository', 'mode': 'tool'},
+                     {'step':'3','file':'tasks/$current_task.json','required':True}],
             transitions=[Transition(to='review')])
         graph = PipelineGraph(name='dpe_default_v2', begin='task_loop', steps=[
             StepNode(id='task_loop', step_type='loop',
@@ -77,6 +78,7 @@ class Case:
             producer,
             StepNode(id='review', output_mode='content', output_target='artifact',
                 output_fixed={'verdict': {'file':'review_verdict.json'}},
+                context=[{'step':'3','file':'tasks/$current_task.json','required':True}],
                 transitions=[
                     Transition(to='task_loop', match={'from_file':'review_verdict.json','field':'passed','value':True}),
                     Transition(to='t_impl', match={'from_file':'review_verdict.json','field':'passed','value':False}, max_loop=3)]),
@@ -84,6 +86,8 @@ class Case:
         self.sf.register_graph(graph)
         d=self.sf._workspace.get_step_dir('p',graph.name,'3'); d.mkdir(parents=True)
         (d/'manifest.json').write_text(json.dumps({'items':[self.raw_card]}))
+        self.card_file=d/'tasks'/f'{self.raw_card}.json';self.card_file.parent.mkdir()
+        self.card_file.write_text(json.dumps({'id':self.raw_card,'owns':['allowed.py','partial.py'],'shared_hotspots':[]}))
         self.run=self.sf.create_run(graph.name, {'project_id':'p'}, project_id='p')
         import api.dependencies as deps
         monkeypatch.setattr(deps, 'get_skillflow', lambda:self.sf)
@@ -94,6 +98,14 @@ class Case:
         self.sf.start_run(self.run)
         self.runner=AgentStepRunner(self.db,self.ws)
         self.requests=[]; self.responses=[]; self.script=[]; self.claims=[]; self.artifacts=[]
+        self.handlers=[];self.resolved_cards=[]
+        for name in ('_run_native_step','_run_tool_step','_run_tool_content_step'):
+            original=getattr(PipelineEngine,name)
+            def observed(engine,*args,_original=original,_name=name,**kwargs):
+                self.handlers.append({'handler':_name,'run_id':engine._run_id,
+                    'step_instance_id':engine._step_instance_id,'claim_epoch':engine._claim_epoch})
+                return _original(engine,*args,**kwargs)
+            monkeypatch.setattr(PipelineEngine,name,observed)
         def complete(**kwargs):
             self.requests.append(copy.deepcopy({k:kwargs.get(k) for k in ('messages','tools','model','response_format')}))
             assert self.script, 'unexpected extra paid generation'
@@ -122,17 +134,37 @@ class Case:
                 self.claims.append({'instance':claim.token.step_instance_id,'epoch':claim.token.claim_epoch,'step':claim.step_id,
                                     'loop_item':row['loop_item'],'artifact_dir':str(artifact)})
                 self.artifacts.append(claim.inputs['_artifact_dir'])
-                # Supply a real card in resolved input, like the manifest's context source.
-                claim.inputs.setdefault('_resolved_context',{}).update({
-                    '[current_task]':'card_a','Step 3 — tasks/card_a.json':json.dumps({
-                        'id':'card_a','owns':['allowed.py','partial.py'],'shared_hotspots':[]})})
+                # Observe the real SDK context snapshot; never inject scope/card values.
+                context=claim.inputs['_resolved_context']
+                assert context['[current_task]']==self.raw_card
+                cards=[v for k,v in context.items() if k.endswith(f'tasks/{self.raw_card}.json')]
+                assert len(cards)==1 and json.loads(cards[0])==json.loads(self.card_file.read_text())
+                self.resolved_cards.append({'step_instance_id':claim.token.step_instance_id,
+                    'claim_epoch':claim.token.claim_epoch,'step_id':claim.step_id,
+                    'card_file':str(self.card_file),'card':json.loads(cards[0]),
+                    'resolved_context':copy.deepcopy(context),
+                    'tool_names':sorted(claim.inputs['_tool_schemas'])})
                 return claim
             self.sf.advance_run(self.run)
         raise AssertionError('SDK did not release '+expected)
 
     def execute(self, claim, *script):
-        self.script=list(script)
-        return asyncio.run(self.runner.execute(claim))
+        self.script=list(script);before=len(self.handlers);completed=False
+        try:
+            result=asyncio.run(self.runner.execute(claim));completed=True
+            return result
+        finally:
+            actual=self.handlers[before:]
+            if completed:assert actual, 'normal successful runner must enter an observed handler'
+            expected={'native':'_run_native_step','json-tool':'_run_tool_step',
+                      'json-content':'_run_tool_content_step'}[self.mode]
+            assert all(x['handler']==expected for x in actual), actual
+            target=Path(claim.inputs['_artifact_dir'])/'write_scope_receipt.json'
+            if actual and target.exists():
+                witness=json.loads(target.read_text()).get('response_witness')
+                if witness is not None:
+                    assert witness['origin']['mode']=={'_run_native_step':'native',
+                        '_run_tool_step':'json-tools','_run_tool_content_step':'json-content'}[expected]
 
     def review_again(self, claim):
         self.sf.confirm_step(claim.token,StepResult())
@@ -150,7 +182,8 @@ class Case:
 
     def evidence(self):
         print('REFUSAL_EVIDENCE '+json.dumps({'mode':self.mode,'run':self.run,
-            'claims':self.claims,'requests':self.requests,'responses':self.responses,
+            'claims':self.claims,'handlers':self.handlers,'resolved_cards':self.resolved_cards,
+            'requests':self.requests,'responses':self.responses,
             'denials':self.denials(),
             'completion_events':[r for r in self.sf.get_trace(self.run) if r['event'] in ('completion_started','completion_finished','resumed_from_trace','native_batch_recovery')],
             'sdk_steps':self.sf.get_steps(self.run),
@@ -268,3 +301,32 @@ def test_json_invalid_response_remains_ordinary_repair(cases):
     assert (c.root/'allowed.py').read_text()=='VALID = True\n'
     assert not c.denials()
     assert len(c.requests)==2
+
+
+@pytest.mark.parametrize('mode',['native','json-tool','json-content'])
+def test_revised_upstream_card_permits_formerly_refused_output(cases,mode):
+    c=cases(mode);first=c.claim()
+    original_card=json.loads(c.card_file.read_text())
+    c.execute(first,denied(mode),finish(mode))
+    raw_first=c.denials()[0]['payload']
+    assert raw_first['requested_path']=='forbidden.py'
+    assert not (c.root/'forbidden.py').exists()
+    revised={**original_card,'owns':original_card['owns']+['forbidden.py']}
+    c.card_file.write_text(json.dumps(revised))  # trusted upstream Step3 artifact
+    second=c.review_again(first)  # SDK snapshots revised bytes when it claims
+    assert c.resolved_cards[0]['card']==original_card
+    assert c.resolved_cards[-1]['card']==revised
+    permitted=(action('write_file',id='forbidden',content='NOW_PERMITTED = True\n') if mode=='json-content'
+               else action('create',file='forbidden.py',content='NOW_PERMITTED = True\n'))
+    response=native(permitted) if mode=='native' else {'actions':[permitted]}
+    before=len(c.requests)
+    c.execute(second,response,finish(mode))
+    assert len(c.requests)-before==(2 if mode=='native' else 1)
+    assert (c.root/'forbidden.py').read_text()=='NOW_PERMITTED = True\n'
+    assert len(c.denials())==1 and c.denials()[0]['payload']==raw_first
+    c.sf.confirm_step(second.token,StepResult())
+    code=json.loads((Path(second.inputs['_artifact_dir'])/'code_changes.json').read_text())
+    authority=json.loads((Path(second.inputs['_artifact_dir'])/'write_scope_receipt.json').read_text())
+    assert code['files']==['forbidden.py'] and code['step_instance_id']==second.token.step_instance_id
+    assert authority['allowed_scope']['owns']==revised['owns']
+    assert authority['violations'][0]==raw_first

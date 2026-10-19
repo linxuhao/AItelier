@@ -30,3 +30,12 @@ Revision2 asserts every actual producer/reviewer SDK row has the raw card item
 and the final artifact path is step/item before manually supplying card content.
 The prior fixture lacked a return edge and proved only manually supplied-card
 scope behavior with a flat directory; its earlier evidence remains historical.
+
+Revision3 observes actual handler entry with wrappers that only record then call
+the original. JSON full-tool uses legitimate allow_full_write=False (create/edit
+and repository reads), while JSON-content retains its constrained writer. Cards
+are read by real required Step3/tasks/$current_task.json SDK context sources; no
+resolved-context card or WriteScope is injected. A trusted upstream artifact
+revision is tested through a new producer, newly permitted output and receipt.
+Earlier json-tool labels actually selected JSON-content; prior evidence remains
+historical and cannot establish the full-tool route.

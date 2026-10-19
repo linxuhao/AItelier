@@ -95,13 +95,23 @@ def _derived_index(path: Path, repo: Path) -> bool:
             return False
         own_dir = index.parent
         origins = set()
-        for origin in records[:-1:2]:
+        for origin, entry in zip(records[:-1:2], records[1:-1:2]):
             if origin == "command line:":
                 continue  # fixed settings from the existing closed Git helper
             if not origin.startswith("file:"):
                 return False
             source = Path(origin[5:])
-            origins.add(source if source.is_absolute() else repo / source)
+            source = source if source.is_absolute() else repo / source
+            origins.add(source)
+            key, separator, value = entry.partition("\n")
+            if key == "include.path" or (key.startswith("includeif.") and key.endswith(".path")):
+                # Empty includes emit no origin entries; qualify their declared
+                # paths too. Do not emulate conditions or path expansion: an
+                # uncertain include conservatively keeps physical coverage.
+                if not separator or not value or value.startswith(("~", "%(")):
+                    return False
+                included = Path(value)
+                origins.add(included if included.is_absolute() else source.parent / included)
         # Empty config files emit no entries/origins. Both standard local stores
         # must therefore be checked even when their content contributes no keys.
         for source in origins | {metadata / "config", own_dir / "config.worktree"}:

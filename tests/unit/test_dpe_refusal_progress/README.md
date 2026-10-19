@@ -1,0 +1,26 @@
+# Task-item refusal regressions
+
+Run with exact official skillflow-py 1.5.97 in an offline disposable container:
+
+    python -m pytest -q -s tests/unit/test_dpe_refusal_progress
+
+The scenario calls the real AgentStepRunner, PipelineEngine, AIGateway and SDK
+with an owned real Git worktree, task loop and code-only item receipt. Only
+litellm.completion is scripted. Dependency composition points to the fixture DB
+and SDK; no scope admission, gateway, tool dispatch or engine is mocked.
+
+Cross-instance repeat tests expect the accepted bounded refusal behavior and
+are RED on base 3d88. Legacy JSON-files correction is also RED on that base.
+Useful path correction, same-batch, JSON syntax repair and refusal-only reclaim
+are positive guards. REFUSAL_EVIDENCE records actual final transport requests,
+returned responses, invocation events, claim identities, raw denials, SDK rows,
+Git identity/status and item receipts, including when a test fails.
+
+This is not a complete production acceptance suite. The small SDK graph keeps
+the default name and producer/item/code-only boundaries, but replaces upstream
+planning and the source reviewer with deterministic fixture artifacts. It does
+not execute the final test/candidate gates or scheduler/run_driver/meta catches.
+Refusal-only reclaim uses genuine SDK release/reclaim and native trace restore;
+it does not simulate an unresolved admitted mutation or an incomplete response
+batch. JSON callback composition/failover/projection loss, actual unsettled
+mutation recovery and missing/corrupt provenance remain uncovered.

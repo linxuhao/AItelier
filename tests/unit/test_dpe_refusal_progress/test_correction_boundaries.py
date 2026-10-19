@@ -16,7 +16,9 @@ def item_case(tmp_path, monkeypatch, mode):
     node = f.StepNode
     def with_return(**kwargs):
         if kwargs.get('id') == 'review':
-            kwargs['transitions'] = list(kwargs['transitions']) + [f.Transition(to='task_loop')]
+            kwargs['transitions'] = [
+                f.Transition(to='task_loop', match={'from_file':'review_verdict.json','field':'passed','value':True}),
+                f.Transition(to='t_impl', match={'from_file':'review_verdict.json','field':'passed','value':False}, max_loop=3)]
         return node(**kwargs)
     monkeypatch.setattr(f, 'StepNode', with_return)
     try:
@@ -61,7 +63,7 @@ def test_genuine_mixed_slot_does_not_activate(tmp_path,monkeypatch):
         assert 'scope_progress_version' not in json.loads(receipt(claim).read_text())
 
 
-@pytest.mark.parametrize('damage',['delete-cause','delete-witness','null-cause','null-witness','version'])
+@pytest.mark.parametrize('damage',['delete-cause','delete-witness','null-cause','null-witness','version','delete-all-progress'])
 def test_required_v1_history_is_not_a_fresh_budget(tmp_path,monkeypatch,damage):
     c=item_case(tmp_path,monkeypatch,'json-tool'); first,data=seed(c)
     second=c.review_again(first)
@@ -69,6 +71,8 @@ def test_required_v1_history_is_not_a_fresh_budget(tmp_path,monkeypatch,damage):
     elif damage=='delete-witness':data.pop('response_witness')
     elif damage=='null-cause':data['scope_cause']=None
     elif damage=='null-witness':data['response_witness']=None
+    elif damage=='delete-all-progress':
+        for k in ('scope_progress_version','scope_cause','response_witness'):data.pop(k)
     else:data['scope_progress_version']=9
     target=receipt(second);target.write_text(json.dumps(data));raw=target.read_bytes()
     before=len(c.requests)
@@ -86,14 +90,20 @@ def test_deleted_required_item_receipt_is_not_fresh(tmp_path,monkeypatch):
 
 
 def test_intact_legacy_raw_history_can_carry_into_correction(tmp_path,monkeypatch):
-    c=item_case(tmp_path,monkeypatch,'json-tool');first,data=seed(c)
-    second=c.review_again(first)
-    for k in ('scope_progress_version','scope_cause','response_witness'):data.pop(k)
-    receipt(second).write_text(json.dumps(data))
+    from core.write_scope import WriteScope
+    c=item_case(tmp_path,monkeypatch,'json-tool');claim=c.claim()
+    scope=WriteScope('card_a',('allowed.py','partial.py'))
+    raw={**scope.refusal('create','forbidden.py'),
+         'step_instance_id':claim.token.step_instance_id,'claim_epoch':claim.token.claim_epoch}
+    data={'run_id':c.run,'step_id':'t_impl','task':'card_a','policy':scope.policy,
+          'allowed_scope':scope.allowed(),'violations':[raw],
+          'claim_history':[{'step_instance_id':claim.token.step_instance_id,'claim_epoch':claim.token.claim_epoch}]}
+    receipt(claim).parent.mkdir(parents=True,exist_ok=True)
+    receipt(claim).write_text(json.dumps(data))
     good={'actions':[f.action('create',file='allowed.py',content='LEGACY = True\n')]}
-    c.execute(second,good)
-    after=json.loads(receipt(second).read_text())
-    assert after['violations'][0]==data['violations'][0]
+    c.execute(claim,good)
+    after=json.loads(receipt(claim).read_text())
+    assert after['violations'][0]==raw
     assert after['scope_cause']['index']==0 and after['response_witness']['carry_match']
     assert (c.root/'allowed.py').read_text()=='LEGACY = True\n'
 
@@ -174,3 +184,23 @@ def test_unresolved_task_scope_keeps_existing_denial_semantics(tmp_path,monkeypa
     assert data['policy']=='missing-task-card-deny'
     assert 'scope_progress_version' not in data
     assert len(c.denials())==1 and not (c.root/'forbidden.py').exists()
+
+
+@pytest.mark.parametrize('mode',['native','json-tool','json-content'])
+def test_real_item_bound_review_retry_has_same_cause(tmp_path,monkeypatch,mode):
+    from core.dpe_pipeline import RepeatedScopeRefusal
+    c=item_case(tmp_path,monkeypatch,mode);first,data=seed(c)
+    second=c.review_again(first)
+    rows=[r for r in c.sf.get_steps(c.run) if r['step_id']=='t_impl']
+    assert len(rows)==2 and all(r['loop_item']=='card_a' for r in rows)
+    assert Path(second.inputs['_artifact_dir']).name=='card_a'
+    before=len(c.requests)
+    with pytest.raises(RepeatedScopeRefusal):c.execute(second,f.denied(mode))
+    after=json.loads(receipt(second).read_text())
+    assert len(c.requests)==before+1
+    assert after['scope_cause']['hash']==data['scope_cause']['hash']
+    assert after['violations'][0]==data['violations'][0]
+    assert after['violations'][-1]['repeated_after_feedback'] is True
+    assert any(data['scope_cause']['error']['error'] in str(m.get('content',''))
+               for m in c.requests[-1]['messages'])
+    c.evidence()

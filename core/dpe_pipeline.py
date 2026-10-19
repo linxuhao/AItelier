@@ -2171,10 +2171,11 @@ class PipelineEngine:
                 from api.dependencies import get_skillflow
                 rows = get_skillflow().get_steps(self._run_id)
                 producer = next((r for r in rows if r["id"] == code.get("step_instance_id")
-                                 and r["step_id"] == "t_impl"), None)
+                                 and r["step_id"] == "t_impl"
+                                 and r.get("loop_item") == self._write_scope.task), None)
                 if producer:
                     instances.add(producer["id"])
-                    if not witness_only and producer.get("loop_item") == self._write_scope.task:
+                    if not witness_only:
                         return True
         except (OSError, ValueError, TypeError):
             pass

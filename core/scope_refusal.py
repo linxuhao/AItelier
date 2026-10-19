@@ -90,6 +90,9 @@ def load_progress(payload, violations, claims):
     fields = {"scope_progress_version", "scope_cause", "response_witness"}
     present = fields & payload.keys()
     if not present:
+        if any("scope_position" in error or "repeated_after_feedback" in error
+               for error in violations):
+            raise ValueError("versioned scope refusal lost its required progress metadata")
         cause = None
         if violations:
             # Preserve the original raw pointer on a trustworthy legacy ledger.

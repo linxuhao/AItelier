@@ -1691,7 +1691,7 @@ def test_failed_attempt_read_preserves_private_and_unavailable_refusals(live, mo
 
 
 @pytest.mark.parametrize("explicit", [True, False])
-@pytest.mark.parametrize("selection", ["accepted", "nonancestor", "unavailable"])
+@pytest.mark.parametrize("selection", ["accepted", "nonancestor", "unavailable", "frozen-drift"])
 def test_reserved_explicit_base_override_recovers_same_attempt_on_selected_commit(live, explicit, selection):
     """A refused A reservation must recover on supported B, retaining frozen A."""
     from core import run_isolation as isolation
@@ -1718,9 +1718,24 @@ def test_reserved_explicit_base_override_recovers_same_attempt_on_selected_commi
     frozen, context_hash = reserved["context"], reserved["context_hash"]
     assert frozen.get("base_sha") == (original if explicit else None)
     assert live.sf.list_runs(project_id=reserved["execution_project_id"]) == []
-    selected = {"accepted": selected, "nonancestor": original, "unavailable": "f" * 40}[selection]
+    selected = {"accepted": selected, "nonancestor": original, "unavailable": "f" * 40,
+                "frozen-drift": selected}[selection]
     chosen = live.service.request_attempt_base(reserved["attempt_id"], selected)
     assert chosen["base_sha"] == selected
+    if selection == "frozen-drift":
+        (repo / "drift.txt").write_text("canonical source changed after selection\n")
+        subprocess.run(["git", "add", "drift.txt"], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-qm", "source drift"], cwd=repo, check=True)
+        refused = live.service.recover_attempt(reserved["attempt_id"])
+        assert refused["status"] == "failed" and refused["run_id"] is None
+        assert refused["context"] == frozen and refused["context_hash"] == context_hash
+        assert live.sf.list_runs(project_id=reserved["execution_project_id"]) == []
+        assert isolation.requested_base(live.db, reserved["execution_project_id"])["base_sha"] == selected
+        event = [e for e in live.service.store.events("reserved-override")
+                 if e["event_type"] == "attempt_preflight_failed"][-1]
+        check = event["payload"]["report"]["checks"][0]
+        assert check["required"] == original and check["actual"] != original
+        return
     if selection != "accepted":
         with pytest.raises(StateConflict, match="accepted dependency commit is not in the source"):
             live.service.recover_attempt(reserved["attempt_id"])

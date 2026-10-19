@@ -1917,6 +1917,26 @@ class Executed:
             n.startswith(key + "::") for n in self.node_ids)
 
 
+def _junit_case_id(case) -> str:
+    """The pytest node id of one junit `testcase` element ('' when unknowable)."""
+    name = case.get("name") or ""
+    if not name:
+        return ""
+    file_attr = case.get("file") or ""
+    classname = case.get("classname") or ""
+    if file_attr:
+        module = file_attr[:-3] if file_attr.endswith(".py") else file_attr
+        dotted = module.replace("/", ".")
+        inner = (classname[len(dotted) + 1:]
+                 if classname.startswith(dotted + ".") else "")
+        parts = [file_attr] + ([inner] if inner else []) + [name]
+    elif classname:
+        parts = ["/".join(classname.split(".")) + ".py", name]
+    else:
+        return ""
+    return "::".join(parts)
+
+
 def _junit_node_ids(path: Path) -> set:
     """Node ids pytest reports as EXECUTED, read from its junit XML.
 
@@ -1933,23 +1953,78 @@ def _junit_node_ids(path: Path) -> set:
         return set()
     out = set()
     for case in root.iter("testcase"):
-        name = case.get("name") or ""
-        if not name:
-            continue
-        file_attr = case.get("file") or ""
-        classname = case.get("classname") or ""
-        if file_attr:
-            module = file_attr[:-3] if file_attr.endswith(".py") else file_attr
-            dotted = module.replace("/", ".")
-            inner = (classname[len(dotted) + 1:]
-                     if classname.startswith(dotted + ".") else "")
-            parts = [file_attr] + ([inner] if inner else []) + [name]
-        elif classname:
-            parts = ["/".join(classname.split(".")) + ".py", name]
-        else:
-            continue
-        out.add("::".join(parts))
+        node = _junit_case_id(case)
+        if node:
+            out.add(node)
     return out
+
+
+def _junit_completed_reds(path: Path, limit: int = 50, detail_chars: int = 2000) -> list:
+    """Failures/errors pytest itself recorded for tests that COMPLETED, from its junit XML.
+
+    Read only when a later storage refusal ended the session early: pytest's
+    `Exit` path prints no assertion detail or short summary, while the JUnit
+    file this same invocation already wrote does carry the completed tests'
+    identity and failure text. Bounded (`limit` cases, `detail_chars` each);
+    each record says whether its detail was cut. These are retained first
+    evidence only -- never attribution, baseline keys or new_failures.
+    """
+    import xml.etree.ElementTree as ET
+    try:
+        root = ET.parse(str(path)).getroot()
+    except Exception:
+        return []
+    out = []
+    for case in root.iter("testcase"):
+        node = _junit_case_id(case)
+        if not node:
+            continue
+        for kind in ("failure", "error"):
+            element = case.find(kind)
+            if element is None:
+                continue
+            message = (element.get("message") or "").strip()
+            detail = (element.text or "").strip()
+            out.append({"node_id": node, "kind": kind,
+                        "message": message[:500],
+                        "detail": detail[:detail_chars],
+                        "detail_complete": len(detail) <= detail_chars})
+            break
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _retain_completed_reds(report: dict, reds: list) -> None:
+    """Put completed reds from JUnit on the report's existing failures/summary.
+
+    Only identities pytest's own terminal output did not already list are
+    added, each marked as completed before the storage refusal. The run stays
+    unmeasured (`storage_unmeasured`), so `_apply_baseline` neither keys nor
+    attributes them; they are diagnostics, not this round's regressions.
+    """
+    if not reds:
+        return
+    listed = {token for f in (report.get("failures") or []) for token in str(f).split()}
+    added = []
+    for red in reds:
+        if red["node_id"] in listed:
+            continue
+        first = red["message"].splitlines()[0] if red["message"] else red["kind"]
+        entry = (f"FAILED {red['node_id']} - {first} (completed before the storage "
+                 f"refusal; recorded in pytest's JUnit, not attributed)")
+        report.setdefault("failures", []).append(entry)
+        added.append(red)
+    if not added:
+        return
+    block = ["Completed test failures/errors recorded in this session's JUnit before the "
+             "storage refusal (first evidence; not attributed, not a baseline):"]
+    for red in added:
+        cut = "" if red["detail_complete"] else "\n    [...detail truncated...]"
+        block.append(f"{red['node_id']}\n    "
+                     + (red["detail"] or red["message"]).replace("\n", "\n    ") + cut)
+    text = "\n".join(block)
+    report["summary"] = (report.get("summary") or "") + "\n\n" + text[:8000]
 
 
 def _baseline_dir(state_dir: str, repo) -> str:
@@ -2447,6 +2522,10 @@ def _report_write_failure(report: dict, target_dir: Path, what: str, exc: OSErro
     retained["raw_bounds"] = bounds
     if report.get("baseline_error"):
         retained["baseline_error"] = report["baseline_error"]
+    if report.get("completed_before_storage_refusal"):
+        # Completed reds read from the (since removed) JUnit before a storage
+        # refusal: already bounded by `_junit_completed_reds`.
+        retained["completed_before_storage_refusal"] = report["completed_before_storage_refusal"]
     if isinstance(diagnosis, dict):
         retained["storage_diagnosis"] = diagnosis
         retained["storage_state"] = diagnosis.get("state")
@@ -2737,6 +2816,16 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
                 storage_preflight_refused = True
             if diagnosis["state"] in STORAGE_EXHAUSTED_STATES:
                 executed = Executed()  # nothing proven to have run: no prune licence
+            if diagnosis["state"] == "exhausted_during_run":
+                # pytest's Exit path prints no assertion detail for tests that
+                # already completed; this same invocation's JUnit (read before
+                # its directory is removed below) does. Retain it as first
+                # evidence on the existing failures/summary surface, bounded,
+                # with the run still unmeasured (no baseline, no new_failures).
+                reds = _junit_completed_reds(junit_path)
+                if reds:
+                    report["completed_before_storage_refusal"] = reds
+                    _retain_completed_reds(report, reds)
         except _HostPrepError as e:
             _host_storage_failure(report, e, unmeasured_entries)
             storage_preflight_refused = bool(report["storage_diagnosis"]["proof"])
@@ -3053,6 +3142,9 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
             "infrastructure_unavailable": bool(report.get("infrastructure_unavailable")),
             "storage_unmeasured": bool(report.get("storage_unmeasured")),
             "storage_state": (report.get("storage_diagnosis") or {}).get("state"),
+            # Completed reds this session's JUnit recorded before a storage
+            # refusal ended it: first evidence, never new_failures/baseline.
+            "completed_before_storage_refusal": report.get("completed_before_storage_refusal") or [],
             "retained_red_candidate": retained_red_candidate,
             "release_evidence": release_disposition(report),
             "purpose": report.get("purpose"),

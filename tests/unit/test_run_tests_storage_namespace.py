@@ -150,19 +150,83 @@ def test_unused_temp_factory_does_not_reset_or_probe_its_basetemp(env):
 
 
 def test_late_required_temp_refusal_keeps_an_earlier_real_red(env):
+    """pytest's Exit path prints no assertion detail for the completed red; the
+    same invocation's JUnit does, and the report must keep it (R4 finding).
+
+    The original stdout is NOT required to contain the detail (it really does
+    not); it must stay exactly what the child printed. The completed red's
+    identity AND assertion text must reach the report/return diagnostics,
+    without becoming a baseline key or a new failure.
+    """
     base = _conftest_basetemp(env)
     _inject_in(env, base, errno.ENOSPC)
     marker = env.tmp / "tmp-body-ran"
     source = ("def test_earlier_red():\n    assert False, 'FIRST_REAL_RED'\n"
               f"def test_tmp(tmp_path):\n    open({str(marker)!r}, 'w').write('x')\n")
     result, report = _run(env, source)
-    assert "FIRST_REAL_RED" in report["stdout"]
-    assert any("test_earlier_red" in f for f in report["failures"])
+    # A real, nonempty child invocation that stopped at the storage refusal.
+    assert report["stdout"].strip(), "the child pytest must really have run"
+    assert report["returncode"] not in (0, None)
     assert not marker.exists()
     assert report["storage_diagnosis"]["state"] == "exhausted_during_run"
+    assert report["storage_diagnosis"]["observation"]["refused_at"] == "temp_factory_use"
     assert "INCOMPLETE" in report["summary"] and "NOT TAKEN" not in report["summary"]
+    # Completed-red first evidence from this session's JUnit, on usable surfaces.
+    reds = report["completed_before_storage_refusal"]
+    assert [r["node_id"] for r in reds] == ["test_sample.py::test_earlier_red"]
+    assert "FIRST_REAL_RED" in reds[0]["message"]
+    assert "AssertionError" in reds[0]["detail"] and "FIRST_REAL_RED" in reds[0]["detail"]
+    assert any("test_sample.py::test_earlier_red" in f and "FIRST_REAL_RED" in f
+               for f in report["failures"])
+    assert "FIRST_REAL_RED" in report["summary"]
+    assert result["completed_before_storage_refusal"] == reds
+    # The tmp-dependent test never completed, so it is not listed as a red.
+    assert not any("test_tmp" in r["node_id"] for r in reds)
+    # Still unmeasured: never attributed, never a baseline or relative pass.
+    assert report["storage_unmeasured"] is True and report["passed"] is False
+    assert report_state(report) == "infrastructure_unavailable"
     assert result["new_failures"] == [] and result["passed_relative"] is False
-    assert not _baseline(env).exists()
+    assert result["baseline_state"] == "unmeasured" and not _baseline(env).exists()
+
+
+def test_completed_red_retention_is_only_for_a_late_storage_refusal(env):
+    """Inverse controls: a clean red keeps its ordinary path and adds no JUnit copy."""
+    _conftest_basetemp(env)
+    result, report = _run(env, "def test_red():\n    assert False, 'ORDINARY_RED'\n")
+    assert report["storage_diagnosis"]["state"] == "clean"
+    assert "completed_before_storage_refusal" not in report
+    assert result["completed_before_storage_refusal"] == []
+    assert any("test_red" in f for f in report["failures"])
+    assert result["baseline_state"] == "seeded"
+
+
+def test_late_refusal_without_an_earlier_red_retains_no_invented_red(env):
+    base = _conftest_basetemp(env)
+    _inject_in(env, base, errno.ENOSPC)
+    source = "def test_green():\n    pass\n" + TMP_TEST
+    result, report = _run(env, source)
+    assert report["storage_diagnosis"]["state"] == "exhausted_during_run"
+    assert "completed_before_storage_refusal" not in report
+    assert result["completed_before_storage_refusal"] == []
+    assert result["new_failures"] == [] and not _baseline(env).exists()
+
+
+def test_junit_completed_reds_reader_is_bounded(tmp_path):
+    xml = tmp_path / "junit.xml"
+    long_detail = "x" * 5000
+    xml.write_text(
+        '<testsuites><testsuite>'
+        '<testcase file="a.py" classname="a" name="t_ok"/>'
+        f'<testcase file="a.py" classname="a" name="t_red"><failure message="boom">{long_detail}'
+        '</failure></testcase>'
+        '<testcase file="a.py" classname="a" name="t_err"><error message="setup">E</error></testcase>'
+        '</testsuite></testsuites>')
+    reds = rt._junit_completed_reds(xml)
+    assert [(r["node_id"], r["kind"]) for r in reds] == [("a.py::t_red", "failure"),
+                                                          ("a.py::t_err", "error")]
+    assert len(reds[0]["detail"]) == 2000 and reds[0]["detail_complete"] is False
+    assert rt._junit_completed_reds(tmp_path / "missing.xml") == []
+    assert rt._junit_node_ids(xml) == {"a.py::t_ok", "a.py::t_red", "a.py::t_err"}
 
 
 def test_nonzero_session_without_identities_is_unmeasured_even_when_clean(env):

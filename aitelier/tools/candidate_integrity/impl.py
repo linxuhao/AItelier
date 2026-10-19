@@ -87,6 +87,29 @@ def _derived_index(path: Path, repo: Path) -> bool:
                 or (exclude.exists() and (not exclude.is_file()
                                          or exclude.stat().st_nlink != 1))):
             return False
+        # These metadata queries consume repository/worktree config and active
+        # includes. Qualify their effective file origins, not just Git's index.
+        config = git(repo, "config", "--includes", "--null", "--show-origin", "--list")
+        records = config.stdout.split("\0")
+        if config.returncode or records[-1] != "" or len(records[:-1]) % 2:
+            return False
+        own_dir = index.parent
+        origins = set()
+        for origin in records[:-1:2]:
+            if origin == "command line:":
+                continue  # fixed settings from the existing closed Git helper
+            if not origin.startswith("file:"):
+                return False
+            source = Path(origin[5:])
+            origins.add(source if source.is_absolute() else repo / source)
+        # Empty config files emit no entries/origins. Both standard local stores
+        # must therefore be checked even when their content contributes no keys.
+        for source in origins | {metadata / "config", own_dir / "config.worktree"}:
+            if (source.resolve() != source
+                    or not (source.is_relative_to(metadata) or source.is_relative_to(own_dir))
+                    or (source in origins and not source.is_file())
+                    or (source.exists() and (not source.is_file() or source.stat().st_nlink != 1))):
+                return False
         # A redirect or unsupported object inside the directory is payload (or
         # a normal snapshot error), never a reason to skip the whole subtree.
         for current, directories, files in os.walk(path, followlinks=False, onerror=_walk_error):

@@ -17,10 +17,16 @@ returned responses, invocation events, claim identities, raw denials, SDK rows,
 Git identity/status and item receipts, including when a test fails.
 
 This is not a complete production acceptance suite. The small SDK graph keeps
-the default name and producer/item/code-only boundaries, but replaces upstream
+the default name and actual SDK producer/item/code-only boundaries, with normal
+conditional review edges returning to the task-loop header, but replaces upstream
 planning and the source reviewer with deterministic fixture artifacts. It does
 not execute the final test/candidate gates or scheduler/run_driver/meta catches.
 Refusal-only reclaim uses genuine SDK release/reclaim and native trace restore;
 it does not simulate an unresolved admitted mutation or an incomplete response
 batch. JSON callback composition/failover/projection loss, actual unsettled
 mutation recovery and missing/corrupt provenance remain uncovered.
+
+Revision2 asserts every actual producer/reviewer SDK row has the raw card item
+and the final artifact path is step/item before manually supplying card content.
+The prior fixture lacked a return edge and proved only manually supplied-card
+scope behavior with a flat directory; its earlier evidence remains historical.

@@ -3260,7 +3260,9 @@ class MetaAgent:
                     raise
                 except Exception as e:
                     try:
-                        sf.fail_step(claimed.token, str(e)[:200], retryable=True)
+                        from core.dpe_pipeline import SCOPE_PROGRESS_TERMINAL
+                        sf.fail_step(claimed.token, str(e)[:200],
+                                     retryable=not isinstance(e, SCOPE_PROGRESS_TERMINAL))
                     except Exception:
                         # fail_step itself failing leaves the step stuck-claimed
                         # and loses the original error entirely.
@@ -3931,7 +3933,9 @@ class MetaAgent:
                 except Exception as e:
                     error_msg = str(e)[:200]
                     try:
-                        sf.fail_step(claimed.token, error_msg, retryable=True)
+                        from core.dpe_pipeline import SCOPE_PROGRESS_TERMINAL
+                        sf.fail_step(claimed.token, error_msg,
+                                     retryable=not isinstance(e, SCOPE_PROGRESS_TERMINAL))
                     except Exception:
                         # fail_step itself failing leaves the step stuck-claimed
                         # and loses the original error entirely.

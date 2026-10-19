@@ -41,7 +41,10 @@ async def test_portable_db_exact_base_then_bounded_review_before_cost(live, monk
     from core.prompt_assembler import PromptAssembler
     service, source, producer, db, original, commit, tree, payload, bundle = fixture(live.tmp / 'producer')
     raw = ('Portable synthetic review café\n' + 'line\n' * 1200).encode()
-    args = {'producer': {'project_id': 'receiver', 'attempt_id': original['attempt_id'], 'artifact': commit},
+    # The honest producer is the retained SAME-project candidate: the portable DB
+    # carries project 'durable' and its terminal producer attempt, and the
+    # consumer below is a new node of that same State project.
+    args = {'producer': {'project_id': 'durable', 'attempt_id': original['attempt_id'], 'artifact': commit},
             'items': [{'name': 'review.md', 'reference': 'candidate://synthetic/review.md',
                        'sha256': hashlib.sha256(raw).hexdigest(), 'size': len(raw),
                        'content_base64': base64.b64encode(raw).decode()}]}
@@ -55,8 +58,11 @@ async def test_portable_db_exact_base_then_bounded_review_before_cost(live, monk
     portable = live.tmp / 'receiver.sqlite'
     with sqlite3.connect(db) as sender, sqlite3.connect(portable) as receiver:
         sender.backup(receiver)
-    fresh = live.tmp / 'fresh-source'
-    fresh.mkdir()
+    # A fresh repository at the project's bound path: it shares no history
+    # with the vanished producer source, so the commit must be imported from
+    # the durable carrier retained in the portable DB.
+    fresh = source
+    fresh.mkdir(parents=True)
     git(fresh, 'init', '-q')
     git(fresh, 'config', 'user.name', 'fixture')
     git(fresh, 'config', 'user.email', 'fixture@localhost')
@@ -67,11 +73,9 @@ async def test_portable_db_exact_base_then_bounded_review_before_cost(live, monk
     monkeypatch.setattr(deps, 'get_db_manager', lambda: successor_db)
     successor = StateService(successor_db, live.ws, live.sf, live.registry,
                              actor='synthetic-reviewer', project_read_trusted=True)
-    successor.create_project('receiver', 'Synthetic receiver')
-    successor.store.add_nodes('receiver', [node('import'), node('review')])
-    successor.bind_source('receiver', str(fresh))
+    successor.store.add_nodes('durable', [node('import'), node('portable-review')])
     imported = request(successor, 'start_external_attempt', {
-        'project_id': 'receiver', 'node_key': 'import', 'expected_revision': 1,
+        'project_id': 'durable', 'node_key': 'import', 'expected_revision': 1,
         'harness': 'synthetic', 'external_id': 'import', 'request_key': 'import', 'base_sha': commit})
     assert imported['status'] == 'running' and imported['context']['base_sha'] == commit
     assert git(fresh, 'rev-parse', commit + '^{tree}') == tree
@@ -85,9 +89,10 @@ async def test_portable_db_exact_base_then_bounded_review_before_cost(live, monk
     live.registry.register_one(live.sf, 'investigate', hint_overrides={
         'scheduler_owned': True, 'repo_mode': 'none', 'seed_file': 'task.md', 'output_step': 'investigate'})
     attempt = request(successor, 'start_attempt', {
-        'project_id': 'receiver', 'node_key': 'review', 'expected_revision': 1,
-        'workflow': 'investigate', 'request_key': 'review',
+        'project_id': 'durable', 'node_key': 'portable-review', 'expected_revision': 1,
+        'workflow': 'investigate', 'request_key': 'portable-review',
         'frozen_prerequisites': {'version': 1, 'checks': [check]}})
+
     assert attempt['status'] == 'running' and attempt['run_id'], attempt
     path = seed_dir(live.sf, attempt['execution_project_id'], 'investigate') / (PREFIX + 'review.md')
     assert path.read_bytes() == raw and path.stat().st_mode & 0o222 == 0

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import stat
 import subprocess
@@ -72,8 +73,13 @@ def _available_runtime_capability(identity, arguments: dict):
     return require_available_capability_identity(identity, arguments["name"])
 
 
-def materialize(spec: dict, *, source: str | None, sf, trace, review_inputs=None) -> dict:
-    """Verify one frozen State-attempt descriptor without mutation."""
+def materialize(spec: dict, *, source: str | None, sf, trace, review_inputs=None,
+                prepared_review_inputs=None) -> dict:
+    """Verify one frozen State-attempt descriptor without mutation.
+
+    `prepared_review_inputs` maps a bundle's canonical arguments to the decoded
+    (identity, files) the service already produced in its pre-launch check, so
+    one parse serves both the early refusal and the seed publication."""
     try:
         from skillflow.prerequisites import materialize_frozen_prerequisites
     except ImportError as exc:
@@ -81,10 +87,13 @@ def materialize(spec: dict, *, source: str | None, sf, trace, review_inputs=None
             "installed SkillFlow lacks frozen prerequisite materialization") from exc
     from core.review_input_bundle import decode, require_identity
     def review_bundle(arguments):
-        identity, files = decode(arguments)
+        prepared = (prepared_review_inputs or {}).get(
+            json.dumps(arguments, sort_keys=True, separators=(",", ":"), ensure_ascii=False))
+        identity, files = prepared if prepared is not None else decode(arguments)
         if review_inputs is not None:
             review_inputs.append((identity, files))
         return identity
+
     return materialize_frozen_prerequisites(spec, {
         "source_head": _source_head(source),
         "review_input_bundle": review_bundle,

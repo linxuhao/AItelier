@@ -417,6 +417,101 @@ class StateService:
             return requested["base_sha"]
         return attempt["context"].get("base_sha") or "HEAD"
 
+    def _preflight_review_inputs(self, attempt, source, prepared, manifest=None):
+        """Refuse a false portable-input producer/receipt binding before any launch effect.
+
+        Pure State reads plus in-memory decoding: no Git I/O, no hashing under a
+        write transaction, no base import, relay or claim mutation. Returns None
+        when the attempt may proceed (filling `prepared` with decoded bundles),
+        otherwise the failed attempt recorded through the existing preflight path.
+
+        The decoded identity is compared with the ACTUAL frozen check `expected`
+        (producer, items and optional acceptance), never with a manifest rebuilt
+        from the supplied arguments. The one-bundle limit and the receiver's
+        own-seed constraint are judged here too, at the same side-effect-free
+        boundary, using the existing graph predicate."""
+        spec = attempt["context"].get("frozen_prerequisites")
+        checks = [c for c in (spec or {}).get("checks", [])
+                  if isinstance(c, dict) and c.get("probe") == "review_input_bundle"]
+        if not checks:
+            return None
+        from core import review_input_bundle as bundle
+
+        def refuse(check, required, actual, exc):
+            # Retain precise expected/actual evidence in the existing
+            # preflight failure machinery; nothing has launched.
+            reason = str(exc)[:1000]
+            report = {"version": 1, "passed": False, "error": f"{type(exc).__name__}: {reason}"[:1000],
+                      "checks": [{"id": check.get("id"), "probe": "review_input_bundle",
+                                  "required": required, "actual": actual,
+                                  "passed": False, "error": reason}]}
+            return self.attempts.record_preflight(
+                attempt["attempt_id"], report, f"frozen prerequisite refusal: {reason}")
+
+        if len(checks) > 1:
+            return refuse(checks[1], checks[1].get("expected"), None,
+                          StateConflict("an attempt may declare exactly one review input bundle"))
+        if manifest is not None:
+            try:
+                from core.seed_publication import reads_own_seed
+                own = reads_own_seed(self.sf._get_resolver(attempt["workflow"]).graph,
+                                     attempt["workflow"], manifest.seed_file)
+            except Exception as exc:  # unresolvable receiver graph: fail closed
+                return refuse(checks[0], checks[0].get("expected"), None,
+                              StateConflict(f"review input receiver graph is unavailable: {type(exc).__name__}"))
+            if not own:
+                return refuse(checks[0], checks[0].get("expected"), None,
+                              StateConflict("review input workflows must read their published seed"))
+        for check in checks:
+            arguments = check.get("arguments")
+            # The actual frozen required identity, retained verbatim on refusal.
+            required = check.get("expected")
+            actual = files = None
+            try:
+                actual, files = bundle.decode(arguments)
+                if not isinstance(required, dict) or actual != required:
+                    raise ValueError("required review input identity differs from the frozen expected identity "
+                                     "or its bytes are unavailable")
+                self._check_review_input_binding(attempt, required)
+            except (ValueError, StateConflict, StateGraphError) as exc:
+                return refuse(check, required, actual, exc)
+            prepared[json.dumps(arguments, sort_keys=True, separators=(",", ":"), ensure_ascii=False)] = (actual, files)
+        return None
+
+
+
+    def _check_review_input_binding(self, attempt, expected):
+        producer = expected["producer"]
+        project_id = attempt["project_id"]
+        if producer["project_id"] != project_id:
+            raise StateConflict("review input producer must belong to this State project")
+        retained = self.attempts.retained_producer(project_id, producer["attempt_id"], producer["artifact"])
+        acceptance = expected.get("acceptance")
+        if acceptance is None:
+            return
+        receipt_id = acceptance["receipt_id"]
+        pins = [(dep, pin) for dep, pin in attempt["dependencies"].items()
+                if pin.get("verified_receipt") == receipt_id]
+        if len(pins) != 1:
+            raise StateConflict("accepted input receipt is not exactly one frozen direct dependency of this attempt")
+        dep, pin = pins[0]
+        row = self.attempts.acceptance_row(receipt_id)
+        if row is None:
+            raise StateConflict("accepted input receipt does not exist")
+        if (row["project_id"] != project_id or row["node_key"] != dep
+                or row["node_revision"] != pin.get("revision")
+                or row["contract_hash"] != pin.get("contract_hash")
+                or row["attempt_id"] != producer["attempt_id"]
+                or row["artifact_ref"] != producer["artifact"]
+                or retained["artifact_ref"] != row["artifact_ref"]
+                or retained["node_key"] != dep):
+            raise StateConflict("accepted input receipt does not match the frozen dependency and producer")
+        if not re.fullmatch(r"[0-9a-f]{64}", row["artifact_ref"]):
+            raise StateConflict("accepted input requires an exact SHA-256 artifact receipt")
+        primary = next((i for i in expected["items"] if i["name"] == acceptance["primary_item"]), None)
+        if primary is None or primary["sha256"] != row["artifact_ref"]:
+            raise StateConflict("accepted input primary item does not match the accepted artifact")
+
     def start_external_attempt(self, project_id, node_key, expected_revision, harness, external_id,
                                request_key, instruction="", base_sha=None, claim_id=None, fence=None):
         """Register external execution scope; never compose or dispatch a workflow."""
@@ -585,7 +680,16 @@ class StateService:
                     "note": "Launch outcome is unknown. No duplicate run was started; retain and inspect the execution project."}
         if attempt["status"] != "reserved":
             return attempt
+        # Portable review inputs are refused here, on the new-launch branch and
+        # before any base import, relay mutation or execution claim. The decoded
+        # bytes are reused by the normal frozen-prerequisite materialization.
+        prepared_inputs = {}
+        early = self._preflight_review_inputs(attempt, source, prepared_inputs, manifest)
+
+        if early is not None:
+            return early
         from core import run_isolation
+
         # The supported request is the current selection; context preserves the
         # original intent and must not reset a later director override on recovery.
         selected = self._dependency_ref(attempt, None)
@@ -608,7 +712,8 @@ class StateService:
             try:
                 from core.frozen_attempt import materialize
                 report = materialize(prerequisites, source=source, sf=self.sf,
-                                     trace=trace.append, review_inputs=review_inputs)
+                                     trace=trace.append, review_inputs=review_inputs,
+                                     prepared_review_inputs=prepared_inputs)
                 if len(review_inputs) > 1:
                     raise StateConflict("an attempt may declare exactly one review input bundle")
                 if review_inputs:

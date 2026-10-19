@@ -1358,12 +1358,28 @@ def test_successor_restores_owner_cursor_and_pending_checkpoint_without_duplicat
     assert live.sf.get_run(checkpoint["run_id"])["status"] == "paused"
 
 
-def _review_bundle(project_id="game"):
+def _real_producer(live, project_id="game", key="portable-producer", payload=b"candidate producer\n"):
+    """A genuine retained terminal producer made through the public State APIs."""
+    live.service.store.add_nodes(project_id, [spec(key)])
+    producer = live.service.start_external_attempt(project_id, key, 1, "fixture", key + "-ext", key + "-req")
+    artifact = hashlib.sha256(payload).hexdigest()
+    body = json.dumps({"status": "candidate", "settled": True, "usable": True}).encode()
+    report = live.tmp / (key + "-terminal.json")
+    report.write_bytes(body)
+    done = live.service.report_external_attempt(producer["attempt_id"], key + "-end", 0, producer["context_hash"],
+        "candidate", str(report), hashlib.sha256(body).hexdigest(), True, artifact, "sha256")
+    assert done["status"] == "candidate" and done["artifact_ref"] == artifact
+    return done
+
+
+def _review_bundle(project_id="game", live=None):
     import base64
     from core.review_input_bundle import manifest
-    producer = {"project_id": project_id, "attempt_id": "external-producer-1", "artifact": "a" * 40}
+    real = _real_producer(live, project_id)
+    producer = {"project_id": project_id, "attempt_id": real["attempt_id"], "artifact": real["artifact_ref"]}
     contents = {"prose.md": "Candidate rationale: café\n", "ledger.json": '{"accepted": false}\n',
                 "manifest.json": '{"candidate": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}\n'}
+
     arguments = {"producer": producer, "items": [
         {"name": name, "reference": "candidate://producer-1/" + name,
          "sha256": hashlib.sha256(content.encode()).hexdigest(), "size": len(content.encode()),
@@ -1385,7 +1401,7 @@ async def test_review_bundle_survives_deleted_producer_before_first_agent_call(l
         live.sf.register_graph(PipelineGraph.from_yaml(Path(__file__).parents[2] / "configs/investigate.yaml"))
         live.registry.register_one(live.sf, "investigate", hint_overrides={
             "scheduler_owned": True, "repo_mode": "none", "seed_file": "task.md", "output_step": "investigate"})
-    check, contents = _review_bundle()
+    check, contents = _review_bundle(live=live)
     producer = live.tmp / "producer-workspace"
     producer.mkdir()
     for name, text in contents.items():
@@ -1436,7 +1452,7 @@ def test_review_bundle_refusal_precedes_launch_and_every_agent_side_effect(live,
     import core.run_launcher as launcher
     import core.run_isolation as isolation
     from aitelier.runner import AgentStepRunner
-    check, _ = _review_bundle()
+    check, _ = _review_bundle(live=live)
     item = check["arguments"]["items"][0]
     if failure == "missing":
         item["content_base64"] = None
@@ -1470,7 +1486,7 @@ async def test_review_run_input_tampering_refuses_before_workspace_or_model(live
     from aitelier.runner import AgentStepRunner
     from core.seed_publication import seed_dir
     from core.review_input_bundle import PREFIX
-    check, _ = _review_bundle()
+    check, _ = _review_bundle(live=live)
     attempt = live.service.start_attempt("game", "a", 1, "state_fixture", "tampered-" + failure,
         frozen_prerequisites=_frozen(check))
     seed = seed_dir(live.sf, attempt["execution_project_id"], attempt["workflow"])
@@ -1506,7 +1522,7 @@ async def test_review_run_input_tampering_refuses_before_workspace_or_model(live
 
 @pytest.mark.parametrize("invalid", ["host-path", "cross-project", "traversal", "count", "item-size", "total-size", "extra-field"])
 def test_review_bundle_does_not_expand_host_or_project_read_scope(live, invalid):
-    check, _ = _review_bundle()
+    check, _ = _review_bundle(live=live)
     args = check["arguments"]
     if invalid == "host-path":
         args["items"][0]["reference"] = "/private/producer/prose.md"
@@ -1536,7 +1552,7 @@ def test_review_bundle_poller_adoption_preserves_frozen_identity(live, monkeypat
     import core.seed_publication as seeds
     monkeypatch.setattr(scheduler, "db", live.db)
     monkeypatch.setattr(scheduler, "get_skillflow", lambda: live.sf)
-    check, _ = _review_bundle()
+    check, _ = _review_bundle(live=live)
     original = launcher.publish_seeds
     adopted = []
     def publish_and_adopt(directory, files, **kwargs):
@@ -1568,7 +1584,7 @@ def test_bounded_review_inputs_reach_prompt_without_line_clipping():
 def test_review_host_admission_refuses_before_framework_claim_or_cost_tools(live, monkeypatch, entrypoint, failure):
     from core.seed_publication import seed_dir
     from core.review_input_bundle import PREFIX
-    check, _ = _review_bundle()
+    check, _ = _review_bundle(live=live)
     attempt = live.service.start_attempt("game", "a", 1, "state_fixture", "host-" + entrypoint + failure,
         frozen_prerequisites=_frozen(check))
     path = seed_dir(live.sf, attempt["execution_project_id"], attempt["workflow"]) / (PREFIX + "prose.md")

@@ -300,9 +300,7 @@ def review_seed_context(directory: Path, config_name: str) -> dict:
     identity = json.loads(marker.read_text()).get("review_input_bundle")
     if identity is None:
         return {}
-    from core.review_input_bundle import manifest
-    arguments = {"producer": identity.get("producer"), "items": [
-        dict(item, content_base64=None) for item in identity.get("items", [])]}
-    if manifest(arguments) != identity:
+    from core.review_input_bundle import identity_arguments, manifest
+    if manifest(identity_arguments(identity)) != identity:
         raise ValueError("invalid published review input identity")
     return {"_review_input_bundle": identity, "_review_input_config": config_name}

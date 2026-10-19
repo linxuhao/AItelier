@@ -143,7 +143,7 @@ def test_skillflow_base_refusal_retires_reservation_before_launcher(tmp_path, mo
     # This is a workflow admission test: supply the real host runtime schema,
     # while the other carrier tests deliberately exercise State-only storage.
     from core.db_manager import DBManager
-    service.db = DBManager(db.db_path)
+    service.db = DBManager(str(db))
     with service.store.transaction(write=True) as conn:
         conn.execute("DROP TRIGGER state_git_artifacts_no_delete")
         conn.execute("DELETE FROM state_git_artifacts")

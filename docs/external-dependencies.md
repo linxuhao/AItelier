@@ -40,7 +40,7 @@ not requirements.
 |---|---|---|
 | `deepseek` | `https://api.deepseek.com/` | `DEEPSEEK_API_KEY` |
 | `ark` | `https://ark.cn-beijing.volces.com/api/coding/v3` | `ARK_API_KEY` |
-| `localqwen` | `http://100.68.74.107:8000/v1` | `LOCAL_QWEN_API_KEY` |
+| `managedvision` | `http://100.104.11.4:9041/engines/translator/v1` | `MANAGED_VISION_API_KEY` |
 
 ### Why a second candidate is worth a second account
 

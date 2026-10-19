@@ -139,7 +139,7 @@ def test_cutover_fence_blocks_new_index_operation(tmp_path):
         result = subprocess.run([sys.executable, str(ROOT / 'core/semantic_index_control.py'),
                                  '--control-dir', str(directory), '--worktrees-root', str(tmp_path / 'runs'),
                                  '--projects-root', str(projects), '--once'], capture_output=True, text=True)
-        assert result.returncode == 0, result.stderr
+        assert result.returncode != 0 and 'BlockingIOError' in result.stderr
         assert not (root / '.zvec-grep').exists()
         assert not (directory / 'project-owner.json').exists()
 

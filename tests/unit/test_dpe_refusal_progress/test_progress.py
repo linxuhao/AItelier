@@ -47,6 +47,7 @@ class Case:
         monkeypatch.setenv('AITELIER_LLM_STREAM', '0')
         monkeypatch.delenv('AITELIER_FORCE_ALL_AGENT_MODELS', raising=False)
         self.mode = mode
+        self.raw_card = 'card_a'
         self.canonical = tmp/'canonical'; self.canonical.mkdir()
         git(self.canonical, 'init', '-q')
         git(self.canonical, 'config', 'user.name', 'Offline fixture')
@@ -76,11 +77,13 @@ class Case:
             producer,
             StepNode(id='review', output_mode='content', output_target='artifact',
                 output_fixed={'verdict': {'file':'review_verdict.json'}},
-                transitions=[Transition(to='t_impl', max_loop=3)]),
+                transitions=[
+                    Transition(to='task_loop', match={'from_file':'review_verdict.json','field':'passed','value':True}),
+                    Transition(to='t_impl', match={'from_file':'review_verdict.json','field':'passed','value':False}, max_loop=3)]),
             StepNode(id='done', step_type='gate')])
         self.sf.register_graph(graph)
         d=self.sf._workspace.get_step_dir('p',graph.name,'3'); d.mkdir(parents=True)
-        (d/'manifest.json').write_text(json.dumps({'items':['card_a']}))
+        (d/'manifest.json').write_text(json.dumps({'items':[self.raw_card]}))
         self.run=self.sf.create_run(graph.name, {'project_id':'p'}, project_id='p')
         import api.dependencies as deps
         monkeypatch.setattr(deps, 'get_skillflow', lambda:self.sf)
@@ -112,7 +115,12 @@ class Case:
             claim=self.sf.claim_next_step(self.run)
             if claim:
                 assert claim.step_id==expected
-                self.claims.append({'instance':claim.token.step_instance_id,'epoch':claim.token.claim_epoch,'step':claim.step_id})
+                row=next(r for r in self.sf.get_steps(self.run) if r['id']==claim.token.step_instance_id)
+                artifact=Path(claim.inputs['_artifact_dir'])
+                assert row['loop_item']==self.raw_card, 'SDK must own this raw loop item'
+                assert artifact.name==self.raw_card and artifact.parent.name==claim.step_id
+                self.claims.append({'instance':claim.token.step_instance_id,'epoch':claim.token.claim_epoch,'step':claim.step_id,
+                                    'loop_item':row['loop_item'],'artifact_dir':str(artifact)})
                 self.artifacts.append(claim.inputs['_artifact_dir'])
                 # Supply a real card in resolved input, like the manifest's context source.
                 claim.inputs.setdefault('_resolved_context',{}).update({

@@ -204,3 +204,91 @@ def test_real_item_bound_review_retry_has_same_cause(tmp_path,monkeypatch,mode):
     assert any(data['scope_cause']['error']['error'] in str(m.get('content',''))
                for m in c.requests[-1]['messages'])
     c.evidence()
+
+
+_BAD_WITNESS_SHAPES = [
+    ('native','empty',[{}]),
+    ('native','missing-segment',[{'assistant_index':2,'call_index':0,'tool':'read'}]),
+    ('native','negative-assistant',[{'segment':0,'assistant_index':-1,'call_index':0,'tool':'read'}]),
+    ('native','bool-segment',[{'segment':True,'assistant_index':2,'call_index':0,'tool':'read'}]),
+    ('native','string-call',[{'segment':0,'assistant_index':2,'call_index':'0','tool':'read'}]),
+    ('native','nonenumerated-call',[{'segment':0,'assistant_index':2,'call_index':1,'tool':'read'}]),
+    ('native','json-position',[{'kind':'actions','index':0,'tool':'read'}]),
+    ('json-tool','empty',[{}]),
+    ('json-tool','native-position',[{'segment':0,'assistant_index':2,'call_index':0,'tool':'read'}]),
+    ('json-tool','unknown-kind',[{'kind':'unknown','index':0,'tool':'read'}]),
+    ('json-tool','missing-index',[{'kind':'actions','tool':'read'}]),
+    ('json-tool','bool-index',[{'kind':'actions','index':False,'tool':'read'}]),
+    ('json-tool','negative-index',[{'kind':'actions','index':-1,'tool':'read'}]),
+    ('json-content','empty',[{}]),
+    ('json-content','native-position',[{'segment':0,'assistant_index':2,'call_index':0,'tool':'read'}]),
+    ('json-content','nonstring-path',[{'kind':'files','index':0,'path':None}]),
+    ('json-content','extra-field',[{'kind':'files','index':0,'path':'allowed.py','extra':1}]),
+]
+
+
+@pytest.mark.parametrize('mode,case,positions',_BAD_WITNESS_SHAPES,
+                         ids=[m+'-'+label for m,label,_ in _BAD_WITNESS_SHAPES])
+def test_required_witness_position_shape_blocks_before_generation(tmp_path,monkeypatch,mode,case,positions):
+    c=item_case(tmp_path,monkeypatch,mode);first,data=seed(c)
+    second=c.review_again(first)
+    target=receipt(second);data['response_witness']['positions']=positions
+    target.write_text(json.dumps(data));raw=target.read_bytes();before=len(c.requests)
+    try:
+        with pytest.raises(ScopeObservationUnavailable):c.execute(second,f.finish(mode))
+        assert len(c.requests)==before
+        assert target.read_bytes()==raw
+    finally:
+        print('WITNESS_SHAPE_EVIDENCE '+json.dumps({'case':case,'mode':mode,
+            'claims':c.claims,'sdk_steps':c.sf.get_steps(c.run),'artifact_dir':str(target.parent),
+            'transport_calls_before':before,'transport_calls_after':len(c.requests),
+            'corrupt_receipt':data,'bytes_unchanged':target.read_bytes()==raw}))
+
+
+@pytest.mark.parametrize('field',['presented_sha256','response_digest'])
+def test_required_witness_digest_is_sha256_hex(tmp_path,monkeypatch,field):
+    c=item_case(tmp_path,monkeypatch,'json-tool');first,data=seed(c);second=c.review_again(first)
+    data['response_witness'][field]='z'*64
+    target=receipt(second);target.write_text(json.dumps(data));raw=target.read_bytes();before=len(c.requests)
+    with pytest.raises(ScopeObservationUnavailable):c.execute(second,f.finish(c.mode))
+    assert len(c.requests)==before and target.read_bytes()==raw
+
+
+@pytest.mark.parametrize('mode',['native','json-tool','json-content'])
+def test_valid_witness_roundtrip_keeps_unrelated_cause_and_allows_correction(tmp_path,monkeypatch,mode):
+    c=item_case(tmp_path,monkeypatch,mode);first,data=seed(c);second=c.review_again(first)
+    good=(f.action('write_file',id='allowed',content='VALID_SHAPE = True\n') if mode=='json-content'
+          else f.action('create',file='allowed.py',content='VALID_SHAPE = True\n'))
+    response=f.native(good) if mode=='native' else {'actions':[good]}
+    c.execute(second,response,f.finish(mode))
+    after=json.loads(receipt(second).read_text())
+    assert after['scope_cause']['hash']==data['scope_cause']['hash']
+    assert after['response_witness']['carry_match'] is True
+    assert (c.root/'allowed.py').read_text()=='VALID_SHAPE = True\n'
+
+
+@pytest.mark.parametrize('mode',['json-tool','json-content'])
+def test_producer_nullable_tool_empty_path_and_gapped_indices_remain_loadable(tmp_path,monkeypatch,mode):
+    c=item_case(tmp_path,monkeypatch,mode);first=c.claim()
+    malformed={'actions':[None,{}],'files':[None,{}]}
+    # Actual json_positions observes a skipped non-dict entry, tool=None and
+    # path=''. The action is malformed, but that metadata form is producer-valid.
+    interrupted=False
+    try:
+        c.execute(first,f.denied(mode),malformed,KeyboardInterrupt('retain produced malformed-shape witness'))
+    except (AttributeError, TypeError, KeyboardInterrupt):
+        # Existing dispatch may reject malformed action entries AFTER the
+        # successful-response witness was produced. No mutation was requested.
+        interrupted=True
+    data=json.loads(receipt(first).read_text())
+    assert data['response_witness']['positions']==[
+        {'kind':'actions','index':1,'tool':None},{'kind':'files','index':1,'path':''}]
+    if interrupted:
+        c.sf.release_claim(first.token,'malformed model actions; only denial/no mutation')
+        second=c.claim()
+    else:
+        second=c.review_again(first)
+    good=(f.action('write_file',id='allowed',content='NULLABLE = True\n') if mode=='json-content'
+          else f.action('create',file='allowed.py',content='NULLABLE = True\n'))
+    c.execute(second,{'actions':[good]})
+    assert (c.root/'allowed.py').read_text()=='NULLABLE = True\n'

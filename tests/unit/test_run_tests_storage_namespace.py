@@ -1,10 +1,12 @@
 """Storage diagnosis must agree with the namespace pytest REALLY uses (UNRUN by its source-only author).
 
-Second-round regressions for the first independent review of
-`bcc9e64dcdac1629896ec2da21c8ea0c24cecc1b`: the executor entry assumed `/tmp`;
-a repository `addopts = --basetemp=...` moved pytest's `tmp_path` elsewhere, so
-a refusal there read as `clean` while a healthy configured namespace was refused
-for an unrelated full `/tmp`.
+Third round (R3) for the second independent review of
+`5bc303a09da9728a226df8b32619d7e6132064a8`: a separate `--noconftest` resolver
+process could not see a conftest `pytest_configure` that set
+`option.basetemp`, so an ENOSPC in that real namespace read as `clean`. The
+namespace is now reported by the REAL pytest session at `pytest_sessionstart`
+(after every configuration source, before collection) and probed by the
+entry's own syscall.
 
 These tests use the REAL executor entry launching a REAL pytest subprocess and
 the REAL public `run_tests`. Only the filesystem ANSWER is injected (finite; no
@@ -13,6 +15,7 @@ registered bounded-tmpfs controls.
 """
 import errno
 import os
+import time
 
 import pytest
 
@@ -20,7 +23,7 @@ import aitelier.tools.run_tests.impl as rt
 from aitelier.gate_evidence import release_disposition, report_state
 from core import repository_executor_entry as entry
 from tests.unit.test_run_tests_storage_exhaustion import (  # noqa: F401 (fixture re-export)
-    GREEN, PROBE, _baseline, _inject, _run, env)
+    GREEN, PROBE, RED, _baseline, _inject, _run, env)
 
 TMP_TEST = "def test_tmp(tmp_path):\n    assert tmp_path.is_dir()\n"
 
@@ -48,16 +51,85 @@ def _configure_basetemp(env):
     return parent
 
 
-def test_entry_resolves_the_configured_basetemp_from_pytest_itself(env):
-    parent = _configure_basetemp(env)
-    (env.repo / "test_sample.py").write_text(TMP_TEST)
-    resolved = entry._resolve_pytest_tmp(
-        {"HOME": "/tmp", "PATH": os.environ["PATH"]},
-        ["python3", "-m", "pytest", str(env.repo), "-q", "--rootdir", str(env.repo)],
-        str(env.repo))
-    assert resolved["resolved"] is True and resolved["source"] == "pytest_basetemp"
-    assert resolved["path"] == str(parent)
+def _conftest_basetemp(env):
+    """A normal conftest `pytest_configure` selects basetemp (the R2 failure path)."""
+    parent = env.tmp / "hooked"
+    parent.mkdir()
+    (env.repo / "conftest.py").write_text(
+        "def pytest_configure(config):\n"
+        f"    config.option.basetemp = {str(parent / 'hooked-base')!r}\n")
+    return parent
 
+
+def test_conftest_configured_basetemp_is_the_witnessed_namespace(env):
+    parent = _conftest_basetemp(env)
+    result, report = _run(env, TMP_TEST)
+    resolution = report["storage_diagnosis"]["observation"]["tmp_resolution"]
+    assert resolution["resolved"] is True and resolution["source"] == "pytest_basetemp"
+    assert resolution["path"] == str(parent)
+    assert report["returncode"] == 0 and result["passed"] is True
+    assert report["storage_diagnosis"]["state"] == "clean"
+    # The configured basetemp was really used by the real tmp_path.
+    assert (parent / "hooked-base").is_dir()
+
+
+def test_conftest_configured_basetemp_exhaustion_is_never_a_known_failure(env):
+    marker = env.tmp / "a-test-ran"
+    parent = _conftest_basetemp(env)
+    seen = _inject_in(env, parent, errno.ENOSPC)
+    result, report = _run(env, f"def test_tmp(tmp_path):\n    open({str(marker)!r}, 'w')\n")
+    assert seen, "the entry must probe the namespace the conftest configured"
+    diagnosis = report["storage_diagnosis"]
+    assert diagnosis["state"] == "exhausted_preflight"
+    assert diagnosis["proof"][0]["path"] == str(parent)
+    assert diagnosis["observation"]["refused_at"] == "session_start_before_collection"
+    assert not marker.exists(), "no test may run after the entry's refusal"
+    assert report["storage_unmeasured"] is True and report["passed"] is False
+    assert report_state(report) == "infrastructure_unavailable"
+    assert release_disposition(report) == "unresolved" == result["release_evidence"]
+    assert result["passed_relative"] is False and result["new_failures"] == []
+    assert result["baseline_state"] == "unmeasured" and not _baseline(env).exists()
+
+
+def test_conftest_basetemp_does_not_override_the_witness_with_another_root(env):
+    """A full unrelated /tmp is not where this session creates tmp_path."""
+    _conftest_basetemp(env)
+    seen = _inject_in(env, "/tmp", errno.ENOSPC)
+    result, report = _run(env, TMP_TEST)
+    assert not seen and result["passed"] is True
+    assert report["storage_diagnosis"]["state"] == "clean"
+
+
+def test_namespace_witness_spends_the_same_single_wall_budget(env):
+    """No separate resolver budget: a slow configuration counts against `timeout`."""
+    (env.repo / "conftest.py").write_text(
+        "import time\ndef pytest_configure(config):\n    time.sleep(5)\n")
+    (env.repo / "test_sample.py").write_text(GREEN)
+    started = time.monotonic()
+    result = entry.run({"repo": str(env.repo), "timeout": 1, "pytest_timeout": True,
+                        "import_module": "",
+                        "args": ["python3", "-m", "pytest", str(env.repo), "-q",
+                                 "--rootdir", str(env.repo)]})
+    elapsed = time.monotonic() - started
+    assert result["timed_out"] is True
+    assert elapsed < 4, f"one wall budget, observed {elapsed:.3f}s for timeout=1"
+
+
+def test_nonzero_session_without_identities_is_unmeasured_even_when_clean(env):
+    (env.repo / "conftest.py").write_text(
+        "def pytest_sessionfinish(session, exitstatus):\n    session.exitstatus = 3\n")
+    result, report = _run(env, GREEN)
+    assert report["returncode"] not in (0, None) and report["failures"] == []
+    assert result["passed_relative"] is False and result["baseline_state"] == "unmeasured"
+    assert report_state(report) == "failed" and not _baseline(env).exists()
+
+
+def test_real_assertion_red_is_still_identified_with_a_witnessed_namespace(env):
+    _conftest_basetemp(env)
+    result, report = _run(env, RED)
+    assert report["storage_diagnosis"]["state"] == "clean"
+    assert any("test_red" in f for f in report["failures"])
+    assert result["baseline_state"] == "seeded" and _baseline(env).is_file()
 
 def test_configured_basetemp_exhaustion_is_unmeasured_through_the_public_path(env):
     parent = _configure_basetemp(env)

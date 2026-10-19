@@ -144,20 +144,31 @@ def test_bytes_versus_inodes_come_from_retained_statvfs_not_from_a_threshold():
 
 # --- the real entry + the real public run_tests -------------------------------
 
+def _tmp_observation(report):
+    """The entry's own observation of the session's tmp namespace."""
+    found = [o for o in report["storage_diagnosis"]["observation"]["before"]
+             if "pytest_tmp" in (o.get("roles") or [])]
+    assert len(found) == 1, "the session's namespace must be observed exactly once"
+    return found[0]
+
+
 def test_preflight_enospc_is_unmeasured_never_a_failure_or_baseline(env):
-    marker = env.tmp / "pytest-was-started"
-    (env.repo / "conftest.py").write_text(f"open({str(marker)!r}, 'w').write('x')\n")
+    # Repository configuration (conftest) is what tells pytest where tmp_path
+    # lives, so it does run; no TEST MODULE may be collected after a refusal.
+    marker = env.tmp / "test-module-was-collected"
     _inject(env, errno.ENOSPC, lambda n: True)
     _vfs(env, f_ffree=0, f_favail=0)
-    result, report = _run(env, RED)
+    result, report = _run(env, f"open({str(marker)!r}, 'w').write('x')\n" + RED)
 
     assert report is not None and result["written"] == "test_report.json"
     assert env.calls, "the real executor entry must have been called"
-    assert not marker.exists(), "no repository code may run after a proved refusal"
+    assert not marker.exists(), "no test module may be collected after a proved refusal"
     proof = report["storage_diagnosis"]["proof"]
     assert proof and proof[0]["errno"] == errno.ENOSPC and proof[0]["errname"] == "ENOSPC"
     assert proof[0]["resource"] == ["inodes"] and proof[0]["path"] == "/tmp"
-    assert report["storage_diagnosis"]["observation"]["before"][0]["statvfs"]["f_favail"] == 0
+    assert _tmp_observation(report)["statvfs"]["f_favail"] == 0
+    assert report["storage_diagnosis"]["observation"]["refused_at"] == \
+        "session_start_before_collection"
     # Explicit infrastructure not-run, in the file and on the return.
     assert report["passed"] is False and report["skipped"] is True
     assert report["infrastructure_unavailable"] and report["storage_unmeasured"]
@@ -166,8 +177,9 @@ def test_preflight_enospc_is_unmeasured_never_a_failure_or_baseline(env):
     assert release_disposition(report) == "unresolved" == result["release_evidence"]
     assert result["evidence_state"] == "infrastructure_unavailable" and result["storage_unmeasured"]
     assert result["storage_state"] == "exhausted_preflight"
-    # Raw executor return preserved, no invented test failure, no baseline.
-    assert report["returncode"] == -1 and "storage preflight refused: ENOSPC" in report["stderr"]
+    # Raw pytest return preserved, no invented test failure, no baseline.
+    assert report["returncode"] not in (0, 1) and "storage refused" in (
+        report["stdout"] + report["stderr"])
     assert not report["collection_errors"]
     assert all(f.startswith("pytest:storage exhausted") for f in report["failures"])
     assert result["new_failures"] == [] and result["passed_relative"] is False

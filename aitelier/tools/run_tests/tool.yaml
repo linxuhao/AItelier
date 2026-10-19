@@ -36,20 +36,30 @@ description: >
   gate that checked nothing has not passed. If no test runner can be provisioned
   at all the gate records a distinct, non-passing infrastructure_unavailable
   outcome. So does a PROVED storage inability: the trusted executor entry
-  asks pytest itself where tmp_path will be created (a configured --basetemp
-  from the repository's ini/addopts wins, else the process temp dir), probes
-  exactly that namespace (a real mkdir + small write, errno kept, statvfs
-  bytes/inodes retained) and only an ENOSPC/EDQUOT answer yields
-  skipped_because=storage_exhausted, storage_unmeasured:true and
-  baseline_state=unmeasured (never new_failures, never a baseline write, never
-  passed_relative). A namespace that cannot be resolved from pytest, or a record
-  with no successful syscall witness, is storage state `unknown`, not clean;
-  pytest's own "could not create numbered dir" text is the repository's and is
-  not evidence. A baseline file is written only AFTER test_report.json was
-  durably stored; if the report (or its evidence-cycle manifest) cannot be
-  written the return is a non-pass with written:null, infrastructure_unavailable
-  and the already observed stdout/stderr/failures/storage_diagnosis retained,
-  and no baseline is persisted. Reports are artifacts, not source files; a code
+  starts the same pytest invocation itself with one observing plugin; at
+  pytest_sessionstart (after command line, ini addopts AND conftest
+  pytest_configure, before collection) the session reports the directory its
+  tmp_path factory will use, and the ENTRY probes exactly that directory (a
+  real mkdir + small write, errno kept, statvfs bytes/inodes retained). Only
+  the entry's own ENOSPC/EDQUOT answer yields skipped_because=storage_exhausted,
+  storage_unmeasured:true and baseline_state=unmeasured (never new_failures,
+  never a baseline write, never passed_relative); the session is then stopped
+  before any test is collected. The junit output directory is probed before
+  pytest starts. A namespace the session did not report, or a record with no
+  successful syscall witness, is storage state `unknown`, not clean; pytest's
+  own "could not create numbered dir" text is the repository's and is not
+  evidence. A non-zero result with no usable failure identity is never a
+  known red (baseline_state=unmeasured), whatever the storage looked like.
+  The report is staged under a temporary name and published by rename only
+  after the baseline decision was committed: a failed baseline seed/prune is
+  withdrawn from the report (baseline_state=unmeasured, passed_relative false,
+  baseline_persisted false, baseline_error kept, previous baseline file left
+  intact) instead of claimed. If the report (or its evidence-cycle manifest)
+  cannot be written or published the return is a non-pass with written:null,
+  infrastructure_unavailable and the already observed
+  stdout/stderr/failures/storage_diagnosis retained as bounded tails
+  (raw_bounds gives each stream's full length, completeness and sha256), and
+  no baseline is persisted. Reports are artifacts, not source files; a code
   agent can read its report with read(source="self", path="test_report.json").
 
   The repository gate's protocol: the gate is handed GATE_REPORT_DIR (a new,

@@ -15,6 +15,7 @@ Docker controls' job.
 """
 import errno
 import json
+import os
 from pathlib import Path
 
 import aitelier.gate_evidence as gate_evidence
@@ -36,15 +37,35 @@ def _run_with_gate(env, source):
     return result, json.loads((env.out / "test_report.json").read_text())
 
 
+def _is_report(path):
+    return path.name == "test_report.json" or path.name.startswith(".test_report.json.tmp")
+
+
 def _fail_report_write(env):
     real = Path.write_text
 
     def write_text(self, *args, **kwargs):
-        if self.name == "test_report.json":
+        if _is_report(self):
             raise OSError(errno.ENOSPC, "No space left on device")
         return real(self, *args, **kwargs)
 
     env.monkeypatch.setattr(Path, "write_text", write_text)
+
+
+def _fail_baseline_write(env, number=errno.ENOSPC):
+    """The baseline write truncates its target and then answers `number`."""
+    real = Path.write_text
+    calls = []
+
+    def write_text(self, *args, **kwargs):
+        if rt.BASELINE_FILE in self.name:
+            calls.append(str(self))
+            real(self, "", encoding="utf-8")           # really truncate what it opened
+            raise OSError(number, os.strerror(number), str(self))
+        return real(self, *args, **kwargs)
+
+    env.monkeypatch.setattr(Path, "write_text", write_text)
+    return calls
 
 
 def test_during_run_exhaustion_with_unkeyed_default_gate_stays_unmeasured(env):
@@ -118,3 +139,102 @@ def test_fail_fast_early_report_write_failure_is_a_nondelivery(env):
     assert result["written"] is None and result["passed"] is False
     assert result["report_write_failed"] is True and result["storage_exhausted"] is True
     assert not _baseline(env).exists()
+
+
+# --- R3: baseline persistence and report publication compose truthfully -------
+
+def test_failed_baseline_seed_after_real_red_claims_no_seed_or_known_failure(env):
+    calls = _fail_baseline_write(env)
+    result, report = _run(env, RED)
+    assert calls, "the baseline write must really have been attempted"
+    # The genuine red stays a red, with its raw evidence and identity.
+    assert report["returncode"] == 1 and "test_red" in report["stdout"]
+    assert any("test_red" in f for f in report["failures"])
+    # ...but no seed that is not on disk is claimed, in the file or the return.
+    for view in (report, result):
+        assert view["baseline_state"] == "unmeasured"
+        assert view["passed_relative"] is False and view["new_failures"] == []
+        assert view["baseline_persisted"] is False and "ENOSPC" in view["baseline_error"]
+    assert not report.get("baseline_seeded") and report["baseline_failures"] == []
+    assert gate_evidence.report_state(report) == "failed"
+    assert result["release_evidence"] != "known_failure"
+    assert not _baseline(env).exists() or _baseline(env).read_text() == ""
+    assert result["written"] == "test_report.json"   # the report itself WAS delivered
+
+
+def test_failed_seed_does_not_reset_attribution_on_recovery(env):
+    """After a failed seed the next delivered run seeds normally; nothing is pretended."""
+    _fail_baseline_write(env)
+    _run(env, RED)
+    env.monkeypatch.setattr(Path, "write_text", _REAL_WRITE_TEXT)
+    result, report = _run(env, RED)
+    assert result["baseline_state"] == "seeded" and result["baseline_persisted"] is True
+    assert json.loads(_baseline(env).read_text())["failures"]
+
+
+def test_failed_prune_leaves_existing_baseline_intact_and_claims_nothing(env):
+    _run(env, RED)                                     # delivered seed
+    before = _baseline(env).read_bytes()
+    _fail_baseline_write(env)
+    result, report = _run(env, GREEN)                  # would prune test_red
+    assert result["baseline_state"] == "unmeasured" and result["baseline_persisted"] is False
+    assert result["passed"] is True                    # absolute green is still green
+    assert _baseline(env).read_bytes() == before, "a failed prune may not damage the baseline"
+
+
+def test_report_publish_failure_after_baseline_is_a_nondelivery_and_keeps_old_report(env):
+    _run(env, GREEN)
+    previous = (env.out / "test_report.json").read_bytes()
+    real_replace = os.replace
+
+    def replace(src, dst, *args, **kwargs):
+        if Path(dst).name == "test_report.json":
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return real_replace(src, dst, *args, **kwargs)
+
+    env.monkeypatch.setattr(rt.os, "replace", replace)
+    result, _ = _run(env, RED)
+    assert result["written"] is None and result["passed"] is False and result["_error"]
+    assert result["report_write_failed"] and result["release_evidence"] == "unresolved"
+    assert "test_red" in result["stdout"] and result["raw_bounds"]["stdout"]["complete"]
+    assert (env.out / "test_report.json").read_bytes() == previous, "never truncated"
+    assert not list(env.out.glob(".test_report.json.tmp*"))
+
+
+def test_report_restage_failure_after_baseline_error_is_not_a_written_pass(env):
+    """R2-D1: the diagnostic rewrite failing used to be swallowed."""
+    real = Path.write_text
+    staged = []
+
+    def write_text(self, *args, **kwargs):
+        if rt.BASELINE_FILE in self.name:
+            raise OSError(errno.ENOSPC, "No space left on device")
+        if self.name.startswith(".test_report.json.tmp"):
+            staged.append(1)
+            if len(staged) >= 2:                       # the re-stage after baseline_error
+                real(self, "{", encoding="utf-8")       # partial write, then fail
+                raise OSError(errno.ENOSPC, "No space left on device")
+        return real(self, *args, **kwargs)
+
+    env.monkeypatch.setattr(Path, "write_text", write_text)
+    result, report = _run(env, GREEN)
+    assert len(staged) == 2
+    assert result["written"] is None and result["passed"] is False and result["_error"]
+    assert result["baseline_persisted"] is False and "ENOSPC" in result["baseline_error"]
+    assert report is None and not list(env.out.glob(".test_report.json.tmp*"))
+
+
+def test_oversized_output_is_marked_incomplete_never_called_full_raw(env):
+    _fail_report_write(env)
+    noisy = "def test_noisy():\n    print('x' * 70000)\n    assert False\n"
+    (env.repo / "conftest.py").write_text("")
+    result, _ = _run(env, noisy, )
+    bounds = result["raw_bounds"]["stdout"]
+    if bounds["chars"] > 60_000:
+        assert bounds["complete"] is False and len(bounds["sha256"]) == 64
+        assert result["stdout"].startswith("[...truncated head...]")
+    else:
+        assert bounds["complete"] is True
+
+
+_REAL_WRITE_TEXT = Path.write_text

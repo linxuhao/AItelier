@@ -56,7 +56,8 @@ def test_bytes_and_inode_exhaustion_are_both_retained_through_the_public_path(en
     _, report = _run(env, GREEN)
     assert report["storage_diagnosis"]["proof"][0]["resource"] == resource
     assert report["storage_unmeasured"] and report["passed"] is False
-    stored = report["storage_diagnosis"]["observation"]["before"][0]["statvfs"]
+    stored = [o for o in report["storage_diagnosis"]["observation"]["before"]
+              if "pytest_tmp" in o["roles"]][0]["statvfs"]
     assert all(stored[k] == v for k, v in fields.items())
 
 
@@ -95,7 +96,7 @@ def test_report_write_failure_never_fabricates_success(env, source):
     real = Path.write_text
 
     def write_text(self, *args, **kwargs):
-        if self.name == "test_report.json":
+        if self.name == "test_report.json" or self.name.startswith(".test_report.json.tmp"):
             raise OSError(errno.ENOSPC, "No space left on device")
         return real(self, *args, **kwargs)
 

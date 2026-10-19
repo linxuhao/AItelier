@@ -38,26 +38,18 @@ _STATVFS_FIELDS = ("f_bsize", "f_frsize", "f_blocks", "f_bfree", "f_bavail",
                    "f_files", "f_ffree", "f_favail")
 
 
-def _child_tmp(env):
-    """The DEFAULT directory the child's pytest would use (its own env).
-
-    Only a fallback: the namespace pytest really uses is resolved from pytest
-    itself by `_resolve_pytest_tmp`.
-    """
-    return env.get("TMPDIR") or "/tmp"
-
-
-_RESOLVE_TMP = (
-    "import json, sys, tempfile\n"
-    "out = {'tempdir': tempfile.gettempdir()}\n"
-    "try:\n"
-    "    from _pytest.config import _prepareconfig\n"
-    "    option = _prepareconfig(sys.argv[1:]).option\n"
-    "    out['basetemp'] = str(option.basetemp) if getattr(option, 'basetemp', None) else None\n"
-    "    out['config_ok'] = True\n"
-    "except BaseException as exc:\n"
-    "    out['config_error'] = type(exc).__name__\n"
-    "print(json.dumps(out))\n")
+# The namespace pytest REALLY uses is read INSIDE the real pytest session, not
+# re-derived by a second parse. The entry starts pytest itself (`pytest.main`,
+# the in-process API `python -m pytest` ends in) with one plugin. Its
+# `pytest_sessionstart` runs after every configuration source -- command line,
+# ini `addopts`, conftest `pytest_configure` -- and before collection; it only
+# REPORTS the directory the session's tmp_path factory will create under, then
+# waits for the entry's verdict. The decision is the entry's own: a real mkdir +
+# write on exactly that directory, made by this (trusted) process. The session
+# never decides anything about the disk. No second process, no extra timeout:
+# the wait is inside the one wall budget of the pytest leg.
+WITNESS_FLAG = "--aitelier-pytest-witness"
+WITNESS_SCHEMA = "pytest-namespace/1"
 
 
 def _nearest_existing_dir(path):
@@ -70,42 +62,111 @@ def _nearest_existing_dir(path):
     return probe
 
 
-def _resolve_pytest_tmp(env, command, repo):
-    """The directory the child's pytest will really create tmp_path under.
+def _session_namespace(config):
+    """Where THIS session's tmp_path factory creates directories (read-only).
 
-    Asked of pytest itself, with the child's own env and cwd: its normal
-    configuration (command line, `addopts` of the repository's ini file) is
-    parsed WITHOUT importing repository conftest files, and `--basetemp` wins
-    when configured; otherwise `tempfile.gettempdir()` of the same env is what
-    pytest's tmp_path factory uses. Nothing is inferred from repository text
-    output. When pytest cannot be asked, the answer is the default root and
-    `resolved` is False: the observation then stays evidence but is not
-    authority to refuse or to waive anything.
+    The factory (`config._tmp_path_factory`) is what `tmp_path` really uses;
+    `config.option.basetemp` is consulted only when no factory exists.
     """
-    fallback = {"path": _child_tmp(env), "resolved": False, "source": "default_unresolved"}
-    args = list(command)
-    if args[1:3] != ["-m", "pytest"]:
-        return fallback
+    factory = getattr(config, "_tmp_path_factory", None)
+    if factory is not None:
+        given = getattr(factory, "_basetemp", None) or getattr(factory, "_given_basetemp", None)
+    else:
+        given = getattr(config.option, "basetemp", None)
+    if given:
+        # pytest removes and re-creates a given basetemp itself: the creation
+        # happens in its PARENT, which is therefore the namespace to witness.
+        base = os.path.abspath(str(given))
+        return {"path": _nearest_existing_dir(os.path.dirname(base)),
+                "source": "pytest_basetemp", "basetemp": base}
+    import tempfile
+    root = os.environ.get("PYTEST_DEBUG_TEMPROOT") or tempfile.gettempdir()
+    return {"path": _nearest_existing_dir(root), "source": "tempfile_gettempdir"}
+
+
+def _witness_main(argv):
+    """`python3 <entry> --aitelier-pytest-witness W,R <pytest args>`: pytest itself."""
+    report_fd, verdict_fd = (int(x) for x in argv[0].split(","))
+    args = list(argv[1:])
+    sys.path[0] = os.getcwd()   # what `python -m pytest` puts first, not this file's dir
+    import pytest
+
+    class Witness:
+        @pytest.hookimpl(trylast=True)
+        def pytest_sessionstart(self, session):
+            record = {"schema": WITNESS_SCHEMA}
+            try:
+                record.update(_session_namespace(session.config))
+            except Exception as exc:   # an unresolvable namespace stays unknown
+                record["error"] = f"{type(exc).__name__}: {exc}"[:300]
+            verdict = b""
+            try:
+                os.write(report_fd, (json.dumps(record) + "\n").encode())
+                os.close(report_fd)
+                verdict = os.read(verdict_fd, 64)
+                os.close(verdict_fd)
+            except OSError:
+                pass
+            if verdict.startswith(b"refuse"):
+                # Before collection: no test module is imported or run.
+                pytest.exit("aitelier executor: storage refused in this session's "
+                            f"temp namespace {record.get('path')}; nothing was collected", 3)
+
+    return int(pytest.main(args, plugins=[Witness()]))
+
+
+def _read_record(fd):
+    """One newline-terminated record from the session (None on EOF/garbage)."""
+    data = b""
     try:
-        found = subprocess.run(
-            [args[0], "-c", _RESOLVE_TMP, "--noconftest", *args[3:]], cwd=repo, env=env,
-            capture_output=True, text=True, timeout=60)
-        info = json.loads((found.stdout.strip().splitlines() or [""])[-1])
-    except (OSError, ValueError, subprocess.SubprocessError):
-        return fallback
-    if not isinstance(info, dict):
-        return fallback
-    base = info.get("basetemp")
-    if info.get("config_ok") and isinstance(base, str) and base:
-        target = _nearest_existing_dir(os.path.join(repo, base))
-        if target is None:
-            return fallback
-        return {"path": target, "resolved": True, "source": "pytest_basetemp",
-                "basetemp": os.path.join(repo, base)}
-    temp = info.get("tempdir")
-    if info.get("config_ok") and isinstance(temp, str) and temp:
-        return {"path": temp, "resolved": True, "source": "tempfile_gettempdir"}
-    return fallback
+        while b"\n" not in data and len(data) < 65536:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            data += chunk
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    try:
+        record = json.loads(data.split(b"\n", 1)[0])
+    except ValueError:
+        return None
+    return record if isinstance(record, dict) and record.get("schema") == WITNESS_SCHEMA else None
+
+
+def _serve_witness(report_fd, verdict_fd, storage):
+    """Answer the session: the entry's OWN syscall on the session's namespace."""
+    verdict = b"go\n"
+    try:
+        record = _read_record(report_fd)
+        path = record.get("path") if record else None
+        if not (isinstance(path, str) and os.path.isabs(path) and os.path.isdir(path)):
+            storage["tmp_resolution"] = {"resolved": False, "source": "session_unreported",
+                                         "error": (record or {}).get("error")}
+            return
+        spec = {"path": path, "roles": ["pytest_tmp"], "authoritative": True}
+        obs = _observe_root(spec)
+        storage["roots"].append(spec)
+        storage["before"].append(obs)
+        storage["tmp_root"] = path
+        storage["tmp_resolution"] = {"resolved": True, "source": record.get("source"),
+                                     "path": path, "basetemp": record.get("basetemp"),
+                                     "observed_at": "session_start"}
+        if _is_full([obs]):
+            storage["preflight_refused"] = True
+            storage["refused_at"] = "session_start_before_collection"
+            verdict = b"refuse\n"
+    except Exception as exc:   # never fabricate a verdict: unresolved, session goes on
+        storage["tmp_resolution"] = {"resolved": False, "source": "entry_error",
+                                     "error": f"{type(exc).__name__}: {exc}"[:300]}
+    finally:
+        try:
+            os.write(verdict_fd, verdict)
+        except OSError:
+            pass
+        os.close(verdict_fd)
+
 
 
 
@@ -198,28 +259,29 @@ def _is_full(observations):
     return None
 
 
-def _storage_roots(env, command, repo):
-    """Every directory this pytest leg must be able to write, deduplicated.
+def _required_roots(command):
+    """The junit record directory the TRUSTED caller built (`--junitxml=`).
 
-    The namespace pytest itself will use for tmp_path (`_resolve_pytest_tmp`),
-    plus the directory of the junit record the backend asked for
-    (`--junitxml=`, an argument the TRUSTED caller built; it is the mounted
-    output root pytest writes its result record into). Each root carries the
-    roles it plays and whether its observation is authoritative: a tmp root
-    that could not be resolved from pytest is only evidence.
+    Known before repository code runs, so it may refuse before pytest starts.
+    The tmp namespace is only known inside the session (`_serve_witness`).
     """
-    tmp = _resolve_pytest_tmp(env, command, repo)
-    roots = [(tmp["path"], "pytest_tmp", tmp["resolved"])]
+    roots = []
     for arg in command:
         if isinstance(arg, str) and arg.startswith("--junitxml="):
-            roots.append((os.path.dirname(arg.split("=", 1)[1]) or ".", "junit", True))
-    merged = {}
-    for path, role, authoritative in roots:
-        key = os.path.realpath(path)
-        entry = merged.setdefault(key, {"path": path, "roles": [], "authoritative": False})
-        entry["roles"].append(role)
-        entry["authoritative"] = entry["authoritative"] or authoritative
-    return list(merged.values()), tmp
+            path = os.path.dirname(arg.split("=", 1)[1]) or "."
+            if all(os.path.realpath(r["path"]) != os.path.realpath(path) for r in roots):
+                roots.append({"path": path, "roles": ["junit"], "authoritative": True})
+    return roots
+
+
+def _witness_command(command):
+    """`python3 -m pytest ARGS` -> the same pytest, started by this entry (or None)."""
+    args = list(command)
+    if len(args) < 3 or args[1:3] != ["-m", "pytest"]:
+        return None
+    return args
+
+
 
 
 def _coding_shell(payload, env):
@@ -324,20 +386,23 @@ def run(payload):
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             return {"returncode": -1, "stdout": "", "stderr": "", "timed_out": False,
                     "import_error": "", "unavailable": f"JavaScript lint unavailable: {exc}"}
-    # A pytest leg observes its own temp namespace BEFORE repository code runs:
-    # a namespace the filesystem itself refuses (ENOSPC/EDQUOT) is not worth an
-    # hour of tests that cannot create tmp_path. Nothing here depends on the
-    # repository's text or on a size watermark.
+    # A pytest leg observes the storage it must write BEFORE repository code
+    # runs. Here: the junit record directory the trusted caller named. The temp
+    # namespace tmp_path really uses is only known inside the session; it is
+    # observed there, before collection, by `_serve_witness`. Nothing depends
+    # on the repository's text or on a size watermark. ONE wall budget
+    # (`deadline`) covers the import probe, that wait and the session itself.
+    deadline = time.monotonic() + payload["timeout"]
     storage = None
     if payload.get("pytest_timeout") and not payload.get("profile"):
-        roots, tmp = _storage_roots(env, payload["args"], repo)
-        storage = {"schema": STORAGE_SCHEMA, "tmp_root": tmp["path"], "tmp_resolution": tmp,
+        roots = _required_roots(payload["args"])
+        storage = {"schema": STORAGE_SCHEMA, "tmp_root": None,
+                   "tmp_resolution": {"resolved": False, "source": "not_started"},
                    "roots": roots, "before": [_observe_root(r) for r in roots]}
         full = _is_full(storage["before"])
         if full:
-
-
             storage["preflight_refused"] = True
+            storage["refused_at"] = "before_pytest_start"
             obs, name = full
             return {"returncode": -1, "stdout": "", "timed_out": False, "import_error": "",
                     "stderr": (f"storage preflight refused: {obs[name]['errname']} on {name} in "
@@ -411,34 +476,58 @@ def run(payload):
                 "env": dict(env)}
         except Exception:
             pass  # Optional diagnostics must never prevent the ordinary gate.
+    def remaining():
+        return max(0.1, deadline - time.monotonic())
+
     import_error = ""
     if payload.get("import_module"):
         probe = subprocess.run([sys.executable, "-c", "import importlib,sys; importlib.import_module(sys.argv[1])",
                                 payload["import_module"]], cwd=repo, env=env,
-                               capture_output=True, text=True, timeout=min(60, payload["timeout"]))
+                               capture_output=True, text=True, timeout=min(60, remaining()))
         if probe.returncode:
             import_error = f"import {payload['import_module']} failed: {probe.stderr[-600:]}"
-    proc = None
+    proc = witness = None
+    launch, pass_fds, child_ends = command, (), ()
+    witnessed = _witness_command(command) if storage is not None else None
+    if witnessed is not None:
+        # The SAME pytest invocation, started through this entry so the session
+        # can tell it where tmp_path lives (see `_serve_witness`).
+        report_r, report_w = os.pipe()
+        verdict_r, verdict_w = os.pipe()
+        launch = [witnessed[0], os.path.abspath(__file__), WITNESS_FLAG,
+                  f"{report_w},{verdict_r}", *witnessed[3:]]
+        pass_fds, child_ends = (report_w, verdict_r), (report_w, verdict_r)
     try:
-        proc = subprocess.Popen(command, cwd=repo, env=env, text=stdin_data is None,
-                                stdin=subprocess.PIPE if stdin_data is not None else None,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+        try:
+            proc = subprocess.Popen(launch, cwd=repo, env=env, text=stdin_data is None,
+                                    stdin=subprocess.PIPE if stdin_data is not None else None,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    start_new_session=True, pass_fds=pass_fds)
+        finally:
+            for fd in child_ends:
+                os.close(fd)
+        if witnessed is not None:
+            witness = threading.Thread(target=_serve_witness,
+                                       args=(report_r, verdict_w, storage), daemon=True)
+            witness.start()
         timed_out = False
         try:
             if stdin_data is None:
-                stdout, stderr = proc.communicate(timeout=payload["timeout"])
+                stdout, stderr = proc.communicate(timeout=remaining())
             else:
-                stdout, stderr = proc.communicate(input=stdin_data, timeout=payload["timeout"])
+                stdout, stderr = proc.communicate(input=stdin_data, timeout=remaining())
         except subprocess.TimeoutExpired:
             timed_out = True
             os.killpg(proc.pid, signal.SIGKILL)
             stdout, stderr = proc.communicate()
         if isinstance(stdout, bytes):
             stdout, stderr = stdout.decode("utf-8", errors="replace"), stderr.decode("utf-8", errors="replace")
-        if storage is not None and proc.returncode != 0:
+        if witness is not None:
+            witness.join(1)        # the session ended: its pipe is at EOF (bounded)
+        if storage is not None and proc.returncode != 0 and not storage.get("preflight_refused"):
             # What the namespace looks like AFTER a non-clean session: pytest has
             # swallowed the errno by now, the filesystem has not.
-            storage["after"] = [_observe_root(r) for r in storage["roots"]]
+            storage["after"] = [_observe_root(r) for r in list(storage["roots"])]
 
         return {"returncode": proc.returncode, "stdout": stdout, "stderr": stderr,
                 "timed_out": timed_out, "import_error": import_error,
@@ -450,9 +539,14 @@ def run(payload):
                 os.killpg(proc.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+        elif witnessed is not None:
+            for fd in (report_r, verdict_w):
+                os.close(fd)
         if relay:
             relay.shutdown()
             relay.server_close()
 
 if __name__ == "__main__":
+    if len(sys.argv) > 2 and sys.argv[1] == WITNESS_FLAG:
+        sys.exit(_witness_main(sys.argv[2:]))
     print(json.dumps(run(json.loads(sys.argv[1]))))

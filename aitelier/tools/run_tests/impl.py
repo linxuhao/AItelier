@@ -2050,17 +2050,18 @@ def _apply_baseline(report: dict, state_dir: str,
         report["baseline_state"] = "unreadable"
         return
 
-    diagnosed = (report.get("storage_diagnosis") or {}).get("state")
-    if (diagnosed in ("unknown", "ambiguous") and not failures and not report.get("passed")
+    if (not failures and not report.get("passed")
             and report.get("returncode") not in (0, None)):
-        # A non-zero pytest result with NO usable failure identity, while the
-        # storage could not be shown healthy, is not a "known red": an empty
-        # case list is no evidence that the red was already there, and no label
-        # is invented for it. It stays visibly refused (never seeds, never
-        # relative-passes) and the raw output stays in the report.
+        # A non-zero pytest result with NO usable failure identity is not a
+        # "known red", whatever the storage looked like: an empty case list is
+        # not a measured zero-failure session, and no evidence that the red
+        # was already there. No label is invented for it. It stays visibly
+        # refused (never seeds, never relative-passes) and the raw output
+        # stays in the report.
+        diagnosed = (report.get("storage_diagnosis") or {}).get("state") or "unknown"
         report["baseline_error"] = (
-            "non-zero pytest result without usable failure identities and without a "
-            f"trustworthy storage observation ({diagnosed}); nothing can be attributed")
+            f"non-zero result (rc={report.get('returncode')}) without usable failure "
+            f"identities (storage observation: {diagnosed}); nothing can be attributed")
         report["new_failures"] = []
         report["passed_relative"] = False
         report["baseline_failures"] = []
@@ -2143,16 +2144,58 @@ def _apply_baseline(report: dict, state_dir: str,
     return _commit_baseline(report, {"path": path, "keep": keep})
 
 
-def _commit_baseline(report: dict, pending: dict) -> None:
-    """Write a baseline decided by `_apply_baseline`; the errno stays in `baseline_error`."""
+def _write_replacing(path: Path, text: str) -> None:
+    """Write `text` to `path` through a sibling temp file and `os.replace`.
+
+    A failed write (ENOSPC mid-file, say) leaves whatever `path` held before
+    intact instead of truncated; the temp file is this call's own name and is
+    removed on failure. Not a durability or cross-writer guarantee.
+    """
+    tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}-{time.monotonic_ns()}")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def _commit_baseline(report: dict, pending: dict) -> bool:
+    """Write a baseline decided by `_apply_baseline`; True only if it was stored.
+
+    On failure the decision is WITHDRAWN from the report: a seed or prune that
+    is not on disk cannot back `baseline_state: seeded|compared`, a known-red
+    set or a relative pass (`gate_evidence.report_state` reads those as an
+    attributable known red). The previous baseline file, if any, is left as it
+    was (`_write_replacing`); the absolute `passed`, the raw output and
+    `failures[]` are untouched, and nothing is invented.
+    """
     path = pending["path"]
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(
-            {"failures": pending["keep"], "updated_at": time.time()}, indent=2),
-            encoding="utf-8")
+        _write_replacing(path, json.dumps(
+            {"failures": pending["keep"], "updated_at": time.time()}, indent=2))
     except OSError as e:
-        report["baseline_error"] = f"could not write {path}: {e}"
+        number = e.errno
+        prior = report.get("baseline_error")
+        sentence = (f"could not write {path}: {e} (errno {number} "
+                    f"{errno.errorcode.get(number, '')}); the "
+                    f"{'seed' if report.get('baseline_seeded') else 'baseline update'} "
+                    "was NOT stored, so no baseline attribution or relative pass is claimed")
+        report["baseline_error"] = f"{prior}; {sentence}" if prior else sentence
+        report["baseline_persisted"] = False
+        report["baseline_write_errno"] = number
+        report.pop("baseline_seeded", None)
+        report["new_failures"] = []
+        report["passed_relative"] = False
+        report["baseline_failures"] = []
+        report["baseline_state"] = "unmeasured"
+        return False
+    report["baseline_persisted"] = True
+    return True
 
 
 
@@ -2308,9 +2351,13 @@ def _mark_storage_unmeasured(report: dict, diagnosis: dict, unmeasured_entries: 
     where = (f"{proof.get('op')} in {proof.get('path')} -> {proof.get('errname')} "
              f"({'/'.join(proof.get('resource') or [])})")
     ran = diagnosis["state"] == "exhausted_during_run"
+    at_session = (diagnosis.get("observation") or {}).get("refused_at") == \
+        "session_start_before_collection"
+    when = (" after pytest ran" if ran else
+            " at pytest session start, before any test was collected" if at_session else
+            " before any repository code ran")
     sentence = (f"Storage exhausted: the trusted executor's own {where} was refused by the "
-                f"filesystem" + (" after pytest ran" if ran else " before any repository "
-                "code ran") + ". The test measurement is "
+                f"filesystem" + when + ". The test measurement is "
                 + ("INCOMPLETE and its results cannot be trusted either way"
                    if ran else "NOT TAKEN") + ". This is not a test failure and is never a "
                 "baseline; re-run once capacity is restored.")
@@ -2375,18 +2422,28 @@ def _report_write_failure(report: dict, target_dir: Path, what: str, exc: OSErro
     number = exc.errno
     exhausted = number in _STORAGE_FULL
     # The raw observations were made before the store failed and are the only
-    # copy once the JUnit directory is cleaned up: keep them (bounded tails)
-    # in the same return, beside -- never instead of -- the failure itself.
-    def tail(text, limit=60_000):
+    # copy once the JUnit directory is cleaned up: keep them in the same return,
+    # beside -- never instead of -- the failure itself. This is a BOUNDED tail,
+    # not complete raw preservation: `raw_bounds` says, per stream, whether it
+    # is complete and gives the original length and sha256 of the full text.
+    bounds = {}
+
+    def tail(name, text, limit=60_000):
         text = text if isinstance(text, str) else ""
+        bounds[name] = {"chars": len(text), "complete": len(text) <= limit,
+                        "sha256": hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()}
         return text if len(text) <= limit else "[...truncated head...]" + text[-limit:]
 
     diagnosis = report.get("storage_diagnosis")
-    retained = {"stdout": tail(report.get("stdout")), "stderr": tail(report.get("stderr")),
+    retained = {"stdout": tail("stdout", report.get("stdout")),
+                "stderr": tail("stderr", report.get("stderr")),
                 "failures": [str(f)[:2000] for f in (report.get("failures") or [])][:100],
                 "collection_errors": [str(f)[:2000] for f in
                                       (report.get("collection_errors") or [])][:100],
-                "summary": tail(report.get("summary"), 8_000)}
+                "summary": tail("summary", report.get("summary"), 8_000)}
+    retained["raw_bounds"] = bounds
+    if report.get("baseline_error"):
+        retained["baseline_error"] = report["baseline_error"]
     if isinstance(diagnosis, dict):
         retained["storage_diagnosis"] = diagnosis
         retained["storage_state"] = diagnosis.get("state")
@@ -2397,7 +2454,10 @@ def _report_write_failure(report: dict, target_dir: Path, what: str, exc: OSErro
             "infrastructure_unavailable": True,
             "evidence_state": "infrastructure_unavailable",
             "release_evidence": "unresolved", "passed_relative": False,
-            "new_failures": [], "baseline_state": "unmeasured", "baseline_persisted": False,
+            "new_failures": [], "baseline_state": "unmeasured",
+            # What really happened to the baseline file: on every path but a
+            # failed final publish no baseline write was attempted at all.
+            "baseline_persisted": report.get("baseline_persisted") is True,
             "storage_unmeasured": bool(report.get("storage_unmeasured")),
             "returncode_observed": report.get("returncode"),
             "raw_retained": retained, **retained,
@@ -2939,22 +2999,49 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
                 capture=prechange_capture, source=prechange_from)
         except Exception as exc:
             report["prechange_unavailable"] = str(exc)[:300]
+    # Delivery, in an order whose every outcome is described truthfully:
+    #   1. the report is STAGED (a sibling temp name; nothing published yet) --
+    #      a failure here persists neither report nor baseline;
+    #   2. the baseline decision is committed; if that write fails the claim it
+    #      backed is withdrawn from the report (`_commit_baseline`) and the
+    #      staged report is re-staged to say so;
+    #   3. the staged report is published by `os.replace`, so an earlier valid
+    #      report is never truncated by a failed write.
+    # A failure at 1-3 is the existing non-delivery answer (`_report_write_failure`),
+    # never `written: test_report.json`.
+    report_path = target_dir / "test_report.json"
+    staged = report_path.with_name(
+        f".test_report.json.tmp-{os.getpid()}-{time.monotonic_ns()}")
+
+    def undeliverable(what: str, exc: OSError) -> dict:
+        try:
+            staged.unlink()
+        except OSError:
+            pass
+        return _report_write_failure(report, target_dir, what, exc)
+
+    def stage() -> None:
+        staged.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+
     try:
-        (target_dir / "test_report.json").write_text(
-            json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+        stage()
     except OSError as exc:
         # Delivery failed: no baseline is persisted from a report nobody can read.
-        return _report_write_failure(report, target_dir, "write", exc)
-    if pending_baseline:
-        _commit_baseline(report, pending_baseline)
-        if report.get("baseline_error"):
-            try:   # keep the file consistent with what was (not) persisted
-                (target_dir / "test_report.json").write_text(
-                    json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
-            except OSError:
-                pass
+        return undeliverable("write", exc)
+    if pending_baseline and not _commit_baseline(report, pending_baseline):
+        try:
+            stage()
+        except OSError as exc:
+            return undeliverable("write", exc)
+    try:
+        os.replace(staged, report_path)
+    except OSError as exc:
+        return undeliverable("publish", exc)
 
     return {"written": "test_report.json", "passed": report["passed"],
+            # What the baseline write actually did (None: nothing to write).
+            "baseline_persisted": report.get("baseline_persisted"),
+            "baseline_error": report.get("baseline_error"),
             # Read by the same consumers as the file's own fields: a proved
             # storage inability is infrastructure evidence, never a red.
             "evidence_state": report.get("evidence_state"),

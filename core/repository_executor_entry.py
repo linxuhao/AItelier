@@ -1,6 +1,7 @@
 """Container entry: capture actual command results, with no backend environment."""
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import importlib.util
+import errno
 import hashlib
 import stat
 import json
@@ -13,6 +14,132 @@ import sys
 import threading
 import selectors
 import time
+import uuid
+
+
+# ---------------------------------------------------------------------------
+# Trusted storage observation.
+#
+# pytest's `tmp_path` machinery (`_pytest.pathlib.make_numbered_dir`) catches
+# EVERY exception from its `mkdir` and, after ten tries, raises a bare
+# "could not create numbered dir ... after 10 tries" -- the errno is gone. On
+# 2026-09-19 a full root filesystem (100%, 349M free) turned 41 tests into such
+# errors and the round was sent back to the implementer for code it had not
+# broken. The repository's stdout/stderr is the repository's own text and proves
+# nothing about the disk, so THIS entry (trusted code, outside the repository)
+# asks the filesystem itself: one small mkdir + 4 KiB write in the namespace the
+# child's pytest uses for temporary directories, with the errno kept, plus the
+# statvfs bytes/inodes and the mount that backs the path. There is no free-space
+# threshold anywhere: only an ENOSPC/EDQUOT answer from a real syscall counts.
+# ---------------------------------------------------------------------------
+STORAGE_SCHEMA = "storage-observation/1"
+_STORAGE_FULL = (errno.ENOSPC, errno.EDQUOT)
+_STATVFS_FIELDS = ("f_bsize", "f_frsize", "f_blocks", "f_bfree", "f_bavail",
+                   "f_files", "f_ffree", "f_favail")
+
+
+def _child_tmp(env):
+    """The directory the CHILD's pytest uses for tmp_path (its own env)."""
+    return env.get("TMPDIR") or "/tmp"
+
+
+def _attempt(call):
+    try:
+        call()
+    except OSError as exc:
+        return {"ok": False, "errno": exc.errno,
+                "errname": errno.errorcode.get(exc.errno, ""), "error": str(exc)[:200]}
+    return {"ok": True, "errno": None}
+
+
+def _mount_of(path):
+    """The mount backing `path`, from the child's own /proc (best effort)."""
+    try:
+        real = os.path.realpath(path)
+        best = None
+        with open("/proc/self/mountinfo", encoding="utf-8", errors="replace") as stream:
+            for line in stream:
+                left, _, right = line.partition(" - ")
+                before, after = left.split(), right.split()
+                if len(before) < 5 or len(after) < 2:
+                    continue
+                point = before[4].replace("\\040", " ")
+                if real == point or real.startswith(point.rstrip("/") + "/"):
+                    if best is None or len(point) >= len(best["mount_point"]):
+                        best = {"mount_point": point, "fstype": after[0], "source": after[1]}
+        return best
+    except OSError:
+        return None
+
+
+def _probe_dir(path):
+    """Observe `path`: statvfs, backing mount, and a real mkdir + small write."""
+    obs = {"path": path}
+    try:
+        info = os.statvfs(path)
+        obs["statvfs"] = {name: getattr(info, name) for name in _STATVFS_FIELDS}
+    except OSError as exc:
+        obs["statvfs"] = {"errno": exc.errno, "errname": errno.errorcode.get(exc.errno, "")}
+    try:
+        obs["st_dev"] = os.stat(path).st_dev
+    except OSError:
+        pass
+    obs["mount"] = _mount_of(path)
+    probe = os.path.join(path, ".aitelier-storage-probe-" + uuid.uuid4().hex)
+    canary = os.path.join(probe, "canary")
+    obs["mkdir"] = _attempt(lambda: os.mkdir(probe, 0o700))
+    if not obs["mkdir"]["ok"]:
+        obs["write"] = {"ok": False, "errno": None, "skipped": "mkdir failed"}
+        return obs
+
+    def write():
+        descriptor = os.open(canary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            os.write(descriptor, b"\0" * 4096)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    obs["write"] = _attempt(write)
+    leftovers = []
+    for remove, target in ((os.unlink, canary), (os.rmdir, probe)):  # only our own names
+        try:
+            remove(target)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            leftovers.append({"path": target, "errno": exc.errno})
+    if leftovers:
+        obs["cleanup_errors"] = leftovers
+    return obs
+
+
+def _is_full(observations):
+    for obs in observations:
+        for name in ("mkdir", "write"):
+            if (obs.get(name) or {}).get("errno") in _STORAGE_FULL:
+                return obs, name
+    return None
+
+
+def _storage_roots(env, command):
+    """Every directory this pytest leg must be able to write, deduplicated.
+
+    The child's tmp namespace, plus the directory of the junit record the
+    backend asked for (`--junitxml=`, an argument the TRUSTED caller built;
+    it is the mounted output root pytest writes its result record into).
+    """
+    roots = [_child_tmp(env)]
+    for arg in command:
+        if isinstance(arg, str) and arg.startswith("--junitxml="):
+            roots.append(os.path.dirname(arg.split("=", 1)[1]) or ".")
+    seen, unique = set(), []
+    for root in roots:
+        key = os.path.realpath(root)
+        if key not in seen:
+            seen.add(key)
+            unique.append(root)
+    return unique
 
 
 def _coding_shell(payload, env):
@@ -116,6 +243,23 @@ def run(payload):
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             return {"returncode": -1, "stdout": "", "stderr": "", "timed_out": False,
                     "import_error": "", "unavailable": f"JavaScript lint unavailable: {exc}"}
+    # A pytest leg observes its own temp namespace BEFORE repository code runs:
+    # a namespace the filesystem itself refuses (ENOSPC/EDQUOT) is not worth an
+    # hour of tests that cannot create tmp_path. Nothing here depends on the
+    # repository's text or on a size watermark.
+    storage = None
+    if payload.get("pytest_timeout") and not payload.get("profile"):
+        roots = _storage_roots(env, payload["args"])
+        storage = {"schema": STORAGE_SCHEMA, "tmp_root": _child_tmp(env),
+                   "roots": roots, "before": [_probe_dir(r) for r in roots]}
+        full = _is_full(storage["before"])
+        if full:
+            storage["preflight_refused"] = True
+            obs, name = full
+            return {"returncode": -1, "stdout": "", "timed_out": False, "import_error": "",
+                    "stderr": (f"storage preflight refused: {obs[name]['errname']} on {name} in "
+                               f"{obs['path']}; no repository code was executed"),
+                    "storage": storage}
     relay = None
     if payload.get("relay_socket"):
         class Handler(BaseHTTPRequestHandler):
@@ -208,8 +352,13 @@ def run(payload):
             stdout, stderr = proc.communicate()
         if isinstance(stdout, bytes):
             stdout, stderr = stdout.decode("utf-8", errors="replace"), stderr.decode("utf-8", errors="replace")
+        if storage is not None and proc.returncode != 0:
+            # What the namespace looks like AFTER a non-clean session: pytest has
+            # swallowed the errno by now, the filesystem has not.
+            storage["after"] = [_probe_dir(r) for r in storage["roots"]]
         return {"returncode": proc.returncode, "stdout": stdout, "stderr": stderr,
                 "timed_out": timed_out, "import_error": import_error,
+                **({"storage": storage} if storage is not None else {}),
                 **({"execution_identity": execution_identity} if execution_identity else {})}
     finally:
         if proc is not None:

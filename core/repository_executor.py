@@ -792,6 +792,10 @@ def _launch_via_host(socket_path: str, repo: Path, args: list[str], timeout: int
     completed.import_error = result.get("import_error", "")
     completed.git = response.get("git")
     completed.execution_identity = result.get("execution_identity")
+    # The entry's own filesystem observation (`storage-observation/1`), carried
+    # beside -- never inside -- the raw return/stdout/stderr. Consumed by
+    # `run_tests._apply_storage_diagnosis`; absent from an older entry.
+    completed.storage = result.get("storage") if isinstance(result.get("storage"), dict) else None
     return completed
 
 
@@ -868,6 +872,7 @@ def _execute(repo: Path, args: list[str], timeout: int, *,
                                                 result["stdout"], result["stderr"])
         completed.import_error = result.get("import_error", "")
         completed.git = git_info
+        completed.storage = result.get("storage") if isinstance(result.get("storage"), dict) else None
         return completed
     finally:
         if git_dir is not None:

@@ -17,6 +17,7 @@ compile sections are the real gate.
 """
 
 import ctypes
+import errno
 import hashlib
 import importlib.util
 import json
@@ -2028,6 +2029,18 @@ def _apply_baseline(report: dict, state_dir: str,
         report["baseline_state"] = "unreadable"
         return
 
+    if report.get("storage_unmeasured") or report.get("measurement_not_taken"):
+        # A PROVED storage inability (`diagnose_storage`: errno from a trusted
+        # syscall) means this session measured nothing trustworthy. Whatever
+        # pytest printed stays in failures[]/stdout as retained evidence, but it
+        # is not a set of this round's regressions: nothing is new, nothing may
+        # seed, prune or rewrite a baseline, and no relative pass can exist.
+        report["new_failures"] = []
+        report["passed_relative"] = False
+        report["baseline_failures"] = []
+        report["baseline_state"] = "unmeasured"
+        return
+
     known = set(baseline)
     # A declared ABSENCE is not a baseline, in either direction:
     #
@@ -2122,6 +2135,197 @@ def _apply_baseline(report: dict, state_dir: str,
 PYTEST_WALL_SECONDS = 1800
 
 
+# --- Storage exhaustion is not a test regression -------------------------------
+#
+# pytest's tmp_path (`make_numbered_dir`) swallows the errno of a failed mkdir and
+# reports only "could not create numbered dir ... after 10 tries" -- the 41 errors
+# of iss-8403bf9711304e5c, sent back to an implementer whose code was fine. That
+# sentence is the REPOSITORY's text and is deliberately not read here: it is also
+# what a read-only directory or a permission error produces. The only evidence
+# accepted is the errno of a syscall made by the trusted executor entry
+# (`core/repository_executor_entry.py`, `storage-observation/1`) -- or by this
+# module itself, on the backend's own output root -- answering ENOSPC/EDQUOT. No
+# free-space threshold is consulted: `statvfs` numbers are RETAINED beside the
+# errno (they say bytes vs inodes) but never decide anything.
+STORAGE_SCHEMA = "storage-observation/1"
+_STORAGE_FULL = (errno.ENOSPC, errno.EDQUOT)
+_STATVFS_FIELDS = ("f_bsize", "f_frsize", "f_blocks", "f_bfree", "f_bavail",
+                   "f_files", "f_ffree", "f_favail")
+STORAGE_EXHAUSTED_STATES = ("exhausted_preflight", "exhausted_during_run")
+
+
+class _HostPrepError(Exception):
+    """The backend's own output root could not be prepared (errno kept)."""
+
+    def __init__(self, what: str, path, exc: OSError):
+        super().__init__(f"{what} {path}: {exc}")
+        self.what, self.path, self.exc = what, str(path), exc
+
+
+def _host_statvfs(path) -> dict | None:
+    probe = Path(path)
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    try:
+        info = os.statvfs(str(probe))
+    except OSError:
+        return None
+    return {name: getattr(info, name) for name in _STATVFS_FIELDS}
+
+
+def _full_resource(vfs) -> list[str]:
+    """Which resource the retained statvfs says is at zero (evidence, not proof)."""
+    out = []
+    if isinstance(vfs, dict):
+        if vfs.get("f_files") and vfs.get("f_favail") == 0:
+            out.append("inodes")
+        if vfs.get("f_blocks") and vfs.get("f_bavail") == 0:
+            out.append("bytes")
+    return out or ["unspecified"]
+
+
+def diagnose_storage(storage, returncode) -> dict:
+    """Classify the trusted storage observation of ONE pytest leg. Pure.
+
+    States:
+      exhausted_preflight   a probe made BEFORE repository code ran got ENOSPC/EDQUOT;
+                            pytest was not started.
+      exhausted_during_run  probes were clean before, but after a non-clean pytest
+                            session the same syscalls get ENOSPC/EDQUOT.
+      ambiguous             a probe failed with some other errno (EACCES, EROFS, ...)
+                            or with no errno: NOT disk exhaustion, nothing waived.
+      clean                 every probe succeeded: the failures are the code's.
+      unknown               no trusted observation (older entry, other transport).
+    """
+    if not isinstance(storage, dict) or storage.get("schema") != STORAGE_SCHEMA:
+        return {"state": "unknown", "reason": "no trusted storage observation"}
+    findings = []
+    for phase in ("before", "after"):
+        observations = storage.get(phase)
+        for obs in observations if isinstance(observations, list) else ():
+            if not isinstance(obs, dict):
+                continue
+            for op in ("mkdir", "write"):
+                attempt = obs.get(op)
+                if not isinstance(attempt, dict) or attempt.get("ok") is not False:
+                    continue
+                if attempt.get("skipped"):
+                    continue
+                number = attempt.get("errno")
+                number = number if type(number) is int else None
+                findings.append({
+                    "phase": phase, "path": obs.get("path"), "op": op, "errno": number,
+                    "errname": errno.errorcode.get(number, "") if number else "",
+                    "exhausted": number in _STORAGE_FULL,
+                    "resource": (_full_resource(obs.get("statvfs"))
+                                 if number in _STORAGE_FULL else []),
+                    "mount": obs.get("mount"), "statvfs": obs.get("statvfs")})
+    exhausted = [f for f in findings if f["exhausted"]]
+    if any(f["phase"] == "before" for f in exhausted):
+        state = "exhausted_preflight"
+    elif exhausted and returncode != 0:
+        state = "exhausted_during_run"
+    elif findings:
+        state = "ambiguous"
+    else:
+        state = "clean"
+    return {"state": state, "findings": findings,
+            "proof": [f for f in exhausted if state in STORAGE_EXHAUSTED_STATES][:4],
+            "preflight_refused": storage.get("preflight_refused") is True,
+            "observation": storage}
+
+
+def _mark_storage_unmeasured(report: dict, diagnosis: dict, unmeasured_entries: list) -> None:
+    """Make a PROVED storage inability an infrastructure not-run.
+
+    It is the same outcome `cpu_executor_unavailable` already is (skipped +
+    infrastructure_unavailable + evidence_state), so gate_evidence.report_state
+    reads it as `infrastructure_unavailable` and release routing as `unresolved`;
+    `storage_unmeasured` is what `_apply_baseline` reads to refuse seeding,
+    pruning and any relative pass. The raw returncode/stdout/stderr stay as the
+    executor returned them; `failures[]` keeps whatever pytest really listed.
+    """
+    proof = (diagnosis.get("proof") or [{}])[0]
+    where = (f"{proof.get('op')} in {proof.get('path')} -> {proof.get('errname')} "
+             f"({'/'.join(proof.get('resource') or [])})")
+    ran = diagnosis["state"] == "exhausted_during_run"
+    sentence = (f"Storage exhausted: the trusted executor's own {where} was refused by the "
+                f"filesystem" + (" after pytest ran" if ran else " before any repository "
+                "code ran") + ". The test measurement is "
+                + ("INCOMPLETE and its results cannot be trusted either way"
+                   if ran else "NOT TAKEN") + ". This is not a test failure and is never a "
+                "baseline; re-run once capacity is restored.")
+    report.update(passed=False, skipped=True, infrastructure_unavailable=True,
+                  skipped_because="storage_exhausted", evidence_state="infrastructure_unavailable",
+                  storage_unmeasured=True)
+    report["summary"] = sentence + ("\n\n" + report["summary"] if report.get("summary") else "")
+    entry = f"pytest:storage exhausted ({where}) — no trustworthy measurement"
+    report["failures"].append(entry)
+    unmeasured_entries.append(entry)
+
+
+def _apply_storage_diagnosis(report: dict, storage, returncode,
+                             unmeasured_entries: list) -> dict:
+    diagnosis = diagnose_storage(storage, returncode)
+    report["storage_diagnosis"] = diagnosis
+    if diagnosis["state"] in STORAGE_EXHAUSTED_STATES:
+        if diagnosis["state"] == "exhausted_preflight":
+            diagnosis["pytest_ran"] = False
+        _mark_storage_unmeasured(report, diagnosis, unmeasured_entries)
+    return diagnosis
+
+
+def _host_storage_failure(report: dict, err: _HostPrepError, unmeasured_entries: list) -> None:
+    """The backend's own junit/output root refused a syscall: nothing was run."""
+    number = err.exc.errno
+    exhausted = number in _STORAGE_FULL
+    finding = {"phase": "before", "path": err.path, "op": err.what, "errno": number,
+               "errname": errno.errorcode.get(number, ""), "exhausted": exhausted,
+               "error": str(err.exc)[:200], "statvfs": _host_statvfs(err.path)}
+    finding["resource"] = _full_resource(finding["statvfs"]) if exhausted else []
+    state = "exhausted_preflight" if exhausted else "ambiguous"
+    report["storage_diagnosis"] = {"state": state, "scope": "backend_output_root",
+                                   "findings": [finding],
+                                   "proof": [finding] if exhausted else [],
+                                   "pytest_ran": False}
+    # pytest was never started: there is no session return code to report, and
+    # the default 0 would read as a clean run.
+    report["returncode"] = None
+    if exhausted:
+        _mark_storage_unmeasured(report, report["storage_diagnosis"], unmeasured_entries)
+    else:
+        # Not proof of exhaustion, but pytest was never started either: say that,
+        # as an unavailable facility, and claim nothing about the disk.
+        report.update(passed=False, returncode=-1, skipped=True, infrastructure_unavailable=True,
+                      skipped_because="test_workspace_unavailable", summary=str(err),
+                      measurement_not_taken=True)
+        entry = f"pytest:could not prepare its result directory ({err}) — no measurement"
+        report["failures"].append(entry)
+        unmeasured_entries.append(entry)
+
+
+def _report_write_failure(report: dict, target_dir: Path, what: str, exc: OSError) -> dict:
+    """The report itself could not be stored: say so, and never claim success.
+
+    `written: None` is what routes a run to `test_evidence_missing` (a report
+    that was not written is not evidence). `passed` is False whatever the suite
+    did -- a green result that could not be recorded is not a delivered verdict.
+    The errno is kept; ENOSPC/EDQUOT here is the filesystem's own answer for the
+    backend's output root.
+    """
+    number = exc.errno
+    exhausted = number in _STORAGE_FULL
+    return {"written": None, "passed": False, "_error": True,
+            "error": (f"run_tests: could not {what} the test report under {target_dir}: "
+                      f"{exc} (errno {number} {errno.errorcode.get(number, '')})"),
+            "report_write_failed": True, "storage_exhausted": exhausted,
+            "infrastructure_unavailable": True,
+            "evidence_state": "infrastructure_unavailable",
+            "release_evidence": "unresolved", "passed_relative": False,
+            "returncode_observed": report.get("returncode"),
+            "host_statvfs": _host_statvfs(target_dir)}
+
+
 def run_tests(*, project_root: str = "", out_dir: str = "",
               workspace_root: str = "", repo_gate: bool = True,
               state_dir: str = "", run_id: str = "",
@@ -2149,6 +2353,10 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
     # pytest killed at its wall, a node runner that is not installed). Every
     # other entry is a measured failure.
     unmeasured_entries: list[str] = []
+    # Set when a trusted probe proved the test namespace cannot be written
+    # BEFORE repository code ran: the node and repo gates are then not started
+    # either (they would only spend their budget on the same refusal).
+    storage_preflight_refused = False
 
     prechange_before = prechange_cases = prechange_profile = None
     retained_red_candidate = False
@@ -2262,10 +2470,20 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
         # later `repo_apply`.
         junit_root = (datadir.aitelier_home() / "gate-reports" /
                       hashlib.sha256(run_id.encode()).hexdigest())
-        junit_root.mkdir(parents=True, exist_ok=True)
-        junit_dir = tempfile.mkdtemp(prefix="run_tests_junit_", dir=junit_root)
-        junit_path = Path(junit_dir) / "junit.xml"
+        junit_dir = None
         try:
+            # The backend's own output root. These two calls used to sit outside
+            # the `try`, so a full filesystem here raised out of run_tests with
+            # no report at all; the errno is kept now and classified.
+            try:
+                junit_root.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                raise _HostPrepError("mkdir", junit_root, exc) from exc
+            try:
+                junit_dir = tempfile.mkdtemp(prefix="run_tests_junit_", dir=junit_root)
+            except OSError as exc:
+                raise _HostPrepError("mkdtemp", junit_root, exc) from exc
+            junit_path = Path(junit_dir) / "junit.xml"
             # --rootdir forces pytest root to the project repo so it doesn't
             # walk up and find AItelier's pytest.ini (whose testpaths=tests
             # would cause discovery of AItelier's own test suite).
@@ -2359,6 +2577,18 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
             # cause is the failed editable install, and a reader given only
             # the symptom rewrites packaging metadata that was never wrong.
             report["summary"] = _lead_with_install_error(report)
+            # The executor entry's own filesystem observation decides whether
+            # this session measured anything (see `diagnose_storage`); the
+            # repository's output text is never consulted for that.
+            diagnosis = _apply_storage_diagnosis(
+                report, getattr(done, "storage", None), done.returncode, unmeasured_entries)
+            if diagnosis["state"] == "exhausted_preflight":
+                storage_preflight_refused = True
+            if diagnosis["state"] in STORAGE_EXHAUSTED_STATES:
+                executed = Executed()  # nothing proven to have run: no prune licence
+        except _HostPrepError as e:
+            _host_storage_failure(report, e, unmeasured_entries)
+            storage_preflight_refused = bool(report["storage_diagnosis"]["proof"])
         except repository_executor.IsolationUnavailable as e:
             report.update(passed=False, returncode=-1, skipped=True, infrastructure_unavailable=True,
                           skipped_because="cpu_executor_unavailable", summary=str(e))
@@ -2391,7 +2621,8 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
         except Exception as e:  # never raise — the step must not fail
             report.update(passed=False, summary=f"Error running pytest: {e}")
         finally:
-            shutil.rmtree(junit_dir, ignore_errors=True)
+            if junit_dir:
+                shutil.rmtree(junit_dir, ignore_errors=True)
 
         # A package that doesn't import fails the gate whatever pytest said
         # (it can still exit 0 — e.g. when the broken module is only reached
@@ -2405,7 +2636,7 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
     # 5_review loops frontend breakage back through the goal-loop exactly
     # like pytest failures.
     if repo is not None and repo.exists():
-        node = _run_node_checks(repo, run_id=run_id)
+        node = None if storage_preflight_refused else _run_node_checks(repo, run_id=run_id)
         if node is not None:
             report["node"] = node
             executed.node_gate_ran = not node.get("skipped")
@@ -2430,7 +2661,9 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
     # `repo_gate: false` belongs ONLY to a pipeline that already owns an engine
     # gate of its own (dpe_game's 5_compile). Everywhere else the default
     # stands: a green pytest over a product pytest cannot compile is not a pass.
-    if repo_gate and repo is not None and repo.exists():
+    if storage_preflight_refused and repo_gate:
+        report["repo_gate_skipped_because"] = "storage_exhausted_preflight"
+    if repo_gate and repo is not None and repo.exists() and not storage_preflight_refused:
         gate = _acquire_repo_gate(repo, run_id=run_id)
         if gate is not None:
             report["repo_gate"] = gate
@@ -2590,7 +2823,10 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
     if not out_dir and repo is None:
         return {"written": None, "passed": False, "error": report["summary"]}
     target_dir = Path(out_dir) if out_dir else repo
-    target_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        target_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return _report_write_failure(report, target_dir, "mkdir", exc)
     if run_id and (evidence_cycle_start or evidence_cycle_from):
         from aitelier.gate_evidence import stamp_report
         stamp_report(report, run_id=run_id, out_dir=str(target_dir),
@@ -2604,9 +2840,18 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
                 capture=prechange_capture, source=prechange_from)
         except Exception as exc:
             report["prechange_unavailable"] = str(exc)[:300]
-    (target_dir / "test_report.json").write_text(
-        json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+    try:
+        (target_dir / "test_report.json").write_text(
+            json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+    except OSError as exc:
+        return _report_write_failure(report, target_dir, "write", exc)
     return {"written": "test_report.json", "passed": report["passed"],
+            # Read by the same consumers as the file's own fields: a proved
+            # storage inability is infrastructure evidence, never a red.
+            "evidence_state": report.get("evidence_state"),
+            "infrastructure_unavailable": bool(report.get("infrastructure_unavailable")),
+            "storage_unmeasured": bool(report.get("storage_unmeasured")),
+            "storage_state": (report.get("storage_diagnosis") or {}).get("state"),
             "retained_red_candidate": retained_red_candidate,
             "release_evidence": release_disposition(report),
             "purpose": report.get("purpose"),

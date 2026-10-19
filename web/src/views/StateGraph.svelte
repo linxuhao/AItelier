@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { stateLayout, stateTone, stateNextAction, shortText, cardLines, groupFacets, stemOf, STATE_CARD, STATE_LANE,
+  import { stateLayout, stateTone, stateNextAction, shortText, cardLines, groupFacets, STATE_CARD, STATE_LANE,
            type StateNodeSummary, type StateLane } from '../lib/stateGraph';
   import { st } from '../lib/stateI18n.svelte';
   interface Props { nodes: StateNodeSummary[]; selected: string; onselect: (key: string) => void }
@@ -16,10 +16,9 @@
   let grouped = $state(true);
   const groupable = $derived(nodes.some(n => n.facet === 'contract' || n.facet === 'test'));
   const shown = $derived(grouped && groupable ? groupFacets(nodes) : nodes);
-  const byKey = $derived(new Map(nodes.map(n => [n.node_key, n])));
   // A selected lane keeps its group selected, so collapsing never loses the focus.
-  const selectedShown = $derived(grouped && groupable && byKey.has(selected)
-    ? stemOf(byKey.get(selected)!) : selected);
+  const selectedShown = $derived(shown.find(n =>
+    ((n as { members?: string[] }).members ?? [n.node_key]).includes(selected))?.node_key ?? selected);
   const domains = $derived([...new Set(shown.map(n => n.domain))].sort());
   // Wrap ranks to what stays legible at 50%; auto-fit then shrinks only as far as needed.
   const perRow = $derived(canvasWidth > 0

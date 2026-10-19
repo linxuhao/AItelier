@@ -160,3 +160,68 @@ describe('groupFacets', () => {
     expect(layout.tooLarge).toBe(false);
   });
 });
+
+// A valid lane dependency can leave a family and re-enter another lane.
+// Contracting that path makes a cycle that does not exist in State.
+describe('facet contraction preserves State topology', () => {
+  const bridge = () => [
+    goal('work.contract', [], {facet: 'contract'}),
+    goal('design.bridge', ['work.contract'], {facet: 'design'}),
+    goal('work.test', ['design.bridge'], {facet: 'test'}),
+    goal('work', ['work.contract', 'work.test'], {facet: 'content'}),
+    goal('safe.contract', [], {facet: 'contract'}),
+    goal('safe', ['safe.contract'], {facet: 'content'}),
+  ];
+  it('keeps the external contract-to-test path displayable without dropping its edges', () => {
+    const nodes = bridge();
+    expect(stateLayout(nodes).nodes).toHaveLength(6);
+    const groups = groupFacets(nodes);
+    const layout = stateLayout(groups);
+    expect(layout.nodes.map(n => n.node_key).sort()).toEqual([
+      'design.bridge', 'safe', 'work', 'work.contract', 'work.test']);
+    expect(groups.find(g => g.node_key === 'safe')!.members).toEqual(['safe', 'safe.contract']);
+    expect(layout.edges.map(e => [e.from, e.to]).sort()).toEqual([
+      ['design.bridge', 'work.test'], ['work.contract', 'design.bridge'],
+      ['work.contract', 'work'], ['work.test', 'work']].sort());
+  });
+  it.each([false, true])('keeps the same safe partition and edges under input reversal=%s', reverse => {
+    const nodes = bridge();
+    const result = groupFacets(reverse ? nodes.reverse() : nodes);
+    expect(result.map(g => g.members.join('|')).sort()).toEqual([
+      'design.bridge', 'safe|safe.contract', 'work', 'work.contract', 'work.test']);
+    const focused = stateLayout(result, '', 'work.test');
+    expect(focused.nodes.map(n => n.node_key).sort()).toEqual(['design.bridge', 'work', 'work.test']);
+    expect(focused.edges.map(e => [e.from, e.to]).sort()).toEqual([
+      ['design.bridge', 'work.test'], ['work.test', 'work']]);
+    const filtered = stateLayout(result, 'work');
+    expect(filtered.hiddenEdges).toBe(2);
+    expect(filtered.nodes.find(n => n.node_key === 'work.test')!.outsideDependencies).toBe(1);
+    expect(stateLayout(result, '', '', 'work.test').nodes.map(n => n.node_key)).toEqual(['work.test']);
+  });
+
+  it('refuses conflicting contractions even when either family alone is safe', () => {
+    const nodes = [
+      goal('a.contract', [], {facet: 'contract'}),
+      goal('a', ['a.contract', 'b.contract'], {facet: 'content'}),
+      goal('b.contract', [], {facet: 'contract'}),
+      goal('b', ['b.contract', 'a.contract'], {facet: 'content'}),
+    ];
+    for (const input of [nodes, [...nodes].reverse(), [...nodes.slice(1), nodes[0]]]) {
+      const groups = groupFacets(input);
+      expect(groups.map(g => g.members.join('|')).sort()).toEqual(['a|a.contract', 'b', 'b.contract']);
+      expect(stateLayout(groups).edges.map(e => [e.from, e.to]).sort()).toEqual([
+        ['a', 'b'], ['b.contract', 'a'], ['b.contract', 'b']]);
+    }
+  });
+
+  it.each([
+    ['Duplicate', [goal('a.contract', [], {facet:'contract'}), goal('a.contract', [], {facet:'contract'})]],
+    ['Missing', [goal('a.contract', ['a'], {facet:'contract'})]],
+    ['cycle', [goal('a.contract', ['a'], {facet:'contract'}), goal('a', ['a.contract'], {facet:'content'})]],
+    ['cycle', [goal('a.contract', [], {facet:'contract'}), goal('a', ['a'], {facet:'content'})]],
+  ])('retains invalid raw %s input for the layout error boundary', (error, nodes) => {
+    expect(() => groupFacets(nodes)).not.toThrow();
+    expect(() => stateLayout(groupFacets(nodes), 'unrelated', '', 'no-match')).toThrow(new RegExp(error));
+  });
+
+});

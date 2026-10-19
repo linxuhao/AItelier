@@ -178,3 +178,21 @@ def test_native_runner_budget_handoff_retains_actual_refusal_request(tmp_path, m
     assert receipt['response_witness']['carry_match']is True
     print('BOUNDARY_RUNNER_HANDOFF '+json.dumps({'handoffs':handoffs,'requests':case.requests,
         'witness':receipt['response_witness'],'denials':case.denials()},default=str))
+
+
+def test_unprovisioned_nested_cpu_gate_retains_nonpassing_reason(tmp_path):
+    """Measure the actual isolated-executor refusal, never pretend pytest rc5 ran."""
+    from aitelier.tools.run_tests import impl as rt
+    from tests.unit.test_dpe_refusal_progress.test_progress import git
+    repo=tmp_path/'gate-repo';repo.mkdir()
+    (repo/'app.py').write_text('VALUE = 1\n')
+    git(repo,'init','-q');git(repo,'add','--','app.py')
+    git(repo,'-c','user.name=fixture','-c','user.email=fixture@example.invalid','commit','-qm','owned gate fixture')
+    out=tmp_path/'gate-output'
+    result=rt.run_tests(project_root=str(repo),out_dir=str(out))
+    report=json.loads((out/'test_report.json').read_text())
+    Path('/raw/nested-cpu-gate-report.json').write_text(json.dumps({'result':result,'report':report},indent=2))
+    assert result['passed']is False and report['passed']is False
+    assert report.get('infrastructure_unavailable')is True
+    assert report.get('skipped_because')=='cpu_executor_unavailable'
+    assert report['returncode']==-1 and report['summary']

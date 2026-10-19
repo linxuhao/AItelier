@@ -23,13 +23,38 @@ _SHA = re.compile(r"[0-9a-f]{64}\Z")
 PREFIX = "review_input_"
 
 
+def identity_arguments(identity):
+    """Rebuild the strict argument shape from a retained identity, losslessly.
+
+    The optional `acceptance` object is carried through unchanged; an ordinary
+    identity without it keeps its original shape."""
+    if not isinstance(identity, dict):
+        raise ValueError("review input identity must be an object")
+    args = {"producer": identity.get("producer"), "items": [
+        dict(item, content_base64=None) if isinstance(item, dict) else item
+        for item in identity.get("items", [])]}
+    if "acceptance" in identity:
+        args["acceptance"] = identity["acceptance"]
+    return args
+
+
 def _shape(arguments):
-    if not isinstance(arguments, dict) or set(arguments) != {"producer", "items"}:
-        raise ValueError("review_input_bundle requires exactly producer and items")
+    keys = {"producer", "items"}
+    if (isinstance(arguments, dict) and "acceptance" in arguments
+            and set(arguments) == keys | {"acceptance"}):
+        keys = keys | {"acceptance"}
+    if not isinstance(arguments, dict) or set(arguments) != keys:
+        raise ValueError("review_input_bundle requires exactly producer and items, plus optional acceptance")
     producer = arguments["producer"]
     if (not isinstance(producer, dict) or set(producer) != {"project_id", "attempt_id", "artifact"}
             or any(not isinstance(v, str) or not 1 <= len(v) <= 128 for v in producer.values())):
         raise ValueError("bundle producer requires project_id, attempt_id and artifact identities")
+    acceptance = arguments.get("acceptance")
+    if "acceptance" in keys and (
+            not isinstance(acceptance, dict) or set(acceptance) != {"receipt_id", "primary_item"}
+            or any(not isinstance(v, str) or not 1 <= len(v) <= 128 for v in acceptance.values())):
+        raise ValueError("bundle acceptance requires exactly receipt_id and primary_item")
+
     items = arguments["items"]
     if not isinstance(items, list) or not 1 <= len(items) <= MAX_ITEMS:
         raise ValueError(f"bundle must declare 1-{MAX_ITEMS} inputs")
@@ -54,20 +79,32 @@ def _shape(arguments):
         names.add(name)
     if sum(item["size"] for item in items) > MAX_TOTAL_BYTES:
         raise ValueError("bundle exceeds total size bound")
+    if "acceptance" in keys:
+        if acceptance["primary_item"] not in names:
+            raise ValueError("bundle acceptance primary_item must name a declared item")
+        primary = next(i for i in items if i["name"] == acceptance["primary_item"])
+        if not primary["sha256"]:
+            raise ValueError("bundle acceptance primary item requires an exact sha256")
 
 
 def manifest(arguments):
     """The expected identity to copy into the frozen check's expected field."""
     _shape(arguments)
-    return {"producer": arguments["producer"], "items": [
+    out = {"producer": arguments["producer"], "items": [
         {k: item[k] for k in ("name", "reference", "sha256", "size")}
         for item in arguments["items"]]}
+    if "acceptance" in arguments:
+        out["acceptance"] = arguments["acceptance"]
+    return out
 
 
 def decode(arguments):
     """Observe every declared item, retaining expected/actual failures as data."""
     expected = manifest(arguments)
     actual = {"producer": expected["producer"], "items": []}
+    if "acceptance" in expected:
+        actual["acceptance"] = expected["acceptance"]
+
     files = {}
     total = 0
     for item in arguments["items"]:
@@ -122,15 +159,16 @@ def _load(sf, run_id, run_context, step_id, phase):
         return {}
     # Identity originated in preflight; reconstruct its strict shape before
     # using any name to address a file, including on resumed persisted runs.
-    args = {"producer": identity.get("producer"), "items": [
-        dict(item, content_base64=None) for item in identity.get("items", [])]}
-    manifest(args)
+    manifest(identity_arguments(identity))
     project_id = run_context["project_id"]
     config_name = run_context["_review_input_config"]
     if any(not isinstance(v, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", v)
            or v in {".", ".."} for v in (project_id, config_name)):
         raise StateConflict("review input location has an invalid project or config identity")
     actual = {"producer": identity["producer"], "items": []}
+    if "acceptance" in identity:
+        actual["acceptance"] = identity["acceptance"]
+
     context = {}
     for item in identity["items"]:
         observed = {"name": item["name"], "reference": item["reference"],

@@ -115,6 +115,36 @@ class StateAttempts:
         with self.store.transaction() as conn:
             return _public(self._attempt(conn, attempt_id))
 
+    def retained_producer(self, project_id: str, attempt_id: str, artifact: str) -> dict:
+        """Resolve a portable input's claimed producer to its retained terminal
+        record in THIS project. Reference integrity only: a historical candidate
+        is fine (its review supersedes its author); nothing here promotes it.
+        Foreign or unknown attempts are indistinguishable to the caller."""
+        missing = StateConflict("review input producer attempt is not a retained terminal candidate of this State project")
+        with self.store.transaction() as conn:
+            found = conn.execute("SELECT * FROM state_attempts WHERE attempt_id=?", (attempt_id,)).fetchone()
+            if found is None or found["project_id"] != project_id:
+                raise missing
+            row = dict(found)
+            retained = row.get("artifact_ref")
+            if (row["status"] != "candidate" or not isinstance(retained, str)
+                    or not SHA.fullmatch(retained) or retained != artifact):
+                raise StateConflict("review input producer has no matching retained terminal candidate artifact")
+
+            if row.get("execution_kind") == "external":
+                report = conn.execute("SELECT * FROM state_external_observations WHERE attempt_id=? AND observation_id=?",
+                                      (attempt_id, row.get("terminal_observation_id"))).fetchone()
+                if (not report or report["status"] != "candidate" or not report["quiescent"]
+                        or report["artifact_ref"] != retained):
+                    raise StateConflict("review input producer lacks a quiescent terminal observation")
+            return {k: row[k] for k in ("attempt_id", "project_id", "node_key", "node_revision",
+                                        "contract_hash", "artifact_ref")}
+
+    def acceptance_row(self, receipt_id: str) -> dict | None:
+        with self.store.transaction() as conn:
+            row = conn.execute("SELECT * FROM state_acceptances WHERE receipt_id=?", (receipt_id,)).fetchone()
+            return dict(row) if row else None
+
     def list(self, project_id: str, node_key: str, limit: int = 100) -> list[dict]:
         integer(limit, "limit", 1, 500)
         with self.store.transaction() as conn:

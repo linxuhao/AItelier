@@ -146,3 +146,35 @@ def retained_process_identity():
     Path('/raw/identity.json').write_text(json.dumps(identity,indent=2))
     assert identity['sdk']=='1.5.97'and identity['module']=='/work/core/dpe_pipeline.py'
     assert head==os.environ['BOUNDARY_TEST_SHA'] and identity['mounts']
+
+
+def test_native_runner_budget_handoff_retains_actual_refusal_request(tmp_path, monkeypatch):
+    """A declared bounded fixture window and long returned reasoning select handoff."""
+    from core import model_routes
+    providers=tmp_path/'handoff-providers.json'
+    providers.write_text(json.dumps({'deepseek':{'base_url':'https://offline.invalid/v1',
+        'api_key_env':'BOUNDARY_OFFLINE_KEY','max_input_tokens':20000}}))
+    monkeypatch.setenv('BOUNDARY_OFFLINE_KEY','offline-fixture')
+    original_config=model_routes.config_or_example
+    monkeypatch.setattr(model_routes,'config_or_example',lambda name:str(providers)if name=='llm_providers.json'else original_config(name))
+    case=Case(tmp_path,monkeypatch,'native');claim=case.claim()
+    transport=litellm.completion
+    responses=0
+    def complete(**kwargs):
+        nonlocal responses
+        result=transport(**kwargs);responses+=1
+        if responses==1:result.choices[0].message.reasoning_content='context growth '*12000
+        return result
+    monkeypatch.setattr(litellm,'completion',complete)
+    case.execute(claim,denied('native'),finish('native'))
+    events=case.sf.get_trace(case.run,limit=10000)
+    handoffs=[r for r in events if r['event']=='context_handoff']
+    assert handoffs,'the real runner did not select a context-budget handoff'
+    assert len(case.requests)==2 and len(case.denials())==1
+    receipt=json.loads((Path(claim.inputs['_artifact_dir'])/'write_scope_receipt.json').read_text())
+    carry=carry_text(receipt['scope_cause'])
+    assert any(carry in str(m.get('content',''))for m in case.requests[-1]['messages'])
+    assert any('"context_handoff"'in str(m.get('content',''))for m in case.requests[-1]['messages'])
+    assert receipt['response_witness']['carry_match']is True
+    print('BOUNDARY_RUNNER_HANDOFF '+json.dumps({'handoffs':handoffs,'requests':case.requests,
+        'witness':receipt['response_witness'],'denials':case.denials()},default=str))

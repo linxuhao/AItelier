@@ -8,18 +8,37 @@ from core.dpe_pipeline import PipelineEngine, ScopeObservationUnavailable
 from tests.unit.test_dpe_refusal_progress import test_progress as f
 
 
+
+def item_case(tmp_path, monkeypatch, mode):
+    # The accepted baseline fixture has no edge back to its loop header, so
+    # SDK97 correctly reports loop_item=None. Keep that fixture unchanged and
+    # add the real return edge here to exercise actual item-bound directories.
+    node = f.StepNode
+    def with_return(**kwargs):
+        if kwargs.get('id') == 'review':
+            kwargs['transitions'] = list(kwargs['transitions']) + [f.Transition(to='task_loop')]
+        return node(**kwargs)
+    monkeypatch.setattr(f, 'StepNode', with_return)
+    try:
+        return f.Case(tmp_path, monkeypatch, mode)
+    finally:
+        monkeypatch.setattr(f, 'StepNode', node)
+
+
 def receipt(claim):
     return Path(claim.inputs['_artifact_dir'])/'write_scope_receipt.json'
 
 
 def seed(c):
     claim=c.claim()
+    row=next(r for r in c.sf.get_steps(c.run) if r['id']==claim.token.step_instance_id)
+    assert row['loop_item']=='card_a' and Path(claim.inputs['_artifact_dir']).name=='card_a'
     c.execute(claim,f.denied(c.mode),f.finish(c.mode))
     return claim,json.loads(receipt(claim).read_text())
 
 
 def test_fixed_code_slot_activates_from_normal_runner(tmp_path,monkeypatch):
-    c=f.Case(tmp_path,monkeypatch,'json-content'); claim,data=seed(c)
+    c=item_case(tmp_path,monkeypatch,'json-content'); claim,data=seed(c)
     assert data['scope_progress_version']==1
     assert data['scope_cause']['index']==0
     assert data['response_witness']['origin']['step_instance_id']==claim.token.step_instance_id
@@ -35,7 +54,7 @@ def test_genuine_mixed_slot_does_not_activate(tmp_path,monkeypatch):
                                 'note':{'file':'note.md','target':'artifact'}}
         return node(**kw)
     monkeypatch.setattr(f,'StepNode',mixed)
-    c=f.Case(tmp_path,monkeypatch,'json-content');claim=c.claim()
+    c=item_case(tmp_path,monkeypatch,'json-content');claim=c.claim()
     c.execute(claim,f.denied(c.mode),f.finish(c.mode))
     assert claim.inputs['_has_code_output'] is True and len(c.denials())==1
     if receipt(claim).exists():
@@ -44,7 +63,7 @@ def test_genuine_mixed_slot_does_not_activate(tmp_path,monkeypatch):
 
 @pytest.mark.parametrize('damage',['delete-cause','delete-witness','null-cause','null-witness','version'])
 def test_required_v1_history_is_not_a_fresh_budget(tmp_path,monkeypatch,damage):
-    c=f.Case(tmp_path,monkeypatch,'json-tool'); first,data=seed(c)
+    c=item_case(tmp_path,monkeypatch,'json-tool'); first,data=seed(c)
     second=c.review_again(first)
     if damage=='delete-cause':data.pop('scope_cause')
     elif damage=='delete-witness':data.pop('response_witness')
@@ -59,7 +78,7 @@ def test_required_v1_history_is_not_a_fresh_budget(tmp_path,monkeypatch,damage):
 
 
 def test_deleted_required_item_receipt_is_not_fresh(tmp_path,monkeypatch):
-    c=f.Case(tmp_path,monkeypatch,'json-tool');first,_=seed(c)
+    c=item_case(tmp_path,monkeypatch,'json-tool');first,_=seed(c)
     second=c.review_again(first);receipt(second).unlink()
     before=len(c.requests)
     with pytest.raises(ScopeObservationUnavailable):c.execute(second,f.finish(c.mode))
@@ -67,7 +86,7 @@ def test_deleted_required_item_receipt_is_not_fresh(tmp_path,monkeypatch):
 
 
 def test_intact_legacy_raw_history_can_carry_into_correction(tmp_path,monkeypatch):
-    c=f.Case(tmp_path,monkeypatch,'json-tool');first,data=seed(c)
+    c=item_case(tmp_path,monkeypatch,'json-tool');first,data=seed(c)
     second=c.review_again(first)
     for k in ('scope_progress_version','scope_cause','response_witness'):data.pop(k)
     receipt(second).write_text(json.dumps(data))
@@ -80,7 +99,7 @@ def test_intact_legacy_raw_history_can_carry_into_correction(tmp_path,monkeypatc
 
 
 def test_first_denial_without_successful_next_response_needs_no_witness(tmp_path,monkeypatch):
-    c=f.Case(tmp_path,monkeypatch,'json-tool');first=c.claim()
+    c=item_case(tmp_path,monkeypatch,'json-tool');first=c.claim()
     with pytest.raises(KeyboardInterrupt):
         c.execute(first,f.denied(c.mode),KeyboardInterrupt('no returned action'))
     before=json.loads(receipt(first).read_text())
@@ -95,7 +114,7 @@ def test_first_denial_without_successful_next_response_needs_no_witness(tmp_path
 
 @pytest.mark.parametrize('commit_before_crash',[False,True])
 def test_recovered_identical_batch_binds_original_producer(tmp_path,monkeypatch,commit_before_crash):
-    c=f.Case(tmp_path,monkeypatch,'native');initial,_=seed(c)
+    c=item_case(tmp_path,monkeypatch,'native');initial,_=seed(c)
     a=c.review_again(initial)
     batch=f.native(f.action('read',path='seed.py'),f.action('finish_step',summary='done'))
     c.execute(a,batch)
@@ -131,7 +150,7 @@ def test_recovered_identical_batch_binds_original_producer(tmp_path,monkeypatch,
 
 
 def test_unmatched_recovered_denial_retains_same_original_cause(tmp_path,monkeypatch):
-    c=f.Case(tmp_path,monkeypatch,'native');initial,data=seed(c)
+    c=item_case(tmp_path,monkeypatch,'native');initial,data=seed(c)
     b=c.review_again(initial);original=PipelineEngine._scope_commit_response
     def crash(*args,**kwargs):raise KeyboardInterrupt('before witness commit')
     monkeypatch.setattr(PipelineEngine,'_scope_commit_response',crash)
@@ -145,3 +164,13 @@ def test_unmatched_recovered_denial_retains_same_original_cause(tmp_path,monkeyp
     assert after['scope_cause']['index']==data['scope_cause']['index']==0
     assert after['scope_cause']['error']==data['violations'][0]
     assert (c.root/'allowed.py').read_text()=='RECLAIM = True\n'
+
+
+def test_unresolved_task_scope_keeps_existing_denial_semantics(tmp_path,monkeypatch):
+    c=item_case(tmp_path,monkeypatch,'native');claim=c.claim()
+    claim.inputs['_resolved_context'].pop('Step 3 — tasks/card_a.json')
+    c.execute(claim,f.denied('native'),f.finish('native'))
+    data=json.loads(receipt(claim).read_text())
+    assert data['policy']=='missing-task-card-deny'
+    assert 'scope_progress_version' not in data
+    assert len(c.denials())==1 and not (c.root/'forbidden.py').exists()

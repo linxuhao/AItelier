@@ -2171,11 +2171,10 @@ class PipelineEngine:
                 from api.dependencies import get_skillflow
                 rows = get_skillflow().get_steps(self._run_id)
                 producer = next((r for r in rows if r["id"] == code.get("step_instance_id")
-                                 and r["step_id"] == "t_impl"
-                                 and r.get("loop_item") == self._write_scope.task), None)
+                                 and r["step_id"] == "t_impl"), None)
                 if producer:
                     instances.add(producer["id"])
-                    if not witness_only:
+                    if not witness_only and producer.get("loop_item") == self._write_scope.task:
                         return True
         except (OSError, ValueError, TypeError):
             pass
@@ -2189,7 +2188,10 @@ class PipelineEngine:
                     if row.get("step_id") != "t_impl":
                         continue
                     event, payload = row.get("event"), row.get("payload") or {}
-                    if event == "scope_response_witness":
+                    if (event == "scope_response_witness"
+                            and (payload.get("task") == self._write_scope.task
+                                 or (isinstance(cause, dict)
+                                     and payload.get("cause_hash") == cause.get("hash")))):
                         return True
                     if (not witness_only and event == "write_scope_violation"
                             and payload.get("task") == self._write_scope.task):
@@ -2300,7 +2302,7 @@ class PipelineEngine:
         self._scope_batch = {"cause": closure.cause, "witness": witness,
                              "created": False}
         self._trace("step", "scope_response_witness", {
-            "cause_hash": closure.cause.get("hash"),
+            "cause_hash": closure.cause.get("hash"), "task": self._write_scope.task,
             "invocation_id": evidence["invocation_id"],
             "response_digest": digest, "positions": len(positions)})
 
@@ -5771,8 +5773,8 @@ class PipelineEngine:
         destinations = SimpleNamespace(output_target=output_target, output_fixed=output_fixed or {})
         self._scope_policy = bool(
             has_target(destinations, "code") and not has_target(destinations, "artifact")
-            and write_scope is not None and step_id == "t_impl"
-            and config_name == DPE_GRAPH_NAME and artifact_dir)
+            and write_scope is not None and write_scope.policy == "task-card"
+            and step_id == "t_impl" and config_name == DPE_GRAPH_NAME and artifact_dir)
         self._scope_mode = ""
         self._scope_position = None
         self._load_write_scope_receipt()

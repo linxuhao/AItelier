@@ -519,12 +519,39 @@ class IndexControl:
 
     @staticmethod
     def _exclude_storage(root: Path):
+        if not root.is_absolute() or root.resolve() != root or (root / ".git").is_symlink():
+            raise ValueError("index storage root must not redirect")
+        top = git(root, "rev-parse", "--show-toplevel")
+        tracked = git(root, "ls-files", "--", ".zvec-grep")
+        common = git(root, "rev-parse", "--path-format=absolute", "--git-common-dir")
+        if (top.returncode or top.stdout.strip() != str(root)
+                or tracked.returncode or tracked.stdout.strip()
+                or common.returncode or not common.stdout.strip()):
+            raise ValueError("index storage ownership is unavailable or tracked")
+        common_dir = Path(common.stdout.strip())
         result = git(root, "rev-parse", "--path-format=absolute", "--git-path", "info/exclude")
         if result.returncode or not result.stdout.strip():
             raise RuntimeError("cannot resolve Git's common exclude file")
         path = Path(result.stdout.strip())
+        cache = root / ".zvec-grep"
+        if (not common_dir.is_absolute() or common_dir.resolve() != common_dir
+                or path != common_dir / "info/exclude" or path.resolve() != path
+                or cache.is_symlink() or (cache.exists() and not cache.is_dir())
+                or any((cache / name).is_symlink() for name in
+                       ("manifest.json", "files.zvec", "index.zvec", "locks"))):
+            raise ValueError("index or Git exclusion storage must not redirect")
+        if path.exists():
+            if not path.is_file() or path.stat().st_nlink != 1:
+                raise ValueError("Git exclusion must be one regular owned file")
+            if ".zvec-grep/" in path.read_text(encoding="utf-8").splitlines():
+                effective = git(root, "-c", "core.excludesFile=/dev/null",
+                                "check-ignore", "-q", "--", ".zvec-grep/")
+                if effective.returncode:
+                    raise RuntimeError("existing index storage exclusion is not effective")
+                return  # validated existing rule; do not open read-only Source for writing
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a+", encoding="utf-8") as stream:
+        fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "a+", encoding="utf-8") as stream:
             fcntl.flock(stream, fcntl.LOCK_EX)
             stream.seek(0)
             text = stream.read()

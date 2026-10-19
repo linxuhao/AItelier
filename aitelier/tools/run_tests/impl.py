@@ -17,6 +17,7 @@ compile sections are the real gate.
 """
 
 import ctypes
+import errno
 import hashlib
 import importlib.util
 import json
@@ -37,7 +38,7 @@ from aitelier import gate_admission
 # variable 'release_disposition'` before writing a report at all. That is a
 # step that never produced a verdict for a reason that has nothing to do with
 # the code under test — the exact shape this card exists to remove.
-from aitelier.gate_evidence import release_disposition
+from aitelier.gate_evidence import release_disposition, report_state
 from aitelier.gate_coverage import validate_coverage
 import sys
 import tempfile
@@ -1916,6 +1917,26 @@ class Executed:
             n.startswith(key + "::") for n in self.node_ids)
 
 
+def _junit_case_id(case) -> str:
+    """The pytest node id of one junit `testcase` element ('' when unknowable)."""
+    name = case.get("name") or ""
+    if not name:
+        return ""
+    file_attr = case.get("file") or ""
+    classname = case.get("classname") or ""
+    if file_attr:
+        module = file_attr[:-3] if file_attr.endswith(".py") else file_attr
+        dotted = module.replace("/", ".")
+        inner = (classname[len(dotted) + 1:]
+                 if classname.startswith(dotted + ".") else "")
+        parts = [file_attr] + ([inner] if inner else []) + [name]
+    elif classname:
+        parts = ["/".join(classname.split(".")) + ".py", name]
+    else:
+        return ""
+    return "::".join(parts)
+
+
 def _junit_node_ids(path: Path) -> set:
     """Node ids pytest reports as EXECUTED, read from its junit XML.
 
@@ -1932,23 +1953,78 @@ def _junit_node_ids(path: Path) -> set:
         return set()
     out = set()
     for case in root.iter("testcase"):
-        name = case.get("name") or ""
-        if not name:
-            continue
-        file_attr = case.get("file") or ""
-        classname = case.get("classname") or ""
-        if file_attr:
-            module = file_attr[:-3] if file_attr.endswith(".py") else file_attr
-            dotted = module.replace("/", ".")
-            inner = (classname[len(dotted) + 1:]
-                     if classname.startswith(dotted + ".") else "")
-            parts = [file_attr] + ([inner] if inner else []) + [name]
-        elif classname:
-            parts = ["/".join(classname.split(".")) + ".py", name]
-        else:
-            continue
-        out.add("::".join(parts))
+        node = _junit_case_id(case)
+        if node:
+            out.add(node)
     return out
+
+
+def _junit_completed_reds(path: Path, limit: int = 50, detail_chars: int = 2000) -> list:
+    """Failures/errors pytest itself recorded for tests that COMPLETED, from its junit XML.
+
+    Read only when a later storage refusal ended the session early: pytest's
+    `Exit` path prints no assertion detail or short summary, while the JUnit
+    file this same invocation already wrote does carry the completed tests'
+    identity and failure text. Bounded (`limit` cases, `detail_chars` each);
+    each record says whether its detail was cut. These are retained first
+    evidence only -- never attribution, baseline keys or new_failures.
+    """
+    import xml.etree.ElementTree as ET
+    try:
+        root = ET.parse(str(path)).getroot()
+    except Exception:
+        return []
+    out = []
+    for case in root.iter("testcase"):
+        node = _junit_case_id(case)
+        if not node:
+            continue
+        for kind in ("failure", "error"):
+            element = case.find(kind)
+            if element is None:
+                continue
+            message = (element.get("message") or "").strip()
+            detail = (element.text or "").strip()
+            out.append({"node_id": node, "kind": kind,
+                        "message": message[:500],
+                        "detail": detail[:detail_chars],
+                        "detail_complete": len(detail) <= detail_chars})
+            break
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _retain_completed_reds(report: dict, reds: list) -> None:
+    """Put completed reds from JUnit on the report's existing failures/summary.
+
+    Only identities pytest's own terminal output did not already list are
+    added, each marked as completed before the storage refusal. The run stays
+    unmeasured (`storage_unmeasured`), so `_apply_baseline` neither keys nor
+    attributes them; they are diagnostics, not this round's regressions.
+    """
+    if not reds:
+        return
+    listed = {token for f in (report.get("failures") or []) for token in str(f).split()}
+    added = []
+    for red in reds:
+        if red["node_id"] in listed:
+            continue
+        first = red["message"].splitlines()[0] if red["message"] else red["kind"]
+        entry = (f"FAILED {red['node_id']} - {first} (completed before the storage "
+                 f"refusal; recorded in pytest's JUnit, not attributed)")
+        report.setdefault("failures", []).append(entry)
+        added.append(red)
+    if not added:
+        return
+    block = ["Completed test failures/errors recorded in this session's JUnit before the "
+             "storage refusal (first evidence; not attributed, not a baseline):"]
+    for red in added:
+        cut = "" if red["detail_complete"] else "\n    [...detail truncated...]"
+        block.append(f"{red['node_id']}\n    "
+                     + (red["detail"] or red["message"]).replace("\n", "\n    ") + cut)
+    text = "\n".join(block)
+    report["summary"] = (report.get("summary") or "") + "\n\n" + text[:8000]
 
 
 def _baseline_dir(state_dir: str, repo) -> str:
@@ -1973,7 +2049,9 @@ def _baseline_dir(state_dir: str, repo) -> str:
 
 
 def _apply_baseline(report: dict, state_dir: str,
-                    executed: "Executed | None" = None) -> None:
+                    executed: "Executed | None" = None,
+                    defer_write: bool = False) -> "dict | None":
+
     """Add `new_failures[]` + `passed_relative` by diffing against known-red.
 
     `passed` stays absolute (whatever the suite actually reported) — callers and
@@ -2016,6 +2094,25 @@ def _apply_baseline(report: dict, state_dir: str,
             state = "unreadable"
 
     identity_error = report.get("failure_identity_error")
+    if report.get("storage_unmeasured") or report.get("measurement_not_taken"):
+        # A PROVED storage inability (`diagnose_storage`: errno from a trusted
+        # syscall) means this session measured nothing trustworthy. Whatever
+        # pytest printed stays in failures[]/stdout as retained evidence, but it
+        # is not a set of this round's regressions: nothing is new, nothing may
+        # seed, prune or rewrite a baseline, and no relative pass can exist.
+        # This precedes the identity-error branch: an unkeyable failure list on
+        # an unmeasured run is still unmeasured, and the identity error stays
+        # visible as a diagnostic instead of becoming `new_failures`.
+        if identity_error:
+            prior = report.get("baseline_error")
+            report["baseline_error"] = (f"{prior}; {identity_error}" if prior
+                                        else str(identity_error))
+        report["new_failures"] = []
+        report["passed_relative"] = False
+        report["baseline_failures"] = []
+        report["baseline_state"] = "unmeasured"
+        return
+
     if identity_error:
         prior = report.get("baseline_error")
         report["baseline_error"] = (f"{prior}; {identity_error}" if prior
@@ -2027,6 +2124,25 @@ def _apply_baseline(report: dict, state_dir: str,
         # the diff it would produce is not a measurement of anything.
         report["baseline_state"] = "unreadable"
         return
+
+    if (not failures and not report.get("passed")
+            and report.get("returncode") not in (0, None)):
+        # A non-zero pytest result with NO usable failure identity is not a
+        # "known red", whatever the storage looked like: an empty case list is
+        # not a measured zero-failure session, and no evidence that the red
+        # was already there. No label is invented for it. It stays visibly
+        # refused (never seeds, never relative-passes) and the raw output
+        # stays in the report.
+        diagnosed = (report.get("storage_diagnosis") or {}).get("state") or "unknown"
+        report["baseline_error"] = (
+            f"non-zero result (rc={report.get('returncode')}) without usable failure "
+            f"identities (storage observation: {diagnosed}); nothing can be attributed")
+        report["new_failures"] = []
+        report["passed_relative"] = False
+        report["baseline_failures"] = []
+        report["baseline_state"] = "unmeasured"
+        return
+
 
     known = set(baseline)
     # A declared ABSENCE is not a baseline, in either direction:
@@ -2069,6 +2185,7 @@ def _apply_baseline(report: dict, state_dir: str,
     # Only a measured baseline may report a known-red SET. `[]` beside
     # `unavailable` means nobody looked, and saying so in one field that a
     # reader already routes on beats a sentence in `summary` nobody parses.
+
     report["baseline_failures"] = (sorted(known) if state in BASELINE_MEASURED
                                    else [])
 
@@ -2094,13 +2211,71 @@ def _apply_baseline(report: dict, state_dir: str,
         report["baseline_kept_unproven"] = blocked[:50]
     if keep == sorted(baseline) and path.is_file():
         return
+    if defer_write:
+        # The caller stages the measured report before committing this decision,
+        # then publishes it. A later publication failure discloses any baseline
+        # already stored alongside the raw observations and non-delivery result.
+        return {"path": path, "keep": keep}
+    return _commit_baseline(report, {"path": path, "keep": keep})
+
+
+def _write_replacing(path: Path, text: str) -> None:
+    """Write `text` to `path` through a sibling temp file and `os.replace`.
+
+    A failed write (ENOSPC mid-file, say) leaves whatever `path` held before
+    intact instead of truncated; the temp file is this call's own name and is
+    removed on failure. Not a durability or cross-writer guarantee.
+    """
+    tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}-{time.monotonic_ns()}")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def _commit_baseline(report: dict, pending: dict) -> bool:
+    """Write a baseline decided by `_apply_baseline`; True only if it was stored.
+
+    On failure the decision is WITHDRAWN from the report: a seed or prune that
+    is not on disk cannot back `baseline_state: seeded|compared`, a known-red
+    set or a relative pass (`gate_evidence.report_state` reads those as an
+    attributable known red). The previous baseline file, if any, is left as it
+    was (`_write_replacing`); the absolute `passed`, the raw output and
+    `failures[]` are untouched, and nothing is invented.
+    """
+    path = pending["path"]
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(
-            {"failures": keep, "updated_at": time.time()}, indent=2),
-            encoding="utf-8")
+        _write_replacing(path, json.dumps(
+            {"failures": pending["keep"], "updated_at": time.time()}, indent=2))
     except OSError as e:
-        report["baseline_error"] = f"could not write {path}: {e}"
+        number = e.errno
+        prior = report.get("baseline_error")
+        sentence = (f"could not write {path}: {e} (errno {number} "
+                    f"{errno.errorcode.get(number, '')}); the "
+                    f"{'seed' if report.get('baseline_seeded') else 'baseline update'} "
+                    "was NOT stored, so no baseline attribution or relative pass is claimed")
+        report["baseline_error"] = f"{prior}; {sentence}" if prior else sentence
+        report["baseline_persisted"] = False
+        report["baseline_write_errno"] = number
+        report.pop("baseline_seeded", None)
+        report["new_failures"] = []
+        report["passed_relative"] = False
+        report["baseline_failures"] = []
+        report["baseline_state"] = "unmeasured"
+        if "evidence_state" in report:
+            report["evidence_state"] = report_state(report)
+        if "release_evidence" in report:
+            report["release_evidence"] = release_disposition(report)
+        return False
+    report["baseline_persisted"] = True
+    return True
+
 
 
 # How long the pytest leg may run before it is killed.
@@ -2120,6 +2295,256 @@ def _apply_baseline(report: dict, state_dir: str,
 # 1.2% of its neighbour is not protecting the scheduler from anything, it is
 # just the smallest number in the file.
 PYTEST_WALL_SECONDS = 1800
+
+
+# --- Storage exhaustion is not a test regression -------------------------------
+#
+# pytest's tmp_path (`make_numbered_dir`) swallows the errno of a failed mkdir and
+# reports only "could not create numbered dir ... after 10 tries" -- the 41 errors
+# of iss-8403bf9711304e5c, sent back to an implementer whose code was fine. That
+# sentence is the REPOSITORY's text and is deliberately not read here: it is also
+# what a read-only directory or a permission error produces. The only evidence
+# accepted is the errno of a syscall made by the trusted executor entry
+# (`core/repository_executor_entry.py`, `storage-observation/1`) -- or by this
+# module itself, on the backend's own output root -- answering ENOSPC/EDQUOT. No
+# free-space threshold is consulted: `statvfs` numbers are RETAINED beside the
+# errno (they say bytes vs inodes) but never decide anything.
+STORAGE_SCHEMA = "storage-observation/1"
+_STORAGE_FULL = (errno.ENOSPC, errno.EDQUOT)
+_STATVFS_FIELDS = ("f_bsize", "f_frsize", "f_blocks", "f_bfree", "f_bavail",
+                   "f_files", "f_ffree", "f_favail")
+STORAGE_EXHAUSTED_STATES = ("exhausted_preflight", "exhausted_during_run")
+
+
+class _HostPrepError(Exception):
+    """The backend's own output root could not be prepared (errno kept)."""
+
+    def __init__(self, what: str, path, exc: OSError):
+        super().__init__(f"{what} {path}: {exc}")
+        self.what, self.path, self.exc = what, str(path), exc
+
+
+def _host_statvfs(path) -> dict | None:
+    probe = Path(path)
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    try:
+        info = os.statvfs(str(probe))
+    except OSError:
+        return None
+    return {name: getattr(info, name) for name in _STATVFS_FIELDS}
+
+
+def _full_resource(vfs) -> list[str]:
+    """Which resource the retained statvfs says is at zero (evidence, not proof)."""
+    out = []
+    if isinstance(vfs, dict):
+        if vfs.get("f_files") and vfs.get("f_favail") == 0:
+            out.append("inodes")
+        if vfs.get("f_blocks") and vfs.get("f_bavail") == 0:
+            out.append("bytes")
+    return out or ["unspecified"]
+
+
+def diagnose_storage(storage, returncode) -> dict:
+    """Classify the trusted storage observation of ONE pytest leg. Pure.
+
+    States:
+      exhausted_preflight   output-root probe got ENOSPC/EDQUOT before pytest started.
+      exhausted_during_run  a required-temp probe during the session, or a probe
+                            after a non-clean session, got ENOSPC/EDQUOT.
+      ambiguous             a probe failed with some other errno (EACCES, EROFS, ...)
+                            or with no errno: NOT disk exhaustion, nothing waived.
+      clean                 every probe succeeded: the failures are the code's.
+      unknown               no trusted observation (older entry, other transport).
+    """
+    if not isinstance(storage, dict) or storage.get("schema") != STORAGE_SCHEMA:
+        return {"state": "unknown", "reason": "no trusted storage observation"}
+    findings = []
+    witnessed = 0          # authoritative probes that actually succeeded (mkdir AND write)
+    for phase in ("before", "after"):
+        observations = storage.get(phase)
+        for obs in observations if isinstance(observations, list) else ():
+            if not isinstance(obs, dict):
+                continue
+            # Only an explicit False demotes a root to evidence: the entry sets it
+            # when the pytest temp namespace could not be resolved from pytest.
+            authoritative = obs.get("authoritative") is not False
+            mkdir, write = obs.get("mkdir"), obs.get("write")
+            if (authoritative and isinstance(mkdir, dict) and mkdir.get("ok") is True
+                    and isinstance(write, dict) and write.get("ok") is True):
+                witnessed += 1
+            for op in ("mkdir", "write"):
+                attempt = obs.get(op)
+                if not isinstance(attempt, dict) or attempt.get("ok") is not False:
+                    continue
+                if attempt.get("skipped"):
+                    continue
+                number = attempt.get("errno")
+                number = number if type(number) is int else None
+                full = number in _STORAGE_FULL
+                findings.append({
+                    "phase": phase, "path": obs.get("path"), "op": op, "errno": number,
+                    "errname": errno.errorcode.get(number, "") if number else "",
+                    "exhausted": full and authoritative,
+                    "authoritative": authoritative,
+                    "resource": (_full_resource(obs.get("statvfs"))
+                                 if full and authoritative else []),
+                    "mount": obs.get("mount"), "statvfs": obs.get("statvfs")})
+    exhausted = [f for f in findings if f["exhausted"]]
+    resolution = storage.get("tmp_resolution")
+    unresolved = isinstance(resolution, dict) and resolution.get("resolved") is False
+    if any(f["phase"] == "before" for f in exhausted):
+        state = ("exhausted_during_run" if storage.get("refused_at") == "temp_factory_use"
+                 else "exhausted_preflight")
+    elif exhausted and returncode != 0:
+        state = "exhausted_during_run"
+    elif findings:
+        state = "ambiguous"
+    elif witnessed == 0 or unresolved:
+        # No successful syscall witness (schema-only / partial / copied data), or
+        # the namespace pytest really uses could not be established: clean is a
+        # claim this record cannot support.
+        state = "unknown"
+    else:
+        state = "clean"
+    return {"state": state, "findings": findings,
+            "proof": [f for f in exhausted if state in STORAGE_EXHAUSTED_STATES][:4],
+            "preflight_refused": storage.get("preflight_refused") is True,
+            "tmp_resolution": resolution if isinstance(resolution, dict) else None,
+            "observation": storage}
+
+
+
+def _mark_storage_unmeasured(report: dict, diagnosis: dict, unmeasured_entries: list) -> None:
+    """Make a PROVED storage inability an infrastructure not-run.
+
+    It is the same outcome `cpu_executor_unavailable` already is (skipped +
+    infrastructure_unavailable + evidence_state), so gate_evidence.report_state
+    reads it as `infrastructure_unavailable` and release routing as `unresolved`;
+    `storage_unmeasured` is what `_apply_baseline` reads to refuse seeding,
+    pruning and any relative pass. The raw returncode/stdout/stderr stay as the
+    executor returned them; `failures[]` keeps whatever pytest really listed.
+    """
+    proof = (diagnosis.get("proof") or [{}])[0]
+    where = (f"{proof.get('op')} in {proof.get('path')} -> {proof.get('errname')} "
+             f"({'/'.join(proof.get('resource') or [])})")
+    ran = diagnosis["state"] == "exhausted_during_run"
+    at_factory = (diagnosis.get("observation") or {}).get("refused_at") == "temp_factory_use"
+    when = (" during pytest's normal temp initialization; earlier configuration, collection "
+            "or tests may already have run" if at_factory else " after pytest ran" if ran else
+            " before any repository code ran")
+    sentence = (f"Storage exhausted: the trusted executor's own {where} was refused by the "
+                f"filesystem" + when + ". The test measurement is "
+                + ("INCOMPLETE and its results cannot be trusted either way"
+                   if ran else "NOT TAKEN") + ". This is not a test failure and is never a "
+                "baseline; re-run once capacity is restored.")
+    report.update(passed=False, skipped=True, infrastructure_unavailable=True,
+                  skipped_because="storage_exhausted", evidence_state="infrastructure_unavailable",
+                  storage_unmeasured=True)
+    report["summary"] = sentence + ("\n\n" + report["summary"] if report.get("summary") else "")
+    entry = f"pytest:storage exhausted ({where}) — no trustworthy measurement"
+    report["failures"].append(entry)
+    unmeasured_entries.append(entry)
+
+
+def _apply_storage_diagnosis(report: dict, storage, returncode,
+                             unmeasured_entries: list) -> dict:
+    diagnosis = diagnose_storage(storage, returncode)
+    report["storage_diagnosis"] = diagnosis
+    if diagnosis["state"] in STORAGE_EXHAUSTED_STATES:
+        if diagnosis["state"] == "exhausted_preflight":
+            diagnosis["pytest_ran"] = False
+        _mark_storage_unmeasured(report, diagnosis, unmeasured_entries)
+    return diagnosis
+
+
+def _host_storage_failure(report: dict, err: _HostPrepError, unmeasured_entries: list) -> None:
+    """The backend's own junit/output root refused a syscall: nothing was run."""
+    number = err.exc.errno
+    exhausted = number in _STORAGE_FULL
+    finding = {"phase": "before", "path": err.path, "op": err.what, "errno": number,
+               "errname": errno.errorcode.get(number, ""), "exhausted": exhausted,
+               "error": str(err.exc)[:200], "statvfs": _host_statvfs(err.path)}
+    finding["resource"] = _full_resource(finding["statvfs"]) if exhausted else []
+    state = "exhausted_preflight" if exhausted else "ambiguous"
+    report["storage_diagnosis"] = {"state": state, "scope": "backend_output_root",
+                                   "findings": [finding],
+                                   "proof": [finding] if exhausted else [],
+                                   "pytest_ran": False}
+    # pytest was never started: there is no session return code to report, and
+    # the default 0 would read as a clean run.
+    report["returncode"] = None
+    if exhausted:
+        _mark_storage_unmeasured(report, report["storage_diagnosis"], unmeasured_entries)
+    else:
+        # Not proof of exhaustion, but pytest was never started either: say that,
+        # as an unavailable facility, and claim nothing about the disk.
+        report.update(passed=False, returncode=-1, skipped=True, infrastructure_unavailable=True,
+                      skipped_because="test_workspace_unavailable", summary=str(err),
+                      measurement_not_taken=True)
+        entry = f"pytest:could not prepare its result directory ({err}) — no measurement"
+        report["failures"].append(entry)
+        unmeasured_entries.append(entry)
+
+
+def _report_write_failure(report: dict, target_dir: Path, what: str, exc: OSError) -> dict:
+    """The report itself could not be stored: say so, and never claim success.
+
+    `written: None` is what routes a run to `test_evidence_missing` (a report
+    that was not written is not evidence). `passed` is False whatever the suite
+    did -- a green result that could not be recorded is not a delivered verdict.
+    The errno is kept; ENOSPC/EDQUOT here is the filesystem's own answer for the
+    backend's output root.
+    """
+    number = exc.errno
+    exhausted = number in _STORAGE_FULL
+    # The raw observations were made before the store failed and are the only
+    # copy once the JUnit directory is cleaned up: keep them in the same return,
+    # beside -- never instead of -- the failure itself. This is a BOUNDED tail,
+    # not complete raw preservation: `raw_bounds` says, per stream, whether it
+    # is complete and gives the original length and sha256 of the full text.
+    bounds = {}
+
+    def tail(name, text, limit=60_000):
+        text = text if isinstance(text, str) else ""
+        bounds[name] = {"chars": len(text), "complete": len(text) <= limit,
+                        "sha256": hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()}
+        return text if len(text) <= limit else "[...truncated head...]" + text[-limit:]
+
+    diagnosis = report.get("storage_diagnosis")
+    retained = {"stdout": tail("stdout", report.get("stdout")),
+                "stderr": tail("stderr", report.get("stderr")),
+                "failures": [str(f)[:2000] for f in (report.get("failures") or [])][:100],
+                "collection_errors": [str(f)[:2000] for f in
+                                      (report.get("collection_errors") or [])][:100],
+                "summary": tail("summary", report.get("summary"), 8_000)}
+    retained["raw_bounds"] = bounds
+    if report.get("baseline_error"):
+        retained["baseline_error"] = report["baseline_error"]
+    if report.get("completed_before_storage_refusal"):
+        # Completed reds read from the (since removed) JUnit before a storage
+        # refusal: already bounded by `_junit_completed_reds`.
+        retained["completed_before_storage_refusal"] = report["completed_before_storage_refusal"]
+    if isinstance(diagnosis, dict):
+        retained["storage_diagnosis"] = diagnosis
+        retained["storage_state"] = diagnosis.get("state")
+    return {"written": None, "passed": False, "_error": True,
+            "error": (f"run_tests: could not {what} the test report under {target_dir}: "
+                      f"{exc} (errno {number} {errno.errorcode.get(number, '')})"),
+            "report_write_failed": True, "storage_exhausted": exhausted,
+            "infrastructure_unavailable": True,
+            "evidence_state": "infrastructure_unavailable",
+            "release_evidence": "unresolved", "passed_relative": False,
+            "new_failures": [], "baseline_state": "unmeasured",
+            # A baseline can already be stored when final publication fails;
+            # an attempted but failed seed/update is explicitly False.
+            "baseline_persisted": report.get("baseline_persisted") is True,
+            "storage_unmeasured": bool(report.get("storage_unmeasured")),
+            "returncode_observed": report.get("returncode"),
+            "raw_retained": retained, **retained,
+            "host_statvfs": _host_statvfs(target_dir)}
+
 
 
 def run_tests(*, project_root: str = "", out_dir: str = "",
@@ -2149,6 +2574,10 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
     # pytest killed at its wall, a node runner that is not installed). Every
     # other entry is a measured failure.
     unmeasured_entries: list[str] = []
+    # Set when a trusted probe proved the test namespace cannot be written
+    # BEFORE repository code ran: the node and repo gates are then not started
+    # either (they would only spend their budget on the same refusal).
+    storage_preflight_refused = False
 
     prechange_before = prechange_cases = prechange_profile = None
     retained_red_candidate = False
@@ -2195,12 +2624,21 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
             # been measured.
             report.update(passed_relative=False, new_failures=[],
                           baseline_failures=[], baseline_state="unavailable")
-            target_dir.mkdir(parents=True, exist_ok=True)
-            if run_id and evidence_cycle_from:
-                stamp_report(report, run_id=run_id, out_dir=str(target_dir),
-                             cycle_from=evidence_cycle_from)
-            (target_dir / "test_report.json").write_text(
-                json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+            stage = "mkdir"
+            try:
+                target_dir.mkdir(parents=True, exist_ok=True)
+                if run_id and evidence_cycle_from:
+                    stage = "stamp the evidence cycle of"
+                    stamp_report(report, run_id=run_id, out_dir=str(target_dir),
+                                 cycle_from=evidence_cycle_from)
+                stage = "write"
+                (target_dir / "test_report.json").write_text(
+                    json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+            except OSError as exc:
+                # Same non-delivery answer as the main path: never an escaped
+                # exception, never a claim that the report was written.
+                return _report_write_failure(report, target_dir, stage, exc)
+
             return {"written": "test_report.json", "passed": False,
                     "passed_relative": False, "new_failures": [],
                     "baseline_state": "unavailable", "baseline_known": 0,
@@ -2262,10 +2700,20 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
         # later `repo_apply`.
         junit_root = (datadir.aitelier_home() / "gate-reports" /
                       hashlib.sha256(run_id.encode()).hexdigest())
-        junit_root.mkdir(parents=True, exist_ok=True)
-        junit_dir = tempfile.mkdtemp(prefix="run_tests_junit_", dir=junit_root)
-        junit_path = Path(junit_dir) / "junit.xml"
+        junit_dir = None
         try:
+            # The backend's own output root. These two calls used to sit outside
+            # the `try`, so a full filesystem here raised out of run_tests with
+            # no report at all; the errno is kept now and classified.
+            try:
+                junit_root.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                raise _HostPrepError("mkdir", junit_root, exc) from exc
+            try:
+                junit_dir = tempfile.mkdtemp(prefix="run_tests_junit_", dir=junit_root)
+            except OSError as exc:
+                raise _HostPrepError("mkdtemp", junit_root, exc) from exc
+            junit_path = Path(junit_dir) / "junit.xml"
             # --rootdir forces pytest root to the project repo so it doesn't
             # walk up and find AItelier's pytest.ini (whose testpaths=tests
             # would cause discovery of AItelier's own test suite).
@@ -2359,6 +2807,28 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
             # cause is the failed editable install, and a reader given only
             # the symptom rewrites packaging metadata that was never wrong.
             report["summary"] = _lead_with_install_error(report)
+            # The executor entry's own filesystem observation decides whether
+            # this session measured anything (see `diagnose_storage`); the
+            # repository's output text is never consulted for that.
+            diagnosis = _apply_storage_diagnosis(
+                report, getattr(done, "storage", None), done.returncode, unmeasured_entries)
+            if diagnosis["state"] == "exhausted_preflight":
+                storage_preflight_refused = True
+            if diagnosis["state"] in STORAGE_EXHAUSTED_STATES:
+                executed = Executed()  # nothing proven to have run: no prune licence
+            if diagnosis["state"] == "exhausted_during_run":
+                # pytest's Exit path prints no assertion detail for tests that
+                # already completed; this same invocation's JUnit (read before
+                # its directory is removed below) does. Retain it as first
+                # evidence on the existing failures/summary surface, bounded,
+                # with the run still unmeasured (no baseline, no new_failures).
+                reds = _junit_completed_reds(junit_path)
+                if reds:
+                    report["completed_before_storage_refusal"] = reds
+                    _retain_completed_reds(report, reds)
+        except _HostPrepError as e:
+            _host_storage_failure(report, e, unmeasured_entries)
+            storage_preflight_refused = bool(report["storage_diagnosis"]["proof"])
         except repository_executor.IsolationUnavailable as e:
             report.update(passed=False, returncode=-1, skipped=True, infrastructure_unavailable=True,
                           skipped_because="cpu_executor_unavailable", summary=str(e))
@@ -2391,7 +2861,8 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
         except Exception as e:  # never raise — the step must not fail
             report.update(passed=False, summary=f"Error running pytest: {e}")
         finally:
-            shutil.rmtree(junit_dir, ignore_errors=True)
+            if junit_dir:
+                shutil.rmtree(junit_dir, ignore_errors=True)
 
         # A package that doesn't import fails the gate whatever pytest said
         # (it can still exit 0 — e.g. when the broken module is only reached
@@ -2405,7 +2876,7 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
     # 5_review loops frontend breakage back through the goal-loop exactly
     # like pytest failures.
     if repo is not None and repo.exists():
-        node = _run_node_checks(repo, run_id=run_id)
+        node = None if storage_preflight_refused else _run_node_checks(repo, run_id=run_id)
         if node is not None:
             report["node"] = node
             executed.node_gate_ran = not node.get("skipped")
@@ -2430,7 +2901,9 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
     # `repo_gate: false` belongs ONLY to a pipeline that already owns an engine
     # gate of its own (dpe_game's 5_compile). Everywhere else the default
     # stands: a green pytest over a product pytest cannot compile is not a pass.
-    if repo_gate and repo is not None and repo.exists():
+    if storage_preflight_refused and repo_gate:
+        report["repo_gate_skipped_because"] = "storage_exhausted_preflight"
+    if repo_gate and repo is not None and repo.exists() and not storage_preflight_refused:
         gate = _acquire_repo_gate(repo, run_id=run_id)
         if gate is not None:
             report["repo_gate"] = gate
@@ -2564,7 +3037,11 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
     # `baseline_state` that says whether either is a measurement, on top of the
     # absolute `passed`, so a reader can tell this round's breakage from the
     # repo's standing red — and tell both from "no baseline was taken".
-    _apply_baseline(report, _baseline_dir(state_dir, repo), executed)
+    # The decision is taken now; persistence waits for a successful report stage
+    # (see the delivery order below), with any later side effect disclosed.
+    pending_baseline = _apply_baseline(
+        report, _baseline_dir(state_dir, repo), executed, defer_write=True)
+
 
     # With no repo AND no out_dir there is nowhere to write — say so in the
     # return rather than defaulting to the CWD, which is the whole point above.
@@ -2590,12 +3067,22 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
     if not out_dir and repo is None:
         return {"written": None, "passed": False, "error": report["summary"]}
     target_dir = Path(out_dir) if out_dir else repo
-    target_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        target_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return _report_write_failure(report, target_dir, "mkdir", exc)
     if run_id and (evidence_cycle_start or evidence_cycle_from):
         from aitelier.gate_evidence import stamp_report
-        stamp_report(report, run_id=run_id, out_dir=str(target_dir),
-                     start_cycle=evidence_cycle_start,
-                     cycle_from=evidence_cycle_from)
+        try:
+            stamp_report(report, run_id=run_id, out_dir=str(target_dir),
+                         start_cycle=evidence_cycle_start,
+                         cycle_from=evidence_cycle_from)
+        except OSError as exc:
+            # The evidence-cycle manifest is part of delivering this report: a
+            # failed store is a non-delivery that keeps the raw observations and
+            # persists no baseline, like a failed initial report stage.
+            return _report_write_failure(report, target_dir, "stamp the evidence cycle of", exc)
+
     if prechange_enabled:
         try:
             after = coding.owned_snapshot(repo, run_id, original=prechange_capture)
@@ -2604,9 +3091,60 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
                 capture=prechange_capture, source=prechange_from)
         except Exception as exc:
             report["prechange_unavailable"] = str(exc)[:300]
-    (target_dir / "test_report.json").write_text(
-        json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+    # Delivery, in an order whose every outcome is described truthfully:
+    #   1. the report is STAGED (a sibling temp name; nothing published yet) --
+    #      a failure here persists neither report nor baseline;
+    #   2. the baseline decision is committed; if that write fails the claim it
+    #      backed is withdrawn from the report (`_commit_baseline`) and the
+    #      staged report is re-staged to say so;
+    #   3. the staged report is published by `os.replace`, so an earlier valid
+    #      report is never truncated by a failed write.
+    # A failure at 1-3 is the existing non-delivery answer (`_report_write_failure`),
+    # never `written: test_report.json`. A failure at final publication can leave
+    # the already stored baseline; that measured side effect is disclosed by
+    # baseline_persisted, alongside the retained raw and non-delivery verdict.
+    report_path = target_dir / "test_report.json"
+    staged = report_path.with_name(
+        f".test_report.json.tmp-{os.getpid()}-{time.monotonic_ns()}")
+
+    def undeliverable(what: str, exc: OSError) -> dict:
+        try:
+            staged.unlink()
+        except OSError:
+            pass
+        return _report_write_failure(report, target_dir, what, exc)
+
+    def stage() -> None:
+        staged.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    try:
+        stage()
+    except OSError as exc:
+        # Initial staging failed before the pending baseline was committed.
+        return undeliverable("write", exc)
+    if pending_baseline and not _commit_baseline(report, pending_baseline):
+        try:
+            stage()
+        except OSError as exc:
+            return undeliverable("write", exc)
+    try:
+        os.replace(staged, report_path)
+    except OSError as exc:
+        return undeliverable("publish", exc)
+
     return {"written": "test_report.json", "passed": report["passed"],
+            # What the baseline write actually did (None: nothing to write).
+            "baseline_persisted": report.get("baseline_persisted"),
+            "baseline_error": report.get("baseline_error"),
+            # Read by the same consumers as the file's own fields: a proved
+            # storage inability is infrastructure evidence, never a red.
+            "evidence_state": report.get("evidence_state"),
+            "infrastructure_unavailable": bool(report.get("infrastructure_unavailable")),
+            "storage_unmeasured": bool(report.get("storage_unmeasured")),
+            "storage_state": (report.get("storage_diagnosis") or {}).get("state"),
+            # Completed reds this session's JUnit recorded before a storage
+            # refusal ended it: first evidence, never new_failures/baseline.
+            "completed_before_storage_refusal": report.get("completed_before_storage_refusal") or [],
             "retained_red_candidate": retained_red_candidate,
             "release_evidence": release_disposition(report),
             "purpose": report.get("purpose"),

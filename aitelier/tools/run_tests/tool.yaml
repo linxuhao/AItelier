@@ -35,8 +35,41 @@ description: >
   collected NOTHING is reported as passed:false + no_tests_collected:true — a
   gate that checked nothing has not passed. If no test runner can be provisioned
   at all the gate records a distinct, non-passing infrastructure_unavailable
-  outcome. Reports are artifacts, not source files; a code
+  outcome. So does a PROVED storage inability: the trusted executor entry
+  starts the same pytest invocation itself with one observing plugin; at
+  pytest_sessionstart it installs a lazy observer on that session's tmp_path
+  factory. Only when pytest normally needs its base does its normal reset and
+  creation run; the session then reports the actual base (or selected parent
+  after failed initialization), and the ENTRY probes it (a real mkdir + small
+  write, errno kept, statvfs bytes/inodes retained). An unused factory is never
+  initialized or cleaned for this diagnostic. Only
+  the entry's own ENOSPC/EDQUOT answer yields skipped_because=storage_exhausted,
+  storage_unmeasured:true and baseline_state=unmeasured (never new_failures,
+  never a baseline write, never passed_relative). A refusal during normal temp
+  use stops the session as an INCOMPLETE measurement: collection or earlier
+  tests may already have run, and their original evidence is retained.
+  The junit output directory is probed before
+  pytest starts. A namespace the session did not report, or a record with no
+  successful syscall witness, is storage state `unknown`, not clean; pytest's
+  own "could not create numbered dir" text is the repository's and is not
+  evidence. A non-zero result with no usable failure identity is never a
+  known red (baseline_state=unmeasured), whatever the storage looked like.
+  The report is staged under a temporary name and published by rename only
+  after the baseline decision was committed: a failed baseline seed/prune is
+  withdrawn from the report (baseline_state=unmeasured, passed_relative false,
+  baseline_persisted false, baseline_error kept, previous baseline file left
+  intact) instead of claimed. If the report (or its evidence-cycle manifest)
+  cannot be written or published the return is a non-pass with written:null,
+  infrastructure_unavailable and the already observed
+  stdout/stderr/failures/storage_diagnosis retained as bounded tails
+  (raw_bounds gives each stream's full length, completeness and sha256), and
+  baseline_persisted discloses whether a measured baseline was already stored.
+  A failed initial report stage or cycle-manifest write stores no baseline;
+  failure of final publication can leave the already stored baseline, with
+  written:null and the retained raw making the side effect inspectable.
+  Reports are artifacts, not source files; a code
   agent can read its report with read(source="self", path="test_report.json").
+
   The repository gate's protocol: the gate is handed GATE_REPORT_DIR (a new,
   empty ticket directory of its own), and the first thing it has to create
   there is a directory holding its report — a

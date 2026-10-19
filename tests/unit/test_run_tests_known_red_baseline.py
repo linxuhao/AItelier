@@ -284,12 +284,16 @@ def test_an_unavailable_baseline_cannot_produce_a_relative_pass(tmp_path):
     r = {"passed": False, "returncode": 2, "failures": []}
     _apply_baseline(r, "")
     assert r["passed_relative"] is False
-    assert r["baseline_state"] == "unavailable"
+    assert r["baseline_state"] == "unmeasured"
 
-    # The same report WITH a baseline behind it may still be forgiven.
+    # Even WITH a baseline directory behind it, a non-zero result with no usable
+    # failure identity is not a measured zero-failure session: it may neither
+    # seed nor be forgiven (execution.storage-exhaustion-is-not-a-test-regression
+    # R3 -- an empty case list is no evidence that the red was already there).
     ok = {"passed": False, "returncode": 2, "failures": []}
     _apply_baseline(ok, str(tmp_path))
-    assert ok["passed_relative"] is True and ok["baseline_state"] == "seeded"
+    assert ok["passed_relative"] is False and ok["baseline_state"] == "unmeasured"
+    assert not (tmp_path / BASELINE_FILE).exists()
 
 
 def test_an_unreadable_baseline_is_not_reported_as_an_empty_one(tmp_path):

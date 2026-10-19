@@ -23,9 +23,10 @@ class MarkerError(RuntimeError):
 def records(monkeypatch, normal, tmp_path):
     sf, db, ws, pid, rid, root, client, cp, wakes = normal
     rows = []
-    original_app = client.app
+    original_app = client._transport.app
     raw = Path('/raw') if Path('/raw').is_dir() else tmp_path
-    failures = []
+    failures, errors = [], []
+    asgi_path = raw/(tmp_path.name+'-asgi.json')
     class ObservedASGI:
         async def __call__(self, scope, receive, send):
             status = None
@@ -37,13 +38,22 @@ def records(monkeypatch, normal, tmp_path):
             try:
                 await original_app(scope, receive, observed_send)
             except BaseException as exc:
+                errors.append(exc)
                 failures.append({'status': status, 'type': type(exc).__name__,
+                    'cause_type': type(exc.__cause__).__name__ if exc.__cause__ is not None else None,
                     'frames': [{'file': f.filename, 'line': f.lineno, 'function': f.name}
                                for f in traceback.extract_tb(exc.__traceback__)],
                     'thread': threading.get_ident(), 'loop': id(asyncio.get_running_loop())})
-                (raw/(tmp_path.name+'-asgi.json')).write_text(json.dumps(failures, indent=2))
+                asgi_path.write_text(json.dumps(failures, indent=2))
                 raise
-    monkeypatch.setattr(client, 'app', ObservedASGI())
+    observer = ObservedASGI()
+    # TestClient's transport captured its app at construction; bind that object
+    # before requests, as well as the public app reference used for readback.
+    monkeypatch.setattr(client._transport, 'app', observer)
+    monkeypatch.setattr(client, 'app', observer)
+    monkeypatch.setattr(client, '_checkpoint_observer_errors', errors, raising=False)
+    monkeypatch.setattr(client, '_checkpoint_asgi_path', asgi_path, raising=False)
+    assert client._transport.app is client.app is observer
     topology = {'sdk_module': skillflow.__file__, 'sdk_version': importlib.metadata.version('skillflow-py'),
                 'sdk_db_path': sf._db_path, 'trace_db_path': sf._trace_db_path,
                 'trace_uses_engine_connection': sf._trace_db_path is None,
@@ -63,17 +73,39 @@ def records(monkeypatch, normal, tmp_path):
     observation.logger.removeHandler(handler)
 
 
+
+def assert_outer_failure(client, marker, cause=None):
+    assert client._checkpoint_observer_errors == [marker]
+    assert client._checkpoint_observer_errors[0] is marker
+    assert marker.__cause__ is cause
+    path = client._checkpoint_asgi_path
+    assert path.is_file() and path.stat().st_size > 0
+    captured = json.loads(path.read_text())
+    assert len(captured) == 1
+    row = captured[0]
+    assert row['status'] == 500 and row['type'] == type(marker).__name__
+    assert row['cause_type'] == (type(cause).__name__ if cause is not None else None)
+    assert row['frames'][-1]['function'].startswith('fail_')
+    assert row['frames'][-1]['line'] > 0
+    assert row['thread'] == client.portal.call(threading.get_ident)
+    assert row['loop'] == id(client.portal.call(asyncio.get_running_loop))
+    row.update(same_marker=True, same_cause=True)
+    path.write_text(json.dumps(captured, indent=2))
+
+
 @pytest.mark.parametrize('route,phase', [('run', 'route_run_lookup'), ('project', 'run_lookup')])
 def test_original_untranslated_rest_failure(normal, monkeypatch, records, route, phase):
     sf, db, ws, pid, rid, root, client, cp, wakes = normal
     marker = MarkerError('SECRET must not appear in diagnostics')
+    cause = ValueError('SECRET cause')
     def fail_lookup(value):
-        raise marker
+        raise marker from cause
     monkeypatch.setattr(sf, 'get_run', fail_lookup)
     path = f'/api/runs/{rid}/checkpoint/approve' if route == 'run' else f'/api/meta/{pid}/checkpoint/approve'
     reply = client.post(path, json={'run_id': rid, 'checkpoint': 'gather',
         'expected_checkpoint': cp['expected_checkpoint'], 'decision_id': 'observed-marker'})
     assert reply.status_code == 500 and reply.text == 'Internal Server Error'
+    assert_outer_failure(client, marker, cause)
     assert len(records) == 1
     row = records[0]
     assert row['phase'] == phase and row['run_id'] == rid
@@ -93,6 +125,7 @@ def test_translated_controller_boundary_is_not_changed(normal, monkeypatch, reco
         raise marker
     monkeypatch.setattr(mr, 'state_checkpoint_controller', fail_controller)
     assert approve(normal).status_code == 500
+    assert_outer_failure(normal[6], marker)
     assert len(records) == 1 and records[0]['phase'] == 'state_controller'
 
 
@@ -163,3 +196,30 @@ def test_success_replay_has_no_failure_record(normal, records):
     assert approve(normal).status_code == 200
     assert approve(normal).status_code == 200
     assert not records
+
+
+@pytest.mark.parametrize('lookup,phase', [(1, 'approve_run_lookup'), (2, 'finalize_run_lookup')])
+def test_each_in_lock_run_read_has_its_own_phase(normal, records, monkeypatch, tmp_path, lookup, phase):
+    import sys
+    from core import scheduler
+    sf, db, ws, pid, rid, root, client, cp, wakes = normal
+    original = sf.get_run
+    count, held = 0, []
+    marker = MarkerError('controlled in-lock read')
+    def fail_helper_read(run_id):
+        nonlocal count
+        if sys._getframe(1).f_code.co_name == 'approve_meta':
+            count += 1
+            if count == lookup:
+                held.append(scheduler._get_tick_lock(pid).locked())
+                raise marker
+        return original(run_id)
+    monkeypatch.setattr(sf, 'get_run', fail_helper_read)
+    response = approve(normal)
+    assert response.status_code == 409 and held == [True] and len(records) == 1
+    assert records[0]['phase'] == phase
+    assert records[0]['exceptions'][0]['frames'][-1]['function'] == 'fail_helper_read'
+    raw = Path('/raw') if Path('/raw').is_dir() else tmp_path
+    (raw/(tmp_path.name+'-read-phase.json')).write_text(json.dumps({
+        'lookup': lookup, 'phase': phase, 'lock_held_at_marker': held,
+        'status': response.status_code, 'records': records}, indent=2))

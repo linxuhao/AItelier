@@ -81,6 +81,7 @@ def approve_meta(sf, run_id: str, step_runner=None, *,
             steps are NOT claimed or executed — the function only advances graph
             state, preserving existing behavior.
     """
+    checkpoint_phase("approve_run_lookup")
     run = sf.get_run(run_id)
     # Completion does not prove THIS decision was recorded. Validate/replay
     # the original identity before returning, even when finalize already ran.
@@ -94,6 +95,7 @@ def approve_meta(sf, run_id: str, step_runner=None, *,
     # finalize → complete) needs only a couple advances; the budget is a stall
     # guard, not a normal code path.
     for _ in range(8):
+        checkpoint_phase("finalize_run_lookup")
         run = sf.get_run(run_id)
         if not run:
             raise RuntimeError(f"meta run {run_id} vanished during finalize")
@@ -158,6 +160,7 @@ def approve_and_submit_meta(sf, db, ws, run_id: str, *,
     if not run or run.get("graph_name") != META_GRAPH:
         raise ValueError("Expected the project's exact meta_conversation run")
     pid = run["project_id"]
+    checkpoint_phase("project_lock_lookup")
     lock = _get_tick_lock(pid)
     checkpoint_phase("project_lock_wait", project_lock=lock)
     with lock:
@@ -168,6 +171,7 @@ def approve_and_submit_meta(sf, db, ws, run_id: str, *,
         state = retained_gather_state(sf, run_id,
                                       expected_checkpoint["step_instance_id"])
         brief = state.get("brief") or {}
+        checkpoint_phase("project_projection_lookup")
         project = db.get_project(pid) or {}
         # Match the scheduler's lifecycle owner: an active run wins; otherwise
         # prefer the project's primary config, then the most recent run. An old
@@ -175,6 +179,7 @@ def approve_and_submit_meta(sf, db, ws, run_id: str, *,
         checkpoint_phase("lifecycle_owner")
         owner = sf.get_run_by_project(pid)
         if not owner:
+            checkpoint_phase("lifecycle_runs_lookup")
             runs = sf.list_runs(pid)
             primary = project.get("config_name") or "dpe_default_v2"
             owner = next((r for r in runs if r["graph_name"] == primary),
@@ -187,7 +192,9 @@ def approve_and_submit_meta(sf, db, ws, run_id: str, *,
         # the exact completed meta owner may turn them into build readiness.
         status = project.get("status") or ""
         if status.startswith("checkpoint:") or status == "completed":
+            checkpoint_phase("project_projection_update")
             db.update_project(pid, status="planning")
+        checkpoint_phase("build_readiness")
         completed = project.get("completed_project_steps") or []
         if isinstance(completed, str):
             completed = json.loads(completed)

@@ -928,6 +928,7 @@ def approve_checkpoint(
             checkpoint_failure(exc, translated=True)
             raise HTTPException(409, str(exc)) from exc
         from core.scheduler import _sync_project_status_to_db
+        checkpoint_phase("sync_project_status")
         _sync_project_status_to_db(project_id)
     if request.rescue_failed:
         checkpoint_phase("rescue_reactivate")
@@ -977,6 +978,7 @@ def approve_checkpoint(
         return {"status": "approved", "checkpoint": request.checkpoint,
                 "run_id": run_id, "decision_id": request.decision_id}
 
+    checkpoint_phase("rescue_resolution")
     # Push the checkpoint_resolved SSE event as a short, non-blocking task.
     try:
         resolved_payload = json.dumps({

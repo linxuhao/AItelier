@@ -141,13 +141,13 @@ def run_selected(tmp_path,monkeypatch,native,actions,is_relay=True,action_only=F
     with sf.trace_connection(successor['execution_project_id']) as conn:
         rows=[{'category':r[0],'event':r[1],'payload':json.loads(r[2] or '{}')} for r in conn.execute(
             'SELECT category,event,payload_json FROM skillflow_trace WHERE run_id=? ORDER BY seq',(rid,))]
-    evidence={'native_config':native,'claim_catalog':sorted(claim.inputs['_tool_schemas']),
+    evidence={'run_id':rid,'native_config':native,'claim_catalog':sorted(claim.inputs['_tool_schemas']),
               'legacy_code_staging':claim.inputs.get('_legacy_code_staging'),'relay':successor['context'].get('relay'),
               'requests':gateway.requests,'responses':gateway.responses,'trace':rows,
               'error':repr(error),'retained_bytes':(root/'retained.py').read_text(),
               'forbidden_path_exists':(root/'forbidden.py').exists()}
     dest=Path(os.environ.get('RELAY_PROTOCOL_EVIDENCE',str(tmp_path/'evidence')));dest.mkdir(parents=True,exist_ok=True)
-    (dest/(tmp_path.name+'.json')).write_text(json.dumps(evidence,indent=2,default=str)+'\n')
+    (dest/(tmp_path.name+'-'+rid+'.json')).write_text(json.dumps(evidence,indent=2,default=str)+'\n')
     if error:raise error
     return evidence
 

@@ -1520,6 +1520,11 @@ class AIGateway:
             self.active_model)
         requested_endpoint = self.active_model
         response = self._complete_prebuilt(kwargs)   # sets self.last_usage
+        # Same trusted host callback as generate_native: the final sanitized
+        # messages of a request that actually completed successfully.
+        observer = getattr(self, "on_messages_presented", None)
+        if callable(observer):
+            observer(kwargs["messages"])
         if self.last_outbound is not None:
             if self.active_model != requested_endpoint:
                 self.last_outbound["append_only"] = False

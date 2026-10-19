@@ -284,7 +284,7 @@ def test_an_unavailable_baseline_cannot_produce_a_relative_pass(tmp_path):
     r = {"passed": False, "returncode": 2, "failures": []}
     _apply_baseline(r, "")
     assert r["passed_relative"] is False
-    assert r["baseline_state"] == "unavailable"
+    assert r["baseline_state"] == "unmeasured"
 
     # Even WITH a baseline directory behind it, a non-zero result with no usable
     # failure identity is not a measured zero-failure session: it may neither

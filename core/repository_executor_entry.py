@@ -41,13 +41,13 @@ _STATVFS_FIELDS = ("f_bsize", "f_frsize", "f_blocks", "f_bfree", "f_bavail",
 # The namespace pytest REALLY uses is read INSIDE the real pytest session, not
 # re-derived by a second parse. The entry starts pytest itself (`pytest.main`,
 # the in-process API `python -m pytest` ends in) with one plugin. Its
-# `pytest_sessionstart` runs after every configuration source -- command line,
-# ini `addopts`, conftest `pytest_configure` -- and before collection; it only
-# REPORTS the directory the session's tmp_path factory will create under, then
-# waits for the entry's verdict. The decision is the entry's own: a real mkdir +
-# write on exactly that directory, made by this (trusted) process. The session
-# never decides anything about the disk. No second process, no extra timeout:
-# the wait is inside the one wall budget of the pytest leg.
+# `pytest_sessionstart` installs a lazy observer on this session's tmp factory.
+# Only when pytest normally needs its base does the observer let its normal
+# reset/creation happen, REPORT the resulting directory, and wait for the
+# entry's verdict. An unused factory is never initialized or cleaned for a
+# diagnostic. The entry makes its own mkdir + write on that directory; the
+# session never decides anything about the disk. The wait shares the one wall
+# budget of the pytest leg.
 WITNESS_FLAG = "--aitelier-pytest-witness"
 WITNESS_SCHEMA = "pytest-namespace/1"
 
@@ -92,13 +92,11 @@ def _witness_main(argv):
     import pytest
 
     class Witness:
-        @pytest.hookimpl(trylast=True)
-        def pytest_sessionstart(self, session):
-            record = {"schema": WITNESS_SCHEMA}
-            try:
-                record.update(_session_namespace(session.config))
-            except Exception as exc:   # an unresolvable namespace stays unknown
-                record["error"] = f"{type(exc).__name__}: {exc}"[:300]
+        reported = False
+
+        def observe(self, record):
+            self.reported = True
+            record["schema"] = WITNESS_SCHEMA
             verdict = b""
             try:
                 os.write(report_fd, (json.dumps(record) + "\n").encode())
@@ -108,9 +106,42 @@ def _witness_main(argv):
             except OSError:
                 pass
             if verdict.startswith(b"refuse"):
-                # Before collection: no test module is imported or run.
-                pytest.exit("aitelier executor: storage refused in this session's "
-                            f"temp namespace {record.get('path')}; nothing was collected", 3)
+                detail = record.get("initialization_error")
+                pytest.exit("aitelier executor: storage refused when pytest needed its "
+                            f"temp base {record.get('path')}"
+                            + (f"; normal initialization failed: {detail}" if detail else ""), 3)
+
+        @pytest.hookimpl(trylast=True)
+        def pytest_sessionstart(self, session):
+            factory = getattr(session.config, "_tmp_path_factory", None)
+            if factory is None:
+                return
+            original = factory.getbasetemp
+
+            def getbasetemp():
+                if self.reported:
+                    return original()
+                record = {"required": True}
+                try:
+                    base = original()       # pytest's usual cleanup/creation, at its usual time
+                except Exception as exc:
+                    record["initialization_error"] = f"{type(exc).__name__}: {exc}"[:2000]
+                    try:
+                        record.update(_session_namespace(session.config))
+                    except Exception as resolution_error:
+                        record["error"] = f"{type(resolution_error).__name__}: {resolution_error}"[:300]
+                    self.observe(record)
+                    raise                  # preserve an ordinary non-storage initialization error
+                record.update(path=os.path.abspath(str(base)), source="pytest_initialized_basetemp",
+                              basetemp=os.path.abspath(str(base)))
+                self.observe(record)
+                return base
+
+            factory.getbasetemp = getbasetemp
+
+        def pytest_sessionfinish(self, session, exitstatus):
+            if not self.reported:
+                self.observe({"required": False})
 
     return int(pytest.main(args, plugins=[Witness()]))
 
@@ -140,6 +171,10 @@ def _serve_witness(report_fd, verdict_fd, storage):
     verdict = b"go\n"
     try:
         record = _read_record(report_fd)
+        if record and record.get("required") is False:
+            storage["tmp_resolution"] = {"resolved": True, "source": "not_required",
+                                         "observed_at": "session_finish"}
+            return
         path = record.get("path") if record else None
         if not (isinstance(path, str) and os.path.isabs(path) and os.path.isdir(path)):
             storage["tmp_resolution"] = {"resolved": False, "source": "session_unreported",
@@ -152,10 +187,10 @@ def _serve_witness(report_fd, verdict_fd, storage):
         storage["tmp_root"] = path
         storage["tmp_resolution"] = {"resolved": True, "source": record.get("source"),
                                      "path": path, "basetemp": record.get("basetemp"),
-                                     "observed_at": "session_start"}
+                                     "observed_at": "temp_factory_use",
+                                     "initialization_error": record.get("initialization_error")}
         if _is_full([obs]):
-            storage["preflight_refused"] = True
-            storage["refused_at"] = "session_start_before_collection"
+            storage["refused_at"] = "temp_factory_use"
             verdict = b"refuse\n"
     except Exception as exc:   # never fabricate a verdict: unresolved, session goes on
         storage["tmp_resolution"] = {"resolved": False, "source": "entry_error",
@@ -389,7 +424,7 @@ def run(payload):
     # A pytest leg observes the storage it must write BEFORE repository code
     # runs. Here: the junit record directory the trusted caller named. The temp
     # namespace tmp_path really uses is only known inside the session; it is
-    # observed there, before collection, by `_serve_witness`. Nothing depends
+    # observed when pytest normally needs its base, by `_serve_witness`. Nothing depends
     # on the repository's text or on a size watermark. ONE wall budget
     # (`deadline`) covers the import probe, that wait and the session itself.
     deadline = time.monotonic() + payload["timeout"]
@@ -524,7 +559,7 @@ def run(payload):
             stdout, stderr = stdout.decode("utf-8", errors="replace"), stderr.decode("utf-8", errors="replace")
         if witness is not None:
             witness.join(1)        # the session ended: its pipe is at EOF (bounded)
-        if storage is not None and proc.returncode != 0 and not storage.get("preflight_refused"):
+        if storage is not None and proc.returncode != 0 and not storage.get("refused_at"):
             # What the namespace looks like AFTER a non-clean session: pytest has
             # swallowed the errno by now, the filesystem has not.
             storage["after"] = [_observe_root(r) for r in list(storage["roots"])]

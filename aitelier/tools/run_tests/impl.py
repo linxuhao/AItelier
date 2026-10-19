@@ -38,7 +38,7 @@ from aitelier import gate_admission
 # variable 'release_disposition'` before writing a report at all. That is a
 # step that never produced a verdict for a reason that has nothing to do with
 # the code under test — the exact shape this card exists to remove.
-from aitelier.gate_evidence import release_disposition
+from aitelier.gate_evidence import release_disposition, report_state
 from aitelier.gate_coverage import validate_coverage
 import sys
 import tempfile
@@ -2137,9 +2137,9 @@ def _apply_baseline(report: dict, state_dir: str,
     if keep == sorted(baseline) and path.is_file():
         return
     if defer_write:
-        # The caller persists only AFTER the report that justifies this baseline
-        # was durably delivered (`_commit_baseline`): a baseline taken from a
-        # report that could not be stored is a claim nobody can verify.
+        # The caller stages the measured report before committing this decision,
+        # then publishes it. A later publication failure discloses any baseline
+        # already stored alongside the raw observations and non-delivery result.
         return {"path": path, "keep": keep}
     return _commit_baseline(report, {"path": path, "keep": keep})
 
@@ -2193,6 +2193,10 @@ def _commit_baseline(report: dict, pending: dict) -> bool:
         report["passed_relative"] = False
         report["baseline_failures"] = []
         report["baseline_state"] = "unmeasured"
+        if "evidence_state" in report:
+            report["evidence_state"] = report_state(report)
+        if "release_evidence" in report:
+            report["release_evidence"] = release_disposition(report)
         return False
     report["baseline_persisted"] = True
     return True
@@ -2271,10 +2275,9 @@ def diagnose_storage(storage, returncode) -> dict:
     """Classify the trusted storage observation of ONE pytest leg. Pure.
 
     States:
-      exhausted_preflight   a probe made BEFORE repository code ran got ENOSPC/EDQUOT;
-                            pytest was not started.
-      exhausted_during_run  probes were clean before, but after a non-clean pytest
-                            session the same syscalls get ENOSPC/EDQUOT.
+      exhausted_preflight   output-root probe got ENOSPC/EDQUOT before pytest started.
+      exhausted_during_run  a required-temp probe during the session, or a probe
+                            after a non-clean session, got ENOSPC/EDQUOT.
       ambiguous             a probe failed with some other errno (EACCES, EROFS, ...)
                             or with no errno: NOT disk exhaustion, nothing waived.
       clean                 every probe succeeded: the failures are the code's.
@@ -2317,7 +2320,8 @@ def diagnose_storage(storage, returncode) -> dict:
     resolution = storage.get("tmp_resolution")
     unresolved = isinstance(resolution, dict) and resolution.get("resolved") is False
     if any(f["phase"] == "before" for f in exhausted):
-        state = "exhausted_preflight"
+        state = ("exhausted_during_run" if storage.get("refused_at") == "temp_factory_use"
+                 else "exhausted_preflight")
     elif exhausted and returncode != 0:
         state = "exhausted_during_run"
     elif findings:
@@ -2351,10 +2355,9 @@ def _mark_storage_unmeasured(report: dict, diagnosis: dict, unmeasured_entries: 
     where = (f"{proof.get('op')} in {proof.get('path')} -> {proof.get('errname')} "
              f"({'/'.join(proof.get('resource') or [])})")
     ran = diagnosis["state"] == "exhausted_during_run"
-    at_session = (diagnosis.get("observation") or {}).get("refused_at") == \
-        "session_start_before_collection"
-    when = (" after pytest ran" if ran else
-            " at pytest session start, before any test was collected" if at_session else
+    at_factory = (diagnosis.get("observation") or {}).get("refused_at") == "temp_factory_use"
+    when = (" during pytest's normal temp initialization; earlier configuration, collection "
+            "or tests may already have run" if at_factory else " after pytest ran" if ran else
             " before any repository code ran")
     sentence = (f"Storage exhausted: the trusted executor's own {where} was refused by the "
                 f"filesystem" + when + ". The test measurement is "
@@ -2455,8 +2458,8 @@ def _report_write_failure(report: dict, target_dir: Path, what: str, exc: OSErro
             "evidence_state": "infrastructure_unavailable",
             "release_evidence": "unresolved", "passed_relative": False,
             "new_failures": [], "baseline_state": "unmeasured",
-            # What really happened to the baseline file: on every path but a
-            # failed final publish no baseline write was attempted at all.
+            # A baseline can already be stored when final publication fails;
+            # an attempted but failed seed/update is explicitly False.
             "baseline_persisted": report.get("baseline_persisted") is True,
             "storage_unmeasured": bool(report.get("storage_unmeasured")),
             "returncode_observed": report.get("returncode"),
@@ -2945,8 +2948,8 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
     # `baseline_state` that says whether either is a measurement, on top of the
     # absolute `passed`, so a reader can tell this round's breakage from the
     # repo's standing red — and tell both from "no baseline was taken".
-    # The baseline decision is taken now, but a file is written only after the
-    # report it describes has been durably delivered (see `_commit_baseline`).
+    # The decision is taken now; persistence waits for a successful report stage
+    # (see the delivery order below), with any later side effect disclosed.
     pending_baseline = _apply_baseline(
         report, _baseline_dir(state_dir, repo), executed, defer_write=True)
 
@@ -2988,7 +2991,7 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
         except OSError as exc:
             # The evidence-cycle manifest is part of delivering this report: a
             # failed store is a non-delivery that keeps the raw observations and
-            # persists no baseline, exactly like a failed report write.
+            # persists no baseline, like a failed initial report stage.
             return _report_write_failure(report, target_dir, "stamp the evidence cycle of", exc)
 
     if prechange_enabled:
@@ -3008,7 +3011,9 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
     #   3. the staged report is published by `os.replace`, so an earlier valid
     #      report is never truncated by a failed write.
     # A failure at 1-3 is the existing non-delivery answer (`_report_write_failure`),
-    # never `written: test_report.json`.
+    # never `written: test_report.json`. A failure at final publication can leave
+    # the already stored baseline; that measured side effect is disclosed by
+    # baseline_persisted, alongside the retained raw and non-delivery verdict.
     report_path = target_dir / "test_report.json"
     staged = report_path.with_name(
         f".test_report.json.tmp-{os.getpid()}-{time.monotonic_ns()}")
@@ -3026,7 +3031,7 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
     try:
         stage()
     except OSError as exc:
-        # Delivery failed: no baseline is persisted from a report nobody can read.
+        # Initial staging failed before the pending baseline was committed.
         return undeliverable("write", exc)
     if pending_baseline and not _commit_baseline(report, pending_baseline):
         try:

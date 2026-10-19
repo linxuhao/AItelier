@@ -18,7 +18,7 @@ import aitelier.tools.run_tests.impl as rt
 from aitelier.gate_evidence import report_state
 from core import repository_executor
 from tests.unit.test_run_tests_storage_exhaustion import (  # noqa: F401 (fixture re-export)
-    GREEN, RED, _baseline, _fail, _inject, _run, _vfs, env)
+    GREEN, RED, TMP_GREEN, _baseline, _fail, _inject, _run, _vfs, env)
 
 
 def test_repository_text_claiming_numbered_dir_failure_is_not_trusted_evidence(env):
@@ -39,7 +39,7 @@ def test_repository_text_claiming_numbered_dir_failure_is_not_trusted_evidence(e
 @pytest.mark.parametrize("number", [errno.EACCES, errno.EROFS])
 def test_permission_or_readonly_mkdir_is_ambiguous_not_exhaustion(env, number):
     _inject(env, number, lambda n: True)
-    result, report = _run(env, GREEN)
+    result, report = _run(env, TMP_GREEN)
     diagnosis = report["storage_diagnosis"]
     assert diagnosis["state"] == "ambiguous" and diagnosis["findings"][0]["errno"] == number
     assert diagnosis["proof"] == []
@@ -53,7 +53,7 @@ def test_permission_or_readonly_mkdir_is_ambiguous_not_exhaustion(env, number):
 def test_bytes_and_inode_exhaustion_are_both_retained_through_the_public_path(env, fields, resource):
     _inject(env, errno.ENOSPC, lambda n: True)
     _vfs(env, **fields)
-    _, report = _run(env, GREEN)
+    _, report = _run(env, TMP_GREEN)
     assert report["storage_diagnosis"]["proof"][0]["resource"] == resource
     assert report["storage_unmeasured"] and report["passed"] is False
     stored = [o for o in report["storage_diagnosis"]["observation"]["before"]

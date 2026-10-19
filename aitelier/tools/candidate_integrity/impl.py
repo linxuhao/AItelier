@@ -6,8 +6,11 @@ import hashlib
 import json
 import os
 import stat
+import subprocess
 import tempfile
 from pathlib import Path
+
+from core.semantic_index_control import git
 
 _SNAPSHOT = "candidate_snapshot.json"
 _REPORT = "candidate_integrity_report.json"
@@ -52,6 +55,50 @@ def _file_hash(path: Path) -> tuple[int, str]:
     return size, digest.hexdigest()
 
 
+def _derived_index(path: Path, repo: Path) -> bool:
+    """Only untracked, ignored, nonredirected Git-owned index storage is derived."""
+    if path.is_symlink() or (repo / ".git").is_symlink():
+        return False
+    relative = path.relative_to(repo).as_posix()
+    try:
+        top = git(path, "rev-parse", "--show-toplevel")
+        tracked = git(repo, "ls-files", "-z", "--", f":(literal){relative}")
+        committed = git(repo, "ls-tree", "-r", "--name-only", "-z", "HEAD", "--",
+                        f":(literal){relative}")
+        own = git(repo, "rev-parse", "--absolute-git-dir")
+        ignored = git(repo, "-c", "core.excludesFile=/dev/null", "check-ignore",
+                      "-q", "--", relative + "/")
+        common = git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")
+        if (top.returncode or top.stdout.strip() != str(repo)
+                or tracked.returncode or tracked.stdout or committed.returncode or committed.stdout
+                or own.returncode or not own.stdout.strip() or ignored.returncode
+                or common.returncode or not common.stdout.strip()):
+            return False
+        metadata = Path(common.stdout.strip())
+        exclude = metadata / "info/exclude"
+        index = Path(own.stdout.strip()) / "index"
+        if (not metadata.is_absolute() or metadata.resolve() != metadata
+                or exclude.resolve() != exclude or index.resolve() != index
+                or not index.is_file() or index.stat().st_nlink != 1
+                or (exclude.exists() and (not exclude.is_file()
+                                         or exclude.stat().st_nlink != 1))):
+            return False
+        # A redirect or unsupported object inside the directory is payload (or
+        # a normal snapshot error), never a reason to skip the whole subtree.
+        def unreadable(error):
+            raise error
+        for current, directories, files in os.walk(path, followlinks=False, onerror=unreadable):
+            for name in directories + files:
+                info = (Path(current) / name).lstat()
+                mode = info.st_mode
+                if (name == ".git" or not (stat.S_ISDIR(mode) or stat.S_ISREG(mode))
+                        or (stat.S_ISREG(mode) and info.st_nlink != 1)):
+                    return False
+        return True
+    except (OSError, subprocess.TimeoutExpired):
+        return False  # unavailable ownership keeps the physical payload covered
+
+
 def _snapshot(repo: Path) -> dict:
     entries: list[dict] = []
     for current, directories, files in os.walk(repo, topdown=True, followlinks=False):
@@ -87,7 +134,7 @@ def _snapshot(repo: Path) -> dict:
                 entries.append({"path": path.relative_to(repo).as_posix(),
                                 "type": "symlink", "size": len(target),
                                 "sha256": _digest(target)})
-            else:
+            elif name != ".zvec-grep" or not _derived_index(path, repo):
                 real_directories.append(name)
         directories[:] = real_directories
 
@@ -99,7 +146,7 @@ def _snapshot(repo: Path) -> dict:
     canonical = json.dumps(entries, ensure_ascii=False, sort_keys=True,
                            separators=(",", ":")).encode("utf-8")
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "candidate_sha256": _digest(canonical),
         "readme": {"path": "README.md", "size": readme["size"],
                    "sha256": readme["sha256"]},
@@ -149,7 +196,7 @@ def candidate_integrity(*, project_root: str = "", out_dir: str = "",
             raise ValueError("candidate_integrity baseline_step must be one sibling step id")
         baseline_path = output.parent / baseline_step / _SNAPSHOT
         baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
-        if baseline.get("schema_version") != 1 or not isinstance(baseline.get("entries"), list):
+        if baseline.get("schema_version") != 2 or not isinstance(baseline.get("entries"), list):
             raise ValueError("candidate snapshot has an unsupported schema")
         if baseline.get("project_root") != str(repo):
             raise ValueError("candidate snapshot belongs to a different resolved project root")

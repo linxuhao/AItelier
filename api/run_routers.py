@@ -2,6 +2,8 @@
 # REST endpoints for pipeline run history and execution traces.
 # Bridges skillflow's run/trace query APIs to HTTP.
 
+from core.checkpoint_observation import observe_checkpoint, checkpoint_phase
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from typing import Optional
 from pydantic import BaseModel
@@ -457,6 +459,7 @@ def get_run_checkpoint(
 
 
 @router.post("/runs/{run_id}/checkpoint/approve")
+@observe_checkpoint
 def approve_run_checkpoint(
     run_id: str,
     body: CheckpointApprovalRequest,
@@ -468,6 +471,7 @@ def approve_run_checkpoint(
     from api.meta_routers import approve_checkpoint
     if body.run_id and body.run_id != run_id:
         raise HTTPException(409, "Body run_id differs from the exact route")
+    checkpoint_phase("route_run_lookup", run_id=run_id, decision_id=body.decision_id)
     return approve_checkpoint(_run_to_project_id(run_id), body.model_copy(update={"run_id": run_id}), request, user, db)
 
 

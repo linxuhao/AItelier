@@ -20,6 +20,7 @@ No skillflow changes are required.
 """
 
 import json
+from core.checkpoint_observation import checkpoint_phase
 
 META_GRAPH = "meta_conversation"
 GATHER_STEP = "gather"
@@ -83,6 +84,7 @@ def approve_meta(sf, run_id: str, step_runner=None, *,
     run = sf.get_run(run_id)
     # Completion does not prove THIS decision was recorded. Validate/replay
     # the original identity before returning, even when finalize already ran.
+    checkpoint_phase("approve")
     sf.approve_checkpoint(run_id, expected_checkpoint=expected_checkpoint,
                           decision_id=decision_id)
     if run and run.get("status") == "completed":
@@ -103,6 +105,7 @@ def approve_meta(sf, run_id: str, step_runner=None, *,
                 f"meta run {run_id} failed during finalize: "
                 f"{run.get('error_reason') or 'finalize did not emit artifacts'}")
         try:
+            checkpoint_phase("advance_finalize")
             next_node = sf.advance_run(run_id)
         except Exception as e:
             # A raising finalize tool (e.g. an incomplete brief) lands here.
@@ -150,14 +153,17 @@ def approve_and_submit_meta(sf, db, ws, run_id: str, *,
     from core.project_submit import seed_and_trigger
     from core.scheduler import _get_tick_lock
 
+    checkpoint_phase("meta_run_lookup")
     run = sf.get_run(run_id)
     if not run or run.get("graph_name") != META_GRAPH:
         raise ValueError("Expected the project's exact meta_conversation run")
     pid = run["project_id"]
+    checkpoint_phase("project_lock_wait")
     with _get_tick_lock(pid):
         # The SDK still validates/replays the decision, including after completion.
         approve_meta(sf, run_id, expected_checkpoint=expected_checkpoint,
                      decision_id=decision_id)
+        checkpoint_phase("retained_gather")
         state = retained_gather_state(sf, run_id,
                                       expected_checkpoint["step_instance_id"])
         brief = state.get("brief") or {}
@@ -165,6 +171,7 @@ def approve_and_submit_meta(sf, db, ws, run_id: str, *,
         # Match the scheduler's lifecycle owner: an active run wins; otherwise
         # prefer the project's primary config, then the most recent run. An old
         # meta decision must not rewrite a later build's pause/progress cache.
+        checkpoint_phase("lifecycle_owner")
         owner = sf.get_run_by_project(pid)
         if not owner:
             runs = sf.list_runs(pid)
@@ -187,6 +194,7 @@ def approve_and_submit_meta(sf, db, ws, run_id: str, *,
                 and not project.get("meta_state") and "1" in completed
                 and project.get("brief") == format_brief_as_markdown(brief)):
             return {"status": "already_planned", "project_id": pid}
+        checkpoint_phase("seed_submit")
         result = seed_and_trigger(db, ws, pid, brief)
         if result.get("status") not in ("submitted", "already_planned"):
             raise RuntimeError(result.get("message") or "The finalized build was not submitted")

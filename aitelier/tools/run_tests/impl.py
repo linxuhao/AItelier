@@ -1974,7 +1974,9 @@ def _baseline_dir(state_dir: str, repo) -> str:
 
 
 def _apply_baseline(report: dict, state_dir: str,
-                    executed: "Executed | None" = None) -> None:
+                    executed: "Executed | None" = None,
+                    defer_write: bool = False) -> "dict | None":
+
     """Add `new_failures[]` + `passed_relative` by diffing against known-red.
 
     `passed` stays absolute (whatever the suite actually reported) — callers and
@@ -2017,6 +2019,25 @@ def _apply_baseline(report: dict, state_dir: str,
             state = "unreadable"
 
     identity_error = report.get("failure_identity_error")
+    if report.get("storage_unmeasured") or report.get("measurement_not_taken"):
+        # A PROVED storage inability (`diagnose_storage`: errno from a trusted
+        # syscall) means this session measured nothing trustworthy. Whatever
+        # pytest printed stays in failures[]/stdout as retained evidence, but it
+        # is not a set of this round's regressions: nothing is new, nothing may
+        # seed, prune or rewrite a baseline, and no relative pass can exist.
+        # This precedes the identity-error branch: an unkeyable failure list on
+        # an unmeasured run is still unmeasured, and the identity error stays
+        # visible as a diagnostic instead of becoming `new_failures`.
+        if identity_error:
+            prior = report.get("baseline_error")
+            report["baseline_error"] = (f"{prior}; {identity_error}" if prior
+                                        else str(identity_error))
+        report["new_failures"] = []
+        report["passed_relative"] = False
+        report["baseline_failures"] = []
+        report["baseline_state"] = "unmeasured"
+        return
+
     if identity_error:
         prior = report.get("baseline_error")
         report["baseline_error"] = (f"{prior}; {identity_error}" if prior
@@ -2029,17 +2050,23 @@ def _apply_baseline(report: dict, state_dir: str,
         report["baseline_state"] = "unreadable"
         return
 
-    if report.get("storage_unmeasured") or report.get("measurement_not_taken"):
-        # A PROVED storage inability (`diagnose_storage`: errno from a trusted
-        # syscall) means this session measured nothing trustworthy. Whatever
-        # pytest printed stays in failures[]/stdout as retained evidence, but it
-        # is not a set of this round's regressions: nothing is new, nothing may
-        # seed, prune or rewrite a baseline, and no relative pass can exist.
+    diagnosed = (report.get("storage_diagnosis") or {}).get("state")
+    if (diagnosed in ("unknown", "ambiguous") and not failures and not report.get("passed")
+            and report.get("returncode") not in (0, None)):
+        # A non-zero pytest result with NO usable failure identity, while the
+        # storage could not be shown healthy, is not a "known red": an empty
+        # case list is no evidence that the red was already there, and no label
+        # is invented for it. It stays visibly refused (never seeds, never
+        # relative-passes) and the raw output stays in the report.
+        report["baseline_error"] = (
+            "non-zero pytest result without usable failure identities and without a "
+            f"trustworthy storage observation ({diagnosed}); nothing can be attributed")
         report["new_failures"] = []
         report["passed_relative"] = False
         report["baseline_failures"] = []
         report["baseline_state"] = "unmeasured"
         return
+
 
     known = set(baseline)
     # A declared ABSENCE is not a baseline, in either direction:
@@ -2082,6 +2109,7 @@ def _apply_baseline(report: dict, state_dir: str,
     # Only a measured baseline may report a known-red SET. `[]` beside
     # `unavailable` means nobody looked, and saying so in one field that a
     # reader already routes on beats a sentence in `summary` nobody parses.
+
     report["baseline_failures"] = (sorted(known) if state in BASELINE_MEASURED
                                    else [])
 
@@ -2107,13 +2135,25 @@ def _apply_baseline(report: dict, state_dir: str,
         report["baseline_kept_unproven"] = blocked[:50]
     if keep == sorted(baseline) and path.is_file():
         return
+    if defer_write:
+        # The caller persists only AFTER the report that justifies this baseline
+        # was durably delivered (`_commit_baseline`): a baseline taken from a
+        # report that could not be stored is a claim nobody can verify.
+        return {"path": path, "keep": keep}
+    return _commit_baseline(report, {"path": path, "keep": keep})
+
+
+def _commit_baseline(report: dict, pending: dict) -> None:
+    """Write a baseline decided by `_apply_baseline`; the errno stays in `baseline_error`."""
+    path = pending["path"]
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(
-            {"failures": keep, "updated_at": time.time()}, indent=2),
+            {"failures": pending["keep"], "updated_at": time.time()}, indent=2),
             encoding="utf-8")
     except OSError as e:
         report["baseline_error"] = f"could not write {path}: {e}"
+
 
 
 # How long the pytest leg may run before it is killed.
@@ -2200,11 +2240,19 @@ def diagnose_storage(storage, returncode) -> dict:
     if not isinstance(storage, dict) or storage.get("schema") != STORAGE_SCHEMA:
         return {"state": "unknown", "reason": "no trusted storage observation"}
     findings = []
+    witnessed = 0          # authoritative probes that actually succeeded (mkdir AND write)
     for phase in ("before", "after"):
         observations = storage.get(phase)
         for obs in observations if isinstance(observations, list) else ():
             if not isinstance(obs, dict):
                 continue
+            # Only an explicit False demotes a root to evidence: the entry sets it
+            # when the pytest temp namespace could not be resolved from pytest.
+            authoritative = obs.get("authoritative") is not False
+            mkdir, write = obs.get("mkdir"), obs.get("write")
+            if (authoritative and isinstance(mkdir, dict) and mkdir.get("ok") is True
+                    and isinstance(write, dict) and write.get("ok") is True):
+                witnessed += 1
             for op in ("mkdir", "write"):
                 attempt = obs.get(op)
                 if not isinstance(attempt, dict) or attempt.get("ok") is not False:
@@ -2213,26 +2261,37 @@ def diagnose_storage(storage, returncode) -> dict:
                     continue
                 number = attempt.get("errno")
                 number = number if type(number) is int else None
+                full = number in _STORAGE_FULL
                 findings.append({
                     "phase": phase, "path": obs.get("path"), "op": op, "errno": number,
                     "errname": errno.errorcode.get(number, "") if number else "",
-                    "exhausted": number in _STORAGE_FULL,
+                    "exhausted": full and authoritative,
+                    "authoritative": authoritative,
                     "resource": (_full_resource(obs.get("statvfs"))
-                                 if number in _STORAGE_FULL else []),
+                                 if full and authoritative else []),
                     "mount": obs.get("mount"), "statvfs": obs.get("statvfs")})
     exhausted = [f for f in findings if f["exhausted"]]
+    resolution = storage.get("tmp_resolution")
+    unresolved = isinstance(resolution, dict) and resolution.get("resolved") is False
     if any(f["phase"] == "before" for f in exhausted):
         state = "exhausted_preflight"
     elif exhausted and returncode != 0:
         state = "exhausted_during_run"
     elif findings:
         state = "ambiguous"
+    elif witnessed == 0 or unresolved:
+        # No successful syscall witness (schema-only / partial / copied data), or
+        # the namespace pytest really uses could not be established: clean is a
+        # claim this record cannot support.
+        state = "unknown"
     else:
         state = "clean"
     return {"state": state, "findings": findings,
             "proof": [f for f in exhausted if state in STORAGE_EXHAUSTED_STATES][:4],
             "preflight_refused": storage.get("preflight_refused") is True,
+            "tmp_resolution": resolution if isinstance(resolution, dict) else None,
             "observation": storage}
+
 
 
 def _mark_storage_unmeasured(report: dict, diagnosis: dict, unmeasured_entries: list) -> None:
@@ -2315,6 +2374,22 @@ def _report_write_failure(report: dict, target_dir: Path, what: str, exc: OSErro
     """
     number = exc.errno
     exhausted = number in _STORAGE_FULL
+    # The raw observations were made before the store failed and are the only
+    # copy once the JUnit directory is cleaned up: keep them (bounded tails)
+    # in the same return, beside -- never instead of -- the failure itself.
+    def tail(text, limit=60_000):
+        text = text if isinstance(text, str) else ""
+        return text if len(text) <= limit else "[...truncated head...]" + text[-limit:]
+
+    diagnosis = report.get("storage_diagnosis")
+    retained = {"stdout": tail(report.get("stdout")), "stderr": tail(report.get("stderr")),
+                "failures": [str(f)[:2000] for f in (report.get("failures") or [])][:100],
+                "collection_errors": [str(f)[:2000] for f in
+                                      (report.get("collection_errors") or [])][:100],
+                "summary": tail(report.get("summary"), 8_000)}
+    if isinstance(diagnosis, dict):
+        retained["storage_diagnosis"] = diagnosis
+        retained["storage_state"] = diagnosis.get("state")
     return {"written": None, "passed": False, "_error": True,
             "error": (f"run_tests: could not {what} the test report under {target_dir}: "
                       f"{exc} (errno {number} {errno.errorcode.get(number, '')})"),
@@ -2322,8 +2397,12 @@ def _report_write_failure(report: dict, target_dir: Path, what: str, exc: OSErro
             "infrastructure_unavailable": True,
             "evidence_state": "infrastructure_unavailable",
             "release_evidence": "unresolved", "passed_relative": False,
+            "new_failures": [], "baseline_state": "unmeasured", "baseline_persisted": False,
+            "storage_unmeasured": bool(report.get("storage_unmeasured")),
             "returncode_observed": report.get("returncode"),
+            "raw_retained": retained, **retained,
             "host_statvfs": _host_statvfs(target_dir)}
+
 
 
 def run_tests(*, project_root: str = "", out_dir: str = "",
@@ -2403,12 +2482,21 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
             # been measured.
             report.update(passed_relative=False, new_failures=[],
                           baseline_failures=[], baseline_state="unavailable")
-            target_dir.mkdir(parents=True, exist_ok=True)
-            if run_id and evidence_cycle_from:
-                stamp_report(report, run_id=run_id, out_dir=str(target_dir),
-                             cycle_from=evidence_cycle_from)
-            (target_dir / "test_report.json").write_text(
-                json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+            stage = "mkdir"
+            try:
+                target_dir.mkdir(parents=True, exist_ok=True)
+                if run_id and evidence_cycle_from:
+                    stage = "stamp the evidence cycle of"
+                    stamp_report(report, run_id=run_id, out_dir=str(target_dir),
+                                 cycle_from=evidence_cycle_from)
+                stage = "write"
+                (target_dir / "test_report.json").write_text(
+                    json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+            except OSError as exc:
+                # Same non-delivery answer as the main path: never an escaped
+                # exception, never a claim that the report was written.
+                return _report_write_failure(report, target_dir, stage, exc)
+
             return {"written": "test_report.json", "passed": False,
                     "passed_relative": False, "new_failures": [],
                     "baseline_state": "unavailable", "baseline_known": 0,
@@ -2797,7 +2885,11 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
     # `baseline_state` that says whether either is a measurement, on top of the
     # absolute `passed`, so a reader can tell this round's breakage from the
     # repo's standing red — and tell both from "no baseline was taken".
-    _apply_baseline(report, _baseline_dir(state_dir, repo), executed)
+    # The baseline decision is taken now, but a file is written only after the
+    # report it describes has been durably delivered (see `_commit_baseline`).
+    pending_baseline = _apply_baseline(
+        report, _baseline_dir(state_dir, repo), executed, defer_write=True)
+
 
     # With no repo AND no out_dir there is nowhere to write — say so in the
     # return rather than defaulting to the CWD, which is the whole point above.
@@ -2829,9 +2921,16 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
         return _report_write_failure(report, target_dir, "mkdir", exc)
     if run_id and (evidence_cycle_start or evidence_cycle_from):
         from aitelier.gate_evidence import stamp_report
-        stamp_report(report, run_id=run_id, out_dir=str(target_dir),
-                     start_cycle=evidence_cycle_start,
-                     cycle_from=evidence_cycle_from)
+        try:
+            stamp_report(report, run_id=run_id, out_dir=str(target_dir),
+                         start_cycle=evidence_cycle_start,
+                         cycle_from=evidence_cycle_from)
+        except OSError as exc:
+            # The evidence-cycle manifest is part of delivering this report: a
+            # failed store is a non-delivery that keeps the raw observations and
+            # persists no baseline, exactly like a failed report write.
+            return _report_write_failure(report, target_dir, "stamp the evidence cycle of", exc)
+
     if prechange_enabled:
         try:
             after = coding.owned_snapshot(repo, run_id, original=prechange_capture)
@@ -2844,7 +2943,17 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
         (target_dir / "test_report.json").write_text(
             json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
     except OSError as exc:
+        # Delivery failed: no baseline is persisted from a report nobody can read.
         return _report_write_failure(report, target_dir, "write", exc)
+    if pending_baseline:
+        _commit_baseline(report, pending_baseline)
+        if report.get("baseline_error"):
+            try:   # keep the file consistent with what was (not) persisted
+                (target_dir / "test_report.json").write_text(
+                    json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+            except OSError:
+                pass
+
     return {"written": "test_report.json", "passed": report["passed"],
             # Read by the same consumers as the file's own fields: a proved
             # storage inability is infrastructure evidence, never a red.

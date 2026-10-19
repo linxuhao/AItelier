@@ -39,8 +39,74 @@ _STATVFS_FIELDS = ("f_bsize", "f_frsize", "f_blocks", "f_bfree", "f_bavail",
 
 
 def _child_tmp(env):
-    """The directory the CHILD's pytest uses for tmp_path (its own env)."""
+    """The DEFAULT directory the child's pytest would use (its own env).
+
+    Only a fallback: the namespace pytest really uses is resolved from pytest
+    itself by `_resolve_pytest_tmp`.
+    """
     return env.get("TMPDIR") or "/tmp"
+
+
+_RESOLVE_TMP = (
+    "import json, sys, tempfile\n"
+    "out = {'tempdir': tempfile.gettempdir()}\n"
+    "try:\n"
+    "    from _pytest.config import _prepareconfig\n"
+    "    option = _prepareconfig(sys.argv[1:]).option\n"
+    "    out['basetemp'] = str(option.basetemp) if getattr(option, 'basetemp', None) else None\n"
+    "    out['config_ok'] = True\n"
+    "except BaseException as exc:\n"
+    "    out['config_error'] = type(exc).__name__\n"
+    "print(json.dumps(out))\n")
+
+
+def _nearest_existing_dir(path):
+    probe = os.path.abspath(path)
+    while not os.path.isdir(probe):
+        parent = os.path.dirname(probe)
+        if parent == probe:
+            return None
+        probe = parent
+    return probe
+
+
+def _resolve_pytest_tmp(env, command, repo):
+    """The directory the child's pytest will really create tmp_path under.
+
+    Asked of pytest itself, with the child's own env and cwd: its normal
+    configuration (command line, `addopts` of the repository's ini file) is
+    parsed WITHOUT importing repository conftest files, and `--basetemp` wins
+    when configured; otherwise `tempfile.gettempdir()` of the same env is what
+    pytest's tmp_path factory uses. Nothing is inferred from repository text
+    output. When pytest cannot be asked, the answer is the default root and
+    `resolved` is False: the observation then stays evidence but is not
+    authority to refuse or to waive anything.
+    """
+    fallback = {"path": _child_tmp(env), "resolved": False, "source": "default_unresolved"}
+    args = list(command)
+    if args[1:3] != ["-m", "pytest"]:
+        return fallback
+    try:
+        found = subprocess.run(
+            [args[0], "-c", _RESOLVE_TMP, "--noconftest", *args[3:]], cwd=repo, env=env,
+            capture_output=True, text=True, timeout=60)
+        info = json.loads((found.stdout.strip().splitlines() or [""])[-1])
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return fallback
+    if not isinstance(info, dict):
+        return fallback
+    base = info.get("basetemp")
+    if info.get("config_ok") and isinstance(base, str) and base:
+        target = _nearest_existing_dir(os.path.join(repo, base))
+        if target is None:
+            return fallback
+        return {"path": target, "resolved": True, "source": "pytest_basetemp",
+                "basetemp": os.path.join(repo, base)}
+    temp = info.get("tempdir")
+    if info.get("config_ok") and isinstance(temp, str) and temp:
+        return {"path": temp, "resolved": True, "source": "tempfile_gettempdir"}
+    return fallback
+
 
 
 def _attempt(call):
@@ -114,35 +180,50 @@ def _probe_dir(path):
     return obs
 
 
+def _observe_root(spec):
+    obs = _probe_dir(spec["path"])
+    obs["roles"] = spec["roles"]
+    obs["authoritative"] = spec["authoritative"]
+    return obs
+
+
 def _is_full(observations):
+
     for obs in observations:
+        if obs.get("authoritative") is False:
+            continue
         for name in ("mkdir", "write"):
             if (obs.get(name) or {}).get("errno") in _STORAGE_FULL:
                 return obs, name
     return None
 
 
-def _storage_roots(env, command):
+def _storage_roots(env, command, repo):
     """Every directory this pytest leg must be able to write, deduplicated.
 
-    The child's tmp namespace, plus the directory of the junit record the
-    backend asked for (`--junitxml=`, an argument the TRUSTED caller built;
-    it is the mounted output root pytest writes its result record into).
+    The namespace pytest itself will use for tmp_path (`_resolve_pytest_tmp`),
+    plus the directory of the junit record the backend asked for
+    (`--junitxml=`, an argument the TRUSTED caller built; it is the mounted
+    output root pytest writes its result record into). Each root carries the
+    roles it plays and whether its observation is authoritative: a tmp root
+    that could not be resolved from pytest is only evidence.
     """
-    roots = [_child_tmp(env)]
+    tmp = _resolve_pytest_tmp(env, command, repo)
+    roots = [(tmp["path"], "pytest_tmp", tmp["resolved"])]
     for arg in command:
         if isinstance(arg, str) and arg.startswith("--junitxml="):
-            roots.append(os.path.dirname(arg.split("=", 1)[1]) or ".")
-    seen, unique = set(), []
-    for root in roots:
-        key = os.path.realpath(root)
-        if key not in seen:
-            seen.add(key)
-            unique.append(root)
-    return unique
+            roots.append((os.path.dirname(arg.split("=", 1)[1]) or ".", "junit", True))
+    merged = {}
+    for path, role, authoritative in roots:
+        key = os.path.realpath(path)
+        entry = merged.setdefault(key, {"path": path, "roles": [], "authoritative": False})
+        entry["roles"].append(role)
+        entry["authoritative"] = entry["authoritative"] or authoritative
+    return list(merged.values()), tmp
 
 
 def _coding_shell(payload, env):
+
     """Bound retained bytes while draining arbitrary shell output."""
     limit = 12_000
     output = {"stdout": bytearray(), "stderr": bytearray()}
@@ -249,11 +330,13 @@ def run(payload):
     # repository's text or on a size watermark.
     storage = None
     if payload.get("pytest_timeout") and not payload.get("profile"):
-        roots = _storage_roots(env, payload["args"])
-        storage = {"schema": STORAGE_SCHEMA, "tmp_root": _child_tmp(env),
-                   "roots": roots, "before": [_probe_dir(r) for r in roots]}
+        roots, tmp = _storage_roots(env, payload["args"], repo)
+        storage = {"schema": STORAGE_SCHEMA, "tmp_root": tmp["path"], "tmp_resolution": tmp,
+                   "roots": roots, "before": [_observe_root(r) for r in roots]}
         full = _is_full(storage["before"])
         if full:
+
+
             storage["preflight_refused"] = True
             obs, name = full
             return {"returncode": -1, "stdout": "", "timed_out": False, "import_error": "",
@@ -355,7 +438,8 @@ def run(payload):
         if storage is not None and proc.returncode != 0:
             # What the namespace looks like AFTER a non-clean session: pytest has
             # swallowed the errno by now, the filesystem has not.
-            storage["after"] = [_probe_dir(r) for r in storage["roots"]]
+            storage["after"] = [_observe_root(r) for r in storage["roots"]]
+
         return {"returncode": proc.returncode, "stdout": stdout, "stderr": stderr,
                 "timed_out": timed_out, "import_error": import_error,
                 **({"storage": storage} if storage is not None else {}),

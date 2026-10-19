@@ -140,6 +140,10 @@ def test_unavailable_candidate_refuses_before_any_external_reservation(tmp_path,
 def test_skillflow_base_refusal_retires_reservation_before_launcher(tmp_path, monkeypatch):
     monkeypatch.setenv("AITELIER_HOME", str(tmp_path / "home"))
     service, source, producer, db, old, commit, tree, payload, bundle = fixture(tmp_path / "fixture")
+    # This is a workflow admission test: supply the real host runtime schema,
+    # while the other carrier tests deliberately exercise State-only storage.
+    from core.db_manager import DBManager
+    service.db = DBManager(db.db_path)
     with service.store.transaction(write=True) as conn:
         conn.execute("DROP TRIGGER state_git_artifacts_no_delete")
         conn.execute("DELETE FROM state_git_artifacts")

@@ -3805,6 +3805,8 @@ class PipelineEngine:
                                               "preview": f"Executed {len(tool_calls)} tool call(s)"})
 
                 if write_calls:
+                    landed_this_turn = False
+                    scope_refused = []
                     for action in write_calls:
                         self._scope_position = self._json_action_position(actions, action)
                         result = self._exec_tool(action)
@@ -3821,6 +3823,21 @@ class PipelineEngine:
                                             [name for name in value if isinstance(name, str)]
                                             if isinstance(value, (list, tuple)) else [])
                         completed = {path_key(name) for name in receipts}
+                        # Only this exact host-created admission result proves the
+                        # mutation was refused before dispatch. It is actionable
+                        # feedback, not a failed write whose target must be
+                        # repaired: the next response may choose an allowed path
+                        # or finish. A proven repeat already raised in _exec_tool.
+                        # A tool's lookalike error stays an ordinary failure.
+                        if (self._scope_policy_active()
+                                and not (names or effect or completed)
+                                and result.get("scope_violation") is True
+                                and any(result is item for item in
+                                        getattr(self, "_scope_violations", []))):
+                            entry = "Write error (scope): " + json.dumps(result, ensure_ascii=False)
+                            tool_results.append(entry)
+                            scope_refused.append(entry)
+                            continue
                         if write_failed(result) or not (names or effect):
                             entry = "Write error: " + json.dumps(result, ensure_ascii=False)
                             tool_results.append(entry)
@@ -3836,6 +3853,7 @@ class PipelineEngine:
                             for target in targets:
                                 pending_write_failures.setdefault(target, entry)
                             continue
+                        landed_this_turn = True
                         # A different successful file is not repair. Require both
                         # the requested target and its error-free effect receipt.
                         for target in targets:
@@ -3852,6 +3870,16 @@ class PipelineEngine:
                         self._emit("write_failed", {
                             "error": feedback,
                             "preview": f"{len(pending_write_failures)} write target(s) unresolved"})
+                        continue
+                    if scope_refused and not landed_this_turn:
+                        # Nothing in this response landed: hand the exact refusal
+                        # to the next request instead of completing with no output.
+                        # Earlier authorized files stay retained.
+                        self._feedback_exploratory = False
+                        feedback = "\n".join(scope_refused)
+                        self._emit("write_failed", {
+                            "error": feedback,
+                            "preview": f"{len(scope_refused)} write(s) outside write scope"})
                         continue
                     self._emit("files_written", {"files": written_files,
                                                  "preview": f"Written {len(written_files)} file(s)"})

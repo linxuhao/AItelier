@@ -75,6 +75,27 @@ class AgentStepRunner:
         if any(r["status"] in ("pending", "claimed") and r["id"] >= producer["id"]
                for r in producers):
             raise ValueError("current item has a newer unfinished producer")
+        # A read-only review may have only the current item, without its card.
+        # Its deny-all WRITE policy is not the completed producer's authority.
+        # Read one exact persisted producer claim, never every run payload.
+        from core.write_scope import scope_from_context
+        with sf._ro() as conn:
+            claimed = conn.execute(
+                "SELECT inputs_json FROM skillflow_steps WHERE id = ? "
+                "AND run_id = ? AND step_id = 't_impl' AND loop_item = ? "
+                "AND status = 'completed' AND claim_epoch = ? AND completion_seq = ?",
+                (producer["id"], step.token.run_id, scope.task,
+                 producer["claim_epoch"], producer["completion_seq"]),
+            ).fetchone()
+        if claimed is None:
+            raise ValueError("current producing claim is unavailable")
+        producer_inputs = json.loads(claimed["inputs_json"])
+        producer_scope = scope_from_context(producer_inputs.get("_resolved_context"))
+        if (producer_scope is None or producer_scope.task != scope.task
+                or producer_scope.policy != "task-card"):
+            raise ValueError("current producer task-card authority is unavailable")
+        if scope.policy == "task-card" and scope.allowed() != producer_scope.allowed():
+            raise ValueError("review card scope does not match the current producing item")
         artifact_dir = Path(step.inputs.get("_artifact_dir", ""))
         if not artifact_dir.is_absolute():
             raise ValueError("review artifact directory is unavailable")
@@ -87,13 +108,13 @@ class AgentStepRunner:
         expected_claim = {"step_instance_id": producer["id"], "claim_epoch": producer["claim_epoch"]}
         if (authority.get("run_id") != step.token.run_id or authority.get("step_id") != "t_impl"
                 or authority.get("task") != scope.task
-                or authority.get("allowed_scope") != scope.allowed()
+                or authority.get("allowed_scope") != producer_scope.allowed()
                 or not authority.get("claim_history")
                 or authority["claim_history"][-1] != expected_claim):
             raise ValueError("write-scope receipt does not match the current producing item/claim")
         result = closeout_gate(
             project_root=str(run_isolation.resolve_for_resolver(self._db, step.token.run_id) or ""),
-            owns=list(scope.owns), shared_hotspots=list(scope.shared_hotspots),
+            owns=list(producer_scope.owns), shared_hotspots=list(producer_scope.shared_hotspots),
             task_name=scope.task, scope_violations=authority.get("violations", []),
             code_receipt=receipt)
         if not result.get("attribution_valid"):

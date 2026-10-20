@@ -2651,6 +2651,7 @@ _detached_tick_owners: dict[str, "str | None"] = {}
 _LEASE_SWEEP_INTERVAL_S = float(_os.getenv("AITELIER_LEASE_SWEEP_SECONDS", "60"))
 _last_lease_sweep = 0.0
 _lease_sweep_reported: dict = {}
+_worktree_sweep_reported: dict = {}
 
 
 def _sweep_ended_leases() -> None:
@@ -2705,6 +2706,15 @@ def _sweep_ended_leases() -> None:
         logging.getLogger("aitelier.scheduler").warning(
             "worktree reap sweep failed", exc_info=True)
         return
+    # Report only new/changed causes from this same reaper observation.
+    retained = {item["run_id"]: item.get("reason") or ""
+                for item in reap.get("retained", [])}
+    for rid, reason in retained.items():
+        if _worktree_sweep_reported.get(rid) != reason:
+            tick_log("", "worktree_retained", run=rid,
+                     reason=reason[:200].replace("\n", " ").replace("\r", " "))
+    _worktree_sweep_reported.clear()
+    _worktree_sweep_reported.update(retained)
     for item in reap.get("removed", []):
         tick_log("", "worktree_reaped", run=item["run_id"][:8],
                  reason=(item.get("reason") or "")[:200])

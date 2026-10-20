@@ -80,7 +80,11 @@ class Harness:
         self.path, self.root, self.reports = path, path / "queue", path / "reports"
         self.aroot, self.home = path / "aroot", path / "home"
         self.aroot.mkdir(); self.home.mkdir()
-        archive = subprocess.run(["git", "-C", str(REPO), "archive", "HEAD"],
+        # Only the six real Source files this boundary imports, all from the
+        # exact reviewed HEAD. Never copy the full repository for each vector.
+        files = ["scripts/gate_queue.py", "cli/__init__.py", "cli/client.py",
+                 "core/__init__.py", "core/driver_credentials.py", "core/datadir.py"]
+        archive = subprocess.run(["git", "-C", str(REPO), "archive", "HEAD", *files],
                                  capture_output=True, check=True, timeout=TIMEOUT).stdout
         with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
             tar.extractall(self.aroot, filter="data")
@@ -354,6 +358,15 @@ class Harness:
         line, self.buffer = self.buffer.split(b"\n", 1)
         row=json.loads(line); self.timeline.append(row)
         if row["event"] == "start":
+            # A start event can precede the daemon's durable PID/birth write by
+            # a few instructions. Wait on the actual lock once (bounded by the
+            # subprocess timeout), rather than relying on scheduling sleeps.
+            barrier = subprocess.run([self.ordinary, "-c",
+                "import fcntl,sys;f=open(sys.argv[1],'a');fcntl.flock(f,fcntl.LOCK_EX)",
+                str(self.root/"mutation.lock")], env=self.env, capture_output=True,
+                text=True, timeout=TIMEOUT)
+            assert barrier.returncode == 0, barrier.stderr
+            self.timeline.append(dict(event="admission-transition-settled",ticket=ticket))
             try:
                 self.child_pidfds.append(os.pidfd_open(row["identity"]["pid"]))
             except ProcessLookupError:

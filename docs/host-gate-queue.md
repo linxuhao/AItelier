@@ -165,7 +165,9 @@ python3 -m pytest -c tests/host_gate_queue/pytest.ini \
   --confcutdir=tests/host_gate_queue -s tests/host_gate_queue
 ```
 
-The owned suite exports `git archive HEAD` into a disposable root, uses the real
+The owned suite exports only six required tracked files from exact `HEAD` into a
+disposable root (queue, package initializers, client, credentials and datadir;
+about 95 KiB, with no full-repository copy per test), uses the real
 APIClient/httpx/credential modules and a loopback stdlib HTTP fixture. Missing
 interpreter/modules or an escaped credential path is an error, never a skip.
 It builds the accepted literal harmless Git objects and five registrations,

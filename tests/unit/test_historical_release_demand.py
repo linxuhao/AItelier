@@ -146,6 +146,8 @@ def test_explicit_release_retains_uncertain_or_foreign_resources(entry, monkeypa
         field, value = {"foreign-project": ("project_id", "foreign"), "foreign-config": ("config_name", "foreign"), "foreign-source": ("source_repo", str(tmp_path)), "path": ("worktree_path", str(rig.source)), "reaped": ("disposition", "reaped_discarded")}[fault]
         with rig.db.get_connection() as conn:
             conn.execute("UPDATE run_isolation SET " + field + "=? WHERE run_id=?", (value, rec["run_id"]))
+            conn.commit()
+        assert ri.record(rig.db, rec["run_id"])[field] == value
     elif fault == "symlink":
         outside = tmp_path / "foreign-cache"
         outside.mkdir()

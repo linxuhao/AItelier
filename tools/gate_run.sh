@@ -48,19 +48,6 @@ HEAD_BEFORE="$(git -C "$WORKTREE" rev-parse HEAD)"
 echo "$HEAD_BEFORE" > "$HEADF"
 rm -f "$EXITF"
 
-# 2026-09-19: the sidecar's /tmp had grown to 21G and took the root volume to
-# 90%. One ~700M co-op run dir per gate (host+client logs, two Godot HOMEs, a
-# project copy), named <scenario>-gate-<pid>, never removed. The shape of the
-# leak is what matters: the path is NAMED by the caller but CREATED by the
-# sidecar in its own filesystem, so whatever cleanup the caller does runs in
-# the wrong container and the sidecar's copy is nobody's.
-#
-# Sweeping here rather than at the producer is deliberate: this is the one
-# place that knows no gate is in flight (the gate's own container does not
-# exist yet at this line), and the sweep is by shape, so it keeps working when
-# the producer changes. It can never fail a gate: || true, and its own guard
-# skips the sweep whenever a wuxia-gate-* container is alive.
-sh /home/linxuhao/.AItelier/bin/godot_tmp_janitor.sh > "$REPORTS/$SUFFIX.janitor.log" 2>&1 || true
 
 mkdir -p "$SNAPROOT"
 rm -rf "$SNAP"
@@ -84,7 +71,9 @@ python3 "$BINDING_TOOL" sidecar "$REPORTS/$SUFFIX.sidecar-before.json" >> "$LOG"
   exit 69
 }
 
-docker run --rm --name "$NAME" --network aitelier_default -u 1000:1000 \
+docker run --rm --init --name "$NAME" --network aitelier_default -u 1000:1000 \
+  --cpus 2 --memory 2g --memory-swap 2g --pids-limit 512 \
+  --cap-drop ALL --security-opt no-new-privileges \
   -e HOME=/home/linxuhao -e GATE_REPORT_DIR="$REPORTS" \
   -e PYTHONPATH=/app -e PYTHONDONTWRITEBYTECODE=1 -e GATE_BINDING_FILE="$BINDING" \
   -v "$BINDING:$BINDING:ro" \

@@ -56,6 +56,13 @@ limits. It reveals no environment or secrets. Retention defaults and omitted
 retain behavior remain unchanged. The finite quotas are configured capacity;
 future real artifact sufficiency is measured by the normal native run.
 
+
+The ordinary launcher does not clean shared sidecar scratch: it never invokes
+the godot tmp janitor, on launch, on useful execution or on any refusal, and the
+absence of its own gate container proves no exclusivity over the sidecar.
+Shared scratch maintenance is a separate operation that an operator must run
+with the actual owner and evidence checked, never as a gate side effect.
+
 Source review and disposable CPU validation do not establish installed launcher,
 active sidecar configuration, game/native/render/browser/package or public
 readiness. Each remains separately measured and accepted.

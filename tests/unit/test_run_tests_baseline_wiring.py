@@ -200,11 +200,12 @@ def test_a_cycle_limit_reason_names_the_reds_and_the_baseline():
         "baseline_state": "compared",
         "baseline_failures": ["a", "b"],
     })
-    assert "0 of 2 failures are NEW" in line
-    assert "baseline compared, 2 known-red" in line
+    assert "0 of 2 failures NEW since the observed baseline" in line
+    assert "compared, 2 known-red" in line
+    assert "this round" not in line      # a compared run does not exonerate the round
     assert "test_compose_default_uses_public_host_and_wildcard_port" in line
     # The DB status column keeps 160 characters; the counts must be inside it.
-    assert "0 of 2 failures are NEW" in line[:160]
+    assert "0 of 2 failures NEW since the observed baseline" in line[:160]
 
 
 def test_the_reason_says_when_attribution_was_never_possible():
@@ -264,7 +265,7 @@ def test_the_reason_reads_the_report_the_run_itself_recorded(tmp_path,
     monkeypatch.setattr("api.dependencies.get_skillflow", lambda: _SF())
     detail = scheduler._test_gate_attribution("run-x")
     assert detail.startswith("test: ")
-    assert "0 of 1 failures are NEW" in detail
+    assert "0 of 1 failures NEW since the observed baseline" in detail
 
 
 def test_no_run_tests_call_in_the_trace_yields_no_attribution(monkeypatch):
@@ -277,3 +278,113 @@ def test_no_run_tests_call_in_the_trace_yields_no_attribution(monkeypatch):
 
     monkeypatch.setattr("api.dependencies.get_skillflow", lambda: _SF())
     assert scheduler._test_gate_attribution("run-x") == ""
+
+
+# ── temporal provenance of the snapshot (seeded is not a pre-edit baseline) ────
+
+_RED = "FAILED tests/unit/test_a.py::test_one - boom"
+
+
+def _real_report(state_dir, failures=(_RED,)):
+    """A report shaped like run_tests', baseline fields from the REAL function."""
+    from aitelier.tools.run_tests.impl import _apply_baseline
+    report = {"passed": False, "returncode": 1, "failures": list(failures)}
+    _apply_baseline(report, state_dir)
+    return report
+
+
+def test_a_seeded_report_says_attribution_unknown_not_zero_new(tmp_path):
+    from core.scheduler import _attribution_line
+
+    report = _real_report(str(tmp_path))
+    assert report["baseline_state"] == "seeded"
+    assert report["new_failures"] == []          # machine behaviour preserved
+    line = _attribution_line(report)
+    assert "attribution UNKNOWN" in line[:80]
+    assert "after the edits" in line
+    assert "NEW" not in line                     # no "0 of N NEW" exoneration
+    assert "known-red" in line
+    assert "tests/unit/test_a.py::test_one" in line
+
+
+def test_a_later_compared_report_counts_changes_since_the_snapshot(tmp_path):
+    from core.scheduler import _attribution_line
+
+    _real_report(str(tmp_path))                  # first observation seeds
+    second = "FAILED tests/unit/test_b.py::test_two - bang"
+    report = _real_report(str(tmp_path), failures=(_RED, second))
+    assert report["baseline_state"] == "compared"
+    line = _attribution_line(report)
+    assert "1 of 2 failures NEW since the observed baseline" in line
+    assert "attribution UNKNOWN" not in line
+    assert "test_b.py::test_two" in line
+
+
+def test_no_state_dir_is_unavailable_not_an_empty_measured_baseline():
+    from core.scheduler import _attribution_line
+
+    report = _real_report("")
+    assert report["baseline_state"] == "unavailable"
+    assert report["baseline_failures"] == []
+    line = _attribution_line(report)
+    assert "attribution UNKNOWN" in line
+    assert "capability: stateful" in line
+
+
+def test_unreadable_unmeasured_and_missing_each_state_their_own_cause(tmp_path):
+    from core.scheduler import _attribution_line
+    from aitelier.tools.run_tests.impl import BASELINE_FILE
+
+    (tmp_path / BASELINE_FILE).write_text("{not json", encoding="utf-8")
+    unreadable = _real_report(str(tmp_path))
+    assert unreadable["baseline_state"] == "unreadable"
+    u_line = _attribution_line(unreadable)
+    assert "unreadable" in u_line and "capability: stateful" not in u_line
+
+    m_line = _attribution_line({
+        "passed": False, "failures": [_RED], "baseline_state": "unmeasured",
+        "baseline_error": "non-zero result (rc=2) without usable failure identities"})
+    assert "not measured" in m_line and "capability: stateful" not in m_line
+    assert "rc=2" in m_line
+
+    a_line = _attribution_line({"passed": False, "failures": [_RED]})
+    assert "no baseline_state" in a_line and "capability: stateful" not in a_line
+
+
+def test_the_stored_seeded_report_reaches_the_failure_reason(tmp_path,
+                                                             monkeypatch):
+    """report on disk -> trace out_dir -> _failure_reason (the status consumer)."""
+    from core import scheduler
+
+    out_dir = tmp_path / "coding_impl" / "test"
+    out_dir.mkdir(parents=True)
+    report = _real_report(str(tmp_path / "state"))
+    (out_dir / "test_report.json").write_text(json.dumps(report), encoding="utf-8")
+
+    rows = [{"step_id": "test", "payload_json": json.dumps(
+        {"params": {"out_dir": str(out_dir), "step_name": "run_tests"}})}]
+
+    class _SF:
+        def trace_query(self, run_id, sql, args):
+            return rows
+
+    monkeypatch.setattr("api.dependencies.get_skillflow", lambda: _SF())
+    scheduler._failure_reason_cache.pop("run-seeded", None)
+    reason = scheduler._failure_reason(
+        {"id": "run-seeded", "error_reason": "Cycle limit exceeded"})
+    scheduler._failure_reason_cache.pop("run-seeded", None)
+    assert "attribution UNKNOWN" in reason
+    assert "NEW" not in reason
+    # the attribution must survive the 160-character status prefix
+    assert "attribution UNKNOWN" in reason[:160]
+
+
+def test_wiring_control_the_reason_path_calls_the_attribution_line(monkeypatch):
+    """If the caller stops using `_attribution_line` the reason loses it."""
+    import inspect
+    from core import scheduler
+
+    assert "_attribution_line(report)" in inspect.getsource(
+        scheduler._test_gate_attribution)
+    assert "_test_gate_attribution(run_id)" in inspect.getsource(
+        scheduler._failure_reason)

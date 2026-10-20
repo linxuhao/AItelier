@@ -290,6 +290,44 @@ report whose reds are unattributable) gets `baseline_state: unreadable` and
 reads `repo_gate_absent` when the key is there, and falls back to
 `repo_gate_unmeasured` only for a report written before the key existed.
 
+### What a baseline learns, and what its diagnostic may say
+
+The baseline is scoped per worktree (`_baseline_dir`: one directory per
+repository path under the config's `state_dir`) and is first observed on the
+first `run_tests` that finds none. In `coding_impl` that run happens AFTER the
+implement step, so the first snapshot already contains whatever the round
+broke. It is a first-observed snapshot, not a pre-edit baseline: no causal
+attribution to the round can be derived from it. Later runs compare against
+that snapshot and may only prune it (a key proven to have run and passed is
+dropped); nothing is ever added. Relative passes (`passed_relative`) are a
+claim about change since the observed snapshot and never prove quality. The
+cross-round key is unchanged, and `passed` stays absolute: `configs/coding_impl.yaml`
+routes on absolute `passed`, not on `passed_relative`.
+
+The human reason line (`core/scheduler.py:_attribution_line`, front-loaded into
+the 160-character status column) therefore says, per `baseline_state`:
+
+| state | wording |
+|---|---|
+| `seeded` | `attribution UNKNOWN`: the baseline was first taken now, after the edits; no pre-edit comparison |
+| `compared` | `N of M failures NEW since the observed baseline` (a change since the snapshot, not whole-round exoneration) |
+| `unavailable` | attribution UNKNOWN, step declares no `capability: stateful` |
+| `unreadable` | attribution UNKNOWN, baseline unreadable or failure identities unkeyable |
+| `unmeasured` | attribution UNKNOWN, run not measured; nothing seeded or compared |
+| missing / other | attribution UNKNOWN, report carries no (or an unrecognised) `baseline_state` |
+
+Machine fields (`new_failures`, `baseline_failures`, `baseline_state`,
+`passed_relative`, seeding, pruning) are unchanged by this wording.
+
+### Docker-red disposition
+
+The two historical compose allowlist/port assertions concern the content of
+the compose configuration and do not require a Docker binary. That independent
+issue is covered by the already-verified harness node
+`the-image-cannot-run-the-suite-it-is-judged-by` (receipt `cc0a0a27`); this
+attribution change does not rerun the image suites, and does not claim the old
+round as a whole passed. Old first failures remain history.
+
 ## The four witnesses
 
 `evidence/gate-cycle-accounting-20260921/` holds four `run_tests` reports

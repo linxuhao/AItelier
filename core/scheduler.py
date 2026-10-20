@@ -2255,27 +2255,66 @@ def _test_gate_attribution(run_id: str) -> str:
 
 
 def _attribution_line(report: dict) -> str:
-    """One line: how many reds, how many are the ROUND's, what the baseline was.
+    """One line: how many reds, what the baseline state was, what that can claim.
 
     Front-loaded because the caller's caller truncates the whole reason to 160
     characters for the DB status column — the counts and the baseline state
     have to survive that cut, the failure names are a bonus.
+
+    What each `baseline_state` may honestly say (see `_apply_baseline`):
+
+      * `compared` — a baseline file already existed and this run diffed
+        against it: "N of M failures NEW since the observed baseline". That is
+        a change since whatever snapshot was observed, NOT a statement about
+        the whole round: the snapshot is per-worktree and was itself first
+        taken at some earlier lap.
+      * `seeded` — this run TOOK the baseline from its own failures. `run_tests`
+        runs after the implement step, so the snapshot already contains
+        whatever the round broke; `new_failures` is empty by construction and
+        no causal attribution to the round is possible. Attribution UNKNOWN.
+      * `unavailable` — no `state_dir` (step lacks `capability: stateful`).
+      * `unreadable` — corrupt baseline file or unkeyable failure identities.
+      * `unmeasured` — no trustworthy verdict (storage refusal, declared
+        absence, non-zero exit with no failure identities).
+      * anything else / missing — the report carries no usable state.
+
+    Each says its own cause; none is folded into another's wording.
     """
     if not isinstance(report, dict) or report.get("passed") is not False:
         return ""
     failures = [str(f) for f in (report.get("failures") or [])]
     new = [str(f) for f in (report.get("new_failures") or [])]
-    state = str(report.get("baseline_state") or "absent")
+    raw_state = report.get("baseline_state")
+    state = str(raw_state) if raw_state else "absent"
     known = len(report.get("baseline_failures") or [])
-    if state in ("seeded", "compared"):
-        head = (f"{len(new)} of {len(failures)} failures are NEW this round "
-                f"(baseline {state}, {known} known-red)")
+    err = " ".join(str(report.get("baseline_error") or "").split())[:60]
+    named = failures
+    if state == "compared":
+        head = (f"{len(new)} of {len(failures)} failures NEW since the observed "
+                f"baseline (compared, {known} known-red)")
         named = new or failures
-    else:
+    elif state == "seeded":
+        head = (f"{len(failures)} failures, attribution UNKNOWN — baseline first "
+                f"taken now, after the edits ({known} recorded as known-red); "
+                f"no pre-edit comparison")
+    elif state == "unavailable":
         head = (f"{len(failures)} failures, attribution UNKNOWN — no baseline "
                 f"was taken ({state}); the step declares no "
                 f"`capability: stateful`")
-        named = failures
+    elif state == "unreadable":
+        head = (f"{len(failures)} failures, attribution UNKNOWN — baseline "
+                f"unreadable or failure identities unkeyable"
+                + (f" ({err})" if err else ""))
+    elif state == "unmeasured":
+        head = (f"{len(failures)} failures, attribution UNKNOWN — run not "
+                f"measured, no baseline taken or compared"
+                + (f" ({err})" if err else ""))
+    elif state == "absent":
+        head = (f"{len(failures)} failures, attribution UNKNOWN — report "
+                f"carries no baseline_state")
+    else:
+        head = (f"{len(failures)} failures, attribution UNKNOWN — unrecognised "
+                f"baseline_state {state[:30]!r}")
     if not named:
         return head
     return head + ": " + "; ".join(_failure_key_of(f) for f in named[:3])

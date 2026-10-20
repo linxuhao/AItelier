@@ -2067,6 +2067,14 @@ def _apply_baseline(report: dict, state_dir: str,
     after the seed — an added key would let this round's own regression enter
     the baseline and be forgiven by the next lap.
 
+    Scope: the snapshot is per worktree (`_baseline_dir`) and first OBSERVED by
+    the first run that finds none. In `coding_impl` that run follows the
+    implement step, so a `seeded` snapshot contains whatever the round broke —
+    it is not a pre-edit baseline and supports no causal attribution; only a
+    later `compared` run measures change SINCE that snapshot. The human
+    diagnostic (`scheduler._attribution_line`) states this per state.
+
+
     `baseline_state` says which of four things happened, because the fields
     alone cannot: `seeded`, `compared`, `unavailable` (no `state_dir` — the
     `stateful` capability is what injects one, and the step must declare it) and

@@ -2652,6 +2652,8 @@ _LEASE_SWEEP_INTERVAL_S = float(_os.getenv("AITELIER_LEASE_SWEEP_SECONDS", "60")
 _last_lease_sweep = 0.0
 _lease_sweep_reported: dict = {}
 _worktree_sweep_reported: dict = {}
+_index_sweep_reported: dict = {}
+
 
 
 _IDLE_RETENTION_REASON_RE = None
@@ -2713,9 +2715,23 @@ def _sweep_ended_leases() -> None:
         if _lease_sweep_reported.get(rid) != reason:
             _lease_sweep_reported[rid] = reason
             tick_log("", "lease_retained", run=rid[:8], reason=reason)
+    # Index retention is keyed by the FULL run id and the FULL reason text (no
+    # digit stripping): an unchanged repeat is quiet, a first/changed cause is
+    # logged. The cache is replaced by the set observed in this successful
+    # report, so it is bounded by it and absent IDs retire (and re-log on
+    # reappearance). A failed reconcile returned above, leaving it untouched.
+    index_observed = {}
     for item in resource_report.get("retained", []):
-        tick_log("", "index_retained", run=item["run_id"][:8],
-                 reason=(item.get("reason") or "")[:200])
+        index_observed[item["run_id"]] = item.get("reason") or ""
+    for rid in report.get("released", []):
+        _index_sweep_reported.pop(rid, None)
+    for rid, reason in index_observed.items():
+        if _index_sweep_reported.get(rid) != reason:
+            tick_log("", "index_retained", run=rid,
+                     reason=reason[:200].replace("\n", " ").replace("\r", " "))
+    _index_sweep_reported.clear()
+    _index_sweep_reported.update(index_observed)
+
 
     # Lease release only says the run is terminal + quiet. Reaping is a second,
     # stricter decision: clean tree + locally provable integration (or explicit

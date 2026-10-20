@@ -1,0 +1,274 @@
+{
+  "git_objects": {
+    "README_bytes": "harmless gate fixture\n",
+    "blob_sha": "d17bb0d210b33ccb38518ef6772c67d767a420ae",
+    "tree_sha": "4dcf0259ac4711b18d47e4492be9e26fa8d4e58d",
+    "source_sha": "9ab3c017a019bfb024c9a9f3d1668c35144e6f0c",
+    "commit_text": "tree 4dcf0259ac4711b18d47e4492be9e26fa8d4e58d\nauthor Queue Fixture <queue@example.invalid> 1 +0000\ncommitter Queue Fixture <queue@example.invalid> 1 +0000\n\nHarmless fixture\n",
+    "construction": "Write these harmless Git objects into disposable repo; real queue rev-parse must see this exact commit; no game Source"
+  },
+  "registration_file": {
+    "registrations": [
+      {
+        "node": "fixture.one",
+        "attempt": {
+          "seq": 101,
+          "attempt_id": "attempt-fixture-one",
+          "project_id": "fixture-project",
+          "node_key": "fixture.one",
+          "node_revision": 1,
+          "contract_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+          "context_hash": "5555555555555555555555555555555555555555555555555555555555555555",
+          "owner_driver_id": "fixture-driver",
+          "owner_fence": 1,
+          "status": "running",
+          "observation_version": 0,
+          "terminal_observation_id": null,
+          "artifact_ref": null,
+          "artifact_kind": null,
+          "lease_state": "healthy",
+          "context": {
+            "base_sha": "9ab3c017a019bfb024c9a9f3d1668c35144e6f0c",
+            "acceptance": [
+              {
+                "id": "native-result",
+                "kind": "test",
+                "description": "Only actual native result may satisfy this criterion"
+              }
+            ]
+          }
+        },
+        "claim": {
+          "claim_id": "claim-fixture-one",
+          "driver_id": "fixture-driver",
+          "fence": 5,
+          "project_id": "fixture-project",
+          "node_key": "fixture.one",
+          "node_revision": 1,
+          "status": "live",
+          "lease_state": "healthy",
+          "attempt_id": null
+        }
+      },
+      {
+        "node": "fixture.two",
+        "attempt": {
+          "seq": 102,
+          "attempt_id": "attempt-fixture-two",
+          "project_id": "fixture-project",
+          "node_key": "fixture.two",
+          "node_revision": 1,
+          "contract_hash": "2222222222222222222222222222222222222222222222222222222222222222",
+          "context_hash": "6666666666666666666666666666666666666666666666666666666666666666",
+          "owner_driver_id": "fixture-driver",
+          "owner_fence": 1,
+          "status": "running",
+          "observation_version": 0,
+          "terminal_observation_id": null,
+          "artifact_ref": null,
+          "artifact_kind": null,
+          "lease_state": "healthy",
+          "context": {
+            "base_sha": "9ab3c017a019bfb024c9a9f3d1668c35144e6f0c",
+            "acceptance": [
+              {
+                "id": "native-result",
+                "kind": "test",
+                "description": "Only actual native result may satisfy this criterion"
+              }
+            ]
+          }
+        },
+        "claim": {
+          "claim_id": "claim-fixture-two",
+          "driver_id": "fixture-driver",
+          "fence": 6,
+          "project_id": "fixture-project",
+          "node_key": "fixture.two",
+          "node_revision": 1,
+          "status": "live",
+          "lease_state": "healthy",
+          "attempt_id": null
+        }
+      },
+      {
+        "node": "fixture.three",
+        "attempt": {
+          "seq": 103,
+          "attempt_id": "attempt-fixture-three",
+          "project_id": "fixture-project",
+          "node_key": "fixture.three",
+          "node_revision": 1,
+          "contract_hash": "3333333333333333333333333333333333333333333333333333333333333333",
+          "context_hash": "7777777777777777777777777777777777777777777777777777777777777777",
+          "owner_driver_id": "fixture-driver",
+          "owner_fence": 1,
+          "status": "running",
+          "observation_version": 0,
+          "terminal_observation_id": null,
+          "artifact_ref": null,
+          "artifact_kind": null,
+          "lease_state": "healthy",
+          "context": {
+            "base_sha": "9ab3c017a019bfb024c9a9f3d1668c35144e6f0c",
+            "acceptance": [
+              {
+                "id": "native-result",
+                "kind": "test",
+                "description": "Only actual native result may satisfy this criterion"
+              }
+            ]
+          }
+        },
+        "claim": {
+          "claim_id": "claim-fixture-three",
+          "driver_id": "fixture-driver",
+          "fence": 7,
+          "project_id": "fixture-project",
+          "node_key": "fixture.three",
+          "node_revision": 1,
+          "status": "live",
+          "lease_state": "healthy",
+          "attempt_id": null
+        }
+      },
+      {
+        "node": "fixture.four",
+        "attempt": {
+          "seq": 104,
+          "attempt_id": "attempt-fixture-four",
+          "project_id": "fixture-project",
+          "node_key": "fixture.four",
+          "node_revision": 1,
+          "contract_hash": "4444444444444444444444444444444444444444444444444444444444444444",
+          "context_hash": "8888888888888888888888888888888888888888888888888888888888888888",
+          "owner_driver_id": "fixture-driver",
+          "owner_fence": 1,
+          "status": "running",
+          "observation_version": 0,
+          "terminal_observation_id": null,
+          "artifact_ref": null,
+          "artifact_kind": null,
+          "lease_state": "healthy",
+          "context": {
+            "base_sha": "9ab3c017a019bfb024c9a9f3d1668c35144e6f0c",
+            "acceptance": [
+              {
+                "id": "native-result",
+                "kind": "test",
+                "description": "Only actual native result may satisfy this criterion"
+              }
+            ]
+          }
+        },
+        "claim": {
+          "claim_id": "claim-fixture-four",
+          "driver_id": "fixture-driver",
+          "fence": 8,
+          "project_id": "fixture-project",
+          "node_key": "fixture.four",
+          "node_revision": 1,
+          "status": "live",
+          "lease_state": "healthy",
+          "attempt_id": null
+        }
+      },
+      {
+        "node": "fixture.five",
+        "attempt": {
+          "seq": 105,
+          "attempt_id": "attempt-fixture-five",
+          "project_id": "fixture-project",
+          "node_key": "fixture.five",
+          "node_revision": 1,
+          "contract_hash": "5555555555555555555555555555555555555555555555555555555555555555",
+          "context_hash": "9999999999999999999999999999999999999999999999999999999999999999",
+          "owner_driver_id": "fixture-driver",
+          "owner_fence": 1,
+          "status": "running",
+          "observation_version": 0,
+          "terminal_observation_id": null,
+          "artifact_ref": null,
+          "artifact_kind": null,
+          "lease_state": "healthy",
+          "context": {
+            "base_sha": "9ab3c017a019bfb024c9a9f3d1668c35144e6f0c",
+            "acceptance": [
+              {
+                "id": "native-result",
+                "kind": "test",
+                "description": "Only actual native result may satisfy this criterion"
+              }
+            ]
+          }
+        },
+        "claim": {
+          "claim_id": "claim-fixture-five",
+          "driver_id": "fixture-driver",
+          "fence": 9,
+          "project_id": "fixture-project",
+          "node_key": "fixture.five",
+          "node_revision": 1,
+          "status": "live",
+          "lease_state": "healthy",
+          "attempt_id": null
+        }
+      }
+    ],
+    "source": {
+      "source": "ABS_TEST_WORKTREE",
+      "artifact": "9ab3c017a019bfb024c9a9f3d1668c35144e6f0c"
+    },
+    "instruction": "One harmless physical task, five fixture contexts",
+    "cursor": 0
+  },
+  "whoami": {
+    "enabled": true,
+    "kind": "driver",
+    "actor": "driver:fixture-driver",
+    "driver_id": "fixture-driver",
+    "is_admin": false
+  },
+  "source_review_report": {
+    "status": "completed",
+    "settled": true,
+    "usable": true,
+    "criterion_id": "source-review",
+    "verdict": "fail",
+    "artifact": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "source_sha": "9ab3c017a019bfb024c9a9f3d1668c35144e6f0c",
+    "detail": "Synthetic offline fixture of an actually evaluated review failure. This fixture is not evidence about any product; native work remains unrun."
+  },
+  "source_review_context": {
+    "project_id": "fixture-project",
+    "node_key": "fixture.review",
+    "node_revision": 1,
+    "attempt_id": "attempt-fixture-source-review",
+    "context_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "status": "candidate",
+    "artifact_kind": "sha256",
+    "artifact_ref": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "context": {
+      "base_sha": "9ab3c017a019bfb024c9a9f3d1668c35144e6f0c",
+      "acceptance": [
+        {
+          "id": "source-review",
+          "kind": "review",
+          "description": "Actual evaluated source review"
+        }
+      ]
+    }
+  },
+  "source_failure_evidence": {
+    "evidence_id": "ev-fixture-source-fail",
+    "attempt_id": "attempt-fixture-source-review",
+    "criterion_id": "source-review",
+    "kind": "review",
+    "verdict": "fail",
+    "artifact_ref": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "report_ref": "ABS_TEST_R/source-review.json",
+    "report_sha256": "503ee85f779a3f7fe579f542c91bf10b2218e7fec4c306d411664334cef3f047",
+    "reviewer": "driver:fixture-reviewer",
+    "detail": "Fixture review artifact is SHA256; physical Source is separate"
+  }
+}

@@ -218,8 +218,9 @@ def test_the_reason_says_when_attribution_was_never_possible():
         "baseline_failures": [],
     })
     assert "attribution UNKNOWN" in line
-    assert "capability: stateful" in line
-    assert "tests/unit/test_a.py::test_one" in line
+    assert "unavailable" in line and "no state_dir" in line
+    assert line.startswith("tests/unit/test_a.py::test_one")
+
 
 
 def test_a_passing_report_contributes_no_failure_reason():
@@ -300,11 +301,11 @@ def test_a_seeded_report_says_attribution_unknown_not_zero_new(tmp_path):
     assert report["baseline_state"] == "seeded"
     assert report["new_failures"] == []          # machine behaviour preserved
     line = _attribution_line(report)
-    assert "attribution UNKNOWN" in line[:80]
-    assert "after the edits" in line
+    assert "seeded: attribution UNKNOWN" in line
     assert "NEW" not in line                     # no "0 of N NEW" exoneration
-    assert "known-red" in line
+    assert "first observed" in line
     assert "tests/unit/test_a.py::test_one" in line
+    assert len(line) < 120                       # short enough to survive the cut
 
 
 def test_a_later_compared_report_counts_changes_since_the_snapshot(tmp_path):
@@ -328,7 +329,8 @@ def test_no_state_dir_is_unavailable_not_an_empty_measured_baseline():
     assert report["baseline_failures"] == []
     line = _attribution_line(report)
     assert "attribution UNKNOWN" in line
-    assert "capability: stateful" in line
+    assert "unavailable" in line and "no state_dir" in line
+
 
 
 def test_unreadable_unmeasured_and_missing_each_state_their_own_cause(tmp_path):
@@ -339,26 +341,26 @@ def test_unreadable_unmeasured_and_missing_each_state_their_own_cause(tmp_path):
     unreadable = _real_report(str(tmp_path))
     assert unreadable["baseline_state"] == "unreadable"
     u_line = _attribution_line(unreadable)
-    assert "unreadable" in u_line and "capability: stateful" not in u_line
+    assert "unreadable" in u_line and "unavailable" not in u_line
 
     m_line = _attribution_line({
         "passed": False, "failures": [_RED], "baseline_state": "unmeasured",
         "baseline_error": "non-zero result (rc=2) without usable failure identities"})
-    assert "not measured" in m_line and "capability: stateful" not in m_line
+    assert "unmeasured" in m_line and "unavailable" not in m_line
     assert "rc=2" in m_line
 
     a_line = _attribution_line({"passed": False, "failures": [_RED]})
-    assert "no baseline_state" in a_line and "capability: stateful" not in a_line
+    assert "no baseline_state" in a_line and "unavailable" not in a_line
 
 
-def test_the_stored_seeded_report_reaches_the_failure_reason(tmp_path,
-                                                             monkeypatch):
-    """report on disk -> trace out_dir -> _failure_reason (the status consumer)."""
+
+def _stored_reason(tmp_path, monkeypatch, report, run_id):
+    """Write `report` where the trace says run_tests wrote it; return the
+    reason the project-status consumer would persist (`failed:` + [:160])."""
     from core import scheduler
 
     out_dir = tmp_path / "coding_impl" / "test"
-    out_dir.mkdir(parents=True)
-    report = _real_report(str(tmp_path / "state"))
+    out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "test_report.json").write_text(json.dumps(report), encoding="utf-8")
 
     rows = [{"step_id": "test", "payload_json": json.dumps(
@@ -369,14 +371,62 @@ def test_the_stored_seeded_report_reaches_the_failure_reason(tmp_path,
             return rows
 
     monkeypatch.setattr("api.dependencies.get_skillflow", lambda: _SF())
-    scheduler._failure_reason_cache.pop("run-seeded", None)
+    scheduler._failure_reason_cache.pop(run_id, None)
     reason = scheduler._failure_reason(
-        {"id": "run-seeded", "error_reason": "Cycle limit exceeded"})
-    scheduler._failure_reason_cache.pop("run-seeded", None)
-    assert "attribution UNKNOWN" in reason
-    assert "NEW" not in reason
-    # the attribution must survive the 160-character status prefix
-    assert "attribution UNKNOWN" in reason[:160]
+        {"id": run_id, "error_reason": "Cycle limit exceeded"})
+    scheduler._failure_reason_cache.pop(run_id, None)
+    return f"failed:{reason}"[:160]
+
+
+_OWNED = "FAILED tests/test_owned.py::test_owned_breakage - AssertionError"
+_OWNED_KEY = "tests/test_owned.py::test_owned_breakage"
+
+
+def test_the_stored_seeded_report_reaches_the_failure_reason(tmp_path,
+                                                             monkeypatch):
+    """report on disk -> trace out_dir -> _failure_reason -> status prefix."""
+    report = _real_report(str(tmp_path / "state"), failures=(_OWNED,))
+    assert report["baseline_state"] == "seeded"
+    persisted = _stored_reason(tmp_path, monkeypatch, report, "run-seeded")
+    assert len(persisted) <= 160
+    # the useful test identity AND the state survive the real 160-char prefix
+    assert _OWNED_KEY in persisted
+    assert "seeded" in persisted and "attribution UNKNOWN" in persisted
+    assert "NEW" not in persisted
+    assert "after the edits" not in persisted
+    assert "pre-existing" not in persisted
+
+
+def test_the_stored_unavailable_report_keeps_the_test_key_in_the_prefix(
+        tmp_path, monkeypatch):
+    report = _real_report("", failures=(_OWNED,))
+    assert report["baseline_state"] == "unavailable"
+    persisted = _stored_reason(tmp_path, monkeypatch, report, "run-unavail")
+    assert _OWNED_KEY in persisted
+    assert "unavailable" in persisted and "attribution UNKNOWN" in persisted
+
+
+def test_the_stored_compared_report_counts_change_since_the_snapshot(
+        tmp_path, monkeypatch):
+    state = str(tmp_path / "state")
+    _real_report(state, failures=(_RED,))                 # first observation
+    report = _real_report(state, failures=(_RED, _OWNED))  # genuine later run
+    assert report["baseline_state"] == "compared"
+    persisted = _stored_reason(tmp_path, monkeypatch, report, "run-compared")
+    assert "1 of 2 failures NEW since the observed baseline" in persisted
+    assert _OWNED_KEY in persisted
+    assert "attribution UNKNOWN" not in persisted
+
+
+def test_a_seeded_line_makes_no_universal_after_edit_or_exoneration_claim(
+        tmp_path):
+    from core.scheduler import _attribution_line
+
+    line = _attribution_line(_real_report(str(tmp_path), failures=(_OWNED,)))
+    for banned in ("after the edit", "before the edit", "pre-edit",
+                   "pre-existing", "0 of", "NEW"):
+        assert banned not in line
+    assert line.startswith(_OWNED_KEY)
 
 
 def test_wiring_control_the_reason_path_calls_the_attribution_line(monkeypatch):

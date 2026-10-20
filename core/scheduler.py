@@ -2255,23 +2255,30 @@ def _test_gate_attribution(run_id: str) -> str:
 
 
 def _attribution_line(report: dict) -> str:
-    """One line: how many reds, what the baseline state was, what that can claim.
+    """One short line: the red test, the baseline state, what that can claim.
 
-    Front-loaded because the caller's caller truncates the whole reason to 160
-    characters for the DB status column — the counts and the baseline state
-    have to survive that cut, the failure names are a bonus.
+    Front-loaded because the caller's caller keeps only the first 160
+    characters of the whole reason for the DB status column (after a
+    `failed:` prefix and the run's own error text). The first failing test key
+    therefore comes FIRST, then the state and `attribution UNKNOWN` where it
+    applies; a long wording ahead of the test name would push the one thing a
+    reader can act on out of the column.
 
     What each `baseline_state` may honestly say (see `_apply_baseline`):
 
       * `compared` — a baseline file already existed and this run diffed
         against it: "N of M failures NEW since the observed baseline". That is
-        a change since whatever snapshot was observed, NOT a statement about
-        the whole round: the snapshot is per-worktree and was itself first
-        taken at some earlier lap.
-      * `seeded` — this run TOOK the baseline from its own failures. `run_tests`
-        runs after the implement step, so the snapshot already contains
-        whatever the round broke; `new_failures` is empty by construction and
-        no causal attribution to the round is possible. Attribution UNKNOWN.
+        a change since the snapshot that was observed, NOT a statement about
+        the whole round: the snapshot is per worktree and was first observed
+        at some earlier run.
+      * `seeded` — this run TOOK the snapshot from its own failures: the first
+        observation. The report carries no timestamp or ordering relative to
+        the round's edits, so it proves neither "before" nor "after";
+        `new_failures` is empty by construction. Attribution UNKNOWN. (In
+        `configs/coding_impl.yaml` the `baseline` step, with
+        `prechange_capture`, runs before `implement` and the `test` step reads
+        it through `prechange_from` — that is a separate machine protocol; this
+        generic state alone does not say which run took the snapshot.)
       * `unavailable` — no `state_dir` (step lacks `capability: stateful`).
       * `unreadable` — corrupt baseline file or unkeyable failure identities.
       * `unmeasured` — no trustworthy verdict (storage refusal, declared
@@ -2288,36 +2295,33 @@ def _attribution_line(report: dict) -> str:
     state = str(raw_state) if raw_state else "absent"
     known = len(report.get("baseline_failures") or [])
     err = " ".join(str(report.get("baseline_error") or "").split())[:60]
+    n = len(failures)
     named = failures
     if state == "compared":
-        head = (f"{len(new)} of {len(failures)} failures NEW since the observed "
-                f"baseline (compared, {known} known-red)")
+        body = (f"{len(new)} of {n} failures NEW since the observed baseline "
+                f"(compared, {known} known-red)")
         named = new or failures
     elif state == "seeded":
-        head = (f"{len(failures)} failures, attribution UNKNOWN — baseline first "
-                f"taken now, after the edits ({known} recorded as known-red); "
-                f"no pre-edit comparison")
+        body = f"seeded: attribution UNKNOWN (first observed; {n} failed)"
     elif state == "unavailable":
-        head = (f"{len(failures)} failures, attribution UNKNOWN — no baseline "
-                f"was taken ({state}); the step declares no "
-                f"`capability: stateful`")
+        body = (f"unavailable: attribution UNKNOWN "
+                f"({n} failed; no state_dir)")
     elif state == "unreadable":
-        head = (f"{len(failures)} failures, attribution UNKNOWN — baseline "
-                f"unreadable or failure identities unkeyable"
-                + (f" ({err})" if err else ""))
+        body = (f"unreadable: attribution UNKNOWN ({n} failed"
+                + (f"; {err}" if err else "") + ")")
     elif state == "unmeasured":
-        head = (f"{len(failures)} failures, attribution UNKNOWN — run not "
-                f"measured, no baseline taken or compared"
-                + (f" ({err})" if err else ""))
+        body = (f"unmeasured: attribution UNKNOWN ({n} failed"
+                + (f"; {err}" if err else "") + ")")
     elif state == "absent":
-        head = (f"{len(failures)} failures, attribution UNKNOWN — report "
-                f"carries no baseline_state")
+        body = f"attribution UNKNOWN ({n} failed; no baseline_state)"
     else:
-        head = (f"{len(failures)} failures, attribution UNKNOWN — unrecognised "
-                f"baseline_state {state[:30]!r}")
+        body = (f"attribution UNKNOWN ({n} failed; "
+                f"baseline_state {state[:20]!r})")
     if not named:
-        return head
-    return head + ": " + "; ".join(_failure_key_of(f) for f in named[:3])
+        return body
+    # The key goes first and is capped so that, behind the caller's own
+    # `failed:<error> — <step>: ` prefix, the state still lands in 160 chars.
+    return f"{_failure_key_of(named[0])[:60]} — {body}"
 
 
 def _failure_key_of(failure: str) -> str:

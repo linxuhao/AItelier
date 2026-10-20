@@ -2067,13 +2067,16 @@ def _apply_baseline(report: dict, state_dir: str,
     after the seed — an added key would let this round's own regression enter
     the baseline and be forgiven by the next lap.
 
-    Scope: the snapshot is per worktree (`_baseline_dir`) and first OBSERVED by
-    the first run that finds none. In `coding_impl` that run follows the
-    implement step, so a `seeded` snapshot contains whatever the round broke —
-    it is not a pre-edit baseline and supports no causal attribution; only a
-    later `compared` run measures change SINCE that snapshot. The human
-    diagnostic (`scheduler._attribution_line`) states this per state.
-
+    Scope: the snapshot is per worktree (`_baseline_dir`) and is FIRST OBSERVED
+    by the first run that finds none. `baseline_state: seeded` records that and
+    nothing more: the report has no timestamp or ordering against the round's
+    edits, so a seed alone proves neither "before" nor "after" and supports no
+    causal attribution. (`configs/coding_impl.yaml` runs a `baseline` step with
+    `prechange_capture: true` BEFORE `implement`, and its `test` step reads it
+    with `prechange_from: baseline`; that machine protocol is separate and is
+    unchanged.) Only a later `compared` run measures change SINCE the observed
+    snapshot. The human diagnostic (`scheduler._attribution_line`) states this
+    per state.
 
     `baseline_state` says which of four things happened, because the fields
     alone cannot: `seeded`, `compared`, `unavailable` (no `state_dir` — the

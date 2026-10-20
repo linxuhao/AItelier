@@ -294,27 +294,35 @@ reads `repo_gate_absent` when the key is there, and falls back to
 
 The baseline is scoped per worktree (`_baseline_dir`: one directory per
 repository path under the config's `state_dir`) and is first observed on the
-first `run_tests` that finds none. In `coding_impl` that run happens AFTER the
-implement step, so the first snapshot already contains whatever the round
-broke. It is a first-observed snapshot, not a pre-edit baseline: no causal
-attribution to the round can be derived from it. Later runs compare against
-that snapshot and may only prune it (a key proven to have run and passed is
-dropped); nothing is ever added. Relative passes (`passed_relative`) are a
-claim about change since the observed snapshot and never prove quality. The
-cross-round key is unchanged, and `passed` stays absolute: `configs/coding_impl.yaml`
-routes on absolute `passed`, not on `passed_relative`.
+first `run_tests` that finds none. `baseline_state: seeded` records only that
+first observation: the report carries no timestamp or ordering relative to the
+round's edits, so a seed alone proves neither "before the edits" nor "after the
+edits", and no causal attribution to the round can be derived from it. Later
+runs compare against that snapshot and may only prune it (a key proven to have
+run and passed is dropped); nothing is ever added. Relative passes
+(`passed_relative`) are a claim about change since the observed snapshot and
+never prove quality. The cross-round key is unchanged, and `passed` stays
+absolute: `configs/coding_impl.yaml` routes on absolute `passed`, not on
+`passed_relative`.
 
-The human reason line (`core/scheduler.py:_attribution_line`, front-loaded into
-the 160-character status column) therefore says, per `baseline_state`:
+`configs/coding_impl.yaml` has its own, separate protocol: a `baseline` step
+(`run_tests`, `prechange_capture: true`) runs BEFORE `implement`, and the `test`
+step reads it with `prechange_from: baseline`. That protocol is unchanged here;
+the generic `baseline_state` alone does not say which of those steps took the
+snapshot.
 
-| state | wording |
+The human reason line (`core/scheduler.py:_attribution_line`) puts the first
+failing test key FIRST, so it survives the 160-character status prefix, and then
+the state. Per `baseline_state`:
+
+| state | wording after the test key |
 |---|---|
-| `seeded` | `attribution UNKNOWN`: the baseline was first taken now, after the edits; no pre-edit comparison |
+| `seeded` | `seeded: attribution UNKNOWN (first observed; N failed)` — no `NEW` count, no before/after claim |
 | `compared` | `N of M failures NEW since the observed baseline` (a change since the snapshot, not whole-round exoneration) |
-| `unavailable` | attribution UNKNOWN, step declares no `capability: stateful` |
-| `unreadable` | attribution UNKNOWN, baseline unreadable or failure identities unkeyable |
-| `unmeasured` | attribution UNKNOWN, run not measured; nothing seeded or compared |
-| missing / other | attribution UNKNOWN, report carries no (or an unrecognised) `baseline_state` |
+| `unavailable` | `unavailable: attribution UNKNOWN (N failed; no state_dir)` |
+| `unreadable` | `unreadable: attribution UNKNOWN`, with the baseline error when present |
+| `unmeasured` | `unmeasured: attribution UNKNOWN`, with the reason when present |
+| missing / other | `attribution UNKNOWN (N failed; no baseline_state)` or the unrecognised value |
 
 Machine fields (`new_failures`, `baseline_failures`, `baseline_state`,
 `passed_relative`, seeding, pruning) are unchanged by this wording.

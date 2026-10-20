@@ -36,7 +36,7 @@ readiness, errors, generation fencing, release and restart reconciliation
 use the existing `indexes` ledger. The worker does not create an empty ledger;
 a real host prepare demand creates it. Terminal historical trees without a
 ledger owner retain their old derived index. Active recorded runs are adopted
-by the host reconciler. Terminal release applies only to recorded ledger
+by the host reconciler. Automatic terminal release applies only to recorded ledger
 owners; source, Git branches, artifacts, trace and State remain retained.
 
 The worker shares the existing deployment admission fence throughout each
@@ -75,3 +75,24 @@ compatibility and fresh prepare/drop against the real 0.2.2 package in an
 isolated fixture. Source and unit checks alone are not deployed acceptance.
 
 Reference: https://github.com/zvec-ai/zvec-grep/releases/tag/v0.2.2
+
+## Explicit historical run release
+
+An off-tunnel local CLI admin can inspect one exact recorded terminal run with
+`GET /api/admin/runs/{run_id}/semantic-resource`, then explicitly request its
+semantic release with `POST /api/admin/runs/{run_id}/semantic-resource/release`.
+Use the existing CLI admin credential. Both entries use the already initialized
+host engine and DB; they refuse uninitialized, active, paused, uncertain or
+mismatched ownership and invalid recorded paths. No caller-supplied root is used.
+Inspection does not create a missing ledger. The explicit POST may adopt only
+this historical run as `desired=released`; HTTP 202 means demand was recorded,
+not that release completed. Inspect `release_acknowledged` and the ledger's
+revision/outcome/error after the ordinary worker runs. Repeating an unchanged
+request preserves the same revision and any pending/error result. Startup and
+normal reconciliation still do not adopt terminal missing-ledger history.
+
+The request holds existing deployment admission and resource/control locks.
+It does not run an index command, grant discard, release checkout leases,
+remove a worktree or change the ordinary idle/merge/dirty/ignored-file cleanup
+rules. Branches, commits and evidence remain subject to their existing retention
+rules. A missing ledger is an observation, not a diagnosis of earlier failures.

@@ -60,3 +60,36 @@ def deployment_runtime_observation(request: Request):
         return dq.runtime_observation(skillflow=sf, db=db)
     except Exception as exc:
         raise HTTPException(503, f"Live runtime observation unavailable: {type(exc).__name__}") from exc
+
+
+def _semantic_resource(request: Request, run_id: str, *, release: bool):
+    """Use the resident host, never initialize a management-only engine."""
+    import sys
+    from api import authz
+    if not authz.local_admin_authority(request):
+        raise HTTPException(403, "Semantic resource management requires the local CLI admin authority")
+    dependencies = sys.modules.get("api.dependencies")
+    sf = getattr(dependencies, "_skillflow_instance", None)
+    db = getattr(dependencies, "db_instance", None)
+    if sf is None or db is None:
+        raise HTTPException(503, "Already initialized live SkillFlow and DB are required")
+    from core import run_resources
+    try:
+        result = (run_resources.request_semantic_release(db, sf, run_id) if release
+                  else run_resources.semantic_release_status(db, sf, run_id))
+    except Exception as exc:
+        raise HTTPException(409, f"Semantic resource retained: {type(exc).__name__}: {str(exc)[:500]}") from exc
+    return result
+
+
+@router.get("/runs/{run_id}/semantic-resource", dependencies=[Depends(require_writer)])
+def semantic_resource_status(run_id: str, request: Request):
+    """Inspect one recorded terminal run; absent demand is not an acknowledgement."""
+    return _semantic_resource(request, run_id, release=False)
+
+
+@router.post("/runs/{run_id}/semantic-resource/release", status_code=202,
+             dependencies=[Depends(require_writer)])
+def request_semantic_resource_release(run_id: str, request: Request):
+    """Explicitly queue one owned historical release, without running cleanup."""
+    return _semantic_resource(request, run_id, release=True)

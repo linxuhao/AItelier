@@ -20,6 +20,7 @@ No skillflow changes are required.
 """
 
 import json
+from core.checkpoint_observation import observe_checkpoint, checkpoint_phase
 
 META_GRAPH = "meta_conversation"
 GATHER_STEP = "gather"
@@ -58,6 +59,7 @@ def request_brief_changes(sf, run_id: str, feedback: str) -> None:
                          redirect_to=GATHER_STEP)
 
 
+@observe_checkpoint
 def approve_meta(sf, run_id: str, step_runner=None, *,
                  expected_checkpoint=None, decision_id="") -> None:
     """Approve the brief and drive the run through its `finalize` tool step.
@@ -80,9 +82,11 @@ def approve_meta(sf, run_id: str, step_runner=None, *,
             steps are NOT claimed or executed — the function only advances graph
             state, preserving existing behavior.
     """
+    checkpoint_phase("approve_run_lookup", run_id=run_id, decision_id=decision_id)
     run = sf.get_run(run_id)
     # Completion does not prove THIS decision was recorded. Validate/replay
     # the original identity before returning, even when finalize already ran.
+    checkpoint_phase("approve")
     sf.approve_checkpoint(run_id, expected_checkpoint=expected_checkpoint,
                           decision_id=decision_id)
     if run and run.get("status") == "completed":
@@ -92,6 +96,7 @@ def approve_meta(sf, run_id: str, step_runner=None, *,
     # finalize → complete) needs only a couple advances; the budget is a stall
     # guard, not a normal code path.
     for _ in range(8):
+        checkpoint_phase("finalize_run_lookup")
         run = sf.get_run(run_id)
         if not run:
             raise RuntimeError(f"meta run {run_id} vanished during finalize")
@@ -103,6 +108,7 @@ def approve_meta(sf, run_id: str, step_runner=None, *,
                 f"meta run {run_id} failed during finalize: "
                 f"{run.get('error_reason') or 'finalize did not emit artifacts'}")
         try:
+            checkpoint_phase("advance_finalize")
             next_node = sf.advance_run(run_id)
         except Exception as e:
             # A raising finalize tool (e.g. an incomplete brief) lands here.
@@ -112,14 +118,18 @@ def approve_meta(sf, run_id: str, step_runner=None, *,
         # node, claim + execute + confirm the step (tool or agent).
         if next_node is not None and step_runner is not None:
             try:
+                checkpoint_phase("claim_finalize")
                 claimed = sf.claim_next_step(run_id)
             except Exception:
                 continue  # nothing to claim — let the loop re-check status
             if claimed is not None:
                 try:
+                    checkpoint_phase("execute_finalize")
                     result = step_runner(claimed)
+                    checkpoint_phase("confirm_finalize")
                     sf.confirm_step(claimed.token, result)
                 except Exception as e:
+                    checkpoint_phase("fail_finalize")
                     sf.fail_step(claimed.token, str(e)[:200], retryable=False)
                     raise RuntimeError(
                         f"meta run {run_id} step '{claimed.step_id}' failed: {e}") from e

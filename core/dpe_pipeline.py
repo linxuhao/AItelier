@@ -4941,6 +4941,43 @@ class PipelineEngine:
                             after = _context_boundary(agent.gateway, model_messages,
                                                       native_tools)
                             if after["handoff"]:
+                                # Same retained-incomplete outcome as the turn
+                                # cap: no provider call is made for this turn,
+                                # so only the turns already sent are counted.
+                                failure = _budget_failure_report(
+                                    max_turns=current_max_turns,
+                                    first_write_turn=first_write_turn,
+                                    written_files=written_files,
+                                    reads_searches=reads_searches,
+                                    tool_failures=tool_failures,
+                                    expansion_requests=expansion_requests,
+                                    relay=relay_progress,
+                                    turns_used=turn_count,
+                                    budget_exhausted="context",
+                                    read_accounting=self._read_accounting(),
+                                    output_budget=_output_budget_state(
+                                        completion_tokens=output_completion_tokens,
+                                        reasoning_tokens=output_reasoning_tokens,
+                                        peak_turn_completion=output_peak_completion,
+                                        peak_turn_cap=output_peak_cap,
+                                        max_output_tokens=int(getattr(
+                                            agent.gateway, "max_output_tokens", 0) or 0),
+                                        cap_at_start=output_cap_at_start,
+                                        escalations_used=output_escalations_used,
+                                    ),
+                                )
+                                self._trace("step", "context_budget_exhausted", {
+                                    "step_id": step_id, "attempt": attempt,
+                                    "turn": turn_count + 1,
+                                    "context_boundary": after,
+                                    "early_progress_intervened": early_progress_intervened,
+                                    "relay_acknowledged": relay_acknowledged,
+                                    **failure,
+                                })
+                                self._emit("context_budget_exhausted", {
+                                    "step_id": step_id, "turn": turn_count + 1,
+                                    "preview": f"Step {step_id} stopped: context exceeds endpoint budget after handoff",
+                                })
                                 raise NativeTurnBudgetExhausted(
                                     f"Step {step_id}: context handoff still exceeds "
                                     f"active endpoint budget ({after['estimated_prompt_tokens']} "
@@ -4976,7 +5013,12 @@ class PipelineEngine:
                                 tool_choice=tool_choice,
                             )
                     except Exception as e:
-                        if isinstance(e, SCOPE_PROGRESS_TERMINAL):
+                        # Host-typed terminal outcomes decided while preparing
+                        # this turn are not generation errors: turning them
+                        # into feedback + break reported retained partial work
+                        # as files_written, or retried the exhausted request.
+                        if isinstance(e, (*SCOPE_PROGRESS_TERMINAL,
+                                          NativeTurnBudgetExhausted)):
                             raise
                         from core.ai_router import is_provider_failure
                         self._record_generation_error(

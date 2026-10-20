@@ -266,7 +266,7 @@ class Harness:
         registration = registration or self.registrations(suffix)
         filename = self.file("registrations" + suffix + ".json", registration)
         result = self.cli("submit", "--registrations", filename, "--purpose", "final-composed-normal",
-                          "--label", suffix or "A", str(self.worktree), SHA)
+                          "--label=" + (suffix or "A"), str(self.worktree), SHA)
         ticket = result.stdout.strip()
         os.mkfifo(self.control / ticket)
         self.controls[ticket] = os.open(self.control / ticket, os.O_RDWR | os.O_NONBLOCK)

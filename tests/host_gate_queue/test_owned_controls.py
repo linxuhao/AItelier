@@ -106,7 +106,8 @@ def test_C06_in_process_transport_stub_is_not_accepted_as_real_client(h):
     bad='''def _state_adapter(expected_driver_id):
     nodes = json.loads(Path(os.environ["QUEUE_NEGATIVE_STUB_NODES"]).read_text())
     class Reply:
-        def __init__(self, value): self.value = value
+        status_code = 200
+        def __init__(self, value): self.value = value; self.content = json.dumps(value).encode()
         def raise_for_status(self): pass
         def json(self): return self.value
     class Stub:

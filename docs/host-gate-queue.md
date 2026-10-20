@@ -133,8 +133,13 @@ requests/decisions at 32, IDs at 128 ASCII characters and reasons at 4000 charac
 Overflow refuses rather than truncates.
 
 Bound recovery adopts only an exact PID/birth/nonce identity or an exact matching
-exit receipt. It never uses a global container-name prefix as ownership. Unknown
-execution becomes `held/recovery_unknown` and blocks further admission where a
+exit receipt. Exact-live adoption records the observed child exit even when no
+native verdict appears; its runner return code remains unknown (`null`). That
+no-verdict outcome stays an infrastructure failure with no native exit/verdict,
+while the retained matching exit receipt permits the controller's genuine final
+physical receipt and deferred terminal State delivery. Failed status alone is
+never quiescence evidence. Recovery never uses a global container-name prefix as
+ownership. Unknown execution becomes `held/recovery_unknown` and blocks further admission where a
 live consumer may remain. Known adopted work finishes once; no automatic retry
 or duplicate launch. Gate exit 1 plus a real manifest remains a delivered native
 red (`done`, `verdict:failed`), distinct from no execution and infrastructure loss.

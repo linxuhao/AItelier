@@ -1021,8 +1021,11 @@ def reconcile_owned(record):
         with mutation_lock():
             current = read_ticket(record["ticket"])
             exitf = report_parent(record["ticket"]) / (SUFFIX + ".gate.exit")
+            # Both outcomes observed the same exact child exit. Its wait status
+            # is unknown after daemon loss; a missing native verdict does not
+            # erase that exit fact or turn it into a product verdict.
+            invocation_exit(current, None)
             if exitf.exists():
-                invocation_exit(current, None)
                 _finalize(current)
             else:
                 current.update(state="failed", error="exact owned invocation exited without verdict", finished_at=now())

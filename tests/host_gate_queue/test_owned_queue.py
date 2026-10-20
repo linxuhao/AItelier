@@ -349,7 +349,7 @@ def test_P18_actual_unwrapped_HTTP_shapes_are_required(h,malformed):
         source=h.attempts["attempt-fixture-source-review"]
         h.attempts["attempt-fixture-source-review"]={"result":source}
     if malformed in ("evidence-object","wrapped-attempt"):
-        h.report(a,rc=5 if malformed=="evidence-object" else 7)
+        h.report(a,rc=7)  # Both fixtures wrap the HTTP result: transport unknown.
         assert not h.write_posts() and h.record(a)["state"]=="queued"
     elif malformed=="missing-me":
         before=h.raw(a); h.finish(h.daemon(),rc=5); assert h.raw(a)==before

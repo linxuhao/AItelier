@@ -222,6 +222,62 @@ def test_the_reason_says_when_attribution_was_never_possible():
     assert line.startswith("tests/unit/test_a.py::test_one")
 
 
+_LONG_RED = ("FAILED tests/unit/test_mcp_transport_security.py::"
+             "test_compose_default_uses_public_host_and_wildcard_port"
+             " - FileNotFoundError")
+
+
+def _persisted_status(monkeypatch, report):
+    """The status column exactly as `_sync_project_status_to_db` writes it."""
+    from core import scheduler
+    line = scheduler._attribution_line(report)
+    monkeypatch.setattr(scheduler, "_test_gate_attribution",
+                        lambda run_id: f"test: {line}")
+    run = {"id": "", "error_reason": "Cycle limit exceeded"}
+    return f"failed:{scheduler._failure_reason(run)[:160]}"
+
+
+@pytest.mark.parametrize("state, must_survive", [
+    ("compared", "1 of 1 failures NEW since the observed baseline"),
+    ("seeded", "seeded: attribution UNKNOWN"),
+    ("unavailable", "unavailable: attribution UNKNOWN"),
+])
+def test_a_long_path_costs_directories_not_the_test_name(monkeypatch, state,
+                                                         must_survive):
+    """Behind the real `failed:Cycle limit exceeded — test: ` prefix and the
+    160-char cap, the complete function name and the state both survive; the
+    redundant `tests/unit/` context is what gets dropped."""
+    status = _persisted_status(monkeypatch, {
+        "passed": False, "failures": [_LONG_RED], "new_failures": [_LONG_RED],
+        "baseline_state": state, "baseline_failures": []})
+    assert status.startswith("failed:Cycle limit exceeded — test: ")
+    assert ("test_compose_default_uses_public_host_and_wildcard_port — "
+            in status)
+    assert must_survive in status
+    assert "tests/unit/" not in status
+
+
+def test_a_short_key_keeps_its_whole_path(monkeypatch):
+    red = "FAILED tests/test_owned.py::test_owned_breakage - assert"
+    status = _persisted_status(monkeypatch, {
+        "passed": False, "failures": [red], "new_failures": [],
+        "baseline_state": "seeded", "baseline_failures": [red]})
+    assert ("test: tests/test_owned.py::test_owned_breakage — "
+            "seeded: attribution UNKNOWN") in status
+
+
+def test_the_display_key_shortens_context_before_identity():
+    from core.scheduler import _display_key
+    short = "tests/test_owned.py::test_owned_breakage"
+    assert _display_key(short) == short
+    deep = ("tests/unit/a/very/deep/tree/test_mod.py::"
+            "test_a_reasonably_named_case")
+    assert _display_key(deep) == "test_mod.py::test_a_reasonably_named_case"
+    long_name = "tests/unit/test_m.py::test_" + "x" * 80
+    assert _display_key(long_name) == ("test_" + "x" * 80)[:60]
+
+
+
 
 def test_a_passing_report_contributes_no_failure_reason():
     from core.scheduler import _attribution_line

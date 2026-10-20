@@ -2319,9 +2319,27 @@ def _attribution_line(report: dict) -> str:
                 f"baseline_state {state[:20]!r})")
     if not named:
         return body
-    # The key goes first and is capped so that, behind the caller's own
+    # The key goes first and is bounded so that, behind the caller's own
     # `failed:<error> — <step>: ` prefix, the state still lands in 160 chars.
-    return f"{_failure_key_of(named[0])[:60]} — {body}"
+    return f"{_display_key(_failure_key_of(named[0]))} — {body}"
+
+
+def _display_key(key: str, cap: int = 60) -> str:
+    """A failure key short enough for the status column, test name intact.
+
+    Redundant path context goes first: the directories, then the file name.
+    The test identity after the first `::` is only cut when it alone exceeds
+    the cap — a long directory prefix never costs the function name.
+    """
+    if len(key) <= cap:
+        return key
+    path, sep, test = key.partition("::")
+    if not sep:
+        return key[:cap]
+    in_file = f"{path.rsplit('/', 1)[-1]}::{test}"
+    if len(in_file) <= cap:
+        return in_file
+    return test[:cap]
 
 
 def _failure_key_of(failure: str) -> str:

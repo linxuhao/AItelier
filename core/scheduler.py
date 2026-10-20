@@ -2654,6 +2654,27 @@ _lease_sweep_reported: dict = {}
 _worktree_sweep_reported: dict = {}
 
 
+_IDLE_RETENTION_REASON_RE = None
+
+
+def _worktree_retention_cause_key(reason: str):
+    """Stable identity of a retained-worktree cause for log coalescing.
+
+    Only the exact `idle <N>s; minimum <M>s` reason emitted by
+    `run_resources.idle_eligible` drops its elapsed seconds (the configured
+    minimum stays part of the key). Every other reason keeps its full text.
+    """
+    global _IDLE_RETENTION_REASON_RE
+    if _IDLE_RETENTION_REASON_RE is None:
+        import re as _re
+        _IDLE_RETENTION_REASON_RE = _re.compile(
+            r"idle (?:0|[1-9][0-9]*)s; minimum ([0-9]+)s", _re.ASCII)
+    m = _IDLE_RETENTION_REASON_RE.fullmatch(reason)
+    if m:
+        return ("idle", m.group(1))
+    return ("reason", reason)
+
+
 def _sweep_ended_leases() -> None:
     """Ask every held lease whether its run is over and quiet. Retain on doubt.
 
@@ -2706,15 +2727,21 @@ def _sweep_ended_leases() -> None:
         logging.getLogger("aitelier.scheduler").warning(
             "worktree reap sweep failed", exc_info=True)
         return
-    # Report only new/changed causes from this same reaper observation.
+    # Report only new/changed causes from this same reaper observation. The
+    # cache stores a cause key, not the raw text: the exact idle-retention
+    # shape produced by run_resources.idle_eligible advances its elapsed
+    # seconds every sweep, which is not a change of cause. Anything else —
+    # including other text containing numbers — is keyed by its full text.
     retained = {item["run_id"]: item.get("reason") or ""
                 for item in reap.get("retained", [])}
+    keys = {rid: _worktree_retention_cause_key(reason)
+            for rid, reason in retained.items()}
     for rid, reason in retained.items():
-        if _worktree_sweep_reported.get(rid) != reason:
+        if _worktree_sweep_reported.get(rid) != keys[rid]:
             tick_log("", "worktree_retained", run=rid,
                      reason=reason[:200].replace("\n", " ").replace("\r", " "))
     _worktree_sweep_reported.clear()
-    _worktree_sweep_reported.update(retained)
+    _worktree_sweep_reported.update(keys)
     for item in reap.get("removed", []):
         tick_log("", "worktree_reaped", run=item["run_id"][:8],
                  reason=(item.get("reason") or "")[:200])

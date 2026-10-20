@@ -8,6 +8,7 @@ import copy
 import importlib.metadata
 import json
 import subprocess
+import tomllib
 from pathlib import Path
 
 import litellm
@@ -41,7 +42,10 @@ def native(*actions):
 
 class Case:
     def __init__(self, tmp, monkeypatch, mode):
-        assert importlib.metadata.version('skillflow-py') == '1.5.97'
+        dependencies = tomllib.loads((Path(__file__).resolve().parents[3] / 'pyproject.toml').read_text())['project']['dependencies']
+        pin, = [dependency.removeprefix('skillflow-py==') for dependency in dependencies
+                if dependency.startswith('skillflow-py==')]
+        assert importlib.metadata.version('skillflow-py') == pin
         monkeypatch.setenv('AITELIER_HOME', str(tmp/'home'))
         monkeypatch.setenv('AITELIER_ZVEC_LIFECYCLE', '0')
         monkeypatch.setenv('AITELIER_LLM_STREAM', '0')

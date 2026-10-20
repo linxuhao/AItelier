@@ -1,8 +1,11 @@
-"""Real Git/SDK delivery and normal runner review; no model or production service."""
+"""Real Git/SDK claims; synthetic receipt assembly and review engine unit seams.
+
+The normal PipelineEngine/receipt path is covered by test_dpe_claimed_review_scope.
+"""
 import json
 import importlib.metadata
 import subprocess
-from dataclasses import replace
+import tomllib
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -14,6 +17,7 @@ from skillflow.workspace import _sanitize_item
 
 from aitelier.runner import AgentStepRunner
 from aitelier.tools.closeout_gate.impl import closeout_gate
+from core.write_scope import card_from_context, scope_from_context
 
 
 def git(repo, *args):
@@ -22,7 +26,10 @@ def git(repo, *args):
 
 class Scenario:
     def __init__(self, tmp_path, monkeypatch):
-        assert importlib.metadata.version('skillflow-py') == '1.5.95'
+        dependencies = tomllib.loads((Path(__file__).resolve().parents[2] / 'pyproject.toml').read_text())['project']['dependencies']
+        pin, = [dependency.removeprefix('skillflow-py==') for dependency in dependencies
+                if dependency.startswith('skillflow-py==')]
+        assert importlib.metadata.version('skillflow-py') == pin
         self.repo = tmp_path / 'repo'; self.repo.mkdir()
         git(self.repo, 'init', '-q'); git(self.repo, 'config', 'user.name', 'Fixture')
         git(self.repo, 'config', 'user.email', 'fixture@example.invalid')
@@ -35,6 +42,7 @@ class Scenario:
                      loop=LoopConfig(source={'step': '3', 'file': 'manifest.json', 'field': 'items'}, item_as='current_task'),
                      transitions=[Transition(to='t_impl', max_loop=20), Transition(to='done')]),
             StepNode(id='t_impl', output_mode='write', output_target='code',
+                     context=[{'step': '3', 'file': 'tasks/$current_task.json', 'required': True}],
                      transitions=[Transition(to='t_impl_review')]),
             StepNode(id='t_impl_review', agent_config='task_implementer_reviewer', output_mode='content',
                      output_fixed={'verdict': {'file': 'review_verdict.json'}},
@@ -47,6 +55,10 @@ class Scenario:
         self.sf.register_graph(graph)
         manifest = self.sf._workspace.get_step_dir('p', graph.name, '3'); manifest.mkdir(parents=True)
         (manifest / 'manifest.json').write_text(json.dumps({'items': ['card_a', 'card_b']}))
+        (manifest / 'tasks').mkdir()
+        for task, path in [('card_a', 'a.txt'), ('card_b', 'b with spaces.txt')]:
+            (manifest / 'tasks' / f'{task}.json').write_text(json.dumps({
+                'id': task, 'owns': [path], 'shared_hotspots': []}))
         self.run = self.sf.create_run(graph.name, {'project_id': 'p'}, project_id='p')
         self.sf.start_run(self.run)
         self.calls = []
@@ -81,6 +93,8 @@ class Scenario:
         step = self.claim('t_impl')
         item = self.sf.get_steps(self.run)
         row = next(r for r in item if r['id'] == step.token.step_instance_id)
+        scope = scope_from_context(step.inputs['_resolved_context'])
+        assert scope.policy == 'task-card' and scope.owns == (path,)
         code = self.sf._code_output(self.run, 't_impl')
         (self.repo / path).parent.mkdir(parents=True, exist_ok=True)
         (self.repo / path).write_text(content)
@@ -89,8 +103,9 @@ class Scenario:
         authority_file = artifact / 'write_scope_receipt.json'
         history = json.loads(authority_file.read_text())['claim_history'] if authority_file.exists() else []
         history.append({'step_instance_id': row['id'], 'claim_epoch': row['claim_epoch']})
-        authority_file.write_text(json.dumps({'run_id': self.run, 'step_id': 't_impl', 'task': row['loop_item'],
-                    'allowed_scope': {'owns': [path], 'shared_hotspots': []},
+        # Unit receipt seam: use the actual declared producer claim's authority.
+        authority_file.write_text(json.dumps({'run_id': step.token.run_id, 'step_id': step.step_id, 'task': scope.task,
+                    'allowed_scope': scope.allowed(),
                     'claim_history': history, 'violations': []}))
         # The current committed receipt is not produced until actual SDK confirmation.
         before = json.loads((artifact / 'code_changes.json').read_text()) if (artifact / 'code_changes.json').exists() else None
@@ -99,11 +114,10 @@ class Scenario:
         receipt = json.loads((artifact / 'code_changes.json').read_text())
         assert receipt['step_instance_id'] == row['id'] and receipt['commit'] == git(self.repo, 'rev-parse', 'HEAD')
         review = self.claim('t_impl_review')
-        card = {'owns': [path]}
-        context = dict(review.inputs.get('_resolved_context', {}))
-        context.update({'[current_task]': row['loop_item'], f'Step 3 — tasks/{row["loop_item"]}.json': card,
-                        '[closeout_gate]': 'initial context source'})
-        review = replace(review, inputs={**review.inputs, '_resolved_context': context})
+        context = review.inputs['_resolved_context']
+        assert context['[current_task]'] == scope.task
+        assert card_from_context(context, scope.task) is None
+        assert scope_from_context(context).policy == 'missing-task-card-deny'
         self.item_dir = artifact; self.receipt = receipt; self.review = review
         return review
 

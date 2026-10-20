@@ -3,6 +3,8 @@
 # Client owns conversation history and sends it with each request.
 # Auth-optional: ownership checks are no-ops when user=None (CLI mode).
 
+from core.checkpoint_observation import observe_checkpoint, checkpoint_phase, checkpoint_failure
+
 import logging
 import re
 
@@ -842,6 +844,7 @@ def state_checkpoint_controller(http_request, run_id, db):
 
 
 @router.post("/{project_id}/checkpoint/approve")
+@observe_checkpoint
 def approve_checkpoint(
     project_id: str,
     request: CheckpointApprovalRequest,
@@ -850,9 +853,12 @@ def approve_checkpoint(
     db: DBManager = Depends(get_db_manager),
 ):
     """Approve a checkpoint and resume the pipeline."""
+    checkpoint_phase("project_lookup", project_id=project_id, run_id=request.run_id,
+                     decision_id=request.decision_id)
     project = db.get_project(project_id)
     if not project:
         raise HTTPException(404, "Project not found")
+    checkpoint_phase("ownership")
     check_write_owner(user, project)
 
     # skillflow's approve_checkpoint(run_id) has NO feedback parameter; only
@@ -876,17 +882,21 @@ def approve_checkpoint(
             f"before launching. Re-send as a rejection, or drop `feedback` if "
             f"you really do mean 'approve as-is'."))
 
+    checkpoint_phase("skillflow")
     sf = get_skillflow()
     run_id = request.run_id
+    checkpoint_phase("run_lookup")
     run = sf.get_run(run_id) if run_id else None
     if not run or run.get("project_id") != project_id:
         raise HTTPException(409, "Approval requires the observed exact run_id for this project")
+    checkpoint_phase("state_controller")
     state_checkpoint_controller(http_request, run_id, db)
     _step_id, _label = request.checkpoint, "Checkpoint"
     if request.rescue_failed:
         # Failure recovery is a different action, never a fallback from an SDK refusal.
         if run.get("status") != "failed":
             raise HTTPException(409, "Only a failed run can be explicitly rescued")
+        checkpoint_phase("rescue_checkpoint_lookup")
         _step_id, _label, _rid, _graph, _inst = _get_checkpoint_info(project_id, run_id)
         if not _step_id or request.checkpoint != _step_id:
             raise HTTPException(409, "Failed-run rescue checkpoint changed")
@@ -894,15 +904,19 @@ def approve_checkpoint(
         # Do not read a fresh checkpoint here or gate on paused: the SDK must
         # compare the reviewed token atomically and replay identical decisions
         # even when this run has already advanced to another checkpoint/ending.
+        checkpoint_phase("sdk_approve")
         try:
             next_node = sf.approve_checkpoint(
                 run_id, expected_checkpoint=request.expected_checkpoint,
                 decision_id=request.decision_id)
         except Exception as exc:
+            checkpoint_failure(exc, translated=True)
             raise HTTPException(409, str(exc)) from exc
         from core.scheduler import _sync_project_status_to_db
+        checkpoint_phase("sync_project_status")
         _sync_project_status_to_db(project_id)
     if request.rescue_failed:
+        checkpoint_phase("rescue_reactivate")
         sf.reactivate_run(run_id)
         from core.run_driver import restore_retry_budget
         # Restoring the budget is best-effort; RESUMING is not. Unguarded, a
@@ -914,17 +928,20 @@ def approve_checkpoint(
         # that resumes with a stale retry count still moves; one that never
         # resumes does not.
         try:
+            checkpoint_phase("rescue_retry_budget")
             restore_retry_budget(sf, run_id)   # see the docstring: reactivate
         except Exception:                      # alone leaves the blocker at max
             logger.warning("restore_retry_budget failed for run %s; resuming "
                            "anyway — the blocked step may re-fail immediately",
                            run_id, exc_info=True)
+        checkpoint_phase("rescue_resume")
         sf.resume_run(run_id)
 
     # Clear the drafting gate: the user approved the brief, so the scheduler
     # is now allowed to pick up this project. Without this, projects created
     # via the meta conversation would be stuck in meta_state='drafting' forever
     # and the scheduler would never create a DPE run for them.
+    checkpoint_phase("clear_drafting")
     db.set_project_meta_state(project_id, None)
 
     # Wake the scheduler and return immediately. Do NOT run the pipeline tick
@@ -937,6 +954,7 @@ def approve_checkpoint(
     # APScheduler, which runs the step decoupled from this request.
     from core.scheduler import wake_scheduler
     import asyncio, json, time, sys
+    checkpoint_phase("scheduler_wake")
     wake_scheduler()
 
     if not request.rescue_failed:
@@ -945,6 +963,7 @@ def approve_checkpoint(
         return {"status": "approved", "checkpoint": request.checkpoint,
                 "run_id": run_id, "decision_id": request.decision_id}
 
+    checkpoint_phase("rescue_resolution")
     # Push the checkpoint_resolved SSE event as a short, non-blocking task.
     try:
         resolved_payload = json.dumps({

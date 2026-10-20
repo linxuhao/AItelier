@@ -71,6 +71,45 @@ def test_retention_messages_are_bounded_but_changes_after_display_limit_are_obse
     assert len(sweep.observe([{**item, "reason": reason + " changed"}])) == 1
 
 
+def test_idle_elapsed_only_repeats_are_coalesced_but_useful_changes_are_logged(sweep):
+    def idle(run_id, elapsed, minimum=86400):
+        return {"run_id": run_id, "reason": f"idle {elapsed}s; minimum {minimum}s"}
+
+    a, b = "idle-run-aaaa-1111", "idle-run-bbbb-2222"
+    first = sweep.observe([idle(a, 100)])
+    assert len(first) == 1 and "reason=idle 100s; minimum 86400s" in first[0]
+    assert sweep.observe([idle(a, 160)]) == []  # elapsed-only change
+    assert sweep.observe([idle(a, 9000)]) == []
+    changed_min = sweep.observe([idle(a, 9060, 172800)])  # minimum changed
+    assert len(changed_min) == 1 and "minimum 172800s" in changed_min[0]
+    assert sweep.observe([idle(a, 9120, 172800)]) == []
+    # A distinct run with the same cause shape is its own first observation.
+    assert len(sweep.observe([idle(a, 9180, 172800), idle(b, 5, 172800)])) == 1
+    # Leaving idle and re-entering it are both visible.
+    other = {"run_id": a, "reason": "unclassified ignored files retained; they may contain evidence"}
+    assert len(sweep.observe([other, idle(b, 65, 172800)])) == 1
+    assert len(sweep.observe([idle(a, 1, 172800), idle(b, 125, 172800)])) == 1
+    # Retirement and reappearance remain new observations.
+    assert sweep.observe([idle(b, 185, 172800)]) == []
+    assert len(sweep.observe([idle(a, 2, 172800), idle(b, 245, 172800)])) == 1
+
+
+def test_numbers_in_non_idle_or_inexact_reasons_are_never_stripped(sweep):
+    run = "numeric-run-0001"
+    assert len(sweep.observe([{"run_id": run, "reason": "cannot establish inactivity: clock 10 skew"}])) == 1
+    assert len(sweep.observe([{"run_id": run, "reason": "cannot establish inactivity: clock 11 skew"}])) == 1
+    assert sweep.observe([{"run_id": run, "reason": "cannot establish inactivity: clock 11 skew"}]) == []
+    assert len(sweep.observe([{"run_id": run, "reason": "3 host write admissions have not retired"}])) == 1
+    assert len(sweep.observe([{"run_id": run, "reason": "4 host write admissions have not retired"}])) == 1
+    # Near-miss shapes of the idle reason keep their full text as the key.
+    assert len(sweep.observe([{"run_id": run, "reason": "idle 10s; minimum 60s extra 1"}])) == 1
+    assert len(sweep.observe([{"run_id": run, "reason": "idle 11s; minimum 60s extra 1"}])) == 1
+    assert len(sweep.observe([{"run_id": run, "reason": "idle 11s; minimum 60s"}])) == 1
+    assert len(sweep.observe([{"run_id": run, "reason": "idle 11.5s; minimum 60s"}])) == 1
+    assert len(sweep.observe([{"run_id": run, "reason": "idle 12.5s; minimum 60s"}])) == 1
+
+
+
 def test_failed_reap_is_not_a_successful_absence_observation(sweep, caplog):
     item = {"run_id": "owned-unknown-run", "reason": "source Git worktree inventory is unavailable"}
     assert len(sweep.observe([item])) == 1

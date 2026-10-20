@@ -248,3 +248,59 @@ def invalidate(root: str) -> None:
     row = ctl.for_root(root)
     if row and row["desired"] == "ready":
         ctl.request(row, "ready", force=True)
+
+
+def _terminal_resource(db, sf, run_id: str) -> dict:
+    """Resolve one trusted host record; callers never supply a filesystem root."""
+    from core import run_isolation as ri
+    rec = ri.record(db, run_id)
+    if (not rec or rec.get("mode") not in (ri.MODE_WORKTREE, ri.MODE_READ_SNAPSHOT)
+            or (rec.get("disposition") or "").startswith(("reaped_", "reaping_"))):
+        raise ValueError("run has no retained managed checkout")
+    row, reason = terminal_quiet(sf, run_id)
+    if row is None:
+        raise ValueError(reason)
+    if (rec["project_id"] != row.get("project_id")
+            or rec["config_name"] != row.get("graph_name")
+            or rec["source_repo"] != ri._source_repo_for(db, rec["project_id"])):
+        raise ValueError("recorded checkout does not match the engine/project binding")
+    validate_checkout(rec, datadir.worktrees_dir())
+    if ri.write_admissions(db, rec["worktree_path"]):
+        raise ValueError("host write admissions have not retired")
+    ri.require_no_foreign_lease(db, rec["worktree_path"], run_id)
+    return rec
+
+
+def semantic_release_status(db, sf, run_id: str) -> dict:
+    """Inspect an exact terminal root without adopting history or creating a ledger."""
+    rec = _terminal_resource(db, sf, run_id)
+    directory = datadir.semantic_index_control_dir()
+    ctl = (IndexControl(directory, datadir.worktrees_dir(), initialize=False)
+           if (directory / "control.sqlite3").exists() else None)
+    ledger = ctl.get(run_id) if ctl else None
+    if ledger and (ledger["root"] != rec["worktree_path"]
+                   or ledger["source"] != rec["source_repo"]):
+        raise ValueError("a run's index ownership cannot change")
+    return {"run_id": run_id, "root": rec["worktree_path"], "ledger": ledger,
+            "release_acknowledged": IndexControl.settled(ledger, "released")}
+
+
+def request_semantic_release(db, sf, run_id: str) -> dict:
+    """Explicit owner demand only; the ordinary worker must acknowledge release.
+
+    This does not release checkout leases, grant discard or run a reaper/index
+    command. Startup/reconcile still do not adopt terminal missing-ledger roots.
+    """
+    from core.semantic_index_control import deployment_admission
+    if not enabled():
+        raise ValueError("semantic resource lifecycle is disabled")
+    rec = _terminal_resource(db, sf, run_id)
+    directory = datadir.semantic_index_control_dir()
+    with deployment_admission(directory):
+        ctl = control()
+        with ctl.lock(run_id):
+            # Recheck after the resource lock; request owns the control lock.
+            rec = _terminal_resource(db, sf, run_id)
+            ledger = ctl.request(rec, "released")
+    return {"run_id": run_id, "root": rec["worktree_path"], "ledger": ledger,
+            "release_acknowledged": ctl.settled(ledger, "released")}

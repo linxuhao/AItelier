@@ -1809,7 +1809,12 @@ _tick_last_skip = 0.0
 _TICK_STUCK_HEARTBEAT_S = 60
 _tick_last_stuck: dict[tuple, float] = {}
 _tick_last_hold = 0.0
-_tick_last_brief = 0.0
+# Waiting for input (`awaiting_brief`, `awaiting_seed`) and the `no_run` the
+# ordinary tick logs right after them. Keyed (outcome, project_id) with a
+# detail signature, so each project and each changed cause is visible at once
+# and an unchanged repeat heartbeats on the existing 60s hold window.
+_TICK_WAIT_OUTCOMES = ("awaiting_brief", "awaiting_seed", "no_run")
+_tick_last_wait: dict[tuple, tuple[tuple, float]] = {}
 # Paused terminal ticks are a per-project repeater too: an unchanged paused run
 # is reported on every poll (20 identical lines in 95s observed live), and at
 # 5s that is 17k lines a day for a project that is not going to move by itself.
@@ -1872,7 +1877,7 @@ def tick_log(project_id: str, outcome: str, **detail) -> None:
     `locked` and `at_capacity` coalesce per project for the same reason: the
     poller reports every in-flight or over-cap project on every poll.
     """
-    global _tick_last_idle, _tick_last_hold, _tick_last_skip, _tick_last_brief
+    global _tick_last_idle, _tick_last_hold, _tick_last_skip
     try:
         paused_key = project_id or "-"
         is_paused = outcome == "terminal" and detail.get("status") == "paused"
@@ -1881,6 +1886,11 @@ def tick_log(project_id: str, outcome: str, **detail) -> None:
             # old heartbeat so a later pause is emitted immediately instead of
             # waiting out a window that started before real progress.
             _tick_last_paused.pop(paused_key, None)
+        if outcome not in _TICK_WAIT_OUTCOMES:
+            # Same rule for waiting: real progress for this project clears its
+            # waiting entries so a return to waiting is emitted immediately.
+            for _w in _TICK_WAIT_OUTCOMES:
+                _tick_last_wait.pop((_w, paused_key), None)
         if outcome == "idle":
             now = _time.time()
             if now - _tick_last_idle < _TICK_IDLE_HEARTBEAT_S:
@@ -1891,11 +1901,22 @@ def tick_log(project_id: str, outcome: str, **detail) -> None:
             if now - _tick_last_hold < _TICK_HOLD_HEARTBEAT_S:
                 return
             _tick_last_hold = now
-        elif outcome == "awaiting_brief":
+        elif outcome in _TICK_WAIT_OUTCOMES:
+            # Normal waiting/no-run outcomes: coalesced per (outcome, project)
+            # on the detail signature. One normal tick can emit
+            # `awaiting_brief` and then `no_run` for the same project, so each
+            # outcome keeps its own entry — a single per-project slot would be
+            # overwritten by its sibling and never suppress anything.
             now = _time.time()
-            if now - _tick_last_brief < _TICK_HOLD_HEARTBEAT_S:
+            wait_key = (outcome, paused_key)
+            signature = tuple(sorted(
+                (k, str(v)) for k, v in detail.items()
+                if v not in (None, "")))
+            previous = _tick_last_wait.get(wait_key)
+            if (previous is not None and previous[0] == signature
+                    and now - previous[1] < _TICK_HOLD_HEARTBEAT_S):
                 return
-            _tick_last_brief = now
+            _tick_last_wait[wait_key] = (signature, now)
         elif is_paused:
             now = _time.time()
             signature = tuple(sorted(

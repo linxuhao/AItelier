@@ -405,12 +405,6 @@ def test_P15_adopted_no_verdict_exit_finishes_deferred_State_delivery_once(h):
     assert completed["failures"]==live["failures"]
     assert sum(e.get("event")=="start" and e["ticket"]==a for e in h.timeline)==1
     assert not h.write_posts(), "daemon exit alone must not forward a terminal State report"
-    # The recovery observer knows this exact child exited, but not its wait status.
-    exit_ref=completed["invocation_exit"]
-    raw=Path(exit_ref["path"]).read_bytes()
-    assert checksum(raw)==exit_ref["sha256"]
-    exit_receipt=json.loads(raw)
-    assert exit_receipt["invocation_identity"]==identity and exit_receipt["runner_rc"] is None
     proof=h.file("owned-child-no-verdict-exit.json",dict(invocation_identity=identity,
         child_exit_ack="pidfd-readable",process_observed_exited=True,no_native_verdict=True))
     physical=h.file("physical-no-verdict.json",dict(ticket=a,source_sha=SHA,
@@ -419,8 +413,18 @@ def test_P15_adopted_no_verdict_exit_finishes_deferred_State_delivery_once(h):
         raw_gate_exit_ref_or_null=None,
         report_scope=dict(attempt_ids=[c["attempt_id"] for c in completed["contexts"]])))
     observation=h.observation(a,observation_id="actual-recovered-no-verdict-completion")
-    result=h.report(a,request="recovered-final-delivery",observation=observation,physical=physical)
+    result=h.report(a,request="recovered-final-delivery",observation=observation,physical=physical,rc=None)
+    h.file("recovered-terminal-delivery-result.json",dict(returncode=result.returncode,
+        stdout=result.stdout,stderr=result.stderr,state_report_posts=len(h.write_posts()),
+        invocation_exit_present="invocation_exit" in completed,child_exit_ack="pidfd-readable"))
+    assert result.returncode==0, "known adopted child exited without native verdict, but truthful terminal delivery refused: " + result.stderr
     assert json.loads(result.stdout)["state_delivery"]=="acknowledged"
+    # The recovery observer knows this exact child exited, but not its wait status.
+    exit_ref=completed["invocation_exit"]
+    raw=Path(exit_ref["path"]).read_bytes()
+    assert checksum(raw)==exit_ref["sha256"]
+    exit_receipt=json.loads(raw)
+    assert exit_receipt["invocation_identity"]==identity and exit_receipt["runner_rc"] is None
     assert len(h.write_posts())==1 and h.write_posts()[0]["body"]["status"]=="failed"
     assert "artifact" not in h.write_posts()[0]["body"] and "artifact_kind" not in h.write_posts()[0]["body"]
     # Identical wrapper replay must not send another terminal State report.

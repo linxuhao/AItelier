@@ -34,15 +34,14 @@ States:
 
 CANCEL. `cancel TICKET --expected-sha SHA --reason TEXT [--actor NAME]` withdraws ONE
 queued ticket that never started (nothing in it but what `submit` wrote, no report
-directory). It takes the daemon's own daemon.lock, non-blocking, so a running daemon
-or a second cancel makes it refuse (rc 4) instead of racing; it never signals or stops
-anything, and a refusal writes nothing. The ticket keeps every original field; the
+directory). It takes mutation.lock, non-blocking, for the short read/check/write
+transition (rc 4 if busy). The daemon keeps daemon.lock for single-instance ownership
+but releases mutation.lock while a gate runs. Cancel never signals or stops anything,
+and a refusal writes nothing. The ticket keeps every original field; the
 exact pre-cancel ticket.json is kept in `cancellation.original_text` with its sha256 in
 `cancellation.original_sha256`. rc: 0 cancelled or already-cancelled, 3 unknown ticket,
-4 lock held, 5 refused (wrong sha, not queued, started, malformed...).
-Undo a cancellation: while holding daemon.lock, write `cancellation.original_text` back
-over ticket.json (its sha256 is the recorded one). Undo this script: restore the
-saved copy of the previous gate_queue.py.
+4 mutation lock held, 5 refused (wrong sha, not queued, started, malformed...).
+A cancelled ticket is terminal; resubmit explicitly if work is wanted again.
 """
 
 from __future__ import annotations
@@ -61,6 +60,7 @@ import subprocess
 import sys
 import time
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -70,6 +70,7 @@ REPORTS = Path(os.environ.get("GATE_QUEUE_REPORTS", HOME / ".AItelier/gate-repor
 GATE_RUN = Path(os.environ.get("GATE_RUN_SH", HOME / ".AItelier/bin/gate_run.sh"))
 TICKETS = ROOT / "tickets"
 LOCK = ROOT / "daemon.lock"
+MUTATION_LOCK = ROOT / "mutation.lock"
 PIDFILE = ROOT / "daemon.pid"
 STOPFILE = ROOT / "stop"
 DAEMON_LOG = ROOT / "daemon.log"
@@ -96,6 +97,15 @@ def log(message: str) -> None:
 
 
 # --- tickets ----------------------------------------------------------------
+
+@contextmanager
+def mutation_lock():
+    """Serialize only ticket transitions, never a gate's execution or adoption wait."""
+    ROOT.mkdir(parents=True, exist_ok=True)
+    with MUTATION_LOCK.open("a") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        yield
+
 
 def ticket_path(ticket: str) -> Path:
     return TICKETS / ticket / "ticket.json"
@@ -146,7 +156,8 @@ def cmd_submit(args) -> int:
         "verdict": None,
         "error": None,
     }
-    write_ticket(record)
+    with mutation_lock():
+        write_ticket(record)
     print(ticket)
     if not daemon_alive():
         print("warning: no gate-queue daemon is running — this ticket stays "
@@ -245,10 +256,9 @@ def cancel_unstarted_problem(record: dict) -> str | None:
 def cmd_cancel(args) -> int:
     """Withdraw ONE queued, never-started ticket, keeping its history.
 
-    Decided entirely under the daemon's own daemon.lock (flock, non-blocking; opened
-    without truncating, so its inode is never replaced). The daemon holds that lock for
-    its whole life, so a running daemon -- or a second cancel -- makes this refuse
-    instead of racing it. A refusal writes nothing; nothing is signalled or stopped."""
+    Decided under mutation.lock (flock, non-blocking; its inode is never replaced).
+    Admission and finalization share this short lock. daemon.lock remains exclusively
+    the daemon's lifetime lock. A refusal writes nothing; nothing is stopped."""
     def refuse(message: str, rc: int = 5) -> int:
         print("refused: %s (nothing was changed)" % message, file=sys.stderr)
         return rc
@@ -263,12 +273,12 @@ def cmd_cancel(args) -> int:
     if not ROOT.is_dir():
         print("unknown ticket: %s (no queue at %s)" % (args.ticket, ROOT), file=sys.stderr)
         return 3
-    fd = os.open(LOCK, os.O_RDWR | os.O_CREAT, 0o644)
+    fd = os.open(MUTATION_LOCK, os.O_RDWR | os.O_CREAT, 0o644)
     try:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            return refuse("another process holds %s (a gate-queue daemon or another cancel)" % LOCK, 4)
+            return refuse("another ticket transition holds %s" % MUTATION_LOCK, 4)
         # Everything below is read, checked and written while holding the lock.
         path = ticket_path(args.ticket)
         try:
@@ -350,7 +360,18 @@ def container_alive(ticket: str) -> bool:
 
 
 def finalize(record: dict, runner_rc: int | None = None) -> dict:
-    """Read the exit FILE (never a pipe — a pipe eats the exit code) and flatten."""
+    """Finish only a fresh running record; stale selections cannot restore a cancel."""
+    with mutation_lock():
+        current = read_ticket(record["ticket"])
+        if current["state"] != "running":
+            return current
+        if record.get("error"):
+            current["error"] = record["error"]
+        return _finalize(current, runner_rc)
+
+
+def _finalize(record: dict, runner_rc: int | None = None) -> dict:
+    """Read the exit FILE and flatten while the caller holds mutation.lock."""
     parent = report_parent(record["ticket"])
     exitf = parent / ("%s.gate.exit" % SUFFIX)
     raw = exitf.read_text().strip() if exitf.exists() else ""
@@ -384,11 +405,16 @@ def finalize(record: dict, runner_rc: int | None = None) -> dict:
     return record
 
 
-def run_one(record: dict) -> None:
-    parent = report_parent(record["ticket"])
-    parent.mkdir(parents=True, exist_ok=True)
-    record.update(state="running", started_at=now(), error=None)
-    write_ticket(record)
+def run_one(record: dict) -> bool:
+    with mutation_lock():
+        # Selection may predate a cancel. Admission must read disk again.
+        record = read_ticket(record["ticket"])
+        if record["state"] != "queued":
+            return False
+        parent = report_parent(record["ticket"])
+        parent.mkdir(parents=True, exist_ok=True)
+        record.update(state="running", started_at=now(), error=None)
+        write_ticket(record)
     log("running %s %s @%s" % (record["ticket"], record["worktree"],
                                record["sha"][:12]))
 
@@ -398,10 +424,13 @@ def run_one(record: dict) -> None:
         record["error"] = ("HEAD is %s, ticket asked for %s — refusing to gate a "
                            "tree that is not the submitted commit"
                            % (head or "<unreadable>", record["sha"]))
-        record.update(state="failed", finished_at=now())
-        write_ticket(record)
+        with mutation_lock():
+            current = read_ticket(record["ticket"])
+            if current["state"] == "running":
+                current.update(state="failed", finished_at=now(), error=record["error"])
+                write_ticket(current)
         log("refused %s: %s" % (record["ticket"], record["error"]))
-        return
+        return True
 
     proc = subprocess.run([str(GATE_RUN), record["worktree"], str(parent), SUFFIX],
                           stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
@@ -409,16 +438,21 @@ def run_one(record: dict) -> None:
     if proc.returncode in (64, 65, 66) or proc.stderr.strip():
         record["error"] = "gate_run.sh rc=%d %s" % (proc.returncode,
                                                     proc.stderr.strip()[:400])
-    finalize(record, proc.returncode)
+    record = finalize(record, proc.returncode)
     log("finished %s state=%s exit=%s" % (record["ticket"], record["state"],
                                           record["gate_exit_code"]))
+    return True
 
 
 def reconcile() -> None:
     """A daemon restart must not lose work. Adopt or requeue in-flight tickets."""
-    for record in all_tickets():
-        if record["state"] != "running":
-            continue
+    with mutation_lock():
+        records = all_tickets()
+    for selected in records:
+        with mutation_lock():
+            record = read_ticket(selected["ticket"])
+            if record["state"] != "running":
+                continue
         exitf = report_parent(record["ticket"]) / ("%s.gate.exit" % SUFFIX)
         if exitf.exists():
             log("adopting finished %s" % record["ticket"])
@@ -431,8 +465,11 @@ def reconcile() -> None:
             finalize(record)
         else:
             log("requeueing %s — nothing is running it" % record["ticket"])
-            record.update(state="queued", started_at=None)
-            write_ticket(record)
+            with mutation_lock():
+                current = read_ticket(record["ticket"])
+                if current["state"] == "running":
+                    current.update(state="queued", started_at=None)
+                    write_ticket(current)
 
 
 def cmd_daemon(args) -> int:
@@ -459,14 +496,15 @@ def cmd_daemon(args) -> int:
     try:
         reconcile()
         while not stopping["now"] and not STOPFILE.exists():
-            pending = [r for r in all_tickets() if r["state"] == "queued"]
+            with mutation_lock():
+                pending = [r for r in all_tickets() if r["state"] == "queued"]
             if not pending:
                 if args.once:
                     break
                 time.sleep(POLL_SECONDS)
                 continue
-            run_one(pending[0])  # FIFO: all_tickets() sorts by submitted_at
-            if args.once:
+            admitted = run_one(pending[0])  # FIFO: all_tickets() sorts by submitted_at
+            if args.once and admitted:
                 break
     finally:
         log("daemon down pid=%d" % os.getpid())
@@ -516,7 +554,7 @@ def main(argv=None) -> int:
     p.set_defaults(func=cmd_list)
 
     p = sub.add_parser("cancel", help="withdraw one queued, never-started ticket "
-                                      "(takes daemon.lock; refuses while a daemon runs)")
+                                      "(takes the short mutation.lock; never stops running work)")
     p.add_argument("ticket")
     p.add_argument("--expected-sha", required=True,
                    help="the full commit sha the ticket was submitted for")

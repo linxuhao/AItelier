@@ -2276,39 +2276,106 @@ def _test_gate_attribution(run_id: str) -> str:
 
 
 def _attribution_line(report: dict) -> str:
-    """One line: how many reds, how many are the ROUND's, what the baseline was.
+    """One short line: the red test, the baseline state, what that can claim.
 
-    Front-loaded because the caller's caller truncates the whole reason to 160
-    characters for the DB status column — the counts and the baseline state
-    have to survive that cut, the failure names are a bonus.
+    Front-loaded because the caller's caller keeps only the first 160
+    characters of the whole reason for the DB status column (after a
+    `failed:` prefix and the run's own error text). The first failing test key
+    therefore comes FIRST, then the state and `attribution UNKNOWN` where it
+    applies; a long wording ahead of the test name would push the one thing a
+    reader can act on out of the column.
+
+    What each `baseline_state` may honestly say (see `_apply_baseline`):
+
+      * `compared` — a baseline file already existed and this run diffed
+        against it: "N of M failures NEW since the observed baseline". That is
+        a change since the snapshot that was observed, NOT a statement about
+        the whole round: the snapshot is per worktree and was first observed
+        at some earlier run.
+      * `seeded` — this run TOOK the snapshot from its own failures: the first
+        observation. The report carries no timestamp or ordering relative to
+        the round's edits, so it proves neither "before" nor "after";
+        `new_failures` is empty by construction. Attribution UNKNOWN. (In
+        `configs/coding_impl.yaml` the `baseline` step, with
+        `prechange_capture`, runs before `implement` and the `test` step reads
+        it through `prechange_from` — that is a separate machine protocol; this
+        generic state alone does not say which run took the snapshot.)
+      * `unavailable` — no `state_dir` (step lacks `capability: stateful`).
+      * `unreadable` — corrupt baseline file or unkeyable failure identities.
+      * `unmeasured` — no trustworthy verdict (storage refusal, declared
+        absence, non-zero exit with no failure identities).
+      * anything else / missing — the report carries no usable state.
+
+    Each says its own cause; none is folded into another's wording.
     """
     if not isinstance(report, dict) or report.get("passed") is not False:
         return ""
     failures = [str(f) for f in (report.get("failures") or [])]
     new = [str(f) for f in (report.get("new_failures") or [])]
-    state = str(report.get("baseline_state") or "absent")
+    raw_state = report.get("baseline_state")
+    state = str(raw_state) if raw_state else "absent"
     known = len(report.get("baseline_failures") or [])
-    if state in ("seeded", "compared"):
-        head = (f"{len(new)} of {len(failures)} failures are NEW this round "
-                f"(baseline {state}, {known} known-red)")
+    err = " ".join(str(report.get("baseline_error") or "").split())[:60]
+    n = len(failures)
+    named = failures
+    if state == "compared":
+        body = (f"{len(new)} of {n} failures NEW since the observed baseline "
+                f"(compared, {known} known-red)")
         named = new or failures
+    elif state == "seeded":
+        body = f"seeded: attribution UNKNOWN (first observed; {n} failed)"
+    elif state == "unavailable":
+        body = (f"unavailable: attribution UNKNOWN "
+                f"({n} failed; no state_dir)")
+    elif state == "unreadable":
+        body = (f"unreadable: attribution UNKNOWN ({n} failed"
+                + (f"; {err}" if err else "") + ")")
+    elif state == "unmeasured":
+        body = (f"unmeasured: attribution UNKNOWN ({n} failed"
+                + (f"; {err}" if err else "") + ")")
+    elif state == "absent":
+        body = f"attribution UNKNOWN ({n} failed; no baseline_state)"
     else:
-        head = (f"{len(failures)} failures, attribution UNKNOWN — no baseline "
-                f"was taken ({state}); the step declares no "
-                f"`capability: stateful`")
-        named = failures
+        body = (f"attribution UNKNOWN ({n} failed; "
+                f"baseline_state {state[:20]!r})")
     if not named:
-        return head
-    return head + ": " + "; ".join(_failure_key_of(f) for f in named[:3])
+        return body
+    # The key goes first and is bounded so that, behind the caller's own
+    # `failed:<error> — <step>: ` prefix, the state still lands in 160 chars.
+    return f"{_display_key(_failure_key_of(named[0]))} — {body}"
+
+
+def _display_key(key: str, cap: int = 60) -> str:
+    """A failure key short enough for the status column, test name intact.
+
+    Redundant path context goes first: the directories, then the file name.
+    The test identity after the first `::` is only cut when it alone exceeds
+    the cap — a long directory prefix never costs the function name.
+    """
+    if len(key) <= cap:
+        return key
+    path, sep, test = key.partition("::")
+    if not sep:
+        return key[:cap]
+    in_file = f"{path.rsplit('/', 1)[-1]}::{test}"
+    if len(in_file) <= cap:
+        return in_file
+    return test[:cap]
 
 
 def _failure_key_of(failure: str) -> str:
-    """The run-to-run-stable identity of a failure line, or a short prefix."""
+    """The run-to-run-stable identity of a failure line, UNBOUNDED.
+
+    No cap here: a deep pytest path can exceed any fixed prefix length, and
+    cutting before `_display_key` sees the key would erase the test name it
+    exists to keep. The only bound is the one `_display_key` applies to the
+    final displayed text.
+    """
     try:
         from aitelier.tools.run_tests.impl import _failure_key
-        return _failure_key(failure)[:120]
+        return _failure_key(failure)
     except Exception:
-        return " ".join(str(failure).split())[:120]
+        return " ".join(str(failure).split())
 
 
 def _last_trace_error(run_id: str) -> str:

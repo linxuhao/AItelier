@@ -200,11 +200,12 @@ def test_a_cycle_limit_reason_names_the_reds_and_the_baseline():
         "baseline_state": "compared",
         "baseline_failures": ["a", "b"],
     })
-    assert "0 of 2 failures are NEW" in line
-    assert "baseline compared, 2 known-red" in line
+    assert "0 of 2 failures NEW since the observed baseline" in line
+    assert "compared, 2 known-red" in line
+    assert "this round" not in line      # a compared run does not exonerate the round
     assert "test_compose_default_uses_public_host_and_wildcard_port" in line
     # The DB status column keeps 160 characters; the counts must be inside it.
-    assert "0 of 2 failures are NEW" in line[:160]
+    assert "0 of 2 failures NEW since the observed baseline" in line[:160]
 
 
 def test_the_reason_says_when_attribution_was_never_possible():
@@ -217,8 +218,91 @@ def test_the_reason_says_when_attribution_was_never_possible():
         "baseline_failures": [],
     })
     assert "attribution UNKNOWN" in line
-    assert "capability: stateful" in line
-    assert "tests/unit/test_a.py::test_one" in line
+    assert "unavailable" in line and "no state_dir" in line
+    assert line.startswith("tests/unit/test_a.py::test_one")
+
+
+_LONG_RED = ("FAILED tests/unit/test_mcp_transport_security.py::"
+             "test_compose_default_uses_public_host_and_wildcard_port"
+             " - FileNotFoundError")
+
+
+def _persisted_status(monkeypatch, report):
+    """The status column exactly as `_sync_project_status_to_db` writes it."""
+    from core import scheduler
+    line = scheduler._attribution_line(report)
+    monkeypatch.setattr(scheduler, "_test_gate_attribution",
+                        lambda run_id: f"test: {line}")
+    run = {"id": "", "error_reason": "Cycle limit exceeded"}
+    return f"failed:{scheduler._failure_reason(run)[:160]}"
+
+
+@pytest.mark.parametrize("state, must_survive", [
+    ("compared", "1 of 1 failures NEW since the observed baseline"),
+    ("seeded", "seeded: attribution UNKNOWN"),
+    ("unavailable", "unavailable: attribution UNKNOWN"),
+])
+def test_a_long_path_costs_directories_not_the_test_name(monkeypatch, state,
+                                                         must_survive):
+    """Behind the real `failed:Cycle limit exceeded — test: ` prefix and the
+    160-char cap, the complete function name and the state both survive; the
+    redundant `tests/unit/` context is what gets dropped."""
+    status = _persisted_status(monkeypatch, {
+        "passed": False, "failures": [_LONG_RED], "new_failures": [_LONG_RED],
+        "baseline_state": state, "baseline_failures": []})
+    assert status.startswith("failed:Cycle limit exceeded — test: ")
+    assert ("test_compose_default_uses_public_host_and_wildcard_port — "
+            in status)
+    assert must_survive in status
+    assert "tests/unit/" not in status
+
+
+def test_a_short_key_keeps_its_whole_path(monkeypatch):
+    red = "FAILED tests/test_owned.py::test_owned_breakage - assert"
+    status = _persisted_status(monkeypatch, {
+        "passed": False, "failures": [red], "new_failures": [],
+        "baseline_state": "seeded", "baseline_failures": [red]})
+    assert ("test: tests/test_owned.py::test_owned_breakage — "
+            "seeded: attribution UNKNOWN") in status
+
+
+def test_the_display_key_shortens_context_before_identity():
+    from core.scheduler import _display_key
+    short = "tests/test_owned.py::test_owned_breakage"
+    assert _display_key(short) == short
+    deep = ("tests/unit/a/very/deep/tree/test_mod.py::"
+            "test_a_reasonably_named_case")
+    assert _display_key(deep) == "test_mod.py::test_a_reasonably_named_case"
+    long_name = "tests/unit/test_m.py::test_" + "x" * 80
+    assert _display_key(long_name) == ("test_" + "x" * 80)[:60]
+
+
+_DEEP_KEY = ("tests/integration/component_lifecycle/nested_context_scenarios/"
+             "with_shared_fixtures/and_parametrized_matrix/"
+             "test_deep_owned_module.py::test_deep_owned_breakage")
+
+
+def test_a_deep_path_over_120_chars_keeps_the_test_name(monkeypatch):
+    """The parsed identity reaches display selection whole.
+
+    A realistic nested path longer than 120 characters used to be cut by
+    `_failure_key_of` BEFORE `_display_key` could drop directories, so the
+    status showed only directory bytes and lost `test_deep_owned_breakage`.
+    """
+    from core.scheduler import _failure_key_of
+    red = f"FAILED {_DEEP_KEY} - assert 1 == 2"
+    assert len(_DEEP_KEY) > 120
+    assert _failure_key_of(red) == _DEEP_KEY
+    status = _persisted_status(monkeypatch, {
+        "passed": False, "failures": [red], "new_failures": [],
+        "baseline_state": "seeded", "baseline_failures": [red]})
+    assert status.startswith("failed:Cycle limit exceeded — test: ")
+    assert ("test: test_deep_owned_module.py::test_deep_owned_breakage — "
+            "seeded: attribution UNKNOWN") in status
+    assert "nested_context_scenari" not in status
+    assert len(status) <= 167  # `failed:` + the 160-char reason
+
+
 
 
 def test_a_passing_report_contributes_no_failure_reason():
@@ -264,7 +348,7 @@ def test_the_reason_reads_the_report_the_run_itself_recorded(tmp_path,
     monkeypatch.setattr("api.dependencies.get_skillflow", lambda: _SF())
     detail = scheduler._test_gate_attribution("run-x")
     assert detail.startswith("test: ")
-    assert "0 of 1 failures are NEW" in detail
+    assert "0 of 1 failures NEW since the observed baseline" in detail
 
 
 def test_no_run_tests_call_in_the_trace_yields_no_attribution(monkeypatch):
@@ -277,3 +361,162 @@ def test_no_run_tests_call_in_the_trace_yields_no_attribution(monkeypatch):
 
     monkeypatch.setattr("api.dependencies.get_skillflow", lambda: _SF())
     assert scheduler._test_gate_attribution("run-x") == ""
+
+
+# ── temporal provenance of the snapshot (seeded is not a pre-edit baseline) ────
+
+_RED = "FAILED tests/unit/test_a.py::test_one - boom"
+
+
+def _real_report(state_dir, failures=(_RED,)):
+    """A report shaped like run_tests', baseline fields from the REAL function."""
+    from aitelier.tools.run_tests.impl import _apply_baseline
+    report = {"passed": False, "returncode": 1, "failures": list(failures)}
+    _apply_baseline(report, state_dir)
+    return report
+
+
+def test_a_seeded_report_says_attribution_unknown_not_zero_new(tmp_path):
+    from core.scheduler import _attribution_line
+
+    report = _real_report(str(tmp_path))
+    assert report["baseline_state"] == "seeded"
+    assert report["new_failures"] == []          # machine behaviour preserved
+    line = _attribution_line(report)
+    assert "seeded: attribution UNKNOWN" in line
+    assert "NEW" not in line                     # no "0 of N NEW" exoneration
+    assert "first observed" in line
+    assert "tests/unit/test_a.py::test_one" in line
+    assert len(line) < 120                       # short enough to survive the cut
+
+
+def test_a_later_compared_report_counts_changes_since_the_snapshot(tmp_path):
+    from core.scheduler import _attribution_line
+
+    _real_report(str(tmp_path))                  # first observation seeds
+    second = "FAILED tests/unit/test_b.py::test_two - bang"
+    report = _real_report(str(tmp_path), failures=(_RED, second))
+    assert report["baseline_state"] == "compared"
+    line = _attribution_line(report)
+    assert "1 of 2 failures NEW since the observed baseline" in line
+    assert "attribution UNKNOWN" not in line
+    assert "test_b.py::test_two" in line
+
+
+def test_no_state_dir_is_unavailable_not_an_empty_measured_baseline():
+    from core.scheduler import _attribution_line
+
+    report = _real_report("")
+    assert report["baseline_state"] == "unavailable"
+    assert report["baseline_failures"] == []
+    line = _attribution_line(report)
+    assert "attribution UNKNOWN" in line
+    assert "unavailable" in line and "no state_dir" in line
+
+
+
+def test_unreadable_unmeasured_and_missing_each_state_their_own_cause(tmp_path):
+    from core.scheduler import _attribution_line
+    from aitelier.tools.run_tests.impl import BASELINE_FILE
+
+    (tmp_path / BASELINE_FILE).write_text("{not json", encoding="utf-8")
+    unreadable = _real_report(str(tmp_path))
+    assert unreadable["baseline_state"] == "unreadable"
+    u_line = _attribution_line(unreadable)
+    assert "unreadable" in u_line and "unavailable" not in u_line
+
+    m_line = _attribution_line({
+        "passed": False, "failures": [_RED], "baseline_state": "unmeasured",
+        "baseline_error": "non-zero result (rc=2) without usable failure identities"})
+    assert "unmeasured" in m_line and "unavailable" not in m_line
+    assert "rc=2" in m_line
+
+    a_line = _attribution_line({"passed": False, "failures": [_RED]})
+    assert "no baseline_state" in a_line and "unavailable" not in a_line
+
+
+
+def _stored_reason(tmp_path, monkeypatch, report, run_id):
+    """Write `report` where the trace says run_tests wrote it; return the
+    reason the project-status consumer would persist (`failed:` + [:160])."""
+    from core import scheduler
+
+    out_dir = tmp_path / "coding_impl" / "test"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "test_report.json").write_text(json.dumps(report), encoding="utf-8")
+
+    rows = [{"step_id": "test", "payload_json": json.dumps(
+        {"params": {"out_dir": str(out_dir), "step_name": "run_tests"}})}]
+
+    class _SF:
+        def trace_query(self, run_id, sql, args):
+            return rows
+
+    monkeypatch.setattr("api.dependencies.get_skillflow", lambda: _SF())
+    scheduler._failure_reason_cache.pop(run_id, None)
+    reason = scheduler._failure_reason(
+        {"id": run_id, "error_reason": "Cycle limit exceeded"})
+    scheduler._failure_reason_cache.pop(run_id, None)
+    return f"failed:{reason}"[:160]
+
+
+_OWNED = "FAILED tests/test_owned.py::test_owned_breakage - AssertionError"
+_OWNED_KEY = "tests/test_owned.py::test_owned_breakage"
+
+
+def test_the_stored_seeded_report_reaches_the_failure_reason(tmp_path,
+                                                             monkeypatch):
+    """report on disk -> trace out_dir -> _failure_reason -> status prefix."""
+    report = _real_report(str(tmp_path / "state"), failures=(_OWNED,))
+    assert report["baseline_state"] == "seeded"
+    persisted = _stored_reason(tmp_path, monkeypatch, report, "run-seeded")
+    assert len(persisted) <= 160
+    # the useful test identity AND the state survive the real 160-char prefix
+    assert _OWNED_KEY in persisted
+    assert "seeded" in persisted and "attribution UNKNOWN" in persisted
+    assert "NEW" not in persisted
+    assert "after the edits" not in persisted
+    assert "pre-existing" not in persisted
+
+
+def test_the_stored_unavailable_report_keeps_the_test_key_in_the_prefix(
+        tmp_path, monkeypatch):
+    report = _real_report("", failures=(_OWNED,))
+    assert report["baseline_state"] == "unavailable"
+    persisted = _stored_reason(tmp_path, monkeypatch, report, "run-unavail")
+    assert _OWNED_KEY in persisted
+    assert "unavailable" in persisted and "attribution UNKNOWN" in persisted
+
+
+def test_the_stored_compared_report_counts_change_since_the_snapshot(
+        tmp_path, monkeypatch):
+    state = str(tmp_path / "state")
+    _real_report(state, failures=(_RED,))                 # first observation
+    report = _real_report(state, failures=(_RED, _OWNED))  # genuine later run
+    assert report["baseline_state"] == "compared"
+    persisted = _stored_reason(tmp_path, monkeypatch, report, "run-compared")
+    assert "1 of 2 failures NEW since the observed baseline" in persisted
+    assert _OWNED_KEY in persisted
+    assert "attribution UNKNOWN" not in persisted
+
+
+def test_a_seeded_line_makes_no_universal_after_edit_or_exoneration_claim(
+        tmp_path):
+    from core.scheduler import _attribution_line
+
+    line = _attribution_line(_real_report(str(tmp_path), failures=(_OWNED,)))
+    for banned in ("after the edit", "before the edit", "pre-edit",
+                   "pre-existing", "0 of", "NEW"):
+        assert banned not in line
+    assert line.startswith(_OWNED_KEY)
+
+
+def test_wiring_control_the_reason_path_calls_the_attribution_line(monkeypatch):
+    """If the caller stops using `_attribution_line` the reason loses it."""
+    import inspect
+    from core import scheduler
+
+    assert "_attribution_line(report)" in inspect.getsource(
+        scheduler._test_gate_attribution)
+    assert "_test_gate_attribution(run_id)" in inspect.getsource(
+        scheduler._failure_reason)

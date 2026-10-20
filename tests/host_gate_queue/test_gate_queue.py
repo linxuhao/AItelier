@@ -102,7 +102,8 @@ class Queue:
         return result
 
     def submit(self, label):
-        ticket = self.cli("submit", str(self.worktree), self.sha, "--label", label).stdout.strip()
+        ticket = self.cli("submit-unowned", str(self.worktree), self.sha, "--label", label,
+                          "--unowned-reason", "fixture").stdout.strip()
         fifo = self.control / ticket
         os.mkfifo(fifo)
         self.controls[ticket] = os.open(fifo, os.O_RDWR | os.O_NONBLOCK)

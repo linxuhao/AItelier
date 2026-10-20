@@ -2343,12 +2343,18 @@ def _display_key(key: str, cap: int = 60) -> str:
 
 
 def _failure_key_of(failure: str) -> str:
-    """The run-to-run-stable identity of a failure line, or a short prefix."""
+    """The run-to-run-stable identity of a failure line, UNBOUNDED.
+
+    No cap here: a deep pytest path can exceed any fixed prefix length, and
+    cutting before `_display_key` sees the key would erase the test name it
+    exists to keep. The only bound is the one `_display_key` applies to the
+    final displayed text.
+    """
     try:
         from aitelier.tools.run_tests.impl import _failure_key
-        return _failure_key(failure)[:120]
+        return _failure_key(failure)
     except Exception:
-        return " ".join(str(failure).split())[:120]
+        return " ".join(str(failure).split())
 
 
 def _last_trace_error(run_id: str) -> str:

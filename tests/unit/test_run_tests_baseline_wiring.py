@@ -277,6 +277,32 @@ def test_the_display_key_shortens_context_before_identity():
     assert _display_key(long_name) == ("test_" + "x" * 80)[:60]
 
 
+_DEEP_KEY = ("tests/integration/component_lifecycle/nested_context_scenarios/"
+             "with_shared_fixtures/and_parametrized_matrix/"
+             "test_deep_owned_module.py::test_deep_owned_breakage")
+
+
+def test_a_deep_path_over_120_chars_keeps_the_test_name(monkeypatch):
+    """The parsed identity reaches display selection whole.
+
+    A realistic nested path longer than 120 characters used to be cut by
+    `_failure_key_of` BEFORE `_display_key` could drop directories, so the
+    status showed only directory bytes and lost `test_deep_owned_breakage`.
+    """
+    from core.scheduler import _failure_key_of
+    red = f"FAILED {_DEEP_KEY} - assert 1 == 2"
+    assert len(_DEEP_KEY) > 120
+    assert _failure_key_of(red) == _DEEP_KEY
+    status = _persisted_status(monkeypatch, {
+        "passed": False, "failures": [red], "new_failures": [],
+        "baseline_state": "seeded", "baseline_failures": [red]})
+    assert status.startswith("failed:Cycle limit exceeded — test: ")
+    assert ("test: test_deep_owned_module.py::test_deep_owned_breakage — "
+            "seeded: attribution UNKNOWN") in status
+    assert "nested_context_scenari" not in status
+    assert len(status) <= 167  # `failed:` + the 160-char reason
+
+
 
 
 def test_a_passing_report_contributes_no_failure_reason():

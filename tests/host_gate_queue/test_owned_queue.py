@@ -10,6 +10,7 @@ import fcntl
 import hashlib
 import json
 import os
+import select
 from pathlib import Path
 import subprocess
 
@@ -368,3 +369,64 @@ def test_P09_authoritative_State_failed_without_product_fail_report_can_keep_bas
              purpose="baseline-evidence:comparison",authority="attempt-fixture-one")
     h.complete(a)
     assert h.record(a)["active_context_ids"]==[] and h.record(a)["verdict"]=="passed"
+
+
+def test_P15_adopted_no_verdict_exit_finishes_deferred_State_delivery_once(h):
+    # The original P15 checked state/no-rerun but omitted completion delivery.
+    # Exercise the same real child through daemon loss, adoption and final report.
+    a=h.submit()
+    original=h.daemon()
+    start=h.event("start",a)
+    identity=h.record(a)["invocation_identity"]
+    assert identity["pid"]==start["identity"]["pid"] and identity["birth"]
+    assert identity["nonce"]==start["identity"]["nonce"]
+    h.report(a,rc=6)
+    live=h.record(a)
+    assert live["state"]=="running" and not h.write_posts()
+    assert live["excluded_context_ids"]==["attempt-fixture-one"]
+    assert len(live["contexts"])==5 and len(live["active_context_ids"])==4
+    assert live["state_delivery_by_context"]["attempt-fixture-one"]["state_delivery"]=="deferred-live"
+    original.kill()  # Only this fixture's owned daemon; the same child remains live.
+    h.finish(original,rc=-9)
+    adopted=h.daemon()
+    h.log_event(adopted,"adopting exact owned invocation")
+    assert h.record(a)["invocation_identity"]==identity and not h.write_posts()
+    h.release(a,"noverdict")
+    h.event("finish",a)
+    h.finish(adopted)
+    assert h.child_pidfds and all(select.select([fd],[],[],TIMEOUT)[0] for fd in h.child_pidfds), "owned child exit was not acknowledged"
+    completed=h.record(a)
+    assert completed["state"]=="failed"
+    assert completed["gate_exit_code"] is completed["verdict"] is completed["report_dir"] is None
+    assert not (h.reports/a/"gate.gate.exit").exists() and not (h.reports/a/"manifest.json").exists()
+    assert completed["invocation_identity"]==identity
+    assert completed["excluded_context_ids"]==live["excluded_context_ids"]
+    assert completed["active_context_ids"]==live["active_context_ids"]
+    assert completed["failures"]==live["failures"]
+    assert sum(e.get("event")=="start" and e["ticket"]==a for e in h.timeline)==1
+    assert not h.write_posts(), "daemon exit alone must not forward a terminal State report"
+    # The recovery observer knows this exact child exited, but not its wait status.
+    exit_ref=completed["invocation_exit"]
+    raw=Path(exit_ref["path"]).read_bytes()
+    assert checksum(raw)==exit_ref["sha256"]
+    exit_receipt=json.loads(raw)
+    assert exit_receipt["invocation_identity"]==identity and exit_receipt["runner_rc"] is None
+    proof=h.file("owned-child-no-verdict-exit.json",dict(invocation_identity=identity,
+        child_exit_ack="pidfd-readable",process_observed_exited=True,no_native_verdict=True))
+    physical=h.file("physical-no-verdict.json",dict(ticket=a,source_sha=SHA,
+        invocation_identity=identity,outcome="owned-quiescent",
+        actual_ownership_refs_and_sha256=[dict(path=proof,sha256=checksum(Path(proof).read_bytes()))],
+        raw_gate_exit_ref_or_null=None,
+        report_scope=dict(attempt_ids=[c["attempt_id"] for c in completed["contexts"]])))
+    observation=h.observation(a,observation_id="actual-recovered-no-verdict-completion")
+    result=h.report(a,request="recovered-final-delivery",observation=observation,physical=physical)
+    assert json.loads(result.stdout)["state_delivery"]=="acknowledged"
+    assert len(h.write_posts())==1 and h.write_posts()[0]["body"]["status"]=="failed"
+    assert "artifact" not in h.write_posts()[0]["body"] and "artifact_kind" not in h.write_posts()[0]["body"]
+    # Identical wrapper replay must not send another terminal State report.
+    h.report(a,request="recovered-final-delivery",observation=observation,physical=physical)
+    assert len(h.write_posts())==1 and not any("record_evidence" in r["path"] for r in h.requests)
+    final=h.record(a)
+    assert final["excluded_context_ids"]==live["excluded_context_ids"] and final["failures"]==live["failures"]
+    assert final["gate_exit_code"] is final["verdict"] is None
+    assert original.poll() is not None and adopted.poll() is not None

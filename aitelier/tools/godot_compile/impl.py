@@ -150,6 +150,82 @@ def _write_playtest_summary(target_dir: Path, pt: dict) -> None:
         "\n".join(lines), encoding="utf-8")
 
 
+def _split_phase_diagnostics(report: dict, target_dir: Path, owner: dict) -> None:
+    """Keep the builder's raw per-pass evidence out of the prompt-facing report.
+
+    compile_report.json is inlined into reviewer and PM prompts; raw Godot
+    streams belong beside it, whole, in ``compile_diagnostics.json`` (same
+    reachable-by-read-tool arrangement as playtest_report.json). The report keeps
+    an index — outcome, return code and stream sizes per pass — so a reader sees
+    which passes ran and where the raw text is. Nothing is cut: the file carries
+    every stream exactly as the builder returned it, ``null`` for a pass that
+    never ran. ``request_ids_match`` says whether the builder echoed the identity
+    this call sent, so evidence from another invocation cannot pass as this one's
+    (None when the call sent no identity to compare).
+    """
+    diag = report.get("compile_diagnostics")
+    # A file left by an earlier cycle must not stand in for evidence this call
+    # never obtained (no project, builder unreachable, builder predating this).
+    (target_dir / "compile_diagnostics.json").unlink(missing_ok=True)
+    if not isinstance(diag, dict):
+        return
+    (target_dir / "compile_diagnostics.json").write_text(
+        json.dumps(diag, indent=2), encoding="utf-8")
+    index = {k: v for k, v in diag.items() if k != "phases"}
+    index["evidence_file"] = "compile_diagnostics.json"
+    index["request_ids_match"] = (all(diag.get(k) == v for k, v in owner.items())
+                                  if owner else None)
+    index["phases"] = [
+        {**{k: v for k, v in phase.items() if k not in ("stdout", "stderr")},
+         **{f"{stream}_chars": (None if phase.get(stream) is None else len(phase[stream]))
+            for stream in ("stdout", "stderr")}}
+        for phase in diag.get("phases") or []]
+    report["compile_diagnostics"] = index
+
+
+
+def _refuse_incomplete_pass(report: dict) -> None:
+    """Never accept ``passed: true`` that the report's own phase record denies.
+
+    The builder derives completion from the real subprocess outcomes; this
+    consumer re-checks the raw record it received, so a builder that still
+    equated "no parsed error lines" with success cannot authorize a pass. Only
+    the authoritative phases count (warm import, explicit reparse); the cold
+    import is diagnostic. The one exemption is the builder's own explicit
+    ``no_project`` answer (nothing to compile, nothing ran). Every other pass
+    must carry the phase record that observed it: a pass with NO record is an
+    unobserved authoritative witness, not a clean one, and is refused through
+    the same truthful infrastructure-unavailable (unmeasured) fields.
+    """
+    if report.get("passed") is not True or report.get("no_project"):
+        return
+    diag = report.get("compile_diagnostics")
+    raw_phases = diag.get("phases") if isinstance(diag, dict) else None
+    phases = {p.get("phase"): p for p in raw_phases or [] if isinstance(p, dict)}
+    reasons = []
+    if not phases:
+        reasons.append("no compile phase record accompanied the pass "
+                       "(authoritative warm import and explicit reparse unobserved)")
+    else:
+        for name in ("warm_import", "explicit_reparse"):
+            phase = phases.get(name)
+            if phase is None:
+                reasons.append(f"{name} missing from the phase record")
+            elif phase.get("outcome") != "exited" or phase.get("returncode") != 0:
+                reasons.append("%s %s (returncode %s)" % (
+                    name, phase.get("outcome"), phase.get("returncode")))
+
+    if not reasons:
+        return
+    report.update(passed=False, execution_complete=False,
+                  incomplete_reasons=reasons,
+                  infrastructure_unavailable=True,
+                  evidence_state="infrastructure_unavailable",
+                  summary="GDScript compilation INCOMPLETE (%s) — NOT verified, "
+                          "not a pass." % "; ".join(reasons))
+
+
+
 def _godot_compile_unstamped(*, project_root: str = "", out_dir: str = "",
                              workspace_root: str = "", project_id: str = "",
                              run_id: str = "", step_id: str = "",
@@ -160,6 +236,7 @@ def _godot_compile_unstamped(*, project_root: str = "", out_dir: str = "",
     repo = Path(project_root or workspace_root).resolve()
     report = {"passed": True, "returncode": 0, "file_count": 0,
               "errors": [], "warning_count": 0, "summary": ""}
+    owner = {}
 
     if not repo.exists():
         report.update(passed=False, summary=f"Project root not found: {repo}")
@@ -199,6 +276,7 @@ def _godot_compile_unstamped(*, project_root: str = "", out_dir: str = "",
             report["summary"] = (
                 external_deps.unreachable("GODOT_BUILDER_URL", _BUILDER_URL, e)
                 + " Compile gate skipped — GDScript NOT verified.")
+        _refuse_incomplete_pass(report)
         # The sidecar says there is no Godot project at a path where THIS
         # process just stat'd project.godot. It is not looking at the same
         # bytes we are — a bind mount whose source directory was replaced keeps
@@ -218,6 +296,7 @@ def _godot_compile_unstamped(*, project_root: str = "", out_dir: str = "",
 
     target_dir = Path(out_dir) if out_dir else repo
     target_dir.mkdir(parents=True, exist_ok=True)
+    _split_phase_diagnostics(report, target_dir, owner)
     (target_dir / "compile_report.json").write_text(
         json.dumps(report, indent=2), encoding="utf-8")
 
@@ -241,6 +320,9 @@ def _godot_compile_unstamped(*, project_root: str = "", out_dir: str = "",
                 encoding="utf-8")
     else:
         reason = ("Parse failed — play-test skipped (fix parse errors first)."
+                  if not report.get("passed", True)
+                  and report.get("execution_complete") is not False
+                  else "Compilation did not complete — play-test skipped (not a pass)."
                   if not report.get("passed", True)
                   else "No project.godot — not a Godot project; play-test skipped.")
         skipped = {"passed": report.get("passed", True), "frames": 0,
@@ -285,6 +367,7 @@ def godot_compile(*, project_root: str = "", out_dir: str = "",
                                   warning_count=0)
             playtest_report = upstream_failed_report(blocker, "Godot play-test")
             playtest_report.update(frames=0, errors=[], state={}, captures=[])
+            (target / "compile_diagnostics.json").unlink(missing_ok=True)
             for name, report in (("compile_report.json", compile_report),
                                  ("playtest_report.json", playtest_report)):
                 (target / name).write_text(json.dumps(report, indent=2),

@@ -108,7 +108,7 @@ def _run(repo, out):
 def test_pole_3_a_retained_red_then_a_refusal_is_a_measured_red(
         busy, tmp_path, monkeypatch, mode):
     if mode == "compile_red":
-        monkeypatch.setattr(busy.gh, "compile_project", lambda _p: {
+        monkeypatch.setattr(busy.gh, "compile_project", lambda _p, **_k: {
             "passed": False, "summary": "1 error",
             "errors": [{"file": "res://a.gd", "line": 3,
                         "msg": "Parse Error: probe"}]})

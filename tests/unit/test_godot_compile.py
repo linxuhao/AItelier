@@ -11,6 +11,15 @@ import urllib.request
 from aitelier.tools.godot_compile.impl import godot_compile
 
 
+# The builder's per-pass record for a complete compile. A pass is only believed
+# when this witness accompanies it (absence is refused, not assumed clean).
+_DONE = [{"phase": name, "outcome": "exited", "returncode": 0,
+          "stdout": "PARSE_ALL_LOADED=1/1\n" if name == "explicit_reparse" else "",
+          "stderr": "", "output_complete": True}
+         for name in ("cold_import", "warm_import", "explicit_reparse")]
+_DIAG = {"invocation_id": "t", "phases": _DONE}
+
+
 def _mock_urlopen(monkeypatch, payload=None, fail=False):
     class _Resp:
         def __init__(self, p):
@@ -95,6 +104,8 @@ def test_parse_pass_chains_playtest(tmp_path, monkeypatch):
         payload = ({"passed": True, "errors": [], "file_count": 1, "summary": "ok"}
                    if calls["n"] == 1 else
                    {"passed": True, "frames": 180, "errors": [], "state": {}, "summary": "ran"})
+        if calls["n"] == 1:
+            payload["compile_diagnostics"] = _DIAG
         class _R:
             def read(self): return json.dumps(payload).encode()
             def __enter__(self): return self
@@ -181,6 +192,8 @@ def test_the_playtest_summary_carries_the_failing_assertions(tmp_path, monkeypat
                    {"passed": True, "spec_used": True, "frames": 180,
                     "errors": [], "state": {}, "behavior": behaviour,
                     "summary": "ran clean but 1/2 scenario(s) failed asserts"})
+        if calls["n"] == 1:
+            payload["compile_diagnostics"] = _DIAG
 
         class _R:
             def read(self): return json.dumps(payload).encode()
@@ -236,6 +249,8 @@ def test_the_summary_carries_the_observed_value_not_just_false(tmp_path, monkeyp
                    {"passed": True, "spec_used": True, "frames": 180,
                     "errors": [], "state": {}, "behavior": behaviour,
                     "summary": "ran clean but 1/1 scenario(s) failed asserts"})
+        if calls["n"] == 1:
+            payload["compile_diagnostics"] = _DIAG
 
         class _R:
             def read(self): return json.dumps(payload).encode()

@@ -11,7 +11,10 @@ Two capabilities, exposed over HTTP and CLI:
 
   compile  -> `godot --headless --path <proj> --import`, parse stderr for
               GDScript parse errors / failed script loads. Returns CS####-style
-              diagnostics with res:// file + line.
+              diagnostics with res:// file + line. The answer also carries
+              `compile_diagnostics`: the raw stdout/stderr and outcome of each
+              pass that ran (cold import, warm import, explicit reparse), inline
+              because the staged copy is gone before the answer is sent.
 
   playtest -> copy the project, inject an autoload probe, run the game for N
               frames on a virtual X display (Xvfb + software GL), then return:
@@ -904,7 +907,29 @@ func _init() -> void:
 """
 
 
-def _parse_every_script(dst: Path, timeout: int) -> tuple[str, int]:
+def _compile_phase(args: list[str], timeout: int, phase: dict):
+    """Run one compilation pass and record what it actually did, uninterpreted.
+
+    The record is filled only from the real subprocess result; a pass that never
+    started keeps the `not_run` default and stdout/stderr stay None rather than
+    becoming an empty, successful-looking stream.
+    """
+    try:
+        cp = _run(args, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        def text(value):
+            return value.decode("utf-8", errors="replace") if isinstance(value, bytes) else value
+        phase.update(outcome="timeout", timeout_sec=timeout, returncode=None,
+                     stdout=text(exc.output), stderr=text(exc.stderr),
+                     output_complete=False)
+        raise
+    phase.update(outcome="signaled" if cp.returncode < 0 else "exited",
+                 returncode=cp.returncode, stdout=cp.stdout, stderr=cp.stderr,
+                 output_complete=True)
+    return cp
+
+
+def _parse_every_script(dst: Path, timeout: int, *, phase: dict) -> tuple[str, int]:
     """Load every .gd explicitly. Returns (stderr, scripts_loaded_ok).
 
     Errors are pushed, never raised, and quit() is the last statement on the
@@ -923,10 +948,13 @@ def _parse_every_script(dst: Path, timeout: int) -> tuple[str, int]:
     probe = dst / "__parse_all.gd"
     try:
         probe.write_text(_PARSE_ALL_GD, encoding="utf-8")
-        cp = _run(["--path", str(dst), "--script", "res://__parse_all.gd"],
-                  timeout=timeout)
+        args = ["--path", str(dst), "--script", "res://__parse_all.gd"]
+        cp = _compile_phase(args, timeout, phase)
     except subprocess.TimeoutExpired:
-        return ("", -1)
+        # The pass did not finish, but whatever it printed before the wall is
+        # real evidence: a parse error already on stderr is a proven code fault
+        # and must reach the verdict (coverage stays -1 = unverified).
+        return (phase.get("stderr") or "", -1)
     finally:
         probe.unlink(missing_ok=True)
     n = -1
@@ -936,7 +964,46 @@ def _parse_every_script(dst: Path, timeout: int) -> tuple[str, int]:
     return (cp.stderr or "", n)
 
 
-def compile_project(project_dir: str, timeout: int = 120) -> dict:
+_COMPILE_PHASES = ("cold_import", "warm_import", "explicit_reparse")
+
+
+def compile_project(project_dir: str, timeout: int = 120, *, corr: dict | None = None) -> dict:
+    """Compile verdict plus `compile_diagnostics`: the raw, per-pass evidence.
+
+    The diagnostics ride inline in the answer because the staged copy that
+    produced them is removed before it returns; a locator into it would dangle.
+    `corr` is whatever identity the request carried (None when it carried none),
+    `invocation_id` is minted here, so a record cannot be mistaken for another
+    call's. It never feeds the verdict: only the warm import and the explicit
+    reparse do, exactly as before.
+    """
+    corr = corr or {}
+    diagnostics = {
+        "invocation_id": uuid.uuid4().hex,
+        "project_dir": str(Path(project_dir).resolve()),
+        "project_id": corr.get("project_id"),
+        "run_id": corr.get("run_id"),
+        "operation_id": corr.get("operation_id"),
+        "phases": [{"phase": name, "outcome": "not_run", "returncode": None,
+                    "stdout": None, "stderr": None, "output_complete": False}
+                   for name in _COMPILE_PHASES],
+        "scope": {
+            "measured": [
+                "cold_import: first --import, diagnostic only (never gates)",
+                "warm_import: second --import, authoritative parse/load verdict",
+                "explicit_reparse: --script over every parent .gd on a bare "
+                "SceneTree, parse errors only (never load failures)"],
+            "unmeasured": [
+                "early SceneTree entry-time behaviour: static preloads and "
+                "autoloads. Not executed here; this is not full entry-time "
+                "validation"]},
+    }
+    report = _compile_project(project_dir, timeout, diagnostics["phases"])
+    report["compile_diagnostics"] = diagnostics
+    return report
+
+
+def _compile_project(project_dir: str, timeout: int, phases: list[dict]) -> dict:
     proj = Path(project_dir)
     config = proj / "project.godot"
     if config.is_symlink() or (config.exists() and not config.is_file()):
@@ -971,16 +1038,29 @@ def compile_project(project_dir: str, timeout: int = 120) -> dict:
         # reports 18 errors, pass two reports the 6 that are real. Blaming the
         # agent for the other 12 makes the goal loop burn iterations chasing
         # errors that do not exist.
-        _run(["--path", str(dst), "--import"], timeout=timeout)
-        cp = _run(["--path", str(dst), "--import"], timeout=timeout)
+        _compile_phase(["--path", str(dst), "--import"], timeout, phases[0])
+        cp = _compile_phase(["--path", str(dst), "--import"], timeout, phases[1])
     except subprocess.TimeoutExpired:
         shutil.rmtree(dst.parent, ignore_errors=True)
-        return {"passed": False, "returncode": -1, "file_count": len(gd_files),
-                "errors": [{"kind": "timeout", "msg": f"Import timed out after {timeout}s",
-                            "file": None, "line": None}],
-                "warning_count": 0, "summary": "Godot import timed out.",
-                "excluded_child_roots": excluded}
-    all_stderr, loaded_ok = _parse_every_script(dst, timeout)
+        # Partial warm-import output that already holds a parse/load fault is a
+        # proven code fault; it stays a genuine failure. Anything else is an
+        # unfinished authoritative pass: not a pass, and not a code verdict.
+        warm_faults = []
+        if phases[1].get("outcome") == "timeout":
+            warm_faults = [e for e in _parse_errors(phases[1].get("stderr") or "")
+                           if e["kind"] in ("parse", "load")]
+        timeout_report = {
+            "passed": False, "returncode": -1, "file_count": len(gd_files),
+            "errors": warm_faults + [{"kind": "timeout",
+                                     "msg": f"Import timed out after {timeout}s",
+                                     "file": None, "line": None}],
+            "warning_count": 0, "summary": "Godot import timed out.",
+            "excluded_child_roots": excluded}
+        return _mark_execution(timeout_report, [
+            "%s timed out after %ss" % (
+                "warm_import" if phases[0].get("outcome") != "timeout" else "cold_import",
+                timeout)], proven_fault=bool(warm_faults))
+    all_stderr, loaded_ok = _parse_every_script(dst, timeout, phase=phases[2])
     # The explicit pass contributes CAUSES only. Its `load` failures are not
     # trustworthy: `--script` runs a bare SceneTree with NO autoloads, so every
     # script that names GameManager / CombatManager / GridManager fails to
@@ -1023,9 +1103,72 @@ def compile_project(project_dir: str, timeout: int = 120) -> dict:
         summary += " Excluded non-parent roots (outside this parent validation): " + "; ".join(
                        "%s (%s)" % (e["path"], e["reason"]) for e in excluded)
     shutil.rmtree(dst.parent, ignore_errors=True)
-    return {"passed": passed, "returncode": cp.returncode, "file_count": len(gd_files),
-            "errors": errs, "warning_count": 0, "summary": summary,
-            "excluded_child_roots": excluded}
+    report = {"passed": passed, "returncode": cp.returncode, "file_count": len(gd_files),
+              "errors": errs, "warning_count": 0, "summary": summary,
+              "excluded_child_roots": excluded}
+    # Completion is observed from the real phase outcomes, never inferred from
+    # the absence of parsed error lines. A proven parse/load fault stays a
+    # genuine failure; an unfinished authoritative phase can never be a pass.
+    reasons = _incomplete_reasons(phases, loaded_ok)
+    if errs:
+        # A nonzero exit that parsed errors explain is the fault itself, not an
+        # unfinished run; signals, timeouts and missing phases still count.
+        reasons = [r for r in reasons if " exited with code " not in r]
+    if reasons:
+        _mark_execution(report, reasons, proven_fault=bool(errs))
+    return report
+
+
+def _incomplete_reasons(phases: list[dict], loaded_ok: int) -> list[str]:
+    """Why the AUTHORITATIVE phases (warm import, explicit reparse) did not
+    complete normally. The cold import is diagnostic only and never counts.
+
+    A phase is complete only if it really exited with code 0. Signal, timeout
+    and not_run are never complete. A nonzero exit is reported here too; when
+    parsed errors explain it, the caller keeps the failure genuine instead.
+    The reparse must also have printed its PARSE_ALL_LOADED marker: a clean
+    exit without it means the loader never reached its last statement.
+    """
+    reasons = []
+    for name, phase in (("warm_import", phases[1]), ("explicit_reparse", phases[2])):
+        outcome, rc = phase.get("outcome"), phase.get("returncode")
+        if outcome == "signaled":
+            reasons.append("%s was killed by signal %s" % (name, -rc if rc else "?"))
+        elif outcome == "timeout":
+            reasons.append("%s TIMED OUT — coverage unverified" % name)
+        elif outcome != "exited":
+            reasons.append("%s did not run (%s)" % (name, outcome))
+        elif rc != 0:
+            reasons.append("%s exited with code %s" % (name, rc))
+    if phases[2].get("outcome") == "exited" and loaded_ok < 0:
+        reasons.append("explicit_reparse never reported PARSE_ALL_LOADED")
+    return reasons
+
+
+def _mark_execution(report: dict, reasons: list[str], *, proven_fault: bool) -> dict:
+    """Record unfinished authoritative execution on a compile report.
+
+    Never grants a pass. Without a proven parse/load fault the report carries
+    the existing truthful infrastructure-unavailable state (unmeasured, not a
+    code regression). With one, the fault keeps the report an ordinary
+    failure; the reasons are still listed beside it.
+    """
+    report["passed"] = False
+    report["execution_complete"] = False
+    report["incomplete_reasons"] = list(reasons)
+    if proven_fault:
+        # An error list that already names the real fault is enough; nothing
+        # may mask it behind an absence marker.
+        return report
+    report["infrastructure_unavailable"] = True
+    report["evidence_state"] = "infrastructure_unavailable"
+    if not any(e.get("kind") == "timeout" for e in report.get("errors", [])):
+        report.setdefault("errors", []).append(
+            {"kind": "incomplete", "file": None, "line": None,
+             "msg": "Authoritative compilation did not complete: " + "; ".join(reasons)})
+    report["summary"] = ("GDScript compilation INCOMPLETE (%s) — NOT verified, "
+                         "not a pass." % "; ".join(reasons))
+    return report
 
 
 # ── playtest gate ──────────────────────────────────────────────────────────
@@ -5817,7 +5960,14 @@ class _Handler(BaseHTTPRequestHandler):
                         elapsed, wait_timeout,
                         owner_wait["render_owner_waited_for_owner_ids"], owned=True))
             if self.path == "/compile":
-                self._send(200, compile_project(proj))
+                # Only the identity the request actually carried is passed, so
+                # a plain request reaches compile_project exactly as before.
+                corr = {"project_id": req.get("project_id"),
+                        "run_id": req.get("run_id"),
+                        "operation_id": (req.get("operation_id")
+                                         or self.headers.get("X-AItelier-Operation"))}
+                self._send(200, compile_project(
+                    proj, **({"corr": corr} if any(corr.values()) else {})))
             elif self.path == "/checkgd":
                 self._send(200, check_gdscript(
                     req.get("files") or [], timeout=req.get("timeout", 120)))

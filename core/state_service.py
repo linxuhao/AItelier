@@ -17,6 +17,7 @@ from core.state_privacy import writer_only_read
 
 from core.state_graph import StateConflict, StateGraphError, StateGraphStore, canonical, digest, key, text
 from core.state_attempts import StateAttempts, artifact_ref, evidence_director_identity
+from core import state_prior_candidate as prior_candidate
 
 
 # One path component an ``id`` fragment may contribute verbatim: non-empty, no
@@ -522,14 +523,37 @@ class StateService:
             except StateConflict as exc:
                 preflight_failure.append(str(exc))
                 raise
+        def prior_account(prior):
+            # Visibility only, never a refusal: an unreadable source is "unknown".
+            try:
+                source = self._source(project_id)
+            except Exception:  # noqa: BLE001
+                source = None
+            return prior_candidate.account(prior, source, base_sha,
+                                           "requested_base" if base_sha else "source_head")
         try:
             return self.external.register(project_id, node_key, expected_revision, harness, external_id,
                 request_key, instruction, base_sha=base_sha, preflight=preflight if base_sha else None,
-                claim_id=claim_id, fence=fence)
+                claim_id=claim_id, fence=fence, prior_account=prior_account)
         except StateConflict:
             if preflight_failure:
                 self._record_artifact_refusal(project_id, node_key, base_sha, preflight_failure[0])
             raise
+
+    def _pin_prior_candidate(self, attempt, source):
+        """Make the previous same-node candidate's fate visible for a fresh
+        SkillFlow attempt, judged against the base its worktree will ACTUALLY
+        start from: the director-requested/materialized base, else source HEAD.
+        Observation only; see core.state_prior_candidate."""
+        from core import run_isolation
+        try:
+            requested = run_isolation.requested_base(self.db, attempt["execution_project_id"])
+        except Exception:  # noqa: BLE001 - unreadable selection is reported, not refused
+            requested = None
+        selected = (requested or {}).get("base_sha") or attempt["context"].get("base_sha")
+        origin = "requested_base" if selected else "source_head"
+        return self.attempts.pin_prior_candidate(
+            attempt["attempt_id"], lambda prior: prior_candidate.account(prior, source, selected, origin))
 
     def _record_artifact_refusal(self, project_id, node_key, base_sha, actual):
         with self.store.transaction(write=True) as conn:
@@ -702,6 +726,10 @@ class StateService:
                     raise
                 return self.attempts.record_preflight(aid,
                     {"passed": False, "expected": base_sha, "actual": str(exc)}, str(exc))
+        if not attempt["context"].get("relay_of"):
+            # A relay deliberately continues the failed branch; only a FRESH
+            # attempt can silently leave its predecessor's candidate behind.
+            self._pin_prior_candidate(attempt, source)
         attempt = self.attempts.pin_host_contract(aid, {
             "source_repo": source, "seed_file": manifest.seed_file, "output_step": manifest.output_step,
             "scheduler_owned": bool(manifest.scheduler_owned), "repo_mode": manifest.repo_mode})

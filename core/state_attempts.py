@@ -353,13 +353,23 @@ class StateAttempts:
                     raise StateConflict("external execution identity was already registered")
                 preflight()
             if prior_account is not None:
-                # Observability only; never refuses. Judged after the base was
-                # materialized (preflight) and inside the same write transaction
-                # that creates the attempt, so an idempotent replay (returned
-                # above) can neither duplicate nor alter the account.
+                # Observability only; never refuses. ``prior_account`` was built
+                # BEFORE this write transaction (it runs Git) from the same
+                # immutable facts; here only a cheap SQL identity check remains.
+                # A stale pairing (the node's latest candidate changed meanwhile)
+                # degrades to an explicit unknown, never to a wrong judgement.
+                # An idempotent replay returned above, so it can neither
+                # duplicate nor alter the account.
                 prior = prior_candidate.latest_prior(conn, project_id, node_key)
                 if prior is not None:
-                    ctx["prior_candidate"] = prior_account(prior)
+                    seen = prior_account.get("prior")
+                    if (seen is not None and seen["attempt_id"] == prior["attempt_id"]
+                            and seen["artifact_ref"] == prior["artifact_ref"]):
+                        ctx["prior_candidate"] = prior_account["value"]
+                    else:
+                        ctx["prior_candidate"] = prior_candidate.unresolved(
+                            prior, "the previous candidate changed while admission was judged; not evaluated",
+                            base=base_sha, origin=prior_candidate.REQUESTED if base_sha else prior_candidate.UNRESOLVED)
             uid = uuid.uuid4().hex
             aid = "attempt-" + uid
             execution = None if external else "sg-" + uid
@@ -499,27 +509,63 @@ class StateAttempts:
             return _public(self._attempt(conn, attempt_id))
 
 
-    def pin_prior_candidate(self, attempt_id: str, build) -> dict:
-        """Freeze, once and before dispatch, the observed relation between the
-        node's previous candidate and the base this attempt will actually build
-        on. ``build(prior_row)`` returns the account. Never refuses: with no
-        previous Git candidate nothing is written, and an attempt already past
-        reservation or already carrying an account is returned unchanged, so a
-        retry duplicates neither the context entry nor its event."""
+    def latest_prior_candidate(self, project_id: str, node_key: str):
+        """Read-only: the node's most recent Git-commit candidate row, or None."""
+        with self.store.transaction() as conn:
+            return prior_candidate.latest_prior(conn, project_id, node_key)
+
+    def prior_candidate_pending(self, attempt_id: str):
+        """Read-only. The node's previous Git candidate (a row) when this fresh,
+        still-reserved attempt has no account yet; else None. Runs no Git."""
+        with self.store.transaction() as conn:
+            attempt = self._attempt(conn, attempt_id)
+            if "prior_candidate" in json.loads(attempt["context_json"]) or attempt["status"] != "reserved":
+                return None
+            return prior_candidate.latest_prior(conn, attempt["project_id"], attempt["node_key"],
+                                                before_attempt_id=attempt_id)
+
+    def pin_prior_candidate(self, attempt_id: str, prior: dict, value: dict) -> dict:
+        """Freeze, once and before dispatch, the account ``value`` that was built
+        (outside any State transaction) for ``prior``. Never refuses and runs no
+        Git here: with no previous Git candidate nothing is written, and an
+        attempt already past reservation or already carrying an account is
+        returned unchanged, so a retry duplicates neither the context entry nor
+        its event. If the latest candidate is no longer ``prior``, the account
+        becomes an explicit pending unknown."""
         with self.store.transaction(write=True) as conn:
             attempt = self._attempt(conn, attempt_id)
             context = json.loads(attempt["context_json"])
             if "prior_candidate" in context or attempt["status"] != "reserved":
                 return _public(attempt)
-            prior = prior_candidate.latest_prior(conn, attempt["project_id"], attempt["node_key"],
-                                                 before_attempt_id=attempt_id)
-            if prior is None:
+            current = prior_candidate.latest_prior(conn, attempt["project_id"], attempt["node_key"],
+                                                   before_attempt_id=attempt_id)
+            if current is None:
                 return _public(attempt)
-            value = build(prior)
+            if current["attempt_id"] != prior["attempt_id"] or current["artifact_ref"] != prior["artifact_ref"]:
+                value = prior_candidate.unresolved(
+                    current, "the previous candidate changed while admission was judged; not evaluated",
+                    pending=True)
             context["prior_candidate"] = value
             conn.execute("UPDATE state_attempts SET context_json=?,updated_at=? WHERE attempt_id=?",
                          (canonical(context), now(), attempt_id))
             prior_candidate.emit(self.store, conn, attempt["project_id"], attempt["node_key"], attempt_id, value)
+            return _public(self._attempt(conn, attempt_id))
+
+    def reconcile_prior_candidate(self, attempt_id: str, expected: dict, value: dict) -> dict:
+        """Replace the pinned account ``expected`` with ``value`` judged against
+        the base the worktree was ACTUALLY provisioned at. Compare-and-set on the
+        stored account, so a concurrent or repeated reconciliation changes and
+        emits nothing twice. Runs no Git; never refuses."""
+        with self.store.transaction(write=True) as conn:
+            attempt = self._attempt(conn, attempt_id)
+            context = json.loads(attempt["context_json"])
+            if context.get("prior_candidate") != expected:
+                return _public(attempt)
+            context["prior_candidate"] = value
+            conn.execute("UPDATE state_attempts SET context_json=?,updated_at=? WHERE attempt_id=?",
+                         (canonical(context), now(), attempt_id))
+            prior_candidate.emit(self.store, conn, attempt["project_id"], attempt["node_key"], attempt_id, value,
+                                 reconciled=True)
             return _public(self._attempt(conn, attempt_id))
 
     def pin_host_contract(self, attempt_id: str, descriptor: dict) -> dict:

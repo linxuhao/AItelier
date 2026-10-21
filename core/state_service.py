@@ -523,14 +523,28 @@ class StateService:
             except StateConflict as exc:
                 preflight_failure.append(str(exc))
                 raise
-        def prior_account(prior):
-            # Visibility only, never a refusal: an unreadable source is "unknown".
+        def build_prior_account():
+            # Visibility only, never a refusal, and built BEFORE any State write
+            # transaction because it runs Git. An external attempt's base is only
+            # what it declared: with none declared nothing is invented from the
+            # source HEAD; the account says unknown.
+            prior = self.attempts.latest_prior_candidate(project_id, node_key)
+            if prior is None:
+                return {"prior": None, "value": None}
+            if not base_sha:
+                return {"prior": prior, "value": prior_candidate.unresolved(
+                    prior, "external attempt declared no base_sha; the selected base is not inferred "
+                           "from the source HEAD")}
             try:
                 source = self._source(project_id)
             except Exception:  # noqa: BLE001
                 source = None
-            return prior_candidate.account(prior, source, base_sha,
-                                           "requested_base" if base_sha else "source_head")
+            return {"prior": prior, "value": prior_candidate.account(
+                prior, source, base_sha, prior_candidate.REQUESTED)}
+        try:
+            prior_account = build_prior_account()
+        except Exception:  # noqa: BLE001 - observation must never refuse admission
+            prior_account = {"prior": None, "value": None}
         try:
             return self.external.register(project_id, node_key, expected_revision, harness, external_id,
                 request_key, instruction, base_sha=base_sha, preflight=preflight if base_sha else None,
@@ -542,18 +556,51 @@ class StateService:
 
     def _pin_prior_candidate(self, attempt, source):
         """Make the previous same-node candidate's fate visible for a fresh
-        SkillFlow attempt, judged against the base its worktree will ACTUALLY
-        start from: the director-requested/materialized base, else source HEAD.
-        Observation only; see core.state_prior_candidate."""
+        SkillFlow attempt. A director-requested base is already an exact fact, so
+        it is judged now (Git runs outside any State transaction). The ordinary
+        no-base selection is resolved from HEAD only when the worktree is
+        provisioned, so it is recorded as an explicit pending UNKNOWN and
+        reconciled from the real isolation receipt (``_reconcile_prior_candidate``);
+        HEAD is never guessed here. Observation only; see core.state_prior_candidate."""
         from core import run_isolation
+        prior = self.attempts.prior_candidate_pending(attempt["attempt_id"])
+        if prior is None:
+            return self.attempts.get(attempt["attempt_id"])
         try:
             requested = run_isolation.requested_base(self.db, attempt["execution_project_id"])
         except Exception:  # noqa: BLE001 - unreadable selection is reported, not refused
             requested = None
         selected = (requested or {}).get("base_sha") or attempt["context"].get("base_sha")
-        origin = "requested_base" if selected else "source_head"
-        return self.attempts.pin_prior_candidate(
-            attempt["attempt_id"], lambda prior: prior_candidate.account(prior, source, selected, origin))
+        if selected:
+            value = prior_candidate.account(prior, source, selected, prior_candidate.REQUESTED)
+        else:
+            value = prior_candidate.unresolved(
+                prior, "ordinary default base is resolved when the worktree is provisioned; "
+                       "not yet materialized, so it is not guessed from the source HEAD", pending=True)
+        return self.attempts.pin_prior_candidate(attempt["attempt_id"], prior, value)
+
+    def _reconcile_prior_candidate(self, attempt):
+        """Re-judge a pinned account against the base the worktree was ACTUALLY
+        provisioned at, read from the normal isolation receipt. Immutable facts
+        only (the pinned prior identity + receipt); Git runs outside State
+        transactions; never refuses or raises. Idempotent via compare-and-set."""
+        try:
+            value = attempt["context"].get("prior_candidate")
+            if (value is None or not attempt.get("run_id") or attempt.get("execution_kind") != "skillflow"
+                    or attempt["context"].get("relay_of")):
+                return attempt
+            from core import run_isolation
+            rec = run_isolation.record(self.db, attempt["run_id"])
+            actual = rec.get("base_sha") if rec and rec.get("mode") == run_isolation.MODE_WORKTREE else None
+            if not actual or not prior_candidate.needs_receipt(value, actual):
+                return attempt
+            prior = {"attempt_id": value["prior_attempt_id"], "status": value["prior_attempt_status"],
+                     "artifact_ref": value["prior_artifact"]}
+            source = rec.get("source_repo") or (attempt["context"].get("host_contract") or {}).get("source_repo")
+            fresh = prior_candidate.account(prior, source, actual, prior_candidate.PROVISIONED)
+            return self.attempts.reconcile_prior_candidate(attempt["attempt_id"], value, fresh)
+        except Exception:  # noqa: BLE001 - observation only
+            return attempt
 
     def _record_artifact_refusal(self, project_id, node_key, base_sha, actual):
         with self.store.transaction(write=True) as conn:
@@ -821,6 +868,10 @@ class StateService:
 
     def _attach_and_observe(self, attempt_id, manifest):
         attempt = self.attempts.get(attempt_id)
+        # The run is bound, so its normal isolation receipt exists: replace any
+        # pending/unmatched prior-candidate account with one judged against the
+        # base the worktree was actually provisioned at (idempotent, observation only).
+        attempt = self._reconcile_prior_candidate(attempt)
         attached = False
         host = attempt["context"].get("host_contract")
         if host is None:
@@ -1355,6 +1406,9 @@ class StateService:
         self._components()
         if not attempt["run_id"]:
             return {**attempt, "note": "No bound run; recover_attempt may bind an existing launch."}
+        # A run bound after a lost launch response is reconciled against its real
+        # isolation receipt here too (compare-and-set; a no-op once judged).
+        attempt = self._reconcile_prior_candidate(attempt)
         observed = self.attempts.reconcile(attempt_id, self.sf)
         if observed["status"] == "failed":
             # What the director needs to choose between continue_from and a

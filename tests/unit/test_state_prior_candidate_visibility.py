@@ -135,22 +135,87 @@ def test_requested_base_containing_prior_candidate_is_reported_included(world, m
     assert [e[0] for e in _events(world, *ACCOUNT_EVENTS)] == ["prior_candidate_included"]
 
 
-def test_ordinary_no_base_selection_judges_the_actual_source_head(world, monkeypatch):
+def _provision(world, attempt):
+    """The real isolation receipt for `attempt`: a genuine run and worktree provisioned
+    by the normal ensure_for_run path, bound to the attempt."""
+    exec_id = attempt["execution_project_id"]
+    world["db"].ensure_project(exec_id, name=exec_id, repo_type="existing", repo_path=str(world["src"]))
+    run_id = world["sf"].create_run("feature", project_id=exec_id)
+    rec = ri.ensure_for_run(world["db"], run_id=run_id, project_id=exec_id, config_name="feature")
+    world["attempts"].bind_run(attempt["attempt_id"], run_id, world["sf"])
+    return rec
+
+
+def test_ordinary_no_base_is_unknown_until_the_real_receipt_then_reconciled_excluded(world, monkeypatch):
     cand = _unreachable_candidate(world)
     _prior_candidate(world, cand)
     attempt, calls = _launch(world, monkeypatch, "no-base")
     account = attempt["context"]["prior_candidate"]
     assert calls
-    assert account["state"] == "excluded"
-    assert account["selected_base"] == world["head"] and account["base_origin"] == "source_head"
+    # No materialized base yet: explicit UNKNOWN, never a guess from source HEAD.
+    assert account["state"] == "unknown" and account["selected_base"] is None
+    assert account["pending_base"] is True and "HEAD" in account["reason"]
+    # The normal provision receipt names the actual base; reconcile through it.
+    attempt = world["attempts"].get(attempt["attempt_id"])
+    rec = _provision(world, attempt)
+    assert rec["base_sha"] == world["head"]
+    done = world["service"]._reconcile_prior_candidate(world["attempts"].get(attempt["attempt_id"]))
+    account = done["context"]["prior_candidate"]
+    assert account["state"] == "excluded" and account["selected_base"] == rec["base_sha"]
+    assert account["base_origin"] == "provisioned_base" and "pending_base" not in account
+    again = world["service"]._reconcile_prior_candidate(world["attempts"].get(attempt["attempt_id"]))
+    assert again["context"]["prior_candidate"] == account
+    assert len(_events(world, *ACCOUNT_EVENTS)) == 2, "pending unknown, then one reconciliation; no duplicates"
 
 
-def test_no_base_selection_reports_included_when_head_contains_the_candidate(world, monkeypatch):
+def test_no_base_reconciles_to_included_when_provisioned_head_contains_the_candidate(world, monkeypatch):
     cand = _commit_file(world["src"], "cand.txt", "candidate\n")
     _prior_candidate(world, cand)
     attempt, _ = _launch(world, monkeypatch, "no-base")
-    account = attempt["context"]["prior_candidate"]
+    assert attempt["context"]["prior_candidate"]["state"] == "unknown"
+    rec = _provision(world, world["attempts"].get(attempt["attempt_id"]))
+    done = world["service"]._reconcile_prior_candidate(world["attempts"].get(attempt["attempt_id"]))
+    account = done["context"]["prior_candidate"]
+    assert account["state"] == "included" and account["selected_base"] == cand == rec["base_sha"]
+
+
+def test_requested_base_account_matches_the_real_provision_receipt(world, monkeypatch):
+    cand = _unreachable_candidate(world)
+    _prior_candidate(world, cand)
+    attempt, _ = _launch(world, monkeypatch, "fresh", base_sha=cand)
+    assert attempt["context"]["prior_candidate"]["state"] == "included"
+    rec = _provision(world, world["attempts"].get(attempt["attempt_id"]))
+    assert rec["base_sha"] == cand, "the director's request is what the worktree really got"
+    done = world["service"]._reconcile_prior_candidate(world["attempts"].get(attempt["attempt_id"]))
+    assert done["context"]["prior_candidate"] == attempt["context"]["prior_candidate"]
+    assert len(_events(world, *ACCOUNT_EVENTS)) == 1
+
+
+def test_source_head_drift_after_admission_is_judged_against_the_provisioned_base(world, monkeypatch):
+    """Normal no-base selection reads HEAD late, at provision. HEAD moves between the
+    account and the provision; the account must name the base the worktree really got,
+    not the earlier HEAD."""
+    cand = _unreachable_candidate(world)
+    _prior_candidate(world, cand)
+    attempt, _ = _launch(world, monkeypatch, "no-base")
+    assert attempt["context"]["prior_candidate"]["state"] == "unknown"
+    subprocess.run(["git", "reset", "-q", "--hard", cand], cwd=world["src"], check=True)
+    rec = _provision(world, world["attempts"].get(attempt["attempt_id"]))
+    assert rec["base_sha"] == cand != world["head"]
+    done = world["service"]._reconcile_prior_candidate(world["attempts"].get(attempt["attempt_id"]))
+    account = done["context"]["prior_candidate"]
     assert account["state"] == "included" and account["selected_base"] == cand
+    assert account["selected_base"] != world["head"]
+
+
+def test_missing_receipt_leaves_pending_unknown_not_a_guess(world, monkeypatch):
+    cand = _unreachable_candidate(world)
+    _prior_candidate(world, cand)
+    attempt, _ = _launch(world, monkeypatch, "no-base")
+    done = world["service"]._reconcile_prior_candidate(world["attempts"].get(attempt["attempt_id"]))
+    assert done["context"]["prior_candidate"]["state"] == "unknown"
+    assert len(_events(world, *ACCOUNT_EVENTS)) == 1
+
 
 
 def test_account_is_judged_from_ancestry_not_from_status_or_names(world, monkeypatch):
@@ -222,15 +287,21 @@ def test_relay_base_precedence_is_unchanged(world):
 
 
 # -- supported external path ------------------------------------------
+# The source binding is immutable once any attempt exists, so it is bound BEFORE
+# the prior attempts are created (the immutable guard is not relaxed).
 
-def _external(world, request_key, base_sha=None):
+def _bind(world):
     if not world["service"].portfolio.source_binding("game"):
         world["service"].bind_source("game", str(world["src"]))
+
+
+def _external(world, request_key, base_sha=None):
     return world["service"].start_external_attempt(
         "game", "a", 1, "fixture", "job-" + request_key, request_key, base_sha=base_sha)
 
 
 def test_external_requested_exact_base_reports_excluded(world):
+    _bind(world)
     cand = _unreachable_candidate(world)
     prior_id = _prior_candidate(world, cand)
     attempt = _external(world, "ext-1", base_sha=world["head"])
@@ -244,14 +315,63 @@ def test_external_requested_exact_base_reports_excluded(world):
     assert len(_events(world, *ACCOUNT_EVENTS)) == 1
 
 
-def test_external_without_base_judges_source_head(world):
+def test_external_requested_base_containing_candidate_reports_included(world):
+    _bind(world)
     cand = _unreachable_candidate(world)
     _prior_candidate(world, cand)
+    account = _external(world, "ext-inc", base_sha=cand)["context"]["prior_candidate"]
+    assert account["state"] == "included" and account["selected_base"] == cand
+
+
+def test_external_without_declared_base_is_unknown_not_source_head(world):
+    _bind(world)
+    cand = _unreachable_candidate(world)
+    prior_id = _prior_candidate(world, cand)
     account = _external(world, "ext-2")["context"]["prior_candidate"]
-    assert account["state"] == "excluded" and account["base_origin"] == "source_head"
-    assert account["selected_base"] == world["head"]
+    assert account["state"] == "unknown" and account["prior_attempt_id"] == prior_id
+    assert account["selected_base"] is None and account["base_origin"] == "unresolved"
+    assert "HEAD" in account["reason"]
+    assert [e[0] for e in _events(world, *ACCOUNT_EVENTS)] == ["prior_candidate_unreconciled"]
 
 
 def test_external_without_prior_candidate_has_no_account(world):
+    _bind(world)
     attempt = _external(world, "ext-3", base_sha=world["head"])
     assert "prior_candidate" not in attempt["context"] and not _events(world, *ACCOUNT_EVENTS)
+
+
+def test_external_account_is_built_outside_the_write_transaction(world, monkeypatch):
+    """Git must not run while State's BEGIN IMMEDIATE is held: the builder runs
+    before the reservation transaction opens."""
+    _bind(world)
+    cand = _unreachable_candidate(world)
+    _prior_candidate(world, cand)
+    from core import state_prior_candidate as pc
+    seen = []
+    real = pc.account
+    store = world["service"].store
+    real_tx = store.transaction
+    state = {"writing": 0}
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def tracked(*a, **k):
+        if k.get("write"):
+            state["writing"] += 1
+        try:
+            with real_tx(*a, **k) as conn:
+                yield conn
+        finally:
+            if k.get("write"):
+                state["writing"] -= 1
+
+    def spy(*a, **k):
+        seen.append(state["writing"])
+        return real(*a, **k)
+    monkeypatch.setattr(store, "transaction", tracked)
+    monkeypatch.setattr(pc, "account", spy)
+    attempt = _external(world, "ext-tx", base_sha=world["head"])
+    assert seen == [0], "Git ran outside any State write transaction"
+    assert attempt["context"]["prior_candidate"]["state"] == "excluded"
+

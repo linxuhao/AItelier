@@ -1,16 +1,24 @@
 """Visible account of a node's previous candidate at fresh-attempt admission.
 
 A fresh attempt of a node builds on the base it selected (an explicit base, or
-the source HEAD). Nothing forces that base to contain the previous attempt's
-candidate commit, and a deliberate fresh rederivation is legitimate. What was
-missing is that the exclusion was silent. This module only OBSERVES: it never
-refuses, adopts, merges or clears anything.
+the ordinary default selection that the isolation layer resolves from the source
+HEAD only when it provisions the worktree). Nothing forces that base to contain
+the previous attempt's candidate commit, and a deliberate fresh rederivation is
+legitimate. What was missing is that the exclusion was silent. This module only
+OBSERVES: it never refuses, adopts, merges or clears anything.
 
 The account is judged from actual Git ancestry in the bound source, through the
 closed Git profile (no hooks, no repository-configured programs). It never
-infers containment from node status or names. Whenever the identities cannot be
-resolved or Git cannot answer, the state is ``unknown`` with the reason, never
-``included`` or silently absent. No previous Git candidate -> no account at all.
+infers containment from node status or names. It also never GUESSES the selected
+base: a base that is not yet materialized (ordinary no-base selection before the
+worktree exists) or that was never declared (an external attempt without a base)
+is reported as ``unknown`` with the reason, never judged against a source HEAD
+read earlier or elsewhere. Whenever the identities cannot be resolved or Git
+cannot answer, the state is ``unknown`` with the reason, never ``included`` or
+silently absent. No previous Git candidate -> no account at all.
+
+Nothing here may run inside a State write transaction: ``account`` shells out to
+Git. Callers build the value first and only then persist it.
 """
 from __future__ import annotations
 
@@ -21,6 +29,9 @@ from core import closed_git
 
 VERSION = 1
 INCLUDED, EXCLUDED, UNKNOWN = "included", "excluded", "unknown"
+# base_origin values: the director's exact request, the base the worktree was
+# really provisioned at (read from the isolation receipt), or none known.
+REQUESTED, PROVISIONED, UNRESOLVED = "requested_base", "provisioned_base", "unresolved"
 _COMMIT = re.compile(r"[0-9a-f]{40}\Z")
 _GIT_TIMEOUT = 20
 
@@ -45,22 +56,35 @@ def _account(prior, base, origin, state, reason):
             "selected_base": base, "base_origin": origin, "state": state, "reason": reason}
 
 
-def account(prior, source, requested_base, origin):
+def unresolved(prior, reason, *, pending=False, base=None, origin=UNRESOLVED):
+    """An explicit ``unknown`` account that runs no Git. ``pending`` marks one
+    that a later real provision receipt may reconcile (SkillFlow only)."""
+    value = _account(prior, base, origin, UNKNOWN, reason)
+    if pending:
+        value["pending_base"] = True
+    return value
+
+
+def needs_receipt(value, actual_base):
+    """Whether ``value`` must be re-derived against the provisioned base."""
+    return bool(value.get("pending_base")) or value.get("selected_base") != actual_base
+
+
+def account(prior, source, base, origin):
     """Observed relation between ``prior``'s candidate and the selected base.
 
-    ``requested_base`` is the exact base this attempt builds on, or None for
-    the ordinary no-base selection (the source HEAD, resolved here). Never raises."""
-    base = requested_base
+    ``base`` is the exact commit this attempt builds on. With no known base the
+    answer is ``unknown``: the source HEAD is deliberately NOT substituted, as
+    it may differ from what is later provisioned. Runs Git; never raises."""
     try:
         if not isinstance(prior["artifact_ref"], str) or not _COMMIT.match(prior["artifact_ref"]):
             return _account(prior, base, origin, UNKNOWN, "previous candidate artifact is not an exact Git commit")
+        if base is None:
+            return _account(prior, None, UNRESOLVED, UNKNOWN,
+                            "no selected base is known; it is not inferred from the source HEAD")
         if not source:
             return _account(prior, base, origin, UNKNOWN, "no bound source repository to judge ancestry in")
-        if base is None:
-            base = closed_git.resolve_commit(source, "HEAD")
-            if base is None:
-                return _account(prior, None, origin, UNKNOWN, "source HEAD could not be resolved to a commit")
-        elif not _COMMIT.match(base):
+        if not isinstance(base, str) or not _COMMIT.match(base):
             return _account(prior, base, origin, UNKNOWN, "selected base is not an exact Git commit")
         if closed_git.resolve_commit(source, prior["artifact_ref"]) != prior["artifact_ref"]:
             return _account(prior, base, origin, UNKNOWN,
@@ -86,6 +110,9 @@ def event_type(value):
     return "prior_candidate_included" if value["state"] == INCLUDED else "prior_candidate_unreconciled"
 
 
-def emit(store, conn, project_id, node_key, attempt_id, value):
-    store._event(conn, project_id, node_key, event_type(value),
-                 {"attempt_id": attempt_id, "prior_candidate": value})
+def emit(store, conn, project_id, node_key, attempt_id, value, reconciled=False):
+    payload = {"attempt_id": attempt_id, "prior_candidate": value}
+    if reconciled:
+        payload["reconciled_from_provision_receipt"] = True
+    store._event(conn, project_id, node_key, event_type(value), payload)
+

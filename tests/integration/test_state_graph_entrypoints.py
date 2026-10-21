@@ -436,6 +436,83 @@ def test_director_chosen_base_surfaces_existing_isolation_record(live, monkeypat
     assert attempt["status"] == "reserved" and attempt["run_id"] is None
 
 
+def _prior_git_candidate(live, project, commit):
+    prior = live.service.attempts.reserve(project, "work", 1, "state_code_fixture", "prior-" + project)
+    with live.db.get_connection() as conn:
+        conn.execute("UPDATE state_attempts SET status='candidate',artifact_ref=? WHERE attempt_id=?",
+                     (commit, prior["attempt_id"]))
+        conn.commit()
+    return prior["attempt_id"]
+
+
+def _commit_unreachable(repo, base):
+    (repo / "cand.txt").write_text("candidate\n")
+    subprocess.run(["git", "add", "cand.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "candidate"], cwd=repo, check=True)
+    cand = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True,
+                          text=True, capture_output=True).stdout.strip()
+    subprocess.run(["git", "reset", "-q", "--hard", base], cwd=repo, check=True)
+    return cand
+
+
+def test_prior_candidate_account_names_the_actual_provisioned_base_under_head_drift(live, monkeypatch):
+    """Public execute(start_attempt) -> real StateService -> normal launcher/isolation.
+    Source HEAD moves after the account was first written and before the worktree is
+    provisioned; the durable account must name the base the worktree really got."""
+    from core import run_isolation
+    from core.state_commands import execute
+
+    repo, head = _code_state_project(live, "drift")
+    cand = _commit_unreachable(repo, head)
+    prior_id = _prior_git_candidate(live, "drift", cand)
+    original = live.service._pin_prior_candidate
+
+    def pin_then_drift(attempt, source):
+        result = original(attempt, source)
+        subprocess.run(["git", "reset", "-q", "--hard", cand], cwd=repo, check=True)
+        return result
+    monkeypatch.setattr(live.service, "_pin_prior_candidate", pin_then_drift)
+
+    launched = execute(live.service, "start_attempt", {
+        "project_id": "drift", "node_key": "work", "expected_revision": 1,
+        "workflow": "state_code_fixture", "request_key": "drift-fresh"}, allow_write=True)
+    assert launched["run_id"]
+    rec = run_isolation.record(live.db, launched["run_id"])
+    assert rec["base_sha"] == cand != head, "the normal provision read HEAD late"
+    attempt = live.service.attempts.get(launched["attempt_id"])
+    account = attempt["context"]["prior_candidate"]
+    assert account["prior_attempt_id"] == prior_id and account["prior_artifact"] == cand
+    assert account["selected_base"] == rec["base_sha"], "the actual provisioned base, not an earlier HEAD"
+    assert account["state"] == "included" and account["base_origin"] == "provisioned_base"
+    assert requested_none(live, attempt)
+    with live.db.get_connection() as conn:
+        row = conn.execute("SELECT artifact_ref,status FROM state_attempts WHERE attempt_id=?",
+                           (prior_id,)).fetchone()
+    assert (row[0], row[1]) == (cand, "candidate"), "prior candidate row is unchanged"
+
+
+def requested_none(live, attempt):
+    from core import run_isolation
+    return run_isolation.requested_base(live.db, attempt["execution_project_id"]) is None
+
+
+def test_prior_candidate_excluded_account_without_drift_through_public_path(live):
+    from core import run_isolation
+    from core.state_commands import execute
+
+    repo, head = _code_state_project(live, "nodrift")
+    cand = _commit_unreachable(repo, head)
+    _prior_git_candidate(live, "nodrift", cand)
+    launched = execute(live.service, "start_attempt", {
+        "project_id": "nodrift", "node_key": "work", "expected_revision": 1,
+        "workflow": "state_code_fixture", "request_key": "nodrift-fresh"}, allow_write=True)
+    rec = run_isolation.record(live.db, launched["run_id"])
+    account = live.service.attempts.get(launched["attempt_id"])["context"]["prior_candidate"]
+    assert rec["base_sha"] == head
+    assert account["state"] == "excluded" and account["selected_base"] == rec["base_sha"]
+    assert launched["status"] == "running", "exclusion is visibility, not a refusal"
+
+
 def test_director_chosen_base_refuses_external_and_past_dispatch_window(live):
     from core.state_commands import execute
 

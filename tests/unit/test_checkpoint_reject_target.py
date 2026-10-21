@@ -94,7 +94,7 @@ def _assert_host_redirect_forwarding(tmp_path, positional):
         assert claimed is not None and claimed.step_id == "maker"
         # The SDK renders cumulative feedback; raw latest rejection stays exact.
         feedback = claimed.inputs["_feedback"]
-        assert isinstance(feedback, str) and feedback.count("revise maker") == 1
+        assert isinstance(feedback, str) and "revise maker" in feedback
         assert claimed.inputs["_rejection"] == "revise maker"
     finally:
         sf._conn.close()

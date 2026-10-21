@@ -191,24 +191,30 @@ def _refuse_incomplete_pass(report: dict) -> None:
     consumer re-checks the raw record it received, so a builder that still
     equated "no parsed error lines" with success cannot authorize a pass. Only
     the authoritative phases count (warm import, explicit reparse); the cold
-    import is diagnostic. A report without any phase record (no project,
-    older builder) is left alone: absence of a record is not asserted here.
+    import is diagnostic. The one exemption is the builder's own explicit
+    ``no_project`` answer (nothing to compile, nothing ran). Every other pass
+    must carry the phase record that observed it: a pass with NO record is an
+    unobserved authoritative witness, not a clean one, and is refused through
+    the same truthful infrastructure-unavailable (unmeasured) fields.
     """
+    if report.get("passed") is not True or report.get("no_project"):
+        return
     diag = report.get("compile_diagnostics")
-    if report.get("passed") is not True or not isinstance(diag, dict):
-        return
-    phases = {p.get("phase"): p for p in diag.get("phases") or []
-              if isinstance(p, dict)}
-    if not phases or report.get("no_project"):
-        return
+    raw_phases = diag.get("phases") if isinstance(diag, dict) else None
+    phases = {p.get("phase"): p for p in raw_phases or [] if isinstance(p, dict)}
     reasons = []
-    for name in ("warm_import", "explicit_reparse"):
-        phase = phases.get(name)
-        if phase is None:
-            reasons.append(f"{name} missing from the phase record")
-        elif phase.get("outcome") != "exited" or phase.get("returncode") != 0:
-            reasons.append("%s %s (returncode %s)" % (
-                name, phase.get("outcome"), phase.get("returncode")))
+    if not phases:
+        reasons.append("no compile phase record accompanied the pass "
+                       "(authoritative warm import and explicit reparse unobserved)")
+    else:
+        for name in ("warm_import", "explicit_reparse"):
+            phase = phases.get(name)
+            if phase is None:
+                reasons.append(f"{name} missing from the phase record")
+            elif phase.get("outcome") != "exited" or phase.get("returncode") != 0:
+                reasons.append("%s %s (returncode %s)" % (
+                    name, phase.get("outcome"), phase.get("returncode")))
+
     if not reasons:
         return
     report.update(passed=False, execution_complete=False,

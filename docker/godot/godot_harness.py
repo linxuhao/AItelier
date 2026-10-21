@@ -951,7 +951,10 @@ def _parse_every_script(dst: Path, timeout: int, *, phase: dict) -> tuple[str, i
         args = ["--path", str(dst), "--script", "res://__parse_all.gd"]
         cp = _compile_phase(args, timeout, phase)
     except subprocess.TimeoutExpired:
-        return ("", -1)
+        # The pass did not finish, but whatever it printed before the wall is
+        # real evidence: a parse error already on stderr is a proven code fault
+        # and must reach the verdict (coverage stays -1 = unverified).
+        return (phase.get("stderr") or "", -1)
     finally:
         probe.unlink(missing_ok=True)
     n = -1

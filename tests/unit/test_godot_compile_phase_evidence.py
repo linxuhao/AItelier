@@ -341,6 +341,74 @@ def test_warm_sigkill_does_not_hide_a_proven_parse_fault(tmp_path, engine):
     assert release_disposition(report) == "known_failure"
 
 
+def test_partial_reparse_parse_fault_then_timeout_stays_a_genuine_failure(
+        tmp_path, engine, monkeypatch):
+    # Real subprocess, real timeout kill: the reparse prints a valid ParseError
+    # and then hangs. The proven fault must not be hidden behind "incomplete".
+    script, _ = engine
+    script(ERR_reparse=FAULT, OUT_reparse="partial\n", HANG_reparse="1")
+    monkeypatch.setattr(gh, "compile_project", functools.partial(gh.compile_project, timeout=1))
+    with server() as url:
+        report = post(url, project(tmp_path))
+    reparse = by_phase(report)["explicit_reparse"]
+    assert reparse["outcome"] == "timeout" and reparse["stderr"] == FAULT
+    assert report["passed"] is False
+    assert [e["kind"] for e in report["errors"]] == ["parse"]
+    assert report["execution_complete"] is False
+    assert any("TIMED OUT" in r for r in report["incomplete_reasons"])
+    assert "infrastructure_unavailable" not in report
+    assert release_disposition(report) == "known_failure"
+
+
+def test_reparse_timeout_without_fault_stays_unmeasured_not_a_code_failure(
+        tmp_path, engine, monkeypatch):
+    script, _ = engine
+    script(HANG_reparse="1")
+    monkeypatch.setattr(gh, "compile_project", functools.partial(gh.compile_project, timeout=1))
+    with server() as url:
+        report = post(url, project(tmp_path))
+    assert [e["kind"] for e in report["errors"]] == ["incomplete"]
+    assert release_disposition(report) == "unresolved"
+
+
+def test_old_producer_pass_without_phase_record_is_refused_by_the_tool(
+        tmp_path, engine, monkeypatch):
+    # An older builder answers over real HTTP with passed:true and NO phase
+    # record while the engine was really SIGKILLed in the warm import.
+    script, _ = engine
+    script(RC_import2="kill")
+    real = gh.compile_project
+
+    def old_producer(proj, **kw):
+        report = real(proj, **kw)
+        # What a pre-phase-record builder reported for this run: a clean pass.
+        report.pop("compile_diagnostics")
+        for key in ("execution_complete", "incomplete_reasons",
+                    "infrastructure_unavailable", "evidence_state"):
+            report.pop(key, None)
+        report.update(passed=True, errors=[], summary="GDScript parse OK (1 of 1).")
+        return report
+    monkeypatch.setattr(gh, "compile_project", old_producer)
+    with server() as url:
+        result, out = run_tool(tmp_path, url, monkeypatch, project(tmp_path), run_id="run")
+    report = json.loads((out / "compile_report.json").read_text())
+    assert result["passed"] is False
+    assert report["passed"] is False
+    assert report["execution_complete"] is False
+    assert report["infrastructure_unavailable"] is True
+    assert "no compile phase record" in report["summary"]
+    assert release_disposition(report) == "unresolved"
+    assert not (out / "compile_diagnostics.json").exists()
+
+
+def test_tool_still_accepts_the_explicit_no_project_answer_without_phases():
+    # Boundary distinction kept: a project-less repo is not an incomplete compile.
+    payload = {"passed": True, "errors": [], "file_count": 0, "no_project": True}
+    report = dict(payload)
+    tool._refuse_incomplete_pass(report)
+    assert report == payload
+
+
 def test_complete_warm_and_reparse_with_cold_only_noise_still_pass(tmp_path, engine):
     script, _ = engine
     script(RC_import1="kill", ERR_import1=COLD)  # cold is diagnostic only

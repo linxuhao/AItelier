@@ -661,7 +661,13 @@ def _tools_on(rig, monkeypatch):
     monkeypatch.setenv("GODOT_BUILDER_URL", rig.base)
     monkeypatch.setattr(rig.gh, "compile_project", lambda proj, timeout=120, **_k: {
         "passed": True, "returncode": 0, "file_count": 1, "errors": [],
-        "warning_count": 0, "summary": "stub compile ok"})
+        "warning_count": 0, "summary": "stub compile ok",
+        # The builder's per-pass witness; a pass without it is refused.
+        "compile_diagnostics": {"invocation_id": "stub", "phases": [
+            {"phase": name, "outcome": "exited", "returncode": 0,
+             "stdout": "PARSE_ALL_LOADED=1/1\n" if name == "explicit_reparse" else "",
+             "stderr": "", "output_complete": True}
+            for name in ("cold_import", "warm_import", "explicit_reparse")]}})
     real_post = pt_impl.post_playtest
     monkeypatch.setattr(pt_impl, "post_playtest",
                         lambda payload, timeout=3600: real_post(payload,

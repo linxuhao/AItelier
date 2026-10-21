@@ -150,6 +150,13 @@ Allowed progress reports are `running`, `paused`, `unknown`, `candidate`, and
 version, the original context hash, and report reference/hash. Each successful
 append increments the observation version. Repeated identical observations do
 not append again; altered replay payloads and out-of-order versions are rejected.
+A `candidate` whose `report_sha256` is already bound to an observation with a
+different `attempt_id` or `observation_id` is refused ("candidate report digest
+was already bound to an earlier observation"). Each separately registered
+attempt therefore needs its own terminal JSON envelope bound to its
+attempt/context; that envelope may reference a shared bundle or raw evidence
+file. Resending the same `attempt_id` and `observation_id` with the identical
+payload is an idempotent retry, not a new candidate.
 
 `candidate` and `failed` require explicit `quiescent=true`. This is the external
 reporter's statement that its workers/operations have settled, not AItelier's

@@ -605,6 +605,36 @@ def test_candidate_report_digest_cannot_be_reused_by_a_later_attempt(system):
     assert system[1].get(second["attempt_id"])["observation_version"] == 0
 
 
+def test_report_ref_help_matches_candidate_digest_uniqueness_and_retry(system):
+    # See also test_candidate_report_digest_cannot_be_reused_by_a_later_attempt and
+    # test_report_retry_is_idempotent_but_mutated_or_out_of_order_reports_fail.
+    from core.state_commands import describe
+    from core.state_driver_guide import STATE_DRIVER_GUIDE
+    help_text = describe()["operations"]["report_external_attempt"]["arguments"][
+        "properties"]["report_ref"]["description"]
+    for text in (help_text, STATE_DRIVER_GUIDE):
+        assert "candidate report digest was already bound to an earlier observation" in text
+        assert "different attempt_id or observation_id" in text
+        assert "own terminal JSON envelope" in text and "idempotent retry" in text
+
+    first = register(system)
+    # Same attempt, different observation_id already carrying the digest: refused.
+    progress = report(system, first, status="running", oid="progress-1",
+                      report_sha256=candidate_report(first))
+    with pytest.raises(StateConflict, match="already bound to an earlier observation"):
+        report(system, progress)
+    done = report(system, progress, oid="completion-2")
+    # Exact retry of the existing observation: idempotent, nothing appended.
+    retry = report(system, progress, oid="completion-2")
+    assert retry["idempotent"] and retry["observation"]["seq"] == done["observation"]["seq"]
+    # Another attempt reusing those bytes is refused; its own envelope is accepted.
+    second = register(system, rid="job-2", request="req-2")
+    with pytest.raises(StateConflict, match="already bound to an earlier observation"):
+        report(system, second, oid="completion-3", report_ref=done["observation"]["report_ref"],
+               report_sha256=done["observation"]["report_sha256"])
+    assert report(system, second, oid="completion-3")["status"] == "candidate"
+
+
 def test_candidate_or_old_observation_report_is_not_independent_evidence(system):
     first = report(system, register(system))
     with pytest.raises(StateConflict, match="independent"):

@@ -428,9 +428,12 @@ class CleanupUnconfirmed(IsolationUnavailable):
 #
 # Every container here (Git preparation, direct repository command, host
 # launcher command) is created by its own UUID name and started separately:
-# `docker create`, then `docker start -a`. Killing a Docker client does not
-# cancel a request the daemon already holds, so a removal issued while a
-# create is in flight can run first and the daemon then creates the
+# `docker create`, then `docker start -a`. START and removal target the
+# container ID the create's reply carried, never the name: a create refused
+# because the name is taken leaves it to its holder, and once this container
+# is renamed or gone (`--rm`) the name may be another's. Killing a Docker
+# client does not cancel a request the daemon already holds, so a removal
+# issued while a create is in flight can run first and the daemon then creates the
 # container (measured on a `docker run` and on a `docker create` killed by
 # KeyboardInterrupt: left `created`/`running` after their removal). So the
 # create client is never killed by cancellation: it runs until it exits or
@@ -448,13 +451,16 @@ class CleanupUnconfirmed(IsolationUnavailable):
 # answered, before START, so a cancelled launch never starts its command.
 # Launcher cancellation (the client socket) is checked at the same point.
 # An unanswered create is unknown: its client is killed (on CREATE_TIMEOUT),
-# the name removed, and the result is `CleanupUnconfirmed` naming it, since
-# the daemon may still create it; nothing is started and `private_git`
-# propagates it, so no repository command follows. Once a create has answered, `docker rm -f NAME` exiting 0
-# is final (it is 0 when the name is already gone, and nothing re-creates
-# it); a removal that does not succeed within REMOVE_DEADLINE is
-# `CleanupUnconfirmed`. Removal waits for the start client to be killed and
-# reaped first, and is itself protected from a held SIGINT.
+# nothing is removed (there is no ID, and the name may be another's: a
+# refusal for a taken name may be the very reply the client lost) and the
+# result is `CleanupUnconfirmed` naming it, since the daemon may still create
+# it; nothing is started and `private_git` propagates it, so no repository
+# command follows. A refused create is not removed either. Once a create has
+# answered with its ID, `docker rm -f ID` exiting 0 is final (it is 0 when
+# the container is already gone, and nothing re-creates an ID); a removal
+# that does not succeed within REMOVE_DEADLINE is `CleanupUnconfirmed`.
+# Removal waits for the start client to be killed and reaped first, and is
+# itself protected from a held SIGINT.
 CREATE_TIMEOUT = 30
 REMOVE_DEADLINE = 30
 
@@ -490,26 +496,23 @@ class _HeldInterrupt:
         return False
 
 
-def _remove_owned(docker: str, name: str, answered: bool) -> None:
+def _remove_owned(docker: str, container: str, name: str) -> None:
+    """Remove the container ``name``'s create answered with, by that ID only."""
     deadline = time.monotonic() + REMOVE_DEADLINE
     while True:
         try:
-            done = subprocess.run([docker, "rm", "-f", name], stdin=subprocess.DEVNULL,
+            done = subprocess.run([docker, "rm", "-f", container], stdin=subprocess.DEVNULL,
                                   capture_output=True, text=True, timeout=10)
             removed, why = done.returncode == 0, done.stderr.strip()[-300:]
         except subprocess.TimeoutExpired:
             removed, why = False, "docker rm did not answer within 10s"
-        if removed and answered:
+        if removed:
             return
-        if removed or time.monotonic() > deadline:
+        if time.monotonic() > deadline:
             break
         time.sleep(0.2)
-    if not answered:
-        raise CleanupUnconfirmed(f"owned container {name}: its create got no answer from the "
-                                 "daemon, so the daemon may still create it after the removal; "
-                                 "its absence is not confirmed", name)
-    raise CleanupUnconfirmed(f"owned container {name} could not be removed within "
-                             f"{REMOVE_DEADLINE}s: {why}", name)
+    raise CleanupUnconfirmed(f"owned container {name} ({container}) could not be removed "
+                             f"within {REMOVE_DEADLINE}s: {why}", name)
 
 
 _DAEMON_REFUSAL = re.compile(r"(?:docker: )?Error response from daemon: ")
@@ -535,14 +538,19 @@ def owned_container(create: list[str], docker: str, name: str, *, cancelled=None
                     text: bool = False):
     """Create ``name`` with the ``create`` argv, start it, yield its `start -a` client.
 
+    START and the removal target the container ID the create answered with,
+    never ``name``: the name may be another's (a create refused because it
+    is taken) or become another's once this container is renamed or gone.
     ``cancelled`` (optional) is called after the create has answered and
-    before START; it raises to cancel. Every exit kills and reaps the start
-    client, then removes ``name`` (`_remove_owned`). A create the daemon
-    refused raises `IsolationUnavailable` ("not created"); one without the
-    daemon's answer ends in `CleanupUnconfirmed`.
+    before START; it raises to cancel. Every exit after a created answer
+    kills and reaps the start client, then removes that ID (`_remove_owned`).
+    A create the daemon refused raises `IsolationUnavailable` ("not
+    created") and removes nothing; one without the daemon's answer removes
+    nothing and ends in `CleanupUnconfirmed` naming ``name``.
     """
     answered = False
     sent = False
+    container = None
     proc = None
     try:
         with _HeldInterrupt():
@@ -564,11 +572,12 @@ def owned_container(create: list[str], docker: str, name: str, *, cancelled=None
                                            f"{err.strip()[-300:]}")
             if answer == "refused":
                 raise IsolationUnavailable(f"owned container not created: {err.strip()[-300:]}")
+            container = out.strip()
         # A SIGINT held during the create was delivered above: START is never reached.
         if cancelled is not None:
             cancelled()
         with _HeldInterrupt():
-            proc = subprocess.Popen([docker, "start", "-a", name], stdin=subprocess.DEVNULL,
+            proc = subprocess.Popen([docker, "start", "-a", container], stdin=subprocess.DEVNULL,
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=text,
                                     start_new_session=True)
         yield proc
@@ -582,8 +591,13 @@ def owned_container(create: list[str], docker: str, name: str, *, cancelled=None
                     proc.stdout.close()
                     proc.stderr.close()
             finally:
-                if sent:
-                    _remove_owned(docker, name, answered)
+                if container is not None:
+                    _remove_owned(docker, container, name)
+                elif sent and not answered:
+                    raise CleanupUnconfirmed(f"owned container {name}: its create got no answer "
+                                             "from the daemon, so the daemon may still create it; "
+                                             "nothing is removed by name (it may be another's) "
+                                             "and its absence is not confirmed", name)
 
 
 def _run_prep(create: list[str], docker: str, name: str, conn=None) -> str:

@@ -158,14 +158,15 @@ def test_four_actual_host_kernel_slots_refuse_fifth_and_release(owned):
 
 
 CREATE_START_SHIM = """#!{python}
-import json, os, sys
+import hashlib, json, os, sys
 args = sys.argv[1:]
 store = {store!r}
 if args[0] == "create":
     at = args.index("--entrypoint")
-    with open(os.path.join(store, args[args.index("--name") + 1]), "w") as stream:
+    cid = hashlib.sha256(args[args.index("--name") + 1].encode()).hexdigest()
+    with open(os.path.join(store, cid), "w") as stream:
         json.dump([args[at + 1]] + args[at + 3:], stream)
-    print("c" * 64)
+    print(cid)
     sys.exit(0)
 if args[:2] == ["start", "-a"]:
     with open(os.path.join(store, args[2])) as stream:
@@ -227,7 +228,7 @@ def test_live_disconnect_promptly_stops_own_child_and_keeps_peer(owned, monkeypa
         thread.join(2)
         assert not thread.is_alive() and time.monotonic() - before < 2
         assert result == ['client disconnected during owned execution']
-        assert len(calls) == 1 and calls[0][-1].startswith('aitelier-cpu-')
+        assert len(calls) == 1 and calls[0][-1] in [p.name for p in (tmp_path / 'containers').iterdir()]
         assert peer.poll() is None
     finally:
         server.close()
@@ -360,7 +361,7 @@ def test_four_simultaneous_real_socket_handlers_and_fifth_share_host_kernel_slot
         for worker in threads:
             worker.join(3)
             assert not worker.is_alive()
-        assert sorted(cleanup) == sorted(commands)
+        assert sorted(cleanup) == sorted(hashlib.sha256(n.encode()).hexdigest() for n in commands)
     finally:
         for client in clients:
             client.close()

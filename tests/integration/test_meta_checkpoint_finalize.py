@@ -2,6 +2,9 @@
 import json
 import logging
 import subprocess
+import threading
+import traceback
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -77,8 +80,56 @@ def normal(tmp_path, monkeypatch):
                 if getattr(dependency.call,'__name__','') == 'get_db_manager':
                     app.dependency_overrides[dependency.call] = lambda:db
     app.dependency_overrides[get_optional_user] = lambda:None
-    with TestClient(app,raise_server_exceptions=False) as client:
+    # Capture the callable actually held by the transport, including concurrent requests.
+    requests, records, translated = [], [], []
+    capture_lock = threading.Lock()
+    raw = Path('/raw') if Path('/raw').is_dir() else tmp_path
+    capture = raw/(tmp_path.name+'-normal-transport.json')
+    from core import checkpoint_observation as observation
+    from fastapi import HTTPException
+    from fastapi.exception_handlers import http_exception_handler
+    async def retain_error(request, exc):
+        translated.append(exc)
+        return await http_exception_handler(request, exc)
+    app.add_exception_handler(HTTPException, retain_error)
+    def save():
+        with capture_lock:
+            capture.write_text(json.dumps({'requests':requests,'records':records,
+                'translated':[{'type':type(e).__name__,'cause':type(e.__cause__).__name__,
+                'frames':[f.name for f in traceback.extract_tb(e.__cause__.__traceback__)] if e.__cause__ else []}
+                for e in translated]},indent=2))
+    class Retain(logging.Handler):
+        def emit(self, record):
+            records.append(record.checkpoint_observation)
+            save()
+    handler = Retain()
+    observation.logger.addHandler(handler)
+    class Transport:
+        async def __call__(self, scope, receive, send):
+            if scope['type'] != 'http':
+                return await app(scope,receive,send)
+            row = {'path':scope['path'],'thread':threading.get_ident()}
+            requests.append(row)
+            async def retain_send(message):
+                if message['type']=='http.response.start': row['status']=message['status']
+                await send(message)
+            try:
+                await app(scope,receive,retain_send)
+            except BaseException as exc:
+                row['exception_type']=type(exc).__name__
+                row['frames']=[f.name for f in traceback.extract_tb(exc.__traceback__)]
+                raise
+            finally:
+                save()
+    transport = Transport()
+    with TestClient(transport,raise_server_exceptions=False) as client:
+        assert client._transport.app is transport
         yield sf,db,ws,pid,rid,root,client,cp,wakes
+    observation.logger.removeHandler(handler)
+    assert observation._current.get() is None
+    if requests:
+        assert capture.is_file() and capture.stat().st_size > 0
+        assert json.loads(capture.read_text())['requests'] == requests
 
 
 def register_dpe(normal):
@@ -130,3 +181,139 @@ def test_current_normal_route_finalizes_then_selects_before_constructor(normal, 
     assert approve(normal,route).status_code == 200
     assert scheduler._get_or_create_skillflow_run(pid) == build
     assert len([r for r in sf.list_runs(pid) if r['graph_name'] == graph.name]) == 1
+
+
+@pytest.mark.parametrize('change',['mutate','delete'])
+def test_retained_payload_drives_genuine_emit_and_completed_replay(normal, change):
+    from tests.unit.test_normal_checkpoint_protocol import _approval_count
+    sf,db,ws,pid,rid,root,client,cp,wakes = normal
+    register_dpe(normal)
+    scheduler._sync_project_status_to_db(pid)
+    gather = root/'meta_conversation/gather/gather_state.json'
+    if change == 'delete': gather.unlink()
+    else: gather.write_text(json.dumps({'brief':{'project_name':'MUTATED','user_stories':['Wrong']}}))
+    assert approve(normal).status_code == 200
+    goals = root/'meta_conversation/finalize/step1_goals.json'
+    assert json.loads(goals.read_text())['project_name'] == BRIEF['project_name']
+    before = (goals.stat().st_mtime_ns,goals.read_bytes(),sf.get_steps(rid,include_payloads=True))
+    assert approve(normal).status_code == 200
+    assert (goals.stat().st_mtime_ns,goals.read_bytes(),sf.get_steps(rid,include_payloads=True)) == before
+    assert _approval_count(sf,rid) == 1
+
+
+@pytest.mark.parametrize('mode',['missing-token','missing-decision','wrong-hash','conflict','stale'])
+def test_identity_refusal_has_no_new_finalize_or_submission(normal, mode):
+    sf,db,ws,pid,rid,root,client,cp,wakes = normal
+    register_dpe(normal)
+    scheduler._sync_project_status_to_db(pid)
+    changes={}
+    if mode=='missing-token': changes['expected_checkpoint']=None
+    elif mode=='missing-decision': changes['decision_id']=''
+    elif mode=='wrong-hash': changes['expected_checkpoint']={**cp['expected_checkpoint'],'outputs_sha256':'f'*64}
+    elif mode=='conflict':
+        assert approve(normal).status_code == 200
+        changes['expected_checkpoint']={**cp['expected_checkpoint'],'version':999}
+    else:
+        sf.reject_checkpoint(rid,'gather','Revise the actual reviewed brief')
+        c=sf.claim_next_step(rid)
+        dest=Path(sf.output_directory(rid,'gather','gather_state'));dest.mkdir(parents=True,exist_ok=True)
+        (dest/'gather_state.json').write_text(json.dumps({'brief':{**BRIEF,'project_name':'Revision'}}))
+        sf.confirm_step(c.token,StepResult(outputs={'gather_state':{'brief':{**BRIEF,'project_name':'Revision'}}}))
+        sf.advance_run(rid)
+    before=(sf.get_run(rid),sf.get_steps(rid,include_payloads=True),db.get_project(pid),sf.list_runs(pid))
+    response=approve(normal,**changes)
+    assert response.status_code==409,response.text
+    assert (sf.get_run(rid),sf.get_steps(rid,include_payloads=True),db.get_project(pid),sf.list_runs(pid))==before
+
+
+def test_failed_genuine_emitter_is_observed_and_cannot_start_unbriefed_build(normal):
+    sf,db,ws,pid,rid,root,client,cp,wakes = normal
+    register_dpe(normal)
+    scheduler._sync_project_status_to_db(pid)
+    # A real owned filesystem refusal, not a patched emitter or SDK connection.
+    (root/'project').write_text('Owned fixture blocks the project directory')
+    response=approve(normal)
+    assert response.status_code==409,response.text
+    assert sf.get_run(rid)['status'] != 'completed'
+    assert not (root/'meta_conversation/finalize/step1_goals.json').exists()
+    assert db.get_active_projects(limit=10)==[]
+    assert scheduler._get_or_create_skillflow_run(pid) is None
+    assert not [r for r in sf.list_runs(pid) if r['graph_name']=='dpe_default_v2']
+
+
+def later_run(normal, state):
+    from skillflow.graph import StepNode,Transition
+    sf,db,ws,pid,*_=normal
+    name='foreign_current' if state=='foreign' else 'dpe_default_v2'
+    graph=PipelineGraph(name=name,begin='1',steps=[
+        StepNode(id='1',step_type='agent',checkpoint=True,checkpoint_label='Real later DPE pause',transitions=[Transition(to='2')]),
+        StepNode(id='2',step_type='agent',transitions=[])])
+    sf.register_graph(graph)
+    db.update_project(pid,config_name='dpe_default_v2')
+    rid=sf.create_run(name,project_id=pid)
+    if state != 'pending':
+        sf.start_run(rid)
+    if state in ('paused','failed'):
+        c=sf.claim_next_step(rid)
+        if state=='failed': sf.fail_step(c.token,'Real later failure',retryable=False)
+        else:
+            sf.confirm_step(c.token,StepResult(outputs={'later':'Actual reviewed DPE work'}));sf.advance_run(rid)
+    return rid
+
+
+@pytest.mark.parametrize('state',['pending','running','paused','failed','foreign'])
+def test_old_meta_replay_preserves_actual_later_owner(normal,state):
+    sf,db,ws,pid,rid,root,client,cp,wakes = normal
+    assert approve(normal).status_code == 200
+    later=later_run(normal,state)
+    scheduler._sync_project_status_to_db(pid)
+    db.set_project_brief(pid,'Later owned brief must survive')
+    if state=='paused': assert sf.get_checkpoint(later)['step_id']=='1'
+    before=(db.get_project(pid),sf.get_run(later),sf.get_steps(later,include_payloads=True))
+    response=approve(normal)
+    assert response.status_code==(409 if state=='failed' else 200),response.text
+    assert (db.get_project(pid),sf.get_run(later),sf.get_steps(later,include_payloads=True))==before
+
+
+def test_ordinary_concurrent_same_decision_requests_emit_once_and_select_one_build(normal):
+    from tests.unit.test_normal_checkpoint_protocol import _approval_count
+    sf,db,ws,pid,rid,root,client,cp,wakes = normal
+    register_dpe(normal)
+    scheduler._sync_project_status_to_db(pid)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures=[pool.submit(approve,normal,route) for route in ('run','project')]
+        responses=[future.result(timeout=20) for future in futures]
+    assert [r.status_code for r in responses]==[200,200],[r.text for r in responses]
+    assert _approval_count(sf,rid)==1
+    assert len([s for s in sf.get_steps(rid) if s['step_id']=='finalize'])==1
+    assert sf.get_run(rid)['status']=='completed'
+    selected=db.get_active_projects(limit=10)
+    assert [p['project_id'] for p in selected]==[pid]
+    first=scheduler._get_or_create_skillflow_run(pid)
+    assert scheduler._get_or_create_skillflow_run(pid)==first
+    assert len([r for r in sf.list_runs(pid) if r['graph_name']=='dpe_default_v2'])==1
+
+
+@pytest.mark.asyncio
+async def test_normal_butler_approval_and_old_replay_do_not_restart_later_build(normal,monkeypatch):
+    from core.meta_agent import MetaAgent
+    sf,db,ws,pid,rid,root,client,cp,wakes=normal
+    register_dpe(normal)
+    scheduler._sync_project_status_to_db(pid)
+    agent=MetaAgent.__new__(MetaAgent);agent.db=db;agent.ws=ws;agent._log_error=lambda msg:None
+    dispatch=[]
+    async def start(args):
+        # Only paid model execution is replaced; ordinary construction is real.
+        selected=db.get_active_projects(limit=10)
+        assert [p['project_id'] for p in selected]==[pid]
+        build=scheduler._get_or_create_skillflow_run(pid)
+        dispatch.append(build)
+        return {'status':'controlled-paid-dispatch','run_id':build}
+    monkeypatch.setattr(agent,'_tool_start_pipeline',start)
+    args={'run_id':rid,'expected_checkpoint':cp['expected_checkpoint'],'decision_id':'butler-reviewed'}
+    result=await agent._tool_approve_project_brief(args)
+    assert result['status']=='controlled-paid-dispatch',result
+    before=db.get_project(pid)
+    replay=await agent._tool_approve_project_brief(args)
+    assert replay['status']=='already_planned',replay
+    assert len(dispatch)==1 and db.get_project(pid)==before

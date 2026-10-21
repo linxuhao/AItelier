@@ -30,7 +30,7 @@ from core.meta_conversation import (
 
 
 def emit_project_artifacts(*, workspace_root: str = "", out_dir: str = "",
-                           **kwargs) -> dict:
+                           run_id: str = "", **kwargs) -> dict:
     """Write project_brief.md + spec.md + step1_goals.json. Returns {written, emitted}."""
     if not workspace_root or not Path(workspace_root).is_absolute():
         # Never fall back to "." → the process CWD (= AItelier's own repo,
@@ -47,13 +47,19 @@ def emit_project_artifacts(*, workspace_root: str = "", out_dir: str = "",
     # project artifacts, so emitting empty ones would let the require_completed
     # end-condition complete the meta run on garbage and start DPE brief-less.
     # Raising fails the step → the run cannot complete → the error surfaces.
-    gs_path = ws / "meta_conversation" / "gather" / "gather_state.json"
-    if not gs_path.is_file():
-        raise ValueError(f"emit_project_artifacts: gather_state.json not found at {gs_path}")
-    try:
-        data = json.loads(gs_path.read_text(encoding="utf-8")) or {}
-    except Exception as e:
-        raise ValueError(f"emit_project_artifacts: gather_state.json is not valid JSON: {e}")
+    if run_id:
+        from api.dependencies import get_skillflow
+        from core.meta_run import retained_gather_state
+        data = retained_gather_state(get_skillflow(), run_id)
+    else:
+        # Standalone utility callers have no SDK run/retained instance.
+        gs_path = ws / "meta_conversation" / "gather" / "gather_state.json"
+        if not gs_path.is_file():
+            raise ValueError(f"emit_project_artifacts: gather_state.json not found at {gs_path}")
+        try:
+            data = json.loads(gs_path.read_text(encoding="utf-8")) or {}
+        except Exception as e:
+            raise ValueError(f"emit_project_artifacts: gather_state.json is not valid JSON: {e}") from e
     brief = data.get("brief") or {}
     stories = brief.get("user_stories")
     if not (isinstance(stories, list) and any(str(s).strip() for s in stories)):

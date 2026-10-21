@@ -13,7 +13,7 @@ deterministic requirements-gathering conversation:
     transcript ``meta/conversation.md`` (maintained by the butler), which the
     gather step reads as context.
   - Approving the brief (:func:`approve_meta`) resumes the checkpoint; the
-    gather step's ``approved → null`` transition completes the run, after which
+    finalize tool emits the reviewed artifacts and completes the run, after which
     the butler triggers DPE (``core/project_submit.seed_and_trigger``).
 
 No skillflow changes are required.
@@ -135,3 +135,84 @@ def approve_meta(sf, run_id: str, step_runner=None, *,
                         f"meta run {run_id} step '{claimed.step_id}' failed: {e}") from e
 
     raise RuntimeError(f"meta run {run_id} did not finalize within the step budget")
+
+
+def retained_gather_state(sf, run_id: str, step_instance_id=None) -> dict:
+    """Read the completed reviewed instance from the SDK's retained payload."""
+    checkpoint_phase("retained_gather")
+    rows = [row for row in sf.get_steps(run_id, include_payloads=True)
+            if row["step_id"] == GATHER_STEP and row["status"] == "completed"
+            and (step_instance_id is None or row["id"] == step_instance_id)]
+    if not rows:
+        raise ValueError("The reviewed gather instance does not belong to this run")
+    state = json.loads(max(rows, key=lambda row: row["id"])["outputs_json"]).get("gather_state")
+    if isinstance(state, str):
+        state = json.loads(state)
+    if not isinstance(state, dict):
+        raise ValueError("The retained gather output is not an object")
+    return state
+
+
+def meta_owns_submission(sf, db, run) -> bool:
+    """Follow the scheduler's owner selection before changing its project cache."""
+    checkpoint_phase("submission_owner")
+    pid = run["project_id"]
+    project = db.get_project(pid) or {}
+    owner = sf.get_run_by_project(pid)
+    if not owner:
+        runs = sf.list_runs(pid)
+        primary = project.get("config_name") or "dpe_default_v2"
+        owner = next((r for r in runs if r["graph_name"] == primary), runs[0] if runs else None)
+    if owner and owner["id"] != run["id"]:
+        if owner["status"] == "failed":
+            raise RuntimeError("The project's failed run needs an explicit retry")
+        return False
+    return True
+
+
+def submit_finalized_meta(sf, db, ws, run, expected_checkpoint) -> dict:
+    """Submit the retained brief only while this completed meta run owns the cache.
+
+    Callers hold the existing per-project scheduler lock across approval and
+    submission; an old replay must not reset a later build's pause or progress.
+    """
+    from core.meta_conversation import format_brief_as_markdown
+    from core.project_submit import seed_and_trigger
+
+    pid = run["project_id"]
+    if not meta_owns_submission(sf, db, run):
+        return {"status": "already_planned", "project_id": pid}
+    brief = retained_gather_state(sf, run["id"], expected_checkpoint["step_instance_id"]).get("brief") or {}
+    checkpoint_phase("submission_project")
+    project = db.get_project(pid) or {}
+    completed = project.get("completed_project_steps") or []
+    if isinstance(completed, str):
+        completed = json.loads(completed)
+    if (not project.get("meta_state") and "1" in completed
+            and project.get("brief") == format_brief_as_markdown(brief)):
+        return {"status": "already_planned", "project_id": pid}
+    # Only the exact meta owner may normalize the real paused/completed cache.
+    # Failed projects still go through seed_and_trigger's explicit-retry refusal.
+    if (project.get("status") or "").startswith("checkpoint:") or project.get("status") == "completed":
+        checkpoint_phase("submission_ready")
+        db.update_project(pid, status="planning")
+    checkpoint_phase("seed_build")
+    result = seed_and_trigger(db, ws, pid, brief)
+    if result.get("status") not in ("submitted", "already_planned"):
+        raise RuntimeError(result.get("message") or "The finalized build was not submitted")
+    return result
+
+
+@observe_checkpoint
+def approve_and_submit_meta(sf, db, ws, run_id: str, *, expected_checkpoint=None, decision_id="") -> dict:
+    """Compose the ordinary SDK approval, genuine finalize and build submission."""
+    from core.scheduler import _get_tick_lock
+
+    checkpoint_phase("submission_run", run_id=run_id, decision_id=decision_id)
+    run = sf.get_run(run_id)
+    if not run or run.get("graph_name") != META_GRAPH:
+        raise ValueError("Expected the project's exact meta_conversation run")
+    checkpoint_phase("submission_lock")
+    with _get_tick_lock(run["project_id"]):
+        approve_meta(sf, run_id, expected_checkpoint=expected_checkpoint, decision_id=decision_id)
+        return submit_finalized_meta(sf, db, ws, run, expected_checkpoint)

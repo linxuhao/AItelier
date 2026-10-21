@@ -368,3 +368,52 @@ def test_real_failed_step_explicit_rescue_keeps_existing_resume_path(normal):
     assert sf.get_run(later)['status']=='running'
     assert sf.get_run(rid)['status']=='paused'
     assert not (root/'meta_conversation/finalize/step1_goals.json').exists()
+
+
+def _schema(db):
+    import sqlite3
+    with sqlite3.connect(db.db_path) as conn:
+        return conn.execute("SELECT type,name,sql FROM sqlite_master ORDER BY type,name").fetchall()
+
+
+def _state_schema_names(tmp_path):
+    # The objects a trusted store's constructor creates, from the real initializer.
+    from core.state_graph import initialize_graph_schema
+    scratch = DBManager(str(tmp_path/'scratch-state.db'))
+    plain = {row[1] for row in _schema(scratch)}
+    initialize_graph_schema(scratch)
+    return {row[1] for row in _schema(scratch)} - plain
+
+
+@pytest.mark.parametrize('route',['run','project'])
+def test_ordinary_controller_request_runs_no_state_schema_ddl(normal, route, tmp_path):
+    # The ownership check on an ordinary request reads; it neither creates nor
+    # migrates State schema on the database the route was handed. A run no
+    # State attempt binds stays an unmanaged run on an unmanaged database.
+    sf,db,ws,pid,rid,root,client,cp,wakes = normal
+    names = _state_schema_names(tmp_path)
+    assert 'state_nodes' in names and 'state_project_enforcement' in names
+    before = _schema(db)
+    assert not names & {row[1] for row in before}
+    response = approve(normal, route)
+    assert response.status_code == 200, response.text
+    after = _schema(db)
+    assert not names & {row[1] for row in after}
+    assert [row for row in after if row[1].startswith('state_')] == []
+    assert sf.get_run(rid)['status'] == 'completed'
+
+
+def test_initialized_state_controller_requests_keep_schema_and_owner(normal, monkeypatch):
+    from tests.unit.test_state_p3_checkpoint_entry import _bind_state_attempt, _as
+    from tests.unit.test_normal_checkpoint_protocol import _approval_count
+    sf,db,ws,pid,rid,root,client,cp,wakes = normal
+    _bind_state_attempt(db, rid)
+    initialized = _schema(db)
+    assert 'state_attempts' in {row[1] for row in initialized}
+    _as(monkeypatch, 'grok')
+    response = approve(normal)
+    assert response.status_code == 409 and 'not_attempt_owner' in response.text
+    assert _approval_count(sf, rid) == 0 and _schema(db) == initialized
+    _as(monkeypatch, 'codex')
+    assert approve(normal, 'project').status_code == 200
+    assert _approval_count(sf, rid) == 1 and _schema(db) == initialized

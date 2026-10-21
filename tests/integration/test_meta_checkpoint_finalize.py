@@ -69,6 +69,8 @@ def normal(tmp_path, monkeypatch):
     app = FastAPI()
     app.include_router(mr.router)
     app.include_router(rr.router)
+    app.dependency_overrides[mr.get_db_manager] = lambda:db
+    app.dependency_overrides[rr.get_db_manager] = lambda:db
     for route in app.routes:
         if hasattr(route,'dependant'):
             for dependency in route.dependant.dependencies:

@@ -298,12 +298,20 @@ def checkpoint_controller(db, run_id, driver_id, is_admin, actor) -> dict:
     ``break_glass`` recorded in a ``checkpoint_break_glass`` event. Ownership
     moving between this check and the engine call is an accepted gap, named
     in docs/driver-claims.md (checkpoint answers are rare and human-paced).
+
+    The check READS existing facts on the caller's handle. It builds no store:
+    a store's constructor creates and migrates schema, and an ordinary
+    checkpoint request must not run DDL on the database it was handed
+    (concurrent answers would race that migration). Absent tables mean no
+    State attempt binds the run. Only the admin's break-glass event writes,
+    through the store, once a bound attempt proves the State schema exists.
     """
     from core.state_graph import StateGraphStore
     if not run_id:
         return {"enforced": False}
-    store = StateGraphStore(db, project_read_trusted=True)
-    with store.transaction() as conn:
+    with db.get_connection() as conn:
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("BEGIN")
         if not _has_table(conn, "state_attempts"):
             return {"enforced": False}
         row = conn.execute("SELECT attempt_id,project_id,node_key,owner_driver_id,owner_fence "
@@ -321,6 +329,7 @@ def checkpoint_controller(db, run_id, driver_id, is_admin, actor) -> dict:
         raise ClaimError("not_attempt_owner", f"checkpoints of run {run_id} are decided by the owner of attempt "
                          f"{attempt['attempt_id']} (driver {attempt['owner_driver_id']}); take_over_attempt "
                          "or a handoff changes the controller", owner_driver_id=attempt["owner_driver_id"])
+    store = StateGraphStore(db, project_read_trusted=True)
     with store.transaction(write=True) as conn:
         store._event(conn, attempt["project_id"], attempt["node_key"], "checkpoint_break_glass", {
             "attempt_id": attempt["attempt_id"], "run_id": run_id, "actor": actor,

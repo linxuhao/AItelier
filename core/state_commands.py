@@ -687,7 +687,13 @@ class ExternalObservation(Attempt):
         "absolute local path, or a file:// URL with an empty or localhost host, to a regular file whose "
         "bytes hash to report_sha256. Terminal reports require structured JSON with settled=true and "
         "usable=true, and status candidate/completed for candidate or failed for failed. Quiescent late "
-        "reports are hash-verified without the terminal envelope check."))
+        "reports are hash-verified without the terminal envelope check. A fresh candidate observation needs a "
+        "report_sha256 not already recorded on any observation of a different attempt or observation_id; "
+        "reusing such a digest is refused. Only an exact retry of the same attempt_id and observation_id "
+        "with an identical payload is accepted idempotently. Each independently registered node or attempt "
+        "therefore reports its own small terminal JSON envelope, bound to its own context/identity; the "
+        "envelopes may point at the same immutable underlying artifact, bundle or raw output, so no work "
+        "is rerun and no evidence is changed or invented."))
     report_sha256: str
     quiescent: bool = False
     artifact: str | None = None

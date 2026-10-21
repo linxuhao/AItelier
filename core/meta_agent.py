@@ -3110,8 +3110,8 @@ class MetaAgent:
     async def _tool_approve_project_brief(self, args: dict) -> dict:
         """Approve the reviewed brief, complete the meta run, and trigger DPE."""
         from api.dependencies import get_skillflow
-        from core.meta_run import approve_meta
-        from core.project_submit import seed_and_trigger
+        from core.meta_run import approve_meta, meta_owns_submission, submit_finalized_meta
+        from core.scheduler import _get_tick_lock
 
         sf = get_skillflow()
         run_id = args.get("run_id")
@@ -3144,46 +3144,26 @@ class MetaAgent:
                                "has not produced a complete brief. Keep talking to "
                                "add requirements before approving."}
 
-        # Drive the meta run through its finalize tool step — the SOLE producer of
-        # the project artifacts (project_brief.md, spec.md, step1_goals.json). If
-        # it fails to emit, do NOT start DPE (it would run brief-less); surface the
-        # error so the user can retry. Only trigger DPE once finalize has emitted.
+        # Serialize with ordinary scheduler ticks; paid DPE execution stays outside.
         try:
-            from aitelier.runner import AgentStepRunner
-            from core.event_bus import event_bus
-
-            async def _run_step(claimed):
-                runner = AgentStepRunner(
-                    db_manager=self.db, workspace_manager=self.ws,
-                    agent_factory=None, prompt_assembler=None,
-                    event_bus=event_bus,
-                )
-                return await runner.execute(claimed)
-
-            approve_meta(sf, run_id, step_runner=_run_step,
-                         expected_checkpoint=expected,
-                         decision_id=args.get("decision_id", ""))
+            with _get_tick_lock(pid):
+                approve_meta(sf, run_id, expected_checkpoint=expected,
+                             decision_id=args.get("decision_id", ""))
+                if not meta_owns_submission(sf, self.db, run):
+                    return {"status": "already_planned", "project_id": pid}
+                build_config, cfg_err = self._resolve_build_config(sf, args)
+                if cfg_err:
+                    return {"status": "error", "message": cfg_err}
+                if build_config != "dpe_default_v2":
+                    self.db.update_project(pid, config_name=build_config)
+                res = submit_finalized_meta(sf, self.db, self.ws, run, expected)
+                if res["status"] == "already_planned":
+                    return res
         except Exception as e:
             self._log_error(f"approve_meta failed for {run_id}: {e}")
             return {"status": "error", "project_id": pid,
                     "message": f"Brief approval/finalization not confirmed: {e}. "
                                "The build was not started; retain the same reviewed decision on retry."}
-
-        # Config composition can register a graph and update the project. Keep
-        # those effects after SDK validation/replay and successful finalization.
-        # A config error can be corrected using the same already-approved brief.
-        build_config, cfg_err = self._resolve_build_config(sf, args)
-        if cfg_err:
-            return {"status": "error", "message": cfg_err}
-        if build_config != "dpe_default_v2":
-            self.db.update_project(pid, config_name=build_config)
-
-        res = seed_and_trigger(self.db, self.ws, pid, brief)
-        if res.get("status") not in ("submitted", "already_planned"):
-            res.setdefault("project_id", pid)
-            res["message"] = res.get("message",
-                f"Failed to seed the build pipeline: {res.get('status', 'unknown error')}")
-            return res
 
         # The meta agent now starts the DPE build pipeline and drives it to its
         # first review checkpoint, surfaced in this chat (reuses the proven

@@ -873,7 +873,8 @@ async def test_wait_does_not_recover_candidate_from_old_node_revision(system, tm
 
 
 @pytest.mark.asyncio
-async def test_obsolete_candidate_exception_names_only_explicit_attempts_and_preserves_filter_modes(system, tmp_path):
+@pytest.mark.parametrize("timeout", [0, 2])
+async def test_obsolete_candidate_exception_names_only_explicit_attempts_and_preserves_filter_modes(system, tmp_path, timeout):
     store, attempts, _ = system
     old, _, _ = _old_unpinned_and_accepted_successor(system, tmp_path)
     store.add_nodes("game", [spec("d")])
@@ -881,15 +882,20 @@ async def test_obsolete_candidate_exception_names_only_explicit_attempts_and_pre
     service = _recovery_service(system, tmp_path)
     cursor = store.events("game")[-1]["seq"]
     before = _wait_history_rows(store)
+    # Cover cached snapshots and real recovery without a 20 ms scheduling deadline.
     any_result = await service.wait_for_state_change("game", after=cursor, node_keys=["d"],
-        attempt_ids=[old["attempt_id"]], filter_mode="any", return_when_idle=True, timeout_seconds=.02)
+        attempt_ids=[old["attempt_id"]], filter_mode="any", return_when_idle=True, timeout_seconds=timeout)
+    assert any_result["timed_out"] is False, any_result
+    assert any_result["events"] == [] and any_result["next_after"] == cursor, any_result
     assert any_result["reason"] == "action_required"
     assert any_result["attempts"] == [{"attempt_id": old["attempt_id"], "status": "candidate", "artifact_ref": None}]
     all_result = await service.wait_for_state_change("game", after=cursor, node_keys=["d"],
-        attempt_ids=[old["attempt_id"]], filter_mode="all", return_when_idle=True, timeout_seconds=.02)
+        attempt_ids=[old["attempt_id"]], filter_mode="all", return_when_idle=True, timeout_seconds=timeout)
+    assert all_result["timed_out"] is False, all_result
+    assert all_result["events"] == [] and all_result["next_after"] == cursor, all_result
     assert all_result["reason"] == "nothing_to_wait"
     unnamed = await service.wait_for_state_change("game", after=cursor, node_keys=["a"],
-        attempt_ids=[healthy["attempt_id"]], filter_mode="any", return_when_idle=True, timeout_seconds=.02)
+        attempt_ids=[healthy["attempt_id"]], filter_mode="any", return_when_idle=True, timeout_seconds=timeout)
     assert unnamed["timed_out"] and "reason" not in unnamed
     assert _wait_history_rows(store) == before
 

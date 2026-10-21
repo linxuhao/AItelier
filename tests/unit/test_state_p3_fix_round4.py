@@ -7,7 +7,7 @@ tested in test_state_p3_checkpoint_entry.py.
 """
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, create_autospec
 
 INFO = ("gather", "Project conversation", "run-1", "meta_conversation", 7)
 
@@ -21,15 +21,19 @@ class TestItem1RestCheckpointRoutes:
         sf = MagicMock()
         sf.get_run.return_value = {"status": "paused"}
         monkeypatch.setattr(mr, "get_skillflow", lambda: sf)
-        monkeypatch.setattr(mr, "_get_checkpoint_info", lambda pid: INFO)
+        checkpoint_info = create_autospec(mr._get_checkpoint_info, return_value=INFO)
+        monkeypatch.setattr(mr, "_get_checkpoint_info", checkpoint_info)
         import core.run_driver as run_driver
         seen = {}
         monkeypatch.setattr(run_driver, "checkpoint_reject_target",
-                            lambda sf_, graph, step, run: seen.update(graph=graph, step=step, run=run) or None)
+                            lambda sf_, graph, step, run: seen.update(graph=graph, step=step, run=run) or "intent_detect")
         resp = client.post("/api/meta/cp-rej-proj/checkpoint/reject",
                            json={"checkpoint": "gather", "feedback": "MUST use PostgreSQL."})
         assert resp.status_code == 200, resp.text
         assert resp.json()["status"] == "rejected"
+        checkpoint_info.assert_called_once_with("cp-rej-proj", "")
         assert seen == {"graph": "meta_conversation", "step": "gather", "run": "run-1"}, "the graph reached the target resolver"
         args, _ = sf.reject_checkpoint.call_args
         assert args[:3] == ("run-1", "gather", "MUST use PostgreSQL.")
+        sf.reject_checkpoint.assert_called_once_with(
+            "run-1", "gather", "MUST use PostgreSQL.", redirect_to="intent_detect")

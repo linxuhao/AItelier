@@ -92,7 +92,8 @@ def candidate(service, tmp_path, node, key, fence=None):
 def evidence(service, tmp_path, attempt, criterion, label, **extra):
     ref, sha = a_file(tmp_path, f"evidence-{label}.json",
                       {"status": "completed", "settled": True, "usable": True, "verdict": "pass",
-                       "criterion_id": criterion})
+                       "criterion_id": criterion, "artifact": ARTIFACT,
+                       "evidence_id": label})
     return write(service, "record_evidence", attempt_id=attempt["attempt_id"], evidence_id=label,
                  criterion_id=criterion, verdict="pass", artifact=ARTIFACT, report_ref=ref, report_sha256=sha, **extra)
 

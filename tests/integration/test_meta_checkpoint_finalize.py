@@ -245,7 +245,7 @@ def test_failed_genuine_emitter_is_observed_and_cannot_start_unbriefed_build(nor
     assert observed['requests'][-1]['status']==409
     assert len(observed['records'])==1
     record=observed['records'][0]
-    assert record['phase']=='advance_finalize' and record['translated']
+    assert record['phase']=='emit_project_artifacts' and record['translated']
     assert record['request_id'] and record['run_id']==rid
     assert record['decision_id']=='current-reviewed-decision'
     assert any(e['type']=='builtins.FileExistsError' for e in record['exceptions'])
@@ -351,14 +351,20 @@ def test_real_meta_auth_and_state_controller_refuse_before_approval(normal,monke
     assert approve(normal).status_code==200
 
 
-def test_real_failed_meta_explicit_rescue_keeps_existing_resume_path(normal):
+def test_real_failed_step_explicit_rescue_keeps_existing_resume_path(normal):
     sf,db,ws,pid,rid,root,client,cp,wakes=normal
-    (root/'project').write_text('Owned finalize refusal')
-    assert approve(normal).status_code==409
-    assert sf.get_run(rid)['status']=='failed'
-    (root/'project').unlink()
-    response=approve(normal,rescue_failed=True)
+    later=later_run(normal,'paused')
+    observed=sf.get_checkpoint(later)
+    sf.approve_checkpoint(later,expected_checkpoint=observed['expected_checkpoint'],decision_id='later-rescue-proof')
+    sf.advance_run(later)
+    claimed=sf.claim_next_step(later)
+    assert claimed.step_id=='2'
+    sf.fail_step(claimed.token,'Owned nonretryable fixture failure',retryable=False)
+    assert sf.get_run(later)['status']=='failed'
+    response=client.post(f'/api/runs/{later}/checkpoint/approve',json={
+        'run_id':later,'checkpoint':'1','rescue_failed':True})
     assert response.status_code==200,response.text
     assert response.json()['status']=='rescued'
-    assert sf.get_run(rid)['status']=='running'
+    assert sf.get_run(later)['status']=='running'
+    assert sf.get_run(rid)['status']=='paused'
     assert not (root/'meta_conversation/finalize/step1_goals.json').exists()

@@ -60,6 +60,8 @@ def emit_project_artifacts(*, workspace_root: str = "", out_dir: str = "",
             data = json.loads(gs_path.read_text(encoding="utf-8")) or {}
         except Exception as e:
             raise ValueError(f"emit_project_artifacts: gather_state.json is not valid JSON: {e}") from e
+    from core.checkpoint_observation import checkpoint_phase
+    checkpoint_phase("emit_project_artifacts")
     brief = data.get("brief") or {}
     stories = brief.get("user_stories")
     if not (isinstance(stories, list) and any(str(s).strip() for s in stories)):

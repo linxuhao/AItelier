@@ -108,7 +108,7 @@ def finish(live, attempt, output="candidate output\n"):
 def evidence(live, attempt, check):
     body = json.dumps({"status": "completed", "settled": True, "usable": True,
                        "check": check, "criterion_id": check,
-                       "artifact": attempt["artifact_ref"], "passed": True}).encode()
+                       "artifact": attempt["artifact_ref"], "verdict": "pass", "passed": True}).encode()
     report = live.tmp / (attempt["node_key"] + "-" + check + ".json")
     report.write_bytes(body)
     return live.service.record_evidence(attempt["attempt_id"], attempt["attempt_id"] + "-" + check,
@@ -203,7 +203,7 @@ def test_state_service_refuses_missing_or_incomplete_evidence_and_retains_valid_
         report = live.tmp / f"complete-{criterion}.json"
         report.write_text(json.dumps({
             "status": "completed", "settled": True, "usable": True,
-            "verdict": "pass", "criterion_id": criterion,
+            "verdict": "pass", "criterion_id": criterion, "artifact": attempt["artifact_ref"],
         }), encoding="utf-8")
         reports.append(report)
         live.service.record_evidence(
@@ -1198,7 +1198,7 @@ def test_end_to_end_rest_acceptance_and_requirement_revision(live):
         assert command("verify_node", target).status_code == 409
         for check in ["behaviour", "review"]:
             body = json.dumps({"status": "completed", "settled": True, "usable": True,
-                               "verdict": "pass", "criterion_id": check}).encode()
+                               "verdict": "pass", "criterion_id": check, "artifact": a["artifact_ref"]}).encode()
             report = live.tmp / ("rest-" + check + ".json")
             report.write_bytes(body)
             out = command("record_evidence", {"attempt_id": a["attempt_id"], "evidence_id": "rest-" + check,
@@ -1352,7 +1352,8 @@ def test_read_only_attempt_without_findings_is_refused_not_pinned_to_the_head(li
     a = live.service.reconcile_attempt(a["attempt_id"])
     assert a["artifact_pending"] is True and a["artifact_ref"] is None
     assert head not in json.dumps(a["note"])
-    body = b'{"status":"completed","settled":true,"usable":true,"verdict":"pass","criterion_id":"review"}'
+    body = json.dumps({"status": "completed", "settled": True, "usable": True,
+                       "verdict": "pass", "criterion_id": "review", "artifact": head}).encode()
     report = live.tmp / "empty-evidence.json"
     report.write_bytes(body)
     with pytest.raises(StateConflict, match="pinned artifact"):

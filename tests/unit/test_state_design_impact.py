@@ -183,7 +183,7 @@ def test_removal_preview_does_not_delete_old_rules_bindings_or_receipts(service)
         hashlib.sha256(result_body).hexdigest(),True,'a'*64,'sha256')
     evidence=Path(service.db.db_path).parent/'fixture-check.json'
     evidence.write_text('{"status":"completed","settled":true,"usable":true,'
-                        '"verdict":"pass","criterion_id":"test"}')
+                        '"verdict":"pass","criterion_id":"test","artifact":"' + 'a'*64 + '"}')
     service.record_evidence(a['attempt_id'],'e','test','pass','a'*64,str(evidence),
                             hashlib.sha256(evidence.read_bytes()).hexdigest())
     receipt=service.verify_node('game','work',2,a['attempt_id'])

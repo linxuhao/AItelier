@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import threading
+from types import SimpleNamespace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -21,10 +22,9 @@ from core import run_isolation, run_resources
 from core.db_manager import DBManager
 from core.dpe_pipeline import NativeTurnBudgetExhausted, PipelineEngine
 from core.skillflow_host import AItelierSkillFlow
-from core.state_attempts import StateAttempts
 from core.state_database import StateDatabase
-from core.state_external import ExternalAttempts
 from core.state_graph import StateGraphStore
+from core.state_service import StateService
 from core.write_scope import scope_from_context
 from core.workspace_manager import WorkspaceManager
 
@@ -64,7 +64,7 @@ def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def independent_report(directory, label, repo, test_log):
+def independent_report(directory, label, repo, test_log, criterion):
     """A separate verifier process reads the commit and real test receipt."""
     directory.mkdir(parents=True, exist_ok=True)
     target = directory / f"{label}.json"
@@ -74,23 +74,28 @@ from pathlib import Path
 repo,out,log=map(Path,sys.argv[1:4])
 candidate=subprocess.run(['git','rev-parse','HEAD'],cwd=repo,check=True,
  text=True,capture_output=True).stdout.strip()
-payload={'verdict':'pass','candidate':candidate,'test_report':str(log),
+tree=subprocess.run(['git','rev-parse','HEAD^{tree}'],cwd=repo,check=True,
+ text=True,capture_output=True).stdout.strip()
+receipt=json.loads(log.read_bytes())
+assert receipt['returncode']==0 and receipt['tree']==tree, receipt
+payload={'status':'completed','settled':True,'usable':True,
+ 'verdict':'pass','artifact':candidate,'criterion_id':sys.argv[4],
+ 'test_report':str(log),
  'test_report_sha256':hashlib.sha256(log.read_bytes()).hexdigest(),
  'reviewer':'independent-subprocess'}
 out.write_text(json.dumps(payload,sort_keys=True,indent=2)+'\\n')
 """
     subprocess.run([sys.executable, "-c", script, str(repo), str(target),
-                    str(test_log)], check=True)
+                    str(test_log), criterion], check=True)
     return target, sha(target)
 
 
-def adjudicate(state, node, candidate, report, report_sha, repo):
-    attempts = StateAttempts(StateGraphStore(state, project_read_trusted=True))
-    external = ExternalAttempts(attempts, "fixture-controller")
-    attempt = external.register("delivery", node, 1, "product-cycle",
-                                f"worker-{node}", f"request-{node}")
-    worker_report = report.with_name(f"{node}-candidate.json")
-    bundle = report.with_name(f"{node}-candidate.bundle")
+def adjudicate(state, node, candidate, reports, test_log, repo):
+    service = StateService(state, actor="fixture-controller", project_read_trusted=True)
+    attempt = service.start_external_attempt("delivery", node, 1, "product-cycle",
+                                             f"worker-{node}", f"request-{node}")
+    worker_report = reports / f"{node}-candidate.json"
+    bundle = reports / f"{node}-candidate.bundle"
     assert git(repo, "rev-parse", "HEAD") == candidate
     git(repo, "bundle", "create", str(bundle), "HEAD")
     # The terminal envelope a real external harness writes: an explicit
@@ -100,18 +105,19 @@ def adjudicate(state, node, candidate, report, report_sha, repo):
         "status": "candidate", "settled": True, "usable": True,
         "artifact": candidate, "producer": f"worker-{node}",
         "git_bundle": {"path": str(bundle), "sha256": sha(bundle)}}) + "\n")
-    observed = external.observe(
+    observed = service.report_external_attempt(
         attempt["attempt_id"], f"candidate-{node}", 0, attempt["context_hash"],
         "candidate", str(worker_report), sha(worker_report), quiescent=True,
         artifact=candidate, artifact_kind="git-sha1")
     for criterion in ("test", "review"):
-        attempts.record_evidence(
+        report, report_sha = independent_report(
+            reports, f"{node}-independent-{criterion}", repo, test_log, criterion)
+        service.record_evidence(
             attempt["attempt_id"], f"{criterion}-{node}", criterion, "pass",
-            candidate, str(report), report_sha, "independent-subprocess",
+            candidate, str(report), report_sha,
             "separate process checked real commit and test receipt")
     assert observed["artifact_ref"] == candidate
-    return attempts.verify("delivery", node, 1, attempt["attempt_id"],
-                           "authorized-director")
+    return service.verify_node("delivery", node, 1, attempt["attempt_id"])
 
 
 class GodotHandler(BaseHTTPRequestHandler):
@@ -274,8 +280,10 @@ async def test_real_product_delivery_cycle(tmp_path, monkeypatch):
     sf = runtime(tmp_path, db)
     sf.register_graph(graph("cycle_a", handoff=True))
     sf.register_graph(graph("cycle_b"))
-    monkeypatch.setattr("api.dependencies.get_skillflow", lambda: sf)
-    monkeypatch.setattr("api.dependencies.get_db_manager", lambda: db)
+    # Bind real owned runtime handles without bootstrapping the host singleton
+    # composition root just to replace its getters.
+    monkeypatch.setitem(sys.modules, "api.dependencies", SimpleNamespace(
+        get_skillflow=lambda: sf, get_db_manager=lambda: db))
 
     run_a = sf.create_run("cycle_a", project_id="delivery-a")
     rec_a = run_isolation.ensure_for_run(
@@ -341,6 +349,7 @@ async def test_real_product_delivery_cycle(tmp_path, monkeypatch):
         thread.join(timeout=5)
         godot.server_close()
 
+    sf.confirm_step(claim_a.token, StepResult())
     test_a = behavior(a, "middle")
     assert test_a.returncode == 0, test_a.stderr
     reports = tmp_path / "reports"
@@ -349,7 +358,6 @@ async def test_real_product_delivery_cycle(tmp_path, monkeypatch):
     test_a_log.write_text(json.dumps({
         "returncode": test_a.returncode, "stdout": test_a.stdout,
         "tree": git(a, "write-tree")}) + "\n")
-    sf.confirm_step(claim_a.token, StepResult())
     candidate_a = git(a, "rev-parse", "HEAD")
     assert candidate_a != original and git(a, "status", "--porcelain") == ""
 
@@ -365,9 +373,9 @@ async def test_real_product_delivery_cycle(tmp_path, monkeypatch):
             {"id": "test", "kind": "test", "description": "real behavior"},
             {"id": "review", "kind": "review", "description": "independent"}]},
     ])
-    report_a, report_a_sha = independent_report(
-        reports, "a-independent", a, test_a_log)
-    receipt_a = adjudicate(state, "a", candidate_a, report_a, report_a_sha, a)
+    receipt_a = adjudicate(state, "a", candidate_a, reports, test_a_log, a)
+    report_a = reports / "a-independent-review.json"
+    report_a_sha = sha(report_a)
     assert receipt_a["artifact_ref"] == candidate_a
     git(source, "merge", "--ff-only", candidate_a)
     assert git(source, "rev-parse", "HEAD") == candidate_a
@@ -417,18 +425,18 @@ async def test_real_product_delivery_cycle(tmp_path, monkeypatch):
     assert (b / "known.gd").read_bytes() == known_bytes
     assert host_b._exec_tool({"tool": "apply_patch", "params": {
         "patch": patch("middle", "new")}})["applied"]
+    sf.confirm_step(claim_b.token, StepResult())
     test_b = behavior(b, "new")
     assert test_b.returncode == 0, test_b.stderr
     test_b_log = reports / "b-test.json"
     test_b_log.write_text(json.dumps({
         "returncode": test_b.returncode, "base": rec_b["base_sha"],
         "tree": git(b, "write-tree")}) + "\n")
-    sf.confirm_step(claim_b.token, StepResult())
     sf.advance_run(run_b)
     candidate_b = git(b, "rev-parse", "HEAD")
-    report_b, report_b_sha = independent_report(
-        reports, "b-independent", b, test_b_log)
-    receipt_b = adjudicate(state, "b", candidate_b, report_b, report_b_sha, b)
+    receipt_b = adjudicate(state, "b", candidate_b, reports, test_b_log, b)
+    report_b = reports / "b-independent-review.json"
+    report_b_sha = sha(report_b)
     assert receipt_b["artifact_ref"] == candidate_b
     git(source, "merge", "--ff-only", candidate_b)
     assert git(source, "rev-parse", "HEAD") == candidate_b

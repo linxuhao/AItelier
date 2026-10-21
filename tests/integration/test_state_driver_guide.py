@@ -483,7 +483,8 @@ def test_harness_doc_report_examples_bind_to_real_validators(tmp_path):
         report = tmp_path / ("omitted-" + omitted + ".json")
         raw = json.dumps(payload).encode()
         report.write_bytes(raw)
-        row = service.record_evidence(
-            attempt["attempt_id"], "omitted-" + omitted, criterion, verdict,
-            artifact, str(report), hashlib.sha256(raw).hexdigest())
-        assert row["verdict"] == verdict and row["artifact_ref"] == artifact
+        with pytest.raises(StateConflict, match="must explicitly declare"):
+            service.record_evidence(
+                attempt["attempt_id"], "omitted-" + omitted, criterion, verdict,
+                artifact, str(report), hashlib.sha256(raw).hexdigest())
+        assert service.attempts.evidence(attempt["attempt_id"]) == []

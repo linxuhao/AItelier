@@ -340,24 +340,21 @@ def retain_report(report_ref: str, report_sha256: str, *, completed: bool,
 def validate_evidence_semantics(report_bytes: bytes, criterion_id: str,
                                 verdict: str, artifact: str) -> None:
     """Bind explicit structured-report fields to the evidence row they support."""
-    if not report_bytes.lstrip().startswith((b"{", b"[")):
-        return
-    try:
-        value = json.loads(report_bytes)
-    except (UnicodeDecodeError, ValueError):
-        return  # retain_report already rejects malformed .json files
-    if not isinstance(value, dict):
-        return
-    if value.get("status") not in {None, "completed"}:
+    value = _structured_terminal(report_bytes)
+    if value["status"] != "completed":
         raise StateConflict("evidence report status is not completed")
-    if value.get("verdict") is not None and value["verdict"] != verdict:
-        raise StateConflict("evidence report verdict conflicts with the evidence row")
-    reported_criterion = value.get("criterion_id", value.get("criterion"))
-    if reported_criterion is not None and reported_criterion != criterion_id:
-        raise StateConflict("evidence report criterion conflicts with the evidence row")
-    reported_artifact = value.get("artifact_ref", value.get("artifact"))
-    if reported_artifact is not None and reported_artifact != artifact:
-        raise StateConflict("evidence report artifact conflicts with the evidence row")
+    for label, names, expected in (
+            ("verdict", ("verdict",), verdict),
+            ("criterion", ("criterion_id", "criterion"), criterion_id),
+            ("artifact", ("artifact", "artifact_ref"), artifact)):
+        supplied = [value[name] for name in names if name in value]
+        if not supplied:
+            raise StateConflict(f"evidence report must explicitly declare {label}")
+        # Every supplied alias must bind the same identity. A valid canonical
+        # field must not hide a conflicting, null or empty alias (or vice versa).
+        if any(not isinstance(item, str) or not item or item != expected
+               for item in supplied):
+            raise StateConflict(f"evidence report {label} conflicts with the evidence row")
 
 
 def validate_external_semantics(report_bytes: bytes, status: str, artifact: str | None) -> None:

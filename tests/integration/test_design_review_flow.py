@@ -122,7 +122,7 @@ def test_new_queries_remain_read_only_on_held_project_with_verified_node(tmp_pat
         hashlib.sha256(report_body).hexdigest(),True,'b'*64,'sha256')
     evidence=tmp_path/'fixture-evidence.json';evidence.write_text(json.dumps(
         {'status':'completed','settled':True,'usable':True,
-         'verdict':'pass','criterion_id':'check'}))
+         'verdict':'pass','criterion_id':'check','artifact':'b'*64}))
     s.record_evidence(a['attempt_id'],'e','check','pass','b'*64,str(evidence),hashlib.sha256(evidence.read_bytes()).hexdigest())
     s.verify_node('p','node',2,a['attempt_id']);s.portfolio.set_dispatch('p','hold',0,'No further work')
     with s.db.get_connection() as c:before=list(c.iterdump())

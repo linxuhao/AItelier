@@ -313,7 +313,7 @@ def test_real_state_only_mcp_can_certify_external_attempt_and_returns_errors(app
             evidence_path=Path(app.state.state_service.db.db_path).parent/('mcp-'+check+'.json')
             evidence_path.write_text(json.dumps({'status':'completed','settled':True,
                                                   'usable':True,'verdict':'pass',
-                                                  'criterion_id':check}))
+                                                  'criterion_id':check,'artifact':ARTIFACT}))
             tool('record_evidence',{'attempt_id':a['attempt_id'],'evidence_id':check,'criterion_id':check,'verdict':'pass','artifact':ARTIFACT,
                  'report_ref':str(evidence_path),'report_sha256':hashlib.sha256(evidence_path.read_bytes()).hexdigest()})
         assert tool('verify_node',target(a))['receipt_id']
@@ -339,7 +339,7 @@ def test_external_lifecycle_never_calls_unavailable_runtime_factory(tmp_path):
         evidence_path=tmp_path/('evidence-'+check+'.json')
         evidence_path.write_text(json.dumps({'status':'completed','settled':True,
                                               'usable':True,'verdict':'pass',
-                                              'criterion_id':check}))
+                                              'criterion_id':check,'artifact':ARTIFACT}))
         service.record_evidence(a['attempt_id'],check,check,'pass',ARTIFACT,str(evidence_path),
                                 hashlib.sha256(evidence_path.read_bytes()).hexdigest())
     service.verify_node('game','a',1,a['attempt_id'])
@@ -368,7 +368,7 @@ with TestClient(app) as c:
     a=cmd('start_external_attempt',{'project_id':'p','node_key':'goal','expected_revision':1,'harness':'own-harness','external_id':'job','request_key':'once'})
     report=sys.argv[1]+'.report';report_body=json.dumps({'status':'candidate','settled':True,'usable':True}).encode();open(report,'wb').write(report_body)
     cmd('report_external_attempt',{'attempt_id':a['attempt_id'],'observation_id':'end','expected_version':0,'context_hash':a['context_hash'],'status':'candidate','artifact':'a'*64,'artifact_kind':'sha256','report_ref':report,'report_sha256':hashlib.sha256(report_body).hexdigest(),'quiescent':True})
-    evidence=sys.argv[1]+'.evidence.json';evidence_body=json.dumps({'status':'completed','settled':True,'usable':True,'verdict':'pass','criterion_id':'c'}).encode();open(evidence,'wb').write(evidence_body)
+    evidence=sys.argv[1]+'.evidence.json';evidence_body=json.dumps({'status':'completed','settled':True,'usable':True,'verdict':'pass','criterion_id':'c','artifact':'a'*64}).encode();open(evidence,'wb').write(evidence_body)
     cmd('record_evidence',{'attempt_id':a['attempt_id'],'evidence_id':'e','criterion_id':'c','verdict':'pass','artifact':'a'*64,'report_ref':evidence,'report_sha256':hashlib.sha256(evidence_body).hexdigest()})
     cmd('verify_node',{'project_id':'p','node_key':'goal','expected_revision':1,'attempt_id':a['attempt_id']})
     h=c.post('/mcp/',json={'jsonrpc':'2.0','id':1,'method':'tools/call','params':{'name':'state_graph_read','arguments':{'action':'get_node','arguments':{'project_id':'p','node_key':'goal'}}}},headers={**headers,'Accept':'application/json, text/event-stream'})

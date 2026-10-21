@@ -47,7 +47,7 @@ def _accept(live, key, payload):
         path = live.tmp / (key + "-" + check + ".json")
         path.write_text(json.dumps({"status": "completed", "settled": True, "usable": True,
                                     "verdict": "pass", "criterion_id": check,
-                                    "attempt_id": done["attempt_id"]}))
+                                    "attempt_id": done["attempt_id"], "artifact": artifact}))
         live.service.record_evidence(done["attempt_id"], key + check, check, "pass", artifact, str(path),
                                      hashlib.sha256(path.read_bytes()).hexdigest())
     receipt = live.service.verify_node("game", key, 1, done["attempt_id"])

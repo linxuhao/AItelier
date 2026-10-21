@@ -17,6 +17,7 @@ import unicodedata
 from core.state_graph import (StateConflict, StateGraphError, StateGraphStore,
                               StateNotFound, canonical, digest, integer, key, now, text)
 from core.state_privacy import UntrustedDatabase
+from core import state_prior_candidate as prior_candidate
 
 ACTIVE = ("reserved", "launching", "running", "paused", "unknown")
 SHA = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
@@ -214,7 +215,7 @@ class StateAttempts:
     def _reserve(self, project_id, node_key, expected_revision, workflow, request_key, instruction, *,
                  external=None, continue_from=None, relay_digest=None,
                  frozen_prerequisites=None, base_sha=None, relay_handoff=None, preflight=None,
-                 owner_driver_id=None, claim_id=None, fence=None, is_admin=False):
+                 owner_driver_id=None, claim_id=None, fence=None, is_admin=False, prior_account=None):
         """Common atomic ownership/pin guard for every execution adapter.
 
         ``owner_driver_id`` is the registered driver behind the request; the new
@@ -333,6 +334,7 @@ class StateAttempts:
                     ctx["relay_of"]["expected_digest"] = relay_digest
             if relay_handoff is not None:
                 ctx["relay_handoff"] = relay_handoff
+
             from core.state_design import binding_snapshot
             design = binding_snapshot(conn, project_id, node_key)
             if design is not None:
@@ -350,6 +352,24 @@ class StateAttempts:
                     (project_id, node_key, external["harness"], external["external_id"])).fetchone():
                     raise StateConflict("external execution identity was already registered")
                 preflight()
+            if prior_account is not None:
+                # Observability only; never refuses. ``prior_account`` was built
+                # BEFORE this write transaction (it runs Git) from the same
+                # immutable facts; here only a cheap SQL identity check remains.
+                # A stale pairing (the node's latest candidate changed meanwhile)
+                # degrades to an explicit unknown, never to a wrong judgement.
+                # An idempotent replay returned above, so it can neither
+                # duplicate nor alter the account.
+                prior = prior_candidate.latest_prior(conn, project_id, node_key)
+                if prior is not None:
+                    seen = prior_account.get("prior")
+                    if (seen is not None and seen["attempt_id"] == prior["attempt_id"]
+                            and seen["artifact_ref"] == prior["artifact_ref"]):
+                        ctx["prior_candidate"] = prior_account["value"]
+                    else:
+                        ctx["prior_candidate"] = prior_candidate.unresolved(
+                            prior, "the previous candidate changed while admission was judged; not evaluated",
+                            base=base_sha, origin=prior_candidate.REQUESTED if base_sha else prior_candidate.UNRESOLVED)
             uid = uuid.uuid4().hex
             aid = "attempt-" + uid
             execution = None if external else "sg-" + uid
@@ -405,6 +425,8 @@ class StateAttempts:
                 payload["break_glass"] = True
             self.store._event(conn, project_id, node_key,
                               "external_attempt_registered" if external else "attempt_reserved", payload)
+            if ctx.get("prior_candidate") is not None:
+                prior_candidate.emit(self.store, conn, project_id, node_key, aid, ctx["prior_candidate"])
             return _public(self._attempt(conn, aid))
 
     @staticmethod
@@ -484,6 +506,66 @@ class StateAttempts:
                          (canonical(context), now(), attempt_id))
             self.store._event(conn, attempt["project_id"], attempt["node_key"], "attempt_relay_prepared",
                               {"attempt_id": attempt_id, "relay_of": context["relay_of"]["attempt_id"], "relay": relay})
+            return _public(self._attempt(conn, attempt_id))
+
+
+    def latest_prior_candidate(self, project_id: str, node_key: str):
+        """Read-only: the node's most recent Git-commit candidate row, or None."""
+        with self.store.transaction() as conn:
+            return prior_candidate.latest_prior(conn, project_id, node_key)
+
+    def prior_candidate_pending(self, attempt_id: str):
+        """Read-only. The node's previous Git candidate (a row) when this fresh,
+        still-reserved attempt has no account yet; else None. Runs no Git."""
+        with self.store.transaction() as conn:
+            attempt = self._attempt(conn, attempt_id)
+            if "prior_candidate" in json.loads(attempt["context_json"]) or attempt["status"] != "reserved":
+                return None
+            return prior_candidate.latest_prior(conn, attempt["project_id"], attempt["node_key"],
+                                                before_attempt_id=attempt_id)
+
+    def pin_prior_candidate(self, attempt_id: str, prior: dict, value: dict) -> dict:
+        """Freeze, once and before dispatch, the account ``value`` that was built
+        (outside any State transaction) for ``prior``. Never refuses and runs no
+        Git here: with no previous Git candidate nothing is written, and an
+        attempt already past reservation or already carrying an account is
+        returned unchanged, so a retry duplicates neither the context entry nor
+        its event. If the latest candidate is no longer ``prior``, the account
+        becomes an explicit pending unknown."""
+        with self.store.transaction(write=True) as conn:
+            attempt = self._attempt(conn, attempt_id)
+            context = json.loads(attempt["context_json"])
+            if "prior_candidate" in context or attempt["status"] != "reserved":
+                return _public(attempt)
+            current = prior_candidate.latest_prior(conn, attempt["project_id"], attempt["node_key"],
+                                                   before_attempt_id=attempt_id)
+            if current is None:
+                return _public(attempt)
+            if current["attempt_id"] != prior["attempt_id"] or current["artifact_ref"] != prior["artifact_ref"]:
+                value = prior_candidate.unresolved(
+                    current, "the previous candidate changed while admission was judged; not evaluated",
+                    pending=True)
+            context["prior_candidate"] = value
+            conn.execute("UPDATE state_attempts SET context_json=?,updated_at=? WHERE attempt_id=?",
+                         (canonical(context), now(), attempt_id))
+            prior_candidate.emit(self.store, conn, attempt["project_id"], attempt["node_key"], attempt_id, value)
+            return _public(self._attempt(conn, attempt_id))
+
+    def reconcile_prior_candidate(self, attempt_id: str, expected: dict, value: dict) -> dict:
+        """Replace the pinned account ``expected`` with ``value`` judged against
+        the base the worktree was ACTUALLY provisioned at. Compare-and-set on the
+        stored account, so a concurrent or repeated reconciliation changes and
+        emits nothing twice. Runs no Git; never refuses."""
+        with self.store.transaction(write=True) as conn:
+            attempt = self._attempt(conn, attempt_id)
+            context = json.loads(attempt["context_json"])
+            if context.get("prior_candidate") != expected:
+                return _public(attempt)
+            context["prior_candidate"] = value
+            conn.execute("UPDATE state_attempts SET context_json=?,updated_at=? WHERE attempt_id=?",
+                         (canonical(context), now(), attempt_id))
+            prior_candidate.emit(self.store, conn, attempt["project_id"], attempt["node_key"], attempt_id, value,
+                                 reconciled=True)
             return _public(self._attempt(conn, attempt_id))
 
     def pin_host_contract(self, attempt_id: str, descriptor: dict) -> dict:

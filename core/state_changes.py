@@ -10,7 +10,7 @@ _lock = threading.Lock()
 _waiters = {}
 # Routine execution progress does not require another model turn.
 _QUIET = {"host_contract_pinned", "attempt_reserved", "external_attempt_registered",
-          "attempt_launching", "attempt_bound"}
+          "attempt_launching", "attempt_bound", "prior_candidate_included"}
 
 
 @contextmanager

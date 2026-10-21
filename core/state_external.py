@@ -28,7 +28,8 @@ class ExternalAttempts:
         self.is_admin = is_admin is True
 
     def register(self, project_id, node_key, expected_revision, harness, external_id,
-                 request_key, instruction='', base_sha=None, preflight=None, claim_id=None, fence=None):
+                 request_key, instruction='', base_sha=None, preflight=None, claim_id=None, fence=None,
+                 prior_account=None):
         identity = {'harness': key(harness, 'harness'),
                     'external_id': text(external_id, 'external execution identity', 500),
                     'reporting_actor': self.actor}
@@ -37,7 +38,8 @@ class ExternalAttempts:
             return self.attempts._reserve(
                 project_id, node_key, expected_revision, None, request_key,
                 instruction, external=identity, base_sha=base_sha, preflight=preflight,
-                owner_driver_id=self.driver_id, claim_id=claim_id, fence=fence, is_admin=self.is_admin)
+                owner_driver_id=self.driver_id, claim_id=claim_id, fence=fence, is_admin=self.is_admin,
+                prior_account=prior_account)
 
     def _authorize_report(self, conn, a, fence) -> bool:
         """Who may append an observation, and with which fence (P3, §7.3 rule 2).

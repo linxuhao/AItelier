@@ -52,8 +52,8 @@ class PublicTraceRuntime:
         return self.sdk.get_graph_version(name, version)
 
     def _get_resolver_for_run(self, run_id):
-        # Only run observations are scripted. Use their exact historical pin,
-        # with State's no-fallback invariant, then delegate to the real SDK.
+        # Only run observations are scripted. Validate this fixture's declared
+        # history and pin before delegating; no production fallback claim.
         run = self.get_run(run_id)
         if run is None:
             raise SkillFlowError(f"Run '{run_id}' not found")

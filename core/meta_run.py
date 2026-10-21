@@ -188,7 +188,8 @@ def submit_finalized_meta(sf, db, ws, run, expected_checkpoint) -> dict:
     completed = project.get("completed_project_steps") or []
     if isinstance(completed, str):
         completed = json.loads(completed)
-    if (not project.get("meta_state") and "1" in completed
+    if (not (project.get("status") or "").startswith("failed:")
+            and not project.get("meta_state") and "1" in completed
             and project.get("brief") == format_brief_as_markdown(brief)):
         return {"status": "already_planned", "project_id": pid}
     # Only the exact meta owner may normalize the real paused/completed cache.
@@ -212,7 +213,8 @@ def approve_and_submit_meta(sf, db, ws, run_id: str, *, expected_checkpoint=None
     run = sf.get_run(run_id)
     if not run or run.get("graph_name") != META_GRAPH:
         raise ValueError("Expected the project's exact meta_conversation run")
-    checkpoint_phase("submission_lock")
-    with _get_tick_lock(run["project_id"]):
+    lock = _get_tick_lock(run["project_id"])
+    checkpoint_phase("submission_lock", project_lock=lock)
+    with lock:
         approve_meta(sf, run_id, expected_checkpoint=expected_checkpoint, decision_id=decision_id)
         return submit_finalized_meta(sf, db, ws, run, expected_checkpoint)

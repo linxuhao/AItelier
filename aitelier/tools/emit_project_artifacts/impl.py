@@ -11,8 +11,8 @@ host glue:
     consumed by DPE step 1 via a ``{config: meta_conversation, step: finalize,
     output: step1_goals.json}`` cross-config context source.
 
-Pure, deterministic transform (no LLM): the brief comes from the gather step's
-``gather_state.json`` and the spec is the verbatim ``meta/conversation.md`` — so
+Pure, deterministic transform (no LLM): the brief comes from the completed gather instance's
+SDK-retained ``gather_state`` payload and the spec is the verbatim ``meta/conversation.md`` — so
 detailed requirements (e.g. game rules) survive un-summarized.
 
 Runs INLINE during ``advance_run`` (framework mode); the graph's

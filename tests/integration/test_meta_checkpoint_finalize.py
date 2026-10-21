@@ -122,6 +122,7 @@ def normal(tmp_path, monkeypatch):
             finally:
                 save()
     transport = Transport()
+    transport.product_app = app
     with TestClient(transport,raise_server_exceptions=False) as client:
         assert client._transport.app is transport
         yield sf,db,ws,pid,rid,root,client,cp,wakes
@@ -226,7 +227,7 @@ def test_identity_refusal_has_no_new_finalize_or_submission(normal, mode):
     assert (sf.get_run(rid),sf.get_steps(rid,include_payloads=True),db.get_project(pid),sf.list_runs(pid))==before
 
 
-def test_failed_genuine_emitter_is_observed_and_cannot_start_unbriefed_build(normal):
+def test_failed_genuine_emitter_is_observed_and_cannot_start_unbriefed_build(normal,tmp_path):
     sf,db,ws,pid,rid,root,client,cp,wakes = normal
     register_dpe(normal)
     scheduler._sync_project_status_to_db(pid)
@@ -239,6 +240,17 @@ def test_failed_genuine_emitter_is_observed_and_cannot_start_unbriefed_build(nor
     assert db.get_active_projects(limit=10)==[]
     assert scheduler._get_or_create_skillflow_run(pid) is None
     assert not [r for r in sf.list_runs(pid) if r['graph_name']=='dpe_default_v2']
+    raw=Path('/raw') if Path('/raw').is_dir() else tmp_path
+    observed=json.loads((raw/(tmp_path.name+'-normal-transport.json')).read_text())
+    assert observed['requests'][-1]['status']==409
+    assert len(observed['records'])==1
+    record=observed['records'][0]
+    assert record['phase']=='advance_finalize' and record['translated']
+    assert record['request_id'] and record['run_id']==rid
+    assert record['decision_id']=='current-reviewed-decision'
+    assert any(e['type']=='builtins.FileExistsError' for e in record['exceptions'])
+    assert any(f['function']=='emit_project_artifacts' for e in record['exceptions'] for f in e['frames'])
+    assert observed['translated'][-1]['cause']=='RuntimeError'
 
 
 def later_run(normal, state):
@@ -317,3 +329,36 @@ async def test_normal_butler_approval_and_old_replay_do_not_restart_later_build(
     replay=await agent._tool_approve_project_brief(args)
     assert replay['status']=='already_planned',replay
     assert len(dispatch)==1 and db.get_project(pid)==before
+
+
+
+def test_real_meta_auth_and_state_controller_refuse_before_approval(normal,monkeypatch):
+    from api.auth import CurrentUser
+    from tests.unit.test_state_p3_checkpoint_entry import _bind_state_attempt, _as
+    from tests.unit.test_normal_checkpoint_protocol import _approval_count
+    sf,db,ws,pid,rid,root,client,cp,wakes=normal
+    app = client._transport.app.product_app
+    app.dependency_overrides[get_optional_user]=lambda:CurrentUser(email='foreign@invalid',display_name='Foreign',source='cloudflare')
+    assert approve(normal).status_code==404
+    assert sf.get_run(rid)['status']=='paused' and _approval_count(sf,rid)==0
+    app.dependency_overrides[get_optional_user]=lambda:None
+    _bind_state_attempt(db,rid)
+    _as(monkeypatch,'grok')
+    response=approve(normal)
+    assert response.status_code==409 and 'not_attempt_owner' in response.text
+    assert sf.get_run(rid)['status']=='paused' and _approval_count(sf,rid)==0
+    _as(monkeypatch,'codex')
+    assert approve(normal).status_code==200
+
+
+def test_real_failed_meta_explicit_rescue_keeps_existing_resume_path(normal):
+    sf,db,ws,pid,rid,root,client,cp,wakes=normal
+    (root/'project').write_text('Owned finalize refusal')
+    assert approve(normal).status_code==409
+    assert sf.get_run(rid)['status']=='failed'
+    (root/'project').unlink()
+    response=approve(normal,rescue_failed=True)
+    assert response.status_code==200,response.text
+    assert response.json()['status']=='rescued'
+    assert sf.get_run(rid)['status']=='running'
+    assert not (root/'meta_conversation/finalize/step1_goals.json').exists()

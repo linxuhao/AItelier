@@ -56,7 +56,7 @@ def test_mcp_driver_onboarding_surfaces_are_discoverable_and_consistent(tmp_path
         evidence_schema = help_body["operations"]["record_evidence"]
         artifact_help = evidence_schema["arguments"]["properties"]["artifact"]["description"]
         verdict_help = evidence_schema["arguments"]["properties"]["verdict"]["description"]
-        assert "failed external attempt" in artifact_help
+        assert "failed external or bound SkillFlow attempt" in artifact_help
         assert "never promotes" in artifact_help
         assert "exactly once per criterion" in artifact_help
         assert "only pass or fail" in verdict_help

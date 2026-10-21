@@ -407,6 +407,8 @@ async def test_real_product_delivery_cycle(tmp_path, monkeypatch):
     rec_b = run_isolation.ensure_for_run(
         db, run_id=run_b, project_id="delivery-b", config_name="cycle_b")
     b = Path(rec_b["worktree_path"])
+    assert ctl.process_once() == [{"run_id": run_b, "outcome": "ready"}]
+    assert ctl.settled(ctl.get(run_b), "ready")
     assert rec_b["base_sha"] == candidate_a
     assert behavior(b, "middle").returncode == 0
     sf.start_run(run_b)
@@ -481,6 +483,8 @@ async def test_real_product_delivery_cycle(tmp_path, monkeypatch):
     budget_rec = run_isolation.ensure_for_run(
         db, run_id=budget_run, project_id="budget", config_name="budget_cycle")
     budget_tree = Path(budget_rec["worktree_path"])
+    assert ctl.process_once() == [{"run_id": budget_run, "outcome": "ready"}]
+    assert ctl.settled(ctl.get(budget_run), "ready")
     protected_bytes = (b / "app.py").read_bytes()
     source_before_budget = git(source, "rev-parse", "HEAD")
     sf.start_run(budget_run)

@@ -7,7 +7,6 @@ import os
 import subprocess
 import sys
 import threading
-from types import SimpleNamespace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -280,10 +279,8 @@ async def test_real_product_delivery_cycle(tmp_path, monkeypatch):
     sf = runtime(tmp_path, db)
     sf.register_graph(graph("cycle_a", handoff=True))
     sf.register_graph(graph("cycle_b"))
-    # Bind real owned runtime handles without bootstrapping the host singleton
-    # composition root just to replace its getters.
-    monkeypatch.setitem(sys.modules, "api.dependencies", SimpleNamespace(
-        get_skillflow=lambda: sf, get_db_manager=lambda: db))
+    monkeypatch.setattr("api.dependencies.get_skillflow", lambda: sf)
+    monkeypatch.setattr("api.dependencies.get_db_manager", lambda: db)
 
     run_a = sf.create_run("cycle_a", project_id="delivery-a")
     rec_a = run_isolation.ensure_for_run(

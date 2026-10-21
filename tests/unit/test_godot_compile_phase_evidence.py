@@ -275,6 +275,129 @@ def test_scope_names_the_unmeasured_entry_time_context_and_runs_no_entry_scripts
 
 # ── the tool and gate consumer, over real HTTP ──────────────────────────────
 
+
+# ── incomplete AUTHORITATIVE execution is never a pass ──────────────────────
+# The engine here is the scripted shell binary above (NOT real Godot): the
+# subprocess, SIGKILL and timeout are real kernel events through the normal
+# HTTP handler, compile_project and _run; only the engine's output is scripted.
+
+def assert_incomplete_not_pass(report):
+    assert report["passed"] is False
+    assert report["execution_complete"] is False
+    assert report["incomplete_reasons"]
+    assert report["infrastructure_unavailable"] is True
+    assert not report["summary"].startswith("GDScript parse OK")
+    assert release_disposition(report) == "unresolved"
+
+
+def test_warm_import_killed_by_sigkill_is_not_a_compile_pass(tmp_path, engine):
+    script, _ = engine
+    script(RC_import2="kill")
+    with server() as url:
+        report = post(url, project(tmp_path), operation_id="op")
+    warm = by_phase(report)["warm_import"]
+    assert (warm["outcome"], warm["returncode"]) == ("signaled", -9)
+    assert_incomplete_not_pass(report)
+    assert any("warm_import" in r and "signal 9" in r for r in report["incomplete_reasons"])
+
+
+def test_explicit_reparse_timeout_is_not_a_compile_pass(tmp_path, engine, monkeypatch):
+    script, _ = engine
+    script(HANG_reparse="1")
+    monkeypatch.setattr(gh, "compile_project", functools.partial(gh.compile_project, timeout=1))
+    with server() as url:
+        report = post(url, project(tmp_path))
+    assert by_phase(report)["explicit_reparse"]["outcome"] == "timeout"
+    assert_incomplete_not_pass(report)
+
+
+def test_warm_import_nonzero_without_parsed_errors_is_not_a_pass(tmp_path, engine):
+    script, _ = engine
+    script(RC_import2="3", ERR_import2="engine aborted mid-import\n")
+    with server() as url:
+        report = post(url, project(tmp_path))
+    assert by_phase(report)["warm_import"]["returncode"] == 3
+    assert_incomplete_not_pass(report)
+
+
+def test_reparse_without_loaded_marker_is_not_a_pass(tmp_path, engine):
+    script, _ = engine
+    script(OUT_reparse="")
+    with server() as url:
+        report = post(url, project(tmp_path))
+    assert_incomplete_not_pass(report)
+    assert any("PARSE_ALL_LOADED" in r for r in report["incomplete_reasons"])
+
+
+def test_warm_sigkill_does_not_hide_a_proven_parse_fault(tmp_path, engine):
+    script, _ = engine
+    script(RC_import2="kill", ERR_import2=FAULT)
+    with server() as url:
+        report = post(url, project(tmp_path))
+    assert report["passed"] is False
+    assert [e["kind"] for e in report["errors"]] == ["parse"]
+    assert report["execution_complete"] is False
+    assert "infrastructure_unavailable" not in report  # a real fault, not unmeasured
+    assert release_disposition(report) == "known_failure"
+
+
+def test_complete_warm_and_reparse_with_cold_only_noise_still_pass(tmp_path, engine):
+    script, _ = engine
+    script(RC_import1="kill", ERR_import1=COLD)  # cold is diagnostic only
+    with server() as url:
+        report = post(url, project(tmp_path))
+    assert report["passed"] is True
+    assert "execution_complete" not in report
+    assert by_phase(report)["cold_import"]["outcome"] == "signaled"
+    assert release_disposition(report) == "passed"
+
+
+def test_tool_refuses_a_builder_pass_that_its_own_phase_record_denies(tmp_path, monkeypatch):
+    repo = project(tmp_path)
+    phases = [{"phase": "cold_import", "outcome": "exited", "returncode": 0,
+               "stdout": "", "stderr": "", "output_complete": True},
+              {"phase": "warm_import", "outcome": "signaled", "returncode": -9,
+               "stdout": "", "stderr": "", "output_complete": True},
+              {"phase": "explicit_reparse", "outcome": "exited", "returncode": 0,
+               "stdout": "PARSE_ALL_LOADED=1/1\n", "stderr": "", "output_complete": True}]
+    payload = {"passed": True, "errors": [], "file_count": 1, "returncode": -9,
+               "summary": "GDScript parse OK (1 of 1 scripts explicitly re-parsed).",
+               "compile_diagnostics": {"invocation_id": "x", "phases": phases}}
+
+    class Response:
+        def read(self):
+            return json.dumps(payload).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: Response())
+    out = tmp_path / "out"
+    result = tool.godot_compile(project_root=str(repo), out_dir=str(out))
+    report = json.loads((out / "compile_report.json").read_text())
+    assert result["passed"] is False
+    assert_incomplete_not_pass(report)
+    playtest = json.loads((out / "playtest_report.json").read_text())
+    assert playtest["skipped_because"] == "upstream_failed"
+    assert playtest["upstream_state"] == "infrastructure_unavailable"
+
+
+def test_tool_end_to_end_sigkill_over_real_http_fails_the_compile_gate(
+        tmp_path, engine, monkeypatch):
+    script, _ = engine
+    script(RC_import2="kill")
+    with server() as url:
+        result, out = run_tool(tmp_path, url, monkeypatch, project(tmp_path), run_id="run")
+    report = json.loads((out / "compile_report.json").read_text())
+    assert result["passed"] is False
+    assert_incomplete_not_pass(report)
+    assert report["compile_diagnostics"]["phases"][1]["outcome"] == "signaled"
+    raw = json.loads((out / "compile_diagnostics.json").read_text())
+    assert raw["phases"][1]["returncode"] == -9
+
+
 def run_tool(tmp_path, url, monkeypatch, repo, **kwargs):
     monkeypatch.setattr(tool, "_BUILDER_URL", url)
     # The chained play-test is a different gate with its own transport; only the

@@ -1039,11 +1039,24 @@ def _compile_project(project_dir: str, timeout: int, phases: list[dict]) -> dict
         cp = _compile_phase(["--path", str(dst), "--import"], timeout, phases[1])
     except subprocess.TimeoutExpired:
         shutil.rmtree(dst.parent, ignore_errors=True)
-        return {"passed": False, "returncode": -1, "file_count": len(gd_files),
-                "errors": [{"kind": "timeout", "msg": f"Import timed out after {timeout}s",
-                            "file": None, "line": None}],
-                "warning_count": 0, "summary": "Godot import timed out.",
-                "excluded_child_roots": excluded}
+        # Partial warm-import output that already holds a parse/load fault is a
+        # proven code fault; it stays a genuine failure. Anything else is an
+        # unfinished authoritative pass: not a pass, and not a code verdict.
+        warm_faults = []
+        if phases[1].get("outcome") == "timeout":
+            warm_faults = [e for e in _parse_errors(phases[1].get("stderr") or "")
+                           if e["kind"] in ("parse", "load")]
+        timeout_report = {
+            "passed": False, "returncode": -1, "file_count": len(gd_files),
+            "errors": warm_faults + [{"kind": "timeout",
+                                     "msg": f"Import timed out after {timeout}s",
+                                     "file": None, "line": None}],
+            "warning_count": 0, "summary": "Godot import timed out.",
+            "excluded_child_roots": excluded}
+        return _mark_execution(timeout_report, [
+            "%s timed out after %ss" % (
+                "warm_import" if phases[0].get("outcome") != "timeout" else "cold_import",
+                timeout)], proven_fault=bool(warm_faults))
     all_stderr, loaded_ok = _parse_every_script(dst, timeout, phase=phases[2])
     # The explicit pass contributes CAUSES only. Its `load` failures are not
     # trustworthy: `--script` runs a bare SceneTree with NO autoloads, so every
@@ -1087,9 +1100,72 @@ def _compile_project(project_dir: str, timeout: int, phases: list[dict]) -> dict
         summary += " Excluded non-parent roots (outside this parent validation): " + "; ".join(
                        "%s (%s)" % (e["path"], e["reason"]) for e in excluded)
     shutil.rmtree(dst.parent, ignore_errors=True)
-    return {"passed": passed, "returncode": cp.returncode, "file_count": len(gd_files),
-            "errors": errs, "warning_count": 0, "summary": summary,
-            "excluded_child_roots": excluded}
+    report = {"passed": passed, "returncode": cp.returncode, "file_count": len(gd_files),
+              "errors": errs, "warning_count": 0, "summary": summary,
+              "excluded_child_roots": excluded}
+    # Completion is observed from the real phase outcomes, never inferred from
+    # the absence of parsed error lines. A proven parse/load fault stays a
+    # genuine failure; an unfinished authoritative phase can never be a pass.
+    reasons = _incomplete_reasons(phases, loaded_ok)
+    if errs:
+        # A nonzero exit that parsed errors explain is the fault itself, not an
+        # unfinished run; signals, timeouts and missing phases still count.
+        reasons = [r for r in reasons if " exited with code " not in r]
+    if reasons:
+        _mark_execution(report, reasons, proven_fault=bool(errs))
+    return report
+
+
+def _incomplete_reasons(phases: list[dict], loaded_ok: int) -> list[str]:
+    """Why the AUTHORITATIVE phases (warm import, explicit reparse) did not
+    complete normally. The cold import is diagnostic only and never counts.
+
+    A phase is complete only if it really exited with code 0. Signal, timeout
+    and not_run are never complete. A nonzero exit is reported here too; when
+    parsed errors explain it, the caller keeps the failure genuine instead.
+    The reparse must also have printed its PARSE_ALL_LOADED marker: a clean
+    exit without it means the loader never reached its last statement.
+    """
+    reasons = []
+    for name, phase in (("warm_import", phases[1]), ("explicit_reparse", phases[2])):
+        outcome, rc = phase.get("outcome"), phase.get("returncode")
+        if outcome == "signaled":
+            reasons.append("%s was killed by signal %s" % (name, -rc if rc else "?"))
+        elif outcome == "timeout":
+            reasons.append("%s TIMED OUT — coverage unverified" % name)
+        elif outcome != "exited":
+            reasons.append("%s did not run (%s)" % (name, outcome))
+        elif rc != 0:
+            reasons.append("%s exited with code %s" % (name, rc))
+    if phases[2].get("outcome") == "exited" and loaded_ok < 0:
+        reasons.append("explicit_reparse never reported PARSE_ALL_LOADED")
+    return reasons
+
+
+def _mark_execution(report: dict, reasons: list[str], *, proven_fault: bool) -> dict:
+    """Record unfinished authoritative execution on a compile report.
+
+    Never grants a pass. Without a proven parse/load fault the report carries
+    the existing truthful infrastructure-unavailable state (unmeasured, not a
+    code regression). With one, the fault keeps the report an ordinary
+    failure; the reasons are still listed beside it.
+    """
+    report["passed"] = False
+    report["execution_complete"] = False
+    report["incomplete_reasons"] = list(reasons)
+    if proven_fault:
+        # An error list that already names the real fault is enough; nothing
+        # may mask it behind an absence marker.
+        return report
+    report["infrastructure_unavailable"] = True
+    report["evidence_state"] = "infrastructure_unavailable"
+    if not any(e.get("kind") == "timeout" for e in report.get("errors", [])):
+        report.setdefault("errors", []).append(
+            {"kind": "incomplete", "file": None, "line": None,
+             "msg": "Authoritative compilation did not complete: " + "; ".join(reasons)})
+    report["summary"] = ("GDScript compilation INCOMPLETE (%s) — NOT verified, "
+                         "not a pass." % "; ".join(reasons))
+    return report
 
 
 # ── playtest gate ──────────────────────────────────────────────────────────

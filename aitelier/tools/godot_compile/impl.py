@@ -183,6 +183,43 @@ def _split_phase_diagnostics(report: dict, target_dir: Path, owner: dict) -> Non
     report["compile_diagnostics"] = index
 
 
+
+def _refuse_incomplete_pass(report: dict) -> None:
+    """Never accept ``passed: true`` that the report's own phase record denies.
+
+    The builder derives completion from the real subprocess outcomes; this
+    consumer re-checks the raw record it received, so a builder that still
+    equated "no parsed error lines" with success cannot authorize a pass. Only
+    the authoritative phases count (warm import, explicit reparse); the cold
+    import is diagnostic. A report without any phase record (no project,
+    older builder) is left alone: absence of a record is not asserted here.
+    """
+    diag = report.get("compile_diagnostics")
+    if report.get("passed") is not True or not isinstance(diag, dict):
+        return
+    phases = {p.get("phase"): p for p in diag.get("phases") or []
+              if isinstance(p, dict)}
+    if not phases or report.get("no_project"):
+        return
+    reasons = []
+    for name in ("warm_import", "explicit_reparse"):
+        phase = phases.get(name)
+        if phase is None:
+            reasons.append(f"{name} missing from the phase record")
+        elif phase.get("outcome") != "exited" or phase.get("returncode") != 0:
+            reasons.append("%s %s (returncode %s)" % (
+                name, phase.get("outcome"), phase.get("returncode")))
+    if not reasons:
+        return
+    report.update(passed=False, execution_complete=False,
+                  incomplete_reasons=reasons,
+                  infrastructure_unavailable=True,
+                  evidence_state="infrastructure_unavailable",
+                  summary="GDScript compilation INCOMPLETE (%s) — NOT verified, "
+                          "not a pass." % "; ".join(reasons))
+
+
+
 def _godot_compile_unstamped(*, project_root: str = "", out_dir: str = "",
                              workspace_root: str = "", project_id: str = "",
                              run_id: str = "", step_id: str = "",
@@ -233,6 +270,7 @@ def _godot_compile_unstamped(*, project_root: str = "", out_dir: str = "",
             report["summary"] = (
                 external_deps.unreachable("GODOT_BUILDER_URL", _BUILDER_URL, e)
                 + " Compile gate skipped — GDScript NOT verified.")
+        _refuse_incomplete_pass(report)
         # The sidecar says there is no Godot project at a path where THIS
         # process just stat'd project.godot. It is not looking at the same
         # bytes we are — a bind mount whose source directory was replaced keeps
@@ -276,6 +314,9 @@ def _godot_compile_unstamped(*, project_root: str = "", out_dir: str = "",
                 encoding="utf-8")
     else:
         reason = ("Parse failed — play-test skipped (fix parse errors first)."
+                  if not report.get("passed", True)
+                  and report.get("execution_complete") is not False
+                  else "Compilation did not complete — play-test skipped (not a pass)."
                   if not report.get("passed", True)
                   else "No project.godot — not a Godot project; play-test skipped.")
         skipped = {"passed": report.get("passed", True), "frames": 0,

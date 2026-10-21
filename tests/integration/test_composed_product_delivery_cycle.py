@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -532,8 +533,27 @@ async def test_real_product_delivery_cycle(tmp_path, monkeypatch):
     assert run_resources.reconcile(db, sf, run_a)["requested"] == [run_a]
     assert ctl.process_once() == [{"run_id": run_a, "outcome": "released"}]
     reaped = run_isolation.reap_released_worktrees(db, sf)
-    assert [item["run_id"] for item in reaped["removed"]] == [run_a]
+    assert reaped["removed"] == [], reaped
+    assert any(item["run_id"] == run_a and item["reason"].startswith("idle ")
+               for item in reaped["retained"]), reaped
+    # Exercise the unchanged 24-hour policy with the supported per-call test
+    # clock. Even after that delay, unclassified ignored evidence must survive.
+    after_idle = time.time() + 86401
+    retained = run_isolation.reap_released_worktrees(db, sf, now=after_idle)
+    assert retained["removed"] == [], retained
+    assert any(item["run_id"] == run_a and "unclassified ignored files" in item["reason"]
+               for item in retained["retained"]), retained
+    # Hand off the known knowledge artifact before removing its duplicate from
+    # the disposable checkout; the reaper itself gets no ignored-file waiver.
+    knowledge_report = reports / "a-knowledge.md"
+    knowledge_report.write_bytes(knowledge.read_bytes())
+    knowledge_sha = sha(knowledge)
+    assert sha(knowledge_report) == knowledge_sha
+    knowledge.unlink()
+    reaped = run_isolation.reap_released_worktrees(db, sf, now=after_idle)
+    assert [item["run_id"] for item in reaped["removed"]] == [run_a], reaped
     assert not a.exists()
+    assert knowledge_report.is_file() and sha(knowledge_report) == knowledge_sha
     assert report_a.is_file() and sha(report_a) == report_a_sha
     assert git(source, "cat-file", "-t", candidate_a) == "commit"
 
@@ -572,7 +592,8 @@ async def test_real_product_delivery_cycle(tmp_path, monkeypatch):
     ctl.process_once()
     assert run_resources.reconcile(db, sf, dirty_run)["requested"] == [dirty_run]
     ctl.process_once()
-    kept = run_isolation.reap_released_worktrees(db, sf)["retained"]
+    kept = run_isolation.reap_released_worktrees(
+        db, sf, now=time.time() + 86401)["retained"]
     assert any(item["run_id"] == dirty_run and "uncommitted" in item["reason"]
                for item in kept)
     assert dirty.is_dir()

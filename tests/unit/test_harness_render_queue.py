@@ -659,7 +659,7 @@ def _tools_on(rig, monkeypatch):
                             lambda gate, reason, **_d: skips.append(reason))
         monkeypatch.setattr(mod, "_BUILDER_URL", rig.base)
     monkeypatch.setenv("GODOT_BUILDER_URL", rig.base)
-    monkeypatch.setattr(rig.gh, "compile_project", lambda proj, timeout=120: {
+    monkeypatch.setattr(rig.gh, "compile_project", lambda proj, timeout=120, **_k: {
         "passed": True, "returncode": 0, "file_count": 1, "errors": [],
         "warning_count": 0, "summary": "stub compile ok"})
     real_post = pt_impl.post_playtest

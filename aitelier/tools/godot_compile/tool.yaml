@@ -3,7 +3,10 @@ description: >
   Parse-check every GDScript + scene in the consolidated repo together (by
   importing the project via the godot-builder sidecar) and write
   compile_report.json {passed, returncode, file_count, errors, summary} where
-  each error carries a res:// file + line. THEN, if parsing passed, chain a
+  each error carries a res:// file + line, and compile_diagnostics.json: the raw
+  stdout/stderr and outcome of every pass the builder executed (cold import,
+  authoritative warm import, explicit reparse); compile_report.json keeps only
+  an index of it. THEN, if parsing passed, chain a
   play-test (godot_playtest) and write playtest_report.json — including
   captures[], PNGs of real rendered frames unpacked under frames/ next to the
   reports; if parsing

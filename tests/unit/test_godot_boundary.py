@@ -77,7 +77,7 @@ def test_staging_marks_child_roots_in_the_copy(tmp_path):
 def test_compile_counts_and_reports_only_parent_scripts(tmp_path, monkeypatch):
     child, ignored = _make_boundary_project(tmp_path)
     monkeypatch.setattr(gh, "_run", lambda *a, **k: subprocess.CompletedProcess([], 0, "", ""))
-    monkeypatch.setattr(gh, "_parse_every_script", lambda d, t: ("", 2))
+    monkeypatch.setattr(gh, "_parse_every_script", lambda d, t, **kw: ("", 2))
     monkeypatch.setattr(gh.shutil, "rmtree", lambda *a, **k: None)
     r = gh.compile_project(str(tmp_path))
     assert r["passed"] is True
@@ -93,7 +93,7 @@ def test_parent_parse_error_still_fails_despite_child_boundaries(tmp_path, monke
     monkeypatch.setattr(gh, "_run", lambda *a, **k: subprocess.CompletedProcess([], 0, "", ""))
     monkeypatch.setattr(
         gh, "_parse_every_script",
-        lambda d, t: ("SCRIPT ERROR: Parse Error: bad\n"
+        lambda d, t, **kw: ("SCRIPT ERROR: Parse Error: bad\n"
                       "          at: GDScript::reload (res://main.gd:2)\n", 1))
     monkeypatch.setattr(gh.shutil, "rmtree", lambda *a, **k: None)
     r = gh.compile_project(str(tmp_path))
@@ -159,7 +159,7 @@ def test_staging_never_follows_script_or_directory_links(tmp_path, monkeypatch):
     finally:
         shutil.rmtree(dst.parent)
     monkeypatch.setattr(gh, "_run", lambda *a, **k: subprocess.CompletedProcess([], 0, "", ""))
-    monkeypatch.setattr(gh, "_parse_every_script", lambda d, t: ("", 2))
+    monkeypatch.setattr(gh, "_parse_every_script", lambda d, t, **kw: ("", 2))
     assert gh.compile_project(str(tmp_path))["file_count"] == 2
 
 
@@ -208,7 +208,7 @@ def test_root_ignore_directory_is_parent_source_and_stays_staged(tmp_path, monke
     assert "." not in {e["path"] for e in gh._excluded_roots(tmp_path)}
     monkeypatch.setattr(gh, "_run", lambda *a, **k: subprocess.CompletedProcess([], 0, "", ""))
 
-    def parse_staged(dst, timeout):
+    def parse_staged(dst, timeout, **kw):
         # The parser can only report what staging copied; no Godot run.
         if (dst / ".gdignore" / "bad.gd").is_file():
             return ("SCRIPT ERROR: Parse Error: bad\n"
@@ -250,7 +250,7 @@ def test_nested_inventory_is_sorted_and_ordinary_contract_siblings_remain(tmp_pa
     excluded = gh._excluded_roots(tmp_path)
     assert [e["path"] for e in excluded] == ["contracts/child", "vendor"]
     monkeypatch.setattr(gh, "_run", lambda *a, **k: subprocess.CompletedProcess([], 0, "", ""))
-    monkeypatch.setattr(gh, "_parse_every_script", lambda d, t: (
+    monkeypatch.setattr(gh, "_parse_every_script", lambda d, t, **kw: (
         "SCRIPT ERROR: Parse Error: bad\n"
         "          at: GDScript::reload (res://contracts/child-extra/bad.gd:2)\n", 2))
     result = gh.compile_project(str(tmp_path))
@@ -273,7 +273,7 @@ def test_child_can_be_staged_and_checked_under_its_own_root(tmp_path, monkeypatc
         return subprocess.CompletedProcess([], 0, "", "")
 
     monkeypatch.setattr(gh, "_run", engine_stub)
-    monkeypatch.setattr(gh, "_parse_every_script", lambda d, t: ("", 2))
+    monkeypatch.setattr(gh, "_parse_every_script", lambda d, t, **kw: ("", 2))
     result = gh.compile_project(str(child))
     assert result["passed"] is True
     assert result["file_count"] == 2
@@ -301,7 +301,7 @@ def test_invalid_parent_project_marker_cannot_be_a_pass(tmp_path, monkeypatch, k
         marker.symlink_to(target)
     (tmp_path / "bad.gd").write_text("extends Node\nfunc broken(:\n")
     monkeypatch.setattr(gh, "_run", lambda *a, **k: subprocess.CompletedProcess([], 0, "", ""))
-    monkeypatch.setattr(gh, "_parse_every_script", lambda d, t: ("", 1))
+    monkeypatch.setattr(gh, "_parse_every_script", lambda d, t, **kw: ("", 1))
     result = gh.compile_project(str(tmp_path))
     assert result["passed"] is False
     assert result["errors"][0]["kind"] == "boundary"
@@ -314,7 +314,7 @@ def test_hidden_parent_scripts_are_counted_and_keep_named_parse_errors(tmp_path,
     hidden.mkdir()
     (hidden / "bad.gd").write_text("extends Node\nfunc broken(:\n")
     monkeypatch.setattr(gh, "_run", lambda *a, **k: subprocess.CompletedProcess([], 0, "", ""))
-    monkeypatch.setattr(gh, "_parse_every_script", lambda d, t: (
+    monkeypatch.setattr(gh, "_parse_every_script", lambda d, t, **kw: (
         "SCRIPT ERROR: Parse Error: bad\n"
         "          at: GDScript::reload (res://.ordinary/bad.gd:2)\n", 2))
     result = gh.compile_project(str(tmp_path))

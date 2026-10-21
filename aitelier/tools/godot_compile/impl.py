@@ -150,6 +150,39 @@ def _write_playtest_summary(target_dir: Path, pt: dict) -> None:
         "\n".join(lines), encoding="utf-8")
 
 
+def _split_phase_diagnostics(report: dict, target_dir: Path, owner: dict) -> None:
+    """Keep the builder's raw per-pass evidence out of the prompt-facing report.
+
+    compile_report.json is inlined into reviewer and PM prompts; raw Godot
+    streams belong beside it, whole, in ``compile_diagnostics.json`` (same
+    reachable-by-read-tool arrangement as playtest_report.json). The report keeps
+    an index — outcome, return code and stream sizes per pass — so a reader sees
+    which passes ran and where the raw text is. Nothing is cut: the file carries
+    every stream exactly as the builder returned it, ``null`` for a pass that
+    never ran. ``request_ids_match`` says whether the builder echoed the identity
+    this call sent, so evidence from another invocation cannot pass as this one's
+    (None when the call sent no identity to compare).
+    """
+    diag = report.get("compile_diagnostics")
+    # A file left by an earlier cycle must not stand in for evidence this call
+    # never obtained (no project, builder unreachable, builder predating this).
+    (target_dir / "compile_diagnostics.json").unlink(missing_ok=True)
+    if not isinstance(diag, dict):
+        return
+    (target_dir / "compile_diagnostics.json").write_text(
+        json.dumps(diag, indent=2), encoding="utf-8")
+    index = {k: v for k, v in diag.items() if k != "phases"}
+    index["evidence_file"] = "compile_diagnostics.json"
+    index["request_ids_match"] = (all(diag.get(k) == v for k, v in owner.items())
+                                  if owner else None)
+    index["phases"] = [
+        {**{k: v for k, v in phase.items() if k not in ("stdout", "stderr")},
+         **{f"{stream}_chars": (None if phase.get(stream) is None else len(phase[stream]))
+            for stream in ("stdout", "stderr")}}
+        for phase in diag.get("phases") or []]
+    report["compile_diagnostics"] = index
+
+
 def _godot_compile_unstamped(*, project_root: str = "", out_dir: str = "",
                              workspace_root: str = "", project_id: str = "",
                              run_id: str = "", step_id: str = "",
@@ -160,6 +193,7 @@ def _godot_compile_unstamped(*, project_root: str = "", out_dir: str = "",
     repo = Path(project_root or workspace_root).resolve()
     report = {"passed": True, "returncode": 0, "file_count": 0,
               "errors": [], "warning_count": 0, "summary": ""}
+    owner = {}
 
     if not repo.exists():
         report.update(passed=False, summary=f"Project root not found: {repo}")
@@ -218,6 +252,7 @@ def _godot_compile_unstamped(*, project_root: str = "", out_dir: str = "",
 
     target_dir = Path(out_dir) if out_dir else repo
     target_dir.mkdir(parents=True, exist_ok=True)
+    _split_phase_diagnostics(report, target_dir, owner)
     (target_dir / "compile_report.json").write_text(
         json.dumps(report, indent=2), encoding="utf-8")
 
@@ -285,6 +320,7 @@ def godot_compile(*, project_root: str = "", out_dir: str = "",
                                   warning_count=0)
             playtest_report = upstream_failed_report(blocker, "Godot play-test")
             playtest_report.update(frames=0, errors=[], state={}, captures=[])
+            (target / "compile_diagnostics.json").unlink(missing_ok=True)
             for name, report in (("compile_report.json", compile_report),
                                  ("playtest_report.json", playtest_report)):
                 (target / name).write_text(json.dumps(report, indent=2),

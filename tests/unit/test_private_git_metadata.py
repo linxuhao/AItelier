@@ -12,6 +12,7 @@ container mounts. The container's bounds themselves (no network, rlimit,
 memory, the source object directory as its only source mount) are measured
 with real Docker by the operator controls, not here.
 """
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -127,7 +128,7 @@ if args[0] == "create":
         sys.exit(1)
     os.makedirs(store, exist_ok=True)
     at = args.index("--entrypoint")
-    with open(os.path.join(store, name), "w") as stream:
+    with open(os.path.join(store, hashlib.sha256(name.encode()).hexdigest()), "w") as stream:
         json.dump([args[at + 1]] + args[at + 3:], stream)
     if how == "eof" and target:        # the daemon creates it; the client lost the reply
         print('error during connect: Post "http://%2Fd.sock/v1.56/containers/create": EOF',
@@ -158,6 +159,11 @@ def docker(tmp_path, monkeypatch):
 def docker_calls(tmp_path):
     log = tmp_path / "docker.log"
     return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+
+
+def _id(name):
+    """The ID the shim answers a create of ``name`` with."""
+    return hashlib.sha256(name.encode()).hexdigest()
 
 
 def provision(repo, tmp_path, common=None):
@@ -371,28 +377,28 @@ def test_preparation_container_is_bounded(source, tmp_path, docker):
     assert volumes == [f"{objects}:{objects}:ro", f"{tmp_path / 'dest'}:{tmp_path / 'dest'}:rw"]
 
 
-def test_preparation_container_is_removed_by_name(source, tmp_path, docker):
+def test_preparation_container_is_started_and_removed_by_its_id(source, tmp_path, docker):
     provision(source, tmp_path)
     calls = docker_calls(tmp_path)
-    name = calls[0][calls[0].index("--name") + 1]
-    assert calls[0][0] == "create" and calls[1:] == [["start", "-a", name], ["rm", "-f", name]]
+    own = _id(calls[0][calls[0].index("--name") + 1])
+    assert calls[0][0] == "create" and calls[1:] == [["start", "-a", own], ["rm", "-f", own]]
 
 
-def test_failed_create_is_still_removed_by_name(tmp_path, docker):
+def test_failed_create_removes_nothing_by_name(tmp_path, docker):
     # Exit 2 without the daemon's reply: no answer, so absence is not claimed.
     with pytest.raises(executor.CleanupUnconfirmed, match="no answer from the daemon"):
         executor._run_prep([docker, "unknown-subcommand"], docker, "prep-z")
-    assert docker_calls(tmp_path)[-1] == ["rm", "-f", "prep-z"]
+    assert docker_calls(tmp_path) == [["unknown-subcommand"]]
 
 
-def test_create_refused_by_the_daemon_is_not_created_and_removed_by_name(tmp_path, docker,
+def test_create_refused_by_the_daemon_is_not_created_and_removes_nothing(tmp_path, docker,
                                                                          monkeypatch):
     monkeypatch.setenv("DOCKER_SHIM_CREATE", "refuse")
     with pytest.raises(RuntimeError, match="not created") as raised:
         executor._run_prep([docker, "create", "--name", "aitelier-git-z", "--entrypoint", "sh",
                             "image"], docker, "aitelier-git-z")
     assert not isinstance(raised.value, executor.CleanupUnconfirmed)
-    assert docker_calls(tmp_path)[-1] == ["rm", "-f", "aitelier-git-z"]
+    assert [c[0] for c in docker_calls(tmp_path)] == ["create"]
 
 
 def test_preparation_deadline_stops_and_removes_it(tmp_path, docker, monkeypatch):
@@ -406,7 +412,7 @@ def test_preparation_deadline_stops_and_removes_it(tmp_path, docker, monkeypatch
     assert time.monotonic() - started < 3
     with pytest.raises(ProcessLookupError):
         os.kill(int(marker.read_text()), 0)
-    assert docker_calls(tmp_path)[1:] == [["start", "-a", "prep-x"], ["rm", "-f", "prep-x"]]
+    assert docker_calls(tmp_path)[1:] == [["start", "-a", _id("prep-x")], ["rm", "-f", _id("prep-x")]]
 
 
 def test_client_disconnect_cancels_preparation(tmp_path, docker, monkeypatch):
@@ -425,7 +431,7 @@ def test_client_disconnect_cancels_preparation(tmp_path, docker, monkeypatch):
     server.close()
     assert time.monotonic() - started < 3
     # Cancelled once the create answered: the preparation is never started.
-    assert docker_calls(tmp_path)[1:] == [["rm", "-f", "prep-y"]]
+    assert docker_calls(tmp_path)[1:] == [["rm", "-f", _id("prep-y")]]
     assert spawned == [["create"], ["rm"]]
 
 
@@ -449,7 +455,7 @@ def test_client_disconnect_while_preparation_runs_stops_it(tmp_path, docker):
     assert time.monotonic() - started < 5
     with pytest.raises(ProcessLookupError):
         os.kill(int(marker.read_text()), 0)
-    assert docker_calls(tmp_path)[1:] == [["start", "-a", "prep-w"], ["rm", "-f", "prep-w"]]
+    assert docker_calls(tmp_path)[1:] == [["start", "-a", _id("prep-w")], ["rm", "-f", _id("prep-w")]]
 
 
 def test_detached_head_stays_detached(source, tmp_path, docker):
@@ -581,7 +587,11 @@ class TestContainer:
 
 
 def _starts_test_container(command):
-    return command[1:3] == ["start", "-a"] and command[3].startswith("aitelier-cpu-")
+    if command[1:3] != ["start", "-a"]:
+        return False
+    names = [c[c.index("--name") + 1] for c in map(json.loads, Path(
+        os.environ["DOCKER_SHIM_LOG"]).read_text().splitlines()) if c[0] == "create"]
+    return command[3] in {_id(n) for n in names if n.startswith("aitelier-cpu-")}
 
 
 def test_direct_adapter_still_runs_a_repository_without_git(tmp_path, monkeypatch, docker):
@@ -612,7 +622,7 @@ def test_direct_adapter_mounts_private_git_and_removes_it(source, tmp_path, monk
         if not _starts_test_container(command):
             return real_popen(command, **kwargs)  # creates, and the preparation (shim)
         create = next(c for c in docker_calls(tmp_path)
-                      if c[0] == "create" and command[-1] in c and "python3" in c)
+                      if c[0] == "create" and _id(c[c.index("--name") + 1]) == command[-1] and "python3" in c)
         target = next(v for v in create if v.endswith(f":{source / '.git'}:ro"))
         seen["private"] = Path(target.split(":")[0])
         seen["head"] = (seen["private"] / "HEAD").read_text()
@@ -645,7 +655,7 @@ def test_unanswered_preparation_create_stops_the_direct_launch(source, tmp_path,
     assert raised.value.name.startswith("aitelier-git-")
     assert raised.value.name in str(raised.value)
     # Nothing after the unanswered preparation: no repository container, no START.
-    assert [c[1] for c in spawned] == ["create", "rm"]
+    assert [c[1] for c in spawned] == ["create"]        # nor any removal by name
     assert not any(c[1] == "create" and c[c.index("--name") + 1].startswith("aitelier-cpu-")
                    for c in docker_calls(tmp_path) if "--name" in c)
     assert list((tmp_path / "home" / "cpu-git").iterdir()) == []
@@ -694,4 +704,4 @@ def test_unanswered_command_create_is_unconfirmed_and_never_started(tmp_path, mo
     with pytest.raises(executor.CleanupUnconfirmed) as raised:
         executor._execute(repo, ["python3", "-m", "pytest"], 5)
     assert raised.value.name.startswith("aitelier-cpu-")
-    assert [c[1] for c in spawned] == ["create", "rm"]
+    assert [c[1] for c in spawned] == ["create"]

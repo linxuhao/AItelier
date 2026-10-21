@@ -93,7 +93,7 @@ def test_actual_entry_timeout_captures_partial_and_reaps_owned_child(tmp_path):
 
 
 @pytest.mark.parametrize("failure", [subprocess.TimeoutExpired(["docker"],1), KeyboardInterrupt()])
-def test_adapter_timeout_cancel_cleanup_is_name_scoped(monkeypatch, tmp_path, failure):
+def test_adapter_timeout_cancel_cleanup_is_id_scoped(monkeypatch, tmp_path, failure):
     calls=[]
     class Created:
         returncode = 0
@@ -126,10 +126,10 @@ def test_adapter_timeout_cancel_cleanup_is_name_scoped(monkeypatch, tmp_path, fa
     launch,start,kill,reaped,remove=calls
     name=launch[launch.index("--name")+1]
     assert name.startswith("aitelier-cpu-") and launch[:2] == ["/trusted/docker","create"]
-    assert start == ["/trusted/docker","start","-a",name]
-    # Own client stopped and reaped before the name-scoped removal.
+    assert start == ["/trusted/docker","start","-a","c" * 64]
+    # Own client stopped and reaped before removal of the acknowledged ID.
     assert kill == ["client-kill"] and reaped == ["client-reaped"]
-    assert remove == ["/trusted/docker","rm","-f",name]
+    assert remove == ["/trusted/docker","rm","-f","c" * 64]
     for flag,value in [("--network","none"),("--cpus","2"),("--memory","2g"),("--pids-limit","512")]:
         assert launch[launch.index(flag)+1] == value
     assert "--rm" in launch and "--init" in launch

@@ -11,6 +11,38 @@ An authorized operator installs an accepted exact Source with
 identity helper; installation is separate from authoring or CPU validation.
 No installation or activation is performed by the Source batch.
 
+For an authorized update of only an existing launcher, use the same installer:
+
+```sh
+sh tools/install_gate_run.sh --launcher-only "$EXPECTED_INSTALLED_SHA256" "$EXPECTED_SOURCE_SHA256" "$DEST"
+```
+
+Both hashes must be explicit lowercase SHA256 values derived from the installed
+preimage and the accepted Source's `tools/gate_run.sh`. They identify bytes;
+they do not grant maintenance authority. This mode requires an existing regular
+launcher and destination directory, checks both hashes, writes a same-directory
+pending file, preserves installed mode/uid/gid, fsyncs it and atomically renames
+it over `gate_run.sh`. An already-open old descriptor keeps the old bytes.
+`gate_binding.py` and unrelated files are untouched. Stale hashes, malformed
+arguments, missing files and symlink launchers refuse before replacement. A
+failure after rename is an error, with no automatic rollback or retry.
+
+Both installation modes take the same nonblocking advisory lock at
+`DEST/.gate_run.install.lock`; a competing participant refuses. The lock file
+stays in place and must not be removed during installation. It coordinates
+participating installers only: other writers can ignore it, so authorization
+must also exclude competing writers of this launcher. The ordinary mode still
+installs both files with mode755; it is not a two-file atomic transaction.
+Python3 and the existing Unix install tools are required, with no AItelier/SDK
+imports, initialization, API or service operation.
+
+Updating an unused launcher pathname is a file-only operation. Unrelated CPU
+work that does not consume it need not stop. The operator must establish the
+actual consumer/owner scope before installation; Source review does not prove
+that a production file is unused. Backend restarts and deployment operations
+retain their existing guards and physical vetoes. This installer neither calls
+nor changes those guards and does not perform a backend restart or deployment.
+
 The queue's inherited `GATE_BINDING_FILE` must name a regular JSON file:
 
 ```json

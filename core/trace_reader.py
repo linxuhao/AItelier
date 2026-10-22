@@ -25,6 +25,10 @@ import json
 
 _TRACE_COLS = "SELECT seq, step_id, category, event, payload_json, created_at"
 
+# errors_only pages through the trace this many rows per query, so each query and
+# each Python pass stays small however deep the matches sit.
+_ERRORS_BATCH = 100
+
 
 def resolve_run_ref(sf, ref: str) -> tuple[dict | None, dict]:
     """A run row from either a run id or a project id, AND how it was resolved.
@@ -114,9 +118,10 @@ def trace_rows(sf, ref: str, where: str, params: list, limit: int,
 
 def _payload(row) -> dict:
     try:
-        return json.loads(row["payload_json"])
+        payload = json.loads(row["payload_json"])
     except (ValueError, TypeError):
         return {}
+    return payload if isinstance(payload, dict) else {}
 
 
 def trace_list(sf, ref: str, *, step: str = "", category: str = "",
@@ -131,37 +136,68 @@ def trace_list(sf, ref: str, *, step: str = "", category: str = "",
         where += " AND category = ?"
         params.append(category.strip())
     limit = max(1, min(int(limit or 50), 200))
-    if errors_only:
-        # Widen in SQL, then drop the false hits in Python — an empty `error`
-        # field is how a PASSING gate records its success, so the SQL filter
-        # alone would report every green gate as a failure.
-        where += " AND (payload_json LIKE '%error%' OR payload_json LIKE '%false%')"
     order_sql = "ASC" if (order or "desc").lower() == "asc" else "DESC"
-    res = trace_rows(sf, ref, where, params,
-                     limit * (4 if errors_only else 1), order_sql)
-    if "error" in res:
-        return res
-    out = []
-    for r in res["rows"]:
-        payload = _payload(r)
-        if errors_only:
-            err = payload.get("error")
-            failed = payload.get("passed") is False or payload.get("status") == "failed"
-            if not ((isinstance(err, str) and err.strip()) or failed):
-                continue
-        out.append({"seq": r["seq"], "step": r["step_id"], "category": r["category"],
-                    "event": r["event"], "at": r["created_at"],
-                    "summary": trace_summary(payload)})
-        if len(out) >= limit:
+    # errors_only is classified in Python over the whole filtered trace: any text
+    # prefilter can disagree with the JSON decoder (\u-escaped keys), and an empty
+    # `error` is how a PASSING gate records success. A fixed LIMIT would end before
+    # the real failures do, so page by seq, _ERRORS_BATCH rows per query, until
+    # `limit` entries or the trace runs out; a plain listing is one page of `limit`.
+    page_size = _ERRORS_BATCH if errors_only else limit
+    out: list[dict] = []
+    target, run, resolved = ref, None, None
+    ceiling = last = None
+    done = False
+    if errors_only and order_sql == "ASC":
+        # Freeze the newest seq now: a live trace keeps growing and an ascending
+        # scan would chase the appends. DESC pages only ever go lower.
+        res = trace_rows(sf, ref, where, params, 1, "DESC")
+        if "error" in res:
+            return res
+        run, resolved = res["run"], res.get("resolved")
+        target = run["id"]              # pin: a project id would re-resolve per page
+        if res["rows"]:
+            ceiling = res["rows"][0]["seq"]
+        else:
+            done = True
+    while not done:
+        page_where, page_params = where, list(params)
+        if ceiling is not None:
+            page_where += " AND seq <= ?"
+            page_params.append(ceiling)
+        if last is not None:
+            page_where += " AND seq > ?" if order_sql == "ASC" else " AND seq < ?"
+            page_params.append(last)
+        res = trace_rows(sf, target, page_where, page_params, page_size, order_sql)
+        if "error" in res:
+            return res
+        if run is None:
+            run, resolved = res["run"], res.get("resolved")
+            target = run["id"]
+        rows = res["rows"]
+        for r in rows:
+            payload = _payload(r)
+            if errors_only:
+                err = payload.get("error")
+                failed = payload.get("passed") is False or payload.get("status") == "failed"
+                if not ((isinstance(err, str) and err.strip()) or failed):
+                    continue
+            out.append({"seq": r["seq"], "step": r["step_id"], "category": r["category"],
+                        "event": r["event"], "at": r["created_at"],
+                        "summary": trace_summary(payload)})
+            if len(out) >= limit:
+                break
+        if not errors_only or len(out) >= limit or not rows:
             break
-    run = res["run"]
+        last = rows[-1]["seq"]
+        if ceiling is not None and last >= ceiling:
+            break
     listed = {"run_id": run["id"], "project_id": run.get("project_id"),
               "run_status": run.get("status"),
               "run_error": run.get("error_reason") or run.get("error"),
               "count": len(out), "entries": out,
               "hint": "trace_read(run_id, seq) for a full payload."}
-    if res.get("resolved"):
-        listed["resolved"] = res["resolved"]
+    if resolved:
+        listed["resolved"] = resolved
     return listed
 
 

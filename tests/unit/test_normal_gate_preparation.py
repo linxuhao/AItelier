@@ -1,9 +1,11 @@
 """Owned filesystem/runtime controls, with Docker effects replaced at their boundary."""
+import hashlib
 import importlib
 import io
 import json
 import subprocess
 import shutil
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -21,16 +23,23 @@ QUOTAS = {"GODOT_RETAIN_MAX_FILES": "4096", "GODOT_RETAIN_MAX_BYTES": "536870912
 
 
 @pytest.fixture
-def bound(tmp_path, monkeypatch):
+def bound(tmp_path, monkeypatch, request):
+    requested_sdk = getattr(request, "param", "1.5.99")
     fixture = tmp_path / "fixture-source"
     subprocess.run(["git", "clone", "--quiet", "--shared", "--no-hardlinks", str(SOURCE), str(fixture)], check=True)
     manifest = tmp_path / "binding.json"
     binding = {"source": str(SOURCE), "head": gb.git(SOURCE, "rev-parse", "HEAD"),
                "tree": gb.git(SOURCE, "rev-parse", "HEAD^{tree}"), "image": "sha256:" + "a" * 64,
+               "sdk": "1.5.99" if requested_sdk == "actual-image" else requested_sdk,
                "files": {name: gb.digest(SOURCE / name) for name in gb.FILES},
                "engine_sha256": gb.digest(SOURCE / gb.FILES[0])}
     manifest.write_text(json.dumps(binding))
     monkeypatch.setenv("GATE_BINDING_FILE", str(manifest))
+    # Explicit test metadata boundary, not a claim about the installed SDK.
+    version = gb.metadata.version
+    if requested_sdk != "actual-image":
+        monkeypatch.setattr(gb.metadata, "version",
+                            lambda name: binding["sdk"] if name == "skillflow-py" else version(name))
     harness = importlib.import_module("docker.godot.godot_harness")
 
     def health(url, timeout):
@@ -43,20 +52,23 @@ def bound(tmp_path, monkeypatch):
     shutil.rmtree(fixture)
 
 
+@pytest.mark.parametrize("bound", ["1.5.85", "1.5.99", "actual-image"], indirect=True)
 def test_capture_measures_actual_imports_and_both_coordinates(bound):
     manifest, binding, fixture = bound
-    captured = gb.capture(binding, str(SOURCE), str(fixture))
+    frozen, sha256 = gb.read_binding(manifest)
+    captured = gb.capture(frozen, sha256, str(SOURCE), str(fixture))
     assert captured["files"][0] == {"path": str(SOURCE / gb.FILES[0]),
                                     "sha256": binding["files"][gb.FILES[0]]}
     assert captured["files"][1]["path"] == str(fixture / gb.FILES[0])
     assert captured["engine"]["path"] == "/srv/godot_harness.py"
     assert captured["engine"]["sha256"] == binding["engine_sha256"]
-    assert captured["sdk"] == "1.5.85"
+    assert captured["sdk"] == binding["sdk"]
+    assert captured["binding_sha256"] == sha256
 
 
 @pytest.mark.parametrize("mutation", ["missing", "changed", "symlink"])
 def test_frozen_fixture_refuses_missing_or_changed_file(bound, mutation):
-    _, binding, fixture = bound
+    manifest, binding, fixture = bound
     target = fixture / gb.FILES[1]
     if mutation == "changed":
         target.write_text("changed Source\n")
@@ -65,25 +77,138 @@ def test_frozen_fixture_refuses_missing_or_changed_file(bound, mutation):
         if mutation == "symlink":
             target.symlink_to(SOURCE / gb.FILES[1])
     with pytest.raises(ValueError, match="frozen|identity|regular"):
-        gb.capture(binding, str(SOURCE), str(fixture))
+        gb.capture(binding, gb.digest(manifest), str(SOURCE), str(fixture))
 
 
-def test_real_stage_exit_and_changed_after_identity_are_retained(bound, tmp_path, monkeypatch):
+@pytest.mark.parametrize("bound", ["1.5.85", "1.5.99"], indirect=True)
+@pytest.mark.parametrize("stage", [0, 23])
+def test_real_stage_exit_and_changed_after_identity_are_retained(bound, tmp_path, monkeypatch, stage):
     manifest, binding, fixture = bound
     game = tmp_path / "game"
     game.mkdir()
     run = game / "run_tests.sh"
-    run.write_text("#!/bin/sh\nexit 23\n")
+    run.write_text(f"#!/bin/sh\nexit {stage}\n")
     run.chmod(0o755)
     monkeypatch.chdir(game)
     report = tmp_path / "gate.json"
-    assert gb.run_bound(str(manifest), str(report), str(SOURCE), str(fixture)) == 23
+    sha256 = gb.digest(manifest)
+    assert gb.run_bound(str(manifest), str(report), str(SOURCE), str(fixture), sha256) == stage
     assert json.loads(report.read_text())["identity"] == "unchanged"
+    assert gb.receipt_identity(report, stage, manifest, sha256) == "unchanged"
+    original = report.read_bytes()
     target = fixture / gb.FILES[1]
     run.write_text(f"#!/bin/sh\nprintf changed > '{target}'\nexit 23\n")
-    assert gb.run_bound(str(manifest), str(report), str(SOURCE), str(fixture)) == 69
-    result = json.loads(report.read_text())
-    assert result["identity"] == "poisoned" and result["raw_exit"] == 23
+    changed_report = tmp_path / "changed-gate.json"
+    assert gb.run_bound(str(manifest), str(changed_report), str(SOURCE), str(fixture), sha256) == 69
+    result = json.loads(changed_report.read_text())
+    assert result["identity"] == "mismatch" and result["raw_exit"] == 23
+    assert report.read_bytes() == original
+
+
+@pytest.mark.parametrize("bound", ["1.5.85", "1.5.99"], indirect=True)
+def test_sdk_mismatch_refuses_before_stage(bound, tmp_path, monkeypatch):
+    manifest, binding, fixture = bound
+    other = "1.5.99" if binding["sdk"] == "1.5.85" else "1.5.85"
+    version = gb.metadata.version
+    monkeypatch.setattr(gb.metadata, "version",
+                        lambda name: other if name == "skillflow-py" else version(name))
+    report = tmp_path / "mismatch.json"
+    assert gb.run_bound(manifest, report, str(SOURCE), str(fixture), gb.digest(manifest)) == 69
+    receipt = json.loads(report.read_text())
+    assert receipt["identity"] == "mismatch" and receipt["raw_exit"] is None
+    assert f"expected {binding['sdk']}, observed {other}" in receipt["error"]
+
+
+@pytest.mark.parametrize("pin", [None, 85, "", "1.5.*", ">=1.5.85", "1.5.99 "])
+def test_missing_or_malformed_pin_has_no_implicit_migration(bound, tmp_path, pin):
+    manifest, binding, fixture = bound
+    if pin is None:
+        del binding["sdk"]
+    else:
+        binding["sdk"] = pin
+    manifest.write_text(json.dumps(binding))
+    with pytest.raises(ValueError, match="sdk"):
+        gb.read_binding(manifest)
+    report = tmp_path / "invalid-pin.json"
+    assert gb.run_bound(manifest, report, str(SOURCE), str(fixture)) == 69
+    receipt = json.loads(report.read_text())
+    assert receipt["identity"] == "unknown" and receipt["raw_exit"] is None
+
+
+@pytest.mark.parametrize("kind", ["symlink", "directory", "fifo"])
+def test_manifest_requires_regular_non_symlink_bytes(bound, tmp_path, kind):
+    manifest, _, _ = bound
+    raw = manifest.read_bytes()
+    manifest.unlink()
+    if kind == "directory":
+        manifest.mkdir()
+    elif kind == "fifo":
+        __import__("os").mkfifo(manifest)
+    else:
+        target = tmp_path / "target.json"
+        target.write_bytes(raw)
+        manifest.symlink_to(target)
+    with pytest.raises((OSError, ValueError)):
+        gb.read_binding(manifest)
+
+
+def test_manifest_path_swap_during_parse_keeps_one_raw_witness(bound, tmp_path, monkeypatch):
+    manifest, binding, fixture = bound
+    raw = manifest.read_bytes()
+    sha256 = hashlib.sha256(raw).hexdigest()
+    replacement = tmp_path / "replacement.json"
+    replacement.write_text(json.dumps({**binding, "sdk": "1.5.85", "image": "sha256:" + "f" * 64}))
+    loads, read_regular = gb.json.loads, gb.read_regular
+    reads = []
+
+    def counted_read(path):
+        if Path(path) == manifest:
+            reads.append(path)
+        return read_regular(path)
+
+    def swap_during_parse(value, *args, **kwargs):
+        monkeypatch.setattr(gb.json, "loads", loads)
+        assert value == raw
+        replacement.replace(manifest)
+        return loads(value, *args, **kwargs)
+
+    monkeypatch.setattr(gb, "read_regular", counted_read)
+    monkeypatch.setattr(gb.json, "loads", swap_during_parse)
+    captured = gb.capture(binding, sha256, str(SOURCE), str(fixture))
+    assert len(reads) == 1
+    assert captured["sdk"] == "1.5.99"
+    assert captured["image"] == binding["image"]
+    assert captured["binding_sha256"] == sha256
+    assert hashlib.sha256(manifest.read_bytes()).hexdigest() != sha256
+    with pytest.raises(gb.IdentityMismatch, match="frozen binding bytes"):
+        gb.capture(binding, sha256, str(SOURCE), str(fixture))
+
+
+@pytest.mark.parametrize("field", ["sdk", "image", "binding_sha256", "rebuilt"])
+def test_receipt_requires_original_frozen_pin_hash_and_image(bound, tmp_path, field):
+    manifest, binding, fixture = bound
+    frozen, sha256 = gb.read_binding(manifest)
+    observation = gb.capture(frozen, sha256, str(SOURCE), str(fixture))
+    receipt = dict(identity="unchanged", raw_exit=23, before=observation, after=observation)
+    report = tmp_path / "receipt.json"
+    report.write_text(json.dumps(receipt))
+    assert gb.receipt_identity(report, 23, manifest, sha256) == "unchanged"
+    assert gb.receipt_identity(report, 23, manifest, None) == "unknown"
+    if field == "rebuilt":
+        manifest.write_text(json.dumps({**binding, "sdk": "1.5.85", "image": "sha256:" + "f" * 64}))
+        observation.update(sdk="1.5.85", image="sha256:" + "f" * 64,
+                           binding_sha256=gb.digest(manifest))
+    else:
+        observation[field] = {"sdk": "1.5.85", "image": "sha256:" + "f" * 64,
+                              "binding_sha256": "f" * 64}[field]
+    report.write_text(json.dumps(receipt))
+    assert gb.receipt_identity(report, 23, manifest, sha256) == "unknown"
+
+
+def test_capture_compares_callers_binding_instead_of_rebuilding_it(bound):
+    manifest, binding, fixture = bound
+    with pytest.raises(gb.IdentityMismatch, match="caller's frozen binding"):
+        gb.capture({**binding, "sdk": "1.5.85"}, gb.digest(manifest), str(SOURCE), str(fixture))
 
 
 def test_missing_engine_identity_refuses_before_stage(bound, tmp_path, monkeypatch):
@@ -95,9 +220,15 @@ def test_missing_engine_identity_refuses_before_stage(bound, tmp_path, monkeypat
 
 
 @pytest.mark.parametrize("change_sidecar", [False, True])
+@pytest.mark.parametrize("bound", ["1.5.85", "1.5.99"], indirect=True)
+@pytest.mark.parametrize("sdk_state", ["compatible", "mismatch", "missing"])
 def test_normal_launcher_real_snapshot_exit_and_sidecar_poison(
-        bound, tmp_path, monkeypatch, change_sidecar):
-    manifest, binding, _ = bound
+        bound, tmp_path, monkeypatch, change_sidecar, sdk_state):
+    manifest, binding, fixture = bound
+    observed_sdk = binding["sdk"] if sdk_state == "compatible" else "1.5.0"
+    if sdk_state == "missing":
+        del binding["sdk"]
+        manifest.write_text(json.dumps(binding))
     bins, game, reports = (tmp_path / name for name in ("bin", "game", "reports"))
     for path in (bins, game, reports):
         path.mkdir()
@@ -109,14 +240,19 @@ def test_normal_launcher_real_snapshot_exit_and_sidecar_poison(
         'SNAPROOT="/home/linxuhao/.AItelier/gate-snapshots"', f'SNAPROOT="{tmp_path / "snapshots"}"'))
     subprocess.run(["git", "init", "--quiet", str(game)], check=True)
     (game / "run_tests.sh").write_text("#!/bin/sh\nexit 23\n")
+    (game / "run_tests.sh").chmod(0o755)
     subprocess.run(["git", "-C", str(game), "add", "run_tests.sh"], check=True)
     subprocess.run(["git", "-C", str(game), "-c", "user.name=fixture", "-c",
                     "user.email=fixture@localhost", "commit", "-qm", "fixture"], check=True)
     head = gb.git(game, "rev-parse", "HEAD")
     calls = tmp_path / "docker-calls.jsonl"
+    harness = importlib.import_module("docker.godot.godot_harness")
+    health = harness.health_snapshot()
+    health["source_identity"]["path"] = "/srv/godot_harness.py"
+    health_bytes = json.dumps(health).encode()
     fake = bins / "docker"
-    fake.write_text(f'''#!/usr/local/bin/python3
-import json,sys
+    fake.write_text(f'''#!{sys.executable}
+import io,json,os,sys
 from pathlib import Path
 args=sys.argv[1:]
 calls=Path({str(calls)!r})
@@ -130,20 +266,44 @@ else:
  assert {binding['image']!r} in args
  assert {str(SOURCE) + ':/app:ro'!r} in args
  assert {str(SOURCE) + ':/home/linxuhao/AItelier:ro'!r} in args
- assert args[-4:-1]==['/app/tools/gate_binding.py','run',{str(manifest)!r}]
- Path(args[-1]).write_text(json.dumps({{'identity':'unchanged','raw_exit':23}}))
- sys.exit(23)
+ assert '/app/tools/gate_binding.py' in args
+ assert args[-3:-1]==['run',{str(manifest)!r}]
+ # Execute the real helper, imports, Git checks and owned stage. Only image
+ # metadata and engine health are controlled boundaries in this unit fixture.
+ sys.path.insert(0,{str(SOURCE)!r})
+ from tools import gate_binding as observer
+ version=observer.metadata.version
+ observer.metadata.version=lambda name: {observed_sdk!r} if name=='skillflow-py' else version(name)
+ observer.urllib.request.urlopen=lambda *a,**k: io.BytesIO({health_bytes!r})
+ os.chdir(args[args.index('-w')+1])
+ sys.exit(observer.run_bound({str(manifest)!r},args[-1],{str(SOURCE)!r},{str(fixture)!r},
+                            expected_sha256=args[args.index('--binding-sha256')+1]))
 ''')
     fake.chmod(0o755)
     monkeypatch.setenv("PATH", str(bins) + ":" + __import__("os").environ["PATH"])
     result = subprocess.run([str(launcher), str(game), str(reports), "owned"], capture_output=True, text=True)
-    assert result.returncode == (69 if change_sidecar else 23), result.stderr
+    retained = change_sidecar or sdk_state == "mismatch"
+    assert result.returncode == (69 if retained or sdk_state == "missing" else 23), result.stderr
+    if sdk_state == "missing":
+        assert not calls.exists()
+        assert not (reports / "owned.gate.head").exists()
+        assert not (tmp_path / "snapshots").exists()
+        return
     assert (reports / "owned.gate.head").read_text().strip() == head
     exit_value = (reports / "owned.gate.exit").read_text().strip()
-    assert exit_value.startswith("poisoned-platform") if change_sidecar else exit_value == "23"
+    assert exit_value.startswith("mismatch-platform-identity;") if retained else exit_value == "23"
+    receipt = json.loads((reports / "owned.platform-identity.json").read_text())
+    assert receipt["raw_exit"] == (None if sdk_state == "mismatch" else 23)
     assert gb.git(game, "rev-parse", "HEAD") == head
     assert gb.git(game, "status", "--porcelain") == ""
-    assert len(gb.git(game, "worktree", "list", "--porcelain").splitlines()) == 3
+    snapshots = list((tmp_path / "snapshots").iterdir())
+    if retained:
+        assert len(snapshots) == 1
+        assert gb.git(snapshots[0], "rev-parse", "HEAD") == head
+        assert f"worktree {snapshots[0]}" in gb.git(game, "worktree", "list", "--porcelain")
+    else:
+        assert snapshots == []
+        assert len(gb.git(game, "worktree", "list", "--porcelain").splitlines()) == 3
 
 
 @pytest.fixture

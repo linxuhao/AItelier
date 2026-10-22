@@ -6,8 +6,10 @@
 WORKTREE="${1:?abs path to the worktree}"
 BINDING="${GATE_BINDING_FILE:?frozen platform Source binding required}"
 BINDING_TOOL="$(dirname "$0")/gate_binding.py"
-PLATFORM_SOURCE="$(python3 "$BINDING_TOOL" source "$BINDING")" || exit 69
-PLATFORM_IMAGE="$(python3 "$BINDING_TOOL" image "$BINDING")" || exit 69
+# Freeze the complete operator binding before dispatch, including SDK and image.
+BINDING_SHA256="$(python3 "$BINDING_TOOL" sha256 "$BINDING")" || exit 69
+PLATFORM_SOURCE="$(python3 "$BINDING_TOOL" source "$BINDING" --binding-sha256 "$BINDING_SHA256")" || exit 69
+PLATFORM_IMAGE="$(python3 "$BINDING_TOOL" image "$BINDING" --binding-sha256 "$BINDING_SHA256")" || exit 69
 REPORTS="${2:?abs path to the gate-report parent dir}"
 SUFFIX="${3:-$(basename "$WORKTREE")}"
 NAME="wuxia-gate-$SUFFIX-$$"
@@ -86,9 +88,9 @@ docker run --rm --init --name "$NAME" --network aitelier_default -u 1000:1000 \
   -v "$PLATFORM_SOURCE:/app:ro" \
   -v "$PLATFORM_SOURCE:/home/linxuhao/AItelier:ro" \
   -v /home/linxuhao/.AItelier:/home/linxuhao/.AItelier \
-  -w "$SNAP" "$PLATFORM_IMAGE" python3 /app/tools/gate_binding.py run "$BINDING" "$REPORTS/$SUFFIX.platform-identity.json" > "$LOG" 2>&1
+  -w "$SNAP" "$PLATFORM_IMAGE" python3 /app/tools/gate_binding.py --binding-sha256 "$BINDING_SHA256" run "$BINDING" "$REPORTS/$SUFFIX.platform-identity.json" > "$LOG" 2>&1
 rc=$?
-identity="$(python3 "$BINDING_TOOL" receipt "$REPORTS/$SUFFIX.platform-identity.json" "$rc" 2>> "$LOG")" || identity=unknown
+identity="$(python3 "$BINDING_TOOL" receipt "$REPORTS/$SUFFIX.platform-identity.json" "$rc" --binding-sha256 "$BINDING_SHA256" 2>> "$LOG")" || identity=unknown
 python3 "$BINDING_TOOL" sidecar "$REPORTS/$SUFFIX.sidecar-after.json" "$REPORTS/$SUFFIX.sidecar-before.json" >> "$LOG" 2>&1
 sidecar_rc=$?
 if [ "$sidecar_rc" -eq 70 ]; then

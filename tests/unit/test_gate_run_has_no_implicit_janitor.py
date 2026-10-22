@@ -7,6 +7,7 @@ text is edited only to redirect absolute coordinates (snapshot root and legacy
 janitor path) to owned fixture directories; control flow is never replaced.
 No real Docker, sidecar, GPU, engine or global janitor is touched.
 """
+import hashlib
 import importlib.util
 import json
 import subprocess
@@ -32,6 +33,8 @@ if mode == "source":
     print({source!r})
 elif mode == "image":
     print({image!r})
+elif mode == "sha256":
+    print({binding_sha256!r})
 elif mode in ("sidecar", "receipt"):
     sys.exit(subprocess.run([sys.executable, {observer!r}, *args]).returncode)
 else:
@@ -84,16 +87,16 @@ def _git(cwd, *args):
                           check=True, capture_output=True, text=True).stdout.strip()
 
 
-def _observation():
+def _observation(sdk="1.5.85", binding_sha256="c" * 64):
     return dict(files=[dict(path=f"/fixture/source-{i}", sha256="a" * 64) for i in range(4)],
                 engine=dict(path="/srv/godot_harness.py", sha256="b" * 64,
                             loaded_sha256="b" * 64, pid=123),
-                sdk="1.5.85", binding_sha256="c" * 64,
+                sdk=sdk, binding_sha256=binding_sha256,
                 python=sys.executable, pid=456, image=IMAGE)
 
 
 def _build(tmp_path, monkeypatch, script_text, *, identity="unchanged", stage=23,
-           valid_git=True, after="unchanged", pause=False):
+           valid_git=True, after="unchanged", pause=False, sdk="1.5.85"):
     """Create the owned launcher copy, Git game fixture and process stand-ins."""
     bins, game, reports, snaps = (tmp_path / n for n in ("bin", "game", "reports", "snapshots"))
     for path in (bins, game, reports):
@@ -107,12 +110,23 @@ def _build(tmp_path, monkeypatch, script_text, *, identity="unchanged", stage=23
     redirected = redirected.replace(OLD_JANITOR, f"sh {janitor}")
     launcher = bins / "gate_run.sh"
     launcher.write_text(redirected)
+    # Source/image process boundaries remain stand-ins; the real receipt reader
+    # receives an explicit closed binding and its original raw hash.
+    binding = tmp_path / "binding.json"
+    binding.write_text(json.dumps(dict(
+        source=str(SOURCE), head="0" * 40, tree="0" * 40, image=IMAGE, sdk=sdk,
+        files={p: "a" * 64 for p in ("docker/godot/godot_harness.py",
+                                    "aitelier/tools/godot_playtest/impl.py")},
+        engine_sha256="b" * 64)))
+    binding_sha256 = hashlib.sha256(binding.read_bytes()).hexdigest()
     binding_calls, docker_calls = tmp_path / "binding-calls.jsonl", tmp_path / "docker-calls.jsonl"
     (bins / "gate_binding.py").write_text(BINDING_STANDIN.format(
         calls=str(binding_calls), source=str(SOURCE), image=IMAGE,
+        binding_sha256=binding_sha256,
         observer=str(SOURCE / "tools/gate_binding.py")))
     receipt = dict(identity=identity, raw_exit=stage,
-                   before=_observation(), after=_observation())
+                   before=_observation(sdk, binding_sha256),
+                   after=_observation(sdk, binding_sha256))
     if identity == "mismatch":
         receipt["after"]["engine"]["pid"] += 1
         receipt["error"] = "IdentityMismatch: observed engine PID differs"
@@ -146,8 +160,6 @@ def _build(tmp_path, monkeypatch, script_text, *, identity="unchanged", stage=23
         head = _git(game, "rev-parse", "HEAD")
     else:
         (game / "run_tests.sh").write_text("#!/bin/sh\nexit 23\n")
-    binding = tmp_path / "binding.json"
-    binding.write_text("{}")
     monkeypatch.setenv("GATE_BINDING_FILE", str(binding))
     monkeypatch.setenv("PATH", f"{bins}:" + __import__("os").environ["PATH"])
     return dict(launcher=launcher, game=game, reports=reports, snaps=snaps, head=head,
@@ -217,8 +229,9 @@ def _final_script():
 
 
 @pytest.mark.parametrize("stage", [0, 23])
-def test_final_useful_gate_keeps_stage_exit_and_calls_no_janitor(tmp_path, monkeypatch, stage):
-    fx = _build(tmp_path, monkeypatch, _final_script(), identity="unchanged", stage=stage)
+@pytest.mark.parametrize("sdk", ["1.5.85", "1.5.99"])
+def test_final_useful_gate_keeps_stage_exit_and_calls_no_janitor(tmp_path, monkeypatch, stage, sdk):
+    fx = _build(tmp_path, monkeypatch, _final_script(), identity="unchanged", stage=stage, sdk=sdk)
     result = _run(fx)
     assert result.returncode == stage, result.stderr
     assert (fx["reports"] / "owned.gate.exit").read_text().strip() == str(stage)
@@ -236,7 +249,7 @@ def test_final_useful_gate_keeps_stage_exit_and_calls_no_janitor(tmp_path, monke
     assert args[args.index("-w") + 1] != str(fx["game"])
     assert IMAGE in args and f"{SOURCE}:/app:ro" in args
     modes = [c[0] for c in _lines(fx["binding_calls"])]
-    assert modes == ["source", "image", "sidecar", "receipt", "sidecar"]
+    assert modes == ["sha256", "source", "image", "sidecar", "receipt", "sidecar"]
     _assert_clean_source_and_snapshot(fx)
 
 
@@ -370,7 +383,8 @@ def test_bound_receipt_preserves_real_exit_and_terminal_evidence(
     script.write_text(f"#!/bin/sh\nexit {stage}\n")
     script.chmod(0o755)
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(observer, "load_binding", lambda *args: {})
+    binding = dict(sdk="1.5.85", image=IMAGE, engine_sha256="b" * 64)
+    monkeypatch.setattr(observer, "read_binding", lambda *args: (binding, "c" * 64))
     before, after = _observation(), _observation()
     if identity == "mismatch":
         after["engine"]["pid"] += 1
@@ -389,7 +403,7 @@ def test_bound_receipt_preserves_real_exit_and_terminal_evidence(
     receipt = json.loads(output.read_text())
     assert receipt["raw_exit"] == stage and receipt["identity"] == identity
     assert ("after" in receipt) == (identity != "unknown")
-    assert observer.receipt_identity(output, result) == identity
+    assert observer.receipt_identity(output, result, "unused", "c" * 64) == identity
 
 
 def test_bound_writer_refuses_stale_receipt_without_overwriting_raw(tmp_path, monkeypatch, observer):
@@ -400,7 +414,7 @@ def test_bound_writer_refuses_stale_receipt_without_overwriting_raw(tmp_path, mo
     def forbidden(*args):
         pytest.fail("stale receipt must refuse before binding or execution")
 
-    monkeypatch.setattr(observer, "load_binding", forbidden)
+    monkeypatch.setattr(observer, "read_binding", forbidden)
     assert observer.run_bound("unused", output) == 69
     assert output.read_bytes() == old
 
@@ -416,7 +430,7 @@ def test_frozen_source_binding_still_requires_exact_clean_git_identity(tmp_path,
     _git(source, "add", ".")
     _git(source, "commit", "-qm", "platform fixture")
     binding = dict(source=str(source), head=_git(source, "rev-parse", "HEAD"),
-                   tree=_git(source, "rev-parse", "HEAD^{tree}"), image=IMAGE,
+                   tree=_git(source, "rev-parse", "HEAD^{tree}"), image=IMAGE, sdk="1.5.85",
                    files={p: observer.digest(source / p) for p in observer.FILES},
                    engine_sha256="b" * 64)
     manifest = tmp_path / "binding.json"
@@ -434,5 +448,5 @@ def test_final_early_invalid_git_refuses_without_janitor_or_docker(tmp_path, mon
     assert "not inside a git work tree" in result.stderr
     assert _janitor_calls(fx) == [] and not fx["janitor_log"].exists()
     assert _lines(fx["docker_calls"]) == []
-    assert [c[0] for c in _lines(fx["binding_calls"])] == ["source", "image"]
+    assert [c[0] for c in _lines(fx["binding_calls"])] == ["sha256", "source", "image"]
     assert not fx["snaps"].exists() or list(fx["snaps"].iterdir()) == []

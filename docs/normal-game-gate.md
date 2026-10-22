@@ -14,18 +14,36 @@ No installation or activation is performed by the Source batch.
 The queue's inherited `GATE_BINDING_FILE` must name a regular JSON file:
 
 ```json
-{"source":"/absolute/frozen/AItelier","head":"<40-hex commit>","tree":"<40-hex tree>","image":"sha256:<64-hex immutable backend image>","files":{"docker/godot/godot_harness.py":"<64-hex SHA256>","aitelier/tools/godot_playtest/impl.py":"<64-hex SHA256>"},"engine_sha256":"<64-hex SHA256>"}
+{"source":"/absolute/frozen/AItelier","head":"<40-hex commit>","tree":"<40-hex tree>","image":"sha256:<64-hex immutable backend image>","sdk":"1.5.99","files":{"docker/godot/godot_harness.py":"<64-hex SHA256>","aitelier/tools/godot_playtest/impl.py":"<64-hex SHA256>"},"engine_sha256":"<64-hex SHA256>"}
 ```
 
-Freeze a clean accepted Source containing these tools, then derive every value
-from that Source and the exact image. The same Source is mounted readonly at
+Freeze a clean accepted Source containing these tools. Before dispatch, the
+operator must choose and freeze `sdk` from an independently reviewed exact
+immutable image. It is a required exact `X.Y.Z` release string; the example
+above does not approve an image. Source dependency declarations and currently
+observed metadata cannot select or update this expectation. Missing pins and
+extra fields refuse without migration. Actual `skillflow-py` metadata must
+equal the explicit pin. Unit controls use 1.5.85 and 1.5.99 pins; those controls
+do not establish runtime compatibility or approve either image.
+
+Manifest parsing and SHA256 consume the same single read from an opened regular
+non-symlink file. The launcher freezes that hash before dispatch and requires
+it for Source/image selection, execution and receipt authorization. Capture
+compares observations with the caller's original binding and hash. A receipt
+can authorize cleanup only against that original hash, SDK pin and image;
+newly observed or rebuilt expectations cannot authorize it. Each invocation
+requires fresh report paths; unknown or mismatched terminal identity retains
+its snapshot and preserves the observed raw exit.
+
+The same Source is mounted readonly at
 `/app` and `/home/linxuhao/AItelier`, with explicit `PYTHONPATH=/app`.
-The actual imports, both fixture coordinates, manifest hash, SDK1.5.85 and
+The actual imports, both fixture coordinates, manifest hash, actual pinned SDK and
 actual engine `/srv/godot_harness.py` loaded/disk hash and process identity are
 recorded before and after `run_tests.sh` in `*.platform-identity.json`.
 Named Docker sidecar CID/image/PID/start identity is recorded separately before
-and after. Missing/changed identity poisons the gate, preserving its raw stage
-exit in the receipt. Source movement, snapshot poisoning, queue ticket and
+and after. Incomplete observations remain unknown; observed differences remain
+mismatches. Both refuse acceptance and retain the snapshot while preserving the
+raw stage exit in the receipt. Source movement, snapshot poisoning, queue ticket and
 normal stage exits retain their existing meaning. No absent-path skip is used.
 
 `aitelier recreate-godot` is a closed operation on the existing initialized

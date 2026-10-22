@@ -568,9 +568,14 @@ def recreate_godot_builder(*, override_file: str, binding_file: str,
     quotas = {"GODOT_RETAIN_MAX_FILES": "4096", "GODOT_RETAIN_MAX_BYTES": "536870912",
               "GODOT_RETAIN_MAX_PATTERNS": "16", "GODOT_RETAIN_MAX_SEARCH_ENTRIES": "4096"}
     override_sha = digest(override_file)
-    if yaml.safe_load(Path(override_file).read_text()) != {
-            "services": {"godot-builder": {"environment": quotas}}}:
-        raise ValueError("override may only set the four owned finite Godot quotas")
+    configuration = yaml.safe_load(Path(override_file).read_text())
+    environment = quotas
+    display_environment = {**quotas, "GODOT_PLAYTEST_RES": "1920x1080"}
+    if configuration == {"services": {"godot-builder": {"environment": display_environment}}}:
+        environment = display_environment
+    elif configuration != {"services": {"godot-builder": {"environment": quotas}}}:
+        raise ValueError("override may only set the four owned finite Godot quotas"
+                         " and optional GODOT_PLAYTEST_RES=1920x1080")
     binding_sha = digest(binding_file)
     binding = load_binding(binding_file)
     expected = {"cid": expected_cid, "pid": expected_pid, "image": expected_image}
@@ -596,7 +601,7 @@ def recreate_godot_builder(*, override_file: str, binding_file: str,
         with tempfile.TemporaryDirectory(prefix="aitelier-godot-recreate-") as temp:
             overlay = Path(temp) / "godot.json"
             overlay.write_text(json.dumps({"services": {"godot-builder": {
-                "image": target_image, "environment": quotas}}}))
+                "image": target_image, "environment": environment}}}))
             receipt["effect_override_sha256"] = hashlib.sha256(overlay.read_bytes()).hexdigest()
             receipt["before"] = _godot_identity()
             if receipt["before"] != expected:

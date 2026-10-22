@@ -10,6 +10,7 @@ import sqlite3
 import time
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -429,13 +430,30 @@ def test_normal_godot_path_mixed_refusal_is_the_retained_baseline(
     assert normal[1] == [] and registry_rows(normal[0][1])[0][1] == "active"
 
 
+@pytest.mark.parametrize("resolution", [
+    pytest.param(None, id="quota-only"),
+    pytest.param("1920x1080", id="display-1920x1080"),
+])
 @pytest.mark.parametrize("controller", [False, True])
 def test_normal_godot_path_honors_exact_metadata_cover_with_godot_effect_only(
-        normal, bound, tmp_path, monkeypatch, controller):
+        normal, bound, tmp_path, monkeypatch, controller, resolution):
     db = normal[0][1]
     seed_registry(db, own_controller=controller)
     before = registry_rows(db)
     args = godot_args(tmp_path, bound, monkeypatch)
+    environment = dict(QUOTAS)
+    if resolution is not None:
+        environment["GODOT_PLAYTEST_RES"] = resolution
+    Path(args["override_file"]).write_text(json.dumps(
+        {"services": {"godot-builder": {"environment": environment}}}))
+    overlays = []
+    compose_boundary = server._compose
+    def compose(*command, **kwargs):
+        if command[:1] == ("-f",):
+            assert_fence_held()
+            overlays.append(json.loads(Path(command[1]).read_text()))
+        return compose_boundary(*command, **kwargs)
+    monkeypatch.setattr(server, "_compose", compose)
     seen = []
     def decide(action, snapshot):
         assert_fence_held()
@@ -445,6 +463,8 @@ def test_normal_godot_path_honors_exact_metadata_cover_with_godot_effect_only(
                         **({"deployment_attempt_id": "deployment-current"} if controller else {}))
     receipt = server.recreate_godot_builder(**args, override_decision=decide)
     assert len(seen) == 1
+    assert overlays == [{"services": {"godot-builder": {
+        "image": args["target_image"], "environment": environment}}}]
     assert normal[1] == [("-f", normal[1][0][1], "up", "-d", "--no-deps", "--force-recreate",
                           "--no-build", "godot-builder")]
     events = json.loads(dq.evidence_path().read_text())["events"]
@@ -489,6 +509,7 @@ def test_other_callers_cannot_assert_the_godot_scope(normal, monkeypatch, case, 
         server._require_deployment_clearance("redeploy", backend_service=True, godot_service=True)
 
 
+@pytest.mark.parametrize("resolution", [None, "1920x1080"])
 @pytest.mark.parametrize("case,match", [
     ("render-named", "cannot be named"),
     ("render-unnamed", "non-nameable authoritative owners: godot_render_owners"),
@@ -505,7 +526,7 @@ def test_other_callers_cannot_assert_the_godot_scope(normal, monkeypatch, case, 
     ("raises", "operator decision failed"),
 ])
 def test_normal_godot_path_counterexamples_refuse_with_unchanged_facts(
-        normal, bound, tmp_path, monkeypatch, case, match):
+        normal, bound, tmp_path, monkeypatch, case, match, resolution):
     db = normal[0][1]
     seed_registry(db)
     if case in {"render-named", "render-unnamed", "render-lost"}:
@@ -525,6 +546,9 @@ def test_normal_godot_path_counterexamples_refuse_with_unchanged_facts(
         monkeypatch.setattr(server.subprocess, "run", run)
     before = registry_rows(db)
     args = godot_args(tmp_path, bound, monkeypatch, identities=[])
+    if resolution is not None:
+        Path(args["override_file"]).write_text(json.dumps({"services": {"godot-builder": {
+            "environment": {**QUOTAS, "GODOT_PLAYTEST_RES": resolution}}}}))
     seen = []
     def decide(action, snapshot):
         seen.append(snapshot)
@@ -589,3 +613,83 @@ def test_accepted_godot_scope_still_rechecks_identity_before_effect(normal, boun
     assert events[-1]["status"] == "aborted" and events[-1]["usable"] is False
     report = json.loads((tmp_path / "effect.json").read_text())
     assert "identity changed" in report["error"] and report["journal"]["event"] == events[-1]
+
+
+@pytest.mark.parametrize("configuration", [
+    {"services": {"godot-builder": {
+        "environment": {**QUOTAS, "GODOT_PLAYTEST_RES": value}}}}
+    for value in (None, True, 19201080, 1920.108, ["1920x1080"], {"width": 1920},
+                  "", "1280x720", "1920x900", "1920X1080", " 1920x1080",
+                  "1920x1080 ", "1920x1080x24", "0x0", "-1x1080",
+                  "999999999x999999999")
+] + [
+    {"services": {"godot-builder": {"environment": QUOTAS}, "aitelier": {}}},
+    {"services": {"godot-builder": {"environment": QUOTAS, "image": "other"}}},
+    {"services": {"godot-builder": {"environment": QUOTAS, "profiles": ["display"]}}},
+    {"services": {"godot-builder": {"environment": QUOTAS}}, "name": "other"},
+    {"services": {"godot-builder": {"environment": {**QUOTAS, "OTHER": "1920x1080"}}}},
+    {"services": {"godot-builder": {
+        "environment": {**QUOTAS, "GODOT_RETAIN_MAX_FILES": "0",
+                        "GODOT_PLAYTEST_RES": "1920x1080"}}}},
+    {"services": {"godot-builder": {"environment": {
+        key: value for key, value in QUOTAS.items() if key != "GODOT_RETAIN_MAX_FILES"}}}},
+    {"services": {"godot-builder": {"environment": [
+        *(f"{key}={value}" for key, value in QUOTAS.items()),
+        "GODOT_PLAYTEST_RES=1920x1080"]}}},
+    None, [],
+])
+def test_normal_godot_configuration_refuses_before_deployment(
+        normal, bound, tmp_path, monkeypatch, configuration):
+    args = godot_args(tmp_path, bound, monkeypatch)
+    Path(args["override_file"]).write_text(json.dumps(configuration))
+    journal = dq.evidence_path()
+    journal_before = journal.read_bytes() if journal.exists() else None
+    def unexpected(*_a, **_k):
+        pytest.fail("invalid configuration reached a deployment boundary")
+    for name in ("_require_docker", "_require_deployment_clearance", "_compose",
+                 "_godot_identity", "_godot_health", "_finish_deployment"):
+        monkeypatch.setattr(server, name, unexpected)
+    with pytest.raises(ValueError, match="override may only set the four owned finite Godot quotas"):
+        server.recreate_godot_builder(**args, override_decision=unexpected)
+    assert normal[1] == [] and not Path(args["report_file"]).exists()
+    assert (journal.read_bytes() if journal.exists() else None) == journal_before
+
+
+@pytest.mark.parametrize("changed_resolution", [None, "1280x720"])
+def test_normal_godot_display_configuration_is_frozen_after_clearance(
+        normal, bound, tmp_path, monkeypatch, changed_resolution):
+    db = normal[0][1]
+    seed_registry(db)
+    before = registry_rows(db)
+    args = godot_args(tmp_path, bound, monkeypatch)
+    path = Path(args["override_file"])
+    path.write_text(json.dumps({"services": {"godot-builder": {
+        "environment": {**QUOTAS, "GODOT_PLAYTEST_RES": "1920x1080"}}}}))
+    observe_identity = server._godot_identity
+    def identity():
+        assert_fence_held()
+        assert latest()["status"] == "overridden"
+        environment = dict(QUOTAS)
+        if changed_resolution is not None:
+            environment["GODOT_PLAYTEST_RES"] = changed_resolution
+        path.write_text(json.dumps({"services": {"godot-builder": {"environment": environment}}}))
+        return observe_identity()
+    monkeypatch.setattr(server, "_godot_identity", identity)
+    seen = []
+    def decide(action, snapshot):
+        assert_fence_held()
+        seen.append(snapshot)
+        return override(action, snapshot, godot_only=True, coordinated_owners=names_for(snapshot))
+    with pytest.raises(ValueError, match="owned configuration changed before effect"):
+        server.recreate_godot_builder(**args, override_decision=decide)
+    assert len(seen) == 1 and normal[1] == []
+    assert registry_rows(db) == before
+    events = json.loads(dq.evidence_path().read_text())["events"]
+    assert events[-2]["status"] == "overridden" and events[-2]["audit"]["godot_only"] is True
+    assert events[-1]["status"] == "aborted" and events[-1]["usable"] is False
+    assert events[-1]["inventory_digest"] == seen[0]["digest"]
+    assert events[-1]["blockers"] == seen[0]["blockers"]
+    assert events[-1]["errors"] == seen[0]["errors"]
+    report = json.loads(Path(args["report_file"]).read_text())
+    assert "owned configuration changed before effect" in report["error"]
+    assert report["journal"]["event"] == events[-1]

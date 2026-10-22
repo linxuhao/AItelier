@@ -181,3 +181,33 @@ CID/PID/image expectations, quota and Source binding rechecks, health/source
 checks and the `--no-deps --force-recreate` Godot-only effect are unchanged.
 This scope does not promote the shared Source, restart the backend or zvec-grep,
 or touch the GPU. It is a Source contract only and does not perform a recreation.
+
+The recreation's owned override file accepts only the exact four string-valued
+quotas below, optionally with the single string `GODOT_PLAYTEST_RES: "1920x1080"`.
+The quota-only document remains valid and adds no display setting to the generated
+overlay. To request the supported display, supply this complete override:
+
+```yaml
+services:
+  godot-builder:
+    environment:
+      GODOT_RETAIN_MAX_FILES: "4096"
+      GODOT_RETAIN_MAX_BYTES: "536870912"
+      GODOT_RETAIN_MAX_PATTERNS: "16"
+      GODOT_RETAIN_MAX_SEARCH_ENTRIES: "4096"
+      GODOT_PLAYTEST_RES: "1920x1080"
+```
+
+Other resolutions, non-string values, missing or changed quotas, extra environment
+keys, services or Compose fields refuse before Docker checks and clearance. The
+generated temporary overlay contains the immutable target image and exactly the
+accepted environment. Both override forms use the same clearance, fence,
+identity/Source checks, configuration hash rechecks and Godot-only effect above.
+A change to the owned override after clearance still aborts before Compose,
+including replacement by the other valid form.
+
+This is host operation configuration for the existing harness, whose display
+default remains 1280x720 when the setting is absent. The requested 1920x1080
+display can contain a 1280x900 game viewport. Source acceptance alone does not
+prove installation, the live display size, native pointer behavior or deployment;
+those need separate coordinated integration evidence.

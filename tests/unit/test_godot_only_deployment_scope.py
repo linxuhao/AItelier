@@ -17,6 +17,7 @@ import pytest
 
 from cli import server
 from core import datadir, deployment_quiescence as dq
+from tools import gate_binding as gb
 from tests.unit.test_backend_passive_deployment import packet, seal
 from tests.unit.test_host_live_deployment_observation import live  # noqa: F401 -- fixture
 from tests.unit.test_live_measurement_override import (  # noqa: F401 -- fixtures
@@ -714,6 +715,7 @@ def test_normal_godot_override_hash_and_configuration_share_one_input_snapshot(
     alternate_sha = hashlib.sha256(alternate).hexdigest()
     assert original_sha != alternate_sha
     native_open = Path.open
+    native_regular = gb.read_regular
     reads = []
     def on_disk():
         with native_open(path, "rb") as f:
@@ -742,6 +744,19 @@ def test_normal_godot_override_hash_and_configuration_share_one_input_snapshot(
         reads.append({"mode": mode, "opened_sha256": hashlib.sha256(on_disk()).hexdigest()})
         return RestoreAfterRead(opened) if len(reads) == 2 else opened
     monkeypatch.setattr(Path, "open", racing_open)
+    def racing_regular(input_path):
+        if Path(input_path) != path:
+            return native_regular(input_path)
+        if len(reads) == 1:
+            replace(alternate)
+        raw = native_regular(input_path)
+        reads.append({"mode": "fd-rb", "opened_sha256": hashlib.sha256(raw).hexdigest()})
+        if len(reads) == 2:
+            replace(original)
+        return raw
+    # digest now reads an opened descriptor; inject the same real A/B swap
+    # there as well as at the parser's Path.open boundary.
+    monkeypatch.setattr(gb, "read_regular", racing_regular)
     def decide(action, snapshot):
         assert_fence_held()
         return override(action, snapshot, godot_only=True, coordinated_owners=names_for(snapshot))

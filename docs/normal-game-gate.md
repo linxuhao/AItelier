@@ -11,21 +11,85 @@ An authorized operator installs an accepted exact Source with
 identity helper; installation is separate from authoring or CPU validation.
 No installation or activation is performed by the Source batch.
 
+For an authorized update of only an existing launcher, use the same installer:
+
+```sh
+sh tools/install_gate_run.sh --launcher-only "$EXPECTED_INSTALLED_SHA256" "$EXPECTED_SOURCE_SHA256" "$DEST"
+```
+
+Both hashes must be explicit lowercase SHA256 values derived from the installed
+preimage and the accepted Source's `tools/gate_run.sh`. They identify bytes;
+they do not grant maintenance authority. This mode requires an existing regular
+launcher and destination directory, checks both hashes, writes a same-directory
+pending file, preserves installed mode/uid/gid, fsyncs it and atomically renames
+it over `gate_run.sh`. An already-open old descriptor keeps the old bytes.
+`gate_binding.py` and unrelated files are untouched. Stale hashes, malformed
+arguments, missing files and symlink launchers refuse before replacement. A
+failure after rename is an error, with no automatic rollback or retry.
+
+For an authorized update of only the existing identity helper, use:
+
+```sh
+sh tools/install_gate_run.sh --helper-only "$EXPECTED_INSTALLED_SHA256" "$EXPECTED_SOURCE_SHA256" "$DEST"
+```
+
+These hashes identify the installed helper and accepted Source's
+`tools/gate_binding.py`. This closed mode uses the same regular-file reads,
+hash checks, preserved metadata and atomic replacement as launcher-only;
+the launcher and unrelated files are untouched. Both single-file modes default
+to `~/.AItelier/bin` when DEST is omitted and require an existing destination.
+Neither mode imports or executes the helper. Source validation performs no
+installation; actual installation requires a separate coordinated operation.
+
+All installation modes take the same nonblocking advisory lock at
+`DEST/.gate_run.install.lock`; a competing participant refuses. The lock file
+stays in place and must not be removed during installation. It coordinates
+participating installers only: other writers can ignore it, so authorization
+must also exclude competing writers of the selected file. The ordinary mode still
+installs both files with mode755; it is not a two-file atomic transaction.
+Python3 and the existing Unix install tools are required, with no AItelier/SDK
+imports, initialization, API or service operation.
+
+Updating an unused launcher pathname is a file-only operation. Unrelated CPU
+work that does not consume it need not stop. The operator must establish the
+actual consumer/owner scope before installation; Source review does not prove
+that a production file is unused. Backend restarts and deployment operations
+retain their existing guards and physical vetoes. This installer neither calls
+nor changes those guards and does not perform a backend restart or deployment.
+
 The queue's inherited `GATE_BINDING_FILE` must name a regular JSON file:
 
 ```json
-{"source":"/absolute/frozen/AItelier","head":"<40-hex commit>","tree":"<40-hex tree>","image":"sha256:<64-hex immutable backend image>","files":{"docker/godot/godot_harness.py":"<64-hex SHA256>","aitelier/tools/godot_playtest/impl.py":"<64-hex SHA256>"},"engine_sha256":"<64-hex SHA256>"}
+{"source":"/absolute/frozen/AItelier","head":"<40-hex commit>","tree":"<40-hex tree>","image":"sha256:<64-hex immutable backend image>","sdk":"1.5.99","files":{"docker/godot/godot_harness.py":"<64-hex SHA256>","aitelier/tools/godot_playtest/impl.py":"<64-hex SHA256>"},"engine_sha256":"<64-hex SHA256>"}
 ```
 
-Freeze a clean accepted Source containing these tools, then derive every value
-from that Source and the exact image. The same Source is mounted readonly at
+Freeze a clean accepted Source containing these tools. Before dispatch, the
+operator must choose and freeze `sdk` from an independently reviewed exact
+immutable image. It is a required exact `X.Y.Z` release string; the example
+above does not approve an image. Source dependency declarations and currently
+observed metadata cannot select or update this expectation. Missing pins and
+extra fields refuse without migration. Actual `skillflow-py` metadata must
+equal the explicit pin. Unit controls use 1.5.85 and 1.5.99 pins; those controls
+do not establish runtime compatibility or approve either image.
+
+Manifest parsing and SHA256 consume the same single read from an opened regular
+non-symlink file. The launcher freezes that hash before dispatch and requires
+it for Source/image selection, execution and receipt authorization. Capture
+compares observations with the caller's original binding and hash. A receipt
+can authorize cleanup only against that original hash, SDK pin and image;
+newly observed or rebuilt expectations cannot authorize it. Each invocation
+requires fresh report paths; unknown or mismatched terminal identity retains
+its snapshot and preserves the observed raw exit.
+
+The same Source is mounted readonly at
 `/app` and `/home/linxuhao/AItelier`, with explicit `PYTHONPATH=/app`.
-The actual imports, both fixture coordinates, manifest hash, SDK1.5.85 and
+The actual imports, both fixture coordinates, manifest hash, actual pinned SDK and
 actual engine `/srv/godot_harness.py` loaded/disk hash and process identity are
 recorded before and after `run_tests.sh` in `*.platform-identity.json`.
 Named Docker sidecar CID/image/PID/start identity is recorded separately before
-and after. Missing/changed identity poisons the gate, preserving its raw stage
-exit in the receipt. Source movement, snapshot poisoning, queue ticket and
+and after. Incomplete observations remain unknown; observed differences remain
+mismatches. Both refuse acceptance and retain the snapshot while preserving the
+raw stage exit in the receipt. Source movement, snapshot poisoning, queue ticket and
 normal stage exits retain their existing meaning. No absent-path skip is used.
 
 `aitelier recreate-godot` is a closed operation on the existing initialized

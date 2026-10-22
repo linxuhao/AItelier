@@ -37,7 +37,8 @@ import yaml
 
 from aitelier.gate_coverage import full_coverage
 from aitelier.tools.run_tests import impl as rt
-from tests.gate_fixture import RUN_TESTS_SH, HarnessRig, red_report
+from tests.gate_fixture import (RUN_TESTS_SH, HarnessRig, embed_env,
+                                install_entry_executor, red_report)
 
 _ROOT = Path(__file__).resolve().parents[2]
 _GRAPH = _ROOT / "configs" / "coding_impl.yaml"
@@ -373,14 +374,10 @@ NODE_SKIPPED = {"passed": True, "skipped": True, "dir": ".", "checks": {},
 REAL_EXHAUSTION_ENV = "AITELIER_TABLE_INOTIFY_EXHAUSTED"
 
 
-def _pytest_unavailable(_repo, report):
-    # The report `_resolve_pytest_python` leaves when no runner can be
-    # provisioned (its last branch), without the three provisioning attempts.
-    report.update(passed=False, skipped=True, infrastructure_unavailable=True,
-                  evidence_state="infrastructure_unavailable", returncode=0,
-                  summary="pytest unavailable and could not be provisioned "
-                          "after 3 attempts (table) — test gate skipped.")
-    return None, None
+def _is_pytest_invocation(args) -> bool:
+    # The pytest session `run_tests` starts, as opposed to the gate command
+    # (`bash run_tests.sh`): the only command whose runner this leg removes.
+    return "pytest" in list(args)
 
 
 class _LibcWithoutInotify:
@@ -450,8 +447,6 @@ def _drive_row(tmp_path, monkeypatch, row_id):
     row = ROWS[row_id]
     monkeypatch.setenv("AITELIER_HOME", str(tmp_path / "home"))
     monkeypatch.setenv("AITELIER_REPO_GATE_RENDER_WAIT_SECONDS", "0.3")
-    monkeypatch.setenv("TABLE_GATE_MODE", row.mode)
-    monkeypatch.setenv("TABLE_GATE_PRE", row.pre)
     inotify = "real"
     if row.leg in _INOTIFY_LEGS:
         if os.environ.get(REAL_EXHAUSTION_ENV) == "1":
@@ -485,9 +480,16 @@ def _drive_row(tmp_path, monkeypatch, row_id):
                                 lambda _repo, **_kw: dict(NODE_SKIPPED))
         if row.leg == "gate_timeout":
             monkeypatch.setattr(rt, "REPO_GATE_TIMEOUT", 3)
-        if row.leg == "pytest_unavailable":
-            monkeypatch.setattr(rt, "_resolve_pytest_python", _pytest_unavailable)
-        (repo / "gate.py").write_text(TABLE_GATE)
+        # Every repository command goes through the real executor entry in this
+        # test container; the explicit unavailable-runner leg refuses only the
+        # pytest invocation (an honest `IsolationUnavailable`), never the gate.
+        calls = install_entry_executor(
+            monkeypatch,
+            refuse=_is_pytest_invocation if row.leg == "pytest_unavailable" else None)
+        # The entry scrubs the child environment: the gate carries its two
+        # controlled settings itself.
+        (repo / "gate.py").write_text(embed_env(
+            TABLE_GATE, TABLE_GATE_MODE=row.mode, TABLE_GATE_PRE=row.pre))
         script = repo / "run_tests.sh"
         script.write_text(RUN_TESTS_SH)
         script.chmod(0o755)
@@ -498,6 +500,25 @@ def _drive_row(tmp_path, monkeypatch, row_id):
         report = json.loads((out / "test_report.json").read_text())
     finally:
         rig.close()
+    # The gate really ran through the executor entry: its real argv, report
+    # directory and relay socket reached the transport.
+    # `_acquire_repo_gate` asks again while a gate is unmeasured, so a refused
+    # gate is called more than once; the last call is the one folded in.
+    gate_calls = [c for c in calls if c["args"][:1] == ["bash"]]
+    assert gate_calls, calls
+    assert all(c["report_dir"] and c["relay_socket"] for c in gate_calls), gate_calls
+    final_call = gate_calls[-1]
+    if row.leg == "pytest_unavailable":
+        # Only the pytest invocation was refused; the gate really ran.
+        assert [c["args"][:1] for c in calls if c["refused"]] == [["python3"]], calls
+        assert not any(c["refused"] for c in gate_calls), gate_calls
+    if row.leg == "gate_timeout":
+        assert final_call["timed_out"] is True, gate_calls
+    elif row.returncode is not None:
+        # The actual process status as the real entry returned it.
+        assert len(gate_calls) == 1, gate_calls
+        assert final_call["returncode"] == row.returncode, gate_calls
+
     gate = report.get("repo_gate") or {}
     attribution = gate.get("report_attribution") or {}
     observed = (gate.get("measured"),

@@ -157,9 +157,14 @@ def test_bad_input_still_refuses_after_candidate_is_retained(tmp_path):
     link.symlink_to(bundle)
     with pytest.raises(StateConflict, match="symlink|unavailable"):
         retain_candidate(report_for(link), candidate)
-    # A bundle with a prerequisite is not self-contained and is refused.
+    # A bundle with a prerequisite is not self-contained and is refused. The
+    # named ref `main` (the candidate tip) gives Git a valid, non-empty thin
+    # bundle; the raw candidate SHA with ^base creates an empty bundle instead.
     thin = tmp_path / "thin.bundle"
-    git(repo, "bundle", "create", str(thin), candidate, "^" + commits[0])
+    git(repo, "bundle", "create", str(thin), "main", "^" + commits[0])
+    header = thin.read_bytes().split(b"\n\n", 1)[0].decode().splitlines()
+    assert "-" + commits[0] in [line.split()[0] for line in header[1:]]
+    assert candidate + " refs/heads/main" in header
     with pytest.raises(StateConflict):
         retain_candidate(report_for(thin), candidate)
 

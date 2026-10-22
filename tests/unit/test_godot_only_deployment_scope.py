@@ -688,8 +688,10 @@ def test_normal_godot_display_configuration_is_frozen_after_clearance(
     assert events[-2]["status"] == "overridden" and events[-2]["audit"]["godot_only"] is True
     assert events[-1]["status"] == "aborted" and events[-1]["usable"] is False
     assert events[-1]["inventory_digest"] == seen[0]["digest"]
-    assert events[-1]["blockers"] == seen[0]["blockers"]
-    assert events[-1]["errors"] == seen[0]["errors"]
+    # Authorization retains the full snapshot; finalization retains its digest.
+    assert events[-2]["inventory_digest"] == seen[0]["digest"]
+    assert events[-2]["blockers"] == seen[0]["blockers"]
+    assert events[-2]["errors"] == seen[0]["errors"]
     report = json.loads(Path(args["report_file"]).read_text())
     assert "owned configuration changed before effect" in report["error"]
     assert report["journal"]["event"] == events[-1]

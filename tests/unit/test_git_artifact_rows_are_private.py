@@ -14,6 +14,7 @@ bytes and that an unopened project's artifact rows are absent entirely.
 """
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 
 import pytest
@@ -37,15 +38,33 @@ def _raw_row(db):
         return dict(raw.execute("SELECT * FROM state_git_artifacts").fetchone())
 
 
+def _assert_retained_closure(tmp_path, row, producer, commit, tree, payload):
+    """The actual stored bytes hash to the row's digest and import into an empty
+    bare repository as exactly the candidate's complete object closure."""
+    from tests.integration.test_state_git_candidate_only_custody import (
+        git, import_closure, reachable, run)
+    stored = bytes(row["bundle_bytes"])
+    assert len(stored) > 0
+    assert hashlib.sha256(stored).hexdigest() == row["bundle_sha256"]
+    recovered, objects = import_closure(tmp_path, "retained-row", stored, commit)
+    assert git(recovered, "rev-parse", "refs/heads/recovered") == commit
+    assert git(recovered, "rev-parse", commit + "^{tree}") == tree
+    assert run(recovered, "cat-file", "blob", commit + ":value") == payload
+    assert objects == reachable(producer, commit)
+    git(recovered, "fsck", "--strict")
+
+
+
 def test_retained_bundle_bytes_are_classified_and_projected_to_null(tmp_path, monkeypatch):
     service, source, producer, db, attempt, commit, tree, payload, bundle = _durable_candidate(
         tmp_path, monkeypatch)
-    # Positive control: the retained `bundle_bytes` really are the candidate's
-    # exact Git bundle bytes, so the column this test guards is not a placeholder.
+    # Positive control: the retained `bundle_bytes` really are a complete,
+    # self-contained candidate closure whose digest is the stored identity, so
+    # the column this test guards is not a placeholder. They are normalized, so
+    # they are NOT expected to equal the producer's bundle bytes.
     control = _raw_row(db)
     assert control["commit_sha"] == commit
-    assert bytes(control["bundle_bytes"]) == bundle.read_bytes()
-    assert len(control["bundle_bytes"]) > 0
+    _assert_retained_closure(tmp_path, control, producer, commit, tree, payload)
     # The table is classified, so `state_git_artifacts` cannot be an unclassified
     # table that silently defaults to public.
     assert "state_git_artifacts" in PRIVATE_STATE_TABLES
@@ -75,7 +94,7 @@ def test_unopened_project_artifact_rows_are_absent_from_an_untrusted_connection(
         tmp_path, monkeypatch):
     service, source, producer, db, attempt, commit, tree, payload, bundle = _durable_candidate(
         tmp_path, monkeypatch)
-    assert bytes(_raw_row(db)["bundle_bytes"]) == bundle.read_bytes()
+    _assert_retained_closure(tmp_path, _raw_row(db), producer, commit, tree, payload)
     # The project is never opened here: its artifact identity must be absent.
     untrusted = StateGraphStore(service.db, project_read_trusted=False)
     with untrusted.transaction() as conn:

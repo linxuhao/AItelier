@@ -140,6 +140,15 @@ path label — and the report JSON must carry a self-contained `git_bundle`
 object with exactly `{"path": <absolute local .bundle path>, "sha256": <64-hex
 bundle digest>}`; `artifact_kind=sha256` requires a 64-hex artifact/bundle
 digest. Do not label a branch name or a mutable path as a digest.
+The producer's bundle may be broad (e.g. `git bundle create --all`). State
+authenticates it by the declared digest (bounded regular/nofollow file), then
+re-packs only the exact candidate's reachable commits/trees/blobs into a
+candidate-only bundle with one fixed ref, verified in an empty repository.
+`git_artifact.bundle_sha256` describes those normalized retained bytes; the
+declared producer digest remains only in the producer's report, which is never
+modified. Unrelated branches are not retained. Existing retained bundles are
+not migrated, and byte-identical output is only promised for one Git version.
+
 The final report should identify the exact source/artifact and the dependency
 receipts its checker used. For a repository outside AItelier, the external
 harness is responsible for proving the code actually includes those dependencies;

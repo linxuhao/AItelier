@@ -567,8 +567,13 @@ def recreate_godot_builder(*, override_file: str, binding_file: str,
     # This is a closed operation, not a generic Compose overlay interface.
     quotas = {"GODOT_RETAIN_MAX_FILES": "4096", "GODOT_RETAIN_MAX_BYTES": "536870912",
               "GODOT_RETAIN_MAX_PATTERNS": "16", "GODOT_RETAIN_MAX_SEARCH_ENTRIES": "4096"}
-    override_sha = digest(override_file)
-    configuration = yaml.safe_load(Path(override_file).read_text())
+    # Preserve the regular-file checks while hashing and parsing one snapshot.
+    override_path = Path(override_file)
+    if override_path.is_symlink() or not override_path.is_file():
+        raise ValueError(f"required regular identity file unavailable: {override_path}")
+    override_bytes = override_path.read_bytes()
+    override_sha = hashlib.sha256(override_bytes).hexdigest()
+    configuration = yaml.safe_load(override_bytes.decode("utf-8"))
     environment = quotas
     display_environment = {**quotas, "GODOT_PLAYTEST_RES": "1920x1080"}
     if configuration == {"services": {"godot-builder": {"environment": display_environment}}}:

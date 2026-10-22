@@ -5,6 +5,7 @@ path tests drive ``recreate_godot_builder`` through the live runtime observation
 the real cutover fence, the journal and the effect/finalization code, with only
 Docker and the process table replaced at their boundary.
 """
+import hashlib
 import json
 import sqlite3
 import time
@@ -695,3 +696,91 @@ def test_normal_godot_display_configuration_is_frozen_after_clearance(
     report = json.loads(Path(args["report_file"]).read_text())
     assert "owned configuration changed before effect" in report["error"]
     assert report["journal"]["event"] == events[-1]
+
+
+def test_normal_godot_override_hash_and_configuration_share_one_input_snapshot(
+        normal, bound, tmp_path, monkeypatch):
+    # Valid form B replaces valid form A for exactly the second real read; A is then restored.
+    db = normal[0][1]
+    seed_registry(db)
+    before = registry_rows(db)
+    args = godot_args(tmp_path, bound, monkeypatch)
+    path = Path(args["override_file"])
+    path.write_bytes(b"# Preserve the raw CRLF snapshot\r\n" + path.read_bytes() + b"\r\n")
+    original = path.read_bytes()
+    alternate = json.dumps({"services": {"godot-builder": {
+        "environment": {**QUOTAS, "GODOT_PLAYTEST_RES": "1920x1080"}}}}).encode()
+    original_sha = hashlib.sha256(original).hexdigest()
+    alternate_sha = hashlib.sha256(alternate).hexdigest()
+    assert original_sha != alternate_sha
+    native_open = Path.open
+    reads = []
+    def on_disk():
+        with native_open(path, "rb") as f:
+            return f.read()
+    def replace(content):
+        with native_open(path, "wb") as f:
+            f.write(content)
+    class RestoreAfterRead:
+        def __init__(self, file):
+            self.file = file
+        def __enter__(self):
+            return self.file.__enter__()
+        def __exit__(self, *exc):
+            try:
+                return self.file.__exit__(*exc)
+            finally:
+                replace(original)
+        def __getattr__(self, name):
+            return getattr(self.file, name)
+    def racing_open(self, mode="r", *a, **k):
+        if self != path or "r" not in mode:
+            return native_open(self, mode, *a, **k)
+        if len(reads) == 1:
+            replace(alternate)
+        opened = native_open(self, mode, *a, **k)
+        reads.append({"mode": mode, "opened_sha256": hashlib.sha256(on_disk()).hexdigest()})
+        return RestoreAfterRead(opened) if len(reads) == 2 else opened
+    monkeypatch.setattr(Path, "open", racing_open)
+    def decide(action, snapshot):
+        assert_fence_held()
+        return override(action, snapshot, godot_only=True, coordinated_owners=names_for(snapshot))
+    error = None
+    try:
+        server.recreate_godot_builder(**args, override_decision=decide)
+    except ValueError as exc:
+        error = str(exc)
+    report = json.loads(Path(args["report_file"]).read_text())
+    witness = {"reads": reads, "error": error, "compose": normal[1],
+               "receipt_override_sha256": report["override_sha256"],
+               "restored": on_disk() == original}
+    assert len(reads) >= 2
+    assert reads[0]["opened_sha256"] == original_sha
+    assert reads[1]["opened_sha256"] == alternate_sha
+    assert witness["error"] == "owned configuration changed before effect"
+    assert witness["compose"] == [] and witness["restored"] is True
+    assert witness["receipt_override_sha256"] == original_sha
+    assert "compose_exit" not in report and registry_rows(db) == before
+    assert latest()["status"] == "aborted" and latest()["usable"] is False
+
+
+@pytest.mark.parametrize("kind", ["missing", "directory", "symlink"])
+def test_normal_godot_override_retains_regular_identity_refusal(normal, bound, tmp_path, monkeypatch, kind):
+    args = godot_args(tmp_path, bound, monkeypatch)
+    path = Path(args["override_file"])
+    if kind == "symlink":
+        target = tmp_path / "actual-quota.json"
+        path.rename(target)
+        path.symlink_to(target.name)
+    else:
+        path.unlink()
+        if kind == "directory":
+            path.mkdir()
+    def unexpected(*_a, **_k):
+        pytest.fail("invalid identity reached a deployment boundary")
+    monkeypatch.setattr(server, "_require_docker", unexpected)
+    monkeypatch.setattr(server, "_require_deployment_clearance", unexpected)
+    monkeypatch.setattr(server, "_compose", unexpected)
+    with pytest.raises(ValueError, match="required regular identity file unavailable"):
+        server.recreate_godot_builder(**args, override_decision=unexpected)
+    assert normal[1] == [] and not Path(args["report_file"]).exists()

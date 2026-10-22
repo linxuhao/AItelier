@@ -205,6 +205,8 @@ accepted environment. Both override forms use the same clearance, fence,
 identity/Source checks, configuration hash rechecks and Godot-only effect above.
 A change to the owned override after clearance still aborts before Compose,
 including replacement by the other valid form.
+The recorded override hash and the parsed configuration come from one read of the
+same raw bytes, and every later hash recheck compares against that snapshot.
 
 This is host operation configuration for the existing harness, whose display
 default remains 1280x720 when the setting is absent. The requested 1920x1080

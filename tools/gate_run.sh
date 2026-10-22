@@ -44,13 +44,19 @@ if [ -n "$(git -C "$WORKTREE" status --porcelain)" ]; then
   echo "refusing: $WORKTREE is dirty — the gate gates a commit, so a dirty tree gates nothing reproducible" >&2
   exit 65
 fi
+# A suffix names one invocation. Refuse prior evidence without altering it.
+for report in "$LOG" "$EXITF" "$HEADF" "$REPORTS/$SUFFIX.platform-identity.json" \
+  "$REPORTS/$SUFFIX.sidecar-before.json" "$REPORTS/$SUFFIX.sidecar-after.json"; do
+  if [ -e "$report" ] || [ -L "$report" ]; then
+    echo "refusing: existing gate report $report; prior evidence retained" >&2
+    exit 69
+  fi
+done
 HEAD_BEFORE="$(git -C "$WORKTREE" rev-parse HEAD)"
 echo "$HEAD_BEFORE" > "$HEADF"
-rm -f "$EXITF"
 
 
 mkdir -p "$SNAPROOT"
-rm -rf "$SNAP"
 if ! git -C "$WORKTREE" worktree add --detach "$SNAP" "$HEAD_BEFORE" >>"$LOG" 2>&1; then
   echo "refusing: could not snapshot $HEAD_BEFORE into $SNAP" >&2
   exit 67
@@ -66,7 +72,7 @@ if [ "$SNAP_HEAD" != "$HEAD_BEFORE" ] || [ "$SNAP_DIRTY" -ne 0 ]; then
 fi
 
 python3 "$BINDING_TOOL" sidecar "$REPORTS/$SUFFIX.sidecar-before.json" >> "$LOG" 2>&1 || {
-  echo "poisoned-platform-identity-before" > "$EXITF"
+  echo "unknown-platform-identity-before" > "$EXITF"
   git -C "$WORKTREE" worktree remove --force "$SNAP" >/dev/null 2>&1
   exit 69
 }
@@ -82,10 +88,18 @@ docker run --rm --init --name "$NAME" --network aitelier_default -u 1000:1000 \
   -v /home/linxuhao/.AItelier:/home/linxuhao/.AItelier \
   -w "$SNAP" "$PLATFORM_IMAGE" python3 /app/tools/gate_binding.py run "$BINDING" "$REPORTS/$SUFFIX.platform-identity.json" > "$LOG" 2>&1
 rc=$?
-identity="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["identity"])' "$REPORTS/$SUFFIX.platform-identity.json" 2>/dev/null)"
-if ! python3 "$BINDING_TOOL" sidecar "$REPORTS/$SUFFIX.sidecar-after.json" "$REPORTS/$SUFFIX.sidecar-before.json" >> "$LOG" 2>&1 || [ "$identity" != "unchanged" ]; then
-  echo "poisoned-platform-identity; see $SUFFIX.platform-identity.json" > "$EXITF"
-  git -C "$WORKTREE" worktree remove --force "$SNAP" >/dev/null 2>&1
+identity="$(python3 "$BINDING_TOOL" receipt "$REPORTS/$SUFFIX.platform-identity.json" "$rc" 2>> "$LOG")" || identity=unknown
+python3 "$BINDING_TOOL" sidecar "$REPORTS/$SUFFIX.sidecar-after.json" "$REPORTS/$SUFFIX.sidecar-before.json" >> "$LOG" 2>&1
+sidecar_rc=$?
+if [ "$sidecar_rc" -eq 70 ]; then
+  identity=mismatch
+elif [ "$sidecar_rc" -ne 0 ] && [ "$identity" != "mismatch" ]; then
+  identity=unknown
+fi
+if [ "$identity" != "unchanged" ]; then
+  [ "$identity" = "mismatch" ] || identity=unknown
+  echo "$identity-platform-identity; real rc was $rc; snapshot retained; see $SUFFIX.platform-identity.json" > "$EXITF"
+  # A client exit alone does not settle consumers of this exact snapshot.
   exit 69
 fi
 

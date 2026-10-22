@@ -1,4 +1,4 @@
-"""Normal installer implementation; launcher-only mode never executes a launcher."""
+"""Normal installer implementation; single-file modes never execute a launcher."""
 import fcntl
 import hashlib
 import json
@@ -33,14 +33,16 @@ def digest(raw):
     return hashlib.sha256(raw).hexdigest()
 
 
-def replace_launcher(source, directory, expected_old, expected_source):
-    desired, _ = read_regular(source / "gate_run.sh")
+def replace_pinned_file(source, directory, expected_old, expected_source, *, helper_only=False):
+    name = "gate_binding.py" if helper_only else "gate_run.sh"
+    label = "helper" if helper_only else "launcher"
+    desired, _ = read_regular(source / name)
     if digest(desired) != expected_source:
-        raise ValueError("Source launcher hash mismatch")
-    old, identity = read_regular("gate_run.sh", dir_fd=directory)
+        raise ValueError(f"Source {label} hash mismatch")
+    old, identity = read_regular(name, dir_fd=directory)
     if digest(old) != expected_old:
-        raise ValueError("Installed launcher hash mismatch")
-    temporary = ".gate_run.sh." + secrets.token_hex(12) + ".pending"
+        raise ValueError(f"Installed {label} hash mismatch")
+    temporary = "." + name + "." + secrets.token_hex(12) + ".pending"
     try:
         fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                      0o600, dir_fd=directory)
@@ -52,9 +54,9 @@ def replace_launcher(source, directory, expected_old, expected_source):
             os.fchmod(stream.fileno(), stat.S_IMODE(identity[3]))
             stream.flush()
             os.fsync(stream.fileno())
-        if read_regular("gate_run.sh", dir_fd=directory) != (old, identity):
-            raise ValueError("Installed launcher changed before replacement")
-        os.replace(temporary, "gate_run.sh", src_dir_fd=directory, dst_dir_fd=directory)
+        if read_regular(name, dir_fd=directory) != (old, identity):
+            raise ValueError(f"Installed {label} changed before replacement")
+        os.replace(temporary, name, src_dir_fd=directory, dst_dir_fd=directory)
         temporary = None
         os.fsync(directory)
     finally:
@@ -71,9 +73,10 @@ def main():
     source = Path(sys.argv[1])
     args = sys.argv[2:]
     launcher_only = bool(args and args[0] == "--launcher-only")
-    if launcher_only:
+    helper_only = bool(args and args[0] == "--helper-only")
+    if launcher_only or helper_only:
         if len(args) not in (3, 4) or (len(args) == 4 and not args[3]) or any(re.fullmatch(r"[0-9a-f]{64}", v) is None for v in args[1:3]):
-            raise ValueError("Usage: install_gate_run.sh --launcher-only EXPECTED_OLD_SHA256 EXPECTED_SOURCE_SHA256 [DEST]")
+            raise ValueError(f"Usage: install_gate_run.sh {args[0]} EXPECTED_OLD_SHA256 EXPECTED_SOURCE_SHA256 [DEST]")
         destination = Path(args[3]) if len(args) == 4 else Path.home() / ".AItelier/bin"
     else:
         if len(args) > 1 or (args and args[0].startswith("--")):
@@ -88,8 +91,8 @@ def main():
             if not stat.S_ISREG(os.fstat(lock).st_mode):
                 raise ValueError("Installer lock is not a regular file")
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            if launcher_only:
-                replace_launcher(source, directory, args[1], args[2])
+            if launcher_only or helper_only:
+                replace_pinned_file(source, directory, args[1], args[2], helper_only=helper_only)
             else:
                 for name in ("gate_run.sh", "gate_binding.py"):
                     subprocess.run(["install", "-m", "755", str(source / name), str(destination / name)], check=True)

@@ -3,6 +3,7 @@
 Set GATE_INSTALLER_SOURCE_ROOT to the exact checkout under review. No app/SDK
 imports are needed. Run only in the prescribed disposable offline CPU capsule.
 """
+import fcntl
 import hashlib
 import json
 import os
@@ -237,6 +238,167 @@ class GateRunInstallerTests(unittest.TestCase):
         self.assertNotEqual(self.helper.read_bytes(), before_helper)
         self.assertEqual(self.helper.read_bytes(), (self.source / "gate_binding.py").read_bytes())
         self.assertEqual(snapshot(self.sibling), self.sibling_before)
+
+
+class GateBindingInstallerTests(unittest.TestCase):
+    def setUp(self):
+        GateRunInstallerTests.setUp(self)
+        self.launcher = self.target
+        self.launcher_before = snapshot(self.launcher)
+        self.target = self.helper
+        self.old = digest(self.target.read_bytes())
+        self.new = digest((self.source / "gate_binding.py").read_bytes())
+
+    def invoke(self, args=None, **kwargs):
+        if args is None:
+            args = ["--helper-only", self.old, self.new, str(self.dest)]
+        return subprocess.run(["sh", str(self.source / "install_gate_run.sh"), *args],
+                              cwd=self.root, capture_output=True, text=True, timeout=10, **kwargs)
+
+    def assert_preserved(self):
+        self.assertEqual(snapshot(self.launcher), self.launcher_before)
+        self.assertEqual(snapshot(self.sibling), self.sibling_before)
+        self.assertFalse(list(self.dest.glob("*.pending")))
+
+    assert_refused = GateRunInstallerTests.assert_refused
+    test_missing_installed_file_refuses_without_creating_it = GateRunInstallerTests.test_missing_installed_file_refuses_without_creating_it
+    test_unknown_lock_symlink_refuses = GateRunInstallerTests.test_unknown_lock_symlink_refuses
+
+    def test_useful_atomic_helper_update_preserves_metadata_and_old_descriptor(self):
+        before = snapshot(self.target)
+        with self.target.open("rb") as old_descriptor:
+            result = self.invoke()
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(old_descriptor.read(), before[0])
+            self.assertEqual(os.fstat(old_descriptor.fileno()).st_ino, before[1])
+        after = snapshot(self.target)
+        self.assertEqual(after[0], (self.source / "gate_binding.py").read_bytes())
+        self.assertNotEqual(after[1], before[1])
+        self.assertEqual(after[2:5], before[2:5])
+        self.assertEqual(digest(after[0]), self.new)
+        self.assertEqual(json.loads(result.stdout), dict(old_sha256=self.old, sha256=self.new,
+                         mode=before[2], uid=before[3], gid=before[4]))
+        self.assert_preserved()
+        lock = self.dest / ".gate_run.install.lock"
+        lock_inode = lock.stat().st_ino
+        self.assert_refused()
+        self.assertEqual(lock.stat().st_ino, lock_inode)
+
+    def test_incorrect_old_and_source_hashes_refuse(self):
+        for old, new in (("0" * 64, self.new), (self.old, "0" * 64)):
+            with self.subTest(old=old, new=new):
+                self.assert_refused(["--helper-only", old, new, str(self.dest)])
+
+    def test_changed_source_pin_refuses(self):
+        (self.source / "gate_binding.py").write_bytes(b"# different source after pinning\n")
+        self.assert_refused()
+
+    def test_malformed_arguments_refuse(self):
+        for args in (["--helper-only"], ["--helper-only", self.old],
+                     ["--helper-only", self.old, "bad", str(self.dest)],
+                     ["--helper-only", self.old.upper(), self.new, str(self.dest)],
+                     ["--helper-only", self.old, self.new, str(self.dest), "extra"],
+                     ["--helper-only", self.old, self.new, ""]):
+            with self.subTest(args=args):
+                result = self.assert_refused(args)
+                self.assertIn("Usage: install_gate_run.sh --helper-only", result.stderr)
+
+    def test_missing_source_refuses(self):
+        (self.source / "gate_binding.py").unlink()
+        self.assert_refused()
+
+    def test_missing_destination_refuses_without_creating_it(self):
+        missing = self.root / "not-created"
+        self.assert_refused(["--helper-only", self.old, self.new, str(missing)])
+        self.assertFalse(missing.exists())
+
+    def check_symlink_refusal(self, path):
+        other = path.with_name("helper-referent")
+        path.rename(other)
+        path.symlink_to(other)
+        before = snapshot(other)
+        self.assert_refused()
+        self.assertTrue(path.is_symlink())
+        self.assertEqual(snapshot(other), before)
+
+    def test_source_symlink_refuses(self):
+        self.check_symlink_refusal(self.source / "gate_binding.py")
+
+    def test_target_symlink_refuses(self):
+        self.check_symlink_refusal(self.target)
+
+    def check_nonregular_refusal(self, path):
+        path.unlink()
+        os.mkfifo(path)
+        before = path.lstat()
+        self.assert_refused()
+        after = path.lstat()
+        self.assertTrue(stat.S_ISFIFO(after.st_mode))
+        self.assertEqual((after.st_ino, after.st_mode, after.st_uid, after.st_gid),
+                         (before.st_ino, before.st_mode, before.st_uid, before.st_gid))
+
+    def test_source_nonregular_refuses_without_blocking(self):
+        self.check_nonregular_refusal(self.source / "gate_binding.py")
+
+    def test_target_nonregular_refuses_without_blocking(self):
+        self.check_nonregular_refusal(self.target)
+
+    def test_held_persistent_lock_refuses(self):
+        lock = self.dest / ".gate_run.install.lock"
+        with lock.open("a+b") as held:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            before = snapshot(lock)
+            self.assert_refused()
+            self.assertEqual(snapshot(lock), before)
+
+    def test_real_late_target_change_refuses_before_replacement(self):
+        # Pause only after the real pending-file fsync. The actual entry point,
+        # reads, hash checks, write, metadata changes and replacement stay intact.
+        instrument = self.root / "instrument"
+        instrument.mkdir()
+        ready, release = self.root / "ready", self.root / "release"
+        os.mkfifo(ready)
+        os.mkfifo(release)
+        ready_fd = os.open(ready, os.O_RDWR | os.O_NONBLOCK)
+        release_fd = os.open(release, os.O_RDWR | os.O_NONBLOCK)
+        (instrument / "sitecustomize.py").write_text(
+            'import os, stat\n'
+            '_fsync = os.fsync\n'
+            'def barrier(fd):\n'
+            '    _fsync(fd)\n'
+            '    if stat.S_ISREG(os.fstat(fd).st_mode):\n'
+            '        with open(os.environ["READY"], "wb") as ready:\n'
+            '            ready.write(b"ready")\n'
+            '        with open(os.environ["RELEASE"], "rb") as release:\n'
+            '            release.readline()\n'
+            'os.fsync = barrier\n')
+        env = dict(os.environ, PYTHONPATH=str(instrument), READY=str(ready), RELEASE=str(release))
+        process = subprocess.Popen(["sh", str(self.source / "install_gate_run.sh"),
+                                    "--helper-only", self.old, self.new, str(self.dest)],
+                                   cwd=self.root, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            self.assertTrue(select.select([ready_fd], [], [], 5)[0], "Installer did not reach fsync barrier")
+            self.assertEqual(os.read(ready_fd, 5), b"ready")
+            self.assertIsNone(process.poll())
+            self.assertEqual(digest(self.target.read_bytes()), self.old)
+            pending = list(self.dest.glob("*.pending"))
+            self.assertEqual(len(pending), 1)
+            self.assertEqual(digest(pending[0].read_bytes()), self.new)
+            self.target.write_bytes(b"# real competing helper change\n")
+            changed = snapshot(self.target)
+            os.write(release_fd, b"continue\n")
+            stdout, stderr = process.communicate(timeout=10)
+            self.assertNotEqual(process.returncode, 0, (stdout, stderr))
+            self.assertIn(b"Installed helper changed before replacement", stderr)
+            self.assertEqual(snapshot(self.target), changed)
+            self.assert_preserved()
+        finally:
+            os.write(release_fd, b"continue\n")
+            if process.poll() is None:
+                process.kill()
+            process.communicate(timeout=5)
+            os.close(ready_fd)
+            os.close(release_fd)
 
 
 if __name__ == "__main__":

@@ -27,11 +27,25 @@ it over `gate_run.sh`. An already-open old descriptor keeps the old bytes.
 arguments, missing files and symlink launchers refuse before replacement. A
 failure after rename is an error, with no automatic rollback or retry.
 
-Both installation modes take the same nonblocking advisory lock at
+For an authorized update of only the existing identity helper, use:
+
+```sh
+sh tools/install_gate_run.sh --helper-only "$EXPECTED_INSTALLED_SHA256" "$EXPECTED_SOURCE_SHA256" "$DEST"
+```
+
+These hashes identify the installed helper and accepted Source's
+`tools/gate_binding.py`. This closed mode uses the same regular-file reads,
+hash checks, preserved metadata and atomic replacement as launcher-only;
+the launcher and unrelated files are untouched. Both single-file modes default
+to `~/.AItelier/bin` when DEST is omitted and require an existing destination.
+Neither mode imports or executes the helper. Source validation performs no
+installation; actual installation requires a separate coordinated operation.
+
+All installation modes take the same nonblocking advisory lock at
 `DEST/.gate_run.install.lock`; a competing participant refuses. The lock file
 stays in place and must not be removed during installation. It coordinates
 participating installers only: other writers can ignore it, so authorization
-must also exclude competing writers of this launcher. The ordinary mode still
+must also exclude competing writers of the selected file. The ordinary mode still
 installs both files with mode755; it is not a two-file atomic transaction.
 Python3 and the existing Unix install tools are required, with no AItelier/SDK
 imports, initialization, API or service operation.

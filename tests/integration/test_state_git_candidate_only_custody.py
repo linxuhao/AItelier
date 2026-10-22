@@ -201,3 +201,66 @@ def test_normalized_bytes_recover_through_state_database_alone(tmp_path):
     assert objects == reachable(source, second)
     assert not has_object(recovered, unrelated_blob)
     assert not has_object(recovered, unrelated_commit)
+
+
+def test_explicit_nonancestor_input_stays_in_original_bundle_not_candidate_custody(tmp_path):
+    """Custody control only: no producer association or consumer is modelled here.
+
+    A commit:path outside the candidate's ancestry can be a useful auxiliary
+    fixture that a reviewer names explicitly. Retention keeps the candidate
+    closure and leaves the original broad bundle (digest and bytes) untouched,
+    so only those original bytes can still recover the auxiliary payload.
+    """
+    repo, commits = make_repo(tmp_path)
+    candidate = commits[-1]
+    payload = b"auxiliary fixture payload\n" + os.urandom(256 * 1024)
+    payload_sha = hashlib.sha256(payload).hexdigest()
+    aux_commit, aux_blob = set_unrelated(repo, payload, name="aux-fixture")
+    operand = aux_commit + ":sentinel.bin"
+    # The explicit commit:path operand really names the exact payload bytes.
+    assert git(repo, "rev-parse", operand) == aux_blob
+    assert hashlib.sha256(run(repo, "cat-file", "blob", operand)).hexdigest() == payload_sha
+    assert aux_commit not in git(repo, "rev-list", candidate).split()
+    assert aux_blob not in reachable(repo, candidate)
+
+    bundle = broad_bundle(repo, tmp_path / "broad.bundle")
+    original = bundle.read_bytes()
+    original_sha = hashlib.sha256(original).hexdigest()
+    report = report_for(bundle)
+    assert json.loads(report)["git_bundle"]["sha256"] == original_sha
+
+    artifact = retain_candidate(report, candidate)
+    retained = artifact["bundle_bytes"]
+
+    # The pinned original digest and bytes are unchanged by retention, and the
+    # retained digest identifies only the different, candidate-only bytes.
+    assert artifact["input_bundle_sha256"] == original_sha
+    assert artifact["bundle_sha256"] == hashlib.sha256(retained).hexdigest()
+    assert artifact["bundle_sha256"] != original_sha
+    assert retained != original
+    assert bundle.read_bytes() == original
+    assert hashlib.sha256(bundle.read_bytes()).hexdigest() == original_sha
+
+    # The original bytes still recover the exact auxiliary fixture in an empty bare repo.
+    original_repo, _ = import_closure(tmp_path, "original-import", original, candidate)
+    git(original_repo, "fetch", "--no-tags", str(bundle), aux_commit + ":refs/heads/aux")
+    assert git(original_repo, "rev-parse", "refs/heads/aux") == aux_commit
+    assert git(original_repo, "rev-parse", "refs/heads/aux:sentinel.bin") == aux_blob
+    recovered_payload = run(original_repo, "cat-file", "blob", "refs/heads/aux:sentinel.bin")
+    assert recovered_payload == payload
+    assert hashlib.sha256(recovered_payload).hexdigest() == payload_sha
+
+    # The candidate-only retained bytes recover the candidate but cannot supply the auxiliary object.
+    retained_repo, objects = import_closure(tmp_path, "retained-import", retained, candidate)
+    assert git(retained_repo, "rev-parse", "refs/heads/recovered") == candidate
+    assert objects == reachable(repo, candidate)
+    assert not has_object(retained_repo, aux_commit)
+    assert not has_object(retained_repo, aux_blob)
+    retained_bundle = tmp_path / "retained-import.bundle"
+    probe = tmp_path / "probe.git"
+    git(tmp_path, "init", "-q", "--bare", str(probe))
+    fetched = subprocess.run(["git", "-C", str(probe), "fetch", "--no-tags", str(retained_bundle),
+                              aux_commit + ":refs/heads/aux"], capture_output=True)
+    assert fetched.returncode != 0
+    assert not has_object(probe, aux_commit)
+    assert not has_object(probe, aux_blob)

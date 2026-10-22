@@ -149,6 +149,23 @@ declared producer digest remains only in the producer's report, which is never
 modified. Unrelated branches are not retained. Existing retained bundles are
 not migrated, and byte-identical output is only promised for one Git version.
 
+The normalized bundle is the closure of the one reported candidate commit, not
+a full test fixture or review context. A ref, commit or `commit:path` blob that
+is not an ancestor of the candidate can still be a genuinely useful input (for
+example a historical fixture a reviewer names explicitly); being outside the
+candidate's ancestry does not make it semantically unused, and State does not
+infer either way. The producer's declared digest still authenticates the
+original broad bytes, while `git_artifact.bundle_sha256` identifies only the
+candidate closure; the two are never interchangeable, and State adds no alias,
+fallback or substitution from one to the other. The original producer input is
+left unchanged and private. State does not promise that its path survives
+producer or host cleanup, and does not re-add extra history to the retained
+bundle. If a review needs such an auxiliary input, it must be handed off
+explicitly through the existing supported contracts: an authentic association
+with the producer, the exact input identity and custody, and a scoped,
+authorized handoff. A bare hash or path label is not enough, and the
+candidate-only retained bundle must not be presented as that input.
+
 The final report should identify the exact source/artifact and the dependency
 receipts its checker used. For a repository outside AItelier, the external
 harness is responsible for proving the code actually includes those dependencies;

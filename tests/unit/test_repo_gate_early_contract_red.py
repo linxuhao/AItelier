@@ -11,6 +11,7 @@ import pytest
 
 from aitelier.gate_coverage import full_coverage, publication_scope_refusal
 from aitelier.tools.run_tests import impl as rt
+from tests.gate_fixture import embed_env, install_entry_executor
 
 
 GATE = r"""
@@ -62,14 +63,19 @@ def run_gate(tmp_path, monkeypatch, mode, coverage=None):
     scenarios.mkdir()
     if mode == "malformed":
         (scenarios / "bad.yaml").write_text("scenario: [\n")
-    (repo / "gate.py").write_text(GATE)
+    # The real executor entry scrubs the child environment: the gate program
+    # carries its two controlled settings itself.
+    (repo / "gate.py").write_text(embed_env(
+        GATE, EARLY_GATE_MODE=mode, EARLY_GATE_COVERAGE=json.dumps(coverage)))
     script = repo / "run_tests.sh"
     script.write_text(f"#!/bin/sh\nexec {sys.executable} gate.py\n")
     script.chmod(0o755)
     monkeypatch.setenv("AITELIER_HOME", str(tmp_path / "data"))
-    monkeypatch.setenv("EARLY_GATE_MODE", mode)
-    monkeypatch.setenv("EARLY_GATE_COVERAGE", json.dumps(coverage))
+    # Real subprocess through the real executor entry; no canned verdict.
+    calls = install_entry_executor(monkeypatch)
     result = rt._run_repo_gate(repo)
+    assert [c["args"][:1] for c in calls] == [["bash"]], calls
+    assert calls[0]["report_dir"] and calls[0]["relay_socket"], calls
     print(json.dumps(result, sort_keys=True))
     assert result["admission"]["requests"] == []
     assert result["admission"]["state"] == "no_engine_request"
@@ -98,7 +104,7 @@ def test_own_early_contract_failure_survives_missing_coverage(tmp_path, monkeypa
     assert json.loads(manifest.read_text())["stages"] == {}
     # Fold the actual acquired gate into the real writer without rerunning it.
     Path(gate["repo"], "gate.py").unlink()
-    monkeypatch.setattr(rt, "_acquire_repo_gate", lambda _: gate)
+    monkeypatch.setattr(rt, "_acquire_repo_gate", lambda _repo, *_a, **_k: gate)
     out = tmp_path / "out"
     result = rt.run_tests(project_root=gate["repo"], out_dir=str(out))
     report = json.loads((out / "test_report.json").read_text())

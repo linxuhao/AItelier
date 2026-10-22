@@ -17,7 +17,9 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
 import threading
+
 import time
 import urllib.error
 import urllib.request
@@ -248,3 +250,74 @@ def write_full_case_gate(repo: Path, lines, exit_code=1, *, early_red=False):
     script = repo / "run_tests.sh"
     script.write_text(f"#!/bin/sh\nexec {sys.executable} fixture_gate\n")
     script.chmod(0o755)
+
+
+def install_entry_executor(monkeypatch, *, refuse=None) -> list:
+    """Install a TEST-ONLY `repository_executor.execute` over the real entry.
+
+    `run_tests` reaches every repository command (the pytest session and the
+    repository gate) through `repository_executor.execute`. The enclosing
+    disposable, network-less test container is the isolation here: there is no
+    nested Docker daemon and no host launcher. This seam runs the real
+    `core.repository_executor_entry.run(payload)` -- real subprocess, real
+    scrubbed environment, real JUnit/`report_dir`, and the entry's own relay
+    bridge to the gate's admission socket -- and returns its result in the
+    shape `_execute` returns it. A killed command raises
+    `subprocess.TimeoutExpired`, as the real executor does. It makes no
+    host-launcher acceptance claim.
+
+    `refuse(args)`, when given and true for a command, models that command's
+    runner as unavailable: the honest `IsolationUnavailable`. Nothing else is
+    refused. Returns the list of every call made (`args`, `repo`, `timeout`,
+    `report_dir`, `relay_socket`, then `returncode` / `timed_out` / `refused`).
+    """
+    from core import repository_executor as executor
+    from core import repository_executor_entry as entry
+    calls: list = []
+
+    def execute(repo, args, timeout, *, writable_dirs=(), relay_socket="",
+                import_module="", pytest_timeout=False, report_dir="", run_id="",
+                profile="", workdir="", npm_cache=""):
+        args = list(args)
+        call = {"args": args, "repo": str(repo), "timeout": timeout,
+                "report_dir": report_dir, "relay_socket": relay_socket,
+                "refused": False}
+        calls.append(call)
+        if profile:
+            raise executor.IsolationUnavailable(
+                "fixture seam serves the pytest and repository-gate commands only")
+        if refuse is not None and refuse(args):
+            call["refused"] = True
+            raise executor.IsolationUnavailable(
+                "fixture: no runner could be provisioned for this command")
+        result = entry.run({
+            "repo": str(Path(repo).resolve()), "args": args, "timeout": timeout,
+            "relay_socket": relay_socket, "import_module": import_module,
+            "pytest_timeout": pytest_timeout, "report_dir": report_dir})
+        call.update(returncode=result["returncode"],
+                    timed_out=bool(result.get("timed_out")))
+        if result.get("timed_out"):
+            raise subprocess.TimeoutExpired(args, timeout, result.get("stdout"),
+                                            result.get("stderr"))
+        done = subprocess.CompletedProcess(args, result["returncode"],
+                                           result["stdout"], result["stderr"])
+        done.import_error = result.get("import_error", "")
+        done.git = None
+        done.execution_identity = result.get("execution_identity")
+        done.storage = (result.get("storage")
+                        if isinstance(result.get("storage"), dict) else None)
+        return done
+
+    monkeypatch.setattr(executor, "execute", execute)
+    return calls
+
+
+def embed_env(program: str, **values: str) -> str:
+    """Prefix a gate program with the few controlled values it reads.
+
+    The real executor entry scrubs the child environment, so a fixture program
+    carries its own fixed settings instead of inheriting them.
+    """
+    prefix = "import os as _os\n" + "".join(
+        f"_os.environ[{name!r}] = {value!r}\n" for name, value in values.items())
+    return prefix + program

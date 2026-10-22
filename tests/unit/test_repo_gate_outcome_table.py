@@ -37,7 +37,8 @@ import yaml
 
 from aitelier.gate_coverage import full_coverage
 from aitelier.tools.run_tests import impl as rt
-from tests.gate_fixture import RUN_TESTS_SH, HarnessRig, red_report
+from tests.gate_fixture import (RUN_TESTS_SH, HarnessRig, embed_env,
+                                install_entry_executor, red_report)
 
 _ROOT = Path(__file__).resolve().parents[2]
 _GRAPH = _ROOT / "configs" / "coding_impl.yaml"
@@ -175,6 +176,13 @@ UNMEASURED, FAIL, PASS = "unmeasured", "measured_fail", "measured_pass"
 UNATTRIBUTABLE = "unattributable"
 OWN = "own"
 TERMINAL = "test_gate_report_unattributable"
+# The identities the TABLE_GATE retains: its python-stage red, and the two
+# scripts the red `/script` answer fails.
+PY_RED = ("[python]: the python suite exited 1",)
+SCRIPT_RED = ("[script]: script res://tests/a.gd FAILED",)
+# Legs that stub `inotify_init1` to EMFILE / make `/script` answer red.
+_INOTIFY_LEGS = ("inotify_unavailable", "inotify_unavailable_script_red")
+_SCRIPT_RED_LEGS = ("script_red", "inotify_unavailable_script_red")
 
 
 class Row(NamedTuple):
@@ -188,6 +196,8 @@ class Row(NamedTuple):
     next: str
     identity_error: bool
     shape: str           # one line for the rendered table
+    returncode: int | None = None  # the gate's own exit status, when pinned
+    reds: tuple = ()     # substrings each retained unattributed red must hold
 
 
 ROWS = {
@@ -328,6 +338,30 @@ ROWS = {
         "clean", "", "inotify_unavailable", True, UNATTRIBUTABLE, UNMEASURED,
         True, "test_gate_absent", False,
         "`inotify_init1` fails; no red anywhere; refused"),
+    # The same unattributable reds beside a gate that EXITS 0 or 1: the exit
+    # status is the gate's own (the engine answers: green -> 0, red -> 1), and
+    # a retained red nobody can own never turns it into a pass, an absence, or
+    # the implementer's red. `busy=False`: the engine is free and answers.
+    "lockfile_first_red_gate_exit_0": Row(
+        "python_red", "lockfile", None, False, UNATTRIBUTABLE, UNATTRIBUTABLE,
+        False, TERMINAL, True,
+        "the gate creates `.gate.lock` first, retains a python red, and the "
+        "engine answers green: exit 0", 0, PY_RED),
+    "lockfile_first_red_gate_exit_1": Row(
+        "python_red", "lockfile", "script_red", False, UNATTRIBUTABLE,
+        UNATTRIBUTABLE, False, TERMINAL, True,
+        "the gate creates `.gate.lock` first, retains a python red, and the "
+        "engine answers red: exit 1", 1, PY_RED + SCRIPT_RED),
+    "inotify_unavailable_red_gate_exit_0": Row(
+        "python_red", "", "inotify_unavailable", False, UNATTRIBUTABLE,
+        UNATTRIBUTABLE, False, TERMINAL, True,
+        "`inotify_init1` fails; the gate's own python red; the engine answers "
+        "green: exit 0", 0, PY_RED),
+    "inotify_unavailable_red_gate_exit_1": Row(
+        "python_red", "", "inotify_unavailable_script_red", False,
+        UNATTRIBUTABLE, UNATTRIBUTABLE, False, TERMINAL, True,
+        "`inotify_init1` fails; the gate's own python red; the engine answers "
+        "red: exit 1", 1, PY_RED + SCRIPT_RED),
 }
 
 NODE_SKIPPED = {"passed": True, "skipped": True, "dir": ".", "checks": {},
@@ -340,14 +374,10 @@ NODE_SKIPPED = {"passed": True, "skipped": True, "dir": ".", "checks": {},
 REAL_EXHAUSTION_ENV = "AITELIER_TABLE_INOTIFY_EXHAUSTED"
 
 
-def _pytest_unavailable(_repo, report):
-    # The report `_resolve_pytest_python` leaves when no runner can be
-    # provisioned (its last branch), without the three provisioning attempts.
-    report.update(passed=False, skipped=True, infrastructure_unavailable=True,
-                  evidence_state="infrastructure_unavailable", returncode=0,
-                  summary="pytest unavailable and could not be provisioned "
-                          "after 3 attempts (table) — test gate skipped.")
-    return None, None
+def _is_pytest_invocation(args) -> bool:
+    # The pytest session `run_tests` starts, as opposed to the gate command
+    # (`bash run_tests.sh`): the only command whose runner this leg removes.
+    return "pytest" in list(args)
 
 
 class _LibcWithoutInotify:
@@ -417,10 +447,8 @@ def _drive_row(tmp_path, monkeypatch, row_id):
     row = ROWS[row_id]
     monkeypatch.setenv("AITELIER_HOME", str(tmp_path / "home"))
     monkeypatch.setenv("AITELIER_REPO_GATE_RENDER_WAIT_SECONDS", "0.3")
-    monkeypatch.setenv("TABLE_GATE_MODE", row.mode)
-    monkeypatch.setenv("TABLE_GATE_PRE", row.pre)
     inotify = "real"
-    if row.leg == "inotify_unavailable":
+    if row.leg in _INOTIFY_LEGS:
         if os.environ.get(REAL_EXHAUSTION_ENV) == "1":
             inotify = "exhausted by the caller"
         else:
@@ -434,7 +462,7 @@ def _drive_row(tmp_path, monkeypatch, row_id):
                 "passed": False, "summary": "1 error",
                 "errors": [{"file": "res://a.gd", "line": 3,
                             "msg": "Parse Error: table"}]})
-        if row.leg == "script_red":
+        if row.leg in _SCRIPT_RED_LEGS:
             rig.script_report = red_report()
         repo = tmp_path / "repo"
         (repo / "tests").mkdir(parents=True)
@@ -452,9 +480,16 @@ def _drive_row(tmp_path, monkeypatch, row_id):
                                 lambda _repo, **_kw: dict(NODE_SKIPPED))
         if row.leg == "gate_timeout":
             monkeypatch.setattr(rt, "REPO_GATE_TIMEOUT", 3)
-        if row.leg == "pytest_unavailable":
-            monkeypatch.setattr(rt, "_resolve_pytest_python", _pytest_unavailable)
-        (repo / "gate.py").write_text(TABLE_GATE)
+        # Every repository command goes through the real executor entry in this
+        # test container; the explicit unavailable-runner leg refuses only the
+        # pytest invocation (an honest `IsolationUnavailable`), never the gate.
+        calls = install_entry_executor(
+            monkeypatch,
+            refuse=_is_pytest_invocation if row.leg == "pytest_unavailable" else None)
+        # The entry scrubs the child environment: the gate carries its two
+        # controlled settings itself.
+        (repo / "gate.py").write_text(embed_env(
+            TABLE_GATE, TABLE_GATE_MODE=row.mode, TABLE_GATE_PRE=row.pre))
         script = repo / "run_tests.sh"
         script.write_text(RUN_TESTS_SH)
         script.chmod(0o755)
@@ -465,6 +500,25 @@ def _drive_row(tmp_path, monkeypatch, row_id):
         report = json.loads((out / "test_report.json").read_text())
     finally:
         rig.close()
+    # The gate really ran through the executor entry: its real argv, report
+    # directory and relay socket reached the transport.
+    # `_acquire_repo_gate` asks again while a gate is unmeasured, so a refused
+    # gate is called more than once; the last call is the one folded in.
+    gate_calls = [c for c in calls if c["args"][:1] == ["bash"]]
+    assert gate_calls, calls
+    assert all(c["report_dir"] and c["relay_socket"] for c in gate_calls), gate_calls
+    final_call = gate_calls[-1]
+    if row.leg == "pytest_unavailable":
+        # Only the pytest invocation was refused; the gate really ran.
+        assert [c["args"][:1] for c in calls if c["refused"]] == [["python3"]], calls
+        assert not any(c["refused"] for c in gate_calls), gate_calls
+    if row.leg == "gate_timeout":
+        assert final_call["timed_out"] is True, gate_calls
+    elif row.returncode is not None:
+        # The actual process status as the real entry returned it.
+        assert len(gate_calls) == 1, gate_calls
+        assert final_call["returncode"] == row.returncode, gate_calls
+
     gate = report.get("repo_gate") or {}
     attribution = gate.get("report_attribution") or {}
     observed = (gate.get("measured"),
@@ -519,11 +573,29 @@ def test_the_outcome_of_every_report_shape(tmp_path_factory, row_id):
         listed = [f for f in report["failures"]
                   if f.startswith("repo_gate:run_tests.sh#")]
         assert len(listed) == gate["retained_findings"], listed
+    if row.returncode is not None:
+        # The gate's own exit status, as the real subprocess returned it.
+        assert gate["returncode"] == row.returncode, (row_id, gate["returncode"])
+    if UNATTRIBUTABLE in (row.measured, row.attribution):
+        # An unattributable report is never a pass: the report file and the
+        # tool's return both say so.
+        assert report["passed"] is False, (row_id, report["passed"])
+        assert result["passed"] is False, (row_id, result["passed"])
     if row.measured == UNATTRIBUTABLE:
         assert gate["retained_findings"] is None
         assert gate["unattributed_reds"], gate
         assert report["repo_gate_unattributable"] is (row.next == TERMINAL)
+        assert result["repo_gate_unattributable"] is (row.next == TERMINAL)
+        assert report["repo_gate_absent"] is False
+        assert result["repo_gate_absent"] is False
         assert result["release_evidence"] == "unresolved"
+        for identity in row.reds:
+            # Each retained red keeps its identity: listed under the gate's
+            # unattributed reds and in the report's failures.
+            assert any(identity in red for red in gate["unattributed_reds"]), (
+                row_id, identity, gate["unattributed_reds"])
+            assert any(identity in f for f in report["failures"]), (
+                row_id, identity, report["failures"])
 
 
 @pytest.mark.parametrize("row_id", list(ROWS))
@@ -532,7 +604,7 @@ def test_the_attribution_of_every_report_shape(tmp_path_factory, row_id):
     _result, report, _observed, _identity = _driven(row_id, tmp_path_factory)
     attribution = report["repo_gate"]["report_attribution"]
     assert attribution["state"] == row.attribution, (row_id, attribution)
-    if row.leg == "inotify_unavailable":
+    if row.leg in _INOTIFY_LEGS:
         assert attribution["observed"] is False, attribution
         assert "inotify_init1 failed (errno 24" in attribution["why"], attribution
     else:

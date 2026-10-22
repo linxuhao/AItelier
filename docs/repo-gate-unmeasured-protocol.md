@@ -60,6 +60,10 @@ asserts every column but the last.
 | `inotify_unavailable_own_red` | `unattributable` | `unattributable` | `false` | `test_gate_report_unattributable` | `true` | `inotify_init1` fails; the gate's own python red; refused |
 | `inotify_unavailable_foreign_red` | `unattributable` | `unattributable` | `false` | `test_gate_report_unattributable` | `true` | `inotify_init1` fails; another writer's red naming this repository, beside the gate's clean report; refused |
 | `inotify_unavailable_no_red` | `unattributable` | `unmeasured` | `true` | `test_gate_absent` | `false` | `inotify_init1` fails; no red anywhere; refused |
+| `lockfile_first_red_gate_exit_0` | `unattributable` | `unattributable` | `false` | `test_gate_report_unattributable` | `true` | the gate creates `.gate.lock` first, retains a python red, and the engine answers green: exit 0 |
+| `lockfile_first_red_gate_exit_1` | `unattributable` | `unattributable` | `false` | `test_gate_report_unattributable` | `true` | the gate creates `.gate.lock` first, retains a python red, and the engine answers red: exit 1 |
+| `inotify_unavailable_red_gate_exit_0` | `unattributable` | `unattributable` | `false` | `test_gate_report_unattributable` | `true` | `inotify_init1` fails; the gate's own python red; the engine answers green: exit 0 |
+| `inotify_unavailable_red_gate_exit_1` | `unattributable` | `unattributable` | `false` | `test_gate_report_unattributable` | `true` | `inotify_init1` fails; the gate's own python red; the engine answers red: exit 1 |
 
 <!-- routing table: end -->
 

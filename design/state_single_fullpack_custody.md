@@ -66,14 +66,22 @@ absolute, has no `/`, is never passed to `open()`; no filesystem path is
 invented. The digest is over the normalized full-pack bytes (header + pack),
 exactly `bundle_sha256` as today.
 
-Rows are classified by value shape with a pure helper
-`git_custody(retained_ref)` in `state_git_artifacts.py`:
+Reserved-prefix rule. `state-db:` is a reserved namespace for `retained_ref`.
+Pure helper `git_custody(retained_ref)` in `state_git_artifacts.py`:
 
-| shape | `custody` | `legacy_cas_path` |
-|---|---|---|
-| `^state-db:git-bundle:sha256:[0-9a-f]{64}$` | `state_db_fullpack` | `null` |
-| absolute path (`os.path.isabs`) | `legacy_db_plus_cas_path` | the stored value |
-| anything else (e.g. test canary) | `unrecognized` | `null` |
+| value | result |
+|---|---|
+| `^state-db:git-bundle:sha256:[0-9a-f]{64}$` | `custody=state_db_fullpack`, `legacy_cas_path=null` |
+| any other string starting `state-db:` (uppercase hex, truncated/long digest, other kind, extra suffix) | **raise `StateConflict("malformed state-db custody reference")`**; never reclassified as legacy/unrecognized, never skips validation |
+| absolute path (`os.path.isabs`) | `custody=legacy_db_plus_cas_path`, `legacy_cas_path=` the stored value |
+| any other string not starting `state-db:` (test canary `refs/vault/canary`, unrelated old refs) | `custody=unrecognized`, `legacy_cas_path=null` (existing behavior, no broad legacy rejection) |
+
+For a valid typed value the embedded digest must also equal the row's
+`bundle_sha256` column. Where each check runs: `get_attempt` (no bytes selected)
+checks grammar + embedded digest == column, else `StateConflict`; the metadata
+read cannot check bytes. `materialize_candidate` additionally requires
+`sha256(bundle_bytes) ==` column == embedded digest (section 5). The error text
+never echoes the stored reference.
 
 ### Current vs future literal metadata
 
@@ -98,13 +106,27 @@ path field is `legacy_cas_path`, present solely for historical rows. A consumer
 that opens `retained_ref` without checking `custody` gets `FileNotFoundError`
 on a non-path string for future rows (loud, never wrong data).
 
-### Privacy
+### Privacy and who sees the derived fields
 
-`state_privacy.py` projection SQL is unchanged (already exposes `retained_ref`,
-NULLs `bundle_bytes`); a typed ref discloses only the already-public
-`bundle_sha256`. `custody`/`legacy_cas_path` are derived only in owner-side
-`get_attempt`. No new download surface or permission; existing public legacy
-paths are left as is.
+Current code: `get_attempt` is in `core.state_commands.PUBLIC_READS` and is one
+shared method (`state_service.py` ~1249); there is no owner-only branch. An
+anonymous caller reaches it only for an opened project (`_refuse_if_project_not_public`)
+and its service holds an `UntrustedDatabase`, whose `state_git_artifacts`
+projection (`state_privacy.py` 244-249, SQL unchanged) filters rows to opened
+projects and returns `bundle_bytes` as NULL. The SQL projection does not stop
+Python-derived fields, so the decision is: **`get_attempt` derives `custody` and
+`legacy_cas_path` for every caller it already serves** (trusted/owner and
+already-authorized public), only from the already-visible
+`commit_sha/tree_sha/bundle_sha256/retained_ref`. The privacy DB filter alone
+decides which rows are visible; a private or unopened project is refused
+before any derivation. Derived fields add no private field: `legacy_cas_path` is
+the legacy `retained_ref` public readers already receive today, and a typed ref
+discloses only the already-public `bundle_sha256`. Bytes are never in a
+response. No new access branch, no trust test, no blob download. The digest in
+a reference is integrity binding to the stored bytes, not authorization: read
+permission comes only from the existing project-privacy/attestation path (the
+trusted immutable DB row plus the byte hash supply provenance); knowing a
+digest grants nothing.
 
 ## 4. Future intake transaction
 
@@ -129,11 +151,19 @@ Entry: `report_external_attempt(...)` -> `state_external.py` candidate branch.
    normalize differently. Conflicting tree -> `StateConflict` as today.
 5. Observation row, report blob and artifact row commit atomically.
 
-No-effects: any refusal before step 5 leaves the DB unchanged and creates **zero**
-bundle filesystem entries (today a refusal after `retain_report` can orphan a
-CAS file). Concurrent intakes of one commit are serialized by the write
-transaction; the second sees the first row. Idempotent replay of the same
-observation payload returns before any of this.
+Effect scope (truthful about the current call order). `state_external.py` 173
+already runs `_terminal_report` -> `retain_report`, which publishes the report
+JSON file, *before* bundle validation at 187 and before the write transaction.
+This design does not change that: a fresh report JSON may remain in the report
+store after a rejected bundle; it is immutable evidence, not garbage, and is not
+cleaned. What is guaranteed is only: (a) **no bundle file** (no second bundle CAS
+copy) is ever written by the new code; (b) any refusal before step 5 leaves the
+State DB unchanged: no observation, no report-blob row, no artifact row, no
+version bump (the in-transaction rows roll back). Total new filesystem entries on
+success or refusal are therefore *at most the report JSON*, never promised zero.
+Concurrent intakes of one commit are serialized by the write transaction; the
+second sees the first row. Idempotent replay returns before any of this.
+Runtime ordering is not changed to make a stronger claim true.
 
 ## 5. Authoritative bytes and normal materialization
 
@@ -141,11 +171,13 @@ observation payload returns before any of this.
 Additive, DB-only changes:
 
 - Load row; `sha256(bytes) == bundle_sha256` (exists).
-- If `custody(retained_ref) == state_db_fullpack`, also require
-  `retained_ref == typed(bundle_sha256)`; else `StateConflict` "custody
-  reference does not match bundle digest".
-- Legacy/unrecognized rows: unchanged (bytes + digest only; the CAS file is
-  still never consulted).
+- `git_custody(retained_ref)` runs first: a malformed `state-db:` value ->
+  `StateConflict`, with no fallback to the legacy bytes-only path. For a valid
+  typed value, `retained_ref == typed(bundle_sha256)` and the actual bytes' hash
+  must match; else `StateConflict` "custody reference does not match bundle
+  digest".
+- Absolute-path and unrecognized (non-`state-db:`) rows: unchanged (bytes +
+  digest only; the CAS file is still never consulted).
 - Missing row for a known external candidate: unchanged "durable bundle missing
   (legacy candidates need re-attestation)". Corrupt bytes: digest-mismatch
   refusal. Missing destination: unchanged refusal.
@@ -202,8 +234,9 @@ is written".
   report store gained no file for the bundle. Line 142 equality still holds.
 - `tests/support/state_canaries.py` (`refs/vault/canary`) stays valid: classified
   `unrecognized`.
-- Unit cases for `git_custody`: the three shapes plus a malformed typed value
-  (wrong length/uppercase -> `unrecognized`).
+- Unit cases for `git_custody`: valid typed, absolute path, `refs/vault/canary`
+  (`unrecognized`), and malformed `state-db:` values (uppercase hex, 63/65 digits,
+  `state-db:other:...`, trailing suffix) -> `StateConflict`.
 - `docs/state-external-harness.md` ~149: future retained bundles are held only in
   State DB; `retained_ref` is a typed DB reference; historical rows keep a path
   in `legacy_cas_path`; consult `custody`.
@@ -214,15 +247,16 @@ All through `report_external_attempt` / `get_attempt` / `materialize_candidate`
 with a real broad bundle from a real repo (existing `fixture()`, `broad_bundle`,
 `set_unrelated` helpers).
 
-1. **New intake, no second CAS write.** Snapshot the report-store tree; intake a
+1. **New intake, no second bundle write.** Snapshot the report-store tree; intake a
    candidate whose producer bundle carries 1 MiB of unrelated random history.
-   Expect only the report-JSON blob added; `custody=state_db_fullpack`,
+   Expect: new files are only the report JSON (written by `_terminal_report`);
+   no file whose bytes contain the normalized bundle; `custody=state_db_fullpack`,
    `legacy_cas_path=null`; stored bytes exclude unrelated objects. Kills today's
-   second file.
+   second bundle file.
 2. **Existing path metadata unchanged.** Seed a legacy row (SQL, absolute path, as
    old code wrote) for commit X; intake a new attempt for X. Row bytes and
-   `retained_ref` identical; `custody=legacy_db_plus_cas_path`; no new file.
-   Kills rewriting legacy rows.
+   `retained_ref` identical; `custody=legacy_db_plus_cas_path`; the new report may
+   add its JSON, but no bundle file. Kills rewriting legacy rows.
 3. **New reference truthful.** `sha256(stored bytes) == bundle_sha256 ==` digest
    in `retained_ref`; `os.path.exists(retained_ref)` is False. Kills a fabricated
    path/URI pretending to be a file.
@@ -233,11 +267,26 @@ with a real broad bundle from a real repo (existing `fixture()`, `broad_bundle`,
    typed digest (triggers dropped in test) -> `StateConflict`.
 5. **Rejected digest / missing bytes roll back.** (a) wrong producer digest ->
    "expected bundle"; (b) `store_candidate` with empty/None bytes or mismatching
-   `bundle_sha256` -> `StateConflict`. Both: no artifact row, no observation,
-   `observation_version` unchanged, report-store listing unchanged.
-6. **Useful valid candidate (control).** Right after vector 5, the valid report
+   `bundle_sha256` -> `StateConflict`. Both: no artifact row, no observation, no
+   report-blob row, `observation_version` unchanged, and the report-store listing
+   gained at most the report JSON (already retained at line 173, allowed) and zero
+   bundle copies.
+6. **Useful valid candidate (control).** Right after vector 5, a fresh valid report
    for the same attempt/version succeeds, status `candidate`, and materializes.
    Proves refusals left no poison.
+7. **Grammar.** `git_custody` on valid typed, absolute path, canary -> three
+   results; malformed `state-db:` (uppercase, truncated, wrong kind) -> `StateConflict`.
+8. **Reads and materialize on a corrupt reference.** Seed (triggers dropped) a row
+   whose `retained_ref` is malformed `state-db:`, and another valid-typed with a
+   different digest than the column, and another valid-typed with correct column
+   but altered bytes: `get_attempt` refuses the first two; `materialize_candidate`
+   refuses all three and the destination repo is unchanged. Legacy rows still
+   read/materialize.
+9. **Actual public/private matrix.** For new-format and legacy rows: trusted
+   `get_attempt` and anonymous `get_attempt` on an opened project both return the
+   derived `custody`/`legacy_cas_path` with no bytes field; anonymous on an unopened
+   project is refused (`ProjectPrivate`), and its row is invisible through the
+   `UntrustedDatabase`. No blob-download action exists.
 
 Accounting measure (not a claim): for N new intakes record
 `sum(length(bundle_bytes))` of new-format rows and the count of bundle-named

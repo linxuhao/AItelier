@@ -287,6 +287,54 @@ def _relay_progress_context(value: Any) -> dict | None:
     return None
 
 
+_ARGS_PROVENANCE_SDK = "sdk_parsed_adapter_boundary_not_wire_bytes"
+_ARGS_PROVENANCE_DSML = "host_parsed_from_dsml_content_not_sdk_arguments"
+_ARGS_PROVENANCE_RETAINED = "retained_history_original_source_unknown"
+
+
+def _native_completion_metadata(result, *, recovered: bool = False) -> dict:
+    """Durable completion metadata for a native turn's trace record.
+
+    Reports what each boundary actually observed, and says which boundary:
+
+    * structured turn: `finish_reason`/`truncated` are the adapter choice's;
+      tool-call arguments are the SDK `function.arguments` strings as handed
+      over by the adapter (not original wire/stream bytes).
+    * DSML-salvaged turn (`tool_calls_salvaged`): the tool calls were parsed
+      out of leaked content by the host's `parse_dsml_tool_calls`, which
+      re-serialises them with json.dumps. Those argument strings are host
+      parser output, NOT SDK function arguments.
+    * recovered turn: replayed from retained history with no provider call.
+      The original finish reason, truncation state, whether it was salvaged
+      and where its arguments came from are all unknown (None), not assumed.
+
+    A missing finish reason is explicitly unknown, never guessed from token
+    counts or empty arguments.
+    """
+    reason = getattr(result, "finish_reason", None)
+    known = (not recovered) and isinstance(reason, str) and bool(reason)
+    salvaged = (None if recovered
+                else bool(getattr(result, "tool_calls_salvaged", False)))
+    if recovered:
+        provenance = _ARGS_PROVENANCE_RETAINED
+    elif salvaged:
+        provenance = _ARGS_PROVENANCE_DSML
+    else:
+        provenance = _ARGS_PROVENANCE_SDK
+    return {
+        "finish_reason": reason if known else "unknown",
+        "finish_reason_known": known,
+        "truncated": (bool(getattr(result, "truncated", False))
+                      if not recovered else None),
+        "tool_calls_salvaged_from_content": salvaged,
+        "completion_metadata_source": (
+            "recovered_from_retained_history_no_provider_call" if recovered
+            else "adapter_choice_boundary"),
+        "arguments_provenance": provenance,
+    }
+
+
+
 _OUTPUT_BUDGET_HALF = 0.5
 
 
@@ -4894,7 +4942,10 @@ class PipelineEngine:
                     result = SimpleNamespace(
                         text=retained.get("content") or "",
                         reasoning_content=retained.get("reasoning_content") or "",
-                        tool_calls=retained["tool_calls"], truncated=False)
+                        tool_calls=retained["tool_calls"], truncated=False,
+                        # No provider call: the original adapter finish
+                        # reason is not available here -> explicitly unknown.
+                        finish_reason=None, tool_calls_salvaged=False)
                     recovery_turn = None
                     self._trace("step", "native_batch_recovery", {
                         "segment": self._context_segment,
@@ -5101,6 +5152,8 @@ class PipelineEngine:
                             "turn": turn_count + 1, "text": result.text or "",
                             "tool_calls": result.tool_calls,
                             "correction_error": f"{type(exc).__name__}: {exc}",
+                            **_native_completion_metadata(
+                                result, recovered=bool(recovering_batch)),
                         }
                         self._trace("response", "output_starvation_invalid_correction", detail)
                         # A concrete malformed batch is different from absent
@@ -5137,9 +5190,12 @@ class PipelineEngine:
                             continue
                         fail_starved_output(detail)
 
-                # Record trace — store the full response (free text + every
-                # tool call with untruncated args + reasoning) so the trace is
-                # a faithful copy of what the model produced, not a lossy digest.
+                # Record trace — free text + every tool call with untruncated
+                # args + reasoning, exactly as this boundary holds them. Which
+                # boundary (SDK arguments / host DSML parser / retained history)
+                # is stated by `arguments_provenance`; this is not a wire-byte
+                # copy of what the model produced.
+
                 self._trace("response", "recovered_agent_response" if recovering_batch else "agent_response", {
                     "attempt": attempt, "turn": turn_count + 1,
                     "text": result.text or "",
@@ -5149,6 +5205,7 @@ class PipelineEngine:
                          "arguments": tc["function"].get("arguments", "")}
                         for tc in result.tool_calls
                     ],
+                    **_native_completion_metadata(result, recovered=bool(recovering_batch)),
                 })
 
                 # The turn hit max_output_tokens and produced neither text nor a

@@ -387,6 +387,14 @@ class NativeTurn:
     tool_calls: list[dict] = field(default_factory=list)
     reasoning_content: str = ""
     truncated: bool = False
+    # The adapter choice's finish_reason exactly as observed. None means the
+    # adapter supplied none (explicitly unknown) — never inferred from token
+    # counts or empty arguments. Tool-call argument strings are as parsed at
+    # the SDK/adapter boundary, not original wire/stream bytes.
+    finish_reason: str | None = None
+    # True when tool_calls were recovered from DSML markup in content rather
+    # than returned as structured adapter tool calls.
+    tool_calls_salvaged: bool = False
 
 
 # Hard ceiling for output-cap escalation (see AIGateway.escalate_output_cap).
@@ -1629,6 +1637,7 @@ class AIGateway:
                 })
 
         text = (msg.content or "").strip()
+        salvaged_from_content = False
 
         # Salvage tool calls the model leaked into content as DSML markup
         # instead of returning them as structured tool_calls (DeepSeek). Without
@@ -1638,10 +1647,14 @@ class AIGateway:
             if salvaged:
                 tool_calls = salvaged
                 text = strip_dsml_markup(text)
+                salvaged_from_content = True
 
         return NativeTurn(
             text=text,
             tool_calls=tool_calls,
             reasoning_content=getattr(msg, "reasoning_content", "") or "",
             truncated=(finish_reason == "length"),
+            finish_reason=(finish_reason if isinstance(finish_reason, str)
+                           and finish_reason else None),
+            tool_calls_salvaged=salvaged_from_content,
         )

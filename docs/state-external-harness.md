@@ -146,8 +146,19 @@ re-packs only the exact candidate's reachable commits/trees/blobs into a
 candidate-only bundle with one fixed ref, verified in an empty repository.
 `git_artifact.bundle_sha256` describes those normalized retained bytes; the
 declared producer digest remains only in the producer's report, which is never
-modified. Unrelated branches are not retained. Existing retained bundles are
-not migrated, and byte-identical output is only promised for one Git version.
+modified. Unrelated branches are not retained. Byte-identical output is only
+promised for one Git version.
+
+Future retained bundles are held only in the State database (`bundle_bytes`);
+no second copy is written to the report store (the report JSON itself still
+is). `git_artifact.retained_ref` for those rows is the typed reference
+`state-db:git-bundle:sha256:<bundle_sha256>`, not a filesystem path. Historical
+rows keep their old absolute path and bytes untouched; `get_attempt` adds a
+derived `custody` (`state_db_fullpack`, `legacy_db_plus_cas_path` or
+`unrecognized`) and `legacy_cas_path` (the historical path, else null). Consult
+`custody` before treating `retained_ref` as a path. `state-db:` is a reserved
+prefix: a malformed value is refused, never treated as a legacy reference.
+
 
 The final report should identify the exact source/artifact and the dependency
 receipts its checker used. For a repository outside AItelier, the external

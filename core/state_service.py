@@ -1260,7 +1260,10 @@ class StateService:
             with self.store.transaction() as conn:
                 artifact = conn.execute("SELECT commit_sha,tree_sha,bundle_sha256,retained_ref "
                     "FROM state_git_artifacts WHERE commit_sha=?", (attempt["artifact_ref"],)).fetchone()
-            attempt["git_artifact"] = dict(artifact) if artifact else None
+            from core.state_git_artifacts import custody_metadata
+            # Derived from the already-visible columns only (no bytes); a
+            # malformed reserved state-db: reference fails closed.
+            attempt["git_artifact"] = custody_metadata(artifact) if artifact else None
         return self._with_refusals(attempt)
 
     def _with_refusals(self, envelope):

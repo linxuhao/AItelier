@@ -109,8 +109,15 @@ def test_broad_bundle_is_retained_as_exact_candidate_closure(tmp_path):
     assert artifact["bundle_sha256"] == hashlib.sha256(retained).hexdigest()
     assert artifact["input_bundle_sha256"] == input_sha
     assert artifact["bundle_sha256"] != input_sha
-    with open(artifact["retained_ref"], "rb") as stored:
-        assert stored.read() == retained
+    # New custody contract: the State DB BLOB is the only copy; the reference is
+    # a typed, self-authenticating DB reference and never a filesystem path.
+    assert artifact["retained_ref"] == "state-db:git-bundle:sha256:" + artifact["bundle_sha256"]
+    assert not os.path.isabs(artifact["retained_ref"])
+    assert not os.path.exists(artifact["retained_ref"])
+    from core import datadir
+    store_dir = datadir.state_report_store_dir()
+    assert not store_dir.exists() or not any(p.is_file() for p in store_dir.rglob("*"))
+
     # Producer input and source refs are untouched.
     assert bundle.read_bytes() == input_bytes
     assert git(repo, "show-ref") == refs_before

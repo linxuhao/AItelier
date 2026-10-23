@@ -1,9 +1,13 @@
 """Self-contained Git bundles retained with immutable State lineage.
 
-The State database is the portable carrier; the existing report store holds a
-second content-addressed copy. Neither run cleanup nor Git GC owns these bytes.
+The State database is the only carrier of future bundles: ``bundle_bytes`` holds
+the one authoritative normalized full pack and ``retained_ref`` is the typed
+reference ``state-db:git-bundle:sha256:<bundle_sha256>``. Historical rows keep
+their absolute report-store path untouched. Neither run cleanup nor Git GC owns
+these bytes.
 There is deliberately no release operation: attempts/observations remain
 recoverable, so State cannot yet prove that their artifacts are unreferenced.
+
 
 A producer may supply a broad bundle (for example ``--all``). The supplied bytes
 are authenticated against the producer's declared SHA-256 and then normalized,
@@ -23,7 +27,7 @@ import tempfile
 from pathlib import Path
 
 from core.state_graph import StateConflict, now
-from core.state_report_integrity import _read_regular_nofollow, retain_report
+from core.state_report_integrity import _read_regular_nofollow
 
 MAX_BUNDLE_BYTES = 128 * 1024 * 1024
 CANDIDATE_REF = "refs/aitelier/candidate"
@@ -116,6 +120,44 @@ def _normalized_bundle(repo, root, commit):
     return header + pack.read_bytes()
 
 
+STATE_DB_PREFIX = "state-db:"
+_TYPED_REF = re.compile(r"state-db:git-bundle:sha256:([0-9a-f]{64})")
+
+
+def typed_ref(bundle_sha256):
+    """The self-authenticating State DB reference for a normalized bundle digest."""
+    return "state-db:git-bundle:sha256:" + bundle_sha256
+
+
+def git_custody(retained_ref):
+    """Pure classifier: ``(custody, legacy_cas_path, embedded_digest)``.
+
+    ``state-db:`` is a reserved namespace; a malformed value there fails closed
+    and is never reclassified as legacy/unrecognized. The error never echoes the
+    stored reference."""
+    if isinstance(retained_ref, str) and retained_ref.startswith(STATE_DB_PREFIX):
+        match = _TYPED_REF.fullmatch(retained_ref)
+        if match is None:
+            raise StateConflict("malformed state-db custody reference")
+        return "state_db_fullpack", None, match.group(1)
+    if isinstance(retained_ref, str) and os.path.isabs(retained_ref):
+        return "legacy_db_plus_cas_path", retained_ref, None
+    return "unrecognized", None, None
+
+
+def custody_metadata(row):
+    """Metadata-only view of a state_git_artifacts row (no bytes): the four
+    stored columns plus derived ``custody`` and ``legacy_cas_path``. A valid typed
+    reference must carry the row's own digest column."""
+    artifact = {k: row[k] for k in ("commit_sha", "tree_sha", "bundle_sha256", "retained_ref")}
+    custody, legacy_path, embedded = git_custody(artifact["retained_ref"])
+    if embedded is not None and embedded != artifact["bundle_sha256"]:
+        raise StateConflict("custody reference does not match bundle digest")
+    artifact["custody"] = custody
+    artifact["legacy_cas_path"] = legacy_path
+    return artifact
+
+
 def retain_candidate(report_bytes, commit):
     descriptor = json.loads(report_bytes).get("git_bundle")
     if (not isinstance(descriptor, dict) or set(descriptor) != {"path", "sha256"}
@@ -140,22 +182,34 @@ def retain_candidate(report_bytes, commit):
         if _validated_bundle(normalized, commit, tree, exact=True) != tree:
             raise StateConflict("normalized Git bundle changed the candidate tree")
         digest = hashlib.sha256(normalized).hexdigest()
-        retained_source = root / "normalized.bundle"
-        retained_source.write_bytes(normalized)
-        retained_ref, retained_bytes = retain_report(str(retained_source), digest, completed=False,
-                                                    max_bytes=MAX_BUNDLE_BYTES)
-    if retained_bytes != normalized:
-        raise StateConflict("Git bundle changed during retention")
+    # The State DB BLOB is the only retained copy: no second bundle file is
+    # written to the report store.
     return {"commit_sha": commit, "tree_sha": tree, "bundle_sha256": digest,
-            "retained_ref": retained_ref, "bundle_bytes": normalized,
+            "retained_ref": typed_ref(digest), "bundle_bytes": normalized,
             "input_bundle_sha256": input_sha}
 
 
-
 def store_candidate(conn, artifact):
+    # In-memory checks first; a failure rolls back the whole write transaction.
+    raw = artifact.get("bundle_bytes")
+    if not isinstance(raw, (bytes, bytearray)) or not raw:
+        raise StateConflict("Git artifact bundle bytes are missing")
+    raw = bytes(raw)
+    digest = artifact.get("bundle_sha256")
+    if (not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)
+            or hashlib.sha256(raw).hexdigest() != digest):
+        raise StateConflict("Git artifact bundle bytes do not match bundle digest")
+    if artifact.get("retained_ref") != typed_ref(digest):
+        raise StateConflict("custody reference does not match bundle digest")
+    for key in ("commit_sha", "tree_sha"):
+        value = artifact.get(key)
+        if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{40}", value):
+            raise StateConflict(f"Git artifact {key} must be 40 lowercase hex")
+    artifact = {**artifact, "bundle_bytes": raw}
     old = conn.execute("SELECT tree_sha FROM state_git_artifacts WHERE commit_sha=?",
                        (artifact["commit_sha"],)).fetchone()
     if old:
+        # Insert-once: the existing row's bytes and reference stay authoritative.
         if old["tree_sha"] != artifact["tree_sha"]:
             raise StateConflict("retained commit has conflicting tree identity")
         return
@@ -177,9 +231,13 @@ def materialize_candidate(store, commit, destination):
         return None
     artifact = dict(artifact)
     raw = bytes(artifact.pop("bundle_bytes"))
+    # A malformed reserved state-db: reference fails closed before any fallback.
+    _, _, embedded = git_custody(artifact["retained_ref"])
     actual = hashlib.sha256(raw).hexdigest()
     if actual != artifact["bundle_sha256"]:
         raise StateConflict(f"expected Git artifact {commit}, bundle {artifact['bundle_sha256']}; actual {actual}")
+    if embedded is not None and embedded != actual:
+        raise StateConflict("custody reference does not match bundle digest")
     if not destination:
         raise StateConflict(f"expected Git artifact {commit}; actual source repository missing")
     _validated_bundle(raw, commit, artifact["tree_sha"], destination)

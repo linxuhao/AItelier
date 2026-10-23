@@ -319,14 +319,15 @@ class TestConcurrentCountingCannotKillAStep:
 
     def test_many_threads_past_the_cap_do_not_raise(self):
         import threading
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import MagicMock
+        from core.agents import AgentFactory
+        original_init = AgentFactory.__init__
         PipelineEngine._FEEDBACK_SEEN.clear()
         errors: list = []
 
         def worker(n: int) -> None:
             try:
-                with patch("core.agents.AgentFactory.__init__", return_value=None):
-                    e = PipelineEngine()
+                e = PipelineEngine()
                 e.factory = MagicMock()
                 e._emit = lambda *a, **kw: None
                 e._trace = lambda *a, **kw: None
@@ -343,6 +344,10 @@ class TestConcurrentCountingCannotKillAStep:
             t.join()
         assert not errors, errors
         assert len(PipelineEngine._FEEDBACK_SEEN) <= PipelineEngine._FEEDBACK_SEEN_CAP
+        # The threads must not leave a mocked AgentFactory constructor behind.
+        assert AgentFactory.__init__ is original_init
+        registry = object()
+        assert AgentFactory(registry=registry)._registry is registry
 
 
 class TestNonFileOutputCounts:

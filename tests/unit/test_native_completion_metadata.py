@@ -3,9 +3,15 @@
 Real `AIGateway.generate_native` conversion (only the provider call is
 scripted) feeding the real native loop and its real trace callback. Scripted
 responses are NOT evidence about any historical provider incident; they only
-prove that what the adapter boundary delivered is what gets recorded.
-Tool-call arguments are SDK-parsed strings at the adapter boundary, never
-original wire bytes.
+prove that what each boundary delivered is what gets recorded, and that the
+trace names which boundary that was:
+
+* structured SDK `function.arguments` -> SDK provenance;
+* tool calls the host parsed out of leaked DSML content -> host-parser
+  provenance (those strings are `json.dumps` output, not SDK arguments);
+* a batch replayed from retained history -> original source UNKNOWN.
+
+No case here claims original wire/stream bytes.
 """
 import json
 from types import SimpleNamespace
@@ -18,10 +24,19 @@ from core.dpe_pipeline import _native_completion_metadata
 from tests.integration.test_native_parity import (  # noqa: F401  (fixtures)
     engine, budget_case, _run, _tc,
 )
+from tests.unit.test_native_direct_code import (
+    host as _host, response as _native_response, execute as _execute,
+)
+from tests.unit.test_native_effect_recovery import (
+    HostCrash, owned_tools, crash_after_fence, traces as _run_traces,
+)
 from tests.unit.test_native_starved_output import wire
 
 _UNSET = object()
 PROVENANCE = "sdk_parsed_adapter_boundary_not_wire_bytes"
+DSML_PROVENANCE = "host_parsed_from_dsml_content_not_sdk_arguments"
+RETAINED_PROVENANCE = "retained_history_original_source_unknown"
+
 
 
 def _resp(finish=_UNSET, calls=(), content="", reasoning=""):
@@ -176,7 +191,101 @@ def test_recovered_turn_reports_unknown_not_assumed():
     assert meta["finish_reason_known"] is False
     assert meta["truncated"] is None
     assert meta["completion_metadata_source"].startswith("recovered_from_retained")
+    # Original salvage state and argument source are unknown, not False.
+    assert meta["tool_calls_salvaged_from_content"] is None
+    assert meta["arguments_provenance"] == RETAINED_PROVENANCE
     # A recovered turn never inherits a finish reason it did not observe.
     stale = SimpleNamespace(finish_reason="length", truncated=True,
-                            tool_calls_salvaged=False)
-    assert _native_completion_metadata(stale, recovered=True)["finish_reason"] == "unknown"
+                            tool_calls_salvaged=True)
+    stale_meta = _native_completion_metadata(stale, recovered=True)
+    assert stale_meta["finish_reason"] == "unknown"
+    assert stale_meta["tool_calls_salvaged_from_content"] is None
+    assert stale_meta["arguments_provenance"] == RETAINED_PROVENANCE
+
+
+_DSML_CONTENT = (
+    'Writing now.\n'
+    '<\uff5c\uff5cDSML\uff5c\uff5ctool_calls>\n'
+    '<\uff5c\uff5cDSML\uff5c\uff5cinvoke name="edit">\n'
+    '<\uff5c\uff5cDSML\uff5c\uff5cparameter name="file" string="true">a.gd'
+    '</\uff5c\uff5cDSML\uff5c\uff5cparameter>\n'
+    '<\uff5c\uff5cDSML\uff5c\uff5cparameter name="revision" string="false">2'
+    '</\uff5c\uff5cDSML\uff5c\uff5cparameter>\n'
+    '</\uff5c\uff5cDSML\uff5c\uff5cinvoke>\n'
+    '</\uff5c\uff5cDSML\uff5c\uff5ctool_calls>'
+)
+
+
+def test_dsml_salvage_through_generate_native_is_host_parsed_not_sdk(budget_case):
+    """Real generate_native DSML salvage -> actual native runner trace.
+
+    The provider returned NO structured tool_calls; the host parsed the leaked
+    markup and re-serialised it with json.dumps. The trace must say so, and
+    must carry the host-parser argument string unchanged, while still carrying
+    the adapter's finish_reason."""
+    eng, ws, draft, traces = budget_case
+    _drive(budget_case, [
+        _resp("stop", content=_DSML_CONTENT),
+        _resp("tool_calls", [FINISH]),
+    ], budget=4)
+    assert _run(eng, ws) is True
+    first = _responses(traces)[0]
+    # Independent expectation, written out rather than recomputed.
+    assert first["tool_calls"] == [
+        {"name": "edit", "arguments": '{"file": "a.gd", "revision": 2}'}]
+    assert first["text"] == "Writing now."
+    assert first["finish_reason"] == "stop"
+    assert first["finish_reason_known"] is True
+    assert first["truncated"] is False
+    assert first["tool_calls_salvaged_from_content"] is True
+    assert first["completion_metadata_source"] == "adapter_choice_boundary"
+    assert first["arguments_provenance"] == DSML_PROVENANCE
+    assert first["arguments_provenance"] != PROVENANCE
+    # Salvaged call really ran as the edit tool (it wrote the draft).
+    assert draft.exists()
+    # The structured finish turn after it is still labelled SDK.
+    last = _responses(traces)[-1]
+    assert last["tool_calls_salvaged_from_content"] is False
+    assert last["arguments_provenance"] == PROVENANCE
+
+
+def test_retained_batch_recovery_trace_marks_original_source_unknown(tmp_path, monkeypatch):
+    """Real retained-batch recovery -> actual recovered_agent_response trace."""
+    sf, rid, claim, root, executions = owned_tools(tmp_path, monkeypatch)
+    before, ws = _host(sf, rid, claim, root,
+                       lambda messages, **kw: _native_response(
+                           'remove_owned', file='baseline.py'))
+    crash_after_fence(before, sf, rid, claim, 'remove_owned')
+    with pytest.raises(HostCrash):
+        _execute(before, ws, rid, claim)
+    provider = []
+
+    def after(messages, **kwargs):
+        provider.append(1)
+        return _native_response('finish_step', summary='retained invocation recovered')
+
+    resumed, ws2 = _host(sf, rid, claim, root, after)
+    try:
+        assert _execute(resumed, ws2, rid, claim)
+        events = _run_traces(sf, rid)
+        recovered = [p for name, p in events if name == 'recovered_agent_response']
+        assert len(recovered) == 1
+        row = recovered[0]
+        # The retained assistant batch's argument string, unchanged.
+        assert row['tool_calls'] == [
+            {'name': 'remove_owned', 'arguments': '{"file": "baseline.py"}'}]
+        assert row['finish_reason'] == 'unknown'
+        assert row['finish_reason_known'] is False
+        assert row['truncated'] is None
+        assert row['tool_calls_salvaged_from_content'] is None
+        assert row['completion_metadata_source'] == (
+            'recovered_from_retained_history_no_provider_call')
+        assert row['arguments_provenance'] == RETAINED_PROVENANCE
+        # No provider call produced it; the only provider call came after.
+        assert any(name == 'native_batch_recovery' and p['provider_called'] is False
+                   for name, p in events)
+        assert provider == [1]
+        assert executions == [('remove', 'baseline=True')]
+    finally:
+        sf._conn.close()
+

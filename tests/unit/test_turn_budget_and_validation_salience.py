@@ -16,9 +16,16 @@ Both defects were measured on jinyong-numbers 2026-09-01, step "3" (the PM):
     graph's context sources — measured at line 1517 of 1519, immediately behind
     a 1484-line clipped design bundle. Same words, same prompt, no salience.
 """
+import copy
+import json
+from unittest.mock import MagicMock
+
 import pytest
 
 from core.dpe_pipeline import PipelineEngine, _LOW_TURN_BUDGET
+from tests.integration.test_native_parity import (  # noqa: F401  (fixture)
+    engine, _WS, _setup, _run, _turn, _tc,
+)
 
 
 class TestTheAgentIsWarnedBeforeTheCliff:
@@ -115,14 +122,64 @@ class TestTheWarningNamesTheEscapeHatch:
         extra, n2, msg = _grant_turns(n, 6)
         assert extra == 0 and n2 == n and "DENIED" in msg
 
-    def test_native_loop_rewrites_the_tool_result(self):
+    def test_native_loop_rewrites_the_tool_result(self, engine, tmp_path):
         # The model reads the tool result, not the trace: a denial the result
-        # still calls "granted" is a lie the agent will act on.
-        import inspect
-        from core.dpe_pipeline import PipelineEngine
-        src = inspect.getsource(PipelineEngine)
-        i = src.index('if tool_name == "ask_more_turns":\n                        # _exec_tool answers')
-        assert '"denied"' in src[i:i + 900]
+        # still calls "granted" is a lie the agent will act on. Drive the real
+        # native loop; `_exec_tool` answers "granted" unconditionally (as the
+        # real one does) and the second, progress-less ask must be DENIED.
+        _setup(tmp_path)
+        ws = _WS(tmp_path)
+        stale = {"status": "granted", "turns": 2}
+        engine._exec_tool = MagicMock(side_effect=lambda action: (
+            dict(stale) if action["tool"] == "ask_more_turns"
+            else {"written": "main.py"}))
+        engine.factory.get_max_tool_turns.return_value = 3
+        events, traces, seen = [], [], []
+        engine._emit = lambda ev, payload=None: events.append((ev, payload or {}))
+        engine._trace = lambda cat, ev, payload: traces.append((cat, ev, payload))
+        script = iter([
+            _turn(tool_calls=[_tc("ask_more_turns", {"turns": 2, "reason": "one"},
+                                  cid="ask1")]),
+            _turn(tool_calls=[_tc("ask_more_turns", {"turns": 2, "reason": "two"},
+                                  cid="ask2")]),
+            _turn(tool_calls=[_tc("write", {"file": "main.py", "content": "x"},
+                                  cid="w1")]),
+            _turn(tool_calls=[_tc("finish_step", cid="fin")]),
+        ])
+        nat = engine.factory.get_native_agent.return_value
+
+        def turn(**kwargs):
+            # Snapshot what the model is actually shown on this turn.
+            seen.append(copy.deepcopy(kwargs["messages"]))
+            return next(script)
+
+        nat.turn.side_effect = turn
+        assert _run(engine, ws) is True
+        assert nat.turn.call_count == 4
+
+        def tool_content(turn_messages, call_id):
+            found = [m for m in turn_messages
+                     if m.get("role") == "tool" and m.get("tool_call_id") == call_id]
+            assert len(found) == 1, call_id
+            return json.loads(found[0]["content"])
+
+        # Turn 3's request is the first one that can contain the second
+        # ask's observation. It carries the denial, not the stale grant.
+        first = tool_content(seen[1], "ask1")
+        assert first["status"] == "granted" and first["turns"] == 2
+        second = tool_content(seen[2], "ask2")
+        assert second["status"] == "denied"
+        assert second["turns"] == 0
+        assert "DENIED" in second["note"] and "no progress" in second["note"]
+        assert second != stale and "granted" not in second["status"]
+        # Effective budget: only the first grant was applied (3 + 2), the
+        # denied ask raised nothing.
+        requests = [p for ev, p in events if ev == "agent_turn_request"]
+        assert len(requests) == 1 and requests[0]["extra_turns"] == 2
+        recorded = [p for _c, ev, p in traces if ev == "step_budget"]
+        assert recorded and recorded[-1]["turn_budget"]["max_turns"] == 5
+        nat.gateway.escalate_output_cap.assert_not_called()
+
 
 
 class TestAValidationFailureIsAnInstruction:

@@ -75,7 +75,7 @@ def docker_cli(tmp_path, monkeypatch):
     cli.chmod(0o700)
     monkeypatch.setenv("CPU_LIFECYCLE_FIXTURE_STATE", str(state))
     # Real client timeouts remain real. Keep the test bounded without a clock mock.
-    monkeypatch.setattr(executor, "REMOVE_DEADLINE", 0.6)
+    monkeypatch.setattr(executor, "REMOVE_DEADLINE", 3)
 
     def configure(scenario):
         state.write_text(json.dumps({"cid": CID, "scenario": scenario, "calls": []}))
@@ -116,7 +116,8 @@ def test_nonabsence_does_not_pass_and_retains_first_daemon_error(docker_cli, sce
 
 
 @pytest.mark.parametrize("scenario", ["slow_rm", "slow_inspect"])
-def test_cli_operations_share_one_cleanup_deadline(docker_cli, scenario):
+def test_cli_operations_share_one_cleanup_deadline(docker_cli, monkeypatch, scenario):
+    monkeypatch.setattr(executor, "REMOVE_DEADLINE", 0.6)
     docker, state = docker_cli(scenario)
     started = time.monotonic()
     with pytest.raises(executor.CleanupUnconfirmed):

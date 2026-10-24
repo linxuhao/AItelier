@@ -523,18 +523,28 @@ _REFUSAL = '{"detail":"This State DAG record is not available."}'
 
 
 class TestAnUnopenedNotebookIsNotAnExistenceOracle:
-    """The note `get` BODY, reached below the guard, answers 200 with an empty
-    note for an unopened project and carries no canary. What an anonymous caller
-    can observe at the chokepoint and on the product route must not tell that
-    project from one that does not exist."""
+    """What an anonymous caller can observe must not tell an unopened project from
+    one that does not exist: at the `execute` chokepoint, on the product route and,
+    since the notebook readers judge the project at the read (privacy node
+    26f38cc8), on the note `get` itself - through the decorated method AND through
+    its unwrapped body (iss-e8361e3eb60b436f item 3)."""
 
     MISSING = "canary-missing"
 
-    def test_the_body_on_an_unopened_project_is_an_empty_note_without_a_canary(self, anonymous):
-        body = _closure_body(anonymous.driver_notes.get)(anonymous.driver_notes, C.SHUT)
-        assert (body["project_id"], body["revision"], body["entry_count"], body["index"]) == (
-            C.SHUT, 0, 0, [])
-        assert C.leaked_tables(json.dumps(body)) == []
+    @pytest.mark.parametrize("bare", [False, True], ids=["wrapped", "bare-body"])
+    def test_the_note_get_refuses_unopened_and_missing_alike_below_the_guard(self, anonymous, bare):
+        refusals = []
+        for project in (C.SHUT, self.MISSING):
+            notes = anonymous.driver_notes
+            with pytest.raises(ProjectPrivate) as raised:
+                if bare:
+                    _closure_body(notes.get)(notes, project)
+                else:
+                    notes.get(project)
+            error = raised.value
+            refusals.append((type(error), error.status_code, error.detail, str(error)))
+        assert refusals[0] == refusals[1], refusals
+        assert C.leaked_tables(json.dumps([repr(r) for r in refusals])) == []
 
     def test_the_chokepoint_refuses_unopened_and_missing_alike(self, anonymous):
         refusals = []

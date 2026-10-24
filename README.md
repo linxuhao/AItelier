@@ -88,6 +88,10 @@ to find exact-version candidates, record direct conflicts and inspect affected
 bindings. These read-only helpers reuse State revisions/baselines; they do not
 introduce a solver, vector database or automatic acceptance.
 
+Callers of the native UI text observation option can follow the
+[native UI text facts guide](docs/ui-text-facts.md) for a normal example and its
+evidence limits.
+
 ## Why AItelier
 
 Most "AI agent" tooling is built for demos, not trust. The tools that build software or automate a workflow for you are non-deterministic black boxes: you can't reproduce a run, audit *why* the agent did what it did, or insert a human approval where it matters. That's exactly the wall that stops agents from being deployed in anything serious — regulated industries, enterprise, anywhere "it usually works" isn't good enough.

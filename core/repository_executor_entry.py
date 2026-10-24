@@ -552,16 +552,45 @@ def run(payload):
             witness = threading.Thread(target=_serve_witness,
                                        args=(report_r, verdict_w, storage), daemon=True)
             witness.start()
-        timed_out = False
+        timed_out, timeout_cleanup = False, None
         try:
             if stdin_data is None:
                 stdout, stderr = proc.communicate(timeout=remaining())
             else:
                 stdout, stderr = proc.communicate(input=stdin_data, timeout=remaining())
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as expired:
             timed_out = True
-            os.killpg(proc.pid, signal.SIGKILL)
-            stdout, stderr = proc.communicate()
+            # A descendant may leave this group and retain either output pipe.
+            # Stop the owned group/direct child now; never grant more test time.
+            settle_deadline = time.monotonic() + 1
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass                # the direct child/group may already be gone
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            stdout, stderr = expired.output or b"", expired.stderr or b""
+            output_complete = False
+            try:
+                stdout, stderr = proc.communicate(timeout=max(0, settle_deadline - time.monotonic()))
+                output_complete = True
+            except subprocess.TimeoutExpired as tail:
+                # communicate's timeout snapshots are cumulative, not new tails.
+                stdout, stderr = tail.output or stdout, tail.stderr or stderr
+            finally:
+                # EOF from an escaped writer is not required for our result.
+                for stream in (proc.stdin, proc.stdout, proc.stderr):
+                    if stream is not None:
+                        stream.close()
+            try:
+                proc.wait(timeout=max(0, settle_deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                pass
+            timeout_cleanup = {"direct_child_reaped": proc.returncode is not None,
+                               "output_complete": output_complete,
+                               "descendants_settled": None}
         if isinstance(stdout, bytes):
             stdout, stderr = stdout.decode("utf-8", errors="replace"), stderr.decode("utf-8", errors="replace")
         if witness is not None:
@@ -571,8 +600,10 @@ def run(payload):
             # swallowed the errno by now, the filesystem has not.
             storage["after"] = [_observe_root(r) for r in list(storage["roots"])]
 
-        return {"returncode": proc.returncode, "stdout": stdout, "stderr": stderr,
+        return {"returncode": proc.returncode if proc.returncode is not None else -1,
+                "stdout": stdout, "stderr": stderr,
                 "timed_out": timed_out, "import_error": import_error,
+                **({"timeout_cleanup": timeout_cleanup} if timeout_cleanup is not None else {}),
                 **({"storage": storage} if storage is not None else {}),
                 **({"execution_identity": execution_identity} if execution_identity else {})}
     finally:

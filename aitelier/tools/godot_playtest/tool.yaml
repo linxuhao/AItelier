@@ -35,6 +35,14 @@ parameters:
     type: string
     description: "Owning project; auto-injected by the host and overwritten if supplied by the agent. Used only for the commit owner identity of the report this gate writes — it reaches no gate threshold."
     required: false
+  ui_text_snapshot:
+    type: object
+    description: >
+      Explicit opt-in, exactly {version: 1}, for bounded same-capture native UI
+      text facts. Facts and actual written-PNG checks remain in the report;
+      they do not observe rendered pixels or certify a text audit. Omit for
+      unchanged legacy behavior. Not supported with provisional_round_feedback.
+    required: false
   purpose:
     type: string
     description: "Optional provisional_round_feedback for coding diagnostics only. Its report always has passed=false/full_test_passed=false; final acceptance still requires the full gate."

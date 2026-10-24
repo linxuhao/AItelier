@@ -21,8 +21,10 @@ It ALWAYS succeeds as a step:
 """
 
 import base64
+import hashlib
 import json
 import os
+import struct
 import urllib.error
 import urllib.request
 import uuid
@@ -234,7 +236,155 @@ def select_scenarios(spec: dict, names: list[str]) -> tuple[dict, list[str]]:
     return picked, unknown
 
 
-def _unpack_frames(report: dict, target_dir: Path) -> None:
+def _unpack_ui_text_frames(report: dict, target_dir: Path) -> None:
+    """Keep provider facts intact; attest only the PNGs actually written here."""
+    check = {"status": "incomplete", "rendered_text_status": "not_observed",
+             "captures": 0, "verified": 0, "missing_facts": 0,
+             "complete": 0, "incomplete": 0, "refused": 0,
+             "error_count": 0, "errors": []}
+
+    def error(index, code):
+        check["error_count"] += 1
+        if len(check["errors"]) < 32:
+            check["errors"].append({"capture": index, "code": code})
+
+    captures = report.get("captures")
+    if not isinstance(captures, list):
+        error(None, "capture_rows_missing")
+        captures = []
+    if not captures:
+        error(None, "no_capture_rows")
+    check["captures"] = len(captures)
+    seen = set()
+    for index, cap in enumerate(captures):
+        before = check["error_count"]
+        if not isinstance(cap, dict):
+            error(index, "invalid_capture_row")
+            continue
+        facts = cap.get("ui_text_facts")
+        if not isinstance(facts, dict):
+            check["missing_facts"] += 1
+            error(index, "facts_missing")
+            facts = {}
+        else:
+            state = facts.get("collection_state")
+            if state in ("complete", "incomplete", "refused"):
+                check[state] += 1
+                if state != "complete":
+                    error(index, "collection_" + state)
+            else:
+                error(index, "invalid_collection_state")
+            if (type(facts.get("version")) is not int or facts["version"] != 1
+                    or facts.get("scope") != "native_ui_text_facts"
+                    or facts.get("rendered_text_status") != "not_observed"):
+                error(index, "invalid_facts_header")
+            if (not isinstance(facts.get("rows"), list)
+                    or not isinstance(facts.get("hidden"), dict)
+                    or not isinstance(facts.get("unknown_surfaces"), list)
+                    or not isinstance(facts.get("errors"), list)):
+                error(index, "facts_fields_missing")
+            if facts.get("errors"):
+                error(index, "provider_facts_errors")
+            size = len(json.dumps(facts).encode())
+            if (size > 1048576 or facts.get("bytes_encoding") != "json.dumps"
+                    or type(facts.get("bytes")) is not int or facts["bytes"] != size):
+                error(index, "facts_wire_size_mismatch")
+            if (type(cap.get("frame")) is not int
+                    or type(facts.get("frame")) is not int
+                    or facts["frame"] != cap["frame"]):
+                error(index, "frame_mismatch")
+            if facts.get("scenario") != cap.get("scenario"):
+                error(index, "scenario_mismatch")
+            if state == "complete" and (not isinstance(facts.get("locale"), str)
+                                         or not facts["locale"]):
+                error(index, "locale_missing")
+        blob = cap.pop("png_b64", "")
+        if not isinstance(blob, str) or not blob:
+            error(index, "png_missing")
+        else:
+            name = os.path.basename(str(cap.get("file") or "frame.png"))
+            if not name or name in seen:
+                error(index, "duplicate_or_invalid_png_name")
+            else:
+                seen.add(name)
+                try:
+                    raw = base64.b64decode(blob, validate=True)
+                    frames_dir = target_dir / "frames"
+                    frames_dir.mkdir(parents=True, exist_ok=True)
+                    path = frames_dir / name
+                    if path.is_symlink():
+                        raise ValueError("PNG output is a symlink")
+                    path.write_bytes(raw)
+                    written = path.read_bytes()
+                    cap["file"] = f"frames/{name}"
+                    if (len(written) < 24 or written[:8] != b"\x89PNG\r\n\x1a\n"
+                            or written[8:16] != b"\x00\x00\x00\rIHDR"):
+                        error(index, "invalid_png_header")
+                    else:
+                        dimensions = list(struct.unpack(">II", written[16:24]))
+                        if (not all(dimensions) or facts.get("image_size") != dimensions
+                                or any(type(n) is not int for n in facts.get("image_size", []))):
+                            error(index, "png_dimensions_mismatch")
+                    if (facts.get("png_sha256") != hashlib.sha256(written).hexdigest()
+                            or type(facts.get("png_bytes")) is not int
+                            or facts["png_bytes"] != len(written)):
+                        error(index, "png_identity_mismatch")
+                except (OSError, ValueError, TypeError):
+                    error(index, "png_materialization_failed")
+        if cap.get("png_error"):
+            error(index, "provider_png_error")
+        if before == check["error_count"]:
+            check["verified"] += 1
+
+    summary = report.get("ui_text_snapshot")
+    if not isinstance(summary, dict):
+        error(None, "snapshot_summary_missing")
+    else:
+        if (type(summary.get("version")) is not int or summary["version"] != 1
+                or summary.get("scope") != "native_ui_text_facts"
+                or summary.get("rendered_text_status") != "not_observed"
+                or summary.get("status") != "complete"):
+            error(None, "snapshot_not_complete")
+        counts = ("requested_captures", "returned_captures", "complete",
+                  "incomplete", "refused", "missing")
+        if any(type(summary.get(k)) is not int or summary[k] < 0 for k in counts):
+            error(None, "invalid_capture_accounting")
+        elif (summary["returned_captures"] != len(captures)
+                or summary["requested_captures"] < len(captures)
+                or summary["missing"] != summary["requested_captures"] - len(captures)
+                or summary["missing"] != 0
+                or any(summary[k] != check[k] for k in ("complete", "incomplete", "refused"))
+                or summary["complete"] + summary["incomplete"] + summary["refused"] != len(captures)):
+            error(None, "capture_accounting_mismatch")
+        projection = {"ui_text_snapshot": summary, "captures": [
+            {"ui_text_facts": cap.get("ui_text_facts")} if isinstance(cap, dict) else {}
+            for cap in captures]}
+        size = len(json.dumps(projection).encode())
+        if (size > 33554432 or summary.get("bytes_encoding") != "json.dumps"
+                or type(summary.get("new_fields_bytes")) is not int
+                or summary["new_fields_bytes"] != size):
+            error(None, "snapshot_wire_size_mismatch")
+        if summary.get("errors"):
+            error(None, "provider_snapshot_errors")
+    check["errors_omitted"] = check["error_count"] - len(check["errors"])
+    if not check["error_count"]:
+        check["status"] = "verified"
+    # This local-artifact projection has only fixed strings/codes, integer
+    # counts and at most 32 code/index entries: bounded to 8 KiB. Its indented
+    # encoding is separate from the untouched producer's HTTP wire accounting.
+    check["bytes_encoding"] = "json.dumps(indent=2) projection"
+    size = len(json.dumps({"ui_text_snapshot_host": check}, indent=2).encode())
+    while check.get("local_projection_bytes") != size:
+        check["local_projection_bytes"] = size
+        size = len(json.dumps({"ui_text_snapshot_host": check}, indent=2).encode())
+    report["ui_text_snapshot_host"] = check
+    report["summary"] = str(report.get("summary", "")) + (
+        " || Native UI text facts: host %s (%d/%d captures verified; %d errors). "
+        "Rendered text remains not_observed."
+        % (check["status"], check["verified"], check["captures"], check["error_count"]))
+
+
+def _unpack_frames(report: dict, target_dir: Path, *, ui_text_snapshot: bool = False) -> None:
     """Materialise the sidecar's base64 frame captures under ``<out_dir>/frames/``
     and leave a relative path behind.
 
@@ -242,6 +392,9 @@ def _unpack_frames(report: dict, target_dir: Path) -> None:
     local temp dir, so the PNGs cannot be written where they belong — they ride
     home inside the JSON. Unpacking them here is what makes the report readable:
     a reviewer opens frames/..., and playtest_report.json never holds a blob."""
+    if ui_text_snapshot:
+        _unpack_ui_text_frames(report, target_dir)
+        return
     frames_dir = target_dir / "frames"
     for cap in report.get("captures") or []:
         blob = cap.pop("png_b64", "")
@@ -337,6 +490,17 @@ def post_playtest(payload: dict, timeout: int = 3600) -> dict:
                         f"suite outgrew the budget (raise it) or a scenario "
                         f"hangs (the sidecar caps each one at 120s, so a whole "
                         f"suite over the wall means the count grew).")}
+        if ("ui_text_snapshot" in payload and isinstance(e, urllib.error.HTTPError)
+                and e.code in (400, 413, 422)):
+            try:
+                refusal_body = json.loads(e.read())
+            except (ValueError, OSError):
+                refusal_body = {"error": "unreadable refusal response"}
+            return {"passed": False, "frames": 0, "errors": [], "state": {},
+                    "behavior": None, "spec_used": False, "gate_refused": True,
+                    "builder_refusal": {"status": e.code, "response": refusal_body},
+                    "summary": "godot-builder explicitly refused the UI text request "
+                               "(HTTP %d); no observation was produced." % e.code}
         refusal = _render_owner_refusal(e)
         if refusal is not None:
             # The sidecar ANSWERED: its render owner needs reconciliation, or
@@ -398,6 +562,14 @@ def godot_playtest(*, project_root: str = "", out_dir: str = "",
     {passed (HARD: crash/didn't-run), behavior (ADVISORY per-scenario asserts),
     frames, errors[], state, spec_used, spec_source, summary} for the reviewer.
     """
+    snapshot_requested = "ui_text_snapshot" in kwargs
+    if snapshot_requested:
+        option = kwargs["ui_text_snapshot"]
+        if (not isinstance(option, dict) or set(option) != {"version"}
+                or type(option["version"]) is not int or option["version"] != 1):
+            raise ValueError("ui_text_snapshot must be exactly {'version': 1}")
+        if kwargs.get("purpose") == "provisional_round_feedback":
+            raise ValueError("ui_text_snapshot is not supported for provisional_round_feedback")
     repo = Path(project_root or workspace_root).resolve()
     if kwargs.get("purpose") not in (None, "", "full_acceptance", "provisional_round_feedback"):
         raise ValueError("unknown playtest purpose")
@@ -459,6 +631,8 @@ def godot_playtest(*, project_root: str = "", out_dir: str = "",
             # those pictures. A default that is right for the gate is wrong here,
             # so the only consumer states its own need.
             payload["captures"] = _DPE_CAPTURES
+            if snapshot_requested:
+                payload["ui_text_snapshot"] = {"version": 1}
             report = post_playtest(payload)
             # The sidecar says there is no Godot project at a path where THIS
             # process just stat'd project.godot. It is not looking at the same
@@ -534,7 +708,7 @@ def godot_playtest(*, project_root: str = "", out_dir: str = "",
 
     target_dir = Path(out_dir) if out_dir else repo
     target_dir.mkdir(parents=True, exist_ok=True)
-    _unpack_frames(report, target_dir)
+    _unpack_frames(report, target_dir, ui_text_snapshot=snapshot_requested)
     (target_dir / "playtest_report.json").write_text(
         json.dumps(report, indent=2), encoding="utf-8")
     return {"written": "playtest_report.json", "passed": report.get("passed", True)}

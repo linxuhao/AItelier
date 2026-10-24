@@ -1190,6 +1190,7 @@ _PROBE_GD = r'''extends Node
 # as a PNG at each frame listed in AITELIER_PROBE_CAPTURE_AT.
 # Always writes {frames, asserts[], nodes{}, captures[]} to AITELIER_PROBE_OUT.
 # Indented with spaces (GDScript accepts consistent spaces or tabs).
+const _UI_TEXT_FACTS := false
 var _frame := 0
 var _max := 180
 var _dumped := false
@@ -1301,10 +1302,15 @@ func _capture_failure(drawn: int, reason: String) -> Dictionary:
     # viewport/texture/image or a failed save_png must never make the frame
     # VANISH from the report: the row is kept with complete=false and the exact
     # reason, so a lost capture can never read as a complete empty corpus.
-    return {"frame": drawn, "file": "", "complete": false, "error": reason,
+    var failure := {"frame": drawn, "file": "", "complete": false, "error": reason,
         "text_observation": {"frame": drawn, "complete": false,
             "error": reason,
             "incomplete_reasons": ["capture failure: %s" % reason]}}
+    if _UI_TEXT_FACTS:
+        failure["ui_text_facts"] = _ui_facts_empty(drawn, Vector2i.ZERO)
+        failure["ui_text_facts"]["collection_state"] = "incomplete"
+        failure["ui_text_facts"]["errors"].append("capture_not_observed")
+    return failure
 func _grab(drawn: int) -> void:
     var vp := get_viewport()
     if vp == null:
@@ -1327,8 +1333,11 @@ func _grab(drawn: int) -> void:
         return
     # Same-frame text/geometry observation: the PNG and the observation are
     # taken at the SAME _on_post_draw instant, so both describe one frame.
-    _captures.append({"frame": drawn, "file": path,
-        "text_observation": _observe_text(drawn, img.get_size())})
+    var capture := {"frame": drawn, "file": path,
+        "text_observation": _observe_text(drawn, img.get_size())}
+    if _UI_TEXT_FACTS:
+        capture["ui_text_facts"] = _observe_ui_facts(drawn, img.get_size())
+    _captures.append(capture)
 
 func _rect_json(r: Rect2) -> Array:
     return [r.position.x, r.position.y, r.size.x, r.size.y]
@@ -1447,6 +1456,222 @@ func _render_chain(c: Control) -> Dictionary:
     out["clip"] = clip
     out["resolved"] = true
     return out
+
+# Opt-in native facts are not an inventory of every rendered pixel/string.
+const _UI_FACT_BYTES := 1048576
+var _ui_fact_bytes := 0
+var _ui_fact_nodes := 0
+func _ui_facts_empty(drawn: int, size: Vector2i) -> Dictionary:
+    return {"version": 1, "scope": "native_ui_text_facts",
+        "collection_state": "complete", "rendered_text_status": "not_observed",
+        "frame": drawn, "scenario": _before_scope,
+        "locale": str(TranslationServer.get_locale()),
+        "viewport_id": str(get_viewport().get_path()),
+        "viewport_rect": _rect_json(get_viewport().get_visible_rect()),
+        "image_size": [size.x, size.y], "png_sha256": null, "png_bytes": null,
+        "rows": [], "hidden": {"count": 0, "reasons": {}},
+        "unknown_surfaces": [], "errors": [], "visited_nodes": 0,
+        "limits": {"nodes": 4096, "depth": 64, "bytes": _UI_FACT_BYTES},
+        "limitations": ["Native API facts only; actual rendered text is not observed. A node walk cannot discover every custom/server/image contribution."]}
+func _ui_fact_error(out: Dictionary, code: String) -> void:
+    if not out["errors"].has(code):
+        out["errors"].append(code)
+    if out["collection_state"] != "refused":
+        out["collection_state"] = "incomplete"
+func _ui_fact_add(out: Dictionary, field: String, value) -> bool:
+    var size := JSON.stringify(value).to_utf8_buffer().size() + 1
+    if _ui_fact_bytes + size > _UI_FACT_BYTES:
+        out["collection_state"] = "refused"
+        _ui_fact_error(out, "native_byte_limit")
+        return false
+    _ui_fact_bytes += size
+    out[field].append(value)
+    return true
+func _ui_fact_unknown(out: Dictionary, node: Node, reason: String) -> bool:
+    # Pixel contribution limits do not turn completed native reads into a
+    # claim about rendered text. The separate not_observed scope always holds.
+    return _ui_fact_add(out, "unknown_surfaces", {
+        "path": str(node.get_path()), "class": node.get_class(), "reason": reason})
+func _ui_fact_hidden(out: Dictionary, reason: String) -> void:
+    out["hidden"]["count"] += 1
+    var reasons: Dictionary = out["hidden"]["reasons"]
+    reasons[reason] = int(reasons.get(reason, 0)) + 1
+func _ui_fact_geometry(c: Control) -> Dictionary:
+    var chain := _render_chain(c)
+    var resolved: bool = chain["resolved"]
+    var effective = null
+    if resolved:
+        effective = chain["screen_rect"].intersection(chain["clip"])
+    return {"screen_rect": _rect_json(chain["screen_rect"]) if resolved else null,
+        "clip_rect": _rect_json(chain["clip"]) if resolved else null,
+        "effective_rect": _rect_json(effective) if effective != null else null,
+        "clip_resolved": resolved, "reason": str(chain["reason"]),
+        "effective_alpha": float(chain["chain_alpha"]) * c.self_modulate.a if resolved else null,
+        "culled": resolved and (chain["layer_culled"] or chain["clip_culled"] or
+            float(chain["chain_alpha"]) * c.self_modulate.a <= 0.0)}
+func _ui_fact_row(out: Dictionary, c: Control, text: String, kind: String,
+        geometry: Dictionary, state: Dictionary, extra: Array = []) -> bool:
+    if text.length() > _UI_FACT_BYTES:
+        out["collection_state"] = "refused"
+        _ui_fact_error(out, "native_byte_limit")
+        return false
+    var limitations := ["Logical/parsed native text is not a confirmed visible glyph string; clipping, reveal, occlusion and custom drawing remain outside this read."]
+    limitations.append_array(extra)
+    return _ui_fact_add(out, "rows", {"path": str(c.get_path()), "class": c.get_class(),
+        "text": text, "text_kind": kind, "visible_in_tree": c.is_visible_in_tree(),
+        "visibility": "possibly_visible" if geometry["clip_resolved"] else "unknown",
+        "geometry": geometry, "limitations": limitations, "state": state})
+func _ui_fact_walk(node: Node, depth: int, out: Dictionary) -> bool:
+    _ui_fact_nodes += 1
+    if _ui_fact_nodes > 4096 or depth > 64:
+        out["collection_state"] = "refused"
+        _ui_fact_error(out, "traversal_bound")
+        return false
+    if str(node.get_path()).length() > _UI_FACT_BYTES:
+        out["collection_state"] = "refused"
+        _ui_fact_error(out, "native_byte_limit")
+        return false
+    if node is CanvasItem:
+        var ci := node as CanvasItem
+        if not ci.is_visible_in_tree():
+            _ui_fact_hidden(out, "not_visible_in_tree")
+        else:
+            if ci.get_script() != null or not ci.get_signal_connection_list("draw").is_empty():
+                if not _ui_fact_unknown(out, node, "script_or_draw_signal_may_add_pixels"):
+                    return false
+            if ci.material != null or ci.use_parent_material:
+                if not _ui_fact_unknown(out, node, "material_visibility_or_glyphs_not_observed"):
+                    return false
+            if node is CanvasModulate and (node as CanvasModulate).color.a != 1.0:
+                if not _ui_fact_unknown(out, node, "canvas_modulation_not_in_native_chain_alpha"):
+                    return false
+            if node is Control:
+                var c := node as Control
+                if c is BaseButton and _prop_or_null(c, "icon") != null:
+                    if not _ui_fact_unknown(out, node, "button_icon_pixels_not_transcribed"):
+                        return false
+                var geometry := _ui_fact_geometry(c)
+                if geometry["culled"]:
+                    _ui_fact_hidden(out, "native_chain_culled")
+                elif c is Label or c.get_class() == "Button" or c is OptionButton:
+                    var state := {}
+                    if c is Label:
+                        var label := c as Label
+                        state = {"uppercase": label.uppercase, "visible_characters": label.visible_characters,
+                            "visible_characters_behavior": label.visible_characters_behavior,
+                            "text_overrun_behavior": label.text_overrun_behavior,
+                            "lines_skipped": label.lines_skipped, "max_lines_visible": label.max_lines_visible}
+                    if c is OptionButton:
+                        var option := c as OptionButton
+                        state = {"selected": option.selected, "popup_open": option.get_popup().visible,
+                            "item_count": option.item_count}
+                    var source := str(c.get("text"))
+                    if source.length() > _UI_FACT_BYTES:
+                        out["collection_state"] = "refused"
+                        _ui_fact_error(out, "native_byte_limit")
+                        return false
+                    if not _ui_fact_row(out, c, str(c.atr(source)), "resolved_logical", geometry, state):
+                        return false
+                elif c is RichTextLabel:
+                    var rich := c as RichTextLabel
+                    if rich.get_total_character_count() > _UI_FACT_BYTES:
+                        out["collection_state"] = "refused"
+                        _ui_fact_error(out, "native_byte_limit")
+                        return false
+                    if not rich.is_finished():
+                        _ui_fact_error(out, "rich_text_not_finished")
+                        if not _ui_fact_unknown(out, node, "rich_text_not_finished"):
+                            return false
+                    elif not _ui_fact_row(out, c, rich.get_parsed_text(), "parsed", geometry,
+                            {"visible_characters": rich.visible_characters, "visible_ratio": rich.visible_ratio,
+                             "scroll_active": rich.scroll_active},
+                            ["Live parsed stack; embedded images/generated markers/effects and scroll/reveal pixels are not transcribed."]):
+                        return false
+                elif c is LineEdit:
+                    var edit := c as LineEdit
+                    if edit.secret or edit.has_ime_text():
+                        _ui_fact_error(out, "secret_or_ime_text_not_read")
+                        if not _ui_fact_unknown(out, node, "secret_or_ime_text_not_read"):
+                            return false
+                    else:
+                        var placeholder: bool = edit.text == ""
+                        var text: String = str(edit.atr(edit.placeholder_text)) if placeholder else edit.text
+                        if not _ui_fact_row(out, c, text, "resolved_logical", geometry,
+                                {"placeholder": placeholder, "secret": false, "ime": false}):
+                            return false
+                elif _TEXT_UNSUPPORTED.has(c.get_class()) or typeof(_prop_or_null(c, "text")) == TYPE_STRING:
+                    if not _ui_fact_unknown(out, node, "native_class_text_not_adapted"):
+                        return false
+                if c is TextureRect or c is TextureButton:
+                    if not _ui_fact_unknown(out, node, "image_pixels_not_transcribed"):
+                        return false
+            elif node is Sprite2D:
+                if not _ui_fact_unknown(out, node, "image_or_custom_pixels_not_transcribed"):
+                    return false
+    elif node is Window:
+        var w := node as Window
+        if not w.visible:
+            _ui_fact_hidden(out, "window_hidden")
+        elif w != get_viewport():
+            if not _ui_fact_unknown(out, node, "window_pixels_not_separately_measured_against_root_png"):
+                return false
+            if w is PopupMenu:
+                var popup := w as PopupMenu
+                if popup.item_count > 4096:
+                    out["collection_state"] = "refused"
+                    _ui_fact_error(out, "item_model_bound")
+                    return false
+                for index in popup.item_count:
+                    var source: String = popup.get_item_text(index)
+                    var mode: int = popup.get_item_auto_translate_mode(index)
+                    var text: String = source
+                    if mode == Node.AUTO_TRANSLATE_MODE_ALWAYS:
+                        text = str(popup.tr(source))
+                    elif mode != Node.AUTO_TRANSLATE_MODE_DISABLED:
+                        text = str(popup.atr(source))
+                    if text.length() > _UI_FACT_BYTES:
+                        out["collection_state"] = "refused"
+                        _ui_fact_error(out, "native_byte_limit")
+                        return false
+                    if not _ui_fact_add(out, "rows", {"path": str(w.get_path()), "class": w.get_class(),
+                            "text": text, "text_kind": "resolved_logical", "visible_in_tree": w.visible,
+                            "visibility": "unknown", "geometry": {"clip_resolved": false,
+                                "screen_rect": null, "clip_rect": null, "effective_rect": null,
+                                "reason": "popup window item pixels not resolved against root PNG"},
+                            "limitations": ["Item model does not establish shown/clipped item glyphs or shortcut text."],
+                            "state": {"item_index": index, "auto_translate_mode": mode, "popup_open": true}}):
+                        return false
+    elif node is Node3D:
+        if not _ui_fact_unknown(out, node, "3d_pixels_not_transcribed"):
+            return false
+    for index in node.get_child_count(true):
+        if not _ui_fact_walk(node.get_child(index, true), depth + 1, out):
+            return false
+    return true
+func _observe_ui_facts(drawn: int, image_size: Vector2i) -> Dictionary:
+    var out := _ui_facts_empty(drawn, image_size)
+    var vp := get_viewport()
+    _png_xform = vp.get_final_transform()
+    _png_rect = Rect2(Vector2.ZERO, Vector2(image_size))
+    _png_unresolved = ""
+    if not (vp.get_stretch_transform() * vp.get_visible_rect()).is_equal_approx(_png_rect):
+        _png_unresolved = "viewport stretch does not match PNG"
+    elif vp.snap_2d_transforms_to_pixel:
+        _png_unresolved = "pixel snapping is not reproduced"
+    out["png_from_viewport_2d"] = [_png_xform.x.x, _png_xform.x.y, _png_xform.y.x,
+        _png_xform.y.y, _png_xform.origin.x, _png_xform.origin.y]
+    _ui_fact_nodes = 0
+    _ui_fact_bytes = JSON.stringify(out).to_utf8_buffer().size()
+    _ui_fact_walk(get_tree().get_root(), 0, out)
+    out["visited_nodes"] = _ui_fact_nodes
+    if out["collection_state"] == "refused" or JSON.stringify(out).to_utf8_buffer().size() > _UI_FACT_BYTES:
+        var refused := _ui_facts_empty(drawn, image_size)
+        refused["collection_state"] = "refused"
+        refused["errors"] = out["errors"] if not out["errors"].is_empty() else ["native_byte_limit"]
+        refused["visited_nodes"] = _ui_fact_nodes
+        return refused
+    return out
+
 const _TEXT_SUPPORTED = ["Label", "Button"]
 # Classes that visibly bear text but whose DISPLAYED string is not an ordinary
 # text property: RichTextLabel markup, LineEdit/TextEdit masking + secret mode,
@@ -2694,6 +2919,9 @@ func _walk(node: Node, acc: Dictionary) -> void:
     if node.get_script() != null:
         var vars := {}
         for p in node.get_property_list():
+            # New opt-in bookkeeping must not change legacy node snapshots.
+            if node == self and str(p.name) in ["_ui_fact_bytes", "_ui_fact_nodes"]:
+                continue
             if p.usage & PROPERTY_USAGE_SCRIPT_VARIABLE:
                 var v = node.get(p.name)
                 match typeof(v):
@@ -2716,8 +2944,11 @@ _PROBE_GD = _PROBE_GD.replace(
     "__BEFORE_PROPERTY_PATH_RE__", json.dumps(r"\A(?:" + _BEFORE_OPERAND_PATTERN + r")\z"))
 
 
-def _inject_probe(dst: Path) -> None:
-    (dst / "_aitelier_probe.gd").write_text(_PROBE_GD)
+def _inject_probe(dst: Path, *, ui_text_facts: bool = False) -> None:
+    probe_source = (_PROBE_GD.replace("const _UI_TEXT_FACTS := false",
+                                     "const _UI_TEXT_FACTS := true", 1)
+                    if ui_text_facts else _PROBE_GD)
+    (dst / "_aitelier_probe.gd").write_text(probe_source)
     pg = dst / "project.godot"
     text = pg.read_text() if pg.is_file() else "config_version=5\n"
     autoload = '_AItelierProbe="*res://_aitelier_probe.gd"'
@@ -2905,6 +3136,179 @@ def _seal_text_observation(obs) -> dict:
     return out
 
 
+
+# Separate opt-in budget: legacy text_observation keeps its exact 64KiB contract.
+_UI_TEXT_OMITTED = object()
+_UI_TEXT_OBJECT_BYTES = 1048576
+_UI_TEXT_TOTAL_BYTES = 33554432
+_UI_TEXT_REFUSAL_RESERVE = 4096
+
+def _validate_ui_text_snapshot(value) -> None:
+    if (not isinstance(value, dict) or set(value) != {"version"}
+            or type(value["version"]) is not int or value["version"] != 1):
+        raise ValueError("ui_text_snapshot requires exactly {version: 1}")
+
+def _ui_text_check_capacity(expected_captures: int) -> None:
+    # Fixed bounded envelopes, including key/list punctuation and summary.
+    # This conservative reserve also covers escaped 64-character locale and
+    # 256-character scenario identity; callers cannot tune the budget.
+    if (type(expected_captures) is not int or expected_captures < 0
+            or (expected_captures + 1) * _UI_TEXT_REFUSAL_RESERVE > _UI_TEXT_TOTAL_BYTES):
+        raise ValueError("ui_text_snapshot minimum refusal envelopes exceed invocation budget")
+
+def _ui_text_preflight(spec, frames, timeout, captures) -> int:
+    if captures is not None and (type(captures) is not int or captures < 0):
+        raise ValueError("ui_text_snapshot captures must be a nonnegative integer")
+    if spec:
+        plans, errors = _authored_execution_plan(spec, frames, timeout)
+        if errors:
+            return 0  # Existing admission remains responsible for its refusal.
+        expected = 0
+        for scenario, plan in zip(spec["scenarios"], plans):
+            timeline, _ = _normalize_timeline(scenario.get("timeline", []))
+            expected += len(_capture_frames(plan[0], timeline, limit=captures))
+            _ui_text_check_capacity(expected)
+    else:
+        if not _valid_frame_count(frames):
+            raise ValueError("ui_text_snapshot frames must be a positive exact integer")
+        expected = len(_capture_frames(frames, limit=captures))
+    _ui_text_check_capacity(expected)
+    return expected
+
+def _ui_text_wire_bytes(facts: dict) -> int:
+    facts["bytes_encoding"] = "json.dumps"
+    size = len(json.dumps(facts).encode())
+    while facts.get("bytes") != size:
+        facts["bytes"] = size
+        size = len(json.dumps(facts).encode())
+    return size
+
+def _ui_text_png_identity(capture: dict):
+    try:
+        raw = base64.b64decode(capture.get("png_b64", ""), validate=True)
+    except (ValueError, TypeError):
+        return None, None, None, "png_base64_invalid"
+    if (capture.get("png_error") or len(raw) < 24
+            or raw[:8] != b"\x89PNG\r\n\x1a\n" or raw[12:16] != b"IHDR"):
+        return None, None, None, "png_missing_or_invalid"
+    size = [int.from_bytes(raw[16:20], "big"), int.from_bytes(raw[20:24], "big")]
+    if min(size) <= 0:
+        return None, None, None, "png_dimensions_invalid"
+    return hashlib.sha256(raw).hexdigest(), len(raw), size, None
+
+def _ui_text_refusal(capture: dict, code: str, original=None) -> dict:
+    original = original if isinstance(original, dict) else {}
+    def short(value, maximum):
+        return value if isinstance(value, str) and len(value) <= maximum else None
+    frame = capture.get("frame")
+    out = {"version": 1, "scope": "native_ui_text_facts",
+           "collection_state": "refused", "rendered_text_status": "not_observed",
+           "frame": frame if type(frame) is int and 0 <= frame <= _MAX_JSON_FRAME else None,
+           "scenario": short(capture.get("scenario"), 256),
+           "locale": short(original.get("locale"), 64),
+           "viewport_rect": (original.get("viewport_rect")
+                             if isinstance(original.get("viewport_rect"), list)
+                             and len(original["viewport_rect"]) == 4
+                             and all(type(v) in (int, float) and math.isfinite(v)
+                                     for v in original["viewport_rect"]) else None),
+           "image_size": None,
+           "png_sha256": None, "png_bytes": None,
+           "rows": [], "hidden": {"count": 0, "reasons": {}},
+           "unknown_surfaces": [], "errors": [code]}
+    digest, count, size, error = _ui_text_png_identity(capture)
+    out.update(png_sha256=digest, png_bytes=count, image_size=size)
+    if error and error not in out["errors"]:
+        out["errors"].append(error)
+    _ui_text_wire_bytes(out)
+    return out
+
+def _bind_ui_text_facts(capture: dict) -> None:
+    facts = capture.get("ui_text_facts")
+    if not isinstance(facts, dict):
+        capture["ui_text_facts"] = _ui_text_refusal(capture, "native_facts_missing")
+        return
+    if (facts.get("version") != 1 or type(facts.get("version")) is not int
+            or facts.get("scope") != "native_ui_text_facts"
+            or facts.get("rendered_text_status") != "not_observed"
+            or facts.get("collection_state") not in ("complete", "incomplete", "refused")
+            or not isinstance(facts.get("rows"), list)
+            or not isinstance(facts.get("hidden"), dict)
+            or not isinstance(facts.get("unknown_surfaces"), list)
+            or not isinstance(facts.get("errors"), list)
+            or any(key in facts for key in ("all_render_complete", "rendered_text_complete"))):
+        capture["ui_text_facts"] = _ui_text_refusal(capture, "native_facts_invalid", facts)
+        return
+    errors = facts["errors"]
+    def error(code):
+        if code not in errors:
+            errors.append(code)
+        if facts["collection_state"] != "refused":
+            facts["collection_state"] = "incomplete"
+    if type(facts.get("frame")) is not int or facts["frame"] != capture.get("frame"):
+        error("native_frame_mismatch")
+    scenario = capture.get("scenario")
+    if facts.get("scenario") not in (None, "", scenario):
+        error("native_scenario_mismatch")
+    facts["scenario"] = scenario
+    if not isinstance(facts.get("locale"), str) or len(facts["locale"]) > 64:
+        error("native_locale_missing_or_invalid")
+    digest, count, size, png_error = _ui_text_png_identity(capture)
+    if png_error:
+        error(png_error)
+    elif facts.get("image_size") != size:
+        error("native_image_size_mismatch")
+    facts.update(png_sha256=digest, png_bytes=count, image_size=size)
+    if len(facts["rows"]) > 4096 or len(facts["unknown_surfaces"]) > 4096:
+        error("native_record_bound")
+    if _ui_text_wire_bytes(facts) > _UI_TEXT_OBJECT_BYTES:
+        capture["ui_text_facts"] = _ui_text_refusal(capture, "object_wire_byte_limit", facts)
+
+def _seal_ui_text_report(report: dict, expected_captures: int) -> dict:
+    captures = report.get("captures")
+    captures = captures if isinstance(captures, list) else []
+    _ui_text_check_capacity(max(expected_captures, len(captures)))
+    for capture in captures:
+        _bind_ui_text_facts(capture)
+    summary = {"version": 1, "scope": "native_ui_text_facts",
+               "rendered_text_status": "not_observed", "status": "incomplete",
+               "requested_captures": expected_captures,
+               "returned_captures": len(captures), "complete": 0,
+               "incomplete": 0, "refused": 0,
+               "missing": max(expected_captures - len(captures), 0),
+               "new_fields_bytes": 0, "bytes_encoding": "json.dumps", "errors": []}
+    report["ui_text_snapshot"] = summary
+    def account():
+        for state in ("complete", "incomplete", "refused"):
+            summary[state] = sum(c["ui_text_facts"]["collection_state"] == state for c in captures)
+        summary["errors"] = []
+        if not expected_captures:
+            summary["errors"].append("no_captures_requested")
+        if summary["missing"]:
+            summary["errors"].append("requested_captures_missing")
+        if len(captures) > expected_captures:
+            summary["errors"].append("unexpected_capture_count")
+        if summary["incomplete"] or summary["refused"]:
+            summary["errors"].append("native_facts_incomplete_or_refused")
+        summary["status"] = ("complete" if expected_captures and not summary["errors"]
+                             else "refused" if summary["refused"] == len(captures) and captures
+                             else "incomplete")
+        projection = {"ui_text_snapshot": summary,
+                      "captures": [{"ui_text_facts": c["ui_text_facts"]} for c in captures]}
+        size = len(json.dumps(projection).encode())
+        while summary["new_fields_bytes"] != size:
+            summary["new_fields_bytes"] = size
+            size = len(json.dumps(projection).encode())
+        return size
+    if account() > _UI_TEXT_TOTAL_BYTES:
+        # Refuse the entire requested set, never a successful prefix. All fixed
+        # envelopes were reserved before copy/import/engine admission.
+        for capture in captures:
+            capture["ui_text_facts"] = _ui_text_refusal(
+                capture, "invocation_wire_byte_limit", capture["ui_text_facts"])
+        account()
+    return report
+
+
 def _attach_pngs(captures: list, cap_dir: Path, timing: dict | None = None) -> list:
     """Inline each captured PNG as base64 and keep only its basename: the sidecar
     mounts the workspace read-only, so the bytes have to ride home in the JSON
@@ -2942,6 +3346,11 @@ def _attach_pngs(captures: list, cap_dir: Path, timing: dict | None = None) -> l
             png_missing.append(png.name)
             _invalidate_observation_for_png(entry, entry["png_error"])
         entry["text_observation"] = _seal_text_observation(entry["text_observation"])
+        if "ui_text_facts" in c:
+            entry["ui_text_facts"] = c["ui_text_facts"]
+            if isinstance(c["ui_text_facts"], dict):
+                entry["scenario"] = c["ui_text_facts"].get("scenario") or None
+            _bind_ui_text_facts(entry)
         out.append(entry)
     if timing is not None:
         timing["png_b64_sec"] = timing.get("png_b64_sec", 0.0) + (time.monotonic() - t0)
@@ -4407,15 +4816,23 @@ def playtest_project(project_dir: str, frames: int = DEFAULT_PLAYTEST_FRAMES,
                      retain_errors: list | None = None,
                      retain_patterns: list | None = None,
                      retain_requested: bool = False,
-                     corr: dict | None = None) -> dict:
+                     corr: dict | None = None,
+                     ui_text_snapshot=_UI_TEXT_OMITTED) -> dict:
+    ui_requested = ui_text_snapshot is not _UI_TEXT_OMITTED
+    expected_ui_captures = 0
+    if ui_requested:
+        _validate_ui_text_snapshot(ui_text_snapshot)
+        expected_ui_captures = _ui_text_preflight(spec, frames, timeout, captures)
     proj = Path(project_dir)
     if not (proj / "project.godot").is_file():
-        return {"passed": True, "frames": 0, "errors": [], "state": {},
-                "behavior": None, "spec_used": False, "no_project": True,
-                "summary": "No Godot project — playtest skipped."}
+        result = {"passed": True, "frames": 0, "errors": [], "state": {},
+                  "behavior": None, "spec_used": False, "no_project": True,
+                  "summary": "No Godot project — playtest skipped."}
+        return _seal_ui_text_report(result, expected_ui_captures) if ui_requested else result
     if spec and _authored_execution_plan(spec, frames, timeout)[1]:
         # Invalid authored work is a structured refusal BEFORE copy/import.
-        return _playtest_spec(proj, spec, frames, timeout, corr=corr)
+        result = _playtest_spec(proj, spec, frames, timeout, corr=corr)
+        return _seal_ui_text_report(result, expected_ui_captures) if ui_requested else result
     # The real Godot user:// root name for THIS project — retention searches
     # the invocation-owned app_userdata/<name> (or custom user dir), never a
     # guessed HOME root and never the whole HOME.
@@ -4430,7 +4847,10 @@ def playtest_project(project_dir: str, frames: int = DEFAULT_PLAYTEST_FRAMES,
     want_raw = bool(retain or retain_errors or retain_patterns or retain_requested)
     raw_logs = _InvocationLogs(homes, labels) if want_raw else []
     try:
-        _inject_probe(dst)
+        if ui_requested:
+            _inject_probe(dst, ui_text_facts=True)
+        else:
+            _inject_probe(dst)
         t_import = time.monotonic()
         try:
             if want_raw:
@@ -4470,7 +4890,7 @@ def playtest_project(project_dir: str, frames: int = DEFAULT_PLAYTEST_FRAMES,
         if isinstance(result, dict):
             result["timing"] = _assemble_ledger(ledger, started_at, t_start,
                                                 copy_sec, import_sec)
-        return result
+        return _seal_ui_text_report(result, expected_ui_captures) if ui_requested else result
     finally:
         for h in homes:
             shutil.rmtree(h, ignore_errors=True)
@@ -6057,6 +6477,8 @@ class _Handler(BaseHTTPRequestHandler):
         one. If the placeholder is not there (an older ledger, or a report with
         no timing at all) the body is sent untouched: a missing number must
         never cost a caller its 444MB of evidence."""
+        if "ui_text_snapshot" in payload:
+            _seal_ui_text_report(payload, payload["ui_text_snapshot"]["requested_captures"])
         t0 = time.monotonic()
         text = json.dumps(payload)
         took = time.monotonic() - t0
@@ -6131,6 +6553,15 @@ class _Handler(BaseHTTPRequestHandler):
             req = json.loads(self.rfile.read(n) or b"{}")
         except json.JSONDecodeError:
             return self._send(400, {"error": "bad json"})
+        if "ui_text_snapshot" in req and self.path != "/playtest":
+            return self._send(400, {"error": "ui_text_snapshot is supported only by /playtest"})
+        if self.path == "/playtest" and "ui_text_snapshot" in req:
+            try:
+                _validate_ui_text_snapshot(req["ui_text_snapshot"])
+                _ui_text_preflight(req.get("spec"), req.get("frames", DEFAULT_PLAYTEST_FRAMES),
+                                   req.get("timeout", 120), req.get("captures"))
+            except (ValueError, TypeError, OverflowError) as exc:
+                return self._send(400, {"error": str(exc)})
         # Owned-evidence and render flags are validated BEFORE any copy, import,
         # admission or effect work, so a request that asks for something invalid
         # changes nothing on this box. `render` must be a real boolean and the
@@ -6319,6 +6750,8 @@ class _Handler(BaseHTTPRequestHandler):
                         "owner_id": owner.get("owner_id") if owner else None,
                         "generation": owner.get("generation") if owner else None}
                 playtest_kwargs = {}
+                if "ui_text_snapshot" in req:
+                    playtest_kwargs["ui_text_snapshot"] = req["ui_text_snapshot"]
                 if retain_files or retain_patterns or retain_errors or retain_requested:
                     playtest_kwargs.update(retain=retain_files,
                                            retain_patterns=retain_patterns,

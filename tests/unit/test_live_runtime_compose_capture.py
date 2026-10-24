@@ -32,7 +32,10 @@ def operated_backend(tmp_path, monkeypatch):
 with open(os.environ['OWNED_COMMAND_LOG'], 'a') as log:
     log.write(json.dumps(sys.argv[1:]) + '\\n')
 if sys.argv[1] == 'compose':
-    assert sys.argv[2:] == ['-f', os.environ['OWNED_COMPOSE_FILE'], 'ps', '-q', 'aitelier']
+    expected = ['-f', os.environ['OWNED_COMPOSE_FILE'], 'ps', '-q', 'aitelier']
+    if 'OWNED_COMPOSE_ROOT' in os.environ:
+        expected = ['--project-directory', os.environ['OWNED_COMPOSE_ROOT']] + expected
+    assert sys.argv[2:] == expected
     mode = os.environ.get('OWNED_COMPOSE_MODE', 'cid')
     if mode == 'nonzero':
         print('a' * 64)
@@ -167,3 +170,34 @@ def test_source_imports_and_owned_container_caps():
     assert Path('/sys/fs/cgroup/memory.max').read_text().strip() == '2147483648'
     assert Path('/sys/fs/cgroup/pids.max').read_text().strip() == '512'
     assert not {'api.dependencies', 'core.db_manager', 'skillflow.core'} & set(sys.modules)
+
+
+@pytest.mark.parametrize('mismatch', [False, True])
+def test_explicit_canonical_compose_root_keeps_normal_identity_verification(
+        operated_backend, tmp_path, monkeypatch, mismatch):
+    facts, log = operated_backend
+    canonical = tmp_path/'canonical-project'; canonical.mkdir()
+    compose_file = canonical/'docker-compose.yml'; compose_file.write_text('services: {}\n')
+    monkeypatch.setenv('OWNED_COMPOSE_ROOT', str(canonical))
+    monkeypatch.setenv('OWNED_COMPOSE_FILE', str(compose_file))
+    if mismatch:
+        facts['runtime_identity']['pid_namespace'] = 'pid:[99999999]'
+        facts['digest'] = dq._observation_digest(facts)
+        with pytest.raises(ValueError, match='operated backend'):
+            server._live_runtime_observation('http://127.0.0.1:4444', compose_root=canonical)
+    else:
+        assert server._live_runtime_observation('http://127.0.0.1:4444', compose_root=canonical) == facts
+    commands = [json.loads(line) for line in log.read_text().splitlines()]
+    assert commands[0] == ['compose', '--project-directory', str(canonical), '-f',
+                           str(compose_file), 'ps', '-q', 'aitelier']
+    assert commands[1] == ['inspect', '--format', '{{.State.Pid}}', 'a'*64]
+    assert not {'api.dependencies', 'core.db_manager', 'skillflow.core'} & set(sys.modules)
+
+
+@pytest.mark.parametrize('kind', ['relative', 'absent', 'no-compose'])
+def test_explicit_compose_root_refuses_unusable_project(tmp_path, kind):
+    root = tmp_path/'canonical'
+    if kind == 'no-compose': root.mkdir()
+    if kind == 'relative': root = Path('relative-project')
+    with pytest.raises((ValueError, FileNotFoundError)):
+        server._compose_files(root)

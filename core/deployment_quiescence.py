@@ -122,7 +122,8 @@ GODOT_COORDINATED_OWNER_IDENTITY = {
 # Decision fields that restrict or refuse an action instead of permitting it.
 # A quiescent inventory needs no permission, but it must still honor these.
 RESTRICTING_OVERRIDE_FIELDS = frozenset({
-    "_invalid_override", "backend_only", "godot_only", "semantic_only", "deployment_attempt_id",
+    "_invalid_override", "backend_only", "godot_only", "semantic_only", "cpu_only",
+    "deployment_attempt_id",
     "coordinated_owners",
 })
 OWNER_INVENTORY_BLOCKERS = {
@@ -2039,9 +2040,20 @@ def _settled_external_owner(row: dict, observed_at: str) -> bool:
         return False
 
 
+# The State registry describes assignments, not CPU sessions. A CPU-only caller
+# may disclose these exact metadata columns as unknown/nonconsumers; it never
+# infers an owner ACK or quiescence from a frozen Doc/research assignment.
+# Extra columns fail closed, including future PID/resource/session/operation
+# identity fields, even when a current metadata row reports settled.
+CPU_METADATA_OWNER_FIELDS = frozenset({
+    "attempt_id", "project_id", "node_key", "harness", "external_id", "status",
+    "admitted_at", "updated_at", "settled_at", "abandon_kind", "owner_driver_id",
+})
+
+
 def _classify_blockers(observation: dict, *, backend_only: bool = False,
                        godot_only: bool = False,
-                       semantic_only: bool = False,
+                       semantic_only: bool = False, cpu_only: bool = False,
                        deployment_attempt_id: str | None = None,
                        actor: str | None = None) -> tuple[dict, list[dict]]:
     """Classify effects without removing any measured owner or error.
@@ -2050,7 +2062,7 @@ def _classify_blockers(observation: dict, *, backend_only: bool = False,
     ready demand on persistent storage and settled recovery are passive metadata;
     physical operations, unsettled demand and measurement errors remain vetoes.
     """
-    passive_scope = backend_only or godot_only or semantic_only
+    passive_scope = backend_only or godot_only or semantic_only or cpu_only
     blockers = observation.get("blockers")
     if not isinstance(blockers, dict):
         return {"measurement_failure": [{"reason": "blocker inventory is malformed"}]}, []
@@ -2068,6 +2080,14 @@ def _classify_blockers(observation: dict, *, backend_only: bool = False,
         elif passive_scope and name == "registered_external_owners" and isinstance(rows, list):
             known_rows = []
             for row in rows:
+                if cpu_only:
+                    if CPU_METADATA_OWNER_FIELDS.issuperset(row):
+                        # Preserve raw status and disclose uncertainty; actual host
+                        # processes and admitted operations are separate vetoes.
+                        unknown_owners.append(row)
+                    else:
+                        known_rows.append(row)
+                    continue
                 own_controller = (row.get("attempt_id") == deployment_attempt_id
                                   and row.get("project_id") == "aitelier"
                                   and str(row.get("node_key", "")).startswith("deployment."))
@@ -2159,7 +2179,7 @@ def _coordinated_cover_refusal(coordinated: Any, authoritative: dict, *,
 
 def _valid_override(action: str, observation: dict, override: dict | None, *,
                     backend_only: bool = False, godot_only: bool = False,
-                    semantic_only: bool = False) -> tuple[bool, str]:
+                    semantic_only: bool = False, cpu_only: bool = False) -> tuple[bool, str]:
     if not isinstance(override, dict):
         return False, "no audited override supplied"
     if "_invalid_override" in override:  # a reserved refusal: presence, never truthiness
@@ -2180,8 +2200,8 @@ def _valid_override(action: str, observation: dict, override: dict | None, *,
         return False, "override expiry must include a timezone"
     if expires <= datetime.now(UTC):
         return False, "override has expired"
-    if sum(override.get(key) is True for key in ("backend_only", "godot_only", "semantic_only")) > 1:
-        return False, "backend-only, godot-only and semantic-only scopes are mutually exclusive"
+    if sum(override.get(key) is True for key in ("backend_only", "godot_only", "semantic_only", "cpu_only")) > 1:
+        return False, "backend-only, godot-only, semantic-only and cpu-only scopes are mutually exclusive"
     requested_scope = override.get("backend_only", False)
     if type(requested_scope) is not bool or (requested_scope and not backend_only):
         return False, "backend-only override requires the trusted backend caller"
@@ -2193,11 +2213,20 @@ def _valid_override(action: str, observation: dict, override: dict | None, *,
         return False, "semantic-only override requires the trusted semantic caller"
     if semantic_only and not requested_semantic:
         return False, "semantic-only caller requires a matching semantic-only decision"
+    requested_cpu = override.get("cpu_only", False)
+    if type(requested_cpu) is not bool or (requested_cpu and not cpu_only):
+        return False, "cpu-only override requires the trusted CPU service caller"
+    if cpu_only and not requested_cpu:
+        return False, "cpu-only caller requires a matching cpu-only decision"
+    if requested_cpu and "coordinated_owners" in override:
+        # CPU metadata classification is an operator scope assessment, not an
+        # assertion that unrelated owners agreed. scope_ref is not permission.
+        return False, "cpu-only decisions cannot use coordinated owner agreement"
     controller = override.get("deployment_attempt_id")
     if controller is not None:
         matches = [row for row in observation.get("registered_external_owners", [])
                    if row.get("attempt_id") == controller]
-        if (not (requested_scope or requested_godot or requested_semantic) or not _nonempty_string(controller)
+        if (not (requested_scope or requested_godot or requested_semantic or requested_cpu) or not _nonempty_string(controller)
                 or len(matches) != 1
                 or matches[0].get("project_id") != "aitelier"
                 or not str(matches[0].get("node_key", "")).startswith("deployment.")
@@ -2208,7 +2237,7 @@ def _valid_override(action: str, observation: dict, override: dict | None, *,
             return False, "deployment controller must match the exact recorded owner and audited actor"
     authoritative, unknown_owners = _classify_blockers(
         observation, backend_only=requested_scope, godot_only=requested_godot,
-        semantic_only=requested_semantic,
+        semantic_only=requested_semantic, cpu_only=requested_cpu,
         deployment_attempt_id=controller, actor=override["actor"])
     if "coordinated_owners" in override:
         refusal = _coordinated_cover_refusal(
@@ -2219,7 +2248,7 @@ def _valid_override(action: str, observation: dict, override: dict | None, *,
                       else COORDINATED_OWNER_IDENTITY))
         if refusal is not None:
             return False, refusal
-    elif (requested_scope or requested_godot or requested_semantic
+    elif (requested_scope or requested_godot or requested_semantic or requested_cpu
           or override.get("acknowledge_unknown") is True) and authoritative:
         return False, ("unknown-ownership override cannot bypass authoritative active owners: "
                        + ", ".join(sorted(authoritative)))
@@ -2231,7 +2260,8 @@ def _valid_override(action: str, observation: dict, override: dict | None, *,
 
 def authorize(action: str, observation: dict, *, journal: Path | str | None = None,
               override: dict | None = None, backend_only: bool = False,
-              godot_only: bool = False, semantic_only: bool = False) -> dict:
+              godot_only: bool = False, semantic_only: bool = False,
+              cpu_only: bool = False) -> dict:
     """Authorize a deployment action, persisting every refusal or override.
 
     This is a trusted local API. Audit strings are not authentication. Only the
@@ -2246,6 +2276,13 @@ def authorize(action: str, observation: dict, *, journal: Path | str | None = No
     This is not the backend/Godot CLI wrapper and grants no runtime/recovery or
     process-name authority. A reviewed immutable host guard component can be
     used without installing it into the unchanged backend.
+
+    The normal host CLI may supply cpu_only=True for existing CPU executor
+    entry/config/idle-service maintenance alone. The effect-bound operator must
+    still hold all four normal CPU slots, prove the existing service idle, bind
+    expected Source/entry/config bytes and preserve nonparticipating services,
+    consumers and writers. This clearance grants no backend, Godot, semantic,
+    daemon or GPU effects and is never proof of global quiescence.
     """
     if action not in DEPLOY_ACTIONS:
         raise ValueError(f"unknown deployment action {action!r}")
@@ -2255,8 +2292,10 @@ def authorize(action: str, observation: dict, *, journal: Path | str | None = No
         raise ValueError("godot_only must be an explicit boolean")
     if type(semantic_only) is not bool:
         raise ValueError("semantic_only must be an explicit boolean")
-    if sum((backend_only, godot_only, semantic_only)) > 1:
-        raise ValueError("backend_only, godot_only and semantic_only callers are mutually exclusive")
+    if type(cpu_only) is not bool:
+        raise ValueError("cpu_only must be an explicit boolean")
+    if sum((backend_only, godot_only, semantic_only, cpu_only)) > 1:
+        raise ValueError("backend_only, godot_only, semantic_only and cpu_only callers are mutually exclusive")
     try:
         observation_value = _plain_json_snapshot(observation)
         observation_snapshot_error = None
@@ -2289,7 +2328,7 @@ def authorize(action: str, observation: dict, *, journal: Path | str | None = No
         if validation_error is not None:
             reason = f"observation is malformed: {validation_error}"
             valid = False
-        elif quiet and not restricting and not semantic_only:
+        elif quiet and not restricting and not semantic_only and not cpu_only:
             event = _append_to(state, {"action": action, "status": "authorized",
                                        "pending": True, "usable": False,
                                        "replayed": False,
@@ -2302,14 +2341,15 @@ def authorize(action: str, observation: dict, *, journal: Path | str | None = No
         else:
             valid, reason = _valid_override(
                 action, observation_value, override_value, backend_only=backend_only,
-                godot_only=godot_only, semantic_only=semantic_only)
+                godot_only=godot_only, semantic_only=semantic_only, cpu_only=cpu_only)
         if valid:
             scoped_backend = override_value.get("backend_only") is True
             scoped_godot = override_value.get("godot_only") is True
             scoped_semantic = override_value.get("semantic_only") is True
+            scoped_cpu = override_value.get("cpu_only") is True
             authoritative, unknown_owners = _classify_blockers(
                 observation_value, backend_only=scoped_backend, godot_only=scoped_godot,
-                semantic_only=scoped_semantic,
+                semantic_only=scoped_semantic, cpu_only=scoped_cpu,
                 deployment_attempt_id=override_value.get("deployment_attempt_id"),
                 actor=override_value["actor"])
             unknown_scope = override_value.get("acknowledge_unknown") is True
@@ -2323,7 +2363,8 @@ def authorize(action: str, observation: dict, *, journal: Path | str | None = No
                                                  "ticket": override_value["ticket"],
                                                  **({("backend_only" if scoped_backend
                                                       else "godot_only" if scoped_godot
-                                                      else "semantic_only"): True,
+                                                      else "semantic_only" if scoped_semantic
+                                                      else "cpu_only"): True,
                                                      "deployment_attempt_id": override_value.get("deployment_attempt_id"),
                                                      "deployment_controller_identity": (
                                                          "recorded_owner" if any(
@@ -2334,7 +2375,7 @@ def authorize(action: str, observation: dict, *, journal: Path | str | None = No
                                                              for row in observation_value["registered_external_owners"])
                                                          else "unknown" if override_value.get("deployment_attempt_id")
                                                          else "not_declared")}
-                                                    if scoped_backend or scoped_godot or scoped_semantic else {}),
+                                                    if scoped_backend or scoped_godot or scoped_semantic or scoped_cpu else {}),
                                                  **({"override_scope": "quiescent_restriction",
                                                      "affected_ownership": []}
                                                     if quiet else

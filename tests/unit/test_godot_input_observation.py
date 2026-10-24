@@ -485,32 +485,75 @@ def test_real_skipped_producer_is_detected_against_the_host_schedule(native):
     assert report["passed"] is False and report["spec_errors"]
 
 
-def test_real_receipts_preserve_release_mouse_and_entry_order(native):
+@pytest.mark.parametrize("separated", [False, True], ids=["adjacent-identical-motions", "separated-distinct-motions"])
+def test_real_receipts_preserve_release_mouse_and_entry_order(native, separated):
     project, run = native
+    # Instrument only this disposable copy. These rows describe actual callbacks,
+    # independently of returned injection receipts or application decisions.
+    _append(project,
+            'func _ready() -> void:\n'
+            '    raw_received["callbacks"] = []\n')
+    _replace(project, '    raw_received["events"] += 1\n',
+             '    raw_received["events"] += 1\n'
+             '    var callback: Array = [event.get_class(), Engine.get_process_frames()]\n'
+             '    if event is InputEventAction:\n'
+             '        callback.append(str(event.action))\n'
+             '        callback.append(event.pressed)\n'
+             '    elif event is InputEventMouseMotion:\n'
+             '        callback.append([event.position.x, event.position.y])\n'
+             '    elif event is InputEventMouseButton:\n'
+             '        callback.append(event.button_index)\n'
+             '        callback.append(event.pressed)\n'
+             '        callback.append([event.position.x, event.position.y])\n'
+             '    raw_received["callbacks"].append(callback)\n')
     spec = _case("runtime3_actualgame3accepted")
     spec["scenarios"][0]["timeline"] = [
         {"at": 20, "press": "move_up"},
-        {"at": 22, "hover": "Player +32,32"},
+        {"at": 21 if separated else 22, "hover": "Player +16,32" if separated else "Player +32,32"},
         {"at": 22, "click": "Player +32,32"},
         {"at": 22, "press": "move_up"},
         {"at": 22, "release": "move_up"},
         {"at": 59, "assert": {"Player.grid_y": -1, "Player.position.y": -1}},
     ]
-    report, _ = run(_raw_assert(spec))
+    report, probe = run(_raw_assert(spec))
     obs = _observation(report)
+    assert probe["frames"] == 89 and probe["complete"] is True
     _position(report, -1)
-    _assert_dispatch(report, 2, 9, 2)
+    raw = _received(report)
+    callbacks = raw["callbacks"]
+    actions = [c for c in callbacks if c[0] == "InputEventAction"]
+    motions = [c for c in callbacks if c[0] == "InputEventMouseMotion"]
+    buttons = [c for c in callbacks if c[0] == "InputEventMouseButton"]
+    assert len(callbacks) == len(actions) + len(motions) + len(buttons)
+    assert [c[2:] for c in actions] == [["move_up", True], ["move_up", False], ["move_up", True], ["move_up", False], ["move_up", False]]
+    assert [c[1] - actions[0][1] for c in actions] == [0, 2, 2, 2, 4]
+    assert [c[2:] for c in buttons] == [[1, True, [32, 31]], [1, False, [32, 31]]]
+    expected_positions = [[16, 31], [32, 31]] if separated else [[32, 31]]
+    assert [c[2] for c in motions] == expected_positions, callbacks
+    # Five action callbacks and two button callbacks are independently checked
+    # above. The motion trace, not the nine returned calls, owns this count.
+    _assert_dispatch(report, 2, 5 + 2 + len(expected_positions), 2)
     rows = _decode(obs["receipts"])
     assert [r[0] for r in rows] == list(range(1, 10))
-    assert [r[1] for r in rows] == [20] + [22] * 7 + [24]
-    assert [r[4] for r in rows] == ["action", "action", "mouse_motion", "mouse_motion", "mouse_button", "mouse_button", "action", "action", "action"]
-    assert [r[3] for r in rows] == ["timeline", "auto_release"] + ["timeline"] * 6 + ["auto_release"]
+    expected_frames = [20, 21] + [22] * 6 + [24] if separated else [20] + [22] * 7 + [24]
+    assert [r[1] for r in rows] == expected_frames
+    expected_kinds = ["action", "action", "mouse_motion", "mouse_motion", "mouse_button", "mouse_button", "action", "action", "action"]
+    expected_origins = ["timeline", "auto_release"] + ["timeline"] * 6 + ["auto_release"]
+    if separated:
+        expected_kinds[1:3] = ["mouse_motion", "action"]
+        expected_origins[1:3] = ["timeline", "auto_release"]
+    assert [r[4] for r in rows] == expected_kinds
+    assert [r[3] for r in rows] == expected_origins
+    assert [(r[1], r[5], r[6]) for r in rows if r[4] == "action"] == [(20, "move_up", True), (22, "move_up", False), (22, "move_up", True), (22, "move_up", False), (24, "move_up", False)]
     assert [r[2] for r in rows if r[3] == "timeline"] == [0, 1, 2, 2, 2, 3, 4]
     assert all(r[7] == "returned" for r in rows)
     assert [d["seq"] for d in _decode(obs["witness"])["decisions"]] == [1, 7]
     assert (obs["runtime_injected"], obs["runtime_events_injected"], obs["accepted"], obs["rejected"]) == (2, 9, 1, 1)
+    assert obs["unknown"] == 0 and obs["status"] == "partial"
+    assert obs["acceptance_pass"] is False
     assert obs["delivery_complete"] is True and obs["complete"] is True
-    assert report["passed"] is True
+    assert _scenario(report)["passed"] is True and _scenario(report)["input_dead"] is False
+    assert report["passed"] is True and report["spec_errors"] == []
 
 
 @pytest.mark.parametrize("entries,events", [

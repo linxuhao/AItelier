@@ -77,12 +77,68 @@ def test_example_novel_routes_add_no_private_or_smart_endpoint():
 
 def test_private_production_alias_set_has_no_novel_drift():
     """Opt-in parity check; endpoint bytes remain deployment-private."""
+    configured = os.environ.get("AITELIER_PRIVATE_MODEL_ROUTES")
     path = _private_routes_path()
     if not path.is_file():
+        if configured:
+            # An operator explicitly asked for this measurement: never skip it.
+            raise AssertionError(
+                f"AITELIER_PRIVATE_MODEL_ROUTES={configured!r} is not a readable "
+                f"file ({path}); private route parity was requested but not measured"
+            )
         pytest.skip(
             "set AITELIER_PRIVATE_MODEL_ROUTES to run the private route parity check"
         )
     _assert_specialized_alias_parity(path)
+
+
+def _run_real_private_entry_explicit() -> None:
+    """Run the real entry; an explicit-input skip is converted to a failure."""
+    try:
+        test_private_production_alias_set_has_no_novel_drift()
+    except pytest.skip.Exception as exc:
+        pytest.fail(f"explicit private route input was skipped, not measured: {exc}")
+
+
+def test_explicit_missing_private_input_is_actionable_failure(monkeypatch, tmp_path):
+    missing = tmp_path / "absent_routes.json"
+    monkeypatch.setenv("AITELIER_PRIVATE_MODEL_ROUTES", str(missing))
+    with pytest.raises(AssertionError, match="AITELIER_PRIVATE_MODEL_ROUTES") as info:
+        _run_real_private_entry_explicit()
+    assert str(missing) in str(info.value)
+
+
+def test_explicit_directory_private_input_is_actionable_failure(monkeypatch, tmp_path):
+    monkeypatch.setenv("AITELIER_PRIVATE_MODEL_ROUTES", str(tmp_path))
+    with pytest.raises(AssertionError, match="AITELIER_PRIVATE_MODEL_ROUTES") as info:
+        _run_real_private_entry_explicit()
+    assert str(tmp_path) in str(info.value)
+
+
+def test_explicit_valid_private_input_runs_real_parity(monkeypatch, tmp_path):
+    path = tmp_path / "routes.json"
+    path.write_text(
+        json.dumps({"novel": ["public/prose"], "novel_alt": ["public/reviewer"]}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AITELIER_PRIVATE_MODEL_ROUTES", str(path))
+    _run_real_private_entry_explicit()
+
+
+def test_explicit_drifted_private_input_fails_via_entry(monkeypatch, tmp_path):
+    path = tmp_path / "routes.json"
+    path.write_text(json.dumps({"novel": ["public/prose"]}), encoding="utf-8")
+    monkeypatch.setenv("AITELIER_PRIVATE_MODEL_ROUTES", str(path))
+    with pytest.raises(AssertionError, match="specialized novel aliases drifted"):
+        _run_real_private_entry_explicit()
+
+
+def test_optional_unconfigured_missing_default_still_skips(monkeypatch, tmp_path):
+    monkeypatch.delenv("AITELIER_PRIVATE_MODEL_ROUTES", raising=False)
+    monkeypatch.setitem(globals(), "ROOT", tmp_path)  # no model_routes.json here
+    with pytest.raises(pytest.skip.Exception, match="AITELIER_PRIVATE_MODEL_ROUTES"):
+        test_private_production_alias_set_has_no_novel_drift()
+
 
 
 @pytest.mark.parametrize(

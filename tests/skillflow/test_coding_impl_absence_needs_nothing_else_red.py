@@ -18,17 +18,19 @@
 # is killed at its wall and the shared gate is busy. pytest's own summary says
 # "NOTHING was measured", so nothing was measured anywhere: the run waits at
 # the absence gate and spends no implement cycle.
-import gc
 import json
 
 from core import gate_deferral
 from skillflow.output_targets import git
-from skillflow.tool_loader import ToolLoader
-from tests.gate_fixture import GATE_PY, HarnessRig
+from tests.gate_fixture import (GATE_PY, HarnessRig, assert_repo_gate_calls,
+                                embed_env)
 from tests.skillflow.test_coding_impl_gate_absence import (
     _SILENT_TAIL, _drive, _gate_calls, _wire)
 
-_GATE_TAIL = "exec python3 - <<'PYGATE'\n" + GATE_PY + "\nPYGATE\n"
+# The entry scrubs parent env; the gate owns its controlled fixture settings.
+_GATE_TAIL = ("export FIXTURE_GATE_OP=coding-impl-gate\n"
+              "export FIXTURE_GATE_CLIENT_TIMEOUT=30\n"
+              "exec python3 - <<'PYGATE'\n" + GATE_PY + "\nPYGATE\n")
 
 
 def test_pole_4_a_pytest_red_behind_a_busy_gate_goes_back_to_implement(
@@ -71,18 +73,6 @@ def test_pole_4_a_pytest_red_behind_a_busy_gate_goes_back_to_implement(
     assert any("test_bad" in f for f in report["failures"])
 
 
-def _loaded_run_tests(sf):
-    """The `run_tests` function the host's ToolLoader loaded, as the graph runs it."""
-    loaders = [v for v in vars(sf).values() if isinstance(v, ToolLoader)]
-    if not loaders:
-        loaders = [o for o in gc.get_referents(*vars(sf).values())
-                   if isinstance(o, ToolLoader)]
-    assert len(loaders) == 1, (len(loaders), sorted(vars(sf)))
-    fn = loaders[0].load_fn("run_tests")
-    assert fn.__globals__["__file__"].endswith("aitelier/tools/run_tests/impl.py")
-    return fn
-
-
 def test_a_pytest_wall_behind_a_busy_gate_waits_at_the_absence_gate(
         tmp_path, monkeypatch):
     rig = HarnessRig(tmp_path / "harness", monkeypatch)
@@ -93,15 +83,13 @@ def test_a_pytest_wall_behind_a_busy_gate_waits_at_the_absence_gate(
     counter = tmp_path / "calls.txt"
     try:
         sf, run_id = _wire(tmp_path, monkeypatch, episode_max=30, wait=5,
-                           counter=counter, tail=_GATE_TAIL)
+                           counter=counter, tail=_GATE_TAIL, pytest_wall_seconds=2)
         rig.hold()
         project = sf._workspace.get_project_code_path("p", run_id=run_id)
         (project / "tests" / "test_slow.py").write_text(
             "import time\n\ndef test_slow():\n    time.sleep(30)\n")
         git(project, "add", "tests/test_slow.py")
         git(project, "commit", "-qm", "fixture: a suite that outlives the pytest wall")
-        fn = _loaded_run_tests(sf)
-        monkeypatch.setitem(fn.__globals__, "PYTEST_WALL_SECONDS", 2)
         implement_runs, statuses, outcomes, nodes = _drive(
             sf, run_id, monkeypatch, ticks=80, clock_step=1)
         report = json.loads(gate_deferral.find_test_report(sf, run_id).read_text())
@@ -130,9 +118,11 @@ def test_a_pytest_wall_behind_a_busy_gate_waits_at_the_absence_gate(
 def test_the_absence_gate_laps_run_out_naming_the_absence(tmp_path, monkeypatch):
     """Wait 60 s, the default 3 h ceiling, a gate that never answers: 100 laps
     of 90 s fit inside the ceiling, so the edge's limit is what ends the run."""
+    observations = []
     counter = tmp_path / "calls.txt"
     sf, run_id = _wire(tmp_path, monkeypatch, episode_max=10800, wait=60,
-                       counter=counter, tail=_SILENT_TAIL)
+                       counter=counter, tail=_SILENT_TAIL,
+                       gate_observations=observations)
     assert gate_deferral.wait_seconds() == 60
     assert gate_deferral.episode_max_seconds() == 10800
     implement_runs, statuses, outcomes, nodes = _drive(
@@ -150,9 +140,9 @@ def test_the_absence_gate_laps_run_out_naming_the_absence(tmp_path, monkeypatch)
     assert "cycle limit" not in reason.lower()
     assert reason.startswith(gate_deferral.ABSENCE_TERMINAL), reason
     assert gate_deferral.absent_terminal_names_no_failure(reason)
-    # Every lap the edge allows was used: the first run plus 100 re-runs.
+    # The baseline ran separately; the episode is the first test plus 100 re-runs.
     assert outcomes.count("reacquire") == 100
-    assert _gate_calls(counter) == 101
+    assert_repo_gate_calls(observations, counter, tests=101, measured="unmeasured")
     # And the sentence counts those gate runs, not the ticks that looked.
     assert reason.endswith("(run_tests.sh, 101 gate run(s))"), reason
 
@@ -162,19 +152,21 @@ def test_an_unattributable_red_ends_the_run_on_its_own_terminal(
     """Rev 5: the gate creates `.gate.lock` under its ticket before its report
     directory, retains a python red, and is refused. Its report cannot be
     attributed, so the run ends at `test_gate_report_unattributable` after
-    one gate call: no implement lap, no wait at the absence gate."""
+    one post-implementation gate call: no implement lap, no wait at the
+    absence gate. The real baseline also executes its gate before implement."""
     from tests.unit.test_repo_gate_outcome_table import TABLE_GATE
     rig = HarnessRig(tmp_path / "harness", monkeypatch)
     monkeypatch.setenv("GODOT_BUILDER_URL", rig.base)
     monkeypatch.setenv("AITELIER_REPO_GATE_RENDER_WAIT_SECONDS", "0.3")
-    monkeypatch.setenv("TABLE_GATE_MODE", "python_red")
-    monkeypatch.setenv("TABLE_GATE_PRE", "lockfile")
+    observations = []
     counter = tmp_path / "calls.txt"
     try:
         sf, run_id = _wire(tmp_path, monkeypatch, episode_max=30, wait=5,
                            counter=counter,
-                           tail="exec python3 - <<'PYGATE'\n" + TABLE_GATE
-                                + "\nPYGATE\n")
+                           tail="exec python3 - <<'PYGATE'\n" + embed_env(
+                               TABLE_GATE, TABLE_GATE_MODE="python_red",
+                               TABLE_GATE_PRE="lockfile") + "\nPYGATE\n",
+                           gate_observations=observations)
         rig.hold()
         implement_runs, statuses, outcomes, nodes = _drive(
             sf, run_id, monkeypatch, ticks=40, clock_step=1)
@@ -200,7 +192,7 @@ def test_an_unattributable_red_ends_the_run_on_its_own_terminal(
     assert "cycle limit" not in reason.lower(), reason
     assert "test_gate_absent" not in nodes, nodes
     assert "silent" not in outcomes and "expired" not in outcomes, outcomes
-    assert _gate_calls(counter) == 1
+    assert_repo_gate_calls(observations, counter, tests=1, measured="unattributable")
     assert report["repo_gate_unattributable"] is True
     assert report["repo_gate_absent"] is False
     assert gate["report_attribution"]["state"] == "unattributable"

@@ -50,13 +50,17 @@ from core.skillflow_host import AItelierSkillFlow
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
-def _wire(tmp_path, monkeypatch, *, episode_max, wait, counter, tail):
+def _wire(tmp_path, monkeypatch, *, episode_max, wait, counter, tail,
+          pytest_wall_seconds=None, gate_observations=None):
     """Real graph, real host class, real `run_tests`, real repo gate.
 
     `counter` lives OUTSIDE the worktree so the gate leaves no uncommitted file
     behind it, and `tail` is a script that NEVER answers — it does not count
     attempts and does not change its mind on a later call.
     """
+    from tests.gate_fixture import install_entry_executor
+    # The outer disposable capsule supplies isolation; only Docker I/O is substituted.
+    install_entry_executor(monkeypatch)
     monkeypatch.setattr(gate_deferral, "GATE_DEFERRAL_EPISODE_MAX_SECONDS",
                         episode_max)
     monkeypatch.setattr(gate_deferral, "GATE_DEFERRAL_WAIT_SECONDS", wait)
@@ -100,10 +104,19 @@ def _wire(tmp_path, monkeypatch, *, episode_max, wait, counter, tail):
         except Exception:
             pass
     graph = PipelineGraph.from_yaml(_REPO_ROOT / "configs" / "coding_impl.yaml")
+    if pytest_wall_seconds is not None:
+        for step in graph.steps:
+            if step.tool_name == "run_tests":
+                step.tool_params["pytest_wall_seconds"] = pytest_wall_seconds
     sf.register_graph(graph)
     from core.seed_publication import publish_seeds, seed_dir
     publish_seeds(seed_dir(sf, "p", graph.name), {
         "plan.md": "Implement the isolated fixture and run the declared gate.\n"})
+    # SkillFlow initialization adds plugin tool directories and clears the
+    # loader cache. Install the observer only after host/graph registration.
+    if gate_observations is not None:
+        from tests.gate_fixture import observe_repo_gate_calls
+        observe_repo_gate_calls(loader, counter, gate_observations)
     run_id = sf.create_run(graph.name, {"project_id": "p"})
     sf.start_run(run_id)
     return sf, run_id
@@ -488,9 +501,12 @@ def test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them(
     each wait that runs out (`reacquire`) must re-run the gate step exactly
     once — one gate call per re-acquisition, never an implement cycle.
     """
+    from tests.gate_fixture import assert_repo_gate_calls
+    observations = []
     counter = tmp_path / "calls.txt"
     sf, run_id = _wire(tmp_path, monkeypatch, episode_max=100000, wait=1,
-                       counter=counter, tail=_SILENT_TAIL)
+                       counter=counter, tail=_SILENT_TAIL,
+                       gate_observations=observations)
     monkeypatch.setattr(gate_deferral, "hold_blocks_advance",
                         lambda run_id, **_kw: False)
     implement_runs, statuses, outcomes, nodes = _drive(
@@ -501,8 +517,8 @@ def test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them(
     first = outcomes.index("silent")
     assert set(outcomes[first:]) == {"silent", "reacquire"}, outcomes
     assert outcomes.count("silent") >= 8, outcomes
-    assert _gate_calls(counter) == 1 + outcomes.count("reacquire"), (
-        _gate_calls(counter), outcomes)
+    assert_repo_gate_calls(observations, counter,
+                           tests=1 + outcomes.count("reacquire"), measured="unmeasured")
 
 
 def test_the_host_hold_alone_keeps_the_rows_where_the_absence_left_them(
@@ -515,9 +531,12 @@ def test_the_host_hold_alone_keeps_the_rows_where_the_absence_left_them(
     while the wait runs, and let it through only to re-run the gate step once
     per wait that ran out (`due`).
     """
+    from tests.gate_fixture import assert_repo_gate_calls
+    observations = []
     counter = tmp_path / "calls.txt"
     sf, run_id = _wire(tmp_path, monkeypatch, episode_max=100000, wait=1,
-                       counter=counter, tail=_SILENT_TAIL)
+                       counter=counter, tail=_SILENT_TAIL,
+                       gate_observations=observations)
     real_observe = gate_deferral.observe_run
     seen = []
 
@@ -534,5 +553,5 @@ def test_the_host_hold_alone_keeps_the_rows_where_the_absence_left_them(
     first = seen.index("silent")
     assert set(seen[first:]) == {"silent", "due"}, seen
     assert seen.count("silent") >= 8, seen
-    assert _gate_calls(counter) == 1 + seen[first:].count("due"), (
-        _gate_calls(counter), seen)
+    assert_repo_gate_calls(observations, counter,
+                           tests=1 + seen[first:].count("due"), measured="unmeasured")

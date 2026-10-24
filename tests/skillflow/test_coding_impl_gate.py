@@ -21,6 +21,8 @@ from pathlib import Path
 
 import pytest
 import yaml
+from tests.gate_fixture import (assert_repo_gate_calls, install_entry_executor,
+                                observe_repo_gate_calls, write_full_case_gate)
 
 from skillflow import SkillFlow, PipelineGraph
 import skillflow as _skillflow_pkg
@@ -31,7 +33,8 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
 def _wire(tmp_path, test_results, *, tool_result=None, schema_failure=None,
-          real_run_tests=False, repo_prepare=None):
+          real_run_tests=False, repo_prepare=None, gate_counter=None,
+          gate_observations=None):
     """Real coding_impl graph with a scripted run_tests (`test_results` is the
     per-invocation `passed` sequence; the last value repeats) and a stubbed
     repo_apply. Returns (sf, run_id, calls)."""
@@ -90,6 +93,8 @@ def _wire(tmp_path, test_results, *, tool_result=None, schema_failure=None,
     # re-acquisition has to be exercised on the real config, not on a script.
     if not real_run_tests:
         loader.register_dynamic_tool("run_tests", {}, _run_tests)
+    elif gate_observations is not None:
+        observe_repo_gate_calls(loader, gate_counter, gate_observations)
     loader.register_dynamic_tool("repo_apply", {}, _repo_apply)
     if schema_failure is not None:
         real_schema = loader.load_fn("json_schema")
@@ -305,8 +310,8 @@ _BLOCKED_DECLARATION = (
 
 def _case_record():
     return "AITELIER_REPO_GATE_CASE=" + json.dumps(
-        {"case_id": "compile/autoload", "status": "failed",
-         "detail": "GDScript parse error in the file this round wrote"})
+        {"case_id": "A", "status": "failed",
+         "detail": "fixture behavior remains red"})
 
 
 def _gate_script(counter_path, tail):
@@ -319,7 +324,7 @@ def _gate_script(counter_path, tail):
             f"echo \"$n\" > '{counter_path}'\n" + tail)
 
 
-def _prepare_project_gate(project, counter_path, tail):
+def _prepare_project_gate(project, counter_path):
     """Commit a repo gate (and a green pytest suite) into the PROJECT repo.
 
     They must be committed BEFORE the run starts: a file dropped into the run
@@ -330,15 +335,15 @@ def _prepare_project_gate(project, counter_path, tail):
     (project / "tests" / "test_ok.py").write_text(
         "def test_ok():\n    assert True\n")
     (project / ".gitignore").write_text("__pycache__/\n*.pyc\n")
+    # Retain a complete owned gate report. A stdout marker alone does not
+    # establish a measured gate under the current coverage contract.
+    write_full_case_gate(project, [_case_record()])
     script = project / "run_tests.sh"
+    tail = "\n".join(script.read_text().splitlines()[1:]) + "\n"
     script.write_text(_gate_script(counter_path, tail))
     script.chmod(0o755)
     git(project, "add", "-A")
     git(project, "commit", "-qm", "fixture: a repo gate that can say it did not run")
-
-
-def _gate_calls(counter_path):
-    return int(counter_path.read_text().strip()) if counter_path.exists() else 0
 
 
 # The `if [ "$n" -lt 2 ]` "ask again and it lets go" fixture that used to sit
@@ -354,19 +359,26 @@ test_the_forbidden_two_call_gate_script_is_gone = None
 
 
 
-def test_four_real_reds_still_exhaust_the_cycle_limit(tmp_path):
+def test_four_real_reds_still_exhaust_the_cycle_limit(tmp_path, monkeypatch):
     """(3) The re-acquisition must not make the loop unbounded: four real reds
     still run the edge out and the run dies on `Cycle limit exceeded`."""
+    install_entry_executor(monkeypatch)  # Real entry inside the outer test capsule.
+    observations = []
     counter = tmp_path / "gate_calls.txt"
-    tail = ("printf '%s\\n' '" + _case_record() + "'\n"
-            "exit 1\n")
     sf, run_id, calls = _wire(
         tmp_path, [True], real_run_tests=True,
-        repo_prepare=lambda project: _prepare_project_gate(project, counter,
-                                                           tail))
+        repo_prepare=lambda project: _prepare_project_gate(project, counter),
+        gate_counter=counter, gate_observations=observations)
     status, implement_runs = _drive(sf, run_id)
 
     assert status == "failed"
     assert implement_runs == 4
-    assert _gate_calls(counter) == 4
+    assert_repo_gate_calls(observations, counter, tests=4, measured="measured_fail")
+    for row in observations:
+        report = row["report"]
+        assert report["passed"] is False
+        assert report["repo_gate"]["report_attribution"]["state"] == "own"
+        assert report["repo_gate"]["retained_findings"] > 0
+        assert not report.get("repo_gate_absent")
+        assert not report.get("coding_outcome")
     assert "Cycle limit exceeded" in str(sf.get_run(run_id))

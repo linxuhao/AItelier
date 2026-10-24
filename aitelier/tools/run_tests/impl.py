@@ -2306,6 +2306,7 @@ def _commit_baseline(report: dict, pending: dict) -> bool:
 # 1.2% of its neighbour is not protecting the scheduler from anything, it is
 # just the smallest number in the file.
 PYTEST_WALL_SECONDS = 1800
+MAX_PYTEST_WALL_SECONDS = 7200  # Existing CPU executor request ceiling.
 
 
 # --- Storage exhaustion is not a test regression -------------------------------
@@ -2561,6 +2562,7 @@ def _report_write_failure(report: dict, target_dir: Path, what: str, exc: OSErro
 def run_tests(*, project_root: str = "", out_dir: str = "",
               workspace_root: str = "", repo_gate: bool = True,
               state_dir: str = "", run_id: str = "",
+              pytest_wall_seconds: int = PYTEST_WALL_SECONDS,
               evidence_cycle_start: bool = False,
               evidence_cycle_from: str = "",
               fail_fast_gates: str = "",
@@ -2579,6 +2581,17 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
     """
     report = {"passed": True, "returncode": 0, "summary": "", "failures": [],
               "collection_errors": []}
+    wall_valid = (type(pytest_wall_seconds) is int
+                  and 1 <= pytest_wall_seconds <= MAX_PYTEST_WALL_SECONDS)
+    if wall_valid:
+        report["pytest_wall_seconds"] = pytest_wall_seconds
+    else:
+        reason = ("run_tests: pytest_wall_seconds must be an integer from 1 to "
+                  f"{MAX_PYTEST_WALL_SECONDS}; no tests were executed")
+        report.update(passed=False, returncode=None, skipped=True,
+                      measurement_not_taken=True,
+                      skipped_because="invalid_pytest_wall_seconds", summary=reason)
+        report["failures"].append(reason)
     # Filled in as each leg runs; it is the ONLY licence to shrink the baseline.
     executed = Executed()
     # The entries of `failures[]` that record a leg which measured NOTHING (a
@@ -2592,7 +2605,7 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
 
     prechange_before = prechange_cases = prechange_profile = None
     retained_red_candidate = False
-    prechange_enabled = bool(prechange_capture or prechange_from)
+    prechange_enabled = wall_valid and bool(prechange_capture or prechange_from)
     if prechange_enabled:
         from core import coding_impl_outcome as coding
         try:
@@ -2615,7 +2628,7 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
         except Exception as exc:
             report["prechange_unavailable"] = str(exc)[:300]
 
-    if fail_fast_gates:
+    if fail_fast_gates and wall_valid:
         if not out_dir or not Path(out_dir).is_absolute():
             return {"written": None, "passed": False,
                     "error": ("run_tests fail-fast requires an absolute "
@@ -2659,7 +2672,9 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
                     "upstream_state": (blocker.get("upstream_state")
                                        or blocker.get("state"))}
 
-    if not project_root or not Path(project_root).is_absolute():
+    if not wall_valid:
+        repo = None  # Invalid policy must not start pytest, Node or repository gates.
+    elif not project_root or not Path(project_root).is_absolute():
         # The check is on `project_root` — the code repository — and on nothing
         # else, because that is the only argument that names one.
         #
@@ -2740,7 +2755,7 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
                        "-p", "no:cacheprovider", "--continue-on-collection-errors",
                        "--rootdir", str(repo), f"--junitxml={junit_path}",
                        "-o", "junit_family=xunit1"],
-                PYTEST_WALL_SECONDS, writable_dirs=[Path(junit_dir)],
+                pytest_wall_seconds, writable_dirs=[Path(junit_dir)],
                 import_module=_package_module(repo) or "", pytest_timeout=True, run_id=run_id)
             stdout, stderr = done.stdout, done.stderr
             if prechange_enabled:
@@ -2842,6 +2857,7 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
             storage_preflight_refused = bool(report["storage_diagnosis"]["proof"])
         except repository_executor.IsolationUnavailable as e:
             report.update(passed=False, returncode=-1, skipped=True, infrastructure_unavailable=True,
+                          measurement_not_taken=True, evidence_state="infrastructure_unavailable",
                           skipped_because="cpu_executor_unavailable", summary=str(e))
             report["failures"].append("pytest:isolated CPU executor unavailable — no measurement")
             unmeasured_entries.append(report["failures"][-1])
@@ -2855,18 +2871,18 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
             # is the state that means "go and verify", and the failures entry
             # keeps the reason readable to the agent that has to act on it.
             report.update(
-                passed=False, returncode=None, timed_out=True,
+                passed=False, returncode=None, timed_out=True, measurement_not_taken=True,
                 stdout=e.stdout.decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or ""),
                 stderr=e.stderr.decode(errors="replace") if isinstance(e.stderr, bytes) else (e.stderr or ""),
                 skipped_because="pytest_timeout",
-                pytest_wall_seconds=PYTEST_WALL_SECONDS,
+                pytest_wall_seconds=pytest_wall_seconds,
                 summary=(
-                    f"pytest did not finish within {PYTEST_WALL_SECONDS}s and was "
+                    f"pytest did not finish within {pytest_wall_seconds}s and was "
                     "killed, so NOTHING was measured. This is not a test failure: "
                     "no test result exists either way. Either the suite needs "
                     "longer than this harness allows, or it hangs."))
             report["failures"].append(
-                f"pytest:timed out after {PYTEST_WALL_SECONDS}s — no results "
+                f"pytest:timed out after {pytest_wall_seconds}s — no results "
                 "collected, the suite was killed mid-run")
             unmeasured_entries.append(report["failures"][-1])
         except Exception as e:  # never raise — the step must not fail

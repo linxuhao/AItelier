@@ -30,6 +30,7 @@ from pathlib import Path
 import pytest
 
 from aitelier.tools.run_tests.impl import run_tests
+from tests.gate_fixture import install_entry_executor
 
 
 @pytest.fixture
@@ -115,10 +116,11 @@ def test_an_absolute_workspace_root_does_not_satisfy_the_guard(tmp_path):
     assert "test_step_output" not in json.dumps(report)
 
 
-def test_it_still_runs_the_tests_of_a_real_repo(cwd_repo, tmp_path):
+def test_it_still_runs_the_tests_of_a_real_repo(cwd_repo, tmp_path, monkeypatch):
     """The control: the guard must not have broken the tool it protects, and it
     must be a REAL run — a build that refused everything would pass the tests
     above."""
+    install_entry_executor(monkeypatch)  # Real entry inside the outer test capsule.
     repo = tmp_path / "real_project"
     repo.mkdir()
     (repo / "test_ours.py").write_text(

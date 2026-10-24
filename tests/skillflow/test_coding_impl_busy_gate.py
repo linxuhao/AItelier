@@ -19,7 +19,10 @@ from tests.code_output_fixture import commit_count
 from tests.gate_fixture import GATE_PY, HarnessRig
 from tests.skillflow.test_coding_impl_gate_absence import _drive, _wire
 
-_GATE_TAIL = "exec python3 - <<'PYGATE'\n" + GATE_PY + "\nPYGATE\n"
+# The entry scrubs parent env; the gate owns its controlled fixture settings.
+_GATE_TAIL = ("export FIXTURE_GATE_OP=coding-impl-gate\n"
+              "export FIXTURE_GATE_CLIENT_TIMEOUT=3\n"
+              "exec python3 - <<'PYGATE'\n" + GATE_PY + "\nPYGATE\n")
 
 
 def _inventory(sf, run_id):

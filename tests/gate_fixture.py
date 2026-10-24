@@ -321,3 +321,38 @@ def embed_env(program: str, **values: str) -> str:
     prefix = "import os as _os\n" + "".join(
         f"_os.environ[{name!r}] = {value!r}\n" for name, value in values.items())
     return prefix + program
+
+
+def observe_repo_gate_calls(loader, counter: Path, observations: list) -> None:
+    """Observe real baseline/test tool calls without replacing their result.
+
+    The gate increments its own external counter. Record the boundary of each
+    actual run_tests invocation and read its published report, so a baseline
+    call cannot be silently counted as a test or a re-acquisition.
+    """
+    from functools import wraps
+    real_run_tests = loader.load_fn("run_tests")
+
+    @wraps(real_run_tests)
+    def observed(*args, **kwargs):
+        row = {"phase": "baseline" if kwargs.get("prechange_capture") else "test",
+               "before": int(counter.read_text()) if counter.exists() else 0}
+        observations.append(row)
+        result = real_run_tests(*args, **kwargs)
+        row["after"] = int(counter.read_text()) if counter.exists() else 0
+        row["report"] = json.loads(
+            (Path(kwargs["out_dir"]) / "test_report.json").read_text())
+        return result
+
+    loader.register_dynamic_tool("run_tests", loader.load_schema("run_tests"), observed)
+
+
+def assert_repo_gate_calls(observations, counter: Path, *, tests: int, measured: str):
+    """One actual baseline gate, then exactly one gate for each test call."""
+    assert [row["phase"] for row in observations] == ["baseline"] + ["test"] * tests
+    for index, row in enumerate(observations):
+        assert (row["before"], row["after"]) == (index, index + 1), row
+        gate = row["report"]["repo_gate"]
+        assert gate["attempts"] == 1, gate
+        assert gate["measured"] == measured, gate
+    assert int(counter.read_text()) == observations[-1]["after"]

@@ -45,6 +45,11 @@ WORKDIR /app
 # Install the package + dependencies. The source is also bind-mounted at runtime
 # (docker-compose) so code edits are live without a rebuild.
 COPY . /app
+# Authored repository gates import only this image-owned client module. Keep
+# /app and backend packages off their PYTHONPATH; no new host mount is needed.
+COPY docker/godot/godot_harness.py /opt/aitelier-gate-imports/docker/godot/godot_harness.py
+RUN touch /opt/aitelier-gate-imports/docker/__init__.py \
+    /opt/aitelier-gate-imports/docker/godot/__init__.py
 # Copy the compiled SPA bundle from the frontend-build stage — OUTSIDE /app,
 # so the .:/app live-source mount (docker-compose) can't shadow it. api/main.py
 # serves it via AITELIER_WEB_DIST; no anonymous volume needed, every image

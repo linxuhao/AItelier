@@ -93,6 +93,10 @@ description: >
   table in `docs/repo-gate-unmeasured-protocol.md`, rendered from `ROWS` in
   `tests/unit/test_repo_gate_outcome_table.py`.
 parameters:
+  pytest_wall_seconds:
+    type: integer
+    description: "Pytest leg wall in seconds (integer 1..7200, default 1800). Does not change Node/repository gates or the overall step ceiling; a timeout remains incomplete evidence."
+    required: false
   prechange_capture:
     type: boolean
     description: "Builtin coding_impl only: capture owned original-base observations before implementation."

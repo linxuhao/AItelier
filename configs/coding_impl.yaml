@@ -67,6 +67,9 @@ steps:
     tool_params:
       out_dir: "$STEP_DIR"
       prechange_capture: true
+      # Full-suite measurement reported 2711.62s at 2 CPU / 2 GiB.
+      # Keep full discovery; this budget covers only the pytest leg.
+      pytest_wall_seconds: 3600
     transitions:
       - to: "implement"
 
@@ -111,8 +114,8 @@ steps:
     # failures it did not introduce. The registration existed from the day the
     # capability shipped; no config had ever declared it.
     capability: "stateful"
-    # Must exceed run_tests' worst case (venv + deps + pytest wall) so a slow
-    # run isn't reclaimed mid-flight.
+    # Retain the overall step ceiling. The pytest leg declares its own wall;
+    # Node and repository gates can also consume time within this step.
     #
     # 1200 was SHORTER THAN THE GATE IT TIMES for a Godot project, and this
     # raise is a margin, NOT a repair of an observed failure -- the difference
@@ -130,13 +133,13 @@ steps:
     # as a hard mid-flight reclaim on this path, and the pathology above stayed
     # theoretical. Keep the larger ceiling (a budget below its subject is still
     # wrong on its face) but do not cite it as a fixed defect.
-    # 4200 is a ceiling for pathology, not an estimate: the gate's internal
-    # /playtest timeout is already 3600, so a step that outlives 4200 s is
-    # wedged rather than slow.
+    # This ceiling does not guarantee a mixed Python/Node/Godot gate finishes.
+    # An incomplete measurement remains non-passing.
     timeout_seconds: 4200
     tool_params:
       out_dir: "$STEP_DIR"
       prechange_from: "baseline"
+      pytest_wall_seconds: 3600
     # A failed tool invocation must not consume a report from a prior attempt.
     #
     # THE ABSENCE EDGE LIVES ON THIS STEP, which OWNS `test_report.json`.

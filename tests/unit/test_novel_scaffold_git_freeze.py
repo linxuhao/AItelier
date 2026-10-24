@@ -133,7 +133,7 @@ def test_existing_genesis_conflict_is_never_overwritten_or_normalized(tmp_path):
     assert not (tmp_path / "novel/state/index.yaml").exists()
 
 
-def test_no_git_nested_root_and_invalid_root_fail_before_writes(tmp_path):
+def test_no_git_nested_root_and_invalid_root_fail_before_writes(tmp_path, monkeypatch):
     plain = tmp_path / "plain"
     plain.mkdir()
     seed(plain)
@@ -157,6 +157,16 @@ def test_no_git_nested_root_and_invalid_root_fail_before_writes(tmp_path):
         scaffold_bible(project_root=str(tmp_path / "missing"))
 
     source_checkout = Path(__file__).resolve().parents[2]
+    # Supply the git context ourselves so the refusal is reached even when the
+    # surrounding container cannot resolve the checkout as a git worktree.
+    real_git_toplevel = ns.git_toplevel
+
+    def fake_git_toplevel(path):
+        if Path(path).resolve() == source_checkout.resolve():
+            return source_checkout.resolve()
+        return real_git_toplevel(path)
+
+    monkeypatch.setattr(ns, "git_toplevel", fake_git_toplevel)
     with pytest.raises(ValueError, match="refusing.*AItelier source"):
         scaffold_bible(project_root=str(source_checkout))
 

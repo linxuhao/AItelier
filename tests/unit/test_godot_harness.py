@@ -1602,7 +1602,9 @@ def test_grab_preserves_an_explicit_incomplete_observation_per_failure():
     # Every early exit appends the failure row; the success path is the only
     # one that appends a complete observation.
     assert src.count("_captures.append(_capture_failure(drawn") == 4
-    assert '"text_observation": _observe_text(drawn, img.get_size())})' in src
+    grab = gh._PROBE_GD.split("func _grab(drawn: int) -> void:", 1)[1].split("\nfunc ", 1)[0]
+    assert grab.count("_captures.append(") == 5
+    assert grab.count('"text_observation": _observe_text(drawn, img.get_size())') == 1
 
 
 def test_collector_follows_the_rendering_chain_not_whole_node_ancestry():
@@ -1672,8 +1674,9 @@ def test_byte_ceiling_is_checked_on_the_returned_observation():
     probe = src.split("_PROBE_GD = r\'\'\'", 1)[1]
     body = probe[probe.index("func _observe_text(drawn: int"):]
     body = body[:body.index("\nfunc ")]
-    # No direct append bypasses the accounting inside the observer.
-    observer = probe[probe.index("func _render_chain("):probe.index("func _load_spec(")]
+    # Scope this invariant to the legacy 64KiB collector. Geometry helpers
+    # precede it; the separately budgeted opt-in collector is not this corpus.
+    observer = probe[probe.index("const _TEXT_SUPPORTED"):probe.index("func _load_spec(")]
     assert ".append(" not in observer.replace("chain.append(", "").replace(
         "hidden_by.append(", "").replace("obs[key].append(row)", "")
     # Summary reasons are charged before the final whole-envelope check.

@@ -363,13 +363,18 @@ def _probe_lookups():
 def test_every_tree_lookup_in_the_probe_is_one_of_these():
     # The existing rendered-text observer walks actual children by index; it
     # does not resolve a missing path by its leaf name. Keep every lookup named.
-    assert _probe_lookups() == [
+    expected = [
         ("_observe_text_walk", "if _observe_text_walk(node.get_child(i), depth + 1, obs):"),
         ("_resolve", "return get_node_or_null(NodePath(name))"),
         ("_resolve", "return scene.get_node_or_null(NodePath(name))"),
         ("_resolve", "return get_tree().get_root().find_child(name, true, false)"),
         ("_walk", "for c in node.get_children():"),
     ]
+    if "func _ui_fact_walk(" in gh._PROBE_GD:
+        expected.insert(0, (
+            "_ui_fact_walk",
+            "if not _ui_fact_walk(node.get_child(index, true), depth + 1, out):"))
+    assert _probe_lookups() == expected
 
 
 def test_the_path_branch_returns_the_path_lookup_and_nothing_else():

@@ -11,6 +11,7 @@ import sys
 import threading
 import time
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -1549,6 +1550,48 @@ def test_brackets_inside_a_user_space_command_do_not_grant_the_exemption(command
     assert owners[0]["resource"] == "external_measurement"
     assert owners[0]["ownership"] == "unregistered"
     assert any("unknown ownership" in error for error in errors)
+
+
+def test_the_guard_reads_the_real_process_table_not_a_mistyped_root():
+    """The kernel-thread tests above stand in for /proc, so nothing read PROC_ROOT.
+
+    One mistyped character in that constant (``/porc``) made every real kernel
+    thread unreadable, hence flagged: the guard's live errors went from 8 to 141
+    while this whole suite stayed green.  This test is the constant's reader
+    (iss-059899dc781e4fb2, F2).
+    """
+    assert dq.PROC_ROOT == Path("/proc")
+
+    # Negative polarity against the REAL table, available in any pid namespace:
+    # a user-space process that wears a kernel thread's brackets in argv[0] has a
+    # non-empty /proc/<pid>/cmdline and must not be exempted.
+    masquerade = subprocess.Popen(["[kworker/0:0H]", "30"], executable="/bin/sleep")
+    try:
+        # Popen returns when exec has begun; the kernel publishes argv a moment
+        # later, and an empty cmdline in that window is exactly what a kernel
+        # thread looks like.  Wait for the real argv before asking the guard.
+        cmdline = Path(f"/proc/{masquerade.pid}/cmdline")
+        for _ in range(100):
+            if cmdline.read_bytes()[:1]:
+                break
+            time.sleep(0.05)
+        assert cmdline.read_bytes().startswith(b"[kworker/0:0H]"), "masquerade argv never appeared"
+        assert dq._kernel_thread(f"{masquerade.pid}       1 [kworker/0:0H]") is False
+    finally:
+        masquerade.kill()
+        masquerade.wait()
+
+
+def test_a_real_kernel_thread_is_recognized_through_the_real_process_table():
+    """Positive polarity, only where the host's kernel threads are visible."""
+    try:
+        comm = (Path("/proc/2") / "comm").read_text().strip()
+    except OSError:
+        comm = ""
+    if comm != "kthreadd":
+        pytest.skip("pid 2 is not kthreadd here (a container pid namespace has no "
+                    "kernel threads); the host-only polarity is not measured in this run")
+    assert dq._kernel_thread("2       0 [kthreadd]") is True
 
 
 def test_kernel_thread_noise_no_longer_blocks_the_quiescence_override(

@@ -251,3 +251,41 @@ def test_execute_via_host_preserves_launcher_environment(monkeypatch, tmp_path,
             assert env_name not in os.environ
     finally:
         fake.join(5)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("trusted_import_root", "/app"), ("pythonpath", "/host/private"),
+    ("mounts", ["/host:/app:ro"]), ("test_image", "sha256:" + "b" * 64),
+])
+def test_repository_gate_cannot_select_trusted_import_authority(tmp_path, field, value):
+    cfg = _fixture(tmp_path)
+    script = tmp_path / "projects/repo/run_tests.sh"
+    script.write_text("#!/bin/sh\nexit 0\n")
+    request = _request(tmp_path, args=["bash", str(script)])
+    request[field] = value
+    with pytest.raises(launcher.LaunchRefused, match="unsupported request fields"):
+        launcher.validate_request(cfg, request)
+
+
+def test_gate_harness_export_adds_no_host_mount_or_request_authority(tmp_path, monkeypatch):
+    cfg = _fixture(tmp_path)
+    script = tmp_path / "projects/repo/run_tests.sh"
+    script.write_text("#!/bin/sh\nexit 0\n")
+    report = (tmp_path / "home/gate-reports" /
+              hashlib.sha256(b"normal-run").hexdigest() / "ticket")
+    report.mkdir(parents=True)
+    fields = launcher.validate_request(cfg, _request(tmp_path,
+        args=["bash", str(script)], report_dir=str(report), writable_dirs=[str(report)]))
+    monkeypatch.setattr(launcher.shutil, "which", lambda _: "/controlled/docker")
+    command = launcher.docker_command(cfg, fields, "aitelier-cpu-gate")
+    mounts = {command[i + 1] for i, value in enumerate(command[:-1]) if value == "-v"}
+    repo = str(tmp_path / "projects/repo")
+    assert mounts == {f"{repo}:{repo}:ro", f"{report}:{report}:rw",
+                      f"{cfg['executor_entry']}:/executor.py:ro"}, command
+    assert command[command.index("--network") + 1] == "none"
+    assert command[command.index("--cpus") + 1] == "2"
+    assert command[command.index("--memory") + 1] == "2g"
+    assert "--cap-drop" in command and "--security-opt" in command
+    assert command[command.index("--entrypoint") + 2] == cfg['test_image']
+    payload = json.loads(command[-1])
+    assert not {'pythonpath', 'trusted_import_root', 'mounts', 'test_image'} & payload.keys()

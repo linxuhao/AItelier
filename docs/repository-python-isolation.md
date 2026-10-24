@@ -41,8 +41,21 @@ Each invocation creates one UUID-named disposable container: `--rm --init`, netw
 none, 2 CPUs, 2 GiB, 512 PIDs, dropped capabilities and no new privileges. Four
 kernel-lock slots bound simultaneous CPU tests. Only the repository (read-only),
 trusted entry script and explicit report directories are mounted. Tests receive
-an explicit environment and project-only PYTHONPATH; no provider credentials,
+an explicit environment and project-only PYTHONPATH. Authored Bash gates with
+an owned report ticket additionally receive the fixed image-owned
+`/opt/aitelier-gate-imports` export, containing only the `docker.godot.godot_harness`
+module and its empty package initializers. This supplies the pure request-budget
+helpers used by the gate without adding `/app` to its import roots.
+The export's bytes are part of the operator-reviewed immutable CPU image; no
+repository/request field chooses its source or destination, and no host mount is
+added. Missing exports remain real import failures. No provider credentials,
 backend secret mounts or Docker socket are passed into the test container.
+
+A changed export requires rebuilding/reviewing the CPU image and updating the
+operator's immutable `test_image` pin separately from installing the entry script.
+Review its helper semantics against the selected frozen provider before use;
+source parity is not proof that an image is installed or an engine request ran.
+The provider, relay, network and admission contracts are unchanged.
 
 The authored gate still reaches its existing Godot admission relay. Its HTTP
 requests cross a per-ticket Unix socket through a loopback bridge in the isolated

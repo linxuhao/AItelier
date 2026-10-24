@@ -375,6 +375,11 @@ def _coding_shell(payload, env):
         proc.stderr.close()
 
 
+# Narrow, image-owned export built by Dockerfile. Never a caller-selected host
+# path: the repository gate gets the Godot harness client helpers, not /app.
+GATE_IMPORT_ROOT = "/opt/aitelier-gate-imports"
+
+
 def run(payload):
     repo = payload["repo"]
     env = {"HOME": "/tmp", "PATH": "/usr/local/bin:/usr/bin:/bin",
@@ -384,6 +389,8 @@ def run(payload):
         return _coding_shell(payload, env)
     if payload.get("report_dir"):
         env["GATE_REPORT_DIR"] = payload["report_dir"]
+        if payload.get("args", [])[:1] == ["bash"]:
+            env["PYTHONPATH"] = GATE_IMPORT_ROOT + os.pathsep + env["PYTHONPATH"]
     if payload.get("npm_cache"):
         # Node profiles: the pinned npm first on PATH (never the image's own
         # npm), the ticket's own cache; HOME stays /tmp in the container.

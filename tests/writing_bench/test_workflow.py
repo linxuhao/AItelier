@@ -143,6 +143,12 @@ class Session:
         raise AssertionError("test engine did not settle: " + str(self.sf.get_run(run)))
 
 
+def approve_current(session, run, label):
+    """Approve the checkpoint the run is really paused at, using its current identity."""
+    expected = session.sf.get_checkpoint(run)["expected_checkpoint"]
+    return session.sf.approve_checkpoint(run, expected_checkpoint=expected, decision_id=f"test-{label}-{run}")
+
+
 def test_graph_provided_ledger_and_manual_gate(tmp_path, monkeypatch, bench):
     session = Session(tmp_path, monkeypatch, bench)
     base = git(bench.policy.repo, "rev-parse", "HEAD")
@@ -157,7 +163,7 @@ def test_graph_provided_ledger_and_manual_gate(tmp_path, monkeypatch, bench):
     # This tests the actual trace-based host approval reader, not a seed flag.
     with pytest.raises(BenchError, match="manual checkpoint"):
         adapter.Host().approval(run)
-    session.sf.approve_checkpoint(run)
+    approve_current(session, run, "manual-gate")
     assert session.drive(run) == "completed"
     final = decode((bench.work(run) / "completed.json").read_bytes())
     assert git(bench.policy.repo, "rev-parse", "HEAD") == final["accepted_commit"]
@@ -191,7 +197,7 @@ def test_rules_change_after_manual_preview_refuses_acceptance(tmp_path, monkeypa
     run = session.start(request(bench))
     assert session.drive(run) == "paused"
     session.rules["entries"].append({"address": "note://fiction/new", "body": "新的硬裁定"})
-    session.sf.approve_checkpoint(run)
+    approve_current(session, run, "rules-change")
     with pytest.raises(BenchError, match="rulings changed"):
         session.drive(run)
     assert git(bench.policy.repo, "rev-parse", "HEAD") == base
@@ -201,7 +207,7 @@ def test_graph_backup_only_does_not_repeat_reviews_or_acceptance(tmp_path, monke
     session = Session(tmp_path, monkeypatch, bench)
     run = session.start(request(bench))
     assert session.drive(run) == "paused"
-    session.sf.approve_checkpoint(run)
+    approve_current(session, run, "backup-only")
     session.fail_backup = True
     with pytest.raises(BenchError, match="network"):
         session.drive(run)
@@ -247,7 +253,7 @@ def test_effective_role_change_after_preview_refuses_acceptance(tmp_path, monkey
     role = yaml.safe_load((ROOT / "agent_configs/novel_writing_bench_v2.yaml").read_text())["bench_literary_v2"]
     role["temperature"] = 0.9
     session.sf.register_agent_config_from_dict("bench_literary_v2", role)
-    session.sf.approve_checkpoint(run)
+    approve_current(session, run, "role-change")
     with pytest.raises(BenchError, match="review role"):
         session.drive(run)
     assert git(bench.policy.repo, "rev-parse", "HEAD") == base
@@ -257,7 +263,7 @@ def test_backup_recovery_refuses_running_original(tmp_path, monkeypatch, bench):
     session = Session(tmp_path, monkeypatch, bench)
     run = session.start(request(bench))
     assert session.drive(run) == "paused"
-    session.sf.approve_checkpoint(run)
+    approve_current(session, run, "running-original")
     session.fail_backup = True
     with pytest.raises(BenchError):
         session.drive(run)

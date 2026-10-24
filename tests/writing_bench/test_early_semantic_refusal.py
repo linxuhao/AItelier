@@ -15,7 +15,7 @@ from aitelier.writing_bench import adapter
 from skillflow import ToolExecutionRefused
 from aitelier.writing_bench.storage import BenchError, BenchReplayRefused, decode, git
 from test_bench import CONTRACTS, RULES, accept, bench, ledger, request, staged  # noqa: F401
-from test_workflow import Session
+from test_workflow import Session, approve_current
 
 REVIEW_FILES = {"review_request.json", "editor_packet.md", "audit_packet.md", "review_context.md",
                 "proposed_ledgers.md"}
@@ -176,7 +176,7 @@ def test_missing_revision_that_removes_old_death_is_not_refused(tmp_path, monkey
     assert session.agent_calls == ["extract_ledger", "literary_review", "ledger_audit"]
     assert replay["ledger_sources"] == {"2": "extractor", "3": "author"}
     assert stage["counters"] == {"chapters_written": 3, "last_chapter": 3, "next_chapter": 4}
-    session.sf.approve_checkpoint(run)
+    approve_current(session, run, "missing-revision")
     assert session.drive(run) == "completed"
     from aitelier import novel_state as ns
     card = ns.load_characters(bench.policy.repo)["旅人"]

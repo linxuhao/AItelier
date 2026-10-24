@@ -50,13 +50,16 @@ from core.skillflow_host import AItelierSkillFlow
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
-def _wire(tmp_path, monkeypatch, *, episode_max, wait, counter, tail):
+def _wire(tmp_path, monkeypatch, *, episode_max, wait, counter, tail, pytest_wall_seconds=None):
     """Real graph, real host class, real `run_tests`, real repo gate.
 
     `counter` lives OUTSIDE the worktree so the gate leaves no uncommitted file
     behind it, and `tail` is a script that NEVER answers — it does not count
     attempts and does not change its mind on a later call.
     """
+    from tests.gate_fixture import install_entry_executor
+    # The outer disposable capsule supplies isolation; only Docker I/O is substituted.
+    install_entry_executor(monkeypatch)
     monkeypatch.setattr(gate_deferral, "GATE_DEFERRAL_EPISODE_MAX_SECONDS",
                         episode_max)
     monkeypatch.setattr(gate_deferral, "GATE_DEFERRAL_WAIT_SECONDS", wait)
@@ -100,6 +103,10 @@ def _wire(tmp_path, monkeypatch, *, episode_max, wait, counter, tail):
         except Exception:
             pass
     graph = PipelineGraph.from_yaml(_REPO_ROOT / "configs" / "coding_impl.yaml")
+    if pytest_wall_seconds is not None:
+        for step in graph.steps:
+            if step.tool_name == "run_tests":
+                step.tool_params["pytest_wall_seconds"] = pytest_wall_seconds
     sf.register_graph(graph)
     from core.seed_publication import publish_seeds, seed_dir
     publish_seeds(seed_dir(sf, "p", graph.name), {

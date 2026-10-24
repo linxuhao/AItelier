@@ -18,17 +18,18 @@
 # is killed at its wall and the shared gate is busy. pytest's own summary says
 # "NOTHING was measured", so nothing was measured anywhere: the run waits at
 # the absence gate and spends no implement cycle.
-import gc
 import json
 
 from core import gate_deferral
 from skillflow.output_targets import git
-from skillflow.tool_loader import ToolLoader
 from tests.gate_fixture import GATE_PY, HarnessRig
 from tests.skillflow.test_coding_impl_gate_absence import (
     _SILENT_TAIL, _drive, _gate_calls, _wire)
 
-_GATE_TAIL = "exec python3 - <<'PYGATE'\n" + GATE_PY + "\nPYGATE\n"
+# The entry scrubs parent env; the gate owns its controlled fixture settings.
+_GATE_TAIL = ("export FIXTURE_GATE_OP=coding-impl-gate\n"
+              "export FIXTURE_GATE_CLIENT_TIMEOUT=30\n"
+              "exec python3 - <<'PYGATE'\n" + GATE_PY + "\nPYGATE\n")
 
 
 def test_pole_4_a_pytest_red_behind_a_busy_gate_goes_back_to_implement(
@@ -71,18 +72,6 @@ def test_pole_4_a_pytest_red_behind_a_busy_gate_goes_back_to_implement(
     assert any("test_bad" in f for f in report["failures"])
 
 
-def _loaded_run_tests(sf):
-    """The `run_tests` function the host's ToolLoader loaded, as the graph runs it."""
-    loaders = [v for v in vars(sf).values() if isinstance(v, ToolLoader)]
-    if not loaders:
-        loaders = [o for o in gc.get_referents(*vars(sf).values())
-                   if isinstance(o, ToolLoader)]
-    assert len(loaders) == 1, (len(loaders), sorted(vars(sf)))
-    fn = loaders[0].load_fn("run_tests")
-    assert fn.__globals__["__file__"].endswith("aitelier/tools/run_tests/impl.py")
-    return fn
-
-
 def test_a_pytest_wall_behind_a_busy_gate_waits_at_the_absence_gate(
         tmp_path, monkeypatch):
     rig = HarnessRig(tmp_path / "harness", monkeypatch)
@@ -93,15 +82,13 @@ def test_a_pytest_wall_behind_a_busy_gate_waits_at_the_absence_gate(
     counter = tmp_path / "calls.txt"
     try:
         sf, run_id = _wire(tmp_path, monkeypatch, episode_max=30, wait=5,
-                           counter=counter, tail=_GATE_TAIL)
+                           counter=counter, tail=_GATE_TAIL, pytest_wall_seconds=2)
         rig.hold()
         project = sf._workspace.get_project_code_path("p", run_id=run_id)
         (project / "tests" / "test_slow.py").write_text(
             "import time\n\ndef test_slow():\n    time.sleep(30)\n")
         git(project, "add", "tests/test_slow.py")
         git(project, "commit", "-qm", "fixture: a suite that outlives the pytest wall")
-        fn = _loaded_run_tests(sf)
-        monkeypatch.setitem(fn.__globals__, "PYTEST_WALL_SECONDS", 2)
         implement_runs, statuses, outcomes, nodes = _drive(
             sf, run_id, monkeypatch, ticks=80, clock_step=1)
         report = json.loads(gate_deferral.find_test_report(sf, run_id).read_text())

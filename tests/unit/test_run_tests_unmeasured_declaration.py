@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 from aitelier.tools.run_tests import impl as rt
-from tests.gate_fixture import write_full_case_gate
+from tests.gate_fixture import install_entry_executor, write_full_case_gate
 
 DECLARED = ('AITELIER_REPO_GATE_UNMEASURED='
             '{"state":"blocked","reason":"godot-builder unreachable: '
@@ -84,11 +84,12 @@ def test_there_is_no_exit_code_that_could_be_wired_back_to_unmeasured():
     assert not hasattr(rt, "REPO_GATE_UNMEASURED_EXIT_CODE")
 
 
-def test_a_contract_error_exit_2_is_a_measured_failure_with_failures(tmp_path):
+def test_a_contract_error_exit_2_is_a_measured_failure_with_failures(tmp_path, monkeypatch):
     """The author's own broken contract file, at exit 2, is a RED — the text
     the game gate prints says so itself ("an empty one is not a pass"). It may
     not become an absence with `failures: []` (the forbidden technique: a
     legitimate red leaking past as "nothing was measured")."""
+    install_entry_executor(monkeypatch)  # Real entry inside the outer test capsule.
     repo = _repo_with_gate(
         tmp_path,
         "CONTRACT ERROR: no authored scenarios found under tests/play, "
@@ -108,7 +109,7 @@ def test_a_contract_error_exit_2_is_a_measured_failure_with_failures(tmp_path):
 
 # ── the declaration channel has to survive a REAL gate's output ────────────
 
-def test_a_declaration_survives_output_far_past_the_retention_bound(tmp_path):
+def test_a_declaration_survives_output_far_past_the_retention_bound(tmp_path, monkeypatch):
     """The channel the whole protocol rests on, on a gate whose output is far
     larger than the 2000 characters `output` retains.
 
@@ -118,6 +119,7 @@ def test_a_declaration_survives_output_far_past_the_retention_bound(tmp_path):
     impossible — before, the declaration was only readable while the gate's
     log was SHORT, and no real gate's log is.
     """
+    install_entry_executor(monkeypatch)  # Real entry inside the outer test capsule.
     noise = "=" * 3000
     repo = _repo_with_gate(tmp_path, DECLARED, noise, exit_code=3)
     out = tmp_path / "out"
@@ -388,10 +390,11 @@ def test_a_runner_that_cannot_start_is_unmeasured(monkeypatch):
 
 # ── the measurement word has readers ───────────────────────────────────────
 
-def test_every_repo_gate_run_carries_its_measurement(tmp_path):
+def test_every_repo_gate_run_carries_its_measurement(tmp_path, monkeypatch):
     """Kills M4 (deleting `result["measured"]`): the fold below reads it, so
     the field is not a dead key — it is the only thing that decides whether a
     gate's cases may be pruned or its red forgiven."""
+    install_entry_executor(monkeypatch)  # Real entry inside the outer test capsule.
     repo = _repo_with_gate(tmp_path, "plain red prose", exit_code=1)
     out = tmp_path / "out"
     rt.run_tests(project_root=str(repo), out_dir=str(out))
@@ -417,6 +420,7 @@ def test_an_unmeasured_gate_is_re_run_until_it_yields_a_verdict(tmp_path,
                                                                monkeypatch):
     """A gate that did not run decided NOTHING: the tool re-acquires the
     verdict instead of handing the loop an absence to spend as a cycle."""
+    install_entry_executor(monkeypatch)  # Real entry inside the outer test capsule.
     monkeypatch.setattr(rt, "REPO_GATE_UNMEASURED_ATTEMPTS", 3)
     monkeypatch.setattr(rt, "REPO_GATE_RETRY_DELAY_SECONDS", 0)
     repo = _repo_with_gate(tmp_path, "anything", exit_code=0)
@@ -473,6 +477,7 @@ def test_an_unmeasured_repo_gate_may_not_prune_its_known_red(tmp_path,
     `Executed.ran("repo_gate:...")` reads that field, so `set()` claims the
     gate RAN — and a known-red case is dropped by a gate that said, in its own
     words, that it never ran."""
+    install_entry_executor(monkeypatch)  # Real entry inside the outer test capsule.
     monkeypatch.setattr(rt, "REPO_GATE_UNMEASURED_ATTEMPTS", 1)
     repo = _repo_with_gate(tmp_path, _case("A", "broken"), exit_code=1)
     state = tmp_path / "state"
@@ -494,10 +499,11 @@ def test_an_unmeasured_repo_gate_may_not_prune_its_known_red(tmp_path,
     assert "repo_gate:run_tests.sh#playtest/A/check@0" in report["baseline_kept_unproven"]
 
 
-def test_a_repo_gate_that_measured_green_may_prune_its_known_red(tmp_path):
+def test_a_repo_gate_that_measured_green_may_prune_its_known_red(tmp_path, monkeypatch):
     """Kills M18 (the mirror: `set()` -> `None` on the measured_pass branch).
     The gate DID run and reported nothing failed, so its known-red case is
     measured green and has to leave the baseline."""
+    install_entry_executor(monkeypatch)  # Real entry inside the outer test capsule.
     repo = _repo_with_gate(tmp_path, _case("A", "broken"), exit_code=1)
     state = tmp_path / "state"
     rt.run_tests(project_root=str(repo), out_dir=str(tmp_path / "out-1"),
@@ -520,7 +526,7 @@ def test_a_repo_gate_that_measured_green_may_prune_its_known_red(tmp_path):
 # ── a declared absence may NEVER become a relative pass ───────────────────
 
 def test_a_declared_absence_never_seeds_a_baseline_and_never_passes_relative(
-        tmp_path):
+        tmp_path, monkeypatch):
     """The card's first criterion, end to end through the REAL tool.
 
     Four CONSECUTIVE declarations of absence, on a repo that has never had a
@@ -534,6 +540,7 @@ def test_a_declared_absence_never_seeds_a_baseline_and_never_passes_relative(
     `passed_relative: true`, `baseline_state: seeded`, and
     `run_tests_baseline.json` written, on every pole.
     """
+    install_entry_executor(monkeypatch)  # Real entry inside the outer test capsule.
     repo = _repo_with_gate(tmp_path, DECLARED, exit_code=3)
     state = tmp_path / "state"
     baseline = _baseline_file(state, repo)
@@ -556,13 +563,14 @@ def test_a_declared_absence_never_seeds_a_baseline_and_never_passes_relative(
 
 
 def test_a_real_red_still_enters_the_baseline_and_the_absence_after_it_does_not_pass(
-        tmp_path):
+        tmp_path, monkeypatch):
     """The other pole of the same property, and the reason it is not a
     blanket: a gate that MEASURED red must still seed the baseline.
 
     Without this pole the rule above could be satisfied by never seeding at
     all, which would make every pre-existing red look like this round's.
     """
+    install_entry_executor(monkeypatch)  # Real entry inside the outer test capsule.
     repo = _repo_with_gate(tmp_path, _case("A", "broken"), exit_code=1)
     state = tmp_path / "state"
     out = tmp_path / "out-red"
@@ -592,7 +600,7 @@ def test_a_real_red_still_enters_the_baseline_and_the_absence_after_it_does_not_
 
 
 def test_an_absence_whose_failures_are_all_known_red_still_does_not_pass(
-        tmp_path):
+        tmp_path, monkeypatch):
     """Kills ABSREL (`and not absent` removed from `passed_relative`).
 
     The absence's own `failures[]` entry keys to the gate's name,
@@ -600,6 +608,7 @@ def test_an_absence_whose_failures_are_all_known_red_still_does_not_pass(
     the absence with NO new failure, so `new_failures` alone would call it a
     relative pass. Only the absence clause keeps it false.
     """
+    install_entry_executor(monkeypatch)  # Real entry inside the outer test capsule.
     repo = _repo_with_gate(tmp_path, DECLARED, exit_code=3)
     state = tmp_path / "state"
     baseline = _baseline_file(state, repo)

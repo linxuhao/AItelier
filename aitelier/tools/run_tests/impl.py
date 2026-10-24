@@ -2857,6 +2857,7 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
             storage_preflight_refused = bool(report["storage_diagnosis"]["proof"])
         except repository_executor.IsolationUnavailable as e:
             report.update(passed=False, returncode=-1, skipped=True, infrastructure_unavailable=True,
+                          measurement_not_taken=True, evidence_state="infrastructure_unavailable",
                           skipped_because="cpu_executor_unavailable", summary=str(e))
             report["failures"].append("pytest:isolated CPU executor unavailable — no measurement")
             unmeasured_entries.append(report["failures"][-1])

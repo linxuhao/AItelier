@@ -13,7 +13,7 @@ capability injects, so it survives across runs of the config.
 import json
 from pathlib import Path
 
-from tests.gate_fixture import write_full_case_gate
+from tests.gate_fixture import install_entry_executor, write_full_case_gate
 
 from aitelier.tools.run_tests.impl import (BASELINE_FILE, Executed,
                                            _apply_baseline, _baseline_dir,
@@ -166,7 +166,8 @@ def _run_repo(repo, out, state):
     return report
 
 
-def test_real_repo_gate_a_then_a_plus_b_exposes_b_and_keeps_detail_stable(tmp_path):
+def test_real_repo_gate_a_then_a_plus_b_exposes_b_and_keeps_detail_stable(tmp_path, monkeypatch):
+    install_entry_executor(monkeypatch)  # Real entry inside the outer test capsule.
     repo = tmp_path / "repo"
     repo.mkdir()
     state = tmp_path / "state"
@@ -184,7 +185,8 @@ def test_real_repo_gate_a_then_a_plus_b_exposes_b_and_keeps_detail_stable(tmp_pa
     assert second["baseline_failures"] == ["repo_gate:run_tests.sh#playtest/A/check@0"]
 
 
-def test_real_repo_gate_fixed_then_rebroken_case_becomes_new(tmp_path):
+def test_real_repo_gate_fixed_then_rebroken_case_becomes_new(tmp_path, monkeypatch):
+    install_entry_executor(monkeypatch)  # Real entry inside the outer test capsule.
     repo = tmp_path / "repo"
     repo.mkdir()
     state = tmp_path / "state"
@@ -200,7 +202,8 @@ def test_real_repo_gate_fixed_then_rebroken_case_becomes_new(tmp_path):
     assert "#playtest/B/check@0 failed:   B / check: ok == true -> actual False; observed back" in again["new_failures"][0]
 
 
-def test_repo_gate_without_state_dir_stays_strict(tmp_path):
+def test_repo_gate_without_state_dir_stays_strict(tmp_path, monkeypatch):
+    install_entry_executor(monkeypatch)  # Real entry inside the outer test capsule.
     repo = tmp_path / "repo"
     repo.mkdir()
     _write_repo_gate(repo, _gate_record("A", "a"))
@@ -213,7 +216,8 @@ def test_repo_gate_without_state_dir_stays_strict(tmp_path):
         "repo_gate:run_tests.sh#playtest/A/check@0 failed:   A / check: ok == true -> actual False; observed a"]
 
 
-def test_unreliable_repo_gate_identity_never_seeds_or_changes_baseline(tmp_path):
+def test_unreliable_repo_gate_identity_never_seeds_or_changes_baseline(tmp_path, monkeypatch):
+    install_entry_executor(monkeypatch)  # Real entry inside the outer test capsule.
     repo = tmp_path / "repo"
     repo.mkdir()
     state = tmp_path / "state"
@@ -238,7 +242,8 @@ def test_unreliable_repo_gate_identity_never_seeds_or_changes_baseline(tmp_path)
         assert _baseline_path(state, repo).read_bytes() == before, name
 
 
-def test_complete_capture_keeps_identity_when_display_tail_is_truncated(tmp_path):
+def test_complete_capture_keeps_identity_when_display_tail_is_truncated(tmp_path, monkeypatch):
+    install_entry_executor(monkeypatch)  # Real entry inside the outer test capsule.
     repo = tmp_path / "repo"
     repo.mkdir()
     state = tmp_path / "state"

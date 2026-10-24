@@ -65,6 +65,31 @@ def test_public_tool_forwards_the_declared_wall_without_narrowing_discovery(env,
     assert result["passed"] is False and result["passed_relative"] is False
 
 
+@pytest.mark.parametrize("existing", [False, True], ids=["no-baseline", "known-red-baseline"])
+def test_unavailable_executor_cannot_seed_prune_or_relative_pass(env, existing):
+    previous = _seed(env) if existing else None
+
+    def unavailable(repo, args, timeout, **kwargs):
+        env.calls.append(timeout)
+        raise impl.repository_executor.IsolationUnavailable("fixture: CPU facility unavailable")
+
+    env.monkeypatch.setattr(impl.repository_executor, "execute", unavailable)
+    result, report = _run(env, pytest_wall_seconds=3600)
+    assert env.calls == [3600] and report["pytest_wall_seconds"] == 3600
+    assert report["infrastructure_unavailable"] is True
+    assert report["measurement_not_taken"] is True
+    assert report["evidence_state"] == result["evidence_state"] == "infrastructure_unavailable"
+    assert report["skipped_because"] == "cpu_executor_unavailable"
+    assert "CPU facility unavailable" in report["summary"]
+    assert result["passed"] is False and result["passed_relative"] is False
+    assert result["baseline_state"] == "unmeasured" and result["new_failures"] == []
+    assert result["release_evidence"] == "unresolved"
+    if existing:
+        assert env.baseline.read_bytes() == previous
+    else:
+        assert not env.baseline.exists()
+
+
 @pytest.mark.parametrize("wall", [True, False, "3600", "", None, 0, -1, 7201,
                                   3600.0, float("inf"), [], {}])
 def test_invalid_wall_refuses_every_execution_leg_and_preserves_baseline(env, wall):

@@ -6,13 +6,15 @@ import tempfile
 from pathlib import Path
 
 import aitelier.tools.run_tests.impl as rt
+from tests.gate_fixture import install_entry_executor
 
 
 def _report(out_dir):
     return json.loads((Path(out_dir) / "test_report.json").read_text())
 
 
-def test_runs_when_pytest_present():
+def test_runs_when_pytest_present(monkeypatch):
+    install_entry_executor(monkeypatch)  # Real entry inside the outer test capsule.
     repo = Path(tempfile.mkdtemp())
     (repo / "test_x.py").write_text("def test_ok():\n    assert 1 + 1 == 2\n")
     out = Path(tempfile.mkdtemp())
@@ -24,28 +26,31 @@ def test_runs_when_pytest_present():
 
 
 def test_skips_when_runner_unavailable(monkeypatch):
-    """A missing runner is distinct infrastructure evidence and cannot pass."""
-    monkeypatch.setattr(rt.importlib.util, "find_spec", lambda name: None)
-    monkeypatch.setattr(rt.time, "sleep", lambda *_: None)  # no real backoff in tests
+    """Missing isolated execution is honest infrastructure evidence, with no local fallback."""
+    calls, backend_spawns = [], []
 
-    calls = []
-    def boom(*a, **k):
-        calls.append(a)
-        raise OSError("no network / venv blocked")
-    monkeypatch.setattr(rt.subprocess, "run", boom)
+    def unavailable(*args, **kwargs):
+        calls.append(args)
+        raise rt.repository_executor.IsolationUnavailable("fixture: isolated CPU executor unavailable")
 
+    def forbidden_spawn(*args, **kwargs):
+        backend_spawns.append(args)
+        raise AssertionError("repository execution fell back to the backend")
+
+    monkeypatch.setattr(rt.repository_executor, "execute", unavailable)
+    monkeypatch.setattr(rt.subprocess, "run", forbidden_spawn)
     repo = Path(tempfile.mkdtemp())
     (repo / "test_x.py").write_text("def test_ok():\n    assert True\n")
     out = Path(tempfile.mkdtemp())
     res = rt.run_tests(project_root=str(repo), out_dir=str(out))
     rep = _report(out)
-    assert res["passed"] is False         # tool returns; release stays blocked
-    assert rep["skipped"] is True
+    assert res["passed"] is False and res["passed_relative"] is False
+    assert rep["skipped"] is True and rep["measurement_not_taken"] is True
     assert rep["infrastructure_unavailable"] is True
     assert rep["evidence_state"] == "infrastructure_unavailable"
-    assert "skipped" in rep["summary"].lower()
-    assert "3 attempts" in rep["summary"]  # retried before giving up
-    assert len(calls) == 3                 # one provisioning attempt per retry
+    assert rep["skipped_because"] == "cpu_executor_unavailable"
+    assert "isolated CPU executor unavailable" in rep["summary"]
+    assert len(calls) == 1 and backend_spawns == []
 
 
 def test_provisioning_retries_on_transient_failure(monkeypatch):
@@ -243,7 +248,8 @@ def _broken_repo(tmp_path, n_broken=2, with_good=True):
     return repo
 
 
-def test_every_collection_error_is_reported_not_just_the_first(tmp_path):
+def test_every_collection_error_is_reported_not_just_the_first(tmp_path, monkeypatch):
+    install_entry_executor(monkeypatch)  # Real entry inside the outer test capsule.
     repo = _broken_repo(tmp_path, n_broken=3)
     out = tmp_path / "out"
     res = rt.run_tests(project_root=str(repo), out_dir=str(out))
@@ -258,7 +264,8 @@ def test_every_collection_error_is_reported_not_just_the_first(tmp_path):
         assert any(f"missing_pkg_{i}" in e for e in rep["collection_errors"])
 
 
-def test_collection_errors_lead_the_summary_instead_of_being_tailed_off(tmp_path):
+def test_collection_errors_lead_the_summary_instead_of_being_tailed_off(tmp_path, monkeypatch):
+    install_entry_executor(monkeypatch)  # Real entry inside the outer test capsule.
     repo = _broken_repo(tmp_path, n_broken=2)
     out = tmp_path / "out"
     rt.run_tests(project_root=str(repo), out_dir=str(out))
@@ -271,9 +278,10 @@ def test_collection_errors_lead_the_summary_instead_of_being_tailed_off(tmp_path
     assert all(e in rep["failures"] for e in rep["collection_errors"])
 
 
-def test_importable_tests_still_run_alongside_a_broken_module(tmp_path):
+def test_importable_tests_still_run_alongside_a_broken_module(tmp_path, monkeypatch):
     """The point of --continue-on-collection-errors: one bad module no longer
     reduces the whole suite to zero results."""
+    install_entry_executor(monkeypatch)  # Real entry inside the outer test capsule.
     repo = _broken_repo(tmp_path, n_broken=1, with_good=True)
     out = tmp_path / "out"
     rt.run_tests(project_root=str(repo), out_dir=str(out))
@@ -282,7 +290,8 @@ def test_importable_tests_still_run_alongside_a_broken_module(tmp_path):
     assert "1 passed" in rep["summary"]
 
 
-def test_clean_repo_reports_no_collection_errors(tmp_path):
+def test_clean_repo_reports_no_collection_errors(tmp_path, monkeypatch):
+    install_entry_executor(monkeypatch)  # Real entry inside the outer test capsule.
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / "test_ok.py").write_text("def test_ok():\n    assert True\n")
@@ -360,7 +369,8 @@ def test_install_deps_unreadable_pyproject_is_not_fatal(monkeypatch):
 # has not passed.
 
 
-def test_no_tests_collected_does_not_pass(tmp_path):
+def test_no_tests_collected_does_not_pass(tmp_path, monkeypatch):
+    install_entry_executor(monkeypatch)  # Real entry inside the outer test capsule.
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / "app.py").write_text("def add(a, b):\n    return a + b\n")   # code, no tests
@@ -375,10 +385,11 @@ def test_no_tests_collected_does_not_pass(tmp_path):
     assert any("collected" in f for f in rep["failures"])
 
 
-def test_no_python_sources_means_not_applicable_not_failure(tmp_path):
+def test_no_python_sources_means_not_applicable_not_failure(tmp_path, monkeypatch):
     """A Godot/node project has no pytest suite by construction — failing it
     would spin the goal loop on something no task can fix. Its own gate
     (node / compile section) is the real one."""
+    install_entry_executor(monkeypatch)  # Real entry inside the outer test capsule.
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / "main.gd").write_text("extends Node\n")
@@ -409,7 +420,8 @@ def _pkg_repo(tmp_path, body, dist_name="broken-pkg", mod="broken_pkg"):
     return repo
 
 
-def test_unimportable_package_fails_even_when_pytest_is_green(tmp_path):
+def test_unimportable_package_fails_even_when_pytest_is_green(tmp_path, monkeypatch):
+    install_entry_executor(monkeypatch)  # Real entry inside the outer test capsule.
     repo = _pkg_repo(tmp_path, "AP\n")   # NameError at import time
     out = tmp_path / "out"
     res = rt.run_tests(project_root=str(repo), out_dir=str(out))
@@ -422,7 +434,8 @@ def test_unimportable_package_fails_even_when_pytest_is_green(tmp_path):
     assert rep["import_error"] in rep["failures"]
 
 
-def test_importable_package_is_silent(tmp_path):
+def test_importable_package_is_silent(tmp_path, monkeypatch):
+    install_entry_executor(monkeypatch)  # Real entry inside the outer test capsule.
     repo = _pkg_repo(tmp_path, "VALUE = 1\n")
     out = tmp_path / "out"
     res = rt.run_tests(project_root=str(repo), out_dir=str(out))
@@ -431,9 +444,10 @@ def test_importable_package_is_silent(tmp_path):
     assert "import_error" not in rep
 
 
-def test_smoke_check_skipped_when_the_module_cannot_be_identified(tmp_path):
+def test_smoke_check_skipped_when_the_module_cannot_be_identified(tmp_path, monkeypatch):
     """A dist name that matches nothing in the tree is a name we'd only guess
     wrong with — skip rather than fabricate a failure."""
+    install_entry_executor(monkeypatch)  # Real entry inside the outer test capsule.
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / "pyproject.toml").write_text("[project]\nname='nothing-here'\n")

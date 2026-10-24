@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from tests.gate_fixture import install_entry_executor
 
 from skillflow import SkillFlow, PipelineGraph
 import skillflow as _skillflow_pkg
@@ -354,9 +355,10 @@ test_the_forbidden_two_call_gate_script_is_gone = None
 
 
 
-def test_four_real_reds_still_exhaust_the_cycle_limit(tmp_path):
+def test_four_real_reds_still_exhaust_the_cycle_limit(tmp_path, monkeypatch):
     """(3) The re-acquisition must not make the loop unbounded: four real reds
     still run the edge out and the run dies on `Cycle limit exceeded`."""
+    install_entry_executor(monkeypatch)  # Real entry inside the outer test capsule.
     counter = tmp_path / "gate_calls.txt"
     tail = ("printf '%s\\n' '" + _case_record() + "'\n"
             "exit 1\n")

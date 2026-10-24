@@ -474,7 +474,6 @@ def _drive_row(tmp_path, monkeypatch, row_id):
         if row.leg == "pytest_wall":
             (repo / "tests" / "test_slow.py").write_text(
                 "import time\n\ndef test_slow():\n    time.sleep(60)\n")
-            monkeypatch.setattr(rt, "PYTEST_WALL_SECONDS", 3)
         if row.leg == "node_unavailable":
             monkeypatch.setattr(rt, "_run_node_checks",
                                 lambda _repo, **_kw: dict(NODE_SKIPPED))
@@ -496,7 +495,8 @@ def _drive_row(tmp_path, monkeypatch, row_id):
         if row.busy:
             rig.hold()
         out = tmp_path / "out"
-        result = rt.run_tests(project_root=str(repo), out_dir=str(out))
+        wall = {"pytest_wall_seconds": 3} if row.leg == "pytest_wall" else {}
+        result = rt.run_tests(project_root=str(repo), out_dir=str(out), **wall)
         report = json.loads((out / "test_report.json").read_text())
     finally:
         rig.close()

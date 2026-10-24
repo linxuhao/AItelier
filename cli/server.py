@@ -118,7 +118,7 @@ def _compose_env() -> dict:
     return env
 
 
-def _compose_files() -> list[str]:
+def _compose_files(compose_root: str | Path | None = None) -> list[str]:
     """The -f arguments for every compose call: the base file, and only it.
 
     There used to be an opt-in `docker-compose.edge.yml` overlay carrying the
@@ -129,6 +129,18 @@ def _compose_files() -> list[str]:
     localhost still 200, public path gone, nothing said so. The network now
     lives in the base file, selected by name — one file, nothing to forget.
     """
+    if compose_root is not None:
+        root = Path(compose_root)
+        if not root.is_absolute():
+            raise ValueError("compose_root must be an absolute canonical project directory")
+        root = root.resolve(strict=True)
+        compose = root / "docker-compose.yml"
+        if not compose.is_file():
+            raise ValueError("compose_root must contain docker-compose.yml")
+        # An accepted host CLI may be imported from its immutable worktree while
+        # observing an already initialized canonical backend, without restarting
+        # it or constructing a second runtime. Select its Compose project too.
+        return ["--project-directory", str(root), "-f", str(compose)]
     return ["-f", str(_COMPOSE_FILE)]
 
 
@@ -206,10 +218,12 @@ def _ensure_host_dirs() -> None:
         pass          # let Docker report it in its own terms
 
 
-def _compose(*args: str, **kwargs) -> subprocess.CompletedProcess:
+def _compose(*args: str, compose_root: str | Path | None = None,
+             **kwargs) -> subprocess.CompletedProcess:
     """Run `docker compose -f <file> [-f <overlay>] <args>`."""
     return subprocess.run(
-        ["docker", "compose", *_compose_files(), *args],
+        ["docker", "compose", *(_compose_files(compose_root) if compose_root is not None
+                                else _compose_files()), *args],
         env=_compose_env(),
         **kwargs,
     )
@@ -330,7 +344,7 @@ def _compose_up(*, no_deps: bool = False):
     _warn_if_edge_network_is_alone()
 
 
-def _live_runtime_observation(base_url: str) -> dict:
+def _live_runtime_observation(base_url: str, *, compose_root: str | Path | None = None) -> dict:
     """Fetch initialized live facts and bind them to the backend this CLI operates."""
     from urllib.parse import urlsplit
     from cli.client import _auth_headers
@@ -343,7 +357,8 @@ def _live_runtime_observation(base_url: str) -> dict:
         response.raise_for_status()
         facts = dq._validated_runtime_facts(response.json())
     container = _compose("ps", "-q", _COMPOSE_SERVICE,
-                         capture_output=True, text=True, timeout=15)
+                         capture_output=True, text=True, timeout=15,
+                         **({"compose_root": compose_root} if compose_root is not None else {}))
     if (container.returncode or not isinstance(container.stdout, str)
             or not re.fullmatch(r"[0-9a-f]{12,64}", container.stdout.strip())):
         raise ValueError("Live backend container identity is unavailable")
@@ -361,23 +376,38 @@ def _live_runtime_observation(base_url: str) -> dict:
 def _require_deployment_clearance(
         action: str, *, base_url: str = _DEFAULT_URL,
         override_decision: Callable[[str, dict], dict | None] | None = None,
-        backend_service: bool = False, godot_service: bool = False) -> dict:
+        backend_service: bool = False, godot_service: bool = False,
+        cpu_service: bool = False, compose_root: str | Path | None = None) -> dict:
     """Measure every project and external owner before changing the backend.
 
     Only the backend service actions pass ``backend_service``, and only the
     Godot-only recreation passes ``godot_service``: a scoped decision, and owners
     named as coordinated under it, cover that one service's effect and never
-    another service's.
+    another service's. ``cpu_service`` selects only existing CPU entry/config/
+    idle-service maintenance, never a backend restart. The CPU effect-bound
+    operator must separately exclude CPU sessions, Source consumers and writers,
+    hold all four normal slots and compare/preserve exact Source/config/entry
+    identities before effects. Metadata-only owners remain disclosed unknown,
+    with records/status unchanged; a frozen assignment is not an owner ACK.
+
+    For CPU maintenance only, ``compose_root`` explicitly selects the canonical
+    initialized backend when this accepted CLI is imported from another worktree.
+    The normal authenticated endpoint and namespace identity checks still run.
     """
     from core import datadir
     from core import deployment_quiescence as dq
 
-    if backend_service and godot_service:
+    if type(cpu_service) is not bool:
+        raise ValueError("cpu_service must be an explicit boolean")
+    if sum((bool(backend_service), bool(godot_service), cpu_service)) > 1:
         raise ValueError("a deployment clearance covers one service scope")
+    if compose_root is not None and not cpu_service:
+        raise ValueError("explicit compose_root is supported only for CPU service maintenance")
     fence = dq.acquire_cutover_fence()
     try:
         try:
-            facts = _live_runtime_observation(base_url)
+            facts = _live_runtime_observation(
+                base_url, **({"compose_root": compose_root} if compose_root is not None else {}))
             observation = dq.measure(
                 runtime_facts=facts,
                 sidecar_db=datadir.semantic_index_control_dir() / "control.sqlite3",
@@ -410,7 +440,8 @@ def _require_deployment_clearance(
             override = {"_invalid_override":
                         "backend-only decisions are honored only for the backend service action"}
         clearance = dq.authorize(action, observation, override=override,
-                                 backend_only=not godot_service, godot_only=godot_service)
+                                 backend_only=not (godot_service or cpu_service),
+                                 godot_only=godot_service, cpu_only=cpu_service)
         clearance["_cutover_fence"] = fence
         return clearance
     except BaseException as exc:

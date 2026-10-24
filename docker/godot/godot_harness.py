@@ -1864,7 +1864,7 @@ func _inject_input(event: InputEvent, kind: String, action = null, pressed = nul
         Input.parse_input_event(event)
         return
     _input_seq += 1
-    var eligible := _input_origin == "timeline" and kind == "action" and pressed == true
+    var eligible: bool = _input_origin == "timeline" and kind == "action" and pressed == true
     if eligible:
         event.set_meta("aitelier_input", {"version": 1, "run_id": _input_run_id, "seq": _input_seq})
     var row := [_input_seq, _frame, _input_entry, _input_origin, kind, action, pressed, "attempted"]

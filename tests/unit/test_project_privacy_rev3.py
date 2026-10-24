@@ -236,29 +236,93 @@ class TestSecondCarrierS7:
         assert [p["project_id"] for p in catalog["projects"]] == ["shown"]
 
 
+# MCP read tools that are deliberately PUBLIC (no writer authorization). This is a
+# closed list: a read tool registered in api.mcp_router that is in neither this set
+# nor `_PRIVATE_READ_TOOLS` makes the coupling test below fail.
+PUBLIC_READ_TOOLS = frozenset({
+    # Pipeline / role / template / tool / provider catalogues: configuration
+    # metadata, no project state.
+    "export_pipeline", "get_available_models", "get_pipeline", "get_role",
+    "get_template", "get_tool", "list_pipelines", "list_providers",
+    "list_roles", "list_templates", "list_tools",
+    # Run status: progress and summaries of runs, not project goals/evidence.
+    "get_run_status", "get_run_summary", "list_runs", "wait_for_run",
+    # SkillFlow documentation: static public docs.
+    "skillflow_docs_list", "skillflow_docs_read", "skillflow_docs_search",
+    # Serves tool schemas only, never project state.
+    "state_graph_help",
+    # Identity probe; reveals no token.
+    "driver_whoami",
+})
+
+
+def _unclassified_read_tools(public=PUBLIC_READ_TOOLS):
+    """Derive the classification from the LIVE MCP registry.
+
+    Builds the real MCP (which fills `_TOOL_KIND`) and returns a triple:
+    (read tools that are neither private nor public, public names that are no
+    longer registered read tools, names classified as both private and public).
+    With all three empty, `read_tools - private == set(public)` holds exactly:
+    unclassified empty gives read-private a subset of public, stale empty gives
+    public a subset of read, double_classified empty gives public disjoint from
+    private."""
+    import api.mcp_router as mcp_router
+    mcp_router.build_mcp()
+    read_tools = {name for name, kind in mcp_router._TOOL_KIND.items()
+                  if kind == "read"}
+    unclassified = sorted(read_tools - mcp_router._PRIVATE_READ_TOOLS - set(public))
+    stale_public = sorted(set(public) - read_tools)
+    double_classified = sorted(set(public) & mcp_router._PRIVATE_READ_TOOLS)
+    return unclassified, stale_public, double_classified
+
+
 class TestMcpPrivateReadWhitelistIsCoupled:
     def test_every_state_serving_read_tool_is_whitelisted(self):
         """`_PRIVATE_READ_TOOLS` decides which MCP read tools demand writer
-        authorization. Deriving the expectation from the tool registrations
-        themselves: any `read` tool registered by the state graph tools module
-        that is missing from the frozenset must fail THIS test — so deleting
-        `state_graph_read` from the whitelist goes red naming it, and a new read
-        tool added there cannot silently bypass the writer gate."""
+        authorization. The expectation is derived from the live tool registry
+        (`_TOOL_KIND`), not from source text: every registered read tool must be
+        either in the frozenset or in the closed PUBLIC_READ_TOOLS set above — so
+        deleting `state_graph_read` from the whitelist goes red naming it, and a
+        new read tool cannot silently bypass the writer gate."""
         import api.mcp_router as mcp_router
-        src = (REPO / "api" / "state_graph_tools.py").read_text(encoding="utf-8")
-        # A read tool must be whitelisted exactly when its body can execute a
-        # state action (i.e. return project state); `state_graph_help`, which
-        # only serves schemas, stays public. Each segment is cut at the next
-        # decorator so a body is never contaminated by the tools after it.
-        segments = re.split(r'\n    @', src)
-        serving = []
-        for seg in segments[1:]:
-            m = re.match(r'tool\("([^"]+)",\s*"read"', seg)
-            if m and re.search(r'\b(invoke|execute)\b', seg[m.end():]):
-                serving.append(m.group(1))
-        assert serving, "whitelist derivation found no state read tools - parser is broken"
-        missing = [name for name in serving
-                   if name not in mcp_router._PRIVATE_READ_TOOLS]
-        assert not missing, (
-            f"state read tools {missing} are NOT in mcp_router._PRIVATE_READ_TOOLS: "
-            f"on that transport the project privacy surface is inert for them")
+        unclassified, stale_public, double_classified = _unclassified_read_tools()
+        assert not unclassified, (
+            f"read tools {unclassified} are neither in mcp_router._PRIVATE_READ_TOOLS "
+            f"nor in PUBLIC_READ_TOOLS: on that transport the project privacy surface "
+            f"is inert for them. A new read tool must be classified (private = demands "
+            f"writer authorization; public = add to PUBLIC_READ_TOOLS with a reason)")
+        assert not stale_public, (
+            f"PUBLIC_READ_TOOLS names {stale_public} are no longer registered read "
+            f"tools: remove or reclassify them")
+        assert not double_classified, (
+            f"tools {double_classified} are in both mcp_router._PRIVATE_READ_TOOLS and "
+            f"PUBLIC_READ_TOOLS: a tool must be in exactly one of "
+            f"mcp_router._PRIVATE_READ_TOOLS and PUBLIC_READ_TOOLS")
+        not_read = sorted(name for name in mcp_router._PRIVATE_READ_TOOLS
+                          if mcp_router._TOOL_KIND.get(name) != "read")
+        assert not not_read, (
+            f"mcp_router._PRIVATE_READ_TOOLS names {not_read} are not registered "
+            f"tools of kind 'read'")
+
+    def test_a_newly_injected_read_tool_is_counted(self, monkeypatch):
+        import api.mcp_router as mcp_router
+        assert _unclassified_read_tools() == ([], [], [])
+        with monkeypatch.context() as mp:
+            mp.setitem(mcp_router._TOOL_KIND, "zz_injected_read_tool", "read")
+            unclassified, _, _ = _unclassified_read_tools()
+            assert unclassified == ["zz_injected_read_tool"]
+            # A public tool dropped from the closed set is reported unclassified.
+            dropped, _, _ = _unclassified_read_tools(
+                public=PUBLIC_READ_TOOLS - {"list_runs"})
+            assert "list_runs" in dropped
+            # A public name that is no longer registered is reported stale.
+            _, stale, _ = _unclassified_read_tools(
+                public=PUBLIC_READ_TOOLS | {"zz_gone_tool"})
+            assert stale == ["zz_gone_tool"]
+            # A name in both the private set and the public set is reported.
+            _, _, both = _unclassified_read_tools(
+                public=PUBLIC_READ_TOOLS | {"state_graph_read"})
+            assert both == ["state_graph_read"]
+        assert "zz_injected_read_tool" not in mcp_router._TOOL_KIND
+        assert _unclassified_read_tools() == ([], [], [])
+

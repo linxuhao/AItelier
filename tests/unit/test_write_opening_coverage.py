@@ -31,7 +31,6 @@ from pathlib import Path
 
 import pytest
 
-
 from core.state_commands import WRITE_REQUESTS
 
 REPO = Path(__file__).resolve().parents[2]
@@ -102,7 +101,6 @@ def _exercising_files(action):
     return scope + hits[:MAX_FILES_PER_ACTION]
 
 
-
 def _mutation_run(action, files):
     with tempfile.TemporaryDirectory() as td:
         fire = Path(td) / "fire.json"
@@ -147,7 +145,6 @@ def test_a_write_action_that_opens_the_project_goes_red(action):
         f"'{action}' open the project could go entirely unnoticed")
     files = _exercising_files(action)
     rc, report = _mutation_run(action, files)
-
     names = [f.name for f in files]
     assert report.get("fired", 0) > 0, (
         f"mutation for '{action}' (infected {report.get('target')}) FIRED 0 TIMES over "
@@ -176,7 +173,6 @@ def test_dropping_an_exemption_would_turn_the_gate_red_naming_the_action(action)
         f"privacy modules do not count as a witness")
     files = _exercising_files(action)
     rc, report = _mutation_run(action, files)
-
     assert report.get("fired", 0) > 0, f"'{action}' mutation never fired: {report}"
     assert rc != 0, (f"dropping the exemption for '{action}' would leave the gate facing a "
                      f"GREEN run — the exemption would be untestable; investigate. "

@@ -218,12 +218,31 @@ failed evidence, current-vs-pinned graph mismatch, anonymous denial and error
 states. Its optional `--migration-manifest` shows the real prepared goal manifest
 in the temporary service without touching production data.
 
+**Not an automatic test.** The files in `tests/browser/` are standalone scripts,
+not named `test_*`, and are not collected by pytest
+(`pytest --collect-only tests/browser` collects 0 items) or by any automatic
+gate. The only entry point is
+`python tests/browser/state_project_smoke.py --report-dir <dir> [--migration-manifest <file>]`,
+run from the repository root as a script (not with `-m` or pytest), because it
+imports its siblings by bare module name. `state_node_paint.py` and
+`state_run_summary_checks.py` are helper modules it imports, not separate entry
+points. It needs Playwright with Chromium (neither is declared in `pyproject.toml`
+or installed in the backend image) and a built `web/dist`
+(`cd web && npm ci && npm run build`). It uses only temporary SQLite and
+loopback services.
+
+**Unverified envelope.** A green run is not current evidence for the
+`report_external_attempt`/`record_evidence` envelope that the smoke fixture
+builds: that part was never re-checked against the current schema. This is
+tracked by State issue `iss-1ba92baa737b4c72`, which remains open.
+
 Run the tests in an isolated development environment:
 
 ```sh
 pytest tests/integration/test_state_portfolio.py tests/unit/test_state_migration.py
 cd web && npm ci && npm test && npm run build
-# From repository root, with Playwright installed only in the test environment:
+# From repository root, standalone script, not collected by pytest;
+# needs Playwright with Chromium installed only in the test environment:
 python tests/browser/state_project_smoke.py --report-dir /tmp/new-state-browser-report
 ```
 

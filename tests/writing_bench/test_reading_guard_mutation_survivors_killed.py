@@ -6,8 +6,10 @@ X4  `observed_review` ignores the certificate's `step_id`.
 X5  `load_certificate` ignores that the certificate claim differs from the pointer claim.
 X8  `Coverage._page` credits a bounded page whose text is not the material slice.
 
-All five guards were correct, yet planting each mutant left tests/writing_bench
-green. Each test below is written against the SHIPPED guard, so planting the real
+All five guards were correct, yet planting each mutant changed nothing in
+tests/writing_bench: the suite (8 stale tests already fail on the unmutated base,
+144 pass) gave the same 8 failures and 144 passes for every mutant. Each test
+below is written against the SHIPPED guard, so planting the real
 mutation in the real source file turns exactly this test red. The positive pole
 (the honest input is still accepted) sits beside every refusal, so a test cannot
 pass by refusing everything. Every `pytest.raises` block holds exactly the one

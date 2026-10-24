@@ -10,7 +10,6 @@ import copy
 import importlib.util
 import json
 import os
-import re
 import shutil
 import textwrap
 from pathlib import Path
@@ -267,6 +266,7 @@ def native(tmp_path, monkeypatch):
             result = original(dst, state_path, frames, timeout, extra, **kwargs)
             passes.append({"home": extra["HOME"], "requested_frames": frames,
                            "probe": copy.deepcopy(result[0]),
+                           "payload": copy.deepcopy(payload),
                            "errors": copy.deepcopy(result[1]), "timed_out": result[2]})
             return result
         finally:
@@ -640,12 +640,14 @@ def test_real_513_presses_keep_all_1026_injections_after_refusal(native, declare
 
 
 @pytest.mark.parametrize("presses", [227, 228])
-def test_real_receipt_node_boundary_also_respects_the_actual_byte_cap(native, presses):
+def test_real_receipt_node_boundary_also_respects_the_actual_byte_cap(native, tmp_path, presses):
     project, run = native
     path = project / "all.tscn"
     path.write_text(path.read_text().replace("busy_frames = 5", "busy_frames = 0"))
-    # Keep the witness small so the receipt boundary is independently visible.
-    _replace(project, _ACK, "        pass\n")
+    # 227 must be a useful positive, including real terminal acknowledgments.
+    # Keep only the over-node-bound control's witness small to isolate receipts.
+    if presses == 228:
+        _replace(project, _ACK, "        pass\n")
     spec = _case("runtime3_actualgame3accepted")
     at = 4 * presses + 12
     spec["scenarios"][0]["timeline"] = [{"at": 4 * i, "press": "move_up"} for i in range(presses)] + [
@@ -654,24 +656,37 @@ def test_real_receipt_node_boundary_also_respects_the_actual_byte_cap(native, pr
     ]
     report, probe = run(spec)
     obs = _observation(report)
-    assert probe["frames"] == at + 30
+    native_receipts = probe["input_observation"]["receipts"]
+    encoded = (json.dumps(native_receipts, ensure_ascii=False, allow_nan=False,
+                          separators=(",", ":")).encode("utf-8")
+               if native_receipts is not None else None)
+    (tmp_path / "receipt-capacity.json").write_text(json.dumps({
+        "presses": presses, "returned_tagged_bytes": len(encoded) if encoded is not None else None,
+        "native_errors": probe["input_observation"]["errors"], "receipt_cap_bytes": 65536,
+    }, indent=2))
+    assert probe["frames"] == at + 30 and probe["complete"] is True
     _position(report, -presses)
     _assert_dispatch(report, presses, 2 * presses, presses)
     assert obs["runtime_injected"] == presses and obs["runtime_events_injected"] == 2 * presses
-    assert obs["unknown"] == presses and obs["acceptance_pass"] is None
     if presses == 228:
-        assert obs["receipts"] is None and obs["delivery_complete"] is None
-        assert any("receipt" in e.lower() for e in obs["errors"])
-    elif obs["receipts"] is None:
-        # 4087 raw nodes fit; tagged envelopes/escaping may still exceed bytes.
+        _assert_invalid(report, presses, 2 * presses)
+        assert native_receipts is None and obs["receipts"] is None
         assert obs["delivery_complete"] is None
-        assert any("receipt" in e.lower() and ("byte" in e.lower() or "65536" in e) for e in obs["errors"])
+        assert any("receipt" in e.lower() and "node bound" in e.lower() for e in obs["errors"])
     else:
-        assert len(_decode(obs["receipts"])) == 454
-        encoded = json.dumps(obs["receipts"], ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        # No early-refusal alternative can pass this concrete within-cap case.
+        # Any unexpected refusal stays a first FAIL with original native errors.
+        assert encoded is not None, probe["input_observation"]
         assert len(encoded) <= 65536
-        assert obs["delivery_complete"] is True
-    assert obs["complete"] is False and report["passed"] is False
+        assert len(_decode(native_receipts)) == 454
+        assert obs["receipts"] == native_receipts and obs["delivery_complete"] is True
+        assert (obs["accepted"], obs["rejected"], obs["unknown"]) == (227, 0, 0)
+        decisions = _decode(obs["witness"])["decisions"]
+        assert len(decisions) == 227 and all(d["decision"] == "accepted" for d in decisions)
+        assert obs["complete"] is True and obs["acceptance_pass"] is True
+        assert obs["status"] == "all_accepted" and obs["errors"] == []
+        assert _scenario(report)["passed"] is True and _scenario(report)["input_dead"] is False
+        assert report["passed"] is True and report["spec_errors"] == []
 
 
 @pytest.mark.parametrize("action", ["x" * 40000, "\\" * 17000], ids=["aggregate-raw-strings", "actual-escaped-tagged-bytes"])
@@ -798,8 +813,24 @@ def test_real_report_survives_normal_consumer_serialization_and_summary(native, 
     summary = saved["summary"].lower()
     assert "accept" in summary
     if name == "runtime3_actualgame2accepted":
-        assert re.search(r"(?:accept\w*[^.;|]*2|2[^.;|]*accept)", summary)
-        assert re.search(r"(?:reject\w*[^.;|]*1|1[^.;|]*reject)", summary)
+        def assert_partial_counts(text):
+            marker = " || input acceptance (timeline action presses): "
+            assert marker in text
+            section = text.rsplit(marker, 1)[1]
+            assert section.startswith(
+                "runtime3_actualgame2accepted: partial (eligible injections=3, "
+                "all injections=6, accepted=2, rejected=1, unknown=0, acceptance_pass=false). ")
+
+        assert_partial_counts(summary)
+        for correct, wrong in ((", accepted=2,", ", accepted=0,"),
+                               (", rejected=1,", ", rejected=0,")):
+            assert correct in summary
+            with pytest.raises(AssertionError):
+                assert_partial_counts(summary.replace(correct, wrong))
+        # The unchanged scenario name still contains '2accepted'; it is no
+        # substitute for the explicit accepted/rejected counter fields above.
+        with pytest.raises(AssertionError):
+            assert_partial_counts(name.lower())
         assert _observation(saved)["acceptance_pass"] is False
     else:
         assert _scenario(saved)["input_dead"] is True
@@ -920,3 +951,58 @@ def test_real_capture_and_plural_stimuli_preserve_movement_and_receipts(native, 
     # Retain both complete node mappings and establish their actual difference.
     assert driven["nodes"]["/root/Player"]["vars"]["grid_y"] == -1
     assert control["nodes"]["/root/Player"]["vars"]["grid_y"] == 0
+
+
+def test_real_native_receipt_replay_rejects_each_concrete_malformed_field(native, tmp_path):
+    _, run = native
+    spec = _raw_assert(_case("runtime3_actualgame3accepted"))
+    # A real first frame of 1 makes True numerically equal to the valid value;
+    # bool-frame rejection therefore cannot piggyback on schedule inequality.
+    for entry, frame in zip(spec["scenarios"][0]["timeline"][:3], (1, 11, 21)):
+        entry["at"] = frame
+    report, probe = run(spec)
+    _position(report, -3)
+    _assert_dispatch(report, 3, 6, 3)
+    assert probe["frames"] == 89 and probe["complete"] is True
+    assert report["passed"] is True and report["spec_errors"] == []
+    actual = json.loads((tmp_path / "native-trace.json").read_text())["passes"][0]
+    timeline = actual["payload"]["timeline"]
+    prototype = copy.deepcopy(probe)
+    valid = gh._input_observation_report(True, timeline, copy.deepcopy(prototype), True)
+    assert valid == _observation(report)
+    assert valid["status"] == "all_accepted" and valid["complete"] is True
+    assert (valid["accepted"], valid["rejected"], valid["unknown"]) == (3, 0, 0)
+    assert valid["delivery_complete"] is True and valid["acceptance_pass"] is True
+    assert _decode(valid["receipts"])[0][1] == 1
+    replay_results = {"valid": valid}
+    for fault in ("attempted", "counter_mismatch", "sequence_gap", "boolean_frame"):
+        changed = copy.deepcopy(prototype)
+        observation = changed["input_observation"]
+        receipts = observation["receipts"]["__v"]
+        if fault == "attempted":
+            # Last auto-release stays in the same schedule and witness scope.
+            receipts[-1]["__v"][7] = "attempted"
+        elif fault == "counter_mismatch":
+            observation["runtime_events_injected"] += 1
+        elif fault == "sequence_gap":
+            receipts[1]["__v"][0] += 1
+        else:
+            assert receipts[0]["__v"][1] == 1
+            receipts[0]["__v"][1] = True
+        result = gh._input_observation_report(True, timeline, changed, True)
+        replay_results[fault] = result
+        # Retain the concrete mutation and result before any assertion fails.
+        (tmp_path / ("native-replay-" + fault + ".json")).write_text(json.dumps({
+            "probe": changed, "timeline": timeline, "result": result,
+        }, indent=2))
+        assert result["complete"] is False and result["acceptance_pass"] is None
+        assert result["accepted"] is None and result["rejected"] is None
+        assert result["unknown"] == 3 and result["errors"]
+        if fault in ("attempted", "counter_mismatch"):
+            assert result["delivery_complete"] is False
+            assert any(error.startswith("delivery:") for error in result["errors"])
+        else:
+            assert result["delivery_complete"] is None
+            assert any(error.startswith("receipts: invalid receipt identity") for error in result["errors"])
+    assert probe == prototype
+    (tmp_path / "native-replay-results.json").write_text(json.dumps(replay_results, indent=2))

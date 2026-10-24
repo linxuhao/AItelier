@@ -39,3 +39,31 @@ still fails `changed`; it passes `unchanged` only when both actual reads match.
 Do not use the first later observation as a substitute baseline. Keep existing
 product input frames, state assertions, numeric requirements and zero-delta
 controls. CPU admission tests do not execute Godot or establish runtime proof.
+
+
+## Input-observation bookkeeping when the declaration is omitted
+
+A scenario can opt into cooperative input observation with a whole mapping:
+
+```yaml
+input_observation: {node: Player, property: input_acceptance}
+```
+
+The mapping belongs to the scenario, including an individual `playtest/*.yaml`
+file. Its `node` and `property` fields are preserved by split loading and
+scenario selection; the native probe reads the declared property at the end
+of that scenario.
+
+Without this declaration, the ephemeral probe node's `_input_*` scalar fields
+may still appear under `report.state["/root/_AItelierProbe"].vars`. In particular,
+zero `_input_injected` and `_input_events_injected` values are inactive
+bookkeeping, even when the game received input. They do not measure zero
+callbacks, prove rejection, or provide a complete receipt.
+
+The authoritative scenario result is
+`behavior.scenarios[].input_observation`: omission means `status: unobserved`,
+`runtime_injected`, `runtime_events_injected`, `accepted`, `rejected`, `unknown`,
+`delivery_complete`, `acceptance_pass`, `receipts` and `witness` are null, and
+`complete` is false. Input dispatch and the separate hard comparison against
+an isolated no-input control retain their existing behavior. Do not manufacture
+acceptance or completeness from the debug snapshot.

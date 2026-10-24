@@ -1,125 +1,19 @@
-"""No prose may keep a falsified guarantee alive on this round's files.
+"""Focused controls on the State guard's real behavior.
 
-A previous round deleted last round's lies and wrote fresh ones no test could
-falsify. Prose is not evidence; the assertion is. This test enforces the ban on
-the "keep a lie alive" phrases across the EXACT set of files this round touched,
-so a future edit that tries to soften a refusal with one of them fails here
-rather than passing on a green suite.
+This module keeps three controls on the actual guard code: the router-wide async
+verdict dependency, the ruling parameter of `record_judged`, and the private
+check running before the dispatch approval.
 
-The scan set is DERIVED from git - the diff against this CARD's first-round
-base, not the previous round's candidate - not typed here: a file any of the
-card's rounds adds or edits is in scope automatically, and the ban cannot be
-narrowed by editing a list in this file. The phrases are
-assembled from fragments so this file holds no banned literal, which removes
-the earlier hole where a phrase written on the declaration line slipped a
-line-prefix exclusion. There is no exclusion now: any occurrence fails.
+The card-local lexical ban that used to live here has been retired from ordinary
+tests. It belonged to a closed 2026-09 card, scanned an ever-growing git diff
+against that card's base, and so rejected unrelated prose and fixture files. A
+word scan was never a permanent product invariant. Standards beyond these three
+controls are maintained by independent review and by tests of actual behavior;
+this module does not claim that every guarantee is proved automatically.
 """
 from __future__ import annotations
 
 import re
-import subprocess
-from pathlib import Path
-
-import pytest
-
-REPO = Path(__file__).resolve().parents[2]
-
-# The base this card was opened against - its FIRST round, not the previous
-# round's candidate. Anchoring on the card base keeps every file any of the
-# card's rounds touched in scope; the FILE LIST still comes from git below.
-BASE_SHA = "9c79f11f"
-
-# Assembled from fragments so this module contains no banned literal.
-BANNED = [
-    "not a " + "defect",
-    "docu" + "mented",
-    "inten" + "tionally",
-    "by " + "desi" + "gn",
-    "known " + "limita" + "tion",
-]
-
-_SCANNED_SUFFIXES = (".py", ".md", ".ts", ".tsx", ".txt")
-
-
-def _changed_files() -> list[str]:
-    """The files this round's change touches, TAKEN FROM GIT.
-
-    Union of the round's diff against `BASE_SHA` (committed and uncommitted) and
-    the worktree status, so a file added, edited or renamed by the round is in
-    scope - including this test and the guarantee ledger. Only existing text
-    files under the repository are returned.
-    """
-    def git(*args) -> str:
-        result = subprocess.run(["git", *args], cwd=REPO, text=True,
-                                capture_output=True)
-        return result.stdout if result.returncode == 0 else ""
-
-    names: set = set()
-    for args in (("diff", "--name-only", BASE_SHA, "HEAD"),
-                 ("diff", "--name-only", BASE_SHA),
-                 ("diff", "--name-only", "HEAD~1", "HEAD"),
-                 ("show", "--name-only", "--format=", "HEAD"),
-                 ("diff", "--name-only", "HEAD"),
-                 ("status", "--porcelain")):
-        for line in git(*args).splitlines():
-            line = line.rstrip()
-            if not line:
-                continue
-            if args[0] == "status":
-                line = line[3:]
-                if " -> " in line:
-                    line = line.split(" -> ")[-1]
-            names.add(line.strip())
-    return sorted(rel for rel in names
-                  if rel.endswith(_SCANNED_SUFFIXES) and (REPO / rel).is_file())
-
-
-ROUND_FILES = _changed_files()
-
-
-def test_the_scan_scope_is_derived_from_git_and_not_empty():
-    assert ROUND_FILES, "git reported no changed files for this round"
-
-
-def test_the_scan_is_anchored_on_the_cards_first_round_base():
-    """Guarantee: the scan cannot be narrowed by moving its base forward.
-
-    Anchoring on the previous round's candidate drops the files earlier rounds
-    of this card already changed, and a phrase planted into one of them slips
-    the ban. Falsified by moving BASE_SHA forward: this fails, and a phrase in
-    an earlier-round file stops being scanned (measured: a "by desi"+"gn"
-    phrase planted into `api/state_only.py` is caught under this base).
-    """
-    assert BASE_SHA == "9c79f11f", (
-        "the scan base must stay the card's first-round base; moving it forward "
-        "narrows the scope below files the card already changed")
-    # Resolvable in git, so the scope is a re-runnable derivation rather than a
-    # typed list: this fails if the base commits forward or stops existing.
-    import subprocess
-    resolved = subprocess.run(["git", "cat-file", "-e", BASE_SHA], cwd=REPO,
-                              capture_output=True)
-    assert resolved.returncode == 0, f"base {BASE_SHA} does not resolve in git"
-    assert "api/state_only.py" in ROUND_FILES
-
-
-@pytest.mark.parametrize("rel", ROUND_FILES)
-def test_a_round_file_carries_no_lie_keeping_phrase(rel):
-    text = (REPO / rel).read_text(encoding="utf-8", errors="replace")
-    # The failure names the phrase by its index in BANNED, never by its text,
-    # so a log of a red run does not itself carry the phrase into the tree.
-    hits = [index for index, phrase in enumerate(BANNED) if phrase in text]
-    assert not hits, f"{rel} uses BANNED phrase number(s) {hits}"
-
-
-def test_no_line_prefix_can_exclude_a_banned_phrase():
-    """The hole this replaces: a line-prefix exclusion let a phrase written on
-    the declaration line slip the scan. There is no exclusion now, so planting a
-    phrase on such a line is caught by the very predicate the scan uses."""
-    source = (REPO / "tests/integration/test_no_unfalsifiable_guarantees.py").read_text(
-        encoding="utf-8")
-    assert [p for p in BANNED if p in source] == []
-    planted = source + '    "' + BANNED[0] + '",\n'
-    assert [p for p in BANNED if p in planted] == [BANNED[0]]
 
 
 def test_the_guard_is_still_the_one_router_wide_dependency():

@@ -2,6 +2,27 @@
 
 Card `transport.the-guard-must-not-depend-on-the-shape-of-its-dependency`,
 round 12 (State DAG revision 10). Date: 2026-09-24.
+
+> **Framing note (added 2026-10-24).** Everything below, including the
+> 2026-09-24 round 12 / revision 10 counts, paths, mutation results and claims,
+> is historical delivery evidence recorded for that closed card. It is not a
+> verification of the current tree or of current runtime behavior. Present-tense
+> wording in the original text ("this tree", "on this tree", "committed beside
+> the delivery note") refers to the original candidate at that time. The logs,
+> `logs/` and `final/` paths and the `gs10-mut` worktree named below belong to
+> the original artifact and history; they are not promised to exist in the
+> current checkout, and this note does not rerun or re-verify any of them. The
+> original rows, dates and numbers below are unchanged. The later 904 / 718
+> observations and the 13-failure lexical-scan result are separate State/raw
+> evidence; this archival ledger does not contain or re-verify them.
+>
+> The lexical phrase ban described in row 5 was a card-local method. It has been
+> retired from ordinary CI, because it kept rejecting unrelated files as the
+> diff against that card's base grew. Ordinary CI now retains behavioral
+> controls on the guard instead of a universal vocabulary ban. Retiring that
+> method does not satisfy the original round's acceptance wording
+> retroactively, and it is not a current full audit of every guarantee below.
+
 Rule: a guarantee sentence that no test can falsify is deleted or made true.
 Each row names the test that can fire on it and the source mutation that shows
 the test has teeth. Every number in a row was produced on this tree by the

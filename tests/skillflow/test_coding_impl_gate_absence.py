@@ -72,9 +72,6 @@ def _wire(tmp_path, monkeypatch, *, episode_max, wait, counter, tail,
 
     loader = ToolLoader(Path(_skillflow_pkg.__file__).parent / "tools")
     loader.add_tools_dir(_REPO_ROOT / "aitelier" / "tools")
-    if gate_observations is not None:
-        from tests.gate_fixture import observe_repo_gate_calls
-        observe_repo_gate_calls(loader, counter, gate_observations)
     sf = AItelierSkillFlow(
         str(tmp_path / "sf.db"), tool_loader=loader,
         workspace_base=str(tmp_path / "ws"),
@@ -115,6 +112,11 @@ def _wire(tmp_path, monkeypatch, *, episode_max, wait, counter, tail,
     from core.seed_publication import publish_seeds, seed_dir
     publish_seeds(seed_dir(sf, "p", graph.name), {
         "plan.md": "Implement the isolated fixture and run the declared gate.\n"})
+    # SkillFlow initialization adds plugin tool directories and clears the
+    # loader cache. Install the observer only after host/graph registration.
+    if gate_observations is not None:
+        from tests.gate_fixture import observe_repo_gate_calls
+        observe_repo_gate_calls(loader, counter, gate_observations)
     run_id = sf.create_run(graph.name, {"project_id": "p"})
     sf.start_run(run_id)
     return sf, run_id

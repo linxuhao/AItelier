@@ -1069,6 +1069,75 @@ def test_a_scenario_with_no_input_at_all_is_not_judged_by_l0(monkeypatch, tmp_pa
     assert len(seen) == 1 and r["behavior"]["scenarios"][0]["input_dead"] is False
 
 
+@pytest.mark.parametrize("entry", [
+    pytest.param({}, id="schedule-only"),
+    pytest.param({"capture_before": []}, id="empty-capture"),
+    pytest.param({"press": ""}, id="empty-press"),
+    pytest.param({"release": ""}, id="empty-release"),
+    pytest.param({"click": ""}, id="empty-click"),
+    pytest.param({"hover": ""}, id="empty-hover"),
+    pytest.param({"actions": []}, id="empty-actions"),
+    pytest.param({"clicks": []}, id="empty-clicks"),
+    pytest.param({"hovers": []}, id="empty-hovers"),
+    pytest.param({"actions": [""]}, id="empty-action-item"),
+    pytest.param({"clicks": [""]}, id="empty-click-item"),
+    pytest.param({"hovers": [""]}, id="empty-hover-item"),
+])
+def test_observation_and_empty_operands_do_not_enter_l0(monkeypatch, tmp_path, entry):
+    same = {"Bird": {"vars": {"x": 1}}}
+    seen = _home_recording_probe(monkeypatch, [], control_nodes=same)
+    spec = {"scenarios": [{"name": "observe", "timeline": [
+        {"at": 5, **entry},
+        {"at": 10, "assert": [{"node": "Bird", "expr": "x == 1"}]}]}]}
+    result = gh._playtest_spec(tmp_path / "proj", spec, 60, 120)
+    scenario = result["behavior"]["scenarios"][0]
+    assert result["spec_errors"] == []
+    assert result["passed"] is True
+    assert scenario["complete"] is True
+    assert scenario["pressed"] is False
+    assert scenario["input_dead"] is False
+    assert len(seen) == 1
+    assert not any(call["is_control"] for call in seen)
+
+
+@pytest.mark.parametrize("key", ["press", "release", "click", "hover"])
+def test_real_input_with_capture_metadata_still_enters_l0(monkeypatch, tmp_path, key):
+    same = {"Bird": {"vars": {"x": 1}}}
+    seen = _home_recording_probe(monkeypatch, [], control_nodes=same)
+    spec = {"scenarios": [{"name": "driven", "timeline": [
+        {"at": 5, "capture_before": [], key: "ui_accept"},
+        {"at": 10, "assert": [{"node": "Bird", "expr": "x == 1"}]}]}]}
+    result = gh._playtest_spec(tmp_path / "proj", spec, 60, 120)
+    scenario = result["behavior"]["scenarios"][0]
+    assert result["spec_errors"] == []
+    assert result["passed"] is False
+    assert scenario["comparison_error"] is None
+    assert scenario["pressed"] is True
+    assert scenario["input_dead"] is True
+    assert len(seen) == 2
+    assert sum(call["is_control"] for call in seen) == 1
+
+
+@pytest.mark.parametrize("key", ["press", "click"])
+def test_valid_nonempty_before_capture_keeps_real_input_active(monkeypatch, tmp_path, key):
+    same = {"Bird": {"vars": {"x": 1}}}
+    seen = _home_recording_probe(monkeypatch, [], control_nodes=same)
+    spec = {"scenarios": [{"name": "captured", "timeline": [
+        {"at": 1, "capture_before": [
+            {"id": "initial", "node": "Bird", "attr": "x", "action_frame": 5}]},
+        {"at": 5, key: "ui_accept"},
+        {"at": 10, "assert": [{"node": "Bird", "expr": "x == 1"}]}]}]}
+    result = gh._playtest_spec(tmp_path / "proj", spec, 60, 120)
+    scenario = result["behavior"]["scenarios"][0]
+    assert result["spec_errors"] == []
+    assert result["passed"] is False
+    assert scenario["comparison_error"] is None
+    assert scenario["pressed"] is True
+    assert scenario["input_dead"] is True
+    assert len(seen) == 2
+    assert sum(call["is_control"] for call in seen) == 1
+
+
 def test_input_dead_still_fires_on_a_scene_override_that_ignores_input(monkeypatch, tmp_path):
     """The comparison is not loosened: same scene, same budget, identical end
     state => input_dead, and a scenario whose state DID move stays alive."""

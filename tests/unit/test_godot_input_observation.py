@@ -558,13 +558,17 @@ def test_real_receipts_preserve_release_mouse_and_entry_order(native, separated)
 
 @pytest.mark.parametrize("entries,events", [
     ([{"at": 20, "release": "move_up"}], 1),
+    ([{"at": 20, "hover": "Player +16,32"}], 1),
+    ([{"at": 20, "click": "Player +32,32"}], 3),
     ([{"at": 20, "hover": "Player"}, {"at": 30, "click": "Player"}], 4),
 ])
-def test_real_unsupported_only_input_does_not_claim_semantic_acceptance(native, entries, events):
+def test_real_unsupported_only_input_does_not_claim_semantic_acceptance(native, tmp_path, entries, events):
     project, run = native
     spec = _case("no_input")
     spec["scenarios"][0]["timeline"] = entries + spec["scenarios"][0]["timeline"]
-    report, _ = run(_raw_assert(spec))
+    report, probe = run(_raw_assert(spec))
+    assert probe["frames"] == 89 and probe["complete"] is True
+    assert report["timing"]["scenarios"][0]["frames_stepped"] == 89
     obs = _observation(report)
     _position(report, 0)
     _assert_dispatch(report, 0, events, 0)
@@ -572,6 +576,15 @@ def test_real_unsupported_only_input_does_not_claim_semantic_acceptance(native, 
     assert obs["status"] == "unsupported" and obs["acceptance_pass"] is None
     assert _scenario(report)["pressed"] is True
     assert _scenario(report)["input_dead"] is True and report["passed"] is False
+
+    passes = json.loads((tmp_path / "native-trace.json").read_text())["passes"]
+    assert len(passes) == 2
+    assert all(p["requested_frames"] == p["probe"]["frames"] == 89 for p in passes)
+    assert all(p["probe"]["complete"] is True for p in passes)
+    states = [{path: value for path, value in p["probe"]["nodes"].items()
+               if path != "/root/_AItelierProbe"} for p in passes]
+    assert set(states[0]) == {"/root/Player"}
+    assert states[0] == states[1]
 
 
 def test_real_polling_without_a_retained_token_remains_unknown(native):
@@ -791,3 +804,119 @@ def test_real_report_survives_normal_consumer_serialization_and_summary(native, 
     else:
         assert _scenario(saved)["input_dead"] is True
         assert saved["passed"] is False and _observation(saved)["acceptance_pass"] is False
+
+
+def test_real_empty_stimuli_match_the_assert_only_complete_state(native, tmp_path):
+    _, run = native
+    # Last observation at 29 preserves the existing 60-frame execution budget.
+    # These are admitted raw inputs, not pre-normalized predicate test doubles.
+    observations = {"at": 29, "assert": [
+        {"name": "static state", "node": "Player", "expr": "grid_y == 0"},
+        {"name": "raw received", "node": "Player", "expr": "true", "attr": "raw_received"},
+    ]}
+    variants = [
+        [],
+        [{"at": 10, "capture_before": []}],
+        [{"at": 10, "press": "", "release": "", "click": "", "hover": ""}],
+        [{"at": 10, "actions": [], "clicks": [], "hovers": []}],
+        [{"at": 10, "actions": [""], "clicks": [""], "hovers": [""]}],
+    ]
+    baseline = None
+    for index, entries in enumerate(variants):
+        spec = _case("no_input")
+        scenario = spec["scenarios"][0]
+        scenario["timeline"] = entries + [copy.deepcopy(observations)]
+        # Preserve the original undeclared empty-capture counterexample too.
+        if index == 1:
+            scenario.pop("input_observation")
+        report, probe = run(spec)
+        row, obs = _scenario(report), _observation(report)
+        assert probe["frames"] == 60 and probe["complete"] is True
+        assert report["timing"]["scenarios"][0]["frames_stepped"] == 60
+        assert row["complete"] is True and row["comparison_error"] is None
+        assert row["pressed"] is False and row["input_dead"] is False
+        assert row["passed"] is True and report["passed"] is True
+        assert report["spec_errors"] == [] and all(a["passed"] for a in row["asserts"])
+        _position(report, 0)
+        _assert_dispatch(report, 0, 0, 0)
+        # Compare the complete observed gameplay node mapping, not just grid_y.
+        # The sole excluded node belongs to the harness, not the application.
+        state = {p: v for p, v in probe["nodes"].items() if p != "/root/_AItelierProbe"}
+        assert set(state) == {"/root/Player"}
+        if baseline is None:
+            baseline = state
+        assert state == baseline
+        if index == 1:
+            _assert_unobserved(obs)
+        else:
+            assert obs["runtime_injected"] == obs["runtime_events_injected"] == 0
+            assert obs["status"] == "not_applicable" and obs["complete"] is True
+            assert obs["acceptance_pass"] is None and obs["errors"] == []
+            assert _decode(obs["receipts"]) == []
+            assert _decode(obs["witness"])["decisions"] == []
+        # Each variant runs once; no isolated L0 control is appropriate here.
+        passes = json.loads((tmp_path / "native-trace.json").read_text())["passes"]
+        assert len(passes) == index + 1
+        assert all(p["requested_frames"] == p["probe"]["frames"] == 60 for p in passes)
+
+
+def test_real_zero_event_missing_witness_is_hard_incomplete(native):
+    _, run = native
+    spec = _case("no_input")
+    spec["scenarios"][0]["input_observation"]["property"] = "nonexistent_property"
+    spec["scenarios"][0]["timeline"] = [
+        {"at": 10, "capture_before": []},
+    ] + spec["scenarios"][0]["timeline"]
+    report, probe = run(_raw_assert(spec))
+    row, obs = _scenario(report), _observation(report)
+    assert probe["frames"] == 89 and probe["complete"] is True
+    assert row["pressed"] is False and row["input_dead"] is False
+    assert row["complete"] is False and report["passed"] is False
+    _position(report, 0)
+    _assert_dispatch(report, 0, 0, 0)
+    assert obs["runtime_injected"] == obs["runtime_events_injected"] == 0
+    assert obs["status"] == "incomplete" and obs["complete"] is False
+    assert obs["acceptance_pass"] is None and obs["witness"] is None
+    assert _decode(obs["receipts"]) == [] and obs["delivery_complete"] is True
+    assert any("witness" in error.lower() for error in obs["errors"])
+    assert any("input_observation" in error for error in report["spec_errors"])
+
+
+def test_real_capture_and_plural_stimuli_preserve_movement_and_receipts(native, tmp_path):
+    _, run = native
+    spec = _case("runtime3_actualgame3accepted")
+    spec["scenarios"][0]["timeline"] = [
+        {"at": 19, "capture_before": [
+            {"id": "before_move", "node": "Player", "attr": "grid_y", "action_frame": 20}]},
+        {"at": 20, "actions": ["move_up"]},
+        {"at": 30, "clicks": ["Player +32,32"]},
+        {"at": 40, "hovers": ["Player +16,32"]},
+        {"at": 59, "assert": {"Player.grid_y": -1, "Player.position.y": -1}},
+    ]
+    report, probe = run(_raw_assert(spec))
+    row, obs = _scenario(report), _observation(report)
+    assert probe["frames"] == 89 and probe["complete"] is True
+    assert report["timing"]["scenarios"][0]["frames_stepped"] == 89
+    assert row["complete"] is True and row["comparison_error"] is None
+    assert row["pressed"] is True and row["input_dead"] is False
+    assert row["passed"] is True and report["passed"] is True and report["spec_errors"] == []
+    capture = row["before_captures"]["before_move"]
+    assert capture["ok"] is True and capture["value"] == 0
+    assert (capture["frame"], capture["action_frame"]) == (19, 20)
+    _position(report, -1)
+    _assert_dispatch(report, 1, 6, 1)
+    receipts = _decode(obs["receipts"])
+    assert [r[1] for r in receipts] == [20, 22, 30, 30, 30, 40]
+    assert [r[4] for r in receipts] == ["action", "action", "mouse_motion", "mouse_button", "mouse_button", "mouse_motion"]
+    assert [r[3] for r in receipts] == ["timeline", "auto_release"] + ["timeline"] * 4
+    assert all(r[7] == "returned" for r in receipts)
+    assert (obs["runtime_injected"], obs["runtime_events_injected"], obs["accepted"], obs["rejected"], obs["unknown"]) == (1, 6, 1, 0, 0)
+    assert obs["delivery_complete"] is True and obs["complete"] is True
+    assert obs["status"] == "all_accepted" and obs["acceptance_pass"] is True
+    passes = json.loads((tmp_path / "native-trace.json").read_text())["passes"]
+    assert len(passes) == 2
+    driven, control = [p["probe"] for p in passes]
+    assert all(p["frames"] == 89 and p["complete"] is True for p in (driven, control))
+    # Retain both complete node mappings and establish their actual difference.
+    assert driven["nodes"]["/root/Player"]["vars"]["grid_y"] == -1
+    assert control["nodes"]["/root/Player"]["vars"]["grid_y"] == 0

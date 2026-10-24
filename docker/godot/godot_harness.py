@@ -4159,17 +4159,11 @@ def _playtest_spec_inner(dst: Path, spec: dict, frames: int, timeout: int,
                              "complete": complete,
                              "incomplete_asserts": len(incomplete),
 
-                             # "Did the normalized timeline request input?" -- derived
-                             # from the normalised entries themselves: after
-                             # _normalize_timeline every key is either the
-                             # schedule (`at`), an assertion, or an input the
-                             # probe delivers (press/release/click/hover, and
-                             # whatever is added to _TIMELINE_KEYS next). This
-                             # used to read only `press`, so the 10 click-only
-                             # scenarios never entered L0 at all -- the same
-                             # two-lists-out-of-sync shape as the actions:/press:
-                             # incident, one level up.
-                             "pressed": any(set(e) - {"at", "assert"} for e in timeline),
+                             # Match _apply_entry's supported input branches and
+                             # empty-string no-op sentinel. Scheduling, assertions
+                             # and capture_before observe rather than drive input.
+                             "pressed": any(e.get(k, "") != "" for e in timeline
+                                            for k in ("press", "release", "click", "hover")),
                              "input_dead": False})
         observed_nodes = probe.get("nodes")
         scen_nodes.append(_digest(observed_nodes) if isinstance(observed_nodes, dict) else {})

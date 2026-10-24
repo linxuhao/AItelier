@@ -96,10 +96,12 @@ mounting, permitted project selection, late identity responses, sign-out, errors
 separate page queries, duplicate/paginated run identities, repository-free runs,
 owner filtering, anonymous denial and non-mutating state refresh.
 
-`tests/browser/state_node_paint.py` checks the built app with the full Pico CSS:
+`tests/browser/state_node_paint.py` is a helper module invoked by
+`tests/browser/state_project_smoke.py`; it is not run on its own and is not
+collected by pytest. Against the built app with the full Pico CSS it asserts:
 light/dark themes, normal/hover/focus, nonzero painted label bounds, contrast at
 least 4.5:1, readable actual card size and label containment. The browser smoke
-suite traverses homepage → runs → pipeline definition → project, checks desktop
+script traverses homepage → runs → pipeline definition → project, checks desktop
 first-screen geometry and 390px widths for all three primary screens, and keeps
 existing pinned-run/recovery/anonymous scenarios.
 

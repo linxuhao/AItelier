@@ -4,6 +4,10 @@
 import os
 import tempfile
 
+# Offline tests use LiteLLM's bundled cost map instead of fetching it at import.
+# Keep an explicit caller setting intact; this must precede api/litellm imports.
+os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
+
 # Isolate the ENTIRE data directory for the test session. Defense in depth —
 # the primary guards now live in the code itself (core/datadir.py authority,
 # REQUIRED constructor paths, lifespan _test_mode skip; see

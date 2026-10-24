@@ -11,7 +11,8 @@ from core.state_driver_index import (ENTRY_SCHEMA, DRIVER_ENTRY_SCHEMA, index_li
                                      referenced_addresses)
 from core.state_graph import (StateConflict, StateGraphError, StateNotFound, key, now,
                               text)
-from core.state_privacy import UntrustedDatabase, writer_only_read
+from core.state_privacy import (UntrustedDatabase, refuse_unopened_project, trust_of,
+                                writer_only_read)
 
 _DEFAULT_FORCE = object()
 MAX_SEARCH_QUERY_CHARS = 500
@@ -182,6 +183,14 @@ class StateDriverNotes:
                     if not self.break_glass_reason or not (owner or caller["is_admin"]):
                         raise StateGraphError("not_notebook_owner")
             return self.store.transaction(write=write)
+        if notebook is not None and trust_of(self) is not True:
+            # The project half of the anonymous verdict, at the read: every
+            # notebook reader (decorated wrapper AND bare body) opens its scope
+            # here before any SQL. An untrusted owner gets the ONE refusal for a
+            # project nobody opened and, byte-identically, for one that does not
+            # exist - the same predicate `execute` applies - so the method is not
+            # an existence oracle. Trusted owners are untouched.
+            refuse_unopened_project(self.store, notebook)
         return self.store.transaction(write=write, notebook=notebook)
 
     def _entity(self, conn, scope_id):

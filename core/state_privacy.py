@@ -119,6 +119,25 @@ def refuse_private_read(trusted, action: str) -> None:
         raise ProjectPrivate()
 
 
+def refuse_unopened_project(store, project_id: str) -> None:
+    """Raise the ONE refusal when ``project_id`` is not an opened project.
+
+    The project half of the anonymous verdict, shared by
+    ``core.state_commands._refuse_if_project_not_public`` (the ``execute``
+    chokepoint) and the notebook readers' scoped transaction
+    (``core.state_driver_notes.StateDriverNotes._transaction``). The predicate
+    is ``store.is_project_public``, which is False for a project nobody opened
+    AND for a project that does not exist, so both are refused with the same
+    ``ProjectPrivate`` (status, detail and str) and the refusal is never an
+    existence oracle. The caller decides whether the owner is untrusted; this
+    function judges only the project.
+    """
+    if not store.is_project_public(project_id):
+        from core.state_commands import ProjectPrivate
+        raise ProjectPrivate()
+
+
+
 def trust_of(owner) -> bool:
     """The declared trust level of the object that owns a read.
 

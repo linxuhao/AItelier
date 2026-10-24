@@ -259,16 +259,21 @@ PUBLIC_READ_TOOLS = frozenset({
 def _unclassified_read_tools(public=PUBLIC_READ_TOOLS):
     """Derive the classification from the LIVE MCP registry.
 
-    Builds the real MCP (which fills `_TOOL_KIND`) and returns a pair:
+    Builds the real MCP (which fills `_TOOL_KIND`) and returns a triple:
     (read tools that are neither private nor public, public names that are no
-    longer registered read tools)."""
+    longer registered read tools, names classified as both private and public).
+    With all three empty, `read_tools - private == set(public)` holds exactly:
+    unclassified empty gives read-private a subset of public, stale empty gives
+    public a subset of read, double_classified empty gives public disjoint from
+    private."""
     import api.mcp_router as mcp_router
     mcp_router.build_mcp()
     read_tools = {name for name, kind in mcp_router._TOOL_KIND.items()
                   if kind == "read"}
     unclassified = sorted(read_tools - mcp_router._PRIVATE_READ_TOOLS - set(public))
     stale_public = sorted(set(public) - read_tools)
-    return unclassified, stale_public
+    double_classified = sorted(set(public) & mcp_router._PRIVATE_READ_TOOLS)
+    return unclassified, stale_public, double_classified
 
 
 class TestMcpPrivateReadWhitelistIsCoupled:
@@ -280,7 +285,7 @@ class TestMcpPrivateReadWhitelistIsCoupled:
         deleting `state_graph_read` from the whitelist goes red naming it, and a
         new read tool cannot silently bypass the writer gate."""
         import api.mcp_router as mcp_router
-        unclassified, stale_public = _unclassified_read_tools()
+        unclassified, stale_public, double_classified = _unclassified_read_tools()
         assert not unclassified, (
             f"read tools {unclassified} are neither in mcp_router._PRIVATE_READ_TOOLS "
             f"nor in PUBLIC_READ_TOOLS: on that transport the project privacy surface "
@@ -289,6 +294,10 @@ class TestMcpPrivateReadWhitelistIsCoupled:
         assert not stale_public, (
             f"PUBLIC_READ_TOOLS names {stale_public} are no longer registered read "
             f"tools: remove or reclassify them")
+        assert not double_classified, (
+            f"tools {double_classified} are in both mcp_router._PRIVATE_READ_TOOLS and "
+            f"PUBLIC_READ_TOOLS: a tool must be in exactly one of "
+            f"mcp_router._PRIVATE_READ_TOOLS and PUBLIC_READ_TOOLS")
         not_read = sorted(name for name in mcp_router._PRIVATE_READ_TOOLS
                           if mcp_router._TOOL_KIND.get(name) != "read")
         assert not not_read, (
@@ -297,19 +306,23 @@ class TestMcpPrivateReadWhitelistIsCoupled:
 
     def test_a_newly_injected_read_tool_is_counted(self, monkeypatch):
         import api.mcp_router as mcp_router
-        assert _unclassified_read_tools() == ([], [])
+        assert _unclassified_read_tools() == ([], [], [])
         with monkeypatch.context() as mp:
             mp.setitem(mcp_router._TOOL_KIND, "zz_injected_read_tool", "read")
-            unclassified, _ = _unclassified_read_tools()
+            unclassified, _, _ = _unclassified_read_tools()
             assert unclassified == ["zz_injected_read_tool"]
             # A public tool dropped from the closed set is reported unclassified.
-            dropped, _ = _unclassified_read_tools(
+            dropped, _, _ = _unclassified_read_tools(
                 public=PUBLIC_READ_TOOLS - {"list_runs"})
             assert "list_runs" in dropped
             # A public name that is no longer registered is reported stale.
-            _, stale = _unclassified_read_tools(
+            _, stale, _ = _unclassified_read_tools(
                 public=PUBLIC_READ_TOOLS | {"zz_gone_tool"})
             assert stale == ["zz_gone_tool"]
+            # A name in both the private set and the public set is reported.
+            _, _, both = _unclassified_read_tools(
+                public=PUBLIC_READ_TOOLS | {"state_graph_read"})
+            assert both == ["state_graph_read"]
         assert "zz_injected_read_tool" not in mcp_router._TOOL_KIND
-        assert _unclassified_read_tools() == ([], [])
+        assert _unclassified_read_tools() == ([], [], [])
 

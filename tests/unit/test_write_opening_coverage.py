@@ -8,8 +8,9 @@ unnoticed. So this reader DERIVES the full set from `WRITE_REQUESTS` (the
 authoritative table — an action added there is covered automatically), and for
 each action:
 
-1. finds the tests that exercise it (a file that never mentions the action
-   cannot fire it), and refuses to guess if none exist;
+1. requires a real ORGANIC test witness (a test file outside this module and the
+   always-included privacy modules that names or calls the action) and refuses
+   to pass without one;
 2. runs them under the `mutation_gate` plugin, which makes that one action open
    the project every time it runs;
 3. requires the run to go RED *and* the mutation to have FIRED > 0 times — a
@@ -22,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -51,29 +53,44 @@ def _covered_actions():
     return sorted(set(WRITE_REQUESTS) - set(EXEMPT))
 
 
-def _exercising_files(action):
-    """Tests that could fire this action: files whose text mentions it. A new
-    action in WRITE_REQUESTS with no test anywhere fails LOUDLY here instead of
-    silently passing.
+_SCOPE_MODULE_NAMES = ("test_state_project_privacy.py",
+                       "test_project_privacy_rev3.py",
+                       "test_state_read_visibility.py")
 
-    The privacy modules are ALWAYS in scope, first: they hold the canonical
+
+def _organic_witnesses(action):
+    """Sorted test files under tests/ that really exercise `action`: the action
+    appears as a quoted string or a direct call `name(`. This module and the
+    three always-included privacy modules never count (they would make the
+    witness requirement always true)."""
+    pattern = re.compile(rf"[\"']{re.escape(action)}[\"']|"
+                         rf"(?<![A-Za-z0-9_]){re.escape(action)}\(")
+    own = Path(__file__).resolve()
+    hits = []
+    for path in (REPO / "tests").rglob("test_*.py"):
+        if path.resolve() == own or path.name in _SCOPE_MODULE_NAMES:
+            continue
+        try:
+            if pattern.search(path.read_text(encoding="utf-8")):
+                hits.append(path)
+        except UnicodeDecodeError:
+            continue
+    return sorted(hits)
+
+
+def _exercising_files(action):
+    """Files run under the mutation: the always-included privacy modules first,
+    then the smallest ORGANIC witnesses of the action. That a witness exists is
+    asserted separately (the privacy modules never count as one).
+
+    The privacy modules are ALWAYS in scope: they hold the canonical
     'this project stays private' invariant for EVERY action (a project created
     now is private; only set_project_access writes the visibility table; the
     three poles). They are not a handwritten list of ACTIONS — the action set
     itself is derived from WRITE_REQUESTS; these modules hold the one
     invariant all mutations must break."""
-    scope = [REPO / "tests" / "unit" / "test_state_project_privacy.py",
-             REPO / "tests" / "unit" / "test_project_privacy_rev3.py",
-             REPO / "tests" / "unit" / "test_state_read_visibility.py"]
-    hits = []
-    for path in (REPO / "tests").rglob("test_*.py"):
-        if path == Path(__file__):
-            continue    # this module would recurse into nested mutation runs
-        try:
-            if action in path.read_text(encoding="utf-8"):
-                hits.append(path)
-        except UnicodeDecodeError:
-            continue
+    scope = [REPO / "tests" / "unit" / name for name in _SCOPE_MODULE_NAMES]
+    hits = _organic_witnesses(action)
 
     def rank(path):
         parts = path.relative_to(REPO).parts
@@ -122,9 +139,11 @@ def _mutation_run(action, files):
 
 @pytest.mark.parametrize("action", _covered_actions())
 def test_a_write_action_that_opens_the_project_goes_red(action):
+    assert _organic_witnesses(action), (
+        f"write action '{action}' has no organic test witness: the always-included "
+        f"privacy modules do not count as a witness, so a mutation that makes "
+        f"'{action}' open the project could go entirely unnoticed")
     files = _exercising_files(action)
-    assert files, (f"write action '{action}' is exercised by NO test: a mutation that "
-                   f"makes '{action}' open the project would go entirely unnoticed")
     rc, report = _mutation_run(action, files)
     names = [f.name for f in files]
     assert report.get("fired", 0) > 0, (
@@ -149,13 +168,33 @@ def test_dropping_an_exemption_would_turn_the_gate_red_naming_the_action(action)
     exempted action and pins that the mutation genuinely fires — so the gate's
     demand would be evaluated on a live mutation, and its verdict (red or a
     named failure) names the action, never a silent pass."""
+    assert _organic_witnesses(action), (
+        f"exempted action '{action}' has no organic test witness: the always-included "
+        f"privacy modules do not count as a witness")
     files = _exercising_files(action)
-    assert files, f"exempted action '{action}' is exercised by no test"
     rc, report = _mutation_run(action, files)
     assert report.get("fired", 0) > 0, f"'{action}' mutation never fired: {report}"
     assert rc != 0, (f"dropping the exemption for '{action}' would leave the gate facing a "
                      f"GREEN run — the exemption would be untestable; investigate. "
                      f"{report.get('tail', '')}")
+
+
+@pytest.mark.parametrize("action", sorted(WRITE_REQUESTS))
+def test_every_write_action_has_an_organic_witness(action):
+    """ALL write actions (exempt ones too) need a real test witness outside the
+    always-included privacy modules; the action is named on failure."""
+    witnesses = _organic_witnesses(action)
+    assert witnesses, (f"write action '{action}' has no organic test witness: no test "
+                       f"outside the always-included privacy modules names or calls it")
+    assert not {w.name for w in witnesses} & set(_SCOPE_MODULE_NAMES), (
+        f"always-included privacy modules leaked into the witnesses of '{action}'")
+
+
+def test_an_action_with_no_organic_witness_is_reported(monkeypatch):
+    monkeypatch.setitem(WRITE_REQUESTS, "zz_unwitnessed_action", WRITE_REQUESTS["heartbeat"])
+    assert _organic_witnesses("zz_unwitnessed_action") == []
+    assert _organic_witnesses("heartbeat")
+
 
 # ---------------------------------------------------------------------------
 # The runtime invariant the mutation must break. The plugin opens the project

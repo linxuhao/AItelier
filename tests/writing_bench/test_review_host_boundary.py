@@ -21,7 +21,7 @@ def test_successful_outbound_only_and_after_real_projection():
         def active_model(self):return 'fixture/model'
         def _build_kwargs(self, messages, **extra):
             return {'messages':self._sanitize_messages(messages)}
-        def _complete_prebuilt(self, kwargs):
+        def _complete_prebuilt(self, kwargs, *, native=False):
             self.received=copy.deepcopy(kwargs['messages'])
             if self.fail:raise RuntimeError('provider did not answer')
             return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content='ok',tool_calls=[]),finish_reason='stop')])
@@ -148,7 +148,7 @@ def test_graph_resolver_and_prompt_assembler_present_current_prose_verbatim(tmp_
         @property
         def active_model(self):return 'fixture/model'
         def _build_kwargs(self,messages,**kwargs):return {'messages':self._sanitize_messages(messages)}
-        def _complete_prebuilt(self,kwargs):
+        def _complete_prebuilt(self,kwargs,*,native=False):
             self.presented=copy.deepcopy(kwargs['messages'])
             return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content='read',tool_calls=[]),finish_reason='stop')])
     g=CaptureGateway();visible,_=_project_native_messages([{'role':'user','content':rendered}]);g.generate_native(visible)

@@ -13,6 +13,9 @@ This check is that alarm, and it runs inside whichever interpreter is executing
 the suite — so the instrument that is wrong is the one that goes red.
 """
 import configparser
+import subprocess
+import sys
+import textwrap
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -56,3 +59,58 @@ def test_every_pytest_ini_switch_is_registered_in_this_interpreter(pytestconfig)
         "recognise, so they are silently ignored here while another instrument "
         "honours them. Missing plugin(s) for: " + "; ".join(unregistered)
     )
+
+
+def test_an_async_test_actually_runs_under_the_configured_mode(tmp_path):
+    """Closes iss-0d657d1ab5004494 item 1.
+
+    A plugin that registers `asyncio_mode` but no longer supports its value
+    keeps the registration check above green while the async tests silently
+    stop running. This runs a real `async def` test in a subprocess under the
+    repository's own pytest.ini and demands that it genuinely passed.
+    """
+    module = tmp_path / "test_async_probe.py"
+    module.write_text(
+        textwrap.dedent(
+            """\
+            async def test_runs_as_a_coroutine():
+                assert True
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-c",
+            str(PYTEST_INI),
+            "--rootdir",
+            str(ROOT),
+            "-p",
+            "no:cacheprovider",
+            "--basetemp",
+            str(tmp_path / "basetemp"),
+            "-q",
+            str(module),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    output = result.stdout + result.stderr
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    summary = lines[-1].lower() if lines else ""
+
+    assert result.returncode == 0, (
+        f"pytest exited {result.returncode} on a lone async test:\n{output}"
+    )
+    assert "1 passed" in summary, (
+        f"summary line {summary!r} does not report 1 passed:\n{output}"
+    )
+    for forbidden in ("skipped", "failed", "error", "warning"):
+        assert forbidden not in summary, (
+            f"summary line {summary!r} contains {forbidden!r}:\n{output}"
+        )

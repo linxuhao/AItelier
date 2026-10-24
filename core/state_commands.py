@@ -1056,11 +1056,12 @@ def _anonymous(service) -> bool:
 def _refuse_if_project_not_public(service, action, args) -> None:
     """Raise `ProjectPrivate` for an anonymous read that touches a project nobody
     opened. A project that does not exist is refused identically, so a refusal is
-    never an existence oracle."""
+    never an existence oracle. The single-project half is the SAME helper the
+    notebook readers call at the read (`state_privacy.refuse_unopened_project`)."""
+    from core import state_privacy
     store = service.store
     if "project_id" in args:
-        if not store.is_project_public(args["project_id"]):
-            raise ProjectPrivate()
+        state_privacy.refuse_unopened_project(store, args["project_id"])
         return
     if "attempt_id" in args:
         pid = store.project_for_attempt(args["attempt_id"])

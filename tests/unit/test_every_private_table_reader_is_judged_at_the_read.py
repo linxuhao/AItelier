@@ -522,6 +522,48 @@ class TestTheReviewedPathsAreRefused:
 _REFUSAL = '{"detail":"This State DAG record is not available."}'
 
 
+class TestAnUnopenedNotebookIsNotAnExistenceOracle:
+    """The note `get` BODY, reached below the guard, answers 200 with an empty
+    note for an unopened project and carries no canary. What an anonymous caller
+    can observe at the chokepoint and on the product route must not tell that
+    project from one that does not exist."""
+
+    MISSING = "canary-missing"
+
+    def test_the_body_on_an_unopened_project_is_an_empty_note_without_a_canary(self, anonymous):
+        body = _closure_body(anonymous.driver_notes.get)(anonymous.driver_notes, C.SHUT)
+        assert (body["project_id"], body["revision"], body["entry_count"], body["index"]) == (
+            C.SHUT, 0, 0, [])
+        assert C.leaked_tables(json.dumps(body)) == []
+
+    def test_the_chokepoint_refuses_unopened_and_missing_alike(self, anonymous):
+        refusals = []
+        for project in (C.SHUT, self.MISSING):
+            with pytest.raises(ProjectPrivate) as raised:
+                execute(anonymous, "get_driver_note", {"project_id": project})
+            refusals.append((raised.value.status_code, raised.value.detail, str(raised.value)))
+        assert refusals[0] == refusals[1], refusals
+
+    @pytest.mark.parametrize("mode", ["fresh", "main"])
+    def test_the_product_route_answers_unopened_and_missing_with_the_same_bytes(
+            self, tmp_path, monkeypatch, mode):
+        C.arm(monkeypatch)
+        db = C.new_database(tmp_path, f"oracle-{mode}.sqlite")
+        app = C.app_for(mode, db)
+        client = C.client_for(app, mode)
+        try:
+            assert C.request_is_anonymous(app, client), "the per-request service is not anonymous"
+            answers = {}
+            for project in (C.SHUT, self.MISSING):
+                response = client.get(f"/api/state/projects/{project}/driver-note")
+                answers[project] = (response.status_code, response.headers.get("content-type"),
+                                    response.content)
+        finally:
+            C.release(app)
+        assert answers[C.SHUT] == answers[self.MISSING], answers
+        assert answers[C.SHUT][0] == 403 and answers[C.SHUT][2] == _REFUSAL.encode(), answers
+
+
 def g_control(action: str, svc=Depends(get_service)):
     execute(svc, action, {"project_id": C.OPEN})
     return {"ok": True}

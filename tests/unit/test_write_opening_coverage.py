@@ -125,15 +125,28 @@ def _mutation_run(action, files):
                # coverage) is asserted statically and named in the report.
 
                *[str(f) for f in files]]
+        cmd_line = " ".join(cmd)
         try:
             proc = subprocess.run(cmd, cwd=REPO, env=env, capture_output=True,
                                   text=True, timeout=TIMEOUT_SECONDS)
             rc, tail = proc.returncode, (proc.stdout or "")[-1500:]
-        except subprocess.TimeoutExpired:
-            return 124, {"fired": 0, "error": f"timed out after {TIMEOUT_SECONDS}s"}
+            stderr_tail = (proc.stderr or "")[-1500:]
+        except subprocess.TimeoutExpired as exc:
+            def _partial(data):
+                if data is None:
+                    return ""
+                if isinstance(data, bytes):
+                    data = data.decode("utf-8", errors="replace")
+                return data[-1500:]
+            return 124, {"fired": 0, "error": f"timed out after {TIMEOUT_SECONDS}s",
+                         "tail": _partial(exc.stdout),
+                         "stderr_tail": _partial(exc.stderr),
+                         "cmd": cmd_line}
         report = json.loads(fire.read_text()) if fire.exists() else {"fired": 0}
         report["rc"] = rc
         report["tail"] = tail
+        report["stderr_tail"] = stderr_tail
+        report["cmd"] = cmd_line
         return rc, report
 
 
@@ -176,7 +189,22 @@ def test_dropping_an_exemption_would_turn_the_gate_red_naming_the_action(action)
     assert report.get("fired", 0) > 0, f"'{action}' mutation never fired: {report}"
     assert rc != 0, (f"dropping the exemption for '{action}' would leave the gate facing a "
                      f"GREEN run — the exemption would be untestable; investigate. "
-                     f"{report.get('tail', '')}")
+                     f"{report}")
+
+
+def test_a_nested_run_that_cannot_start_keeps_its_stderr_command_and_exit(tmp_path):
+    """A nested pytest that fails to START (usage error, conftest import error)
+    explains itself on STDERR only; stdout holds just warnings. The report must
+    therefore keep the stderr tail, the nested command and the exit code, or the
+    failure shows as a bare 'fired 0' with the cause lost."""
+    missing = tmp_path / "no_such_file_zz.py"
+    rc, report = _mutation_run("heartbeat", [missing])
+    assert rc == 4, report
+    assert report["rc"] == 4, report
+    assert report["fired"] == 0, report
+    assert "file or directory not found" in report["stderr_tail"], report
+    assert str(missing) in report["cmd"], report
+    assert "-p mutation_gate" in report["cmd"], report
 
 
 @pytest.mark.parametrize("action", sorted(WRITE_REQUESTS))

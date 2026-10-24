@@ -647,3 +647,58 @@ def test_paused_timeout_does_not_repeat_the_same_checkpoint(monkeypatch, capsys)
     assert out.count("CHECKPOINT ") == 1, out
     assert "TIMEOUT" in out
     assert order.count("status-read") == order.count("checkpoint-read") == 2
+
+
+# ── local bootstrap failure vs. real transport failure ───────────────────
+
+class _BlockHttpx:
+    """Meta-path finder making the REAL `import httpx` fail as it does in a
+    system Python that lacks the dependency (ModuleNotFoundError)."""
+
+    @staticmethod
+    def find_spec(fullname, path=None, target=None):
+        if fullname == "httpx" or fullname.startswith("httpx."):
+            raise ModuleNotFoundError("No module named 'httpx'", name="httpx")
+        return None
+
+
+def _block_cli_client_dependency(monkeypatch):
+    """Force the actual `cli.client` top-level `import httpx` to fail."""
+    for name in [m for m in sys.modules
+                 if m == "cli.client" or m == "httpx" or m.startswith("httpx.")]:
+        monkeypatch.delitem(sys.modules, name)
+    monkeypatch.setattr(sys, "meta_path", [_BlockHttpx(), *sys.meta_path])
+
+
+def test_missing_local_dependency_stops_watching_promptly(monkeypatch, capsys):
+    """The real cli.client import fails: exit 4 at once, no HTTP, no sleep."""
+    opened, slept = [], []
+    import urllib.request
+    monkeypatch.setattr(urllib.request, "urlopen",
+                        lambda *a, **k: opened.append(a) or AssertionError("no HTTP"))
+    monkeypatch.setattr(debugctl.time, "sleep", lambda *a, **k: slept.append(a))
+    _block_cli_client_dependency(monkeypatch)
+    with pytest.raises(ImportError):
+        import cli.client  # noqa: F401  -- proves the block is the real failure
+
+    assert _run_await(_args(follow=True)) == 4
+    captured = capsys.readouterr()
+    assert opened == [] and slept == []
+    assert "NOT WATCHING" in captured.err
+    assert "httpx" in captured.err and "LOCAL DEPENDENCY MISSING" in captured.err
+    assert "RECONNECT" not in captured.out + captured.err
+    for outcome in ("COMPLETED", "FAILED", "CHECKPOINT", "TIMEOUT"):
+        assert outcome not in captured.out + captured.err
+
+
+def test_real_transport_failure_still_reconnects_then_exits_four(monkeypatch, capsys):
+    """Control: a genuine connection error keeps the RECONNECT/backoff path."""
+    order = _install(monkeypatch, streams=[], stream_error=OSError("refused"))
+    slept = []
+    monkeypatch.setattr(debugctl.time, "sleep", lambda *a, **k: slept.append(a))
+    assert _run_await(_args()) == 4
+    captured = capsys.readouterr()
+    assert "RECONNECT failed (1x)" in captured.out
+    assert "STREAM UNREACHABLE" in captured.err
+    assert "LOCAL DEPENDENCY MISSING" not in captured.err
+    assert order.count("stream-open") == 60 and len(slept) == 59

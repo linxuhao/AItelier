@@ -483,6 +483,21 @@ def cmd_await(args):
 
     pid = args.project_id
     url = args.url.rstrip("/") + "/api/events/stream"
+    # Every HTTP read below is authenticated through `cli.client`. If this
+    # interpreter cannot import it (e.g. its top-level `httpx` is missing from
+    # the system Python), that is a LOCAL bootstrap fault, not a transport
+    # failure: retrying can never succeed and labelling it RECONNECT would
+    # pretend to watch. Stop at once with 4, the "stopped watching" code,
+    # before any request, sleep or unauthenticated fallback.
+    try:
+        from cli.client import _auth_headers  # noqa: F401
+    except ImportError as e:
+        print(f"LOCAL DEPENDENCY MISSING ({type(e).__name__}: {e}); the CLI auth "
+              f"module cannot be imported by this interpreter ({sys.executable}), "
+              f"NOT WATCHING {pid}. Run with the project's interpreter "
+              f"(e.g. .venv/bin/python debugctl.py await ...).",
+              file=sys.stderr, flush=True)
+        sys.exit(4)
     deadline = time.time() + args.timeout
     want = {"checkpoint_paused", "run_completed", "run_failed", "pipeline_failed"}
     mismatch_warned = False

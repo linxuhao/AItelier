@@ -50,7 +50,8 @@ from core.skillflow_host import AItelierSkillFlow
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
-def _wire(tmp_path, monkeypatch, *, episode_max, wait, counter, tail, pytest_wall_seconds=None):
+def _wire(tmp_path, monkeypatch, *, episode_max, wait, counter, tail,
+          pytest_wall_seconds=None, gate_observations=None):
     """Real graph, real host class, real `run_tests`, real repo gate.
 
     `counter` lives OUTSIDE the worktree so the gate leaves no uncommitted file
@@ -71,6 +72,9 @@ def _wire(tmp_path, monkeypatch, *, episode_max, wait, counter, tail, pytest_wal
 
     loader = ToolLoader(Path(_skillflow_pkg.__file__).parent / "tools")
     loader.add_tools_dir(_REPO_ROOT / "aitelier" / "tools")
+    if gate_observations is not None:
+        from tests.gate_fixture import observe_repo_gate_calls
+        observe_repo_gate_calls(loader, counter, gate_observations)
     sf = AItelierSkillFlow(
         str(tmp_path / "sf.db"), tool_loader=loader,
         workspace_base=str(tmp_path / "ws"),
@@ -495,9 +499,12 @@ def test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them(
     each wait that runs out (`reacquire`) must re-run the gate step exactly
     once — one gate call per re-acquisition, never an implement cycle.
     """
+    from tests.gate_fixture import assert_repo_gate_calls
+    observations = []
     counter = tmp_path / "calls.txt"
     sf, run_id = _wire(tmp_path, monkeypatch, episode_max=100000, wait=1,
-                       counter=counter, tail=_SILENT_TAIL)
+                       counter=counter, tail=_SILENT_TAIL,
+                       gate_observations=observations)
     monkeypatch.setattr(gate_deferral, "hold_blocks_advance",
                         lambda run_id, **_kw: False)
     implement_runs, statuses, outcomes, nodes = _drive(
@@ -508,8 +515,8 @@ def test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them(
     first = outcomes.index("silent")
     assert set(outcomes[first:]) == {"silent", "reacquire"}, outcomes
     assert outcomes.count("silent") >= 8, outcomes
-    assert _gate_calls(counter) == 1 + outcomes.count("reacquire"), (
-        _gate_calls(counter), outcomes)
+    assert_repo_gate_calls(observations, counter,
+                           tests=1 + outcomes.count("reacquire"), measured="unmeasured")
 
 
 def test_the_host_hold_alone_keeps_the_rows_where_the_absence_left_them(
@@ -522,9 +529,12 @@ def test_the_host_hold_alone_keeps_the_rows_where_the_absence_left_them(
     while the wait runs, and let it through only to re-run the gate step once
     per wait that ran out (`due`).
     """
+    from tests.gate_fixture import assert_repo_gate_calls
+    observations = []
     counter = tmp_path / "calls.txt"
     sf, run_id = _wire(tmp_path, monkeypatch, episode_max=100000, wait=1,
-                       counter=counter, tail=_SILENT_TAIL)
+                       counter=counter, tail=_SILENT_TAIL,
+                       gate_observations=observations)
     real_observe = gate_deferral.observe_run
     seen = []
 
@@ -541,5 +551,5 @@ def test_the_host_hold_alone_keeps_the_rows_where_the_absence_left_them(
     first = seen.index("silent")
     assert set(seen[first:]) == {"silent", "due"}, seen
     assert seen.count("silent") >= 8, seen
-    assert _gate_calls(counter) == 1 + seen[first:].count("due"), (
-        _gate_calls(counter), seen)
+    assert_repo_gate_calls(observations, counter,
+                           tests=1 + seen[first:].count("due"), measured="unmeasured")

@@ -47,8 +47,10 @@ def _install(inputs, **overrides):
     return installer.install_coding_entry_pin(**args)
 
 
-def test_install_preserves_fields_metadata_and_neighbors_and_fsyncs(inputs, monkeypatch):
+@pytest.mark.parametrize("mode", [0o640, 0o6750])
+def test_install_preserves_fields_metadata_and_neighbors_and_fsyncs(inputs, monkeypatch, mode):
     config, entry = inputs
+    config.chmod(mode)
     old = load_config(config)
     metadata = config.stat()
     neighbor = config.parent / "neighbor"

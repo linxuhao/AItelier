@@ -85,11 +85,11 @@ def install_coding_entry_pin(config_path, expected_config_sha256,
         try:
             with os.fdopen(fd, "wb") as stream:
                 stream.write(desired)
+                stream.flush()  # Writing after fchmod can clear Linux set-ID mode bits.
                 current = os.fstat(fd)
                 if (current.st_uid, current.st_gid) != metadata[4:6]:
                     os.fchown(fd, metadata[4], metadata[5])
                 os.fchmod(fd, stat.S_IMODE(metadata[3]))
-                stream.flush()
                 os.fsync(fd)
             if (_read_regular(directory, name) != original
                     or _read_regular(source, entry) != accepted):

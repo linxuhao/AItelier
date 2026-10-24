@@ -1,0 +1,49 @@
+{
+  "scene": "res://partial.tscn",
+  "frames": 60,
+  "actions": ["move_up"],
+  "surface": {"Player": ["grid_y", "position", "input_acceptance"]},
+  "scenarios": [
+    {
+      "name": "runtime3_actualgame2accepted",
+      "scene": "res://partial.tscn",
+      "input_observation": {"node": "Player", "property": "input_acceptance"},
+      "timeline": [
+        {"at": 20, "press": "move_up"},
+        {"at": 30, "press": "move_up"},
+        {"at": 40, "press": "move_up"},
+        {"at": 59, "assert": {"Player.grid_y": -2, "Player.position.y": -2}}
+      ]
+    },
+    {
+      "name": "runtime3_actualgame3accepted",
+      "scene": "res://all.tscn",
+      "input_observation": {"node": "Player", "property": "input_acceptance"},
+      "timeline": [
+        {"at": 20, "press": "move_up"},
+        {"at": 30, "press": "move_up"},
+        {"at": 40, "press": "move_up"},
+        {"at": 59, "assert": {"Player.grid_y": -3, "Player.position.y": -3}}
+      ]
+    },
+    {
+      "name": "no_input",
+      "scene": "res://partial.tscn",
+      "input_observation": {"node": "Player", "property": "input_acceptance"},
+      "timeline": [
+        {"at": 59, "assert": {"Player.grid_y": 0, "Player.position.y": 0}}
+      ]
+    },
+    {
+      "name": "witness_only",
+      "scene": "res://witness_only.tscn",
+      "input_observation": {"node": "Player", "property": "input_acceptance"},
+      "timeline": [
+        {"at": 20, "press": "move_up"},
+        {"at": 30, "press": "move_up"},
+        {"at": 40, "press": "move_up"},
+        {"at": 59, "assert": {"Player.grid_y": 0, "Player.position.y": 0}}
+      ]
+    }
+  ]
+}

@@ -191,6 +191,9 @@ def read_spec(repo: Path) -> tuple[dict | None, dict]:
     Scenario timeout cannot exceed the caller timeout (default 120); this
     reader never widens it or converts fixed-FPS game time into walltime.
     Unknown/invalid budgets are refusals, not a smaller runnable scenario.
+    Optional scenario input_observation declarations also survive split loading
+    and selection unchanged. The sidecar validates their exact node/property
+    shape before runtime; declarations are not shared top-level settings.
     """
     info: dict = {"source": "", "errors": [], "notes": []}
     split, errors = _read_split(repo)
@@ -499,6 +502,28 @@ def godot_playtest(*, project_root: str = "", out_dir: str = "",
                 f"reported state, so nothing here was verified. Check the builder "
                 f"(a writable HOME for Godot's user data) and re-run. "
                 f"|| " + str(report.get("summary", "")))
+
+    # Preserve the producer's nested observations in the report written below.
+    # Append to existing diagnostics, including the ZERO-assertion refusal.
+    if _items:
+        acceptance = []
+        for scenario in _items:
+            if not isinstance(scenario, dict):
+                continue
+            observation = scenario.get("input_observation")
+            if not isinstance(observation, dict):
+                acceptance.append("%s: unobserved" % scenario.get("name", "scenario"))
+                continue
+            acceptance.append(
+                "%s: %s (eligible injections=%s, all injections=%s, accepted=%s, rejected=%s, unknown=%s, acceptance_pass=%s)"
+                % (scenario.get("name", "scenario"), observation.get("status", "unobserved"),
+                   observation.get("runtime_injected"), observation.get("runtime_events_injected"),
+                   observation.get("accepted"), observation.get("rejected"), observation.get("unknown"),
+                   observation.get("acceptance_pass")))
+        if acceptance:
+            report["summary"] = str(report.get("summary", "")) + (
+                " || Input acceptance (timeline action presses): " + "; ".join(acceptance)
+                + ". Hard pass alone does not establish individual acceptance.")
 
     report["spec_source"] = info["source"]
     if info["notes"]:

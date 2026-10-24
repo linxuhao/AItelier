@@ -30,15 +30,45 @@
 # That is not hypothetical — a shipped build passed every assertion while the
 # player never moved, no enemy ever acted, and no damage was ever dealt.
 #
-# Gate semantics — FOUR hard failures (they loop the goal-loop):
-#   1. a crash / the main scene didn't run;
-#   2. a timeline entry with an unrecognised key;
-#   3. a scenario that PRESSED input and ended in exactly the state a no-input
-#      control run reaches → the input never reached the game (the gate runs
-#      that control pass itself, headless, once per distinct frame budget);
-#   4. the main scene failed to load.
+# Hard failures include crashes, failure to load/run, malformed contracts,
+# incomplete measurements, and the existing L0 input_dead check. L0 compares
+# complete final state with an isolated no-input control for the same scene
+# and budgets. Identical state hard-fails; a difference does not prove that
+# each input was accepted. `pressed` is the normalized-timeline predicate,
+# not an injection count or acceptance evidence.
 # Assertion outcomes themselves stay ADVISORY — a wrong or flaky assertion is a
 # prominent signal the verifier weighs, never a stalled build.
+#
+# Optional SCENARIO-ONLY declaration (requires cooperating application code):
+#   input_observation: {node: Bird, property: input_acceptance}
+# The declaration has exactly these two keys. `node` resolves a live Node;
+# `property` is a single property identifier, not an expression or nested path.
+# The application owns a Dictionary property initially containing:
+#   {"version": 1, "decisions": []}
+# Eligible timeline action presses carry event metadata `aitelier_input`:
+#   {"version": 1, "run_id": "...", "seq": 1}
+# At the actual action boundary, append one decision retaining that token:
+#   {"run_id": token["run_id"], "seq": token["seq"], "decision": "accepted"}
+# Use "accepted" only after a domain commit or entry into a committed queue.
+# An explicit busy refusal may append "rejected". Handler entry, polling state,
+# Viewport handled flags and digest differences are not acceptance evidence.
+# Deferred code must retain the token and append before the terminal read.
+#
+# The probe reads this property once at its existing finish boundary. It adds
+# no acknowledgement wait: frames remain max(last timeline frame + 30, floor).
+# Missing decisions stay unknown; late decisions cannot change this report.
+# Only returned timeline action presses have supported semantic acceptance.
+# Three presses plus their automatic releases mean runtime_injected=3 and
+# runtime_events_injected=6. Mouse, release and legacy acceptance is unsupported.
+# Runtime receipts and the witness use the existing tagged observer separately:
+# depth 8, 4096 raw nodes, and 65536 actual compact tagged UTF-8 bytes each.
+# Refusal discards the receipt corpus but dispatch and runtime counters continue.
+# Required incomplete observation hard-fails after dispatch; explicit measured
+# rejection reports partial/false without changing authored assertion policy.
+# Without a declaration there is no collection, metadata or witness read:
+# acceptance is unobserved with null counts and acceptance_pass=null.
+# A valid no-input declaration is not_applicable with acceptance_pass=null.
+# The Dictionary witness remains outside L0; witness-only changes cannot pass L0.
 #
 # Absent → the gate falls back to the legacy canned smoke test (auto-press
 # ui_accept, one end snapshot). This example targets a Flappy-Bird-style game.
@@ -66,6 +96,8 @@ scenarios:
           Bird.velocity.y: "velocity.y > 0"
 
   - name: a flap gives the bird upward velocity
+    # Enable only after Bird implements the action-boundary contract above:
+    # input_observation: {node: Bird, property: input_acceptance}
     timeline:
       - { at: 0, press: flap }
       - at: 8

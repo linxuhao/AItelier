@@ -1,0 +1,18 @@
+config_version=5
+
+[application]
+config/name="AItelier Input Acceptance Controls"
+run/main_scene="res://partial.tscn"
+
+[display]
+window/size/viewport_width=64
+window/size/viewport_height=64
+
+[input]
+move_up={
+"deadzone": 0.5,
+"events": []
+}
+
+[rendering]
+renderer/rendering_method="gl_compatibility"

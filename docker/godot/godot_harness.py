@@ -1199,6 +1199,18 @@ var _timeline := []      # SPEC: [{at:int, press?:String, release?:String, asser
 var _releases := {}      # frame -> [action, ...] auto-release schedule
 var _results := []       # [{name, node, expr, passed, actual, error, frame}]
 var _spec_errors := []   # author errors found while running: a target path that does not resolve
+# Optional input observation belongs to the probe, never to gameplay state.
+var _input_enabled := false
+var _input_declaration := {}
+var _input_run_id := ""
+var _input_seq := 0
+var _input_entry = null
+var _input_origin := "legacy"
+var _input_receipts := []
+var _input_raw_bytes := 0
+var _input_receipt_error := ""
+var _input_injected := 0
+var _input_events_injected := 0
 var _capture_dir := ""
 var _capture_at := {}    # frame -> true, consumed as each one is photographed
 var _captures := []      # [{frame, file}]
@@ -1771,6 +1783,10 @@ func _load_spec(path: String) -> void:
         return
     _spec_mode = true
     _before_scope = str(data.get("scenario", ""))
+    if data.has("input_observation"):
+        _input_enabled = true
+        _input_declaration = data["input_observation"]
+        _input_run_id = Crypto.new().generate_random_bytes(16).hex_encode()
     if data.has("frames"):
         _max = int(data["frames"])
     var tl = data.get("timeline", [])
@@ -1805,13 +1821,21 @@ func _process(_d: float) -> void:
     if _frame == 0:
         _capture_baselines()
     if _releases.has(_frame):
-        for act in _releases[_frame]:
+        for release in _releases[_frame]:
+            var act: String = release[0] if _input_enabled else release
+            if _input_enabled:
+                _input_entry = release[1]
+                _input_origin = "auto_release"
             if InputMap.has_action(act):
                 _act(act, false)
         _releases.erase(_frame)
     if _spec_mode:
-        for e in _timeline:
+        for entry in range(_timeline.size()):
+            var e = _timeline[entry]
             if int(e.get("at", -1)) == _frame:
+                if _input_enabled:
+                    _input_entry = entry
+                    _input_origin = "timeline"
                 _apply_entry(e)
     elif _legacy_action != "":
         if _frame % 20 == 0:
@@ -1833,7 +1857,75 @@ func _act(action: String, pressed: bool) -> void:
     var ev := InputEventAction.new()
     ev.action = action
     ev.pressed = pressed
-    Input.parse_input_event(ev)
+    _inject_input(ev, "action", action, pressed)
+
+func _inject_input(event: InputEvent, kind: String, action = null, pressed = null) -> void:
+    if not _input_enabled:
+        Input.parse_input_event(event)
+        return
+    _input_seq += 1
+    var eligible := _input_origin == "timeline" and kind == "action" and pressed == true
+    if eligible:
+        event.set_meta("aitelier_input", {"version": 1, "run_id": _input_run_id, "seq": _input_seq})
+    var row := [_input_seq, _frame, _input_entry, _input_origin, kind, action, pressed, "attempted"]
+    var retained := false
+    if _input_receipt_error == "":
+        # One root Array node, then one row Array plus its eight scalar nodes.
+        if 1 + 9 * (_input_receipts.size() + 1) > _OBS_MAX_NODES:
+            _input_receipt_error = "observation exceeds the %d node bound" % _OBS_MAX_NODES
+        else:
+            var raw_bytes := 0
+            for value in row:
+                if typeof(value) == TYPE_STRING:
+                    raw_bytes += value.to_utf8_buffer().size()
+            if _input_raw_bytes + raw_bytes > _OBS_MAX_BYTES:
+                _input_receipt_error = "receipt raw strings exceed the %d byte cap" % _OBS_MAX_BYTES
+            else:
+                _input_raw_bytes += raw_bytes
+                _input_receipts.append(row)
+                retained = true
+        if _input_receipt_error != "":
+            _input_receipts.clear()
+    # Observation refusal must never change dispatch, IDs or runtime counters.
+    Input.parse_input_event(event)
+    _input_events_injected += 1
+    if eligible:
+        _input_injected += 1
+    row[7] = "returned"
+    if retained:
+        # The retained attempted token had one more raw UTF-8 byte.
+        _input_raw_bytes -= 1
+
+func _finish_input_observation() -> Dictionary:
+    var result := {"version": 1, "scope": "timeline_action_press", "run_id": _input_run_id,
+        "runtime_injected": _input_injected, "runtime_events_injected": _input_events_injected,
+        "receipts": null, "witness": null, "errors": []}
+    var receipt_read := {"ok": false, "error": _input_receipt_error}
+    if _input_receipt_error == "":
+        receipt_read = _observe_value(_input_receipts)
+    if receipt_read["ok"]:
+        result["receipts"] = receipt_read["value"]
+    else:
+        result["errors"].append("receipts: " + str(receipt_read["error"]))
+    # Exactly one terminal read, through the existing bounded tagged observer.
+    var target := _resolve(str(_input_declaration["node"]))
+    var witness_read := {"ok": false, "error": "declared node does not resolve"}
+    if target != null:
+        var actual_property := false
+        for property in target.get_property_list():
+            if str(property["name"]) == str(_input_declaration["property"]):
+                actual_property = true
+                break
+        if actual_property:
+            witness_read = _read_attr(target, str(_input_declaration["property"]))
+        else:
+            witness_read = {"ok": false, "error": "declared property does not exist"}
+    if witness_read["ok"]:
+        result["witness"] = witness_read["value"]
+    else:
+        result["errors"].append("witness: " + str(witness_read["error"]))
+    return result
+
 # LIMITATION, MEASURED 2026-08-24 -- read this before writing a mouse scenario.
 #
 # `click:` reliably drives CONTROLS: Godot routes GUI input by the event's own
@@ -1959,7 +2051,7 @@ func _hover(spec: String) -> void:
     var mm := InputEventMouseMotion.new()
     mm.position = pos
     mm.global_position = pos
-    Input.parse_input_event(mm)
+    _inject_input(mm, "mouse_motion")
 
 
 ## Click a resolved node's on-screen point, optionally displaced by `offset`
@@ -1991,14 +2083,14 @@ func _click_at(node_name: String, offset: Vector2, button: int, spec: String) ->
     var mm := InputEventMouseMotion.new()
     mm.position = pos
     mm.global_position = pos
-    Input.parse_input_event(mm)
+    _inject_input(mm, "mouse_motion")
     for is_down in [true, false]:
         var ev := InputEventMouseButton.new()
         ev.button_index = button
         ev.pressed = is_down
         ev.position = pos
         ev.global_position = pos
-        Input.parse_input_event(ev)
+        _inject_input(ev, "mouse_button", null, is_down)
 
 
 func _apply_entry(e: Dictionary) -> void:
@@ -2019,7 +2111,7 @@ func _apply_entry(e: Dictionary) -> void:
         _act(pr, true)
         var rf := _frame + 2      # hold ~2 frames, then auto-release
         _releases[rf] = _releases.get(rf, [])
-        _releases[rf].append(pr)
+        _releases[rf].append([pr, _input_entry] if _input_enabled else pr)
     var rl = e.get("release", "")
     if rl != "" and InputMap.has_action(rl):
         _act(rl, false)
@@ -2522,6 +2614,8 @@ func _finish() -> void:
     _t_step_end_usec = Time.get_ticks_usec()
     var out := {"frames": _frame, "asserts": _results, "nodes": {}, "captures": _captures,
         "spec_errors": _spec_errors}
+    if _input_enabled:
+        out["input_observation"] = _finish_input_observation()
     # Completeness accounting: a report that lost a scheduled assertion, or
     # that never reached its frame budget, must not be readable as a shorter
     # but successful measurement. `complete` is false whenever the game quit
@@ -3101,6 +3195,13 @@ def _is_str_list(v) -> bool:
     return isinstance(v, list) and all(isinstance(x, str) for x in v)
 
 
+def _valid_input_observation(value) -> bool:
+    return (isinstance(value, dict) and set(value) == {"node", "property"}
+            and isinstance(value["node"], str) and bool(value["node"].strip())
+            and isinstance(value["property"], str)
+            and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", value["property"]) is not None)
+
+
 _SPEC_KEY_TYPES = {
     "scene": (lambda v: isinstance(v, str), "a string"),
     "frames": (lambda v: isinstance(v, int) and not isinstance(v, bool), "an integer"),
@@ -3117,6 +3218,8 @@ _SCENARIO_KEY_TYPES = {
     "repeatability": (lambda v: isinstance(v, bool), "true or false"),
     "description": (lambda v: isinstance(v, str), "a plain string"),
     "execution_budget": (lambda v: isinstance(v, dict), "a mapping"),
+    "input_observation": (_valid_input_observation,
+                          "exactly {node: nonempty string, property: identifier}"),
 }
 _SPEC_KEYS = set(_SPEC_KEY_TYPES)
 _SCENARIO_KEYS = set(_SCENARIO_KEY_TYPES)
@@ -3402,6 +3505,199 @@ def _normalize_timeline(timeline: list) -> tuple[list, list]:
     return out, errors
 
 
+def _input_tagged_items(value, tag: str) -> list:
+    """Inspect the existing observer envelope without generic/lossy decoding."""
+    if (not isinstance(value, dict) or set(value) != {"__t", "__v"}
+            or value["__t"] != tag or not isinstance(value["__v"], list)):
+        raise ValueError("expected tagged " + tag)
+    return value["__v"]
+
+
+def _input_tagged_fields(value, fields: set) -> dict:
+    result = {}
+    for pair in _input_tagged_items(value, "Dictionary"):
+        if (not isinstance(pair, list) or len(pair) != 2
+                or not isinstance(pair[0], str) or pair[0] not in fields
+                or pair[0] in result):
+            raise ValueError("invalid, duplicate or unsupported Dictionary key")
+        result[pair[0]] = pair[1]
+    if set(result) != fields:
+        raise ValueError("Dictionary fields do not match the witness contract")
+    return result
+
+
+def _input_payload_bytes(value) -> None:
+    # These schema-specific reads accept only the native tagged representation.
+    # Native _observe_value remains the authority for raw depth/node/byte bounds.
+    # Check the actual received tagged bytes as well, including JSON escaping.
+    try:
+        size = len(json.dumps(value, ensure_ascii=False, allow_nan=False,
+                              separators=(",", ":")).encode("utf-8"))
+    except (TypeError, ValueError, RecursionError, UnicodeError) as exc:
+        raise ValueError("invalid tagged JSON payload") from exc
+    if size > 65536:
+        raise ValueError("tagged observation exceeds the 65536 byte cap")
+
+
+def _input_expected_operations(timeline: list) -> list:
+    """Independently derive dispatch identities, including mouse and releases."""
+    operations = []
+    for entry, event in enumerate(timeline):
+        frame = event["at"]
+        parts = []
+        if event.get("hover", "") != "":
+            parts.append(("mouse_motion", None, None))
+        if event.get("click", "") != "":
+            parts.extend((("mouse_motion", None, None),
+                          ("mouse_button", None, True),
+                          ("mouse_button", None, False)))
+        if event.get("press", "") != "":
+            action = event["press"]
+            parts.append(("action", action, True))
+            operations.append((frame + 2, 0, entry, 0,
+                               [frame + 2, entry, "auto_release", "action", action, False]))
+        if event.get("release", "") != "":
+            parts.append(("action", event["release"], False))
+        for order, part in enumerate(parts):
+            operations.append((frame, 1, entry, order,
+                               [frame, entry, "timeline", *part]))
+    return [operation[-1] for operation in sorted(operations, key=lambda op: op[:4])]
+
+
+def _input_observation_report(declared: bool, timeline: list, probe: dict,
+                              execution_complete: bool) -> dict:
+    """Validate runtime receipts and one terminal action-boundary witness."""
+    result = {"version": 1, "scope": "timeline_action_press", "run_id": None,
+              "status": "incomplete" if declared else "unobserved",
+              "scheduled_presses": sum(e.get("press", "") != "" for e in timeline),
+              "runtime_injected": None, "runtime_events_injected": None,
+              "accepted": None, "rejected": None, "unknown": None,
+              "delivery_complete": None, "complete": False, "acceptance_pass": None,
+              "receipts": None, "witness": None, "errors": []}
+    if not declared:
+        return result
+    native = probe.get("input_observation")
+    try:
+        required = {"version", "scope", "run_id", "runtime_injected",
+                    "runtime_events_injected", "receipts", "witness", "errors"}
+        if not isinstance(native, dict) or set(native) != required:
+            raise ValueError("declared observation producer is missing or has unsupported fields")
+        if (type(native["version"]) is not int or native["version"] != 1
+                or native["scope"] != "timeline_action_press"
+                or not isinstance(native["run_id"], str) or not native["run_id"]):
+            raise ValueError("unsupported observation version, scope or run identity")
+        injected, events = native["runtime_injected"], native["runtime_events_injected"]
+        if (type(injected) is not int or type(events) is not int
+                or not 0 <= injected <= events):
+            raise ValueError("invalid returned runtime counters")
+        if (not isinstance(native["errors"], list)
+                or any(not isinstance(error, str) for error in native["errors"])):
+            raise ValueError("invalid native observation errors")
+    except ValueError as exc:
+        result["errors"].append(str(exc))
+        return result
+    result.update(run_id=native["run_id"], runtime_injected=injected,
+                  runtime_events_injected=events, unknown=injected)
+    result["errors"].extend(native["errors"])
+    for field in ("receipts", "witness"):
+        if native[field] is not None:
+            try:
+                _input_payload_bytes(native[field])
+                result[field] = native[field]
+            except ValueError as exc:
+                result["errors"].append(field + ": " + str(exc))
+    eligible = set()
+    returned = []
+    returned_events = 0
+    all_returned = True
+    try:
+        rows = _input_tagged_items(result["receipts"], "Array")
+        if 1 + 9 * len(rows) > 4096:
+            raise ValueError("receipt observation exceeds the 4096 raw node bound")
+        for seq, tagged_row in enumerate(rows, 1):
+            row = _input_tagged_items(tagged_row, "Array")
+            if len(row) != 8:
+                raise ValueError("receipt must have exactly eight scalar fields")
+            number, frame, entry, origin, kind, action, pressed, injection = row
+            if (type(number) is not int or number != seq
+                    or type(frame) is not int or frame < 0
+                    or (entry is not None and (type(entry) is not int
+                                               or not 0 <= entry < len(timeline)))
+                    or origin not in ("timeline", "auto_release", "legacy")
+                    or (origin != "legacy" and entry is None)
+                    or kind not in ("action", "mouse_motion", "mouse_button")
+                    or injection not in ("attempted", "returned")):
+                raise ValueError("invalid receipt identity, provenance or injection state")
+            if kind == "action":
+                if not isinstance(action, str) or not action or type(pressed) is not bool:
+                    raise ValueError("invalid action receipt fields")
+            elif action is not None or (kind == "mouse_motion" and pressed is not None) or (
+                    kind == "mouse_button" and type(pressed) is not bool):
+                raise ValueError("invalid mouse receipt fields")
+            if injection == "returned":
+                returned_events += 1
+                returned.append(row[1:7])
+                if origin == "timeline" and kind == "action" and pressed is True:
+                    eligible.add(number)
+            else:
+                all_returned = False
+    except ValueError as exc:
+        result["errors"].append("receipts: " + str(exc))
+        return result
+    result["delivery_complete"] = bool(
+        all_returned and returned_events == events and len(eligible) == injected
+        and returned == _input_expected_operations(timeline))
+    if not result["delivery_complete"]:
+        result["errors"].append("delivery: returned receipts do not match all scheduled operations and counters")
+    decisions = {}
+    try:
+        witness = _input_tagged_fields(result["witness"], {"version", "decisions"})
+        if type(witness["version"]) is not int or witness["version"] != 1:
+            raise ValueError("unsupported witness version")
+        records = _input_tagged_items(witness["decisions"], "Array")
+        # Raw witness shape is Dictionary(version, decisions Array), then seven
+        # raw nodes per three-field decision Dictionary; its maximum depth is 3.
+        if 5 + 7 * len(records) > 4096:
+            raise ValueError("witness observation exceeds the 4096 raw node bound")
+        for tagged_record in records:
+            record = _input_tagged_fields(tagged_record, {"run_id", "seq", "decision"})
+            number = record["seq"]
+            if (not isinstance(record["run_id"], str)
+                    or record["run_id"] != native["run_id"]
+                    or type(number) is not int or number not in eligible
+                    or number in decisions
+                    or record["decision"] not in ("accepted", "rejected")):
+                raise ValueError("foreign, unsupported, nonexistent, duplicate or invalid decision")
+            decisions[number] = record["decision"]
+    except ValueError as exc:
+        result["errors"].append("witness: " + str(exc))
+        return result
+    # A producer refusal or contradictory delivery prevents authoritative totals.
+    if result["errors"]:
+        return result
+    accepted = sum(decision == "accepted" for decision in decisions.values())
+    rejected = sum(decision == "rejected" for decision in decisions.values())
+    unknown = injected - len(decisions)
+    result.update(accepted=accepted, rejected=rejected, unknown=unknown)
+    if not execution_complete:
+        result["errors"].append("execution or assertion measurement is incomplete")
+    if unknown:
+        result["errors"].append("%d eligible returned press(es) have no terminal decision" % unknown)
+    if result["errors"]:
+        return result
+    if injected == 0:
+        result.update(accepted=None, rejected=None)
+        if events:
+            result["status"] = "unsupported"
+            result["errors"].append("semantic acceptance supports timeline action presses only")
+        else:
+            result.update(status="not_applicable", complete=True)
+        return result
+    result.update(complete=True, status="partial" if rejected else "all_accepted",
+                  acceptance_pass=False if rejected else True)
+    return result
+
+
 def _digest(nodes: dict) -> dict:
     """Node state minus the probe's own bookkeeping - its frame counter and
     capture paths differ between any two runs, which would defeat the
@@ -3634,8 +3930,8 @@ def _playtest_spec_inner(dst: Path, spec: dict, frames: int, timeout: int,
     its input timeline and evaluating its Expression assertions against live nodes.
 
     Gate split: ``passed`` (HARD, loops the goal-loop) covers crash / didn't-run,
-    plus the two ways a scenario can look green without testing anything -- a
-    malformed timeline, and input that never reached the game. Per-scenario
+    plus malformed timelines, incomplete measurements, and input with no
+    observable final-state difference from its isolated control. Per-scenario
     assertion outcomes stay ADVISORY (``behavior``) so a wrong or flaky assertion
     can never stall a build that otherwise runs clean."""
     # A spec with keys is read as a spec or refused; the canned smoke test is
@@ -3670,6 +3966,7 @@ def _playtest_spec_inner(dst: Path, spec: dict, frames: int, timeout: int,
     spec_path = dst.parent / "scenario_spec.json"
 
     scen_results, all_errors, captures = [], [], []
+    input_observation_errors = []
     scen_timing: list[dict] = []
     ctrl_timing: list[dict] = []
     all_debt: list[dict] = []
@@ -3711,7 +4008,9 @@ def _playtest_spec_inner(dst: Path, spec: dict, frames: int, timeout: int,
         if refused or unknown or bad_types:
             scen_results.append({"name": name, "ran": False, "errors": [],
                                  "native_debt": [], "asserts": [], "passed": False,
-                                 "pressed": False, "input_dead": False})
+                                 "pressed": False, "input_dead": False,
+                                 "input_observation": _input_observation_report(
+                                     "input_observation" in sc, timeline, {}, False)})
             scen_nodes.append({})
             scen_frames.append(0)
             scen_timeouts.append(0)
@@ -3720,7 +4019,10 @@ def _playtest_spec_inner(dst: Path, spec: dict, frames: int, timeout: int,
         # Admission validated the complete timeline and its explicit/default
         # ceiling before any pass; never clamp and grade a shorter run.
         sframes, scenario_timeout = plans[i]
-        spec_path.write_text(json.dumps({"frames": sframes, "timeline": timeline, "scenario": name}))
+        probe_spec = {"frames": sframes, "timeline": timeline, "scenario": name}
+        if "input_observation" in sc:
+            probe_spec["input_observation"] = sc["input_observation"]
+        spec_path.write_text(json.dumps(probe_spec))
         # Per-scenario scene override. `run_godot` has always been able to boot
         # a specific scene instead of main; only the SPEC-level scene was ever
         # wired to it, so all 27 scenarios booted main.tscn and each one paid
@@ -3831,6 +4133,14 @@ def _playtest_spec_inner(dst: Path, spec: dict, frames: int, timeout: int,
                 "result, so it cannot count as a passing or advisory outcome."
                 % (name, "; ".join(why) or "incomplete", len(asserts),
                    expected_asserts))
+        input_observation = _input_observation_report(
+            "input_observation" in sc, timeline, probe,
+            ran and not timed_out and not errs and complete)
+        if "input_observation" in sc and not input_observation["complete"]:
+            input_observation_errors.extend(
+                "scenario %r: incomplete measurement -- input_observation: %s" % (name, error)
+                for error in input_observation["errors"])
+            complete = False
         scen_passed = (ran and not timed_out and not errs and complete and not missing_asserts
                        and not incomplete
                        and bool(asserts) and all(a.get("passed") for a in asserts))
@@ -3841,6 +4151,7 @@ def _playtest_spec_inner(dst: Path, spec: dict, frames: int, timeout: int,
                              "native_debt": debt,
                              "asserts": asserts, "passed": scen_passed,
                              "before_captures": probe.get("before_captures", {}),
+                             "input_observation": input_observation,
                              # Measurement-completeness rows: what was scheduled
                              # vs what the probe actually reported.
                              "expected_asserts": expected_asserts,
@@ -3848,7 +4159,7 @@ def _playtest_spec_inner(dst: Path, spec: dict, frames: int, timeout: int,
                              "complete": complete,
                              "incomplete_asserts": len(incomplete),
 
-                             # "Did this scenario drive ANY input?" -- derived
+                             # "Did the normalized timeline request input?" -- derived
                              # from the normalised entries themselves: after
                              # _normalize_timeline every key is either the
                              # schedule (`at`), an assertion, or an input the
@@ -3872,9 +4183,9 @@ def _playtest_spec_inner(dst: Path, spec: dict, frames: int, timeout: int,
         captures.extend({**c, "scenario": name, "file": "s%d_%s" % (i, c["file"])}
                         for c in probe.get("captures", []))
 
-    # -- L0: did the input reach the game at all? ----------------------------
-    # A scenario that presses keys and ends in EXACTLY the state an untouched run
-    # reaches tested nothing, however green its assertions look. One extra probe
+    # -- L0: did input produce a final-state difference? --------------------
+    # An identical complete final digest is the existing hard input_dead rule;
+    # neither equality nor a difference proves individual acceptance. One extra probe
     # pass per distinct frame budget buys the answer -- headless, no captures, so
     # it is the cheapest run in the file. This is the gate that would have caught
     # the `actions:`-vs-`press:` mismatch on day one instead of two games later.
@@ -3945,6 +4256,17 @@ def _playtest_spec_inner(dst: Path, spec: dict, frames: int, timeout: int,
     # The determined-game-time check runs over the scenario rows, not the
     # controls: a control has no `at:` and nothing rides on its budget.
     spec_errors.extend(determined_game_time_findings(scen_timing, PLAYTEST_FIXED_FPS))
+    # Required observation failures join the existing measurement failure path
+    # only after dispatch and the existing checks, preserving earlier diagnostics.
+    spec_errors.extend(input_observation_errors)
+    for result in scen_results:
+        observation = result["input_observation"]
+        if observation["acceptance_pass"] is True:
+            if result["input_dead"]:
+                observation.update(status="l0_failed", acceptance_pass=False)
+            elif spec_errors or crashed or not result["ran"]:
+                observation.update(status="incomplete", complete=False, acceptance_pass=None)
+                observation["errors"].append("existing hard checks did not establish a passing run")
 
     dead = [r["name"] for r in scen_results if r["input_dead"]]
     behavior_passed = bool(scen_results) and all(s["passed"] for s in scen_results)
@@ -3963,9 +4285,10 @@ def _playtest_spec_inner(dst: Path, spec: dict, frames: int, timeout: int,
                    % ("runtime error(s)" if crashed else "scene did not run"))
     elif dead:
         summary = ("Playtest HARD-failed: scenario(s) %s pressed input and ended in "
-                   "EXACTLY the state a no-input control run reaches -- the game "
-                   "never received it. Check the action names against "
-                   "project.godot [input] and how the game reads them."
+                   "EXACTLY the state a no-input control run reaches -- no "
+                   "final-state effect was observed. Check the action names against "
+                   "project.godot [input] and how the game reads them. "
+                   "This comparison does not establish individual acceptance."
                    % ", ".join(repr(d) for d in dead))
     elif behavior_passed:
         summary = "Playtest ran %d scenario(s); all assertions passed." % len(scen_results)

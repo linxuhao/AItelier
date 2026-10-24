@@ -52,6 +52,62 @@ OPEN_SECRET = "BINDING-OPEN-BODY-9137"
 ADMIN = {"X-AItelier-Admin-Token": "binding-admin"}
 
 
+# The scheduler keeps "listener installed" markers per AsyncIOScheduler in two
+# WeakSets. They are not a verdict carrier (see the test that checks why); every
+# other WeakSet under api/ or core/ is one.
+_SANCTIONED_WEAKSETS = {
+    "core/scheduler.py": {"_lag_monitor_listener_on", "_shutdown_listener_on"},
+}
+_STAND_DOWN_NAMES = {"prefix_verdict_stands_down_for", "_tree_holds"}
+
+
+def _scanned_modules():
+    """Every module of the product packages `api` and `core`, by repo-relative path."""
+    return {path.relative_to(REPO).as_posix(): path
+            for package in ("api", "core") for path in sorted((REPO / package).rglob("*.py"))}
+
+
+def _identifier(node):
+    import ast
+
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.alias):
+        return node.name.rsplit(".", 1)[-1]
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return node.name
+    return None
+
+
+def _carriers(relpath, source):
+    """The stand-down carriers `source` (the module at `relpath`) names, in order.
+
+    A `WeakSet` is a carrier unless it is the value of one of the module-level
+    names sanctioned for that very file."""
+    import ast
+
+    tree = ast.parse(source)
+    allowed = _SANCTIONED_WEAKSETS.get(relpath, set())
+    sanctioned = set()
+    for node in tree.body:
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.value is not None:
+            target, value = node.target, node.value
+        elif isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            target, value = node.targets[0], node.value
+        else:
+            continue
+        if target.id in allowed:
+            sanctioned.update(id(inner) for inner in ast.walk(value))
+    hits = []
+    for node in ast.walk(tree):
+        name = _identifier(node)
+        if name in _STAND_DOWN_NAMES or (name == "WeakSet" and id(node) not in sanctioned):
+            hits.append(name)
+    return hits
+
+
 def _arm(monkeypatch):
     monkeypatch.setattr(authz, "gate_enabled", lambda: True)
     monkeypatch.setattr(authz, "WRITERS", set())
@@ -199,35 +255,74 @@ class TestNoStandDownAndTheVerdictIsIdempotent:
     def test_the_exemption_and_its_carriers_are_gone_from_the_verdict_path(self):
         """No stand-down carrier survives in the CODE, not merely in the prose.
 
-        The scan is over identifiers (AST names/attributes) and call names, so a
+        The scan is over identifiers (AST names/attributes/imports), so a
         docstring that names the removed exemption is not itself a carrier, while
         a live `_tree_holds`, a `WeakSet` registry or a `_MARK` constant is. A
         renamed fourth carrier of the same shape would still fail the attribute
         scan, because it would have to be reachable as an attribute of a module
         on the verdict path and be mentioned by the guard.
-        """
-        import ast
 
+        It covers EVERY module under `api/` and `core/`, not only the State
+        modules. Narrowing it to `core/state_*` and `core/director_*` left the
+        rest of core (db_manager among them) unwatched: a registry planted there
+        was missed. The one WeakSet that legitimately lives outside State is
+        sanctioned by name in `_SANCTIONED_WEAKSETS`, and the two tests below
+        state and check why it is safe.
+        """
         import api.state_http as state_http
         import api.state_graph_routers  # noqa: F401  (builds the production router)
 
         assert not hasattr(state_http, "prefix_verdict_stands_down_for")
         assert not hasattr(state_http, "_tree_holds")
-        banned = {"prefix_verdict_stands_down_for", "_tree_holds", "WeakSet"}
-        # The verdict path: every API module and the State modules of core. A
-        # core module outside State (the scheduler keeps its in-flight ticks in
-        # a WeakSet) is not on it.
-        verdict_path = sorted((REPO / "api").glob("*.py")) + sorted(
-            p for p in (REPO / "core").glob("*.py")
-            if p.name.startswith(("state_", "director_")))
-        assert len(verdict_path) > 10, verdict_path
-        for path in verdict_path:
-            tree = ast.parse(path.read_text(encoding="utf-8"))
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Attribute):
-                    assert node.attr not in banned, (path, node.attr)
-                elif isinstance(node, ast.Name):
-                    assert node.id not in banned, (path, node.id)
+        scanned = _scanned_modules()
+        assert "core/db_manager.py" in scanned, sorted(scanned)
+        assert {p.relative_to(REPO).as_posix() for p in (REPO / "core").glob("*.py")} <= set(scanned)
+        assert {p.relative_to(REPO).as_posix() for p in (REPO / "api").glob("*.py")} <= set(scanned)
+        for relpath, path in scanned.items():
+            assert _carriers(relpath, path.read_text(encoding="utf-8")) == [], relpath
+
+    def test_the_only_sanctioned_weakset_is_the_schedulers_and_touches_no_verdict_module(self):
+        """WHY the scheduler's two registries are safe, checked rather than asserted.
+
+        They are module-level `WeakSet[AsyncIOScheduler]` values that remember
+        "the lag/shutdown listener is already installed on this scheduler". They
+        hold no verdict, no project and no request. They are safe only while
+        (1) they are exactly those assignments in `core/scheduler.py`, (2) no
+        other module under `api/` or `core/` so much as names them, so no guard
+        can read one as a stand-down, and (3) they still exist, so the
+        allowance is not dead weight. Adding a reader of either name elsewhere,
+        or a third WeakSet anywhere, turns this red.
+        """
+        import ast
+
+        sanctioned = {name for names in _SANCTIONED_WEAKSETS.values() for name in names}
+        scanned = _scanned_modules()
+        for relpath, names in _SANCTIONED_WEAKSETS.items():
+            tree = ast.parse(scanned[relpath].read_text(encoding="utf-8"))
+            assigned = {node.target.id for node in tree.body
+                        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)}
+            assert names <= assigned, (relpath, sorted(names - assigned))
+        for relpath, path in scanned.items():
+            if relpath in _SANCTIONED_WEAKSETS:
+                continue
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                name = _identifier(node)
+                assert name not in sanctioned, (relpath, name)
+
+    def test_the_scan_catches_a_carrier_planted_in_a_module_outside_state(self):
+        """The scan itself, on synthetic source: both poles, nothing on disk."""
+        plant = "import weakref\n_registry = weakref.WeakSet()\n"
+        assert _carriers("core/db_manager.py", plant) == ["WeakSet"]
+        assert _carriers("core/db_manager.py", "def _tree_holds():\n    return 1\n") == ["_tree_holds"]
+        assert _carriers("core/db_manager.py", "from weakref import WeakSet as W\n") == ["WeakSet"]
+        sanctioned = ("import weakref\n"
+                      "_lag_monitor_listener_on: 'weakref.WeakSet[object]' = weakref.WeakSet()\n"
+                      "_shutdown_listener_on: 'weakref.WeakSet[object]' = weakref.WeakSet()\n")
+        assert _carriers("core/scheduler.py", sanctioned) == []
+        # The allowance is for those two names in that one file, nothing wider.
+        assert _carriers("core/db_manager.py", sanctioned) == ["WeakSet", "WeakSet"]
+        assert _carriers("core/scheduler.py", sanctioned + "_third = weakref.WeakSet()\n") == ["WeakSet"]
+        assert _carriers("core/scheduler.py", sanctioned + "def _tree_holds(): pass\n") == ["_tree_holds"]
 
 
     def test_judging_a_request_N_times_equals_judging_it_once(self, tmp_path, monkeypatch):

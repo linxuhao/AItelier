@@ -290,3 +290,49 @@ async def test_candidate_filter_never_hides_actual_active_owner(service, status,
     else:
         assert result["timed_out"] and "reason" not in result
     assert service.attempts.get(attempt["attempt_id"]) == before
+
+
+def test_the_rescan_answer_exposes_only_the_watermark_and_it_is_the_overviews_event_seq(service):
+    """`wait_disposition` answers `rescan` from the event watermark alone.
+
+    The answer is the bare word, and the only `state_events` columns the call
+    reads are `seq` (the aggregate) and `project_id` (the filter): nothing of a
+    row (payload, node, type, time) is copied into it. The watermark it compares
+    with the cursor is `project_overview`'s `event_seq`, to the unit: the cursor
+    that equals it is NOT a rescan, the one before it is. A projection change
+    that starts to read another column, or a watermark that drifts from the
+    overview's, turns this red.
+    """
+    import contextlib
+    import sqlite3
+
+    from core.state_changes import wait_disposition
+
+    service.store.revise_node("p", "a", 1, "more than one event", goal="Changed")
+    watermark = service.portfolio.overview("p")["event_seq"]
+    assert watermark == service.store.events("p")[-1]["seq"] > 1
+
+    read, original = set(), service.store.transaction
+
+    def authorizer(action, table, column, database, source):
+        if action == sqlite3.SQLITE_READ:
+            read.add((table, column))
+        return sqlite3.SQLITE_OK
+
+    @contextlib.contextmanager
+    def watched(*args, **kwargs):
+        with original(*args, **kwargs) as conn:
+            conn.set_authorizer(authorizer)
+            try:
+                yield conn
+            finally:
+                conn.set_authorizer(None)
+
+    service.store.transaction = watched
+    try:
+        answer = wait_disposition(service.store, "p", watermark - 1, None, None, None)
+    finally:
+        del service.store.transaction
+    assert answer == "rescan" and json.dumps(answer) == '"rescan"'
+    assert read == {("state_events", "seq"), ("state_events", "project_id")}, sorted(read)
+    assert wait_disposition(service.store, "p", watermark, None, None, None) != "rescan"

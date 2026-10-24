@@ -522,6 +522,58 @@ class TestTheReviewedPathsAreRefused:
 _REFUSAL = '{"detail":"This State DAG record is not available."}'
 
 
+class TestAnUnopenedNotebookIsNotAnExistenceOracle:
+    """What an anonymous caller can observe must not tell an unopened project from
+    one that does not exist: at the `execute` chokepoint, on the product route and,
+    since the notebook readers judge the project at the read (privacy node
+    26f38cc8), on the note `get` itself - through the decorated method AND through
+    its unwrapped body (iss-e8361e3eb60b436f item 3)."""
+
+    MISSING = "canary-missing"
+
+    @pytest.mark.parametrize("bare", [False, True], ids=["wrapped", "bare-body"])
+    def test_the_note_get_refuses_unopened_and_missing_alike_below_the_guard(self, anonymous, bare):
+        refusals = []
+        for project in (C.SHUT, self.MISSING):
+            notes = anonymous.driver_notes
+            with pytest.raises(ProjectPrivate) as raised:
+                if bare:
+                    _closure_body(notes.get)(notes, project)
+                else:
+                    notes.get(project)
+            error = raised.value
+            refusals.append((type(error), error.status_code, error.detail, str(error)))
+        assert refusals[0] == refusals[1], refusals
+        assert C.leaked_tables(json.dumps([repr(r) for r in refusals])) == []
+
+    def test_the_chokepoint_refuses_unopened_and_missing_alike(self, anonymous):
+        refusals = []
+        for project in (C.SHUT, self.MISSING):
+            with pytest.raises(ProjectPrivate) as raised:
+                execute(anonymous, "get_driver_note", {"project_id": project})
+            refusals.append((raised.value.status_code, raised.value.detail, str(raised.value)))
+        assert refusals[0] == refusals[1], refusals
+
+    @pytest.mark.parametrize("mode", ["fresh", "main"])
+    def test_the_product_route_answers_unopened_and_missing_with_the_same_bytes(
+            self, tmp_path, monkeypatch, mode):
+        C.arm(monkeypatch)
+        db = C.new_database(tmp_path, f"oracle-{mode}.sqlite")
+        app = C.app_for(mode, db)
+        client = C.client_for(app, mode)
+        try:
+            assert C.request_is_anonymous(app, client), "the per-request service is not anonymous"
+            answers = {}
+            for project in (C.SHUT, self.MISSING):
+                response = client.get(f"/api/state/projects/{project}/driver-note")
+                answers[project] = (response.status_code, response.headers.get("content-type"),
+                                    response.content)
+        finally:
+            C.release(app)
+        assert answers[C.SHUT] == answers[self.MISSING], answers
+        assert answers[C.SHUT][0] == 403 and answers[C.SHUT][2] == _REFUSAL.encode(), answers
+
+
 def g_control(action: str, svc=Depends(get_service)):
     execute(svc, action, {"project_id": C.OPEN})
     return {"ok": True}

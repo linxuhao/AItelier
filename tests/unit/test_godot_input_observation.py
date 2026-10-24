@@ -438,9 +438,27 @@ def test_real_early_exit_cannot_be_complete_acceptance(native):
     assert 42 < probe["frames"] < 59
     assert probe["complete"] is False and _scenario(report)["complete"] is False
     assert obs["runtime_injected"] == 3 and obs["runtime_events_injected"] == 6
-    assert obs["complete"] is False and obs["acceptance_pass"] is not True
+    assert obs["complete"] is False and obs["acceptance_pass"] is None
     assert report["passed"] is False and report["spec_errors"]
-    _position(report, -3)
+    row = _scenario(report)
+    assert row["asserts"] == []
+    assert row["expected_asserts"] == row["asserts_missing"] == 2
+    assert "probe did not reach its frame budget" in report["spec_errors"][0]
+    # During scene teardown get_path() need not retain /root/Player. Identify
+    # the fixture's sole gameplay snapshot by class and script-property shape,
+    # require uniqueness, then check actual state independently of the witness.
+    players = [node for node in report["state"].values()
+               if node.get("class") == "Node2D"
+               and {"grid_y", "busy_frames", "busy_until", "witness_only"}
+               <= set(node.get("vars", {}))]
+    assert len(players) == 1, report["state"]
+    player = players[0]
+    assert player["vars"]["busy_frames"] == 5
+    assert player["vars"]["witness_only"] is False
+    assert player["vars"]["grid_y"] == -3
+    assert player["pos"][1] == -3
+    assert "input_acceptance" not in player["vars"]
+    assert "raw_received" not in player["vars"]
 
 
 def test_real_skipped_producer_is_detected_against_the_host_schedule(native):
@@ -472,8 +490,8 @@ def test_real_receipts_preserve_release_mouse_and_entry_order(native):
     spec = _case("runtime3_actualgame3accepted")
     spec["scenarios"][0]["timeline"] = [
         {"at": 20, "press": "move_up"},
-        {"at": 22, "hover": "Player"},
-        {"at": 22, "click": "Player"},
+        {"at": 22, "hover": "Player +32,32"},
+        {"at": 22, "click": "Player +32,32"},
         {"at": 22, "press": "move_up"},
         {"at": 22, "release": "move_up"},
         {"at": 59, "assert": {"Player.grid_y": -1, "Player.position.y": -1}},

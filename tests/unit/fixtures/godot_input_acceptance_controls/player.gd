@@ -10,7 +10,7 @@ var raw_received: Dictionary = {"events": 0, "presses": 0, "tagged": 0, "untagge
 
 func _count_received(event: InputEvent) -> void:
     raw_received["events"] += 1
-    var token = event.get_meta("aitelier_input", null)
+    var token = event.get_meta("aitelier_input") if event.has_meta("aitelier_input") else null
     var eligible: bool = event is InputEventAction and event.pressed
     if eligible:
         raw_received["presses"] += 1
@@ -24,7 +24,7 @@ func _count_received(event: InputEvent) -> void:
             raw_received["bad_metadata"] += 1
 
 func acknowledge(event: InputEvent, decision: String) -> void:
-    var token = event.get_meta("aitelier_input", null)
+    var token = event.get_meta("aitelier_input") if event.has_meta("aitelier_input") else null
     if token is Dictionary and token.get("version") == 1:
         input_acceptance["decisions"].append({"run_id": token["run_id"], "seq": token["seq"], "decision": decision})
 

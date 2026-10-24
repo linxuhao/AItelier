@@ -684,27 +684,59 @@ def _script_project(tmp_path, monkeypatch, entries=("t_a.gd", "t_b.gd")):
 
 
 def _record_homes(monkeypatch, seen, behaviour=None):
-    """Stub `subprocess.run` — NOT `_run` — so the real env assembly is tested.
+    """Stub `subprocess.Popen` — NOT `_run` — so real env assembly is tested.
 
     Each fake invocation writes the save file a suite that saves would leave in
     user://, and records what it found there on entry: the sentinel is how a
     later invocation would betray that it inherited an earlier one's HOME.
     """
+    import signal
     import subprocess
 
-    def fake_run(cmd, **kw):
-        env = kw["env"]
-        home = Path(env["HOME"])
-        seen.append({"home": home,
-                     "found": sorted(p.name for p in home.iterdir()),
-                     "token": env.get("AITELIER_HARNESS_TOKEN"),
-                     "existed": home.is_dir()})
-        (home / "save_1.json").write_text('{"gold": 1}')
-        if behaviour is not None:
-            return behaviour(cmd)
-        return subprocess.CompletedProcess(cmd, 0, "PASS all\n", "")
+    processes = {}
 
-    monkeypatch.setattr(gh.subprocess, "run", fake_run)
+    class FakePopen:
+        def __init__(self, cmd, **kw):
+            env = kw["env"]
+            home = Path(env["HOME"])
+            self.record = {"home": home,
+                           "found": sorted(p.name for p in home.iterdir()),
+                           "token": env.get("AITELIER_HARNESS_TOKEN"),
+                           "existed": home.is_dir(),
+                           "start_new_session": kw["start_new_session"],
+                           "communicate_timeouts": [], "signals": []}
+            seen.append(self.record)
+            (home / "save_1.json").write_text('{"gold": 1}')
+            # An opaque token cannot accidentally identify a real process group.
+            self.pid = object()
+            self.returncode = None
+            self._timeout = None
+            try:
+                self._result = (behaviour(cmd) if behaviour is not None else
+                                subprocess.CompletedProcess(cmd, 0, "PASS all\n", ""))
+            except subprocess.TimeoutExpired as exc:
+                # A Popen timeout occurs in communicate, after construction.
+                self._timeout = exc
+                self._result = subprocess.CompletedProcess(
+                    cmd, -signal.SIGKILL, exc.output, exc.stderr)
+            processes[self.pid] = self
+
+        def communicate(self, timeout=None):
+            self.record["communicate_timeouts"].append(timeout)
+            if self._timeout is not None:
+                exc, self._timeout = self._timeout, None
+                raise exc
+            self.returncode = self._result.returncode
+            return self._result.stdout, self._result.stderr
+
+    def fake_killpg(pid, sig):
+        proc = processes[pid]
+        assert sig == signal.SIGKILL
+        proc.record["signals"].append(sig)
+        proc.returncode = -sig
+
+    monkeypatch.setattr(gh.subprocess, "Popen", FakePopen)
+    monkeypatch.setattr(gh.os, "killpg", fake_killpg)
     return seen
 
 
@@ -721,6 +753,9 @@ def test_each_script_entry_point_runs_in_its_own_home(monkeypatch, tmp_path):
                                                    "res://tests/t_b.gd"]
     assert len(seen) == 2
     first, second = seen
+    assert all(x["start_new_session"] is True for x in seen)
+    assert all(x["communicate_timeouts"] == [30] for x in seen)
+    assert all(x["signals"] == [] for x in seen)
     # Distinct homes, neither of them the container's.
     assert first["home"] != second["home"]
     assert container_home not in (first["home"], second["home"])
@@ -778,6 +813,9 @@ def test_a_red_script_still_reports_and_still_cleans_its_home(monkeypatch, tmp_p
     if outcome == "timeout":
         assert res["stderr"].endswith("timed out after 30s")
     assert len(seen) == 1 and not seen[0]["home"].exists()
+    assert seen[0]["start_new_session"] is True
+    assert seen[0]["communicate_timeouts"] == ([30, 5] if outcome == "timeout" else [30])
+    assert seen[0]["signals"] == ([gh.signal.SIGKILL] if outcome == "timeout" else [])
 
 
 def test_an_unexpected_error_surfaces_and_leaves_no_home_behind(monkeypatch, tmp_path):
@@ -891,13 +929,18 @@ def test_a_dead_input_is_still_called_dead_from_a_fresh_control(monkeypatch, tmp
 
 
 def test_a_control_that_timed_out_accuses_nobody_and_still_cleans_up(monkeypatch, tmp_path):
-    """No control evidence => no input_dead claim (the pre-existing rule), and
-    the home goes anyway."""
+    """Missing control evidence refuses the measurement without accusing the
+    game of dead input, and the home goes anyway."""
     seen = _home_recording_probe(monkeypatch, [], on_control=lambda: ({}, [], True))
     r = gh._playtest_spec(tmp_path / "proj", _spec(["a"]), 60, 120)
 
     assert r["behavior"]["scenarios"][0]["input_dead"] is False
-    assert r["passed"] is True
+    assert r["passed"] is False
+    assert r["spec_errors"] == [
+        "scenario 'a': no-input control is not a complete comparable observation "
+        "(node snapshot is missing or not a mapping); input-dead comparison is unobserved"]
+    assert r["summary"].startswith("Playtest HARD-failed:")
+    assert r["spec_errors"][0] in r["summary"]
     control = [s for s in seen if s["is_control"]][0]
     assert not Path(control["home"]).exists()
 
@@ -991,12 +1034,15 @@ def test_a_click_only_scenario_enters_l0(monkeypatch, tmp_path):
 
 
 def test_every_input_key_the_probe_delivers_counts_as_driving(monkeypatch, tmp_path):
-    """Derived from _TIMELINE_KEYS, not a second hand-written list: whatever
-    the normaliser lets through besides `at`/`assert` is input."""
-    input_keys = sorted(gh._TIMELINE_KEYS - {"at", "assert", "actions", "clicks", "hovers"})
+    """Derive dispatching keys after excluding scheduling, assertions,
+    input-free captures and plural forms expanded by normalization."""
+    input_keys = sorted(gh._TIMELINE_KEYS - {
+        "at", "assert", "capture_before", "actions", "clicks", "hovers"})
     assert input_keys == ["click", "hover", "press", "release"]
     for k in input_keys:
         def fake(dst, state_path, frames, timeout, env, scene="", capture_at=None, timing=None, render=True):
+            if timing is not None:
+                timing["game_usec"] = int(frames * 1_000_000 / 60)
             return ({"frames": frames, "asserts": [{"name": "a", "passed": True}],
                      "nodes": {"Root": {"x": 1}}}, [], False)
         monkeypatch.setattr(gh, "_run_probe", fake)
@@ -1004,7 +1050,12 @@ def test_every_input_key_the_probe_delivers_counts_as_driving(monkeypatch, tmp_p
             {"at": 5, k: "ui_accept"},
             {"at": 10, "assert": [{"node": "N", "expr": "x > 0"}]}]}]}
         r = gh._playtest_spec(tmp_path / "proj", spec, 300, 120)
+        scenario = r["behavior"]["scenarios"][0]
+        assert scenario["pressed"] is True, k
+        assert scenario["comparison_error"] is None, k
+        assert r["spec_errors"] == [], k
         assert r["behavior"]["scenarios"][0]["input_dead"] is True, k
+        assert r["passed"] is False, k
 
 
 def test_a_scenario_with_no_input_at_all_is_not_judged_by_l0(monkeypatch, tmp_path):
@@ -1573,8 +1624,8 @@ def test_probe_gdscript_declares_every_underscore_identifier_it_uses():
     input, assertion and capture with it. This is a lexical check, not a
     GDScript compile; the native parse remains UNRUN."""
     import re
-    probe = re.search(r"_PROBE_GD = r\'\'\'(.*?)\'\'\'",
-                      _HARNESS.read_text(encoding="utf-8"), re.S).group(1)
+    probe = gh._PROBE_GD
+    assert "__BEFORE_PROPERTY_PATH_RE__" not in probe, "unresolved probe placeholder"
     s = re.sub(r'"(?:\\.|[^"\\\n])*"', '""', probe)
     s = re.sub(r"#[^\n]*", "", s)
     declared = set(re.findall(r"\b(?:var|const|func)\s+(_\w+)", s))

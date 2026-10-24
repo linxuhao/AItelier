@@ -194,6 +194,25 @@ def test_binding_cas_exact_selection_and_workflow_reservation(service):
     assert 'design_context' not in unbound['context']
 
 
+def test_bind_node_design_action_binds_through_the_write_surface(service):
+    revision(service); baseline(service)
+    args = dict(project_id='game', node_key='work', expected_revision=1, baseline_id='b1',
+                bindings=[{'design_id': 'cooldown', 'revision': 1, 'purpose': 'implements',
+                           'coverage_scope': SCOPE}],
+                reason='Adopt exact design inputs')
+    result = execute(service, 'bind_node_design', args, allow_write=True)
+    assert result['revision'] == 2
+    assert service.store.get_node('game', 'work')['revision'] == 2
+    bound = service.design.node_bindings('game', 'work')
+    assert result['binding_snapshot_hash'] == bound['binding_snapshot_hash']
+    assert bound['baseline_review_required'] is False
+    with pytest.raises(StateConflict, match='node revision changed'):
+        execute(service, 'bind_node_design', args, allow_write=True)
+    with pytest.raises(StateGraphError, match='mutating action is not available on the read surface'):
+        execute(service, 'bind_node_design', args, allow_write=False)
+    assert service.store.is_project_public('game') is False
+
+
 def test_design_http_authorization_read_surface_and_actor_spoofing(tmp_path):
     app = create_app(str(tmp_path / 'http.sqlite'), 'x' * 32, with_mcp=False)
     client = TestClient(app)

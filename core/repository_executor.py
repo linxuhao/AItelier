@@ -456,9 +456,10 @@ class CleanupUnconfirmed(IsolationUnavailable):
 # result is `CleanupUnconfirmed` naming it, since the daemon may still create
 # it; nothing is started and `private_git` propagates it, so no repository
 # command follows. A refused create is not removed either. Once a create has
-# answered with its ID, `docker rm -f ID` exiting 0 is final (it is 0 when
-# the container is already gone, and nothing re-creates an ID); a removal
-# that does not succeed within REMOVE_DEADLINE is `CleanupUnconfirmed`.
+# answered with its ID, `docker rm -f ID` exiting 0 or an exact-ID absence
+# reply from inspection confirms settlement. An asynchronous auto-removal
+# conflict alone does not. Removal and inspection share REMOVE_DEADLINE;
+# unconfirmed absence remains `CleanupUnconfirmed`.
 # Removal waits for the start client to be killed and reaped first, and is
 # itself protected from a held SIGINT.
 CREATE_TIMEOUT = 30
@@ -497,22 +498,47 @@ class _HeldInterrupt:
 
 
 def _remove_owned(docker: str, container: str, name: str) -> None:
-    """Remove the container ``name``'s create answered with, by that ID only."""
+    """Remove only the create's exact ID; reconcile asynchronous auto-removal."""
     deadline = time.monotonic() + REMOVE_DEADLINE
-    while True:
+    first_error = why = "no removal acknowledgement"
+    while (remaining := deadline - time.monotonic()) > 0:
         try:
             done = subprocess.run([docker, "rm", "-f", container], stdin=subprocess.DEVNULL,
-                                  capture_output=True, text=True, timeout=10)
+                                  capture_output=True, text=True, timeout=min(10, remaining))
             removed, why = done.returncode == 0, done.stderr.strip()[-300:]
         except subprocess.TimeoutExpired:
-            removed, why = False, "docker rm did not answer within 10s"
+            removed, why = False, "docker rm did not answer within the cleanup deadline"
         if removed:
             return
-        if time.monotonic() > deadline:
+        if first_error == "no removal acknowledgement":
+            first_error = why
+        # --rm may already own removal. Its conflict reply is not absence,
+        # but an exact-ID inspect 404 is; never infer it from CLI failure alone.
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
             break
-        time.sleep(0.2)
+        try:
+            inspected = subprocess.run(
+                [docker, "container", "inspect", "--format", "{{.Id}}", container],
+                stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                timeout=min(10, remaining))
+            missing = re.fullmatch(
+                r"(?:Error: |Error response from daemon: )No such (?:container|object): "
+                + re.escape(container), inspected.stderr.strip())
+            if inspected.returncode > 0 and missing:
+                return
+            if inspected.returncode == 0 and inspected.stdout.strip() == container:
+                why = "exact owned container is still present"
+            else:
+                why = "exact owned container absence was not confirmed: " + inspected.stderr.strip()[-300:]
+        except subprocess.TimeoutExpired:
+            why = "exact owned container inspection exceeded the cleanup deadline"
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(min(0.2, remaining))
     raise CleanupUnconfirmed(f"owned container {name} ({container}) could not be removed "
-                             f"within {REMOVE_DEADLINE}s: {why}", name)
+                             f"within {REMOVE_DEADLINE}s; first removal error: {first_error}; "
+                             f"last observation: {why}", name)
 
 
 _DAEMON_REFUSAL = re.compile(r"(?:docker: )?Error response from daemon: ")
@@ -552,6 +578,7 @@ def owned_container(create: list[str], docker: str, name: str, *, cancelled=None
     sent = False
     container = None
     proc = None
+    execution_error = None
     try:
         with _HeldInterrupt():
             made = subprocess.Popen(create, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
@@ -581,6 +608,9 @@ def owned_container(create: list[str], docker: str, name: str, *, cancelled=None
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=text,
                                     start_new_session=True)
         yield proc
+    except BaseException as exc:
+        execution_error = exc
+        raise
     finally:
         with _HeldInterrupt():
             try:
@@ -592,7 +622,15 @@ def owned_container(create: list[str], docker: str, name: str, *, cancelled=None
                     proc.stderr.close()
             finally:
                 if container is not None:
-                    _remove_owned(docker, container, name)
+                    try:
+                        _remove_owned(docker, container, name)
+                    except CleanupUnconfirmed as exc:
+                        if execution_error is not None:
+                            raise CleanupUnconfirmed(
+                                f"{exc}; preceding execution error: "
+                                f"{type(execution_error).__name__}: {str(execution_error)[:300]}",
+                                name) from execution_error
+                        raise
                 elif sent and not answered:
                     raise CleanupUnconfirmed(f"owned container {name}: its create got no answer "
                                              "from the daemon, so the daemon may still create it; "

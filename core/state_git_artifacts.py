@@ -26,6 +26,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from core import closed_git
 from core.state_graph import StateConflict, now
 from core.state_report_integrity import _read_regular_nofollow
 
@@ -87,9 +88,20 @@ def _validated_bundle(raw, commit, expected_tree=None, destination=None, exact=F
             _assert_exact_closure(repo, commit)
         if destination is not None:
             ref = "refs/aitelier/artifacts/" + commit
-            _git(destination, "fetch", "--no-tags", str(bundle), commit + ":" + ref)
-            actual = _git(destination, "rev-parse", ref + "^{commit}")
-            actual_tree = _git(destination, "rev-parse", ref + "^{tree}")
+            try:
+                with closed_git.repo_lock(destination):
+                    # A literal local bundle is not a named remote. Reject URL
+                    # rewriting before the closed transport consumes its path.
+                    if any(k.startswith("url.") and k.endswith((".insteadof", ".pushinsteadof"))
+                           for k, _ in closed_git.config_list(destination)):
+                        raise closed_git.GitRefused("bundle destination config rewrites transport URLs")
+                    closed_git.transport(destination, "fetch", "--no-tags", "--no-recurse-submodules",
+                        "--no-auto-gc", "--", str(bundle), commit + ":" + ref,
+                        profile=("file", ("protocol.file.allow=always",)), timeout=120)
+                    actual = closed_git.out(destination, "rev-parse", ref + "^{commit}")
+                    actual_tree = closed_git.out(destination, "rev-parse", ref + "^{tree}")
+            except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+                raise StateConflict("Git artifact destination import refused: " + type(exc).__name__) from exc
             if actual != commit or actual_tree != tree:
                 raise StateConflict(f"expected commit/tree {commit}/{tree}; actual {actual}/{actual_tree}")
         return tree

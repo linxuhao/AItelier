@@ -213,9 +213,30 @@ class StateAttempts:
         }
 
     def _reserve(self, project_id, node_key, expected_revision, workflow, request_key, instruction, *,
+                 preflight=None, prior_account=None, **kwargs):
+        # Check admission before touching Git, then repeat the same guards in
+        # the committing transaction. Git may wait on the repository lock and
+        # must never hold the State writer while doing so.
+        if preflight is not None:
+            old = self._reserve_once(project_id, node_key, expected_revision, workflow,
+                request_key, instruction, preflight=preflight, _check_only=True, **kwargs)
+            if old is not None:
+                return old  # Replay keeps its original context and performs no import.
+            preflight()
+        if callable(prior_account):
+            try:
+                prior_account = prior_account()
+            except Exception:  # Observation cannot refuse admission.
+                prior_account = {"prior": None, "value": None}
+        return self._reserve_once(project_id, node_key, expected_revision, workflow,
+            request_key, instruction, preflight=preflight, prior_account=prior_account,
+            **kwargs)
+
+    def _reserve_once(self, project_id, node_key, expected_revision, workflow, request_key, instruction, *,
                  external=None, continue_from=None, relay_digest=None,
                  frozen_prerequisites=None, base_sha=None, relay_handoff=None, preflight=None,
-                 owner_driver_id=None, claim_id=None, fence=None, is_admin=False, prior_account=None):
+                 owner_driver_id=None, claim_id=None, fence=None, is_admin=False, prior_account=None,
+                 _check_only=False):
         """Common atomic ownership/pin guard for every execution adapter.
 
         ``owner_driver_id`` is the registered driver behind the request; the new
@@ -341,8 +362,8 @@ class StateAttempts:
                 ctx["design_context"] = design
                 ctx["binding_snapshot_hash"] = digest(design)
             if preflight is not None:
-                # Validate the same uniqueness guards before importing any
-                # artifact. The write transaction closes the validation race.
+                # Both passes use these guards. Only the first pass yields to
+                # the outside-transaction import; the final pass admits atomically.
                 if conn.execute("SELECT 1 FROM state_attempts WHERE project_id=? AND node_key=? "
                     "AND status IN ('reserved','launching','running','paused','unknown') LIMIT 1",
                     (project_id, node_key)).fetchone():
@@ -351,7 +372,8 @@ class StateAttempts:
                     "AND harness=? AND external_id=? LIMIT 1",
                     (project_id, node_key, external["harness"], external["external_id"])).fetchone():
                     raise StateConflict("external execution identity was already registered")
-                preflight()
+                if _check_only:
+                    return None
             if prior_account is not None:
                 # Observability only; never refuses. ``prior_account`` was built
                 # BEFORE this write transaction (it runs Git) from the same

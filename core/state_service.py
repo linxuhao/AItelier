@@ -542,13 +542,9 @@ class StateService:
             return {"prior": prior, "value": prior_candidate.account(
                 prior, source, base_sha, prior_candidate.REQUESTED)}
         try:
-            prior_account = build_prior_account()
-        except Exception:  # noqa: BLE001 - observation must never refuse admission
-            prior_account = {"prior": None, "value": None}
-        try:
             return self.external.register(project_id, node_key, expected_revision, harness, external_id,
                 request_key, instruction, base_sha=base_sha, preflight=preflight if base_sha else None,
-                claim_id=claim_id, fence=fence, prior_account=prior_account)
+                claim_id=claim_id, fence=fence, prior_account=build_prior_account)
         except StateConflict:
             if preflight_failure:
                 self._record_artifact_refusal(project_id, node_key, base_sha, preflight_failure[0])

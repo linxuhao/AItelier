@@ -374,11 +374,10 @@ class StateAttempts:
                     "AND harness=? AND external_id=? LIMIT 1",
                     (project_id, node_key, external["harness"], external["external_id"])).fetchone():
                     raise StateConflict("external execution identity was already registered")
-                if _check_only:
-                    from core.state_portfolio import StatePortfolio
-                    return StatePortfolio._source(conn, self.store._project(conn, project_id))
                 from core.state_portfolio import StatePortfolio
                 current_source = StatePortfolio._source(conn, self.store._project(conn, project_id))
+                if _check_only:
+                    return current_source
                 if current_source != _preflight_source:
                     raise StateConflict("source binding changed during artifact preflight; reload before admission")
             if prior_account is not None:

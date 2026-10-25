@@ -147,7 +147,7 @@ def test_all_selected_provisional_feedback_keeps_old_full_gate_red(world, tmp_pa
     baseline_dir = Path(rt._baseline_dir(str(tmp_path / 'state'), repo)); baseline_dir.mkdir(parents=True)
     known = 'repo_gate:run_tests.sh#playtest/old/assertion'
     path = baseline_dir / rt.BASELINE_FILE; path.write_text(json.dumps({'failures': [known]}))
-    monkeypatch.setattr(rt, '_acquire_repo_gate', lambda _: {
+    monkeypatch.setattr(rt, '_acquire_repo_gate', lambda _, **kwargs: {
         'script': 'run_tests.sh', 'returncode': 0, 'passed': True, 'output': 'provisional green',
         'measured': rt.REPO_GATE_MEASURED_PASS, 'gate_coverage': scope})
     result = rt.run_tests(project_root=str(repo), out_dir=str(tmp_path / 'graph/test'),

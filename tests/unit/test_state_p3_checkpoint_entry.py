@@ -63,7 +63,7 @@ def _rest(client, monkeypatch, project_id, status):
 def test_rest_checkpoint_routes_refuse_a_non_owner_at_entry(client, monkeypatch, clock):
     sf, database = _rest(client, monkeypatch, "cp-entry-proj", "paused")
     _as(monkeypatch, "grok")
-    for verb, body in (("approve", {"checkpoint": "gather", "feedback": "", "run_id": "run-1", "rescue_failed": True}),
+    for verb, body in (("approve", {"checkpoint": "gather", "feedback": "", "run_id": "run-1"}),
                        ("reject", {"checkpoint": "gather", "feedback": "redo"})):
         resp = client.post(f"/api/meta/cp-entry-proj/checkpoint/{verb}", json=body)
         assert resp.status_code == 409 and "not_attempt_owner" in resp.text, resp.text

@@ -244,6 +244,20 @@ def test_unbound_failed_checkpoint_rescue_still_continues_real_work(live, monkey
     assert live.sf.get_run(rid)["status"] == "running"
     live.sf.advance_run(rid)
     claimed = live.sf.claim_next_step(rid)
+    # Official reactivate_run intentionally reopens the completed checkpoint
+    # when no failed step owns the retry. Execute it and review the new token.
+    assert claimed is not None and claimed.step_id == "plan"
+    live.sf.confirm_step(claimed.token, StepResult(outputs={"plan": "recovered plan"}))
+    live.sf.advance_run(rid)
+    checkpoint = live.sf.get_checkpoint(rid)
+    with client_for(live, monkeypatch) as client:
+        response = client.post(f"{prefix}/{identity}/checkpoint/approve", json={
+            "run_id": rid, "checkpoint": "plan",
+            "expected_checkpoint": checkpoint["expected_checkpoint"],
+            "decision_id": "review-recovered-ordinary-plan"})
+    assert response.status_code == 200, response.text
+    live.sf.advance_run(rid)
+    claimed = live.sf.claim_next_step(rid)
     assert claimed is not None and claimed.step_id == "work"
     live.sf.confirm_step(claimed.token, StepResult(outputs={"done": True}))
     live.sf.advance_run(rid)

@@ -217,11 +217,13 @@ class StateAttempts:
         # Check admission before touching Git, then repeat the same guards in
         # the committing transaction. Git may wait on the repository lock and
         # must never hold the State writer while doing so.
+        preflight_source = None
         if preflight is not None:
-            old = self._reserve_once(project_id, node_key, expected_revision, workflow,
+            checked = self._reserve_once(project_id, node_key, expected_revision, workflow,
                 request_key, instruction, preflight=preflight, _check_only=True, **kwargs)
-            if old is not None:
-                return old  # Replay keeps its original context and performs no import.
+            if "attempt_id" in checked:
+                return checked  # Replay keeps its original context and performs no import.
+            preflight_source = checked
             preflight()
         if callable(prior_account):
             try:
@@ -230,13 +232,13 @@ class StateAttempts:
                 prior_account = {"prior": None, "value": None}
         return self._reserve_once(project_id, node_key, expected_revision, workflow,
             request_key, instruction, preflight=preflight, prior_account=prior_account,
-            **kwargs)
+            _preflight_source=preflight_source, **kwargs)
 
     def _reserve_once(self, project_id, node_key, expected_revision, workflow, request_key, instruction, *,
                  external=None, continue_from=None, relay_digest=None,
                  frozen_prerequisites=None, base_sha=None, relay_handoff=None, preflight=None,
                  owner_driver_id=None, claim_id=None, fence=None, is_admin=False, prior_account=None,
-                 _check_only=False):
+                 _check_only=False, _preflight_source=None):
         """Common atomic ownership/pin guard for every execution adapter.
 
         ``owner_driver_id`` is the registered driver behind the request; the new
@@ -373,7 +375,12 @@ class StateAttempts:
                     (project_id, node_key, external["harness"], external["external_id"])).fetchone():
                     raise StateConflict("external execution identity was already registered")
                 if _check_only:
-                    return None
+                    from core.state_portfolio import StatePortfolio
+                    return StatePortfolio._source(conn, self.store._project(conn, project_id))
+                from core.state_portfolio import StatePortfolio
+                current_source = StatePortfolio._source(conn, self.store._project(conn, project_id))
+                if current_source != _preflight_source:
+                    raise StateConflict("source binding changed during artifact preflight; reload before admission")
             if prior_account is not None:
                 # Observability only; never refuses. ``prior_account`` was built
                 # BEFORE this write transaction (it runs Git) from the same

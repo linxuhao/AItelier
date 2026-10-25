@@ -84,7 +84,7 @@ class ProviderRefusal(Exception):
 
 
 class EmptyProviderResponse(Exception):
-    """A native completion contains neither output nor evidence of generation."""
+    """A completion cannot supply usable output to its caller."""
 
 
 def _raise_if_empty_native(response, endpoint: str) -> None:
@@ -981,7 +981,7 @@ class AIGateway:
             pool.shutdown(wait=False)
 
     def _observed_completion(self, kwargs: dict, *, native: bool):
-        """Observe one bounded endpoint attempt, including native validation.
+        """Observe one bounded endpoint attempt, including output validation.
 
         Capture identity before failover. An abandoned worker may still return,
         but only this controller records its terminal wait outcome; timeout is
@@ -1009,6 +1009,11 @@ class AIGateway:
             _raise_if_refused(response, identity["served_by"])
             if native:
                 _raise_if_empty_native(response, identity["served_by"])
+            elif not (response.choices[0].message.content or "").strip():
+                # Text/JSON callers cannot consume reasoning or tool calls.
+                # Fail here before recording success or returning an empty turn.
+                raise EmptyProviderResponse(
+                    f"{identity['served_by']}: empty text response (no visible text)")
         except BaseException as exc:
             note("completion_finished",
                  outcome="timeout" if isinstance(exc, litellm.exceptions.Timeout) else "error",

@@ -186,9 +186,10 @@ def require_new_feedback_output(out_dir):
         raise ValueError("feedback report artifacts already exist; retain the first attempt")
 
 
-def run_feedback(repo, out_dir, scope, full_spec, owner, transport, verifier=verify_feedback):
+def run_feedback(repo, out_dir, scope, full_spec, owner, transport, verifier=verify_feedback,
+                 *, caller_timeout=600):
     """Retain the first raw reply before classification; no acceptance boolean."""
-    from aitelier.tools.godot_playtest.impl import select_scenarios
+    from aitelier.tools.godot_playtest.impl import authored_caller_timeout, select_scenarios
     target = Path(out_dir)
     require_new_feedback_output(target)
     target.mkdir(parents=True, exist_ok=True)
@@ -220,7 +221,8 @@ def run_feedback(repo, out_dir, scope, full_spec, owner, transport, verifier=ver
             if unknown:
                 raise ValueError("unknown selected scenario")
             assertion_identities(selected)
-            payload = {"project_dir": str(repo), "spec": selected, "captures": 0, **owner}
+            payload = {"project_dir": str(repo), "spec": selected, "captures": 0,
+                       "timeout": authored_caller_timeout(selected, caller_timeout), **owner}
             (target / "round_feedback_request.json").write_text(json.dumps(payload, indent=2, ensure_ascii=False))
             raw = transport(payload)
             raw_path.write_text(json.dumps(raw, indent=2, ensure_ascii=False), encoding="utf-8")

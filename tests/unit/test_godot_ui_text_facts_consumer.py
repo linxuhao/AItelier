@@ -244,3 +244,39 @@ def test_host_receipt_is_bounded_separately_from_untouched_wire(tmp_path, monkey
     size = len(json.dumps({"ui_text_snapshot_host": host}, indent=2).encode())
     assert host["local_projection_bytes"] == size <= 8192
     assert saved["ui_text_snapshot"] == response["ui_text_snapshot"]
+
+
+def test_authored_180_request_preserves_ui_snapshot_transport_and_png(tmp_path, monkeypatch):
+    from docker.godot import godot_harness as native
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "project.godot").write_text("config_version=5\n")
+    spec = {"scenarios": [{"name": "s",
+                          "execution_budget": {"max_frames": 3000, "timeout_seconds": 180},
+                          "timeline": [{"at": 4, "assert": {"N.x": "x == 1"}}]}]}
+    (repo / impl.SPEC_FILE).write_text(json.dumps(spec))
+    response = _report()
+    sent = []
+
+    def urlopen(request, timeout):
+        payload = json.loads(request.data)
+        sent.append(payload)
+        plans, errors = native._authored_execution_plan(
+            payload["spec"], 180, payload.get("timeout", 120))
+        assert not errors and plans == [(180, 180)]
+        assert native._ui_text_preflight(
+            payload["spec"], 180, payload["timeout"], payload["captures"]) > 0
+        return io.BytesIO(json.dumps(response).encode())
+
+    monkeypatch.setattr(impl.urllib.request, "urlopen", urlopen)
+    out = tmp_path / "out"
+    result = impl.godot_playtest(project_root=str(repo), out_dir=str(out),
+                                 ui_text_snapshot={"version": 1})
+    saved = json.loads((out / "playtest_report.json").read_text())
+    assert result["passed"] and saved["ui_text_snapshot_host"]["status"] == "verified"
+    assert sent[0]["spec"] == spec and sent[0]["timeout"] == 180
+    assert sent[0]["ui_text_snapshot"] == {"version": 1}
+    assert saved["ui_text_snapshot"] == response["ui_text_snapshot"]
+    assert saved["captures"][0]["ui_text_facts"] == response["captures"][0]["ui_text_facts"]
+    assert (out / saved["captures"][0]["file"]).read_bytes() == _png()

@@ -147,7 +147,7 @@ def test_all_selected_provisional_feedback_keeps_old_full_gate_red(world, tmp_pa
     baseline_dir = Path(rt._baseline_dir(str(tmp_path / 'state'), repo)); baseline_dir.mkdir(parents=True)
     known = 'repo_gate:run_tests.sh#playtest/old/assertion'
     path = baseline_dir / rt.BASELINE_FILE; path.write_text(json.dumps({'failures': [known]}))
-    monkeypatch.setattr(rt, '_acquire_repo_gate', lambda _: {
+    monkeypatch.setattr(rt, '_acquire_repo_gate', lambda _, **kwargs: {
         'script': 'run_tests.sh', 'returncode': 0, 'passed': True, 'output': 'provisional green',
         'measured': rt.REPO_GATE_MEASURED_PASS, 'gate_coverage': scope})
     result = rt.run_tests(project_root=str(repo), out_dir=str(tmp_path / 'graph/test'),
@@ -204,3 +204,78 @@ def test_incomplete_first_attempt_artifact_blocks_both_entry_points(world, monke
     with pytest.raises(ValueError, match="first attempt"):
         rf.run_feedback(repo, out, scope, spec, {}, lambda _: pytest.fail("must not run"))
     assert path.read_bytes() == before and sorted(p.name for p in out.iterdir()) == [artifact]
+
+
+def test_feedback_carries_only_selected_budget_and_retains_actual_request(world, monkeypatch):
+    import io
+    from docker.godot import godot_harness as native
+
+    repo, base, head, spec, _, out = world
+    spec["scenarios"][0]["execution_budget"] = {"max_frames": 3000, "timeout_seconds": 180}
+    spec["scenarios"][3]["execution_budget"] = {"max_frames": 3000, "timeout_seconds": 600}
+    chosen, _ = pt.select_scenarios(spec, ["a", "b", "c"])
+    reply = raw(chosen)
+    sent = []
+
+    def urlopen(request, timeout):
+        payload = json.loads(request.data)
+        sent.append((payload, timeout))
+        plans, errors = native._authored_execution_plan(
+            payload["spec"], 180, payload.get("timeout", 120))
+        assert not errors, errors
+        assert plans == [(180, 180), (180, 120), (180, 120)]
+        return io.BytesIO(json.dumps(reply).encode())
+
+    monkeypatch.setattr(pt.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(pt, "read_spec", lambda _: (
+        spec, {"source": "playtest/", "errors": [], "notes": []}))
+    result = pt.godot_playtest(
+        project_root=str(repo), out_dir=str(out), purpose=rf.PURPOSE,
+        base_sha=base, sentinel_scenarios=["b"], mandatory_scenarios=["c"],
+        operation_id="feedback-owner")
+    assert result["selected_state"] == "selected_pass", result
+    assert not result["passed"] and not result["full_test_passed"]
+    payload, socket_timeout = sent[0]
+    retained = json.loads((out / "round_feedback_request.json").read_text())
+    assert payload["spec"] == chosen and payload["timeout"] == 180
+    assert retained == {k: v for k, v in payload.items() if k != "render_wait_timeout_sec"}
+    assert payload["operation_id"] == "feedback-owner" and payload["captures"] == 0
+    assert socket_timeout == 600
+    assert json.loads((out / "round_feedback_raw.json").read_text()) == reply
+    before = {p.name: p.read_bytes() for p in out.iterdir() if p.is_file()}
+    with pytest.raises(ValueError, match="first attempt"):
+        pt.godot_playtest(project_root=str(repo), out_dir=str(out), purpose=rf.PURPOSE)
+    assert before == {p.name: p.read_bytes() for p in out.iterdir() if p.is_file()}
+    assert len(sent) == 1
+
+
+def test_feedback_retained_request_respects_actual_shorter_transport(world, monkeypatch):
+    import io
+    from docker.godot import godot_harness as native
+
+    repo, base, head, spec, _, out = world
+    spec['scenarios'][0]['execution_budget'] = {'max_frames': 3000, 'timeout_seconds': 180}
+    sent = []
+
+    def urlopen(request, timeout):
+        payload = json.loads(request.data)
+        sent.append((payload, timeout))
+        _, errors = native._authored_execution_plan(payload['spec'], 180, payload['timeout'])
+        assert errors and any('<= caller timeout' in e for e in errors)
+        return io.BytesIO(json.dumps({'passed': False, 'spec_used': False,
+                                     'spec_errors': errors, 'summary': 'bounded caller refusal'}).encode())
+
+    monkeypatch.setattr(pt.urllib.request, 'urlopen', urlopen)
+    monkeypatch.setattr(pt, 'read_spec', lambda _: (
+        spec, {'source': 'playtest/', 'errors': [], 'notes': []}))
+    result = pt.godot_playtest(
+        project_root=str(repo), out_dir=str(out), purpose=rf.PURPOSE,
+        base_sha=base, sentinel_scenarios=['b'], mandatory_scenarios=['c'],
+        feedback_timeout=150, operation_id='short-feedback-owner')
+    assert result['selected_state'] == 'selected_fail'
+    assert not result['passed'] and not result['full_test_passed']
+    payload, socket_timeout = sent[0]
+    retained = json.loads((out / 'round_feedback_request.json').read_text())
+    assert payload['timeout'] == retained['timeout'] == socket_timeout == 150
+    assert payload['operation_id'] == 'short-feedback-owner'
+    assert len(sent) == 1 and (out / 'round_feedback_raw.json').is_file()

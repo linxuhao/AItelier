@@ -3736,7 +3736,9 @@ def _authored_execution_plan(spec, frames, timeout):
         raw_timeline = sc.get("timeline", [])
         timeline, bad = _normalize_timeline(raw_timeline if isinstance(raw_timeline, list) else [])
         errors += [where + ": " + e for e in bad]
-        ceiling, seconds = _MAX_SPEC_FRAMES, timeout
+        # Raising the request ceiling for one explicit scenario must not
+        # enlarge undeclared scenarios. A stricter caller still bounds them.
+        ceiling, seconds = _MAX_SPEC_FRAMES, min(timeout, 120)
         if "execution_budget" in sc:
             budget = sc["execution_budget"]
             if not isinstance(budget, dict) or set(budget) != {"max_frames", "timeout_seconds"}:

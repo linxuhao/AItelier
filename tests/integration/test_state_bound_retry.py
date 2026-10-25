@@ -55,11 +55,17 @@ def retained_task(live, pid):
 
 
 @pytest.mark.parametrize("reconciled", [False, True], ids=["stale-state", "terminal-state"])
+@pytest.mark.parametrize("stopped", [False, True], ids=["step-failed", "operator-stopped"])
 @pytest.mark.parametrize("entry", ["api", "db", "butler", "reactivate_run", "re_run", "resume_run", "pause_run"])
-def test_generic_recovery_refuses_before_any_durable_change(live, monkeypatch, reconciled, entry):
+def test_generic_recovery_refuses_before_any_durable_change(live, monkeypatch, reconciled, stopped, entry):
     attempt = start(live)
     rid, pid = attempt["run_id"], attempt["execution_project_id"]
-    live.sf.fail_run(rid, "retained first failure")
+    if stopped:
+        live.sf.fail_run(rid, "retained first failure")
+    else:
+        live.sf.advance_run(rid)
+        claimed = live.sf.claim_next_step(rid)
+        live.sf.fail_step(claimed.token, "retained first failure", retryable=False)
     assert live.sf.get_run(rid)["status"] == "failed"
     if reconciled:
         attempt = live.service.reconcile_attempt(attempt["attempt_id"])
@@ -224,7 +230,7 @@ def test_unbound_failed_checkpoint_rescue_still_continues_real_work(live, monkey
     name, pid = "ordinary_checkpoint_rescue", "ordinary-checkpoint-rescue"
     live.sf.register_graph(PipelineGraph(name=name, begin="plan", steps=[
         StepNode(id="plan", checkpoint=True, transitions=[Transition(to="work")]),
-        StepNode(id="work")]))
+        StepNode(id="work", max_retries=0)]))
     live.registry.register_one(live.sf, name, hint_overrides={"scheduler_owned": True, "repo_mode": "none"})
     launched = start_config_run(live.db, live.ws, name, pid)
     rid = launched["run_id"]
@@ -233,7 +239,15 @@ def test_unbound_failed_checkpoint_rescue_still_continues_real_work(live, monkey
     live.sf.confirm_step(claimed.token, StepResult(outputs={"plan": "retain this plan"}))
     live.sf.advance_run(rid)
     assert live.sf.get_run(rid)["status"] == "paused"
-    live.sf.fail_run(rid, "ordinary checkpoint failure")
+    checkpoint = live.sf.get_checkpoint(rid)
+    live.sf.approve_checkpoint(rid, expected_checkpoint=checkpoint["expected_checkpoint"],
+                               decision_id="ordinary-initial-plan")
+    live.sf.advance_run(rid)
+    claimed = live.sf.claim_next_step(rid)
+    assert claimed.step_id == "work"
+    live.sf.fail_step(claimed.token, "ordinary work exhausted", retryable=False)
+    assert live.sf.get_run(rid)["status"] == "failed"
+    assert live.sf.get_run(rid)["cancel_requested_at"] is None
     first_trace = live.sf.get_trace(rid)
     identity = rid if prefix == "/api/runs" else pid
     with client_for(live, monkeypatch) as client:
@@ -242,20 +256,6 @@ def test_unbound_failed_checkpoint_rescue_still_continues_real_work(live, monkey
     assert response.status_code == 200, response.text
     assert response.json()["status"] == "rescued"
     assert live.sf.get_run(rid)["status"] == "running"
-    live.sf.advance_run(rid)
-    claimed = live.sf.claim_next_step(rid)
-    # Official reactivate_run intentionally reopens the completed checkpoint
-    # when no failed step owns the retry. Execute it and review the new token.
-    assert claimed is not None and claimed.step_id == "plan"
-    live.sf.confirm_step(claimed.token, StepResult(outputs={"plan": "recovered plan"}))
-    live.sf.advance_run(rid)
-    checkpoint = live.sf.get_checkpoint(rid)
-    with client_for(live, monkeypatch) as client:
-        response = client.post(f"{prefix}/{identity}/checkpoint/approve", json={
-            "run_id": rid, "checkpoint": "plan",
-            "expected_checkpoint": checkpoint["expected_checkpoint"],
-            "decision_id": "review-recovered-ordinary-plan"})
-    assert response.status_code == 200, response.text
     live.sf.advance_run(rid)
     claimed = live.sf.claim_next_step(rid)
     assert claimed is not None and claimed.step_id == "work"

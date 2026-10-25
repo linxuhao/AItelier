@@ -82,6 +82,7 @@ PRIVATE_STATE_TABLES = frozenset({
     # Handoff packages (design §6.2): references into a driver's in-flight work
     # (report refs, private note addresses, next steps). Never public.
     "state_handoffs",
+    "state_context_run_protection_retirements",
 })
 
 PUBLIC_STATE_TABLES = frozenset({
@@ -241,6 +242,13 @@ _OPENED = "SELECT project_id FROM main.state_project_access WHERE visibility='pu
 # the unqualified name resolves to the copy and the database's own table is
 # never readable on that connection.
 PROJECTIONS = {
+    # Public references distinguish original and effective protection. The reason,
+    # request identity and foreign binding witness remain private audit fields.
+    "state_context_run_protection_retirements": (
+        "SELECT project_id,reference_id,original_payload_hash "
+        "FROM main.state_context_run_protection_retirements "
+        f"WHERE project_id IN ({_OPENED})",
+        frozenset({"project_id", "reference_id", "original_payload_hash"})),
     "state_project_access": (
         "SELECT project_id, visibility, NULL AS opened_by, NULL AS opened_at, "
         "NULL AS changed_by, NULL AS changed_at FROM main.state_project_access "

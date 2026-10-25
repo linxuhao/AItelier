@@ -202,6 +202,65 @@ class StatePortfolio:
             self.store._event(conn, project_id, node_key, "historical_reference_added", payload | {"reference_id": reference_id, "acceptance": False})
             return dict(conn.execute("SELECT * FROM state_history_links WHERE project_id=? AND reference_id=?", (project_id, reference_id)).fetchone())
 
+    def retire_context_run_protection(self, project_id, node_key, reference_id, run_id,
+                                      expected_revision, expected_payload_hash, request_key, reason):
+        """Admin-only append-only correction of a provably foreign contextual protection."""
+        from core.state_claims import ClaimError
+        if (getattr(self.service, "is_admin", False) is not True
+                or getattr(self.service, "project_read_trusted", False) is not True):
+            raise ClaimError("admin_required", "only an authenticated admin retires context run protection")
+        for value, name in ((project_id, "project_id"), (node_key, "node_key"),
+                            (reference_id, "reference_id"), (run_id, "run_id"),
+                            (request_key, "request_key")):
+            key(value, name)
+        integer(expected_revision, "expected_revision", 1)
+        if (not isinstance(expected_payload_hash, str) or len(expected_payload_hash) != 64
+                or any(c not in "0123456789abcdef" for c in expected_payload_hash)):
+            raise StateGraphError("expected_payload_hash must be an exact lowercase sha256")
+        reason = text(reason, "retirement reason", 4000)
+        request_hash = digest(dict(project_id=project_id, node_key=node_key, reference_id=reference_id,
+                                  run_id=run_id, expected_revision=expected_revision,
+                                  expected_payload_hash=expected_payload_hash, reason=reason, actor=self.actor))
+        with self.store.transaction(write=True) as conn:
+            prior = conn.execute("SELECT * FROM state_context_run_protection_retirements "
+                                 "WHERE project_id=? AND request_key=?", (project_id, request_key)).fetchone()
+            if prior:
+                if prior["request_hash"] != request_hash:
+                    raise StateConflict("retirement request key already records a different correction")
+                # A retry acknowledges the immutable earlier write, even after node revision changes.
+                return dict(prior) | {"effective_protection": 0}
+            node = self.store._node(conn, project_id, node_key)
+            if node["revision"] != expected_revision:
+                raise StateConflict("node revision changed")
+            reference = conn.execute("SELECT * FROM state_history_links WHERE project_id=? AND reference_id=?",
+                                     (project_id, reference_id)).fetchone()
+            if (not reference or reference["node_key"] != node_key or reference["ref"] != run_id
+                    or reference["kind"] != "run" or reference["protection"] != 1):
+                raise StateConflict("correction requires this node's exact protected run reference")
+            if reference["payload_hash"] != expected_payload_hash:
+                raise StateConflict("reference payload hash changed")
+            if conn.execute("SELECT 1 FROM state_context_run_protection_retirements "
+                            "WHERE project_id=? AND reference_id=?", (project_id, reference_id)).fetchone():
+                raise StateConflict("reference protection already retired by a different request")
+            # Only bind_run's persisted State execution identity proves ownership.
+            # History links, caller labels and legacy execution-project aliases cannot.
+            bindings = conn.execute("SELECT attempt_id,project_id,execution_project_id,workflow,execution_kind "
+                                    "FROM state_attempts WHERE run_id=?", (run_id,)).fetchall()
+            if (len(bindings) != 1 or bindings[0]["execution_kind"] != "skillflow"
+                    or not bindings[0]["execution_project_id"] or not bindings[0]["workflow"]
+                    or bindings[0]["project_id"] == project_id):
+                raise StateConflict("run lacks an unambiguous binding wholly to another State project")
+            binding = bindings[0]
+            values = (project_id, reference_id, node_key, expected_revision, expected_payload_hash,
+                      run_id, binding["project_id"], binding["attempt_id"], binding["execution_project_id"],
+                      request_key, request_hash, self.actor, reason, now())
+            conn.execute("INSERT INTO state_context_run_protection_retirements VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                         values)
+            result = dict(conn.execute("SELECT * FROM state_context_run_protection_retirements "
+                                      "WHERE project_id=? AND reference_id=?", (project_id, reference_id)).fetchone())
+            self.store._event(conn, project_id, node_key, "context_run_protection_retired", result)
+            return result | {"effective_protection": 0}
+
     def references(self, project_id, node_key=None, after="", limit=100):
         integer(limit, "limit", 1, 200)
         if after:
@@ -214,6 +273,17 @@ class StatePortfolio:
                 where += " AND node_key=?"
                 params.append(node_key)
             rows = [dict(r) for r in conn.execute(f"SELECT * FROM state_history_links WHERE {where} ORDER BY reference_id LIMIT ?", (*params, limit + 1))]
+            for row in rows[:limit]:
+                retired = conn.execute("SELECT reference_id FROM state_context_run_protection_retirements "
+                                       "WHERE project_id=? AND reference_id=? AND original_payload_hash=?",
+                                       (project_id, row["reference_id"], row["payload_hash"])).fetchone()
+                row["effective_protection"] = int(bool(row["protection"]) and not retired)
+                row["protection_retired"] = bool(retired)
+                if getattr(self.service, "project_read_trusted", False) is True:
+                    audit = conn.execute("SELECT * FROM state_context_run_protection_retirements "
+                                         "WHERE project_id=? AND reference_id=?",
+                                         (project_id, row["reference_id"])).fetchone()
+                    row["protection_retirement"] = dict(audit) if audit else None
             return {"references": rows[:limit], "next_after": rows[limit - 1]["reference_id"] if len(rows) > limit else None}
 
     def projects(self, repo_path=None, after="", limit=100):

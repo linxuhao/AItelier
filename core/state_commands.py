@@ -798,6 +798,16 @@ class HistoricalReference(Node):
     protect: bool = False
 
 
+class RetireContextRunProtection(Node):
+    reference_id: str
+    run_id: str
+    expected_revision: int = Field(ge=1, description="Current node contract revision, not hold revision.")
+    expected_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    request_key: str = Field(min_length=1, max_length=128)
+    reason: str = Field(min_length=1, max_length=4000, description=(
+        "Admin correction of a known cross-project contextual protection; never releases HOLD."))
+
+
 class RefreshProject(Project):
     after: int = 0
     limit: int = 20
@@ -988,6 +998,7 @@ WRITE_REQUESTS = {
     "verify_node": Verify, "import_tasks": ImportTasks,
     "bind_source": BindSource, "set_dispatch": DispatchPolicy, "set_node_hold": NodeHold,
     "add_reference": HistoricalReference, "refresh_project": RefreshProject,
+    "retire_context_run_protection": RetireContextRunProtection,
     "start_external_attempt": StartExternalAttempt, "report_external_attempt": ExternalObservation,
     "write_driver_note_entry": WriteDriverNoteEntry,
     "supersede_driver_note_entry": SupersedeDriverNoteEntry,
@@ -1142,6 +1153,7 @@ def _handlers(service) -> dict:
         "run_owners": service.portfolio.run_owners, "attempt_detail": service.portfolio.attempt_detail,
         "bind_source": service.bind_source, "set_dispatch": service.portfolio.set_dispatch,
         "set_node_hold": service.set_node_hold, "add_reference": service.add_reference,
+        "retire_context_run_protection": service.retire_context_run_protection,
         "refresh_project": service.refresh_project,
         "start_external_attempt": service.start_external_attempt, "report_external_attempt": service.report_external_attempt,
         "write_driver_note_entry": service.driver_notes.write_entry,

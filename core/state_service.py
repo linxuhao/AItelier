@@ -1517,14 +1517,14 @@ class StateService:
     def set_node_hold(self, project_id, node_key, held, expected_revision, reason, override_reason=None):
         from core.state_enforcement import hold_release_check, override_reason_text
         override_reason = override_reason_text(override_reason)
+        from core.state_metadata import effective_run_references
         if held is False:
             # Protected references may be legacy runs, never reparented attempts.
             with self.store.transaction() as conn:
-                refs = [r[0] for r in conn.execute("SELECT ref FROM state_history_links WHERE project_id=? "
-                        "AND node_key=? AND kind='run' AND protection=1", (project_id, node_key))]
+                refs = effective_run_references(conn, project_id, node_key)
             if refs:
                 self._components()
-                for rid in refs:
+                for _, _, rid in refs:
                     row = self.sf.get_run(rid)
                     if not row or row.get("id") != rid or row.get("status") not in {"completed", "failed"}:
                         raise StateConflict("protected external run is active or unknown; retain its hold")
@@ -1535,6 +1535,8 @@ class StateService:
         with self.store.transaction(write=True) as conn:
             override = None
             if held is False:
+                if effective_run_references(conn, project_id, node_key) != refs:
+                    raise StateConflict("protected references changed; reload before releasing the hold")
                 override = hold_release_check(conn, project_id, node_key, self.actor, self.driver_id,
                                               self.is_admin, override_reason)
             result = self.portfolio._hold(conn, project_id, node_key, held, expected_revision, reason)
@@ -1551,6 +1553,12 @@ class StateService:
                     body=f"Reason: {reason}. override_reason: {override['override_reason']}",
                     refs={"node_key": node_key})
         return result
+
+    def retire_context_run_protection(self, project_id, node_key, reference_id, run_id,
+                                      expected_revision, expected_payload_hash, request_key, reason):
+        return self.portfolio.retire_context_run_protection(
+            project_id, node_key, reference_id, run_id, expected_revision,
+            expected_payload_hash, request_key, reason)
 
     def add_reference(self, project_id, node_key, reference_id, kind, ref, label, provenance_actor,
                       artifact_ref=None, report_sha256=None, protect=False):

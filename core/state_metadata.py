@@ -45,11 +45,41 @@ CREATE TABLE IF NOT EXISTS state_history_links (
     FOREIGN KEY(project_id,node_key) REFERENCES state_nodes(project_id,node_key)
 );
 CREATE INDEX IF NOT EXISTS state_history_by_run ON state_history_links(kind,ref);
+-- A correction changes only scheduling protection, never the original history.
+CREATE TABLE IF NOT EXISTS state_context_run_protection_retirements (
+    project_id TEXT NOT NULL, reference_id TEXT NOT NULL, node_key TEXT NOT NULL,
+    node_revision INTEGER NOT NULL, original_payload_hash TEXT NOT NULL,
+    run_id TEXT NOT NULL, foreign_project_id TEXT NOT NULL,
+    foreign_attempt_id TEXT NOT NULL, foreign_execution_project_id TEXT NOT NULL,
+    request_key TEXT NOT NULL, request_hash TEXT NOT NULL,
+    actor TEXT NOT NULL, reason TEXT NOT NULL, created_at TEXT NOT NULL,
+    PRIMARY KEY(project_id,reference_id), UNIQUE(project_id,request_key),
+    CHECK(project_id != foreign_project_id),
+    FOREIGN KEY(project_id,reference_id) REFERENCES state_history_links(project_id,reference_id),
+    FOREIGN KEY(project_id,node_key) REFERENCES state_nodes(project_id,node_key)
+);
+CREATE TRIGGER IF NOT EXISTS state_context_protection_no_update
+BEFORE UPDATE ON state_context_run_protection_retirements
+BEGIN SELECT RAISE(ABORT,'context protection retirements are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS state_context_protection_no_delete
+BEFORE DELETE ON state_context_run_protection_retirements
+BEGIN SELECT RAISE(ABORT,'context protection retirements are append-only'); END;
 CREATE TRIGGER IF NOT EXISTS state_history_no_update BEFORE UPDATE ON state_history_links
 BEGIN SELECT RAISE(ABORT,'historical references are append-only'); END;
 CREATE TRIGGER IF NOT EXISTS state_history_no_delete BEFORE DELETE ON state_history_links
 BEGIN SELECT RAISE(ABORT,'historical references are append-only'); END;
 """
+
+
+def effective_run_references(conn, project_id, node_key):
+    """Exact remaining scheduling protections, excluding only their typed correction."""
+    return [tuple(row) for row in conn.execute(
+        "SELECT h.reference_id,h.payload_hash,h.ref FROM state_history_links h "
+        "WHERE h.project_id=? AND h.node_key=? AND h.kind='run' AND h.protection=1 "
+        "AND NOT EXISTS(SELECT 1 FROM state_context_run_protection_retirements r "
+        "WHERE r.project_id=h.project_id AND r.reference_id=h.reference_id "
+        "AND r.original_payload_hash=h.payload_hash) ORDER BY h.reference_id",
+        (project_id, node_key))]
 
 
 def project_policy(conn, project_id):

@@ -23,6 +23,7 @@ It ALWAYS succeeds as a step:
 import base64
 import hashlib
 import json
+import math
 import os
 import struct
 import urllib.error
@@ -190,8 +191,9 @@ def read_spec(repo: Path) -> tuple[dict | None, dict]:
     selection. The sidecar preflights the complete authored spec before any
     import/probe: omission retains the 3000-frame ceiling; an explicit finite
     ceiling must cover the last event plus 30 and the shared frame floor.
-    Scenario timeout cannot exceed the caller timeout (default 120); this
-    reader never widens it or converts fixed-FPS game time into walltime.
+    Scenario timeout cannot exceed the caller timeout. The request boundary
+    carries valid authored wall budgets; this reader never converts frames
+    into walltime or changes the authored contract.
     Unknown/invalid budgets are refusals, not a smaller runnable scenario.
     Optional scenario input_observation declarations also survive split loading
     and selection unchanged. The sidecar validates their exact node/property
@@ -434,6 +436,38 @@ def _render_owner_refusal(exc: BaseException) -> dict | None:
     return None
 
 
+def authored_caller_timeout(spec, ceiling: int | float) -> int | float:
+    """Carry bounded wall budgets; leave every invalid declaration for native refusal.
+
+    Match the native representation limit, then bound the carried ceiling by
+    the actual transport caller's existing wall budget. Never estimate from frames.
+    The sidecar remains authoritative for the complete spec and frame coverage.
+    """
+    timeout = 120
+    scenarios = spec.get("scenarios") if isinstance(spec, dict) else None
+    if not isinstance(scenarios, list):
+        return min(timeout, ceiling)
+    poll_limit = (1 << 31) - 1
+    for scenario in scenarios:
+        budget = scenario.get("execution_budget") if isinstance(scenario, dict) else None
+        if not isinstance(budget, dict) or set(budget) != {"max_frames", "timeout_seconds"}:
+            continue
+        frames, seconds = budget["max_frames"], budget["timeout_seconds"]
+        if (not isinstance(frames, int) or isinstance(frames, bool)
+                or not 0 < frames <= (1 << 53) - 1
+                or isinstance(seconds, bool) or not isinstance(seconds, (int, float))):
+            continue
+        try:
+            value = float(seconds)
+            valid = (math.isfinite(value) and 0 < value <= poll_limit / 1000
+                     and math.ceil(value * 1000) <= poll_limit)
+        except (OverflowError, ValueError):
+            valid = False
+        if valid:
+            timeout = max(timeout, seconds)
+    return min(timeout, ceiling)
+
+
 def post_playtest(payload: dict, timeout: int = 3600) -> dict:
     """POST one /playtest request to the sidecar and return its report.
 
@@ -451,8 +485,8 @@ def post_playtest(payload: dict, timeout: int = 3600) -> dict:
     the number alone only moves the cliff; a deadline of ours must never read
     as a verdict of the game's.
 
-    3600s, not 1200. Per-scenario work is capped sidecar-side (120s each), so
-    this bounds the SUITE, and at ~31s/scenario measured it fits ~115 scenarios.
+    3600s, not 1200: this bounds the SUITE independently of the per-scenario
+    caller ceiling carried in the payload. Undeclared scenarios retain 120s.
     jinyong-spine, 2026-08-23 (24 scripts/11 scenarios -> 55/20): the builder
     log shows the exception on wfile.write(body) while sending the 200 — the run
     had FINISHED and the answer had nowhere to go. That is the shape this now
@@ -469,6 +503,7 @@ def post_playtest(payload: dict, timeout: int = 3600) -> dict:
     has timeout - w seconds left.
     """
     payload = dict(payload)
+    payload.setdefault("timeout", authored_caller_timeout(payload.get("spec"), timeout))
     payload.setdefault("render_wait_timeout_sec", round(timeout * RENDER_QUEUE_SHARE, 3))
     body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
@@ -488,8 +523,8 @@ def post_playtest(payload: dict, timeout: int = 3600) -> dict:
                         f"our deadline expiring, not the game failing, and NOT a "
                         f"pass: nothing in this build was verified. Either the "
                         f"suite outgrew the budget (raise it) or a scenario "
-                        f"hangs (the sidecar caps each one at 120s, so a whole "
-                        f"suite over the wall means the count grew).")}
+                        f"hangs (per-scenario deadlines are separate from "
+                        f"this suite deadline).")}
         if ("ui_text_snapshot" in payload and isinstance(e, urllib.error.HTTPError)
                 and e.code in (400, 413, 422)):
             try:
@@ -594,9 +629,11 @@ def godot_playtest(*, project_root: str = "", out_dir: str = "",
             path = target / "playtest_report.json"
             path.write_text(json.dumps(report, indent=2), encoding="utf-8")
             return {"written": str(path), **report}
+        feedback_timeout = int(kwargs.get("feedback_timeout", 600))
         return run_feedback(repo, target, scope, spec, _owner_identity(
             repo, project_id=project_id, run_id=run_id, step_id=step_id, operation_id=operation_id),
-            lambda payload: post_playtest(payload, timeout=int(kwargs.get("feedback_timeout", 600))))
+            lambda payload: post_playtest(payload, timeout=feedback_timeout),
+            caller_timeout=feedback_timeout)
     report = {"passed": True, "frames": 0, "errors": [], "state": {},
               "behavior": None, "spec_used": False, "summary": ""}
     info: dict = {"source": "", "errors": [], "notes": []}

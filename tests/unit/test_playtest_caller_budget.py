@@ -191,19 +191,33 @@ def test_carry_cannot_bypass_native_frame_or_timeline_admission(tmp_path, bridge
     assert not bridge["effects"] and not bridge["probes"]
 
 
-@pytest.mark.parametrize("seconds,valid", [
-    (180, True), (native._MAX_POLL_MILLISECONDS / 1000, True),
-    (math.nextafter(native._MAX_POLL_MILLISECONDS / 1000, math.inf), False),
+@pytest.mark.parametrize("seconds,valid,admitted", [
+    (180, True, True), (3600, True, True), (3601, True, False),
+    (native._MAX_POLL_MILLISECONDS / 1000, True, False),
+    (math.nextafter(native._MAX_POLL_MILLISECONDS / 1000, math.inf), False, False),
 ])
-def test_carried_ceiling_matches_exact_native_limit(tmp_path, bridge, seconds, valid):
+def test_carried_ceiling_respects_native_and_actual_transport_limits(
+        tmp_path, bridge, seconds, valid, admitted):
     authored = contract()
     authored["scenarios"] = authored["scenarios"][:1]
     authored["scenarios"][0]["execution_budget"]["timeout_seconds"] = seconds
     repo = project(tmp_path, authored)
     result = pt.godot_playtest(project_root=str(repo), out_dir=str(tmp_path / "out"))
     assert native._valid_process_timeout(seconds) is valid
-    assert result["passed"] is valid, bridge["reports"]
-    assert bridge["requests"][0][0].get("timeout", 120) == (seconds if valid else 120)
+    assert result["passed"] is admitted, bridge["reports"]
+    assert bridge["requests"][0][0].get("timeout", 120) == (min(seconds, 3600) if valid else 120)
+    if not admitted:
+        assert bridge["reports"][0]["spec_errors"]
+        assert not bridge["effects"] and not bridge["probes"]
+
+
+def test_actual_shorter_transport_refuses_an_otherwise_valid_scenario(tmp_path, bridge):
+    repo = project(tmp_path, None)
+    report = pt.post_playtest({"project_dir": str(repo), "spec": contract()}, timeout=150)
+    assert not report["passed"] and report["spec_errors"]
+    assert bridge["requests"][0][0]["timeout"] == 150
+    assert bridge["requests"][0][1] == 150
+    assert not bridge["effects"] and not bridge["probes"]
 
 
 def test_explicit_request_cap_is_not_overridden(tmp_path, bridge):

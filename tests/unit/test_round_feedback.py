@@ -247,3 +247,35 @@ def test_feedback_carries_only_selected_budget_and_retains_actual_request(world,
         pt.godot_playtest(project_root=str(repo), out_dir=str(out), purpose=rf.PURPOSE)
     assert before == {p.name: p.read_bytes() for p in out.iterdir() if p.is_file()}
     assert len(sent) == 1
+
+
+def test_feedback_retained_request_respects_actual_shorter_transport(world, monkeypatch):
+    import io
+    from docker.godot import godot_harness as native
+
+    repo, base, head, spec, _, out = world
+    spec['scenarios'][0]['execution_budget'] = {'max_frames': 3000, 'timeout_seconds': 180}
+    sent = []
+
+    def urlopen(request, timeout):
+        payload = json.loads(request.data)
+        sent.append((payload, timeout))
+        _, errors = native._authored_execution_plan(payload['spec'], 180, payload['timeout'])
+        assert errors and any('<= caller timeout' in e for e in errors)
+        return io.BytesIO(json.dumps({'passed': False, 'spec_used': False,
+                                     'spec_errors': errors, 'summary': 'bounded caller refusal'}).encode())
+
+    monkeypatch.setattr(pt.urllib.request, 'urlopen', urlopen)
+    monkeypatch.setattr(pt, 'read_spec', lambda _: (
+        spec, {'source': 'playtest/', 'errors': [], 'notes': []}))
+    result = pt.godot_playtest(
+        project_root=str(repo), out_dir=str(out), purpose=rf.PURPOSE,
+        base_sha=base, sentinel_scenarios=['b'], mandatory_scenarios=['c'],
+        feedback_timeout=150, operation_id='short-feedback-owner')
+    assert result['selected_state'] == 'selected_fail'
+    assert not result['passed'] and not result['full_test_passed']
+    payload, socket_timeout = sent[0]
+    retained = json.loads((out / 'round_feedback_request.json').read_text())
+    assert payload['timeout'] == retained['timeout'] == socket_timeout == 150
+    assert payload['operation_id'] == 'short-feedback-owner'
+    assert len(sent) == 1 and (out / 'round_feedback_raw.json').is_file()

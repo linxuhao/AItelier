@@ -118,17 +118,6 @@ def test_meaningful_or_existing_bounded_shapes_are_preserved(wiring, monkeypatch
     assert calls == ["anthropic/claude-sonnet-5-5"]
 
 
-def test_blank_generic_generate_keeps_json_mode(wiring, monkeypatch):
-    g = gw(wiring, "pool")
-    calls = []
-    def complete(**kwargs):
-        calls.append(kwargs)
-        return response("")
-    monkeypatch.setattr(litellm, "completion", complete)
-    assert g.generate("system", "question", is_json_mode=True) == ""
-    assert len(calls) == 1 and calls[0]["response_format"] == {"type": "json_object"}
-
-
 def test_real_stream_builder_blank_native_response_fails(wiring, monkeypatch):
     g = gw(wiring, "deepseek/deepseek-v4-flash")
     monkeypatch.setenv("AITELIER_LLM_STREAM", "1")

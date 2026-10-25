@@ -601,13 +601,35 @@ def test_a_relative_pass_with_no_baseline_holds_instead_of_releasing(tmp_path):
         "5_compile", {"release_evidence": "unresolved"}, {}) == "5_release_wait"
 
 
-def test_run_tests_never_emits_a_relative_pass_it_did_not_measure(tmp_path):
+def test_run_tests_never_emits_a_relative_pass_it_did_not_measure(tmp_path, monkeypatch):
     """End to end through the tool, not just `_apply_baseline`.
 
     A repo with no Python sources and no state_dir: pytest collects nothing,
     the gate is red for another reason, and `failures[]` is empty — the exact
     shape that used to come out `passed_relative: true`.
     """
+    # Supply only the owned executor transport: real entry/pytest still run
+    # inside this disposable CPU capsule, with no nested Docker or host grant.
+    from core import repository_executor, repository_executor_entry
+    import subprocess
+    observed = []
+
+    def capsule_entry(root, args, timeout, **kwargs):
+        payload = {"repo": str(root), "args": args, "timeout": timeout,
+                   **{k: kwargs[k] for k in ("pytest_timeout", "import_module",
+                                            "report_dir", "relay_socket") if k in kwargs}}
+        actual = repository_executor_entry.run(payload)
+        observed.append(actual)
+        assert not actual.get("unavailable") and not actual.get("timed_out")
+        result = subprocess.CompletedProcess(args, actual["returncode"],
+                                             actual["stdout"], actual["stderr"])
+        result.import_error = actual.get("import_error", "")
+        result.storage = actual.get("storage")
+        result.execution_identity = actual.get("execution_identity")
+        result.git = None
+        return result
+
+    monkeypatch.setattr(repository_executor, "execute", capsule_entry)
     repo = tmp_path / "repo"
     (repo / "pkg").mkdir(parents=True)
     (repo / "pkg" / "m.py").write_text("x = 1\n")     # python, but no tests
@@ -615,6 +637,9 @@ def test_run_tests_never_emits_a_relative_pass_it_did_not_measure(tmp_path):
     result = tests_impl.run_tests(project_root=str(repo), out_dir=str(out),
                                   repo_gate=False, state_dir="")
     report = json.loads((out / "test_report.json").read_text())
+    assert observed and observed[0]["returncode"] == 5
+    assert report["no_tests_collected"] is True
+    assert not report.get("infrastructure_unavailable")
     assert report["passed"] is False and report["failures"]
     assert report["baseline_state"] == "unavailable"
     assert result["passed_relative"] is False

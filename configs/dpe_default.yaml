@@ -909,12 +909,12 @@ steps:
     # ~12-minute Godot gate twice per goal-loop iteration. Everywhere the
     # engine gate is NOT in the graph (coding_impl), the default true
     # stands — see aitelier/tools/run_tests/impl.py:_run_repo_gate.
-    # Claim timeout: must exceed run_tests' worst case (venv + pip + project
-    # deps + the 180s pytest wall ≈ 900s) so a slow-but-alive run isn't
-    # reclaimed mid-flight by a concurrent driver — only a dead claim recovers.
-    timeout_seconds: 1200
+    # Full-suite pytest has its own 3600s wall. Keep the claim declaration
+    # above it to leave room for transport, other checks and report publication.
+    timeout_seconds: 4200
     tool_params:
       out_dir: "$STEP_DIR"
+      pytest_wall_seconds: 3600
       repo_gate: false
       evidence_cycle_start: true
     transitions:

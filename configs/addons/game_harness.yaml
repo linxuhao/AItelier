@@ -477,9 +477,11 @@ overlay:
         # Without it run_tests is handed none, no baseline is ever taken, and every
         # pre-existing red in the repo is reported as this round's — see configs/coding_impl.yaml.
         capability: "stateful"
-        timeout_seconds: 1200
+        # The post-design suite needs the same finite wall as 5_test.
+        timeout_seconds: 4200
         tool_params:
           out_dir: "$STEP_DIR"
+          pytest_wall_seconds: 3600
           # game_harness owns the one full compile/play-test gate. This final
           # unit pass checks the design writer's tree without invoking the
           # repo's run_tests.sh and paying the same engine gate a second time.

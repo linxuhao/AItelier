@@ -3650,7 +3650,8 @@ class PipelineEngine:
 
     def _run_tool_step(self, task_id: int, step_id: str, workspace: Any,
                        project_id: str, subtask_id: str | None = None,
-                       agent_config_name: str = "") -> bool:
+                       agent_config_name: str = "", *,
+                       require_explicit_completion: bool = False) -> bool:
         """Full multi-turn tool loop with read_file/list_tree/write.
         Red review is handled by skillflow-level _review steps."""
         agent = self.factory.get_agent(agent_config_name)
@@ -3750,6 +3751,16 @@ class PipelineEngine:
                     tool_schemas=self._tool_schemas,
                     user_lang=self._user_lang,
                 )
+                if require_explicit_completion:
+                    prompt += (
+                        "\n\n[Source completion — JSON fallback]\n"
+                        "A successful write is progress, not completion. Continue the "
+                        "approved plan from the retained tool results; do not replay "
+                        "successful writes. When all required work is complete, include "
+                        "{\"tool\": \"finish_step\", \"params\": "
+                        "{\"summary\": \"...\"}} in actions (it may share the final "
+                        "write turn). Without finish_step or end_step, this step "
+                        "remains incomplete at its existing turn limit.")
                 if cached_exploration and tool_turn == 0:
                     # Deduplicate: same tool call+result can appear multiple times
                     seen = set()
@@ -3891,6 +3902,9 @@ class PipelineEngine:
                         "preview": f"{len(unclaimed)} action(s) named an unavailable tool"})
                     continue
 
+                finishing = any(a.get("tool") in ("finish_step", "end_step")
+                                for a in _control_calls)
+
                 # Handle message actions — emit to user, count toward budget
                 if message_calls:
                     for action in message_calls:
@@ -3904,7 +3918,8 @@ class PipelineEngine:
                                 "preview": content[:200]
                             })
                     # Message-only turn: no tool or write calls — continue exploring
-                    if not tool_calls and not write_calls:
+                    if (not tool_calls and not write_calls
+                            and not (require_explicit_completion and finishing)):
                         self._emit("exploration", {"turn": tool_turn + 1,
                                                     "preview": f"Agent sent message, turn {tool_turn + 1}"})
                         continue
@@ -3923,6 +3938,7 @@ class PipelineEngine:
                         # A granted tool that CHANGED something counts as output
                         # even though it left no file in staging (repo_remove_file, a
                         # durable state write). See _effect_name.
+                        eff = ""
                         wf = self._written_name(result)
                         if wf:
                             written_files.append(wf)
@@ -3930,6 +3946,8 @@ class PipelineEngine:
                             eff = self._effect_name(result)
                             if eff:
                                 effects.append(eff)
+                        if require_explicit_completion and (wf or eff):
+                            self._json_source_effects = True
                     tool_results.extend(turn_results)
                     self._emit("tool_calls", {"count": len(tool_calls), "tools": [a.get("tool") for a in tool_calls],
                                               "preview": f"Executed {len(tool_calls)} tool call(s)"})
@@ -3940,11 +3958,18 @@ class PipelineEngine:
                     for action in write_calls:
                         self._scope_position = self._json_action_position(actions, action)
                         result = self._exec_tool(action)
+                        if require_explicit_completion:
+                            tool_results.append(
+                                f"Tool: {action['tool']}("
+                                + json.dumps(action.get("params", {}), ensure_ascii=False)
+                                + ")\nResult: " + json.dumps(result, ensure_ascii=False))
                         names = self._written_names(result)
                         written_files.extend(names)
                         effect = self._effect_name(result)
                         if effect:
                             effects.append(effect)
+                        if require_explicit_completion and (names or effect):
+                            self._json_source_effects = True
                         targets = write_keys(action)
                         receipts = set(names)
                         for field in ("deleted", "removed"):
@@ -4001,10 +4026,10 @@ class PipelineEngine:
                             "error": feedback,
                             "preview": f"{len(pending_write_failures)} write target(s) unresolved"})
                         continue
-                    if scope_refused and not landed_this_turn:
-                        # Nothing in this response landed: hand the exact refusal
-                        # to the next request instead of completing with no output.
-                        # Earlier authorized files stay retained.
+                    if scope_refused and (require_explicit_completion or not landed_this_turn):
+                        # Present the refusal before accepting completion. In
+                        # explicit source fallback, even a mixed successful/refused
+                        # write batch needs a further response. Retain landed files.
                         self._feedback_exploratory = False
                         feedback = "\n".join(scope_refused)
                         self._emit("write_failed", {
@@ -4013,10 +4038,28 @@ class PipelineEngine:
                         continue
                     self._emit("files_written", {"files": written_files,
                                                  "preview": f"Written {len(written_files)} file(s)"})
-                    break
+                    if not require_explicit_completion:
+                        break
 
-                finishing = any(a.get("tool") in ("finish_step", "end_step")
-                                for a in _control_calls)
+                if require_explicit_completion:
+                    if finishing and pending_write_failure:
+                        raise MaxRetriesExceeded(
+                            f"Task {task_id} Step {step_id}: {pending_write_failure}")
+                    if finishing:
+                        self._trace("step", "json_source_completion", {
+                            "step_id": step_id, "attempt": attempt,
+                            "turn": tool_turn + 1, "explicit_finish": True,
+                            "written_files": sorted(set(written_files)),
+                            "effects": effects,
+                        })
+                        break
+                    self._feedback_exploratory = False
+                    feedback = (
+                        "Continue the approved plan from the retained results. "
+                        "Successful writes remain applied; do not replay them. "
+                        "Call finish_step or end_step only when all work is complete.")
+                    continue
+
                 if finishing and pending_write_failure:
                     raise MaxRetriesExceeded(
                         f"Task {task_id} Step {step_id}: {pending_write_failure}")
@@ -4054,6 +4097,19 @@ class PipelineEngine:
                 self._emit("exploration", {"turn": tool_turn + 1, "preview": f"Exploration turn {tool_turn + 1}, continuing..."})
             else:
                 self._emit("tool_turns_exceeded", {"max_turns": max_turns, "preview": "Max tool turns exceeded"})
+                if require_explicit_completion:
+                    self._trace("step", "json_source_incomplete", {
+                        "step_id": step_id, "attempt": attempt,
+                        "turns": max_turns, "max_turns": max_turns,
+                        "written_files": sorted(set(written_files)), "effects": effects,
+                        "pending_write_failure": pending_write_failure,
+                        "feedback": feedback, "budget_exhausted": "turn",
+                    })
+                    raise MaxRetriesExceeded(
+                        f"Task {task_id} Step {step_id}: JSON source fallback exhausted "
+                        f"{max_turns} turns without finish_step or end_step; "
+                        "incomplete changes and trace retained; no delivery or replay. "
+                        + pending_write_failure)
                 if pending_write_failure:
                     # Do not restart the attempt and replay earlier media calls
                     # when the remaining delivery writes never succeeded.
@@ -6006,6 +6062,11 @@ class PipelineEngine:
         self._json_relay_acknowledged = not bool(self._json_relay_progress)
         self._install_relay_acknowledgement(self._json_relay_progress)
 
+        # A protocol fallback must retain the source step's explicit completion
+        # boundary. Pure JSON roles and artifact/fixed-slot writers keep their
+        # existing single-response delivery contract.
+        json_source_fallback = False
+        self._json_source_effects = False
         # Prefer native tool calling if agent config enables it
         if self.factory.is_native(agent_config_name):
             self._native_side_effects_committed = False
@@ -6042,6 +6103,7 @@ class PipelineEngine:
                 if not self.factory.get_fallback_to_json(agent_config_name):
                     raise
                 # Fall through to JSON mode dispatch below
+                json_source_fallback = output_target == "code" and not output_fixed
                 self._emit("native_fallback", {
                     "step_id": step_id,
                     "preview": f"Native failed ({type(e).__name__}), falling back to JSON mode",
@@ -6076,9 +6138,21 @@ class PipelineEngine:
                                           project_id, subtask_id,
                                           agent_config_name)
         else:
-            return self._run_tool_step(task_id, step_id, workspace,
-                                       project_id, subtask_id,
-                                       agent_config_name)
+            try:
+                return self._run_tool_step(task_id, step_id, workspace,
+                                           project_id, subtask_id,
+                                           agent_config_name,
+                                           require_explicit_completion=json_source_fallback)
+            except Exception as error:
+                if (json_source_fallback and self._json_source_effects
+                        and not isinstance(error, MaxRetriesExceeded)):
+                    self._record_generation_error(
+                        error, "json_source_error", mode="json", step_id=step_id)
+                    raise MaxRetriesExceeded(
+                        f"Step {step_id}: JSON source fallback stopped after retained "
+                        f"changes ({type(error).__name__}: {error}); "
+                        "no delivery or replay.") from error
+                raise
 
     # ── Manifest helpers ──────────────────────────────────────────────
 

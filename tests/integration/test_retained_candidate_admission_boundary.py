@@ -86,6 +86,28 @@ def test_git_and_repository_lock_do_not_hold_state_writer(tmp_path, monkeypatch)
     assert seen == []
 
 
+def test_bare_receiver_keeps_closed_callback_boundary_and_exact_bytes(tmp_path, monkeypatch):
+    monkeypatch.setenv("AITELIER_HOME", str(tmp_path / "home"))
+    service, source, producer, db, prior, commit, tree, payload, bundle = fixture(tmp_path / "owned")
+    prune_producer(source, producer, commit)
+    receiver = tmp_path / "receiver.git"
+    git(tmp_path, "clone", "--bare", "--no-hardlinks", str(source), str(receiver))
+    marker = tmp_path / "bare-marker"
+    hooks = tmp_path / "bare-hooks"
+    hooks.mkdir()
+    hook = hooks / "reference-transaction"
+    hook.write_text("#!/bin/sh\nprintf '%s\\n' callback >> '" + str(marker) + "'\n")
+    hook.chmod(0o700)
+    git(receiver, "config", "core.hooksPath", str(hooks))
+    git(receiver, "update-ref", "refs/owned/control", "HEAD")
+    assert marker.read_text()
+    marker.unlink()
+    artifact = state_git_artifacts.materialize_candidate(service.store, commit, str(receiver))
+    assert artifact["tree_sha"] == tree
+    assert subprocess.check_output(["git", "-C", str(receiver), "show", commit + ":value"]) == payload
+    assert not marker.exists()
+
+
 def test_destination_url_rewrite_refuses_before_transport_or_new_owner(tmp_path, monkeypatch):
     monkeypatch.setenv("AITELIER_HOME", str(tmp_path / "home"))
     service, source, producer, db, prior, commit, tree, payload, bundle = fixture(tmp_path / "owned")

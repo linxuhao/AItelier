@@ -347,8 +347,17 @@ def discover(path) -> Repo:
 
 
 def common_identity(path) -> tuple[str, int, int]:
-    """Validated identity of the shared Git directory: real path plus inode."""
-    common = discover(path).common_dir
+    """Validated shared Git directory identity, including bare bundle receivers."""
+    p = Path(path)
+    if not p.is_dir():
+        raise RuntimeError(f"{p} is not a directory")
+    # Locking object/ref operations needs no working tree. discover() remains
+    # strict for its working-file callers; --show-toplevel would reject a bare repo.
+    res = run(p, "rev-parse", "--path-format=absolute", "--absolute-git-dir", "--git-common-dir")
+    lines = res.stdout.splitlines() if res.returncode == 0 else []
+    if len(lines) != 2 or not all(lines):
+        raise RuntimeError("Not a git repository")
+    common = Path(os.path.realpath(lines[1]))
     st = os.stat(common)
     if not stat.S_ISDIR(st.st_mode):
         raise RuntimeError(f"Git common directory {common} is not a directory")

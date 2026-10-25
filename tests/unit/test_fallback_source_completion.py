@@ -26,9 +26,7 @@ from core.db_manager import DBManager
 from core.workspace_manager import WorkspaceManager
 
 
-ENTITLEMENT = (
-    'Your account (owned-fixture) does not have a valid CodingPlan subscription, '
-    'or your subscription has expired.')
+UNSUPPORTED_NATIVE = 'This endpoint does not support tools in native requests.'
 
 
 def action(name, **params):
@@ -81,7 +79,7 @@ class ScriptedGateway:
             # Exercise the actual three-error native loop and subsequent host
             # dispatch, rather than replacing _run_native_step with a stub.
             raise litellm.BadRequestError(
-                message=ENTITLEMENT, model='ark/glm-5.3-flash', llm_provider='openai')
+                message=UNSUPPORTED_NATIVE, model='ark/glm-5.3-flash', llm_provider='openai')
         reply = next(self.native_replies)
         if isinstance(reply, BaseException):
             raise reply
@@ -222,7 +220,7 @@ def test_fallback_two_writes_then_explicit_finish_uses_actual_host_dispatch(tmp_
     assert w.evidence['head'] != w.base
     native_errors = [r for r in w.rows if r['event'] == 'native_error']
     assert len(native_errors) == 3
-    assert all('CodingPlan' in json.dumps(r['payload']) for r in native_errors)
+    assert all(UNSUPPORTED_NATIVE in r['payload']['original_error'] for r in native_errors)
     assert [r['mode'] for r in w.gateway.requests] == ['native']*3 + ['json']*3
 
 

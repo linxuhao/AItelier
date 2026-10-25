@@ -268,11 +268,17 @@ def reset_endpoint_cooldowns() -> None:
 
 
 def _is_spent_credit(err) -> bool:
-    """Anthropic's out-of-credit answer: HTTP 400 'Your credit balance is too
-    low to access the Anthropic API'. Matched on the prose because the class
-    (BadRequestError) is shared with every genuinely malformed request."""
-    return (isinstance(err, litellm.exceptions.BadRequestError)
-            and "credit balance is too low" in str(err).lower())
+    """Known HTTP 400 account-credit / entitlement refusals.
+
+    LiteLLM also uses BadRequestError for malformed requests. Keep the known
+    refusal phrases narrow: merely mentioning a subscription is not enough.
+    """
+    if not isinstance(err, litellm.exceptions.BadRequestError):
+        return False
+    message = str(err).lower()
+    return ("credit balance is too low" in message
+            or "does not have a valid codingplan subscription, "
+               "or your subscription has expired" in message)
 
 
 def is_provider_failure(error: BaseException) -> bool:
@@ -1082,11 +1088,9 @@ class AIGateway:
                 self._apply_binding(kwargs)
                 continue
             except Exception as e:
-                # Anthropic reports spent credit as a 400, not a 429 — a fact
-                # about the ENDPOINT dressed as a request error. The plan credit
-                # the anthropic provider runs on is a monthly grant with an
-                # expiry, so this is certain to happen to every rotate pool
-                # Claude sits in; without this every step rotated onto it dies.
+                # Spent Anthropic credit and invalid/expired Ark CodingPlan
+                # entitlement arrive as 400s: endpoint failures dressed as
+                # request errors. Reuse the bounded candidate walk and cooldown.
                 if _is_spent_credit(e):
                     if not self._failover(e):
                         exc = self._explain_auth(e)

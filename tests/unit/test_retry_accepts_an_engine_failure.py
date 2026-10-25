@@ -26,23 +26,25 @@ def test_a_run_that_failed_on_its_first_tick_is_still_retryable(client, monkeypa
 
     monkeypatch.setattr(project_routers, "check_write_owner", lambda user, p: None)
 
-    class _DB:
-        def get_project(self, project_id):
-            # RAW column: stuck where the tick left it before the run failed.
-            return {"id": project_id, "status": "running:state_seed",
-                    "current_project_step": "state_seed", "owner_email": ""}
-        def set_project_meta_state(self, *a, **k):
-            seen["cleared"] = True
-        def is_project_planning_complete(self, project_id):
-            seen["reached_the_body"] = True
-            raise RuntimeError("stop here — the gate is what this test is about")
+    # Scope detection uses the actual isolated DB, not a mocked binding answer.
+    from api.main import app
+    db = app.dependency_overrides[project_routers.get_db_manager]()
+    db.ensure_project(pid)
+    with db.get_connection() as conn:
+        conn.execute("UPDATE runs SET status='running:state_seed' WHERE project_id=?", (pid,))
+        conn.commit()
+
+    def stop_at_planning(project_id):
+        seen["reached_the_body"] = True
+        raise RuntimeError("stop here — the gate is what this test is about")
+    monkeypatch.setattr(db, "is_project_planning_complete", stop_at_planning)
 
     import api.dependencies as deps
     monkeypatch.setattr(deps, "enrich_project_status",
                         lambda p: dict(p, status="failed:Tool step 'state_seed' crashed"))
 
     with pytest.raises(RuntimeError, match="stop here"):
-        project_routers.retry_project(pid, user=None, db=_DB())
+        project_routers.retry_project(pid, user=None, db=db)
 
     assert seen.get("reached_the_body"), (
         "the gate rejected a project the engine reports as failed — the same "

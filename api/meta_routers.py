@@ -889,6 +889,13 @@ def approve_checkpoint(
     run = sf.get_run(run_id) if run_id else None
     if not run or run.get("project_id") != project_id:
         raise HTTPException(409, "Approval requires the observed exact run_id for this project")
+    if request.rescue_failed:
+        # Refuse before the controller can write a break-glass State event.
+        from core.state_attempts import StateRecoveryRefused, guard_generic_recovery
+        try:
+            guard_generic_recovery(db, project_id=project_id, run_id=run_id)
+        except StateRecoveryRefused as exc:
+            raise HTTPException(409, str(exc)) from exc
     checkpoint_phase("state_controller")
     state_checkpoint_controller(http_request, run_id, db)
     _step_id, _label = request.checkpoint, "Checkpoint"

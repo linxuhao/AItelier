@@ -79,21 +79,25 @@ def test_rest_checkpoint_routes_refuse_a_non_owner_at_entry(client, monkeypatch,
 
 def test_failed_run_rescue_is_checked_once_at_entry_too(client, monkeypatch, clock):
     import api.run_routers as rr
-    sf, _ = _rest(client, monkeypatch, "cp-rescue-proj", "failed")
+    sf, database = _rest(client, monkeypatch, "cp-rescue-proj", "failed")
+    with database.get_connection() as conn:
+        before = list(conn.iterdump())
     monkeypatch.setattr(rr, "_run_to_project_id", lambda run_id: "cp-rescue-proj")
     _as(monkeypatch, "grok")
     for path in ("/api/meta/cp-rescue-proj/checkpoint/approve", "/api/runs/run-1/checkpoint/approve"):
         resp = client.post(path, json={"checkpoint": "gather", "feedback": "", "run_id": "run-1", "rescue_failed": True})
-        assert resp.status_code == 409 and "not_attempt_owner" in resp.text, (path, resp.text)
+        assert resp.status_code == 409 and "successor disposition" in resp.text, (path, resp.text)
     sf.reactivate_run.assert_not_called()
     sf.resume_run.assert_not_called()
-    _as(monkeypatch, "owner-cli")                       # an admin passes, recorded as break glass
+    _as(monkeypatch, "owner-cli")  # admin rescue also preserves the terminal lineage
     from api import state_graph_routers as routers
     monkeypatch.setattr(routers, "authenticated_is_admin", lambda request: True)
     resp = client.post("/api/meta/cp-rescue-proj/checkpoint/approve", json={"checkpoint": "gather", "feedback": "", "run_id": "run-1", "rescue_failed": True})
-    assert resp.status_code == 200, resp.text
-    sf.reactivate_run.assert_called_once_with("run-1")
-    sf.resume_run.assert_called_once_with("run-1")
+    assert resp.status_code == 409 and "successor disposition" in resp.text, resp.text
+    sf.reactivate_run.assert_not_called()
+    sf.resume_run.assert_not_called()
+    with database.get_connection() as conn:
+        assert list(conn.iterdump()) == before
 
 
 def test_mcp_answer_checkpoint_checks_the_owner_once(tmp_path, monkeypatch, clock):

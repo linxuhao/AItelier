@@ -1608,6 +1608,8 @@ class DBManager:
         Uses skillflow's reactivate_run() instead of direct SQL on projects.status.
         Returns True if the project or its tasks were reset, False otherwise.
         """
+        from core.state_attempts import guard_generic_recovery
+        guard_generic_recovery(self, project_id=project_id)
         from api.dependencies import get_skillflow
         sf = get_skillflow()
 
@@ -1615,7 +1617,7 @@ class DBManager:
         run = sf.get_run_by_project(project_id)
         run_reactivated = run and run["status"] in ("failed", "completed")
         if run_reactivated:
-            sf.reactivate_run(project_id)
+            sf.reactivate_run(run["id"])
 
         # Reset all FAILED tasks to PENDING
         with self.get_connection() as conn:

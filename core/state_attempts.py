@@ -65,6 +65,37 @@ BEGIN SELECT RAISE(ABORT,'acceptance receipts are append-only'); END;
 """
 
 
+class StateRecoveryRefused(ValueError):
+    """Generic recovery cannot preserve a persisted State execution lineage."""
+
+
+def guard_generic_recovery(db, *, project_id=None, run_id=None, allow_active=False):
+    """Read existing bindings without initializing or reconciling State.
+
+    No table means State has not been initialized on this handle. Detection
+    or binding-read errors mean unknown scope and refuse recovery. Binding is
+    independent of claim enforcement, owner presence and reconciliation lag.
+    Only ordinary pause/resume of an active execution may keep its binding.
+    """
+    try:
+        with db.get_connection() as conn:
+            conn.execute("BEGIN")
+            table = conn.execute(
+                "SELECT type FROM sqlite_master WHERE name='state_attempts'").fetchone()
+            if table is None:
+                return
+            if table["type"] != "table":
+                raise StateRecoveryRefused("Cannot establish recovery scope; recovery refused.")
+            rows = conn.execute(
+                "SELECT status FROM state_attempts WHERE execution_project_id=? OR run_id=?",
+                (project_id, run_id)).fetchall()
+    except (sqlite3.Error, OSError):
+        raise StateRecoveryRefused("Cannot establish recovery scope; recovery refused.") from None
+    if rows and (not allow_active or any(row["status"] not in ACTIVE for row in rows)):
+        raise StateRecoveryRefused(
+            "Generic recovery is unavailable; use an explicit State successor disposition.")
+
+
 def artifact_ref(value: str) -> str:
     if not isinstance(value, str) or not SHA.fullmatch(value):
         raise StateGraphError("artifact_ref must be an exact lowercase Git SHA or SHA-256 digest")

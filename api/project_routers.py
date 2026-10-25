@@ -828,6 +828,14 @@ def retry_project(
     if not raw_status.startswith("failed") and not engine_failed:
         raise HTTPException(status_code=400, detail="Only failed projects can be retried")
 
+    # Refuse before clearing failure metadata or resetting task rows. The
+    # execution-project binding also covers unreconciled attempts.
+    from core.state_attempts import StateRecoveryRefused, guard_generic_recovery
+    try:
+        guard_generic_recovery(db, project_id=project_id)
+    except StateRecoveryRefused as exc:
+        raise HTTPException(409, str(exc)) from exc
+
     # Clear project meta_state (error info)
     db.set_project_meta_state(project_id, None)
 

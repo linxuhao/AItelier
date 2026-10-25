@@ -105,24 +105,38 @@ class AItelierSkillFlow(SkillFlow):
     # Generic state moves would carry a paused governing plan past its
     # checkpoint (resume), reopen a dismissed one (reactivate/re_run) or move
     # the pinned graph under a sealed binding (repin).
+    def _guard_state_recovery(self, run_id: str, *, continuation=False):
+        from api.dependencies import get_db_manager
+        from core.state_attempts import guard_generic_recovery
+        run = self.get_run(run_id) or {}
+        guard_generic_recovery(
+            get_db_manager(), project_id=run.get("project_id"), run_id=run_id,
+            allow_active=continuation and run.get("status") in ("running", "paused"))
+
     def resume_run(self, run_id: str, *args, **kwargs):
         from core.coding_workspace import fence_control
         fence_control(run_id, "resume")
-        return super().resume_run(run_id, *args, **kwargs)
+        with self._lock:
+            self._guard_state_recovery(run_id, continuation=True)
+            return super().resume_run(run_id, *args, **kwargs)
 
     def pause_run(self, run_id: str, *args, **kwargs):
         from core.coding_workspace import fence_control
         fence_control(run_id, "pause")
-        return super().pause_run(run_id, *args, **kwargs)
+        with self._lock:
+            self._guard_state_recovery(run_id, continuation=True)
+            return super().pause_run(run_id, *args, **kwargs)
 
     def reactivate_run(self, run_id: str, *args, **kwargs):
         from core.coding_workspace import fence_control
         fence_control(run_id, "reactivation")
+        self._guard_state_recovery(run_id)
         return super().reactivate_run(run_id, *args, **kwargs)
 
     def re_run(self, run_id: str, *args, **kwargs):
         from core.coding_workspace import fence_control
         fence_control(run_id, "re-run")
+        self._guard_state_recovery(run_id)
         return super().re_run(run_id, *args, **kwargs)
 
     def complete_run(self, run_id: str, *args, **kwargs):

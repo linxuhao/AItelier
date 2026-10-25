@@ -135,9 +135,8 @@ def test_a_notebook_rebuilt_without_a_declaration_delivers_no_unopened_note(tmp_
     notebook = StateDriverNotes(anonymous.store, "anonymous-rebuilder")
     assert notebook.project_read_trusted is False
     assert SECRET in repr(notebook.get(PROJECT)["index"])
-    unopened = notebook.get(UNOPENED)
-    print("REBUILT_NOTEBOOK_UNOPENED =", unopened)
-    assert SECRET not in repr(unopened)
+    with pytest.raises(ProjectPrivate):
+        notebook.get(UNOPENED)
 
 
 def test_a_messaging_provider_rebuilt_without_a_declaration_refuses(tmp_path):

@@ -338,3 +338,143 @@ def test_blank_native_with_positive_observed_usage_preserves_native_policy(wirin
     assert ai_router.endpoint_cooldowns() == {}
     assert [(p['outcome'], p['served_by']) for event, p in events
             if event == 'completion_finished'] == [('completed', 'ownedark/first')]
+
+
+DESIGN = '# Owned architecture\n\nA successor produced the bounded design artifact.\n'
+
+
+@pytest.fixture
+def architect_case(tmp_path, monkeypatch, wiring, request):
+    """Exact frozen Architect output contract, ALL actual SDK claim grants.
+
+    This is an isolated output-consumer fixture, not the foreign game run.
+    No schema filtering, replacement tool executors or handler stubs.
+    """
+    sf = SkillFlow(str(tmp_path/'architect-sdk.db'), workspace_base=str(tmp_path/'artifacts'),
+        tool_loader=ToolLoader(Path(skillflow.__file__).parent/'tools'),
+        artifact_history=False, code_path_resolver=lambda pid, run_id=None: False)
+    sf.register_agent_config_from_dict('owned-architect', {
+        'model': 'owned-pool', 'tools': ['read_file'],
+        'native_tool_calling': request.param == 'native', 'fallback_to_json_mode': True,
+        'max_tool_turns': 20, 'system_prompt': 'Produce the owned design artifact. JSON is allowed.'})
+    sf.register_graph(PipelineGraph(name='owned-architect-design', begin='2', steps=[
+        StepNode(id='2', agent_config='owned-architect', output_mode='content',
+            output_target='artifact',
+            output_fixed={'design': {'file': 'step2_design.md', 'target': 'artifact'}})]))
+    rid = sf.create_run('owned-architect-design', project_id='owned')
+    sf.start_run(rid)
+    sf.advance_run(rid)
+    claim = sf.claim_next_step(rid)
+    assert claim is not None
+    schemas = claim.inputs['_tool_schemas']  # Full grants; never filtered.
+    import api.dependencies as dependencies
+    monkeypatch.setattr(dependencies, 'get_skillflow', lambda: sf)
+    ws = WorkspaceManager(str(tmp_path/'artifacts'), projects_base=str(tmp_path/'projects'))
+    monkeypatch.setattr(ws, 'get_code_path', lambda *a, **k: None)
+    engine = PipelineEngine(registry=sf.agent_registry, trace_callback=claim.trace)
+    # Retain the assembler's other native APIs; only fixture prose is fixed.
+    monkeypatch.setattr(engine.assembler, 'assemble', lambda *a, **k: 'Produce the owned design. JSON is allowed.')
+    events, handlers, gateways = [], [], []
+    engine._emit = lambda event, payload=None: events.append((event, payload))
+    for name in ('_run_native_step', '_run_content_step', '_run_tool_content_step', '_run_tool_step'):
+        original = getattr(engine, name)
+        def observe(*args, _name=name, _original=original, **kwargs):
+            handlers.append({'handler': _name, 'kwargs': dict(kwargs),
+                             'live_grants': sorted(engine._tool_schemas)})
+            return _original(*args, **kwargs)
+        monkeypatch.setattr(engine, name, observe)
+    def build(_factory, _name):
+        gateway = wiring()
+        gateway.on_completion = lambda event, payload: engine._trace('llm', event, payload)
+        gateways.append(gateway)
+        return gateway
+    monkeypatch.setattr(AgentFactory, '_build_gateway', build)
+    root = Path(claim.inputs['_output_dir'])
+    raw = os.environ.get('REVIEW_RAW')
+    # Preserve actual grants even when a generation assertion below fails.
+    def evidence():
+        if raw:
+            Path(raw).mkdir(parents=True, exist_ok=True)
+            Path(raw, request.node.name+'-architect.json').write_text(json.dumps({
+                'claim_inputs': claim.inputs, 'full_grants': schemas,
+                'trace': sf.get_trace(rid), 'events': events, 'handlers': handlers,
+                'files': {str(p.relative_to(root)): p.read_text()
+                          for p in root.rglob('*') if p.is_file()},
+            }, indent=2, default=str)+'\n')
+    evidence()
+    # The retained trace 1137 also explicitly advertises write_design. If this
+    # SDK generation differs, fail visibly with its complete actual grants.
+    assert {'create_design', 'edit_design', 'write_design'} <= set(schemas), schemas
+    assert claim.inputs['_output_target'] == 'artifact'
+    assert claim.inputs['_output_fixed']['design']['file'] == 'step2_design.md'
+    def run():
+        return engine.run_step(1, '2', ws, 'owned', agent_config_name='owned-architect',
+            tool_schemas=schemas, output_dir=claim.inputs['_output_dir'],
+            output_target=claim.inputs['_output_target'], output_fixed=claim.inputs['_output_fixed'],
+            config_name='owned-architect-design', run_id=rid,
+            step_instance_id=claim.token.step_instance_id, claim_epoch=claim.token.claim_epoch)
+    case = SimpleNamespace(sf=sf, rid=rid, claim=claim, run=run, engine=engine,
+        events=events, handlers=handlers, gateways=gateways, root=root, mode=request.param)
+    try:
+        yield case
+    finally:
+        evidence()
+        sf._conn.close()
+
+
+def design_reply(native):
+    actions = [{'tool': 'create_design', 'params': {'initialContent': DESIGN}}]
+    if not native:
+        # Artifact JSON keeps the useful single-response contract: no finish
+        # action is needed to deliver this actual generated fixed-slot write.
+        return response(json.dumps({'actions': actions}))
+    actions.append({'tool': 'finish_step', 'params': {'summary': 'Owned design ready'}})
+    tools = [{'id': 'owned-design-'+str(i), 'type': 'function', 'function': {
+        'name': action['tool'], 'arguments': json.dumps(action['params'])}}
+        for i, action in enumerate(actions)]
+    return response(None, tools=tools)
+
+
+@pytest.mark.parametrize('architect_case', ['native', 'json'], indirect=True)
+@pytest.mark.parametrize('exhausted', [False, True], ids=['successor', 'exhausted'])
+def test_architect_design_full_generated_grants(architect_case, monkeypatch, exhausted):
+    case = architect_case
+    calls, errors = [], []
+    def complete(**kwargs):
+        calls.append(kwargs['model'])
+        if kwargs['model'] == WIRE_MODELS[0] or exhausted:
+            error = refusal(model=kwargs['model'])
+            errors.append(error)
+            raise error
+        return design_reply(native=case.mode == 'native')
+    monkeypatch.setattr(litellm, 'completion', complete)
+    if exhausted:
+        with pytest.raises(litellm.BadRequestError) as caught:
+            case.run()
+        assert caught.value is errors[-1]
+        assert not (case.root/'step2_design.md').exists()
+    else:
+        assert case.run() is True
+        assert (case.root/'step2_design.md').read_text() == DESIGN
+    assert calls == WIRE_MODELS, calls
+    # Full slot grants include write_design AND create/edit, so prefix dispatch
+    # goes to tool-content. Forcing _run_tool_step would require dropping a
+    # real grant; do not make that alteration to satisfy a guessed path.
+    expected = '_run_native_step' if case.mode == 'native' else '_run_tool_content_step'
+    assert [record['handler'] for record in case.handlers] == [expected], case.handlers
+    assert all(record['kwargs'].get('require_explicit_completion', False) is False
+               for record in case.handlers), case.handlers
+    assert case.engine._output_target == 'artifact'
+    assert not case.engine._json_source_effects
+    assert not any(event in {'native_fallback', 'step_retry'} for event, _ in case.events)
+    rows = case.sf.get_trace(case.rid)
+    assert not any(row['event'] == 'json_source_completion' for row in rows)
+    if exhausted:
+        failures = [row for row in rows if row['category'] == 'error']
+        assert len(failures) == 1
+        assert failures[0]['event'] == ('native_error' if case.mode == 'native' else 'provider_error')
+        assert failures[0]['payload']['original_error'] == str(errors[-1])
+        assert not any(row['category'] == 'tool_call' for row in rows)
+        assert not any(event == 'files_written' for event, _ in case.events)
+    else:
+        assert any(row['category'] == 'tool_call' and row['event'] == 'create_design' for row in rows)

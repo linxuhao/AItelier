@@ -45,11 +45,11 @@ def refusal(message=ENTITLEMENT, *, model='first'):
         response=httpx.Response(400, request=httpx.Request('POST', 'https://offline.invalid/v1')))
 
 
-def response(content='useful answer', *, tools=None):
+def response(content='useful answer', *, tools=None, completion=2):
     return litellm.ModelResponse(model='owned-offline', choices=[{
         'index': 0, 'finish_reason': 'stop', 'message': {
             'role': 'assistant', 'content': content, 'tool_calls': tools}}],
-        usage={'prompt_tokens': 19, 'completion_tokens': 2, 'total_tokens': 21})
+        usage={'prompt_tokens': 19, 'completion_tokens': completion, 'total_tokens': 19 + completion})
 
 
 @pytest.fixture
@@ -198,7 +198,7 @@ def content_case(tmp_path, monkeypatch, wiring, request):
                 config_name='owned-content', run_id=rid,
                 step_instance_id=claim.token.step_instance_id, claim_epoch=claim.token.claim_epoch)
         case = SimpleNamespace(sf=sf, rid=rid, claim=claim, run=run, events=events,
-            handlers=handlers, gateways=gateways, root=Path(claim.inputs['_output_dir']))
+            handlers=handlers, gateways=gateways, engine=engine, root=Path(claim.inputs['_output_dir']))
         cases.append(case)
         return case
     yield make
@@ -226,7 +226,7 @@ def artifact_reply(native=False):
 
 @pytest.mark.parametrize('read', [False, True], ids=['content', 'tool-content'])
 @pytest.mark.parametrize('mode', ['json', 'native'])
-@pytest.mark.parametrize('first', ['entitlement', 'blank'])
+@pytest.mark.parametrize('first', ['entitlement', 'blank-zero', 'blank-missing'])
 def test_artifact_dispatch_writes_useful_successor(content_case, monkeypatch, read, mode, first):
     case = content_case(mode=mode, read=read)
     calls = []
@@ -235,7 +235,10 @@ def test_artifact_dispatch_writes_useful_successor(content_case, monkeypatch, re
         if kwargs['model'] == WIRE_MODELS[0]:
             if first == 'entitlement':
                 raise refusal()
-            return response(' \n\t')
+            blank = response(' \n\t', completion=0)
+            if first == 'blank-missing':
+                blank.usage = None
+            return blank
         return artifact_reply(native=mode == 'native')
     monkeypatch.setattr(litellm, 'completion', complete)
     assert case.run() is True
@@ -288,7 +291,11 @@ def test_unsupported_native_400_still_delivers_json_artifact(content_case, monke
     assert case.run() is True
     assert calls == [(WIRE_MODELS[0], True)]*3 + [(WIRE_MODELS[0], False)], calls
     assert (case.root/'report.md').read_text() == USEFUL
-    assert case.handlers == ['_run_native_step', '_run_tool_content_step' if read else '_run_content_step']
+    # Native setup installs host controls into the live schema dictionary.
+    # Those actual non-write grants remain when run_step selects JSON, so both
+    # initial schema subsets now enter the existing tool-content handler.
+    assert 'ask_more_turns' in case.engine._tool_schemas
+    assert case.handlers == ['_run_native_step', '_run_tool_content_step']
     assert sum(event == 'native_fallback' for event, _ in case.events) == 1
     assert ai_router.endpoint_cooldowns() == {}
 
@@ -309,3 +316,25 @@ def test_entitlement_match_does_not_widen_exception_or_context_policy(wiring, mo
     assert caught.value is error
     assert calls == WIRE_MODELS[:1], 'unknown context ceiling cannot justify walking to another unknown ceiling'
     assert ai_router.endpoint_cooldowns() == {}
+
+
+@pytest.mark.parametrize('positive', ['completion', 'reasoning'])
+def test_blank_native_with_positive_observed_usage_preserves_native_policy(wiring, monkeypatch, positive):
+    gateway = wiring()
+    reply = response(' \n\t', completion=7 if positive == 'completion' else 0)
+    if positive == 'reasoning':
+        reply.usage = litellm.Usage(prompt_tokens=19, completion_tokens=0,
+            completion_tokens_details={'reasoning_tokens': 5})
+    calls, events = [], []
+    gateway.on_completion = lambda event, payload: events.append((event, payload))
+    def complete(**kwargs):
+        calls.append(kwargs['model'])
+        return reply
+    monkeypatch.setattr(litellm, 'completion', complete)
+    turn = gateway.generate_native([{'role': 'user', 'content': 'owned request'}])
+    assert turn.text == '' and turn.tool_calls == [] and turn.reasoning_content == ''
+    assert calls == WIRE_MODELS[:1]
+    assert gateway.active_model == 'ownedark/first' and gateway._failovers == []
+    assert ai_router.endpoint_cooldowns() == {}
+    assert [(p['outcome'], p['served_by']) for event, p in events
+            if event == 'completion_finished'] == [('completed', 'ownedark/first')]

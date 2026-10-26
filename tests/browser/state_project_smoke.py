@@ -156,7 +156,7 @@ def report_external_candidate(own, root, attempt, check):
 
 
 def record_external_evidence(own, root, attempt_id, check):
-    """Record the independent passing evidence, then verify the node."""
+    """Record the checker passing evidence, then verify the synthetic node."""
     artifact=sha256_hex(CHECK_SOURCE.encode())
     path,sha=write_report(Path(root)/'fixture-reports'/'external-evidence.json',
         evidence_envelope('actual-test','pass',artifact,returncode=check.returncode,
@@ -168,8 +168,8 @@ def record_external_evidence(own, root, attempt_id, check):
 
 def external_fixture(root):
     """Real external checker -> candidate -> evidence -> verified. Returns (service, attempt_id)."""
-    check=run_external_checker()
     own,attempt=start_external(root)
+    check=run_external_checker()
     report_external_candidate(own,root,attempt,check)
     record_external_evidence(own,root,attempt['attempt_id'],check)
     return own,attempt['attempt_id']

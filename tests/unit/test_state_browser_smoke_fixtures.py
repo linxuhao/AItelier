@@ -13,7 +13,7 @@ import ast
 import hashlib
 import importlib.util
 import json
-import sys
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -133,8 +133,6 @@ def test_old_workflow_fixture_envelope_is_refused_by_the_real_api(smoke, tmp_pat
 
 
 def test_external_fixture_runs_checker_and_verifies_through_real_state_api(smoke, tmp_path):
-    check = smoke.run_external_checker()
-    assert check.returncode == 0
     own, attempt_id = smoke.external_fixture(tmp_path)
     attempt = own.attempts.get(attempt_id)
     artifact = hashlib.sha256(smoke.CHECK_SOURCE.encode()).hexdigest()
@@ -165,8 +163,8 @@ def test_external_fixture_runs_checker_and_verifies_through_real_state_api(smoke
 
 
 def test_old_external_fixture_envelope_is_refused_by_the_real_api(smoke, tmp_path):
-    check = smoke.run_external_checker()
     own, attempt = smoke.start_external(tmp_path)
+    check = smoke.run_external_checker()
     artifact = hashlib.sha256(smoke.CHECK_SOURCE.encode()).hexdigest()
     # The pre-repair terminal report: only returncode/stdout/stderr, no
     # status/settled/usable/artifact.
@@ -187,4 +185,29 @@ def test_old_external_fixture_envelope_is_refused_by_the_real_api(smoke, tmp_pat
     smoke.report_external_candidate(own, tmp_path, attempt, check)
     assert own.attempts.get(attempt["attempt_id"])["status"] == "candidate"
     smoke.record_external_evidence(own, tmp_path, attempt["attempt_id"], check)
+    assert _node_status(own, "external-only", "external.goal") == "VERIFIED"
+
+
+def test_external_checker_starts_after_durable_state_registration(smoke, tmp_path, monkeypatch):
+    real_checker = smoke.run_external_checker
+    witnessed = []
+
+    def observe_then_run_real_checker():
+        path = tmp_path / "external-only.sqlite"
+        assert path.is_file(), "external checker started before State registration"
+        # Read-only: observing the start must not create a database or owner.
+        with sqlite3.connect(path.as_uri() + "?mode=ro", uri=True) as conn:
+            rows = conn.execute(
+                "SELECT attempt_id,status FROM state_attempts WHERE project_id=? AND node_key=?",
+                ("external-only", "external.goal")).fetchall()
+        assert len(rows) == 1 and rows[0][1] == "running"
+        witnessed.append(rows[0][0])
+        result = real_checker()
+        assert result.returncode == 0
+        return result
+
+    monkeypatch.setattr(smoke, "run_external_checker", observe_then_run_real_checker)
+    own, attempt_id = smoke.external_fixture(tmp_path)
+    assert witnessed == [attempt_id]
+    assert own.attempts.get(attempt_id)["status"] == "candidate"
     assert _node_status(own, "external-only", "external.goal") == "VERIFIED"

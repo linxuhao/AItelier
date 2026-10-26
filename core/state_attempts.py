@@ -125,7 +125,41 @@ def _public(row: dict) -> dict:
     return result
 
 
+def release_bound_claims(store, conn, attempt: dict, actor: str, result_status: str) -> int:
+    """Release the live claims still bound to this exact attempt (design 4.3).
+
+    Runs inside the caller's terminal-settlement transaction. Only claims whose
+    ``attempt_id`` is this attempt are touched, so unbound or newer-attempt
+    claims keep their ownership and fence. Each release writes one normal claim
+    history row and one ``claim_released`` event; a later call finds nothing live.
+    """
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='state_node_claims'").fetchone() is None:
+        # The claims subsystem is optional: without its table no claim can be bound.
+        return 0
+    released = 0
+    for claim in conn.execute("SELECT * FROM state_node_claims WHERE attempt_id=? AND project_id=? "
+                              "AND node_key=? AND status='live'",
+                              (attempt["attempt_id"], attempt["project_id"], attempt["node_key"])).fetchall():
+        reason = f"attempt settled as {result_status}"
+        updated = conn.execute("UPDATE state_node_claims SET status='released',updated_at=? "
+                               "WHERE claim_id=? AND attempt_id=? AND status='live'",
+                               (now(), claim["claim_id"], attempt["attempt_id"]))
+        if updated.rowcount != 1:
+            continue
+        conn.execute("INSERT INTO state_claim_history(claim_id,project_id,node_key,driver_id,purpose,status,"
+                     "fence,lease_expires_at,actor,reason,created_at) VALUES(?,?,?,?,?,'released',?,?,?,?,?)",
+                     (claim["claim_id"], claim["project_id"], claim["node_key"], claim["driver_id"],
+                      claim["purpose"], claim["fence"], claim["lease_expires_at"], actor, reason, now()))
+        store._event(conn, attempt["project_id"], attempt["node_key"], "claim_released", {
+            "claim_id": claim["claim_id"], "driver_id": claim["driver_id"], "purpose": claim["purpose"],
+            "fence": claim["fence"], "reason": reason,
+            "attempt_id": attempt["attempt_id"], "actor": actor, "break_glass": False})
+        released += 1
+    return released
+
+
 class StateAttempts:
+
     def __init__(self, store: StateGraphStore):
         self.store = store
         if not isinstance(store.db, UntrustedDatabase):
@@ -783,7 +817,8 @@ class StateAttempts:
                                "graph_digest": row.get("graph_digest")})
             return _public(self._attempt(conn, attempt_id))
 
-    def reconcile(self, attempt_id: str, sf, candidate_artifact: str | None = None) -> dict:
+    def reconcile(self, attempt_id: str, sf, candidate_artifact: str | None = None,
+                  actor: str | None = None) -> dict:
         """Observe a real run; never modify its graph, checkpoints or status."""
         attempt = self.get(attempt_id)
         if attempt["execution_kind"] != "skillflow":
@@ -815,7 +850,10 @@ class StateAttempts:
             if current["run_id"] != row["id"]:
                 raise StateConflict("attempt binding changed")
             fresh = self._pins_current(conn, current)
-            if status in {"candidate", "failed"} and not fresh:
+            # Quiescence was proved above (complete zero-alive/lost/unknown audit);
+            # stale inputs change the recorded status, not that proof.
+            quiescent = status in {"candidate", "failed"}
+            if quiescent and not fresh:
                 status = "superseded"
             if current["status"] in {"candidate", "failed", "superseded", "abandoned"} and status in ACTIVE:
                 raise StateConflict("terminal attempt's run was revived; use a new attempt")
@@ -858,6 +896,10 @@ class StateAttempts:
                 self.store._event(conn, current["project_id"], current["node_key"], "attempt_observed",
                                   {"attempt_id": attempt_id, "status": status, "artifact_ref": artifact,
                                    "stale_inputs": not fresh, "workflow_observation": observation})
+            if quiescent:
+                # Complete zero-alive/lost/unknown quiescence was proved above, and the
+                # revival/abandon guards have passed: settle only this attempt's claims.
+                release_bound_claims(self.store, conn, current, actor or "workflow-reconcile", status)
             return {**_public(self._attempt(conn, attempt_id)), "stale_inputs": not fresh}
 
     def _eligible_candidate(self, conn, attempt):

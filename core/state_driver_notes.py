@@ -1,6 +1,7 @@
 "Project-scoped, revisioned director handoff notes stored beside State facts."
 from __future__ import annotations
 
+import functools
 import re
 from datetime import datetime, timezone
 
@@ -11,10 +12,36 @@ from core.state_driver_index import (ENTRY_SCHEMA, DRIVER_ENTRY_SCHEMA, index_li
                                      referenced_addresses)
 from core.state_graph import (StateConflict, StateGraphError, StateNotFound, key, now,
                               text)
-from core.state_privacy import (UntrustedDatabase, refuse_unopened_project, trust_of,
-                                writer_only_read)
+from core.state_privacy import (UntrustedDatabase, refuse_private_read,
+                                refuse_unopened_project, trust_of, writer_only_read)
 
 _DEFAULT_FORCE = object()
+
+
+def untrusted_owner_refused(write_action: str):
+    """Refuse an UNTRUSTED owner at a WRITE method, before any database access.
+
+    ``write_action`` is the writer's own WRITE action name (for example
+    ``write_driver_note_entry``). It is deliberately not a read action: it is in
+    neither ``PUBLIC_READS`` nor ``WRITER_ONLY_READS``, so ``read_visibility``
+    calls it private (unknown -> private, fail closed) and ``refuse_private_read``
+    raises the one ``ProjectPrivate`` for an untrusted owner. A writer must never
+    carry a public READ label, so the method is marked with
+    ``__state_write_action__`` and NOT with ``__state_read_action__``.
+    """
+    def decorate(function):
+        @functools.wraps(function)
+        def wrapper(self, *args, **kwargs):
+            refuse_private_read(trust_of(self), write_action)
+            return function(self, *args, **kwargs)
+        wrapper.__state_write_action__ = write_action
+        # Same rule as `writer_only_read`: no `__wrapped__` bypass around the verdict.
+        del wrapper.__wrapped__
+        return wrapper
+    return decorate
+
+
+
 MAX_SEARCH_QUERY_CHARS = 500
 MAX_SEARCH_LIMIT = 100
 MAX_EXCERPT_CHARS = 1000
@@ -478,7 +505,7 @@ class StateDriverNotes:
              director_identity, timestamp, timestamp))
         return entry_id
 
-    @writer_only_read("get_driver_note_entry")
+    @untrusted_owner_refused("write_driver_note_entry")
     def write_entry(self, project_id: str, assertion: str, body: str, director_identity: str,
                     force=_DEFAULT_FORCE, landed: str = "") -> dict:
         """Write one assertion plus its body and return the address of both."""
@@ -501,7 +528,7 @@ class StateDriverNotes:
                 "director_identity": director_identity})
             return {**self._detail(row), **projection}
 
-    @writer_only_read("get_driver_note_entry")
+    @untrusted_owner_refused("supersede_driver_note_entry")
     def supersede_entry(self, project_id: str, entry_id: str, assertion: str, body: str,
                         reason: str, director_identity: str, force=_DEFAULT_FORCE,
                         landed: str = "") -> dict:
@@ -539,7 +566,7 @@ class StateDriverNotes:
             return {"superseded": self._detail(retired), "successor": self._detail(successor),
                     **projection}
 
-    @writer_only_read("get_driver_note_entry")
+    @untrusted_owner_refused("delist_driver_note_entry")
     def delist_entry(self, project_id: str, entry_id: str, reason: str,
                      director_identity: str) -> dict:
         """Evict a line from the index without deleting its body.

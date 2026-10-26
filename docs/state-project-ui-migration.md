@@ -231,10 +231,18 @@ or installed in the backend image) and a built `web/dist`
 (`cd web && npm ci && npm run build`). It uses only temporary SQLite and
 loopback services.
 
-**Unverified envelope.** A green run is not current evidence for the
-`report_external_attempt`/`record_evidence` envelope that the smoke fixture
-builds: that part was never re-checked against the current schema. This is
-tracked by State issue `iss-1ba92baa737b4c72`, which remains open.
+**Fixture contract.** The script builds its synthetic fixtures through the
+current State/SQLite/SkillFlow APIs, never by weakening a State validator. The
+first FAIL evidence and the external-harness candidate/evidence are each an
+actual absolute JSON file declaring `status`, `settled`, `usable`, and (for
+evidence) `criterion_id`, `verdict` and `artifact` matching the row it supports;
+artifacts are SHA-256 digests of real synthetic bytes, not invented Git custody.
+The external checker really runs as a subprocess before State records it. All of
+it is labelled synthetic, not game acceptance. The same helpers are exercised
+without Playwright by `tests/unit/test_state_browser_smoke_fixtures.py`, which
+is collected by pytest but does not start a browser; only the standalone command
+above runs Chromium. A green run is evidence only for the run that was actually
+executed and retained.
 
 Run the tests in an isolated development environment:
 

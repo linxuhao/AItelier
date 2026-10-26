@@ -7,7 +7,8 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_serializer, model_validator
+from pydantic import (BaseModel, ConfigDict, Field, ValidationError, field_serializer, field_validator,
+                      model_validator)
 from starlette.exceptions import HTTPException
 
 from core.state_driver_guide import guide_section
@@ -77,8 +78,64 @@ class Node(Project):
     node_key: str
 
 
+_KEY_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"
+
+
+def _omit_default(schema: dict) -> None:
+    schema.pop("default", None)
+
+
+class NewNodeCriterion(BaseModel):
+    """One acceptance check of a node being created. Mirrors core.state_graph.contract:
+    exactly id, kind and description, each required."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    id: str = Field(min_length=1, max_length=128, pattern=_KEY_PATTERN,
+                    description="Unique within the node; letters/digits/._- starting with a letter or digit.")
+    kind: Literal["test", "review", "human", "artifact", "integration"]
+    description: str = Field(min_length=1, max_length=2000)
+
+
+class NewNode(BaseModel):
+    """One node for add_nodes. Mirrors core.state_graph.StateGraphStore._add: the
+    creation key is `key` (read records call it node_key; that name is refused
+    here), plus goal and acceptance, and optionally dependencies, priority, facet.
+    Anything else, including status or workflow progress, is refused."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    key: str = Field(min_length=1, max_length=128, pattern=_KEY_PATTERN,
+                     description="New node key (not node_key); unique in the project.")
+    goal: str = Field(min_length=1, max_length=20000)
+    acceptance: list[NewNodeCriterion] = Field(min_length=1, max_length=64, description=(
+        "1-64 explicit checks with unique ids; an empty contract cannot pass."))
+    dependencies: list[str] = Field(
+        default=None, max_length=1000, json_schema_extra=_omit_default,
+        description="Optional node keys this node depends on (default none); nodes in the same batch may be referenced.")
+    priority: int = Field(default=0, ge=-100000, le=100000)
+    facet: Literal["design", "contract", "test", "content", "integration"] | None = Field(
+        default=None, json_schema_extra=_omit_default,
+        description="Optional: design | contract | test | content | integration.")
+
+    @field_validator("dependencies")
+    @classmethod
+    def _dependency_keys(cls, value):
+        import re
+        for dep in value:
+            if not re.fullmatch(_KEY_PATTERN, dep):
+                raise ValueError("dependency must be 1-128 letters/digits/._-, starting with a letter or digit")
+        return value
+
+
 class AddNodes(Project):
-    nodes: list[dict] = Field(min_length=1, max_length=200)
+    nodes: list[NewNode] = Field(min_length=1, max_length=200)
+
+    @field_serializer("nodes")
+    def _sent_fields_only(self, nodes: list[NewNode]) -> list[dict]:
+        # The graph still receives plain dicts holding only the fields sent.
+        return [node.model_dump(exclude_unset=True) for node in nodes]
+
 
 
 class ReviseNode(Node):

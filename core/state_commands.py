@@ -1153,7 +1153,13 @@ def _filter_catalog(service, action, result):
             and isinstance(result.get("projects"), list):
         kept = [p for p in result["projects"] if p.get("project_id") in public]
         out = {**result, "projects": kept}
-        out["next_after"] = kept[-1].get("project_id") if kept else None
+        # The SQL page already carries the right cursor (the last id of the page
+        # iff more rows follow, else None). Rewrite it ONLY when this filter
+        # actually dropped a row from a page that has a cursor, so the cursor can
+        # never be an id this caller may not see; a page the filter left whole
+        # keeps the SQL page's own next_after (None on the last page).
+        if len(kept) != len(result["projects"]) and result.get("next_after") is not None:
+            out["next_after"] = kept[-1].get("project_id") if kept else None
         return out
     return result
 

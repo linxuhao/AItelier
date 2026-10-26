@@ -8,10 +8,12 @@ HTTP is loopback only. Fixtures are explicitly synthetic, not game acceptance.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
 import socket
+import subprocess
 import sys
 import tempfile
 import threading
@@ -22,13 +24,50 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 
-def fixture(root):
+FIXTURE_LABEL = 'Synthetic browser fixture; not game acceptance.'
+CHECK_SOURCE = 'assert sum([2,3])==5'
+SYNTHETIC_CANDIDATE = b'synthetic browser fixture candidate bytes for ui.responsive'
+
+
+def sha256_hex(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def write_report(path, envelope):
+    """Write one complete JSON report file; return (absolute path, SHA-256)."""
+    path = Path(path).resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    body = json.dumps(envelope, ensure_ascii=False, indent=2, sort_keys=True).encode('utf-8') + b'\n'
+    path.write_bytes(body)
+    return str(path), sha256_hex(body)
+
+
+def evidence_envelope(criterion_id, verdict, artifact, **facts):
+    """Current completed-report envelope that record_evidence binds to its row."""
+    return {'status': 'completed', 'settled': True, 'usable': True,
+            'criterion_id': criterion_id, 'verdict': verdict, 'artifact': artifact,
+            'synthetic': True, 'label': FIXTURE_LABEL, **facts}
+
+
+def candidate_envelope(artifact, **facts):
+    """Current settled terminal-candidate envelope for report_external_attempt."""
+    return {'status': 'candidate', 'settled': True, 'usable': True, 'artifact': artifact,
+            'synthetic': True, 'label': FIXTURE_LABEL, **facts}
+
+
+def seed_workflow(root):
+    """Real State/SQLite/SDK rows up to a reconciled candidate, before any evidence.
+
+    Returns (service, sf, run_id, attempt_id, candidate_artifact). The candidate
+    artifact is the SHA-256 of real synthetic bytes, not an invented Git commit.
+    """
     from core.db_manager import DBManager
     from core.state_service import StateService
     from core.workspace_manager import WorkspaceManager
     from core.config_registry import ConfigRegistry
     from skillflow.core import SkillFlow, StepResult
     from skillflow.graph import PipelineGraph, StepNode
+    root = Path(root)
     db = DBManager(str(root / 'state.db'))
     sf = SkillFlow(str(root / 'sf.db'))
     ws = WorkspaceManager(str(root / 'ws'), str(root / 'projects'))
@@ -53,18 +92,87 @@ def fixture(root):
     rid=sf.create_run('browser_feature',project_id=a['execution_project_id']);sf.start_run(rid)
     service.attempts.bind_run(a['attempt_id'],rid,sf);sf.advance_run(rid)
     claim=sf.claim_next_step(rid);sf.confirm_step(claim.token,StepResult(outputs={'fixture':'candidate'}));sf.advance_run(rid)
-    service.attempts.reconcile(a['attempt_id'],sf,'a'*40)
-    service.attempts.record_evidence(a['attempt_id'],'ui-first-failure','behaviour','fail','a'*40,
-        'fixture/geometry-failure.json','f'*64,'fixture-verifier','Synthetic failed geometry observation')
+    artifact = sha256_hex(SYNTHETIC_CANDIDATE)
+    service.attempts.reconcile(a['attempt_id'],sf,artifact)
+    return service, sf, rid, a['attempt_id'], artifact
+
+
+def record_first_failure(service, root, attempt_id, artifact):
+    """Record the visible first FAIL from a real absolute JSON report file.
+
+    Returns (report path, report SHA-256) of the file State retained evidence for.
+    """
+    detail = 'Synthetic failed geometry observation'
+    report_ref, report_sha = write_report(
+        Path(root) / 'fixture-reports' / 'geometry-failure.json',
+        evidence_envelope('behaviour', 'fail', artifact, observation=detail))
+    service.record_evidence(attempt_id, 'ui-first-failure', 'behaviour', 'fail', artifact,
+                            report_ref, report_sha, detail)
+    return report_ref, report_sha
+
+
+def fixture(root):
+    from skillflow.graph import PipelineGraph, StepNode
+    service, sf, rid, attempt_id, artifact = seed_workflow(root)
+    report_ref, report_sha = record_first_failure(service, root, attempt_id, artifact)
     # A later registration must not redraw this old run with new nodes.
     sf.register_graph(PipelineGraph(name='browser_feature',begin='NEW_NODE_MUST_NOT_APPEAR',steps=[StepNode(id='NEW_NODE_MUST_NOT_APPEAR')]))
     external=sf.create_run('browser_feature',project_id='legacy-external');sf.start_run(external);sf.pause_run(external)
     service.add_reference('shrimp-preview','coop.authored','paused-external','run',external,
         '已有任务停在架构审查，请勿重复启动','fixture-director')
-    service.portfolio.add_reference('shrimp-preview','ui.responsive','geometry-report','report','fixture/geometry-failure.json',
-        '首败证据保留','fixture-verifier',report_sha256='f'*64)
+    service.portfolio.add_reference('shrimp-preview','ui.responsive','geometry-report','report',report_ref,
+        '首败证据保留','fixture-verifier',report_sha256=report_sha)
     service.portfolio.set_dispatch('shrimp-preview','hold',0,'迁移清单待审查；不自动启动，不继承旧绿灯')
     return service,sf,rid,external
+
+
+def run_external_checker():
+    """The test harness, not AItelier, really runs its own checker."""
+    check=subprocess.run([sys.executable,'-B','-c',CHECK_SOURCE],capture_output=True,text=True,timeout=10)
+    assert check.returncode==0
+    return check
+
+
+def start_external(root):
+    """A State-only database with one registered external attempt (no workflow)."""
+    from core.state_database import StateDatabase
+    from core.state_service import StateService
+    own=StateService(StateDatabase(str(Path(root)/'external-only.sqlite')),actor='browser-external-verifier',
+                     project_read_trusted=True)
+    own.create_project('external-only','External harness project')
+    own.store.add_nodes('external-only',[{'key':'external.goal','goal':'外部 harness 验证目标',
+        'acceptance':[{'id':'actual-test','kind':'test','description':'Actual Python assertion passes'}]}])
+    attempt=own.start_external_attempt('external-only','external.goal',1,'director-subagents','session/checker-1','once')
+    return own,attempt
+
+
+def report_external_candidate(own, root, attempt, check):
+    """Report the settled terminal candidate from a real absolute JSON file."""
+    artifact=sha256_hex(CHECK_SOURCE.encode())
+    path,sha=write_report(Path(root)/'fixture-reports'/'external-candidate.json',
+        candidate_envelope(artifact,returncode=check.returncode,stdout=check.stdout,stderr=check.stderr))
+    return own.report_external_attempt(attempt['attempt_id'],'complete',0,attempt['context_hash'],'candidate',
+        path,sha,True,artifact,'sha256')
+
+
+def record_external_evidence(own, root, attempt_id, check):
+    """Record the independent passing evidence, then verify the node."""
+    artifact=sha256_hex(CHECK_SOURCE.encode())
+    path,sha=write_report(Path(root)/'fixture-reports'/'external-evidence.json',
+        evidence_envelope('actual-test','pass',artifact,returncode=check.returncode,
+                          checker=CHECK_SOURCE,observation='Synthetic external checker passed'))
+    own.record_evidence(attempt_id,'actual-test-evidence','actual-test','pass',artifact,path,sha)
+    own.verify_node('external-only','external.goal',1,attempt_id)
+    return path,sha
+
+
+def external_fixture(root):
+    """Real external checker -> candidate -> evidence -> verified. Returns (service, attempt_id)."""
+    check=run_external_checker()
+    own,attempt=start_external(root)
+    report_external_candidate(own,root,attempt,check)
+    record_external_evidence(own,root,attempt['attempt_id'],check)
+    return own,attempt['attempt_id']
 
 
 def main():
@@ -258,25 +366,9 @@ def main():
                     data={'project_id':'shrimp-preview'}).status==403
                 checks.append('anonymous reader sees the public graph and the opened project working notes')
                 # A real external attempt in the isolated API has no workflow.
-                # The test harness, not AItelier, runs and waits for its checker.
-                import subprocess, hashlib
-                from core.state_database import StateDatabase
-                from core.state_service import StateService
-                own=StateService(StateDatabase(str(root/'external-only.sqlite')),actor='browser-external-verifier',
-                                 project_read_trusted=True)
-                own.create_project('external-only','External harness project')
-                own.store.add_nodes('external-only',[{'key':'external.goal','goal':'外部 harness 验证目标',
-                    'acceptance':[{'id':'actual-test','kind':'test','description':'Actual Python assertion passes'}]}])
-                a=own.start_external_attempt('external-only','external.goal',1,'director-subagents','session/checker-1','once')
-                check=subprocess.run([sys.executable,'-B','-c','assert sum([2,3])==5'],capture_output=True,text=True,timeout=10)
-                assert check.returncode==0
-                evidence_bytes=json.dumps({'returncode':check.returncode,'stdout':check.stdout,'stderr':check.stderr}).encode()
-                evidence_file=root/'external-fixture-test.json';evidence_file.write_bytes(evidence_bytes)
-                h=hashlib.sha256(evidence_bytes).hexdigest();artifact=hashlib.sha256(b'assert sum([2,3])==5').hexdigest()
-                a=own.report_external_attempt(a['attempt_id'],'complete',0,a['context_hash'],'candidate',
-                    str(evidence_file),h,True,artifact,'sha256')
-                own.record_evidence(a['attempt_id'],'actual-test-evidence','actual-test','pass',artifact,str(evidence_file),h)
-                own.verify_node('external-only','external.goal',1,a['attempt_id'])
+                # The test harness, not AItelier, runs its checker (inside
+                # external_fixture); real State APIs then record the evidence.
+                own,_external_attempt_id=external_fixture(root)
                 # Swap the isolated route dependency, not the user's real app.
                 app.dependency_overrides[get_service]=lambda:own
                 page.set_viewport_size({'width':1440,'height':1000})

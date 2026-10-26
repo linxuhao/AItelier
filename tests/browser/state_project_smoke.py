@@ -307,6 +307,18 @@ def main():
                 page.goto(base+'/#/state-projects');expect(page.get_by_role('heading',name='Projects · State DAG')).to_be_visible()
                 page.locator('a.project-card[href="#/state-projects/shrimp-preview"]').click();expect(page.locator('g.goal')).to_have_count(8)
                 expect(page.get_by_role('heading',name='武虾传奇 · Migration preview')).to_be_visible()
+                # The current graph opens auto-fitted. Reach at least 1x using
+                # its real controls before applying the unchanged 1x paint gate.
+                zoom_badge=page.locator('.state-graph .zoom button').nth(1)
+                zoom_steps=[]
+                for _ in range(5):
+                    width=page.locator('g.goal .card').first.bounding_box()['width']
+                    if width>=260:break
+                    before_percent=int(zoom_badge.inner_text().removesuffix('%'))
+                    page.get_by_role('button',name='Zoom in',exact=True).click()
+                    expect(zoom_badge).to_have_text(f'{min(180,before_percent+20)}%')
+                    zoom_steps.append({'from_percent':before_percent,'to_percent':int(zoom_badge.inner_text().removesuffix('%'))})
+                (out/'pre-paint-zoom.json').write_text(json.dumps({'steps':zoom_steps,'actual_card_width':page.locator('g.goal .card').first.bounding_box()['width'],'actual_percent':zoom_badge.inner_text()},indent=2)+'\n')
                 from state_node_paint import assert_state_node_paint
                 paint = assert_state_node_paint(page)
                 (out/'node-paint-contrast.json').write_text(json.dumps(paint,indent=2)+'\n')
@@ -315,7 +327,11 @@ def main():
                 page.locator('g.goal').filter(has=page.locator('text.goal-key',has_text='ui.responsive')).click()
                 expect(page.locator('.node-panel')).to_contain_text('合作界面与原生输入')
                 expect(page.locator('.node-panel')).to_contain_text('CANDIDATE')
-                page.get_by_role('button',name='Zoom in').click();expect(page.get_by_role('button',name='120%')).to_be_visible()
+                before_percent=int(zoom_badge.inner_text().removesuffix('%'))
+                before_width=page.locator('.state-graph .canvas svg').bounding_box()['width']
+                page.get_by_role('button',name='Zoom in',exact=True).click()
+                expect(zoom_badge).to_have_text(f'{min(180,before_percent+20)}%')
+                assert page.locator('.state-graph .canvas svg').bounding_box()['width']>before_width, 'Zoom badge changed without enlarging the actual graph'
                 page.get_by_role('button',name='Reload view').click();expect(page.locator('.node-panel')).to_contain_text('合作界面与原生输入')
                 page.screenshot(path=str(out/'project-desktop.png'),full_page=True)
                 checks.append('desktop: project graph, 8 real API nodes, hold, candidate-not-verified, selection, zoom and reload')

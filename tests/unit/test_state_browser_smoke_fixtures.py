@@ -104,8 +104,9 @@ def test_workflow_fixture_first_fail_is_a_real_file_and_current_envelope(smoke, 
 def test_old_workflow_fixture_envelope_is_refused_by_the_real_api(smoke, tmp_path):
     service, sf, _run_id, attempt_id, artifact = smoke.seed_workflow(tmp_path)
     try:
-        # The pre-repair call: relative, nonexistent report path and a made-up
-        # digest, over a made-up 40-hex "Git" artifact.
+        # The old report shape: relative, nonexistent path and made-up digest.
+        # The artifact here is the real synthetic SHA-256 seeded above. This
+        # probes service report binding, not the old fixture's lower-level call.
         with pytest.raises(StateConflict):
             service.record_evidence(attempt_id, "ui-first-failure", "behaviour", "fail", artifact,
                                     "fixture/geometry-failure.json", "f" * 64,

@@ -133,6 +133,9 @@ def release_bound_claims(store, conn, attempt: dict, actor: str, result_status: 
     claims keep their ownership and fence. Each release writes one normal claim
     history row and one ``claim_released`` event; a later call finds nothing live.
     """
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='state_node_claims'").fetchone() is None:
+        # The claims subsystem is optional: without its table no claim can be bound.
+        return 0
     released = 0
     for claim in conn.execute("SELECT * FROM state_node_claims WHERE attempt_id=? AND project_id=? "
                               "AND node_key=? AND status='live'",
@@ -847,7 +850,10 @@ class StateAttempts:
             if current["run_id"] != row["id"]:
                 raise StateConflict("attempt binding changed")
             fresh = self._pins_current(conn, current)
-            if status in {"candidate", "failed"} and not fresh:
+            # Quiescence was proved above (complete zero-alive/lost/unknown audit);
+            # stale inputs change the recorded status, not that proof.
+            quiescent = status in {"candidate", "failed"}
+            if quiescent and not fresh:
                 status = "superseded"
             if current["status"] in {"candidate", "failed", "superseded", "abandoned"} and status in ACTIVE:
                 raise StateConflict("terminal attempt's run was revived; use a new attempt")
@@ -890,7 +896,7 @@ class StateAttempts:
                 self.store._event(conn, current["project_id"], current["node_key"], "attempt_observed",
                                   {"attempt_id": attempt_id, "status": status, "artifact_ref": artifact,
                                    "stale_inputs": not fresh, "workflow_observation": observation})
-            if status in {"candidate", "failed"}:
+            if quiescent:
                 # Complete zero-alive/lost/unknown quiescence was proved above, and the
                 # revival/abandon guards have passed: settle only this attempt's claims.
                 release_bound_claims(self.store, conn, current, actor or "workflow-reconcile", status)

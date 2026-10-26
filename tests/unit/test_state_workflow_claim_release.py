@@ -237,3 +237,78 @@ def test_revived_terminal_attempt_is_refused_and_keeps_claim(system, monkeypatch
     with pytest.raises(StateConflict, match="revived"):
         attempts.reconcile(attempt["attempt_id"], sf, actor=ACTOR)
     assert claim_row(store, claim["claim_id"])["status"] == "live"
+
+
+@pytest.mark.parametrize("terminal", ["completed", "failed"])
+def test_stale_quiescent_terminal_is_superseded_and_releases_only_its_bound_claim(system, terminal):
+    store, attempts, sf = system
+    claim, attempt, rid = bound_attempt(system)
+    other, _, _ = bound_attempt(system, driver="grok", node="d", request="r-other")
+    unbound_review = claims_for(store, "reviewer").claim_node("game", "a", "review", 1, "rev-a")
+    artifact = ARTIFACT if terminal == "completed" else None
+    if terminal == "completed":
+        complete(sf, rid)
+    else:
+        sf.fail_run(rid, "implementation failed")
+    store.revise_node("game", "a", 1, "contract changed while the run was in flight", goal="Implement a again")
+    result = attempts.reconcile(attempt["attempt_id"], sf, artifact, actor=ACTOR)
+    assert result["status"] == "superseded" and result["stale_inputs"] is True
+    assert result["artifact_ref"] is None
+    with store.transaction() as conn:
+        node = dict(conn.execute("SELECT * FROM state_nodes WHERE project_id='game' AND node_key='a'").fetchone())
+        receipts = conn.execute("SELECT COUNT(*) FROM state_acceptances").fetchone()[0]
+    assert node["status"] not in {"CANDIDATE", "VERIFIED"} and node["verified_receipt"] is None
+    assert receipts == 0
+    row = claim_row(store, claim["claim_id"])
+    assert row["status"] == "released" and row["fence"] == claim["fence"]
+    rows = history(store, claim["claim_id"])
+    assert [h["status"] for h in rows] == ["live", "released"] and rows[-1]["actor"] == ACTOR
+    events = released_events(store, claim["claim_id"])
+    assert len(events) == 1 and events[0]["attempt_id"] == attempt["attempt_id"]
+    assert claim_row(store, other["claim_id"])["status"] == "live"
+    assert claim_row(store, unbound_review["claim_id"])["status"] == "live"
+    # repeated unchanged observation adds no further history or event
+    attempts.reconcile(attempt["attempt_id"], sf, artifact, actor=ACTOR)
+    assert len(released_events(store, claim["claim_id"])) == 1
+    assert len(history(store, claim["claim_id"])) == 2
+    # a normal next controller can claim the revised node
+    nxt = claims_for(store, "codex").claim_node("game", "a", "implement", 2, "codex-rev2")
+    assert nxt["status"] == "live" and nxt["driver_id"] == "codex"
+
+
+def test_stale_non_quiescent_run_keeps_its_bound_claim(system, monkeypatch):
+    store, attempts, sf = system
+    claim, attempt, rid = bound_attempt(system)
+    complete(sf, rid)
+    store.revise_node("game", "a", 1, "contract changed while the run was in flight", goal="Implement a again")
+    monkeypatch.setattr(sf, "audit_operation_owners", lambda _rid: {"lost": [], "unknown": [], "alive": 1})
+    assert attempts.reconcile(attempt["attempt_id"], sf, ARTIFACT, actor=ACTOR)["status"] == "unknown"
+    assert claim_row(store, claim["claim_id"])["status"] == "live"
+    assert released_events(store, claim["claim_id"]) == []
+
+
+@pytest.mark.parametrize("terminal", ["completed", "failed"])
+def test_minimal_store_without_optional_claims_tables_reconciles_as_before(tmp_path, terminal):
+    store = StateGraphStore(DBManager(str(tmp_path / "minimal.db")), project_read_trusted=True)
+    store.create_project("game", "Long-running game")
+    store.add_nodes("game", [spec("a")])
+    attempts = StateAttempts(store)
+    sf = SkillFlow(str(tmp_path / "minimal-sf.db"))
+    try:
+        sf.register_graph(PipelineGraph(name="feature", begin="implementation", steps=[StepNode(id="implementation")]))
+        attempt = attempts.reserve("game", "a", 1, "feature", "r-minimal")
+        rid = sf.create_run(attempt["workflow"], project_id=attempt["execution_project_id"])
+        sf.start_run(rid)
+        attempts.bind_run(attempt["attempt_id"], rid, sf)
+        with store.transaction() as conn:
+            assert conn.execute("SELECT 1 FROM sqlite_master WHERE name='state_node_claims'").fetchone() is None
+        if terminal == "completed":
+            complete(sf, rid)
+            assert attempts.reconcile(attempt["attempt_id"], sf, ARTIFACT)["status"] == "candidate"
+        else:
+            sf.fail_run(rid, "implementation failed")
+            assert attempts.reconcile(attempt["attempt_id"], sf)["status"] == "failed"
+        with store.transaction() as conn:
+            assert conn.execute("SELECT 1 FROM sqlite_master WHERE name='state_node_claims'").fetchone() is None
+    finally:
+        sf._conn.close()

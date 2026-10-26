@@ -30,7 +30,12 @@ dependencies = [
     # the pytest it can load, and the divergence itself now has a check that
     # goes red (tests/unit/test_pytest_ini_switches_have_their_plugins.py), so
     # freezing the interpreter would buy nothing we have measured a need for.
-    "pytest-asyncio>=1.0",
+    # pytest-asyncio's metadata bounds the pytest it can load; it does not
+    # bound pytest-asyncio itself. Cap the plugin below the next major (the
+    # project follows SemVer) so an unreviewed 2.x cannot be resolved silently,
+    # while supported 1.x upgrades remain allowed and the real async-semantics
+    # alarm keeps running.
+    "pytest-asyncio>=1.0,<2",
     "fastapi>=0.136",
     "typer>=0.24",
     "litellm>=1.85",

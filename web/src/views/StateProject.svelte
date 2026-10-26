@@ -133,18 +133,7 @@
         <button class:active={tab === 'issues'} aria-pressed={tab === 'issues'} onclick={() => tab = 'issues'}>{st('issues')} · {data.issue_counts?.open ?? 0}</button>
       </nav>
       <p class="snapshot">{st('snapshot')}: {data.observed_at} · event {data.event_seq} {loading ? ' · ' + st('loading') : ''}</p>
-      <section class="working-notes" aria-label={st('workingNotes')}>
-        <h2>{st('workingNotes')}</h2>
-        {#if noteError}<p role="alert">{noteError}</p>
-        {:else if !note}<p aria-live="polite">{st('loading')}</p>
-        {:else}
-          <p class="note-meta">{st('revision')} r{note.revision} · {note.listed_count}/{note.entry_count}</p>
-          <details><summary>{st('detail')}</summary>
-            {#each note.index as item (item.address)}<p class="note-text">{item.index_line} · {item.address}</p>{/each}</details>
-        {/if}
-      </section>
       {#if tab === 'graph'}
-        <StateRunSummary projectId={params.id} refresh={detailRefresh} onselect={selectNode}/>
         <div class="workspace"><StateGraph nodes={data.nodes} {selected} onselect={selectNode} />
           <StateNodePanel projectId={params.id} nodeKey={selected} refresh={detailRefresh} onselect={selectNode} nodes={data.nodes} /></div>
       {:else if tab === 'runs'}
@@ -168,6 +157,19 @@
         <div class="evidence-workspace"><div class="node-index"><h3>{st('total')}</h3>
           {#each data.nodes as node (node.node_key)}<button class:chosen={selected === node.node_key} onclick={() => selected = node.node_key}>{node.title}<small>{node.status}</small></button>{/each}
         </div><StateNodePanel projectId={params.id} nodeKey={selected} refresh={detailRefresh} onselect={selectNode} nodes={data.nodes} /></div>
+      {/if}
+      <section class="working-notes" aria-label={st('workingNotes')}>
+        <h2>{st('workingNotes')}</h2>
+        {#if noteError}<p role="alert">{noteError}</p>
+        {:else if !note}<p aria-live="polite">{st('loading')}</p>
+        {:else}
+          <p class="note-meta">{st('revision')} r{note.revision} · {note.listed_count}/{note.entry_count}</p>
+          <details><summary>{st('detail')}</summary>
+            {#each note.index as item (item.address)}<p class="note-text">{item.index_line} · {item.address}</p>{/each}</details>
+        {/if}
+      </section>
+      {#if tab === 'graph'}
+        <StateRunSummary projectId={params.id} refresh={detailRefresh} onselect={selectNode}/>
       {/if}
     {/if}
   {/if}

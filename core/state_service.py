@@ -1408,7 +1408,7 @@ class StateService:
         # A run bound after a lost launch response is reconciled against its real
         # isolation receipt here too (compare-and-set; a no-op once judged).
         attempt = self._reconcile_prior_candidate(attempt)
-        observed = self.attempts.reconcile(attempt_id, self.sf)
+        observed = self.attempts.reconcile(attempt_id, self.sf, actor=self.actor)
         if observed["status"] == "failed":
             # What the director needs to choose between continue_from and a
             # fresh attempt: the retained commits and staged files, by step.
@@ -1448,7 +1448,7 @@ class StateService:
                         "detail": str(exc),
                     },
                 })
-            observed = self.attempts.reconcile(attempt_id, self.sf, artifact)
+            observed = self.attempts.reconcile(attempt_id, self.sf, artifact, actor=self.actor)
         return self._with_refusals(observed)
 
     def record_evidence(self, attempt_id, evidence_id, criterion_id, verdict, artifact, report_ref, report_sha256, detail="",

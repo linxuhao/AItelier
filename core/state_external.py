@@ -12,7 +12,7 @@ import re
 
 from core.state_graph import StateConflict, StateGraphError, digest, integer, key, now, text
 from core.drivers import actor_continues
-from core.state_attempts import _public
+from core.state_attempts import _public, release_bound_claims
 from core.state_claims import ClaimError
 from core.state_enforcement import enforced
 from core.state_report_integrity import retain_report, store_report_blob, validate_external_semantics
@@ -297,19 +297,7 @@ class ExternalAttempts:
                  'fence':fence})
             if terminal and a['owner_driver_id']:
                 # A settled attempt releases the claims bound to it (design §4.3).
-                for claim in conn.execute("SELECT * FROM state_node_claims WHERE attempt_id=? AND status='live'",
-                                          (attempt_id,)).fetchall():
-                    conn.execute("UPDATE state_node_claims SET status='released',updated_at=? WHERE claim_id=?",
-                                 (now(), claim['claim_id']))
-                    conn.execute("INSERT INTO state_claim_history(claim_id,project_id,node_key,driver_id,purpose,status,"
-                                 "fence,lease_expires_at,actor,reason,created_at) VALUES(?,?,?,?,?,'released',?,?,?,?,?)",
-                                 (claim['claim_id'], claim['project_id'], claim['node_key'], claim['driver_id'],
-                                  claim['purpose'], claim['fence'], claim['lease_expires_at'], self.actor,
-                                  f'attempt settled as {result_status}', now()))
-                    self.store._event(conn, a['project_id'], a['node_key'], 'claim_released', {
-                        'claim_id': claim['claim_id'], 'driver_id': claim['driver_id'], 'purpose': claim['purpose'],
-                        'fence': claim['fence'], 'reason': f'attempt settled as {result_status}',
-                        'attempt_id': attempt_id, 'actor': self.actor, 'break_glass': False})
+                release_bound_claims(self.store, conn, a, self.actor, result_status)
             updated = self.attempts._attempt(conn, attempt_id)
             row = conn.execute('SELECT * FROM state_external_observations WHERE attempt_id=? AND observation_id=?',
                                (attempt_id,observation_id)).fetchone()

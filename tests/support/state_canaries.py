@@ -137,7 +137,34 @@ def _plan():
              "VALUES(?,?,'claim',NULL,'claim-canary-public-id','a',?,NULL,'offered',?,1,?,'0',?,?,?)"),
             ("handoff-canary", OPEN, c("state_handoffs"), '{"next_step": "%s"}' % c("state_handoffs"),
              c("state_handoffs"), "2999-01-01T00:00:00.000000+00:00", now, now)),
+        # A correction retiring the scheduling protection of a run reference on
+        # the OPENED project's public node (its parent row is written by
+        # ``_prerequisites``). The public projection carries only the project,
+        # reference id and original payload hash; the canary sits in the private
+        # audit columns (reason, request identity, foreign binding witness).
+        "state_context_run_protection_retirements": (
+            ("INSERT INTO state_context_run_protection_retirements(project_id,reference_id,node_key,"
+             "node_revision,original_payload_hash,run_id,foreign_project_id,foreign_attempt_id,"
+             "foreign_execution_project_id,request_key,request_hash,actor,reason,created_at) "
+             "VALUES(?,?,'a',1,?,?,?,?,?,?,'0',?,?,?)"),
+            (OPEN, "retirement-canary-reference", "retirement-canary-payload-hash",
+             "retirement-canary-run", SHUT, c("state_context_run_protection_retirements"),
+             SHUT, c("state_context_run_protection_retirements"), "seeder",
+             c("state_context_run_protection_retirements"), now)),
     }
+
+
+def _prerequisites():
+    """Parent rows the plan's rows reference by foreign key. They carry no canary."""
+    now = _now()
+    return [(
+        "INSERT INTO state_history_links(project_id,reference_id,node_key,kind,ref,label,"
+        "observed_status,artifact_ref,report_sha256,provenance_actor,recorded_by,node_revision,"
+        "protection,payload_hash,created_at) "
+        "VALUES(?,?,'a','run',?,'canary run','completed',NULL,NULL,'seeder','seeder',1,1,?,?)",
+        (OPEN, "retirement-canary-reference", "retirement-canary-run",
+         "retirement-canary-payload-hash", now))]
+
 
 
 
@@ -169,6 +196,9 @@ def plant(path: str) -> None:
         f"{sorted(set(plan) - set(PRIVATE_STATE_TABLES))}")
     raw = sqlite3.connect(path)
     try:
+        for sql, params in _prerequisites():
+            cursor = raw.execute(sql, params)
+            assert cursor.rowcount == 1, (sql, cursor.rowcount)
         for table in sorted(plan):
             sql, params = plan[table]
             cursor = raw.execute(sql, params)

@@ -324,3 +324,113 @@ def test_cached_skip_through_canonical_evidence_reader_stays_unresolved(
     assert gate_evidence.report_state(second) == "skipped"
     assert gate_evidence.release_disposition(second) == "unresolved"
 
+
+# -- Totality of the positive-observation parser over supported JSON values ---
+# Every primitive JSON value a provider could put in heartbeat_at/generation
+# must yield either positive proof (well-formed, fresh) or UNKNOWN -> ordinary
+# POST. None may leak a conversion/arithmetic exception into the caller.
+
+_HUGE = 10 ** 400  # a valid JSON integer of 401 digits
+
+
+def _lifecycle_raw(row: dict, **raw_fields) -> bytes:
+    """Serialize a lifecycle body, splicing raw JSON literals for fields."""
+    row = dict(row)
+    for k in raw_fields:
+        row[k] = f"__RAW_{k}__"
+    body = json.dumps({"resource": "render", "owners": [row]})
+    for k, lit in raw_fields.items():
+        body = body.replace(json.dumps(f"__RAW_{k}__"), lit)
+    return body.encode()
+
+
+def test_huge_integer_heartbeat_first_wait_then_measured_retry(provider, project, tmp_path):
+    """Actual caller path: 401-digit JSON heartbeat is UNKNOWN, never an
+    exception, never positive proof; the authoritative POST runs and measures."""
+    provider.lifecycle = (200, {"resource": "render", "owners": [provider.row("owner-A")]})
+    first, res1 = _run(project, tmp_path / "o1")
+    assert first["skipped_because"] == "render_owner_wait_timed_out"
+    assert len(provider.posts) == 1
+    provider.lifecycle = (200, _lifecycle_raw(provider.row("owner-A"),
+                                              heartbeat_at=str(_HUGE)))
+    provider.post_mode = "ok"
+    report, res = _run(project, tmp_path / "o2", op="op-2")
+    assert provider.gets == 1, "observation was not consulted"
+    assert len(provider.posts) == 2
+    assert report["frames"] == 7 and report["state"] == {"x": 1}
+    assert "render_owner_repeat_suppressed" not in report
+    assert impl._repeat_memory == {}
+
+
+_BAD_HEARTBEAT_LITERALS = [
+    str(_HUGE), "-" + str(_HUGE), "1e400", "-1e400", "1e308", "-1e308",
+    "Infinity", "-Infinity", "NaN", "100000000000000000000", "0", "-1", "0.0",
+    "true", "false", "null", '"1"', '""', "[]", "{}", "[1]",
+]
+_BAD_GENERATION_LITERALS = [
+    str(_HUGE), "-" + str(_HUGE), str(2 ** 63), "-1", "0", "1.0", "1e400",
+    "Infinity", "NaN", "true", "false", "null", '"1"', "[]", "{}",
+]
+
+
+@pytest.mark.parametrize("field,literal",
+                         [("heartbeat_at", v) for v in _BAD_HEARTBEAT_LITERALS]
+                         + [("generation", v) for v in _BAD_GENERATION_LITERALS])
+def test_malformed_json_field_is_unknown_via_actual_caller(
+        provider, project, tmp_path, field, literal):
+    provider.lifecycle = (200, {"resource": "render", "owners": [provider.row("owner-A")]})
+    _run(project, tmp_path / "o1")
+    provider.lifecycle = (200, _lifecycle_raw(provider.row("owner-A"), **{field: literal}))
+    provider.post_mode = "ok"
+    report, _ = _run(project, tmp_path / "o2", op="op-2")
+    assert provider.gets == 1
+    assert len(provider.posts) == 2, (field, literal)
+    assert report["frames"] == 7 and "render_owner_repeat_suppressed" not in report
+
+
+@pytest.mark.parametrize("field,literal",
+                         [("heartbeat_at", v) for v in _BAD_HEARTBEAT_LITERALS]
+                         + [("generation", v) for v in _BAD_GENERATION_LITERALS])
+def test_observer_itself_is_total_and_returns_unknown(provider, field, literal):
+    """The raw observer return, not the caller's safety net, must be None."""
+    provider.lifecycle = (200, _lifecycle_raw(provider.row("owner-A"), **{field: literal}))
+    assert impl._observe_active_owner("owner-A") is None
+    assert provider.gets == 1
+
+
+def test_observer_missing_heartbeat_is_unknown(provider):
+    row = provider.row("owner-A")
+    del row["heartbeat_at"]
+    provider.lifecycle = (200, {"resource": "render", "owners": [row]})
+    assert impl._observe_active_owner("owner-A") is None
+
+
+@pytest.mark.parametrize("field,make", [
+    ("heartbeat_at", lambda: int(time.time())),          # JSON integer epoch
+    ("heartbeat_at", lambda: time.time() + 3.0),         # within skew
+    ("heartbeat_at", lambda: time.time() - 100.0),       # within staleness
+    ("generation", lambda: 2 ** 63 - 1),                 # SQLite INTEGER max
+    ("generation", lambda: 12345),
+])
+def test_well_formed_positive_observation_still_suppresses(
+        provider, project, tmp_path, field, make):
+    """Totality must not over-reject: valid protocol values remain proof."""
+    provider.lifecycle = (200, {"resource": "render", "owners": [provider.row("owner-A")]})
+    _run(project, tmp_path / "o1")
+    row = provider.row("owner-A")
+    row[field] = make()
+    provider.lifecycle = (200, {"resource": "render", "owners": [row]})
+    assert impl._observe_active_owner("owner-A") is not None
+    second, res = _run(project, tmp_path / "o2", op="op-2")
+    assert len(provider.posts) == 1
+    assert second["render_owner_repeat_suppressed"] is True
+    assert second["measurement_status"] == "UNMEASURED" and second["frames"] == 0
+    assert second["passed"] is False and res["passed"] is False
+
+
+def test_future_heartbeat_beyond_skew_is_unknown(provider):
+    row = provider.row("owner-A")
+    row["heartbeat_at"] = time.time() + impl._OWNER_HEARTBEAT_FUTURE_SKEW_SEC + 30
+    provider.lifecycle = (200, {"resource": "render", "owners": [row]})
+    assert impl._observe_active_owner("owner-A") is None
+

@@ -487,6 +487,7 @@ _OWNER_OBSERVE_TIMEOUT_SEC = 5.0
 _OWNER_HEARTBEAT_STALE_SEC = 120.0  # mirrors the sidecar's staleness threshold
 _OWNER_HEARTBEAT_FUTURE_SKEW_SEC = 5.0  # tolerated clock skew; beyond it = unknown
 _REPEAT_MEMORY_MAX = 64
+_SQLITE_INT_MAX = 2 ** 63 - 1  # generation column bound on the established wire
 _repeat_memory: dict = {}
 _repeat_memory_lock = threading.Lock()
 
@@ -548,21 +549,27 @@ def _observe_active_owner(owner_id: str) -> dict | None:
     if row.get("resource", "render") != "render":
         return None
     # The established wire carries an integer generation >= 1 (the sidecar
-    # allocates MAX(generation)+1 per acquisition); anything else is not a
-    # well-formed owner row and therefore not positive proof.
+    # allocates MAX(generation)+1 per acquisition in a SQLite INTEGER column,
+    # so it is bounded by 2**63-1); anything else -- bool, float, string,
+    # null, missing, out of range -- is not a well-formed owner row and
+    # therefore not positive proof.
     generation = row.get("generation")
-    if (type(generation) is not int) or generation < 1:
+    if (type(generation) is not int) or not 1 <= generation <= _SQLITE_INT_MAX:
         return None
-    # Heartbeat is a real epoch float. Non-finite, boolean, non-numeric and
-    # future values are unknown. Freshness is only what the row reports; it is
+    # Heartbeat is a SQLite REAL epoch (JSON int or float). Everything else
+    # -- bool, string, null, missing, list/object -- is unknown. The window
+    # test is done by COMPARISON only: Python compares int and float exactly
+    # without converting, so arbitrarily large JSON integers (10**400) and
+    # NaN/+-Infinity can never raise (no float(), no subtraction) and simply
+    # fall outside the window. Freshness is only what the row reports; it is
     # not kernel liveness.
     beat = row.get("heartbeat_at")
-    if (isinstance(beat, bool) or not isinstance(beat, (int, float))
-            or not math.isfinite(beat)):
+    if type(beat) not in (int, float):
         return None
-    age = time.time() - beat
-    if age < -_OWNER_HEARTBEAT_FUTURE_SKEW_SEC or age > _OWNER_HEARTBEAT_STALE_SEC:
-        return None
+    now = time.time()
+    if not (now - _OWNER_HEARTBEAT_STALE_SEC <= beat
+            <= now + _OWNER_HEARTBEAT_FUTURE_SKEW_SEC):
+        return None  # stale, future beyond skew, NaN, +-inf, huge: unknown
     return row
 
 
@@ -575,7 +582,10 @@ def _suppressed_repeat(key, payload: dict) -> dict | None:
         memo = _repeat_memory.get(key)
     if memo is None:
         return None
-    row = _observe_active_owner(memo["owner_id"])
+    try:
+        row = _observe_active_owner(memo["owner_id"])
+    except Exception:  # an observation must never break the caller: unknown
+        row = None
     if row is None:
         _forget_wait_expired(key)
         return None

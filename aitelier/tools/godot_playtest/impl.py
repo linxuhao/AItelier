@@ -485,6 +485,7 @@ def authored_caller_timeout(spec, ceiling: int | float) -> int | float:
 # evidence of anything: the suppressed report stays UNMEASURED.
 _OWNER_OBSERVE_TIMEOUT_SEC = 5.0
 _OWNER_HEARTBEAT_STALE_SEC = 120.0  # mirrors the sidecar's staleness threshold
+_OWNER_HEARTBEAT_FUTURE_SKEW_SEC = 5.0  # tolerated clock skew; beyond it = unknown
 _REPEAT_MEMORY_MAX = 64
 _repeat_memory: dict = {}
 _repeat_memory_lock = threading.Lock()
@@ -537,16 +538,33 @@ def _observe_active_owner(owner_id: str) -> dict | None:
     owners = body.get("owners")
     if not isinstance(owners, list):
         return None
-    for row in owners:
-        if not isinstance(row, dict) or row.get("owner_id") != owner_id:
-            continue
-        beat = row.get("heartbeat_at")
-        if (row.get("status") == "active" and isinstance(beat, (int, float))
-                and not isinstance(beat, bool)
-                and time.time() - beat <= _OWNER_HEARTBEAT_STALE_SEC):
-            return row
+    matches = [row for row in owners
+               if isinstance(row, dict) and row.get("owner_id") == owner_id]
+    if len(matches) != 1:
+        return None  # absent, or ambiguous: never positive proof
+    row = matches[0]
+    if row.get("status") != "active":
         return None
-    return None
+    if row.get("resource", "render") != "render":
+        return None
+    # The established wire carries an integer generation >= 1 (the sidecar
+    # allocates MAX(generation)+1 per acquisition); anything else is not a
+    # well-formed owner row and therefore not positive proof.
+    generation = row.get("generation")
+    if (type(generation) is not int) or generation < 1:
+        return None
+    # Heartbeat is a real epoch float. Non-finite, boolean, non-numeric and
+    # future values are unknown. Freshness is only what the row reports; it is
+    # not kernel liveness.
+    beat = row.get("heartbeat_at")
+    if (isinstance(beat, bool) or not isinstance(beat, (int, float))
+            or not math.isfinite(beat)):
+        return None
+    age = time.time() - beat
+    if age < -_OWNER_HEARTBEAT_FUTURE_SKEW_SEC or age > _OWNER_HEARTBEAT_STALE_SEC:
+        return None
+    return row
+
 
 
 def _suppressed_repeat(key, payload: dict) -> dict | None:
@@ -563,7 +581,10 @@ def _suppressed_repeat(key, payload: dict) -> dict | None:
         return None
     log_gate_skip("godot_playtest", "render_owner_repeat_suppressed",
                   url=_BUILDER_URL, owner_id=memo["owner_id"])
-    return {"passed": True, "frames": 0, "errors": [], "state": {},
+    # passed:false -- an unmeasured, cached skip must never read as a
+    # successful measurement. (The ordinary first-time refusal keeps its
+    # established passed:true shape; this cached path is new and stricter.)
+    return {"passed": False, "frames": 0, "errors": [], "state": {},
             "behavior": None, "spec_used": False, "gate_skipped": True,
             "skipped_because": "render_owner_wait_timed_out",
             "measurement_status": "UNMEASURED",

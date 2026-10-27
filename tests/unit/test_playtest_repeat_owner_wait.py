@@ -249,3 +249,78 @@ def test_memory_is_bounded(provider):
     for i in range(impl._REPEAT_MEMORY_MAX + 20):
         impl._remember_wait_expired(("u", "p", f"r{i}", "d"), {"owner_id": "o"})
     assert len(impl._repeat_memory) == impl._REPEAT_MEMORY_MAX
+
+
+def test_suppressed_repeat_bare_tool_return_is_not_a_success(provider, project, tmp_path):
+    """The actual return of godot_playtest must not advertise a cached,
+    UNMEASURED skip as a successful measurement."""
+    provider.lifecycle = (200, {"resource": "render", "owners": [provider.row("owner-A")]})
+    _run(project, tmp_path / "o1")
+    second, res = _run(project, tmp_path / "o2", op="op-2")
+    assert len(provider.posts) == 1
+    assert second["render_owner_repeat_suppressed"] is True
+    assert second["passed"] is False
+    assert res["passed"] is False, res
+
+
+def _bad_row(provider, **override):
+    row = provider.row("owner-A")
+    row.update(override)
+    return row
+
+
+@pytest.mark.parametrize("override", [
+    {"heartbeat_at": lambda: time.time() + 86400},
+    {"heartbeat_at": lambda: float("inf")},
+    {"heartbeat_at": lambda: float("nan")},
+    {"heartbeat_at": lambda: True},
+    {"generation": lambda: None},
+    {"generation": lambda: 0},
+    {"generation": lambda: "1"},
+    {"generation": lambda: 1.0},
+    {"generation": lambda: True},
+    {"resource": lambda: "other"},
+], ids=lambda o: next(iter(o)))
+def test_malformed_positive_observation_is_unknown_and_posts(
+        provider, project, tmp_path, override):
+    provider.lifecycle = (200, {"resource": "render", "owners": [provider.row("owner-A")]})
+    _run(project, tmp_path / "o1")
+    row = _bad_row(provider, **{k: v() for k, v in override.items()})
+    provider.lifecycle = (200, {"resource": "render", "owners": [row]})
+    provider.post_mode = "ok"
+    report, _ = _run(project, tmp_path / "o2", op="op-2")
+    assert len(provider.posts) == 2, override
+    assert report["frames"] == 7 and "render_owner_repeat_suppressed" not in report
+
+
+def test_missing_generation_is_unknown_and_posts(provider, project, tmp_path):
+    provider.lifecycle = (200, {"resource": "render", "owners": [provider.row("owner-A")]})
+    _run(project, tmp_path / "o1")
+    row = provider.row("owner-A")
+    del row["generation"]
+    provider.lifecycle = (200, {"resource": "render", "owners": [row]})
+    _run(project, tmp_path / "o2", op="op-2")
+    assert len(provider.posts) == 2
+
+
+def test_duplicate_owner_rows_are_ambiguous_not_positive(provider, project, tmp_path):
+    provider.lifecycle = (200, {"resource": "render", "owners": [provider.row("owner-A")]})
+    _run(project, tmp_path / "o1")
+    provider.lifecycle = (200, {"resource": "render", "owners": [
+        provider.row("owner-A"), provider.row("owner-A", generation=2)]})
+    _run(project, tmp_path / "o2", op="op-2")
+    assert len(provider.posts) == 2
+
+
+def test_cached_skip_through_canonical_evidence_reader_stays_unresolved(
+        provider, project, tmp_path):
+    """The cached skip, read by the real evidence stamper, is neither a pass
+    nor release evidence."""
+    from aitelier import gate_evidence
+    provider.lifecycle = (200, {"resource": "render", "owners": [provider.row("owner-A")]})
+    _run(project, tmp_path / "o1")
+    second, _ = _run(project, tmp_path / "o2", op="op-2")
+    assert len(provider.posts) == 1
+    assert gate_evidence.report_state(second) == "skipped"
+    assert gate_evidence.release_disposition(second) == "unresolved"
+

@@ -1,88 +1,85 @@
-"""A checkpoint must stay answerable after the pointer to it is lost.
+"""A genuine restart preserves routed checkpoint identity.
 
-skillflow's `recover_stale_claims` reaps a dead owner's claim by setting the
-run's `current_node` to NULL — unconditionally, PAUSED runs included, where the
-reaped claim says nothing about where the run sits. Restart the container while
-a checkpoint waits and that pointer is gone.
-
-`_get_checkpoint_info` derived the checkpoint step from `current_node` alone, so
-the loss was terminal: every answer path (SPA, CLI, butler, MCP) reported "no
-checkpoint to answer" for a run visibly paused at one, and the run could never
-be resumed. Measured on jinyong-hud, 2026-08-27, with the human vision verdict
-already written.
+The modern SDK owns checkpoint resolution. A NULL/empty pointer that disagrees
+with the retained routed pause is corruption, not a reason to guess another
+checkpoint. Keep that refusal separate from ordinary process recovery.
 """
-from unittest.mock import MagicMock
-
 import pytest
+from skillflow.core import SkillFlow, SkillFlowError, StepResult
+from skillflow.graph import PipelineGraph, StepNode, Transition
 
 
-def _node(checkpoint, label="", targets=()):
-    n = MagicMock()
-    n.checkpoint = checkpoint
-    n.checkpoint_label = label
-    n.transitions = [MagicMock(to=t, match={"from": "checkpoint"}) for t in targets]
-    return n
+def paused_checkpoint(tmp_path):
+    path = tmp_path / 'checkpoint.db'
+    options = dict(workspace_base=str(tmp_path / 'ws'), projects_base=str(tmp_path / 'projects'))
+    sf = SkillFlow(str(path), **options)
+    sf.register_graph(PipelineGraph(name='restart_proof', begin='plan', steps=[
+        StepNode(id='plan', checkpoint=True, checkpoint_label='Plan review',
+                 transitions=[Transition(to='vision')]),
+        StepNode(id='vision', checkpoint=True, checkpoint_label='Vision review',
+                 transitions=[Transition(to='done')]),
+        StepNode(id='done', transitions=[])]))
+    rid = sf.create_run('restart_proof', project_id='restart-proof')
+    sf.start_run(rid)
+    claim = sf.claim_next_step(rid)
+    sf.confirm_step(claim.token, StepResult(outputs={'plan': 'owned reviewed plan'}))
+    sf.advance_run(rid)
+    first = sf.get_checkpoint(rid)
+    sf.approve_checkpoint(rid, expected_checkpoint=first['expected_checkpoint'], decision_id='plan-approved')
+    sf.advance_run(rid)
+    claim = sf.claim_next_step(rid)
+    assert claim.step_id == 'vision'
+    sf.confirm_step(claim.token, StepResult(outputs={'frames': 'owned reviewed frames'}))
+    sf.advance_run(rid)
+    retained = sf.get_checkpoint(rid)
+    assert retained['step_id'] == 'vision'
+    assert retained['expected_checkpoint'] != first['expected_checkpoint']
+    return sf, rid, retained, path, options
 
 
-NODES = {
-    "5_vision": _node(False),
-    "5_vision_human": _node(True, "看帧裁决", ("5_vision_judged",)),
-    "3": _node(True, "计划评审", ("3_budget",)),
-}
-
-
-def _sf(current_node):
-    sf = MagicMock()
-    sf.get_run_by_project.return_value = {
-        "id": "run1", "graph_name": "dpe_game", "status": "paused",
-        "current_node": current_node, "error_reason": None,
-    }
-    resolver = MagicMock()
-    resolver.get_node.side_effect = lambda sid: NODES.get(sid)
-    sf._get_resolver.return_value = resolver
-    # The pinned accessor is what the code prefers now — a run answers about the
-    # graph version it started with, not whatever is registered. Same resolver
-    # here so these tests keep exercising checkpoint RESOLUTION.
-    sf._get_resolver_for_run.return_value = resolver
-    sf.get_steps.return_value = [
-        {"step_id": "3", "status": "completed", "id": 10},
-        {"step_id": "5_vision", "status": "completed", "id": 20},
-        {"step_id": "5_vision_human", "status": "completed", "id": 21},
-    ]
-    return sf
-
-
-@pytest.fixture
-def info(monkeypatch):
+def test_pointer_present_identifies_the_exact_checkpoint(tmp_path, monkeypatch):
     from api import meta_routers
-
-    def _call(current_node):
-        monkeypatch.setattr(meta_routers, "get_skillflow", lambda: _sf(current_node))
-        return meta_routers._get_checkpoint_info("p1")
-    return _call
-
-
-def test_pointer_present_identifies_the_exact_checkpoint(info):
-    step_id, label, _run, _graph, instance = info("5_vision_judged")
-    assert step_id == "5_vision_human"
-    assert label == "看帧裁决"
-    assert instance == 21
+    sf, rid, retained, _, _ = paused_checkpoint(tmp_path)
+    monkeypatch.setattr(meta_routers, 'get_skillflow', lambda: sf)
+    assert meta_routers._get_checkpoint_info('restart-proof') == (
+        'vision', 'Vision review', rid, 'restart_proof', retained['expected_checkpoint']['step_instance_id'])
 
 
-def test_pointer_lost_still_finds_the_checkpoint(info):
-    # This is the restart case: current_node nulled, run still paused.
-    step_id, label, _run, _graph, instance = info(None)
-    assert step_id == "5_vision_human", (
-        "a paused run whose current_node was reaped must still be answerable")
-    assert label == "看帧裁决"
-    assert instance == 21
+def test_fresh_engine_and_real_recovery_preserve_the_retained_pause(tmp_path, monkeypatch):
+    from api import meta_routers
+    _, rid, retained, path, options = paused_checkpoint(tmp_path)
+    reopened = SkillFlow(str(path), **options)
+    reopened.recover_stale_claims(run_id=rid)
+    assert reopened.get_checkpoint(rid) == retained
+    monkeypatch.setattr(meta_routers, 'get_skillflow', lambda: reopened)
+    step, label, actual_run, _, instance = meta_routers._get_checkpoint_info('restart-proof', rid)
+    assert (step, label, actual_run, instance) == (
+        'vision', 'Vision review', rid, retained['expected_checkpoint']['step_instance_id'])
+    reopened.approve_checkpoint(rid, expected_checkpoint=retained['expected_checkpoint'],
+                                decision_id='vision-after-restart')
+    reopened.advance_run(rid)
+    assert reopened.claim_next_step(rid).step_id == 'done'
 
 
-def test_empty_pointer_is_treated_the_same_as_missing(info):
-    assert info("")[0] == "5_vision_human"
+@pytest.mark.parametrize('pointer', [None, ''], ids=['null', 'empty'])
+def test_corrupt_pointer_is_refused_without_guessing_a_checkpoint(tmp_path, monkeypatch, pointer):
+    from api import meta_routers
+    sf, rid, retained, _, _ = paused_checkpoint(tmp_path)
+    with sf._tx() as conn:
+        conn.execute('UPDATE skillflow_runs SET current_node=? WHERE id=?', (pointer, rid))
+    monkeypatch.setattr(meta_routers, 'get_skillflow', lambda: sf)
+    with pytest.raises(SkillFlowError, match='matching routed checkpoint pause'):
+        meta_routers._get_checkpoint_info('restart-proof', rid)
+    assert sf.get_run(rid)['status'] == 'paused'
+    assert sf.get_run(rid)['current_node'] == pointer
+    assert retained['step_id'] == 'vision'
 
 
-def test_pointer_lost_picks_the_MOST_RECENT_checkpoint_not_the_first(info):
-    # Step 3 is also a checkpoint and completed earlier. Falling back to it
-    # would rewind the run past everything the task loop built.
-    assert info(None)[0] != "3"
+def test_restart_keeps_the_most_recent_checkpoint_not_the_first(tmp_path, monkeypatch):
+    from api import meta_routers
+    _, rid, retained, path, options = paused_checkpoint(tmp_path)
+    reopened = SkillFlow(str(path), **options)
+    monkeypatch.setattr(meta_routers, 'get_skillflow', lambda: reopened)
+    result = meta_routers._get_checkpoint_info('restart-proof', rid)
+    assert result[0] == retained['step_id'] == 'vision'
+    assert result[4] == retained['expected_checkpoint']['step_instance_id']

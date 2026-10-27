@@ -1,5 +1,5 @@
 import json
-from types import SimpleNamespace
+from uuid import uuid4
 import pytest
 from skillflow.graph import PipelineGraph, StepNode, Transition
 from skillflow.core import StepResult
@@ -16,7 +16,10 @@ def completed_meta(sf, client=None):
         StepNode(id='gather', step_type='agent', checkpoint=True, transitions=[Transition(to='finalize')]),
         StepNode(id='finalize', step_type='agent', transitions=[])])
     sf.register_graph(graph)
-    rid = sf.create_run(graph.name, project_id='normal-checkpoint-proof')
+    from api.dependencies import get_db_manager
+    project_id = 'completed-meta-' + uuid4().hex
+    get_db_manager().ensure_project(project_id)
+    rid = sf.create_run(graph.name, project_id=project_id)
     sf.start_run(rid)
     c = sf.claim_next_step(rid)
     original = {'brief': {'user_stories': ['Original reviewed story'], 'goal': 'ORIGINAL'}, 'need_input': False}
@@ -87,7 +90,13 @@ async def test_completed_brief_tool_binds_original_token_and_retained_brief(live
     rid, observed, original = completed_meta(sf, client if mode == 'valid-cli-recovery' else None)
     agent=MetaAgent.__new__(MetaAgent)
     effects=[]
-    agent.db=SimpleNamespace(update_project=lambda *a,**kw:effects.append(('update',kw)))
+    from api.dependencies import get_db_manager
+    agent.db=get_db_manager()
+    update=agent.db.update_project
+    def retain_update(*args,**kwargs):
+        effects.append(('update',kwargs))
+        return update(*args,**kwargs)
+    monkeypatch.setattr(agent.db,'update_project',retain_update)
     agent.ws=object()
     agent._log_error=lambda msg:None
     def resolve_build_config(sf,args):

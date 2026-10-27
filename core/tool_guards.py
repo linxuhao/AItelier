@@ -37,7 +37,7 @@ SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 
 def _bad_name(name, kind: str) -> str | None:
-    if not isinstance(name, str) or not SAFE_NAME.match(name or "") or ".." in name:
+    if not isinstance(name, str) or not SAFE_NAME.fullmatch(name or "") or ".." in name:
         return (f"invalid {kind} name {name!r} — it must be a single name "
                 f"(letters, digits, dot, underscore, dash; no path separators, "
                 f"no '..', no leading dot)")

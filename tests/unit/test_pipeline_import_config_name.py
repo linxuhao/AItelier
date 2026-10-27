@@ -20,7 +20,7 @@ import yaml
 
 from core import pipeline_bundle as pb, pipeline_registry as pr
 from core.pipeline_bundle import BundleError
-from core.tool_guards import bad_config_name
+from core.tool_guards import bad_config_name, bad_tool_name
 from tests.integration.test_nested_callback_seed import runtime  # noqa: F401  (fixture)
 
 TOOL_FILES = {"tool.yaml": "name: custom_scorer\ndescription: score it\n",
@@ -121,6 +121,8 @@ INVALID = [
     pytest.param("gen_a..b", id="double-dot"),
     pytest.param("gen_a\x00b", id="nul"),
     pytest.param("gen_a\tb", id="control-tab"),
+    pytest.param("gen_a\n", id="final-newline"),
+    pytest.param("gen_" + "a" * 60 + "\n", id="64-ascii-plus-newline65"),
     pytest.param("gen_caf\u00e9", id="non-ascii"),
     pytest.param("gen_a b", id="space"),
 ]
@@ -218,6 +220,8 @@ def _real_snapshot(sf, registry, name):
     pytest.param("gen_" + "b" * 61, id="length65"),
     pytest.param("gen_" + "b" * 64, id="length68"),
     pytest.param("gen_x/../y", id="traversal"),
+    pytest.param("gen_a\n", id="final-newline"),
+    pytest.param("gen_" + "a" * 60 + "\n", id="64-ascii-plus-newline65"),
 ])
 def test_real_runtime_refusal_leaves_disk_sdk_and_registry_untouched(runtime, boundaries, name):
     sf, db, ws, registry, outbound = runtime
@@ -246,3 +250,11 @@ def test_real_runtime_exact_64_import_registers_and_exports(runtime, boundaries)
     assert Path(result["path"]).is_file()
     assert pb.export_pipeline(name)["config_name"] == name
     assert outbound == []
+
+
+@pytest.mark.parametrize("name", ["gen_a\n", "gen_" + "a" * 60 + "\n"])
+def test_shared_config_and_tool_checker_consumes_the_entire_name(name):
+    # A dollar anchor with match() can stop before a final newline. Both public
+    # consumers must enforce the same unchanged whole-name grammar.
+    assert bad_config_name(name) is not None
+    assert bad_tool_name(name) is not None

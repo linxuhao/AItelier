@@ -34,6 +34,13 @@ _SPENT_WINDOW_RE = re.compile(
     r"\byou (?:have )?(?:reached|exceeded) your (?:\w+ )?"
     r"(?:\d+[- ]?hours?|hourly|daily|weekly|monthly)\s+(?:usage\s+)?limit\b")
 
+# Observed Anthropic HTTP 400 wording (see `is_spend_limit_refusal`).
+_SPEND_LIMIT_RE = re.compile(r"\byou have reached your specified api usage limits?\b")
+_REGAIN_ACCESS_RE = re.compile(
+    r"regain access on\s+(\d{4}-\d{2}-\d{2})\s+at\s+(\d{2}):(\d{2})\s*utc\b",
+    re.IGNORECASE)
+
+
 
 def is_quota_exhausted(err) -> bool:
     """Is this a spent usage window (vs. burst throttling)?
@@ -42,13 +49,40 @@ def is_quota_exhausted(err) -> bool:
     For window-limit wording, exceptions must also carry HTTP 429 provenance:
     the scheduler receives arbitrary application/tool errors as well. Plain
     strings support message inspection without importing the gateway/SDK.
+    The observed Anthropic HTTP 400 spend-limit refusal is a spent window too,
+    but only for an exception with that exact status/provider provenance.
     """
+    if is_spend_limit_refusal(err):
+        return True
     msg = str(err).lower()
     if "quota" in msg and ("exceed" in msg or "exhaust" in msg or "reset" in msg):
         return True
     if not isinstance(err, str) and getattr(err, "status_code", None) != 429:
         return False
     return _SPENT_WINDOW_RE.search(msg) is not None
+
+
+def is_spend_limit_refusal(err) -> bool:
+    """Observed Anthropic HTTP 400 API spend-limit refusal.
+
+    Anthropic reports a spent organisation spend limit as `invalid_request_error`
+    with status 400, not 429, and the prose names neither a quota nor a window:
+    "You have reached your specified API usage limits. You will regain access on
+    2026-11-01 at 00:00 UTC." LiteLLM types it as BadRequestError, so neither
+    `is_quota_exhausted` nor a status remap recognises it.
+
+    Provenance is part of the match: exception objects only (never a plain
+    string or tool text), HTTP 400, and an Anthropic `llm_provider`. The wording
+    alone is not trusted, because the same sentence can be quoted by arbitrary
+    application prose.
+    """
+    if isinstance(err, str):
+        return False
+    if getattr(err, "status_code", None) != 400:
+        return False
+    if str(getattr(err, "llm_provider", "") or "").lower() != "anthropic":
+        return False
+    return _SPEND_LIMIT_RE.search(str(err).lower()) is not None
 
 
 def quota_reset_at(err) -> "datetime.datetime | None":
@@ -58,9 +92,22 @@ def quota_reset_at(err) -> "datetime.datetime | None":
     expected to fall back to a short fixed hold rather than guess.
     """
     from datetime import datetime, timedelta, timezone
-    m = _QUOTA_RESET_RE.search(str(err))
+    text = str(err)
+    m = _QUOTA_RESET_RE.search(text)
     if not m:
-        return None
+        # Anthropic spend limit: "You will regain access on 2026-11-01 at
+        # 00:00 UTC." Only an explicitly stated UTC instant is parsed.
+        g = _REGAIN_ACCESS_RE.search(text)
+        if not g:
+            return None
+        try:
+            stamp = datetime.strptime(
+                f"{g.group(1)} {g.group(2)}:{g.group(3)}:00",
+                "%Y-%m-%d %H:%M:%S")
+
+        except ValueError:
+            return None
+        return stamp.replace(tzinfo=timezone.utc)
     try:
         stamp = datetime.strptime(m.group(1).replace("T", " "),
                                   "%Y-%m-%d %H:%M:%S")
@@ -74,3 +121,4 @@ def quota_reset_at(err) -> "datetime.datetime | None":
     # No offset given: assume the provider meant UTC. Being wrong here costs at
     # most a few hours of holding, which is still better than a dead run.
     return stamp.replace(tzinfo=timezone.utc)
+

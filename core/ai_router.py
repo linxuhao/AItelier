@@ -180,7 +180,8 @@ def _endpoint_window(concrete: str, provs: dict | None) -> int | None:
 # scheduler holds every tick until the reset instant (see _quota_hold).
 # The burst-vs-spent-window test lives in core.llm_quota: the scheduler asks
 # the same questions on a path that must not import litellm.
-from core.llm_quota import is_quota_exhausted, quota_reset_at
+from core.llm_quota import (is_quota_exhausted, is_spend_limit_refusal,
+                            quota_reset_at)
 
 
 def _canonical_request_value(value) -> str:
@@ -1088,10 +1089,11 @@ class AIGateway:
                 self._apply_binding(kwargs)
                 continue
             except Exception as e:
-                # Spent Anthropic credit and invalid/expired Ark CodingPlan
-                # entitlement arrive as 400s: endpoint failures dressed as
-                # request errors. Reuse the bounded candidate walk and cooldown.
-                if _is_spent_credit(e):
+                # Spent Anthropic credit, an observed Anthropic API spend-limit
+                # refusal and invalid/expired Ark CodingPlan entitlement arrive
+                # as 400s: endpoint failures dressed as request errors. Reuse
+                # the bounded candidate walk and cooldown.
+                if _is_spent_credit(e) or is_spend_limit_refusal(e):
                     if not self._failover(e):
                         exc = self._explain_auth(e)
                         exc._aitelier_candidates = list(self._candidates)

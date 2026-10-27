@@ -48,8 +48,14 @@ A node is an acceptance-bearing goal. A found defect, coverage gap, cross-projec
 hand-off or open question is an **issue** (`report_issue`, kind
 `defect|gap|handoff|question`, optional linked `node_keys`, `source` provenance).
 Reporting and `link_issue` never change a node's status, revision, readiness or
-the frontier, and issues are never dispatched. Investigation narrative lives in
-the issue body, not in a node goal (revising a goal invalidates dependents).
+the frontier, and issues are never dispatched. `link_issue` ADDS the requested
+`node_keys` to the issue's current links (an empty list keeps them all; at most 20
+effective links). Only an explicit strict boolean `replace_existing=true` (default
+false) makes `node_keys` the exact new set, removing every other link (an empty
+list then clears all); the response and `issue_linked` event carry the effective
+set and the intent. `expected_version` and OPEN-issue checks apply in both modes.
+Investigation narrative lives in the issue body, not in a node goal (revising a
+goal invalidates dependents).
 
 `resolve_issue` is terminal and must name what absorbed the issue:
 `absorbed` (a node revision created after the report), `promoted` (a node created

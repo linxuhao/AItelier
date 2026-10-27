@@ -236,21 +236,43 @@ class StateIssues:
         return row
 
     def link(self, project_id: str, issue_id: str, expected_version: int, node_keys: list[str],
-             reason: str) -> dict:
-        """Replace the linked node set of an OPEN issue. Nodes are not changed."""
+             reason: str, replace_existing: bool = False) -> dict:
+        """Link nodes to an OPEN issue. Nodes are not changed.
+
+        By default the requested nodes are ADDED to the current links (union), so an
+        incremental link can never drop prior provenance and an empty list keeps
+        every link. Only an explicit ``replace_existing=True`` makes ``node_keys``
+        the exact new set (an empty list then clears all links).
+        """
         project_id = key(project_id, "project_id")
         reason = text(reason, "reason", 4000)
+        if not isinstance(replace_existing, bool):
+            raise StateGraphError("replace_existing must be a boolean (true replaces the whole link set)")
         with self.store.transaction(write=True) as conn:
             row = self._open_for_write(conn, project_id, issue_id, expected_version)
-            links = self._node_keys(conn, project_id, node_keys)
-            conn.execute("DELETE FROM state_issue_nodes WHERE issue_id=?", (row["issue_id"],))
+            requested = self._node_keys(conn, project_id, node_keys)
+            current = self._links(conn, row["issue_id"])
+            links = requested if replace_existing else sorted(set(current) | set(requested))
+            if len(links) > MAX_LINKS:
+                raise StateGraphError(
+                    f"an issue can link at most {MAX_LINKS} nodes; the effective set would have {len(links)} "
+                    "(use replace_existing=true to choose an exact smaller set)")
+            removed = sorted(set(current) - set(links))
+            added = sorted(set(links) - set(current))
+            if removed:
+                conn.executemany("DELETE FROM state_issue_nodes WHERE issue_id=? AND node_key=?",
+                                 [(row["issue_id"], k) for k in removed])
             conn.executemany("INSERT INTO state_issue_nodes VALUES(?,?,?)",
-                             [(row["issue_id"], project_id, k) for k in links])
+                             [(row["issue_id"], project_id, k) for k in added])
             conn.execute("UPDATE state_issues SET version=version+1,updated_at=? WHERE issue_id=?",
                          (now(), row["issue_id"]))
             self.store._event(conn, project_id, None, "issue_linked", {
-                "issue_id": row["issue_id"], "node_keys": links, "reason": reason})
-            return self._view(conn, self._issue(conn, project_id, issue_id), full=True)
+                "issue_id": row["issue_id"], "node_keys": links, "requested_node_keys": requested,
+                "added_node_keys": added, "removed_node_keys": removed,
+                "replace_existing": replace_existing, "reason": reason})
+            return {**self._view(conn, self._issue(conn, project_id, issue_id), full=True),
+                    "effective_node_keys": links, "added_node_keys": added,
+                    "removed_node_keys": removed, "replace_existing": replace_existing}
 
     def resolve(self, project_id: str, issue_id: str, expected_version: int, resolution: str,
                 reason: str, director_identity: str, node_key: str | None = None,

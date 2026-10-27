@@ -11,7 +11,7 @@ import yaml
 
 from api import mcp_router
 from core import pipeline_bundle as pb, project_id as pid_mod
-from tests.integration.test_nested_callback_seed import bundle, runtime  # noqa: F401  (fixture)
+from tests.integration.test_nested_callback_seed import runtime  # noqa: F401  (fixture)
 
 LONG_NAME = "gen_sdk100_live_checkpoint_20261027_b0a871b25d544edc88d9578958f66e93"
 
@@ -33,7 +33,24 @@ def test_long_imported_config_launches_with_valid_project_and_exact_identity(run
     # No event loop means _start_driver attaches nothing: the run stays at its start.
     monkeypatch.setattr(mcp_router, "_MAIN_LOOP", None)
     assert len(LONG_NAME) > 64
-    imported = pb.import_pipeline(sf, registry, bundle(LONG_NAME, "direct", "unused", "unused"))
+    graph = {
+        "name": LONG_NAME,
+        "x-aitelier": {"repo_mode": "none", "scheduler_owned": False,
+                       "seed_file": "task.md", "output_step": "docs"},
+        "begin": "docs",
+        "end_conditions": {"combinator": "or", "conditions": [
+            {"type": "node_reached", "node": "done", "result": "completed"}]},
+        "steps": [
+            {"id": "docs", "step_type": "tool", "tool_name": "skillflow_docs_list",
+             "transitions": [{"to": "done"}]},
+            {"id": "done", "step_type": "gate", "transitions": [{"to": None}]},
+        ],
+    }
+    native_bundle = {
+        pb.BUNDLE_KEY: pb.BUNDLE_VERSION, "config_name": LONG_NAME,
+        "graph_yaml": yaml.safe_dump(graph), "roles": {}, "tools": {},
+    }
+    imported = pb.import_pipeline(sf, registry, native_bundle)
     assert imported["config_name"] == LONG_NAME
     manifest = registry.get(LONG_NAME)
     assert manifest is not None and manifest.config_name == LONG_NAME
@@ -64,3 +81,6 @@ def test_long_imported_config_launches_with_valid_project_and_exact_identity(run
     persisted = yaml.safe_load(Path(imported["path"]).read_text())
     assert persisted["name"] == LONG_NAME
     assert registry.get(LONG_NAME).config_name == LONG_NAME
+    assert persisted["steps"][0]["step_type"] == "tool"
+    assert persisted["steps"][0]["tool_name"] == "skillflow_docs_list"
+    assert outbound == []  # Neither a live nor scripted provider was called.

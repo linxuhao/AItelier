@@ -263,6 +263,12 @@ def import_pipeline(sf, registry, bundle: dict, *, name: str | None = None,
             f"pipeline name. Importing it would replace a built-in config of that "
             f"name. Re-run with name=<something> to install it as "
             f"{pr.GEN_PREFIX}<slug>.")
+    # The FINAL selected destination must satisfy the same single-name contract
+    # export/get/edit already enforce, before anything is probed or persisted.
+    bad = bad_config_name(config_name)
+    if bad:
+        raise BundleError(bad)
+
 
     graph = yaml.safe_load(bundle["graph_yaml"]) or {}
     roles = dict(bundle.get("roles") or {})

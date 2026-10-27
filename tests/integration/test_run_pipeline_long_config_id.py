@@ -3,6 +3,13 @@
 Real DB / SDK / registry state in an isolated home (the shared `runtime`
 fixture); generate_run_id, the project validator and start_config_run are all
 real. Nothing is driven: no provider is called and no driver loop is attached.
+
+The ordinary import uses an exact 64-character name, the longest the existing
+config-name contract (core.tool_guards.bad_config_name) accepts. The originally
+observed 68-character generated name is admitted by NEITHER import nor
+export/get/edit any more; it stays covered at the launcher-helper level by
+tests/unit/test_run_launcher_project_ids.py and is refused at import by
+tests/unit/test_pipeline_import_config_name.py.
 """
 import re
 from pathlib import Path
@@ -11,9 +18,12 @@ import yaml
 
 from api import mcp_router
 from core import pipeline_bundle as pb, project_id as pid_mod
+from core.tool_guards import bad_config_name
 from tests.integration.test_nested_callback_seed import runtime  # noqa: F401  (fixture)
 
-LONG_NAME = "gen_sdk100_live_checkpoint_20261027_b0a871b25d544edc88d9578958f66e93"
+ORIGINAL_68 = "gen_sdk100_live_checkpoint_20261027_b0a871b25d544edc88d9578958f66e93"
+# Exact 64: same prefix, hex tail cut to what the 64-character contract leaves.
+LONG_NAME = ORIGINAL_68[:64]
 
 
 def _run_pipeline_tool():
@@ -32,7 +42,10 @@ def test_long_imported_config_launches_with_valid_project_and_exact_identity(run
     sf, db, ws, registry, outbound = runtime
     # No event loop means _start_driver attaches nothing: the run stays at its start.
     monkeypatch.setattr(mcp_router, "_MAIN_LOOP", None)
-    assert len(LONG_NAME) > 64
+    assert len(ORIGINAL_68) == 68 and bad_config_name(ORIGINAL_68) is not None
+    assert len(LONG_NAME) == 64
+    assert bad_config_name(LONG_NAME) is None  # the real config-name guard accepts it
+
     graph = {
         "name": LONG_NAME,
         "x-aitelier": {"repo_mode": "none", "scheduler_owned": False,

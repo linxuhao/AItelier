@@ -26,6 +26,8 @@ import json
 import math
 import os
 import struct
+import threading
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -468,6 +470,159 @@ def authored_caller_timeout(spec, ceiling: int | float) -> int | float:
     return min(timeout, ceiling)
 
 
+# -- Repeat protection after an exhausted render-owner wait -------------------
+# A caller whose render_wait_timeout_sec just ran out behind live owner X, and
+# that immediately asks again while X is still the active owner, would spend
+# another full queue wait for the same outcome (live 2026-10-27: 450s twice
+# per owner, zero scene measurements). Before re-POSTing, such a caller asks
+# the sidecar's existing read-only GET /lifecycle whether that owner is still
+# active. Only a POSITIVE observation of the same owner, active, with a fresh
+# heartbeat suppresses the POST. Anything else -- owner released, a different
+# owner, unreadable/malformed/unavailable observation -- leaves the ordinary
+# POST path untouched; unknown is never read as free, and never as blocked.
+# The memory is process-local, bounded, scoped to one caller (builder URL,
+# project, run, project dir -- never the per-call operation_id) and is never
+# evidence of anything: the suppressed report stays UNMEASURED.
+_OWNER_OBSERVE_TIMEOUT_SEC = 5.0
+_OWNER_HEARTBEAT_STALE_SEC = 120.0  # mirrors the sidecar's staleness threshold
+_OWNER_HEARTBEAT_FUTURE_SKEW_SEC = 5.0  # tolerated clock skew; beyond it = unknown
+_REPEAT_MEMORY_MAX = 64
+_SQLITE_INT_MAX = 2 ** 63 - 1  # generation column bound on the established wire
+_repeat_memory: dict = {}
+_repeat_memory_lock = threading.Lock()
+
+
+def _caller_key(payload: dict):
+    """Stable caller scope, or None when the request carries no run identity."""
+    run_id = payload.get("run_id")
+    if not run_id:
+        return None
+    return (_BUILDER_URL.rstrip("/"), str(payload.get("project_id") or ""),
+            str(run_id), str(payload.get("project_dir") or ""))
+
+
+def _remember_wait_expired(key, refusal: dict) -> None:
+    owner_id = refusal.get("owner_id")
+    if key is None or not owner_id or not isinstance(owner_id, str):
+        return
+    with _repeat_memory_lock:
+        _repeat_memory.pop(key, None)
+        _repeat_memory[key] = {"owner_id": owner_id, "refusal": dict(refusal),
+                               "recorded_at": time.time()}
+        while len(_repeat_memory) > _REPEAT_MEMORY_MAX:
+            _repeat_memory.pop(next(iter(_repeat_memory)))
+
+
+def _forget_wait_expired(key) -> None:
+    if key is None:
+        return
+    with _repeat_memory_lock:
+        _repeat_memory.pop(key, None)
+
+
+def _observe_active_owner(owner_id: str) -> dict | None:
+    """The owner's lifecycle row iff GET /lifecycle POSITIVELY shows it active.
+
+    None means "not shown active": released, replaced, or the observation was
+    unavailable or malformed. Callers treat None as permission to ask the
+    sidecar normally, which stays the only authority.
+    """
+    try:
+        with urllib.request.urlopen(
+                _BUILDER_URL.rstrip("/") + "/lifecycle",
+                timeout=_OWNER_OBSERVE_TIMEOUT_SEC) as resp:
+            body = json.loads(resp.read())
+    except Exception:
+        return None
+    if not isinstance(body, dict) or body.get("resource") != "render":
+        return None
+    owners = body.get("owners")
+    if not isinstance(owners, list):
+        return None
+    matches = [row for row in owners
+               if isinstance(row, dict) and row.get("owner_id") == owner_id]
+    if len(matches) != 1:
+        return None  # absent, or ambiguous: never positive proof
+    row = matches[0]
+    if row.get("status") != "active":
+        return None
+    if row.get("resource", "render") != "render":
+        return None
+    # The established wire carries an integer generation >= 1 (the sidecar
+    # allocates MAX(generation)+1 per acquisition in a SQLite INTEGER column,
+    # so it is bounded by 2**63-1); anything else -- bool, float, string,
+    # null, missing, out of range -- is not a well-formed owner row and
+    # therefore not positive proof.
+    generation = row.get("generation")
+    if (type(generation) is not int) or not 1 <= generation <= _SQLITE_INT_MAX:
+        return None
+    # Heartbeat is a SQLite REAL epoch (JSON int or float). Everything else
+    # -- bool, string, null, missing, list/object -- is unknown. The window
+    # test is done by COMPARISON only: Python compares int and float exactly
+    # without converting, so arbitrarily large JSON integers (10**400) and
+    # NaN/+-Infinity can never raise (no float(), no subtraction) and simply
+    # fall outside the window. Freshness is only what the row reports; it is
+    # not kernel liveness.
+    beat = row.get("heartbeat_at")
+    if type(beat) not in (int, float):
+        return None
+    now = time.time()
+    if not (now - _OWNER_HEARTBEAT_STALE_SEC <= beat
+            <= now + _OWNER_HEARTBEAT_FUTURE_SKEW_SEC):
+        return None  # stale, future beyond skew, NaN, +-inf, huge: unknown
+    return row
+
+
+
+def _suppressed_repeat(key, payload: dict) -> dict | None:
+    """An UNMEASURED report instead of a repeat POST, or None to POST normally."""
+    if key is None:
+        return None
+    with _repeat_memory_lock:
+        memo = _repeat_memory.get(key)
+    if memo is None:
+        return None
+    try:
+        row = _observe_active_owner(memo["owner_id"])
+    except Exception:  # an observation must never break the caller: unknown
+        row = None
+    if row is None:
+        _forget_wait_expired(key)
+        return None
+    log_gate_skip("godot_playtest", "render_owner_repeat_suppressed",
+                  url=_BUILDER_URL, owner_id=memo["owner_id"])
+    # passed:false -- an unmeasured, cached skip must never read as a
+    # successful measurement. (The ordinary first-time refusal keeps its
+    # established passed:true shape; this cached path is new and stricter.)
+    return {"passed": False, "frames": 0, "errors": [], "state": {},
+            "behavior": None, "spec_used": False, "gate_skipped": True,
+            "skipped_because": "render_owner_wait_timed_out",
+            "measurement_status": "UNMEASURED",
+            "render_owner_repeat_suppressed": True,
+            "render_owner_conflict": memo["refusal"],
+            "render_owner_observation": {
+                "owner_id": row.get("owner_id"),
+                "generation": row.get("generation"),
+                "status": row.get("status"),
+                "project_id": row.get("project_id"),
+                "run_id": row.get("run_id"),
+                "heartbeat_at": row.get("heartbeat_at"),
+                "caller_run_id": payload.get("run_id"),
+                "caller_project_id": payload.get("project_id")},
+            "retry_condition": (
+                "retry after render owner %s is no longer reported active by "
+                "GET /lifecycle (released) or a different owner holds the render"
+                % memo["owner_id"]),
+            "summary": (
+                f"godot-builder play-test NOT attempted again: this caller's "
+                f"render-owner wait already expired and render owner "
+                f"{memo['owner_id']} is still reported active by GET /lifecycle. "
+                f"UNMEASURED -- no scene was rendered or smoke-tested, and this "
+                f"is not a pass. It becomes retryable once that owner is "
+                f"released or replaced. Play-test gate skipped -- scene NOT "
+                f"smoke-tested.")}
+
+
 def post_playtest(payload: dict, timeout: int = 3600) -> dict:
     """POST one /playtest request to the sidecar and return its report.
 
@@ -506,12 +661,18 @@ def post_playtest(payload: dict, timeout: int = 3600) -> dict:
     payload.setdefault("timeout", authored_caller_timeout(payload.get("spec"), timeout))
     payload.setdefault("render_wait_timeout_sec", round(timeout * RENDER_QUEUE_SHARE, 3))
     body = json.dumps(payload).encode("utf-8")
+    caller_key = _caller_key(payload)
+    suppressed = _suppressed_repeat(caller_key, payload)
+    if suppressed is not None:
+        return suppressed
     req = urllib.request.Request(
         _BUILDER_URL.rstrip("/") + "/playtest", data=body,
         headers={"Content-Type": "application/json"}, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read())
+            result = json.loads(resp.read())
+            _forget_wait_expired(caller_key)
+            return result
     except (urllib.error.URLError, OSError, json.JSONDecodeError,
             TimeoutError) as e:
         if _is_timeout(e):
@@ -547,6 +708,8 @@ def post_playtest(payload: dict, timeout: int = 3600) -> dict:
                        else f"render_owner_{refusal.get('owner_kind')}")
             log_gate_skip("godot_playtest", because, url=_BUILDER_URL,
                           owner_id=refusal.get("owner_id"))
+            if refusal.get("error") == "render owner wait timed out":
+                _remember_wait_expired(caller_key, refusal)
             return {"passed": True, "frames": 0, "errors": [], "state": {},
                     "behavior": None, "spec_used": False, "gate_skipped": True,
                     "skipped_because": because, "render_owner_conflict": refusal,

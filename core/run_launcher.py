@@ -36,10 +36,23 @@ def slugify(text: str, *, sep: str = "-", maxlen: int = 40,
     return s or fallback
 
 
+# A generated run id is `<slug>-<8 hex>`; core.project_id allows at most 64
+# characters, so the slug gets what the dash and the suffix leave over.
+_RUN_ID_SUFFIX_LEN = 8
+_RUN_ID_SLUG_MAX = 64 - 1 - _RUN_ID_SUFFIX_LEN
+
+
 def generate_run_id(config_name: str) -> str:
-    """A filesystem-safe project_id (run key) for a fresh run of a config."""
-    slug = "".join(c if c.isalnum() else "-" for c in config_name.lower()).strip("-")
-    return f"{slug}-{uuid.uuid4().hex[:8]}"
+    """A project_id (run key) for a fresh run of a config.
+
+    Always satisfies ``core.project_id``: ASCII, 1-64 characters, alphanumeric
+    first. Only the slug is shortened for a long config name — the fresh random
+    suffix is kept whole, and the registered config name itself is untouched."""
+    slug = slugify(config_name, maxlen=_RUN_ID_SLUG_MAX, fallback="run")
+    # Truncation can leave a trailing separator; the slug's first char is
+    # alphanumeric, so stripping never empties it.
+    slug = slug.rstrip("-")
+    return f"{slug}-{uuid.uuid4().hex[:_RUN_ID_SUFFIX_LEN]}"
 
 
 def missing_cross_config_inputs(sf, config_name: str, project_id: str) -> list[dict]:

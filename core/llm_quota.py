@@ -68,8 +68,9 @@ def is_spend_limit_refusal(err) -> bool:
     Anthropic reports a spent organisation spend limit as `invalid_request_error`
     with status 400, not 429, and the prose names neither a quota nor a window:
     "You have reached your specified API usage limits. You will regain access on
-    2026-11-01 at 00:00 UTC." LiteLLM types it as BadRequestError, so neither
-    `is_quota_exhausted` nor a status remap recognises it.
+    2026-11-01 at 00:00 UTC." LiteLLM types it as BadRequestError, so on the
+    pre-fix baseline neither `is_quota_exhausted` nor a status remap recognised
+    it as a present-tense spent window; `is_quota_exhausted` now delegates here.
 
     Provenance is part of the match: exception objects only (never a plain
     string or tool text), HTTP 400, and an Anthropic `llm_provider`. The wording

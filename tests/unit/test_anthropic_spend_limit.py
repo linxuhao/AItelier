@@ -4,8 +4,12 @@ Retained incident (synthetic ids here): LiteLLM raised BadRequestError /
 AnthropicException `invalid_request_error` — "You have reached your specified
 API usage limits. You will regain access on 2026-11-01 at 00:00 UTC." Neither the
 quota classifier nor the 429 window classifier saw it, so the 400 was treated as
-request-shaped: no endpoint walk, and every native/JSON caller replayed it as
-format/no-output repair (16 failed requests, zero useful output).
+request-shaped: no endpoint walk. Root's measured controlled baseline on frozen
+8258: native callers made 3 native requests plus 1 JSON request (replayed as
+format/no-output repair); JSON-only content/tool-content callers made 1 request
+(the error already escaped) but without an endpoint walk or `provider_error`
+trace. The retained full c784 incident (16 failed requests, zero useful output)
+is a distinct, historical scope and is not reproduced here.
 
 Self-contained. Only `litellm.completion` is scripted; the gateway retry/walk, the
 DPE native/content/tool-content loops and the SDK fixed-slot writer are real.
@@ -366,7 +370,8 @@ def test_artifact_dispatch_exhausted_spend_limit_is_original_without_replay(cont
     monkeypatch.setattr(litellm, 'completion', complete)
     with pytest.raises(litellm.BadRequestError) as caught:
         case.run()
-    # Baseline replays this as format/no-output repair: far more than 2 requests.
+    # Baseline: native callers replayed this as format/no-output repair (3 native
+    # + 1 JSON request); JSON-only callers made 1 request with no endpoint walk.
     assert calls == WIRE_MODELS, calls
     assert caught.value is errors[-1]
     assert not (case.root/'report.md').exists()

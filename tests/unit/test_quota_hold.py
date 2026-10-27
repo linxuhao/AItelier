@@ -11,6 +11,7 @@ import pytest
 
 from core.llm_quota import is_quota_exhausted, quota_reset_at
 import core.scheduler as sched
+from tests.integration.test_native_parity import engine  # noqa: F401  (fixture)
 
 
 REAL = ("litellm.RateLimitError: RateLimitError: OpenAIException - You have "
@@ -208,19 +209,88 @@ class TestQuotaEscapesTheAgentLoop:
     could not fire on the one path that mattered.
     """
 
-    def test_a_spent_quota_is_not_swallowed_as_agent_feedback(self):
-        import inspect
+    @staticmethod
+    def _drive(engine, tmp_path, turns):
+        """Run the real `run_step` -> `_run_native_step` loop over scripted turns.
 
-        from core import dpe_pipeline
+        Only the agent's `turn` is scripted (the gateway call boundary); the
+        native loop, its exception handler, the retry loop and the JSON
+        fallback dispatch are the production code.
+        """
+        from unittest.mock import MagicMock
 
-        src = inspect.getsource(dpe_pipeline.PipelineEngine._run_native_step)
-        handler = src[src.index("except Exception as e:"):]
-        raise_pos = handler.index("raise")
-        feedback_pos = handler.index("Native tool calling error")
-        assert raise_pos < feedback_pos, (
-            "the quota re-raise must come BEFORE the generic feedback path, or "
-            "the error is converted to prose and the hold can never fire")
-        assert "is_quota_exhausted" in handler
+        from tests.integration.test_native_parity import _WS, _run, _setup
+
+        engine.factory.get_max_retries.return_value = 3
+        engine.factory.get_fallback_to_json.return_value = True
+        engine._exec_tool = MagicMock(return_value={"written": "main.py"})
+        events, rows = [], []
+        engine._emit = lambda event, payload=None: events.append(event)
+        engine._trace_cb = lambda category, event, payload: rows.append(
+            (category, event, payload))
+        agent = engine.factory.get_native_agent.return_value
+        agent.turn.side_effect = turns
+        _setup(tmp_path)
+        ws = _WS(tmp_path)
+        return agent, ws, events, rows, lambda: _run(engine, ws)
+
+    @pytest.mark.parametrize("typed", [True, False],
+                             ids=["litellm-429", "plain-exception"])
+    def test_a_spent_quota_is_not_swallowed_as_agent_feedback(
+            self, engine, tmp_path, typed):
+        """The ORIGINAL spent-quota error object leaves the native loop.
+
+        A swallowed quota would be converted to "Native tool calling error"
+        feedback and the loop would call the spent endpoint again once per
+        attempt (max_retries=3 here), then fall back to JSON or raise
+        MaxRetriesExceeded. Exactly one call, the same object, no fallback and
+        no writes is what proves it escaped.
+        """
+        import litellm
+
+        if typed:
+            spent = litellm.exceptions.RateLimitError(
+                message=REAL, model="owned-fixture", llm_provider="openai")
+        else:
+            spent = Exception(REAL)       # reaches the loop by quota wording alone
+        assert is_quota_exhausted(spent)
+        agent, ws, events, rows, run = self._drive(engine, tmp_path, spent)
+
+        with pytest.raises(BaseException) as caught:
+            run()
+
+        assert caught.value is spent
+        assert agent.turn.call_count == 1, (
+            "the spent endpoint was called again: the quota was swallowed as "
+            "agent feedback and replayed as a no-output/native->JSON repair")
+        engine._exec_tool.assert_not_called()
+        assert ws.written_drafts == {}
+        assert not any(e in ("native_fallback", "step_retry", "files_written")
+                       for e in events), events
+        # Observed: the original text is traced, and nothing was turned into
+        # feedback prose that a later attempt would see.
+        errors = [p for c, e, p in rows if c == "error"]
+        assert [e for c, e, p in rows if c == "error"] == ["native_error"]
+        assert errors[0]["original_error"] == str(spent)
+        assert errors[0]["error_type"] == type(spent).__name__
+        assert "native_error" in events
+
+    def test_an_ordinary_native_error_is_still_agent_feedback(
+            self, engine, tmp_path):
+        """Control: a non-provider error keeps the in-loop recovery path, so the
+        spent-quota escape above is not just a blanket re-raise."""
+        from tests.integration.test_native_parity import _tc, _turn
+
+        turns = [ValueError("owned malformed tool arguments"),
+                 _turn(tool_calls=[_tc("write", {"file": "main.py",
+                                                  "content": "x"})]),
+                 _turn(tool_calls=[_tc("finish_step")])]
+        agent, ws, events, rows, run = self._drive(engine, tmp_path, turns)
+
+        assert run() is True
+        assert agent.turn.call_count == 3
+        engine._exec_tool.assert_called()
+        assert "native_error" in events
 
     def test_the_predicate_agrees_on_a_real_provider_message(self):
         from core.llm_quota import is_quota_exhausted

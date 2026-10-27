@@ -611,8 +611,13 @@ class ListIssues(Project):
 
 class LinkIssue(IssueRef):
     expected_version: int = Field(ge=1)
-    node_keys: list[str] = Field(max_length=20)
+    node_keys: list[str] = Field(max_length=20, description=(
+        "Nodes to link. By default they are ADDED to the issue's current links (an empty list keeps "
+        "them all); the effective set may hold at most 20 nodes."))
     reason: str = Field(min_length=1, max_length=4000)
+    replace_existing: bool = Field(default=False, description=(
+        "Optional strict boolean, default false. true is DESTRUCTIVE: node_keys becomes the exact new "
+        "link set, so every other current link is removed (an empty node_keys clears all links)."))
 
 
 class ResolveIssue(IssueRef):

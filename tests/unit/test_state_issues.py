@@ -40,7 +40,8 @@ def test_report_and_link_never_touch_the_node(svc):
     assert issue["status"] == "open" and issue["created"] is True
     assert [n["node_key"] for n in issue["nodes"]] == ["a"]
     execute(svc, "link_issue", {"project_id": "p", "issue_id": issue["issue_id"], "expected_version": 1,
-                                "node_keys": [], "reason": "not this node"}, allow_write=True)
+                                "node_keys": [], "reason": "not this node", "replace_existing": True},
+            allow_write=True)
     assert _node_row(svc) == before
     assert svc.store.frontier("p") == frontier
     types = [e["event_type"] for e in svc.store.events("p")]
@@ -272,3 +273,140 @@ def test_fixed_is_a_distinct_status_and_the_four_existing_semantics_still_resolv
                                            "reason": "not a defect", "director_identity": "wuxia"},
                     allow_write=True)
     assert done["status"] == "rejected"
+
+
+def _nodes(svc, *keys, project_id="p"):
+    svc.store.add_nodes(project_id, [{"key": k, "goal": k.upper(), "acceptance": CRIT} for k in keys])
+
+
+def _link(svc, issue_id, version, node_keys, **kw):
+    args = {"project_id": "p", "issue_id": issue_id, "expected_version": version,
+            "node_keys": node_keys, "reason": "provenance"}
+    return execute(svc, "link_issue", args | kw, allow_write=True)
+
+
+def _keys(view):
+    return [n["node_key"] for n in view["nodes"]]
+
+
+def _fresh(svc, issue_id):
+    return execute(svc, "get_issue", {"project_id": "p", "issue_id": issue_id})
+
+
+def test_link_defaults_to_adding_and_preserves_existing_links(svc):
+    _nodes(svc, "b", "c", "d", "e", "f", "g")
+    issue = _report(svc, node_keys=["a", "b", "c", "d", "e"])
+    before = {k: _node_row(svc, k) for k in "abcdefg"}
+    frontier = svc.store.frontier("p")
+    added = _link(svc, issue["issue_id"], 1, ["f"])
+    assert _keys(added) == ["a", "b", "c", "d", "e", "f"]
+    assert added["effective_node_keys"] == ["a", "b", "c", "d", "e", "f"]
+    assert added["added_node_keys"] == ["f"] and added["removed_node_keys"] == []
+    assert added["replace_existing"] is False and added["version"] == 2
+    # Repeating the same incremental request (current version) is idempotent on the set.
+    again = _link(svc, issue["issue_id"], 2, ["f"])
+    assert _keys(again) == ["a", "b", "c", "d", "e", "f"] and again["added_node_keys"] == []
+    assert again["version"] == 3
+    # Readback agrees with the response.
+    assert _keys(_fresh(svc, issue["issue_id"])) == ["a", "b", "c", "d", "e", "f"]
+    # Nodes and frontier are untouched.
+    assert {k: _node_row(svc, k) for k in "abcdefg"} == before
+    assert svc.store.frontier("p") == frontier
+    # The audit event records the effective set and the (default) intent.
+    event = [e for e in svc.store.events("p") if e["event_type"] == "issue_linked"][0]
+    assert event["payload"]["node_keys"] == ["a", "b", "c", "d", "e", "f"]
+    assert event["payload"]["replace_existing"] is False
+    assert event["payload"]["added_node_keys"] == ["f"] and event["payload"]["removed_node_keys"] == []
+
+
+def test_empty_default_link_preserves_all_links_but_still_bumps_version(svc):
+    _nodes(svc, "b")
+    issue = _report(svc, node_keys=["a", "b"])
+    kept = _link(svc, issue["issue_id"], 1, [])
+    assert _keys(kept) == ["a", "b"] and kept["version"] == 2
+    assert _keys(_fresh(svc, issue["issue_id"])) == ["a", "b"]
+    explicit_false = _link(svc, issue["issue_id"], 2, [], replace_existing=False)
+    assert _keys(explicit_false) == ["a", "b"]
+
+
+def test_explicit_replacement_and_empty_replacement_remove_links(svc):
+    _nodes(svc, "b", "c")
+    issue = _report(svc, node_keys=["a", "b"])
+    replaced = _link(svc, issue["issue_id"], 1, ["c"], replace_existing=True)
+    assert _keys(replaced) == ["c"] and replaced["effective_node_keys"] == ["c"]
+    assert replaced["removed_node_keys"] == ["a", "b"] and replaced["added_node_keys"] == ["c"]
+    assert replaced["replace_existing"] is True and replaced["version"] == 2
+    assert _keys(_fresh(svc, issue["issue_id"])) == ["c"]
+    cleared = _link(svc, issue["issue_id"], 2, [], replace_existing=True)
+    assert _keys(cleared) == [] and cleared["effective_node_keys"] == []
+    assert cleared["removed_node_keys"] == ["c"] and cleared["version"] == 3
+    assert _keys(_fresh(svc, issue["issue_id"])) == []
+    event = [e for e in svc.store.events("p") if e["event_type"] == "issue_linked"][-1]
+    assert event["payload"]["replace_existing"] is True and event["payload"]["node_keys"] == []
+    assert event["payload"]["removed_node_keys"] == ["c"]
+
+
+def test_stale_concurrent_writer_conflicts_and_retry_keeps_both_additions(svc):
+    _nodes(svc, "b", "c")
+    issue = _report(svc, node_keys=["a"])
+    # Two writers read version 1; the first lands, the second must not overwrite blindly.
+    _link(svc, issue["issue_id"], 1, ["b"])
+    with pytest.raises(StateConflict, match="version conflict"):
+        _link(svc, issue["issue_id"], 1, ["c"])
+    with pytest.raises(StateConflict, match="version conflict"):
+        _link(svc, issue["issue_id"], 1, [], replace_existing=True)
+    stale = _fresh(svc, issue["issue_id"])
+    assert _keys(stale) == ["a", "b"] and stale["version"] == 2
+    retried = _link(svc, issue["issue_id"], stale["version"], ["c"])
+    assert _keys(retried) == ["a", "b", "c"] and retried["version"] == 3
+
+
+def test_invalid_link_input_rolls_back_without_partial_changes(svc):
+    _nodes(svc, "b")
+    _nodes(svc, "foreign", project_id="q")
+    issue = _report(svc, node_keys=["a", "b"])
+    events = len(svc.store.events("p"))
+    for mode in (False, True):
+        with pytest.raises(StateNotFound):
+            _link(svc, issue["issue_id"], 1, ["missing"], replace_existing=mode)
+        with pytest.raises(StateNotFound):  # cross-project node
+            _link(svc, issue["issue_id"], 1, ["foreign"], replace_existing=mode)
+        with pytest.raises(StateNotFound):  # one valid + one unknown is refused whole
+            _link(svc, issue["issue_id"], 1, ["b", "missing"], replace_existing=mode)
+    for bad in ("true", "false", 1, 0, None, "yes"):
+        with pytest.raises(StateGraphError):
+            _link(svc, issue["issue_id"], 1, [], replace_existing=bad)
+    with pytest.raises(StateGraphError):
+        svc.issues.link("p", issue["issue_id"], 1, [], "provenance", replace_existing="true")
+    fresh = _fresh(svc, issue["issue_id"])
+    assert _keys(fresh) == ["a", "b"] and fresh["version"] == 1
+    assert len(svc.store.events("p")) == events
+
+
+def test_link_max_effective_links_is_enforced_in_both_modes(svc):
+    names = [f"n{i:02d}" for i in range(21)]
+    _nodes(svc, *names)
+    issue = _report(svc, node_keys=names[:20])
+    with pytest.raises(StateGraphError, match="at most 20"):
+        _link(svc, issue["issue_id"], 1, [names[20]])
+    fresh = _fresh(svc, issue["issue_id"])
+    assert _keys(fresh) == names[:20] and fresh["version"] == 1
+    with pytest.raises(StateGraphError):  # the request itself may not exceed 20 either
+        _link(svc, issue["issue_id"], 1, names, replace_existing=True)
+    # Re-adding an already linked node keeps the effective set at 20 and is allowed.
+    assert len(_keys(_link(svc, issue["issue_id"], 1, [names[0]]))) == 20
+    # A deliberate replacement may swap a node in.
+    swapped = _link(svc, issue["issue_id"], 2, [names[20]], replace_existing=True)
+    assert _keys(swapped) == [names[20]]
+
+
+def test_link_on_a_closed_issue_is_refused_in_both_modes_without_change(svc):
+    issue = _report(svc, node_keys=["a"])
+    execute(svc, "resolve_issue", {"project_id": "p", "issue_id": issue["issue_id"], "expected_version": 1,
+                                   "resolution": "rejected", "reason": "no", "director_identity": "wuxia"},
+            allow_write=True)
+    for mode in (False, True):
+        with pytest.raises(StateConflict, match="already rejected"):
+            _link(svc, issue["issue_id"], 2, [], replace_existing=mode)
+    fresh = _fresh(svc, issue["issue_id"])
+    assert _keys(fresh) == ["a"] and fresh["version"] == 2

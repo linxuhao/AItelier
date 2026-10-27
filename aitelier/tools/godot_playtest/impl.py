@@ -26,6 +26,8 @@ import json
 import math
 import os
 import struct
+import threading
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -468,6 +470,128 @@ def authored_caller_timeout(spec, ceiling: int | float) -> int | float:
     return min(timeout, ceiling)
 
 
+# -- Repeat protection after an exhausted render-owner wait -------------------
+# A caller whose render_wait_timeout_sec just ran out behind live owner X, and
+# that immediately asks again while X is still the active owner, would spend
+# another full queue wait for the same outcome (live 2026-10-27: 450s twice
+# per owner, zero scene measurements). Before re-POSTing, such a caller asks
+# the sidecar's existing read-only GET /lifecycle whether that owner is still
+# active. Only a POSITIVE observation of the same owner, active, with a fresh
+# heartbeat suppresses the POST. Anything else -- owner released, a different
+# owner, unreadable/malformed/unavailable observation -- leaves the ordinary
+# POST path untouched; unknown is never read as free, and never as blocked.
+# The memory is process-local, bounded, scoped to one caller (builder URL,
+# project, run, project dir -- never the per-call operation_id) and is never
+# evidence of anything: the suppressed report stays UNMEASURED.
+_OWNER_OBSERVE_TIMEOUT_SEC = 5.0
+_OWNER_HEARTBEAT_STALE_SEC = 120.0  # mirrors the sidecar's staleness threshold
+_REPEAT_MEMORY_MAX = 64
+_repeat_memory: dict = {}
+_repeat_memory_lock = threading.Lock()
+
+
+def _caller_key(payload: dict):
+    """Stable caller scope, or None when the request carries no run identity."""
+    run_id = payload.get("run_id")
+    if not run_id:
+        return None
+    return (_BUILDER_URL.rstrip("/"), str(payload.get("project_id") or ""),
+            str(run_id), str(payload.get("project_dir") or ""))
+
+
+def _remember_wait_expired(key, refusal: dict) -> None:
+    owner_id = refusal.get("owner_id")
+    if key is None or not owner_id or not isinstance(owner_id, str):
+        return
+    with _repeat_memory_lock:
+        _repeat_memory.pop(key, None)
+        _repeat_memory[key] = {"owner_id": owner_id, "refusal": dict(refusal),
+                               "recorded_at": time.time()}
+        while len(_repeat_memory) > _REPEAT_MEMORY_MAX:
+            _repeat_memory.pop(next(iter(_repeat_memory)))
+
+
+def _forget_wait_expired(key) -> None:
+    if key is None:
+        return
+    with _repeat_memory_lock:
+        _repeat_memory.pop(key, None)
+
+
+def _observe_active_owner(owner_id: str) -> dict | None:
+    """The owner's lifecycle row iff GET /lifecycle POSITIVELY shows it active.
+
+    None means "not shown active": released, replaced, or the observation was
+    unavailable or malformed. Callers treat None as permission to ask the
+    sidecar normally, which stays the only authority.
+    """
+    try:
+        with urllib.request.urlopen(
+                _BUILDER_URL.rstrip("/") + "/lifecycle",
+                timeout=_OWNER_OBSERVE_TIMEOUT_SEC) as resp:
+            body = json.loads(resp.read())
+    except Exception:
+        return None
+    if not isinstance(body, dict) or body.get("resource") != "render":
+        return None
+    owners = body.get("owners")
+    if not isinstance(owners, list):
+        return None
+    for row in owners:
+        if not isinstance(row, dict) or row.get("owner_id") != owner_id:
+            continue
+        beat = row.get("heartbeat_at")
+        if (row.get("status") == "active" and isinstance(beat, (int, float))
+                and not isinstance(beat, bool)
+                and time.time() - beat <= _OWNER_HEARTBEAT_STALE_SEC):
+            return row
+        return None
+    return None
+
+
+def _suppressed_repeat(key, payload: dict) -> dict | None:
+    """An UNMEASURED report instead of a repeat POST, or None to POST normally."""
+    if key is None:
+        return None
+    with _repeat_memory_lock:
+        memo = _repeat_memory.get(key)
+    if memo is None:
+        return None
+    row = _observe_active_owner(memo["owner_id"])
+    if row is None:
+        _forget_wait_expired(key)
+        return None
+    log_gate_skip("godot_playtest", "render_owner_repeat_suppressed",
+                  url=_BUILDER_URL, owner_id=memo["owner_id"])
+    return {"passed": True, "frames": 0, "errors": [], "state": {},
+            "behavior": None, "spec_used": False, "gate_skipped": True,
+            "skipped_because": "render_owner_wait_timed_out",
+            "measurement_status": "UNMEASURED",
+            "render_owner_repeat_suppressed": True,
+            "render_owner_conflict": memo["refusal"],
+            "render_owner_observation": {
+                "owner_id": row.get("owner_id"),
+                "generation": row.get("generation"),
+                "status": row.get("status"),
+                "project_id": row.get("project_id"),
+                "run_id": row.get("run_id"),
+                "heartbeat_at": row.get("heartbeat_at"),
+                "caller_run_id": payload.get("run_id"),
+                "caller_project_id": payload.get("project_id")},
+            "retry_condition": (
+                "retry after render owner %s is no longer reported active by "
+                "GET /lifecycle (released) or a different owner holds the render"
+                % memo["owner_id"]),
+            "summary": (
+                f"godot-builder play-test NOT attempted again: this caller's "
+                f"render-owner wait already expired and render owner "
+                f"{memo['owner_id']} is still reported active by GET /lifecycle. "
+                f"UNMEASURED -- no scene was rendered or smoke-tested, and this "
+                f"is not a pass. It becomes retryable once that owner is "
+                f"released or replaced. Play-test gate skipped -- scene NOT "
+                f"smoke-tested.")}
+
+
 def post_playtest(payload: dict, timeout: int = 3600) -> dict:
     """POST one /playtest request to the sidecar and return its report.
 
@@ -506,12 +630,18 @@ def post_playtest(payload: dict, timeout: int = 3600) -> dict:
     payload.setdefault("timeout", authored_caller_timeout(payload.get("spec"), timeout))
     payload.setdefault("render_wait_timeout_sec", round(timeout * RENDER_QUEUE_SHARE, 3))
     body = json.dumps(payload).encode("utf-8")
+    caller_key = _caller_key(payload)
+    suppressed = _suppressed_repeat(caller_key, payload)
+    if suppressed is not None:
+        return suppressed
     req = urllib.request.Request(
         _BUILDER_URL.rstrip("/") + "/playtest", data=body,
         headers={"Content-Type": "application/json"}, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read())
+            result = json.loads(resp.read())
+            _forget_wait_expired(caller_key)
+            return result
     except (urllib.error.URLError, OSError, json.JSONDecodeError,
             TimeoutError) as e:
         if _is_timeout(e):
@@ -547,6 +677,8 @@ def post_playtest(payload: dict, timeout: int = 3600) -> dict:
                        else f"render_owner_{refusal.get('owner_kind')}")
             log_gate_skip("godot_playtest", because, url=_BUILDER_URL,
                           owner_id=refusal.get("owner_id"))
+            if refusal.get("error") == "render owner wait timed out":
+                _remember_wait_expired(caller_key, refusal)
             return {"passed": True, "frames": 0, "errors": [], "state": {},
                     "behavior": None, "spec_used": False, "gate_skipped": True,
                     "skipped_because": because, "render_owner_conflict": refusal,

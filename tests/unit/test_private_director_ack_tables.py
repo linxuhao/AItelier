@@ -15,6 +15,8 @@ TABLES={'state_director_delivery_acks','state_director_legacy_acks'}
 # packages private, the enforcement switch public.
 P3_PRIVATE={'state_handoffs'}
 P3_PUBLIC={'state_project_enforcement'}
+# The retained Git bundle store holds the same private bytes as state_git_artifacts.
+BUNDLE_STORE_PRIVATE={'state_git_bundle_store'}
 BASE='f367c46f2cd29d4d3306aa6ca540bf8c54ebbeb9'
 
 def old_sets():
@@ -26,11 +28,11 @@ def old_sets():
 
 def test_policy_adds_only_two_private_ack_tables_and_preserves_public_set():
     old=old_sets()
-    assert set(PRIVATE_STATE_TABLES)-old['PRIVATE_STATE_TABLES']==TABLES|P3_PRIVATE
+    assert set(PRIVATE_STATE_TABLES)-old['PRIVATE_STATE_TABLES']==TABLES|P3_PRIVATE|BUNDLE_STORE_PRIVATE
     assert not old['PRIVATE_STATE_TABLES']-set(PRIVATE_STATE_TABLES)
     assert set(PUBLIC_STATE_TABLES)-old['PUBLIC_STATE_TABLES']==P3_PUBLIC
     assert not old['PUBLIC_STATE_TABLES']-set(PUBLIC_STATE_TABLES)
-    assert not (TABLES|P3_PRIVATE) & set(PUBLIC_STATE_TABLES)
+    assert not (TABLES|P3_PRIVATE|BUNDLE_STORE_PRIVATE) & set(PUBLIC_STATE_TABLES)
 
 def ack_ledger(db):
     with db.get_connection() as c:

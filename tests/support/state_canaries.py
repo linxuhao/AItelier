@@ -23,6 +23,7 @@ really in the database before any anonymous read is judged.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import sqlite3
 from datetime import datetime, timezone
@@ -113,6 +114,14 @@ def _plan():
             (c("state_git_artifacts"), c("state_git_artifacts") + "-tree",
              c("state_git_artifacts") + "-sha256", "refs/vault/canary",
              c("state_git_artifacts").encode(), now)),
+        # The bundle store holds the same private bytes, content-addressed. Its
+        # key must be a hex digest (schema CHECK), so the canary is the payload:
+        # a raw keyframe whose bytes ARE the canary.
+        "state_git_bundle_store": (
+            "INSERT INTO state_git_bundle_store(bundle_sha256,codec,base_sha256,raw_size,"
+            "payload,created_at) VALUES(?,'raw',NULL,?,?,?)",
+            (hashlib.sha256(c("state_git_bundle_store").encode()).hexdigest(),
+             len(c("state_git_bundle_store")), c("state_git_bundle_store").encode(), now)),
         # A LIVE claim on the OPENED project's public node. Its holder and lease
         # are public there; the canary sits only in the PRIVATE columns
         # (workspace, request key) that no public read may carry.

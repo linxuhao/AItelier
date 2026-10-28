@@ -76,6 +76,29 @@ BEGIN SELECT RAISE(ABORT,'recoverable Git artifacts are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS state_git_artifacts_no_delete
 BEFORE DELETE ON state_git_artifacts
 BEGIN SELECT RAISE(ABORT,'recoverable Git artifacts are retained'); END;
+CREATE TABLE IF NOT EXISTS state_git_bundle_store (
+    bundle_sha256 TEXT PRIMARY KEY
+        CHECK(length(bundle_sha256)=64 AND bundle_sha256 NOT GLOB '*[^0-9a-f]*'),
+    codec TEXT NOT NULL CHECK(codec IN ('raw','zstd-prefix')),
+    base_sha256 TEXT REFERENCES state_git_bundle_store(bundle_sha256),
+    raw_size INTEGER NOT NULL
+        CHECK(typeof(raw_size)='integer' AND raw_size > 0 AND raw_size <= 134217728),
+    payload BLOB NOT NULL CHECK(typeof(payload)='blob'), created_at TEXT NOT NULL,
+    CHECK ((codec='raw' AND base_sha256 IS NULL)
+        OR (codec='zstd-prefix' AND base_sha256 IS NOT NULL AND base_sha256 <> bundle_sha256))
+);
+CREATE INDEX IF NOT EXISTS state_git_bundle_store_base ON state_git_bundle_store(base_sha256);
+CREATE TRIGGER IF NOT EXISTS state_git_bundle_store_depth_one
+BEFORE INSERT ON state_git_bundle_store
+WHEN NEW.codec<>'raw' AND NOT EXISTS (SELECT 1 FROM state_git_bundle_store
+    WHERE bundle_sha256=NEW.base_sha256 AND codec='raw')
+BEGIN SELECT RAISE(ABORT,'a Git bundle delta base must be a stored raw keyframe'); END;
+CREATE TRIGGER IF NOT EXISTS state_git_bundle_store_no_update
+BEFORE UPDATE ON state_git_bundle_store
+BEGIN SELECT RAISE(ABORT,'retained Git bundle bytes are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS state_git_bundle_store_no_delete
+BEFORE DELETE ON state_git_bundle_store
+BEGIN SELECT RAISE(ABORT,'retained Git bundle bytes are retained'); END;
 CREATE UNIQUE INDEX IF NOT EXISTS state_attempt_external_identity
 ON state_attempts(project_id,node_key,harness,external_id) WHERE execution_kind='external';
 CREATE TRIGGER IF NOT EXISTS state_attempt_executor_immutable

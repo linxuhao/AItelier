@@ -70,6 +70,11 @@ dependencies = [
     # stayed green — the exact host/image split this dependency was declared
     # to close.
     "mcp>=1.28,<2",
+    # Retained candidate Git bundles are stored as zstd deltas against a raw
+    # keyframe (core/state_git_artifacts.py). The reader relies on
+    # decompress(allow_extra_data=False), present in 0.23+ (tested on 0.25.0);
+    # the zstd frame format is stable, so no upper bound.
+    "zstandard>=0.23",
 ]
 
 [project.scripts]

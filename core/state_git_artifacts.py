@@ -15,6 +15,16 @@ in an owned temporary bare repository, into a candidate-only bundle: one fixed
 ref and a freshly generated full pack of exactly the candidate's reachable
 commits, trees and blobs. The retained digest (``bundle_sha256``) describes the
 normalized bytes; the producer's original digest stays only in its report.
+
+Storage of the bytes. A row written by ``store_candidate`` keeps all its
+columns but an empty ``bundle_bytes`` (X''); the exact bytes live once, keyed by
+``bundle_sha256``, in the immutable ``state_git_bundle_store``: either a ``raw``
+keyframe, or a ``zstd-prefix`` delta compressed with a raw keyframe's bytes as
+a raw-content prefix dictionary. Depth is always 1 (a delta's base is a raw
+keyframe; the schema refuses anything else). A row with non-empty
+``bundle_bytes`` (written before the store, or never migrated) is read as
+before. Either way the restored bytes are verified against ``bundle_sha256``
+on every read, and any defect in a payload, base or codec field fails closed.
 """
 from __future__ import annotations
 
@@ -201,6 +211,168 @@ def retain_candidate(report_bytes, commit):
             "input_bundle_sha256": input_sha}
 
 
+BUNDLE_STORE = "state_git_bundle_store"
+# A new bundle becomes a raw keyframe when its delta would exceed this share of
+# its raw size, or when the chosen keyframe already carries this many deltas.
+DELTA_MAX_FRACTION = 0.25
+KEYFRAME_MAX_DEPENDENTS = 200
+# Keyframes tried per new bundle: the most recent ones of comparable size
+# (within 2x either way). Different repositories' candidates interleave, and a
+# delta against another repository's keyframe is never useful.
+KEYFRAME_CANDIDATES = 2
+# 2**28 covers a 128 MiB dictionary plus a 128 MiB target.
+_WINDOW_LOG = 28
+
+
+def _zstd():
+    try:
+        import zstandard
+    except ImportError as exc:
+        raise StateConflict("Git bundle store codec unavailable: zstandard is not installed") from exc
+    return zstandard
+
+
+def _prefix_dict(zstd, base):
+    return zstd.ZstdCompressionDict(base, dict_type=zstd.DICT_TYPE_RAWCONTENT)
+
+
+def encode_delta(base, raw):
+    """zstd frame of ``raw`` using ``base`` as a raw-content prefix dictionary.
+
+    The match tables must cover the whole dictionary: the level presets index
+    only a few MiB of it and find almost nothing in an 80 MB base, so the hash
+    and chain sizes follow the base's size explicitly."""
+    zstd = _zstd()
+    log = max(17, min(27, len(base).bit_length() - 1))
+    params = zstd.ZstdCompressionParameters(
+        window_log=_WINDOW_LOG, hash_log=log, chain_log=log, search_log=4, min_match=5,
+        strategy=zstd.STRATEGY_LAZY2, write_checksum=True, write_content_size=True)
+    return zstd.ZstdCompressor(dict_data=_prefix_dict(zstd, base),
+                               compression_params=params).compress(raw)
+
+
+def decode_delta(base, payload, raw_size):
+    """Inverse of ``encode_delta``; refuses anything but one frame of ``raw_size`` bytes."""
+    zstd = _zstd()
+    try:
+        if zstd.frame_content_size(payload) != raw_size:
+            raise StateConflict("Git bundle store delta declares a different size")
+        # One frame, nothing after it (allow_extra_data=False raises otherwise).
+        data = zstd.ZstdDecompressor(dict_data=_prefix_dict(zstd, base),
+                                     max_window_size=1 << _WINDOW_LOG).decompress(
+            payload, max_output_size=raw_size, allow_extra_data=False)
+    except zstd.ZstdError as exc:
+        raise StateConflict("Git bundle store delta does not decode: " + str(exc)[:200]) from exc
+    if len(data) != raw_size:
+        raise StateConflict("Git bundle store delta decodes to a different size")
+    return data
+
+
+_STORE_COLUMNS = "bundle_sha256,codec,base_sha256,raw_size,payload"
+
+
+def _store_entry(conn, digest):
+    # CAST: a payload damaged into another storage class is read as bytes and
+    # then refused by the digest checks, never raised as a decoding error.
+    row = conn.execute("SELECT bundle_sha256,codec,base_sha256,raw_size,CAST(payload AS BLOB) "
+                       f"FROM {BUNDLE_STORE} WHERE bundle_sha256=?", (digest,)).fetchone()
+    return None if row is None else tuple(row)
+
+
+def _keyframe_bytes(entry, digest):
+    """A verified raw keyframe's bytes, or StateConflict."""
+    if entry is None:
+        raise StateConflict("Git bundle store delta base is missing")
+    key, codec, base, size, payload = entry
+    if key != digest or codec != "raw" or base is not None:
+        raise StateConflict("Git bundle store delta base is not a raw keyframe")
+    payload = bytes(payload)
+    if len(payload) != size or hashlib.sha256(payload).hexdigest() != digest:
+        raise StateConflict("Git bundle store delta base does not match its digest")
+    return payload
+
+
+def load_stored_bundle(conn, digest):
+    """The exact bytes stored under ``digest``, verified; StateConflict on any defect."""
+    entry = _store_entry(conn, digest)
+    if entry is None:
+        raise StateConflict("Git bundle store has no bytes for this digest")
+    key, codec, base_digest, size, payload = entry
+    if key != digest or not isinstance(size, int) or not 0 < size <= MAX_BUNDLE_BYTES \
+            or not isinstance(payload, (bytes, bytearray)):
+        raise StateConflict("Git bundle store row is malformed")
+    if codec == "raw" and base_digest is None:
+        data = bytes(payload)
+    elif codec == "zstd-prefix" and isinstance(base_digest, str) and base_digest != digest:
+        base = _keyframe_bytes(_store_entry(conn, base_digest), base_digest)
+        data = decode_delta(base, bytes(payload), size)
+    else:
+        raise StateConflict("Git bundle store row has an unknown codec or base")
+    if len(data) != size or hashlib.sha256(data).hexdigest() != digest:
+        raise StateConflict("Git bundle store bytes do not match their digest")
+    return data
+
+
+def retained_bundle_bytes(conn, artifact):
+    """The bytes a ``state_git_artifacts`` row retains, NOT yet digest-checked.
+
+    Non-empty ``bundle_bytes`` are returned as stored (legacy and unmigrated
+    rows, unchanged behaviour). Empty bytes are resolved from the store only for
+    the custody shapes that keep their bytes in the State DB; an unrecognized
+    row keeps today's behaviour (empty bytes, refused by the digest check)."""
+    raw = bytes(artifact["bundle_bytes"])
+    if raw:
+        return raw
+    custody, _, _ = git_custody(artifact["retained_ref"])
+    if custody not in ("state_db_fullpack", "legacy_db_plus_cas_path"):
+        return raw
+    return load_stored_bundle(conn, artifact["bundle_sha256"])
+
+
+def store_bundle(conn, digest, raw):
+    """Insert-once: ensure the store holds ``raw`` under ``digest``.
+
+    Picks a keyframe (most recent raw keyframes of comparable size with fewer
+    than KEYFRAME_MAX_DEPENDENTS deltas), keeps the first delta no larger than
+    DELTA_MAX_FRACTION of the raw size that decodes back to exactly ``raw``,
+    and otherwise stores ``raw`` as a new keyframe. Returns the stored
+    ``(codec, payload_size)``. Runs in the caller's transaction."""
+    raw = bytes(raw)
+    if not raw or len(raw) > MAX_BUNDLE_BYTES or hashlib.sha256(raw).hexdigest() != digest:
+        raise StateConflict("Git bundle store input does not match its digest")
+    existing = _store_entry(conn, digest)
+    if existing is not None:
+        if load_stored_bundle(conn, digest) != raw:
+            raise StateConflict("Git bundle store already holds different bytes for this digest")
+        return existing[1], len(existing[4])
+    keyframes = conn.execute(
+        f"SELECT k.bundle_sha256 FROM {BUNDLE_STORE} k WHERE k.codec='raw' "
+        "AND k.raw_size BETWEEN ? AND ? AND (SELECT count(*) FROM "
+        f"{BUNDLE_STORE} d WHERE d.base_sha256=k.bundle_sha256) < ? "
+        "ORDER BY k.rowid DESC LIMIT ?",
+        ((len(raw) + 1) // 2, len(raw) * 2, KEYFRAME_MAX_DEPENDENTS, KEYFRAME_CANDIDATES)).fetchall()
+    for (base_digest,) in keyframes:
+        try:
+            base = _keyframe_bytes(_store_entry(conn, base_digest), base_digest)
+        except StateConflict:
+            continue  # a damaged keyframe is never used as a base
+        payload = encode_delta(base, raw)
+        if len(payload) > len(raw) * DELTA_MAX_FRACTION:
+            continue
+        try:
+            exact = decode_delta(base, payload, len(raw)) == raw
+        except StateConflict:
+            exact = False
+        if exact:
+            conn.execute(f"INSERT INTO {BUNDLE_STORE} ({_STORE_COLUMNS},created_at) "
+                         "VALUES(?,'zstd-prefix',?,?,?,?)",
+                         (digest, base_digest, len(raw), payload, now()))
+            return "zstd-prefix", len(payload)
+    conn.execute(f"INSERT INTO {BUNDLE_STORE} ({_STORE_COLUMNS},created_at) "
+                 "VALUES(?,'raw',NULL,?,?,?)", (digest, len(raw), raw, now()))
+    return "raw", len(raw)
+
+
 def store_candidate(conn, artifact):
     # In-memory checks first; a failure rolls back the whole write transaction.
     raw = artifact.get("bundle_bytes")
@@ -217,7 +389,6 @@ def store_candidate(conn, artifact):
         value = artifact.get(key)
         if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{40}", value):
             raise StateConflict(f"Git artifact {key} must be 40 lowercase hex")
-    artifact = {**artifact, "bundle_bytes": raw}
     old = conn.execute("SELECT tree_sha FROM state_git_artifacts WHERE commit_sha=?",
                        (artifact["commit_sha"],)).fetchone()
     if old:
@@ -225,6 +396,11 @@ def store_candidate(conn, artifact):
         if old["tree_sha"] != artifact["tree_sha"]:
             raise StateConflict("retained commit has conflicting tree identity")
         return
+    # The bytes go to the content-addressed store (verified before insertion);
+    # the row keeps every column, with an empty bundle_bytes. Encoding runs in
+    # this write transaction: about 2-3 s per keyframe tried for an 80 MB bundle.
+    store_bundle(conn, digest, raw)
+    artifact = {**artifact, "bundle_bytes": b""}
     conn.execute("INSERT INTO state_git_artifacts "
                  "(commit_sha,tree_sha,bundle_sha256,retained_ref,bundle_bytes,created_at) "
                  "VALUES(?,?,?,?,?,?)", tuple(artifact[k] for k in (
@@ -237,14 +413,20 @@ def materialize_candidate(store, commit, destination):
         known = conn.execute("SELECT 1 FROM state_attempts WHERE execution_kind='external' "
                              "AND artifact_kind='git-sha1' AND artifact_ref=? LIMIT 1", (commit,)).fetchone()
         artifact = conn.execute("SELECT * FROM state_git_artifacts WHERE commit_sha=?", (commit,)).fetchone()
+        if artifact is not None:
+            artifact = dict(artifact)
+            # A malformed reserved state-db: reference fails closed before any fallback.
+            _, _, embedded = git_custody(artifact["retained_ref"])
+            try:
+                raw = retained_bundle_bytes(conn, artifact)
+            except StateConflict as exc:
+                raise StateConflict(f"expected Git artifact {commit}, bundle {artifact['bundle_sha256']}; "
+                                    f"actual {exc}") from exc
     if artifact is None:
         if known:
             raise StateConflict(f"expected Git artifact {commit}; actual durable bundle missing (legacy candidates need re-attestation)")
         return None
-    artifact = dict(artifact)
-    raw = bytes(artifact.pop("bundle_bytes"))
-    # A malformed reserved state-db: reference fails closed before any fallback.
-    _, _, embedded = git_custody(artifact["retained_ref"])
+    del artifact["bundle_bytes"]
     actual = hashlib.sha256(raw).hexdigest()
     if actual != artifact["bundle_sha256"]:
         raise StateConflict(f"expected Git artifact {commit}, bundle {artifact['bundle_sha256']}; actual {actual}")

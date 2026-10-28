@@ -199,9 +199,10 @@ def test_normalized_bytes_recover_through_state_database_alone(tmp_path):
     assert json.loads(report.read_bytes())["git_bundle"]["sha256"] == input_sha
     identity = service.get_attempt(attempt["attempt_id"])["git_artifact"]
     assert identity["commit_sha"] == second and identity["bundle_sha256"] != input_sha
+    from core.state_git_artifacts import retained_bundle_bytes
     with service.store.transaction() as conn:
-        stored = bytes(conn.execute("SELECT bundle_bytes FROM state_git_artifacts WHERE commit_sha=?",
-                                    (second,)).fetchone()[0])
+        stored = retained_bundle_bytes(conn, conn.execute(
+            "SELECT * FROM state_git_artifacts WHERE commit_sha=?", (second,)).fetchone())
     assert hashlib.sha256(stored).hexdigest() == identity["bundle_sha256"]
     broad.unlink()
     recovered, objects = import_closure(tmp_path, "db-recovered", stored, second)

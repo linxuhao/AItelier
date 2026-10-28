@@ -74,6 +74,10 @@ PRIVATE_STATE_TABLES = frozenset({
     # through an untrusted connection, so this table is classified here and the
     # identity is projected with ``bundle_bytes`` replaced by NULL below.
     "state_git_artifacts",
+    # The same private Git bytes, held content-addressed (raw keyframes and
+    # zstd deltas against them) for rows whose ``bundle_bytes`` is empty. No
+    # projection: an untrusted connection cannot read any of its rows.
+    "state_git_bundle_store",
     # Who is working on what (design/multi-driver-coop.md §4.2). The declared
     # workspace, request key and every history row (release reasons) are
     # private; a public read of an OPENED project sees only the projected

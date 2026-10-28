@@ -149,9 +149,13 @@ declared producer digest remains only in the producer's report, which is never
 modified. Unrelated branches are not retained. Byte-identical output is only
 promised for one Git version.
 
-Future retained bundles are held only in the State database (`bundle_bytes`);
+Future retained bundles are held only in the State database;
 no second copy is written to the report store (the report JSON itself still
-is). `git_artifact.retained_ref` for those rows is the typed reference
+is). New rows keep an empty `bundle_bytes` and the exact bytes live once in the
+private, immutable `state_git_bundle_store` (a raw keyframe, or a zstd delta
+against one), restored and checked against `bundle_sha256` on every read;
+older rows keep their bytes inline until `tools/migrate_bundle_store.py` moves
+them. `git_artifact.retained_ref` for those rows is the typed reference
 `state-db:git-bundle:sha256:<bundle_sha256>`, not a filesystem path. Historical
 rows keep their old absolute path and bytes untouched; `get_attempt` adds a
 derived `custody` (`state_db_fullpack`, `legacy_db_plus_cas_path` or

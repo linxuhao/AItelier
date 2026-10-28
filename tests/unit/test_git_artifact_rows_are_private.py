@@ -32,10 +32,16 @@ def _durable_candidate(tmp_path, monkeypatch):
 
 
 def _raw_row(db):
-    """The whole artifact row read by an UNARMED connection: the control."""
+    """The whole artifact row read by an UNARMED connection: the control. A new
+    row keeps an empty ``bundle_bytes``; its bytes live in the private bundle
+    store and are resolved here, on the same unarmed connection."""
+    from core.state_git_artifacts import retained_bundle_bytes
     with sqlite3.connect(db) as raw:
         raw.row_factory = sqlite3.Row
-        return dict(raw.execute("SELECT * FROM state_git_artifacts").fetchone())
+        row = dict(raw.execute("SELECT * FROM state_git_artifacts").fetchone())
+        assert row["bundle_bytes"] == b""
+        row["stored_bytes"] = retained_bundle_bytes(raw, row)
+        return row
 
 
 def _assert_retained_closure(tmp_path, row, producer, commit, tree, payload):
@@ -43,7 +49,7 @@ def _assert_retained_closure(tmp_path, row, producer, commit, tree, payload):
     bare repository as exactly the candidate's complete object closure."""
     from tests.integration.test_state_git_candidate_only_custody import (
         git, import_closure, reachable, run)
-    stored = bytes(row["bundle_bytes"])
+    stored = bytes(row["stored_bytes"])
     assert len(stored) > 0
     assert hashlib.sha256(stored).hexdigest() == row["bundle_sha256"]
     recovered, objects = import_closure(tmp_path, "retained-row", stored, commit)
@@ -88,6 +94,19 @@ def test_retained_bundle_bytes_are_classified_and_projected_to_null(tmp_path, mo
     with pytest.raises(ProjectPrivate):
         with untrusted.transaction() as conn:
             conn.execute("SELECT bundle_bytes FROM main.state_git_artifacts").fetchall()
+    # The bundle store that now holds those bytes is private and has no
+    # projection: positive control on an unarmed connection, then every read
+    # of it on the armed connection is refused, qualified or not.
+    assert "state_git_bundle_store" in PRIVATE_STATE_TABLES
+    with sqlite3.connect(db) as raw:
+        assert raw.execute("SELECT count(*) FROM state_git_bundle_store WHERE bundle_sha256=?",
+                           (control["bundle_sha256"],)).fetchone()[0] == 1
+    for sql in ("SELECT payload FROM state_git_bundle_store",
+                "SELECT payload FROM main.state_git_bundle_store",
+                "SELECT count(*) FROM state_git_bundle_store"):
+        with pytest.raises(ProjectPrivate):
+            with untrusted.transaction() as conn:
+                conn.execute(sql).fetchall()
 
 
 def test_unopened_project_artifact_rows_are_absent_from_an_untrusted_connection(

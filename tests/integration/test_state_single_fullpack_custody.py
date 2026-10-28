@@ -51,6 +51,14 @@ def rows(db):
         return [dict(r) for r in raw.execute("SELECT * FROM state_git_artifacts ORDER BY commit_sha")]
 
 
+def retained(db, row):
+    """The exact bytes a row retains: inline, or (new rows, empty bundle_bytes)
+    from the private bundle store, read on an unarmed connection."""
+    from core.state_git_artifacts import retained_bundle_bytes
+    with sqlite3.connect(db) as raw:
+        return retained_bundle_bytes(raw, row)
+
+
 def corrupt(db, sql, args=(), trigger="state_git_artifacts_no_update"):
     """Disposable-database corruption fixture: impossible rows need the trigger gone."""
     with sqlite3.connect(db) as raw:
@@ -114,7 +122,9 @@ def test_new_intake_stores_one_pack_and_writes_no_second_bundle_file(tmp_path):
     added = {k: v for k, v in after.items() if k not in before}
     assert [os.path.basename(k) for k in added] == [report_sha]  # report JSON only
     row = next(r for r in rows(db) if r["commit_sha"] == commit2)
-    stored = bytes(row["bundle_bytes"])
+    assert row["bundle_bytes"] == b""  # the bytes live once, in the bundle store
+    stored = retained(db, row)
+    assert stored
     assert not any(stored in data or data.startswith(b"# v2 git bundle") for data in after.values())
     # The reference is truthful: digest of stored bytes == column == reference; not a path.
     assert sha(stored) == row["bundle_sha256"]
@@ -134,8 +144,11 @@ def test_new_intake_stores_one_pack_and_writes_no_second_bundle_file(tmp_path):
 def test_legacy_row_is_reattested_without_rewrite_or_bundle_file(tmp_path):
     service, source, producer, db, attempt, commit, tree, payload, bundle = fixture(tmp_path / "fx")
     legacy = "/legacy/report-store/ab/" + "c" * 64
-    corrupt(db, "UPDATE state_git_artifacts SET retained_ref=?", (legacy,))
+    # A legacy row carries its bytes inline and an absolute path reference.
+    corrupt(db, "UPDATE state_git_artifacts SET retained_ref=?,bundle_bytes=?",
+            (legacy, retained(db, rows(db)[0])))
     old = rows(db)[0]
+    assert old["bundle_bytes"]
     before = store_files()
     again = start(service)
     # Same commit, a fresh report; the producer bundle is still present.
@@ -177,13 +190,14 @@ def test_get_attempt_matrix_trusted_public_and_private(tmp_path):
 def test_malformed_mismatched_and_altered_references_fail_closed(tmp_path):
     service, source, producer, db, attempt, commit, tree, payload, bundle = fixture(tmp_path / "fx")
     original = rows(db)[0]
+    full = retained(db, original)
     dest = tmp_path / "dest.git"
     git(tmp_path, "init", "-q", "--bare", str(dest))
     refs_before = subprocess.check_output(["git", "-C", str(dest), "for-each-ref"])
     cases = [("malformed", "UPDATE state_git_artifacts SET retained_ref=?", (PREFIX + "A" * 64,), True),
              ("other-digest", "UPDATE state_git_artifacts SET retained_ref=?", (PREFIX + "b" * 64,), True),
              ("altered-bytes", "UPDATE state_git_artifacts SET bundle_bytes=?",
-              (original["bundle_bytes"][:-1] + b"x",), False)]
+              (full[:-1] + b"x",), False)]
     for name, sql, args, metadata_refused in cases:
         corrupt(db, "UPDATE state_git_artifacts SET retained_ref=?,bundle_bytes=?",
                 (original["retained_ref"], original["bundle_bytes"]))

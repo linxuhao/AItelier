@@ -410,7 +410,8 @@ class SQLiteDirectorMessaging:
             return response
         from core.director_messaging_quorum import members
         drivers = {m for project in projects for m in members(conn, project)} - {self.driver_id}
-        extra = recipient_presence_block(conn, drivers, self._clock())
+        extra = recipient_presence_block(conn, drivers, self._clock(), fan_out=True,
+                                         where="the project mailbox")
         return {**response, "result": {**result, **extra}} if extra else response
 
     @writer_only_read("list_director_messages")

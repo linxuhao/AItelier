@@ -447,6 +447,10 @@
                 }
               ]
             },
+            "recipient_presence_total": {
+              "type": "integer",
+              "minimum": 201
+            },
             "advice": {
               "type": "string",
               "maxLength": 2000

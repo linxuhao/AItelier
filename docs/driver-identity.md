@@ -139,21 +139,34 @@ Every driver view carries a derived `presence` object
 A non-positive or non-numeric value falls back to its default; if the stale bound
 is not greater than the online bound both fall back to the defaults.
 
-`last_seen_at` is refreshed (at most once a minute per driver and process) by every
+`last_seen_at` is refreshed (at most once a minute per driver and process; a failed write on the request path backs off for the same minute, the inbox long-poll retries after 5 s, off the event loop) by every
 request that presents the driver's token and by `list_driver_messages`,
 `wait_for_driver_inbox` and a `wait_for_state_change` that includes the driver
-inbox, so a driver parked on a 15-minute inbox wait stays `online`. A failed
-write (busy database) never denies the credential and is retried after 5 s.
+inbox, so a driver parked on a 15-minute inbox wait stays `online`. A busy database never denies the credential.
 
 Sending: `send_driver_message`, and `send_director_message` when called with
-`protocol_version="v3"` (the v2 response schema is frozen and unchanged), return `recipient_presence` (one object
-with `driver_id` for a single recipient; a list for a project fan-out; for a project
-mailbox the recipients are its member drivers except the sender) and, when any
-recipient is not online, `advice`: `recipient <id> is <status> (last seen <ts>, <N> min
-ago); the message is queued in its inbox; do not block waiting for a reply`. The
-message is delivered exactly as before. Presence is computed when the message is first
-accepted and is not part of the stored idempotent record, so a replay returns the
-record unchanged. A project mailbox whose only member is the sender adds neither field.
+`protocol_version="v3"` (the v2 response schema is frozen and unchanged), return
+`recipient_presence` and, when any recipient is not online, `advice`: `recipient <id> is
+<status> (last seen <ts>, <N> min ago); the message is queued in its inbox (director
+messages: "in the project mailbox"); do not block waiting for a reply`. Shape:
+
+- a single named recipient (`target_driver_id`): one presence object with `driver_id`;
+- a fan-out (`project_members`, or any director message, whose recipients are the target
+  project's active member drivers except the sender): ALWAYS a list, even with one
+  member, not-online entries first, at most 200 entries; `recipient_presence_total`
+  gives the full count when the list was cut.
+
+A never-seen recipient reads "never seen"; a stamp that is unreadable or more than 60 s
+in the future reads "last seen time unknown" and counts as `offline`, never as activity.
+The message is delivered exactly as before. Presence is computed when the message is
+first accepted and is not part of the stored idempotent record, so a replay returns the
+record unchanged. A project mailbox whose only active member is the sender adds neither
+field.
+
+**Schema note:** `contracts/director_messaging/v3/schema.json` gained the optional send
+result fields `recipient_presence`, `recipient_presence_total` and `advice` (the schema
+stays closed). A client that vendored the earlier v3 `sendSuccess` must update its copy or
+it will reject these results; v2 clients are unaffected.
 
 What a sender should do when the recipient is `away` or `offline`: send anyway (it is
 queued), then continue with work that does not depend on the answer, and poll later

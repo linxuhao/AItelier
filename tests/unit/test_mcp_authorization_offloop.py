@@ -15,6 +15,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.lowlevel.server import request_ctx
 
 from api import authz, mcp_router
+from core import drivers
 from core.drivers import DriverRegistry
 from core.state_database import StateDatabase
 
@@ -36,7 +37,7 @@ def owned_auth(tmp_path, monkeypatch):
     db = ObservedDatabase(str(tmp_path/'drivers.sqlite'))
     registry = DriverRegistry(db, 'owned-pepper-'*4)
     token = registry.register('owned-driver','Owned driver',actor='owned-fixture')['token']
-    registry._last_seen.clear();sql_started.clear();observations.clear()
+    drivers._LAST_SEEN.clear();sql_started.clear();observations.clear()
     monkeypatch.setattr(authz, 'gate_enabled', lambda: True)
     monkeypatch.setattr(authz, 'driver_registry', lambda: registry)
     monkeypatch.setattr(authz.cf_access,'email_from_request_headers',lambda headers,cookies=None:None)

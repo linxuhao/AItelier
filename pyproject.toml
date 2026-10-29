@@ -38,7 +38,12 @@ dependencies = [
     "pytest-asyncio>=1.0,<2",
     "fastapi>=0.136",
     "typer>=0.24",
-    "litellm>=1.85",
+    # Upper bound is load-bearing: litellm 1.106.x imports mcp.types.CacheableResult at
+    # completion time whenever `tools` are passed, and mcp<2 (1.30.0, the newest this
+    # file allows) has no such name, so EVERY tool-calling completion died with
+    # ImportError after the 2026-10-28 image rebuild floated litellm from 1.105.1 to
+    # 1.106.5. Raise this only together with a real tools completion test.
+    "litellm>=1.85,<1.106",
     # litellm's provider JSON path imports orjson at call time but no longer
     # pulls it transitively (litellm 1.92) — declare it so a rebuild never ships
     # a butler that 500s on the first LLM call with "No module named 'orjson'".

@@ -34,6 +34,7 @@ Q13. an admin (owner e-mail, ``owner-cli``) is never refused by a claim rule;
 """
 from __future__ import annotations
 
+from core import driver_presence
 from core.state_claims import ClaimError, lease_state, now_stamp
 from core.state_graph import text
 
@@ -132,10 +133,11 @@ def dispatch_claim(conn, project_id, node_key, driver_id, is_admin, claim_id=Non
                              node_key=node_key, lapsed_claim_id=lapsed["claim_id"])
         raise ClaimError("claim_required", f"this project enforces claims: claim_node(purpose=implement) on "
                          f"{node_key} before starting an attempt", node_key=node_key)
+    note, described = driver_presence.holder_note(conn, live["driver_id"], live["claim_id"], live["fence"])
     raise ClaimError("claimed_by_other", f"node {node_key} is claimed for implement by driver {live['driver_id']} "
-                     f"until {live['lease_expires_at']}", holder=live["driver_id"], claim_id=live["claim_id"],
+                     f"until {live['lease_expires_at']}{note}", holder=live["driver_id"], claim_id=live["claim_id"],
                      lease_expires_at=live["lease_expires_at"],
-                     lease_state=lease_state(live["lease_expires_at"], current or now_stamp()))
+                     lease_state=lease_state(live["lease_expires_at"], current or now_stamp()), **described)
 
 
 def launch_authorization(conn, attempt, driver_id, is_admin, claim_id=None, fence=None):

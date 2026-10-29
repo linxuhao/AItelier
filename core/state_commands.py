@@ -247,7 +247,7 @@ class Heartbeat(Project):
 
 class ListClaims(Project):
     node_keys: list[str] | None = Field(default=None, min_length=1, max_length=100)
-    statuses: list[Literal["live", "released", "expired", "transferred", "revoked"]] | None = Field(
+    statuses: list[Literal["live", "released", "expired", "transferred", "revoked", "taken_over"]] | None = Field(
         default=None, min_length=1, description="Defaults to live claims only.")
     driver_id: str | None = None
     limit: int = Field(default=100, ge=1, le=500)
@@ -255,6 +255,14 @@ class ListClaims(Project):
 
 class ClaimRef(Project):
     claim_id: str
+
+
+class TakeOverClaim(Project):
+    claim_id: str
+    expected_fence: int = Field(ge=1)
+    reason: str = Field(min_length=20, max_length=300, description=(
+        "Why you take it over (recorded in history, the claim_taken_over event and the owner's notice)."))
+    request_key: str = Field(min_length=1, max_length=200, description="Idempotent per (you, request_key).")
 
 
 def _omit_null_default(schema: dict) -> None:
@@ -1073,6 +1081,7 @@ WRITE_REQUESTS = {
     "set_claim_enforcement": SetClaimEnforcement,
     "set_review_independence": SetReviewIndependence,
     "abandon_external_attempt": AbandonExternalAttempt, "take_over_attempt": TakeOverAttempt,
+    "take_over_claim": TakeOverClaim,
     "register_subagent": RegisterSubagent,
     "offer_handoff": OfferHandoff, "accept_handoff": AcceptHandoff,
     "decline_handoff": DeclineHandoff, "withdraw_handoff": WithdrawHandoff,
@@ -1241,6 +1250,7 @@ def _handlers(service) -> dict:
         "set_review_independence": service.portfolio.set_review_independence,
         "abandon_external_attempt": service.recovery.abandon_external_attempt,
         "take_over_attempt": service.recovery.take_over_attempt,
+        "take_over_claim": service.takeover.take_over_claim,
         "register_subagent": service.subagents.register_subagent,
         "list_subagents": service.subagents.list_subagents,
         "offer_handoff": service.handoffs.offer_handoff, "accept_handoff": service.handoffs.accept_handoff,

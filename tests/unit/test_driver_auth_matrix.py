@@ -286,11 +286,23 @@ class TestDriverRouterDoors:
                 assert response.status_code == 403, (method, route.path, response.text)
         assert len(probed) == len([m for r in driver_routers.router.routes for m in r.methods]) >= 10
 
+    # The one non-admin write: a driver declares ITS OWN presence (presence v2).
+    # It names no driver in path or body; the credential decides who.
+    SELF_ONLY_WRITES = {("POST", "/api/drivers/me/presence")}
+
     def test_every_write_route_is_admin_only(self, on):
         client, _, tokens = on
         for route in driver_routers.router.routes:
             path = route.path.replace("{driver_id}", "grok-bot").replace("{project_id}", "p")
             for method in route.methods - {"GET"}:
+                if (method, route.path) in self.SELF_ONLY_WRITES:
+                    assert "{" not in route.path
+                    own = client.request(method, path, json={"status": "offline"}, headers=_drv(tokens["codex"]))
+                    assert own.status_code == 200 and own.json()["driver_id"] == "codex", own.text
+                    other = client.request(method, path, json={"status": "offline", "driver_id": "grok-bot"},
+                                           headers=_drv(tokens["codex"]))
+                    assert other.status_code == 422
+                    continue
                 response = client.request(method, path, json={}, headers=_drv(tokens["codex"]))
                 assert response.status_code == 403, (method, route.path)
                 assert response.headers["X-AItelier-Denial"] == authz.ADMIN_REQUIRED

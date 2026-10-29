@@ -218,10 +218,13 @@ def _capabilities(value) -> str:
     return encoded
 
 
-# -- presence: information only ------------------------------------------------
-# Presence is DERIVED from ``last_seen_at``; nothing is stored and NOTHING in
+# -- presence: information, plus ONE authority ----------------------------------
+# v1 presence is DERIVED from ``last_seen_at``. core.driver_presence combines it
+# with a driver's own offline declaration and its waits in progress (effective
+# presence). Presence is information EXCEPT that another member may take over
+# the claims of an OFFLINE owner (core.state_takeover); NOTHING else in
 # permission, claim, lease or fence logic may read it
-# (tests/unit/test_driver_presence.py greps for that).
+# (tests/unit/test_driver_presence.py and test_driver_offline_takeover.py guard that).
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
@@ -345,6 +348,13 @@ def recipient_presence_block(conn, driver_ids, now=None, *, fan_out: bool = Fals
     return out
 
 
+def _effective_view(conn, driver_id) -> dict:
+    """The presence a driver view shows: effective presence (core.driver_presence),
+    which keeps the v1 fields and adds the declaration and the wait facts."""
+    from core.driver_presence import effective_presence
+    return effective_presence(conn, driver_id)
+
+
 def public_view(row) -> dict:
     """A driver row as any reader may see it: never the token hash."""
     data = dict(row)
@@ -402,7 +412,7 @@ class DriverRegistry:
                 raise DriverError(f"no driver '{driver_id}'")
             view = public_view(row)
             view["projects"] = self._memberships(conn, driver_id)
-            view["presence"] = presence_now(view["last_seen_at"])
+            view["presence"] = _effective_view(conn, driver_id)
             return view
 
     def list(self) -> list[dict]:
@@ -410,7 +420,7 @@ class DriverRegistry:
             rows = conn.execute("SELECT * FROM drivers ORDER BY driver_id").fetchall()
             views = [public_view(r) for r in rows]
             for view in views:
-                view["presence"] = presence_now(view["last_seen_at"])
+                view["presence"] = _effective_view(conn, view["driver_id"])
             return views
 
     def project_members(self, project_id: str) -> list[dict]:
@@ -627,7 +637,8 @@ class DriverRegistry:
             (driver_id,)).fetchall()]
 
     def _touch(self, conn, driver_id):
-        """Diagnostic only, throttled; never part of any lease decision."""
+        """Throttled activity stamp. Feeds presence: information, plus the one
+        authority of core.state_takeover (an OFFLINE owner's claims)."""
         _stamp_last_seen(conn, str(getattr(self.db, "db_path", id(self.db))), driver_id)
 
 
@@ -675,6 +686,27 @@ def touch_driver(db, driver_id) -> None:
             _stamp_last_seen(conn, path, driver_id, LAST_SEEN_RETRY_SECONDS)
     except (sqlite3.Error, ValueError, RuntimeError):
         pass
+
+
+# The ONE other writer of driver_audit, for presence declarations, which a
+# driver makes for itself without the registry's pepper. The payload is closed
+# and enumerated exactly like DriverRegistry._audit's: no reason text, no token.
+_PRESENCE_AUDIT = {"status": ("offline", "online"),
+                   "cause": ("declared", "wait", "claim_node", "heartbeat", "start_external_attempt",
+                             "report_external_attempt")}
+
+
+def presence_audit(conn, driver_id: str, status: str, cause: str, actor: str) -> None:
+    """Append one ``presence`` audit line on the caller's connection (skipped
+    when the registry tables do not exist: driver identity off)."""
+    payload = {"status": status, "cause": cause}
+    if any(payload[k] not in allowed for k, allowed in _PRESENCE_AUDIT.items()):
+        raise DriverError("audit payload contains an invalid operation fact")
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='driver_audit'").fetchone():
+        return
+    conn.execute("INSERT INTO driver_audit(driver_id, operation, payload_json, actor, created_at) "
+                 "VALUES(?,?,?,?,?)",
+                 (driver_id, "presence", json.dumps(payload, sort_keys=True), actor, now()))
 
 
 _REGISTRIES: dict[str, DriverRegistry] = {}

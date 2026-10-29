@@ -183,6 +183,9 @@ class StateService:
         from core.state_recovery import StateRecovery
         self.recovery = StateRecovery(self.store, actor, driver_id=driver_id, is_admin=self.is_admin,
                                       claims=self.claims)
+        # Presence v2: the claims of an OFFLINE owner may be taken over by a member.
+        from core.state_takeover import StateTakeover
+        self.takeover = StateTakeover(self.store, actor, driver_id=driver_id, claims=self.claims)
         from core.state_subagents import StateSubagents
         self.subagents = StateSubagents(self.store, actor, driver_id=driver_id)
         from core.state_handoffs import StateHandoffs

@@ -103,7 +103,7 @@ A `subagents` item renews every live claim you hold for that label
 
 `healthy` → `expired` (within the 900 s grace) → `reclaimable`; `legacy_unleased`
 never expires. Events: `claim_acquired`, `claim_released`, `lease_expired`,
-plus P3: `claim_transferred`, `attempt_abandoned`, `attempt_ownership_transferred`,
+plus P3: `claim_transferred`, `claim_taken_over` (presence v2), `attempt_abandoned`, `attempt_ownership_transferred`,
 `claim_overridden`, `subagent_registered`, `handoff_*`, `checkpoint_break_glass`. Expiry is detected lazily (claim reads, `claim_node`,
 every `wait_for_state_change` iteration). An attempt is NEVER changed by expiry;
 P3 makes the change an explicit, audited member action (below).
@@ -166,6 +166,63 @@ Available in any project once an attempt's `lease_state` is
 - A `legacy_unleased` attempt (no lease) is reclaimed only with an explicit
   `override_reason` (design §9.2 step 4; owner confirmation is procedural).
   An admin may reclaim before the grace or without the reason: `break_glass`.
+
+## Takeover of an offline owner's claim (presence v2)
+
+Owner request 2026-10-29 (State issue iss-ff73340f04c24858). Presence is
+information EXCEPT here (`docs/driver-identity.md`, "What presence may and may
+not do").
+
+`take_over_claim(project_id, claim_id, expected_fence, reason, request_key)` —
+`reason` 20..300 characters; idempotent per (caller, `request_key`).
+
+Allowed only when, in ONE write transaction: the caller is an ACTIVE member of
+the project (fails closed without the registry) and not the claim's owner; the
+claim is `live` (a claim past expiry + grace is retired first and is then
+simply claimable); `expected_fence` is its fence; the node is not closed; and
+the owner's EFFECTIVE presence is `offline` - re-read inside that transaction,
+so a wait, heartbeat or claim of the owner that commits first wins.
+
+| refusal | when |
+|---|---|
+| `owner_not_offline` | the owner is online or away (facts: `owner_presence`) |
+| `not_a_member` | the caller is not an active member of the project |
+| `stale_fence` | `expected_fence` is not the claim's fence |
+| `claim_not_live` | the claim is released, expired, transferred or already taken over (the race loser) |
+| `already_held` | the claim is the caller's own |
+| `request_key_reused` | the same key with a different claim/fence/reason |
+| `node_closed` | the node is SUPERSEDED (or VERIFIED for implement) |
+
+Effect, atomically: the old claim becomes `taken_over` (new terminal status;
+history row with the reason); the caller gets a NEW live claim on the same node
+with the same purpose, workspace and lease length, fence = node max + 1, a
+fresh lease, no bound attempt and no subagent; events `claim_taken_over`
+(`from_driver_id`, `to_driver_id`, `reason`, old and new fence, and the
+presence evidence used: status, basis, declared, reason, since,
+expected_return, last_seen_at, seconds_since_seen, waiting, last_wait_end) and
+`claim_acquired` (`taken_over_from`); a `takeover_notice` in the previous
+owner's driver inbox. Node holds and their reasons are untouched.
+
+The previous owner afterwards: `heartbeat` of the old claim is refused
+`stale_fence`; `release_claim` of it is `stale_fence`; a dispatch naming the
+old claim/fence is `stale_fence`; `claim_node` is `claimed_by_other`.
+
+Attempts are NOT moved (minimum consistent scope). An attempt the previous
+owner started keeps its owner, owner fence (the attempt fence is separate from
+the claim fence) and lease: the previous owner may still report on and renew
+it, and while it is active the node admits no new attempt (`node has an active
+attempt`). The takeover result lists such attempts under `active_attempts`
+with a `note`. Moving the attempt stays `take_over_attempt` /
+`abandon_external_attempt`, which still require its lease to be reclaimable
+(`lease_not_expired: lease is healthy; reclaimable at ...` before that).
+
+Migration: `taken_over` widens the status CHECK of `state_node_claims` and
+`state_claim_history`. SQLite cannot alter a CHECK, so the first claim-store
+initialization on an older database runs the same preserving rebuild the P3
+`abandoned` status used (`core.state_attempt_schema._rebuild`): every row, the
+history seq high-water mark, indexes and triggers survive; foreign keys are
+checked before commit; a second run changes nothing. `list_claims(statuses=)`
+accepts `taken_over`.
 
 ## Subagent registry (P3, record only, design §4.6)
 

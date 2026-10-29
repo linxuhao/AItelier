@@ -32,6 +32,7 @@ import sqlite3
 import uuid
 from datetime import UTC, datetime, timedelta
 
+from core import driver_presence
 from core.state_graph import (
     StateConflict,
     StateGraphError,
@@ -44,7 +45,10 @@ from core.state_privacy import UntrustedDatabase, writer_only_read
 
 PURPOSES = ("implement", "review", "investigate", "plan")
 EXCLUSIVE_PURPOSES = ("implement", "plan")
-CLAIM_STATUSES = ("live", "released", "expired", "transferred", "revoked")
+# taken_over: the owner was OFFLINE and another member took the claim over
+# (core.state_takeover); terminal like released/expired/transferred.
+CLAIM_STATUSES = ("live", "released", "expired", "transferred", "revoked", "taken_over")
+_STATUS_CHECK = "CHECK(status IN (" + ",".join(f"'{s}'" for s in CLAIM_STATUSES) + "))"
 DEFAULT_LEASE_SECONDS = 7200          # D3: two hours, renewable without limit
 MIN_LEASE_SECONDS = 60
 MAX_LEASE_SECONDS = 86400
@@ -60,13 +64,15 @@ PUBLIC_CLAIM_COLUMNS = ("claim_id", "project_id", "node_key", "driver_id", "suba
                         "created_at")
 _ACTIVE_ATTEMPT = ("reserved", "launching", "running", "paused", "unknown")
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS state_node_claims (
+# The two tables as {name} templates: the CHECK on status is widened by a
+# preserving rebuild (core.state_attempt_schema._rebuild) on databases created
+# before `taken_over` existed; see initialize().
+CLAIMS_TABLE = """CREATE TABLE IF NOT EXISTS {name} (
     claim_id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL, node_key TEXT NOT NULL,
     driver_id TEXT NOT NULL,
     purpose TEXT NOT NULL CHECK(purpose IN ('implement','review','investigate','plan')),
-    status TEXT NOT NULL CHECK(status IN ('live','released','expired','transferred','revoked')),
+    status TEXT NOT NULL """ + _STATUS_CHECK + """,
     fence INTEGER NOT NULL CHECK(fence >= 1),
     node_revision INTEGER NOT NULL,
     attempt_id TEXT,
@@ -78,22 +84,24 @@ CREATE TABLE IF NOT EXISTS state_node_claims (
     created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
     UNIQUE(project_id, node_key, driver_id, request_key),
     FOREIGN KEY(project_id, node_key) REFERENCES state_nodes(project_id, node_key)
-);
+)"""
+HISTORY_TABLE = """CREATE TABLE IF NOT EXISTS {name} (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    claim_id TEXT NOT NULL, project_id TEXT NOT NULL, node_key TEXT NOT NULL,
+    driver_id TEXT NOT NULL, purpose TEXT NOT NULL,
+    status TEXT NOT NULL """ + _STATUS_CHECK + """,
+    fence INTEGER NOT NULL, lease_expires_at TEXT NOT NULL,
+    actor TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
+    FOREIGN KEY(claim_id) REFERENCES state_node_claims(claim_id)
+)"""
+SCHEMA = CLAIMS_TABLE.format(name="state_node_claims") + """;
 CREATE UNIQUE INDEX IF NOT EXISTS state_node_claims_one_exclusive
 ON state_node_claims(project_id, node_key) WHERE status='live' AND purpose IN ('implement','plan');
 CREATE INDEX IF NOT EXISTS state_node_claims_live
 ON state_node_claims(project_id, status, lease_expires_at);
 CREATE TRIGGER IF NOT EXISTS state_node_claims_no_delete BEFORE DELETE ON state_node_claims
 BEGIN SELECT RAISE(ABORT,'claims are never deleted; release them'); END;
-CREATE TABLE IF NOT EXISTS state_claim_history (
-    seq INTEGER PRIMARY KEY AUTOINCREMENT,
-    claim_id TEXT NOT NULL, project_id TEXT NOT NULL, node_key TEXT NOT NULL,
-    driver_id TEXT NOT NULL, purpose TEXT NOT NULL,
-    status TEXT NOT NULL CHECK(status IN ('live','released','expired','transferred','revoked')),
-    fence INTEGER NOT NULL, lease_expires_at TEXT NOT NULL,
-    actor TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
-    FOREIGN KEY(claim_id) REFERENCES state_node_claims(claim_id)
-);
+""" + HISTORY_TABLE.format(name="state_claim_history") + """;
 CREATE INDEX IF NOT EXISTS state_claim_history_claim ON state_claim_history(claim_id, seq);
 CREATE TRIGGER IF NOT EXISTS state_claim_history_no_update BEFORE UPDATE ON state_claim_history
 BEGIN SELECT RAISE(ABORT,'claim history is append-only'); END;
@@ -105,9 +113,47 @@ BEGIN SELECT RAISE(ABORT,'claim history is append-only'); END;
 # transport, which already resolved it from an ACTIVE driver token.
 
 
+def _status_check_current(conn) -> bool:
+    """Whether both claim tables already accept every status (or do not exist yet)."""
+    for table in ("state_node_claims", "state_claim_history"):
+        row = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
+        if row is not None and "'taken_over'" not in row[0]:
+            return False
+    return True
+
+
+def _widen_status_check(conn) -> None:
+    """Rebuild the claim tables whose CHECK predates `taken_over`, keeping every
+    row, the history seq high-water mark, indexes and triggers (the same
+    preserving rebuild the P3 `abandoned` status used for state_attempts).
+    Re-judged under the write lock, so concurrent initializers rebuild once."""
+    from core.state_attempt_schema import _rebuild, _table_sql
+    conn.execute("PRAGMA busy_timeout=10000")
+    conn.execute("PRAGMA foreign_keys=OFF")
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        if "'taken_over'" not in (_table_sql(conn, "state_node_claims") or "'taken_over'"):
+            _rebuild(conn, "state_node_claims", CLAIMS_TABLE, ("state_claim_history", "state_handoffs"))
+        if "'taken_over'" not in (_table_sql(conn, "state_claim_history") or "'taken_over'"):
+            _rebuild(conn, "state_claim_history", HISTORY_TABLE, ())
+        for table in ("state_node_claims", "state_claim_history", "state_handoffs"):
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone() \
+                    and conn.execute(f"PRAGMA foreign_key_check({table})").fetchone():
+                raise sqlite3.IntegrityError("claim status migration failed foreign-key validation")
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    finally:
+        conn.execute("PRAGMA foreign_keys=ON")
+
+
 def initialize(db) -> None:
-    """Create the claim tables on a real handle; idempotent, never touches rows."""
+    """Create the claim tables on a real handle; idempotent, never touches rows
+    (except the one-time preserving rebuild that widens the status CHECK)."""
     with db.get_connection() as conn:
+        if not _status_check_current(conn):
+            _widen_status_check(conn)
         conn.executescript(SCHEMA)
         conn.commit()
 
@@ -294,6 +340,7 @@ class StateClaims:
     def claim_node(self, project_id, node_key, purpose, expected_revision, request_key,
                    lease_seconds=DEFAULT_LEASE_SECONDS, workspace="", subagent=None):
         driver = self._require_driver()
+        driver_presence.mark_back(self.store, driver, "claim_node")
         if purpose not in PURPOSES:
             raise StateGraphError("purpose must be implement, review, investigate or plan")
         if type(lease_seconds) is not int or not MIN_LEASE_SECONDS <= lease_seconds <= MAX_LEASE_SECONDS:
@@ -359,9 +406,10 @@ class StateClaims:
         if holder["driver_id"] == driver:
             raise ClaimError("already_held", f"you already hold {holder['purpose']} claim {holder['claim_id']} "
                              f"(fence {holder['fence']})", **facts)
+        note, described = driver_presence.holder_note(conn, holder["driver_id"], holder["claim_id"], holder["fence"])
         raise ClaimError("claimed_by_other", f"node is claimed for {holder['purpose']} by driver "
                          f"{holder['driver_id']} until {holder['lease_expires_at']} "
-                         f"(lease_state {facts['lease_state']})", **facts)
+                         f"(lease_state {facts['lease_state']}){note}", **facts, **described)
 
     def release_claim(self, project_id, claim_id, fence, reason):
         reason = text(reason, "release reason", 2000)
@@ -377,6 +425,9 @@ class StateClaims:
                 raise ClaimError("stale_fence", f"claim fence is {claim['fence']}, not {fence}; reload")
             if claim["status"] == "released":
                 return {**_claim_view(claim, now_stamp()), "idempotent": True}
+            if claim["status"] == "taken_over":
+                raise ClaimError("stale_fence", f"claim {claim_id} was taken over while you were offline; fence "
+                                 f"{fence} no longer holds this node; reload with list_claims")
             if claim["status"] != "live":
                 raise ClaimError("claim_not_live", f"claim is {claim['status']}")
             current = now_stamp()
@@ -398,6 +449,7 @@ class StateClaims:
         for that ``<driver_id>/<label>``.
         """
         driver = self._require_driver()
+        driver_presence.mark_back(self.store, driver, "heartbeat")
         claims, attempts, subagents = claims or [], attempts or [], subagents or []
         total = len(claims) + len(attempts) + len(subagents)
         if not 1 <= total <= MAX_HEARTBEAT_ITEMS:
@@ -418,7 +470,7 @@ class StateClaims:
                 row = conn.execute("SELECT * FROM state_node_claims WHERE claim_id=? AND project_id=?",
                                    (item["claim_id"], project_id)).fetchone()
                 code = ("not_found" if row is None else "not_claim_owner" if row["driver_id"] != driver
-                        else "stale_fence" if row["fence"] != item["fence"]
+                        else "stale_fence" if row["fence"] != item["fence"] or row["status"] == "taken_over"
                         else "claim_not_live" if row["status"] != "live" else None)
                 if code:
                     refused.append({"kind": "claim", "id": item["claim_id"], "error": code})
@@ -474,7 +526,9 @@ class StateClaims:
                 sql += " AND driver_id=?"
                 args.append(driver_id)
             rows = conn.execute(sql + " ORDER BY created_at DESC, claim_id LIMIT ?", [*args, limit + 1]).fetchall()
-        return {"claims": [_claim_view(r, current) for r in rows[:limit]], "truncated": len(rows) > limit,
+            claims = [_claim_view(r, current) for r in rows[:limit]]
+            driver_presence.annotate_claims(conn, claims)
+        return {"claims": claims, "truncated": len(rows) > limit,
                 "observed_at": current, "grace_seconds": GRACE_SECONDS}
 
     @writer_only_read("get_claim")
@@ -483,7 +537,8 @@ class StateClaims:
         current = now_stamp()
         with self.store.transaction() as conn:
             self.store._project(conn, project_id)
-            claim = self._claim(conn, project_id, claim_id)
+            claim = _claim_view(self._claim(conn, project_id, claim_id), current)
+            driver_presence.annotate_claims(conn, [claim])
             history = [dict(r) for r in conn.execute(
                 "SELECT * FROM state_claim_history WHERE claim_id=? ORDER BY seq", (claim_id,))]
-        return {"claim": _claim_view(claim, current), "history": history, "observed_at": current}
+        return {"claim": claim, "history": history, "observed_at": current}

@@ -121,7 +121,7 @@ attribution, not proof. Mitigations: per-driver files, audit log
 Tokens are stored only as HMAC-SHA256(pepper, token); the audit never carries a
 token or hash. `public` is not a project member by default (Q5).
 
-## Presence: information, never authority
+## Presence: information, plus one authority (claim takeover)
 
 Every driver view carries a derived `presence` object
 (`{"status", "last_seen_at", "seconds_since_seen"}`): `GET /api/drivers`,
@@ -173,10 +173,72 @@ queued), then continue with work that does not depend on the answer, and poll la
 instead of blocking in `wait_for_driver_inbox`/`wait_for_state_change` on a reply. For
 something that cannot wait, ask the owner or route to another member.
 
-Presence is **information only**. No permission, claim, lease, fence or handoff
-decision reads it (`tests/unit/test_driver_presence.py` greps for that); an
-`offline` driver keeps its claims until they lapse by the existing rules. The
-owner remains the only authority to suspend or retire a driver.
+### Presence v2: declared offline, waits, effective presence
+
+A driver may **declare itself** offline: MCP tool `declare_driver_presence(status,
+reason?, expected_return?)` or `POST /api/drivers/me/presence` with
+`{"status": "offline"|"online", "reason"?: <=200 chars, "expected_return"?: ISO-8601}`.
+The driver is always the caller (taken from the credential; there is no driver
+argument, an extra field is refused). The row lives in
+`driver_presence_declarations` (driver_id, status, declared_at, reason,
+expected_return; created on first use). Repeating the same declaration changes
+nothing; a new reason/expected_return keeps `since`; `online` deletes the row.
+Every change appends a `presence` line to `driver_audit` with `{status, cause}`
+only (cause: declared, wait, claim_node, heartbeat, start_external_attempt,
+report_external_attempt) - never the reason text.
+
+Every presence view (the driver views above; `holder_presence` on claims) is
+now the EFFECTIVE presence. It keeps `status`, `last_seen_at` and
+`seconds_since_seen`, and adds `basis`, `derived_status`, `declared`,
+`declared_status`, `reason`, `since`, `expected_return`, `waiting` and
+`last_wait_end`. In order:
+
+| rule | status | basis |
+|---|---|---|
+| a `wait_for_driver_inbox`, `wait_for_state_change` or `wait_for_run` of the driver is in progress, or ended at most `AITELIER_PRESENCE_WAIT_GRACE_SECONDS` (default 120; bad value -> 120) ago | `online` | `wait` |
+| an offline declaration exists (recent `last_seen_at` from reads does not change it) | `offline` | `declared` |
+| otherwise the v1 rule above | online/away/offline | `last_seen` |
+
+A wait OVERRIDES a declaration and, when it starts, clears it (audited, cause
+`wait`). `claim_node`, `heartbeat`, `start_external_attempt` and
+`report_external_attempt` by the driver also clear it (and refresh
+`last_seen_at`, throttled). Ordinary reads do not.
+
+Waits are recorded in the database (`driver_presence_waits`: open-wait count,
+`active_until` = start + timeout + 30 s, `last_wait_end`), not in process
+memory: the takeover decision below must see a wait served by any process that
+opens the same SQLite file (the State-only service, the host CLI, a second
+worker). A process that dies mid-wait keeps the driver online no longer than
+that wait's own timeout plus the grace. Each wait costs two short writes
+(start: busy timeout 2 s; end: 0.5 s; a failure is logged and never fails the
+wait).
+
+### What presence may and may not do
+
+Presence is **information**, with exactly ONE exception:
+
+- MAY: be shown in driver views, `list_claims` / `get_claim`
+  (`holder_presence`, and `takeover_hint` on a live claim whose holder is
+  offline), `claimed_by_other` refusals, and message `advice`;
+- MAY (the one authority): allow another active member of a project to
+  `take_over_claim` a LIVE claim whose owner is effectively `offline` at the
+  moment of the write (`docs/driver-claims.md`);
+- MAY NOT: change dispatch, reports, leases or their expiry, fences, attempt
+  reclaim (`take_over_attempt` / `abandon_external_attempt` keep their lease
+  rule), holds, handoffs, membership, message delivery, or any other
+  permission. `online` and `away` owners are never taken over.
+
+The guard is mechanical: `tests/unit/test_driver_presence.py` and
+`tests/unit/test_driver_offline_takeover.py` refuse any presence read in
+permission, claim, lease and fence code other than four describing hooks
+(`annotate_claims`, `holder_note`, `mark_back`, `driver_waiting`), refuse a
+hook result inside a condition there, and pin `core/state_takeover.py` as the
+only module that decides on `effective_presence`. An `offline` driver keeps its
+claims until they lapse or a member takes them over. The owner remains the only
+authority to suspend or retire a driver.
+
+Messaging `recipient_presence` / `advice` still uses the v1 derived presence
+(unchanged by this step).
 
 ## Compatibility
 

@@ -347,7 +347,7 @@ def build_mcp() -> FastMCP:
     _register_bundle_tools(tool)
     _register_edit_tools(tool)
     _register_run_tools(tool, mcp)
-    _register_wait_tool(tool)
+    _register_wait_tool(tool, mcp)
     _register_trace_tools(tool)
     _register_lifecycle_tools(tool)
     _register_model_tools(tool)
@@ -1524,7 +1524,23 @@ _WAIT_DEFAULT_S = 45
 _WAIT_MAX_S = 3600
 
 
-def _register_wait_tool(tool):
+def _register_wait_tool(tool, mcp=None):
+
+    def _waiting_driver():
+        """(database, driver_id) of the registered driver making this call, for the
+        presence v2 wait marker; (None, None) when there is none."""
+        if mcp is None:
+            return None, None
+        try:
+            request = _request_from(mcp.get_context())
+            from api.state_graph_routers import authenticated_driver_id
+            driver = authenticated_driver_id(request) if request is not None else None
+            if not driver:
+                return None, None
+            from api.dependencies import get_db_manager
+            return get_db_manager(), driver
+        except Exception:  # noqa: BLE001 - presence bookkeeping never fails a wait
+            return None, None
 
     @tool("wait_for_run", "read",
           "Block until a run pauses at a checkpoint or finishes, then return why. "
@@ -1596,7 +1612,10 @@ def _register_wait_tool(tool):
                 timed_out = True          # asked for a look, not a wait
             else:
                 try:
-                    await asyncio.wait_for(settled.wait(), timeout)
+                    # A driver blocked here is present (presence v2 wait marker).
+                    from core import driver_presence
+                    async with driver_presence.driver_waiting(*_waiting_driver(), timeout):
+                        await asyncio.wait_for(settled.wait(), timeout)
                     timed_out = False
                 except asyncio.TimeoutError:
                     timed_out = True

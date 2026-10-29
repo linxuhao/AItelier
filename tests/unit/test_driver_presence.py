@@ -148,7 +148,9 @@ def test_registry_views_carry_presence_and_keep_every_existing_field(world):
     assert one["presence"]["status"] == "online" and one["last_seen_at"] == one["presence"]["last_seen_at"]
     listed = {d["driver_id"]: d for d in reg.list()}
     assert listed["carol"]["presence"]["status"] == "away"
-    assert listed["ada"]["presence"] == {"status": "offline", "last_seen_at": None, "seconds_since_seen": None}
+    v1 = {k: listed["ada"]["presence"][k] for k in ("status", "last_seen_at", "seconds_since_seen")}
+    assert v1 == {"status": "offline", "last_seen_at": None, "seconds_since_seen": None}   # v1 fields kept
+    assert listed["ada"]["presence"]["basis"] == "last_seen"                               # presence v2 adds
     assert all(set(drivers.PUBLIC_FIELDS) <= set(d) for d in listed.values())
 
 
@@ -434,11 +436,14 @@ def test_authenticated_state_rest_call_refreshes_last_seen(world, monkeypatch):
 def test_state_only_service_refreshes_last_seen_for_driver_credentials(world, tmp_path, monkeypatch):
     from api.state_only import create_app
     db, reg, tokens, _ = world
-    secrets_dir = tmp_path / "secrets"
-    secrets_dir.mkdir()
-    (secrets_dir / drivers.PEPPER_SECRET_NAME).write_text(PEPPER)
-    monkeypatch.setenv("AITELIER_SECRETS_DIR", str(secrets_dir))
+    # Independent of the ambient container: read_pepper() tries the fixed paths
+    # /run/secrets and /run/aitelier-secrets BEFORE $AITELIER_SECRETS_DIR, so in
+    # the production container (which mounts the real pepper there) a secrets
+    # dir alone lost to the real pepper and every fixture token was a 401.
+    monkeypatch.setattr(drivers, "read_pepper", lambda: PEPPER)
     monkeypatch.setenv(drivers.FEATURE_ENV, "on")
+    monkeypatch.delenv("AITELIER_ADMIN_TOKEN", raising=False)
+    monkeypatch.delenv("AITELIER_SECRETS_DIR", raising=False)
     drivers._REGISTRIES.clear()
     app = create_app(db.db_path, "dedicated-state-bearer-token-0123456789abcdef", with_mcp=False)
     with TestClient(app, base_url="http://localhost") as client:
@@ -450,37 +455,57 @@ def test_state_only_service_refreshes_last_seen_for_driver_credentials(world, tm
     drivers._REGISTRIES.clear()
 
 
-# -- presence is information, never authority ----------------------------------
+# -- presence is information, plus ONE authority -----------------------------------
+# Presence v2 (core.driver_presence) gives presence exactly one authority: an
+# OFFLINE owner's claims may be taken over (core.state_takeover). Permission,
+# claim, lease and fence code may otherwise touch presence only through the
+# describing/back hooks below - never reading it (the AST half of this guard is
+# tests/unit/test_driver_offline_takeover.py::test_permission_code_uses_presence_only_through_describing_hooks).
 PRESENCE_NAMES = {"presence_of", "presence_now", "presence_advice", "presence_thresholds",
-                  "recipient_presence_block"}
-PRESENCE_TOKEN = re.compile(r"presence_(of|now|thresholds|advice)|recipient_presence|seconds_since_seen"
-                            r"|PRESENCE_(ONLINE|OFFLINE)|AITELIER_PRESENCE")
+                  "recipient_presence_block", "effective_presence", "_effective_view"}
+PRESENCE_TOKEN = re.compile(r"presence_(of|now|thresholds|advice|for)|recipient_presence|seconds_since_seen"
+                            r"|PRESENCE_(ONLINE|OFFLINE)|AITELIER_PRESENCE|effective_presence|_effective_view"
+                            r"|driver_presence|holder_presence|takeover_hint")
 PERMISSION_TOKEN = re.compile(PRESENCE_TOKEN.pattern + r"""|["']presence["']|\.presence\b|\bpresence\s*=""")
+# The only presence usages permission code may contain: the module import and
+# the four hooks that describe a holder, clear a declaration or mark a wait.
+DESCRIBING_HOOKS = re.compile(r"^\s*from core import driver_presence\s*$"
+                              r"|\bdriver_presence\.(annotate_claims|holder_note|mark_back|driver_waiting)\(", re.M)
 PERMISSION_FILES = ["core/state_claims.py", "core/state_enforcement.py", "core/state_handoffs.py",
                     "core/state_subagents.py", "core/driver_notices.py", "core/state_attempts.py",
-                    "core/state_service.py", "core/state_commands.py", "api/authz.py", "api/state_only.py",
+                    "core/state_service.py", "core/state_commands.py", "core/state_external.py",
+                    "core/state_recovery.py", "core/state_changes.py", "api/authz.py", "api/state_only.py",
                     "api/state_http.py", "api/state_graph_routers.py", "api/mcp_router.py"]
-ALLOWED_PRESENCE_USERS = {"core/drivers.py", "core/driver_inbox.py", "core/director_messaging.py"}
+ALLOWED_PRESENCE_USERS = {"core/drivers.py", "core/driver_inbox.py", "core/director_messaging.py",
+                          "core/driver_presence.py", "core/state_takeover.py"}
 
 
 def test_permission_claim_lease_and_fence_code_never_reads_presence_or_last_seen():
     for rel in PERMISSION_FILES:
-        text = (ROOT / rel).read_text(encoding="utf-8")
+        text = DESCRIBING_HOOKS.sub("", (ROOT / rel).read_text(encoding="utf-8"))
         assert not PERMISSION_TOKEN.search(text), rel
         assert "last_seen" not in text, rel
 
 
 @pytest.mark.parametrize("snippet", ['view["presence"]["status"]', "view['presence']", 'row.get("presence")',
-                                     "d.presence", "presence = 1", "presence_now(x)", "x['seconds_since_seen']"])
+                                     "d.presence", "presence = 1", "presence_now(x)", "x['seconds_since_seen']",
+                                     "driver_presence.effective_presence(conn, d)", "effective_presence(conn, d)",
+                                     "from core.driver_presence import effective_presence",
+                                     "driver_presence.presence_for(db, d)", "claim['holder_presence']",
+                                     "driver_presence.wait_grace_seconds()", "AITELIER_PRESENCE_WAIT_GRACE_SECONDS"])
 def test_the_authorization_guard_pattern_catches_every_way_of_reading_presence(snippet):
-    assert PERMISSION_TOKEN.search(snippet)
+    assert PERMISSION_TOKEN.search(DESCRIBING_HOOKS.sub("", snippet))
 
 
 def test_only_the_reporting_modules_use_presence_helpers():
     users = {str(path.relative_to(ROOT)) for folder in ("core", "api") for path in (ROOT / folder).glob("*.py")
-             if PRESENCE_TOKEN.search(path.read_text(encoding="utf-8"))}
-    # api/driver_routers.py only reads the already-presence-carrying registry views.
-    assert users - {"api/driver_routers.py"} == ALLOWED_PRESENCE_USERS
+             if PRESENCE_TOKEN.search(DESCRIBING_HOOKS.sub("", path.read_text(encoding="utf-8")))}
+    # api/driver_routers.py only reads the already-presence-carrying registry views
+    # and offers the self-declaration route; api/state_graph_tools.py offers the
+    # self-declaration MCP tool.
+    # core/state_driver_guide.py is the driver-facing documentation of the rule.
+    assert users - {"api/driver_routers.py", "api/state_graph_tools.py",
+                    "core/state_driver_guide.py"} == ALLOWED_PRESENCE_USERS
 
 
 def test_inside_drivers_py_only_describing_views_call_the_presence_helpers():
@@ -498,7 +523,7 @@ def test_inside_drivers_py_only_describing_views_call_the_presence_helpers():
             used = {n.id for n in ast.walk(fn) if isinstance(n, ast.Name)}
             if used & PRESENCE_NAMES:
                 callers.add(owner + fn.name)
-    assert callers == {"presence_now", "recipient_presence_block",
+    assert callers == {"presence_now", "recipient_presence_block", "_effective_view",
                        "DriverRegistry.get", "DriverRegistry.list"}
     assert drivers.DriverRegistry.lookup_token.__code__.co_names.count("presence_now") == 0
 

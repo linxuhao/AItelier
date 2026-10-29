@@ -94,6 +94,22 @@ async def wait_for_state_change(service, project_id, after=0, node_keys=None, at
                                 note_after_revision=None, filter_mode="all", actionable_only=True,
                                 timeout_seconds=30.0, limit=100, return_when_idle=False,
                                 include_lease_events=True, include_driver_inbox=False, inbox_after=0):
+    # A driver blocked here is present (presence v2 wait marker, kept in the
+    # database): online, and its offline declaration ends.
+    from core import driver_presence
+    async with driver_presence.driver_waiting(getattr(service, "db", None), getattr(service, "driver_id", None),
+                                              timeout_seconds):
+        return await _wait_for_state_change(
+            service, project_id, after, node_keys, attempt_ids, note_after_revision, filter_mode,
+            actionable_only, timeout_seconds, limit, return_when_idle,
+            include_lease_events=include_lease_events, include_driver_inbox=include_driver_inbox,
+            inbox_after=inbox_after)
+
+
+async def _wait_for_state_change(service, project_id, after=0, node_keys=None, attempt_ids=None,
+                                 note_after_revision=None, filter_mode="all", actionable_only=True,
+                                 timeout_seconds=30.0, limit=100, return_when_idle=False,
+                                 include_lease_events=True, include_driver_inbox=False, inbox_after=0):
     # Service callers receive the same strict contract as REST/MCP callers.
     from core.state_commands import WaitForStateChange
     from core.state_graph import key

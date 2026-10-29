@@ -263,6 +263,8 @@ _ARGUMENT_SEEDS = {
     # subject, or pydantic refuses before the handler - and the mutation - can run.
     "register_subagent": {"label": "w", "workspace": "h:/w#b"},
     "offer_handoff": {"claim_id": "claim-mutation", "package": {"next_step": "x"}},
+    # Presence v2: a takeover reason is 20..300 characters.
+    "take_over_claim": {"reason": "mutation sentinel takeover reason"},
 }
 
 

@@ -12,6 +12,7 @@ A token appears in exactly two responses - register and rotate - once.
 from __future__ import annotations
 
 import sqlite3
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
@@ -70,6 +71,12 @@ class SetAdmin(_Strict):
     reason: str = Field(min_length=1, max_length=2000)
 
 
+class DeclarePresence(_Strict):
+    status: Literal["offline", "online"]
+    reason: str | None = Field(default=None, max_length=200)
+    expected_return: str | None = Field(default=None, max_length=64)
+
+
 class SetMembership(_Strict):
     status: str
     expected_revision: int
@@ -90,6 +97,19 @@ def whoami(request: Request):
     if registry is not None and identity is not None and identity.driver_id:
         out["driver"] = _call(registry.get, identity.driver_id)
     return out
+
+
+@router.post("/me/presence", dependencies=[Depends(authz.require_writer)])
+def declare_my_presence(body: DeclarePresence, request: Request):
+    """Presence v2: the calling driver declares ITSELF offline or online. The
+    driver comes from the credential; there is no driver in the path or body."""
+    registry = _registry()
+    identity = authz.request_identity(request)
+    if identity is None or identity.kind != "driver" or not identity.driver_id:
+        raise HTTPException(403, "driver_identity_required: presence is declared by a registered driver for itself")
+    from core.driver_presence import declare
+    return _call(declare, registry.db, identity.driver_id, body.status, body.reason, body.expected_return,
+                 actor=identity.actor)
 
 
 @router.get("", dependencies=[Depends(authz.require_reader)])

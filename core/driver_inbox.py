@@ -199,18 +199,21 @@ class DriverInbox:
         if type(timeout_seconds) not in (int,float) or not 0<=timeout_seconds<=900:
             raise StateGraphError("invalid_request")
         from core.state_changes import subscribe
+        from core.driver_presence import driver_waiting
         deadline=time.monotonic()+timeout_seconds
-        with subscribe(self.store.db.db_path) as signal:
-            while True:
-                signal.clear()
-                # list_driver_messages stamps last_seen (blocking SQLite): keep it off the event loop.
-                result=await asyncio.to_thread(self.list_driver_messages,driver_id,after)
-                if result["messages"] or return_when_idle or time.monotonic()>=deadline:
-                    return result
-                try:
-                    await asyncio.wait_for(signal.wait(),timeout=min(1,max(0,deadline-time.monotonic())))
-                except asyncio.TimeoutError:
-                    pass
+        # A driver blocked here is present (presence v2): online, and its offline declaration ends.
+        async with driver_waiting(self.store.db, self.driver_id, timeout_seconds):
+            with subscribe(self.store.db.db_path) as signal:
+                while True:
+                    signal.clear()
+                    # list_driver_messages stamps last_seen (blocking SQLite): keep it off the event loop.
+                    result=await asyncio.to_thread(self.list_driver_messages,driver_id,after)
+                    if result["messages"] or return_when_idle or time.monotonic()>=deadline:
+                        return result
+                    try:
+                        await asyncio.wait_for(signal.wait(),timeout=min(1,max(0,deadline-time.monotonic())))
+                    except asyncio.TimeoutError:
+                        pass
 
 
     def acknowledge_driver_message(self, delivery_id, expected_version, request_key, break_glass_reason=None):

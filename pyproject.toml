@@ -51,7 +51,10 @@ dependencies = [
     "PyYAML>=6.0.3,<7",
     "httpx>=0.28",
     "pydantic>=2.13",
-    "apscheduler>=3.11",
+    # Upper bound is load-bearing: apscheduler 4 is a full API rewrite and has no
+    # apscheduler.schedulers.asyncio.AsyncIOScheduler, which core/scheduler.py imports
+    # (installed: 3.11.3). Raise only together with a port of core/scheduler.py.
+    "apscheduler>=3.11,<4",
     "tenacity>=9.1",
     # godot_vision ships every captured frame inline as base64 in the request
     # body. A 960x704 game frame is a ~900 KB PNG (the ink-wash background has

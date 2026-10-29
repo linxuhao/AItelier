@@ -60,6 +60,8 @@ ENV AITELIER_WEB_DIST=/srv/web_dist
 # checkout or an old image layer.
 RUN pip install --no-cache-dir -e .
 RUN python -c "from core.output_migration import require_output_engine; require_output_engine()"
+# Fail the build if a tool-calling litellm completion cannot run (2026-10-28 litellm 1.106.5 incident).
+RUN LITELLM_LOCAL_MODEL_COST_MAP=True python -c 'import litellm; r = litellm.completion(model="anthropic/claude-sonnet-5-5", messages=[{"role": "user", "content": "hi"}], tools=[{"type": "function", "function": {"name": "read", "parameters": {"type": "object", "properties": {}}}}], mock_response="ok"); assert r.choices[0].message.content == "ok"'
 
 # Identity for in-container git commits (workspace_manager commits set no inline
 # identity, and there is no global ~/.gitconfig in the image). Overridable.

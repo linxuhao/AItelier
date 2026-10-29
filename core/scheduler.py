@@ -2823,7 +2823,9 @@ def _sweep_ended_leases() -> None:
 
     # Lease release only says the run is terminal + quiet. Reaping is a second,
     # stricter decision: clean tree + locally provable integration (or explicit
-    # discard). Merely pushed/open-PR work remains on disk.
+    # discard). Merely pushed/open-PR work remains on disk until it has been
+    # idle AITELIER_UNMERGED_REAP_AFTER_SECONDS; then only the directory goes,
+    # after its HEAD is held by a verified ref.
     try:
         reap = run_isolation.reap_released_worktrees(db, sf)
     except Exception:

@@ -49,10 +49,20 @@ into the source checkout's current HEAD (or an operator has explicitly recorded
 `discarded`). Merely pushing a branch or opening a PR is never enough. On any
 uncertainty the tree is retained: a missed reap costs disk, a wrong reap can lose
 somebody's unmerged delivery.
+
+A released tree that is neither merged nor discarded is not kept forever
+either. After `AITELIER_UNMERGED_REAP_AFTER_SECONDS` of observed inactivity
+(default three days; 0 disables) the clock may grant removal of the DIRECTORY,
+never discard of the COMMIT: the same retention vetoes and raw cleanliness proof
+apply, and the checkout's HEAD must first be held by a ref in the source repo —
+its own run branch when HEAD is that branch's tip, otherwise a created and
+verified `refs/aitelier/reclaimed-worktrees/<run_id>`. If no ref can be proven,
+the tree stays. Such a reap is recorded as `reaped_ref_preserved:<ref>`.
 """
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import subprocess
@@ -70,6 +80,13 @@ MODE_READ_SNAPSHOT = "read_snapshot"
 
 
 BRANCH_PREFIX = "codex/run/"
+
+# A clock may reclaim the directory of an unmerged, undiscarded released tree,
+# never its commit: HEAD is first held by a ref under this prefix (or by the
+# run's own branch). 0 disables; the default is three days of inactivity.
+UNMERGED_REAP_ENV = "AITELIER_UNMERGED_REAP_AFTER_SECONDS"
+UNMERGED_REAP_DEFAULT_SECONDS = 259200
+RECLAIMED_REF_PREFIX = "refs/aitelier/reclaimed-worktrees/"
 
 # The closed backend Git profile (core.closed_git): no inherited GIT_*
 # routing, no global/system config, hooks/fsmonitor/pager/signing off. The
@@ -1473,18 +1490,84 @@ def _index_storage_present(worktree, names) -> bool:
         os.close(root)
 
 
-def _reap_intent(disposition: str) -> tuple[bool, str | None] | None:
-    """Decode the durable decision written immediately before Git removal."""
+def _reap_intent(disposition: str):
+    """Decode the durable decision written immediately before Git removal.
+
+    Returns `(discarded, merge_target, preserved)`, where `preserved` is the
+    `(head_sha, ref)` of a ref-preserving reap, or None when nothing is pending.
+    """
     if disposition == "reaping_discarded":
-        return True, None
+        return True, None, None
     prefix = "reaping_merged_into:"
     if disposition.startswith(prefix) and disposition[len(prefix):]:
-        return False, disposition[len(prefix):]
+        return False, disposition[len(prefix):], None
+    prefix = "reaping_ref_preserved:"
+    if disposition.startswith(prefix):
+        sha, sep, ref = disposition[len(prefix):].partition(":")
+        if sep and sha and ref:
+            return False, None, (sha, ref)
     return None
 
 
+def _reaped_disposition(discarded: bool, target: str | None, preserved) -> str:
+    if preserved:
+        return f"reaped_ref_preserved:{preserved[1]}"
+    return "reaped_discarded" if discarded else f"reaped_merged_into:{target}"
+
+
+def _unmerged_reason(branch, integration_ref) -> str:
+    return f"branch {branch} is unmerged into {integration_ref}"
+
+
+def _unmerged_reap_after(value=None) -> float:
+    """Idle seconds before an unmerged released tree's directory may go; 0 = never."""
+    limit = float(value if value is not None else os.environ.get(
+        UNMERGED_REAP_ENV, str(UNMERGED_REAP_DEFAULT_SECONDS)))
+    if not math.isfinite(limit) or limit < 0:
+        raise ValueError(f"{UNMERGED_REAP_ENV} must be finite and nonnegative")
+    return limit
+
+
+def _commit_at(cwd, ref: str) -> str:
+    res = _git(cwd, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}")
+    return res.stdout.strip() if res.returncode == 0 else ""
+
+
+def _preserve_run_head(rec: dict) -> tuple[str, str]:
+    """Hold the checkout's HEAD by a ref in the source repo; raise if unproven.
+
+    Called under the source repo lock, after the cleanliness proof. Uses the
+    run's own branch when HEAD is its tip; otherwise creates (never moves) the
+    run's reclaimed ref and verifies it. Nothing is deleted or forced.
+    """
+    source = rec["source_repo"]
+    sha = _commit_at(rec["worktree_path"], "HEAD")
+    if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sha):
+        raise ValueError("worktree HEAD is unknown; nothing was preserved")
+    if rec.get("mode") == MODE_READ_SNAPSHOT and sha != rec.get("base_sha"):
+        raise ValueError("read snapshot changed from its recorded detached base")
+    reclaimed = RECLAIMED_REF_PREFIX + _require_usable_run_id(rec["run_id"])
+    candidates = [reclaimed]
+    if rec.get("mode") == MODE_WORKTREE and rec.get("branch"):
+        candidates.insert(0, f"refs/heads/{rec['branch']}")
+    for ref in candidates:
+        if _commit_at(source, ref) == sha:
+            return sha, ref
+    if _git(source, "check-ref-format", reclaimed).returncode:
+        raise ValueError(f"{reclaimed} is not a valid ref name; checkout retained")
+    # Empty old value: create only, never move an existing ref.
+    made = _git(source, "update-ref", "-m", "aitelier: preserve reclaimed run worktree head",
+                reclaimed, sha, "")
+    if made.returncode:
+        raise ValueError(f"could not create {reclaimed}; checkout retained "
+                         f"({(made.stderr or made.stdout).strip()[:200]})")
+    if _commit_at(source, reclaimed) != sha:
+        raise ValueError(f"{reclaimed} does not verify at {sha}; checkout retained")
+    return sha, reclaimed
+
+
 def _missing_reap_is_owned(rec: dict, *, discarded: bool,
-                           target: str | None) -> tuple[bool, str]:
+                           target: str | None, preserved=None) -> tuple[bool, str]:
     """Prove a pending reap names the exact tree Git has already removed."""
     path = Path(rec.get("worktree_path") or "")
     managed = datadir.worktrees_dir().absolute()
@@ -1500,6 +1583,11 @@ def _missing_reap_is_owned(rec: dict, *, discarded: bool,
              if line.startswith("worktree ")]
     if str(path) in paths:
         return False, "source Git still records the pending worktree"
+    if preserved:
+        sha, ref = preserved
+        if _git(rec["source_repo"], "merge-base", "--is-ancestor", sha, ref).returncode:
+            return False, f"the preserving ref {ref} no longer holds {sha}"
+        return True, f"reconciled removed {path}; head {sha} preserved by {ref}"
     if not discarded:
         branch = rec.get("branch")
         if rec.get("mode") == MODE_WORKTREE:
@@ -1548,15 +1636,24 @@ def _require_reap_retention(db, rec, row, ctl, *, now, minimum):
 
 
 def reap_released_worktrees(db, sf, *, min_idle_seconds: float | None = None,
-                           now: float | None = None) -> dict:
+                           now: float | None = None,
+                           unmerged_reap_after_seconds: float | None = None) -> dict:
     """Reclaim quiet, integrated/discarded, idle roots after index release.
 
-    A clock never grants discard. Resource + control locks fence concurrent
-    readers, sidecar jobs and host preparation. No force removal or branch
-    deletion is performed. Any unclassified ignored files retain the checkout.
+    A clock never grants discard. It grants only removal of an unmerged tree's
+    directory, after `unmerged_reap_after_seconds` (env
+    `AITELIER_UNMERGED_REAP_AFTER_SECONDS`; 0 disables) of inactivity and once
+    its HEAD is held by a verified ref. Resource + control locks fence
+    concurrent readers, sidecar jobs and host preparation. No force removal or
+    branch deletion is performed. Any unclassified ignored files retain the
+    checkout.
     """
-    from contextlib import ExitStack
+    from contextlib import ExitStack, nullcontext
     from core import run_resources as resources
+    try:
+        unmerged_after, unmerged_error = _unmerged_reap_after(unmerged_reap_after_seconds), ""
+    except (TypeError, ValueError) as exc:
+        unmerged_after, unmerged_error = None, f"unmerged reap is misconfigured: {exc}"
     removed, kept = [], []
     for initial in retained(db):
         rid = initial["run_id"]
@@ -1575,16 +1672,8 @@ def reap_released_worktrees(db, sf, *, min_idle_seconds: float | None = None,
                 if row is None:
                     raise ValueError(why)
                 intent = _reap_intent(rec.get("disposition") or "")
-                if intent:
-                    discarded, target = intent
-                else:
-                    discarded = rec.get("disposition") == "discarded"
-                    target = None
-                    if not discarded:
-                        target, why = _source_current_ref(rec)
-                        if not target:
-                            raise ValueError(why)
                 if intent and not os.path.lexists(rec["worktree_path"]):
+                    discarded, target, preserved = intent
                     with db.get_connection() as conn:
                         admissions = conn.execute(
                             "SELECT COUNT(*) FROM checkout_write_admissions WHERE canonical_checkout=?",
@@ -1595,13 +1684,12 @@ def reap_released_worktrees(db, sf, *, min_idle_seconds: float | None = None,
                     if ctl and ledger is not None and not ctl.settled(ledger, "released"):
                         raise ValueError("semantic release is not positively acknowledged")
                     ok, why = _missing_reap_is_owned(
-                        rec, discarded=discarded, target=target)
+                        rec, discarded=discarded, target=target, preserved=preserved)
                     if not ok:
                         raise ValueError(why)
                     if ctl and ledger is not None:
                         ctl.forget(rid)
-                    final = ("reaped_discarded" if discarded
-                             else f"reaped_merged_into:{target}")
+                    final = _reaped_disposition(discarded, target, preserved)
                     with db.get_connection() as conn:
                         conn.execute(
                             "UPDATE run_isolation SET disposition=?,note=? WHERE run_id=?",
@@ -1609,14 +1697,46 @@ def reap_released_worktrees(db, sf, *, min_idle_seconds: float | None = None,
                         conn.commit()
                     removed.append({"run_id": rid, "reason": why})
                     continue
+                if intent and not intent[2]:
+                    discarded, target = intent[:2]
+                else:
+                    # A pending ref-preserving reap whose tree still exists is
+                    # decided afresh; its ref, if made, is reused.
+                    discarded = rec.get("disposition") == "discarded"
+                    target = None
+                    if not discarded:
+                        target, why = _source_current_ref(rec)
+                        if not target and unmerged_after == 0:
+                            raise ValueError(why)
                 _require_reap_retention(
                     db, rec, row, ctl, now=now, minimum=min_idle_seconds)
                 # Cheap retention vetoes above cannot grant removal. Only a
                 # candidate that survives them needs the full raw-byte proof.
-                ok, why = is_disposable(db, rid, run_status=row["status"], admitted_ops=0,
-                                        integration_ref=target, require_merge=not discarded)
+                ok = False
+                if discarded or target:
+                    ok, why = is_disposable(db, rid, run_status=row["status"], admitted_ops=0,
+                                            integration_ref=target, require_merge=not discarded)
+                preserve = False
                 if not ok:
-                    raise ValueError(why)
+                    unmerged = not discarded and (
+                        not target or why == _unmerged_reason(rec["branch"], target))
+                    if not unmerged or unmerged_after == 0:
+                        raise ValueError(why)
+                    if unmerged_after is None:
+                        raise ValueError(f"{why}; {unmerged_error}")
+                    # Neither merged nor discarded: only a long observed idle
+                    # may reclaim the directory, and only with HEAD held by a ref.
+                    idle, idle_why = resources.idle_eligible(
+                        rec, row, ctl.get(rid) if ctl else None,
+                        now=now, minimum=unmerged_after)
+                    if not idle:
+                        raise ValueError(
+                            f"{why}; ref-preserved reap waits for {int(unmerged_after)}s idle"
+                            if idle_why.startswith("idle ") else f"{why}; {idle_why}")
+                    ok, why = is_disposable(db, rid, run_status=row["status"], admitted_ops=0)
+                    if not ok:
+                        raise ValueError(why)
+                    preserve = True
                 _require_reap_retention(
                     db, rec, row, ctl, now=now, minimum=min_idle_seconds)
                 # Recheck the engine after filesystem observations, not only at
@@ -1624,20 +1744,31 @@ def reap_released_worktrees(db, sf, *, min_idle_seconds: float | None = None,
                 fresh, why = resources.terminal_quiet(sf, rid)
                 if fresh is None:
                     raise ValueError(why)
-                pending = ("reaping_discarded" if discarded
-                           else f"reaping_merged_into:{target}")
-                with db.get_connection() as conn:
-                    conn.execute("UPDATE run_isolation SET disposition=? WHERE run_id=?",
-                                 (pending, rid))
-                    conn.commit()
-                ok, why = _remove_run_worktree(rec)
+                preserved = None
+                with (closed_git.repo_lock(rec["source_repo"]) if preserve else nullcontext()):
+                    # The ref exists and verifies BEFORE the pending marker, and
+                    # the marker names it BEFORE removal: every crash window
+                    # leaves either the tree or a ref-held commit.
+                    if preserve:
+                        preserved = _preserve_run_head(rec)
+                        pending = f"reaping_ref_preserved:{preserved[0]}:{preserved[1]}"
+                    else:
+                        pending = ("reaping_discarded" if discarded
+                                   else f"reaping_merged_into:{target}")
+                    with db.get_connection() as conn:
+                        conn.execute("UPDATE run_isolation SET disposition=? WHERE run_id=?",
+                                     (pending, rid))
+                        conn.commit()
+                    ok, why = _remove_run_worktree(rec)
                 if not ok:
                     raise ValueError(why)
+                if preserved:
+                    why = f"{why}; head {preserved[0]} preserved by {preserved[1]}"
                 if ctl:
                     ctl.forget(rid)
                 with db.get_connection() as conn:
                     conn.execute("UPDATE run_isolation SET disposition=?,note=? WHERE run_id=?",
-                                 ("reaped_discarded" if discarded else f"reaped_merged_into:{target}",
+                                 (_reaped_disposition(discarded, target, preserved),
                                   why[:500], rid))
                     conn.commit()
                 removed.append({"run_id": rid, "reason": why})
@@ -1709,8 +1840,7 @@ def is_disposable(db, run_id: str, *, run_status: str, admitted_ops: int,
                 merged = _git(rec["source_repo"], "merge-base", "--is-ancestor",
                               tip, integration_ref)
                 if merged.returncode != 0:
-                    return False, (f"branch {rec['branch']} is unmerged into "
-                                   f"{integration_ref}")
+                    return False, _unmerged_reason(rec["branch"], integration_ref)
             # Ownership/branch/integration rejection needs no tracked-content reads.
             # Raw cleanliness: index equals HEAD, every tracked file hashes (no-follow,
             # full bytes) to its blob, no untracked file. No `git status`: its refresh

@@ -41,6 +41,13 @@ PUBLIC_DRIVER_ID = "public"
 OWNER_CLI_DRIVER_ID = "owner-cli"
 TOKEN_PREFIX = "aitd_"
 LAST_SEEN_THROTTLE_SECONDS = 60
+LAST_SEEN_RETRY_SECONDS = 5          # long polls only; the request path keeps the full throttle
+PRESENCE_FUTURE_SKEW_SECONDS = 60
+PRESENCE_LIST_CAP = 200
+PRESENCE_ONLINE_ENV = "AITELIER_PRESENCE_ONLINE_SECONDS"
+PRESENCE_OFFLINE_ENV = "AITELIER_PRESENCE_OFFLINE_SECONDS"
+PRESENCE_ONLINE_DEFAULT = 900
+PRESENCE_OFFLINE_DEFAULT = 21600
 _DRIVER_ID = re.compile(r"[a-z0-9][a-z0-9_.-]{0,63}\Z")
 _STATUSES = ("active", "suspended", "retired")
 
@@ -211,6 +218,133 @@ def _capabilities(value) -> str:
     return encoded
 
 
+# -- presence: information only ------------------------------------------------
+# Presence is DERIVED from ``last_seen_at``; nothing is stored and NOTHING in
+# permission, claim, lease or fence logic may read it
+# (tests/unit/test_driver_presence.py greps for that).
+
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
+
+
+def _positive_seconds(name: str, default: int) -> int:
+    raw = os.getenv(name, "").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+def presence_thresholds() -> tuple[int, int]:
+    """(online_seconds, stale_seconds) from the environment; bad values -> defaults.
+
+    ``stale`` must exceed ``online``; otherwise both fall back to the defaults.
+    """
+    online = _positive_seconds(PRESENCE_ONLINE_ENV, PRESENCE_ONLINE_DEFAULT)
+    stale = _positive_seconds(PRESENCE_OFFLINE_ENV, PRESENCE_OFFLINE_DEFAULT)
+    if stale <= online:
+        return PRESENCE_ONLINE_DEFAULT, PRESENCE_OFFLINE_DEFAULT
+    return online, stale
+
+
+def _as_datetime(value) -> datetime | None:
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str) and value.strip():
+        try:
+            parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
+def presence_of(last_seen_at, now, *, online_seconds: int, stale_seconds: int) -> dict:
+    """``online`` if seen within ``online_seconds``, ``away`` within ``stale_seconds``,
+    else ``offline``. Both bounds are inclusive. Never seen is ``offline`` with
+    ``last_seen_at`` None. An unreadable stamp, or one more than
+    ``PRESENCE_FUTURE_SKEW_SECONDS`` in the future, is ``offline`` with the raw stamp
+    kept and ``seconds_since_seen`` None (unknown) - it is never evidence of
+    activity. A stamp up to that far ahead (clock skew) counts as age 0."""
+    seen = _as_datetime(last_seen_at)
+    current = _as_datetime(now)
+    raw = last_seen_at if isinstance(last_seen_at, str) and last_seen_at else None
+    if seen is None or current is None:
+        return {"status": "offline", "last_seen_at": raw, "seconds_since_seen": None}
+    delta = (current - seen).total_seconds()
+    if delta < -PRESENCE_FUTURE_SKEW_SECONDS:
+        return {"status": "offline", "last_seen_at": raw or seen.isoformat(), "seconds_since_seen": None}
+    age = max(0, int(delta))
+    status = "online" if age <= online_seconds else "away" if age <= stale_seconds else "offline"
+    return {"status": status, "last_seen_at": raw or seen.isoformat(), "seconds_since_seen": age}
+
+
+def presence_now(last_seen_at, now=None) -> dict:
+    """``presence_of`` with the environment thresholds and the current time."""
+    online, stale = presence_thresholds()
+    return presence_of(last_seen_at, _utcnow() if now is None else now,
+                       online_seconds=online, stale_seconds=stale)
+
+
+def presence_advice(driver_id: str, presence: dict, where: str = "its inbox") -> str | None:
+    """The sender-facing hint for a recipient that is not online, else None."""
+    if presence["status"] == "online":
+        return None
+    seen = presence["last_seen_at"]
+    if seen is None:
+        when = "never seen"
+    elif presence["seconds_since_seen"] is None:
+        when = "last seen time unknown"
+    else:
+        when = f"last seen {seen}, {presence['seconds_since_seen'] // 60} min ago"
+    return (f"recipient {driver_id} is {presence['status']} ({when}); "
+            f"the message is queued in {where}; do not block waiting for a reply")
+
+
+def recipient_presence_block(conn, driver_ids, now=None, *, fan_out: bool = False,
+                             where: str = "its inbox") -> dict:
+    """``recipient_presence`` (and ``advice`` when some recipient is not online)
+    for the drivers a message was addressed to, read on the sender's connection.
+
+    A single named recipient (``fan_out=False``): one presence object with its
+    ``driver_id``. A fan-out (project members / project mailbox): ALWAYS a list,
+    active drivers only, at most ``PRESENCE_LIST_CAP`` entries (not-online first)
+    with ``recipient_presence_total`` added when it was cut. No resolvable
+    recipient (or no drivers table): ``{}``. Information only - callers attach it
+    to a result and decide nothing by it.
+    """
+    ids = sorted({d for d in driver_ids if isinstance(d, str) and d})
+    if not ids or not conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='drivers'").fetchone():
+        return {}
+    rows = {}
+    for start in range(0, len(ids), 500):
+        chunk = ids[start:start + 500]
+        rows.update({r[0]: (r[1], r[2]) for r in conn.execute(
+            "SELECT driver_id, last_seen_at, status FROM drivers WHERE driver_id IN (%s)"
+            % ",".join("?" * len(chunk)), chunk)})
+    items = [{"driver_id": d, **presence_now(rows[d][0], now)} for d in ids
+             if d in rows and (not fan_out or rows[d][1] == "active")]
+    if not items:
+        return {}
+    advice = [presence_advice(i["driver_id"], i, where) for i in items]
+    advice = [a for a in advice if a]
+    out = {}
+    if fan_out:
+        items.sort(key=lambda i: (i["status"] == "online", i["driver_id"]))
+        out["recipient_presence"] = items[:PRESENCE_LIST_CAP]
+        if len(items) > PRESENCE_LIST_CAP:
+            out["recipient_presence_total"] = len(items)
+    else:
+        out["recipient_presence"] = items[0]
+    if advice:
+        out["advice"] = " ".join(advice[:5]) + (f" (+{len(advice) - 5} more recipients not online)"
+                                                if len(advice) > 5 else "")
+    return out
+
+
 def public_view(row) -> dict:
     """A driver row as any reader may see it: never the token hash."""
     data = dict(row)
@@ -227,7 +361,6 @@ class DriverRegistry:
             raise DriverError("driver registry needs a pepper secret of at least 32 characters")
         self.db = db
         self._pepper = pepper
-        self._last_seen: dict[str, float] = {}
         with self.db.get_connection() as conn:
             conn.executescript(SCHEMA)
             conn.commit()
@@ -269,12 +402,16 @@ class DriverRegistry:
                 raise DriverError(f"no driver '{driver_id}'")
             view = public_view(row)
             view["projects"] = self._memberships(conn, driver_id)
+            view["presence"] = presence_now(view["last_seen_at"])
             return view
 
     def list(self) -> list[dict]:
         with self.db.get_connection() as conn:
             rows = conn.execute("SELECT * FROM drivers ORDER BY driver_id").fetchall()
-            return [public_view(r) for r in rows]
+            views = [public_view(r) for r in rows]
+            for view in views:
+                view["presence"] = presence_now(view["last_seen_at"])
+            return views
 
     def project_members(self, project_id: str) -> list[dict]:
         with self.db.get_connection() as conn:
@@ -491,16 +628,53 @@ class DriverRegistry:
 
     def _touch(self, conn, driver_id):
         """Diagnostic only, throttled; never part of any lease decision."""
-        clock = time.monotonic()
-        if clock - self._last_seen.get(driver_id, -1e9) < LAST_SEEN_THROTTLE_SECONDS:
-            return
-        self._last_seen[driver_id] = clock
-        try:
-            conn.execute("UPDATE drivers SET last_seen_at=? WHERE driver_id=?", (now(), driver_id))
-            conn.commit()
-        except sqlite3.Error:
-            # A busy database must never turn a valid credential into a denial.
-            pass
+        _stamp_last_seen(conn, str(getattr(self.db, "db_path", id(self.db))), driver_id)
+
+
+# The throttle is module-wide, keyed by (database, driver), so the credential
+# check and the inbox long-poll share one budget. A stamp is only remembered
+# after a SUCCESSFUL write. A failed one on the request path (``_touch``) keeps
+# the full backoff, so a locked database costs one stall per minute, as before.
+# Only the off-loop long-poll stamp (``touch_driver``, short busy_timeout) may
+# retry sooner, after ``LAST_SEEN_RETRY_SECONDS``.
+_LAST_SEEN: dict[tuple[str, str], float] = {}
+
+
+def _mono() -> float:
+    return time.monotonic()
+
+
+def _stamp_last_seen(conn, db_path: str, driver_id: str, retry_seconds: int | None = None) -> None:
+    key = (db_path, driver_id)
+    clock = _mono()
+    if clock - _LAST_SEEN.get(key, -1e9) < LAST_SEEN_THROTTLE_SECONDS:
+        return
+    try:
+        conn.execute("UPDATE drivers SET last_seen_at=? WHERE driver_id=?", (now(), driver_id))
+        conn.commit()
+    except sqlite3.Error:
+        # A busy database must never turn a valid credential into a denial.
+        _LAST_SEEN[key] = clock if retry_seconds is None else clock - LAST_SEEN_THROTTLE_SECONDS + retry_seconds
+        return
+    _LAST_SEEN[key] = clock
+
+
+def touch_driver(db, driver_id) -> None:
+    """Refresh ``last_seen_at`` for an authenticated driver on a path that does
+    not go through ``lookup_token`` (an inbox long-poll can hold one request for
+    15 minutes). Throttled like ``_touch``; any database failure is swallowed.
+    Blocking SQLite: call it off the event loop (``asyncio.to_thread``)."""
+    if not isinstance(driver_id, str) or not driver_id:
+        return
+    path = str(getattr(db, "db_path", id(db)))
+    if _mono() - _LAST_SEEN.get((path, driver_id), -1e9) < LAST_SEEN_THROTTLE_SECONDS:
+        return
+    try:
+        with db.get_connection() as conn:
+            conn.execute("PRAGMA busy_timeout=500")  # a diagnostic stamp must not stall a long-poll
+            _stamp_last_seen(conn, path, driver_id, LAST_SEEN_RETRY_SECONDS)
+    except (sqlite3.Error, ValueError, RuntimeError):
+        pass
 
 
 _REGISTRIES: dict[str, DriverRegistry] = {}

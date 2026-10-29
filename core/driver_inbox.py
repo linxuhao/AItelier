@@ -4,6 +4,7 @@ import asyncio
 import json
 import time
 from uuid import uuid4
+from core.drivers import recipient_presence_block, touch_driver
 from core.state_graph import StateGraphError, now
 from core.state_privacy import UntrustedDatabase, writer_only_read
 
@@ -139,9 +140,19 @@ class DriverInbox:
                 conn.execute("INSERT INTO driver_inbox_deliveries VALUES(?,?,?,?,?,?)", (did,mid,target,seq,"unread",1))
                 deliveries.append({"delivery_id":did,"target_driver_id":target,"seq":seq,"status":"unread","version":1})
             result=self._record(conn,"send",request_key,payload,{"message_id":mid,"deliveries":deliveries})
+            result=self._presence(conn,result,_system,fan_out=bool(project_members))
         from core.state_changes import notify
         notify(self.store.db.db_path)
         return result
+
+    @staticmethod
+    def _presence(conn, result, system, fan_out):
+        """Add the recipients' presence AFTER the idempotent record was written, so the
+        record (and therefore every replay) is byte-identical to before."""
+        if system:
+            return result
+        return {**result, **recipient_presence_block(
+            conn, [d["target_driver_id"] for d in result["deliveries"]], fan_out=fan_out)}
 
     def system_notice(self, **kwargs):
         return self.send_driver_message(_system=True, **kwargs)
@@ -152,6 +163,8 @@ class DriverInbox:
         self._authorize(driver_id)
         if type(after) is not int or after<0 or type(limit) is not int or not 1<=limit<=100:
             raise StateGraphError("invalid_request")
+        # Reading your inbox is activity; wait_for_driver_inbox loops through here.
+        touch_driver(self.store.db, self.driver_id)
         with self.store.transaction() as conn:
             self._driver(conn, driver_id)
             high=conn.execute("SELECT COALESCE(MAX(seq),0) FROM driver_inbox_deliveries WHERE target_driver_id=?", (driver_id,)).fetchone()[0]
@@ -190,7 +203,8 @@ class DriverInbox:
         with subscribe(self.store.db.db_path) as signal:
             while True:
                 signal.clear()
-                result=self.list_driver_messages(driver_id,after)
+                # list_driver_messages stamps last_seen (blocking SQLite): keep it off the event loop.
+                result=await asyncio.to_thread(self.list_driver_messages,driver_id,after)
                 if result["messages"] or return_when_idle or time.monotonic()>=deadline:
                     return result
                 try:

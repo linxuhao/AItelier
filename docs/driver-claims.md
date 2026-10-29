@@ -207,14 +207,30 @@ The previous owner afterwards: `heartbeat` of the old claim is refused
 `stale_fence`; `release_claim` of it is `stale_fence`; a dispatch naming the
 old claim/fence is `stale_fence`; `claim_node` is `claimed_by_other`.
 
-Attempts are NOT moved (minimum consistent scope). An attempt the previous
-owner started keeps its owner, owner fence (the attempt fence is separate from
-the claim fence) and lease: the previous owner may still report on and renew
-it, and while it is active the node admits no new attempt (`node has an active
-attempt`). The takeover result lists such attempts under `active_attempts`
-with a `note`. Moving the attempt stays `take_over_attempt` /
-`abandon_external_attempt`, which still require its lease to be reclaimable
-(`lease_not_expired: lease is healthy; reclaimable at ...` before that).
+A claim takeover does not move attempts (the attempt fence is separate from
+the claim fence): while the previous owner's attempt is active the node admits
+no new attempt (`node has an active attempt`). The takeover result lists the
+active attempts under `active_attempts`; one owned by the same offline owner
+carries `next_command` = `take_over_attempt(attempt_id, expected_owner_fence,
+reason)`, and a `note` says so.
+
+**Attempts of an offline owner.** The same rule extends to
+`take_over_attempt`: before the lease is reclaimable it succeeds when the
+attempt owner's effective presence is `offline` (re-read inside the write
+transaction, `core.state_takeover.offline_owner_evidence`), the caller is an
+active member (`not_a_member` otherwise) and not the owner (`already_owner`),
+and `expected_owner_fence` matches (`stale_fence`). Effect as for any
+takeover: owner and lease move to the caller, owner fence +1, the bound claim
+transfers (or the caller's held claim - e.g. from `take_over_claim` - is bound
+with a fresh fence), notice to the previous owner;
+`attempt_ownership_transferred` carries `owner_offline: true` and
+`owner_presence` (the evidence). The previous owner's later
+`report_external_attempt` is `stale_fence`; its attempt heartbeat is
+`not_attempt_owner` (the existing P3 contract). For an online or away owner
+nothing changes: `lease_not_expired: lease is healthy; reclaimable at ...`.
+`abandon_external_attempt` is NOT extended (taking over is sufficient: the new
+owner can then report or settle the attempt), so its lease rule and its
+`confirmed_stopped` attestation are unchanged.
 
 Migration: `taken_over` widens the status CHECK of `state_node_claims` and
 `state_claim_history`. SQLite cannot alter a CHECK, so the first claim-store

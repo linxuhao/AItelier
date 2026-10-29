@@ -648,34 +648,206 @@ def test_claimed_by_other_names_holder_presence_and_the_takeover(world):
 
 
 # ---------------------------------------------------------------------------
-# E. attempts are not moved (documented minimum)
+# E. attempts: claim takeover names the blocking attempt; take_over_attempt of an offline owner
 # ---------------------------------------------------------------------------
-def test_attempts_keep_their_owner_and_block_new_attempts_until_reclaimable(world):
-    bob, carol = world.svc["bob"], world.svc["carol"]
+def enforced(world):
     write(world.owner, "set_claim_enforcement", project_id="p", claim_enforcement="on", expected_revision=0,
-          reason="enforce for the attempt test")
-    held = claim(bob)
-    attempt = write(bob, "start_external_attempt", project_id="p", node_key="a", expected_revision=1,
-                    harness="h", external_id="job-a", request_key="rk-a", claim_id=held["claim_id"],
+          reason="enforce for the attempt tests")
+
+
+def bob_attempt(world, node="a"):
+    held = claim(world.svc["bob"], node=node)
+    attempt = write(world.svc["bob"], "start_external_attempt", project_id="p", node_key=node, expected_revision=1,
+                    harness="h", external_id="job-" + node, request_key="rk-" + node, claim_id=held["claim_id"],
                     fence=held["fence"])
+    return held, attempt
+
+
+def take_attempt(service, attempt, fence=1, reason="owner offline; continuing"):
+    return write(service, "take_over_attempt", attempt_id=attempt["attempt_id"], expected_owner_fence=fence,
+                 reason=reason)
+
+
+def bob_report(world, attempt, fence=1, oid="o1", version=None, who="bob"):
+    return write(world.svc[who], "report_external_attempt", attempt_id=attempt["attempt_id"], observation_id=oid,
+                 expected_version=attempt["observation_version"] if version is None else version,
+                 context_hash=attempt["context_hash"], status="running", report_ref="/tmp/r",
+                 report_sha256="0" * 64, fence=fence)
+
+
+def test_claim_takeover_names_the_blocking_attempt_and_its_next_command_which_succeeds(world):
+    bob, carol = world.svc["bob"], world.svc["carol"]
+    enforced(world)
+    held, attempt = bob_attempt(world)
+    # Before any takeover the old owner's report path is unchanged.
+    assert bob_report(world, attempt)["status"] == "running"
+    attempt = read(bob, "get_attempt", attempt_id=attempt["attempt_id"])
     offline(world)
     out = take(carol, held)
-    assert [a["attempt_id"] for a in out["active_attempts"]] == [attempt["attempt_id"]]
-    assert out["active_attempts"][0]["owner_driver_id"] == "bob" and "take_over_attempt" in out["note"]
+    blocking = out["active_attempts"]
+    assert [a["attempt_id"] for a in blocking] == [attempt["attempt_id"]] and blocking[0]["owner_driver_id"] == "bob"
+    command = blocking[0]["next_command"]
+    assert command == {"action": "take_over_attempt", "arguments": {
+        "attempt_id": attempt["attempt_id"], "expected_owner_fence": 1, "reason": REASON}}
+    assert "next_command" in out["note"]
     new = out["claim"]
     with pytest.raises(StateConflict, match="node has an active attempt"):
         write(carol, "start_external_attempt", project_id="p", node_key="a", expected_revision=1, harness="h",
               external_id="job-c", request_key="rk-c", claim_id=new["claim_id"], fence=new["fence"])
-    early = refusal(lambda: write(carol, "take_over_attempt", attempt_id=attempt["attempt_id"],
-                                  expected_owner_fence=1, reason="owner offline"))
+    moved = write(carol, command["action"], **command["arguments"])
+    assert moved["owner_driver_id"] == "carol" and moved["owner_fence"] == 2 and moved["lease_state"] == "healthy"
+    assert moved["owner_presence"]["status"] == "offline" and moved["owner_presence"]["declared"] is True
+    assert moved["claim"]["driver_id"] == "carol" and moved["claim"]["attempt_id"] == attempt["attempt_id"]
+    event = events(world, "attempt_ownership_transferred")[-1]
+    assert event["owner_offline"] is True and event["owner_presence"]["basis"] == "declared"
+    assert event["from_driver_id"] == "bob" and event["to_driver_id"] == "carol" and event["fence"] == 2
+    assert "while you were offline" in [m for m in bob.driver_inbox.list_driver_messages()["messages"]
+                                        if "attempt" in m["subject"]][-1]["body"]
+    # The previous owner is fenced out of the attempt.
+    assert refusal(lambda: bob_report(world, attempt, fence=1, oid="o2")).code == "stale_fence"
+    assert refusal(lambda: bob_report(world, attempt, fence=2, oid="o3")).code == "stale_fence"
+    beat = write(bob, "heartbeat", project_id="p", attempts=[{"attempt_id": attempt["attempt_id"], "fence": 1}])
+    assert beat["refused"] == [{"kind": "attempt", "id": attempt["attempt_id"], "error": "not_attempt_owner"}]
+    assert bob_report(world, attempt, fence=2, oid="o4", who="carol")["status"] == "running"
+
+
+def test_take_over_attempt_of_an_offline_owner_without_a_claim_takeover(world):
+    enforced(world)
+    held, attempt = bob_attempt(world)
+    set_seen(world.db, "bob", SIX_HOURS + 60)                     # derived offline, nothing declared
+    moved = take_attempt(world.svc["erin"], attempt)
+    assert moved["owner_driver_id"] == "erin" and moved["owner_fence"] == 2
+    assert moved["owner_presence"]["basis"] == "last_seen"
+    assert read(world.svc["erin"], "get_claim", project_id="p", claim_id=held["claim_id"])["claim"]["status"] == \
+        "transferred"
+
+
+@pytest.mark.parametrize("seen", [10, 3600, SIX_HOURS])
+def test_online_or_away_owner_keeps_the_unchanged_healthy_lease_refusal(world, seen):
+    enforced(world)
+    _, attempt = bob_attempt(world)
+    set_seen(world.db, "bob", seen)
+    refused = refusal(lambda: take_attempt(world.svc["carol"], attempt))
+    assert refused.code == "lease_not_expired"
+    assert re.match(r"lease_not_expired: lease is healthy; reclaimable at \S+ \(expiry \S+ \+ 900s grace\)$",
+                    str(refused)), str(refused)
+    assert read(world.svc["carol"], "get_attempt", attempt_id=attempt["attempt_id"])["owner_driver_id"] == "bob"
+
+
+def test_a_waiting_owner_keeps_its_attempt(world):
+    enforced(world)
+    _, attempt = bob_attempt(world)
+    bob = world.svc["bob"]
+    result = {}
+
+    def try_take():
+        offline(world)
+        result["code"] = refusal(lambda: take_attempt(world.svc["carol"], attempt)).code
+
+    _wait_and_observe(bob, lambda: bob.driver_inbox.wait_for_driver_inbox(timeout_seconds=1.0),
+                      declare_during=try_take)
+    assert result["code"] == "lease_not_expired"
+
+
+def test_take_over_attempt_refusals_for_an_offline_owner(world):
+    enforced(world)
+    _, attempt = bob_attempt(world)
+    offline(world)
+    # (With a live registry the P3 helper answers not_project_member first; this fixture has none,
+    # so the strict check of the offline path answers.)
+    assert refusal(lambda: take_attempt(world.svc["dave"], attempt)).code == "not_a_member"
+    world.reg.set_membership("p", "erin", "removed", 1, "left", actor="test")
+    assert refusal(lambda: take_attempt(world.svc["erin"], attempt)).code == "not_a_member"
+    world.reg.set_status("carol", "suspended", 1, "paused", actor="test")      # member row kept, driver inactive
+    assert refusal(lambda: take_attempt(world.svc["carol"], attempt)).code == "not_a_member"
+    world.reg.set_status("carol", "active", 2, "back", actor="test")
+    assert refusal(lambda: take_attempt(world.svc["bob"], attempt)).code == "already_owner"
+    stale = refusal(lambda: take_attempt(world.svc["carol"], attempt, fence=5))
+    assert stale.code == "stale_fence"
+    take_attempt(world.svc["carol"], attempt)
+    offline(world, who="carol")
+    again = refusal(lambda: take_attempt(world.svc["bob"], attempt, fence=1))
+    assert again.code == "stale_fence"                               # the fence moved to 2
+
+
+def test_take_over_attempt_refuses_a_non_member_only_through_the_strict_registry_check(world, monkeypatch):
+    """With the P3 membership helper unable to judge (no live registry), the
+    offline path still fails closed on the transaction's own registry rows."""
+    from core import state_enforcement
+    enforced(world)
+    _, attempt = bob_attempt(world)
+    offline(world)
+    monkeypatch.setattr(state_enforcement, "project_membership", lambda *a: None)
+    assert refusal(lambda: take_attempt(world.svc["dave"], attempt)).code == "not_a_member"
+
+
+def test_abandon_is_not_extended_and_keeps_its_attestation(world):
+    enforced(world)
+    _, attempt = bob_attempt(world)
+    offline(world)
+    early = refusal(lambda: write(world.svc["carol"], "abandon_external_attempt", attempt_id=attempt["attempt_id"],
+                                  expected_owner_fence=1, abandon_kind="unknown", reason="owner offline"))
     assert early.code == "lease_not_expired"
-    # The previous owner still owns its attempt: its report is accepted (attempt fence, not claim fence).
-    observed = write(bob, "report_external_attempt", attempt_id=attempt["attempt_id"], observation_id="o1",
-                     expected_version=attempt["observation_version"], context_hash=attempt["context_hash"],
-                     status="running", report_ref="/tmp/r", report_sha256="0" * 64, fence=1)
-    assert observed["status"] == "running"
-    still = read(carol, "get_claim", project_id="p", claim_id=new["claim_id"])["claim"]
-    assert still["status"] == "live" and still["attempt_id"] is None
+    with pytest.raises(StateGraphError, match="attestation"):
+        write(world.svc["carol"], "abandon_external_attempt", attempt_id=attempt["attempt_id"],
+              expected_owner_fence=1, abandon_kind="confirmed_stopped", reason="owner offline")
+
+
+def test_two_attempt_takeovers_race_and_exactly_one_wins(world):
+    enforced(world)
+    _, attempt = bob_attempt(world)
+    offline(world)
+    barrier, outcomes = threading.Barrier(2), []
+
+    def go(who):
+        service = StateService(world.db, actor="driver:" + who, driver_id=who, project_read_trusted=True)
+        barrier.wait()
+        try:
+            outcomes.append(("ok", take_attempt(service, attempt)["owner_driver_id"]))
+        except ClaimError as exc:
+            outcomes.append((exc.code, who))
+
+    threads = [threading.Thread(target=go, args=(who,)) for who in ("carol", "erin")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert sorted(o[0] for o in outcomes) == ["ok", "stale_fence"], outcomes
+    assert read(world.svc["bob"], "get_attempt", attempt_id=attempt["attempt_id"])["owner_fence"] == 2
+
+
+def test_attempt_takeover_against_the_owners_heartbeat_has_one_consistent_outcome(world):
+    enforced(world)
+    for round_, node in enumerate(("a", "b")):
+        drivers._LAST_SEEN.clear()
+        _, attempt = bob_attempt(world, node=node)
+        offline(world)
+        barrier, result = threading.Barrier(2), {}
+
+        def heartbeat():
+            barrier.wait()
+            out = write(StateService(world.db, actor="driver:bob", driver_id="bob", project_read_trusted=True),
+                        "heartbeat", project_id="p", attempts=[{"attempt_id": attempt["attempt_id"], "fence": 1}])
+            result["renewed"] = bool(out["renewed"])
+
+        def takeover():
+            barrier.wait()
+            try:
+                take_attempt(StateService(world.db, actor="driver:carol", driver_id="carol",
+                                          project_read_trusted=True), attempt)
+                result["taken"] = True
+            except ClaimError as exc:
+                assert exc.code == "lease_not_expired", exc
+                result["taken"] = False
+
+        threads = [threading.Thread(target=heartbeat), threading.Thread(target=takeover)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert result["renewed"] != result["taken"], (round_, result)
+        owner = read(world.svc["bob"], "get_attempt", attempt_id=attempt["attempt_id"])["owner_driver_id"]
+        assert owner == ("carol" if result["taken"] else "bob")
 
 
 # ---------------------------------------------------------------------------
@@ -790,7 +962,19 @@ def test_only_state_takeover_decides_on_effective_presence():
     calls = [(fn.name, node) for fn in ast.walk(tree) if isinstance(fn, ast.FunctionDef)
              for node in ast.walk(fn) if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
              and node.func.attr == "effective_presence"]
-    assert [name for name, _ in calls] == ["take_over_claim"]
+    assert sorted(name for name, _ in calls) == ["offline_owner_evidence", "take_over_claim"]
+    # offline_owner_evidence is reached only from StateRecovery._reclaimable, and only when
+    # take_over_attempt passes offline_owner (abandon_external_attempt never does).
+    referencing = {str(p.relative_to(ROOT)) for folder in ("core", "api") for p in (ROOT / folder).glob("*.py")
+                   if "offline_owner_evidence" in p.read_text(encoding="utf-8")}
+    assert referencing == {"core/state_takeover.py", "core/state_recovery.py"}
+    rtree = ast.parse((ROOT / "core/state_recovery.py").read_text(encoding="utf-8"))
+    users = {fn.name for fn in ast.walk(rtree) if isinstance(fn, ast.FunctionDef)
+             and any(isinstance(n, ast.Name) and n.id == "offline_owner_evidence" for n in ast.walk(fn))}
+    assert users == {"_reclaimable"}
+    passing = {fn.name for fn in ast.walk(rtree) if isinstance(fn, ast.FunctionDef)
+               and any(isinstance(n, ast.keyword) and n.arg == "offline_owner" for n in ast.walk(fn))}
+    assert passing == {"take_over_attempt"}
     text = (ROOT / "core/state_takeover.py").read_text(encoding="utf-8")
     assert re.search(r'presence\["status"\] != "offline"', text)
     # drivers.py only DESCRIBES it in its views

@@ -17,13 +17,13 @@ takeover notice in the previous owner's driver inbox record it. Its later
 heartbeat or release of the old claim is ``stale_fence``; a dispatch naming
 the old claim/fence is ``stale_fence``; claim_node is ``claimed_by_other``.
 
-What it does NOT do (minimum consistent scope): attempts keep their owner,
-owner fence and lease. The previous owner may still report on, and renew, an
-attempt it started (the attempt fence is separate from the claim fence), and
-while that attempt is active the node admits no new attempt (one active
-attempt per node). Moving an attempt stays take_over_attempt /
-abandon_external_attempt, after its lease lapsed. The result lists such
-attempts under ``active_attempts``. Node holds and their reasons are untouched.
+A claim takeover does not move attempts (the attempt fence is separate from
+the claim fence): while the previous owner's attempt is active the node admits
+no new attempt. The SAME rule extends to that attempt: ``take_over_attempt``
+is admitted before its lease lapses when its owner is offline
+(``offline_owner_evidence``, called from core.state_recovery inside its write
+transaction); the claim takeover result names it under ``active_attempts``
+with the exact ``next_command``. Node holds and their reasons are untouched.
 """
 from __future__ import annotations
 
@@ -48,6 +48,24 @@ def _member(conn, project_id, driver_id) -> bool:
     return conn.execute("SELECT 1 FROM project_drivers m JOIN drivers d USING(driver_id) WHERE m.project_id=? "
                         "AND m.driver_id=? AND m.status='member' AND d.status='active'",
                         (project_id, driver_id)).fetchone() is not None
+
+
+def offline_owner_evidence(conn, project_id, owner_driver_id, caller) -> dict | None:
+    """The second (and last) use of the authority: may ``caller`` take over an
+    attempt of ``owner_driver_id`` BEFORE its lease lapsed? Only when, read on
+    the caller's write transaction, the owner's effective presence is offline
+    and the caller is an active member that is not the owner. Returns the
+    presence evidence, or None (the caller then refuses exactly as before).
+    A non-member facing an offline owner is refused ``not_a_member``."""
+    if not owner_driver_id or owner_driver_id == caller or not caller:
+        return None
+    presence = driver_presence.effective_presence(conn, owner_driver_id)
+    if presence["status"] != "offline":
+        return None
+    if not _member(conn, project_id, caller):
+        raise ClaimError("not_a_member", f"taking over the attempt of an offline owner is for active members of "
+                         f"project {project_id}; driver {caller} is not one", project_id=project_id)
+    return _evidence(presence)
 
 
 def _evidence(presence) -> dict:
@@ -142,6 +160,12 @@ class StateTakeover:
                 "SELECT attempt_id, owner_driver_id, owner_fence, status, lease_expires_at FROM state_attempts "
                 "WHERE project_id=? AND node_key=? AND status IN (" + ",".join("?" * len(_ACTIVE_ATTEMPT)) + ")",
                 (project_id, old["node_key"], *_ACTIVE_ATTEMPT))]
+            for attempt in attempts:
+                if attempt["owner_driver_id"] == owner:
+                    # The same offline owner: take_over_attempt is admitted now (before its lease lapses).
+                    attempt["next_command"] = {"action": "take_over_attempt", "arguments": {
+                        "attempt_id": attempt["attempt_id"], "expected_owner_fence": attempt["owner_fence"],
+                        "reason": reason}}
             notice = driver_notices.notify(
                 conn, target_driver_id=owner, kind="takeover_notice", project_id=project_id,
                 sender_driver_id=driver,
@@ -154,7 +178,8 @@ class StateTakeover:
                       "owner_presence": evidence, "notified": notice, "idempotent": False,
                       "active_attempts": attempts}
             if attempts and old["purpose"] in EXCLUSIVE_PURPOSES:
-                result["note"] = ("attempts are not moved by a claim takeover: an active attempt keeps its owner and "
-                                  "lease, so no new attempt starts on this node until it settles or its lease "
-                                  "lapses (take_over_attempt / abandon_external_attempt)")
+                result["note"] = ("a claim takeover does not move attempts: the active attempt listed in "
+                                  "active_attempts blocks a new attempt on this node. Its owner is offline, so run "
+                                  "its next_command (take_over_attempt) now to become its owner (fence +1); "
+                                  "otherwise wait until it settles")
             return result

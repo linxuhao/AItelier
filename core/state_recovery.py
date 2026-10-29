@@ -54,8 +54,14 @@ class StateRecovery:
             raise StateNotFound(f"attempt {attempt_id!r} not found")
         return dict(row)
 
-    def _reclaimable(self, conn, attempt, expected_owner_fence, override_reason, current) -> bool:
-        """Every precondition of §4.4; returns whether this is a break-glass write."""
+    def _reclaimable(self, conn, attempt, expected_owner_fence, override_reason, current,
+                     offline_owner=None) -> bool:
+        """Every precondition of §4.4; returns whether this is a break-glass write.
+
+        ``offline_owner`` (a dict, take_over_attempt only): before the grace, an
+        attempt whose owner driver is OFFLINE (presence v2, judged by
+        core.state_takeover inside this transaction) may be taken over by an
+        active member; the presence evidence is put into the dict."""
         if attempt["status"] not in ACTIVE:
             raise ClaimError("attempt_not_active", f"attempt is {attempt['status']}; nothing to reclaim")
         # §4.4: "any project MEMBER". Judged inside the ownership transaction; an
@@ -77,6 +83,13 @@ class StateRecovery:
         if state != "reclaimable":
             if self.is_admin:
                 return True
+            if offline_owner is not None:
+                from core.state_takeover import offline_owner_evidence
+                evidence = offline_owner_evidence(conn, attempt["project_id"], attempt["owner_driver_id"],
+                                                  self.driver_id)
+                if evidence is not None:
+                    offline_owner.update(evidence)
+                    return member_break_glass
             raise ClaimError("lease_not_expired", f"lease is {state}; reclaimable at "
                              f"{add_seconds(expires, GRACE_SECONDS)} (expiry {expires} + {GRACE_SECONDS}s grace)",
                              lease_state=state, lease_expires_at=expires,
@@ -262,7 +275,9 @@ class StateRecovery:
             attempt = self._attempt(conn, attempt_id)
             if attempt["owner_driver_id"] == self.driver_id:
                 raise ClaimError("already_owner", "you already own this attempt; heartbeat it instead")
-            break_glass = self._reclaimable(conn, attempt, expected_owner_fence, override_reason, current)
+            offline = {}
+            break_glass = self._reclaimable(conn, attempt, expected_owner_fence, override_reason, current,
+                                            offline_owner=offline)
             fence = attempt["owner_fence"] + 1
             expires = add_seconds(current, DEFAULT_LEASE_SECONDS)
             conn.execute("UPDATE state_attempts SET owner_driver_id=?,owner_fence=?,lease_expires_at=?,"
@@ -275,6 +290,9 @@ class StateRecovery:
                        "to_driver_id": self.driver_id, "previous_fence": attempt["owner_fence"], "fence": fence,
                        "lease_expires_at": expires, "reason": reason, "override_reason": override_reason,
                        "break_glass": break_glass, "actor": self.actor, "voided_handoffs": voided}
+            if offline:
+                # Presence v2: taken over before the grace because the owner is offline.
+                payload["owner_offline"], payload["owner_presence"] = True, offline
             self.store._event(conn, attempt["project_id"], attempt["node_key"], "attempt_ownership_transferred", payload)
             notice = None
             if attempt["owner_driver_id"]:
@@ -282,9 +300,13 @@ class StateRecovery:
                     conn, target_driver_id=attempt["owner_driver_id"], kind="takeover_notice",
                     project_id=attempt["project_id"],
                     subject=f"your attempt {attempt_id} on {attempt['node_key']} was taken over by {self.driver_id}",
-                    body=(f"{self.actor} took over attempt {attempt_id} (node {attempt['node_key']}) after its lease "
-                          f"lapsed: {reason}. Fence is now {fence}; your observe/report calls with the old fence are "
+                    body=(f"{self.actor} took over attempt {attempt_id} (node {attempt['node_key']}) "
+                          + ("while you were offline" if offline else "after its lease lapsed")
+                          + f": {reason}. Fence is now {fence}; your observe/report calls with the old fence are "
                           "refused (stale_fence). Stop your workers on it: they are fenced out, not inherited."),
                     refs={"attempt_id": attempt_id, "node_key": attempt["node_key"]})
             result = _public(self._attempt(conn, attempt_id))
-        return {**result, "break_glass": break_glass, "claim": claim, "notified": notice}
+        out = {**result, "break_glass": break_glass, "claim": claim, "notified": notice}
+        if offline:
+            out["owner_presence"] = offline
+        return out

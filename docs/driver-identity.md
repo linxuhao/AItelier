@@ -221,19 +221,21 @@ Presence is **information**, with exactly ONE exception:
   (`holder_presence`, and `takeover_hint` on a live claim whose holder is
   offline), `claimed_by_other` refusals, and message `advice`;
 - MAY (the one authority): allow another active member of a project to
-  `take_over_claim` a LIVE claim whose owner is effectively `offline` at the
+  `take_over_claim` a LIVE claim, and `take_over_attempt` an active attempt
+  before its lease lapses, when the owner is effectively `offline` at the
   moment of the write (`docs/driver-claims.md`);
-- MAY NOT: change dispatch, reports, leases or their expiry, fences, attempt
-  reclaim (`take_over_attempt` / `abandon_external_attempt` keep their lease
-  rule), holds, handoffs, membership, message delivery, or any other
-  permission. `online` and `away` owners are never taken over.
+- MAY NOT: change dispatch, reports, leases or their expiry, fences,
+  `abandon_external_attempt` (lease rule and attestation unchanged), holds,
+  handoffs, membership, message delivery, or any other permission. `online` and
+  `away` owners are never taken over.
 
 The guard is mechanical: `tests/unit/test_driver_presence.py` and
 `tests/unit/test_driver_offline_takeover.py` refuse any presence read in
 permission, claim, lease and fence code other than four describing hooks
 (`annotate_claims`, `holder_note`, `mark_back`, `driver_waiting`), refuse a
 hook result inside a condition there, and pin `core/state_takeover.py` as the
-only module that decides on `effective_presence`. An `offline` driver keeps its
+only module that decides on `effective_presence` (`take_over_claim` and
+`offline_owner_evidence`, the latter reached only from `take_over_attempt`). An `offline` driver keeps its
 claims until they lapse or a member takes them over. The owner remains the only
 authority to suspend or retire a driver.
 

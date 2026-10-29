@@ -9,6 +9,7 @@ import unicodedata
 from uuid import UUID, uuid4
 
 from core.director_messaging_protocol import DirectorMessageError, SCHEMA_ID, V3_SCHEMA_ID, ERROR_CODES
+from core.drivers import recipient_presence_block
 from core.state_driver_notes import _redact
 from core.state_privacy import UntrustedDatabase, writer_only_read
 
@@ -393,7 +394,24 @@ class SQLiteDirectorMessaging:
             if self.v3:
                 message.update(sender_driver_id=self.driver_id,ack_mode=ack_mode,ack_quorum=ack_quorum)
             result = {"message": message, "deliveries": deliveries, "replayed": False}
-            return self._record(conn, sender_project_id, operation, request_key, payload_json, result)
+            return self._presence(conn, self._record(conn, sender_project_id, operation, request_key, payload_json, result))
+
+    def _presence(self, conn, response):
+        """Add ``recipient_presence`` / ``advice`` AFTER the idempotent record was
+        written (never stored; a replay returns the record unchanged). The target
+        of a project mailbox is its member drivers, minus the sender; a project
+        with no registered member resolves no recipient and adds nothing. Only the
+        v3 response schema declares these optional fields."""
+        if self.reply_schema != V3_SCHEMA_ID:   # v2 is a frozen closed schema
+            return response
+        result = response["result"]
+        projects = sorted({d["target_project_id"] for d in result.get("deliveries", ())})
+        if not projects:
+            return response
+        from core.director_messaging_quorum import members
+        drivers = {m for project in projects for m in members(conn, project)} - {self.driver_id}
+        extra = recipient_presence_block(conn, drivers, self._clock())
+        return {**response, "result": {**result, **extra}} if extra else response
 
     @writer_only_read("list_director_messages")
     @_message_errors

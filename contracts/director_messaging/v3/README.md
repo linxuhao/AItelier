@@ -23,3 +23,11 @@ to 1000 characters and may explain a declared field and stable validation kind o
 authorization requirement. It never echoes submitted values, unknown field names,
 validator context, message body, credentials or the supplied director identity.
 An explanation does not relax request validation or grant membership.
+
+A v3 send result may also carry two optional, informational fields:
+`recipient_presence` (one presence object, or a list for several recipients; the
+recipients of a project mailbox are its member drivers except the sender) and,
+when a recipient is not online, `advice`. Both are computed at send time from the
+drivers' `last_seen_at`, are never stored or replayed from the idempotency record,
+and are absent for v2 responses and for a project with no registered member.
+Presence grants nothing and no ownership decision reads it.

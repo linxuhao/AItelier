@@ -95,7 +95,10 @@ def test_all_five_real_ids_deliver_exact_refs_and_replay_idempotently(peers):
     result = send(peers["ada"], project_id="alpha", refs=refs)
     row = peers["bob"].driver_inbox.list_driver_messages()["messages"][0]
     assert json.loads(row["refs_json"]) == refs
-    assert send(peers["ada"], project_id="alpha", refs=refs) == result
+    # A replay is the stored record; the send-time presence annotation is not part of it.
+    informational = ("recipient_presence", "advice")
+    assert send(peers["ada"], project_id="alpha", refs=refs) == {k: v for k, v in result.items()
+                                                                 if k not in informational}
     before = counts(peers["ada"])
     assert before == {t: 1 for t in INBOX_TABLES}
     with pytest.raises(StateGraphError, match="idempotency_conflict"):

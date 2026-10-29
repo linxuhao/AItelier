@@ -431,8 +431,61 @@
             },
             "replayed": {
               "type": "boolean"
+            },
+            "recipient_presence": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/recipientPresence"
+                },
+                {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 200,
+                  "items": {
+                    "$ref": "#/$defs/recipientPresence"
+                  }
+                }
+              ]
+            },
+            "advice": {
+              "type": "string",
+              "maxLength": 2000
             }
           }
+        }
+      }
+    },
+    "recipientPresence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "driver_id",
+        "status",
+        "last_seen_at",
+        "seconds_since_seen"
+      ],
+      "properties": {
+        "driver_id": {
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "online",
+            "away",
+            "offline"
+          ]
+        },
+        "last_seen_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "seconds_since_seen": {
+          "type": [
+            "integer",
+            "null"
+          ]
         }
       }
     },

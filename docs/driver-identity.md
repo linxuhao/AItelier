@@ -121,6 +121,50 @@ attribution, not proof. Mitigations: per-driver files, audit log
 Tokens are stored only as HMAC-SHA256(pepper, token); the audit never carries a
 token or hash. `public` is not a project member by default (Q5).
 
+## Presence: information, never authority
+
+Every driver view carries a derived `presence` object
+(`{"status", "last_seen_at", "seconds_since_seen"}`): `GET /api/drivers`,
+`GET /api/drivers/{id}`, `GET /api/drivers/me` (under `driver`), MCP
+`driver_whoami` (under `driver`; the State-only service's reduced whoami has no driver view), and per member in
+`GET /api/drivers/projects/{project_id}`. Nothing is stored; it is computed from
+`last_seen_at` when asked.
+
+| status | rule (both bounds inclusive) |
+|---|---|
+| `online` | seen within `AITELIER_PRESENCE_ONLINE_SECONDS` (default 900 = 15 min) |
+| `away` | seen within `AITELIER_PRESENCE_OFFLINE_SECONDS` (default 21600 = 6 h) |
+| `offline` | older than that, or never seen |
+
+A non-positive or non-numeric value falls back to its default; if the stale bound
+is not greater than the online bound both fall back to the defaults.
+
+`last_seen_at` is refreshed (at most once a minute per driver and process) by every
+request that presents the driver's token and by `list_driver_messages`,
+`wait_for_driver_inbox` and a `wait_for_state_change` that includes the driver
+inbox, so a driver parked on a 15-minute inbox wait stays `online`. A failed
+write (busy database) never denies the credential and is retried after 5 s.
+
+Sending: `send_driver_message`, and `send_director_message` when called with
+`protocol_version="v3"` (the v2 response schema is frozen and unchanged), return `recipient_presence` (one object
+with `driver_id` for a single recipient; a list for a project fan-out; for a project
+mailbox the recipients are its member drivers except the sender) and, when any
+recipient is not online, `advice`: `recipient <id> is <status> (last seen <ts>, <N> min
+ago); the message is queued in its inbox; do not block waiting for a reply`. The
+message is delivered exactly as before. Presence is computed when the message is first
+accepted and is not part of the stored idempotent record, so a replay returns the
+record unchanged. A project mailbox whose only member is the sender adds neither field.
+
+What a sender should do when the recipient is `away` or `offline`: send anyway (it is
+queued), then continue with work that does not depend on the answer, and poll later
+instead of blocking in `wait_for_driver_inbox`/`wait_for_state_change` on a reply. For
+something that cannot wait, ask the owner or route to another member.
+
+Presence is **information only**. No permission, claim, lease, fence or handoff
+decision reads it (`tests/unit/test_driver_presence.py` greps for that); an
+`offline` driver keeps its claims until they lapse by the existing rules. The
+owner remains the only authority to suspend or retire a driver.
+
 ## Compatibility
 
 External attempts started before P0 are owned by `authorized-state-operator`.

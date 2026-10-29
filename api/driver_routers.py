@@ -99,7 +99,12 @@ def list_drivers():
 
 @router.get("/projects/{project_id}", dependencies=[Depends(authz.require_reader)])
 def project_drivers(project_id: str):
-    return {"project_id": project_id, "members": _registry().project_members(project_id)}
+    registry = _registry()
+    # Presence is added here, at the edge, so `project_members` (which enforcement
+    # reads) stays presence-free. Information only.
+    seen = {d["driver_id"]: d["presence"] for d in registry.list()}
+    return {"project_id": project_id,
+            "members": [{**m, "presence": seen.get(m["driver_id"])} for m in registry.project_members(project_id)]}
 
 
 @router.get("/{driver_id}", dependencies=[Depends(authz.require_reader)])

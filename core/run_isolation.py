@@ -50,14 +50,17 @@ into the source checkout's current HEAD (or an operator has explicitly recorded
 uncertainty the tree is retained: a missed reap costs disk, a wrong reap can lose
 somebody's unmerged delivery.
 
-A released tree that is neither merged nor discarded is not kept forever
-either. After `AITELIER_UNMERGED_REAP_AFTER_SECONDS` of observed inactivity
-(default three days; 0 disables) the clock may grant removal of the DIRECTORY,
-never discard of the COMMIT: the same retention vetoes and raw cleanliness proof
-apply, and the checkout's HEAD must first be held by a ref in the source repo —
-its own run branch when HEAD is that branch's tip, otherwise a created and
-verified `refs/aitelier/reclaimed-worktrees/<run_id>`. If no ref can be proven,
-the tree stays. Such a reap is recorded as `reaped_ref_preserved:<ref>`.
+A released, COMPLETED tree that is neither merged nor discarded is not kept
+forever either. After `AITELIER_UNMERGED_REAP_AFTER_SECONDS` of observed
+inactivity (default three days; 0 disables) the clock may grant removal of the
+DIRECTORY, never discard of the COMMIT: the same retention vetoes, raw
+cleanliness proof and native-removal preflight apply, and the checkout's HEAD
+must first be held by `refs/aitelier/reclaimed-worktrees/<run_id>` in the source
+repo (created, never moved, and verified — not the run branch, which nothing
+protects once its worktree is gone). If no ref can be proven, the tree stays.
+Such a reap is recorded as `reaped_ref_preserved:<ref>`. The worktree-private
+reflog and `refs/worktree/*` go with the directory. Failed runs are excluded:
+a rescue reactivates them in their recorded tree.
 """
 
 from __future__ import annotations
@@ -82,10 +85,13 @@ MODE_READ_SNAPSHOT = "read_snapshot"
 BRANCH_PREFIX = "codex/run/"
 
 # A clock may reclaim the directory of an unmerged, undiscarded released tree,
-# never its commit: HEAD is first held by a ref under this prefix (or by the
-# run's own branch). 0 disables; the default is three days of inactivity.
+# never its commit: HEAD is first held by a ref under this prefix. 0 disables;
+# the default is three days of inactivity. At most MAX trees per sweep get the
+# full content proof, bounding lock hold and hashing on a large backlog.
 UNMERGED_REAP_ENV = "AITELIER_UNMERGED_REAP_AFTER_SECONDS"
 UNMERGED_REAP_DEFAULT_SECONDS = 259200
+UNMERGED_REAP_MAX_ENV = "AITELIER_UNMERGED_REAP_MAX_PER_SWEEP"
+UNMERGED_REAP_MAX_DEFAULT = 5
 RECLAIMED_REF_PREFIX = "refs/aitelier/reclaimed-worktrees/"
 
 # The closed backend Git profile (core.closed_git): no inherited GIT_*
@@ -1440,7 +1446,7 @@ def _source_current_ref(rec: dict) -> tuple[str | None, str]:
     return branch.stdout.strip(), ""
 
 
-def _remove_run_worktree(rec: dict) -> tuple[bool, str]:
+def _remove_run_worktree(rec: dict, *, expected_head: str | None = None) -> tuple[bool, str]:
     """Remove only the structurally verified managed checkout; preserve refs."""
     if rec.get("mode") not in (MODE_WORKTREE, MODE_READ_SNAPSHOT):
         return False, "run does not own a disposable worktree"
@@ -1453,7 +1459,7 @@ def _remove_run_worktree(rec: dict) -> tuple[bool, str]:
     # only after a separate preflight proves, as data, that no filter driver,
     # submodule or config include can make that refresh run a program — and
     # never with --force. Anything else retains the tree with the reason.
-    return closed_git.native_remove(rec["source_repo"], path)
+    return closed_git.native_remove(rec["source_repo"], path, expected_head=expected_head)
 
 
 def _index_storage_present(worktree, names) -> bool:
@@ -1533,26 +1539,58 @@ def _commit_at(cwd, ref: str) -> str:
     return res.stdout.strip() if res.returncode == 0 else ""
 
 
-def _preserve_run_head(rec: dict) -> tuple[str, str]:
-    """Hold the checkout's HEAD by a ref in the source repo; raise if unproven.
+def _unmerged_reap_max_per_sweep(value=None) -> int:
+    """At most this many unmerged trees get a full content proof per sweep; 0 = none."""
+    limit = int(value if value is not None else os.environ.get(
+        UNMERGED_REAP_MAX_ENV, str(UNMERGED_REAP_MAX_DEFAULT)))
+    if limit < 0:
+        raise ValueError(f"{UNMERGED_REAP_MAX_ENV} must be nonnegative")
+    return limit
 
-    Called under the source repo lock, after the cleanliness proof. Uses the
-    run's own branch when HEAD is its tip; otherwise creates (never moves) the
-    run's reclaimed ref and verifies it. Nothing is deleted or forced.
+
+# run_id -> (tree observation, reason) of the last failed unmerged content proof.
+# A tree found dirty is not re-hashed until its HEAD, index or top-level
+# directory changes. A stale entry can only retain a tree, never remove one.
+_UNCLEAN_TREES: dict[str, tuple[tuple, str]] = {}
+
+
+def _tree_observation(rec: dict) -> tuple | None:
+    """(HEAD sha, index mtime_ns, root mtime_ns), or None when unobservable."""
+    try:
+        wt = rec["worktree_path"]
+        head = _commit_at(wt, "HEAD")
+        index = _git(wt, "rev-parse", "--path-format=absolute", "--git-path", "index")
+        if not head or index.returncode or not index.stdout.strip():
+            return None
+        try:
+            index_ns = os.stat(index.stdout.strip()).st_mtime_ns
+        except FileNotFoundError:
+            index_ns = 0
+        return head, index_ns, os.stat(wt, follow_symlinks=False).st_mtime_ns
+    except Exception:  # noqa: BLE001 -- unobservable means no cache, never a pass
+        return None
+
+
+def _preserve_run_head(rec: dict, expected: str) -> tuple[str, str]:
+    """Hold the proven HEAD by the run's reclaimed ref in the source repo.
+
+    Called under the source repo lock, after the cleanliness proof. Always
+    uses `refs/aitelier/reclaimed-worktrees/<run_id>`, never the run branch: a
+    branch is unprotected once its worktree is gone. The ref is reused only if
+    it already holds that commit; otherwise it is created (never moved) and
+    verified. Raises — retaining the tree — on any doubt.
     """
     source = rec["source_repo"]
     sha = _commit_at(rec["worktree_path"], "HEAD")
     if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sha):
         raise ValueError("worktree HEAD is unknown; nothing was preserved")
+    if sha != expected:
+        raise ValueError("worktree HEAD moved after its cleanliness proof")
     if rec.get("mode") == MODE_READ_SNAPSHOT and sha != rec.get("base_sha"):
         raise ValueError("read snapshot changed from its recorded detached base")
     reclaimed = RECLAIMED_REF_PREFIX + _require_usable_run_id(rec["run_id"])
-    candidates = [reclaimed]
-    if rec.get("mode") == MODE_WORKTREE and rec.get("branch"):
-        candidates.insert(0, f"refs/heads/{rec['branch']}")
-    for ref in candidates:
-        if _commit_at(source, ref) == sha:
-            return sha, ref
+    if _commit_at(source, reclaimed) == sha:
+        return sha, reclaimed
     if _git(source, "check-ref-format", reclaimed).returncode:
         raise ValueError(f"{reclaimed} is not a valid ref name; checkout retained")
     # Empty old value: create only, never move an existing ref.
@@ -1637,23 +1675,35 @@ def _require_reap_retention(db, rec, row, ctl, *, now, minimum):
 
 def reap_released_worktrees(db, sf, *, min_idle_seconds: float | None = None,
                            now: float | None = None,
-                           unmerged_reap_after_seconds: float | None = None) -> dict:
+                           unmerged_reap_after_seconds: float | None = None,
+                           unmerged_reap_max_per_sweep: int | None = None) -> dict:
     """Reclaim quiet, integrated/discarded, idle roots after index release.
 
-    A clock never grants discard. It grants only removal of an unmerged tree's
-    directory, after `unmerged_reap_after_seconds` (env
+    A clock never grants discard. It grants only removal of a COMPLETED
+    unmerged tree's directory, after `unmerged_reap_after_seconds` (env
     `AITELIER_UNMERGED_REAP_AFTER_SECONDS`; 0 disables) of inactivity and once
-    its HEAD is held by a verified ref. Resource + control locks fence
+    its HEAD is held by a verified reclaimed ref; at most
+    `unmerged_reap_max_per_sweep` such trees are content-proved per sweep.
+    Failed runs are excluded because a rescue reactivates them in place.
+
+    The content proof runs under the global control lock like the merged path:
+    that lock is what fences index sidecars and host preparation from
+    reopening the tree between the retention rechecks and removal, and
+    `native_remove` re-proves cleanliness under it anyway. The per-sweep cap
+    and the negative cleanliness cache bound how long it is held. Resource + control locks fence
     concurrent readers, sidecar jobs and host preparation. No force removal or
     branch deletion is performed. Any unclassified ignored files retain the
     checkout.
     """
     from contextlib import ExitStack, nullcontext
     from core import run_resources as resources
+    unmerged_after, unmerged_max, unmerged_error = None, 0, ""
     try:
-        unmerged_after, unmerged_error = _unmerged_reap_after(unmerged_reap_after_seconds), ""
+        unmerged_after = _unmerged_reap_after(unmerged_reap_after_seconds)
+        unmerged_max = _unmerged_reap_max_per_sweep(unmerged_reap_max_per_sweep)
     except (TypeError, ValueError) as exc:
-        unmerged_after, unmerged_error = None, f"unmerged reap is misconfigured: {exc}"
+        unmerged_error = f"unmerged reap is misconfigured: {exc}"
+    proofs = 0  # unmerged content proofs started in this sweep
     removed, kept = [], []
     for initial in retained(db):
         rid = initial["run_id"]
@@ -1722,8 +1772,13 @@ def reap_released_worktrees(db, sf, *, min_idle_seconds: float | None = None,
                         not target or why == _unmerged_reason(rec["branch"], target))
                     if not unmerged or unmerged_after == 0:
                         raise ValueError(why)
-                    if unmerged_after is None:
+                    if unmerged_error:
                         raise ValueError(f"{why}; {unmerged_error}")
+                    # A failed run can be rescued/retried in place (reactivate
+                    # + resume needs its tree), so only completed runs qualify.
+                    if row["status"] != "completed":
+                        raise ValueError(f"{why}; a {row['status']} run may be rescued, "
+                                         f"so it stays until merged or discarded")
                     # Neither merged nor discarded: only a long observed idle
                     # may reclaim the directory, and only with HEAD held by a ref.
                     idle, idle_why = resources.idle_eligible(
@@ -1733,9 +1788,31 @@ def reap_released_worktrees(db, sf, *, min_idle_seconds: float | None = None,
                         raise ValueError(
                             f"{why}; ref-preserved reap waits for {int(unmerged_after)}s idle"
                             if idle_why.startswith("idle ") else f"{why}; {idle_why}")
+                    observed = _tree_observation(rec)
+                    cached = _UNCLEAN_TREES.get(rid)
+                    if observed is not None and cached and cached[0] == observed:
+                        raise ValueError(cached[1])
+                    if proofs >= unmerged_max:
+                        raise ValueError(f"{why}; ref-preserved reap deferred "
+                                         f"({unmerged_max} per sweep)")
+                    proofs += 1
                     ok, why = is_disposable(db, rid, run_status=row["status"], admitted_ops=0)
+                    if ok:
+                        # Refuse a tree native removal would refuse, before any
+                        # ref or pending marker is written for it.
+                        try:
+                            with closed_git.repo_lock(rec["source_repo"]):
+                                hazards = closed_git.native_remove_hazards(
+                                    rec["source_repo"], rec["worktree_path"])
+                        except Exception as exc:  # noqa: BLE001 -- unknown retains
+                            hazards = [f"native removal preflight failed: {exc}"]
+                        if hazards:
+                            ok, why = False, "native removal retained: " + "; ".join(hazards)[:400]
                     if not ok:
+                        if observed is not None:
+                            _UNCLEAN_TREES[rid] = (observed, why)
                         raise ValueError(why)
+                    _UNCLEAN_TREES.pop(rid, None)
                     preserve = True
                 _require_reap_retention(
                     db, rec, row, ctl, now=now, minimum=min_idle_seconds)
@@ -1750,7 +1827,7 @@ def reap_released_worktrees(db, sf, *, min_idle_seconds: float | None = None,
                     # the marker names it BEFORE removal: every crash window
                     # leaves either the tree or a ref-held commit.
                     if preserve:
-                        preserved = _preserve_run_head(rec)
+                        preserved = _preserve_run_head(rec, observed[0])
                         pending = f"reaping_ref_preserved:{preserved[0]}:{preserved[1]}"
                     else:
                         pending = ("reaping_discarded" if discarded
@@ -1759,7 +1836,18 @@ def reap_released_worktrees(db, sf, *, min_idle_seconds: float | None = None,
                         conn.execute("UPDATE run_isolation SET disposition=? WHERE run_id=?",
                                      (pending, rid))
                         conn.commit()
-                    ok, why = _remove_run_worktree(rec)
+                    if preserve:
+                        ok, why = _remove_run_worktree(rec, expected_head=preserved[0])
+                        if not ok:
+                            # Refused, so the tree is still here: drop the
+                            # pending marker rather than leave it sticky.
+                            with db.get_connection() as conn:
+                                conn.execute(
+                                    "UPDATE run_isolation SET disposition=? WHERE run_id=?",
+                                    (rec.get("disposition"), rid))
+                                conn.commit()
+                    else:
+                        ok, why = _remove_run_worktree(rec)
                 if not ok:
                     raise ValueError(why)
                 if preserved:

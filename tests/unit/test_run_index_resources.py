@@ -278,6 +278,42 @@ def test_activity_resets_the_idle_window_and_sweep_does_not(rig):
     assert not result["removed"] and "idle 100s" in result["retained"][0]["reason"]
 
 
+def _finished_unmerged(rig, monkeypatch):
+    monkeypatch.delenv(ri.UNMERGED_REAP_ENV, raising=False)
+    monkeypatch.setattr(ri, "_UNCLEAN_TREES", {})
+    rec = rig.run()
+    (Path(rec["worktree_path"]) / "code.py").write_text("def delivered(): pass\n")
+    git(rec["worktree_path"], "commit", "-qam", "delivered, never merged")
+    finish(rig, rec)
+    original = rig.sf.get_run
+    monkeypatch.setattr(rig.sf, "get_run", lambda rid: {**original(rid), "status": "completed"})
+    return rec
+
+
+def test_unmerged_reap_with_the_index_ledger_enabled(rig, monkeypatch):
+    rec = _finished_unmerged(rig, monkeypatch)
+    rid, head = rec["run_id"], git(rec["worktree_path"], "rev-parse", "HEAD")
+    assert rig.ctl.settled(rig.ctl.get(rid), "released")
+    result = ri.reap_released_worktrees(rig.db, rig.sf, now=time.time() + 259200 + 3600)
+    assert [x["run_id"] for x in result["removed"]] == [rid], result
+    ref = ri.RECLAIMED_REF_PREFIX + rid
+    assert git(rig.source, "rev-parse", ref) == head
+    assert ri.record(rig.db, rid)["disposition"] == f"reaped_ref_preserved:{ref}"
+    assert rig.ctl.get(rid) is None
+
+
+def test_recent_ledger_activity_blocks_an_unmerged_reap(rig, monkeypatch):
+    rec = _finished_unmerged(rig, monkeypatch)
+    future = time.time() + 259200 + 3600
+    with rig.ctl.connection() as conn:
+        # Past the 24h gate, inside the unmerged 3-day window.
+        conn.execute("UPDATE indexes SET activity_at=?", (future - 90000,))
+    result = ri.reap_released_worktrees(rig.db, rig.sf, now=future)
+    assert not result["removed"]
+    assert "waits for 259200s idle" in result["retained"][0]["reason"]
+    assert Path(rec["worktree_path"]).is_dir()
+
+
 @pytest.mark.parametrize("value", ["nan", "-1", "invalid", "inf"])
 def test_bad_idle_setting_fails_closed(rig, monkeypatch, value):
     rec = rig.run()

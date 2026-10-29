@@ -11,6 +11,7 @@ source checkout's current branch, or after an explicit discard disposition. A
 push or open PR alone never qualifies.
 """
 
+import os
 import subprocess
 import time
 from datetime import UTC, datetime
@@ -557,15 +558,19 @@ def _unmerged_run(db, tmp_path, rid, *, snapshot=False):
     return src, Path(rec["worktree_path"]), head
 
 
-def _reap_unmerged(db, rid, **kw):
+def _reap_unmerged(db, rids, *, status="completed", **kw):
     kw.setdefault("now", time.time() + _PAST_UNMERGED)
-    row = {"status": "completed", "updated_at": datetime.now(UTC).isoformat()}
-    return ri.reap_released_worktrees(db, _ReapSF({rid: row}), min_idle_seconds=0, **kw)
+    row = {"status": status, "updated_at": datetime.now(UTC).isoformat()}
+    rids = [rids] if isinstance(rids, str) else rids
+    return ri.reap_released_worktrees(db, _ReapSF({rid: row for rid in rids}),
+                                      min_idle_seconds=0, **kw)
 
 
 @pytest.fixture
 def unmerged_default(monkeypatch):
     monkeypatch.delenv(ri.UNMERGED_REAP_ENV, raising=False)
+    monkeypatch.delenv(ri.UNMERGED_REAP_MAX_ENV, raising=False)
+    monkeypatch.setattr(ri, "_UNCLEAN_TREES", {})
 
 
 def test_unmerged_tree_is_kept_until_the_idle_threshold(db, home, tmp_path, unmerged_default):
@@ -577,20 +582,62 @@ def test_unmerged_tree_is_kept_until_the_idle_threshold(db, home, tmp_path, unme
     assert ri.record(db, "run-um-young")["disposition"] == "auto_released_terminal_quiet"
 
 
-def test_unmerged_tree_on_its_branch_is_reaped_with_the_branch_kept(
+def test_unmerged_tree_on_its_branch_gets_a_reclaimed_ref_and_keeps_the_branch(
         db, home, tmp_path, unmerged_default):
     src, wt, head = _unmerged_run(db, tmp_path, "run-um-branch")
     branch = ri.record(db, "run-um-branch")["branch"]
+    ref = ri.RECLAIMED_REF_PREFIX + "run-um-branch"
     report = _reap_unmerged(db, "run-um-branch")
     assert not wt.exists()
     assert [x["run_id"] for x in report["removed"]] == ["run-um-branch"]
     final = ri.record(db, "run-um-branch")
-    assert final["disposition"] == f"reaped_ref_preserved:refs/heads/{branch}"
+    # The run branch alone is unprotected once its worktree is gone.
+    assert final["disposition"] == f"reaped_ref_preserved:{ref}"
     assert head in final["note"]
+    assert _git(src, "rev-parse", ref) == head
     assert _git(src, "rev-parse", f"refs/heads/{branch}") == head, "branch must be untouched"
-    assert not _git(src, "for-each-ref", ri.RECLAIMED_REF_PREFIX)
     # Reaped is terminal: a later sweep neither revisits nor reports it.
     assert _reap_unmerged(db, "run-um-branch") == {"removed": [], "retained": []}
+
+
+def test_failed_unmerged_run_is_kept_because_it_may_be_rescued(
+        db, home, tmp_path, unmerged_default):
+    src, wt, _ = _unmerged_run(db, tmp_path, "run-um-failed")
+    report = _reap_unmerged(db, "run-um-failed", status="failed")
+    assert wt.exists() and report["removed"] == []
+    assert "may be rescued" in report["retained"][0]["reason"]
+    assert not _git(src, "for-each-ref", ri.RECLAIMED_REF_PREFIX)
+    # The resolver a rescue resumes through still finds the tree.
+    assert ri.resolve_for_resolver(db, "run-um-failed") == str(wt)
+
+
+def test_unmerged_tree_of_a_detached_source_is_ref_preserved(
+        db, home, tmp_path, unmerged_default):
+    src, wt, head = _unmerged_run(db, tmp_path, "run-um-detached")
+    subprocess.run(["git", "checkout", "-q", "--detach"], cwd=src, check=True)
+    report = _reap_unmerged(db, "run-um-detached")
+    ref = ri.RECLAIMED_REF_PREFIX + "run-um-detached"
+    assert not wt.exists() and report["removed"]
+    assert _git(src, "rev-parse", ref) == head
+    assert ri.record(db, "run-um-detached")["disposition"] == f"reaped_ref_preserved:{ref}"
+
+
+def test_unmerged_tree_of_an_unavailable_source_is_kept(db, home, tmp_path, unmerged_default):
+    src, wt, _ = _unmerged_run(db, tmp_path, "run-um-nosrc")
+    src.rename(tmp_path / "moved-away")
+    report = _reap_unmerged(db, "run-um-nosrc")
+    assert wt.exists() and report["removed"] == [] and report["retained"]
+    assert ri.record(db, "run-um-nosrc")["disposition"] == "auto_released_terminal_quiet"
+
+
+def test_recent_git_activity_blocks_an_unmerged_reap(db, home, tmp_path, unmerged_default):
+    src, wt, _ = _unmerged_run(db, tmp_path, "run-um-active")
+    now = time.time() + _PAST_UNMERGED
+    index = Path(_git(wt, "rev-parse", "--path-format=absolute", "--git-path", "index"))
+    os.utime(index, (now - 100, now - 100))
+    report = _reap_unmerged(db, "run-um-active", now=now)
+    assert wt.exists() and report["removed"] == []
+    assert "waits for 259200s idle" in report["retained"][0]["reason"]
 
 
 def test_unreachable_snapshot_commit_gets_a_reclaimed_ref_before_removal(
@@ -660,9 +707,9 @@ def test_ref_preserving_reap_recovers_each_crash_window(
     ref = ri.RECLAIMED_REF_PREFIX + "run-um-crash"
     real_remove = ri._remove_run_worktree
 
-    def crash(rec):
+    def crash(rec, **kw):
         if window == "after_remove":
-            assert real_remove(rec)[0]
+            assert real_remove(rec, **kw)[0]
         raise RuntimeError("process died")
 
     monkeypatch.setattr(ri, "_remove_run_worktree", crash)
@@ -681,20 +728,109 @@ def test_ref_preserving_reap_recovers_each_crash_window(
     assert _git(src, "rev-parse", ref) == head
 
 
+@pytest.mark.parametrize("mode", ["snapshot", "worktree"])
+@pytest.mark.parametrize("change", ["deleted", "moved"])
 def test_pending_ref_preserving_reap_is_not_finalised_without_its_ref(
-        db, home, tmp_path, monkeypatch, unmerged_default):
-    src, wt, head = _unmerged_run(db, tmp_path, "run-um-lost", snapshot=True)
-    ref = ri.RECLAIMED_REF_PREFIX + "run-um-lost"
-    def crash(rec):
-        raise RuntimeError("process died")
+        db, home, tmp_path, monkeypatch, unmerged_default, mode, change):
+    rid = f"run-um-lost-{mode}-{change}"
+    src, wt, head = _unmerged_run(db, tmp_path, rid, snapshot=mode == "snapshot")
+    ref = ri.RECLAIMED_REF_PREFIX + rid
+    real_remove = ri._remove_run_worktree
+
+    def crash(rec, **kw):
+        assert real_remove(rec, **kw)[0]
+        raise RuntimeError("process died after removal")
 
     monkeypatch.setattr(ri, "_remove_run_worktree", crash)
-    _reap_unmerged(db, "run-um-lost")
-    subprocess.run(["git", "worktree", "remove", str(wt)], cwd=src, check=True)
-    subprocess.run(["git", "update-ref", "-d", ref], cwd=src, check=True)
-    report = _reap_unmerged(db, "run-um-lost")
+    _reap_unmerged(db, rid)
+    assert not wt.exists()
+    if change == "deleted":
+        subprocess.run(["git", "update-ref", "-d", ref], cwd=src, check=True)
+    else:
+        seed = _git(src, "rev-list", "--max-parents=0", "main")
+        subprocess.run(["git", "update-ref", ref, seed], cwd=src, check=True)
+    report = _reap_unmerged(db, rid)
     assert report["removed"] == [] and "no longer holds" in report["retained"][0]["reason"]
-    assert ri.record(db, "run-um-lost")["disposition"].startswith("reaping_ref_preserved:")
+    assert ri.record(db, rid)["disposition"] == f"reaping_ref_preserved:{head}:{ref}"
+
+
+def test_native_removal_hazard_is_refused_before_any_ref_or_marker(
+        db, home, tmp_path, unmerged_default):
+    src, wt, _ = _unmerged_run(db, tmp_path, "run-um-hazard")
+    (wt / ".gitmodules").write_text("")
+    subprocess.run(["git", "add", "-A"], cwd=wt, check=True)
+    subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                    "commit", "-qm", "gitmodules"], cwd=wt, check=True)
+    report = _reap_unmerged(db, "run-um-hazard")
+    assert wt.exists() and report["removed"] == []
+    assert ".gitmodules is present" in report["retained"][0]["reason"]
+    assert not _git(src, "for-each-ref", ri.RECLAIMED_REF_PREFIX)
+    assert ri.record(db, "run-um-hazard")["disposition"] == "auto_released_terminal_quiet"
+
+
+def test_refused_removal_after_the_marker_restores_the_disposition(
+        db, home, tmp_path, monkeypatch, unmerged_default):
+    src, wt, head = _unmerged_run(db, tmp_path, "run-um-refused")
+    monkeypatch.setattr(ri.closed_git, "native_remove",
+                        lambda *a, **kw: (False, "git worktree remove refused: fixture"))
+    report = _reap_unmerged(db, "run-um-refused")
+    assert wt.exists() and report["removed"] == []
+    assert "fixture" in report["retained"][0]["reason"]
+    assert ri.record(db, "run-um-refused")["disposition"] == "auto_released_terminal_quiet"
+
+
+def test_a_commit_landing_after_preservation_retains_the_snapshot(
+        db, home, tmp_path, monkeypatch, unmerged_default):
+    src, wt, head = _unmerged_run(db, tmp_path, "run-um-late", snapshot=True)
+    real_preserve = ri._preserve_run_head
+
+    def preserve_then_commit(rec, expected):
+        held = real_preserve(rec, expected)
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit",
+                        "-q", "--allow-empty", "-m", "late"], cwd=wt, check=True)
+        return held
+
+    monkeypatch.setattr(ri, "_preserve_run_head", preserve_then_commit)
+    report = _reap_unmerged(db, "run-um-late")
+    assert wt.exists() and report["removed"] == []
+    assert f"HEAD is no longer {head}" in report["retained"][0]["reason"]
+    assert _git(wt, "rev-parse", "HEAD") != head
+    assert ri.record(db, "run-um-late")["disposition"] == "auto_released_terminal_quiet"
+
+
+def test_unmerged_reaps_are_capped_per_sweep(db, home, tmp_path, unmerged_default):
+    rids = [f"run-um-cap{i}" for i in range(3)]
+    trees = [_unmerged_run(db, tmp_path, rid)[1] for rid in rids]
+    report = _reap_unmerged(db, rids, unmerged_reap_max_per_sweep=2)
+    assert len(report["removed"]) == 2
+    assert [x["reason"].endswith("ref-preserved reap deferred (2 per sweep)")
+            for x in report["retained"]] == [True]
+    assert sum(t.exists() for t in trees) == 1
+    report = _reap_unmerged(db, rids, unmerged_reap_max_per_sweep=2)
+    assert len(report["removed"]) == 1 and not any(t.exists() for t in trees)
+
+
+def test_a_dirty_unmerged_tree_is_not_rehashed_until_it_changes(
+        db, home, tmp_path, monkeypatch, unmerged_default):
+    src, wt, _ = _unmerged_run(db, tmp_path, "run-um-cache")
+    (wt / "new.txt").write_text("unsaved\n")
+    proofs = []
+    real = ri.is_disposable
+
+    def counting(*a, **kw):
+        if kw.get("integration_ref") is None:
+            proofs.append(1)
+        return real(*a, **kw)
+
+    monkeypatch.setattr(ri, "is_disposable", counting)
+    first = _reap_unmerged(db, "run-um-cache")["retained"][0]["reason"]
+    second = _reap_unmerged(db, "run-um-cache")["retained"][0]["reason"]
+    assert "uncommitted" in first and second == first and len(proofs) == 1
+    subprocess.run(["git", "add", "-A"], cwd=wt, check=True)
+    subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                    "commit", "-qm", "saved"], cwd=wt, check=True)
+    report = _reap_unmerged(db, "run-um-cache")
+    assert len(proofs) == 2 and report["removed"] and not wt.exists()
 
 
 # ── requested base (relay) ───────────────────────────────────────────

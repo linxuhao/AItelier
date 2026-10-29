@@ -1744,8 +1744,12 @@ def native_remove_hazards(source, worktree) -> list[str]:
     return sorted(set(reasons))
 
 
-def native_remove(source, worktree) -> tuple[bool, str]:
-    """Non-force ``git worktree remove`` after the hazard preflight, under the repo lock."""
+def native_remove(source, worktree, *, expected_head: str | None = None) -> tuple[bool, str]:
+    """Non-force ``git worktree remove`` after the hazard preflight, under the repo lock.
+
+    With *expected_head*, a checkout whose HEAD is no longer that commit (e.g.
+    a commit landed after the caller preserved it) is retained.
+    """
     with repo_lock(source):
         try:
             hazards = native_remove_hazards(source, worktree)
@@ -1761,6 +1765,8 @@ def native_remove(source, worktree) -> tuple[bool, str]:
             # Non-force removal would refuse dirty work too; it is retained here
             # without asking Git to look, and nothing is committed or forced.
             return False, f"native removal retained: tree is not clean ({why[:300]})"
+        if expected_head is not None and resolve_commit(worktree, "HEAD") != expected_head:
+            return False, f"native removal retained: HEAD is no longer {expected_head}"
         res = run(source, "worktree", "remove", str(worktree))
         if res.returncode:
             return False, f"git worktree remove refused: {(res.stderr or res.stdout).strip()[:300]}"

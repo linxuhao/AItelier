@@ -229,6 +229,17 @@ async def lifespan(app: FastAPI):
 
     sf.notifications.subscribe(_on_skillflow_event)
 
+    # State claim tables: run their one-time schema migration (the taken_over
+    # status) now, before serving, instead of inside the first request. A
+    # failure is logged and only switches claim takeover off.
+    try:
+        from api.dependencies import get_db_manager as _state_db
+        from core.state_claims import initialize as _initialize_claims
+        _initialize_claims(_state_db())
+    except Exception:  # noqa: BLE001 - never block startup on this
+        import logging as _logging
+        _logging.getLogger(__name__).exception("State claim table initialization at startup failed")
+
     # Recover any claimed steps left by a previous (crashed/killed) process.
     # Server is singleton — any claim at startup is definitively stale.
     from core.scheduler import (recover_claims_on_startup,

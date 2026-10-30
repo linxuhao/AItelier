@@ -98,6 +98,8 @@ def dispatch_claim(conn, project_id, node_key, driver_id, is_admin, claim_id=Non
                 raise ClaimError("not_claim_owner", "review claim belongs to another driver")
             if fence is None or fence != review["fence"]:
                 raise ClaimError("stale_fence", "external review needs its exact claim fence")
+            if review["status"] == "taken_over":
+                raise ClaimError("stale_fence", "this review claim was taken over; its fence no longer holds")
             if (review["status"] != "live" or
                     lease_state(review["lease_expires_at"], current or now_stamp()) == "reclaimable"):
                 raise ClaimError("claim_required", "external review needs a live review claim")

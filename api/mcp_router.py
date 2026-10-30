@@ -1539,7 +1539,9 @@ def _register_wait_tool(tool, mcp=None):
                 return None, None
             from api.dependencies import get_db_manager
             return get_db_manager(), driver
-        except Exception:  # noqa: BLE001 - presence bookkeeping never fails a wait
+        except Exception:  # noqa: BLE001 - no identity means no marker; say why
+            logging.getLogger("aitelier.mcp_wait").warning(
+                "wait_for_run: could not resolve the waiting driver; no presence marker", exc_info=True)
             return None, None
 
     @tool("wait_for_run", "read",

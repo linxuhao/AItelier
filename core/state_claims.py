@@ -28,6 +28,7 @@ write; they derive lease_state from the clock.
 """
 from __future__ import annotations
 
+import logging
 import sqlite3
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -132,6 +133,10 @@ def _widen_status_check(conn) -> None:
     conn.execute("PRAGMA foreign_keys=OFF")
     conn.execute("BEGIN IMMEDIATE")
     try:
+        for table in ("state_node_claims", "state_claim_history", "state_handoffs"):
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone() \
+                    and conn.execute(f"PRAGMA foreign_key_check({table})").fetchone():
+                raise sqlite3.IntegrityError(f"{table} has foreign-key violations; claim status migration skipped")
         if "'taken_over'" not in (_table_sql(conn, "state_node_claims") or "'taken_over'"):
             _rebuild(conn, "state_node_claims", CLAIMS_TABLE, ("state_claim_history", "state_handoffs"))
         if "'taken_over'" not in (_table_sql(conn, "state_claim_history") or "'taken_over'"):
@@ -148,12 +153,31 @@ def _widen_status_check(conn) -> None:
         conn.execute("PRAGMA foreign_keys=ON")
 
 
+# Databases whose status migration failed in this process: not retried per
+# request (each try would hold the write lock); the next process start retries.
+_MIGRATION_FAILED: set[str] = set()
+
+
 def initialize(db) -> None:
     """Create the claim tables on a real handle; idempotent, never touches rows
-    (except the one-time preserving rebuild that widens the status CHECK)."""
+    (except the one-time preserving rebuild that widens the status CHECK).
+
+    The host runs this once at startup (api.main lifespan; the State-only
+    service builds its shared StateService before serving), so the rebuild is
+    not on a request's path. A FAILED rebuild (existing foreign-key violations,
+    a lock it could not get) is logged and degrades ONLY claim takeover
+    (``takeover_unavailable``); every other State request keeps working on the
+    old tables."""
     with db.get_connection() as conn:
-        if not _status_check_current(conn):
-            _widen_status_check(conn)
+        name = str(getattr(db, "db_path", id(db)))
+        if not _status_check_current(conn) and name not in _MIGRATION_FAILED:
+            try:
+                _widen_status_check(conn)
+            except (sqlite3.Error, ValueError):
+                _MIGRATION_FAILED.add(name)
+                logging.getLogger(__name__).exception(
+                    "claim status migration (taken_over) failed on %s; claim takeover stays off until it succeeds",
+                    name)
         conn.executescript(SCHEMA)
         conn.commit()
 
@@ -340,7 +364,6 @@ class StateClaims:
     def claim_node(self, project_id, node_key, purpose, expected_revision, request_key,
                    lease_seconds=DEFAULT_LEASE_SECONDS, workspace="", subagent=None):
         driver = self._require_driver()
-        driver_presence.mark_back(self.store, driver, "claim_node")
         if purpose not in PURPOSES:
             raise StateGraphError("purpose must be implement, review, investigate or plan")
         if type(lease_seconds) is not int or not MIN_LEASE_SECONDS <= lease_seconds <= MAX_LEASE_SECONDS:
@@ -354,6 +377,7 @@ class StateClaims:
         request_hash = digest({"purpose": purpose, "revision": expected_revision, "lease_seconds": lease_seconds,
                                "workspace": workspace, "subagent": subagent})
         with self.store.transaction(write=True) as conn:
+            driver_presence.mark_back(conn, driver, "claim_node")   # back: commits with this claim
             node = self.store._node(conn, project_id, node_key)
             old = conn.execute("SELECT * FROM state_node_claims WHERE project_id=? AND node_key=? "
                                "AND driver_id=? AND request_key=?",
@@ -449,7 +473,6 @@ class StateClaims:
         for that ``<driver_id>/<label>``.
         """
         driver = self._require_driver()
-        driver_presence.mark_back(self.store, driver, "heartbeat")
         claims, attempts, subagents = claims or [], attempts or [], subagents or []
         total = len(claims) + len(attempts) + len(subagents)
         if not 1 <= total <= MAX_HEARTBEAT_ITEMS:
@@ -457,6 +480,7 @@ class StateClaims:
         renewed, refused = [], []
         with self.store.transaction(write=True) as conn:
             self.store._project(conn, project_id)
+            driver_presence.mark_back(conn, driver, "heartbeat")   # back: commits with this heartbeat
             current = now_stamp()
 
             def renew_claim(row):

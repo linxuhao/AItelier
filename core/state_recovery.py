@@ -179,6 +179,11 @@ class StateRecovery:
         index see what it is."""
         from core.state_claims import _claim_view
         node_key = node_key or attempt["node_key"]
+        if purpose in EXCLUSIVE_PURPOSES:
+            # Another driver may hold the node's exclusive claim (e.g. it took the
+            # claim over from an offline owner): refuse like claim_node, inside
+            # this transaction, instead of failing on the unique index.
+            self.claims._refuse_exclusive_holder(conn, attempt["project_id"], node_key, driver, current)
         fence = 1 + conn.execute("SELECT COALESCE(MAX(fence),0) FROM state_node_claims WHERE project_id=? AND node_key=?",
                                  (attempt["project_id"], node_key)).fetchone()[0]
         request_key = f"transfer:{attempt.get('attempt_id') or node_key}:{fence}"
@@ -270,6 +275,8 @@ class StateRecovery:
         if not self.driver_id:
             raise ClaimError("driver_identity_required", "an attempt is owned by a registered driver; the owner's "
                              "e-mail cannot take one over - use an admin driver token (owner-cli)")
+        from core.state_takeover import refuse_shared_identity
+        refuse_shared_identity(self.driver_id)
         current = now_stamp()
         with self.store.transaction(write=True) as conn:
             attempt = self._attempt(conn, attempt_id)

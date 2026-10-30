@@ -34,7 +34,6 @@ class ExternalAttempts:
         identity = {'harness': key(harness, 'harness'),
                     'external_id': text(external_id, 'external execution identity', 500),
                     'reporting_actor': self.actor}
-        driver_presence.mark_back(self.store, self.driver_id, 'start_external_attempt')
         from core import deployment_quiescence as dq
         with dq.operation_admission_fence():
             return self.attempts._reserve(
@@ -118,7 +117,6 @@ class ExternalAttempts:
         pinned report and an explicit 'all workers settled' declaration. Neither
         a timeout nor a missing callback clears the active-attempt lock.
         """
-        driver_presence.mark_back(self.store, self.driver_id, 'report_external_attempt')
         key(observation_id, 'observation id')
         integer(expected_version, 'expected observation version', 0, 2**31-2)
         if not isinstance(status, str) or status not in {'running','paused','unknown','candidate','failed'}:
@@ -196,6 +194,8 @@ class ExternalAttempts:
                    'detail':detail, 'actor':self.actor}
         fingerprint = digest(payload)
         with self.store.transaction(write=True) as conn:
+            # The reporter is back: commits with this observation or not at all.
+            driver_presence.mark_back(conn, self.driver_id, 'report_external_attempt')
             a = self.attempts._attempt(conn, attempt_id)
             if a['execution_kind'] != 'external':
                 raise StateConflict('external reports cannot complete or override a SkillFlow attempt')

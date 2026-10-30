@@ -355,6 +355,10 @@ class StateAttempts:
                 request["relay_digest"] = relay_digest
         request_hash = digest(request)
         with self.store.transaction(write=True) as conn:
+            if external is not None and owner_driver_id:
+                # start_external_attempt: the driver is back, in this very transaction.
+                from core import driver_presence
+                driver_presence.mark_back(conn, owner_driver_id, "start_external_attempt")
             node = self.store._node(conn, project_id, node_key)
             old = conn.execute("SELECT * FROM state_attempts WHERE project_id=? AND node_key=? AND request_key=?",
                                (project_id, node_key, request_key)).fetchone()

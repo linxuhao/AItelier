@@ -175,7 +175,7 @@ something that cannot wait, ask the owner or route to another member.
 
 ### Presence v2: declared offline, waits, effective presence
 
-A driver may **declare itself** offline: MCP tool `declare_driver_presence(status,
+A driver may **declare itself** offline (never the shared `public` identity: `shared_identity`): MCP tool `declare_driver_presence(status,
 reason?, expected_return?)` or `POST /api/drivers/me/presence` with
 `{"status": "offline"|"online", "reason"?: <=200 chars, "expected_return"?: ISO-8601}`.
 The driver is always the caller (taken from the credential; there is no driver
@@ -201,17 +201,25 @@ now the EFFECTIVE presence. It keeps `status`, `last_seen_at` and
 
 A wait OVERRIDES a declaration and, when it starts, clears it (audited, cause
 `wait`). `claim_node`, `heartbeat`, `start_external_attempt` and
-`report_external_attempt` by the driver also clear it (and refresh
-`last_seen_at`, throttled). Ordinary reads do not.
+`report_external_attempt` by the driver also clear it and refresh
+`last_seen_at`, inside their own write transaction. Ordinary reads do not.
 
-Waits are recorded in the database (`driver_presence_waits`: open-wait count,
-`active_until` = start + timeout + 30 s, `last_wait_end`), not in process
-memory: the takeover decision below must see a wait served by any process that
-opens the same SQLite file (the State-only service, the host CLI, a second
-worker). A process that dies mid-wait keeps the driver online no longer than
-that wait's own timeout plus the grace. Each wait costs two short writes
-(start: busy timeout 2 s; end: 0.5 s; a failure is logged and never fails the
-wait).
+Waits are recorded in the database (`driver_presence_waits`, ONE row per
+wait: started, until = start + timeout + 30 s, ended), not in process memory:
+the takeover decision below must see a wait served by any process that opens
+the same SQLite file (the State-only service, the host CLI, a second worker).
+A process that dies mid-wait keeps the driver online no longer than that
+wait's own timeout plus the grace. Each wait costs two short writes. The start
+is retried with backoff for up to 10 s; if it still cannot commit, the wait
+FAILS before waiting with the retryable `wait_not_registered` (it never waits
+unregistered). The end is best effort (0.5 s; a miss keeps the driver online
+until `until`). Clearing a declaration happens in the SAME transaction as the
+claim_node / heartbeat / start / report that proves the driver is back.
+
+Fail closed: `determinable` is false when the driver has no registry row or no
+readable `last_seen_at` and has not declared; the takeover authority never
+reads such a driver as offline. Claims, refusals and takeover events show
+presence WITHOUT the declared reason (only the driver views show it).
 
 ### What presence may and may not do
 

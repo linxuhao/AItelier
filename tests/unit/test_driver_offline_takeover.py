@@ -121,12 +121,14 @@ def hold_row(world):
                                   "WHERE project_id='p' AND node_key='a'").fetchone())
 
 
-def put_wait(world, who, active, until, ended):
+def put_wait(world, who, until, ended, wait_id=None):
+    """One wait row (driver_presence_waits holds one row per wait)."""
     with world.db.get_connection() as conn:
         driver_presence._ensure(conn)
-        conn.execute("INSERT OR REPLACE INTO driver_presence_waits VALUES(?,?,?,?,?)",
-                     (who, active, driver_presence._stamp(until), driver_presence._stamp(until),
-                      driver_presence._stamp(ended) if ended else None))
+        conn.execute("INSERT OR REPLACE INTO driver_presence_waits(wait_id,driver_id,started_at,until,ended_at) "
+                     "VALUES(?,?,?,?,?)",
+                     (wait_id or f"w-{who}-{until.timestamp()}", who, driver_presence._stamp(until),
+                      driver_presence._stamp(until), driver_presence._stamp(ended) if ended else None))
         conn.commit()
 
 
@@ -303,7 +305,7 @@ def test_a_wait_in_progress_overrides_a_declaration_made_during_it(world):
 
 def test_grace_after_a_wait_is_inclusive_and_then_the_declaration_or_derived_applies(world):
     now = datetime.now(UTC)
-    put_wait(world, "bob", 0, now - timedelta(seconds=200), now - timedelta(seconds=120))
+    put_wait(world, "bob", now - timedelta(seconds=200), now - timedelta(seconds=120))
     with world.db.get_connection() as conn:
         assert driver_presence.effective_presence(conn, "bob", now)["basis"] == "wait"
         assert driver_presence.effective_presence(conn, "bob", now + timedelta(seconds=1))["basis"] == "last_seen"
@@ -316,7 +318,7 @@ def test_grace_after_a_wait_is_inclusive_and_then_the_declaration_or_derived_app
 
 def test_grace_is_env_overridable_and_bad_values_fall_back(world, monkeypatch):
     now = datetime.now(UTC)
-    put_wait(world, "bob", 0, now - timedelta(seconds=60), now - timedelta(seconds=30))
+    put_wait(world, "bob", now - timedelta(seconds=60), now - timedelta(seconds=30))
     monkeypatch.setenv(driver_presence.WAIT_GRACE_ENV, "10")
     with world.db.get_connection() as conn:
         assert driver_presence.effective_presence(conn, "bob", now)["basis"] == "last_seen"
@@ -330,20 +332,30 @@ def test_grace_is_env_overridable_and_bad_values_fall_back(world, monkeypatch):
 def test_a_wait_marker_left_by_a_dead_process_is_bounded_by_its_timeout(world):
     now = datetime.now(UTC)
     offline(world)
-    put_wait(world, "bob", 2, now - timedelta(seconds=500), None)       # never recorded its end
+    put_wait(world, "bob", now - timedelta(seconds=500), None)       # never recorded its end
     view = presence(world, "bob")
     assert view["waiting"] is False and view["status"] == "offline" and view["basis"] == "declared"
-    put_wait(world, "bob", 1, now + timedelta(seconds=300), None)       # still inside its timeout
+    put_wait(world, "bob", now + timedelta(seconds=300), None)       # still inside its timeout
     assert presence(world, "bob")["waiting"] is True
 
 
-def test_the_next_wait_restarts_a_stale_counter(world):
-    now = datetime.now(UTC)
-    put_wait(world, "bob", 3, now - timedelta(seconds=500), None)
-    driver_presence._wait_begin(world.db, "bob", 5)
-    driver_presence._wait_end(world.db, "bob")
+def test_overlapping_waits_never_undercount(world):
+    """One wait outlives its own `until` (no end recorded), a second starts, then
+    the first one ends: the second must still count as waiting."""
+    first = driver_presence._wait_begin(world.db, "bob", 5)
     with world.db.get_connection() as conn:
-        assert conn.execute("SELECT active FROM driver_presence_waits WHERE driver_id='bob'").fetchone()[0] == 0
+        past = driver_presence._stamp(datetime.now(UTC) - timedelta(seconds=10))
+        conn.execute("UPDATE driver_presence_waits SET until=? WHERE wait_id=?", (past, first))
+        conn.commit()
+    second = driver_presence._wait_begin(world.db, "bob", 60)
+    driver_presence._wait_end(world.db, first)
+    assert presence(world, "bob")["waiting"] is True
+    third = driver_presence._wait_begin(world.db, "bob", 60)
+    driver_presence._wait_end(world.db, second)
+    assert presence(world, "bob")["waiting"] is True
+    driver_presence._wait_end(world.db, third)
+    after = presence(world, "bob")
+    assert after["waiting"] is False and after["basis"] == "wait"
 
 
 def _act(world, action):
@@ -454,14 +466,14 @@ def test_takeover_refused_while_the_owner_waits_even_if_declared(world):
     assert results["code"] == "owner_not_offline" and results["facts"]["owner_presence"]["basis"] == "wait"
 
 
-def test_refusal_not_a_member(world):
+def test_refusal_not_project_member(world):
     held = claim(world.svc["bob"])
     offline(world)
-    assert refusal(lambda: take(world.svc["dave"], held)).code == "not_a_member"
+    assert refusal(lambda: take(world.svc["dave"], held)).code == "not_project_member"
     world.reg.set_membership("p", "erin", "removed", 1, "left", actor="test")
-    assert refusal(lambda: take(world.svc["erin"], held)).code == "not_a_member"
+    assert refusal(lambda: take(world.svc["erin"], held)).code == "not_project_member"
     world.reg.set_status("carol", "suspended", 1, "paused", actor="test")
-    assert refusal(lambda: take(world.svc["carol"], held)).code == "not_a_member"
+    assert refusal(lambda: take(world.svc["carol"], held)).code == "not_project_member"
 
 
 def test_refusal_stale_fence_claim_not_live_and_own_claim(world):
@@ -621,10 +633,11 @@ def test_list_claims_and_get_claim_carry_holder_presence_and_a_hint_only_when_of
     claim(world.svc["carol"], node="b")
     listed = {c["driver_id"]: c for c in read(world.svc["erin"], "list_claims", project_id="p")["claims"]}
     assert listed["bob"]["holder_presence"]["status"] == "online" and "takeover_hint" not in listed["bob"]
-    offline(world, reason="flight")
+    offline(world, reason="flight to a private place")
     listed = {c["driver_id"]: c for c in read(world.svc["erin"], "list_claims", project_id="p")["claims"]}
     hint = listed["bob"]["takeover_hint"]
-    assert "take_over_claim" in hint and held["claim_id"] in hint and "flight" in hint
+    assert "take_over_claim" in hint and held["claim_id"] in hint and "flight" not in hint
+    assert "reason" not in listed["bob"]["holder_presence"]           # the owner's prose is not copied
     assert listed["bob"]["holder_presence"]["basis"] == "declared"
     assert "takeover_hint" not in listed["carol"]
     one = read(world.svc["erin"], "get_claim", project_id="p", claim_id=held["claim_id"])["claim"]
@@ -753,13 +766,13 @@ def test_take_over_attempt_refusals_for_an_offline_owner(world):
     enforced(world)
     _, attempt = bob_attempt(world)
     offline(world)
-    # (With a live registry the P3 helper answers not_project_member first; this fixture has none,
-    # so the strict check of the offline path answers.)
-    assert refusal(lambda: take_attempt(world.svc["dave"], attempt)).code == "not_a_member"
+    # (This fixture has no live registry: the strict check of the offline path answers, with the
+    # same code as the P3 helper - see test_live_registry_non_member_is_not_project_member.)
+    assert refusal(lambda: take_attempt(world.svc["dave"], attempt)).code == "not_project_member"
     world.reg.set_membership("p", "erin", "removed", 1, "left", actor="test")
-    assert refusal(lambda: take_attempt(world.svc["erin"], attempt)).code == "not_a_member"
+    assert refusal(lambda: take_attempt(world.svc["erin"], attempt)).code == "not_project_member"
     world.reg.set_status("carol", "suspended", 1, "paused", actor="test")      # member row kept, driver inactive
-    assert refusal(lambda: take_attempt(world.svc["carol"], attempt)).code == "not_a_member"
+    assert refusal(lambda: take_attempt(world.svc["carol"], attempt)).code == "not_project_member"
     world.reg.set_status("carol", "active", 2, "back", actor="test")
     assert refusal(lambda: take_attempt(world.svc["bob"], attempt)).code == "already_owner"
     stale = refusal(lambda: take_attempt(world.svc["carol"], attempt, fence=5))
@@ -778,7 +791,7 @@ def test_take_over_attempt_refuses_a_non_member_only_through_the_strict_registry
     _, attempt = bob_attempt(world)
     offline(world)
     monkeypatch.setattr(state_enforcement, "project_membership", lambda *a: None)
-    assert refusal(lambda: take_attempt(world.svc["dave"], attempt)).code == "not_a_member"
+    assert refusal(lambda: take_attempt(world.svc["dave"], attempt)).code == "not_project_member"
 
 
 def test_abandon_is_not_extended_and_keeps_its_attestation(world):
@@ -853,53 +866,151 @@ def test_attempt_takeover_against_the_owners_heartbeat_has_one_consistent_outcom
 # ---------------------------------------------------------------------------
 # F. migration of the claim status CHECK
 # ---------------------------------------------------------------------------
-OLD_CHECK = "CHECK(status IN ('live','released','expired','transferred','revoked'))"
+# The claim tables exactly as main (67cb96ecd8, presence v1) creates them - copied
+# verbatim from `git show 67cb96ecd8:core/state_claims.py` (SCHEMA); the test
+# below re-checks the copy against git when the repository is reachable.
+MAIN_COMMIT = "67cb96ecd8"
+MAIN_CLAIMS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS state_node_claims (
+    claim_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL, node_key TEXT NOT NULL,
+    driver_id TEXT NOT NULL,
+    purpose TEXT NOT NULL CHECK(purpose IN ('implement','review','investigate','plan')),
+    status TEXT NOT NULL CHECK(status IN ('live','released','expired','transferred','revoked')),
+    fence INTEGER NOT NULL CHECK(fence >= 1),
+    node_revision INTEGER NOT NULL,
+    attempt_id TEXT,
+    workspace TEXT NOT NULL DEFAULT '',
+    subagent TEXT,
+    lease_seconds INTEGER NOT NULL CHECK(lease_seconds BETWEEN 60 AND 86400),
+    lease_expires_at TEXT NOT NULL, last_heartbeat_at TEXT NOT NULL,
+    request_key TEXT NOT NULL, request_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+    UNIQUE(project_id, node_key, driver_id, request_key),
+    FOREIGN KEY(project_id, node_key) REFERENCES state_nodes(project_id, node_key)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS state_node_claims_one_exclusive
+ON state_node_claims(project_id, node_key) WHERE status='live' AND purpose IN ('implement','plan');
+CREATE INDEX IF NOT EXISTS state_node_claims_live
+ON state_node_claims(project_id, status, lease_expires_at);
+CREATE TRIGGER IF NOT EXISTS state_node_claims_no_delete BEFORE DELETE ON state_node_claims
+BEGIN SELECT RAISE(ABORT,'claims are never deleted; release them'); END;
+CREATE TABLE IF NOT EXISTS state_claim_history (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    claim_id TEXT NOT NULL, project_id TEXT NOT NULL, node_key TEXT NOT NULL,
+    driver_id TEXT NOT NULL, purpose TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('live','released','expired','transferred','revoked')),
+    fence INTEGER NOT NULL, lease_expires_at TEXT NOT NULL,
+    actor TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
+    FOREIGN KEY(claim_id) REFERENCES state_node_claims(claim_id)
+);
+CREATE INDEX IF NOT EXISTS state_claim_history_claim ON state_claim_history(claim_id, seq);
+CREATE TRIGGER IF NOT EXISTS state_claim_history_no_update BEFORE UPDATE ON state_claim_history
+BEGIN SELECT RAISE(ABORT,'claim history is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS state_claim_history_no_delete BEFORE DELETE ON state_claim_history
+BEGIN SELECT RAISE(ABORT,'claim history is append-only'); END;
+"""
 
 
-def test_old_claim_tables_are_widened_preserving_rows_seq_indexes_and_triggers(tmp_path):
-    path = tmp_path / "old.sqlite"
-    db = StateDatabase(str(path))
-    seed = StateService(db, actor="o", project_read_trusted=True)
-    seed.create_project("p", "P")
-    seed.store.add_nodes("p", [{"key": "a", **NODE}])
-    service = StateService(db, actor="driver:bob", driver_id="bob", project_read_trusted=True)
-    held = write(service, "claim_node", project_id="p", node_key="a", purpose="implement", expected_revision=1,
-                 request_key="k")
-    write(service, "release_claim", project_id="p", claim_id=held["claim_id"], fence=1, reason="x")
-    raw = sqlite3.connect(str(path))
+def test_the_main_schema_copy_is_main_verbatim():
+    import subprocess
+    try:
+        source = subprocess.run(["git", "-C", str(ROOT), "show", f"{MAIN_COMMIT}:core/state_claims.py"],
+                                capture_output=True, text=True, timeout=30, check=True).stdout
+    except (OSError, subprocess.SubprocessError):
+        pytest.skip("the repository history is not reachable here")
+    start = source.index('SCHEMA = """') + len('SCHEMA = """')
+    assert source[start:source.index('"""', start)] == MAIN_CLAIMS_SCHEMA
+
+
+def downgrade_to_main_schema(db):
+    """Rebuild the claim tables with main's real DDL, keeping their rows."""
+    raw = sqlite3.connect(db.db_path)
     raw.execute("PRAGMA foreign_keys=OFF")
-    for table, template in (("state_node_claims", state_claims.CLAIMS_TABLE),
-                            ("state_claim_history", state_claims.HISTORY_TABLE)):
-        custom = raw.execute("SELECT sql FROM sqlite_master WHERE tbl_name=? AND type IN ('index','trigger') "
-                             "AND sql IS NOT NULL", (table,)).fetchall()
-        ddl = template.format(name=table + "_old").replace(state_claims._STATUS_CHECK, OLD_CHECK)
-        raw.execute(ddl)
-        raw.execute(f"INSERT INTO {table}_old SELECT * FROM {table}")
+    for table in ("state_node_claims", "state_claim_history"):
+        raw.execute(f"CREATE TABLE keep_{table} AS SELECT * FROM {table}")
         raw.execute(f"DROP TABLE {table}")
-        raw.execute(f"ALTER TABLE {table}_old RENAME TO {table}")
-        for (sql,) in custom:
-            raw.execute(sql)
+    raw.executescript(MAIN_CLAIMS_SCHEMA)
+    for table in ("state_node_claims", "state_claim_history"):
+        raw.execute(f"INSERT INTO {table} SELECT * FROM keep_{table}")
+        raw.execute(f"DROP TABLE keep_{table}")
+    raw.commit()
+    raw.close()
+
+
+def claim_sql(db, table="state_node_claims"):
+    with db.get_connection() as conn:
+        return conn.execute("SELECT sql FROM sqlite_master WHERE name=?", (table,)).fetchone()[0]
+
+
+@pytest.fixture(autouse=True)
+def _fresh_migration_memory():
+    state_claims._MIGRATION_FAILED.clear()
+    yield
+    state_claims._MIGRATION_FAILED.clear()
+
+
+def test_main_schema_is_widened_preserving_rows_seq_indexes_and_triggers(world):
+    bob = world.svc["bob"]
+    held = claim(bob)
+    write(bob, "release_claim", project_id="p", claim_id=held["claim_id"], fence=held["fence"], reason="x")
+    claim(bob, node="b")
+    downgrade_to_main_schema(world.db)
+    raw = sqlite3.connect(world.db.db_path)
     raw.execute("UPDATE sqlite_sequence SET seq=40 WHERE name='state_claim_history'")
     raw.commit()
-    assert "'taken_over'" not in raw.execute("SELECT sql FROM sqlite_master WHERE name='state_node_claims'").fetchone()[0]
+    assert "'taken_over'" not in claim_sql(world.db)
     before = {t: raw.execute(f"SELECT * FROM {t} ORDER BY 1").fetchall()
               for t in ("state_node_claims", "state_claim_history")}
-    objects = sorted(raw.execute("SELECT type,name FROM sqlite_master WHERE tbl_name IN "
-                                 "('state_node_claims','state_claim_history')").fetchall())
+    objects = sorted(raw.execute("SELECT type,name,sql FROM sqlite_master WHERE tbl_name IN "
+                                 "('state_node_claims','state_claim_history') AND type!='table'").fetchall())
     raw.close()
-    state_claims.initialize(db)
-    state_claims.initialize(db)                                         # second run changes nothing
-    raw = sqlite3.connect(str(path))
+    state_claims.initialize(world.db)
+    state_claims.initialize(world.db)                                   # a second run changes nothing
+    raw = sqlite3.connect(world.db.db_path)
     for table in ("state_node_claims", "state_claim_history"):
-        assert "'taken_over'" in raw.execute("SELECT sql FROM sqlite_master WHERE name=?", (table,)).fetchone()[0]
+        assert "'taken_over'" in claim_sql(world.db, table)
         assert raw.execute(f"SELECT * FROM {table} ORDER BY 1").fetchall() == before[table]
-    assert sorted(raw.execute("SELECT type,name FROM sqlite_master WHERE tbl_name IN "
-                              "('state_node_claims','state_claim_history')").fetchall()) == objects
+    assert sorted(raw.execute("SELECT type,name,sql FROM sqlite_master WHERE tbl_name IN "
+                              "('state_node_claims','state_claim_history') AND type!='table'").fetchall()) == objects
     assert raw.execute("SELECT seq FROM sqlite_sequence WHERE name='state_claim_history'").fetchone()[0] == 40
     assert raw.execute("PRAGMA foreign_key_check").fetchall() == []
     with pytest.raises(sqlite3.IntegrityError, match="never deleted"):
         raw.execute("DELETE FROM state_node_claims")
     raw.close()
+    offline(world)
+    live = read(world.svc["carol"], "list_claims", project_id="p")["claims"][0]
+    assert take(world.svc["carol"], live)["taken_over"]["status"] == "taken_over"
+
+
+def test_a_failed_migration_degrades_only_the_takeover(world, caplog):
+    bob, carol = world.svc["bob"], world.svc["carol"]
+    held = claim(bob)
+    downgrade_to_main_schema(world.db)
+    raw = sqlite3.connect(world.db.db_path)
+    raw.execute("PRAGMA foreign_keys=OFF")
+    raw.execute("INSERT INTO state_claim_history(claim_id,project_id,node_key,driver_id,purpose,status,fence,"
+                "lease_expires_at,actor,reason,created_at) VALUES('claim-ghost','p','a','bob','implement','live',1,"
+                "'2026-01-01','x','synthetic violation','2026-01-01')")
+    raw.commit()
+    raw.close()
+    with caplog.at_level("ERROR"):
+        state_claims.initialize(world.db)                               # never raises
+    assert "foreign-key violations" in caplog.text
+    assert "'taken_over'" not in claim_sql(world.db)                   # skipped, not half-done
+    StateService(world.db, actor="driver:carol", driver_id="carol", project_read_trusted=True)   # no retry, no raise
+    beat = write(bob, "heartbeat", project_id="p", claims=[{"claim_id": held["claim_id"], "fence": held["fence"]}])
+    assert beat["refused"] == []
+    assert claim(carol, node="b")["status"] == "live"
+    assert len(read(carol, "list_claims", project_id="p")["claims"]) == 2
+    offline(world)
+    assert refusal(lambda: take(carol, held)).code == "takeover_unavailable"
+
+
+def test_the_host_migrates_claim_tables_at_startup():
+    source = (ROOT / "api/main.py").read_text(encoding="utf-8")
+    lifespan = source[source.index("async def lifespan"):source.index("\n    recover_claims_on_startup()\n")]
+    assert "_initialize_claims(_state_db())" in lifespan
 
 
 # ---------------------------------------------------------------------------
@@ -976,9 +1087,262 @@ def test_only_state_takeover_decides_on_effective_presence():
                and any(isinstance(n, ast.keyword) and n.arg == "offline_owner" for n in ast.walk(fn))}
     assert passing == {"take_over_attempt"}
     text = (ROOT / "core/state_takeover.py").read_text(encoding="utf-8")
-    assert re.search(r'presence\["status"\] != "offline"', text)
+    assert re.search(r'return presence\["status"\] == "offline" and presence\["determinable"\] is True', text)
+    assert text.count("owner_is_offline(presence)") == 3          # the definition and its two uses
     # drivers.py only DESCRIBES it in its views
     dtree = ast.parse((ROOT / "core/drivers.py").read_text(encoding="utf-8"))
     describing = {fn.name for fn in ast.walk(dtree) if isinstance(fn, ast.FunctionDef)
                   and any(isinstance(n, ast.Name) and n.id == "effective_presence" for n in ast.walk(fn))}
     assert describing == {"_effective_view"}
+
+
+# ---------------------------------------------------------------------------
+# H. review fixes (2026-10-30): fail closed, collisions, public, privacy, wait_for_run
+# ---------------------------------------------------------------------------
+def hold_write_lock(world, seconds, started):
+    def run():
+        conn = sqlite3.connect(world.db.db_path, timeout=10)
+        conn.execute("BEGIN IMMEDIATE")
+        started.set()
+        threading.Event().wait(seconds)
+        conn.rollback()
+        conn.close()
+    thread = threading.Thread(target=run)
+    thread.start()
+    assert started.wait(5)
+    return thread
+
+
+def test_reviewer_scenario_a_wait_started_under_a_3s_write_lock_still_protects_the_owner(world):
+    """bob declares offline and starts a 6 s inbox wait while another connection
+    holds the write lock for 3 s. The wait registers after the lock (bounded
+    retry), so carol's takeover during the wait is refused."""
+    held = claim(world.svc["bob"])
+    offline(world)
+    bob = world.svc["bob"]
+    started = threading.Event()
+    locker = hold_write_lock(world, 3.0, started)
+    result = {}
+
+    def try_take():
+        result["code"] = refusal(lambda: take(world.svc["carol"], held)).code
+
+    seen, _ = _wait_and_observe(bob, lambda: bob.driver_inbox.wait_for_driver_inbox(timeout_seconds=4.0),
+                                declare_during=try_take)
+    locker.join()
+    assert seen["waiting"] is True and seen["declared"] is False
+    assert result["code"] == "owner_not_offline"
+
+
+def test_a_wait_that_cannot_be_registered_fails_retryably_before_waiting(world, monkeypatch):
+    monkeypatch.setattr(driver_presence, "WAIT_REGISTER_SECONDS", 0.6)
+    held = claim(world.svc["bob"])
+    offline(world)
+    started = threading.Event()
+    locker = hold_write_lock(world, 3.0, started)
+    bob = world.svc["bob"]
+    try:
+        with pytest.raises(ClaimError) as caught:
+            asyncio.run(bob.driver_inbox.wait_for_driver_inbox(timeout_seconds=30))
+        assert caught.value.code == "wait_not_registered" and "retry" in str(caught.value)
+        with pytest.raises(ClaimError) as caught:
+            asyncio.run(bob.wait_for_state_change("p", after=10 ** 6, timeout_seconds=30))
+        assert caught.value.code == "wait_not_registered"
+    finally:
+        locker.join()
+    view = presence(world, "bob")
+    assert view["declared"] is True and view["waiting"] is False          # nothing pretended
+    assert take(world.svc["carol"], held)["taken_over"]["status"] == "taken_over"   # consistent: bob never waited
+
+
+@pytest.mark.parametrize("action", ["claim_node", "heartbeat", "start_external_attempt", "report_external_attempt"])
+def test_the_declaration_clear_commits_with_the_action_or_not_at_all(world, action):
+    """If the clear cannot be written the action must not commit either: never
+    'renewed (or claimed, started, reported) while still declared offline'."""
+    bob = world.svc["bob"]
+    held = claim(bob)
+    attempt = None
+    if action == "report_external_attempt":
+        attempt = write(bob, "start_external_attempt", project_id="p", node_key="b", expected_revision=1,
+                        harness="h", external_id="job-b", request_key="rk-b")
+    offline(world)
+    with world.db.get_connection() as conn:
+        conn.execute("CREATE TRIGGER block_clear BEFORE DELETE ON driver_presence_declarations "
+                     "BEGIN SELECT RAISE(ABORT,'synthetic: the clear cannot be written'); END")
+        conn.commit()
+
+    def state():
+        with world.db.get_connection() as conn:
+            return (conn.execute("SELECT lease_expires_at FROM state_node_claims WHERE claim_id=?",
+                                 (held["claim_id"],)).fetchone()[0],
+                    conn.execute("SELECT COUNT(*) FROM state_node_claims").fetchone()[0],
+                    conn.execute("SELECT COUNT(*) FROM state_attempts").fetchone()[0],
+                    conn.execute("SELECT COUNT(*) FROM state_external_observations").fetchone()[0])
+
+    before = state()
+    with pytest.raises(sqlite3.Error, match="synthetic"):
+        if action == "claim_node":
+            claim(bob, node="b")
+        elif action == "heartbeat":
+            write(bob, "heartbeat", project_id="p", claims=[{"claim_id": held["claim_id"], "fence": held["fence"]}])
+        elif action == "start_external_attempt":
+            write(bob, "start_external_attempt", project_id="p", node_key="a", expected_revision=1, harness="h",
+                  external_id="job-a", request_key="rk-a")
+        else:
+            write(bob, "report_external_attempt", attempt_id=attempt["attempt_id"], observation_id="o1",
+                  expected_version=attempt["observation_version"], context_hash=attempt["context_hash"],
+                  status="running", report_ref="/tmp/r", report_sha256="0" * 64)
+    assert state() == before and presence(world, "bob")["declared"] is True
+
+
+@pytest.mark.parametrize("stamp", [None, "garbage", "2999-01-01T00:00:00+00:00"])
+def test_an_owner_whose_presence_cannot_be_determined_is_never_taken_over(world, stamp):
+    held = claim(world.svc["bob"])
+    with world.db.get_connection() as conn:
+        conn.execute("UPDATE drivers SET last_seen_at=? WHERE driver_id='bob'", (stamp,))
+        conn.commit()
+    view = presence(world, "bob")
+    assert view["status"] == "offline" and view["determinable"] is False      # v1 says offline...
+    refused = refusal(lambda: take(world.svc["carol"], held))                # ...the authority does not
+    assert refused.code == "owner_not_offline" and "undeterminable" in str(refused)
+
+
+def test_an_unregistered_owner_is_never_taken_over(world):
+    ghost = StateService(world.db, actor="driver:ghost", driver_id="ghost", project_read_trusted=True)
+    held = claim(ghost)
+    assert presence(world, "ghost")["determinable"] is False
+    assert refusal(lambda: take(world.svc["carol"], held)).code == "owner_not_offline"
+
+
+def test_a_third_member_cannot_take_the_attempt_while_another_holds_the_taken_over_claim(world):
+    enforced(world)
+    held, attempt = bob_attempt(world)
+    offline(world)
+    take(world.svc["carol"], held)
+    refused = refusal(lambda: take_attempt(world.svc["erin"], attempt))
+    assert refused.code == "claimed_by_other" and refused.facts["holder"] == "carol"
+    assert read(world.svc["erin"], "get_attempt", attempt_id=attempt["attempt_id"])["owner_driver_id"] == "bob"
+    assert take_attempt(world.svc["carol"], attempt)["owner_driver_id"] == "carol"   # the claim holder can
+
+
+def test_accepting_an_earlier_handoff_after_a_claim_takeover_is_claimed_by_other(world):
+    enforced(world)
+    held, attempt = bob_attempt(world)
+    offer = write(world.svc["bob"], "offer_handoff", project_id="p", request_key="offer", expected_owner_fence=1,
+                  attempt_id=attempt["attempt_id"], to_driver_id="erin",
+                  package={"workers": {"quiescent": True}, "next_step": "continue"})
+    offline(world)
+    take(world.svc["carol"], held)
+    refused = refusal(lambda: write(world.svc["erin"], "accept_handoff", project_id="p",
+                                    handoff_id=offer["handoff_id"], expected_owner_fence=1))
+    assert refused.code == "claimed_by_other" and refused.facts["holder"] == "carol"
+
+
+def test_live_registry_non_member_is_not_project_member(world, monkeypatch):
+    monkeypatch.setattr(drivers, "registry_for", lambda db: world.reg)
+    enforced(world)
+    held, attempt = bob_attempt(world)
+    offline(world)
+    assert refusal(lambda: take_attempt(world.svc["dave"], attempt)).code == "not_project_member"
+    assert refusal(lambda: take(world.svc["dave"], held)).code == "not_project_member"
+
+
+def test_dispatch_on_a_taken_over_review_claim_is_stale_fence(world):
+    from core.state_enforcement import dispatch_claim
+    review = claim(world.svc["bob"], purpose="review")
+    offline(world)
+    take(world.svc["carol"], review)
+    with world.db.get_connection() as conn:
+        with pytest.raises(ClaimError) as caught:
+            dispatch_claim(conn, "p", "a", "bob", False, claim_id=review["claim_id"], fence=review["fence"],
+                           allow_review=True)
+    assert caught.value.code == "stale_fence"
+
+
+def test_the_shared_public_identity_never_declares_or_takes_over(world):
+    world.reg.set_membership("p", "public", "member", 0, "fixture", actor="test")
+    public = StateService(world.db, actor="driver:public", driver_id="public", project_read_trusted=True)
+    with pytest.raises(drivers.DriverError, match="shared_identity"):
+        driver_presence.declare(world.db, "public", "offline")
+    enforced(world)
+    held, attempt = bob_attempt(world)
+    offline(world)
+    assert refusal(lambda: take(public, held)).code == "shared_identity"
+    assert refusal(lambda: take_attempt(public, attempt)).code == "shared_identity"
+
+
+def test_the_owner_reason_is_not_copied_and_the_result_names_the_previous_claim(world):
+    held = claim(world.svc["bob"])
+    offline(world, reason="private: dentist")
+    refused = refusal(lambda: claim(world.svc["carol"]))
+    assert "dentist" not in str(refused) and "reason" not in refused.facts["holder_presence"]
+    assert "dentist" not in refused.facts["takeover_hint"]
+    out = take(world.svc["carol"], held)
+    assert out["previous_claim_id"] == held["claim_id"] and "host:/w#b" in out["workspace_warning"]
+    assert "reason" not in out["owner_presence"]
+    with world.db.get_connection() as conn:
+        assert "dentist" not in json.dumps([dict(r) for r in conn.execute("SELECT payload_json FROM state_events")])
+
+
+def test_wait_for_run_marks_the_calling_driver_as_waiting(world, monkeypatch, caplog):
+    from api import dependencies, mcp_router, state_graph_routers
+
+    class Notifications:
+        def subscribe(self, cb):
+            pass
+
+        def unsubscribe(self, cb):
+            pass
+
+    class SF:
+        notifications = Notifications()
+
+        def get_run(self, run_id):
+            return {"id": run_id, "status": "running", "graph_name": "g", "project_id": "x", "current_node": "s"}
+
+        def list_runs(self, project_id=None):
+            return []
+
+    class Ctx:
+        class request_context:
+            request = object()
+
+    class FakeMCP:
+        def get_context(self):
+            return Ctx()
+
+    monkeypatch.setattr(dependencies, "get_skillflow", lambda: SF())
+    monkeypatch.setattr(dependencies, "get_db_manager", lambda: world.db)
+    monkeypatch.setattr(state_graph_routers, "authenticated_driver_id", lambda request: "bob")
+    captured = {}
+
+    def tool(name, kind, description):
+        def deco(fn):
+            captured[name] = fn
+            return fn
+        return deco
+
+    mcp_router._register_wait_tool(tool, FakeMCP())
+    offline(world)
+
+    async def run():
+        task = asyncio.create_task(captured["wait_for_run"]("r1", timeout_seconds=1))
+        seen = None
+        for _ in range(100):
+            await asyncio.sleep(0.02)
+            seen = driver_presence.presence_for(world.db, "bob")
+            if seen["waiting"]:
+                break
+        out = await task
+        return seen, out
+
+    seen, out = asyncio.run(run())
+    assert seen["waiting"] is True and seen["declared"] is False and out["timed_out"] is True
+    # An identity that cannot be resolved is logged, never silently swallowed.
+    monkeypatch.setattr(state_graph_routers, "authenticated_driver_id",
+                        lambda request: (_ for _ in ()).throw(RuntimeError("boom")))
+    captured.clear()
+    mcp_router._register_wait_tool(tool, FakeMCP())
+    with caplog.at_level("WARNING"):
+        asyncio.run(captured["wait_for_run"]("r1", timeout_seconds=1))
+    assert "could not resolve the waiting driver" in caplog.text

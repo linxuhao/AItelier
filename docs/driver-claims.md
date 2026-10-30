@@ -185,8 +185,10 @@ so a wait, heartbeat or claim of the owner that commits first wins.
 
 | refusal | when |
 |---|---|
-| `owner_not_offline` | the owner is online or away (facts: `owner_presence`) |
-| `not_a_member` | the caller is not an active member of the project |
+| `owner_not_offline` | the owner is online or away, or its presence cannot be determined (no registry row, no readable `last_seen_at`, not declared): fail closed (facts: `owner_presence`, without the declared reason) |
+| `not_project_member` | the caller is not an active member of the project (the same code as the P3 membership check) |
+| `shared_identity` | the caller is the shared `public` identity, which never takes over (nor `take_over_attempt`) |
+| `takeover_unavailable` | this database's claim tables are not migrated to `taken_over` (startup migration failed: see the log) |
 | `stale_fence` | `expected_fence` is not the claim's fence |
 | `claim_not_live` | the claim is released, expired, transferred or already taken over (the race loser) |
 | `already_held` | the claim is the caller's own |
@@ -196,16 +198,21 @@ so a wait, heartbeat or claim of the owner that commits first wins.
 Effect, atomically: the old claim becomes `taken_over` (new terminal status;
 history row with the reason); the caller gets a NEW live claim on the same node
 with the same purpose, workspace and lease length, fence = node max + 1, a
-fresh lease, no bound attempt and no subagent; events `claim_taken_over`
-(`from_driver_id`, `to_driver_id`, `reason`, old and new fence, and the
-presence evidence used: status, basis, declared, reason, since,
-expected_return, last_seen_at, seconds_since_seen, waiting, last_wait_end) and
+fresh lease, no bound attempt and no subagent; the result names
+`previous_claim_id` and, for a non-empty workspace, a `workspace_warning`: the
+old owner's workers may still write that checkout until their attempt fence
+moves (`take_over_attempt`). Events `claim_taken_over`
+(`from_driver_id`, `to_driver_id`, the taker's `reason`, old and new fence, and
+the presence evidence used: status, basis, determinable, declared, since,
+expected_return, last_seen_at, seconds_since_seen, waiting, last_wait_end -
+never the owner's declared reason) and
 `claim_acquired` (`taken_over_from`); a `takeover_notice` in the previous
 owner's driver inbox. Node holds and their reasons are untouched.
 
 The previous owner afterwards: `heartbeat` of the old claim is refused
 `stale_fence`; `release_claim` of it is `stale_fence`; a dispatch naming the
-old claim/fence is `stale_fence`; `claim_node` is `claimed_by_other`.
+old claim/fence (implement or review) is `stale_fence`; `claim_node` is
+`claimed_by_other`.
 
 A claim takeover does not move attempts (the attempt fence is separate from
 the claim fence): while the previous owner's attempt is active the node admits
@@ -218,8 +225,14 @@ reason)`, and a `note` says so.
 `take_over_attempt`: before the lease is reclaimable it succeeds when the
 attempt owner's effective presence is `offline` (re-read inside the write
 transaction, `core.state_takeover.offline_owner_evidence`), the caller is an
-active member (`not_a_member` otherwise) and not the owner (`already_owner`),
-and `expected_owner_fence` matches (`stale_fence`). Effect as for any
+active member (`not_project_member` otherwise - from the P3 membership check,
+or, without a live registry, from the strict check on the transaction's own
+rows), not the shared `public` identity (`shared_identity`, refused for every
+`take_over_attempt`) and not the owner (`already_owner`), and
+`expected_owner_fence` matches (`stale_fence`). If a THIRD driver holds the
+node's live exclusive claim (it took the claim over), the attempt cannot bring
+its claim along: `claimed_by_other` naming the holder (the same applies to
+`accept_handoff`). Effect as for any
 takeover: owner and lease move to the caller, owner fence +1, the bound claim
 transfers (or the caller's held claim - e.g. from `take_over_claim` - is bound
 with a fresh fence), notice to the previous owner;
@@ -233,11 +246,15 @@ owner can then report or settle the attempt), so its lease rule and its
 `confirmed_stopped` attestation are unchanged.
 
 Migration: `taken_over` widens the status CHECK of `state_node_claims` and
-`state_claim_history`. SQLite cannot alter a CHECK, so the first claim-store
-initialization on an older database runs the same preserving rebuild the P3
-`abandoned` status used (`core.state_attempt_schema._rebuild`): every row, the
-history seq high-water mark, indexes and triggers survive; foreign keys are
-checked before commit; a second run changes nothing. `list_claims(statuses=)`
+`state_claim_history`. SQLite cannot alter a CHECK, so the host runs, once at
+startup before serving (api.main lifespan; the State-only service at app
+creation; lazily otherwise), the same preserving rebuild the P3 `abandoned`
+status used (`core.state_attempt_schema._rebuild`): every row, the history seq
+high-water mark, indexes and triggers survive; a second run changes nothing.
+`PRAGMA foreign_key_check` runs first: with any violation (or any other
+failure) the rebuild is skipped, logged, not retried in that process, and ONLY
+claim takeover is off (`takeover_unavailable`); every other request works on
+the old tables. `list_claims(statuses=)`
 accepts `taken_over`.
 
 ## Subagent registry (P3, record only, design §4.6)

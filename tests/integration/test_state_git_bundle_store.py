@@ -20,12 +20,13 @@ import pytest
 import core.state_git_artifacts as sga
 from core.state_attempt_schema import EXTRA_SCHEMA, _statements
 from core.state_git_artifacts import (
-    custody_metadata, load_stored_bundle, materialize_candidate, retained_bundle_bytes, store_bundle)
+    custody_metadata, load_stored_bundle, materialize_candidate, retain_candidate, retained_bundle_bytes,
+    store_bundle)
 from core.state_graph import StateConflict
 from core.state_service import StateService
 from core.state_database import StateDatabase
 from tests.integration.test_state_git_artifact_durability import fixture, prune_producer
-from tests.integration.test_state_git_candidate_only_custody import git
+from tests.integration.test_state_git_candidate_only_custody import git, make_repo, report_for
 from tests.integration.test_state_single_fullpack_custody import report, start
 
 PREFIX = "state-db:git-bundle:sha256:"
@@ -141,6 +142,23 @@ def test_encoded_row_is_verified_before_insert(tmp_path, monkeypatch):
     assert store_bundle(conn, sha(v2), v2)[0] == "raw"
     monkeypatch.setattr(sga, "decode_delta", real)
     assert load_stored_bundle(conn, sha(v2)) == v2
+
+
+def test_bundle_over_the_former_128_mib_cap_is_retained_and_stored(tmp_path):
+    repo, _ = make_repo(tmp_path)
+    (repo / "big.bin").write_bytes(os.urandom(130 * 1024 * 1024))
+    git(repo, "add", "big.bin")
+    git(repo, "commit", "-qm", "big")
+    candidate = git(repo, "rev-parse", "HEAD")
+    bundle = tmp_path / "big.bundle"
+    git(repo, "bundle", "create", str(bundle), "HEAD")
+    assert bundle.stat().st_size > 128 * 1024 * 1024  # the producer file alone was over the old cap
+    artifact = retain_candidate(report_for(bundle), candidate)
+    raw = artifact["bundle_bytes"]
+    assert 128 * 1024 * 1024 < len(raw) <= sga.MAX_BUNDLE_BYTES
+    conn = schema_db(tmp_path / "s.db")
+    assert store_bundle(conn, artifact["bundle_sha256"], raw) == ("raw", len(raw))
+    assert load_stored_bundle(conn, artifact["bundle_sha256"]) == raw
 
 
 def _delta_store(tmp_path):

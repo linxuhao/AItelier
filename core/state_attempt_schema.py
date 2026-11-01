@@ -82,7 +82,7 @@ CREATE TABLE IF NOT EXISTS state_git_bundle_store (
     codec TEXT NOT NULL CHECK(codec IN ('raw','zstd-prefix')),
     base_sha256 TEXT REFERENCES state_git_bundle_store(bundle_sha256),
     raw_size INTEGER NOT NULL
-        CHECK(typeof(raw_size)='integer' AND raw_size > 0 AND raw_size <= 134217728),
+        CHECK(typeof(raw_size)='integer' AND raw_size > 0 AND raw_size <= 268435456),
     payload BLOB NOT NULL CHECK(typeof(payload)='blob'), created_at TEXT NOT NULL,
     CHECK ((codec='raw' AND base_sha256 IS NULL)
         OR (codec='zstd-prefix' AND base_sha256 IS NOT NULL AND base_sha256 <> bundle_sha256))

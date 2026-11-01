@@ -40,7 +40,7 @@ from core import closed_git
 from core.state_graph import StateConflict, now
 from core.state_report_integrity import _read_regular_nofollow
 
-MAX_BUNDLE_BYTES = 128 * 1024 * 1024
+MAX_BUNDLE_BYTES = 256 * 1024 * 1024
 CANDIDATE_REF = "refs/aitelier/candidate"
 
 
@@ -66,7 +66,7 @@ def _git(repo, *args):
 def _import_bundle(root, raw, commit, expected_tree=None):
     """Import bytes into a fresh bare repo; Git proves completeness and identity."""
     if not raw or len(raw) > MAX_BUNDLE_BYTES:
-        raise StateConflict("Git bundle must contain 1..128 MiB of bytes")
+        raise StateConflict(f"Git bundle must contain 1..{MAX_BUNDLE_BYTES >> 20} MiB of bytes")
     bundle, repo = root / "candidate.bundle", root / "repo.git"
     bundle.write_bytes(raw)
     _git(root, "init", "--bare", str(repo))
@@ -199,7 +199,7 @@ def retain_candidate(report_bytes, commit):
         repo, _, tree = _import_bundle(root, raw, commit)
         normalized = _normalized_bundle(repo, root, commit)
         if len(normalized) > MAX_BUNDLE_BYTES:
-            raise StateConflict("normalized Git bundle exceeds 128 MiB")
+            raise StateConflict(f"normalized Git bundle exceeds {MAX_BUNDLE_BYTES >> 20} MiB")
         # Independent empty-repo proof of the normalized bytes before retention.
         if _validated_bundle(normalized, commit, tree, exact=True) != tree:
             raise StateConflict("normalized Git bundle changed the candidate tree")
@@ -220,8 +220,9 @@ KEYFRAME_MAX_DEPENDENTS = 200
 # (within 2x either way). Different repositories' candidates interleave, and a
 # delta against another repository's keyframe is never useful.
 KEYFRAME_CANDIDATES = 2
-# 2**28 covers a 128 MiB dictionary plus a 128 MiB target.
-_WINDOW_LOG = 28
+# Covers a dictionary of MAX_BUNDLE_BYTES plus a target of MAX_BUNDLE_BYTES (2**29 at 256 MiB).
+# Frames written with a smaller window (28) still decode: the decoder only caps it.
+_WINDOW_LOG = (2 * MAX_BUNDLE_BYTES - 1).bit_length()
 
 
 def _zstd():

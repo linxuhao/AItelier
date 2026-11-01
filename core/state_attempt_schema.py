@@ -207,6 +207,37 @@ def _table_sql(conn, table: str) -> str | None:
     return row[0] if row else None
 
 
+_RAW_CAP = re.compile(r'raw_size\s*<=\s*(\d+)')
+
+
+def _store_cap_stale(conn) -> bool:
+    """Whether the bundle store was created with a smaller raw_size cap than EXTRA_SCHEMA declares.
+
+    Only ever widens: a store that already admits more (the code was rolled
+    back) is left alone, and an unrecognized table definition is not touched."""
+    found = _RAW_CAP.search(_table_sql(conn, 'state_git_bundle_store') or '')
+    return found is not None and int(found.group(1)) < int(_RAW_CAP.search(EXTRA_SCHEMA).group(1))
+
+
+def _widen_store_cap(conn) -> None:
+    """Raise the stored-bundle size CHECK in place, in the caller's transaction.
+
+    A CHECK that every existing row already satisfies may be loosened by editing
+    the stored CREATE text and bumping the schema cookie (SQLite's documented
+    procedure for this). No row is read or copied: the preserving rebuild above
+    would rewrite every retained bundle (several GiB) under the write lock."""
+    cap = _RAW_CAP.search(EXTRA_SCHEMA).group(1)
+    sql = _table_sql(conn, 'state_git_bundle_store')
+    version = conn.execute('PRAGMA schema_version').fetchone()[0]
+    conn.execute('PRAGMA writable_schema=ON')
+    conn.execute("UPDATE sqlite_schema SET sql=? WHERE type='table' AND name='state_git_bundle_store'",
+                 (_RAW_CAP.sub('raw_size <= ' + cap, sql, count=1),))
+    conn.execute(f'PRAGMA schema_version={version + 1}')
+    conn.execute('PRAGMA writable_schema=OFF')
+    if _store_cap_stale(conn) or ('raw_size <= ' + cap) not in _table_sql(conn, 'state_git_bundle_store'):
+        raise sqlite3.IntegrityError('bundle store size cap upgrade did not apply; refusing')
+
+
 # Tables whose rows reference state_attempts; checked after any rebuild.
 _ATTEMPT_DEPENDENTS = ('state_evidence', 'state_acceptances', 'state_external_observations',
                        'state_external_owners', 'driver_subagents', 'state_handoffs')
@@ -280,7 +311,8 @@ def _current(conn, existing_schema: str) -> bool:
                 or 'provenance_json' not in {r['name'] for r in conn.execute('PRAGMA table_info(state_acceptances)')} \
                 or not {'late_after_abandon', 'fence'} <= {
                     r['name'] for r in conn.execute('PRAGMA table_info(state_external_observations)')} \
-                or "'abandoned'" not in (_table_sql(conn, 'state_external_owners') or ''):
+                or "'abandoned'" not in (_table_sql(conn, 'state_external_owners') or '') \
+                or _store_cap_stale(conn):
             return False
         if conn.execute("SELECT 1 FROM state_attempts a WHERE execution_kind='external' AND NOT EXISTS "
                         "(SELECT 1 FROM state_external_owners o WHERE o.attempt_id=a.attempt_id) LIMIT 1").fetchone():
@@ -351,6 +383,9 @@ def initialize(db, existing_schema: str) -> None:
             if owners_sql is not None and "'abandoned'" not in owners_sql:
                 # P3: the owner lifecycle gains `abandoned` too (design §9.1).
                 _rebuild(conn, 'state_external_owners', OWNERS_TABLE, ())
+            if _store_cap_stale(conn):
+                # A store created under a smaller MAX_BUNDLE_BYTES would refuse a larger bundle's row.
+                _widen_store_cap(conn)
             for statement in _statements(EXTRA_SCHEMA):
                 conn.execute(statement)
             conn.execute(

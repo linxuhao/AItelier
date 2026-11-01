@@ -161,6 +161,44 @@ def test_bundle_over_the_former_128_mib_cap_is_retained_and_stored(tmp_path):
     assert load_stored_bundle(conn, artifact["bundle_sha256"]) == raw
 
 
+def test_store_created_under_the_former_cap_is_widened_in_place(tmp_path):
+    path = tmp_path / "state.db"
+    StateService(StateDatabase(str(path)), actor="fixture", project_read_trusted=True)
+    conn = sqlite3.connect(path, isolation_level=None)
+    conn.row_factory = sqlite3.Row
+    v1 = blob(70, 256 * 1024)
+    v2 = edit(v1, 71)
+    store_bundle(conn, sha(v1), v1)
+    assert store_bundle(conn, sha(v2), v2)[0] == "zstd-prefix"
+    # Make the store what a database created before the cap change holds: the same table, the smaller cap.
+    insert = "INSERT INTO state_git_bundle_store VALUES(?,'raw',NULL,?,x'00','2026-11-01T00:00:00')"
+    version = conn.execute("PRAGMA schema_version").fetchone()[0]
+    conn.execute("PRAGMA writable_schema=ON")
+    conn.execute("UPDATE sqlite_schema SET sql=replace(sql,?,?) WHERE type='table' AND name='state_git_bundle_store'",
+                 (str(sga.MAX_BUNDLE_BYTES), str(sga.MAX_BUNDLE_BYTES // 2)))
+    conn.execute(f"PRAGMA schema_version={version + 1}")
+    conn.execute("PRAGMA writable_schema=OFF")
+    conn.close()
+    conn = sqlite3.connect(path, isolation_level=None)
+    conn.row_factory = sqlite3.Row
+    with pytest.raises(sqlite3.IntegrityError, match="raw_size"):
+        conn.execute(insert, ("a" * 64, sga.MAX_BUNDLE_BYTES))
+    rows, shape = store_rows(conn), triggers(path)
+    conn.close()
+    for _ in range(2):  # the upgrade runs once; a second initialization finds nothing to do
+        StateService(StateDatabase(str(path)), actor="fixture", project_read_trusted=True)
+    conn = sqlite3.connect(path, isolation_level=None)
+    conn.row_factory = sqlite3.Row
+    assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    assert store_rows(conn) == rows
+    assert {k: v for k, v in triggers(path).items() if k in shape} == shape
+    for data in (v1, v2):
+        assert load_stored_bundle(conn, sha(data)) == data
+    conn.execute(insert, ("a" * 64, sga.MAX_BUNDLE_BYTES))  # exactly the cap is admitted
+    with pytest.raises(sqlite3.IntegrityError, match="raw_size"):
+        conn.execute(insert, ("b" * 64, sga.MAX_BUNDLE_BYTES + 1))
+
+
 def _delta_store(tmp_path):
     conn = schema_db(tmp_path / "s.db")
     v1 = blob(40, 1024 * 1024)

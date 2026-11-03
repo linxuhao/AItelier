@@ -159,3 +159,67 @@ async def test_real_http_context_is_own_private_scope_and_compact_payload_is_min
             assert client.post("/api/dsh-drivers/alpha/heartbeat").status_code == 403
     finally:
         await runtime.close()
+
+
+async def test_host_completion_reuses_native_session_gateway_and_real_failover(runtime, tmp_path, monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from api import authz
+    from api.dsh_driver_routers import router, manager
+    import core.ai_router as ai
+    import litellm
+    providers = tmp_path / 'providers.json'
+    routes = tmp_path / 'routes.json'
+    providers.write_text(json.dumps({p: {'base_url': 'https://example.invalid/v1', 'api_key_env': 'FIXTURE'}
+                                    for p in ('opencode', 'opencodego', 'deepseek')}))
+    endpoints = ['opencode/deepseek-v4.1-flash-free', 'opencodego/deepseek-v4.1-flash', 'deepseek/deepseek-flash']
+    routes.write_text(json.dumps({'driver': endpoints}))
+    monkeypatch.setattr(ai, '_read_secret', lambda _: 'fixture-key')
+    monkeypatch.setattr(ai, '_ENDPOINT_COOLDOWN', {})
+    gateway_class = ai.AIGateway
+    monkeypatch.setattr(ai, 'AIGateway', lambda model, **kw: gateway_class(model, config_path=str(providers), routes_path=str(routes), **kw))
+    called = []
+    fail_go = False
+    def call(gateway, kwargs, **unused):
+        called.append((gateway.active_model, kwargs))
+        if gateway.provider == 'opencode' or (gateway.provider == 'opencodego' and fail_go):
+            raise litellm.AuthenticationError('fixture unavailable', llm_provider='openai', model=gateway.active_model)
+        return litellm.ModelResponse(choices=[{'message': {'role': 'assistant', 'content': None,
+            'reasoning_content': 'checked', 'tool_calls': [{'id': 'call-1', 'type': 'function',
+             'function': {'name': 'wait', 'arguments': '{}'}}]}, 'finish_reason': 'tool_calls'}],
+             usage={'prompt_tokens': 100, 'completion_tokens': 10, 'total_tokens': 110})
+    monkeypatch.setattr(gateway_class, '_call_llm', call)
+    try:
+        driver = await runtime.start('alpha', actor='fixture')
+        assert driver['provider'] == 'aitelier' and driver['model'] == 'driver'
+        identity = SimpleNamespace(driver_id=driver['driver_id'])
+        monkeypatch.setattr(authz, 'request_identity', lambda _: identity)
+        app = FastAPI(); app.include_router(router)
+        app.dependency_overrides[manager] = lambda: runtime
+        app.dependency_overrides[authz.require_writer] = lambda: None
+        payload = {'session_id': 'native-root', 'messages': [{'role': 'user', 'content': 'work'}],
+                   'tools': [{'type': 'function', 'function': {'name': 'wait', 'parameters': {'type': 'object'}}}]}
+        with TestClient(app) as client:
+            result = client.post('/api/dsh-drivers/alpha/completion', json=payload)
+            assert result.status_code == 200, result.text
+            assert result.json()['served_by'] == endpoints[1]
+            assert result.json()['tool_calls'][0]['function']['name'] == 'wait'
+            assert result.json()['reasoning_content'] == 'checked'
+            assert result.json()['usage']['prompt_tokens'] == 100
+            assert [c[0] for c in called] == endpoints[:2]
+            session_header = called[-1][1]['extra_headers']['x-opencode-session']
+            assert called[-1][1]['extra_headers']['User-Agent'].startswith('AItelier/')
+            assert client.post('/api/dsh-drivers/alpha/completion', json=payload).status_code == 200
+            assert called[-1][0] == endpoints[1]
+            assert called[-1][1]['extra_headers']['x-opencode-session'] == session_header
+            assert len(runtime.gateways['alpha']) == 1
+            fail_go = True
+            result = client.post('/api/dsh-drivers/alpha/completion', json=payload)
+            assert result.json()['served_by'] == endpoints[2]
+            assert 'x-opencode-session' not in called[-1][1].get('extra_headers', {})
+            identity.driver_id = 'other'
+            assert client.post('/api/dsh-drivers/alpha/completion', json=payload).status_code == 403
+        await runtime.stop('alpha')
+        assert 'alpha' not in runtime.gateways
+    finally:
+        await runtime.close()

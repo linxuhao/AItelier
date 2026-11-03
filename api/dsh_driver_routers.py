@@ -25,8 +25,8 @@ def manager(request: Request) -> DshDrivers:
 
 class Start(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    provider: str = Field(default="deepseek-official", min_length=1, max_length=100)
-    model: str = Field(default="deepseek-v4.1-flash", min_length=1, max_length=200)
+    provider: str = Field(default="aitelier", min_length=1, max_length=100)
+    model: str = Field(default="driver", min_length=1, max_length=200)
 
 
 class Activity(BaseModel):
@@ -108,3 +108,36 @@ def heartbeat(project_id: str, request: Request, runtime=Depends(manager), servi
             "claims": [v for k, v in batch if k == "claims"],
             "attempts": [v for k, v in batch if k == "attempts"]}, allow_write=True))
     return {"results": results}
+
+
+class Completion(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    session_id: str = Field(min_length=1, max_length=200)
+    messages: list[dict]
+    tools: list[dict] | None = None
+    max_tokens: int = Field(default=32768, ge=1, le=262144)
+    reasoning_effort: str = Field(default="high", pattern="^(off|low|high|max)$")
+
+
+@router.post("/{project_id}/completion", dependencies=[Depends(authz.require_writer)])
+async def completion(project_id: str, body: Completion, request: Request, runtime=Depends(manager)):
+    """The managed driver uses the same router, credentials and failover as pipelines."""
+    import asyncio
+    from core.ai_router import AIGateway
+    from starlette.concurrency import run_in_threadpool
+    row = owned(project_id, request, runtime)
+    if not row["enabled"] or project_id not in runtime.processes:
+        raise HTTPException(409, "driver is stopped")
+    sessions = runtime.gateways.setdefault(project_id, {})
+    if body.session_id not in sessions:
+        gateway = AIGateway(row["model"], enable_thinking=True, thinking_effort=body.reasoning_effort,
+                            max_output_tokens=body.max_tokens)
+        sessions[body.session_id] = (gateway, asyncio.Lock())
+    gateway, lock = sessions[body.session_id]
+    async with lock:
+        gateway.max_output_tokens = body.max_tokens
+        gateway.thinking_effort = body.reasoning_effort
+        gateway.enable_thinking = body.reasoning_effort != "off"
+        turn = await run_in_threadpool(gateway.generate_native, body.messages, tools=body.tools)
+        return {"text": turn.text, "tool_calls": turn.tool_calls, "reasoning_content": turn.reasoning_content,
+                "truncated": turn.truncated, "usage": gateway.last_usage, "served_by": gateway.active_model}

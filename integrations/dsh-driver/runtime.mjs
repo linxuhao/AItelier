@@ -1,11 +1,12 @@
 /** A resident State DAG driver composed over the pinned DSH base profile. */
+import { installHostModel } from './model.mjs';
 import { createRequire } from 'node:module';
 import { readFile, writeFile, rename } from 'node:fs/promises';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
 export const name = 'aitelier-state-driver';
-export const inject = ['agents', 'sessions', 'sessionPersistence', 'sessionQuery', 'systemPrompt', 'tools', 'compaction', 'credentials'];
+export const inject = ['agents', 'sessions', 'sessionPersistence', 'sessionQuery', 'systemPrompt', 'tools', 'compaction', 'credentials', 'llm'];
 
 /** Grep the immutable raw log, including events shadowed by compaction. */
 export function grepHistory(events, pattern, { regex = false, ignore_case = false, after_seq = -1, limit = 20 } = {}) {
@@ -129,7 +130,8 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
   await ctx.get('loader')?.await();
   const require = createRequire(env.AITELIER_DSH_ENTRY);
   const { defineTool } = await import(require.resolve('@deepseek-ai/dsh-tools'));
-  const { createUserMessage } = await import(require.resolve('@deepseek-ai/dsh-llm'));
+  const llm = await import(require.resolve('@deepseek-ai/dsh-llm'));
+  const { createUserMessage } = llm;
   const { installModelSelection } = await import(require.resolve('@deepseek-ai/dsh-agent'));
   const token = (await readFile(env.AITELIER_DRIVER_TOKEN_FILE, 'utf8')).trim();
   const request = suppliedRequest ?? (async (path, body, signal) => {
@@ -148,11 +150,12 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
     }
     return response.json();
   });
+  installHostModel(ctx, llm, { request, project: env.AITELIER_DSH_PROJECT, session: env.AITELIER_DSH_SESSION });
   // Resolve the existing mounted secret file into DSH's private credential
   // store, never into the environment inherited by test/build subprocesses.
   const secretDir = env.AITELIER_SECRETS_DIR ?? '/run/aitelier-secrets';
   try {
-    const key = (await readFile(join(secretDir, 'DEEPSEEK_API_KEY'), 'utf8')).trim();
+    const key = env.AITELIER_DSH_PROVIDER === 'deepseek-official' ? (await readFile(join(secretDir, 'DEEPSEEK_API_KEY'), 'utf8')).trim() : '';
     if (key) await ctx.credentials.set('DEEPSEEK_API_KEY', key);
   } catch (error) { if (error.code !== 'ENOENT') throw error; }
   const project = env.AITELIER_DSH_PROJECT;

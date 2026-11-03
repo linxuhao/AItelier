@@ -55,11 +55,18 @@ one private directory per generated driver identity. Tokens are mode 0600 and
 never appear in dashboard responses. DSH sessions and the cursor file survive
 backend restarts. Output/errors go to the driver's private `runtime.log`.
 
-The initial route defaults to `deepseek-official / deepseek-v4.1-flash`. The
-runtime imports the mounted `DEEPSEEK_API_KEY` secret into its private DSH
-credential store; the LLM key is not exported into worker subprocesses. A custom
-DSH `settings.yaml` in that driver's home can configure the normal DSH adapters.
-The route chosen at creation is kept on subsequent starts.
+The initial route defaults to `aitelier / driver`. Root, native workers and
+compaction use the host's existing `AIGateway`: one sticky gateway per native
+session, with normal failover and secret-file resolution. The `driver` route
+tries OpenCode free → OpenCode Go DeepSeek V4.1 Flash → DeepSeek official.
+Free models use `/zen/v1`; Go uses `/zen/go/v1`, both with `GO_API_KEY`.
+Free endpoints can refuse third-party clients or exhaust quota; their normal
+errors trigger fallback. Provider keys stay in the host gateway, outside DSH.
+The bridge preserves text, reasoning and tool-call history; attachments are
+represented as handles for native file tools, not sent as model vision input.
+An explicitly selected `deepseek-official` provider can still use the mounted
+`DEEPSEEK_API_KEY` in DSH's private credential store. The route chosen at
+creation is kept on subsequent starts.
 
 Existing authenticated writers can use:
 

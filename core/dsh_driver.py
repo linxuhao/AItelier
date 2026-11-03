@@ -34,6 +34,7 @@ class DshDrivers:
         self.base_url = base_url or os.getenv("AITELIER_DSH_API_URL", "http://127.0.0.1:4444")
         self.processes = {}
         self.monitors = set()
+        self.gateways = {}
         self.lock = asyncio.Lock()
         self.closing = False
         with db.get_connection() as conn:
@@ -123,7 +124,7 @@ class DshDrivers:
                    AITELIER_DSH_ENTRY=str(Path(self.command[0]).resolve()))
         return env
 
-    async def start(self, project_id, *, provider="deepseek-official", model="deepseek-v4.1-flash", actor):
+    async def start(self, project_id, *, provider="aitelier", model="driver", actor):
         async with self.lock:
             if self.closing:
                 raise ValueError("driver manager is shutting down")
@@ -175,6 +176,7 @@ class DshDrivers:
                 except ProcessLookupError:
                     await proc.wait()
             self.processes.pop(project_id, None)
+            self.gateways.pop(project_id, None)
             self.update(project_id, phase="stopped", subagents_json="[]")
             from core.driver_presence import declare
             if self.registry:

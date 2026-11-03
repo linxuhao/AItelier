@@ -116,3 +116,55 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
     if (!process.env.DSH_TEST_KEEP) await rm(directory, { recursive: true });
   }
 });
+
+test('real pinned DSH default host adapter calls the authenticated completion bridge', { timeout: 20000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'dsh-host-model-'));
+  const entry = await realpath(process.env.AITELIER_DSH_TEST_ENTRY ?? new URL('./node_modules/.bin/dsh', import.meta.url));
+  const here = dirname(fileURLToPath(import.meta.url));
+  const completions = [], activity = [];
+  let output = '', proc;
+  const server = createServer(async (req, res) => {
+    const chunks = []; for await (const chunk of req) chunks.push(chunk);
+    const body = chunks.length ? JSON.parse(Buffer.concat(chunks)) : {};
+    const send = value => { res.setHeader('content-type', 'application/json'); res.end(JSON.stringify(value)); };
+    if (req.url === '/api/drivers/me') return send({ driver_id: 'host-fixture' });
+    if (req.url === '/api/state/schema') return send({ operations: {} });
+    if (req.url.endsWith('/context')) return send({ nodes: [], project_note: {}, private_note: {}, event_seq: 1 });
+    if (req.url.endsWith('/activity')) { activity.push(body); return send({ ok: true }); }
+    if (req.url.endsWith('/heartbeat')) return send({ ok: true });
+    if (req.url.endsWith('/list_director_messages')) return send({ items: [] });
+    if (req.url.endsWith('/wait_for_state_change')) return;
+    if (req.url.endsWith('/completion')) {
+      assert.equal(req.headers['x-aitelier-driver-token'], 'fixture-only');
+      completions.push(body);
+      const hasWait = body.tools?.some(t => t.function.name === 'wait');
+      return send({ text: hasWait ? '' : 'Fixture title', reasoning_content: 'ready', truncated: false,
+        tool_calls: hasWait ? [{ id: 'host-wait', function: { name: 'wait', arguments: '{}' } }] : [],
+        usage: { prompt_tokens: 100, completion_tokens: 10 } });
+    }
+    res.statusCode = 404; send({ error: req.url });
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const profile = join(directory, 'home/profiles/driver'); await mkdir(profile, { recursive: true });
+    await writeFile(join(profile, 'package.json'), JSON.stringify({ private: true, dsh: { profile: { bundles: ['@deepseek-ai/dsh-base'] } } }));
+    await writeFile(join(profile, 'cordis.patch.yml'), JSON.stringify([{ id: 'hmr', disabled: true }, { insert: [{ id: 'driver', name: join(here, 'runtime.mjs') }] }]));
+    const token = join(directory, 'token'); await writeFile(token, 'fixture-only', { mode: 0o600 });
+    proc = spawn(process.execPath, [entry, '--profile', 'driver'], { cwd: directory, env: { ...process.env,
+      DSH_HOME: join(directory, 'home'), AITELIER_DSH_ENTRY: entry, AITELIER_DRIVER_TOKEN_FILE: token,
+      AITELIER_DRIVER_ID: 'host-fixture', AITELIER_DSH_PROJECT: 'alpha', AITELIER_DSH_SESSION: 'host-root',
+      AITELIER_DSH_PROVIDER: 'aitelier', AITELIER_DSH_MODEL: 'driver', AITELIER_URL: `http://127.0.0.1:${server.address().port}`,
+      AITELIER_DSH_STATE_DIR: directory, AITELIER_SECRETS_DIR: join(directory, 'absent'),
+    } });
+    proc.stdout.on('data', c => output += c); proc.stderr.on('data', c => output += c);
+    const deadline = Date.now() + 15000;
+    while (Date.now() < deadline && proc.exitCode === null && !activity.some(a => a.phase === 'waiting')) await new Promise(resolve => setTimeout(resolve, 100));
+    assert.ok(activity.some(a => a.phase === 'waiting'), output + JSON.stringify(activity));
+    assert.ok(completions.some(c => c.session_id === 'host-root' && c.tools.some(t => t.function.name === 'wait')), JSON.stringify(completions));
+    assert.ok(!activity.some(a => a.phase === 'failed'), JSON.stringify(activity));
+  } finally {
+    if (proc?.exitCode === null) { proc.kill('SIGTERM'); await once(proc, 'exit'); }
+    server.closeAllConnections(); await new Promise(resolve => server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  }
+});

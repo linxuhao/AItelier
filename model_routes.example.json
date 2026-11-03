@@ -175,5 +175,10 @@
   ],
   "vision": [
     "localqwen/qwen3"
+  ],
+  "driver": [
+    "opencode/deepseek-v4.1-flash-free",
+    "opencodego/deepseek-v4.1-flash",
+    "deepseek/deepseek-flash"
   ]
 }

@@ -5,6 +5,7 @@
   import { st } from '../lib/stateI18n.svelte';
   import { nt, readLastProject, rememberProject } from '../lib/navigation.svelte';
   import StateProject from './StateProject.svelte';
+  import DriverStatus from './DriverStatus.svelte';
   // Reading the project list is a public read (`project_catalog`); writing is
   // not. `canWrite` no longer decides whether the graph may be loaded — that
   // conflation is what hid the whole dashboard from a reader.
@@ -33,6 +34,7 @@
     {#if canRead && projects.length}<label>{nt('pick')}<select value={selected} onchange={choose}>{#each projects as p(p.project_id)}<option value={p.project_id}>{p.title} · {p.project_id}</option>{/each}</select></label>{/if}
     <a href="#/state-projects">{nt('allProjects')} ↗</a>
   </div>
+  <DriverStatus {projects} projectId={selected} />
   {#if !canRead}<p role="status">{st('private')}</p>
   {:else if error}<div role="alert"><p>{error}</p><button class="outline" onclick={()=>retry++}>{nt('retry')}</button></div>
   {:else if loading}<p role="status">{st('loading')}</p>

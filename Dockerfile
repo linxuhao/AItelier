@@ -18,6 +18,12 @@ RUN npm ci
 COPY web/ ./
 RUN npm run build
 
+# Pinned DSH runtime, kept outside the live /app source mount.
+FROM node:24-bookworm-slim AS dsh-runtime
+WORKDIR /opt/aitelier-dsh
+COPY integrations/dsh-driver/package.json integrations/dsh-driver/package-lock.json ./
+RUN npm ci --omit=dev --no-audit --no-fund
+
 # Stage 2: Python runtime
 FROM python:3.12-slim
 
@@ -41,6 +47,8 @@ RUN mkdir -p "${HOME_DIR}" && chown "${APP_UID}:${APP_GID}" "${HOME_DIR}"
 ENV HOME=${HOME_DIR}
 
 WORKDIR /app
+COPY --from=dsh-runtime /usr/local/bin/node /usr/local/bin/node
+COPY --from=dsh-runtime /opt/aitelier-dsh /opt/aitelier-dsh
 
 # Install the package + dependencies. The source is also bind-mounted at runtime
 # (docker-compose) so code edits are live without a rebuild.

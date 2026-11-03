@@ -4,7 +4,7 @@ import { authStore } from '../../stores/auth';
 import { langStore } from '../../stores/i18n';
 import { overview,detail } from '../fixtures/stateProject';
 import { runSummary } from '../fixtures/stateProject';
-const api=vi.hoisted(()=>({stateProjects:vi.fn(),stateOverview:vi.fn(), stateRunSummary:vi.fn(),stateNode:vi.fn(),stateAttempts:vi.fn(),stateDriverNote:vi.fn(),stateRefreshProject:vi.fn(),stateAttemptDetail:vi.fn(),
+const api=vi.hoisted(()=>({driverStatus:vi.fn(),stateProjects:vi.fn(),stateOverview:vi.fn(), stateRunSummary:vi.fn(),stateNode:vi.fn(),stateAttempts:vi.fn(),stateDriverNote:vi.fn(),stateRefreshProject:vi.fn(),stateAttemptDetail:vi.fn(),
   runHistory:vi.fn(),listPipelines:vi.fn(),pipelineGraph:vi.fn(),pipelineStateFile:vi.fn(),getTrace:vi.fn(),setUserLang:vi.fn(),
   listRepos:vi.fn(),listAllRuns:vi.fn(),createProject:vi.fn(),deleteProject:vi.fn()}));
 vi.mock('../../lib/api',()=>api);
@@ -18,7 +18,7 @@ const row=(id='game')=>({project_id:id,title:id==='game'?'武虾传奇':id,sourc
 const run=(id='run-1',patch={})=>({id,project_id:'exec-1',execution_name:'Example',config_name:'feature',status:'running',graph_version:3,created_at:'2026-09-08',updated_at:'2026-09-08',state_project_id:null,state_node_key:null,...patch});
 let storage:Map<string,string>;
 beforeEach(()=>{
-  cleanup();vi.resetAllMocks();langStore.set('en');storage=new Map();
+  cleanup();vi.resetAllMocks();api.driverStatus.mockResolvedValue({total:0,online:0,projects:{}});langStore.set('en');storage=new Map();
   vi.stubGlobal('localStorage',{getItem:(k:string)=>storage.get(k)??null,setItem:(k:string,v:string)=>storage.set(k,v)});
   authStore.set({canWrite:true,permissionResolved:true,email:'owner@local'});
   api.stateProjects.mockResolvedValue({projects:[row()],next_after:null});

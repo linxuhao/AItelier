@@ -7,7 +7,7 @@ import { runSummary } from '../fixtures/stateProject';
 
 const api = vi.hoisted(() => ({ stateOverview: vi.fn(), stateRunSummary:vi.fn(), stateNode: vi.fn(), stateAttempts: vi.fn(),
   stateDriverNote: vi.fn(),
-  stateRefreshProject: vi.fn(), stateAttemptDetail: vi.fn(), stateProjects: vi.fn(), stateRunOwners: vi.fn(),
+  stateRefreshProject: vi.fn(), stateAttemptDetail: vi.fn(), driverStatus:vi.fn(),stateProjects: vi.fn(), stateRunOwners: vi.fn(),
   getRunDetail: vi.fn(), pipelineGraph: vi.fn(), runWorkflowGraph: vi.fn(), getTrace: vi.fn(), setUserLang: vi.fn() }));
 vi.mock('../../lib/api', () => api);
 import StateGraph from '../../views/StateGraph.svelte';
@@ -19,7 +19,7 @@ import RunStateLinks from '../../views/RunStateLinks.svelte';
 import RelatedStateProjects from '../../views/RelatedStateProjects.svelte';
 
 beforeEach(() => {
-  cleanup(); vi.resetAllMocks(); langStore.set('en');
+  cleanup(); vi.resetAllMocks();api.driverStatus.mockResolvedValue({total:0,online:0,projects:{}}); langStore.set('en');
   authStore.set({canWrite: true, permissionResolved: true, email: 'writer@local'});
   api.stateOverview.mockResolvedValue(overview());
   api.stateRunSummary.mockImplementation(async(id:string)=>({...runSummary(),project_id:id}));

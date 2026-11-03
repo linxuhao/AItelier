@@ -3,6 +3,7 @@
   import { stateProjects } from '../lib/api';
   import { isArchived, stateProjectHref, type StateProjectRow } from '../lib/stateGraph';
   import { st } from '../lib/stateI18n.svelte';
+  import DriverStatus from './DriverStatus.svelte';
   const { params = {} }: {params?: {repoPath?: string}} = $props();
   let rows = $state<StateProjectRow[]>([]), error = $state(''), loading = $state(false);
   let query = $state(''), next = $state<string | null>(null), retry = $state(0), showArchived = $state(false);
@@ -41,6 +42,7 @@
     <a href="#/repos">{st('dashboard')} ↗</a></header>
   {#if !canRead}<p role="status">{st('private')}</p>
   {:else}
+    <DriverStatus projects={visible} />
     <label>{st('search')}<input type="search" bind:value={query} placeholder={st('search')} /></label>
     <label class="archived-toggle"><input type="checkbox" bind:checked={showArchived} /> {st('showArchived')}{#if archivedHidden} · {st('archivedHidden')}: {archivedHidden}{/if}</label>
     {#if params.repoPath}<p><code>{params.repoPath}</code></p>{/if}

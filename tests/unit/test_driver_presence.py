@@ -477,7 +477,7 @@ PERMISSION_FILES = ["core/state_claims.py", "core/state_enforcement.py", "core/s
                     "core/state_recovery.py", "core/state_changes.py", "api/authz.py", "api/state_only.py",
                     "api/state_http.py", "api/state_graph_routers.py", "api/mcp_router.py"]
 ALLOWED_PRESENCE_USERS = {"core/drivers.py", "core/driver_inbox.py", "core/director_messaging.py",
-                          "core/driver_presence.py", "core/state_takeover.py"}
+                          "core/driver_presence.py", "core/state_takeover.py", "core/dsh_driver.py"}
 
 
 def test_permission_claim_lease_and_fence_code_never_reads_presence_or_last_seen():
@@ -504,6 +504,8 @@ def test_only_the_reporting_modules_use_presence_helpers():
     # and offers the self-declaration route; api/state_graph_tools.py offers the
     # self-declaration MCP tool.
     # core/state_driver_guide.py is the driver-facing documentation of the rule.
+    # core/dsh_driver.py reports managed-process liveness and declares its own
+    # identity offline on shutdown. It does not authorize work from presence.
     assert users - {"api/driver_routers.py", "api/state_graph_tools.py",
                     "core/state_driver_guide.py"} == ALLOWED_PRESENCE_USERS
 

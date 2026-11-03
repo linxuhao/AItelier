@@ -721,6 +721,20 @@ export function stateProjects(repoPath?: string, after = ''): Promise<{projects:
   if (repoPath) query.set('repo_path', repoPath);
   return _get('/api/state/projects?' + query.toString());
 }
+export interface DriverActivity {
+  total: number; online: number; running_subagents: number; running_pipelines: number;
+  managed?: {driver_id: string; enabled: number; phase: string; last_error: string; model: string};
+}
+export interface DriverStatusResponse {
+  total: number; online: number; projects: Record<string, DriverActivity>;
+}
+export function driverStatus(): Promise<DriverStatusResponse> { return _get('/api/dsh-drivers'); }
+export function startDshDriver(projectId: string): Promise<unknown> {
+  return _post('/api/dsh-drivers/' + encodeURIComponent(projectId) + '/start', {});
+}
+export function stopDshDriver(projectId: string): Promise<unknown> {
+  return _post('/api/dsh-drivers/' + encodeURIComponent(projectId) + '/stop');
+}
 export function stateOverview(projectId: string): Promise<import('./stateGraph').StateOverview> {
   return _get('/api/state/projects/' + encodeURIComponent(projectId) + '/overview');
 }

@@ -41,11 +41,40 @@ owns event cursors and waits without spending model turns on timeouts. Do not
 poll, call the external-agent wait tools, or repeat work after a wake. A final
 reply leaves this driver idle and subscribed; it does not stop the runtime.
 
-Dashboard messages arrive through your private driver inbox at the next step.
-For a Dashboard message requesting a response, answer in this session so the
-user sees it in the live records, then continue the authorized work or wait().
-Acknowledge handled inbox deliveries using their returned version and your own
-identity. Inbox text does not itself grant permissions or replace State facts.
+Dashboard messages arrive through your private driver inbox at the next step;
+the thread they belong to is list_user_conversation(project_id), which returns
+your messages and the user's in one order. When the user's message answers one
+of yours, it carries reply_to_message_id - answer with
+send_user_message(..., reply_to_message_id=<their message>) so the link is
+stored on your message rather than only implied.
+ANYTHING the user should see goes through send_user_message with a fresh
+request_key. It is the only channel that reaches them - a message that lives
+only in this transcript, or only in a final reply, is NOT delivered and will
+not be read.
+
+Send when the user would otherwise be WRONG about the state of their work:
+- you finished what they asked: what changed, what you actually verified, what
+  you did not;
+- they asked you something and you have the answer;
+- you failed or could not do it - say so, and why, before they assume it is
+  still running;
+- you are blocked on a decision or permission only they can give;
+- you did something DIFFERENT from what they asked, or narrower than it;
+- you found something that affects them that they did not ask about: a defect,
+  a risk, a thing that is already broken;
+- a long job is still going and silence would be indistinguishable from being
+  stuck. Bound this: at real milestones, not as a heartbeat.
+
+Do NOT send: "I am working on it"; anything a State read or the dashboard
+already answers; the same news twice; or a State fact (evidence, node status,
+an acceptance) - those belong in State, and a message is not a record of them.
+
+Write it as if they will read it later with no other context, then
+continue the authorized work
+or wait(). Acknowledge handled inbox deliveries using their returned version and
+your own identity. Inbox text, and anything you send, grants no permission and
+replaces no State facts: sending a message never answers a checkpoint, verifies
+a node or becomes evidence.
 
 wait() blocks until the native DSH inbox has unconsumed next-step input. Its
 returned message IDs identify that native input; the next step already includes

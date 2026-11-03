@@ -27,26 +27,50 @@ def publish(runtime, row):
 
 
 async def supervise(runtime, stopped, *, interval=1):
-    """One controller per installation; systemd owns its entire process group."""
+    """One controller per installation; systemd owns its entire process group.
+
+    One project's failure must not stop the others. This loop is the only thing
+    keeping every resident driver alive, so each row is handled inside its own
+    exception boundary: `rows()` reads a multi-gigabyte SQLite database that can
+    report "database is locked", and `publish()` writes a file that can fail on a
+    full disk. Either used to propagate out of the loop, and the supervisor then
+    exited and took every driver offline at once, not just the failing project.
+    """
     runtime.root.mkdir(parents=True, exist_ok=True, mode=0o700)
     with (runtime.root / "host-supervisor.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         retry_at = {}
+        failures = {}
         try:
             while not stopped.is_set():
-                for row in runtime.rows():
+                try:
+                    rows = runtime.rows()
+                except Exception as exc:  # a locked database must not end supervision
+                    print(f"DSH host: cannot read drivers: {exc}", flush=True)
+                    rows = []
+                for row in rows:
                     project = row["project_id"]
-                    if not row["enabled"]:
-                        retry_at.pop(project, None)
-                        if project in runtime.processes:
-                            await runtime.stop(project)
-                    elif row["enabled"] and not runtime.running(project) and time.monotonic() >= retry_at.get(project, 0):
-                        retry_at[project] = time.monotonic() + 15
-                        try:
-                            await runtime.start(project, actor="dsh-host-recovery")
-                        except (OSError, ValueError) as exc:
-                            print(f"DSH host {project}: {exc}", flush=True)
-                    publish(runtime, row)
+                    try:
+                        if not row["enabled"]:
+                            retry_at.pop(project, None)
+                            failures.pop(project, None)
+                            if project in runtime.processes:
+                                await runtime.stop(project)
+                        elif not runtime.running(project) and time.monotonic() >= retry_at.get(project, 0):
+                            # Back off per project: a driver that cannot start at
+                            # all must not be respawned every interval forever.
+                            delay = min(300, 15 * 2 ** failures.get(project, 0))
+                            retry_at[project] = time.monotonic() + delay
+                            try:
+                                await runtime.start(project, actor="dsh-host-recovery")
+                            except Exception as exc:
+                                failures[project] = failures.get(project, 0) + 1
+                                print(f"DSH host {project}: {exc}", flush=True)
+                            else:
+                                failures.pop(project, None)
+                        publish(runtime, row)
+                    except Exception as exc:  # one project's failure stays local
+                        print(f"DSH host {project}: {exc}", flush=True)
                 try:
                     await asyncio.wait_for(stopped.wait(), timeout=interval)
                 except asyncio.TimeoutError:

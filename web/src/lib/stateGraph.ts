@@ -7,6 +7,9 @@ export interface SourceBinding { kind: string; repo_path: string | null; common_
 export interface StateProjectRow {
   project_id: string; title: string; source_project_id: string | null;
   node_count: number; verified_count: number; source: SourceBinding; policy: DispatchPolicy;
+  /** State's `state_projects.created_at`, carried by `project_catalog`; the
+   *  list's recency tie-break when no driver row has a newer timestamp. */
+  created_at?: string;
 }
 /** An archived project keeps all its records but is hidden from project pickers and lists by default. */
 export const isArchived = (p: StateProjectRow): boolean => p.policy?.dispatch === 'archive';

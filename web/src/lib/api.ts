@@ -744,6 +744,56 @@ export function messageDshDriver(projectId: string, driverId: string, body: stri
     subject: 'Dashboard message', body, kind: 'note', delivery_mode: 'transient',
   });
 }
+export interface DriverUserMessage {
+  message_id: string; sender_driver_id: string; project_id: string;
+  subject: string; body: string; refs: Record<string, string>; created_at: string;
+}
+export interface DriverUserMessages {
+  project_id: string; messages: DriverUserMessage[]; matched_total: number; truncated: boolean;
+}
+/** Durable messages the project's driver sent its user, newest first. */
+export function dshDriverMessages(projectId: string, limit = 50): Promise<DriverUserMessages> {
+  return _get('/api/dsh-drivers/' + encodeURIComponent(projectId) + '/messages?limit=' + limit);
+}
+export interface DriverConversationEntry {
+  message_id: string; thread_id: string; project_id: string;
+  sender_kind: 'driver' | 'user'; sender_driver_id: string | null;
+  subject: string; body: string; refs: Record<string, string>;
+  reply_to_message_id: string | null; created_at: string;
+}
+export interface DriverConversation {
+  project_id: string; messages: DriverConversationEntry[]; has_more: boolean;
+  next_cursor: string | null; end_of_history: boolean; matched_total: number;
+  unread_count: number; read_upto_message_id: string | null; read_upto_created_at: string | null;
+}
+/** ONE conversation, both directions, newest first. `cursor` is `next_cursor`
+ *  from the previous page: a keyset on (created_at, message_id), so walking
+ *  every page returns each message exactly once; `next_cursor: null` is the
+ *  end of history. */
+export function dshDriverConversation(projectId: string, cursor?: string | null, limit = 30): Promise<DriverConversation> {
+  const query = new URLSearchParams({limit: String(limit)});
+  if (cursor) query.set('cursor', cursor);
+  return _get('/api/dsh-drivers/' + encodeURIComponent(projectId) + '/conversation?' + query.toString());
+}
+export interface DriverConversationUnread { projects: Record<string, number>; total: number }
+/** The persisted unread badge per project: driver messages newer than the
+ *  stored read marker. Needs no driver online. */
+export function dshDriverConversationUnread(projectId?: string): Promise<DriverConversationUnread> {
+  return _get('/api/dsh-drivers/unread' + (projectId ? '?project_id=' + encodeURIComponent(projectId) : ''));
+}
+/** The user's half of the conversation: one durable row plus the driver's inbox
+ *  delivery. `replyToMessageId` is stored on the row; the driver may be offline. */
+export function sendDriverConversationMessage(projectId: string, body: string,
+  options: {replyToMessageId?: string | null; targetDriverId?: string | null} = {}): Promise<unknown> {
+  const args: Record<string, unknown> = {request_key: crypto.randomUUID(), project_id: projectId, body};
+  if (options.replyToMessageId) args.reply_to_message_id = options.replyToMessageId;
+  if (options.targetDriverId) args.target_driver_id = options.targetDriverId;
+  return _post('/api/state/commands/send_user_conversation_message', args);
+}
+/** Advance the persisted read marker to a message the user was actually shown. */
+export function markDriverConversationRead(projectId: string, messageId: string): Promise<unknown> {
+  return _post('/api/state/commands/mark_user_conversation_read', {project_id: projectId, message_id: messageId});
+}
 export function startDshDriver(projectId: string): Promise<unknown> {
   return _post('/api/dsh-drivers/' + encodeURIComponent(projectId) + '/start', {});
 }

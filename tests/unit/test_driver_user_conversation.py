@@ -464,3 +464,32 @@ def test_an_existing_inbox_database_gains_the_new_columns_and_keeps_its_rows(tmp
     page = execute(user, "list_user_conversation", {"project_id": "alpha"})
     assert [m["message_id"] for m in page["messages"]] == [wrote["message_id"], said["message_id"]]
     assert page["matched_total"] == 2 and page["messages"][1]["sender_kind"] == "user"
+
+
+def test_unread_without_a_project_covers_only_my_own_projects(world):
+    """The badge must not enumerate projects the caller cannot read.
+
+    With no project named, the count used to be taken over every row in the
+    database, so a reader of one project could learn another project's name and
+    unread count - a private project leaking through a badge that never shows
+    its contents.
+    """
+    say_driver(world, request_key="alpha-1")
+    # A second project, with its own driver and an unread driver->user message.
+    world["seed"].store.registry.set_membership(
+        "beta", "cara", "member", 0, "fixture", actor="test") if hasattr(
+        world["seed"].store, "registry") else None
+    registry = DriverRegistry(world["db"], "user-conversation-pepper-not-a-secret")
+    registry.register("cara", "cara", actor="test")
+    registry.set_membership("beta", "cara", "member", 0, "fixture", actor="test")
+    cara = StateService(world["db"], actor="driver:cara", driver_id="cara", project_read_trusted=True)
+    execute(cara, "send_user_message",
+            {"request_key": "beta-1", "project_id": "beta", "subject": "Beta", "body": "b"},
+            allow_write=True)
+
+    mine = execute(world["ada"], "user_conversation_unread", {})
+    assert set(mine["projects"]) == {"alpha"}, mine
+    assert mine["total"] == 1
+
+    theirs = execute(cara, "user_conversation_unread", {})
+    assert set(theirs["projects"]) == {"beta"}, theirs

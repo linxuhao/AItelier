@@ -488,13 +488,27 @@ class DriverInbox:
 
         This is the badge the dashboard shows before the conversation is
         opened, so it must answer without reading any message body and without
-        the sending driver being online. `total` is the sum over the projects
-        the caller asked about (all of them when no project is named).
+        the sending driver being online.
+
+        With no project named, a DRIVER sees only the projects it is a member
+        of. Counting every row in the database would let a driver credential
+        enumerate other projects' names and unread counts - a private project
+        would leak through a badge that never shows its contents. A user/owner
+        handle has no driver identity and keeps the whole-project view, which it
+        can already read.
         """
         with self.store.transaction() as conn:
             if project_id is not None:
                 self.store._project(conn, project_id)
                 projects = {project_id: self._unread(conn, project_id)}
+            elif self.driver_id:
+                rows = conn.execute(
+                    "SELECT DISTINCT m.project_id AS project_id "
+                    "FROM driver_inbox_messages m "
+                    "JOIN project_drivers d ON d.project_id = m.project_id "
+                    "WHERE m.audience='user' AND d.driver_id=? AND d.status='member'",
+                    (self.driver_id,)).fetchall()
+                projects = {r["project_id"]: self._unread(conn, r["project_id"]) for r in rows}
             else:
                 projects = {r["project_id"]: r["n"] for r in conn.execute(
                     "SELECT project_id, COUNT(*) AS n FROM driver_inbox_messages "

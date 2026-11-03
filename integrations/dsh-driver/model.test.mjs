@@ -30,3 +30,41 @@ test('host bridge preserves tools, tool results, reasoning, session identity and
 test('unsupported dynamic tool blocks fail explicitly', () => {
   assert.throws(() => openaiMessages({ messages: [{ role: 'developer', content: [{ type: 'tool-addition' }] }] }), /Unsupported/);
 });
+
+test('image blocks are forwarded as image_url parts, never silently downgraded', async () => {
+  let adapter, payload;
+  const attachments = { async readImageRequest(ref, target, signal) {
+    assert.equal(ref.attachmentId, 'img-1'); assert.ok(target.maxBytes > 0);
+    return { mediaType: 'image/png', data: new Uint8Array([1, 2, 3]) };
+  } };
+  installHostModel({ llm: { registerAdapter(_names, value) { adapter = value; } }, get(name) {
+    assert.equal(name, 'attachments'); return attachments;
+  } }, { LlmAdapter: class {} }, { project: 'alpha', session: 'root', async request(_path, body) {
+    payload = body; return { text: 'ok', tool_calls: [], truncated: false, usage: { prompt_tokens: 1, completion_tokens: 1 } };
+  } });
+  const options = { provider: 'aitelier', model: 'driver', sessionId: 's',
+    messages: [{ role: 'user', content: [{ type: 'text', text: 'what is this' },
+      { type: 'image', attachment: { attachmentId: 'img-1', name: 'shot.png' } }] }] };
+  const chunks = []; for await (const chunk of adapter.stream(options)) chunks.push(chunk);
+  const content = payload.messages[0].content;
+  assert.equal(content[0].text, 'what is this');
+  assert.equal(content[1].type, 'image_url');
+  assert.equal(content[1].image_url.url, 'data:image/png;base64,AQID');
+});
+
+test('an image without the attachment service fails loudly', async () => {
+  let adapter;
+  installHostModel({ llm: { registerAdapter(_names, value) { adapter = value; } }, get() { return undefined; } },
+    { LlmAdapter: class {} }, { project: 'alpha', session: 'root', async request() { throw new Error('must not be called'); } });
+  const options = { provider: 'aitelier', model: 'driver', sessionId: 's',
+    messages: [{ role: 'user', content: [{ type: 'image', attachment: { attachmentId: 'img-1' } }] }] };
+  await assert.rejects(async () => { for await (const _ of adapter.stream(options)) { /* drain */ } }, /attachment service is not mounted/);
+});
+
+test('the route declares image input', async () => {
+  let adapter;
+  installHostModel({ llm: { registerAdapter(_names, value) { adapter = value; } }, get() { return {}; } },
+    { LlmAdapter: class {} }, { project: 'alpha', session: 'root', async request() { return {}; } });
+  const info = await adapter.resolveModel('aitelier', 'driver');
+  assert.deepEqual(info.inputModalities, ['text', 'image']);
+});

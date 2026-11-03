@@ -2,7 +2,8 @@
   import { onMount, onDestroy } from 'svelte';
   import { authStore } from '../stores/auth';
   import { driverStatus, dshDriverConversationUnread, stateProjects, type DriverStatusResponse } from '../lib/api';
-  import { isArchived, stateProjectHref, type StateProjectRow } from '../lib/stateGraph';
+  import { isArchived, type StateProjectRow } from '../lib/stateGraph';
+  import { rememberProject } from '../lib/navigation.svelte';
   import { driverState, driverStateLabelKey, sortDagRows } from '../lib/driverList';
   import { st } from '../lib/stateI18n.svelte';
   import DriverConversationPane from './DriverConversationPane.svelte';
@@ -19,6 +20,8 @@
   // Per-DAG driver state and unread badge, read from State and then ordered by
   // the SAME running-first rule the driver table uses.
   let drivers = $state<DriverStatusResponse | null>(null), unread = $state<Record<string, number>>({});
+  // Which DAG the conversation pane is about. The list sets it; the pane shows it.
+  let paneSelection = $state('');
   let driverTimer: ReturnType<typeof setInterval> | undefined, driverMounted = false;
   const ordered = $derived(sortDagRows(filtered, drivers));
   async function loadDriverState() {
@@ -76,7 +79,11 @@
       {#each ordered as project (project.project_id)}
         {@const phase = drivers?.projects[project.project_id]?.managed?.phase}
         {@const activity = drivers?.projects[project.project_id]}
-        <a class="project-card" href={stateProjectHref(project.project_id)}>
+        <!-- This was a link into the DAG. Selecting which DAG the conversation
+             is about belongs here now, and the way INTO a DAG moved to the
+             pane header - the two swapped, they were not both added. -->
+        <button type="button" class="project-card" aria-pressed={paneSelection === project.project_id}
+          onclick={() => { paneSelection = project.project_id; rememberProject(paneSelection); }}>
           <div class="card-top"><span>{project.project_id}</span><span class:held={project.policy.dispatch !== 'active'}>{project.policy.dispatch}</span></div>
           <h2>{project.title}</h2>
           {#if $authStore.canWrite}
@@ -97,7 +104,7 @@
           {#if project.source.repo_path}<p class="source">{project.source.repo_path}</p>{:else}<p class="source">{st('noSource')}</p>{/if}
           {#if project.policy.dispatch !== 'active'}<p class="hold-reason">⏸ {project.policy.reason}</p>{/if}
           <span class="open">{st('graph')} →</span>
-        </a>
+        </button>
       {/each}
     </div>
     {#if visible.length && !filtered.length}<p>{st('noMatch')}</p>{/if}
@@ -105,7 +112,7 @@
   {/if}
 </section>
 {#if $authStore.canWrite && canRead && visible.length}
-  <DriverConversationPane projects={ordered} status={drivers}
+  <DriverConversationPane projects={ordered} status={drivers} bind:selected={paneSelection}
     onread={loadDriverState} onrefresh={() => void loadDriverState()} />
 {/if}
 </div>
@@ -115,7 +122,12 @@
      page (#view-container) is left with nothing to scroll. `minmax(0,1fr)` and
      `min-height:0` let the columns shrink below their content, which is what
      makes a child's own overflow-y actually engage. */
-  .dag-split { display:grid; grid-template-columns:minmax(0,1fr) auto; grid-template-rows:minmax(0,1fr);
+  /* The pane is on the LEFT now, but the DOM keeps the list first because that
+     is the reading order of the page. Placement is explicit so the two cannot
+     drift apart: list -> column 2, pane -> column 1. */
+  .dag-split > .state-projects { grid-column:2; }
+  .dag-split > .conversation-pane { grid-column:1; }
+  .dag-split { display:grid; grid-template-columns:auto minmax(0,1fr); grid-template-rows:minmax(0,1fr);
     align-items:stretch; gap:1rem; height:100%; min-height:0; max-width:1680px; margin:0 auto; }
   .state-projects { min-width:0; min-height:0; max-width:1280px; margin:0 auto;
     overflow-x:hidden; overflow-y:auto; padding-right:.15rem; }
@@ -126,8 +138,11 @@
   label { max-width:420px; font-size:.8rem; display:block; } input { padding:.55rem; font-size:.85rem; }
   .archived-toggle { margin:.5rem 0 1rem; } .archived-toggle input { padding:0; }
   .project-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(min(100%,310px),1fr)); gap:1rem; }
-  .project-card { display:block; border:1px solid var(--pico-muted-border-color,#dbe3ec); border-radius:12px; padding:1.05rem; background:var(--pico-card-background-color,#fff); color:inherit; text-decoration:none; }
+  .project-card { display:block; width:100%; text-align:left; font:inherit; cursor:pointer; border:1px solid var(--pico-muted-border-color,#dbe3ec); border-radius:12px; padding:1.05rem; background:var(--pico-card-background-color,#fff); color:inherit; text-decoration:none; }
   .project-card:hover,.project-card:focus { border-color:var(--pico-primary,#0066cc); }
+  /* The card that owns the conversation is marked, not merely hovered. */
+  .project-card[aria-pressed="true"] { border-color:var(--pico-primary,#0066cc);
+    box-shadow:inset 3px 0 0 var(--pico-primary,#0066cc); }
   .card-top { display:flex; justify-content:space-between; gap:.5rem; font-size:.7rem; overflow-wrap:anywhere; color:var(--pico-muted-color,#64748b); }
   h2 { font-size:1.2rem; margin:1rem 0; }
   .driver-line { display:flex; align-items:center; flex-wrap:wrap; gap:.35rem .5rem; margin:0 0 .7rem; font-size:.72rem; }

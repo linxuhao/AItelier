@@ -34,6 +34,21 @@ const driverTable = () => ({total: 4, online: 2, projects: {
 }});
 const cards = (container: HTMLElement) =>
   [...container.querySelectorAll('.project-card')].map(card => card.querySelector('h2')?.textContent);
+/** Selecting a DAG is the list's job now: click its card. The pane header only
+ *  reports which DAG that is, so a link into it is the observable result. */
+async function selectDag(view: any, id: string) {
+  const card = [...view.container.querySelectorAll('.project-card')]
+    .find((c: any) => (c.textContent ?? '').includes(id)) as HTMLElement | undefined;
+  if (!card) throw new Error('no project card for ' + id);
+  await fireEvent.click(card);
+  await waitFor(() => {
+    const link = view.container.querySelector('aside.conversation-pane .pane-project') as HTMLAnchorElement;
+    expect(link?.getAttribute('href') ?? '').toContain(id);
+  });
+}
+const dagHref = (view: any) =>
+  (view.container.querySelector('aside.conversation-pane .pane-project') as HTMLAnchorElement | null)
+    ?.getAttribute('href') ?? '';
 
 let storage: Map<string, string>;
 beforeEach(() => {
@@ -138,12 +153,15 @@ describe('the split conversation pane', () => {
       window.dispatchEvent(new Event('resize'));
       await waitFor(() => expect(aside(view).dataset.narrow).toBe('true'));
       // No drag target and no fixed pixel width: the pane is a full-width row
-      // under the list, and its picker and mode switch still work.
+      // under the list, and its DAG link and mode switch still work.
       expect(view.queryByRole('separator', {name: 'Resize conversation pane'})).toBeNull();
       expect(aside(view).style.width).toBe('');
       expect(view.getByRole('tab', {name: 'Conversation'})).toBeTruthy();
-      const picker = view.getByLabelText('State DAG') as HTMLSelectElement;
-      await fireEvent.change(picker, {target: {value: 'idle-recent'}});
+      // The picker that used to switch DAGs is gone, header included; the link
+      // into the selected DAG is what the header carries instead.
+      expect(aside(view).querySelector('select')).toBeNull();
+      expect(view.getByLabelText('Open this State DAG')).toBeTruthy();
+      await selectDag(view, 'idle-recent');
       await waitFor(() => expect(api.dshDriverConversation).toHaveBeenCalledWith('idle-recent'));
     } finally { window.innerWidth = 1024; }
   });
@@ -151,21 +169,27 @@ describe('the split conversation pane', () => {
   it('keeps the selected DAG across two mode switches and does not reload the thread', async () => {
     const view = render(StateProjects);
     await view.findByRole('heading', {name: 'running-old'});
-    const picker = view.getByLabelText('State DAG') as HTMLSelectElement;
-    await waitFor(() => expect(picker.options.length).toBe(4));
-    await fireEvent.change(picker, {target: {value: 'idle-recent'}});
+    // Every DAG in the list is a way to select it - four cards, and no picker
+    // anywhere; the card for the selected DAG says so.
+    await waitFor(() => expect(view.container.querySelectorAll('.project-card').length).toBe(4));
+    expect(view.container.querySelector('aside.conversation-pane select')).toBeNull();
+    await selectDag(view, 'idle-recent');
     await waitFor(() => expect(api.dshDriverConversation).toHaveBeenCalledWith('idle-recent'));
     const callsAfterPick = api.dshDriverConversation.mock.calls.length;
+    const selectedCard = () => [...view.container.querySelectorAll('.project-card')]
+      .find(c => (c.textContent ?? '').includes('idle-recent')) as HTMLElement;
+    expect(selectedCard().getAttribute('aria-pressed')).toBe('true');
 
     await fireEvent.click(view.getByRole('tab', {name: 'Run history'}));
     await waitFor(() => expect(api.dshDriverHistory).toHaveBeenCalledWith('idle-recent', undefined));
-    expect(picker.value).toBe('idle-recent');
+    expect(dagHref(view)).toContain('idle-recent');
+    expect(selectedCard().getAttribute('aria-pressed')).toBe('true');
     expect(view.container.querySelector('[data-mode-panel="conversation"]')?.hasAttribute('hidden')).toBe(true);
     expect(view.container.querySelector('[data-mode-panel="run"]')?.hasAttribute('hidden')).toBe(false);
 
     await fireEvent.click(view.getByRole('tab', {name: 'Conversation'}));
     await waitFor(() => expect(aside(view).querySelector('[data-mode-panel="conversation"]')?.hasAttribute('hidden')).toBe(false));
-    expect((view.getByLabelText('State DAG') as HTMLSelectElement).value).toBe('idle-recent');
+    expect(dagHref(view)).toContain('idle-recent');
     // Switching back did not re-issue the page request: the thread the user was
     // reading is the same one, same position, without asking to reload.
     expect(api.dshDriverConversation.mock.calls.length).toBe(callsAfterPick);
@@ -173,6 +197,7 @@ describe('the split conversation pane', () => {
 
     await fireEvent.click(view.getByRole('tab', {name: 'Run history'}));
     expect(api.dshDriverHistory.mock.calls.length).toBe(1);
-    expect((view.getByLabelText('State DAG') as HTMLSelectElement).value).toBe('idle-recent');
+    expect(dagHref(view)).toContain('idle-recent');
+    expect(selectedCard().getAttribute('aria-pressed')).toBe('true');
   });
 });

@@ -5,18 +5,21 @@
   import { clampPaneWidth, isNarrow, paneMaxFor, readPaneWidth, writePaneWidth,
     NARROW_BREAKPOINT, PANE_DEFAULT, PANE_MIN } from '../lib/splitPane';
   import { startDshDriver, stopDshDriver, type DriverStatusResponse } from '../lib/api';
-  import type { StateProjectRow } from '../lib/stateGraph';
+  import { stateProjectHref, type StateProjectRow } from '../lib/stateGraph';
   import DriverConversation from './DriverConversation.svelte';
   import DriverRunLog from './DriverRunLog.svelte';
   // The right-hand half of the DAG page: one State DAG at a time, the same
   // selection in both modes, and a width the user owns. Both panels stay mounted
   // once visited and are only hidden, so switching modes never reloads the
   // thread or throws away the page the user had loaded.
-  const { projects = [], status = null, onread = () => {}, onrefresh = () => {} }: {
+  let { projects = [], status = null, onread = () => {}, onrefresh = () => {},
+    selected = $bindable('') }: {
     projects?: StateProjectRow[]; status?: DriverStatusResponse | null;
     onread?: () => void; onrefresh?: () => void;
+    // Owned by the page, not by this pane: the DAG list is what switches it now,
+    // and the header only shows which DAG you are in.
+    selected?: string;
   } = $props();
-  let selected = $state('');
   let mode = $state<'conversation' | 'run'>('conversation');
   let visitedRun = $state(false);
   let viewport = $state(NARROW_BREAKPOINT + 1);
@@ -33,6 +36,7 @@
     if (ids.includes(selected)) return;
     const prior = readLastProject();
     selected = ids.includes(prior) ? prior : ids[0];
+    rememberProject(selected);
   });
   // Start/stop moved here with the pane: it acts on the DAG selected in this
   // select, which is the same selection the conversation and the run log use.
@@ -47,10 +51,6 @@
       onrefresh();
     } catch (e) { controlError = String(e instanceof Error ? e.message : e); }
     finally { busy = false; }
-  }
-  function choose(event: Event) {
-    selected = (event.target as HTMLSelectElement).value;
-    rememberProject(selected);
   }
   function chooseMode(next: 'conversation' | 'run') {
     mode = next;
@@ -104,11 +104,14 @@
   {/if}
   <header class="pane-header">
     {#if projects.length}
-      <select class="pane-project" aria-label={st('conversationPaneProject')} value={selected} onchange={choose}>
-        {#each projects as project (project.project_id)}
-          <option value={project.project_id}>{project.title} · {project.project_id}</option>
-        {/each}
-      </select>
+      <!-- This used to be a picker. Selecting a DAG is now the list's job, so
+           the header says which DAG you are in and takes you to it. -->
+      <a class="pane-project" href={stateProjectHref(selected)} aria-label={st('conversationPaneOpenDag')}
+        title={st('conversationPaneOpenDag')}>
+        <span class="pane-project-title">{current?.title ?? selected}</span>
+        <span class="pane-project-id">{selected}</span>
+        <span aria-hidden="true">↗</span>
+      </a>
     {/if}
     <!-- Icon-only, so the name lives in aria-label (title is the hint). One
          button, two states: it always acts on the DAG this header selects. -->
@@ -125,7 +128,7 @@
     </button>
     <!-- Same row as the picker: the two modes used to take a band of their own,
          and every band above the thread is height the thread does not get. -->
-    <div class="pane-modes" role="tablist" aria-label={st('conversationPaneMode')}>
+    <div class="pane-modes" role="tablist" aria-label={st('conversationPaneMode')} data-modes="segmented">
       <button type="button" role="tab" class:active={mode === 'conversation'} aria-selected={mode === 'conversation'}
         onclick={() => chooseMode('conversation')}>{st('driverConversation')}</button>
       <button type="button" role="tab" class:active={mode === 'run'} aria-selected={mode === 'run'}
@@ -177,10 +180,25 @@
   .pane-header{display:flex;align-items:center;flex-wrap:wrap;gap:.3rem;padding:.3rem .5rem;border-bottom:1px solid var(--pico-muted-border-color,#e6ebf1);}
   /* No visible label text: the accessible name is on the control itself, and
      the row has to hold four controls without wrapping at a normal width. */
-  .pane-project{flex:1 1 8rem;margin:0;padding:.2rem 1.4rem .2rem .35rem;font-size:.75rem;min-width:0;max-width:none;}
+  /* A link that reads as the control it replaced: same box, same weight. */
+  .pane-project{flex:1 1 8rem;display:flex;align-items:baseline;gap:.3rem;min-width:0;margin:0;
+    padding:.2rem .35rem;font-size:.75rem;font-weight:600;text-decoration:none;color:inherit;
+    border:1px solid transparent;border-radius:6px;}
+  .pane-project:hover,.pane-project:focus{border-color:var(--pico-primary,#0066cc);color:var(--pico-primary,#0066cc);}
+  .pane-project-title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .pane-project-id{font-weight:400;font-size:.66rem;opacity:.65;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
   .pane-modes{display:flex;gap:.15rem;flex:0 0 auto;}
   .pane-modes button{width:auto;margin:0;font-size:.7rem;padding:.15rem .45rem;background:none;border:1px solid transparent;color:inherit;}
-  .pane-modes button.active{border-color:var(--pico-primary,#0066cc);border-radius:6px;color:var(--pico-primary,#0066cc);}
+  /* One control with two states, not two buttons that happen to sit together:
+     a shared pill, a raised segment for the chosen mode and a recessed one for
+     the other, so "which mode am I in" is answered by shape as well as colour. */
+  .pane-modes{gap:0;border:1px solid var(--pico-muted-border-color,#dbe3ec);border-radius:7px;
+    overflow:hidden;background:var(--pico-muted-background-color,#eef2f7);}
+  .pane-modes button{border:0;border-radius:0;padding:.2rem .55rem;color:inherit;opacity:.75;}
+  .pane-modes button + button{border-left:1px solid var(--pico-muted-border-color,#dbe3ec);}
+  .pane-modes button.active{background:var(--pico-card-background-color,#fff);color:var(--pico-primary,#0066cc);
+    font-weight:600;opacity:1;box-shadow:0 1px 2px rgba(16,32,48,.18);}
+  .pane-modes button:not(.active){box-shadow:inset 0 1px 2px rgba(16,32,48,.16);}
   .pane-body{display:flex;flex-direction:column;flex:1 1 auto;min-height:0;overflow-x:hidden;overflow-y:hidden;padding:.15rem .5rem .3rem;}
   .pane-panel{display:flex;flex-direction:column;flex:1 1 auto;min-height:0;overflow-x:hidden;overflow-y:hidden;}
   /* `hidden` must win over the panel's own display:flex, or a non-selected tab

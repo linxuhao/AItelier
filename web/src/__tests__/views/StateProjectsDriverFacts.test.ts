@@ -59,12 +59,22 @@ const card = (container: HTMLElement, id: string) =>
 const fact = (container: HTMLElement, id: string, name: string) =>
   card(container, id).querySelector(`[data-fact="${name}"]`)?.textContent?.trim();
 // The pane picks its first project before the driver table lands, so a test
-// that cares WHICH project the control acts on says so explicitly.
+// that cares WHICH project the control acts on says so explicitly. Selecting a
+// DAG is the list's job now: click its card, and the pane header's link into
+// that DAG (plus the card's own aria-pressed) is how the selection shows.
 async function pick(view: any, id: string) {
-  const picker = view.getByLabelText('State DAG') as HTMLSelectElement;
-  await waitFor(() => expect(picker.options.length).toBe(2));
-  await fireEvent.change(picker, {target: {value: id}});
-  await waitFor(() => expect(picker.value).toBe(id));
+  await waitFor(() => expect(view.container.querySelectorAll('.project-card').length).toBe(2));
+  const card = [...view.container.querySelectorAll('.project-card')]
+    .find((c: any) => (c.textContent ?? '').includes(id)) as HTMLElement | undefined;
+  if (!card) throw new Error('no project card for ' + id);
+  await fireEvent.click(card);
+  await waitFor(() => {
+    const link = view.container.querySelector('aside.conversation-pane .pane-project') as HTMLAnchorElement;
+    expect(link?.getAttribute('href') ?? '').toContain(id);
+    const selected = [...view.container.querySelectorAll('.project-card')]
+      .find((c: any) => (c.textContent ?? '').includes(id)) as HTMLElement;
+    expect(selected.getAttribute('aria-pressed')).toBe('true');
+  });
 }
 
 describe('the project button carries its own driver facts', () => {

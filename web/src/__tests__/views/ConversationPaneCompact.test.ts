@@ -103,21 +103,35 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
+/** Selecting a DAG is the list's job now: click its card. */
+async function selectDag(view: any, id: string) {
+  const card = [...view.container.querySelectorAll('.project-card')]
+    .find((c: any) => (c.textContent ?? '').includes(id)) as HTMLElement | undefined;
+  if (!card) throw new Error('no project card for ' + id);
+  await fireEvent.click(card);
+  await waitFor(() => {
+    const link = view.container.querySelector('aside.conversation-pane .pane-project') as HTMLAnchorElement;
+    expect(link?.getAttribute('href') ?? '').toContain(id);
+  });
+}
+
 async function mountPane() {
   const view = render(StateProjects);
   await view.findByRole('heading', {name: 'hot'});
   const pane = view.container.querySelector('aside.conversation-pane') as HTMLElement;
-  const picker = view.getByLabelText('State DAG') as HTMLSelectElement;
   // Until driver status lands both rows are idle, so which one the pane picks
-  // first is not fixed: select the DAG under test explicitly.
-  if (picker.value !== 'hot') await fireEvent.change(picker, {target: {value: 'hot'}});
+  // first is not fixed: select the DAG under test explicitly, on its card.
+  await selectDag(view, 'hot');
   await waitFor(() => expect(view.container.querySelectorAll('article.message').length).toBe(2));
   // `hot` is managed: wait until the toggle knows it before asserting its name.
   await waitFor(() => expect(view.getByRole('button', {name: 'Stop driver'})).toBeTruthy());
   const header = pane.querySelector('.pane-header') as HTMLElement;
+  // The header used to hold the picker; it now holds the link into the DAG the
+  // list selected, which is what "which DAG is this pane about" reads as.
+  const dagLink = pane.querySelector('.pane-project') as HTMLAnchorElement;
   const thread = pane.querySelector('[data-conversation-thread]') as HTMLElement;
   const composer = pane.querySelector('[data-conversation-composer]') as HTMLElement;
-  return {view, pane, header, thread, composer, picker};
+  return {view, pane, header, thread, composer, dagLink};
 }
 
 describe('the vertical budget goes to the thread', () => {
@@ -157,10 +171,14 @@ describe('the vertical budget goes to the thread', () => {
     const {view, pane, header, thread, composer} = await mountPane();
 
     // The pane is handle + ONE control row + the body. The modes used to be a
-    // second band; they are now part of the header, so the tabs, the picker and
-    // the driver toggle share a single row.
+    // second band; they are now part of the header, so the tabs, the DAG link
+    // and the driver toggle share a single row.
     expect([...pane.children].map(classes).flat()).toEqual(['resize-handle', 'pane-header', 'pane-body']);
-    expect(header.contains(view.getByLabelText('State DAG'))).toBe(true);
+    expect(header.contains(view.getByLabelText('Open this State DAG'))).toBe(true);
+    // The project picker is gone from the header - the list selects, the header
+    // says which DAG this is and links into it.
+    expect(header.querySelector('select')).toBeNull();
+    expect(header.querySelector('.pane-project')?.getAttribute('href')).toContain('hot');
     expect(header.contains(view.getByRole('button', {name: 'Stop driver'}))).toBe(true);
     expect(header.querySelector('[role="tablist"]')).toBeTruthy();
     expect(view.getByRole('tab', {name: 'Conversation'}).closest('.pane-header')).toBe(header);
@@ -223,7 +241,7 @@ describe('controls are consolidated, not deleted', () => {
   });
 
   it('starts and stops the selected DAG from an icon-only button with an accessible name', async () => {
-    const {view, picker} = await mountPane();
+    const {view} = await mountPane();
     const stop = view.getByRole('button', {name: 'Stop driver'});
     // Icon-only: no visible text, but a name for assistive tech and a hint.
     expect(stop.textContent?.trim()).toBe('');
@@ -232,8 +250,8 @@ describe('controls are consolidated, not deleted', () => {
     await fireEvent.click(stop);
     await waitFor(() => expect(api.stopDshDriver).toHaveBeenCalledWith('hot'));
 
-    // The control acts on whatever the picker selects - not on a fixed project.
-    await fireEvent.change(picker, {target: {value: 'cold'}});
+    // The control acts on whatever the list selects - not on a fixed project.
+    await selectDag(view, 'cold');
     await waitFor(() => expect(api.dshDriverConversation).toHaveBeenCalledWith('cold'));
     const start = await waitFor(() => view.getByRole('button', {name: 'Start driver'}));
     expect(view.queryByRole('button', {name: 'Stop driver'})).toBeNull();

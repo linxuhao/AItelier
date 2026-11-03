@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import time
 import uuid
 
 from core.driver_credentials import read_token_file
@@ -27,7 +28,7 @@ CREATE TABLE IF NOT EXISTS dsh_drivers (
 
 
 class DshDrivers:
-    def __init__(self, db, registry, root: Path, *, command=None, base_url=None):
+    def __init__(self, db, registry, root: Path, *, command=None, base_url=None, host_controller=False):
         self.db, self.registry = db, registry
         self.root = Path(root)
         self.command = command or [os.getenv("AITELIER_DSH_BIN", "/opt/aitelier-dsh/node_modules/.bin/dsh")]
@@ -37,9 +38,34 @@ class DshDrivers:
         self.gateways = {}
         self.lock = asyncio.Lock()
         self.closing = False
+        self.host_controller = host_controller
         with db.get_connection() as conn:
             conn.executescript(SCHEMA)
             conn.commit()
+
+    @property
+    def external_host(self):
+        """The shared installation setting selects the host controller, not uvicorn."""
+        if self.host_controller:
+            return False
+        try:
+            return json.loads((self.root / "runtime.json").read_text()).get("mode") == "host"
+        except FileNotFoundError:
+            return False
+
+    def running(self, project_id):
+        if not self.external_host:
+            proc = self.processes.get(project_id)
+            return proc is not None and proc.returncode is None
+        row = self.get(project_id)
+        if row is None or not row["enabled"]:
+            return False
+        try:
+            state = json.loads((self.root / row["driver_id"] / "host-process.json").read_text())
+            age = time.time() - state["seen_at"]
+            return state["session_id"] == row["session_id"] and bool(state["pid"]) and 0 <= age < 15
+        except (OSError, ValueError, KeyError, TypeError):
+            return False
 
     def rows(self):
         with self.db.get_connection() as conn:
@@ -122,12 +148,20 @@ class DshDrivers:
                    AITELIER_DSH_MODEL=row["model"], AITELIER_URL=self.base_url,
                    AITELIER_DSH_STATE_DIR=str(directory),
                    AITELIER_DSH_ENTRY=str(Path(self.command[0]).resolve()))
+        if self.host_controller:
+            env.update(DSH_PERMISSION_MODE="danger-full-access", AITELIER_DSH_EXECUTION="host",
+                       AITELIER_DSH_BACKEND_SOURCE=str(Path(__file__).resolve().parents[1]))
         return env
 
     async def start(self, project_id, *, provider="aitelier", model="driver", actor):
         async with self.lock:
             if self.closing:
                 raise ValueError("driver manager is shutting down")
+            if self.external_host:
+                row = self._provision(project_id, provider, model, actor)
+                if not row["enabled"]:
+                    self.update(project_id, enabled=1, phase="starting", last_error="", subagents_json="[]")
+                return self.public(self.get(project_id))
             proc = self.processes.get(project_id)
             if proc is not None and proc.returncode is None:
                 return self.public(self.get(project_id))
@@ -163,6 +197,19 @@ class DshDrivers:
             row = self.get(project_id)
             if row is None:
                 raise ValueError("this project has no managed DSH driver")
+            if self.external_host:
+                self.update(project_id, enabled=0, phase="stopping")
+                # The host acknowledges shutdown by removing its process marker.
+                marker = self.root / row["driver_id"] / "host-process.json"
+                for _ in range(100):
+                    if not marker.exists():
+                        break
+                    await asyncio.sleep(0.2)
+                else:
+                    raise ValueError("host driver shutdown is still pending; inspect the host service")
+                self.gateways.pop(project_id, None)
+                self.update(project_id, phase="stopped", subagents_json="[]")
+                return self.public(self.get(project_id))
             self.update(project_id, enabled=int(preserve_enabled), phase="stopping")
             proc = self.processes.get(project_id)
             if proc is not None and proc.returncode is None:
@@ -185,6 +232,8 @@ class DshDrivers:
             return self.public(self.get(project_id))
 
     async def resume(self):
+        if self.external_host:
+            return
         for row in self.rows():
             if row["enabled"]:
                 try:
@@ -194,8 +243,10 @@ class DshDrivers:
 
     async def close(self):
         self.closing = True
+        if self.external_host:
+            return  # Backend restarts must not stop the host's resident sessions.
         for project_id in list(self.processes):
-            await self.stop(project_id, preserve_enabled=True)
+            await self.stop(project_id, preserve_enabled=bool(self.get(project_id)["enabled"]))
         if self.monitors:
             await asyncio.gather(*self.monitors)
 
@@ -229,8 +280,7 @@ class DshDrivers:
         for row in self.rows():
             for d in drivers:
                 if d["driver_id"] == row["driver_id"]:
-                    proc = self.processes.get(row["project_id"])
-                    d["presence"] = {"status": "online" if proc is not None and proc.returncode is None
+                    d["presence"] = {"status": "online" if self.running(row["project_id"])
                                      and row["phase"] in {"running", "waiting"} else "offline"}
         seen = {d["driver_id"]: d for d in drivers}
         projects = {}
@@ -246,8 +296,7 @@ class DshDrivers:
         for row in self.rows():
             p = projects.setdefault(row["project_id"], {"drivers": [], "running_subagents": 0, "running_pipelines": 0})
             p["managed"] = self.public(row)
-            proc = self.processes.get(row["project_id"])
-            p["running_subagents"] = len(json.loads(row["subagents_json"])) if proc is not None and proc.returncode is None else 0
+            p["running_subagents"] = len(json.loads(row["subagents_json"])) if self.running(row["project_id"]) else 0
         def counts(ds):
             return {"total": len(ds), "online": sum(d.get("presence", {}).get("status") == "online" and d["status"] == "active" for d in ds)}
         for p in projects.values():

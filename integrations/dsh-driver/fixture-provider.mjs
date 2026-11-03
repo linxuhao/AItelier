@@ -6,6 +6,7 @@ export const name = 'fixture-provider';
 export const inject = ['llm'];
 export function apply(ctx) {
   let rootCalls = 0, pressure = false, triggered = false, childMessaged = false, childShell = false, childWork = 0;
+  const host = process.env.AITELIER_DSH_EXECUTION === 'host';
   class FixtureAdapter extends LlmAdapter {
     async resolveModel(provider, model) { return { provider, id: model, name: model, context: { contextWindow: 16000 }, defaultMaxTokens: 1024 }; }
     async *stream(options) {
@@ -23,9 +24,10 @@ export function apply(ctx) {
       else if (child && !childShell) {
         childShell = true;
         const outside = process.env.AITELIER_TEST_OUTSIDE_CWD;
-        block = { type: 'tool-call', id: 'fixture-child-shell', name: 'bash', arguments: JSON.stringify({ description: 'Verify inherited workspace and owned checkout writes', command: `if printf forbidden > '${outside}/outside-probe.txt'; then printf OUTSIDE_WRITE_ALLOWED; else printf OUTSIDE_WRITE_DENIED; fi; printf 'WORKER_SHELL_OK' > worker-proof.txt; cat worker-proof.txt; git init -q . && git add worker-proof.txt && git -c user.name=fixture -c user.email=fixture@example.invalid commit -q -m 'native workspace fixture' && git rev-parse HEAD > commit-proof.txt`, run_in_background: false }) };
+        const git = host ? `git init -q --bare '${outside}/origin.git' && git init -q '${outside}/worker' && cd '${outside}/worker' && git config user.name fixture && git config user.email fixture@example.invalid && printf host > child.txt && git add child.txt && git commit -q -m child && git remote add origin '${outside}/origin.git' && git push -q origin HEAD:refs/heads/main && git fetch -q origin main && git merge --ff-only FETCH_HEAD && git rev-parse HEAD > '${outside}/host-git-proof.txt'` : `git init -q . && git add worker-proof.txt && git -c user.name=fixture -c user.email=fixture@example.invalid commit -q -m 'native workspace fixture' && git rev-parse HEAD > commit-proof.txt`;
+        block = { type: 'tool-call', id: 'fixture-child-shell', name: 'bash', arguments: JSON.stringify({ description: 'Verify inherited workspace and owned checkout writes', command: `if printf allowed > '${outside}/outside-probe.txt'; then printf OUTSIDE_WRITE_ALLOWED; else printf OUTSIDE_WRITE_DENIED; fi; printf 'WORKER_SHELL_OK' > worker-proof.txt; cat worker-proof.txt; ${git}`, run_in_background: false }) };
       }
-      else if (child && childWork < 4) {
+      else if (child && !host && childWork < 4) {
         const steps = [['open', {}], ['write', {path:'child.txt',content:'native child',create:true}],
           ['bash', {command:'python3 -m pytest -q test_child.py'}], ['deliver', {commit_message:'native child change'}]];
         const [action, args] = steps[childWork++];
@@ -38,8 +40,10 @@ export function apply(ctx) {
       }
       else if (!options.tools?.length) block = { type: 'text', text: 'Fixture session' };
       else {
-        const call = rootCalls++;
-        if (call === 0) block = { type: 'tool-call', id: 'fixture-pipelines', name: 'mcp__aitelier__list_pipelines', arguments: '{}' };
+        const rawCall = rootCalls++;
+        const call = host ? rawCall - 1 : rawCall;
+        if (host && rawCall === 0) block = {type:'tool-call',id:'fixture-root-host-shell',name:'bash',arguments:JSON.stringify({description:'Verify migrated root host access',command:`printf ROOT_HOST_OK > '${process.env.AITELIER_TEST_OUTSIDE_CWD}/root-host-proof.txt'` + (process.env.AITELIER_TEST_DOCKER ? ` && docker version --format '{{.Server.Version}}' > '${process.env.AITELIER_TEST_OUTSIDE_CWD}/docker-proof.txt'` : ''),run_in_background:false})};
+        else if (call === 0) block = { type: 'tool-call', id: 'fixture-pipelines', name: 'mcp__aitelier__list_pipelines', arguments: '{}' };
         else if (call === 1) block = { type: 'tool-call', id: 'fixture-spawn', name: 'subagent', arguments: JSON.stringify({ description: 'smoke child', prompt: 'CHILD_TASK_MARKER', cwd: process.env.AITELIER_TEST_CHILD_CWD }) };
         else if (call === 2) { pressure = true; block = { type: 'text', text: 'HISTORY_BEFORE_COMPACT_ANCHOR ' + 'earlier context '.repeat(14000) }; }
         else if (call === 3) block = { type: 'tool-call', id: 'fixture-grep', name: 'grep_chat_history', arguments: JSON.stringify({ pattern: 'Resume the assigned State DAG' }) };

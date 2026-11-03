@@ -134,9 +134,12 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
     const older = await readHistory(join(directory, 'home/sessions'), 'fixture-root', { before_seq: archive.entries.at(-1).seq, limit: 2 });
     assert.equal(older.entries.length, 2);
     assert.ok(older.entries.at(-1).seq < archive.entries.at(-1).seq);
+    // Migrate this exact persisted workspace-write session, not a fresh root.
+    environment.AITELIER_DSH_EXECUTION = 'host';
+    environment.DSH_PERMISSION_MODE = 'danger-full-access';
     proc = launch();
-    const resumedBy = Date.now() + 10000;
-    while (Date.now() < resumedBy && proc.exitCode === null && !requests.slice(before).some(r => r.options.tools?.some(t => t.name === 'wait'))) {
+    const resumedBy = Date.now() + 20000;
+    while (Date.now() < resumedBy && proc.exitCode === null && !events.slice().reverse().some(e => e.data?.message?.toolCallId === 'fixture-child-shell' && JSON.stringify(e.data).includes('OUTSIDE_WRITE_ALLOWED'))) {
       await new Promise(resolve => setTimeout(resolve, 100));
     }
     assert.equal(proc.exitCode, null, output);
@@ -144,6 +147,14 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
     assert.ok(resumed, 'persisted driver did not resume\n' + output);
     assert.match(JSON.stringify(resumed.options.messages), /earlier details can be searched/);
     assert.match(JSON.stringify(resumed.options), /你是 alpha 项目 State DAG 的常驻导演/);
+    assert.ok(!resumed.options.tools.some(t => t.name === 'project_work'), 'host kept obsolete coding bridge');
+    assert.equal(await readFile(join(outsideDirectory, 'root-host-proof.txt'), 'utf8'), 'ROOT_HOST_OK');
+    assert.equal(await readFile(join(outsideDirectory, 'outside-probe.txt'), 'utf8'), 'allowed');
+    assert.match(await readFile(join(outsideDirectory, 'host-git-proof.txt'), 'utf8'), /^[0-9a-f]{40}\n$/);
+    if (process.env.AITELIER_TEST_DOCKER) assert.match(await readFile(join(outsideDirectory, 'docker-proof.txt'), 'utf8'), /^\d+\./);
+    const childRequest = requests.slice(before).find(r => r.child && r.options.tools?.some(t=>t.name==='bash'));
+    assert.match(JSON.stringify(childRequest.options), /danger-full-access/);
+    assert.doesNotMatch(JSON.stringify(childRequest.options), /Current DSH file policy: workspace-write/);
   } finally {
     if (proc && proc.exitCode === null) { proc.kill('SIGTERM'); await once(proc, 'exit'); }
     for (const response of [...parked, ...childWaits]) response.destroy();

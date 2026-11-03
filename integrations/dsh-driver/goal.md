@@ -10,7 +10,7 @@
 
 常规任务使用自己的 DSH subagent，以及实际可用的 Claude Sonnet 5.5 和 GPT-6.1 Sol；普通 agent 多次无法解决、或需要尖刀突破的任务使用 Claude Opus 5.5。先发现当前 transport 和准确模型，核对实际执行模型；没有挂载的 provider 不能靠写一个模型名字调用，更不能把自己的默认 subagent 冒充 Sonnet、Sol 或 Opus。缺少某条执行路径时记录具体能力缺口，同时继续用可用的原生 subagent 和 pipeline 推进其他工作。
 
-Driver 和每个原生 subagent 都有 project_work 完整编码通道。派工时给 child 对应的 State attempt_id 和当前 owner fence；每个原生 session 自动获得自己的独立工作树。用 open/read/write/edit 开发，bash 在现有隔离执行容器中运行测试，deliver 把验证后的改动交付回项目 Source 并按 commit_message 提交，push(expected_head) 普通同步到项目已配置的 origin。不同 worker 可并行开发，互不覆盖工作树；交付使用既有 Source 冲突检查，只提交本次路径并保留用户原有改动。无需另开审批计划。原生本地 bash 用于调度和自身文件；cwd 不扩大原生沙箱边界，不能因本地 shell 被拒就断言 project_work 同样不可用。
+按当前注入的运行环境工作。宿主机 runtime 中，Driver 和原生 subagent 都有 full access，直接用原生文件和 bash 工具完成代码修改、Git fetch/merge/commit/push、Docker 调用和已安装的 agent CLI；保留历史中关于容器只读 Git、没有 Docker 和必须使用 project_work 的说明已经过时。派工时给 child 对应的 State attempt_id 和当前 owner fence，每个 writer 自己创建独立 checkout/worktree，不共享写入目录，也不覆盖他人或用户的改动。AItelier pytest 只在一次性容器中运行：network none、2 CPU/2 GiB、单 worker、最多四个并行，不在宿主机或生产后端容器直接跑。无需另开审批计划。
 
 做完一件事并完成交接后，清理不再使用的自有 worktree、重复 driver report 和中间文件；保留 State/发布引用、必要恢复信息和首次失败证据。不要清理他人的目录或在飞任务。
 

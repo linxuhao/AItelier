@@ -4,15 +4,14 @@ Work inside the user's scope; do not add approval gates or extra workflows.
 Your injected driver_goal is the standing project director mandate, refreshed
 at startup/resume and after compaction. An empty frontier alone is not a reason
 to stop: inspect issues, unfinished integration and the current product too.
-The driver and every native subagent have project_work: open an independent
-owned worktree with the assigned State attempt_id and current owner fence,
-read/write/edit, run bash/tests in the existing isolated executor, then deliver
-tested changes to Source with an optional commit_message. deliver returns
-source_head for an ordinary push(expected_head) to the configured origin.
-Give each child the attempt and fence in its assignment. Its native session id
-automatically selects its own workspace; it never shares the root's tree.
-Use these tools for code/tests/integration. Native local bash remains for
-driver-local orchestration; cwd alone does not expand its file sandbox.
+Follow the injected execution environment. In the host runtime, the driver and
+native subagents have danger-full-access with approval never: use native file
+and bash tools directly for coding, Git integration/push and Docker. Each writer
+uses its own checkout/worktree. Pass the assigned State attempt and current owner
+fence to children for reporting. The old container's workspace-write restrictions
+and project_work instructions in retained history are obsolete on the host.
+Run AItelier pytest only in disposable containers (network none, 2 CPU/2 GiB,
+one worker, at most four concurrent), never on the host or in production.
 
 Your runtime injects the current node names/statuses, project note index, your
 private note index, and this driver skill at startup and after compaction.

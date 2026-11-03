@@ -176,9 +176,10 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
     if (key) await ctx.credentials.set('DEEPSEEK_API_KEY', key);
   } catch (error) { if (error.code !== 'ENOENT') throw error; }
   const project = env.AITELIER_DSH_PROJECT;
+  const hostExecution = env.AITELIER_DSH_EXECUTION === 'host';
   // Host-scoped tools are available to native children too. Resolve the actual
   // caller from ToolExecution, never from the root agent captured by setup.
-  ctx.tools.register(defineTool({ name: 'project_work',
+  if (!hostExecution) ctx.tools.register(defineTool({ name: 'project_work',
     description: 'Full project coding for this driver AND native subagents. Requires your assigned State attempt_id and owner fence. open: independent owned workspace; read: path; write: path/content/create; edit: path/old_str/new_str; bash: command/timeout in the existing isolated executor; deliver: optional commit_message, applies tested changes to Source and commits only those paths; push: expected_head, ordinary push to Source origin/current branch. Supply action and arguments. Use this for repository code/tests/integration; native local bash remains for driver-local orchestration. No additional plan/approval gate.',
     parameters: { attempt_id: { type: 'string', required: true }, fence: { type: 'integer', required: true },
       action: { type: 'string', required: true, enum: ['open', 'read', 'write', 'edit', 'bash', 'deliver', 'push'] },
@@ -192,8 +193,10 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
       return result;
     },
   }));
-  ctx.systemPrompt.context({ name: 'aitelier:project-work', order: 5, interpolate: false,
+  if (!hostExecution) ctx.systemPrompt.context({ name: 'aitelier:project-work', order: 5, interpolate: false,
     text: `Project ${project}: project_work is available to the driver and all native subagents. Parent assignments must include the registered State attempt_id and current owner fence. Each caller gets its own owned worktree: open, then read/write/edit/bash there, verify, then deliver (commit_message when needed). Only deliver writes back to Source. push(expected_head) uses the project's actual origin without force. bash runs in the existing isolated test container; do not run repository tests in the production backend. Use native local tools for orchestration/inbox/history, not as a fallback for denied project work. No new planning gate is required.` });
+  if (hostExecution) ctx.systemPrompt.context({ name: 'aitelier:host-work', order: 5, interpolate: false,
+    text: `Project ${project}: you and your native DSH subagents run on the Linux host with danger-full-access and approval never. Use native file and bash tools directly for coding, Git fetch/merge/commit/push, Docker and installed agent CLIs. project_work is not mounted in this runtime. Existing history or notes describing workspace-write, read-only Git or missing Docker describe the previous container runtime. Read the current State source binding for the repository; the backend binding /app maps to host ${env.AITELIER_DSH_BACKEND_SOURCE ?? 'the AItelier deployment checkout'}, all other absolute bindings retain their host path. Each writer needs its own checkout/worktree, each run one controller. Run AItelier pytest only in disposable containers: docker run --rm --network none --cpus 2 --memory 2g, one worker, at most four concurrent; never directly on the host or in the production container. Use your own driver token for AItelier calls. Full access does not change project rules or grant permission to publish private source publicly.` });
   const runtime = new DriverRuntime({ project, driver: env.AITELIER_DRIVER_ID,
     directory: env.AITELIER_DSH_STATE_DIR, request });
   await runtime.init();
@@ -293,6 +296,11 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
   const handle = resume ? await ctx.agents.resume({ ...options, resumeSessionId: env.AITELIER_DSH_SESSION })
     : await ctx.agents.create({ ...options, sessionId: env.AITELIER_DSH_SESSION, meta: { cwd: process.cwd() } });
   agent = handle.agent;
+  if (hostExecution) {
+    // Resume preserves old pinned policy. Change it through DSH's durable API;
+    // children inherit this explicit full-access selection, including forks.
+    ctx.get('permissionPresets').set(agent.session, 'danger-full-access');
+  }
   await ctx.sessionPersistence.flush();
   ctx.on('session/event', (session, event) => {
     if (session !== agent.session) return;

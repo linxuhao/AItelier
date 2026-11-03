@@ -2,9 +2,10 @@
 
 Each State DAG can run one resident DSH process. Start/stop it from **Driver
 status** on the dashboard or project catalog. Repeated starts reuse the same
-process, driver token, private notebook and persisted session. A normal backend
-restart resumes enabled drivers. A failed process remains visibly failed; stop
-and start it to retry. Starting a driver authorizes work within that project's
+process, driver token, private notebook and persisted session. In the production
+host runtime, backend restarts leave drivers running; the independent host
+service resumes enabled drivers after its own restart and retries failed
+processes with a delay. Starting a driver authorizes work within that project's
 existing State rules, so do not start one alongside another controller doing the
 same work.
 
@@ -45,7 +46,23 @@ Runtime details use the existing private reader permission.
 
 ## Runtime and configuration
 
-The Docker image installs `@deepseek-ai/dsh@0.2.1-rc.5` and its lockfile outside
+The production runtime is the user service `aitelier-dsh-host.service` (template
+in `deploy/`). It runs `python -m core.dsh_host` on the host, using the same
+`dsh_drivers` rows and per-driver state directories as the backend. The shared
+`dsh-drivers/runtime.json` setting `{"mode":"host"}` disables backend process
+launch/shutdown. Dashboard start/stop updates the existing enabled rows; the
+host reconciles them every second. Atomic process markers expire after 15
+seconds, so a dead host supervisor cannot leave workers counted online. An
+exclusive flock prevents duplicate supervisors; systemd owns all child processes.
+The backend retains its Docker deployment.
+
+The host installation at `~/.local/share/aitelier-dsh/` uses the exact same
+Node 24 and pinned DSH dependencies as the image. The service connects to the
+backend via `http://127.0.0.1:4444`, retains per-driver tokens, and uses the host's
+existing GitHub secret-file credential helper. Provider API keys remain in the
+backend model gateway. No Docker socket is mounted into the backend.
+
+The Docker image also installs `@deepseek-ai/dsh@0.2.1-rc.5` and its lockfile outside
 the live source mount, together with Node 24. Rebuild the image to install this
 runtime; restarting an old image does not install it. No production deployment
 is performed by the implementation tests.
@@ -93,11 +110,15 @@ frontier, prioritizes critical defects, and aims for four independent pipelines
 and four subagents when actionable work exists. The owner's push/publish scope,
 model preferences and cleanup policy are part of that mandate.
 
-Native subagents accept a working `cwd`, but this pinned version records the
-parent's immutable workspace boundary in local child session headers. Use
-independent clones (including their own `.git`) under the driver's workspace;
-setting `cwd` to an external shared worktree does not grant write access. This profile
-mounts native Spawn/Fork only. Claude Code and Codex external subagent providers
+Host drivers use `danger-full-access` and `approval=never`. Startup explicitly
+updates resumed sessions through DSH's permission preset API, replacing the old
+workspace-write pin. Native children inherit full access and can work in their
+own external worktrees with writable Git metadata. Use native file/bash tools
+for development, fetch/merge/commit/push and Docker. Each writer still needs an
+independent checkout, and AItelier pytest runs only in disposable offline
+2-CPU/2-GiB containers, never directly on the host or in production. The backend
+binding `/app` maps to the host deployment checkout; other source paths are
+unchanged. This profile mounts native Spawn/Fork only. Claude Code and Codex external subagent providers
 are not mounted by this MVP; naming a preferred model in the goal does not
 install a provider or change the host adapter's default model.
 
@@ -109,7 +130,11 @@ subscription response, including an empty timeout response.
 
 ## Project coding for the driver and native workers
 
-`project_work` is a host-scoped native tool, available to the root and every
+The former container runtime's `project_work` bridge is not mounted for host
+drivers. Old history describing read-only Git, absent Docker or mandatory
+`project_work` is superseded by the injected host execution context.
+
+For container-mode installations, `project_work` is a host-scoped native tool, available to the root and every
 native child. It sends the actual caller session id with the driver's own token.
 The backend validates the assigned State attempt owner/fence and resolves Source
 from the project's State binding. Each session/attempt gets a separate existing

@@ -102,7 +102,7 @@ def context(project_id: str, request: Request, runtime=Depends(manager), service
 @router.post("/{project_id}/activity", dependencies=[Depends(authz.require_writer)])
 async def activity(project_id: str, body: Activity, request: Request, runtime=Depends(manager)):
     row = owned(project_id, request, runtime)
-    if not row["enabled"] or project_id not in runtime.processes:
+    if not row["enabled"] or not runtime.running(project_id):
         raise HTTPException(409, "driver is stopped")
     import json
     runtime.update(project_id, phase=body.phase, subagents_json=json.dumps(body.subagents), last_error=body.error)
@@ -116,7 +116,7 @@ async def activity(project_id: str, body: Activity, request: Request, runtime=De
 @router.post("/{project_id}/heartbeat", dependencies=[Depends(authz.require_writer)])
 def heartbeat(project_id: str, request: Request, runtime=Depends(manager), service=Depends(get_service)):
     row = owned(project_id, request, runtime)
-    if not row["enabled"] or project_id not in runtime.processes:
+    if not row["enabled"] or not runtime.running(project_id):
         raise HTTPException(409, "driver is stopped")
     claims = execute(service, "list_claims", {"project_id": project_id, "driver_id": row["driver_id"], "limit": 100})["claims"]
     with service.db.get_connection() as conn:
@@ -162,7 +162,7 @@ async def project_work(project_id: str, body: ProjectWork, request: Request,
     from starlette.concurrency import run_in_threadpool
     from core.dsh_work import project_work as execute_work
     row = owned(project_id, request, runtime)
-    if not row["enabled"] or project_id not in runtime.processes:
+    if not row["enabled"] or not runtime.running(project_id):
         raise HTTPException(409, "driver is stopped")
 
     async def stream():
@@ -191,7 +191,7 @@ async def completion(project_id: str, body: Completion, request: Request, runtim
     from core.ai_router import AIGateway
     from starlette.concurrency import run_in_threadpool
     row = owned(project_id, request, runtime)
-    if not row["enabled"] or project_id not in runtime.processes:
+    if not row["enabled"] or not runtime.running(project_id):
         raise HTTPException(409, "driver is stopped")
     sessions = runtime.gateways.setdefault(project_id, {})
     if body.session_id not in sessions:

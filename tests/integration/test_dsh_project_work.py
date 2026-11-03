@@ -140,7 +140,7 @@ def test_authenticated_work_endpoint_uses_actual_child_scope(work, env, monkeypa
     from api.main import app
     identity=SimpleNamespace(driver_id=work['driver'],actor='driver:'+work['driver'],kind='driver',is_admin=False)
     monkeypatch.setattr(authz,'request_identity',lambda _:identity)
-    runtime=SimpleNamespace(db=env['db'],processes={work['dag']:object()},
+    runtime=SimpleNamespace(db=env['db'],running=lambda pid:pid==work['dag'],
         get=lambda _: {'driver_id':work['driver'],'enabled':True})
     previous=dict(app.dependency_overrides)
     app.dependency_overrides.update({manager:lambda:runtime,get_service:lambda:work['service'],get_skillflow:lambda:env['sf']})

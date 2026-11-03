@@ -1,0 +1,27 @@
+[Unit]
+Description=AItelier resident DSH drivers
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/AItelier
+ExecStart=%h/AItelier/.venv/bin/python -m core.dsh_host
+Environment="PATH=%h/.local/share/aitelier-dsh/bin:%h/.npm-global/bin:/home/linuxbrew/.linuxbrew/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="AITELIER_DSH_BIN=%h/.local/share/aitelier-dsh/node_modules/.bin/dsh"
+Environment="AITELIER_HOME=%h/.AItelier"
+Environment="AITELIER_SECRETS_DIR=%h/.aitelier-secrets"
+Environment="AITELIER_DRIVER_IDENTITY=on"
+Environment="AITELIER_DSH_API_URL=http://127.0.0.1:4444"
+Environment="GIT_CONFIG_COUNT=1"
+Environment="GIT_CONFIG_KEY_0=credential.helper"
+Environment="GIT_CONFIG_VALUE_0=%h/AItelier/docker/git-credential-helper.sh"
+Environment="AITELIER_GITHUB_TOKEN_FILE=%h/.aitelier-secrets/GITHUB_TOKEN"
+Restart=always
+RestartSec=5
+KillMode=control-group
+TimeoutStopSec=45
+UMask=0077
+
+[Install]
+WantedBy=default.target

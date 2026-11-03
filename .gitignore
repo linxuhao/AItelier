@@ -253,3 +253,13 @@ vendor/wheels/*
 # git worktrees, so a `git add -A` in this shared checkout would otherwise
 # sweep whole in-flight trees into a commit.
 .wt/
+
+# One-off session scripts and dumps. They are scratch work, not source: they
+# belong to whoever ran them and must never be committed. Ignored rather than
+# deleted on purpose - the recovery scripts under output/ are the kind of thing
+# an older State report may still point at.
+grok-*.py
+grokq.py
+grokinbox.py
+help-full.txt
+output/

@@ -13,6 +13,8 @@ if os.environ.get('READONLY_BASELINE') == '1':
     spec.loader.exec_module(dq)
 
 
+pytestmark = pytest.mark.docker  # needs docker + a frozen clean Source
+
 def fixture(tmp_path, monkeypatch):
     root=tmp_path/'proc'
     raw=json.loads(Path('/reports/original-attribution.json').read_text())

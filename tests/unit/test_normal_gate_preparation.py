@@ -22,6 +22,8 @@ QUOTAS = {"GODOT_RETAIN_MAX_FILES": "4096", "GODOT_RETAIN_MAX_BYTES": "536870912
           "GODOT_RETAIN_MAX_PATTERNS": "16", "GODOT_RETAIN_MAX_SEARCH_ENTRIES": "4096"}
 
 
+pytestmark = pytest.mark.docker  # needs docker + a frozen clean Source
+
 @pytest.fixture
 def bound(tmp_path, monkeypatch, request):
     requested_sdk = getattr(request, "param", "1.5.99")

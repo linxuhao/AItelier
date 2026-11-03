@@ -27,6 +27,8 @@ from tests.unit.test_normal_gate_preparation import QUOTAS, bound  # noqa: F401 
 RESEARCH = ("research-a", "research-b")
 
 
+pytestmark = pytest.mark.docker  # needs docker + a frozen clean Source
+
 def godot_packet():
     """Current-shaped Godot mix: retained ready demand, the own deployment controller,
     two unaffected active remote research owners, paused recovery and SSH noise."""

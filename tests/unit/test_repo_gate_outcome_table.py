@@ -64,6 +64,8 @@ pre = os.environ.get("TABLE_GATE_PRE", "")
 builder = os.environ.get("GODOT_BUILDER_URL", "http://godot-builder:8080")
 parent = os.environ.get("GATE_REPORT_DIR") or tempfile.gettempdir()
 os.makedirs(parent, exist_ok=True)
+pytestmark = pytest.mark.docker  # needs docker + a frozen clean Source
+
 def pre_writer(repo_claim):
     f = tempfile.mkdtemp(prefix="aaa-first-", dir=parent)
     for name, v in (("python.json", {"returncode": 1}),

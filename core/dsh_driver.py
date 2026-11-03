@@ -35,8 +35,14 @@ CREATE TABLE IF NOT EXISTS dsh_drivers (
 # streamable-HTTP and need no token from loopback - agentmcp's gate only demands
 # one beyond the Cloudflare edge.
 DSH_EXTRA_MCP_DEFAULTS = {
-    "agentmcp": "http://127.0.0.1:9003/mcp",
     "devmcp": "http://127.0.0.1:7676/mcp",
+    "zvec": "http://127.0.0.1:7999/mcp",
+    # agentmcp (asr/ocr/pdf/web, media generation, video) is OPT-IN on purpose.
+    # MCP tool schemas are not searchable in DSH - they "enter every request" -
+    # so its 61 tools cost about 14k tokens per turn, measured as the request
+    # header growing from 56,147 to 112,427 characters. Worth it when media work
+    # is the job; not worth paying on every turn of code and State work.
+    "agentmcp": "",
 }
 
 
@@ -180,9 +186,9 @@ class DshDrivers:
         # not its ability to start - which is why the State MCP above is the only
         # one that fails hard.
         extra = []
-        for server, env_name in (("agentmcp", "AITELIER_DSH_MCP_AGENTMCP"),
-                                 ("devmcp", "AITELIER_DSH_MCP_DEVMCP")):
-            url = os.environ.get(env_name, DSH_EXTRA_MCP_DEFAULTS.get(server, "")).strip()
+        for server, default_url in DSH_EXTRA_MCP_DEFAULTS.items():
+            url = os.environ.get(
+                "AITELIER_DSH_MCP_" + server.upper(), default_url).strip()
             if not url:
                 continue
             extra.append({"id": "mcp-" + server, "name": "@deepseek-ai/dsh-mcp-client", "config": {

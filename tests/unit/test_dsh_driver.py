@@ -438,8 +438,11 @@ def test_local_mcp_servers_are_registered_by_default(runtime):
 
     # The State MCP must keep failing hard: it is a prerequisite, not a capability.
     assert by_id["mcp-aitelier"]["config"]["failOnStartupError"] is True
-    for server, url in (("agentmcp", "http://127.0.0.1:9003/mcp"),
-                        ("devmcp", "http://127.0.0.1:7676/mcp")):
+    assert "mcp-agentmcp" not in by_id, (
+        "agentmcp is opt-in: its 61 schemas cost ~14k tokens on every request, "
+        "and a default must not spend that on code-and-State work")
+    for server, url in (("devmcp", "http://127.0.0.1:7676/mcp"),
+                        ("zvec", "http://127.0.0.1:7999/mcp")):
         entry = by_id["mcp-" + server]
         assert entry["config"]["serverName"] == server
         assert entry["config"]["url"] == url
@@ -448,13 +451,24 @@ def test_local_mcp_servers_are_registered_by_default(runtime):
         assert entry["config"]["failOnStartupError"] is False
 
 
+def test_agentmcp_is_available_on_request(runtime, monkeypatch):
+    row = runtime._provision("alpha", "fixture-provider", "fixture-model", "fixture")
+    monkeypatch.setenv("AITELIER_DSH_MCP_AGENTMCP", "http://127.0.0.1:9003/mcp")
+    runtime._environment(row)
+    patch = _patch_document(runtime, row)
+    by_id = {e["id"]: e for e in next(p["insert"] for p in patch if "insert" in p)}
+    assert by_id["mcp-agentmcp"]["config"]["url"] == "http://127.0.0.1:9003/mcp"
+    assert by_id["mcp-agentmcp"]["config"]["failOnStartupError"] is False, (
+        "opt-in must not become fail-hard: a media service being down still "
+        "must not stop the driver")
+
+
 def test_blanking_one_local_mcp_url_removes_only_that_entry(runtime, monkeypatch):
-    import yaml
-    monkeypatch.setenv("AITELIER_DSH_MCP_AGENTMCP", "")
+    monkeypatch.setenv("AITELIER_DSH_MCP_DEVMCP", "")
     row = runtime._provision("alpha", "fixture-provider", "fixture-model", "fixture")
     runtime._environment(row)
     patch = _patch_document(runtime, row)
     ids = {e["id"] for e in next(p["insert"] for p in patch if "insert" in p)}
-    assert "mcp-agentmcp" not in ids, "a blank URL must withdraw the entry"
-    assert "mcp-devmcp" in ids, "the other service is independent"
+    assert "mcp-devmcp" not in ids, "a blank URL must withdraw the entry"
+    assert "mcp-zvec" in ids, "the other services are independent"
     assert "mcp-aitelier" in ids

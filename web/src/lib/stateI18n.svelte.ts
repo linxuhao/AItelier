@@ -4,6 +4,12 @@ let lang = $state(get(langStore));
 langStore.subscribe(value => { lang = value; });
 const en: Record<string, string> = {
   driverLive:'Live', driverReconnecting:'Reconnecting…', driverMessage:'Message driver', driverMessageSend:'Send', driverMessageSent:'Sent to driver inbox', driverHistory:'Run history', driverHistoryOlder:'Older records', driverHistoryRefresh:'Refresh', driverHistoryEmpty:'No persisted records yet', driverHistoryClose:'Close history', driverTotal:'Total', driverOnline:'Online', driverRunning:'Running', driverStart:'Start driver', driverStop:'Stop driver', driverMessages:'Messages to you', driverMessagesRefresh:'Refresh', driverMessagesEmpty:'No message from this driver yet', driverMessagesClose:'Close messages', driverMessagesFrom:'from', driverMessagesSent:'Sent', driverMessagesOlder:'Only the newest are shown',
+  driverConversation:'Conversation', driverConversationEmpty:'No messages yet. Say something to your driver.',
+  driverConversationYou:'You', driverConversationDriver:'Driver', driverConversationReply:'Reply',
+  driverConversationReplyingTo:'Replying to', driverConversationCancelReply:'Cancel reply',
+  driverConversationCompose:'Write a message', driverConversationSent:'Sent',
+  driverConversationLoadMore:'Load earlier messages', driverConversationStart:'Beginning of the conversation',
+  driverConversationUnread:'unread',
   summaryWrongProject:"Summary belongs to a different project",
   summaryHeading:"Related executions",
   summaryScope:"Counters cover workflow runs and external attempts; only active ones are listed.",
@@ -74,6 +80,12 @@ const en: Record<string, string> = {
 };
 const zh: Record<string, string> = {
   driverLive:'实时', driverReconnecting:'重新连接中…', driverMessage:'给 driver 发消息', driverMessageSend:'发送', driverMessageSent:'已发送到 driver 收件箱', driverHistory:'运行记录', driverHistoryOlder:'更早记录', driverHistoryRefresh:'刷新', driverHistoryEmpty:'暂无已保存记录', driverHistoryClose:'关闭记录', driverTotal:'总数', driverOnline:'在线', driverRunning:'运行中', driverStart:'启动 driver', driverStop:'停止 driver', driverMessages:'发给你的消息', driverMessagesRefresh:'刷新', driverMessagesEmpty:'该 driver 还没有发来消息', driverMessagesClose:'关闭消息', driverMessagesFrom:'来自', driverMessagesSent:'发送于', driverMessagesOlder:'仅显示最新消息',
+  driverConversation:'对话', driverConversationEmpty:'还没有消息，和你的 driver 说点什么吧。',
+  driverConversationYou:'你', driverConversationDriver:'Driver', driverConversationReply:'回复',
+  driverConversationReplyingTo:'回复', driverConversationCancelReply:'取消回复',
+  driverConversationCompose:'写一条消息', driverConversationSent:'已发送',
+  driverConversationLoadMore:'加载更早的消息', driverConversationStart:'已经是对话开头',
+  driverConversationUnread:'条未读',
   summaryWrongProject:"汇总属于其他项目，已拒绝显示",
   summaryHeading:"关联执行",
   summaryScope:"计数含工作流 Run 与外部尝试；只列出进行中的。",
@@ -135,6 +147,12 @@ const zh: Record<string, string> = {
 };
 const fr: Record<string, string> = {
   driverLive:'En direct', driverReconnecting:'Reconnexion…', driverMessage:'Message au driver', driverMessageSend:'Envoyer', driverMessageSent:'Envoyé à la boîte du driver', driverHistory:'Historique', driverHistoryOlder:'Plus ancien', driverHistoryRefresh:'Actualiser', driverHistoryEmpty:'Aucun enregistrement', driverHistoryClose:'Fermer', driverTotal:'Total', driverOnline:'En ligne', driverRunning:'En cours', driverStart:'Démarrer', driverStop:'Arrêter', driverMessages:'Messages pour vous', driverMessagesRefresh:'Actualiser', driverMessagesEmpty:'Aucun message de ce driver', driverMessagesClose:'Fermer les messages', driverMessagesFrom:'de', driverMessagesSent:'Envoyé', driverMessagesOlder:'Seuls les plus récents sont affichés',
+  driverConversation:'Conversation', driverConversationEmpty:'Aucun message. Écrivez à votre driver.',
+  driverConversationYou:'Vous', driverConversationDriver:'Driver', driverConversationReply:'Répondre',
+  driverConversationReplyingTo:'En réponse à', driverConversationCancelReply:'Annuler la réponse',
+  driverConversationCompose:'Écrire un message', driverConversationSent:'Envoyé',
+  driverConversationLoadMore:'Charger les messages plus anciens', driverConversationStart:'Début de la conversation',
+  driverConversationUnread:'non lus',
   summaryWrongProject:"Le résumé appartient à un autre projet",
   summaryHeading:"Exécutions liées",
   summaryScope:"Compteurs : exécutions de workflow et tentatives externes ; seules les actives sont listées.",

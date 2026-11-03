@@ -1,6 +1,7 @@
 """Private driver deliveries. State project mailboxes remain separate."""
 from __future__ import annotations
 import asyncio
+import base64
 import json
 import time
 from uuid import uuid4
@@ -15,6 +16,7 @@ CREATE TABLE IF NOT EXISTS driver_inbox_messages (
  subject TEXT NOT NULL, body TEXT NOT NULL, refs_json TEXT NOT NULL,
  reply_to_message_id TEXT, created_at TEXT NOT NULL,
  audience TEXT NOT NULL DEFAULT 'driver' CHECK(audience IN ('driver','user')),
+ channel TEXT CHECK(channel IN ('user')),
  CHECK(delivery_mode IN ('transient','standing')));
 CREATE TABLE IF NOT EXISTS driver_inbox_deliveries (
  delivery_id TEXT PRIMARY KEY, message_id TEXT NOT NULL REFERENCES driver_inbox_messages,
@@ -26,9 +28,45 @@ CREATE TABLE IF NOT EXISTS driver_inbox_requests (
  actor TEXT NOT NULL, operation TEXT NOT NULL, request_key TEXT NOT NULL,
  payload_json TEXT NOT NULL, result_json TEXT NOT NULL,
  PRIMARY KEY(actor,operation,request_key));
+CREATE TABLE IF NOT EXISTS driver_user_conversation_reads (
+ project_id TEXT PRIMARY KEY,
+ read_created_at TEXT NOT NULL, read_message_id TEXT,
+ updated_at TEXT NOT NULL);
 """
 KINDS = {"note", "request", "review_request", "handoff_offer", "handoff_reply"}
 SYSTEM_KINDS = {"lease_notice", "takeover_notice", "subagent_orphaned", "handoff_offer"}
+
+# The user's conversation: ONE thread per project holding BOTH directions.
+# A driver -> user message is recognised by `audience='user'`; a user -> driver
+# message is a driver-addressed row (it is delivered to a driver's inbox) marked
+# `channel='user'`. `audience`/`channel` are additive columns, so a row written
+# before either existed still reads back through its own half.
+CONVERSATION = "(audience='user' OR channel='user')"
+
+
+def encode_conversation_cursor(created_at, message_id):
+    """Opaque keyset position: the (created_at, message_id) of the last row read.
+
+    Encoding, not signing: the pair names a position in a total order, so a
+    hand-edited cursor can only move the window - it can never widen what the
+    reader is allowed to see, which the action and project verdicts decide.
+    """
+    return base64.urlsafe_b64encode(
+        json.dumps([created_at, message_id], separators=(",", ":")).encode("utf-8")).decode("ascii")
+
+
+def decode_conversation_cursor(cursor):
+    if not isinstance(cursor, str) or not cursor or len(cursor) > 1000:
+        raise StateGraphError("invalid_cursor")
+    try:
+        payload = json.loads(base64.urlsafe_b64decode(cursor.encode("ascii")))
+    except Exception:
+        raise StateGraphError("invalid_cursor") from None
+    if (not isinstance(payload, list) or len(payload) != 2
+            or not all(isinstance(part, str) and part for part in payload)):
+        raise StateGraphError("invalid_cursor")
+    return payload[0], payload[1]
+
 
 class DriverInbox:
     def __init__(self, store, actor, driver_id=None):
@@ -43,6 +81,14 @@ class DriverInbox:
                         "PRAGMA table_info(driver_inbox_messages)")}:
                     conn.execute("ALTER TABLE driver_inbox_messages ADD COLUMN audience TEXT "
                                  "NOT NULL DEFAULT 'driver' CHECK(audience IN ('driver','user'))")
+                # Additive (the user -> driver half of one conversation). Every
+                # existing row keeps channel NULL: a driver-addressed message
+                # that no human wrote is not part of the user's thread, and the
+                # rows the driver sent the user are recognised by `audience`.
+                if "channel" not in {r["name"] for r in conn.execute(
+                        "PRAGMA table_info(driver_inbox_messages)")}:
+                    conn.execute("ALTER TABLE driver_inbox_messages ADD COLUMN channel TEXT "
+                                 "CHECK(channel IN ('user'))")
                 conn.commit()
 
     def _authorize(self, driver_id, *, write=False, break_glass_reason=None):
@@ -168,7 +214,19 @@ class DriverInbox:
         return {**result, **recipient_presence_block(
             conn, [d["target_driver_id"] for d in result["deliveries"]], fan_out=fan_out)}
 
-    def send_user_message(self, request_key, subject, body, project_id, refs=None):
+    @staticmethod
+    def _conversation_message(conn, project_id, message_id):
+        """One row of THIS project's user conversation, or None."""
+        if not isinstance(message_id, str) or not message_id or len(message_id) > 200:
+            raise StateGraphError("invalid_request")
+        row = conn.execute(
+            "SELECT message_id,thread_id,sender_driver_id,audience,channel FROM driver_inbox_messages "
+            f"WHERE message_id=? AND project_id=? AND {CONVERSATION}",
+            (message_id, project_id)).fetchone()
+        return None if row is None else dict(row)
+
+    def send_user_message(self, request_key, subject, body, project_id, refs=None,
+                          reply_to_message_id=None):
         """Record one message from the calling driver to the project's user.
 
         PRESENTATION, never authority: this writes one message row with NO
@@ -178,6 +236,11 @@ class DriverInbox:
         Idempotent per (actor, request_key): the same payload returns the same
         durable message identity, a different one under the same key is refused
         with idempotency_conflict. The row is what survives a backend restart.
+
+        `reply_to_message_id` answers one of the USER's messages in this project;
+        it is persisted on the row and joins that message's thread. It changes
+        nothing about the message's standing: a reply is no more authoritative
+        than the message it answers.
         """
         if type(request_key) is not str or not request_key or len(request_key)>320:
             raise StateGraphError("invalid_request")
@@ -188,7 +251,12 @@ class DriverInbox:
         refs = {} if refs is None else refs
         if not isinstance(refs, dict):
             raise StateGraphError("invalid_refs")
-        payload = json.dumps([subject, body, project_id, refs, self.driver_id], sort_keys=True)
+        # The reply link is appended only when it is set, so the payload of every
+        # request written before it existed still replays byte-identically.
+        payload = [subject, body, project_id, refs, self.driver_id]
+        if reply_to_message_id is not None:
+            payload.append(reply_to_message_id)
+        payload = json.dumps(payload, sort_keys=True)
         with self.store.transaction(write=True) as conn:
             replay = self._replay(conn, "send_user", request_key, payload)
             if replay is not None:
@@ -198,15 +266,242 @@ class DriverInbox:
                 raise StateGraphError("inactive_driver")
             self.store._project(conn, project_id)
             self._refs(conn, refs, project_id)
+            parent = None
+            if reply_to_message_id is not None:
+                parent = self._conversation_message(conn, project_id, reply_to_message_id)
+                if parent is None:
+                    raise StateGraphError("unknown_message")
+                if parent["audience"] != "driver" or parent["channel"] != "user":
+                    raise StateGraphError("invalid_reply_target")
             mid, created = str(uuid4()), now()
             conn.execute("INSERT INTO driver_inbox_messages(message_id,thread_id,sender_driver_id,project_id,"
                          "kind,delivery_mode,subject,body,refs_json,reply_to_message_id,created_at,audience) "
                          "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-                         (mid, mid, self.driver_id, project_id, "note", "transient", subject, body,
-                          json.dumps(refs), None, created, "user"))
+                         (mid, parent["thread_id"] if parent else mid, self.driver_id, project_id, "note",
+                          "transient", subject, body, json.dumps(refs), reply_to_message_id, created, "user"))
             return self._record(conn, "send_user", request_key, payload,
                                 {"message_id": mid, "project_id": project_id,
                                  "sender_driver_id": self.driver_id, "created_at": created})
+
+    def send_user_conversation_message(self, request_key, project_id, body, subject=None,
+                                       reply_to_message_id=None, target_driver_id=None):
+        """Record one message from the project's USER to its driver.
+
+        The mirror of `send_user_message`, and equally PRESENTATION: this writes
+        one message row plus the inbox deliveries that make it visible to the
+        addressed driver. It is not evidence, it answers no checkpoint, it
+        cannot verify a node, and it needs no driver to be online - the row and
+        its delivery wait for the driver.
+
+        `reply_to_message_id` must name a message the driver sent this project's
+        user. The link is stored ON THE ROW, so it survives the request and is
+        visible to everyone who reads the message back. It also decides the
+        recipient (whoever wrote the message being answered) unless a target is
+        named explicitly.
+
+        Idempotent per (actor, request_key), like every write here.
+        """
+        if type(request_key) is not str or not request_key or len(request_key) > 320:
+            raise StateGraphError("invalid_request")
+        subject = "Message from the user" if subject is None else subject
+        if (type(subject) is not str or not 1 <= len(subject) <= 200
+                or type(body) is not str or len(body) > 8000):
+            raise StateGraphError("invalid_request")
+        if self.driver_id or not self.project_read_trusted or not self.actor.startswith("owner:"):
+            raise StateGraphError("user_identity_required")
+        payload = json.dumps([subject, body, project_id, reply_to_message_id, target_driver_id],
+                             sort_keys=True)
+        with self.store.transaction(write=True) as conn:
+            replay = self._replay(conn, "send_user_conversation", request_key, payload)
+            if replay is not None:
+                return replay
+            self.store._project(conn, project_id)
+            parent = None
+            if reply_to_message_id is not None:
+                parent = self._conversation_message(conn, project_id, reply_to_message_id)
+                if parent is None:
+                    raise StateGraphError("unknown_message")
+                if parent["audience"] != "user" or not parent["sender_driver_id"]:
+                    raise StateGraphError("invalid_reply_target")
+            if target_driver_id is not None:
+                targets = [target_driver_id]
+            elif parent is not None:
+                targets = [parent["sender_driver_id"]]
+            else:
+                targets = [r["driver_id"] for r in conn.execute(
+                    "SELECT p.driver_id FROM project_drivers p JOIN drivers d USING(driver_id) "
+                    "WHERE p.project_id=? AND p.status='member' ORDER BY p.driver_id", (project_id,))]
+            if not targets or len(targets) > 200:
+                raise StateGraphError("no_recipients")
+            for target in targets:
+                self._driver(conn, target)
+            mid, created = str(uuid4()), now()
+            conn.execute("INSERT INTO driver_inbox_messages(message_id,thread_id,sender_driver_id,project_id,"
+                         "kind,delivery_mode,subject,body,refs_json,reply_to_message_id,created_at,audience,channel) "
+                         "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                         (mid, parent["thread_id"] if parent else mid, None, project_id, "note",
+                          "transient", subject, body, "{}", reply_to_message_id, created, "driver", "user"))
+            deliveries = []
+            for target in targets:
+                seq = conn.execute("SELECT COALESCE(MAX(seq),0)+1 FROM driver_inbox_deliveries "
+                                   "WHERE target_driver_id=?", (target,)).fetchone()[0]
+                did = str(uuid4())
+                conn.execute("INSERT INTO driver_inbox_deliveries VALUES(?,?,?,?,?,?)",
+                             (did, mid, target, seq, "unread", 1))
+                deliveries.append({"delivery_id": did, "target_driver_id": target, "seq": seq,
+                                   "status": "unread", "version": 1})
+            result = self._record(conn, "send_user_conversation", request_key, payload,
+                                  {"message_id": mid, "project_id": project_id, "sender_kind": "user",
+                                   "created_at": created, "reply_to_message_id": reply_to_message_id,
+                                   "deliveries": deliveries})
+        from core.state_changes import notify
+        notify(self.store.db.db_path)
+        return result
+
+    @writer_only_read('list_user_conversation')
+    def list_user_conversation(self, project_id, limit=30, cursor=None):
+        """Newest-first page of ONE conversation: both senders, one order.
+
+        Rows only: the driver's presence and runtime are never consulted, so a
+        question can be read (and answered) while the driver is offline.
+
+        Paging is keyset on `(created_at, message_id)` - the exact total order
+        the page is sorted by - never OFFSET. `next_cursor` names the last row
+        returned; the next page is STRICTLY older than that pair. Because
+        message_id is unique, the pair is a strict total order: no row can be
+        returned twice, and no row that existed when the walk started can be
+        stepped over, whatever arrives between two page fetches. `has_more` is
+        answered from a limit+1 fetch, so the end of history (`next_cursor:
+        null`) is stated rather than inferred from a short page.
+        """
+        if type(limit) is not int or not 1 <= limit <= 200:
+            raise StateGraphError("invalid_request")
+        after = None if cursor is None else decode_conversation_cursor(cursor)
+        bound, params = "", [project_id]
+        if after is not None:
+            bound = "AND (created_at < ? OR (created_at = ? AND message_id < ?))"
+            params += [after[0], after[0], after[1]]
+        with self.store.transaction() as conn:
+            self.store._project(conn, project_id)
+            rows = [dict(r) for r in conn.execute(
+                "SELECT message_id,thread_id,sender_driver_id,project_id,subject,body,refs_json,"
+                "reply_to_message_id,created_at,audience FROM driver_inbox_messages "
+                f"WHERE project_id=? AND {CONVERSATION} {bound} "
+                "ORDER BY created_at DESC, message_id DESC LIMIT ?", (*params, limit + 1))]
+            total = conn.execute("SELECT COUNT(*) FROM driver_inbox_messages "
+                                 f"WHERE project_id=? AND {CONVERSATION}", (project_id,)).fetchone()[0]
+            marker = self._read_marker(conn, project_id)
+            unread = self._unread(conn, project_id)
+        page, more = rows[:limit], len(rows) > limit
+        messages = []
+        for row in page:
+            messages.append({
+                "message_id": row["message_id"], "thread_id": row["thread_id"],
+                "project_id": row["project_id"],
+                # Who spoke: the driver's id, or the user. `sender_kind` is the
+                # discriminator the UI renders; `sender_driver_id` is null for
+                # the user, because a human has no driver id to report.
+                "sender_kind": "driver" if row["audience"] == "user" else "user",
+                "sender_driver_id": row["sender_driver_id"],
+                "subject": row["subject"], "body": row["body"],
+                "refs": json.loads(row["refs_json"]),
+                "reply_to_message_id": row["reply_to_message_id"],
+                "created_at": row["created_at"]})
+        next_cursor = (encode_conversation_cursor(page[-1]["created_at"], page[-1]["message_id"])
+                       if more else None)
+        return {"project_id": project_id, "messages": messages, "has_more": more,
+                "next_cursor": next_cursor, "end_of_history": not more, "matched_total": total,
+                "unread_count": unread,
+                "read_upto_message_id": marker["read_message_id"] if marker else None,
+                "read_upto_created_at": marker["read_created_at"] if marker else None}
+
+    @staticmethod
+    def _read_marker(conn, project_id):
+        row = conn.execute("SELECT read_created_at,read_message_id,updated_at "
+                           "FROM driver_user_conversation_reads WHERE project_id=?",
+                           (project_id,)).fetchone()
+        return None if row is None else dict(row)
+
+    @staticmethod
+    def _unread(conn, project_id):
+        """How many messages the DRIVER sent this project's user are newer than
+        the persisted read marker.
+
+        Persisted rows only: the sender's presence is never consulted, so the
+        count is the same whether the driver is working or long gone. With no
+        marker every message the driver sent is unread.
+        """
+        row = conn.execute(
+            "SELECT COUNT(*) FROM driver_inbox_messages m "
+            "LEFT JOIN driver_user_conversation_reads r ON r.project_id = m.project_id "
+            "WHERE m.audience='user' AND m.project_id=? AND (r.read_created_at IS NULL "
+            " OR m.created_at > r.read_created_at "
+            " OR (m.created_at = r.read_created_at "
+            "     AND m.message_id > COALESCE(r.read_message_id,'')))",
+            (project_id,)).fetchone()
+        return row[0]
+
+    def mark_user_conversation_read(self, project_id, message_id):
+        """Advance the user's persisted read marker to `message_id`.
+
+        `message_id` must be a message of THIS project's conversation - the UI
+        passes the newest one it actually loaded, never "now". That is what
+        keeps a message the driver sends while the page is open unread: the
+        marker can only ever move to a row the user was shown.
+
+        Idempotent and monotonic: the marker never moves backwards, and
+        re-marking the same position writes nothing and answers the same
+        result, so a double click cannot double-count or lose a message.
+        """
+        if not isinstance(message_id, str) or not message_id:
+            raise StateGraphError("invalid_request")
+        if self.driver_id or not self.project_read_trusted or not self.actor.startswith("owner:"):
+            raise StateGraphError("user_identity_required")
+        with self.store.transaction(write=True) as conn:
+            self.store._project(conn, project_id)
+            target = conn.execute(
+                "SELECT created_at FROM driver_inbox_messages "
+                f"WHERE message_id=? AND project_id=? AND {CONVERSATION}",
+                (message_id, project_id)).fetchone()
+            if target is None:
+                raise StateGraphError("unknown_message")
+            created = target["created_at"]
+            marker = self._read_marker(conn, project_id)
+            advanced = (marker is None
+                        or created > marker["read_created_at"]
+                        or (created == marker["read_created_at"]
+                            and message_id > (marker["read_message_id"] or "")))
+            if advanced:
+                conn.execute(
+                    "INSERT OR REPLACE INTO driver_user_conversation_reads"
+                    "(project_id,read_created_at,read_message_id,updated_at) VALUES(?,?,?,?)",
+                    (project_id, created, message_id, now()))
+            marker = self._read_marker(conn, project_id)
+            return {"project_id": project_id, "advanced": advanced,
+                    "read_upto_message_id": marker["read_message_id"],
+                    "read_upto_created_at": marker["read_created_at"],
+                    "unread_count": self._unread(conn, project_id)}
+
+    @writer_only_read('user_conversation_unread')
+    def user_conversation_unread(self, project_id=None):
+        """Unread driver messages per project, from persisted rows only.
+
+        This is the badge the dashboard shows before the conversation is
+        opened, so it must answer without reading any message body and without
+        the sending driver being online. `total` is the sum over the projects
+        the caller asked about (all of them when no project is named).
+        """
+        with self.store.transaction() as conn:
+            if project_id is not None:
+                self.store._project(conn, project_id)
+                projects = {project_id: self._unread(conn, project_id)}
+            else:
+                projects = {r["project_id"]: r["n"] for r in conn.execute(
+                    "SELECT project_id, COUNT(*) AS n FROM driver_inbox_messages "
+                    "WHERE audience='user' AND project_id IS NOT NULL GROUP BY project_id")}
+                for pid in list(projects):
+                    projects[pid] = self._unread(conn, pid)
+        return {"projects": projects, "total": sum(projects.values())}
 
     @writer_only_read('list_user_messages')
     def list_user_messages(self, project_id, limit=50):

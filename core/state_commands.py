@@ -326,6 +326,9 @@ class SendUserMessage(Project):
         "Optional: node_key (requires project_id), attempt_id, issue_id, claim_id, "
         "subagent_id, each a nonempty string naming an existing record. Context only: "
         "a ref never becomes evidence or acceptance."))
+    reply_to_message_id: str | None = Field(default=None, max_length=200, description=(
+        "The id of one of the USER's messages in this project, from "
+        "list_user_conversation. The link is stored on the message; it grants nothing."))
 
     @field_serializer("refs")
     def _set_refs_only(self, refs: MessageRefs) -> dict:
@@ -334,6 +337,50 @@ class SendUserMessage(Project):
 
 class ListUserMessages(Project):
     limit: int = Field(default=50, ge=1, le=200)
+
+
+class SendUserConversationMessage(Project):
+    """User -> driver: the other half of one project conversation.
+
+    Needs no driver online, and is presentation only: the row - and the inbox
+    delivery that shows it to the driver - grants nothing and answers nothing.
+    """
+
+    request_key: str = Field(min_length=1, max_length=320)
+    body: str = Field(max_length=8000)
+    subject: str | None = Field(default=None, min_length=1, max_length=200, description=(
+        "Optional heading; defaults to a fixed label rather than a copy of the body."))
+    reply_to_message_id: str | None = Field(default=None, max_length=200, description=(
+        "The id of one message the DRIVER sent this project's user, from "
+        "list_user_conversation. Persisted on the row and shown on read-back; a "
+        "reply to an id that is not in this project's conversation is refused."))
+    target_driver_id: str | None = Field(default=None, max_length=200, description=(
+        "Who to address. Defaulted from the replied-to message's sender, or to this "
+        "project's member drivers when this is not a reply."))
+
+
+class ListUserConversation(Project):
+    limit: int = Field(default=30, ge=1, le=200)
+    cursor: str | None = Field(default=None, max_length=1000, description=(
+        "`next_cursor` from the previous page. Keyset on (created_at, message_id), "
+        "strictly older, so walking every page returns each message exactly once. "
+        "Omit for the newest page; `next_cursor: null` is the end of history."))
+
+
+class MarkUserConversationRead(Project):
+    """Move the user's persisted read marker to a message they were shown."""
+
+    message_id: str = Field(min_length=1, max_length=200, description=(
+        "The newest message the user actually SAW (a message_id from "
+        "list_user_conversation), never 'now': a message that arrives while the "
+        "page is open stays unread until the page shows it. Monotonic and "
+        "idempotent - the marker never moves backwards and marking the same "
+        "position twice changes nothing."))
+
+
+class UserConversationUnread(Request):
+    project_id: str | None = Field(default=None, description=(
+        "Limit the count to one project. Omit for every project with driver messages."))
 
 
 class WaitForDriverInbox(Request):
@@ -974,7 +1021,8 @@ READ_REQUESTS = {
     "driver_postcompact_guidance": DriverPostcompactGuidance,
     "list_driver_notebooks": Request,
     "list_driver_messages": ListDriverMessages, "wait_for_driver_inbox": WaitForDriverInbox,
-    "list_user_messages": ListUserMessages,
+    "list_user_messages": ListUserMessages, "list_user_conversation": ListUserConversation,
+    "user_conversation_unread": UserConversationUnread,
     "design_catalog": Project, "get_design_revision": DesignRevision,
     "search_design_items": SearchDesignItems, "design_impact": DesignImpact,
     "get_design_baseline": DesignBaseline, "get_design_bindings": Node,
@@ -1058,6 +1106,9 @@ WRITER_ONLY_READS = frozenset({
     # Driver -> user messages: the user's own dashboard feed. Private like the
     # driver inbox it shares storage with, and readable only through a credential.
     "list_user_messages",
+    # The same conversation, both directions: the user's own thread. Private
+    # for exactly the same reason as the feed above.
+    "list_user_conversation", "user_conversation_unread",
     # P3: subagent registry (workspaces) and handoff packages. Both private.
     "list_subagents", "list_handoffs", "get_handoff",
 })
@@ -1080,6 +1131,8 @@ def is_public_read(action: str) -> bool:
 WRITE_REQUESTS = {
     "send_driver_message": SendDriverMessage,
     "send_user_message": SendUserMessage,
+    "send_user_conversation_message": SendUserConversationMessage,
+    "mark_user_conversation_read": MarkUserConversationRead,
     "acknowledge_driver_message": DriverDeliveryTransition, "resolve_driver_message": DriverDeliveryTransition,
     "create_design_revision": CreateDesignRevision, "create_design_baseline": CreateDesignBaseline,
     "bind_node_design": BindDesign,
@@ -1216,8 +1269,12 @@ def _handlers(service) -> dict:
         "list_driver_notebooks": service.list_driver_notebooks,
         "send_driver_message": service.driver_inbox.send_driver_message,
         "send_user_message": service.driver_inbox.send_user_message,
+        "send_user_conversation_message": service.driver_inbox.send_user_conversation_message,
+        "mark_user_conversation_read": service.driver_inbox.mark_user_conversation_read,
         "list_driver_messages": service.driver_inbox.list_driver_messages,
         "list_user_messages": service.driver_inbox.list_user_messages,
+        "list_user_conversation": service.driver_inbox.list_user_conversation,
+        "user_conversation_unread": service.driver_inbox.user_conversation_unread,
         "wait_for_driver_inbox": service.driver_inbox.wait_for_driver_inbox,
         "acknowledge_driver_message": service.driver_inbox.acknowledge_driver_message,
         "resolve_driver_message": service.driver_inbox.resolve_driver_message,

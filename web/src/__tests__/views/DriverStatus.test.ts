@@ -2,7 +2,8 @@ import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
 import { render, cleanup, fireEvent, waitFor } from '@testing-library/svelte';
 import { authStore } from '../../stores/auth';
 import { langStore } from '../../stores/i18n';
-const api = vi.hoisted(() => ({ driverStatus: vi.fn(), startDshDriver: vi.fn(), stopDshDriver: vi.fn(), dshDriverHistory: vi.fn(), dshDriverMessages: vi.fn(), messageDshDriver: vi.fn() }));
+const api = vi.hoisted(() => ({ driverStatus: vi.fn(), startDshDriver: vi.fn(), stopDshDriver: vi.fn(), dshDriverHistory: vi.fn(), dshDriverMessages: vi.fn(), messageDshDriver: vi.fn(),
+  dshDriverConversation: vi.fn(), dshDriverConversationUnread: vi.fn(), sendDriverConversationMessage: vi.fn(), markDriverConversationRead: vi.fn() }));
 vi.mock('../../lib/api', () => api);
 import DriverStatus from '../../views/DriverStatus.svelte';
 const projects: any[] = [{ project_id: 'alpha', title: 'Alpha' }, { project_id: 'beta', title: 'Beta' }];
@@ -18,6 +19,10 @@ beforeEach(() => {
   api.dshDriverHistory.mockResolvedValue({driver_id: 'dsh-alpha', session_id: 'root-alpha', entries: [{seq: 5, type: 'tool/result', text: 'saved result', timestamp: 1}], has_more: true, next_before_seq: 5});
   api.dshDriverMessages.mockResolvedValue({project_id: 'alpha', messages: [], matched_total: 0, truncated: false});
   api.messageDshDriver.mockResolvedValue({});
+  api.dshDriverConversationUnread.mockResolvedValue({projects: {}, total: 0});
+  api.dshDriverConversation.mockResolvedValue({project_id: 'alpha', messages: [], has_more: false, next_cursor: null, end_of_history: true, matched_total: 0, unread_count: 0, read_upto_message_id: null, read_upto_created_at: null});
+  api.sendDriverConversationMessage.mockResolvedValue({});
+  api.markDriverConversationRead.mockResolvedValue({});
   api.startDshDriver.mockResolvedValue({}); api.stopDshDriver.mockResolvedValue({});
 });
 afterEach(() => {cleanup(); vi.useRealTimers();});
@@ -113,37 +118,56 @@ describe('driver records and realtime conversation', () => {
   });
 });
 
-describe('driver messages addressed to the user', () => {
-  const page = (messages: any[]) => ({project_id: 'alpha', messages, matched_total: messages.length, truncated: false});
-  const message = (id: string, subject: string, body: string, created: string) =>
-    ({message_id: id, sender_driver_id: 'dsh-alpha', project_id: 'alpha', subject, body, refs: {}, created_at: created});
-  it('reads them newest first with sender and time, and never needs the run log', async () => {
-    api.dshDriverMessages.mockResolvedValue(page([
-      message('m2', 'Second report', 'all nodes dispatched', '2026-11-03T10:00:00+00:00'),
-      message('m1', 'First report', 'started on the frontier', '2026-11-03T09:00:00+00:00'),
-    ]));
+describe('one conversation with the driver', () => {
+  const entry = (id: string, kind: 'driver' | 'user', subject: string, body: string, created: string, extra: any = {}) =>
+    ({message_id: id, thread_id: id, project_id: 'alpha', sender_kind: kind,
+      sender_driver_id: kind === 'driver' ? 'dsh-alpha' : null, subject, body, refs: {},
+      reply_to_message_id: null, created_at: created, ...extra});
+  const page = (messages: any[], extra: any = {}) =>
+    ({project_id: 'alpha', messages, has_more: false, next_cursor: null, end_of_history: true,
+      matched_total: messages.length, unread_count: 0, read_upto_message_id: null,
+      read_upto_created_at: null, ...extra});
+
+  it('shows the persisted unread badge, then clears it by reading the thread', async () => {
+    api.dshDriverConversationUnread
+      .mockResolvedValueOnce({projects: {alpha: 2}, total: 2})
+      .mockResolvedValue({projects: {alpha: 0, beta: 0}, total: 0});
+    api.dshDriverConversation.mockResolvedValue(page([
+      entry('m2', 'driver', 'Second report', 'all nodes dispatched', '2026-11-03T10:00:00+00:00'),
+      entry('m1', 'user', 'Message from the user', 'start with node a', '2026-11-03T09:00:00+00:00'),
+    ], {unread_count: 2}));
     const view = render(DriverStatus, {projects});
     await view.findByText('Total: 4 · Online: 2');
-    // beta has no managed runtime at all; every project still exposes its feed.
-    expect(view.getAllByRole('button', {name: 'Messages to you'})).toHaveLength(2);
-    await fireEvent.click(view.getAllByRole('button', {name: 'Messages to you'})[0]);
-    await waitFor(() => expect(api.dshDriverMessages).toHaveBeenCalledWith('alpha'));
+    // beta has no managed runtime at all; every project still exposes its thread.
+    expect(view.getAllByRole('button', {name: 'Conversation'})).toHaveLength(2);
+    await waitFor(() => expect(view.container.querySelectorAll('.unread')).toHaveLength(1));
+    expect(view.container.querySelector('.unread')!.textContent).toBe('2');
+
+    await fireEvent.click(view.getAllByRole('button', {name: 'Conversation'})[0]);
+    await waitFor(() => expect(api.dshDriverConversation).toHaveBeenCalledWith('alpha'));
     await view.findByText('Second report');
-    expect(view.getByText('all nodes dispatched')).toBeTruthy();
-    expect(view.getByText('started on the frontier')).toBeTruthy();
-    expect(view.container.textContent).toContain('from dsh-alpha');
-    expect([...view.container.querySelectorAll('article.message strong')].map(e => e.textContent))
-      .toEqual(['Second report', 'First report']);
-    // Reading a message is not reading a run: the history/live stream stays shut.
+    // Opening the thread advanced the persisted marker to the newest message it
+    // showed - not to "now" - and the badge went away.
+    await waitFor(() => expect(api.markDriverConversationRead).toHaveBeenCalledWith('alpha', 'm2'));
+    await waitFor(() => expect(view.container.querySelector('.unread')).toBeNull());
+    // One chronological order with both senders visible.
+    expect([...view.container.querySelectorAll('article.message .subject')].map(e => e.textContent))
+      .toEqual(['Message from the user', 'Second report']);
+    expect([...view.container.querySelectorAll('article.message .sender')].map(e => e.textContent))
+      .toEqual(['You', 'dsh-alpha']);
+    // Reading a conversation is not reading a run: the history/live stream stays shut.
     expect(api.dshDriverHistory).not.toHaveBeenCalled();
     await fireEvent.click(view.getByRole('button', {name: 'Close messages'}));
     expect(view.container.querySelector('article.message')).toBeNull();
   });
-  it('says so when the driver has sent nothing yet', async () => {
+
+  it('says so when the conversation is empty, and shows no badge for a read thread', async () => {
     const view = render(DriverStatus, {projects});
     await view.findByText('Total: 4 · Online: 2');
-    await fireEvent.click(view.getAllByRole('button', {name: 'Messages to you'})[0]);
-    await view.findByText('No message from this driver yet');
-    expect(api.dshDriverMessages).toHaveBeenCalledWith('alpha');
+    await waitFor(() => expect(api.dshDriverConversationUnread).toHaveBeenCalled());
+    expect(view.container.querySelector('.unread')).toBeNull();
+    await fireEvent.click(view.getAllByRole('button', {name: 'Conversation'})[0]);
+    await view.findByText('No messages yet. Say something to your driver.');
+    expect(api.markDriverConversationRead).not.toHaveBeenCalled();
   });
 });

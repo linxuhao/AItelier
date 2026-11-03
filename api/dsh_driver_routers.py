@@ -81,6 +81,50 @@ def messages(project_id: str, limit: int = Query(default=50, ge=1, le=200),
         raise HTTPException(422, str(exc)) from exc
 
 
+@router.get("/unread", dependencies=[Depends(authz.require_reader)])
+def unread(project_id: str | None = Query(default=None, max_length=200),
+           service=Depends(get_service)):
+    """The unread badge: how many driver messages the user has not seen yet.
+
+    Counted from persisted rows against the persisted read marker
+    (`mark_user_conversation_read`), so it survives a refresh and a different
+    browser, and it never consults the sending driver's presence.
+    """
+    try:
+        return execute(service, "user_conversation_unread", {"project_id": project_id})
+    except ProjectPrivate as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except StateNotFound as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except StateGraphError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@router.get("/{project_id}/conversation", dependencies=[Depends(authz.require_reader)])
+def conversation(project_id: str, limit: int = Query(default=30, ge=1, le=200),
+                 cursor: str | None = Query(default=None, max_length=1000),
+                 service=Depends(get_service)):
+    """ONE conversation: what the driver told the user and what the user told it.
+
+    Both directions, one chronological order (newest first), each entry carrying
+    its sender. `next_cursor` is a keyset position, so `?cursor=` walks older
+    pages without duplicating or skipping a message while new ones arrive;
+    `next_cursor: null` is the end of history. Same authenticated reader verdict
+    as the neighbouring driver routes, and persisted rows only - nothing here
+    consults the driver's presence or runtime, so an offline driver's messages
+    still read.
+    """
+    try:
+        return execute(service, "list_user_conversation",
+                       {"project_id": project_id, "limit": limit, "cursor": cursor})
+    except ProjectPrivate as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except StateNotFound as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except StateGraphError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
 @router.post("/{project_id}/start", dependencies=[Depends(authz.require_writer)])
 async def start(project_id: str, body: Start, request: Request, runtime=Depends(manager)):
     try:

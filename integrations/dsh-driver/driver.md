@@ -38,7 +38,12 @@ owns event cursors and waits without spending model turns on timeouts. Do not
 poll, call the external-agent wait tools, or repeat work after a wake. A final
 reply leaves this driver idle and subscribed; it does not stop the runtime.
 
-Dashboard messages arrive through your private driver inbox at the next step.
+Dashboard messages arrive through your private driver inbox at the next step;
+the thread they belong to is list_user_conversation(project_id), which returns
+your messages and the user's in one order. When the user's message answers one
+of yours, it carries reply_to_message_id - answer with
+send_user_message(..., reply_to_message_id=<their message>) so the link is
+stored on your message rather than only implied.
 ANYTHING the user should see goes through send_user_message with a fresh
 request_key. It is the only channel that reaches them - a message that lives
 only in this transcript, or only in a final reply, is NOT delivered and will

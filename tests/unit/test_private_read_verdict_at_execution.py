@@ -48,6 +48,8 @@ _ARGS = {
     'list_driver_messages': {},
     'list_driver_notebooks': {},
     'list_user_messages': {'project_id': C.OPEN},
+    'list_user_conversation': {'project_id': C.OPEN},
+    'user_conversation_unread': {},
     'wait_for_driver_inbox': {'timeout_seconds': 0},
     "events": {"project_id": C.OPEN},
     "get_claim": {"project_id": C.OPEN, "claim_id": "claim-canary-public-id"},

@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { authStore } from '../stores/auth';
-  import { driverStatus, startDshDriver, stopDshDriver, dshDriverHistory, dshDriverMessages, messageDshDriver, type DriverStatusResponse, type DriverHistory, type DriverHistoryEntry, type DriverUserMessages } from '../lib/api';
+  import { driverStatus, startDshDriver, stopDshDriver, dshDriverHistory, messageDshDriver, dshDriverConversationUnread, type DriverStatusResponse, type DriverHistory, type DriverHistoryEntry } from '../lib/api';
+  import DriverConversation from './DriverConversation.svelte';
   import type { StateProjectRow } from '../lib/stateGraph';
   import { st } from '../lib/stateI18n.svelte';
   const { projects = [], projectId = '' }: {projects?: StateProjectRow[]; projectId?: string} = $props();
@@ -18,8 +19,9 @@
   let latest = $state(true);
   let pendingLive: DriverHistoryEntry[] = [];
   let message = $state(''), sending = $state(false), messageSent = $state(false), messageError = $state('');
-  let messagesProject = $state(''), messages = $state<DriverUserMessages | null>(null);
-  let messagesLoading = $state(false), messagesError = $state(''), messagesGeneration = 0;
+  // ONE conversation per project (both directions) and its persisted unread badge.
+  let conversationProject = $state('');
+  let unread = $state<Record<string, number>>({});
   function mergeEntries(entries: DriverHistoryEntry[], updates: DriverHistoryEntry[]) {
     return [...new Map([...entries, ...updates].map(e => [e.seq, e])).values()].sort((a, b) => a.seq - b.seq).slice(-100);
   }
@@ -92,24 +94,18 @@
     finally { if (mounted && version === historyGeneration) historyLoading = false; }
   }
   function closeHistory() { stream?.close(); stream = undefined; live = false; pendingLive = []; historyGeneration++; historyProject = ''; history = null; historyLoading = false; }
-  // Messages the driver addressed to the user. Persisted rows: this must not
-  // depend on the run log, the session or the driver still being online.
-  async function loadMessages(id: string) {
-    const version = ++messagesGeneration;
-    messagesLoading = true; messagesError = '';
+  // The unread badge counts persisted rows against the persisted read marker,
+  // so it survives a refresh and needs no driver online. It is refreshed on the
+  // same tick as the driver table, and the conversation advances the marker
+  // only up to what it actually showed.
+  async function loadUnread() {
     try {
-      const page = await dshDriverMessages(id);
-      if (mounted && version === messagesGeneration && messagesProject === id) messages = page;
-    } catch (e) {
-      if (mounted && version === messagesGeneration && messagesProject === id) messagesError = String(e instanceof Error ? e.message : e);
-    } finally { if (mounted && version === messagesGeneration && messagesProject === id) messagesLoading = false; }
+      const result = await dshDriverConversationUnread();
+      if (mounted) unread = result.projects ?? {};
+    } catch { /* the badge is a convenience: a failed count hides it, never blocks the page */ }
   }
-  function showMessages(id: string) {
-    if (messagesProject === id) { void loadMessages(id); return; }
-    messagesProject = id; messages = null; messagesError = ''; messagesLoading = false;
-    void loadMessages(id);
-  }
-  function closeMessages() { messagesGeneration++; messagesProject = ''; messages = null; messagesError = ''; messagesLoading = false; }
+  function showConversation(id: string) { conversationProject = id; }
+  function closeConversation() { conversationProject = ''; void loadUnread(); }
   function recordText(text: string) {
     try {
       const data = JSON.parse(text), content = data.message?.content;
@@ -120,12 +116,12 @@
   async function refresh() {
     if (fetching || !$authStore.canWrite) return;
     fetching = true;
-    try { const result = await driverStatus(); if (mounted) { status = result; error = ''; if (messagesProject) void loadMessages(messagesProject); } }
+    try { const result = await driverStatus(); if (mounted) { status = result; error = ''; void loadUnread(); } }
     catch (e) { if (mounted) error = String(e instanceof Error ? e.message : e); }
     finally { fetching = false; }
   }
   $effect(() => { if ($authStore.permissionResolved && $authStore.canWrite && mounted) void refresh(); });
-  $effect(() => { if ($authStore.permissionResolved && !$authStore.canWrite) closeHistory(); });
+  $effect(() => { if ($authStore.permissionResolved && !$authStore.canWrite) { closeHistory(); conversationProject = ''; unread = {}; } });
   onMount(() => { mounted = true; void refresh(); timer = setInterval(refresh, 10000); });
   onDestroy(() => { mounted = false; historyGeneration++; stream?.close(); if (timer) clearInterval(timer); });
   async function toggle(id: string, enabled: boolean) {
@@ -152,7 +148,7 @@
           <tr><td>{p.title}</td><td>{activity?.total ?? 0} / {activity?.online ?? 0}</td><td>{activity?.running_subagents ?? 0}</td><td>{activity?.running_pipelines ?? 0}</td>
             <td><span>{activity?.managed?.phase ?? '—'}</span>
               <button class="outline" disabled={!!busy} onclick={() => toggle(p.project_id, !!activity?.managed?.enabled)}>{busy === p.project_id ? '…' : activity?.managed?.enabled ? st('driverStop') : st('driverStart')}</button>
-              <button class="outline" onclick={() => showMessages(p.project_id)}>{st('driverMessages')}</button>
+              <button class="outline" aria-label={st('driverConversation')} onclick={() => showConversation(p.project_id)}>{st('driverConversation')}{#if unread[p.project_id]}<span class="unread" title={st('driverConversationUnread')}>{unread[p.project_id]}</span>{/if}</button>
               {#if activity?.managed}<button class="outline" onclick={() => showHistory(p.project_id)}>{st('driverHistory')}</button>{/if}
               {#if activity?.managed?.last_error}<small role="status">{activity.managed.last_error}</small>{/if}
             </td></tr>
@@ -182,23 +178,11 @@
           {/if}
         </section>
       {/if}
-      {#if messagesProject}
-        <section class="history" aria-label={st('driverMessages')}>
-          <header><strong>{st('driverMessages')} · {projects.find(p => p.project_id === messagesProject)?.title ?? messagesProject}</strong>
-            <button class="outline" disabled={messagesLoading} onclick={() => showMessages(messagesProject)}>{st('driverMessagesRefresh')}</button>
-            <button class="outline" onclick={closeMessages}>{st('driverMessagesClose')}</button></header>
-          {#if messagesError}<p role="alert">{messagesError}</p>{/if}
-          {#if messagesLoading && !messages}<p role="status">{st('loading')}</p>{/if}
-          {#if messages}
-            {#if !messages.messages.length}<p>{st('driverMessagesEmpty')}</p>{/if}
-            {#each messages.messages as item (item.message_id)}
-              <article class="message"><header><strong>{item.subject}</strong>
-                <span class="identity">{st('driverMessagesFrom')} {item.sender_driver_id} · {st('driverMessagesSent')} {new Date(item.created_at).toLocaleString()}</span></header>
-                {#if item.body}<pre>{item.body}</pre>{/if}</article>
-            {/each}
-            {#if messages.truncated}<p class="identity">{st('driverMessagesOlder')}</p>{/if}
-          {/if}
-        </section>
+      {#if conversationProject}
+        <DriverConversation projectId={conversationProject}
+          projectTitle={projects.find(p => p.project_id === conversationProject)?.title ?? conversationProject}
+          driverId={status.projects[conversationProject]?.managed?.driver_id ?? ''}
+          onclose={closeConversation} onread={() => void loadUnread()} />
       {/if}
     {/if}
   </details>
@@ -214,7 +198,6 @@
   .live{color:#15803d;}form{margin:.7rem 0;}label{display:block;font-size:.8rem;}textarea{font-size:.8rem;margin:.3rem 0;}
   .identity{overflow-wrap:anywhere;color:var(--pico-muted-color,#64748b);}
   .record{margin:.45rem 0;}.record summary{cursor:pointer;}
-  .message{margin:.45rem 0;padding:.35rem .55rem;border:1px solid var(--pico-muted-border-color,#ddd);border-radius:6px;}
-  .message header{display:block;}.message pre{margin:.25rem 0 0;max-height:20rem;}
+  .unread{display:inline-block;margin:0 0 0 .35rem;padding:0 .35rem;border-radius:999px;background:var(--pico-primary,#2563eb);color:#fff;font-size:.65rem;line-height:1.5;}
   pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:32rem;overflow:auto;font-size:.75rem;padding:.5rem;}
 </style>

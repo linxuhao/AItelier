@@ -47,6 +47,7 @@ _ARGS = {
     'driver_postcompact_guidance': {'project_id': C.OPEN},
     'list_driver_messages': {},
     'list_driver_notebooks': {},
+    'list_user_messages': {'project_id': C.OPEN},
     'wait_for_driver_inbox': {'timeout_seconds': 0},
     "events": {"project_id": C.OPEN},
     "get_claim": {"project_id": C.OPEN, "claim_id": "claim-canary-public-id"},

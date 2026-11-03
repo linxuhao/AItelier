@@ -744,6 +744,17 @@ export function messageDshDriver(projectId: string, driverId: string, body: stri
     subject: 'Dashboard message', body, kind: 'note', delivery_mode: 'transient',
   });
 }
+export interface DriverUserMessage {
+  message_id: string; sender_driver_id: string; project_id: string;
+  subject: string; body: string; refs: Record<string, string>; created_at: string;
+}
+export interface DriverUserMessages {
+  project_id: string; messages: DriverUserMessage[]; matched_total: number; truncated: boolean;
+}
+/** Durable messages the project's driver sent its user, newest first. */
+export function dshDriverMessages(projectId: string, limit = 50): Promise<DriverUserMessages> {
+  return _get('/api/dsh-drivers/' + encodeURIComponent(projectId) + '/messages?limit=' + limit);
+}
 export function startDshDriver(projectId: string): Promise<unknown> {
   return _post('/api/dsh-drivers/' + encodeURIComponent(projectId) + '/start', {});
 }

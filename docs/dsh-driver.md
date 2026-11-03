@@ -36,6 +36,16 @@ lines and excerpts. Literal search is the default; `regex`, `ignore_case`,
 `after_seq` and `limit` support focused follow-up searches. There is no second
 chat-history store or search index.
 
+`send_user_message(request_key, subject, body, node_key?)` stores one durable
+message from the driver to the project's user instead of leaving the reply inside
+the session log. It is idempotent per (driver, request_key): the same payload
+returns the same message id, and a different payload under the same key is
+refused. The dashboard lists those messages newest first under **Driver status**
+(`GET /api/dsh-drivers/<project>/messages`, reader permission), with the sending
+driver and its time, and does not need that driver to be online or its run
+records to exist. A message is presentation only: it never grants a permission,
+answers a checkpoint, verifies a node or becomes State evidence.
+
 The dashboard shows all non-retired registered drivers and their online count,
 then the same counts per DAG, currently active DSH-native subagent activations
 (including nested children), and running pipeline attempts bound to the DAG.

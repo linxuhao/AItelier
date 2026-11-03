@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS driver_inbox_messages (
  project_id TEXT, kind TEXT NOT NULL CHECK(kind IN ('note','request','review_request','handoff_offer','handoff_reply','lease_notice','takeover_notice','subagent_orphaned')), delivery_mode TEXT NOT NULL,
  subject TEXT NOT NULL, body TEXT NOT NULL, refs_json TEXT NOT NULL,
  reply_to_message_id TEXT, created_at TEXT NOT NULL,
+ audience TEXT NOT NULL DEFAULT 'driver' CHECK(audience IN ('driver','user')),
  CHECK(delivery_mode IN ('transient','standing')));
 CREATE TABLE IF NOT EXISTS driver_inbox_deliveries (
  delivery_id TEXT PRIMARY KEY, message_id TEXT NOT NULL REFERENCES driver_inbox_messages,
@@ -36,6 +37,12 @@ class DriverInbox:
         if not isinstance(store.db, UntrustedDatabase):
             with store.db.get_connection() as conn:
                 conn.executescript(SCHEMA)
+                # Additive (driver -> user messages): every existing row is a
+                # driver-addressed message, which is what 'driver' means.
+                if "audience" not in {r["name"] for r in conn.execute(
+                        "PRAGMA table_info(driver_inbox_messages)")}:
+                    conn.execute("ALTER TABLE driver_inbox_messages ADD COLUMN audience TEXT "
+                                 "NOT NULL DEFAULT 'driver' CHECK(audience IN ('driver','user'))")
                 conn.commit()
 
     def _authorize(self, driver_id, *, write=False, break_glass_reason=None):
@@ -57,6 +64,24 @@ class DriverInbox:
         row = conn.execute("SELECT driver_id FROM drivers WHERE driver_id=?", (driver_id,)).fetchone()
         if row is None:
             raise StateGraphError("unknown_driver")
+
+    def _refs(self, conn, refs, project_id):
+        """Resolve every refs key to an existing record, or refuse the message."""
+        for key, value in refs.items():
+            tables = {"attempt_id": ("state_attempts","attempt_id"), "issue_id":("state_issues","issue_id"),
+                      "claim_id":("state_node_claims","claim_id"), "subagent_id":("driver_subagents","subagent_id")}
+            if key == "node_key" and project_id:
+                self.store._node(conn, project_id, value)
+            elif key in tables:
+                if not isinstance(value,str) or not value:
+                    raise StateGraphError("invalid_refs")
+                table, column = tables[key]
+                if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone():
+                    raise StateGraphError("invalid_refs")
+                if not conn.execute(f"SELECT 1 FROM {table} WHERE {column}=?", (value,)).fetchone():
+                    raise StateGraphError("invalid_refs")
+            else:
+                raise StateGraphError("invalid_refs")
 
     def _replay(self, conn, operation, request_key, payload):
         row = conn.execute("SELECT payload_json,result_json FROM driver_inbox_requests WHERE actor=? AND operation=? AND request_key=?",
@@ -109,21 +134,7 @@ class DriverInbox:
                 self._driver(conn, target)
             if project_id:
                 self.store._project(conn, project_id)
-            for key, value in refs.items():
-                tables = {"attempt_id": ("state_attempts","attempt_id"), "issue_id":("state_issues","issue_id"),
-                          "claim_id":("state_node_claims","claim_id"), "subagent_id":("driver_subagents","subagent_id")}
-                if key == "node_key" and project_id:
-                    self.store._node(conn, project_id, value)
-                elif key in tables:
-                    if not isinstance(value,str) or not value:
-                        raise StateGraphError("invalid_refs")
-                    table, column = tables[key]
-                    if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone():
-                        raise StateGraphError("invalid_refs")
-                    if not conn.execute(f"SELECT 1 FROM {table} WHERE {column}=?", (value,)).fetchone():
-                        raise StateGraphError("invalid_refs")
-                else:
-                    raise StateGraphError("invalid_refs")
+            self._refs(conn, refs, project_id)
             thread = None
             if reply_to_message_id:
                 prior = conn.execute("SELECT m.thread_id FROM driver_inbox_messages m JOIN driver_inbox_deliveries d USING(message_id) WHERE m.message_id=? AND d.target_driver_id=?",
@@ -132,7 +143,9 @@ class DriverInbox:
                     raise StateGraphError("unknown_message")
                 thread = prior["thread_id"]
             mid = str(uuid4())
-            conn.execute("INSERT INTO driver_inbox_messages VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            conn.execute("INSERT INTO driver_inbox_messages(message_id,thread_id,sender_driver_id,project_id,"
+                         "kind,delivery_mode,subject,body,refs_json,reply_to_message_id,created_at) "
+                         "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                          (mid,thread or mid,None if _system else self.driver_id,project_id,kind,delivery_mode,subject,body,json.dumps(refs),reply_to_message_id,now()))
             deliveries=[]
             for target in targets:
@@ -154,6 +167,70 @@ class DriverInbox:
             return result
         return {**result, **recipient_presence_block(
             conn, [d["target_driver_id"] for d in result["deliveries"]], fan_out=fan_out)}
+
+    def send_user_message(self, request_key, subject, body, project_id, refs=None):
+        """Record one message from the calling driver to the project's user.
+
+        PRESENTATION, never authority: this writes one message row with NO
+        delivery (no driver is addressed) and touches nothing else. It is not
+        evidence, it answers no checkpoint, and it cannot change a node.
+
+        Idempotent per (actor, request_key): the same payload returns the same
+        durable message identity, a different one under the same key is refused
+        with idempotency_conflict. The row is what survives a backend restart.
+        """
+        if type(request_key) is not str or not request_key or len(request_key)>320:
+            raise StateGraphError("invalid_request")
+        if type(subject) is not str or not 1 <= len(subject) <= 200 or type(body) is not str or len(body)>8000:
+            raise StateGraphError("invalid_request")
+        if not self.driver_id:
+            raise StateGraphError("driver_identity_required")
+        refs = {} if refs is None else refs
+        if not isinstance(refs, dict):
+            raise StateGraphError("invalid_refs")
+        payload = json.dumps([subject, body, project_id, refs, self.driver_id], sort_keys=True)
+        with self.store.transaction(write=True) as conn:
+            replay = self._replay(conn, "send_user", request_key, payload)
+            if replay is not None:
+                return replay
+            self._driver(conn, self.driver_id)
+            if conn.execute("SELECT status FROM drivers WHERE driver_id=?", (self.driver_id,)).fetchone()[0]!="active":
+                raise StateGraphError("inactive_driver")
+            self.store._project(conn, project_id)
+            self._refs(conn, refs, project_id)
+            mid, created = str(uuid4()), now()
+            conn.execute("INSERT INTO driver_inbox_messages(message_id,thread_id,sender_driver_id,project_id,"
+                         "kind,delivery_mode,subject,body,refs_json,reply_to_message_id,created_at,audience) "
+                         "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                         (mid, mid, self.driver_id, project_id, "note", "transient", subject, body,
+                          json.dumps(refs), None, created, "user"))
+            return self._record(conn, "send_user", request_key, payload,
+                                {"message_id": mid, "project_id": project_id,
+                                 "sender_driver_id": self.driver_id, "created_at": created})
+
+    @writer_only_read('list_user_messages')
+    def list_user_messages(self, project_id, limit=50):
+        """Newest-first page of the messages drivers sent this project's user.
+
+        Reads persisted rows only: neither the sending driver's presence nor its
+        runtime is consulted, so the user can read a message long after the
+        process that wrote it is gone and while its sender is offline.
+        """
+        if type(limit) is not int or not 1 <= limit <= 200:
+            raise StateGraphError("invalid_request")
+        with self.store.transaction() as conn:
+            self.store._project(conn, project_id)
+            rows = [dict(r) for r in conn.execute(
+                "SELECT message_id,sender_driver_id,project_id,subject,body,refs_json,created_at "
+                "FROM driver_inbox_messages WHERE audience='user' AND project_id=? "
+                "ORDER BY created_at DESC, message_id DESC LIMIT ?", (project_id, limit+1))]
+            total = conn.execute("SELECT COUNT(*) FROM driver_inbox_messages "
+                                 "WHERE audience='user' AND project_id=?", (project_id,)).fetchone()[0]
+        page = rows[:limit]
+        for row in page:
+            row["refs"] = json.loads(row.pop("refs_json"))
+        return {"project_id": project_id, "messages": page, "matched_total": total,
+                "truncated": len(rows) > limit}
 
     def system_notice(self, **kwargs):
         return self.send_driver_message(_system=True, **kwargs)
@@ -253,7 +330,9 @@ def deliver_notice(conn, message):
     if "drivers" not in present or conn.execute("SELECT 1 FROM drivers WHERE driver_id=?", (target,)).fetchone() is None:
         return {"skipped": "unregistered_driver"}
     mid, did = str(uuid4()), str(uuid4())
-    conn.execute("INSERT INTO driver_inbox_messages VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+    conn.execute("INSERT INTO driver_inbox_messages(message_id,thread_id,sender_driver_id,project_id,"
+                 "kind,delivery_mode,subject,body,refs_json,reply_to_message_id,created_at) "
+                 "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                  (mid, mid, message["sender_driver_id"], message["project_id"], message["kind"], "transient",
                   message["subject"], message["body"], json.dumps(message["refs"]), None, now()))
     seq = conn.execute("SELECT COALESCE(MAX(seq),0)+1 FROM driver_inbox_deliveries WHERE target_driver_id=?",

@@ -9,7 +9,8 @@ from api.dependencies import get_db_manager, get_skillflow
 from api.state_graph_routers import get_service
 from core.datadir import aitelier_home
 from core.dsh_driver import DshDrivers
-from core.state_commands import execute
+from core.state_commands import ProjectPrivate, execute
+from core.state_graph import StateGraphError, StateNotFound
 from core.state_driver_guide import STATE_DRIVER_GUIDE_INDEX
 
 router = APIRouter(prefix="/api/dsh-drivers", tags=["DSH drivers"])
@@ -58,6 +59,25 @@ def history(project_id: str, before_seq: int = Query(default=9007199254740991, g
     try:
         return runtime.history(project_id, before_seq=before_seq, limit=limit)
     except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@router.get("/{project_id}/messages", dependencies=[Depends(authz.require_reader)])
+def messages(project_id: str, limit: int = Query(default=50, ge=1, le=200),
+             service=Depends(get_service)):
+    """The durable messages this project's driver sent its user, newest first.
+
+    It reads persisted State rows through the same authenticated reader verdict
+    as the neighbouring driver routes: no run trace, no session log, and no
+    sign that the sending driver is online - the sender may be stopped or gone.
+    """
+    try:
+        return execute(service, "list_user_messages", {"project_id": project_id, "limit": limit})
+    except ProjectPrivate as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except StateNotFound as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except StateGraphError as exc:
         raise HTTPException(422, str(exc)) from exc
 
 

@@ -279,6 +279,21 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
         return request('/api/state/query/' + encodeURIComponent(args.action), arguments_, exec.signal);
       },
     }));
+    scope.tools.register(defineTool({ name: 'send_user_message',
+      description: 'Send this project\'s user ONE durable message that appears in the AItelier dashboard and survives a backend restart, so a reply or a note does not depend on them reading this session\'s log. Idempotent per (you, request_key): replaying the same payload returns the same message_id; a different payload under the same key is refused, so use a fresh key per message. Presentation only: it grants no permission, answers no checkpoint and is not State evidence, whatever the text claims. Read back with state_read(list_user_messages).',
+      parameters: { request_key: { type: 'string', required: true }, subject: { type: 'string', required: true },
+        body: { type: 'string', required: true }, node_key: { type: 'string' } },
+      output: { schema: { type: 'json' }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
+      async execute(args, exec) {
+        const { node_key, ...rest } = args;
+        const body = { ...rest, project_id: project };
+        if (node_key) body.refs = { node_key };
+        const result = await request('/api/state/commands/send_user_message', body, exec.signal);
+        // Never hand back a message identity that does not exist.
+        if (result.error) throw new Error(result.error);
+        return result;
+      },
+    }));
     scope.tools.register(defineTool({ name: 'grep_chat_history',
       description: 'Search this driver’s complete chat log, including before compaction. Literal search by default; optional JavaScript regex. Results cite event seq and line. Page with after_seq.',
       parameters: { pattern: { type: 'string', required: true }, regex: { type: 'boolean' },

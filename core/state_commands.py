@@ -315,6 +315,27 @@ class ListDriverMessages(Request):
     after: int = Field(default=0, ge=0)
     limit: int = Field(default=100, ge=1, le=100)
 
+
+class SendUserMessage(Project):
+    """Driver -> user: a durable dashboard message, never a State fact."""
+
+    request_key: str = Field(min_length=1, max_length=320)
+    subject: str = Field(min_length=1, max_length=200)
+    body: str = Field(max_length=8000)
+    refs: MessageRefs = Field(default_factory=MessageRefs, description=(
+        "Optional: node_key (requires project_id), attempt_id, issue_id, claim_id, "
+        "subagent_id, each a nonempty string naming an existing record. Context only: "
+        "a ref never becomes evidence or acceptance."))
+
+    @field_serializer("refs")
+    def _set_refs_only(self, refs: MessageRefs) -> dict:
+        return refs.model_dump(exclude_none=True)
+
+
+class ListUserMessages(Project):
+    limit: int = Field(default=50, ge=1, le=200)
+
+
 class WaitForDriverInbox(Request):
     driver_id: str | None = None
     after: int = Field(default=0, ge=0)
@@ -953,6 +974,7 @@ READ_REQUESTS = {
     "driver_postcompact_guidance": DriverPostcompactGuidance,
     "list_driver_notebooks": Request,
     "list_driver_messages": ListDriverMessages, "wait_for_driver_inbox": WaitForDriverInbox,
+    "list_user_messages": ListUserMessages,
     "design_catalog": Project, "get_design_revision": DesignRevision,
     "search_design_items": SearchDesignItems, "design_impact": DesignImpact,
     "get_design_baseline": DesignBaseline, "get_design_bindings": Node,
@@ -1033,6 +1055,9 @@ WRITER_ONLY_READS = frozenset({
     "project_visibility",
     # Multi-driver claims: who works on what, in which workspace (P1).
     "list_claims", "get_claim",
+    # Driver -> user messages: the user's own dashboard feed. Private like the
+    # driver inbox it shares storage with, and readable only through a credential.
+    "list_user_messages",
     # P3: subagent registry (workspaces) and handoff packages. Both private.
     "list_subagents", "list_handoffs", "get_handoff",
 })
@@ -1054,6 +1079,7 @@ def is_public_read(action: str) -> bool:
 
 WRITE_REQUESTS = {
     "send_driver_message": SendDriverMessage,
+    "send_user_message": SendUserMessage,
     "acknowledge_driver_message": DriverDeliveryTransition, "resolve_driver_message": DriverDeliveryTransition,
     "create_design_revision": CreateDesignRevision, "create_design_baseline": CreateDesignBaseline,
     "bind_node_design": BindDesign,
@@ -1189,7 +1215,9 @@ def _handlers(service) -> dict:
         "driver_postcompact_guidance": service.driver_postcompact_guidance,
         "list_driver_notebooks": service.list_driver_notebooks,
         "send_driver_message": service.driver_inbox.send_driver_message,
+        "send_user_message": service.driver_inbox.send_user_message,
         "list_driver_messages": service.driver_inbox.list_driver_messages,
+        "list_user_messages": service.driver_inbox.list_user_messages,
         "wait_for_driver_inbox": service.driver_inbox.wait_for_driver_inbox,
         "acknowledge_driver_message": service.driver_inbox.acknowledge_driver_message,
         "resolve_driver_message": service.driver_inbox.resolve_driver_message,

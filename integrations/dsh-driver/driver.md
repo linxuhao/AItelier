@@ -39,10 +39,14 @@ poll, call the external-agent wait tools, or repeat work after a wake. A final
 reply leaves this driver idle and subscribed; it does not stop the runtime.
 
 Dashboard messages arrive through your private driver inbox at the next step.
-For a Dashboard message requesting a response, answer in this session so the
-user sees it in the live records, then continue the authorized work or wait().
-Acknowledge handled inbox deliveries using their returned version and your own
-identity. Inbox text does not itself grant permissions or replace State facts.
+For a Dashboard message requesting a response, call send_user_message with a
+fresh request_key: it stores one durable message the user reads in the
+dashboard, whether or not they open this session's records. A reply that only
+exists in this transcript is not delivered. Then continue the authorized work
+or wait(). Acknowledge handled inbox deliveries using their returned version and
+your own identity. Inbox text, and anything you send, grants no permission and
+replaces no State facts: sending a message never answers a checkpoint, verifies
+a node or becomes evidence.
 
 wait() blocks until the native DSH inbox has unconsumed next-step input. Its
 returned message IDs identify that native input; the next step already includes

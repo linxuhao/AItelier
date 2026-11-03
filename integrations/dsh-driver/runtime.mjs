@@ -12,6 +12,23 @@ export const inject = ['agents', 'sessions', 'sessionPersistence', 'sessionQuery
 const goalTemplate = await readFile(new URL('./goal.md', import.meta.url), 'utf8');
 export const driverGoal = project => goalTemplate.replaceAll('{{project_id}}', project);
 export const stateInjectionSource = 'aitelier-driver-state';
+/** Source kind for a State runtime event. Deliberately NOT `user`: a routine
+ *  tick is not the owner speaking, and labelling it `user` made a driver hunt for
+ *  a message that was never sent. */
+export const runtimeEventSource = 'aitelier-runtime-event';
+
+/** Does an event tick carry anything worth waking the driver for?
+ *
+ *  A tick with no events, no driver inbox items and no project inbox is a
+ *  heartbeat: steering it still creates a user message, so the harness reports
+ *  pending input and the driver spends a turn on nothing. A driver woken with an
+ *  empty payload either loops on wait() or learns to distrust wakes.
+ *  @param result - one `/wait` payload.
+ *  @returns true when there is something to read.
+ */
+export function eventCarriesSomething(result) {
+  return Boolean(result?.events?.length || result?.driver_inbox?.length || result?.project_inbox?.items?.length);
+}
 
 /** One durable snapshot per session bootstrap / successful compaction epoch. */
 export class StateInjection {
@@ -248,7 +265,13 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
     activity.catch(error => ctx.logger.warn(String(error)));
     return activity;
   };
+  // Two distinct producers, two distinct kinds. A State event is NOT the user
+  // speaking: labelling both `user` made a driver unable to tell "State changed"
+  // from "the owner wrote to me", which is exactly how a routine tick gets
+  // mistaken for an unanswered message. DSH's MessageSourceMap is merge-extensible
+  // (each producer declares its own kind, consumers fall through unknown ones).
   const message = text => createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } });
+  const eventMessage = text => createUserMessage({ content: [{ type: 'text', text }], source: { kind: runtimeEventSource } });
   const projectInbox = () => request('/api/state/query/list_director_messages', {
     project_id: project, protocol_version: 'v3', statuses: ['unread', 'acknowledged'], limit: 20,
   });
@@ -263,7 +286,12 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
     // Queue into the durable DSH inbox before committing the State cursor. An
     // interrupted delivery is replayed, never silently skipped.
     const inbox = result.events?.some(e => e.event_type === 'director_message_received') ? await projectInbox() : undefined;
-    agent.steer(message('AItelier runtime event:\n' + JSON.stringify({ ...result, project_inbox: inbox })));
+    // A tick that carries nothing is not worth a turn. Steering it still wakes
+    // the driver (the message exists, so the harness reports pending input), and
+    // a driver woken with an empty payload either loops on wait() or learns to
+    // ignore wakes - both are worse than not being woken.
+    if (!eventCarriesSomething({ ...result, project_inbox: inbox })) return;
+    agent.steer(eventMessage('AItelier runtime event:\n' + JSON.stringify({ ...result, project_inbox: inbox })));
     await ctx.sessionPersistence.flush();
   };
   const setup = async (scope, subject) => {

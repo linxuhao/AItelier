@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DriverRuntime, StateInjection, stateInjectionSource, grepHistory, connectionErrorMessage } from './runtime.mjs';
+import { DriverRuntime, StateInjection, stateInjectionSource, runtimeEventSource, eventCarriesSomething, grepHistory, connectionErrorMessage } from './runtime.mjs';
 
 test('State injection survives resume and ignores ordinary events, steps and failed compaction', async () => {
   const events = [], session = { snapshotEvents: () => events };
@@ -207,3 +207,24 @@ test('empty/resolved inbox replies advance cursors without model turns', async (
   await assert.rejects(r.pump(), /done/);
   assert.equal(delivered,0); assert.equal(r.after,12); assert.equal(r.inboxAfter,2);
 }));
+
+
+// ── A State tick is not the owner speaking ──────────────────────────────────
+// Every injected state event used to be labelled `source.kind: 'user'`, so a
+// driver could not tell "State changed" from "the owner wrote to me" - and a
+// routine tick got mistaken for an unanswered message. The kinds are now
+// distinct, and a tick carrying nothing no longer steers at all.
+test('a State event is not labelled as the user, and an empty tick does not wake the driver', () => {
+  assert.notEqual(runtimeEventSource, 'user');
+  assert.notEqual(runtimeEventSource, stateInjectionSource);
+
+  // An empty heartbeat: no events, no driver inbox, no project inbox.
+  assert.equal(eventCarriesSomething({ timed_out: true, events: [] }), false);
+  assert.equal(eventCarriesSomething({ timed_out: true }), false);
+  assert.equal(eventCarriesSomething({}), false);
+
+  // Anything readable is worth the turn.
+  assert.equal(eventCarriesSomething({ events: [{ seq: 1 }] }), true);
+  assert.equal(eventCarriesSomething({ driver_inbox: [{ message_id: 'm' }] }), true);
+  assert.equal(eventCarriesSomething({ project_inbox: { items: [{ message: {} }] } }), true);
+});

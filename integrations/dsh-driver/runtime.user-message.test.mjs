@@ -92,7 +92,7 @@ test('native send_user_message tool calls the durable driver -> user action', { 
     proc.stderr.on('data', chunk => output += chunk);
     const deadline = Date.now() + 35000;
     while (Date.now() < deadline && proc.exitCode === null) {
-      if (sent.length && turns.length > 1) break;
+      if (sent.length && turns.some(turn => turn.some(m => m.role === 'tool' && JSON.stringify(m).includes('fixture-message-id')))) break;
       if (activity.some(a => a.phase === 'failed')) break;
       await new Promise(resolve => setTimeout(resolve, 100));
     }
@@ -101,7 +101,7 @@ test('native send_user_message tool calls the durable driver -> user action', { 
     assert.deepEqual(sent[0], { request_key: 'smoke-user-message', subject: 'Smoke report',
       body: 'durable body', project_id: 'alpha', refs: { node_key: 'n' } });
     // The identity the action returned reached the model as the tool result.
-    assert.ok(JSON.stringify(turns.at(-1)).includes('fixture-message-id'),
+    assert.ok(turns.some(turn => turn.some(m => m.role === 'tool' && JSON.stringify(m).includes('fixture-message-id'))),
       'the durable message identity did not reach the model\n' + JSON.stringify(turns.at(-1)).slice(0, 2000));
     assert.ok(!activity.some(a => a.phase === 'failed'), JSON.stringify(activity) + output);
   } finally {

@@ -10,7 +10,7 @@
 
 常规任务使用自己的 DSH subagent，以及实际可用的 Claude Sonnet 5.5 和 GPT-6.1 Sol；普通 agent 多次无法解决、或需要尖刀突破的任务使用 Claude Opus 5.5。先发现当前 transport 和准确模型，核对实际执行模型；没有挂载的 provider 不能靠写一个模型名字调用，更不能把自己的默认 subagent 冒充 Sonnet、Sol 或 Opus。缺少某条执行路径时记录具体能力缺口，同时继续用可用的原生 subagent 和 pipeline 推进其他工作。
 
-原生 subagent 支持 cwd：为有界任务指定实际隔离 checkout 的 cwd，让该 worker 在自己的 workspace 中读写。父 driver 的 session workspace 限制不等于所有 child checkout 都只读。遇到权限或工具缺口时检查实际执行路径，记录可复现的阻塞，不把过去某次拒绝当作整个项目的永久禁令。
+原生 subagent 支持 cwd，但当前固定版本的 child 沙箱仍继承父 session 的 workspace 边界，cwd 不能扩大写权限。代码任务使用 driver 自己 workspace 内的独立 clone（包括可写的独立 .git），再给 worker 指定该 clone 的 cwd；不要让 worker 去写父 workspace 外的共享 worktree。集成也在自有 clone 中完成，并按授权同步正确的 remote。遇到权限或工具缺口时检查实际执行路径，记录可复现的阻塞，同时继续推进能执行的工作。
 
 做完一件事并完成交接后，清理不再使用的自有 worktree、重复 driver report 和中间文件；保留 State/发布引用、必要恢复信息和首次失败证据。不要清理他人的目录或在飞任务。
 

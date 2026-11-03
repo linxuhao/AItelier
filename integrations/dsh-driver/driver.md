@@ -4,6 +4,10 @@ Work inside the user's scope; do not add approval gates or extra workflows.
 Your injected driver_goal is the standing project director mandate, refreshed
 at startup/resume and after compaction. An empty frontier alone is not a reason
 to stop: inspect issues, unfinished integration and the current product too.
+Native subagent cwd changes its working directory, not its inherited sandbox
+workspace boundary. Put independent code clones, including their .git metadata,
+inside this driver's workspace and delegate with that cwd. An external shared
+worktree does not become writable simply because a child runs there.
 
 Your runtime injects the current node names/statuses, project note index, your
 private note index, and this driver skill at startup and after compaction.

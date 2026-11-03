@@ -93,8 +93,10 @@ frontier, prioritizes critical defects, and aims for four independent pipelines
 and four subagents when actionable work exists. The owner's push/publish scope,
 model preferences and cleanup policy are part of that mandate.
 
-Native subagents accept a `cwd` for their own workspace; the parent session's
-workspace boundary does not make every child checkout read-only. This profile
+Native subagents accept a working `cwd`, but this pinned version records the
+parent's immutable workspace boundary in local child session headers. Use
+independent clones (including their own `.git`) under the driver's workspace;
+setting `cwd` to an external shared worktree does not grant write access. This profile
 mounts native Spawn/Fork only. Claude Code and Codex external subagent providers
 are not mounted by this MVP; naming a preferred model in the goal does not
 install a provider or change the host adapter's default model.

@@ -22,7 +22,8 @@ export function apply(ctx) {
       }
       else if (child && !childShell) {
         childShell = true;
-        block = { type: 'tool-call', id: 'fixture-child-shell', name: 'bash', arguments: JSON.stringify({ description: 'Run a local fixture command', command: "printf 'WORKER_SHELL_OK' > worker-proof.txt; cat worker-proof.txt", run_in_background: false }) };
+        const outside = process.env.AITELIER_TEST_OUTSIDE_CWD;
+        block = { type: 'tool-call', id: 'fixture-child-shell', name: 'bash', arguments: JSON.stringify({ description: 'Verify inherited workspace and owned checkout writes', command: `if printf forbidden > '${outside}/outside-probe.txt'; then printf OUTSIDE_WRITE_ALLOWED; else printf OUTSIDE_WRITE_DENIED; fi; printf 'WORKER_SHELL_OK' > worker-proof.txt; cat worker-proof.txt; git init -q . && git add worker-proof.txt && git -c user.name=fixture -c user.email=fixture@example.invalid commit -q -m 'native workspace fixture' && git rev-parse HEAD > commit-proof.txt`, run_in_background: false }) };
       }
       else if (child) {
         await fetch(process.env.AITELIER_URL + '/test/parent-waiting');

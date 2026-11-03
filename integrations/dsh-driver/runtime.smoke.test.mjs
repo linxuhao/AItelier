@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { mkdtemp, mkdir, writeFile, readFile, rm, realpath } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { tmpdir, homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
@@ -10,8 +10,11 @@ import { once } from 'node:events';
 import { readHistory } from './history.mjs';
 
 test('real pinned DSH: native child, auto compact, fresh injection, raw history grep and unified wait', { timeout: 45000 }, async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'dsh-native-smoke-'));
-  const childDirectory = await mkdtemp(join(tmpdir(), 'dsh-child-workspace-'));
+  // Use non-temporary roots: /tmp is writable independently of workspace policy.
+  const directory = await mkdtemp(join(homedir(), 'dsh-native-smoke-'));
+  const outsideDirectory = await mkdtemp(join(homedir(), 'dsh-outside-workspace-'));
+  const childDirectory = join(directory, 'work', 'child');
+  await mkdir(childDirectory, {recursive:true});
   const entry = await realpath(process.env.AITELIER_DSH_TEST_ENTRY ?? new URL('./node_modules/.bin/dsh', import.meta.url));
   const here = dirname(fileURLToPath(import.meta.url));
   const requests = [], activity = [], events = [], parked = new Set(), childWaits = new Set();
@@ -79,6 +82,7 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
       AITELIER_DSH_PROVIDER: 'fixture', AITELIER_DSH_MODEL: 'fixture-model', AITELIER_URL: base,
       AITELIER_DSH_STATE_DIR: directory, AITELIER_SECRETS_DIR: join(directory, 'no-secrets'),
       AITELIER_TEST_CHILD_CWD: childDirectory,
+      AITELIER_TEST_OUTSIDE_CWD: outsideDirectory,
     };
     const launch = () => {
       const child = spawn(process.execPath, [entry, '--profile', 'driver'], { cwd: directory, env: environment });
@@ -102,7 +106,10 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
     assert.ok(after.some(r => JSON.stringify(r.options.messages).includes('fresh private rule')), 'fresh private note missing\n' + output);
     assert.ok(after.some(r => JSON.stringify(r.options.messages).includes('VERIFIED')), 'fresh node status missing');
     assert.ok(after.some(r => JSON.stringify(r.options).includes('你是 alpha 项目 State DAG 的常驻导演')), 'standing director goal missing after compact');
-    assert.equal(await readFile(join(childDirectory, 'worker-proof.txt'), 'utf8'), 'WORKER_SHELL_OK', 'native child could not write in its own cwd outside the parent workspace');
+    assert.equal(await readFile(join(childDirectory, 'worker-proof.txt'), 'utf8'), 'WORKER_SHELL_OK', 'native child could not write in its owned checkout under the parent workspace');
+    assert.match(await readFile(join(childDirectory, 'commit-proof.txt'), 'utf8'), /^[0-9a-f]{40}\n$/, 'native child could not commit using its own git metadata');
+    await assert.rejects(readFile(join(outsideDirectory, 'outside-probe.txt')), {code:'ENOENT'});
+    assert.ok(events.some(e => e.data?.message?.toolCallId === 'fixture-child-shell' && JSON.stringify(e.data).includes('OUTSIDE_WRITE_DENIED')), 'child cwd was incorrectly treated as a new write grant');
     assert.ok(events.some(e => e.type === 'tool/result' && JSON.stringify(e.data).includes('next_after_seq') && JSON.stringify(e.data).includes('Resume the assigned State DAG')), 'precompact grep missing\n' + output);
     assert.ok(activity.some(a => a.phase === 'waiting' && a.subagents.length > 0), 'parent never waited while the native child was active');
     assert.ok(activity.some(a => a.phase === 'waiting' && a.subagents.length === 0), output);
@@ -138,7 +145,7 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
     for (const response of [...parked, ...childWaits]) response.destroy();
     server.closeAllConnections(); await new Promise(resolve => server.close(resolve));
     if (!process.env.DSH_TEST_KEEP) await rm(directory, { recursive: true });
-    await rm(childDirectory, { recursive: true, force: true });
+    await rm(outsideDirectory, { recursive: true, force: true });
   }
 });
 

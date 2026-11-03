@@ -21,7 +21,7 @@
   let nextCursor = $state<string | null>(null), hasMore = $state(false), endOfHistory = $state(false);
   let loading = $state(false), ready = $state(false), error = $state('');
   let replyTo = $state<DriverConversationEntry | null>(null);
-  let text = $state(''), sending = $state(false), sent = $state(false), sendError = $state('');
+  let text = $state(''), sending = $state(false), sendError = $state('');
   let generation = 0;
   // An older page is loaded, so the pagination cursor points BELOW the newest
   // page and belongs to that older page. A newest-page refresh must then leave
@@ -99,18 +99,18 @@
   async function send() {
     const body = text.trim();
     if (!body || sending) return;
-    sending = true; sent = false; sendError = '';
+    sending = true; sendError = '';
     const answering = replyTo;
     try {
       await sendDriverConversationMessage(projectId, body, {
         replyToMessageId: answering?.message_id, targetDriverId: driverId || undefined});
-      text = ''; replyTo = null; sent = true;
+      text = ''; replyTo = null;
       await loadNewest();
       await scrollToNewest();
     } catch (e) { sendError = String(e instanceof Error ? e.message : e); }
     finally { sending = false; }
   }
-  function reply(entry: DriverConversationEntry) { replyTo = entry; sent = false; sendError = ''; }
+  function reply(entry: DriverConversationEntry) { replyTo = entry; sendError = ''; }
 
   // ── the thread refreshes itself ───────────────────────────────────────────
   // A message the driver sends while this pane is open used to need the Refresh
@@ -239,7 +239,6 @@
         aria-label={st('driverConversationCompose')}></textarea>
       <button type="submit" disabled={sending || !text.trim()}>{sending ? '…' : st('driverMessageSend')}</button>
     </div>
-    {#if sent}<span role="status">{st('driverConversationSent')}</span>{/if}
     {#if sendError}<p role="alert">{sendError}</p>{/if}
   </form>
 </section>

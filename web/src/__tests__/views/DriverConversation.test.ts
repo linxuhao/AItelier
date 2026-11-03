@@ -65,8 +65,10 @@ describe('one conversation, both directions', () => {
     await waitFor(() => expect(api.sendDriverConversationMessage)
       .toHaveBeenCalledWith('alpha', 'node a is done',
         {replyToMessageId: 'm2', targetDriverId: 'dsh-alpha'}));
-    await view.findByText('Sent');
-    expect((view.getByRole('textbox', {name: 'Write a message'}) as HTMLTextAreaElement).value).toBe('');
+    // The 'Sent' indicator was removed by request, so the observable evidence of
+    // a completed send is the field clearing; wait on that instead of the text.
+    await waitFor(() => expect(
+      (view.getByRole('textbox', {name: 'Write a message'}) as HTMLTextAreaElement).value).toBe(''));
     // The reply affordance is gone again: the next message is a new one.
     expect(view.queryByText(/Replying to · Second report/)).toBeNull();
   });

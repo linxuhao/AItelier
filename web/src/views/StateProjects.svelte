@@ -151,7 +151,12 @@
   .driver-line { display:flex; align-items:center; flex-wrap:wrap; gap:.35rem .5rem; margin:0 0 .7rem; font-size:.72rem; }
   .driver-facts { display:flex; align-items:center; flex-wrap:wrap; gap:.25rem .6rem; color:var(--pico-muted-color,#64748b); }
   .driver-facts .fact { display:inline-flex; align-items:baseline; gap:.15rem; }
-  .driver-facts strong { font-size:.8rem; color:var(--pico-color,#1f2937); }
+  /* NOT var(--pico-color): the card became a <button>, and Pico redefines
+     --pico-color inside a button to its inverse (white). These numbers went
+     white on a white card while the .counts numbers - which do not read that
+     variable - stayed visible, which is exactly the report. `inherit` keeps them
+     the card's own text colour in every theme. */
+  .driver-facts strong { font-size:.8rem; color:inherit; font-weight:600; }
   .driver-state { display:inline-flex; align-items:center; gap:.3rem; color:var(--pico-muted-color,#64748b); }
   .driver-state::before { content:''; width:.45rem; height:.45rem; border-radius:50%; background:#94a3b8; }
   .driver-state[data-phase="running"]::before { background:#15803d; }

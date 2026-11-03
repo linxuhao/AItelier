@@ -341,3 +341,33 @@ describe('a poll marks read only what the reader is actually looking at', () => 
     expect(api.markDriverConversationRead).not.toHaveBeenCalled();
   });
 });
+
+// ── Tagged blocks, and the at-a-glance mark ─────────────────────────────────
+// The owner's requirement: see at a glance which message asks something. The
+// mark therefore lives in the message header (visible in the thread), and the
+// tagged blocks render with their kind. A `question` tag asks; it is not a
+// checkpoint and the UI must not dress it as one.
+describe('tagged segments', () => {
+  it('marks only the message that asks something, and renders each block with its kind', async () => {
+    api.dshDriverConversation.mockResolvedValue(page([
+      entry('q1', 'driver', 'Deploy question', '2026-11-03T12:00:00+00:00',
+        {segments: [{kind: 'question', text: 'may I restart the host now?'}]}),
+      entry('i1', 'driver', 'Just an update', '2026-11-03T11:00:00+00:00',
+        {segments: [{kind: 'info', text: 'nothing is in flight'}]}),
+      entry('p1', 'driver', 'Plain message', '2026-11-03T10:00:00+00:00'),
+    ]));
+    const view = render(DriverConversation, {projectId: 'alpha'});
+    await view.findByText('Deploy question');
+
+    const marks = view.container.querySelectorAll('article.message .asks');
+    expect(marks.length, 'only the asking message carries the mark').toBe(1);
+
+    // The thread renders oldest-first, so the segment order follows time, not
+    // the order the fixture listed them in.
+    const kinds = [...view.container.querySelectorAll('.segment')].map(n => n.getAttribute('data-kind'));
+    expect(kinds).toEqual(['info', 'question']);
+    expect(view.getByText('may I restart the host now?')).toBeTruthy();
+    // A plain message keeps its body and gets no tag furniture.
+    expect(view.getByText('body of Plain message')).toBeTruthy();
+  });
+});

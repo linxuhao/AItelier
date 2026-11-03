@@ -237,10 +237,24 @@
             {#if entry.sender_kind === 'driver'}
               <button class="outline" type="button" aria-label="{st('driverConversationReply')}: {entry.subject}" onclick={() => reply(entry)}>{st('driverConversationReply')}</button>
             {/if}
+            {#if entry.segments?.some((segment) => segment.kind === 'question')}
+              <span class="asks" title={st('messageAsksQuestion')} aria-label={st('messageAsksQuestion')}>?</span>
+            {/if}
           </header>
           {#if entry.reply_to_message_id}<p class="identity">{st('driverConversationReplyingTo')} #{entry.reply_to_message_id.slice(0, 8)}</p>{/if}
           <strong class="subject">{entry.subject}</strong>
-          {#if entry.body}<pre>{entry.body}</pre>{/if}
+          {#if entry.segments?.length}
+            <!-- Tagged blocks: the question ones are the reason this exists - the
+                 reader can see what is being asked without reading a wall of text. -->
+            <ul class="segments">
+              {#each entry.segments as segment}
+                <li class="segment" data-kind={segment.kind}>
+                  <span class="seg-tag">{segment.kind === 'question' ? st('segmentQuestion') : st('segmentInfo')}</span>
+                  <span class="seg-text">{segment.text}</span>
+                </li>
+              {/each}
+            </ul>
+          {:else if entry.body}<pre>{entry.body}</pre>{/if}
         </article>
       {/each}
     {/if}
@@ -288,6 +302,14 @@
   .composer-row button[type="submit"]{flex:0 0 auto;width:auto;margin:0;}
   button{font-size:.7rem;padding:.2rem .5rem;margin:0 0 0 .5rem;width:auto;}
   p{margin:.4rem 0;}
+  .asks{display:inline-flex;align-items:center;justify-content:center;width:1.1rem;height:1.1rem;
+    border-radius:999px;background:var(--pico-primary,#2563eb);color:#fff;font-size:.7rem;font-weight:700;}
+  .segments{list-style:none;margin:.35rem 0 0;padding:0;display:flex;flex-direction:column;gap:.3rem;}
+  .segment{display:flex;gap:.4rem;align-items:baseline;font-size:.82rem;line-height:1.45;}
+  .seg-tag{flex:0 0 auto;font-size:.62rem;letter-spacing:.04em;text-transform:uppercase;
+    padding:.05rem .35rem;border-radius:999px;border:1px solid var(--pico-muted-border-color,#dbe3ec);color:var(--pico-muted-color,#64748b);}
+  .segment[data-kind="question"] .seg-tag{border-color:var(--pico-primary,#2563eb);color:var(--pico-primary,#2563eb);}
+  .segment[data-kind="question"] .seg-text{font-weight:600;}
   .identity{overflow-wrap:anywhere;color:var(--pico-muted-color,#64748b);}
   .message{margin:.45rem 0;padding:.35rem .55rem;border:1px solid var(--pico-muted-border-color,#ddd);border-radius:6px;}
   .message.mine{border-color:var(--pico-primary-border,#93c5fd);}

@@ -760,6 +760,9 @@ export interface DriverConversationEntry {
   sender_kind: 'driver' | 'user'; sender_driver_id: string | null;
   subject: string; body: string; refs: Record<string, string>;
   reply_to_message_id: string | null; created_at: string;
+  /** Tagged blocks, when the sender wrote any. A `question` block is one the
+   *  reader owes an answer to; it is presentation, never a checkpoint. */
+  segments?: {kind: 'info' | 'question'; text: string}[] | null;
 }
 export interface DriverConversation {
   project_id: string; messages: DriverConversationEntry[]; has_more: boolean;

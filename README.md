@@ -222,6 +222,66 @@ aitelier "build me a todo app"    # One-shot pipeline
 aitelier server                   # Backend container (start/reuse)
 ```
 
+### Resident DSH drivers: install from a clean checkout (Linux)
+
+The optional built-in director runs **one DSH driver per State DAG on the host**;
+the AItelier backend stays in Docker. Drivers and native subagents have full
+access as the installing Linux user, use independent worktrees, and can call
+Git, Docker and installed agent CLIs. State, inboxes, model routing, live history
+and driver controls remain in AItelier's dashboard. AItelier pytest still runs
+only in disposable containers, not on the host or in the production backend.
+
+Prerequisites: Python 3.12+ with `venv`/pip, Git, working Docker with Compose v2,
+and a systemd user session (`systemctl --user`). Use the same user and `HOME` for
+the backend and drivers. On Ubuntu/Debian, install `python3.12-venv` if
+`python3.12 -m venv` reports missing `ensurepip`. Complete the model-key setup above; the shipped
+`driver` route uses `GO_API_KEY` for OpenCode Go, then `DEEPSEEK_API_KEY` as
+fallback. Set `GITHUB_TOKEN` as a secret file if private GitHub clone/push is
+needed. Provider keys are read by the backend model gateway.
+
+From the repository root, **before the first backend start**:
+
+```bash
+# Creates .venv, installs Python deps, builds the Dockerfile's dsh-runtime stage
+# from the committed npm lockfile, and renders a service for this checkout.
+# No preinstalled Node/DSH, production image or migration /tmp files needed.
+python3.12 deploy/install_dsh_host.py --no-start
+
+docker compose up -d --build aitelier
+systemctl --user enable --now aitelier-dsh-host.service
+loginctl enable-linger "$USER"     # start the user service at boot without login
+```
+
+The installer creates the identity pepper secret if absent, enables driver
+identity in `.env`, and selects host mode in `~/.AItelier/dsh-drivers/runtime.json`.
+It preserves existing credentials, sessions and cursors. It does not create
+projects or start their agents: open **Driver status** on the dashboard and
+start the desired State DAG's driver. That driver's own token is provisioned
+by AItelier. The checkout may live outside `~/AItelier`.
+
+**Startup and shutdown:** the backend uses Docker's `unless-stopped` policy;
+the separate DSH service is enabled at boot by the commands above. Restarting
+the backend leaves DSH running and reconnecting. If you manually stop the DSH
+service, `aitelier` / `aitelier server` starts only the backend; start DSH with
+`systemctl --user start aitelier-dsh-host.service`. To stop both:
+
+```bash
+systemctl --user stop aitelier-dsh-host.service
+docker compose stop aitelier
+```
+
+**Updates:** after updating the checkout, rerun
+`python3.12 deploy/install_dsh_host.py`. It reuses a matching runtime, installs
+changed runtime dependencies in a separate release directory, and leaves active
+drivers running. Apply a changed service/runtime when their work is settled:
+`systemctl --user restart aitelier-dsh-host.service`. Backend upgrades retain
+their existing Docker deployment procedure. View service status/logs with
+`systemctl --user status aitelier-dsh-host.service` and
+`journalctl --user -u aitelier-dsh-host.service -f`.
+
+See [the driver guide](docs/dsh-driver.md#install-and-update-the-host-service)
+for options, existing container-driver migration and state paths.
+
 ### Run with Docker (+ Cloudflare)
 
 The backend and web UI also ship as a container. The CLI starts it automatically if Docker is running (and reuses it if already up), or you can manage it directly:

@@ -56,8 +56,9 @@ seconds, so a dead host supervisor cannot leave workers counted online. An
 exclusive flock prevents duplicate supervisors; systemd owns all child processes.
 The backend retains its Docker deployment.
 
-The host installation at `~/.local/share/aitelier-dsh/` uses the exact same
-Node 24 and pinned DSH dependencies as the image. The service connects to the
+The host installation at `~/.local/share/aitelier-dsh/releases/<fingerprint>/`
+uses Node 24 and the pinned DSH dependencies from the same Dockerfile stage as
+the image. The service connects to the
 backend via `http://127.0.0.1:4444`, retains per-driver tokens, and uses the host's
 existing GitHub secret-file credential helper. Provider API keys remain in the
 backend model gateway. No Docker socket is mounted into the backend.
@@ -85,6 +86,59 @@ represented as handles for native file tools, not sent as model vision input.
 An explicitly selected `deepseek-official` provider can still use the mounted
 `DEEPSEEK_API_KEY` in DSH's private credential store. The route chosen at
 creation is kept on subsequent starts.
+
+## Install and update the host service
+
+The repository installer is `deploy/install_dsh_host.py`; the `.service` beside
+it is a template and must be rendered rather than copied directly. It needs
+Linux, Python 3.12+ with venv/pip (`python3.12-venv` on Ubuntu/Debian), Git,
+Docker, and a systemd user session. It can
+run before any AItelier container exists. No global Node, npm or DSH install is
+required: `docker build --target dsh-runtime` installs the committed npm lockfile,
+then a temporary, never-started container exports Node and its dependencies.
+The temporary container is removed. Versioned installation directories avoid
+overwriting modules used by active drivers.
+
+Follow [the clean-checkout README steps](../README.md#resident-dsh-drivers-install-from-a-clean-checkout-linux).
+`--no-start` prepares `.venv` (including `pip install -e .`), the runtime, shared
+state, a new identity pepper if needed, `.env` and the generated user unit.
+Start the backend with that `.env`, then enable/start the user unit. For a
+backend that already uses driver identity, omit `--no-start` to enable/start
+the service immediately. This does not restart an already-running service or
+any Docker service; a modified unit takes effect on its next restart.
+
+```bash
+python3.12 deploy/install_dsh_host.py --help
+python3.12 deploy/install_dsh_host.py
+systemctl --user status aitelier-dsh-host.service
+# After active work has settled, apply a changed unit/runtime:
+systemctl --user restart aitelier-dsh-host.service
+```
+
+Paths are resolved from the checkout and installing user's `HOME`; neither the
+author's username nor `~/AItelier` is required. `--repo`, `--runtime-dir`,
+`--api-url` and `--service-name` support explicit installation locations and
+isolated rehearsals. `AITELIER_SECRETS_DIR` follows the invoking environment or
+`.env`, defaulting to `~/.aitelier-secrets`; it must be a host path. The data
+root follows the Compose contract, `$HOME/.AItelier`. Preserve the original
+`AITELIER_DRIVER_TOKEN_PEPPER` when restoring an existing identity database:
+the installer refuses to silently replace it. Model and GitHub keys are never
+printed or embedded in the unit; Git uses the repository's secret-file helper.
+
+For an existing container-mode installation, stop its managed drivers through
+the dashboard before running the installer. It refuses to switch an enabled
+container controller into host mode, preventing duplicate roots. Existing
+driver tokens, sessions, notes and cursors stay in place and the same drivers
+can then be started on the host. If driver identity was previously disabled,
+recreate the backend with the updated `.env` before starting project drivers.
+
+Boot startup needs an enabled user unit and lingering:
+`loginctl enable-linger "$USER"` (may require administrator authorization on
+your distribution). Docker manages backend startup separately. A manually
+stopped DSH service is not started by `aitelier server`; use `systemctl --user
+start aitelier-dsh-host.service`. Stopping the user service preserves enabled
+driver rows, so its next start resumes those sessions. To keep one driver off,
+stop that project through the dashboard instead.
 
 Existing authenticated writers can use:
 

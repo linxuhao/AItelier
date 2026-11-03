@@ -401,3 +401,60 @@ def test_losing_the_provision_race_removes_the_orphan_identity(runtime, tmp_path
     members = {m["driver_id"]: m["status"] for m in runtime.registry.project_members("alpha")}
     assert members.get(winner["driver_id"]) == "member", "the winner must be untouched"
     assert members.get(loser_id) == "removed", "the loser must no longer be a member"
+
+
+# ── Local MCP services are configuration, not code ──────────────────────────
+# The host runs two MCP servers the driver can use: agentmcp (asr/ocr/pdf/web,
+# media generation, video) and devmcp (files, bash, subagent jobs). They are
+# registered through the same cordis patch the State MCP already uses, and the
+# URL is the switch - no URL, no entry, so an operator can withdraw one without
+# touching code and a host that lacks them behaves exactly as before.
+
+
+def _patch_document(runtime, row):
+    """The cordis patch as data.
+
+    It carries `!!js` tags (the driver token expression is code, not text), which
+    a safe loader refuses; the tag is irrelevant to what these tests assert, so
+    every unknown tag is read as the scalar it decorates.
+    """
+    import yaml
+    class _Any(yaml.SafeLoader):
+        pass
+    _Any.add_multi_constructor("tag:yaml.org,2002:",
+                               lambda loader, suffix, node: loader.construct_scalar(node))
+    path = (runtime.root / row["driver_id"] / "home" / "profiles" / "driver"
+            / "cordis.patch.yml")
+    return yaml.load(path.read_text(), Loader=_Any)
+
+
+def test_local_mcp_servers_are_registered_by_default(runtime):
+    import yaml
+    row = runtime._provision("alpha", "fixture-provider", "fixture-model", "fixture")
+    runtime._environment(row)
+    patch = _patch_document(runtime, row)
+    insert = next(p["insert"] for p in patch if "insert" in p)
+    by_id = {e["id"]: e for e in insert}
+
+    # The State MCP must keep failing hard: it is a prerequisite, not a capability.
+    assert by_id["mcp-aitelier"]["config"]["failOnStartupError"] is True
+    for server, url in (("agentmcp", "http://127.0.0.1:9003/mcp"),
+                        ("devmcp", "http://127.0.0.1:7676/mcp")):
+        entry = by_id["mcp-" + server]
+        assert entry["config"]["serverName"] == server
+        assert entry["config"]["url"] == url
+        assert entry["config"]["transport"] == "streamable-http"
+        # A capability that is down must not stop the driver from starting.
+        assert entry["config"]["failOnStartupError"] is False
+
+
+def test_blanking_one_local_mcp_url_removes_only_that_entry(runtime, monkeypatch):
+    import yaml
+    monkeypatch.setenv("AITELIER_DSH_MCP_AGENTMCP", "")
+    row = runtime._provision("alpha", "fixture-provider", "fixture-model", "fixture")
+    runtime._environment(row)
+    patch = _patch_document(runtime, row)
+    ids = {e["id"] for e in next(p["insert"] for p in patch if "insert" in p)}
+    assert "mcp-agentmcp" not in ids, "a blank URL must withdraw the entry"
+    assert "mcp-devmcp" in ids, "the other service is independent"
+    assert "mcp-aitelier" in ids

@@ -29,6 +29,17 @@ CREATE TABLE IF NOT EXISTS dsh_drivers (
 """
 
 
+# Local MCP endpoints the driver is given by default on this host. Ports match
+# the services that already run here: agentmcp (asr/ocr/pdf/web + media + video)
+# on 9003 and dev-tools-mcp (files, bash, subagent jobs) on 7676. Both are plain
+# streamable-HTTP and need no token from loopback - agentmcp's gate only demands
+# one beyond the Cloudflare edge.
+DSH_EXTRA_MCP_DEFAULTS = {
+    "agentmcp": "http://127.0.0.1:9003/mcp",
+    "devmcp": "http://127.0.0.1:7676/mcp",
+}
+
+
 class DshDrivers:
     def __init__(self, db, registry, root: Path, *, command=None, base_url=None, host_controller=False):
         self.db, self.registry = db, registry
@@ -159,6 +170,24 @@ class DshDrivers:
             "profile": {"bundles": ["@deepseek-ai/dsh-base"]}}}))
         source = Path(__file__).resolve().parents[1] / "integrations" / "dsh-driver" / "runtime.mjs"
         # JSON is YAML too; the runtime installs its own native State/pipeline tools.
+        # Local MCP services the driver may use, each switchable independently:
+        # the URL is the switch. A blank URL means "do not register it", so an
+        # operator can take one away without editing code, and a host that does
+        # not run these services keeps exactly the tool set it had before.
+        #
+        # failOnStartupError stays False for these: they are capabilities, not
+        # prerequisites. A service that is down must cost the driver its tools,
+        # not its ability to start - which is why the State MCP above is the only
+        # one that fails hard.
+        extra = []
+        for server, env_name in (("agentmcp", "AITELIER_DSH_MCP_AGENTMCP"),
+                                 ("devmcp", "AITELIER_DSH_MCP_DEVMCP")):
+            url = os.environ.get(env_name, DSH_EXTRA_MCP_DEFAULTS.get(server, "")).strip()
+            if not url:
+                continue
+            extra.append({"id": "mcp-" + server, "name": "@deepseek-ai/dsh-mcp-client", "config": {
+                "serverName": server, "transport": "streamable-http", "url": url,
+                "failOnStartupError": False, "toolCallTimeoutMs": 960000}})
         patches = [
             {"id": "hmr", "disabled": True},
             {"insert": [{"id": "aitelier-driver", "name": str(source)},
@@ -166,7 +195,7 @@ class DshDrivers:
                     "serverName": "aitelier", "transport": "streamable-http",
                     "url": self.base_url.rstrip("/") + "/mcp",
                     "headers": {"X-AItelier-Driver-Token": "__DRIVER_TOKEN__"},
-                    "failOnStartupError": True, "toolCallTimeoutMs": 960000}}]},
+                    "failOnStartupError": True, "toolCallTimeoutMs": 960000}}] + extra},
         ]
         import yaml
         (profile / "cordis.patch.yml").write_text(yaml.safe_dump(patches, sort_keys=False).replace(

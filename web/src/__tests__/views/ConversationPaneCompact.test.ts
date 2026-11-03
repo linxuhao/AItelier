@@ -365,3 +365,34 @@ describe('the composer is one row', () => {
     } finally { window.innerWidth = 1024; }
   });
 });
+
+// ── One control with two states, not two buttons ────────────────────────────
+// The owner asked for the mode pair to behave like a pressed/raised toggle. The
+// assertions below pin the parts a test can decide: a single shared pill, the
+// chosen segment marked active and aria-selected, the other neither, and the
+// marking following the click. The literal pixels are a browser's job.
+describe('the mode pair is one control with two states', () => {
+  it('marks exactly one segment as the pressed state and moves it with the click', async () => {
+    const {view} = await mountPane();
+    const group = view.container.querySelector('[data-modes="segmented"]') as HTMLElement;
+    expect(group, 'the two modes must share one pill').toBeTruthy();
+    // Exactly the two modes live inside that one pill.
+    expect(group.querySelectorAll('[role="tab"]').length).toBe(2);
+
+    const conversation = view.getByRole('tab', {name: 'Conversation'}) as HTMLElement;
+    const run = view.getByRole('tab', {name: 'Run history'}) as HTMLElement;
+    expect(group.contains(conversation) && group.contains(run)).toBe(true);
+
+    // Conversation is the default: it is the raised one.
+    expect(conversation.classList.contains('active')).toBe(true);
+    expect(conversation.getAttribute('aria-selected')).toBe('true');
+    expect(run.classList.contains('active')).toBe(false);
+    expect(run.getAttribute('aria-selected')).toBe('false');
+
+    await fireEvent.click(run);
+    await waitFor(() => expect(run.classList.contains('active')).toBe(true));
+    expect(run.getAttribute('aria-selected')).toBe('true');
+    expect(conversation.classList.contains('active')).toBe(false);
+    expect(conversation.getAttribute('aria-selected')).toBe('false');
+  });
+});

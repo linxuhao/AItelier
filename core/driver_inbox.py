@@ -192,7 +192,6 @@ class DriverInbox:
         refs = {} if refs is None else refs
         if not isinstance(refs, dict):
             raise StateGraphError("invalid_refs")
-        segments = self._segments(segments)
         payload = json.dumps([subject, body, target_driver_id, project_members, project_id, kind, delivery_mode, refs, reply_to_message_id, None if _system else self.driver_id], sort_keys=True)
         with self.store.transaction(write=True) as conn:
             replay = self._replay(conn, "send", request_key, payload)
@@ -286,6 +285,7 @@ class DriverInbox:
         refs = {} if refs is None else refs
         if not isinstance(refs, dict):
             raise StateGraphError("invalid_refs")
+        segments = self._segments(segments)
         # The reply link is appended only when it is set, so the payload of every
         # request written before it existed still replays byte-identically.
         payload = [subject, body, project_id, refs, self.driver_id]

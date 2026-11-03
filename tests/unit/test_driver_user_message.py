@@ -303,3 +303,31 @@ def test_an_untagged_message_keeps_its_old_payload_and_reads_as_no_segments(worl
                    {"project_id": "alpha", "limit": 10})
     row = next(m for m in page["messages"] if m["message_id"] == first["message_id"])
     assert row["segments"] == []
+
+
+# ── The other send path, which a user-message test cannot cover ─────────────
+# This exists because a change to `send_user_message` broke `send_driver_message`:
+# a normalisation call landed in the driver-to-driver function, which has no
+# `segments` parameter, so every send there raised NameError. The user-message
+# tests stayed green because they never call the other function. One test per
+# send path is the actual guard; two functions that share a shape are not.
+
+def test_driver_to_driver_send_still_works(world):
+    sent = execute(world["ada"], "send_driver_message",
+                   {"request_key": "to-bob", "subject": "coordination",
+                    "body": "are you the owner of this node?",
+                    "target_driver_id": "bob"}, allow_write=True)
+    assert sent["message_id"]
+    assert [d["target_driver_id"] for d in sent["deliveries"]] == ["bob"]
+    assert sent["deliveries"][0]["status"] == "unread"
+
+
+def test_driver_to_driver_rejects_the_same_bad_arguments_as_before(world):
+    # The guard rails on this path must survive the fix: exactly one of the two
+    # recipient forms, and a real delivery mode.
+    for bad in ({"target_driver_id": "bob", "project_members": "alpha"},
+                {"target_driver_id": "bob", "delivery_mode": "sometimes"}):
+        payload = {"request_key": "bad-" + str(len(bad)), "subject": "s",
+                   "body": "b", **bad}
+        with pytest.raises(Exception):
+            execute(world["ada"], "send_driver_message", payload, allow_write=True)

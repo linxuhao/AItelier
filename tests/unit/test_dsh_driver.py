@@ -98,6 +98,89 @@ def test_empty_install_and_running_pipeline_counts_are_truthful(runtime, tmp_pat
     assert runtime.status()['projects']['alpha']['running_pipelines'] == 1
 
 
+async def test_every_running_worker_is_counted_once_across_native_and_external_attempts(runtime):
+    """`running_subagents` is the union of the native and the external workers.
+
+    It used to read only `subagents_json`, so an attempt registered through
+    `start_external_attempt` (`execution_kind='external'`) was counted by
+    neither figure: three running external attempts showed as
+    `running_subagents: 0` on 2026-11-03.
+
+    The dedupe identity is the per-worker id string, because both sides
+    enumerate workers, not attempts:
+
+    * native children are the DSH subagent *run ids* the runtime adds on
+      `subagent/start` (integrations/dsh-driver/runtime.mjs, `info.runId`), and
+    * an external attempt's worker is its `external_id`.
+
+    It is deliberately NOT `claim_node`'s `subagent` field: that one is a
+    claimed label `'<driver_id>/<label>'`, a different namespace from the run
+    ids in `subagents_json`, so it can never identify the same worker. A
+    driver that starts an external attempt for a native child therefore uses
+    that child's run id as `external_id` and counts once. `running_pipelines`
+    keeps counting running skillflow attempts only.
+    """
+    from core.state_commands import execute
+    service = StateService(runtime.db, actor='fixture', project_read_trusted=True)
+    node = lambda key: {'key': key, 'goal': key, 'acceptance': [{'id': 'check', 'kind': 'test', 'description': 'fixture'}]}
+    service.store.add_nodes('alpha', [node('external-one'), node('external-two'), node('pipeline')])
+    service.store.add_nodes('beta', [node('shared'), node('external-only')])
+    run_id = 'run-2f7c1f9a4f0e4d6c'
+
+    def start_external(project, node_key, request_key, external_id):
+        attempt = execute(service, 'start_external_attempt', {'project_id': project, 'node_key': node_key,
+            'expected_revision': 1, 'harness': 'dsh', 'external_id': external_id,
+            'request_key': request_key}, allow_write=True)
+        return execute(service, 'report_external_attempt', {'attempt_id': attempt['attempt_id'],
+            'observation_id': request_key + '-running', 'expected_version': attempt['observation_version'],
+            'context_hash': attempt['context_hash'], 'status': 'running',
+            'report_ref': '/tmp/not-retained-while-running', 'report_sha256': '0' * 64},
+            allow_write=True)
+
+    def settle(*attempt_ids, status='failed'):
+        # Persist the lifecycle observation this read-only dashboard consumes.
+        with runtime.db.get_connection() as conn:
+            conn.executemany('UPDATE state_attempts SET status=? WHERE attempt_id=?',
+                             [(status, attempt_id) for attempt_id in attempt_ids])
+            conn.commit()
+
+    card = lambda project: runtime.status()['projects'][project]
+    try:
+        # 1. One running external attempt and no native child: 1, not 0. This
+        #    project has no DSH driver row at all, so its card must still exist
+        #    with zeros elsewhere instead of disappearing.
+        first = start_external('alpha', 'external-one', 'rk-external-one', 'run-alpha-one')
+        assert card('alpha') == {'total': 0, 'online': 0, 'running_subagents': 1, 'running_pipelines': 0}
+        # The same worker is a worker, not two: one external_id twice on two
+        # nodes is still one running worker.
+        second = start_external('alpha', 'external-two', 'rk-external-two', 'run-alpha-one')
+        assert card('alpha')['running_subagents'] == 1
+        # skillflow attempts stay out of this figure and keep their own.
+        pipeline = service.attempts.reserve('alpha', 'pipeline', 1, 'fixture_pipeline', 'fixture-pipeline')
+        settle(pipeline['attempt_id'], status='running')
+        assert card('alpha')['running_pipelines'] == 1 and card('alpha')['running_subagents'] == 1
+        # 2. Settled attempts are not running, in every terminal status.
+        settle(first['attempt_id'])
+        assert card('alpha')['running_subagents'] == 1
+        settle(second['attempt_id'], status='abandoned')
+        assert card('alpha')['running_subagents'] == 0
+        # ... and the pipeline is untouched by that.
+        assert card('alpha')['running_pipelines'] == 1
+
+        # 3. No double count when the worker is both a registered native
+        #    subagent (its run id is in subagents_json) and a running external
+        #    attempt using that same run id as external_id.
+        await runtime.start('beta', actor='fixture')
+        runtime.update('beta', phase='running', subagents_json=json.dumps([run_id, 'run-native-only']))
+        start_external('beta', 'shared', 'rk-shared', run_id)
+        assert card('beta')['running_subagents'] == 2, 'the shared worker must be counted once'
+        start_external('beta', 'external-only', 'rk-external-only', 'run-external-only')
+        assert card('beta')['running_subagents'] == 3
+        assert card('beta')['running_pipelines'] == 0
+    finally:
+        await runtime.close()
+
+
 async def test_profile_keeps_owner_credentials_out_and_uses_pinned_runtime(runtime, monkeypatch):
     monkeypatch.setenv("AITELIER_ADMIN_TOKEN", "fixture-never-inherit-owner")
     monkeypatch.setenv("AITELIER_DRIVER_TOKEN", "fixture-wrong-driver")

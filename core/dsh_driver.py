@@ -293,10 +293,35 @@ class DshDrivers:
             for r in conn.execute("SELECT project_id,COUNT(*) n FROM state_attempts "
                                   "WHERE execution_kind='skillflow' AND status='running' GROUP BY project_id") if 'state_attempts' in tables else []:
                 projects.setdefault(r["project_id"], {"drivers": [], "running_subagents": 0, "running_pipelines": 0})["running_pipelines"] = r["n"]
+            # An attempt registered through start_external_attempt is
+            # execution_kind='external', so it appeared in NEITHER figure: not in
+            # running_pipelines (skillflow only) and not in subagents_json (native
+            # children only). A driver that does all its work through external
+            # subagents therefore reported zero running workers while several were
+            # running. Collect those workers here; they are unioned with the native
+            # run ids below and deduped on the id string, because both sides name a
+            # worker, not an attempt.
+            external_workers = {}
+            for r in conn.execute("SELECT project_id,external_id FROM state_attempts "
+                                  "WHERE execution_kind='external' AND status='running' "
+                                  "AND project_id IS NOT NULL") if 'state_attempts' in tables else []:
+                ids = external_workers.setdefault(r["project_id"], set())
+                if r["external_id"]:
+                    ids.add(r["external_id"])
+                else:
+                    ids.add("")
+            for pid in external_workers:
+                projects.setdefault(pid, {"drivers": [], "running_subagents": 0, "running_pipelines": 0})
         for row in self.rows():
             p = projects.setdefault(row["project_id"], {"drivers": [], "running_subagents": 0, "running_pipelines": 0})
             p["managed"] = self.public(row)
-            p["running_subagents"] = len(json.loads(row["subagents_json"])) if self.running(row["project_id"]) else 0
+            native = set(json.loads(row["subagents_json"])) if self.running(row["project_id"]) else set()
+            p["running_subagents"] = len(native | external_workers.get(row["project_id"], set()))
+        for pid, ids in external_workers.items():
+            # A project with running external work but no managed driver row keeps
+            # its card instead of vanishing from the response.
+            if "running_subagents" in projects[pid] and "managed" not in projects[pid]:
+                projects[pid]["running_subagents"] = len(ids)
         def counts(ds):
             return {"total": len(ds), "online": sum(d.get("presence", {}).get("status") == "online" and d["status"] == "active" for d in ds)}
         for p in projects.values():

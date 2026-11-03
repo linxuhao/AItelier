@@ -41,6 +41,10 @@ async def test_independent_tokens_one_process_per_dag_and_clean_stop(runtime):
         status = runtime.status()
         assert status["projects"]["alpha"] | {} == {
             "total": 1, "online": 1, "running_subagents": 2, "running_pipelines": 0,
+            # The card also carries the unsettled-attempt figures, kept separate
+            # from the running counts so a registered-but-idle attempt can never
+            # read as a live worker.
+            "unsettled_attempts": 0, "unsettled_expired_attempts": 0,
             "managed": runtime.public(runtime.get("alpha")),
         }
         assert "token" not in json.dumps(status)
@@ -98,85 +102,67 @@ def test_empty_install_and_running_pipeline_counts_are_truthful(runtime, tmp_pat
     assert runtime.status()['projects']['alpha']['running_pipelines'] == 1
 
 
-async def test_every_running_worker_is_counted_once_across_native_and_external_attempts(runtime):
-    """`running_subagents` is the union of the native and the external workers.
+async def test_running_workers_are_live_children_not_registered_attempts(runtime):
+    """`running_subagents` must mean LIVE workers, not registered attempts.
 
-    It used to read only `subagents_json`, so an attempt registered through
-    `start_external_attempt` (`execution_kind='external'`) was counted by
-    neither figure: three running external attempts showed as
-    `running_subagents: 0` on 2026-11-03.
-
-    The dedupe identity is the per-worker id string, because both sides
-    enumerate workers, not attempts:
-
-    * native children are the DSH subagent *run ids* the runtime adds on
-      `subagent/start` (integrations/dsh-driver/runtime.mjs, `info.runId`), and
-    * an external attempt's worker is its `external_id`.
-
-    It is deliberately NOT `claim_node`'s `subagent` field: that one is a
-    claimed label `'<driver_id>/<label>'`, a different namespace from the run
-    ids in `subagents_json`, so it can never identify the same worker. A
-    driver that starts an external attempt for a native child therefore uses
-    that child's run id as `external_id` and counts once. `running_pipelines`
-    keeps counting running skillflow attempts only.
+    An external attempt proves a worker was registered. Only the native child
+    list tracks liveness, because the runtime empties it when a child exits.
+    Measured 2026-11-03: two of three "running" external attempts had leases
+    expired 5 and 21 days earlier, and a worker visible through both a native
+    child and an external attempt was counted twice (native ids are UUIDs,
+    external_ids are slugs, so they can never be matched by identity).
     """
     from core.state_commands import execute
+    import datetime as _dt
     service = StateService(runtime.db, actor='fixture', project_read_trusted=True)
     node = lambda key: {'key': key, 'goal': key, 'acceptance': [{'id': 'check', 'kind': 'test', 'description': 'fixture'}]}
-    service.store.add_nodes('alpha', [node('external-one'), node('external-two'), node('pipeline')])
-    service.store.add_nodes('beta', [node('shared'), node('external-only')])
-    run_id = 'run-2f7c1f9a4f0e4d6c'
+    service.store.add_nodes('alpha', [node('live-worker'), node('dead-worker')])
+    run_id = 'c1708e1a-d013-4dfe-9c9b-6a4a346a7d35'
 
-    def start_external(project, node_key, request_key, external_id):
-        attempt = execute(service, 'start_external_attempt', {'project_id': project, 'node_key': node_key,
+    def register(project, node_key, request_key, external_id):
+        return execute(service, 'start_external_attempt', {'project_id': project, 'node_key': node_key,
             'expected_revision': 1, 'harness': 'dsh', 'external_id': external_id,
             'request_key': request_key}, allow_write=True)
-        return execute(service, 'report_external_attempt', {'attempt_id': attempt['attempt_id'],
-            'observation_id': request_key + '-running', 'expected_version': attempt['observation_version'],
-            'context_hash': attempt['context_hash'], 'status': 'running',
-            'report_ref': '/tmp/not-retained-while-running', 'report_sha256': '0' * 64},
-            allow_write=True)
 
-    def settle(*attempt_ids, status='failed'):
-        # Persist the lifecycle observation this read-only dashboard consumes.
+    def set_lease(attempt_id, iso):
         with runtime.db.get_connection() as conn:
-            conn.executemany('UPDATE state_attempts SET status=? WHERE attempt_id=?',
-                             [(status, attempt_id) for attempt_id in attempt_ids])
+            conn.execute('UPDATE state_attempts SET lease_expires_at=? WHERE attempt_id=?', (iso, attempt_id))
             conn.commit()
 
     card = lambda project: runtime.status()['projects'][project]
+    future = (_dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(hours=2)).isoformat()
+    past = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=21)).isoformat()
     try:
-        # 1. One running external attempt and no native child: 1, not 0. This
-        #    project has no DSH driver row at all, so its card must still exist
-        #    with zeros elsewhere instead of disappearing.
-        first = start_external('alpha', 'external-one', 'rk-external-one', 'run-alpha-one')
-        assert card('alpha') == {'total': 0, 'online': 0, 'running_subagents': 1, 'running_pipelines': 0}
-        # The same worker is a worker, not two: one external_id twice on two
-        # nodes is still one running worker.
-        second = start_external('alpha', 'external-two', 'rk-external-two', 'run-alpha-one')
-        assert card('alpha')['running_subagents'] == 1
-        # skillflow attempts stay out of this figure and keep their own.
-        pipeline = service.attempts.reserve('alpha', 'pipeline', 1, 'fixture_pipeline', 'fixture-pipeline')
-        settle(pipeline['attempt_id'], status='running')
-        assert card('alpha')['running_pipelines'] == 1 and card('alpha')['running_subagents'] == 1
-        # 2. Settled attempts are not running, in every terminal status.
-        settle(first['attempt_id'])
-        assert card('alpha')['running_subagents'] == 1
-        settle(second['attempt_id'], status='abandoned')
-        assert card('alpha')['running_subagents'] == 0
-        # ... and the pipeline is untouched by that.
-        assert card('alpha')['running_pipelines'] == 1
+        await runtime.start('alpha', actor='fixture')
+        # One live native child, and an external attempt registered for that same
+        # piece of work under a slug id. That is one worker, not two.
+        runtime.update('alpha', phase='running', subagents_json=json.dumps([run_id]))
+        live = register('alpha', 'live-worker', 'rk-live', 'compact-pane-20261103')
+        set_lease(live['attempt_id'], future)
+        assert card('alpha')['running_subagents'] == 1, 'the registered attempt must not inflate a live child'
+        assert card('alpha')['unsettled_attempts'] == 1
+        assert card('alpha')['unsettled_expired_attempts'] == 0
 
-        # 3. No double count when the worker is both a registered native
-        #    subagent (its run id is in subagents_json) and a running external
-        #    attempt using that same run id as external_id.
-        await runtime.start('beta', actor='fixture')
-        runtime.update('beta', phase='running', subagents_json=json.dumps([run_id, 'run-native-only']))
-        start_external('beta', 'shared', 'rk-shared', run_id)
-        assert card('beta')['running_subagents'] == 2, 'the shared worker must be counted once'
-        start_external('beta', 'external-only', 'rk-external-only', 'run-external-only')
-        assert card('beta')['running_subagents'] == 3
-        assert card('beta')['running_pipelines'] == 0
+        # A dead row is never a running worker, and it is visibly expired.
+        dead = register('alpha', 'dead-worker', 'rk-dead', 'agent-depth-pollution-r5-20261013')
+        set_lease(dead['attempt_id'], past)
+        assert card('alpha')['running_subagents'] == 1, 'a dead attempt is not a worker'
+        assert card('alpha')['unsettled_attempts'] == 2
+        assert card('alpha')['unsettled_expired_attempts'] == 1, 'the expired one must be distinguishable'
+
+        # Settling removes it from the unsettled figure entirely.
+        with runtime.db.get_connection() as conn:
+            conn.execute("UPDATE state_attempts SET status='failed' WHERE attempt_id=?", (dead['attempt_id'],))
+            conn.commit()
+        assert card('alpha')['unsettled_attempts'] == 1
+        assert card('alpha')['unsettled_expired_attempts'] == 0
+
+        # A stopped driver has no live children, whatever is still registered.
+        # (phase='waiting' is NOT enough - the process is still alive, which is
+        # exactly the distinction this contract is about.)
+        await runtime.stop('alpha')
+        assert card('alpha')['running_subagents'] == 0, 'a stopped driver holds no live workers'
+        assert card('alpha')['unsettled_attempts'] == 1, 'the unsettled attempt is still visible'
     finally:
         await runtime.close()
 

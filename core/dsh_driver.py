@@ -275,6 +275,16 @@ class DshDrivers:
         return {k: row[k] for k in ("project_id", "driver_id", "enabled", "phase", "provider", "model",
                                     "session_id", "last_error", "updated_at")}
 
+    @staticmethod
+    def _utc_now_iso() -> str:
+        """Current UTC instant in the same shape state_attempts stores leases.
+
+        Both sides are ISO-8601 with an explicit +00:00 offset, so a string
+        comparison is a valid time comparison and avoids parsing per row.
+        """
+        from datetime import datetime, timezone
+        return datetime.now(timezone.utc).isoformat()
+
     def status(self):
         drivers = [d for d in (self.registry.list() if self.registry else []) if d["status"] != "retired"]
         for row in self.rows():
@@ -289,39 +299,47 @@ class DshDrivers:
             members = conn.execute("SELECT project_id,driver_id FROM project_drivers WHERE status='member'").fetchall() if self.registry else []
             for m in members:
                 if m["driver_id"] in seen:
-                    projects.setdefault(m["project_id"], {"drivers": [], "running_subagents": 0, "running_pipelines": 0})["drivers"].append(seen[m["driver_id"]])
+                    projects.setdefault(m["project_id"], {"drivers": [], "running_subagents": 0, "running_pipelines": 0, "unsettled_attempts": 0, "unsettled_expired_attempts": 0})["drivers"].append(seen[m["driver_id"]])
             for r in conn.execute("SELECT project_id,COUNT(*) n FROM state_attempts "
                                   "WHERE execution_kind='skillflow' AND status='running' GROUP BY project_id") if 'state_attempts' in tables else []:
-                projects.setdefault(r["project_id"], {"drivers": [], "running_subagents": 0, "running_pipelines": 0})["running_pipelines"] = r["n"]
-            # An attempt registered through start_external_attempt is
-            # execution_kind='external', so it appeared in NEITHER figure: not in
-            # running_pipelines (skillflow only) and not in subagents_json (native
-            # children only). A driver that does all its work through external
-            # subagents therefore reported zero running workers while several were
-            # running. Collect those workers here; they are unioned with the native
-            # run ids below and deduped on the id string, because both sides name a
-            # worker, not an attempt.
-            external_workers = {}
-            for r in conn.execute("SELECT project_id,external_id FROM state_attempts "
+                projects.setdefault(r["project_id"], {"drivers": [], "running_subagents": 0, "running_pipelines": 0, "unsettled_attempts": 0, "unsettled_expired_attempts": 0})["running_pipelines"] = r["n"]
+            # "running_subagents" means LIVE workers, and only the native child
+            # list tracks liveness: the runtime empties it when a child exits.
+            # An external attempt proves a worker was REGISTERED, not that anyone
+            # is working - two of three "running" attempts on 2026-11-03 had
+            # leases expired 5 and 21 days earlier. Counting attempts as workers
+            # therefore reports dead rows as staff.
+            #
+            # They are still worth seeing: an unsettled attempt is money spent
+            # with no result recorded. So they get their own figure, split by
+            # whether the lease is still good, and are never added into a running
+            # count. Native ids are UUIDs and external_ids are free-form slugs, so
+            # the two can never be matched by identity - which is the second
+            # reason not to union them: a caller that registers both would be
+            # counted twice for one worker.
+            unsettled = {}
+            for r in conn.execute("SELECT project_id,external_id,lease_expires_at FROM state_attempts "
                                   "WHERE execution_kind='external' AND status='running' "
                                   "AND project_id IS NOT NULL") if 'state_attempts' in tables else []:
-                ids = external_workers.setdefault(r["project_id"], set())
-                if r["external_id"]:
-                    ids.add(r["external_id"])
-                else:
-                    ids.add("")
-            for pid in external_workers:
-                projects.setdefault(pid, {"drivers": [], "running_subagents": 0, "running_pipelines": 0})
+                lease = r["lease_expires_at"] or ""
+                live = bool(lease) and lease > self._utc_now_iso()
+                slot = unsettled.setdefault(r["project_id"], {"live": set(), "expired": set()})
+                slot["live" if live else "expired"].add(r["external_id"] or "")
+            for pid, slot in unsettled.items():
+                projects.setdefault(pid, {"drivers": [], "running_subagents": 0,
+                                          "running_pipelines": 0, "unsettled_attempts": 0,
+                                          "unsettled_expired_attempts": 0})
         for row in self.rows():
-            p = projects.setdefault(row["project_id"], {"drivers": [], "running_subagents": 0, "running_pipelines": 0})
+            p = projects.setdefault(row["project_id"], {"drivers": [], "running_subagents": 0,
+                                                        "running_pipelines": 0,
+                                                        "unsettled_attempts": 0,
+                                                        "unsettled_expired_attempts": 0})
             p["managed"] = self.public(row)
-            native = set(json.loads(row["subagents_json"])) if self.running(row["project_id"]) else set()
-            p["running_subagents"] = len(native | external_workers.get(row["project_id"], set()))
-        for pid, ids in external_workers.items():
-            # A project with running external work but no managed driver row keeps
-            # its card instead of vanishing from the response.
-            if "running_subagents" in projects[pid] and "managed" not in projects[pid]:
-                projects[pid]["running_subagents"] = len(ids)
+            p["running_subagents"] = len(json.loads(row["subagents_json"])) if self.running(row["project_id"]) else 0
+        for pid, slot in unsettled.items():
+            p = projects[pid]
+            p["unsettled_attempts"] = len(slot["live"]) + len(slot["expired"])
+            p["unsettled_expired_attempts"] = len(slot["expired"])
         def counts(ds):
             return {"total": len(ds), "online": sum(d.get("presence", {}).get("status") == "online" and d["status"] == "active" for d in ds)}
         for p in projects.values():

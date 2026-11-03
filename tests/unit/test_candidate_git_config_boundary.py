@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 from core.semantic_index_control import git as closed_git
-from test_candidate_derived_churn import world, cache, call, git
+from tests.unit.test_candidate_derived_churn import world, cache, call, git
 
 
 @pytest.mark.parametrize('case',['empty-config-alias','include-owned','include-alias','include-hardlink','include-external','include-nested-external','include-parent-alias','worktree-owned','worktree-alias','worktree-hardlink','worktree-include-external','include-empty-alias','include-empty-hardlink','include-empty-external','include-empty-owned','include-inactive-external','worktree-empty-alias'])

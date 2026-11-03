@@ -23,7 +23,7 @@ import pytest
 
 from core import closed_git, run_isolation as ri
 from skillflow.exceptions import IsolationUnavailable
-from test_closed_backend_git import (  # noqa: F401 -- shared fixtures
+from tests.unit.test_closed_backend_git import (  # noqa: F401 -- shared fixtures
     _ReapSF, add_filters, db, g, home, init, marker_program, markers, project, ran, sha256)
 
 

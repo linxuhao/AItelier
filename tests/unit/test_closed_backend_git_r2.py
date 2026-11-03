@@ -31,7 +31,7 @@ import pytest
 
 from core import closed_git
 from core.workspace_manager import WorkspaceManager
-from test_closed_backend_git import (  # noqa: F401 -- shared fixtures
+from tests.unit.test_closed_backend_git import (  # noqa: F401 -- shared fixtures
     add_filters, db, g, home, init, marker_program, markers, project, ran, sha256)
 
 

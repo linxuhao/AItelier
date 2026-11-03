@@ -3,7 +3,7 @@ import sys,json,os
 from pathlib import Path
 import pytest
 sys.path.insert(0,'/workspace/tests/unit')
-from test_candidate_derived_churn import world,cache,call,git
+from tests.unit.test_candidate_derived_churn import world,cache,call,git
 
 @pytest.mark.parametrize('unsafe',['head-tracked-index-removed','index-hardlink','exclude-symlink','exclude-hardlink','config-symlink','config-hardlink'])
 def test_independent_metadata_ownership_keeps_payload(tmp_path,unsafe):

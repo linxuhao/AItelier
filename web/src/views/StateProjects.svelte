@@ -122,11 +122,14 @@
      page (#view-container) is left with nothing to scroll. `minmax(0,1fr)` and
      `min-height:0` let the columns shrink below their content, which is what
      makes a child's own overflow-y actually engage. */
-  /* The pane is on the LEFT now, but the DOM keeps the list first because that
-     is the reading order of the page. Placement is explicit so the two cannot
-     drift apart: list -> column 2, pane -> column 1. */
-  .dag-split > .state-projects { grid-column:2; }
-  .dag-split > .conversation-pane { grid-column:1; }
+  /* The pane is on the LEFT, and the DOM keeps the list first (reading order).
+     `order` moves it, NOT grid-column: reassigning the columns also changed how
+     they are sized, and the list disappeared - the earlier sizing was already
+     correct, so only the paint order changes here. */
+  /* `auto` is the pane's own width and `1fr` is whatever the list can have: with
+     order:-1 the pane is placed first, so it must be first in the column list too
+     or it takes the flexible column and squeezes the list to its content. */
+  .dag-split > .conversation-pane { order:-1; }
   .dag-split { display:grid; grid-template-columns:auto minmax(0,1fr); grid-template-rows:minmax(0,1fr);
     align-items:stretch; gap:1rem; height:100%; min-height:0; max-width:1680px; margin:0 auto; }
   .state-projects { min-width:0; min-height:0; max-width:1280px; margin:0 auto;
@@ -163,6 +166,7 @@
   @media (max-width:900px) {
     /* One column again: the page scrolls, the list is not its own scroll box. */
     .dag-split { grid-template-columns:minmax(0,1fr); grid-template-rows:auto; height:auto; }
+    .dag-split > .conversation-pane { order:0; }
     .state-projects { width:100%; max-width:none; overflow-y:visible; height:auto; }
   }
 </style>

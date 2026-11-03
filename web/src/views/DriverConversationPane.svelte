@@ -197,8 +197,12 @@
   .pane-modes button{border:0;border-radius:0;padding:.2rem .55rem;color:inherit;opacity:.75;}
   .pane-modes button + button{border-left:1px solid var(--pico-muted-border-color,#dbe3ec);}
   .pane-modes button.active{background:var(--pico-card-background-color,#fff);color:var(--pico-primary,#0066cc);
-    font-weight:600;opacity:1;box-shadow:0 1px 2px rgba(16,32,48,.18);}
-  .pane-modes button:not(.active){box-shadow:inset 0 1px 2px rgba(16,32,48,.16);}
+    font-weight:600;opacity:1;}
+  /* The PRESSED look belongs to the chosen segment, not the other one. It was on
+     the unselected button: an inset shadow reads as "pushed in" far more strongly
+     than a raised one reads as "up", so the eye went to the wrong state. */
+  .pane-modes button:not(.active){box-shadow:none;background:transparent;}
+  .pane-modes button.active{box-shadow:inset 0 1px 3px rgba(16,32,48,.22);}
   .pane-body{display:flex;flex-direction:column;flex:1 1 auto;min-height:0;overflow-x:hidden;overflow-y:hidden;padding:.15rem .5rem .3rem;}
   .pane-panel{display:flex;flex-direction:column;flex:1 1 auto;min-height:0;overflow-x:hidden;overflow-y:hidden;}
   /* `hidden` must win over the panel's own display:flex, or a non-selected tab

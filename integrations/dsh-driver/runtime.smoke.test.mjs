@@ -11,6 +11,7 @@ import { readHistory } from './history.mjs';
 
 test('real pinned DSH: native child, auto compact, fresh injection, raw history grep and unified wait', { timeout: 45000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), 'dsh-native-smoke-'));
+  const childDirectory = await mkdtemp(join(tmpdir(), 'dsh-child-workspace-'));
   const entry = await realpath(process.env.AITELIER_DSH_TEST_ENTRY ?? new URL('./node_modules/.bin/dsh', import.meta.url));
   const here = dirname(fileURLToPath(import.meta.url));
   const requests = [], activity = [], events = [], parked = new Set(), childWaits = new Set();
@@ -77,6 +78,7 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
       AITELIER_DRIVER_ID: 'dsh-fixture', AITELIER_DSH_PROJECT: 'alpha', AITELIER_DSH_SESSION: 'fixture-root',
       AITELIER_DSH_PROVIDER: 'fixture', AITELIER_DSH_MODEL: 'fixture-model', AITELIER_URL: base,
       AITELIER_DSH_STATE_DIR: directory, AITELIER_SECRETS_DIR: join(directory, 'no-secrets'),
+      AITELIER_TEST_CHILD_CWD: childDirectory,
     };
     const launch = () => {
       const child = spawn(process.execPath, [entry, '--profile', 'driver'], { cwd: directory, env: environment });
@@ -95,9 +97,12 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
     assert.ok(activity.some(a => a.subagents.length > 0), 'native child activity missing\n' + output + JSON.stringify({contextReads,activity,requests:requests.map(r=>({summary:r.summary,child:r.child})),events:events.map(e=>e.type),directory}));
     assert.ok(events.some(e => e.type === 'compaction/end' && !e.data.error), 'automatic compaction missing\n' + output + JSON.stringify({requests:requests.map(r=>({summary:r.summary,child:r.child,size:JSON.stringify(r.options).length})),events:events.map(e=>({type:e.type,data:e.type==='compaction/end'?e.data:undefined}))}));
     assert.ok(contextReads >= 2, 'context was not refreshed\n' + output);
+    assert.ok(requests.some(r => !r.summary && !r.child && JSON.stringify(r.options).includes('你是 alpha 项目 State DAG 的常驻导演')), 'project director goal missing at startup');
     const after = requests.filter(r => !r.summary && !r.child).slice(2);
     assert.ok(after.some(r => JSON.stringify(r.options.messages).includes('fresh private rule')), 'fresh private note missing\n' + output);
     assert.ok(after.some(r => JSON.stringify(r.options.messages).includes('VERIFIED')), 'fresh node status missing');
+    assert.ok(after.some(r => JSON.stringify(r.options).includes('你是 alpha 项目 State DAG 的常驻导演')), 'standing director goal missing after compact');
+    assert.equal(await readFile(join(childDirectory, 'worker-proof.txt'), 'utf8'), 'WORKER_SHELL_OK', 'native child could not write in its own cwd outside the parent workspace');
     assert.ok(events.some(e => e.type === 'tool/result' && JSON.stringify(e.data).includes('next_after_seq') && JSON.stringify(e.data).includes('Resume the assigned State DAG')), 'precompact grep missing\n' + output);
     assert.ok(activity.some(a => a.phase === 'waiting' && a.subagents.length > 0), 'parent never waited while the native child was active');
     assert.ok(activity.some(a => a.phase === 'waiting' && a.subagents.length === 0), output);
@@ -127,11 +132,13 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
     const resumed = requests.slice(before).find(r => r.options.tools?.some(t => t.name === 'wait'));
     assert.ok(resumed, 'persisted driver did not resume\n' + output);
     assert.match(JSON.stringify(resumed.options.messages), /earlier details can be searched/);
+    assert.match(JSON.stringify(resumed.options), /你是 alpha 项目 State DAG 的常驻导演/);
   } finally {
     if (proc && proc.exitCode === null) { proc.kill('SIGTERM'); await once(proc, 'exit'); }
     for (const response of [...parked, ...childWaits]) response.destroy();
     server.closeAllConnections(); await new Promise(resolve => server.close(resolve));
     if (!process.env.DSH_TEST_KEEP) await rm(directory, { recursive: true });
+    await rm(childDirectory, { recursive: true, force: true });
   }
 });
 
@@ -140,7 +147,7 @@ test('real pinned DSH default host adapter calls the authenticated completion br
   const entry = await realpath(process.env.AITELIER_DSH_TEST_ENTRY ?? new URL('./node_modules/.bin/dsh', import.meta.url));
   const here = dirname(fileURLToPath(import.meta.url));
   const completions = [], activity = [];
-  let output = '', proc, inboxWait, replied = false, call = 0, heldCompletion;
+  let output = '', proc, inboxWait, replied = false, call = 0, heldCompletion, waitRequests = 0;
   const server = createServer(async (req, res) => {
     const chunks = []; for await (const chunk of req) chunks.push(chunk);
     const body = chunks.length ? JSON.parse(Buffer.concat(chunks)) : {};
@@ -151,7 +158,12 @@ test('real pinned DSH default host adapter calls the authenticated completion br
     if (req.url.endsWith('/activity')) { activity.push(body); return send({ ok: true }); }
     if (req.url.endsWith('/heartbeat')) return send({ ok: true });
     if (req.url.endsWith('/list_director_messages')) return send({ items: [] });
-    if (req.url.endsWith('/wait_for_state_change')) { inboxWait = res; return; }
+    if (req.url.endsWith('/wait_for_state_change')) {
+      assert.equal(body.timeout_seconds, 240);
+      if (++waitRequests === 1) { res.destroy(); return; }
+      if (waitRequests === 2) return send({timed_out:true,next_after:1,next_inbox_after:0});
+      inboxWait = res; return;
+    }
     if (req.url.endsWith('/completion')) {
       assert.equal(req.headers['x-aitelier-driver-token'], 'fixture-only');
       completions.push(body);
@@ -184,6 +196,10 @@ test('real pinned DSH default host adapter calls the authenticated completion br
     while (Date.now() < deadline && proc.exitCode === null && !activity.some(a => a.phase === 'waiting')) await new Promise(resolve => setTimeout(resolve, 100));
     assert.ok(activity.some(a => a.phase === 'waiting'), output + JSON.stringify(activity));
     assert.ok(completions.some(c => c.session_id === 'host-root' && c.tools.some(t => t.function.name === 'wait')), JSON.stringify(completions));
+    while (Date.now() < deadline && !inboxWait) await new Promise(resolve => setTimeout(resolve, 50));
+    const errorIndex = activity.findIndex(a => a.error?.includes('AItelier event subscription: fetch failed'));
+    assert.ok(errorIndex >= 0, 'transport error was not diagnosed');
+    assert.ok(activity.slice(errorIndex + 1).some(a => !a.error && a.phase === 'waiting'), 'successful empty response did not clear connection error');
     await new Promise(resolve => setTimeout(resolve, 400));
     assert.equal(completions.filter(c => c.tools?.some(t => t.function.name === 'wait')).length, 1, 'consumed startup input must not wake the first idle wait');
     assert.ok(inboxWait, 'combined runtime wait missing');

@@ -22,7 +22,7 @@ export function apply(ctx) {
       }
       else if (child && !childShell) {
         childShell = true;
-        block = { type: 'tool-call', id: 'fixture-child-shell', name: 'bash', arguments: JSON.stringify({ description: 'Run a local fixture command', command: "printf 'WORKER_SHELL_OK'", run_in_background: false }) };
+        block = { type: 'tool-call', id: 'fixture-child-shell', name: 'bash', arguments: JSON.stringify({ description: 'Run a local fixture command', command: "printf 'WORKER_SHELL_OK' > worker-proof.txt; cat worker-proof.txt", run_in_background: false }) };
       }
       else if (child) {
         await fetch(process.env.AITELIER_URL + '/test/parent-waiting');
@@ -32,7 +32,7 @@ export function apply(ctx) {
       else {
         const call = rootCalls++;
         if (call === 0) block = { type: 'tool-call', id: 'fixture-pipelines', name: 'mcp__aitelier__list_pipelines', arguments: '{}' };
-        else if (call === 1) block = { type: 'tool-call', id: 'fixture-spawn', name: 'subagent', arguments: JSON.stringify({ description: 'smoke child', prompt: 'CHILD_TASK_MARKER' }) };
+        else if (call === 1) block = { type: 'tool-call', id: 'fixture-spawn', name: 'subagent', arguments: JSON.stringify({ description: 'smoke child', prompt: 'CHILD_TASK_MARKER', cwd: process.env.AITELIER_TEST_CHILD_CWD }) };
         else if (call === 2) { pressure = true; block = { type: 'text', text: 'HISTORY_BEFORE_COMPACT_ANCHOR ' + 'earlier context '.repeat(14000) }; }
         else if (call === 3) block = { type: 'tool-call', id: 'fixture-grep', name: 'grep_chat_history', arguments: JSON.stringify({ pattern: 'Resume the assigned State DAG' }) };
         else block = { type: 'tool-call', id: 'fixture-wait-' + call, name: 'wait', arguments: '{}' };

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DriverRuntime, grepHistory } from './runtime.mjs';
+import { DriverRuntime, grepHistory, connectionErrorMessage } from './runtime.mjs';
 
 const snapshot = status => ({ event_seq: 10, nodes: [{ name: 'n', status }],
   project_note: { index: [{ index_line: 'project rule' }] },
@@ -25,6 +25,11 @@ test('fresh context replaces names/statuses and both note indexes after compact'
   assert.equal(rendered.private_note.index[0].index_line, 'new private rule');
   assert.equal(rendered.project_note.index[0].index_line, 'project rule');
   assert.equal(rendered.driver_skill, 'driver skill');
+  assert.match(rendered.driver_goal, /你是 alpha 项目 State DAG 的常驻导演/);
+  assert.match(rendered.driver_goal, /critical issues/);
+  assert.match(rendered.driver_goal, /Claude Sonnet 5\.5 和 GPT-6\.1 Sol/);
+  assert.match(rendered.driver_goal, /Claude Opus 5\.5/);
+  assert.doesNotMatch(rendered.driver_goal, /\{\{project_id\}\}/);
 }));
 test('wrong identity refuses bootstrap before private context is read', async () => fixture(async directory => {
   let reads = 0;
@@ -42,6 +47,7 @@ test('timeouts stay inside runtime; a combined event advances both durable curso
       if (path.endsWith('/heartbeat')) return {};
       assert.equal(args.include_driver_inbox, true);
       assert.equal(args.return_when_idle, false);
+      assert.equal(args.timeout_seconds, 240);
       if (++calls < 3) return { timed_out: true, next_after: 10, next_inbox_after: 0 };
       if (calls === 3) return { timed_out: false, next_after: 12, next_inbox_after: 7, events: [{ type: 'changed' }] };
       r.close(); throw new Error('closed');
@@ -68,19 +74,35 @@ test('wait wakes on native child messages and is cancellation safe', async () =>
   const closing = r.wait(); r.close(); await assert.rejects(closing, /stopped/);
 }));
 test('subscription reconnects without a model turn and never retries a revoked token', async () => fixture(async directory => {
-  let waits = 0, failures = 0, delivered = 0;
+  let waits = 0, failures = 0, delivered = 0, restored = 0;
   const r = new DriverRuntime({ project:'alpha', driver:'driver-a', directory, retryDelayMs:1,
     request: async path => {
       if (path.endsWith('/heartbeat')) return {};
       if (++waits === 1) throw new TypeError('network lost');
       return {timed_out:false,next_after:12,next_inbox_after:3,events:[{event_type:'node_changed'}]};
-    }, onConnectionError: async () => {failures++;}, onEvent: async () => {delivered++;r.close();} });
+    }, onConnectionError: async () => {failures++;}, onConnectionRestored: async () => {restored++;}, onEvent: async () => {delivered++;r.close();} });
   await r.pump();
-  assert.equal(failures,1);assert.equal(delivered,1);assert.equal(r.after,12);
+  assert.equal(failures,1);assert.equal(restored,1);assert.equal(delivered,1);assert.equal(r.after,12);
   const denied = new DriverRuntime({project:'alpha',directory,request:async()=>{
     const error = new Error('revoked');error.status=403;throw error;
   }});
   await assert.rejects(denied.pump(), /revoked/);
+}));
+test('successful empty subscription response clears a transport error without waking the model', async () => fixture(async directory => {
+  let calls = 0, delivered = 0;
+  const status = [];
+  const r = new DriverRuntime({directory, project:'alpha', retryDelayMs:1,
+    request: async path => {
+      if (path.endsWith('/heartbeat')) return {};
+      if (++calls === 1) throw new TypeError('fetch failed', {cause:{code:'UND_ERR_HEADERS_TIMEOUT', message:'Headers Timeout Error'}});
+      if (calls === 2) return {timed_out:true,next_after:12,next_inbox_after:3};
+      r.close(); throw new Error('done');
+    }, onConnectionError: error => {status.push(connectionErrorMessage(error));},
+    onConnectionRestored: () => {status.push('');}, onEvent: () => {delivered++;} });
+  await assert.rejects(r.pump(), /done/);
+  assert.deepEqual(status, ['AItelier event subscription: fetch failed (UND_ERR_HEADERS_TIMEOUT: Headers Timeout Error)', '']);
+  assert.equal(delivered,0); assert.equal(r.after,12); assert.equal(r.inboxAfter,3);
+  assert.equal(r.connectionLost,false);
 }));
 test('history grep includes precompact events, exact citations, regex and pagination', () => {
   const events = [

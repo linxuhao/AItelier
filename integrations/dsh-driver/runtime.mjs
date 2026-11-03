@@ -9,6 +9,13 @@ import { setTimeout as delay } from 'node:timers/promises';
 export const name = 'aitelier-state-driver';
 export const inject = ['agents', 'sessions', 'sessionPersistence', 'sessionQuery', 'systemPrompt', 'tools', 'compaction', 'credentials', 'llm'];
 
+const goalTemplate = await readFile(new URL('./goal.md', import.meta.url), 'utf8');
+export const driverGoal = project => goalTemplate.replaceAll('{{project_id}}', project);
+export function connectionErrorMessage(error) {
+  const cause = error.cause;
+  return `AItelier event subscription: ${error.message}${cause ? ` (${[cause.code, cause.message].filter(Boolean).join(': ')})` : ''}`.slice(0, 2000);
+}
+
 /** Grep the immutable raw log, including events shadowed by compaction. */
 export function grepHistory(events, pattern, { regex = false, ignore_case = false, after_seq = -1, limit = 20 } = {}) {
   if (!pattern) throw new Error('pattern must not be empty');
@@ -36,8 +43,8 @@ export function grepHistory(events, pattern, { regex = false, ignore_case = fals
 // Pure transport/state controller is separate so the actual wait/refresh logic
 // is exercised without making model calls.
 export class DriverRuntime {
-  constructor({ project, driver, directory, request, onEvent = () => {}, onConnectionError = () => {}, retryDelayMs = 1000, pendingInputs = () => [] }) {
-    Object.assign(this, { project, driver, directory, request, onEvent, onConnectionError, retryDelayMs, pendingInputs });
+  constructor({ project, driver, directory, request, onEvent = () => {}, onConnectionError = () => {}, onConnectionRestored = () => {}, retryDelayMs = 1000, pendingInputs = () => [] }) {
+    Object.assign(this, { project, driver, directory, request, onEvent, onConnectionError, onConnectionRestored, retryDelayMs, pendingInputs });
     this.after = 0;
     this.inboxAfter = 0;
     this.snapshot = null;
@@ -45,6 +52,7 @@ export class DriverRuntime {
     this.waiters = new Set();
     this.controller = new AbortController();
     this.lastHeartbeat = 0;
+    this.connectionLost = false;
   }
   async init() {
     const me = await this.request('/api/drivers/me');
@@ -65,6 +73,7 @@ export class DriverRuntime {
   }
   render() {
     return JSON.stringify({ project_id: this.project, driver_id: this.driver,
+      driver_goal: driverGoal(this.project),
       nodes: this.snapshot.nodes, project_note: this.snapshot.project_note,
       private_note: this.snapshot.private_note, driver_skill: this.snapshot.driver_skill,
       runtime_skill: this.snapshot.runtime_skill });
@@ -102,8 +111,13 @@ export class DriverRuntime {
         }
         const result = await this.request('/api/state/query/wait_for_state_change', {
           project_id: this.project, after: this.after, include_driver_inbox: true,
-          inbox_after: this.inboxAfter, timeout_seconds: 900, return_when_idle: false,
+          // Node fetch's default response-header timeout is 300 seconds.
+          inbox_after: this.inboxAfter, timeout_seconds: 240, return_when_idle: false,
         }, this.controller.signal);
+        if (this.connectionLost) {
+          await this.onConnectionRestored();
+          this.connectionLost = false;
+        }
         // No model turn on an ordinary timeout. Native State waits also maintain
         // presence while blocked; there is no independent heartbeat daemon.
         const inbox = (result.driver_inbox ?? []).filter(message => message.status !== 'resolved');
@@ -120,6 +134,7 @@ export class DriverRuntime {
         const transient = error instanceof TypeError || error.name === 'TimeoutError' || error.status >= 500 || [408, 429].includes(error.status);
         if (this.controller.signal.aborted || !transient) throw error;
         // Transport recovery belongs to this subscription, not a model turn.
+        this.connectionLost = true;
         await this.onConnectionError(error);
         await delay(this.retryDelayMs, undefined, { signal: this.controller.signal });
       }
@@ -180,9 +195,11 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
     project_id: project, protocol_version: 'v3', statuses: ['unread', 'acknowledged'], limit: 20,
   });
   runtime.onConnectionError = async error => {
-    ctx.logger.warn(String(error));
-    await report(waiting ? 'waiting' : 'running', String(error).slice(0, 2000)).catch(() => {});
+    const detail = connectionErrorMessage(error);
+    ctx.logger.warn(detail);
+    await report(waiting ? 'waiting' : 'running', detail).catch(() => {});
   };
+  runtime.onConnectionRestored = () => report(waiting ? 'waiting' : 'running');
   runtime.onEvent = async result => {
     // Steer at the next step: a resident turn can remain in wait() indefinitely.
     // Queue into the durable DSH inbox before committing the State cursor. An
@@ -280,7 +297,7 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
   ctx.on('dispose', close);
   await report('running');
   const inbox = await projectInbox();
-  agent.followup(message('Resume the assigned State DAG from the current injected state. Read relevant contracts and notes, advance authorized work, then wait().\nPending project inbox:\n' + JSON.stringify(inbox)));
+  agent.followup(message('Resume the assigned State DAG from the current injected state. Follow driver_goal as this project’s standing director mandate. Read relevant contracts, notes and both inboxes. Review issues and unfinished delivery as well as the frontier, dispatch actionable work, and wait() only after assessing remaining work and concrete blockers.\nPending project inbox:\n' + JSON.stringify(inbox)));
   const pump = runtime.pump().catch(async error => {
     if (!runtime.controller.signal.aborted) {
       await report('failed', String(error).slice(0, 2000));

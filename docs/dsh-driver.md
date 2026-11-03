@@ -83,6 +83,28 @@ can select an installed DSH executable and `AITELIER_DSH_API_URL` overrides the
 default loopback backend URL. Use a complete `dsh` installation from this pinned
 version, not an older globally installed command.
 
+## Standing director goal and connection recovery
+
+`integrations/dsh-driver/goal.md` supplies each project's standing director
+mandate as `driver_goal` in the required context. Startup, session resume and
+post-compaction context include the same project-specific goal. The director
+maintains State/note/inboxes, checks issues and unfinished delivery beyond the
+frontier, prioritizes critical defects, and aims for four independent pipelines
+and four subagents when actionable work exists. The owner's push/publish scope,
+model preferences and cleanup policy are part of that mandate.
+
+Native subagents accept a `cwd` for their own workspace; the parent session's
+workspace boundary does not make every child checkout read-only. This profile
+mounts native Spawn/Fork only. Claude Code and Codex external subagent providers
+are not mounted by this MVP; naming a preferred model in the goal does not
+install a provider or change the host adapter's default model.
+
+The State subscription requests a 240-second wait, below Node fetch's default
+300-second response-header timeout. Ordinary timeouts stay inside the runtime
+without model turns. Transport failures retry there too, include the underlying
+error code/cause in the status, and clear the displayed error after a successful
+subscription response, including an empty timeout response.
+
 ## Checks
 
 Run backend tests only in a throwaway container as required by AGENTS.md.

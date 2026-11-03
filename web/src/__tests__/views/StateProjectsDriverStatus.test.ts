@@ -95,7 +95,7 @@ describe('driver state on the State DAG list', () => {
 describe('the split conversation pane', () => {
   const aside = (view: any) => view.container.querySelector('aside.conversation-pane') as HTMLElement;
 
-  it('resizes by dragging the separator and restores the default width', async () => {
+  it('resizes by dragging the separator and by keyboard, with no size buttons', async () => {
     const view = render(StateProjects);
     await view.findByRole('heading', {name: 'running-old'});
     const handle = view.getByRole('separator', {name: 'Resize conversation pane'});
@@ -106,13 +106,14 @@ describe('the split conversation pane', () => {
     await waitFor(() => expect(aside(view).style.width).toBe('520px'));
     expect(handle.getAttribute('aria-valuenow')).toBe('520');
     expect(storage.get('aitelier_dag_pane_width')).toBe('520');
-    await fireEvent.click(view.getByRole('button', {name: 'Shrink'}));
+    // Expand / Shrink / Restore are gone: they only moved a border the user can
+    // drag. The handle keeps the keyboard half of that capability, so the width
+    // is still settable without a mouse and without a button.
+    await fireEvent.keyDown(handle, {key: 'Home'});
     await waitFor(() => expect(aside(view).style.width).toBe('280px'));
-    await fireEvent.click(view.getByRole('button', {name: 'Expand'}));
+    await fireEvent.keyDown(handle, {key: 'End'});
     await waitFor(() => expect(aside(view).style.width).toBe('614px'));
-    await fireEvent.click(view.getByRole('button', {name: 'Restore'}));
-    await waitFor(() => expect(aside(view).style.width).toBe('420px'));
-    expect(storage.get('aitelier_dag_pane_width')).toBe('420');
+    expect(storage.get('aitelier_dag_pane_width')).toBe('614');
   });
 
   it('survives a reload with the width the user chose', async () => {

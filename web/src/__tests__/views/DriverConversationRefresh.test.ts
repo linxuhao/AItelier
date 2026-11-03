@@ -195,14 +195,19 @@ describe('a refresh does not disturb the reader', () => {
     expect(onread).not.toHaveBeenCalled();
   });
 
-  it('still advances the marker to what it showed when the user asks for a refresh', async () => {
+  it('still advances the marker to what it showed on an explicit visit, never on a timer', async () => {
     const onread = vi.fn();
     const view = render(DriverConversation, {projectId: 'alpha', onread});
     await view.findByText('Second report');
     api.dshDriverConversation.mockResolvedValue(page([m3, m2, m1],
       {unread_count: 1, read_upto_message_id: 'm2'}));
 
-    await fireEvent.click(view.getByRole('button', {name: 'Refresh'}));
+    // The pane has no Refresh button any more, so the explicit visits that may
+    // advance the persisted marker are the mount and the user's own send. What
+    // the button used to do - read the newest page AND mark what it showed - is
+    // still exactly what an explicit visit does; a timer still marks nothing.
+    await fireEvent.input(view.getByRole('textbox', {name: 'Write a message'}), {target: {value: 'hello'}});
+    await fireEvent.click(view.getByRole('button', {name: 'Send'}));
     await view.findByText('Fresh report');
     await waitFor(() => expect(api.markDriverConversationRead).toHaveBeenCalledWith('alpha', 'm3'));
     expect(onread).toHaveBeenCalled();

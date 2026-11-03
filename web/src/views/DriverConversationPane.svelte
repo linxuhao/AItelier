@@ -104,32 +104,35 @@
   {/if}
   <header class="pane-header">
     {#if projects.length}
-      <label class="pane-project">{st('conversationPaneProject')}
-        <select aria-label={st('conversationPaneProject')} value={selected} onchange={choose}>
-          {#each projects as project (project.project_id)}
-            <option value={project.project_id}>{project.title} · {project.project_id}</option>
-          {/each}
-        </select>
-      </label>
+      <select class="pane-project" aria-label={st('conversationPaneProject')} value={selected} onchange={choose}>
+        {#each projects as project (project.project_id)}
+          <option value={project.project_id}>{project.title} · {project.project_id}</option>
+        {/each}
+      </select>
     {/if}
+    <!-- Icon-only, so the name lives in aria-label (title is the hint). One
+         button, two states: it always acts on the DAG this header selects. -->
     <button type="button" class="outline driver-toggle" disabled={busy || !selected}
+      aria-label={driver?.enabled ? st('driverStop') : st('driverStart')}
       title={st('conversationPaneDriverControl')}
-      onclick={() => void toggleDriver()}>{busy ? '…' : driver?.enabled ? st('driverStop') : st('driverStart')}</button>
-    {#if !narrow}
-      <div class="pane-size" role="group" aria-label={st('conversationPaneSize')}>
-        <button type="button" class="outline" onclick={() => setWidth(paneMaxFor(viewport))}>{st('conversationPaneExpand')}</button>
-        <button type="button" class="outline" onclick={() => setWidth(PANE_MIN)}>{st('conversationPaneShrink')}</button>
-        <button type="button" class="outline" onclick={() => setWidth(PANE_DEFAULT)}>{st('conversationPaneRestore')}</button>
-      </div>
-    {/if}
+      onclick={() => void toggleDriver()}>
+      {#if busy}<span class="busy" aria-hidden="true">…</span>
+      {:else if driver?.enabled}
+        <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true" focusable="false"><rect x="3" y="3" width="10" height="10" rx="1.5"/></svg>
+      {:else}
+        <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true" focusable="false"><path d="M4.5 2.8 13 8l-8.5 5.2Z"/></svg>
+      {/if}
+    </button>
+    <!-- Same row as the picker: the two modes used to take a band of their own,
+         and every band above the thread is height the thread does not get. -->
+    <div class="pane-modes" role="tablist" aria-label={st('conversationPaneMode')}>
+      <button type="button" role="tab" class:active={mode === 'conversation'} aria-selected={mode === 'conversation'}
+        onclick={() => chooseMode('conversation')}>{st('driverConversation')}</button>
+      <button type="button" role="tab" class:active={mode === 'run'} aria-selected={mode === 'run'}
+        onclick={() => chooseMode('run')}>{st('driverHistory')}</button>
+    </div>
   </header>
   {#if controlError}<p class="pane-error" role="alert">{controlError}</p>{/if}
-  <div class="pane-modes" role="tablist" aria-label={st('conversationPaneMode')}>
-    <button type="button" role="tab" class:active={mode === 'conversation'} aria-selected={mode === 'conversation'}
-      onclick={() => chooseMode('conversation')}>{st('driverConversation')}</button>
-    <button type="button" role="tab" class:active={mode === 'run'} aria-selected={mode === 'run'}
-      onclick={() => chooseMode('run')}>{st('driverHistory')}</button>
-  </div>
   <!-- Bounded, not scrollable itself: each panel below owns whatever has to
        scroll inside it, and every level may shrink (min-height:0), so no child
        can push the pane past the row the page gives it. -->
@@ -167,21 +170,28 @@
   .resize-handle::after{content:'';position:absolute;top:50%;left:4px;width:2px;height:2.4rem;margin-top:-1.2rem;
     border-radius:2px;background:var(--pico-muted-border-color,#cbd5e1);}
   .resize-handle:hover::after,.resize-handle:focus::after{background:var(--pico-primary,#0066cc);}
-  .pane-header{display:flex;align-items:center;flex-wrap:wrap;gap:.4rem;padding:.6rem .7rem;border-bottom:1px solid var(--pico-muted-border-color,#e6ebf1);}
-  .pane-project{display:flex;align-items:center;gap:.4rem;margin:0;font-size:.7rem;flex:1 1 12rem;min-width:0;max-width:none;}
-  .pane-project select{margin:0;padding:.3rem 1.6rem .3rem .45rem;font-size:.78rem;min-width:0;}
-  .pane-size{display:flex;gap:.25rem;}
-  .pane-size button{width:auto;margin:0;font-size:.65rem;padding:.15rem .4rem;}
-  .pane-modes{display:flex;gap:.25rem;padding:.45rem .7rem;border-bottom:1px solid var(--pico-muted-border-color,#e6ebf1);}
-  .pane-modes button{width:auto;margin:0;font-size:.72rem;padding:.2rem .6rem;background:none;border:1px solid transparent;color:inherit;}
+  /* ONE control row: picker, start/stop icon and both modes. Every band above
+     the thread is height the thread does not get, so the padding here and in
+     .pane-body is deliberately tight - the vertical budget belongs to the
+     thread, which is the only box allowed to grow. */
+  .pane-header{display:flex;align-items:center;flex-wrap:wrap;gap:.3rem;padding:.3rem .5rem;border-bottom:1px solid var(--pico-muted-border-color,#e6ebf1);}
+  /* No visible label text: the accessible name is on the control itself, and
+     the row has to hold four controls without wrapping at a normal width. */
+  .pane-project{flex:1 1 8rem;margin:0;padding:.2rem 1.4rem .2rem .35rem;font-size:.75rem;min-width:0;max-width:none;}
+  .pane-modes{display:flex;gap:.15rem;flex:0 0 auto;}
+  .pane-modes button{width:auto;margin:0;font-size:.7rem;padding:.15rem .45rem;background:none;border:1px solid transparent;color:inherit;}
   .pane-modes button.active{border-color:var(--pico-primary,#0066cc);border-radius:6px;color:var(--pico-primary,#0066cc);}
-  .pane-body{display:flex;flex-direction:column;flex:1 1 auto;min-height:0;overflow-x:hidden;overflow-y:hidden;padding:.2rem .7rem .7rem;}
+  .pane-body{display:flex;flex-direction:column;flex:1 1 auto;min-height:0;overflow-x:hidden;overflow-y:hidden;padding:.15rem .5rem .3rem;}
   .pane-panel{display:flex;flex-direction:column;flex:1 1 auto;min-height:0;overflow-x:hidden;overflow-y:hidden;}
   /* `hidden` must win over the panel's own display:flex, or a non-selected tab
      would still take space. */
   .pane-panel[hidden]{display:none;}
   .pane-panel.scroll{overflow-y:auto;}
-  .driver-toggle{flex:0 0 auto;width:auto;margin:0;font-size:.68rem;padding:.2rem .5rem;}
+  /* Square-ish icon button: the label is aria-label, so it costs no width. */
+  .driver-toggle{flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;
+    width:auto;margin:0;padding:.2rem .35rem;line-height:1;}
+  .driver-toggle svg{fill:currentColor;}
+  .driver-toggle .busy{line-height:1;}
   .pane-error{margin:.2rem .7rem;font-size:.72rem;color:var(--pico-del-color,#b91c1c);}
   .identity{color:var(--pico-muted-color,#64748b);overflow-wrap:anywhere;}
   @media (max-width:900px){

@@ -4,8 +4,11 @@
     type DriverConversationEntry } from '../lib/api';
   import { isAtNewest, mergeThread } from '../lib/conversationThread';
   import { st } from '../lib/stateI18n.svelte';
-  const { projectId, projectTitle = '', driverId = '', onclose = () => {}, onread = () => {} }: {
+  const { projectId, projectTitle = '', driverId = '', onclose, onread = () => {} }: {
     projectId: string; projectTitle?: string; driverId?: string;
+    // Only a host that can actually dismiss the thread passes `onclose`: the
+    // dashboard pane always shows it, so it passes nothing and gets no close
+    // button (the one it had closed nothing there).
     onclose?: () => void; onread?: () => void;
   } = $props();
   // How often an open thread re-reads its newest page: the same bounded cadence
@@ -181,13 +184,17 @@
 <!-- Three bands: a fixed header, ONE scroll box for the thread, and a composer
      that is a sibling of that box. The composer therefore never moves with the
      messages: it sits at the bottom of the pane's own box, not at the end of the
-     scrolled content, so reaching Send never means scrolling anything else. -->
+     scrolled content, so reaching Send never means scrolling anything else.
+     The header is only for a host that has to name and dismiss the thread; in
+     the dashboard pane the picker above already names it, and every band here is
+     height the thread loses. -->
 <section class="conversation" aria-label={st('driverConversation')}>
-  <header class="conversation-head">
-    <strong>{st('driverConversation')} · {projectTitle || projectId}</strong>
-    <button class="outline" type="button" disabled={loading} onclick={() => void loadNewest()}>{st('driverMessagesRefresh')}</button>
-    <button class="outline" type="button" onclick={onclose}>{st('driverMessagesClose')}</button>
-  </header>
+  {#if onclose}
+    <header class="conversation-head">
+      <strong>{st('driverConversation')} · {projectTitle || projectId}</strong>
+      <button class="outline" type="button" onclick={onclose}>{st('driverMessagesClose')}</button>
+    </header>
+  {/if}
   {#if error}<p role="alert">{error}</p>{/if}
   {#if loading && !ready}<p role="status">{st('loading')}</p>{/if}
   <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
@@ -223,8 +230,15 @@
       <p class="identity">{st('driverConversationReplyingTo')} · {replyTo.subject}
         <button class="outline" type="button" onclick={() => (replyTo = null)}>{st('driverConversationCancelReply')}</button></p>
     {/if}
-    <label>{st('driverConversationCompose')}<textarea bind:value={text} maxlength="8000" rows="2" disabled={sending}></textarea></label>
-    <button type="submit" disabled={sending || !text.trim()}>{sending ? '…' : st('driverMessageSend')}</button>
+    <!-- Send on the input's own row, and the input one line tall by default.
+         The visible "write a message" label is gone - the accessible name is on
+         the box itself - so the composer costs one line instead of three. The
+         box keeps `resize:vertical`, so it still grows when the user drags it. -->
+    <div class="composer-row">
+      <textarea bind:value={text} maxlength="8000" rows="1" disabled={sending}
+        aria-label={st('driverConversationCompose')}></textarea>
+      <button type="submit" disabled={sending || !text.trim()}>{sending ? '…' : st('driverMessageSend')}</button>
+    </div>
     {#if sent}<span role="status">{st('driverConversationSent')}</span>{/if}
     {#if sendError}<p role="alert">{sendError}</p>{/if}
   </form>
@@ -232,13 +246,27 @@
 <style>
   /* The box chain that makes the pane own its scroll: this section is a flex
      column that is allowed to shrink (min-height:0) and clips, the thread is the
-     only scroll box, and the composer is a non-shrinking band after it. */
-  .conversation{display:flex;flex-direction:column;flex:1 1 auto;min-height:0;overflow-x:hidden;overflow-y:hidden;
-    border-top:1px solid var(--pico-muted-border-color,#ddd);margin-top:.35rem;padding-top:.35rem;}
-  .conversation-head{display:flex;align-items:center;flex-wrap:wrap;gap:.4rem;flex:0 0 auto;}
+     only scroll box, and the composer is a non-shrinking band after it. No
+     margin or border of its own: the pane's header already draws the line above
+     it, and this band would be height taken from the thread. */
+  .conversation{display:flex;flex-direction:column;flex:1 1 auto;min-height:0;overflow-x:hidden;overflow-y:hidden;}
+  .conversation-head{display:flex;align-items:center;flex-wrap:wrap;gap:.4rem;flex:0 0 auto;
+    padding:.25rem 0;border-top:1px solid var(--pico-muted-border-color,#ddd);}
   .conversation-thread{flex:1 1 auto;min-height:0;overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain;padding-right:.2rem;}
   .conversation-thread:focus-visible{outline:2px solid var(--pico-primary,#0066cc);outline-offset:-2px;}
-  .composer{flex:0 0 auto;margin:.45rem 0 0;padding-top:.45rem;border-top:1px solid var(--pico-muted-border-color,#e6ebf1);}
+  .composer{display:flex;flex-direction:column;flex:0 0 auto;margin:.25rem 0 0;padding-top:.25rem;
+    border-top:1px solid var(--pico-muted-border-color,#e6ebf1);}
+  /* One row: the input takes the width, the button keeps its own. `min-width:0`
+     and `flex-wrap` mean a narrow pane wraps the button under the input instead
+     of pushing it out of the box.
+     Pico's global form rule is `button[type=submit],select,textarea{width:100%}`:
+     left alone it makes the submit button a full-width block and the textarea's
+     base size the whole row, so Send would always wrap to a line of its own.
+     The two selectors below out-specify that rule and pin the row to one line. */
+  .composer-row{display:flex;flex-direction:row;flex-wrap:wrap;align-items:flex-end;gap:.35rem;}
+  .composer-row textarea{flex:1 1 6rem;width:auto;min-width:0;margin:0;resize:vertical;font-size:.8rem;
+    line-height:1.35;padding:.25rem .4rem;}
+  .composer-row button[type="submit"]{flex:0 0 auto;width:auto;margin:0;}
   button{font-size:.7rem;padding:.2rem .5rem;margin:0 0 0 .5rem;width:auto;}
   p{margin:.4rem 0;}
   .identity{overflow-wrap:anywhere;color:var(--pico-muted-color,#64748b);}
@@ -247,7 +275,5 @@
   .message header{display:block;}
   .message .sender{font-weight:600;}
   .message .subject{display:block;margin:.2rem 0;}
-  label{display:block;font-size:.8rem;}
-  textarea{font-size:.8rem;margin:.3rem 0;}
   pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:20rem;overflow-y:auto;overflow-x:hidden;font-size:.75rem;padding:.5rem;margin:.25rem 0 0;}
 </style>

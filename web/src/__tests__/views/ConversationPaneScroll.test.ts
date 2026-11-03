@@ -198,7 +198,10 @@ describe('the conversation pane owns its own scrolling', () => {
     const documentBefore = document.documentElement.scrollHeight;
 
     api.dshDriverConversation.mockResolvedValue(page(60));
-    await fireEvent.click(view.getByRole('button', {name: 'Refresh'}));
+    // There is no Refresh button any more: the thread's own catch-up (the user
+    // returning to the tab) is what re-reads the newest page now. It must land
+    // in exactly the same place the button's page used to.
+    document.dispatchEvent(new Event('visibilitychange'));
     await waitFor(() => expect(view.container.querySelectorAll('article.message').length).toBe(60));
 
     // All the new content landed in the scroller; the pane's box did not change

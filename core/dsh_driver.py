@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
+import sqlite3
 from pathlib import Path
 import signal
 import time
@@ -86,6 +88,23 @@ class DshDrivers:
                          " WHERE project_id=?", (*fields.values(), project_id))
             conn.commit()
 
+    def _discard_provision(self, project_id, driver_id, directory, actor):
+        """Undo a provisioning attempt that lost the insert race.
+
+        Best effort and never fatal: the caller has already established that
+        another driver owns this project, so a failure to tidy up must not turn
+        into a startup error. The directory goes last, after the membership, so a
+        partial cleanup leaves a registered identity WITHOUT a usable token
+        rather than a token belonging to nobody.
+        """
+        try:
+            self.registry.set_membership(project_id, driver_id, "removed", 1,
+                                         "lost DSH provisioning race", actor=actor,
+                                         project_exists=lambda _: True)
+        except Exception:
+            pass
+        shutil.rmtree(directory, ignore_errors=True)
+
     def _provision(self, project_id, provider, model, actor):
         if self.registry is None:
             raise ValueError("driver identity must be enabled to start a DSH driver")
@@ -108,11 +127,26 @@ class DshDrivers:
         self.registry.set_membership(project_id, driver_id, "member", 0,
                                      "Managed per-project DSH driver", actor=actor,
                                      project_exists=lambda _: True)
-        with self.db.get_connection() as conn:
-            conn.execute("INSERT INTO dsh_drivers(project_id,driver_id,provider,model,session_id,updated_at) "
-                         "VALUES(?,?,?,?,?,?)", (project_id, driver_id, provider, model,
-                                                "aitelier-" + driver_id, now()))
-            conn.commit()
+        try:
+            with self.db.get_connection() as conn:
+                conn.execute("INSERT INTO dsh_drivers(project_id,driver_id,provider,model,session_id,updated_at) "
+                             "VALUES(?,?,?,?,?,?)", (project_id, driver_id, provider, model,
+                                                    "aitelier-" + driver_id, now()))
+                conn.commit()
+        except sqlite3.IntegrityError:
+            # The check-then-insert above is not atomic across processes: the host
+            # supervisor and a host-mode backend can both provision a project whose
+            # row does not exist yet. The primary key picks a winner, but the loser
+            # has already created a directory, written a token and registered a
+            # second identity - an orphan holding a token for a project another
+            # driver id already manages. Undo our own side effects and hand back
+            # the winner's row: this is cleanup, not a contract change, and the
+            # winner is untouched.
+            self._discard_provision(project_id, driver_id, directory, actor)
+            row = self.get(project_id)
+            if row is None:  # the winner's row vanished too; report honestly
+                raise
+            return row
         return self.get(project_id)
 
     def _environment(self, row):
@@ -188,7 +222,13 @@ class DshDrivers:
         if self.processes.get(project_id) is proc:
             self.processes.pop(project_id, None)
             row = self.get(project_id)
-            if row["enabled"] and not self.closing:
+            # The row can be deleted between the exit and this read. Reading
+            # through None raised inside a task whose only consumer is
+            # `add_done_callback(self.monitors.discard)`, so nobody retrieved the
+            # exception: it surfaced only as "Task exception was never
+            # retrieved" while the project kept a phase nobody updated. A deleted
+            # project has no phase to set, so there is nothing to do.
+            if row is not None and row["enabled"] and not self.closing:
                 self.update(project_id, phase="failed", subagents_json="[]",
                             last_error=f"DSH exited with code {code}; see runtime.log")
 

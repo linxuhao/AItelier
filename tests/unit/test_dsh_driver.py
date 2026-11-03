@@ -339,3 +339,65 @@ async def test_history_is_bounded_private_and_live_events_use_existing_private_c
             assert client.post('/api/dsh-drivers/alpha/activity', json={'phase': 'running', 'event': entry}).status_code == 403
     finally:
         await runtime.close()
+
+
+# ── Two unguarded failures in the host runtime ───────────────────────────────
+# Both were found while reading this file for the owner's "what is broken in
+# your own runtime" question, and both were left unfixed because each looked
+# like it needed a contract decision. Neither does: one is a missing None check
+# inside a background task, the other is undoing our own side effects when we
+# lose a race.
+
+async def test_observe_tolerates_a_project_deleted_while_the_process_died(runtime):
+    """A row deleted between process exit and the read must not raise.
+
+    `_observe` is a background task whose only consumer discards it, so an
+    exception here was never retrieved: it surfaced as "Task exception was never
+    retrieved" while the project kept a phase nobody updated.
+    """
+    row = runtime._provision("alpha", "fixture-provider", "fixture-model", "fixture")
+    deleted = []
+
+    class Exited:
+        async def wait(self):
+            # The row disappears while the process is exiting.
+            # The managed driver row is what _observe reads; deleting it is the
+            # vanishing project as far as this code path is concerned (the State
+            # project row itself is referenced by other tables and is a different
+            # condition).
+            with runtime.db.get_connection() as conn:
+                conn.execute("DELETE FROM dsh_drivers WHERE project_id='alpha'")
+                conn.commit()
+            deleted.append(True)
+            return 3
+
+    proc = Exited()
+    # _observe only acts when the mapped process IS the one that exited.
+    runtime.processes["alpha"] = proc
+    await runtime._observe("alpha", proc)   # must not raise
+    assert deleted == [True]
+    assert runtime.processes.get("alpha") is None
+
+
+def test_losing_the_provision_race_removes_the_orphan_identity(runtime, tmp_path):
+    """The loser of a cross-process insert race must undo its own effects.
+
+    Before the fix the loser kept a directory, a token file and a registered
+    membership, so the project had a second identity holding a token it would
+    never use.
+    """
+    winner = runtime._provision("alpha", "fixture-provider", "fixture-model", "fixture")
+    loser_id = "dsh-loser000000000001"
+    directory = runtime.root / loser_id
+    directory.mkdir(parents=True, mode=0o700)
+    (directory / "token").write_text("orphan-token\n")
+    runtime.registry.register(loser_id, "DSH · alpha", capabilities={"runtime": "dsh"}, actor="fixture")
+    runtime.registry.set_membership("alpha", loser_id, "member", 0, "provisioned", actor="fixture",
+                                    project_exists=lambda _: True)
+
+    runtime._discard_provision("alpha", loser_id, directory, "fixture")
+
+    assert not directory.exists(), "the orphan's directory and token must be gone"
+    members = {m["driver_id"]: m["status"] for m in runtime.registry.project_members("alpha")}
+    assert members.get(winner["driver_id"]) == "member", "the winner must be untouched"
+    assert members.get(loser_id) == "removed", "the loser must no longer be a member"

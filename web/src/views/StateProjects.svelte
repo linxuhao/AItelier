@@ -5,7 +5,6 @@
   import { isArchived, stateProjectHref, type StateProjectRow } from '../lib/stateGraph';
   import { driverState, driverStateLabelKey, sortDagRows } from '../lib/driverList';
   import { st } from '../lib/stateI18n.svelte';
-  import DriverStatus from './DriverStatus.svelte';
   import DriverConversationPane from './DriverConversationPane.svelte';
   const { params = {} }: {params?: {repoPath?: string}} = $props();
   let rows = $state<StateProjectRow[]>([]), error = $state(''), loading = $state(false);
@@ -67,7 +66,6 @@
     <a href="#/repos">{st('dashboard')} ↗</a></header>
   {#if !canRead}<p role="status">{st('private')}</p>
   {:else}
-    <DriverStatus projects={visible} />
     <label>{st('search')}<input type="search" bind:value={query} placeholder={st('search')} /></label>
     <label class="archived-toggle"><input type="checkbox" bind:checked={showArchived} /> {st('showArchived')}{#if archivedHidden} · {st('archivedHidden')}: {archivedHidden}{/if}</label>
     {#if params.repoPath}<p><code>{params.repoPath}</code></p>{/if}
@@ -77,12 +75,21 @@
     <div class="project-grid">
       {#each ordered as project (project.project_id)}
         {@const phase = drivers?.projects[project.project_id]?.managed?.phase}
+        {@const activity = drivers?.projects[project.project_id]}
         <a class="project-card" href={stateProjectHref(project.project_id)}>
           <div class="card-top"><span>{project.project_id}</span><span class:held={project.policy.dispatch !== 'active'}>{project.policy.dispatch}</span></div>
           <h2>{project.title}</h2>
           {#if $authStore.canWrite}
+            <!-- Everything the driver is doing for THIS project, on the button
+                 that opens it: phase, drivers online/total, and what is running
+                 right now. All four read from the same /api/dsh-drivers row. -->
             <p class="driver-line">
               <span class="driver-state" data-phase={driverState(phase)} title={st(driverStateLabelKey(phase))}>{st(driverStateLabelKey(phase))}</span>
+              <span class="driver-facts" aria-label={st('driverFacts')}>
+                <span class="fact"><strong data-fact="drivers">{activity?.online ?? 0}/{activity?.total ?? 0}</strong> {st('driverCount')}</span>
+                <span class="fact"><strong data-fact="subagents">{activity?.running_subagents ?? 0}</strong> {st('driverSubagents')}</span>
+                <span class="fact"><strong data-fact="pipelines">{activity?.running_pipelines ?? 0}</strong> {st('driverPipelines')}</span>
+              </span>
               {#if unread[project.project_id]}<span class="unread" title={st('driverConversationUnread')}>{unread[project.project_id]}</span>{/if}
             </p>
           {/if}
@@ -98,12 +105,20 @@
   {/if}
 </section>
 {#if $authStore.canWrite && canRead && visible.length}
-  <DriverConversationPane projects={ordered} status={drivers} onread={loadDriverState} />
+  <DriverConversationPane projects={ordered} status={drivers}
+    onread={loadDriverState} onrefresh={() => void loadDriverState()} />
 {/if}
 </div>
 <style>
-  .dag-split { display:flex; align-items:flex-start; gap:1rem; max-width:1680px; margin:0 auto; }
-  .state-projects { flex:1 1 auto; min-width:0; max-width:1280px; margin:0 auto; }
+  /* Two bounded columns that fill the view's height instead of growing with
+     their content: the list scrolls itself, the pane scrolls itself, and the
+     page (#view-container) is left with nothing to scroll. `minmax(0,1fr)` and
+     `min-height:0` let the columns shrink below their content, which is what
+     makes a child's own overflow-y actually engage. */
+  .dag-split { display:grid; grid-template-columns:minmax(0,1fr) auto; grid-template-rows:minmax(0,1fr);
+    align-items:stretch; gap:1rem; height:100%; min-height:0; max-width:1680px; margin:0 auto; }
+  .state-projects { min-width:0; min-height:0; max-width:1280px; margin:0 auto;
+    overflow-x:hidden; overflow-y:auto; padding-right:.15rem; }
   header { display:flex; justify-content:space-between; gap:1rem; align-items:flex-start; flex-wrap:wrap; margin:.6rem 0 1.2rem; }
   h1 { margin:.2rem 0; font-size:1.65rem; } header p { margin:.4rem 0; font-size:.9rem; }
   .eyebrow { letter-spacing:.12em; font-size:.65rem; color:var(--pico-muted-color,#64748b); }
@@ -115,7 +130,10 @@
   .project-card:hover,.project-card:focus { border-color:var(--pico-primary,#0066cc); }
   .card-top { display:flex; justify-content:space-between; gap:.5rem; font-size:.7rem; overflow-wrap:anywhere; color:var(--pico-muted-color,#64748b); }
   h2 { font-size:1.2rem; margin:1rem 0; }
-  .driver-line { display:flex; align-items:center; gap:.35rem; margin:0 0 .7rem; font-size:.72rem; }
+  .driver-line { display:flex; align-items:center; flex-wrap:wrap; gap:.35rem .5rem; margin:0 0 .7rem; font-size:.72rem; }
+  .driver-facts { display:flex; align-items:center; flex-wrap:wrap; gap:.25rem .6rem; color:var(--pico-muted-color,#64748b); }
+  .driver-facts .fact { display:inline-flex; align-items:baseline; gap:.15rem; }
+  .driver-facts strong { font-size:.8rem; color:var(--pico-color,#1f2937); }
   .driver-state { display:inline-flex; align-items:center; gap:.3rem; color:var(--pico-muted-color,#64748b); }
   .driver-state::before { content:''; width:.45rem; height:.45rem; border-radius:50%; background:#94a3b8; }
   .driver-state[data-phase="running"]::before { background:#15803d; }
@@ -128,7 +146,8 @@
   .open { display:block; font-size:.8rem; margin-top:1rem; color:var(--pico-primary,#0066cc); }
   button { width:auto; margin-top:.8rem; }
   @media (max-width:900px) {
-    .dag-split { flex-direction:column; }
-    .state-projects { width:100%; max-width:none; }
+    /* One column again: the page scrolls, the list is not its own scroll box. */
+    .dag-split { grid-template-columns:minmax(0,1fr); grid-template-rows:auto; height:auto; }
+    .state-projects { width:100%; max-width:none; overflow-y:visible; height:auto; }
   }
 </style>

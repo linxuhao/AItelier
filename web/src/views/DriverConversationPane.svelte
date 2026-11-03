@@ -4,7 +4,7 @@
   import { readLastProject, rememberProject } from '../lib/navigation.svelte';
   import { clampPaneWidth, isNarrow, paneMaxFor, readPaneWidth, writePaneWidth,
     NARROW_BREAKPOINT, PANE_DEFAULT, PANE_MIN } from '../lib/splitPane';
-  import type { DriverStatusResponse } from '../lib/api';
+  import { startDshDriver, stopDshDriver, type DriverStatusResponse } from '../lib/api';
   import type { StateProjectRow } from '../lib/stateGraph';
   import DriverConversation from './DriverConversation.svelte';
   import DriverRunLog from './DriverRunLog.svelte';
@@ -12,8 +12,9 @@
   // selection in both modes, and a width the user owns. Both panels stay mounted
   // once visited and are only hidden, so switching modes never reloads the
   // thread or throws away the page the user had loaded.
-  const { projects = [], status = null, onread = () => {} }: {
-    projects?: StateProjectRow[]; status?: DriverStatusResponse | null; onread?: () => void;
+  const { projects = [], status = null, onread = () => {}, onrefresh = () => {} }: {
+    projects?: StateProjectRow[]; status?: DriverStatusResponse | null;
+    onread?: () => void; onrefresh?: () => void;
   } = $props();
   let selected = $state('');
   let mode = $state<'conversation' | 'run'>('conversation');
@@ -21,6 +22,7 @@
   let viewport = $state(NARROW_BREAKPOINT + 1);
   let preferred = $state(PANE_DEFAULT);
   let drag: {startX: number; startWidth: number} | null = null;
+  let busy = $state(false), controlError = $state('');
   const width = $derived(clampPaneWidth(preferred, viewport));
   const narrow = $derived(isNarrow(viewport));
   const current = $derived(projects.find(p => p.project_id === selected));
@@ -32,6 +34,20 @@
     const prior = readLastProject();
     selected = ids.includes(prior) ? prior : ids[0];
   });
+  // Start/stop moved here with the pane: it acts on the DAG selected in this
+  // select, which is the same selection the conversation and the run log use.
+  // The dashboard list no longer carries a control per row, so this is the one
+  // place a driver is started or stopped from the dashboard.
+  async function toggleDriver() {
+    if (!selected || busy) return;
+    busy = true; controlError = '';
+    try {
+      if (driver?.enabled) await stopDshDriver(selected);
+      else await startDshDriver(selected);
+      onrefresh();
+    } catch (e) { controlError = String(e instanceof Error ? e.message : e); }
+    finally { busy = false; }
+  }
   function choose(event: Event) {
     selected = (event.target as HTMLSelectElement).value;
     rememberProject(selected);
@@ -96,6 +112,9 @@
         </select>
       </label>
     {/if}
+    <button type="button" class="outline driver-toggle" disabled={busy || !selected}
+      title={st('conversationPaneDriverControl')}
+      onclick={() => void toggleDriver()}>{busy ? '…' : driver?.enabled ? st('driverStop') : st('driverStart')}</button>
     {#if !narrow}
       <div class="pane-size" role="group" aria-label={st('conversationPaneSize')}>
         <button type="button" class="outline" onclick={() => setWidth(paneMaxFor(viewport))}>{st('conversationPaneExpand')}</button>
@@ -104,21 +123,25 @@
       </div>
     {/if}
   </header>
+  {#if controlError}<p class="pane-error" role="alert">{controlError}</p>{/if}
   <div class="pane-modes" role="tablist" aria-label={st('conversationPaneMode')}>
     <button type="button" role="tab" class:active={mode === 'conversation'} aria-selected={mode === 'conversation'}
       onclick={() => chooseMode('conversation')}>{st('driverConversation')}</button>
     <button type="button" role="tab" class:active={mode === 'run'} aria-selected={mode === 'run'}
       onclick={() => chooseMode('run')}>{st('driverHistory')}</button>
   </div>
+  <!-- Bounded, not scrollable itself: each panel below owns whatever has to
+       scroll inside it, and every level may shrink (min-height:0), so no child
+       can push the pane past the row the page gives it. -->
   <div class="pane-body">
     {#if selected}
       {#key selected}
-        <div data-mode-panel="conversation" hidden={mode !== 'conversation'}>
+        <div class="pane-panel" data-mode-panel="conversation" hidden={mode !== 'conversation'}>
           <DriverConversation projectId={selected} projectTitle={current?.title ?? selected}
             driverId={driver?.driver_id ?? ''} onread={onread} />
         </div>
         {#if visitedRun}
-          <div data-mode-panel="run" hidden={mode !== 'run'}>
+          <div class="pane-panel scroll" data-mode-panel="run" hidden={mode !== 'run'}>
             {#if driver}
               <DriverRunLog projectId={selected} projectTitle={current?.title ?? selected}
                 driverId={driver.driver_id} driverEnabled={!!driver.enabled} />
@@ -130,11 +153,18 @@
   </div>
 </aside>
 <style>
-  .conversation-pane{position:sticky;top:.5rem;display:flex;flex-direction:column;flex:0 0 auto;
-    max-height:calc(100vh - 1rem);border:1px solid var(--pico-muted-border-color,#dbe3ec);border-radius:12px;
+  /* The pane fills the row the split gives it and never scrolls: it is a flex
+     column that clips, so its height is the row's height and cannot follow the
+     thread. Reaching the composer then needs no page scroll. Position:relative
+     (not sticky) keeps the handle anchored while the box stays bounded. */
+  .conversation-pane{position:relative;display:flex;flex-direction:column;flex:0 0 auto;
+    height:100%;max-height:100%;min-height:0;overflow-x:hidden;overflow-y:hidden;
+    border:1px solid var(--pico-muted-border-color,#dbe3ec);border-radius:12px;
     background:var(--pico-card-background-color,#fff);min-width:0;font-size:.8rem;}
-  .resize-handle{position:absolute;top:0;bottom:0;left:-6px;width:12px;cursor:col-resize;z-index:2;}
-  .resize-handle::after{content:'';position:absolute;top:50%;left:5px;width:2px;height:2.4rem;margin-top:-1.2rem;
+  /* Inside the pane's own edge: the pane clips, so a handle straddling the
+     border would be cut in half. 12px of hit area, the line just inside. */
+  .resize-handle{position:absolute;top:0;bottom:0;left:0;width:12px;cursor:col-resize;z-index:2;}
+  .resize-handle::after{content:'';position:absolute;top:50%;left:4px;width:2px;height:2.4rem;margin-top:-1.2rem;
     border-radius:2px;background:var(--pico-muted-border-color,#cbd5e1);}
   .resize-handle:hover::after,.resize-handle:focus::after{background:var(--pico-primary,#0066cc);}
   .pane-header{display:flex;align-items:center;flex-wrap:wrap;gap:.4rem;padding:.6rem .7rem;border-bottom:1px solid var(--pico-muted-border-color,#e6ebf1);}
@@ -145,10 +175,24 @@
   .pane-modes{display:flex;gap:.25rem;padding:.45rem .7rem;border-bottom:1px solid var(--pico-muted-border-color,#e6ebf1);}
   .pane-modes button{width:auto;margin:0;font-size:.72rem;padding:.2rem .6rem;background:none;border:1px solid transparent;color:inherit;}
   .pane-modes button.active{border-color:var(--pico-primary,#0066cc);border-radius:6px;color:var(--pico-primary,#0066cc);}
-  .pane-body{flex:1 1 auto;min-height:0;overflow:auto;padding:.2rem .7rem .7rem;}
+  .pane-body{display:flex;flex-direction:column;flex:1 1 auto;min-height:0;overflow-x:hidden;overflow-y:hidden;padding:.2rem .7rem .7rem;}
+  .pane-panel{display:flex;flex-direction:column;flex:1 1 auto;min-height:0;overflow-x:hidden;overflow-y:hidden;}
+  /* `hidden` must win over the panel's own display:flex, or a non-selected tab
+     would still take space. */
+  .pane-panel[hidden]{display:none;}
+  .pane-panel.scroll{overflow-y:auto;}
+  .driver-toggle{flex:0 0 auto;width:auto;margin:0;font-size:.68rem;padding:.2rem .5rem;}
+  .pane-error{margin:.2rem .7rem;font-size:.72rem;color:var(--pico-del-color,#b91c1c);}
   .identity{color:var(--pico-muted-color,#64748b);overflow-wrap:anywhere;}
   @media (max-width:900px){
-    .conversation-pane{position:static;width:100%;max-height:none;}
+    /* One column: the pane is a normal block under the list and the PAGE
+       scrolls again, which is the old, usable behaviour on a phone. */
+    .conversation-pane{width:100%;height:auto;max-height:none;}
     .pane-project{flex-basis:100%;}
+    .pane-body{overflow-y:visible;}
+    /* Still bounded, just by the viewport share instead of the row: the thread
+       keeps its own scroll and the composer stays pinned on a phone too. */
+    .pane-panel{overflow-y:visible;max-height:70vh;}
+    .pane-panel.scroll{overflow-y:auto;}
   }
 </style>

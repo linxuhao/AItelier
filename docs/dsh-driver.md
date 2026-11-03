@@ -58,10 +58,11 @@ backend restarts. Output/errors go to the driver's private `runtime.log`.
 The initial route defaults to `aitelier / driver`. Root, native workers and
 compaction use the host's existing `AIGateway`: one sticky gateway per native
 session, with normal failover and secret-file resolution. The `driver` route
-tries OpenCode free → OpenCode Go DeepSeek V4.1 Flash → DeepSeek official.
-Free models use `/zen/v1`; Go uses `/zen/go/v1`, both with `GO_API_KEY`.
-Free endpoints can refuse third-party clients or exhaust quota; their normal
-errors trigger fallback. Provider keys stay in the host gateway, outside DSH.
+tries OpenCode Go DeepSeek V4.1 Flash → DeepSeek official. Go uses
+`https://opencode.ai/zen/go/v1` with `GO_API_KEY`. Free candidates were removed
+after direct calls and a client-compatible request probe both returned 429.
+The existing `flash` rotate pool is unchanged. Provider keys stay in the host
+gateway, outside DSH.
 The bridge preserves text, reasoning and tool-call history; attachments are
 represented as handles for native file tools, not sent as model vision input.
 An explicitly selected `deepseek-official` provider can still use the mounted

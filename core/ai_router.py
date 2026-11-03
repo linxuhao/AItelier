@@ -1316,7 +1316,7 @@ class AIGateway:
                 headers[ua_key] = ua
             else:
                 headers.pop(ua_key, None)
-        if self.provider in {"opencodego", "opencode"}:
+        if self.provider == "opencodego":
             headers["x-opencode-session"] = self._opencode_session_id
             headers[ua_key] = agent + (" " + ua if ua else "")
         if headers:

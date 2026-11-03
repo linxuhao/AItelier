@@ -31,10 +31,6 @@
     "api_key_env": "LOCAL_QWEN_API_KEY",
     "max_input_tokens": 131072
   },
-  "opencode": {
-    "base_url": "https://opencode.ai/zen/v1",
-    "api_key_env": "GO_API_KEY"
-  },
   "opencodego": {
     "base_url": "https://opencode.ai/zen/go/v1",
     "api_key_env": "GO_API_KEY"

@@ -31,6 +31,10 @@ Their full definitions are deferred: use search_tools(query) to find the relevan
 names and parameter schemas, then call_tool(name, arguments) to execute them.
 Known names can be called directly through call_tool, without a search gate.
 Native subagents have the same discovery tools in their own caller scope.
+For AgentMCP media/OCR/PDF work, search for the server and task, for example
+search_tools(query="agentmcp image", limit=3). Read the returned parameters and
+call_tool(name="<exact returned name>", arguments={<those fields>}). Tool names
+may be qualified or normalized; use the returned name instead of guessing it.
 Checkpoints remain human decisions. Never approve one on the user's behalf.
 
 Delegate bounded work to DSH subagent or an AItelier pipeline. Before dispatch,

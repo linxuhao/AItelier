@@ -148,6 +148,7 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
     assert.ok(requests.filter(r=>!r.summary && r.options.tools?.length).every(r=>!r.options.tools.some(t=>t.name.startsWith('mcp__'))), 'root or child still receives full MCP schemas');
     for (const child of [false,true]) {
       const relevant = requests.filter(r=>r.child===child && !r.summary);
+      assert.ok(relevant.some(r=>JSON.stringify(r.options).includes('agentmcp image')), 'root or child did not receive tool-search usage instructions');
       assert.ok(relevant.some(r=>r.options.messages.some(m=>m.role==='tool' && m.content.some(b=>b.type==='text' && b.text.includes('"parameters"') && b.text.includes('mcp__aitelier__list_pipelines')))), 'search did not return the full matching schema');
       assert.ok(dispatches.some(d=>(d.session_id!=='fixture-root')===child && d.nested && !d.isError), 'MCP dispatch used the wrong caller');
     }

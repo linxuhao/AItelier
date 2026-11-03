@@ -241,6 +241,19 @@ are omitted from ordinary model requests. Two runtime tools provide access:
   execution chain. For example, after searching for `list_pipelines`, call
   `call_tool(name="mcp__aitelier__list_pipelines", arguments={})`.
 
+Local AgentMCP (`http://127.0.0.1:9003/mcp`), devmcp (`:7676/mcp`) and zvec
+(`:7999/mcp`) are connected by default as optional capabilities. A service being
+down does not block driver startup. Set `AITELIER_DSH_MCP_AGENTMCP`,
+`AITELIER_DSH_MCP_DEVMCP` or `AITELIER_DSH_MCP_ZVEC` in the host service's
+environment to override a URL; an empty value disables that server. Restart the
+host supervisor after changing this configuration, with native workers settled.
+The driver never starts these external services itself.
+
+The standing instructions include an AgentMCP example: search for
+`agentmcp image` (or OCR/PDF/audio/video), inspect the returned parameter schema,
+then call the exact returned tool name with those fields. Media-tool definitions
+remain deferred for both the driver and native children.
+
 The caller's actual agent scope owns lookup, restrictions and execution; the
 root's local registrations/restrictions are not substituted for a child. This
 changes presentation, not permissions. Known names do not require a prior search.

@@ -37,10 +37,9 @@ CREATE TABLE IF NOT EXISTS dsh_drivers (
 DSH_EXTRA_MCP_DEFAULTS = {
     "devmcp": "http://127.0.0.1:7676/mcp",
     "zvec": "http://127.0.0.1:7999/mcp",
-    # Optional media service (asr/ocr/pdf/web, generation, video). Set its URL
-    # to connect it. The driver runtime keeps MCP definitions behind its
-    # caller-scoped search_tools/call_tool surface, including native children.
-    "agentmcp": "",
+    # Media definitions stay behind caller-scoped search_tools/call_tool for
+    # the driver and native children. Blank the URL to disable this service.
+    "agentmcp": "http://127.0.0.1:9003/mcp",
 }
 
 

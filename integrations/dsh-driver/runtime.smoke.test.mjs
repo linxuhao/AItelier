@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { mkdtemp, mkdir, writeFile, rm, realpath } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, rm, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -13,7 +13,7 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
   const directory = await mkdtemp(join(tmpdir(), 'dsh-native-smoke-'));
   const entry = await realpath(process.env.AITELIER_DSH_TEST_ENTRY ?? new URL('./node_modules/.bin/dsh', import.meta.url));
   const here = dirname(fileURLToPath(import.meta.url));
-  const requests = [], activity = [], events = [], parked = new Set();
+  const requests = [], activity = [], events = [], parked = new Set(), childWaits = new Set();
   let changed = false, contextReads = 0, output = '', proc;
   const server = createServer(async (req, res) => {
     const chunks = []; for await (const chunk of req) chunks.push(chunk);
@@ -38,11 +38,19 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
     if (req.url.endsWith('/context')) { contextReads++; return send({ project_id: 'alpha', driver_id: 'dsh-fixture', event_seq: 10,
       nodes: [{ name: 'n', status: changed ? 'VERIFIED' : 'PENDING' }], project_note: { index: ['project rule'] },
       private_note: { index: [changed ? 'fresh private rule' : 'original private rule'] }, driver_skill: 'fixture driver skill', runtime_skill: 'Use wait.' }); }
-    if (req.url.endsWith('/activity')) { activity.push(body); return send({ ok: true }); }
+    if (req.url.endsWith('/activity')) {
+      activity.push(body);
+      if (body.phase === 'waiting') for (const target of childWaits) { target.setHeader('content-type','application/json'); target.end('{}'); childWaits.delete(target); }
+      return send({ ok: true });
+    }
     if (req.url.endsWith('/heartbeat')) return send({ ok: true });
     if (req.url === '/api/state/query/wait_for_state_change') {
       if (changed && body.after < 11) return send({ timed_out: false, next_after: 11, next_inbox_after: 1, events: [{ type: 'node_changed' }] });
       parked.add(res); res.on('close', () => parked.delete(res)); return;
+    }
+    if (req.url === '/test/parent-waiting') {
+      if (activity.some(a => a.phase === 'waiting')) return send({ok:true});
+      childWaits.add(res); return;
     }
     if (req.url === '/test/request') { requests.push(body); return send({ ok: true }); }
     if (req.url === '/test/event') { events.push(body); return send({ ok: true }); }
@@ -80,7 +88,7 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
     while (Date.now() < deadline && proc.exitCode === null) {
       if (activity.some(a => a.phase === 'failed')) break;
       if (events.some(e => e.type === 'tool/result' && JSON.stringify(e.data).includes('next_after_seq'))
-          && events.some(e => e.data?.message?.toolCallId === 'fixture-child-shell') && activity.some(a => a.phase === 'waiting')) break;
+          && events.some(e => e.data?.message?.toolCallId === 'fixture-child-shell') && activity.some(a => a.phase === 'waiting' && a.subagents.length === 0)) break;
       await new Promise(resolve => setTimeout(resolve, 100));
     }
     assert.equal(proc.exitCode, null, output);
@@ -91,7 +99,8 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
     assert.ok(after.some(r => JSON.stringify(r.options.messages).includes('fresh private rule')), 'fresh private note missing\n' + output);
     assert.ok(after.some(r => JSON.stringify(r.options.messages).includes('VERIFIED')), 'fresh node status missing');
     assert.ok(events.some(e => e.type === 'tool/result' && JSON.stringify(e.data).includes('next_after_seq') && JSON.stringify(e.data).includes('Resume the assigned State DAG')), 'precompact grep missing\n' + output);
-    assert.ok(activity.some(a => a.phase === 'waiting'), output);
+    assert.ok(activity.some(a => a.phase === 'waiting' && a.subagents.length > 0), 'parent never waited while the native child was active');
+    assert.ok(activity.some(a => a.phase === 'waiting' && a.subagents.length === 0), output);
     assert.ok(!activity.some(a => a.phase === 'failed'), JSON.stringify(activity) + output);
     const tools = requests.find(r => r.options.tools?.some(t => t.name === 'wait')).options.tools.map(t => t.name);
     for (const hidden of ['state_graph_read', 'wait_for_run', 'wait_for_driver_inbox']) assert.ok(!tools.includes('mcp__aitelier__' + hidden));
@@ -120,7 +129,7 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
     assert.match(JSON.stringify(resumed.options.messages), /earlier details can be searched/);
   } finally {
     if (proc && proc.exitCode === null) { proc.kill('SIGTERM'); await once(proc, 'exit'); }
-    for (const response of parked) response.destroy();
+    for (const response of [...parked, ...childWaits]) response.destroy();
     server.closeAllConnections(); await new Promise(resolve => server.close(resolve));
     if (!process.env.DSH_TEST_KEEP) await rm(directory, { recursive: true });
   }
@@ -131,7 +140,7 @@ test('real pinned DSH default host adapter calls the authenticated completion br
   const entry = await realpath(process.env.AITELIER_DSH_TEST_ENTRY ?? new URL('./node_modules/.bin/dsh', import.meta.url));
   const here = dirname(fileURLToPath(import.meta.url));
   const completions = [], activity = [];
-  let output = '', proc, inboxWait, replied = false, call = 0;
+  let output = '', proc, inboxWait, replied = false, call = 0, heldCompletion;
   const server = createServer(async (req, res) => {
     const chunks = []; for await (const chunk of req) chunks.push(chunk);
     const body = chunks.length ? JSON.parse(Buffer.concat(chunks)) : {};
@@ -148,10 +157,13 @@ test('real pinned DSH default host adapter calls the authenticated completion br
       completions.push(body);
       const hasWait = body.tools?.some(t => t.function.name === 'wait');
       const human = hasWait && JSON.stringify(body.messages).includes('HUMAN_MESSAGE_MARKER');
+      const second = hasWait && JSON.stringify(body.messages).includes('HUMAN_SECOND_MESSAGE');
       if (human) replied = true;
-      return send({ text: human ? 'HUMAN_REPLY_MARKER' : hasWait ? '' : 'Fixture title', reasoning_content: 'ready', truncated: false,
+      const reply = { text: second ? 'HUMAN_SECOND_REPLY' : human ? 'HUMAN_REPLY_MARKER' : hasWait ? '' : 'Fixture title', reasoning_content: 'ready', truncated: false,
         tool_calls: hasWait ? [{ id: 'host-wait-' + call++, function: { name: 'wait', arguments: '{}' } }] : [],
-        usage: { prompt_tokens: 100, completion_tokens: 10 } });
+        usage: { prompt_tokens: 100, completion_tokens: 10 } };
+      if (human && !second) { heldCompletion = () => send(reply); return; }
+      return send(reply);
     }
     res.statusCode = 404; send({ error: req.url });
   });
@@ -172,14 +184,33 @@ test('real pinned DSH default host adapter calls the authenticated completion br
     while (Date.now() < deadline && proc.exitCode === null && !activity.some(a => a.phase === 'waiting')) await new Promise(resolve => setTimeout(resolve, 100));
     assert.ok(activity.some(a => a.phase === 'waiting'), output + JSON.stringify(activity));
     assert.ok(completions.some(c => c.session_id === 'host-root' && c.tools.some(t => t.function.name === 'wait')), JSON.stringify(completions));
+    await new Promise(resolve => setTimeout(resolve, 400));
+    assert.equal(completions.filter(c => c.tools?.some(t => t.function.name === 'wait')).length, 1, 'consumed startup input must not wake the first idle wait');
     assert.ok(inboxWait, 'combined runtime wait missing');
+    const firstWait = inboxWait;
     inboxWait.setHeader('content-type', 'application/json');
     inboxWait.end(JSON.stringify({timed_out: false, next_after: 1, next_inbox_after: 1,
-      driver_inbox: {messages: [{body: 'HUMAN_MESSAGE_MARKER'}]}}));
+      driver_inbox: [{body: 'HUMAN_MESSAGE_MARKER', status: 'unread'}]}));
+    const busyDeadline = Date.now() + 4000;
+    while (Date.now() < busyDeadline && (!heldCompletion || inboxWait === firstWait)) await new Promise(resolve => setTimeout(resolve, 25));
+    assert.ok(heldCompletion && inboxWait !== firstWait, 'model call was not held while the subscription re-armed');
+    inboxWait.setHeader('content-type', 'application/json');
+    inboxWait.end(JSON.stringify({timed_out: false, next_after: 1, next_inbox_after: 2,
+      driver_inbox: [{body: 'HUMAN_SECOND_MESSAGE', status: 'unread'}]}));
+    let queued = false;
+    while (Date.now() < busyDeadline && !queued) {
+      try { queued = JSON.parse(await readFile(join(directory, 'cursor.json'), 'utf8')).inboxAfter === 2; } catch {}
+      if (!queued) await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    assert.ok(queued, 'second inbox message was not persisted during active generation');
+    heldCompletion();
     const replyDeadline = Date.now() + 8000;
-    while (Date.now() < replyDeadline && !activity.some(a => a.event?.text.includes('HUMAN_REPLY_MARKER'))) await new Promise(resolve => setTimeout(resolve, 50));
+    while (Date.now() < replyDeadline && !activity.some(a => a.event?.text.includes('HUMAN_SECOND_REPLY'))) await new Promise(resolve => setTimeout(resolve, 50));
     assert.ok(replied, 'inbox message never reached the native model');
     assert.ok(activity.some(a => a.event?.text.includes('HUMAN_REPLY_MARKER')), output + JSON.stringify(activity));
+    assert.ok(activity.some(a => a.event?.text.includes('HUMAN_SECOND_REPLY')), 'busy-time input was not consumed on the next step');
+    await new Promise(resolve => setTimeout(resolve, 400));
+    assert.equal(completions.filter(c => c.tools?.some(t => t.function.name === 'wait')).length, 3, 'empty waits caused extra model turns');
     assert.ok(!activity.some(a => a.phase === 'failed'), JSON.stringify(activity));
   } finally {
     if (proc?.exitCode === null) { proc.kill('SIGTERM'); await once(proc, 'exit'); }

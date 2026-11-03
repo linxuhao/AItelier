@@ -36,13 +36,12 @@ export function grepHistory(events, pattern, { regex = false, ignore_case = fals
 // Pure transport/state controller is separate so the actual wait/refresh logic
 // is exercised without making model calls.
 export class DriverRuntime {
-  constructor({ project, driver, directory, request, onEvent = () => {}, onConnectionError = () => {}, retryDelayMs = 1000 }) {
-    Object.assign(this, { project, driver, directory, request, onEvent, onConnectionError, retryDelayMs });
+  constructor({ project, driver, directory, request, onEvent = () => {}, onConnectionError = () => {}, retryDelayMs = 1000, pendingInputs = () => [] }) {
+    Object.assign(this, { project, driver, directory, request, onEvent, onConnectionError, retryDelayMs, pendingInputs });
     this.after = 0;
     this.inboxAfter = 0;
     this.snapshot = null;
     this.dirty = true;
-    this.pending = [];
     this.waiters = new Set();
     this.controller = new AbortController();
     this.lastHeartbeat = 0;
@@ -70,14 +69,16 @@ export class DriverRuntime {
       private_note: this.snapshot.private_note, driver_skill: this.snapshot.driver_skill,
       runtime_skill: this.snapshot.runtime_skill });
   }
-  wake(value) {
-    this.pending.push(value);
+  wake() {
+    // A notification is an edge, not durable work. DSH owns the pending input.
     for (const resolve of this.waiters) resolve();
   }
   async wait(signal) {
-    while (!this.pending.length) {
+    while (true) {
       if (signal?.aborted) throw signal.reason;
       if (this.controller.signal.aborted) throw this.controller.signal.reason;
+      const pending = this.pendingInputs();
+      if (pending.length) return pending;
       await new Promise((resolve, reject) => {
         const done = () => { cleanup(); resolve(); };
         const abort = () => { cleanup(); reject(signal?.aborted ? signal.reason : this.controller.signal.reason); };
@@ -91,7 +92,6 @@ export class DriverRuntime {
         this.controller.signal.addEventListener('abort', abort, { once: true });
       });
     }
-    return this.pending.splice(0);
   }
   async pump() {
     while (!this.controller.signal.aborted) {
@@ -106,9 +106,10 @@ export class DriverRuntime {
         }, this.controller.signal);
         // No model turn on an ordinary timeout. Native State waits also maintain
         // presence while blocked; there is no independent heartbeat daemon.
-        if (!result.timed_out) {
+        const inbox = (result.driver_inbox ?? []).filter(message => message.status !== 'resolved');
+        if (!result.timed_out && (result.events?.length || inbox.length)) {
           this.dirty = true;
-          await this.onEvent(result);
+          await this.onEvent({ ...result, driver_inbox: inbox });
         }
         this.after = result.next_after ?? this.after;
         this.inboxAfter = result.next_inbox_after ?? this.inboxAfter;
@@ -210,9 +211,12 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
       if (state) state.text = runtime.render();
       return value;
     });
-    scope.on('agent/inbox/inserted', () => runtime.wake({ reason: 'message_received' }));
+    runtime.pendingInputs = () => subject.inbox.nextStep.map(input => ({
+      reason: 'native_input_pending', message_id: input.id, source_kind: input.source.kind,
+    }));
+    scope.on('agent/inbox/inserted', () => runtime.wake());
     scope.tools.register(defineTool({ name: 'wait',
-      description: 'Wait for State/inbox changes or a subagent message/completion. Runtime owns cursors and timeout retries.',
+      description: 'Wait for pending native input from State, driver inbox or subagents. Returns queued message IDs; the next step includes those messages. Runtime owns subscriptions and timeouts.',
       parameters: {},
       output: { schema: { type: 'json' }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
       async execute(_args, exec) {
@@ -264,7 +268,7 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
   // Observe nested native children too: all activity belongs to this private
   // per-DAG process, so no cross-project worker can enter these counts.
   ctx.on('subagent/start', info => { subagents.add(info.runId); void report(waiting ? 'waiting' : 'running'); });
-  ctx.on('subagent/end', info => { subagents.delete(info.runId); runtime.wake({ reason: 'subagent_completed', id: info.id }); void report(waiting ? 'waiting' : 'running'); });
+  ctx.on('subagent/end', info => { subagents.delete(info.runId); void report(waiting ? 'waiting' : 'running'); });
   ctx.on('agent/error', ({ agent: subject, error }) => { if (subject === agent) void report('failed', String(error).slice(0, 2000)); });
   const close = async () => {
     if (disposed) return;

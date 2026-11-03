@@ -110,3 +110,10 @@ owners send as owners, without borrowing a registered driver's identity; the
 inbox request audit retains that actor. “Sent to driver inbox” confirms delivery,
 while the driver's response appears in the live records. The runtime's existing
 combined State/inbox subscription wakes its native wait when a message arrives.
+
+The wait notification is an edge, not a queue of wake credits. The runtime
+checks the native DSH next-step inbox before and after sleeping. Messages that
+were already claimed during active work cannot wake a later idle wait; new
+messages arriving during a model call remain visible to the following wait.
+Native child completion uses DSH's own inbox delivery. Empty or resolved-only
+subscription replies advance cursors without starting a model turn.

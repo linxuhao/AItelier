@@ -24,7 +24,10 @@ export function apply(ctx) {
         childShell = true;
         block = { type: 'tool-call', id: 'fixture-child-shell', name: 'bash', arguments: JSON.stringify({ description: 'Run a local fixture command', command: "printf 'WORKER_SHELL_OK'", run_in_background: false }) };
       }
-      else if (child) block = { type: 'text', text: 'Native child completed.' };
+      else if (child) {
+        await fetch(process.env.AITELIER_URL + '/test/parent-waiting');
+        block = { type: 'text', text: 'Native child completed.' };
+      }
       else if (!options.tools?.length) block = { type: 'text', text: 'Fixture session' };
       else {
         const call = rootCalls++;

@@ -55,10 +55,12 @@ test('timeouts stay inside runtime; a combined event advances both durable curso
   await restored.init(); assert.equal(restored.after, 12); assert.equal(restored.inboxAfter, 7);
 }));
 test('wait wakes on native child messages and is cancellation safe', async () => fixture(async directory => {
-  const r = new DriverRuntime({ directory });
+  let pending = [];
+  const r = new DriverRuntime({ directory, pendingInputs: () => pending });
   const waiting = r.wait();
-  r.wake({ reason: 'subagent_completed', id: 'child' });
-  assert.deepEqual(await waiting, [{ reason: 'subagent_completed', id: 'child' }]);
+  pending = [{ reason: 'native_input_pending', message_id: 'child-message' }]; r.wake();
+  assert.deepEqual(await waiting, pending);
+  pending = [];
   const stop = new AbortController();
   const cancelled = r.wait(stop.signal); stop.abort(new Error('cancelled'));
   await assert.rejects(cancelled, /cancelled/);
@@ -71,7 +73,7 @@ test('subscription reconnects without a model turn and never retries a revoked t
     request: async path => {
       if (path.endsWith('/heartbeat')) return {};
       if (++waits === 1) throw new TypeError('network lost');
-      return {timed_out:false,next_after:12,next_inbox_after:3};
+      return {timed_out:false,next_after:12,next_inbox_after:3,events:[{event_type:'node_changed'}]};
     }, onConnectionError: async () => {failures++;}, onEvent: async () => {delivered++;r.close();} });
   await r.pump();
   assert.equal(failures,1);assert.equal(delivered,1);assert.equal(r.after,12);
@@ -102,3 +104,35 @@ test('history grep includes precompact events, exact citations, regex and pagina
   assert.match(long.matches[0].matches[0].text, /find-me/);
   assert.equal(long.matches[0].matches[0].truncated, true);
 });
+
+test('old notifications and consumed inputs never become future wait credits', async () => fixture(async directory => {
+  let pending = [];
+  const r = new DriverRuntime({ directory, pendingInputs: () => pending });
+  r.wake(); // Bootstrap input was already claimed before the model called wait.
+  pending = [{reason:'native_input_pending', message_id:'state-1'}]; r.wake();
+  pending = []; // Native pre-step claimed the State update during active work.
+  const abort = new AbortController();
+  let returned = false;
+  const waiting = r.wait(abort.signal).then(() => { returned = true; });
+  r.wake(); // An empty notification while blocked must recheck and stay blocked.
+  await new Promise(resolve => setTimeout(resolve, 15));
+  assert.equal(returned, false);
+  pending = [{reason:'native_input_pending', message_id:'real-new-input'}]; r.wake();
+  await waiting; assert.equal(returned, true);
+  pending = [];
+  const blocked = r.wait(abort.signal); abort.abort(new Error('end fixture'));
+  await assert.rejects(blocked, /end fixture/);
+}));
+
+test('empty/resolved inbox replies advance cursors without model turns', async () => fixture(async directory => {
+  let calls = 0, delivered = 0;
+  const r = new DriverRuntime({directory, project:'alpha',
+    request: async path => {
+      if (path.endsWith('/heartbeat')) return {};
+      if (++calls === 1) return {timed_out:false,events:[],driver_inbox:[],next_after:11,next_inbox_after:1};
+      if (calls === 2) return {timed_out:false,events:[],driver_inbox:[{status:'resolved',body:'old'}],next_after:12,next_inbox_after:2};
+      r.close(); throw new Error('done');
+    }, onEvent:async()=>{delivered++;} });
+  await assert.rejects(r.pump(), /done/);
+  assert.equal(delivered,0); assert.equal(r.after,12); assert.equal(r.inboxAfter,2);
+}));

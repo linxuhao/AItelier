@@ -309,6 +309,23 @@ def _render_owner_conflict(row: dict) -> dict:
 def acquire_render_owner_waiting(project_id: str, run_id: str, operation_id: str, *,
                                  wait_timeout: float | None = None,
                                  should_abort=None) -> dict:
+    """Public entry: one queued render request, counted for its whole wait.
+
+    The queue a scheduler actually starves in is THIS one -- a request waits
+    here for the render OWNER (measured: `/playtest waited 3296s for the render
+    lock`), long before it ever reaches the process lock. Counting only the
+    process-lock phase reports `waiting: 0` exactly when the box is busy, which
+    is the one moment the number exists for.
+    """
+    with _RenderLockWait():
+        return _acquire_render_owner_waiting_inner(
+            project_id, run_id, operation_id,
+            wait_timeout=wait_timeout, should_abort=should_abort)
+
+
+def _acquire_render_owner_waiting_inner(project_id: str, run_id: str, operation_id: str, *,
+                                        wait_timeout: float | None = None,
+                                        should_abort=None) -> dict:
     """Take render ownership, queuing behind a live owner until it releases.
 
     Raises RenderOwnerConflict at once for a holder that needs reconciliation,
@@ -452,6 +469,19 @@ def mark_render_owner_lost(owner_id: str, generation: int, reason: str) -> dict:
     return dict(row)
 
 
+class _RenderRecoveryBlocked(RuntimeError):
+    """Recovery is blocked by an effect that is genuinely still held.
+
+    Distinct from an ordinary refusal because it carries the named blocker:
+    a caller must be able to tell "wait for the render to end" from "the
+    recovery API is waiting on the lock it exists to clear".
+    """
+
+    def __init__(self, message: str, state: dict):
+        super().__init__(message)
+        self.state = state
+
+
 def reconcile_render_owner(owner_id: str, generation: int, actor: str, reason: str) -> dict:
     if not str(actor).strip() or not str(reason).strip():
         raise ValueError("actor and reason are required")
@@ -461,8 +491,14 @@ def reconcile_render_owner(owner_id: str, generation: int, actor: str, reason: s
             (owner_id, generation)).fetchone()
         if owner is None or owner["status"] != "owner_lost":
             raise RuntimeError("only an owner_lost render may be reconciled")
-        if _Handler._RENDER_LOCK.locked():
-            raise RuntimeError("render effect is not settled: process render lock is held")
+        # The process render lock is deliberately NOT a barrier here. Reconcile
+        # exists to clear a render whose owner is already lost, and refusing
+        # while that lock was held made recovery wait on the very lock it must
+        # clear (2026-09-14: ~13 minutes of 409s before the first success). A
+        # render that is really still in flight still blocks reconciliation --
+        # through the durable effect lock below, which it holds for its whole
+        # duration -- and that refusal now names the blocker instead of
+        # reporting a bare "not settled".
         owner_actor = str(owner["actor"] or "")
         if owner_actor.startswith("godot-harness:"):
             try:
@@ -481,7 +517,16 @@ def reconcile_render_owner(owner_id: str, generation: int, actor: str, reason: s
         try:
             effect_lock = _acquire_render_effect_lock(blocking=False)
         except BlockingIOError as exc:
-            raise RuntimeError("render effect is not settled: durable effect lock is held") from exc
+            raise _RenderRecoveryBlocked(
+                "render effect is not settled: the durable effect lock is held by a live render "
+                "(manual recovery: wait for that render to finish, or stop its process and re-run "
+                "/lifecycle/reconcile)",
+                {"blocker": "durable_effect_lock",
+                 "manual_recovery": True,
+                 "process_render_lock_held": bool(_Handler._RENDER_LOCK.locked()),
+                 "owner_id": owner_id,
+                 "generation": generation}) from exc
+
         _release_render_effect_lock(effect_lock)
         updated = conn.execute(
             "UPDATE render_owners SET status='reconciled', ended_at=?, actor=?, reason=? "
@@ -6448,9 +6493,49 @@ def x11_input_smoke(project_dir: str, timeout: int = 180) -> dict:
 _LOADED_SOURCE_SHA256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 
 
+_RENDER_WAITERS = 0
+_RENDER_WAITERS_GUARD = threading.Lock()
+
+
+class _RenderLockWait:
+    """Count one request queued on the process render lock.
+
+    The process lock is held for a whole render, so a caller that cannot see
+    the queue can only discover starvation by timing out. /health reports this
+    counter; nothing here changes the lock's serialising policy.
+    """
+
+    def __enter__(self):
+        global _RENDER_WAITERS
+        with _RENDER_WAITERS_GUARD:
+            _RENDER_WAITERS += 1
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        global _RENDER_WAITERS
+        with _RENDER_WAITERS_GUARD:
+            _RENDER_WAITERS -= 1
+        return False
+
+
+def _render_lock_waiting() -> int:
+    with _RENDER_WAITERS_GUARD:
+        return _RENDER_WAITERS
+
+
 def health_snapshot():
-    """Named effective limits and actual loaded source; no environment dump."""
+    """Named effective limits and actual loaded source; no environment dump.
+
+    Also reports the one resource whose contention a caller cannot otherwise
+    observe: whether the shared render lock is held and how many requests are
+    queued behind it, so a scheduler can decide before sending a gate.
+    """
+    held = bool(_Handler._RENDER_LOCK.locked())
+    waiting = _render_lock_waiting()
     return {"ok": True, "engine": "godot", "bin": GODOT_BIN,
+            "render_lock": {"held": held, "waiting": waiting},
+            "render_lock_held": held,
+            "render_lock_waiting": waiting,
             "source_identity": {"path": str(Path(__file__).resolve()),
                                 "sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                                 "loaded_sha256": _LOADED_SOURCE_SHA256,
@@ -6605,6 +6690,12 @@ class _Handler(BaseHTTPRequestHandler):
                     str(req["owner_id"]), int(req["generation"]),
                     str(req["actor"]), str(req["reason"]))
                 return self._send(200, row)
+            except _RenderRecoveryBlocked as exc:
+                # Named manual-recovery state: a caller must be able to see that
+                # a real effect is still in flight, instead of reading an
+                # indistinguishable "not settled" refusal.
+                return self._send(409, {"error": str(exc),
+                                        "manual_recovery": exc.state})
             except (KeyError, TypeError, ValueError, RuntimeError) as exc:
                 return self._send(409, {"error": str(exc)})
         proj = req.get("project_dir", "")
@@ -6677,7 +6768,8 @@ class _Handler(BaseHTTPRequestHandler):
             heartbeat = _start_owner_heartbeat(owner["owner_id"], owner["generation"])
             waited = time.time()
             try:
-                self._RENDER_LOCK.acquire()
+                with _RenderLockWait():
+                    self._RENDER_LOCK.acquire()
                 effect_lock = _acquire_render_effect_lock()
             except Exception as exc:
                 if self._RENDER_LOCK.locked():

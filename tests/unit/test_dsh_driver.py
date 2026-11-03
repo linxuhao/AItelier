@@ -476,3 +476,33 @@ def test_blanking_one_local_mcp_url_removes_only_that_entry(runtime, monkeypatch
     assert "mcp-devmcp" not in ids, "a blank URL must withdraw the entry"
     assert "mcp-zvec" in ids, "the other services are independent"
     assert "mcp-aitelier" in ids
+
+
+# ── Auto-compact threshold ──────────────────────────────────────────────────
+# DSH fires automatic compaction at min(W * thresholdRatio, W - O - B), shipped
+# ratio 0.8. This driver does not need a large window: the State snapshot is
+# re-injected once after every successful compaction, so compacting earlier costs
+# a summary, not context. The knob is a RATIO of the model's own window, and it is
+# clamped so a typo cannot silently disable compaction or make it constant.
+
+def test_compaction_ratio_is_overridable_and_clamped(runtime, monkeypatch):
+    row = runtime._provision("alpha", "fixture-provider", "fixture-model", "fixture")
+    seen = {}
+    for raw, expected in (("0.5", 0.5), ("0.384", 0.384), ("0.99", 0.8), ("0.01", 0.2), ("garbage", 0.5)):
+        monkeypatch.setenv("AITELIER_DSH_COMPACT_RATIO", raw)
+        runtime._environment(row)
+        patch = _patch_document(runtime, row)
+        entry = next(p for p in patch if p.get("id") == "compaction-basic")
+        seen[raw] = entry["config"]["thresholdRatio"]
+        assert seen[raw] == expected, f"{raw!r} should land on {expected}"
+
+
+def test_the_shipped_ratio_is_lower_than_the_default(runtime, monkeypatch):
+    monkeypatch.delenv("AITELIER_DSH_COMPACT_RATIO", raising=False)
+    row = runtime._provision("alpha", "fixture-provider", "fixture-model", "fixture")
+    runtime._environment(row)
+    patch = _patch_document(runtime, row)
+    entry = next(p for p in patch if p.get("id") == "compaction-basic")
+    assert entry["config"]["thresholdRatio"] == 0.5, (
+        "the driver compacts at half the window: its work survives compaction by "
+        "design, so it trades window for headroom")

@@ -191,8 +191,20 @@ class DshDrivers:
             extra.append({"id": "mcp-" + server, "name": "@deepseek-ai/dsh-mcp-client", "config": {
                 "serverName": server, "transport": "streamable-http", "url": url,
                 "failOnStartupError": False, "toolCallTimeoutMs": 960000}})
+        # Auto-compact fires at `min(W * thresholdRatio, W - O - B)`; the shipped
+        # ratio is 0.8. This driver's work does not depend on a large window - the
+        # State snapshot is re-injected once after every successful compaction -
+        # so paying for a smaller window and compacting earlier is a fair trade.
+        # It is a RATIO of the model's own window, not a token count: 0.5 is 500k
+        # on a 1M window and 100k on a 200k one.
+        ratio = os.environ.get("AITELIER_DSH_COMPACT_RATIO", "0.5").strip()
+        try:
+            ratio = min(0.8, max(0.2, float(ratio)))
+        except ValueError:
+            ratio = 0.5
         patches = [
             {"id": "hmr", "disabled": True},
+            {"id": "compaction-basic", "config": {"thresholdRatio": ratio}},
             {"insert": [{"id": "aitelier-driver", "name": str(source)},
                 {"id": "mcp-aitelier", "name": "@deepseek-ai/dsh-mcp-client", "config": {
                     "serverName": "aitelier", "transport": "streamable-http",

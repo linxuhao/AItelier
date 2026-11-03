@@ -1,4 +1,5 @@
 /** A resident State DAG driver composed over the pinned DSH base profile. */
+import { historyPage } from './history.mjs';
 import { installHostModel } from './model.mjs';
 import { createRequire } from 'node:module';
 import { readFile, writeFile, rename } from 'node:fs/promises';
@@ -166,8 +167,8 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
   const subagents = new Set();
   let agent, agentCtx, waiting = false, disposed = false;
   let activity = Promise.resolve();
-  const report = (phase, error = '') => {
-    const body = { phase, subagents: [...subagents], error };
+  const report = (phase, error = '', event) => {
+    const body = { phase, subagents: [...subagents], error, ...(event ? { event } : {}) };
     activity = activity.catch(() => {}).then(() => request(`/api/dsh-drivers/${encodeURIComponent(project)}/activity`,
       body));
     activity.catch(error => ctx.logger.warn(String(error)));
@@ -182,10 +183,11 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
     await report(waiting ? 'waiting' : 'running', String(error).slice(0, 2000)).catch(() => {});
   };
   runtime.onEvent = async result => {
+    // Steer at the next step: a resident turn can remain in wait() indefinitely.
     // Queue into the durable DSH inbox before committing the State cursor. An
     // interrupted delivery is replayed, never silently skipped.
     const inbox = result.events?.some(e => e.event_type === 'director_message_received') ? await projectInbox() : undefined;
-    agent.followup(message('AItelier runtime event:\n' + JSON.stringify({ ...result, project_inbox: inbox })));
+    agent.steer(message('AItelier runtime event:\n' + JSON.stringify({ ...result, project_inbox: inbox })));
     await ctx.sessionPersistence.flush();
   };
   const setup = async (scope, subject) => {
@@ -254,7 +256,10 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
   agent = handle.agent;
   await ctx.sessionPersistence.flush();
   ctx.on('session/event', (session, event) => {
-    if (session === agent.session && event.type === 'compaction/end' && !event.data.error) runtime.dirty = true;
+    if (session !== agent.session) return;
+    if (event.type === 'compaction/end' && !event.data.error) runtime.dirty = true;
+    const entry = historyPage([event], { limit: 1 }).entries[0];
+    if (entry) void report(waiting ? 'waiting' : 'running', '', entry);
   });
   // Observe nested native children too: all activity belongs to this private
   // per-DAG process, so no cross-project worker can enter these counts.

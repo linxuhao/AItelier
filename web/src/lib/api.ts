@@ -729,6 +729,21 @@ export interface DriverStatusResponse {
   total: number; online: number; projects: Record<string, DriverActivity>;
 }
 export function driverStatus(): Promise<DriverStatusResponse> { return _get('/api/dsh-drivers'); }
+export interface DriverHistoryEntry {seq: number; type: string; name: string | null; timestamp: number | null; text: string; truncated: boolean}
+export interface DriverHistory {
+  driver_id: string; session_id: string;
+  entries: DriverHistoryEntry[];
+  has_more: boolean; next_before_seq: number | null;
+}
+export function dshDriverHistory(projectId: string, beforeSeq?: number): Promise<DriverHistory> {
+  return _get('/api/dsh-drivers/' + encodeURIComponent(projectId) + '/history' + (beforeSeq === undefined ? '' : '?before_seq=' + beforeSeq));
+}
+export function messageDshDriver(projectId: string, driverId: string, body: string): Promise<unknown> {
+  return _post('/api/state/commands/send_driver_message', {
+    request_key: crypto.randomUUID(), target_driver_id: driverId, project_id: projectId,
+    subject: 'Dashboard message', body, kind: 'note', delivery_mode: 'transient',
+  });
+}
 export function startDshDriver(projectId: string): Promise<unknown> {
   return _post('/api/dsh-drivers/' + encodeURIComponent(projectId) + '/start', {});
 }

@@ -223,3 +223,50 @@ async def test_host_completion_reuses_native_session_gateway_and_real_failover(r
         assert 'alpha' not in runtime.gateways
     finally:
         await runtime.close()
+
+
+async def test_history_is_bounded_private_and_live_events_use_existing_private_channel(runtime, monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from api import authz
+    from api.dsh_driver_routers import router, manager
+    from api.sse_manager import stream_manager
+    from unittest.mock import AsyncMock
+    try:
+        driver = await runtime.start('alpha', actor='fixture')
+        row = runtime.get('alpha')
+        assert runtime.history('alpha')['entries'] == []
+        root = runtime.root / row['driver_id'] / 'home/sessions'
+        root.mkdir()
+        seen = []
+        def read(command, **kwargs):
+            seen.append((command, kwargs))
+            return SimpleNamespace(returncode=0, stdout=json.dumps({'session_id': row['session_id'], 'entries': [], 'has_more': False, 'next_before_seq': None}))
+        monkeypatch.setattr('subprocess.run', read)
+        app = FastAPI(); app.include_router(router)
+        app.dependency_overrides[manager] = lambda: runtime
+        monkeypatch.setattr(authz, 'write_denial_reason', lambda _: authz.WRITE_DENIED_NOT_AUTHENTICATED)
+        with TestClient(app) as client:
+            assert client.get('/api/dsh-drivers/alpha/history').status_code == 403
+            assert seen == []
+            app.dependency_overrides[authz.require_reader] = lambda: None
+            result = client.get('/api/dsh-drivers/alpha/history?before_seq=19&limit=3')
+            assert result.status_code == 200, result.text
+            assert result.json()['driver_id'] == row['driver_id']
+            assert seen[-1][0][-4:] == [str(root), row['session_id'], '19', '3']
+            assert 'token' not in json.dumps(seen[-1][0])
+            assert client.get('/api/dsh-drivers/alpha/history?limit=101').status_code == 422
+            assert client.get('/api/dsh-drivers/alpha/history?before_seq=-1').status_code == 422
+            app.dependency_overrides[authz.require_writer] = lambda: None
+            monkeypatch.setattr(authz, 'request_identity', lambda _: SimpleNamespace(driver_id=row['driver_id']))
+            push = AsyncMock(); monkeypatch.setattr(stream_manager, 'push_log', push)
+            entry = {'seq': 12, 'type': 'tool/result', 'text': 'private tool result', 'timestamp': 1}
+            result = client.post('/api/dsh-drivers/alpha/activity', json={'phase': 'running', 'subagents': [], 'event': entry})
+            assert result.status_code == 200, result.text
+            channel, text = push.call_args.args
+            assert channel == 'dsh:' + row['driver_id']
+            assert json.loads(text)['entry']['text'] == 'private tool result'
+            monkeypatch.setattr(authz, 'request_identity', lambda _: SimpleNamespace(driver_id='other'))
+            assert client.post('/api/dsh-drivers/alpha/activity', json={'phase': 'running', 'event': entry}).status_code == 403
+    finally:
+        await runtime.close()

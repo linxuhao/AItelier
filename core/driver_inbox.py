@@ -81,7 +81,8 @@ class DriverInbox:
             raise StateGraphError("invalid_request")
         if bool(target_driver_id) == bool(project_members) or delivery_mode not in ("transient","standing"):
             raise StateGraphError("invalid_request")
-        if kind not in (SYSTEM_KINDS if _system else KINDS) or (not _system and not self.driver_id):
+        human_owner = self.project_read_trusted and self.actor.startswith("owner:")
+        if kind not in (SYSTEM_KINDS if _system else KINDS) or (not _system and not self.driver_id and not human_owner):
             raise StateGraphError("invalid_request")
         refs = {} if refs is None else refs
         if not isinstance(refs, dict):
@@ -91,7 +92,7 @@ class DriverInbox:
             replay = self._replay(conn, "send", request_key, payload)
             if replay is not None:
                 return replay
-            if not _system:
+            if not _system and self.driver_id:
                 self._driver(conn, self.driver_id)
                 if conn.execute("SELECT status FROM drivers WHERE driver_id=?", (self.driver_id,)).fetchone()[0]!="active":
                     raise StateGraphError("inactive_driver")

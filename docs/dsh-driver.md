@@ -90,3 +90,23 @@ Run backend tests only in a throwaway container as required by AGENTS.md.
 DSH process, a local fake model/MCP/State server, native child execution,
 automatic compaction, fresh private-state injection, precompact history grep,
 and unified waiting. It makes no paid model calls and touches no live project.
+
+## Dashboard records and messages
+
+Driver rows are ordered running, waiting, starting, stopping, failed, stopped,
+then projects without a managed driver. “Run history” opens the selected driver's
+native root session: messages, tool calls/results and compaction events, including
+precompact records. Pages hold up to 50 records, with older-page navigation;
+individual event excerpts are bounded and marked when truncated.
+
+Enabled drivers publish new records through the existing authenticated private
+SSE channel. The view merges sequence numbers to avoid duplicates and reloads the
+persisted tail after reconnect. Reading older pages pauses the live view; Refresh
+returns to the latest records. History reads use the pinned native persistence
+backend with read access; they never start an agent or take its write lease.
+
+The message box sends through the existing driver inbox. Authenticated browser
+owners send as owners, without borrowing a registered driver's identity; the
+inbox request audit retains that actor. “Sent to driver inbox” confirms delivery,
+while the driver's response appears in the live records. The runtime's existing
+combined State/inbox subscription wakes its native wait when a message arrives.

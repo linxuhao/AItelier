@@ -2,7 +2,7 @@ import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
 import { render, cleanup, fireEvent, waitFor } from '@testing-library/svelte';
 import { authStore } from '../../stores/auth';
 import { langStore } from '../../stores/i18n';
-const api = vi.hoisted(() => ({ driverStatus: vi.fn(), startDshDriver: vi.fn(), stopDshDriver: vi.fn() }));
+const api = vi.hoisted(() => ({ driverStatus: vi.fn(), startDshDriver: vi.fn(), stopDshDriver: vi.fn(), dshDriverHistory: vi.fn(), messageDshDriver: vi.fn() }));
 vi.mock('../../lib/api', () => api);
 import DriverStatus from '../../views/DriverStatus.svelte';
 const projects: any[] = [{ project_id: 'alpha', title: 'Alpha' }, { project_id: 'beta', title: 'Beta' }];
@@ -15,6 +15,8 @@ beforeEach(() => {
   cleanup(); vi.resetAllMocks(); langStore.set('en');
   authStore.set({canWrite: true, permissionResolved: true, email: 'owner@local'});
   api.driverStatus.mockResolvedValue(status());
+  api.dshDriverHistory.mockResolvedValue({driver_id: 'dsh-alpha', session_id: 'root-alpha', entries: [{seq: 5, type: 'tool/result', text: 'saved result', timestamp: 1}], has_more: true, next_before_seq: 5});
+  api.messageDshDriver.mockResolvedValue({});
   api.startDshDriver.mockResolvedValue({}); api.stopDshDriver.mockResolvedValue({});
 });
 afterEach(() => {cleanup(); vi.useRealTimers();});
@@ -50,5 +52,62 @@ describe('dashboard driver status', () => {
     const view = render(DriverStatus, {projects});
     await view.findByRole('alert');
     expect(view.getByRole('alert').textContent).toBe('runtime unavailable');
+  });
+});
+
+describe('driver records and realtime conversation', () => {
+  it('sorts running before waiting and reorders after status refresh without changing the input', async () => {
+    vi.useFakeTimers();
+    const value: any = status(); value.projects.beta.managed = {enabled: 1, phase: 'running', driver_id: 'dsh-beta'};
+    api.driverStatus.mockResolvedValue(value);
+    const view = render(DriverStatus, {projects});
+    await vi.advanceTimersByTimeAsync(1);
+    expect([...view.container.querySelectorAll('tbody tr')].map(r => r.firstChild?.textContent)).toEqual(['Beta', 'Alpha']);
+    expect(projects.map(p => p.project_id)).toEqual(['alpha', 'beta']);
+    const next: any = status(); next.projects.alpha.managed.phase = 'running'; next.projects.beta.managed = {enabled: 1, phase: 'waiting'};
+    api.driverStatus.mockResolvedValue(next);
+    await vi.advanceTimersByTimeAsync(10000);
+    expect([...view.container.querySelectorAll('tbody tr')].map(r => r.firstChild?.textContent)).toEqual(['Alpha', 'Beta']);
+  });
+  it('reads older records, sends to the exact driver and only reports inbox delivery', async () => {
+    const view = render(DriverStatus, {projects});
+    await view.findByText('Total: 4 · Online: 2');
+    await fireEvent.click(view.getByRole('button', {name: 'Run history'}));
+    await view.findByText('dsh-alpha · root-alpha');
+    expect(api.dshDriverHistory).toHaveBeenCalledWith('alpha', undefined);
+    expect(view.getByText('saved result')).toBeTruthy();
+    await fireEvent.click(view.getByRole('button', {name: 'Older records'}));
+    await waitFor(() => expect(api.dshDriverHistory).toHaveBeenCalledWith('alpha', 5));
+    await fireEvent.input(view.getByRole('textbox', {name: 'Message driver'}), {target: {value: 'Please summarize progress'}});
+    await fireEvent.click(view.getByRole('button', {name: 'Send'}));
+    await waitFor(() => expect(api.messageDshDriver).toHaveBeenCalledWith('alpha', 'dsh-alpha', 'Please summarize progress'));
+    await view.findByText('Sent to driver inbox');
+    expect((view.getByRole('textbox') as HTMLTextAreaElement).value).toBe('');
+  });
+  it('appends live records once, catches up after reconnect and closes the stream', async () => {
+    const streams: any[] = [];
+    class Source {
+      onopen: any; onerror: any; onmessage: any; close = vi.fn();
+      constructor(public url: string) { streams.push(this); }
+    }
+    vi.stubGlobal('EventSource', Source);
+    try {
+      const view = render(DriverStatus, {projects});
+      await view.findByText('Total: 4 · Online: 2');
+      await fireEvent.click(view.getByRole('button', {name: 'Run history'}));
+      await view.findByText('dsh-alpha · root-alpha');
+      expect(streams[0].url).toContain(encodeURIComponent('dsh:dsh-alpha'));
+      streams[0].onopen();
+      await view.findByText('Live');
+      const event = {data: JSON.stringify({log: JSON.stringify({type: 'driver_activity', phase: 'running', subagents: ['worker'], entry: {seq: 6, type: 'assistant/message', text: 'realtime reply', timestamp: 2}})})};
+      streams[0].onmessage(event); streams[0].onmessage(event);
+      await view.findByText('realtime reply');
+      expect(view.getAllByText('realtime reply')).toHaveLength(1);
+      streams[0].onerror(); await view.findByText('Reconnecting…');
+      api.dshDriverHistory.mockResolvedValue({driver_id: 'dsh-alpha', session_id: 'root-alpha', entries: [{seq: 7, type: 'tool/result', text: 'missed while disconnected'}], has_more: true, next_before_seq: 7});
+      streams[0].onopen(); await view.findByText('missed while disconnected');
+      await fireEvent.click(view.getByRole('button', {name: 'Close history'}));
+      expect(streams[0].close).toHaveBeenCalled();
+    } finally {vi.unstubAllGlobals();}
   });
 });

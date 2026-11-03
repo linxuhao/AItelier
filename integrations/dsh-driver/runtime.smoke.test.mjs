@@ -7,6 +7,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
+import { readHistory } from './history.mjs';
 
 test('real pinned DSH: native child, auto compact, fresh injection, raw history grep and unified wait', { timeout: 45000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), 'dsh-native-smoke-'));
@@ -99,7 +100,15 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
     assert.ok(events.some(e => e.type === 'tool/result' && e.data.message.toolCallId === 'fixture-child-shell' && !e.data.message.isError && JSON.stringify(e.data.message.content).includes('WORKER_SHELL_OK')), 'native worker shell failed\n' + JSON.stringify(events.filter(e => e.data?.message?.toolCallId === 'fixture-child-shell')));
     assert.ok(events.some(e => e.type === 'tool/result' && JSON.stringify(e.data).includes('fixture_pipeline')), 'pipeline bridge missing');
     const before = requests.length;
+    assert.ok(activity.some(a => a.event?.type === 'tool/result'), 'native history events were not published live');
     proc.kill('SIGTERM'); await once(proc, 'exit');
+    const archive = await readHistory(join(directory, 'home/sessions'), 'fixture-root', { limit: 100 });
+    assert.ok(archive.entries.some(e => e.text.includes('HISTORY_BEFORE_COMPACT_ANCHOR')), 'precompact history lost');
+    assert.ok(archive.entries.some(e => e.type === 'compaction/end'));
+    assert.ok(archive.entries.every(e => e.timestamp > 0));
+    const older = await readHistory(join(directory, 'home/sessions'), 'fixture-root', { before_seq: archive.entries.at(-1).seq, limit: 2 });
+    assert.equal(older.entries.length, 2);
+    assert.ok(older.entries.at(-1).seq < archive.entries.at(-1).seq);
     proc = launch();
     const resumedBy = Date.now() + 10000;
     while (Date.now() < resumedBy && proc.exitCode === null && !requests.slice(before).some(r => r.options.tools?.some(t => t.name === 'wait'))) {
@@ -122,7 +131,7 @@ test('real pinned DSH default host adapter calls the authenticated completion br
   const entry = await realpath(process.env.AITELIER_DSH_TEST_ENTRY ?? new URL('./node_modules/.bin/dsh', import.meta.url));
   const here = dirname(fileURLToPath(import.meta.url));
   const completions = [], activity = [];
-  let output = '', proc;
+  let output = '', proc, inboxWait, replied = false, call = 0;
   const server = createServer(async (req, res) => {
     const chunks = []; for await (const chunk of req) chunks.push(chunk);
     const body = chunks.length ? JSON.parse(Buffer.concat(chunks)) : {};
@@ -133,13 +142,15 @@ test('real pinned DSH default host adapter calls the authenticated completion br
     if (req.url.endsWith('/activity')) { activity.push(body); return send({ ok: true }); }
     if (req.url.endsWith('/heartbeat')) return send({ ok: true });
     if (req.url.endsWith('/list_director_messages')) return send({ items: [] });
-    if (req.url.endsWith('/wait_for_state_change')) return;
+    if (req.url.endsWith('/wait_for_state_change')) { inboxWait = res; return; }
     if (req.url.endsWith('/completion')) {
       assert.equal(req.headers['x-aitelier-driver-token'], 'fixture-only');
       completions.push(body);
       const hasWait = body.tools?.some(t => t.function.name === 'wait');
-      return send({ text: hasWait ? '' : 'Fixture title', reasoning_content: 'ready', truncated: false,
-        tool_calls: hasWait ? [{ id: 'host-wait', function: { name: 'wait', arguments: '{}' } }] : [],
+      const human = hasWait && JSON.stringify(body.messages).includes('HUMAN_MESSAGE_MARKER');
+      if (human) replied = true;
+      return send({ text: human ? 'HUMAN_REPLY_MARKER' : hasWait ? '' : 'Fixture title', reasoning_content: 'ready', truncated: false,
+        tool_calls: hasWait ? [{ id: 'host-wait-' + call++, function: { name: 'wait', arguments: '{}' } }] : [],
         usage: { prompt_tokens: 100, completion_tokens: 10 } });
     }
     res.statusCode = 404; send({ error: req.url });
@@ -161,6 +172,14 @@ test('real pinned DSH default host adapter calls the authenticated completion br
     while (Date.now() < deadline && proc.exitCode === null && !activity.some(a => a.phase === 'waiting')) await new Promise(resolve => setTimeout(resolve, 100));
     assert.ok(activity.some(a => a.phase === 'waiting'), output + JSON.stringify(activity));
     assert.ok(completions.some(c => c.session_id === 'host-root' && c.tools.some(t => t.function.name === 'wait')), JSON.stringify(completions));
+    assert.ok(inboxWait, 'combined runtime wait missing');
+    inboxWait.setHeader('content-type', 'application/json');
+    inboxWait.end(JSON.stringify({timed_out: false, next_after: 1, next_inbox_after: 1,
+      driver_inbox: {messages: [{body: 'HUMAN_MESSAGE_MARKER'}]}}));
+    const replyDeadline = Date.now() + 8000;
+    while (Date.now() < replyDeadline && !activity.some(a => a.event?.text.includes('HUMAN_REPLY_MARKER'))) await new Promise(resolve => setTimeout(resolve, 50));
+    assert.ok(replied, 'inbox message never reached the native model');
+    assert.ok(activity.some(a => a.event?.text.includes('HUMAN_REPLY_MARKER')), output + JSON.stringify(activity));
     assert.ok(!activity.some(a => a.phase === 'failed'), JSON.stringify(activity));
   } finally {
     if (proc?.exitCode === null) { proc.kill('SIGTERM'); await once(proc, 'exit'); }

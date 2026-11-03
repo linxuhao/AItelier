@@ -1,7 +1,7 @@
 """Managed DSH drivers: existing State reader/writer authentication applies."""
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Query
 from pydantic import BaseModel, ConfigDict, Field
 
 from api import authz
@@ -29,16 +29,36 @@ class Start(BaseModel):
     model: str = Field(default="driver", min_length=1, max_length=200)
 
 
+class HistoryEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    seq: int = Field(ge=0)
+    type: str = Field(pattern="^(user/message|assistant/message|tool/call|tool/result|compaction/end|agent/error)$")
+    name: str | None = Field(default=None, max_length=200)
+    timestamp: float | None = None
+    text: str = Field(max_length=16000)
+    truncated: bool = False
+
+
 class Activity(BaseModel):
     model_config = ConfigDict(extra="forbid")
     phase: str = Field(pattern="^(running|waiting|failed)$")
     subagents: list[str] = Field(default_factory=list, max_length=1000)
     error: str = Field(default="", max_length=2000)
+    event: HistoryEntry | None = None
 
 
 @router.get("", dependencies=[Depends(authz.require_reader)])
 def status(runtime=Depends(manager)):
     return runtime.status()
+
+
+@router.get("/{project_id}/history", dependencies=[Depends(authz.require_reader)])
+def history(project_id: str, before_seq: int = Query(default=9007199254740991, ge=0, le=9007199254740991),
+            limit: int = Query(default=50, ge=1, le=100), runtime=Depends(manager)):
+    try:
+        return runtime.history(project_id, before_seq=before_seq, limit=limit)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 @router.post("/{project_id}/start", dependencies=[Depends(authz.require_writer)])
@@ -80,12 +100,16 @@ def context(project_id: str, request: Request, runtime=Depends(manager), service
 
 
 @router.post("/{project_id}/activity", dependencies=[Depends(authz.require_writer)])
-def activity(project_id: str, body: Activity, request: Request, runtime=Depends(manager)):
+async def activity(project_id: str, body: Activity, request: Request, runtime=Depends(manager)):
     row = owned(project_id, request, runtime)
     if not row["enabled"] or project_id not in runtime.processes:
         raise HTTPException(409, "driver is stopped")
     import json
     runtime.update(project_id, phase=body.phase, subagents_json=json.dumps(body.subagents), last_error=body.error)
+    from api.sse_manager import stream_manager
+    await stream_manager.push_log("dsh:" + row["driver_id"], json.dumps({
+        "type": "driver_activity", "phase": body.phase, "subagents": body.subagents,
+        "entry": body.event.model_dump() if body.event else None}))
     return {"ok": True}
 
 

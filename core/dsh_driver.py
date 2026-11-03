@@ -199,6 +199,26 @@ class DshDrivers:
         if self.monitors:
             await asyncio.gather(*self.monitors)
 
+    def history(self, project_id, *, before_seq=9007199254740991, limit=50):
+        import subprocess
+        row = self.get(project_id)
+        if row is None:
+            raise ValueError("this project has no managed DSH driver")
+        root = self.root / row["driver_id"] / "home" / "sessions"
+        if not root.exists():
+            return {"driver_id": row["driver_id"], "session_id": row["session_id"],
+                    "entries": [], "has_more": False, "next_before_seq": None}
+        script = Path(__file__).resolve().parents[1] / "integrations" / "dsh-driver" / "history.mjs"
+        env = dict(os.environ, AITELIER_DSH_ENTRY=str(Path(self.command[0]).resolve()))
+        try:
+            result = subprocess.run(["node", str(script), str(root), row["session_id"], str(before_seq), str(limit)],
+                                    env=env, capture_output=True, text=True, timeout=25)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise ValueError("DSH history unavailable: " + str(exc)) from exc
+        if result.returncode:
+            raise ValueError("DSH history unavailable: " + result.stderr[-1000:])
+        return {"driver_id": row["driver_id"], **json.loads(result.stdout)}
+
     @staticmethod
     def public(row):
         return {k: row[k] for k in ("project_id", "driver_id", "enabled", "phase", "provider", "model",

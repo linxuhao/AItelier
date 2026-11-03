@@ -165,3 +165,19 @@ def test_list_claims_limit_is_still_part_of_the_command_grammar(peers):
     for bad in (0, 501):
         with pytest.raises(StateGraphError):
             execute(ada, "list_claims", {"project_id": "alpha", "limit": bad})
+
+
+def test_authenticated_owner_can_message_driver_without_borrowing_driver_identity(peers):
+    owner = StateService(peers['ada'].db, actor='owner:owner@example.test', project_read_trusted=True)
+    result = send(owner, body='Please summarize progress', request_key='owner-dashboard-message')
+    row = peers['bob'].driver_inbox.list_driver_messages()['messages'][0]
+    assert row['message_id'] == result['message_id']
+    assert row['body'] == 'Please summarize progress'
+    assert row['sender_driver_id'] is None
+    with owner.store.transaction() as conn:
+        request = conn.execute('SELECT actor FROM driver_inbox_requests WHERE request_key=?', ('owner-dashboard-message',)).fetchone()
+    assert request['actor'] == 'owner:owner@example.test'
+    assert send(owner, body='Please summarize progress', request_key='owner-dashboard-message')['message_id'] == result['message_id']
+    untrusted = StateService(peers['ada'].db, actor='owner:untrusted', project_read_trusted=False)
+    with pytest.raises(StateGraphError):
+        send(untrusted, request_key='untrusted-owner')

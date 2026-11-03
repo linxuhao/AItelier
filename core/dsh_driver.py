@@ -37,11 +37,9 @@ CREATE TABLE IF NOT EXISTS dsh_drivers (
 DSH_EXTRA_MCP_DEFAULTS = {
     "devmcp": "http://127.0.0.1:7676/mcp",
     "zvec": "http://127.0.0.1:7999/mcp",
-    # agentmcp (asr/ocr/pdf/web, media generation, video) is OPT-IN on purpose.
-    # MCP tool schemas are not searchable in DSH - they "enter every request" -
-    # so its 61 tools cost about 14k tokens per turn, measured as the request
-    # header growing from 56,147 to 112,427 characters. Worth it when media work
-    # is the job; not worth paying on every turn of code and State work.
+    # Optional media service (asr/ocr/pdf/web, generation, video). Set its URL
+    # to connect it. The driver runtime keeps MCP definitions behind its
+    # caller-scoped search_tools/call_tool surface, including native children.
     "agentmcp": "",
 }
 

@@ -227,13 +227,44 @@ State project ids also work as `run_pipeline.against_project`: a missing run id
 resolves the authenticated State source binding. Exact retained reviews continue
 to use their original execution project id.
 
+## Tool discovery
+
+The driver and native Spawn/Fork children keep native coding, coordination and
+wait tools directly available. MCP definitions stay in DSH's live registry but
+are omitted from ordinary model requests. Two runtime tools provide access:
+
+- `search_tools(query, limit=5)` searches tool names/descriptions and returns the
+  matching full parameter schemas, up to 10 tools. Use an exact name to inspect
+  one known tool. Newly connected, changed or removed MCP tools are reflected
+  immediately in the caller's catalog.
+- `call_tool(name, arguments)` invokes that exact tool through DSH's existing
+  execution chain. For example, after searching for `list_pipelines`, call
+  `call_tool(name="mcp__aitelier__list_pipelines", arguments={})`.
+
+The caller's actual agent scope owns lookup, restrictions and execution; the
+root's local registrations/restrictions are not substituted for a child. This
+changes presentation, not permissions. Known names do not require a prior search.
+The wrapper preserves tool validation, cancellation, rendered text/images,
+errors and additional context. Its durable call records the target name and
+arguments, and its result records the target's rendered output.
+
+Search results enter history only when requested. Compaction needs no catalog
+injection or persistent loaded-tool list: search again for a schema when needed.
+The native tool prefix stays fixed across searches, which also works with the
+host adapter's ordinary function calling and multi-provider failover. Merely
+setting DSH's `deferLoading` flag or selecting PTC would not provide this: the
+current host adapter does not support incremental tool declarations, and PTC's
+generated SDK would still contain the complete visible tool catalog.
+
 ## Checks
 
 Run backend tests only in a throwaway container as required by AGENTS.md.
 `integrations/dsh-driver` has `npm test` after `npm ci`: it includes a real pinned
 DSH process, a local fake model/MCP/State server, native child execution,
 automatic compaction, fresh private-state injection, precompact history grep,
-and unified waiting. It makes no paid model calls and touches no live project.
+and unified waiting. Tool-discovery checks cover parent/child MCP lookup and
+dispatch, live registry updates, caller restrictions, errors, cancellation and
+unchanged model tool prefixes. It makes no paid model calls and touches no live project.
 
 ## Dashboard records and messages
 

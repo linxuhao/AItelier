@@ -5,7 +5,7 @@ const { LlmAdapter, LlmError, CONTEXT_WINDOW_EXCEEDED_CODE } = await import(requ
 export const name = 'fixture-provider';
 export const inject = ['llm'];
 export function apply(ctx) {
-  let rootCalls = 0, pressure = false, triggered = false, childMessaged = false, childShell = false, childWork = 0;
+  let rootCalls = 0, pressure = false, triggered = false, childMessaged = false, childShell = false, childWork = 0, childDiscovery = 0;
   const host = process.env.AITELIER_DSH_EXECUTION === 'host';
   let overflowed = false;
   class FixtureAdapter extends LlmAdapter {
@@ -16,13 +16,18 @@ export function apply(ctx) {
       const summary = /compaction engine|structured checkpoint|Condense the conversation/i.test(last);
       const child = options.messages.some(m => m.role === 'user' && JSON.stringify(m.content).includes('CHILD_TASK_MARKER'));
       await fetch(process.env.AITELIER_URL + '/test/request', { method: 'POST', body: JSON.stringify({ options, summary, child }) });
-      if (!summary && !child && options.tools?.length && rootCalls >= (host ? 5 : 4) && !overflowed) {
+      if (!summary && !child && options.tools?.length && rootCalls >= (host ? 6 : 5) && !overflowed) {
         overflowed = true;
         await fetch(process.env.AITELIER_URL + '/test/overflow', { method: 'POST' });
         throw new LlmError('fixture context window exceeded', CONTEXT_WINDOW_EXCEEDED_CODE);
       }
       let block;
       if (summary) block = { type: 'text', text: 'Checkpoint: continue the authorized task; earlier details can be searched.' };
+      else if (child && childDiscovery < 2) {
+        block = childDiscovery++ === 0
+          ? {type:'tool-call',id:'fixture-child-search',name:'search_tools',arguments:JSON.stringify({query:'list_pipelines',limit:1})}
+          : {type:'tool-call',id:'fixture-child-pipeline',name:'call_tool',arguments:JSON.stringify({name:'mcp__aitelier__list_pipelines',arguments:{}})};
+      }
       else if (child && !childMessaged) {
         childMessaged = true;
         block = { type: 'tool-call', id: 'fixture-child-message', name: 'send_message', arguments: JSON.stringify({ agent_id: process.env.AITELIER_DSH_SESSION, message: 'CHILD_MESSAGE_MARKER' }) };
@@ -49,10 +54,11 @@ export function apply(ctx) {
         const rawCall = rootCalls++;
         const call = host ? rawCall - 1 : rawCall;
         if (host && rawCall === 0) block = {type:'tool-call',id:'fixture-root-host-shell',name:'bash',arguments:JSON.stringify({description:'Verify migrated root host access',command:`printf ROOT_HOST_OK > '${process.env.AITELIER_TEST_OUTSIDE_CWD}/root-host-proof.txt'` + (process.env.AITELIER_TEST_DOCKER ? ` && docker version --format '{{.Server.Version}}' > '${process.env.AITELIER_TEST_OUTSIDE_CWD}/docker-proof.txt'` : ''),run_in_background:false})};
-        else if (call === 0) block = { type: 'tool-call', id: 'fixture-pipelines', name: 'mcp__aitelier__list_pipelines', arguments: '{}' };
-        else if (call === 1) block = { type: 'tool-call', id: 'fixture-spawn', name: 'subagent', arguments: JSON.stringify({ description: 'smoke child', prompt: 'CHILD_TASK_MARKER', cwd: process.env.AITELIER_TEST_CHILD_CWD }) };
-        else if (call === 2) { pressure = true; block = { type: 'text', text: 'HISTORY_BEFORE_COMPACT_ANCHOR ' + 'earlier context '.repeat(14000) }; }
-        else if (call === 3) block = { type: 'tool-call', id: 'fixture-grep', name: 'grep_chat_history', arguments: JSON.stringify({ pattern: 'Resume the assigned State DAG' }) };
+        else if (call === 0) block = {type:'tool-call',id:'fixture-root-search',name:'search_tools',arguments:JSON.stringify({query:'list_pipelines',limit:1})};
+        else if (call === 1) block = { type: 'tool-call', id: 'fixture-pipelines', name: 'call_tool', arguments: JSON.stringify({name:'mcp__aitelier__list_pipelines',arguments:{}}) };
+        else if (call === 2) block = { type: 'tool-call', id: 'fixture-spawn', name: 'subagent', arguments: JSON.stringify({ description: 'smoke child', prompt: 'CHILD_TASK_MARKER', cwd: process.env.AITELIER_TEST_CHILD_CWD }) };
+        else if (call === 3) { pressure = true; block = { type: 'text', text: 'HISTORY_BEFORE_COMPACT_ANCHOR ' + 'earlier context '.repeat(14000) }; }
+        else if (call === 4) block = { type: 'tool-call', id: 'fixture-grep', name: 'grep_chat_history', arguments: JSON.stringify({ pattern: 'Resume the assigned State DAG' }) };
         else block = { type: 'tool-call', id: 'fixture-wait-' + call, name: 'wait', arguments: '{}' };
       }
       yield { type: 'block-start', index: 0, blockType: block.type };
@@ -64,6 +70,11 @@ export function apply(ctx) {
     }
   }
   ctx.llm.registerAdapter(['fixture'], new FixtureAdapter());
+  ctx.on('tools/result', (exec, result) => {
+    if (exec.name === 'mcp__aitelier__list_pipelines') void fetch(process.env.AITELIER_URL + '/test/dispatch', {
+      method:'POST',body:JSON.stringify({session_id:exec.agent.session.id,call_id:exec.callId,root_call_id:exec.rootCallId,nested:!!exec.parent,isError:result.isError}),
+    });
+  });
   ctx.on('agent/status', ({ agent, status }) => {
     if (agent.session.id === process.env.AITELIER_DSH_SESSION && status === 'idle' && pressure && !triggered) {
       triggered = true;

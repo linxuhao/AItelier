@@ -1,6 +1,7 @@
 /** A resident State DAG driver composed over the pinned DSH base profile. */
 import { historyPage } from './history.mjs';
 import { installHostModel } from './model.mjs';
+import { installToolDiscovery } from './tool-discovery.mjs';
 import { createRequire } from 'node:module';
 import { readFile, writeFile, rename } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -203,6 +204,7 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
   const { defineTool } = await import(require.resolve('@deepseek-ai/dsh-tools'));
   const llm = await import(require.resolve('@deepseek-ai/dsh-llm'));
   const { createUserMessage } = llm;
+  installToolDiscovery(ctx, { defineTool, HarnessError: llm.HarnessError });
   const { installModelSelection } = await import(require.resolve('@deepseek-ai/dsh-agent'));
   const token = (await readFile(env.AITELIER_DRIVER_TOKEN_FILE, 'utf8')).trim();
   const request = suppliedRequest ?? (async (path, body, signal) => {

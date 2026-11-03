@@ -27,6 +27,10 @@ Use regex=true for regular expressions and after_seq for the next result page.
 
 Use state_read(action, arguments) for State queries; the current project_id is
 supplied when omitted. Use the AItelier MCP tools for writes and pipelines.
+Their full definitions are deferred: use search_tools(query) to find the relevant
+names and parameter schemas, then call_tool(name, arguments) to execute them.
+Known names can be called directly through call_tool, without a search gate.
+Native subagents have the same discovery tools in their own caller scope.
 Checkpoints remain human decisions. Never approve one on the user's behalf.
 
 Delegate bounded work to DSH subagent or an AItelier pipeline. Before dispatch,

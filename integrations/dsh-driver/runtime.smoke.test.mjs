@@ -36,7 +36,7 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
   await mkdir(childDirectory, {recursive:true});
   const entry = await realpath(process.env.AITELIER_DSH_TEST_ENTRY ?? new URL('./node_modules/.bin/dsh', import.meta.url));
   const here = dirname(fileURLToPath(import.meta.url));
-  const requests = [], activity = [], events = [], workCalls = [], parked = new Set(), childWaits = new Set();
+  const requests = [], activity = [], events = [], workCalls = [], dispatches = [], parked = new Set(), childWaits = new Set();
   let changed = false, overflowChanged = false, contextReads = 0, output = '', proc;
   const server = createServer(async (req, res) => {
     const chunks = []; for await (const chunk of req) chunks.push(chunk);
@@ -77,6 +77,7 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
       childWaits.add(res); return;
     }
     if (req.url === '/test/request') { requests.push(body); return send({ ok: true }); }
+    if (req.url === '/test/dispatch') { dispatches.push(body); return send({ok:true}); }
     if (req.url === '/test/event') { events.push(body); return send({ ok: true }); }
     if (req.url === '/test/overflow') { overflowChanged = true; return send({ok:true}); }
     if (req.url === '/test/change') {
@@ -143,7 +144,13 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
     assert.ok(!activity.some(a => a.phase === 'failed'), JSON.stringify(activity) + output);
     const tools = requests.find(r => r.options.tools?.some(t => t.name === 'wait')).options.tools.map(t => t.name);
     for (const hidden of ['state_graph_read', 'wait_for_run', 'wait_for_driver_inbox']) assert.ok(!tools.includes('mcp__aitelier__' + hidden));
-    assert.ok(tools.includes('mcp__aitelier__state_graph_write'));
+    assert.ok(tools.includes('search_tools') && tools.includes('call_tool'));
+    assert.ok(requests.filter(r=>!r.summary && r.options.tools?.length).every(r=>!r.options.tools.some(t=>t.name.startsWith('mcp__'))), 'root or child still receives full MCP schemas');
+    for (const child of [false,true]) {
+      const relevant = requests.filter(r=>r.child===child && !r.summary);
+      assert.ok(relevant.some(r=>r.options.messages.some(m=>m.role==='tool' && m.content.some(b=>b.type==='text' && b.text.includes('"parameters"') && b.text.includes('mcp__aitelier__list_pipelines')))), 'search did not return the full matching schema');
+      assert.ok(dispatches.some(d=>(d.session_id!=='fixture-root')===child && d.nested && !d.isError), 'MCP dispatch used the wrong caller');
+    }
     assert.ok(requests.some(r => !r.child && JSON.stringify(r.options.messages).includes('CHILD_MESSAGE_MARKER')), 'native child messaging missing');
     assert.ok(events.some(e => e.type === 'tool/result' && e.data.message.toolCallId === 'fixture-child-shell' && !e.data.message.isError && JSON.stringify(e.data.message.content).includes('WORKER_SHELL_OK')), 'native worker shell failed\n' + JSON.stringify(events.filter(e => e.data?.message?.toolCallId === 'fixture-child-shell')));
     assert.ok(events.some(e => e.type === 'tool/result' && JSON.stringify(e.data).includes('fixture_pipeline')), 'pipeline bridge missing');

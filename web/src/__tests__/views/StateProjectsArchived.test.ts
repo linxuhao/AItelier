@@ -3,7 +3,7 @@ import { render,cleanup,fireEvent } from '@testing-library/svelte';
 import { authStore } from '../../stores/auth';
 import { langStore } from '../../stores/i18n';
 import { overview,detail,runSummary } from '../fixtures/stateProject';
-const api=vi.hoisted(()=>({driverStatus:vi.fn(),stateProjects:vi.fn(),stateOverview:vi.fn(),stateRunSummary:vi.fn(),stateNode:vi.fn(),stateAttempts:vi.fn(),stateDriverNote:vi.fn(),stateRefreshProject:vi.fn(),stateAttemptDetail:vi.fn(),
+const api=vi.hoisted(()=>({driverStatus:vi.fn(),dshDriverConversationUnread:vi.fn(),dshDriverConversation:vi.fn(),dshDriverHistory:vi.fn(),sendDriverConversationMessage:vi.fn(),markDriverConversationRead:vi.fn(),messageDshDriver:vi.fn(),startDshDriver:vi.fn(),stopDshDriver:vi.fn(),stateProjects:vi.fn(),stateOverview:vi.fn(),stateRunSummary:vi.fn(),stateNode:vi.fn(),stateAttempts:vi.fn(),stateDriverNote:vi.fn(),stateRefreshProject:vi.fn(),stateAttemptDetail:vi.fn(),
   runHistory:vi.fn(),listPipelines:vi.fn(),pipelineGraph:vi.fn(),pipelineStateFile:vi.fn(),getTrace:vi.fn(),setUserLang:vi.fn(),
   listRepos:vi.fn(),listAllRuns:vi.fn(),createProject:vi.fn(),deleteProject:vi.fn()}));
 vi.mock('../../lib/api',()=>api);
@@ -14,7 +14,13 @@ import ProjectDashboard from '../../views/ProjectDashboard.svelte';
 const row=(id:string,dispatch='active')=>({project_id:id,title:id,source_project_id:null,node_count:1,verified_count:1,source:{repo_path:null},policy:{dispatch,revision:0,reason:''}});
 let storage:Map<string,string>;
 beforeEach(()=>{
-  cleanup();vi.resetAllMocks();api.driverStatus.mockResolvedValue({total:0,online:0,projects:{}});langStore.set('en');storage=new Map();
+  cleanup();vi.resetAllMocks();api.driverStatus.mockResolvedValue({total:0,online:0,projects:{}});
+  api.dshDriverConversationUnread.mockResolvedValue({projects:{},total:0});
+  api.dshDriverConversation.mockResolvedValue({project_id:'live',messages:[],has_more:false,next_cursor:null,end_of_history:true,matched_total:0,unread_count:0,read_upto_message_id:null,read_upto_created_at:null});
+  api.dshDriverHistory.mockResolvedValue({driver_id:'dsh',session_id:'s',entries:[],has_more:false,next_before_seq:null});
+  api.sendDriverConversationMessage.mockResolvedValue({});api.markDriverConversationRead.mockResolvedValue({});
+  api.messageDshDriver.mockResolvedValue({});api.startDshDriver.mockResolvedValue({});api.stopDshDriver.mockResolvedValue({});
+  langStore.set('en');storage=new Map();
   vi.stubGlobal('localStorage',{getItem:(k:string)=>storage.get(k)??null,setItem:(k:string,v:string)=>storage.set(k,v)});
   authStore.set({canWrite:true,permissionResolved:true,email:'owner@local'});
   api.stateProjects.mockResolvedValue({projects:[row('live'),row('old-canary','archive'),row('paused','hold')],next_after:null});

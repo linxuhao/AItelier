@@ -17,7 +17,7 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
   await mkdir(childDirectory, {recursive:true});
   const entry = await realpath(process.env.AITELIER_DSH_TEST_ENTRY ?? new URL('./node_modules/.bin/dsh', import.meta.url));
   const here = dirname(fileURLToPath(import.meta.url));
-  const requests = [], activity = [], events = [], parked = new Set(), childWaits = new Set();
+  const requests = [], activity = [], events = [], workCalls = [], parked = new Set(), childWaits = new Set();
   let changed = false, contextReads = 0, output = '', proc;
   const server = createServer(async (req, res) => {
     const chunks = []; for await (const chunk of req) chunks.push(chunk);
@@ -48,6 +48,7 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
       return send({ ok: true });
     }
     if (req.url.endsWith('/heartbeat')) return send({ ok: true });
+    if (req.url.endsWith('/work')) { workCalls.push(body); return send({status:'fixture-'+body.action,workspace:'/fixture/owned-child'}); }
     if (req.url === '/api/state/query/wait_for_state_change') {
       if (changed && body.after < 11) return send({ timed_out: false, next_after: 11, next_inbox_after: 1, events: [{ type: 'node_changed' }] });
       parked.add(res); res.on('close', () => parked.delete(res)); return;
@@ -113,6 +114,9 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
     assert.ok(events.some(e => e.type === 'tool/result' && JSON.stringify(e.data).includes('next_after_seq') && JSON.stringify(e.data).includes('Resume the assigned State DAG')), 'precompact grep missing\n' + output);
     assert.ok(activity.some(a => a.phase === 'waiting' && a.subagents.length > 0), 'parent never waited while the native child was active');
     assert.ok(activity.some(a => a.phase === 'waiting' && a.subagents.length === 0), output);
+    assert.deepEqual(workCalls.map(c => c.action), ['open', 'write', 'bash', 'deliver']);
+    assert.ok(workCalls.every(c => c.session_id && c.session_id !== 'fixture-root'), 'child work used the root session identity');
+    assert.equal(new Set(workCalls.map(c => c.session_id)).size, 1);
     assert.ok(!activity.some(a => a.phase === 'failed'), JSON.stringify(activity) + output);
     const tools = requests.find(r => r.options.tools?.some(t => t.name === 'wait')).options.tools.map(t => t.name);
     for (const hidden of ['state_graph_read', 'wait_for_run', 'wait_for_driver_inbox']) assert.ok(!tools.includes('mcp__aitelier__' + hidden));

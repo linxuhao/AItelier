@@ -107,6 +107,29 @@ without model turns. Transport failures retry there too, include the underlying
 error code/cause in the status, and clear the displayed error after a successful
 subscription response, including an empty timeout response.
 
+## Project coding for the driver and native workers
+
+`project_work` is a host-scoped native tool, available to the root and every
+native child. It sends the actual caller session id with the driver's own token.
+The backend validates the assigned State attempt owner/fence and resolves Source
+from the project's State binding. Each session/attempt gets a separate existing
+Coding Mode workspace: `open`, `read`, `write`, `edit`, `bash`, `deliver`, `push`.
+No planning run or additional approval is created. The existing Code Mode
+controller still supplies write admissions, conflict-safe Source delivery and
+path-scoped commits; its host launcher supplies isolated CPU shells/tests.
+
+For concurrent DSH workers, unrelated Source HEAD movement is allowed during
+commit only when every delivered path still matches its original HEAD/index
+before-state. The commit CAS uses the current HEAD under the existing admission.
+Interactive Coding Mode keeps its original default behavior.
+
+`deliver` accepts `commit_message` and returns `source_head`; `push` requires that
+exact `expected_head` and pushes normally to Source's configured origin/current
+branch. No caller URL, force push, owner token or Docker socket is exposed.
+State project ids also work as `run_pipeline.against_project`: a missing run id
+resolves the authenticated State source binding. Exact retained reviews continue
+to use their original execution project id.
+
 ## Checks
 
 Run backend tests only in a throwaway container as required by AGENTS.md.

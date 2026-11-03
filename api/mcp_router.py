@@ -1275,7 +1275,18 @@ def _register_run_tools(tool, mcp=None):
         if against_project:
             proj = db_instance.get_project(against_project)
             if not proj:
-                return {"error": f"against_project '{against_project}' not found"}
+                # State project ids are not pipeline run ids. Resolve the same
+                # authenticated State source binding that resident drivers use.
+                from api.state_graph_routers import get_service
+                from core.dsh_work import pipeline_source
+                try:
+                    request = _request_from(mcp.get_context())
+                    repo_path = pipeline_source(get_service(request, db_instance, ws), against_project)
+                except Exception as exc:
+                    return {"error": f"against_project '{against_project}' unavailable: {exc}"}
+                if exact_review:
+                    return {"error": "exact review requires its retained execution project id"}
+                proj = {"repo_path": repo_path}
             repo_path = proj.get("repo_path")
             if not repo_path and not exact_review:
                 try:

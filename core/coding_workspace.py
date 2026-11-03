@@ -340,10 +340,12 @@ class EntryScope:
     writer: str
     commit_message: str | None = None
     issuer: object = field(default=None, repr=False, compare=False)
+    allow_unrelated_head_movement: bool = False
 
 
 def authorize_entry(db, *, session_id: str, project_id: str, writer: str,
-                    commit_message: str | None = None) -> EntryScope:
+                    commit_message: str | None = None,
+                    allow_unrelated_head_movement: bool = False) -> EntryScope:
     """Only the authenticated chat/controller entry calls this.
 
     The session must already exist server-side; the project must be a known
@@ -366,7 +368,7 @@ def authorize_entry(db, *, session_id: str, project_id: str, writer: str,
         if not isinstance(commit_message, str) or not commit_message.strip() or len(commit_message) > 4000:
             raise Unavailable("commit message must be bounded nonempty text")
     return EntryScope(session_id, project_id, str(writer or "")[:200],
-                      commit_message, _ISSUER)
+                      commit_message, _ISSUER, allow_unrelated_head_movement)
 
 
 def _require_scope(scope) -> EntryScope:
@@ -1654,8 +1656,12 @@ class Handoff:
         source = self.ws.source
         repo = closed_git.discover(source)
         head = closed_git.resolve_commit(repo.top, "HEAD")
-        if head != self.ws.base_sha:
+        if head != self.ws.base_sha and not self.req.scope.allow_unrelated_head_movement:
             return {"eligible": False, "reason": f"Source HEAD moved to {head} since the seed"}
+        # Parallel driver workers may have committed unrelated paths since this
+        # seed. The per-path HEAD/index comparisons below still require every
+        # delivered path to match its original before-state; commit_delivered
+        # then CASes this exact current HEAD under the same Source admission.
         tree = closed_git.ls_tree(repo.top, head)
         idx = closed_git.read_index(repo.git_dir)
         if idx.unmerged_paths():

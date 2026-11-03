@@ -5,7 +5,7 @@ const { LlmAdapter } = await import(require.resolve('@deepseek-ai/dsh-llm'));
 export const name = 'fixture-provider';
 export const inject = ['llm'];
 export function apply(ctx) {
-  let rootCalls = 0, pressure = false, triggered = false, childMessaged = false, childShell = false;
+  let rootCalls = 0, pressure = false, triggered = false, childMessaged = false, childShell = false, childWork = 0;
   class FixtureAdapter extends LlmAdapter {
     async resolveModel(provider, model) { return { provider, id: model, name: model, context: { contextWindow: 16000 }, defaultMaxTokens: 1024 }; }
     async *stream(options) {
@@ -24,6 +24,13 @@ export function apply(ctx) {
         childShell = true;
         const outside = process.env.AITELIER_TEST_OUTSIDE_CWD;
         block = { type: 'tool-call', id: 'fixture-child-shell', name: 'bash', arguments: JSON.stringify({ description: 'Verify inherited workspace and owned checkout writes', command: `if printf forbidden > '${outside}/outside-probe.txt'; then printf OUTSIDE_WRITE_ALLOWED; else printf OUTSIDE_WRITE_DENIED; fi; printf 'WORKER_SHELL_OK' > worker-proof.txt; cat worker-proof.txt; git init -q . && git add worker-proof.txt && git -c user.name=fixture -c user.email=fixture@example.invalid commit -q -m 'native workspace fixture' && git rev-parse HEAD > commit-proof.txt`, run_in_background: false }) };
+      }
+      else if (child && childWork < 4) {
+        const steps = [['open', {}], ['write', {path:'child.txt',content:'native child',create:true}],
+          ['bash', {command:'python3 -m pytest -q test_child.py'}], ['deliver', {commit_message:'native child change'}]];
+        const [action, args] = steps[childWork++];
+        block = { type:'tool-call', id:'fixture-child-work-' + action, name:'project_work',
+          arguments:JSON.stringify({attempt_id:'attempt-fixture',fence:1,action,arguments:args}) };
       }
       else if (child) {
         await fetch(process.env.AITELIER_URL + '/test/parent-waiting');

@@ -176,6 +176,24 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
     if (key) await ctx.credentials.set('DEEPSEEK_API_KEY', key);
   } catch (error) { if (error.code !== 'ENOENT') throw error; }
   const project = env.AITELIER_DSH_PROJECT;
+  // Host-scoped tools are available to native children too. Resolve the actual
+  // caller from ToolExecution, never from the root agent captured by setup.
+  ctx.tools.register(defineTool({ name: 'project_work',
+    description: 'Full project coding for this driver AND native subagents. Requires your assigned State attempt_id and owner fence. open: independent owned workspace; read: path; write: path/content/create; edit: path/old_str/new_str; bash: command/timeout in the existing isolated executor; deliver: optional commit_message, applies tested changes to Source and commits only those paths; push: expected_head, ordinary push to Source origin/current branch. Supply action and arguments. Use this for repository code/tests/integration; native local bash remains for driver-local orchestration. No additional plan/approval gate.',
+    parameters: { attempt_id: { type: 'string', required: true }, fence: { type: 'integer', required: true },
+      action: { type: 'string', required: true, enum: ['open', 'read', 'write', 'edit', 'bash', 'deliver', 'push'] },
+      arguments: { type: 'object', additionalProperties: true } },
+    output: { schema: { type: 'json' }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
+    async execute(args, exec) {
+      const result = await request(`/api/dsh-drivers/${encodeURIComponent(project)}/work`, {
+        ...args, session_id: exec.agent.session.id,
+      }, exec.signal);
+      if (result.error) throw new Error(result.error);
+      return result;
+    },
+  }));
+  ctx.systemPrompt.context({ name: 'aitelier:project-work', order: 5, interpolate: false,
+    text: `Project ${project}: project_work is available to the driver and all native subagents. Parent assignments must include the registered State attempt_id and current owner fence. Each caller gets its own owned worktree: open, then read/write/edit/bash there, verify, then deliver (commit_message when needed). Only deliver writes back to Source. push(expected_head) uses the project's actual origin without force. bash runs in the existing isolated test container; do not run repository tests in the production backend. Use native local tools for orchestration/inbox/history, not as a fallback for denied project work. No new planning gate is required.` });
   const runtime = new DriverRuntime({ project, driver: env.AITELIER_DRIVER_ID,
     directory: env.AITELIER_DSH_STATE_DIR, request });
   await runtime.init();

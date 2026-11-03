@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Query
 from pydantic import BaseModel, ConfigDict, Field
 
 from api import authz
-from api.dependencies import get_db_manager
+from api.dependencies import get_db_manager, get_skillflow
 from api.state_graph_routers import get_service
 from core.datadir import aitelier_home
 from core.dsh_driver import DshDrivers
@@ -141,6 +141,47 @@ class Completion(BaseModel):
     tools: list[dict] | None = None
     max_tokens: int = Field(default=32768, ge=1, le=262144)
     reasoning_effort: str = Field(default="high", pattern="^(off|low|high|max)$")
+
+
+class ProjectWork(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    session_id: str = Field(min_length=1, max_length=200, pattern=r"^[A-Za-z0-9._-]+$")
+    attempt_id: str = Field(min_length=1, max_length=200)
+    fence: int = Field(ge=1)
+    action: str = Field(pattern="^(open|read|write|edit|bash|deliver|push)$")
+    arguments: dict = Field(default_factory=dict)
+
+
+@router.post("/{project_id}/work", dependencies=[Depends(authz.require_writer)])
+async def project_work(project_id: str, body: ProjectWork, request: Request,
+                       runtime=Depends(manager), service=Depends(get_service), sf=Depends(get_skillflow)):
+    """Root and native children share the same authenticated coding capability."""
+    import asyncio
+    import json
+    from fastapi.responses import StreamingResponse
+    from starlette.concurrency import run_in_threadpool
+    from core.dsh_work import project_work as execute_work
+    row = owned(project_id, request, runtime)
+    if not row["enabled"] or project_id not in runtime.processes:
+        raise HTTPException(409, "driver is stopped")
+
+    async def stream():
+        # Flush headers and keep long isolated tests alive through Node fetch;
+        # whitespace is ordinary JSON, not an agent event or another model turn.
+        task = asyncio.create_task(run_in_threadpool(execute_work, runtime.db, service,
+            project_id=project_id, driver_id=row["driver_id"], session_id=body.session_id,
+            attempt_id=body.attempt_id, fence=body.fence, action=body.action,
+            arguments=body.arguments, sf=sf))
+        yield " "
+        while not task.done():
+            await asyncio.wait({task}, timeout=15)
+            if not task.done():
+                yield " "
+        try:
+            yield json.dumps(task.result())
+        except Exception as exc:
+            yield json.dumps({"error": str(exc), "status": "unavailable"})
+    return StreamingResponse(stream(), media_type="application/json")
 
 
 @router.post("/{project_id}/completion", dependencies=[Depends(authz.require_writer)])

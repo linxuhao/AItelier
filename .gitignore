@@ -4,9 +4,9 @@ __pycache__/
 *$py.class
 
 # Web SPA front-end test toolchain (Vitest + jsdom)
-web/node_modules/
+web/node_modules
 web/dist/
-node_modules/
+node_modules
 
 # C extensions
 *.so

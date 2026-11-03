@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { compareThreadPosition, isAtNewest, mergeThread, NEWEST_SLACK } from '../../lib/conversationThread';
+import { compareThreadPosition, isAtNewest, mergeThread, NEWEST_SLACK, shouldMarkReadOnPoll } from '../../lib/conversationThread';
 
 // The thread refresh MERGES the newest page into what is rendered. These are the
 // invariants that make that safe: one row per message_id, the server's own
@@ -74,5 +74,33 @@ describe('deciding whether the reader is following the newest message', () => {
     expect(isAtNewest(box(0, 0, 0))).toBe(true);
     expect(isAtNewest(null)).toBe(true);
     expect(isAtNewest(undefined)).toBe(true);
+  });
+});
+
+
+describe('shouldMarkReadOnPoll', () => {
+  // The owner's report: sitting in the conversation, badge still showed unread.
+  // A poll may mark read only what the reader could actually be reading.
+  const base = {hidden: false, atNewest: true, newestRenderedId: 'm3', newestOnServerId: 'm3'};
+
+  it('marks read when the tab is visible and the reader sits at the newest end', () => {
+    expect(shouldMarkReadOnPoll(base)).toBe(true);
+  });
+
+  it('refuses while the tab is hidden - it has seen nothing', () => {
+    expect(shouldMarkReadOnPoll({...base, hidden: true})).toBe(false);
+  });
+
+  it('refuses for a reader scrolled up - they have not reached what sits below', () => {
+    expect(shouldMarkReadOnPoll({...base, atNewest: false})).toBe(false);
+  });
+
+  it('refuses when the new message did not land at the end of the thread', () => {
+    expect(shouldMarkReadOnPoll({...base, newestRenderedId: 'm2'})).toBe(false);
+  });
+
+  it('refuses when either id is unknown rather than guessing', () => {
+    expect(shouldMarkReadOnPoll({...base, newestRenderedId: null})).toBe(false);
+    expect(shouldMarkReadOnPoll({...base, newestOnServerId: undefined})).toBe(false);
   });
 });

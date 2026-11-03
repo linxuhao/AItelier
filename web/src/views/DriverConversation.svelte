@@ -2,7 +2,7 @@
   import { onMount, tick } from 'svelte';
   import { dshDriverConversation, sendDriverConversationMessage, markDriverConversationRead,
     type DriverConversationEntry } from '../lib/api';
-  import { isAtNewest, mergeThread } from '../lib/conversationThread';
+  import { isAtNewest, mergeThread, shouldMarkReadOnPoll } from '../lib/conversationThread';
   import { st } from '../lib/stateI18n.svelte';
   const { projectId, projectTitle = '', driverId = '', onclose, onread = () => {} }: {
     projectId: string; projectTitle?: string; driverId?: string;
@@ -146,6 +146,26 @@
       // "load earlier" keeps its alert, because this refresh did not address it.
       if (!ready) error = '';
       ready = true;
+      // A poll may advance the marker ONLY for what the reader could actually be
+      // reading: the tab is visible and the thread is parked at its newest end,
+      // so the message that just arrived is on screen in front of them. This is
+      // the difference between "a timer is a look" (still false) and "a timer
+      // while the reader sits at the newest end is a look" (true). A reader
+      // scrolled up has not reached what sits below, and a hidden tab has seen
+      // nothing - both keep their unread.
+      if (page.messages.length && page.unread_count > 0) {
+        const newest = messages[messages.length - 1];
+        const mayMark = shouldMarkReadOnPoll({
+          hidden: typeof document === 'undefined' ? false : document.hidden,
+          atNewest: before?.atNewest ?? null,
+          newestRenderedId: newest?.message_id ?? null,
+          newestOnServerId: page.messages[0]?.message_id ?? null,
+        });
+        if (mayMark) {
+          try { await markDriverConversationRead(asked, newest!.message_id); onread(); }
+          catch { /* the badge is a convenience: a failed mark never fails the read */ }
+        }
+      }
       await keepPlace(before);
     } catch { /* additive only: the thread on screen is better than an empty one */ }
     finally { refreshing = false; }

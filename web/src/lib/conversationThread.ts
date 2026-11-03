@@ -62,3 +62,30 @@ export function isAtNewest(box: ScrollBox | null | undefined, slack = NEWEST_SLA
   const distance = box.scrollHeight - box.scrollTop - box.clientHeight;
   return !Number.isFinite(distance) || distance <= slack;
 }
+
+/** Should a background poll advance the persisted read marker?
+ *
+ *  The rule this encodes: a poll may only mark read what the reader could
+ *  actually be reading right now. That needs all three of:
+ *
+ *  * the tab is visible - a hidden tab has seen nothing;
+ *  * the thread is parked at its newest end - a reader scrolled up has not
+ *    reached what sits below;
+ *  * the newest rendered message IS the newest message on the server - if the
+ *    merge did not put the new message at the end, the reader cannot be looking
+ *    at it.
+ *
+ *  Extracted as a pure function so all three refusals can be asserted directly;
+ *  the component's scroll geometry cannot be controlled reliably in jsdom.
+ */
+export function shouldMarkReadOnPoll(input: {
+  hidden: boolean | undefined;
+  atNewest: boolean | null | undefined;
+  newestRenderedId: string | null | undefined;
+  newestOnServerId: string | null | undefined;
+}): boolean {
+  if (input.hidden) return false;
+  if (input.atNewest === false) return false;
+  if (!input.newestRenderedId || !input.newestOnServerId) return false;
+  return input.newestRenderedId === input.newestOnServerId;
+}

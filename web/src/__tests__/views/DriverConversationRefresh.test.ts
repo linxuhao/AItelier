@@ -23,6 +23,7 @@ const api = vi.hoisted(() => ({
 }));
 vi.mock('../../lib/api', () => api);
 import DriverConversation from '../../views/DriverConversation.svelte';
+import { isAtNewest } from '../../lib/conversationThread';
 
 const REFRESH_MS = 10000;
 const entry = (id: string, kind: 'driver' | 'user', subject: string, created: string, extra: any = {}) =>
@@ -67,6 +68,14 @@ function layOutThread(view: {container: HTMLElement}, clientHeight = 300): HTMLE
   Object.defineProperty(thread, 'scrollHeight', {configurable: true,
     get: () => 100 * articles(view)});
   Object.defineProperty(thread, 'clientHeight', {configurable: true, get: () => clientHeight});
+  // jsdom ignores scrollTop assignments on an element it has not laid out, so a
+  // test that sets it silently keeps position 0 and "scrolled up" never happens.
+  // Own the property outright so both the test and the component read/write the
+  // same value.
+  let top = 0;
+  Object.defineProperty(thread, 'scrollTop', {
+    configurable: true, get: () => top, set: (value: number) => { top = value; },
+  });
   return thread;
 }
 
@@ -177,11 +186,12 @@ describe('a refresh does not disturb the reader', () => {
     expect(api.dshDriverConversation).not.toHaveBeenCalledWith('alpha', 'newest-page-cursor');
   });
 
-  it('leaves an automatically refreshed-in message unread', async () => {
+  it('clears the badge for a message that arrives while the reader is at the newest end', async () => {
     const onread = vi.fn();
     const view = render(DriverConversation, {projectId: 'alpha', onread});
     await view.findByText('Second report');
-    expect(view.container.textContent).not.toContain('unread');
+    api.markDriverConversationRead.mockClear();
+    onread.mockClear();
 
     // A driver message arrives with the server still reporting it unread.
     api.dshDriverConversation.mockResolvedValue(page([m3, m2, m1],
@@ -189,10 +199,13 @@ describe('a refresh does not disturb the reader', () => {
     await vi.advanceTimersByTimeAsync(REFRESH_MS);
     await view.findByText('Fresh report');
 
-    // Shown, but not marked read: the persisted marker may only advance to a
-    // message the user was actually looking at, and a timer is not a look.
-    expect(api.markDriverConversationRead).not.toHaveBeenCalled();
-    expect(onread).not.toHaveBeenCalled();
+    // The reader is in the thread, so the poll marks what is now in front of
+    // them and the badge is told to refresh. (The refusals - scrolled up, hidden
+    // tab, new message not at the end - are asserted directly on
+    // shouldMarkReadOnPoll in the lib test, because jsdom cannot position the
+    // component's scroll box: it ignores scrollTop writes and reports 0x0.)
+    await waitFor(() => expect(api.markDriverConversationRead).toHaveBeenCalledWith('alpha', 'm3'));
+    expect(onread).toHaveBeenCalled();
   });
 
   it('still advances the marker to what it showed on an explicit visit, never on a timer', async () => {
@@ -304,5 +317,27 @@ describe('polling is bounded and failure-tolerant', () => {
     expect(articles(view)).toBe(2);
     // The failure alert described the empty thread; the thread is no longer empty.
     expect(view.queryByRole('alert')).toBeNull();
+  });
+});
+
+// ── The badge clears while the reader is actually in the thread ──────────────
+// The poll used to never advance the read marker ("a timer is not a look"). That
+// is right when nobody is looking, and wrong when the reader is sitting at the
+// newest end of the thread with the tab visible - the message is on screen in
+// front of them. Both halves are asserted here.
+describe('a poll marks read only what the reader is actually looking at', () => {
+  it('does NOT clear the badge while the tab is hidden', async () => {
+    const view = render(DriverConversation, {projectId: 'alpha'});
+    await view.findByText('Second report');
+    layOutThread(view, 100);
+    api.markDriverConversationRead.mockClear();
+    tabHidden = true;
+    document.dispatchEvent(new Event('visibilitychange'));
+
+    api.dshDriverConversation.mockClear();
+    await vi.advanceTimersByTimeAsync(REFRESH_MS * 3);
+
+    expect(api.dshDriverConversation).not.toHaveBeenCalled();
+    expect(api.markDriverConversationRead).not.toHaveBeenCalled();
   });
 });

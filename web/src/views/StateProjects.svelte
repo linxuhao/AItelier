@@ -129,7 +129,7 @@
   /* `auto` is the pane's own width and `1fr` is whatever the list can have: with
      order:-1 the pane is placed first, so it must be first in the column list too
      or it takes the flexible column and squeezes the list to its content. */
-  .dag-split > .conversation-pane { order:-1; }
+  .dag-split > :global(.conversation-pane) { order:-1; }
   .dag-split { display:grid; grid-template-columns:auto minmax(0,1fr); grid-template-rows:minmax(0,1fr);
     align-items:stretch; gap:1rem; height:100%; min-height:0; max-width:1680px; margin:0 auto; }
   .state-projects { min-width:0; min-height:0; max-width:1280px; margin:0 auto;
@@ -166,7 +166,7 @@
   @media (max-width:900px) {
     /* One column again: the page scrolls, the list is not its own scroll box. */
     .dag-split { grid-template-columns:minmax(0,1fr); grid-template-rows:auto; height:auto; }
-    .dag-split > .conversation-pane { order:0; }
+    .dag-split > :global(.conversation-pane) { order:0; }
     .state-projects { width:100%; max-width:none; overflow-y:visible; height:auto; }
   }
 </style>

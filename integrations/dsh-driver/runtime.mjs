@@ -11,6 +11,43 @@ export const inject = ['agents', 'sessions', 'sessionPersistence', 'sessionQuery
 
 const goalTemplate = await readFile(new URL('./goal.md', import.meta.url), 'utf8');
 export const driverGoal = project => goalTemplate.replaceAll('{{project_id}}', project);
+export const stateInjectionSource = 'aitelier-driver-state';
+
+/** One durable snapshot per session bootstrap / successful compaction epoch. */
+export class StateInjection {
+  constructor(session, runtime, createMessage) {
+    Object.assign(this, { session, runtime, createMessage });
+    this.epoch = 0;
+    this.injected = undefined;
+    this.queued = undefined;
+    for (const event of session.snapshotEvents()) this.observe(event);
+  }
+  observe(event) {
+    if (event.type === 'compaction/end' && !event.data.error) this.epoch = event.seq;
+    if (event.type === 'user/message' && event.data.source?.kind === stateInjectionSource) {
+      this.injected = event.data.source.compaction_seq;
+      this.queued = undefined;
+    }
+  }
+  async prepare() {
+    if (this.injected === this.epoch) return;
+    await this.runtime.refresh();
+    const text = 'AItelier driver state — startup / post-compaction snapshot:\n' + this.runtime.render();
+    const message = this.createMessage({ content: [{ type: 'text', text }], source: {
+      kind: stateInjectionSource, form: 'snapshot', compaction_seq: this.epoch,
+      sections: [{ name: 'aitelier:state', text }],
+    } });
+    this.queued = { epoch: this.epoch, message };
+    return message;
+  }
+  async beforeRequest() {
+    if (this.injected === this.epoch || this.queued?.epoch === this.epoch) return;
+    // Overflow retries do not run pre-step again. Their initial step already
+    // committed its system prompt; append the fresh postcompact snapshot now.
+    const message = await this.prepare();
+    this.session.append('user/message', message, { surfaceOp: 'append' });
+  }
+}
 export function connectionErrorMessage(error) {
   const cause = error.cause;
   return `AItelier event subscription: ${error.message}${cause ? ` (${[cause.code, cause.message].filter(Boolean).join(': ')})` : ''}`.slice(0, 2000);
@@ -193,9 +230,9 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
       return result;
     },
   }));
-  if (!hostExecution) ctx.systemPrompt.context({ name: 'aitelier:project-work', order: 5, interpolate: false,
+  if (!hostExecution) ctx.systemPrompt.section({ name: 'aitelier:project-work', order: 5, interpolate: false,
     text: `Project ${project}: project_work is available to the driver and all native subagents. Parent assignments must include the registered State attempt_id and current owner fence. Each caller gets its own owned worktree: open, then read/write/edit/bash there, verify, then deliver (commit_message when needed). Only deliver writes back to Source. push(expected_head) uses the project's actual origin without force. bash runs in the existing isolated test container; do not run repository tests in the production backend. Use native local tools for orchestration/inbox/history, not as a fallback for denied project work. No new planning gate is required.` });
-  if (hostExecution) ctx.systemPrompt.context({ name: 'aitelier:host-work', order: 5, interpolate: false,
+  if (hostExecution) ctx.systemPrompt.section({ name: 'aitelier:host-work', order: 5, interpolate: false,
     text: `Project ${project}: you and your native DSH subagents run on the Linux host with danger-full-access and approval never. Use native file and bash tools directly for coding, Git fetch/merge/commit/push, Docker and installed agent CLIs. project_work is not mounted in this runtime. Existing history or notes describing workspace-write, read-only Git or missing Docker describe the previous container runtime. Read the current State source binding for the repository; the backend binding /app maps to host ${env.AITELIER_DSH_BACKEND_SOURCE ?? 'the AItelier deployment checkout'}, all other absolute bindings retain their host path. Each writer needs its own checkout/worktree, each run one controller. Run AItelier pytest only in disposable containers: docker run --rm --network none --cpus 2 --memory 2g, one worker, at most four concurrent; never directly on the host or in the production container. Use your own driver token for AItelier calls. Full access does not change project rules or grant permission to publish private source publicly.` });
   const runtime = new DriverRuntime({ project, driver: env.AITELIER_DRIVER_ID,
     directory: env.AITELIER_DSH_STATE_DIR, request });
@@ -233,21 +270,20 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
     agentCtx = scope;
     installModelSelection(scope, { current: { provider: env.AITELIER_DSH_PROVIDER,
       model: env.AITELIER_DSH_MODEL }, assembled: undefined });
-    scope.systemPrompt.context({ name: 'aitelier:state', order: 0, required: true,
-      interpolate: false, text: () => runtime.render() });
+    const injection = new StateInjection(subject.session, runtime, createUserMessage);
+    scope.on('session/event', (session, event) => {
+      if (session === subject.session) injection.observe(event);
+    });
     scope.on('agent/pre-step', async (_payload, next) => {
       const decision = await next(); // Includes the base automatic compactor.
-      if (runtime.dirty) await runtime.refresh();
-      return decision;
+      if (decision.kind !== 'enter') return decision;
+      const message = await injection.prepare();
+      return message ? { ...decision, messages: [...decision.messages, message] } : decision;
     });
-    // Overflow recovery may rebuild a request without another pre-step. Refresh
-    // the required context at the assembly boundary as well.
-    scope.on('system-prompt/assemble', async (assembly, _context, next) => {
-      if (runtime.dirty) await runtime.refresh();
-      const value = await next();
-      const state = value.contexts.find(c => c.name === 'aitelier:state');
-      if (state) state.text = runtime.render();
-      return value;
+    scope.on('agent/request', async (_payload, next) => {
+      const config = await next();
+      await injection.beforeRequest();
+      return config;
     });
     runtime.pendingInputs = () => subject.inbox.nextStep.map(input => ({
       reason: 'native_input_pending', message_id: input.id, source_kind: input.source.kind,
@@ -304,7 +340,6 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
   await ctx.sessionPersistence.flush();
   ctx.on('session/event', (session, event) => {
     if (session !== agent.session) return;
-    if (event.type === 'compaction/end' && !event.data.error) runtime.dirty = true;
     const entry = historyPage([event], { limit: 1 }).entries[0];
     if (entry) void report(waiting ? 'waiting' : 'running', '', entry);
   });

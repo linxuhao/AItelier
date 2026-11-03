@@ -1,12 +1,13 @@
 /** Model-free provider used only by runtime.smoke.test.mjs. */
 import { createRequire } from 'node:module';
 const require = createRequire(process.env.AITELIER_DSH_ENTRY);
-const { LlmAdapter } = await import(require.resolve('@deepseek-ai/dsh-llm'));
+const { LlmAdapter, LlmError, CONTEXT_WINDOW_EXCEEDED_CODE } = await import(require.resolve('@deepseek-ai/dsh-llm'));
 export const name = 'fixture-provider';
 export const inject = ['llm'];
 export function apply(ctx) {
   let rootCalls = 0, pressure = false, triggered = false, childMessaged = false, childShell = false, childWork = 0;
   const host = process.env.AITELIER_DSH_EXECUTION === 'host';
+  let overflowed = false;
   class FixtureAdapter extends LlmAdapter {
     async resolveModel(provider, model) { return { provider, id: model, name: model, context: { contextWindow: 16000 }, defaultMaxTokens: 1024 }; }
     async *stream(options) {
@@ -15,6 +16,11 @@ export function apply(ctx) {
       const summary = /compaction engine|structured checkpoint|Condense the conversation/i.test(last);
       const child = options.messages.some(m => m.role === 'user' && JSON.stringify(m.content).includes('CHILD_TASK_MARKER'));
       await fetch(process.env.AITELIER_URL + '/test/request', { method: 'POST', body: JSON.stringify({ options, summary, child }) });
+      if (!summary && !child && options.tools?.length && rootCalls >= (host ? 5 : 4) && !overflowed) {
+        overflowed = true;
+        await fetch(process.env.AITELIER_URL + '/test/overflow', { method: 'POST' });
+        throw new LlmError('fixture context window exceeded', CONTEXT_WINDOW_EXCEEDED_CODE);
+      }
       let block;
       if (summary) block = { type: 'text', text: 'Checkpoint: continue the authorized task; earlier details can be searched.' };
       else if (child && !childMessaged) {
@@ -65,7 +71,7 @@ export function apply(ctx) {
     }
   });
   ctx.on('session/event', (session, event) => {
-    if ((session.id === process.env.AITELIER_DSH_SESSION || event.data?.message?.toolCallId === 'fixture-child-shell') && ['compaction/end', 'surface/replace', 'tool/result'].includes(event.type)) {
+    if ((session.id === process.env.AITELIER_DSH_SESSION || event.data?.message?.toolCallId === 'fixture-child-shell') && ['compaction/end', 'surface/replace', 'tool/result', 'user/message'].includes(event.type)) {
       void fetch(process.env.AITELIER_URL + '/test/event', { method: 'POST', body: JSON.stringify(event) });
     }
   });

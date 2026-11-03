@@ -8,6 +8,25 @@ import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { readHistory } from './history.mjs';
+import { stateInjectionSource } from './runtime.mjs';
+
+function assertInjectionCadence(events) {
+  let epoch = 0;
+  const injected = new Set();
+  for (const event of events) {
+    if (event.type === 'compaction/end' && !event.data.error) epoch = event.seq;
+    if (event.type !== 'user/message') continue;
+    if (event.data.source?.kind === stateInjectionSource) {
+      assert.equal(event.data.source.compaction_seq, epoch);
+      assert.ok(!injected.has(epoch), `State was injected twice in compaction epoch ${epoch}`);
+      injected.add(epoch);
+    }
+    assert.ok(!event.data.source?.sections?.some(s => s.name === 'aitelier:state') || event.data.source.kind === stateInjectionSource,
+      'State was repeated through dynamic native runtime context');
+  }
+  assert.ok(injected.has(0), 'first request never received State');
+  assert.ok(injected.has(epoch), 'latest successful compaction was not followed by fresh State');
+}
 
 test('real pinned DSH: native child, auto compact, fresh injection, raw history grep and unified wait', { timeout: 45000 }, async () => {
   // Use non-temporary roots: /tmp is writable independently of workspace policy.
@@ -18,7 +37,7 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
   const entry = await realpath(process.env.AITELIER_DSH_TEST_ENTRY ?? new URL('./node_modules/.bin/dsh', import.meta.url));
   const here = dirname(fileURLToPath(import.meta.url));
   const requests = [], activity = [], events = [], workCalls = [], parked = new Set(), childWaits = new Set();
-  let changed = false, contextReads = 0, output = '', proc;
+  let changed = false, overflowChanged = false, contextReads = 0, output = '', proc;
   const server = createServer(async (req, res) => {
     const chunks = []; for await (const chunk of req) chunks.push(chunk);
     const raw = Buffer.concat(chunks).toString();
@@ -41,7 +60,7 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
     if (req.url === '/api/state/query/list_director_messages') return send({ result: { items: [] } });
     if (req.url.endsWith('/context')) { contextReads++; return send({ project_id: 'alpha', driver_id: 'dsh-fixture', event_seq: 10,
       nodes: [{ name: 'n', status: changed ? 'VERIFIED' : 'PENDING' }], project_note: { index: ['project rule'] },
-      private_note: { index: [changed ? 'fresh private rule' : 'original private rule'] }, driver_skill: 'fixture driver skill', runtime_skill: 'Use wait.' }); }
+      private_note: { index: [overflowChanged ? 'overflow fresh private rule' : changed ? 'fresh private rule' : 'original private rule'] }, driver_skill: 'fixture driver skill', runtime_skill: 'Use wait.' }); }
     if (req.url.endsWith('/activity')) {
       activity.push(body);
       if (body.phase === 'waiting') for (const target of childWaits) { target.setHeader('content-type','application/json'); target.end('{}'); childWaits.delete(target); }
@@ -59,6 +78,7 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
     }
     if (req.url === '/test/request') { requests.push(body); return send({ ok: true }); }
     if (req.url === '/test/event') { events.push(body); return send({ ok: true }); }
+    if (req.url === '/test/overflow') { overflowChanged = true; return send({ok:true}); }
     if (req.url === '/test/change') {
       changed = true;
       for (const target of parked) { target.setHeader('content-type', 'application/json'); target.end(JSON.stringify({ timed_out: false, next_after: 11, next_inbox_after: 1, events: [{ type: 'node_changed' }] })); }
@@ -114,6 +134,9 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
     assert.ok(events.some(e => e.type === 'tool/result' && JSON.stringify(e.data).includes('next_after_seq') && JSON.stringify(e.data).includes('Resume the assigned State DAG')), 'precompact grep missing\n' + output);
     assert.ok(activity.some(a => a.phase === 'waiting' && a.subagents.length > 0), 'parent never waited while the native child was active');
     assert.ok(activity.some(a => a.phase === 'waiting' && a.subagents.length === 0), output);
+    assertInjectionCadence(events);
+    assert.ok(events.filter(e => e.type === 'compaction/end' && !e.data.error).length >= 2, 'pressure and overflow recovery were not both exercised');
+    assert.ok(events.some(e => e.type === 'user/message' && e.data.source?.kind === stateInjectionSource && JSON.stringify(e.data).includes('overflow fresh private rule')), 'overflow retry did not get fresh State');
     assert.deepEqual(workCalls.map(c => c.action), ['open', 'write', 'bash', 'deliver']);
     assert.ok(workCalls.every(c => c.session_id && c.session_id !== 'fixture-root'), 'child work used the root session identity');
     assert.equal(new Set(workCalls.map(c => c.session_id)).size, 1);
@@ -249,6 +272,8 @@ test('real pinned DSH default host adapter calls the authenticated completion br
     assert.ok(activity.some(a => a.event?.text.includes('HUMAN_SECOND_REPLY')), 'busy-time input was not consumed on the next step');
     await new Promise(resolve => setTimeout(resolve, 400));
     assert.equal(completions.filter(c => c.tools?.some(t => t.function.name === 'wait')).length, 3, 'empty waits caused extra model turns');
+    const stateEvents = activity.filter(a => a.event?.type === 'user/message' && JSON.parse(a.event.text).source?.kind === stateInjectionSource);
+    assert.equal(stateEvents.length, 1, 'ordinary inbox messages duplicated the initial State snapshot');
     assert.ok(!activity.some(a => a.phase === 'failed'), JSON.stringify(activity));
   } finally {
     if (proc?.exitCode === null) { proc.kill('SIGTERM'); await once(proc, 'exit'); }

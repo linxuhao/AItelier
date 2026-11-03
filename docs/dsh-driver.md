@@ -22,12 +22,20 @@ every 20–30 minutes. Stopping it stops that supervision and renewal. Pipeline
 runs remain governed by their existing State lifecycle; stopping the driver
 does not silently cancel a pipeline.
 
-DSH's automatic compactor is enabled. On startup, resume and after compaction,
-before the next model request, the runtime injects:
+DSH's automatic compactor is enabled. Only on the first model request and once
+after each successful compaction, the runtime injects:
 
 - Node names and current statuses, without full acceptance/goal text.
 - The project's current driver-note index and the driver's own private index.
 - The State driver skill/index and the resident-driver instructions.
+
+Each injection is a durable `aitelier-driver-state` message keyed to the last
+successful compaction event. Ordinary State changes, inbox messages and tool
+steps do not append another full snapshot. Process resume reuses its committed
+snapshot; failed compaction adds none. Pressure compaction and overflow recovery
+both receive fresh State before the next model request, including overflow
+retries that do not run another pre-step. Normal event notifications continue;
+query live State explicitly when needed between snapshots.
 
 Note bodies stay addressable through State reads. `grep_chat_history(pattern)`
 searches this driver's complete native raw session log, including messages
@@ -157,8 +165,8 @@ version, not an older globally installed command.
 ## Standing director goal and connection recovery
 
 `integrations/dsh-driver/goal.md` supplies each project's standing director
-mandate as `driver_goal` in the required context. Startup, session resume and
-post-compaction context include the same project-specific goal. The director
+mandate as `driver_goal` in the initial and post-compaction State snapshots.
+Session resume retains the existing snapshot instead of repeating it. The director
 maintains State/note/inboxes, checks issues and unfinished delivery beyond the
 frontier, prioritizes critical defects, and aims for four independent pipelines
 and four subagents when actionable work exists. The owner's push/publish scope,

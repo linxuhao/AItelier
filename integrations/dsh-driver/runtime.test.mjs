@@ -3,7 +3,56 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DriverRuntime, grepHistory, connectionErrorMessage } from './runtime.mjs';
+import { DriverRuntime, StateInjection, stateInjectionSource, grepHistory, connectionErrorMessage } from './runtime.mjs';
+
+test('State injection survives resume and ignores ordinary events, steps and failed compaction', async () => {
+  const events = [], session = { snapshotEvents: () => events };
+  let reads = 0, value = 'initial';
+  const runtime = { refresh: async () => { reads++; }, render: () => value };
+  let injection = new StateInjection(session, runtime, input => input);
+  const append = (type, data) => {
+    const event = { seq: events.length + 1, type, data }; events.push(event); injection.observe(event); return event;
+  };
+  session.append = append;
+  const first = await injection.prepare();
+  await injection.beforeRequest();
+  assert.equal(events.length, 0, 'queued first-step input must be committed by the native loop after its system prompt');
+  append('user/message', first);
+  assert.equal(first.source.kind, stateInjectionSource);
+  for (let i = 0; i < 4; i++) {
+    value = 'State changed ' + i;
+    assert.equal(await injection.prepare(), undefined);
+    await injection.beforeRequest();
+  }
+  append('compaction/end', { error: 'summary failed' });
+  assert.equal(await injection.prepare(), undefined);
+  injection = new StateInjection(session, runtime, input => input);
+  assert.equal(await injection.prepare(), undefined, 'process resume duplicated an existing injection');
+  assert.equal(reads, 1);
+  const compact = append('compaction/end', {});
+  value = 'fresh after compact';
+  const next = await injection.prepare(); append('user/message', next);
+  assert.equal(next.source.compaction_seq, compact.seq);
+  assert.match(next.content[0].text, /fresh after compact/);
+  assert.equal(await injection.prepare(), undefined);
+  assert.equal(reads, 2);
+});
+
+test('overflow retry injects once without another pre-step and restores pending postcompact after restart', async () => {
+  const events = [{seq:1,type:'user/message',data:{source:{kind:stateInjectionSource,compaction_seq:0}}},
+    {seq:2,type:'compaction/end',data:{}}];
+  const session = { snapshotEvents: () => events };
+  let reads = 0;
+  const injection = new StateInjection(session, { refresh: async () => { reads++; }, render: () => 'overflow fresh' }, input=>input);
+  session.append = (type, data, intent) => {
+    assert.deepEqual(intent, {surfaceOp:'append'});
+    const event = {seq:events.length+1,type,data}; events.push(event); injection.observe(event);
+  };
+  await injection.beforeRequest(); await injection.beforeRequest();
+  assert.equal(reads, 1);
+  assert.equal(events.length, 3);
+  assert.equal(events.at(-1).data.source.compaction_seq, 2);
+});
 
 const snapshot = status => ({ event_seq: 10, nodes: [{ name: 'n', status }],
   project_note: { index: [{ index_line: 'project rule' }] },

@@ -102,3 +102,36 @@ async def test_second_host_controller_is_refused_without_stopping_first(runtimes
         assert host.processes['alpha'].returncode is None
     finally:
         stopped.set(); await task
+
+
+async def test_one_project_failure_does_not_end_supervision(runtimes):
+    """A raising start()/publish() must stay local, not take every driver down.
+
+    The supervisor is the only thing keeping resident drivers alive: before this
+    boundary, one project's exception propagated out of the loop and the process
+    exited, marking EVERY driver offline at once.
+    """
+    backend, host = runtimes
+    await backend.start('alpha', actor='fixture')
+    calls = {'alpha': 0}
+    real_start = host.start
+
+    async def flaky_start(project_id, **kwargs):
+        if project_id == 'alpha':
+            calls['alpha'] += 1
+            raise RuntimeError('database is locked')
+        return await real_start(project_id, **kwargs)
+
+    host.start = flaky_start
+    stopped = asyncio.Event()
+    task = asyncio.create_task(supervise(host, stopped, interval=0.01))
+    try:
+        await eventually(lambda: calls['alpha'] >= 1)
+        # The loop is still running and still publishing, not exited.
+        assert not task.done()
+        # Backoff grows instead of hammering every interval.
+        await asyncio.sleep(0.2)
+        assert calls['alpha'] == 1, f'retried {calls["alpha"]} times despite backoff'
+    finally:
+        stopped.set()
+        await task

@@ -89,7 +89,41 @@ class DriverInbox:
                         "PRAGMA table_info(driver_inbox_messages)")}:
                     conn.execute("ALTER TABLE driver_inbox_messages ADD COLUMN channel TEXT "
                                  "CHECK(channel IN ('user'))")
+                # Additive (tagged segments). NULL means the message was written
+                # as one body, which is what every row before this column was.
+                if "segments_json" not in {r["name"] for r in conn.execute(
+                        "PRAGMA table_info(driver_inbox_messages)")}:
+                    conn.execute("ALTER TABLE driver_inbox_messages ADD COLUMN segments_json TEXT")
                 conn.commit()
+
+    @staticmethod
+    def _segments(segments):
+        """Normalise the tagged blocks, refusing anything that would not render.
+
+        Bounded on purpose: this is a glanceable summary, not a second body. The
+        kind is closed to info/question so a later tag cannot appear in stored
+        rows without someone deciding what it means to the reader.
+        """
+        if segments is None:
+            return []
+        if not isinstance(segments, list) or len(segments) > 20:
+            raise StateGraphError("invalid_segments")
+        normalised, total = [], 0
+        for item in segments:
+            # The write surface may hand these over either as plain dicts or as
+            # the validated model; both are the same three fields.
+            if hasattr(item, "model_dump"):
+                item = item.model_dump()
+            if not isinstance(item, dict):
+                raise StateGraphError("invalid_segments")
+            kind, text = item.get("kind"), item.get("text")
+            if kind not in ("info", "question") or type(text) is not str or not 1 <= len(text) <= 2000:
+                raise StateGraphError("invalid_segments")
+            total += len(text)
+            normalised.append({"kind": kind, "text": text})
+        if total > 8000:
+            raise StateGraphError("invalid_segments")
+        return normalised
 
     def _authorize(self, driver_id, *, write=False, break_glass_reason=None):
         if not self.store.project_read_trusted:
@@ -158,6 +192,7 @@ class DriverInbox:
         refs = {} if refs is None else refs
         if not isinstance(refs, dict):
             raise StateGraphError("invalid_refs")
+        segments = self._segments(segments)
         payload = json.dumps([subject, body, target_driver_id, project_members, project_id, kind, delivery_mode, refs, reply_to_message_id, None if _system else self.driver_id], sort_keys=True)
         with self.store.transaction(write=True) as conn:
             replay = self._replay(conn, "send", request_key, payload)
@@ -226,7 +261,7 @@ class DriverInbox:
         return None if row is None else dict(row)
 
     def send_user_message(self, request_key, subject, body, project_id, refs=None,
-                          reply_to_message_id=None):
+                          reply_to_message_id=None, segments=None):
         """Record one message from the calling driver to the project's user.
 
         PRESENTATION, never authority: this writes one message row with NO
@@ -256,6 +291,8 @@ class DriverInbox:
         payload = [subject, body, project_id, refs, self.driver_id]
         if reply_to_message_id is not None:
             payload.append(reply_to_message_id)
+        if segments:
+            payload.append(segments)
         payload = json.dumps(payload, sort_keys=True)
         with self.store.transaction(write=True) as conn:
             replay = self._replay(conn, "send_user", request_key, payload)
@@ -275,10 +312,11 @@ class DriverInbox:
                     raise StateGraphError("invalid_reply_target")
             mid, created = str(uuid4()), now()
             conn.execute("INSERT INTO driver_inbox_messages(message_id,thread_id,sender_driver_id,project_id,"
-                         "kind,delivery_mode,subject,body,refs_json,reply_to_message_id,created_at,audience) "
-                         "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                         "kind,delivery_mode,subject,body,refs_json,reply_to_message_id,created_at,audience,"
+                         "segments_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                          (mid, parent["thread_id"] if parent else mid, self.driver_id, project_id, "note",
-                          "transient", subject, body, json.dumps(refs), reply_to_message_id, created, "user"))
+                          "transient", subject, body, json.dumps(refs), reply_to_message_id, created, "user",
+                          json.dumps(segments) if segments else None))
             return self._record(conn, "send_user", request_key, payload,
                                 {"message_id": mid, "project_id": project_id,
                                  "sender_driver_id": self.driver_id, "created_at": created})
@@ -385,7 +423,7 @@ class DriverInbox:
             self.store._project(conn, project_id)
             rows = [dict(r) for r in conn.execute(
                 "SELECT message_id,thread_id,sender_driver_id,project_id,subject,body,refs_json,"
-                "reply_to_message_id,created_at,audience FROM driver_inbox_messages "
+                "reply_to_message_id,created_at,audience,segments_json FROM driver_inbox_messages "
                 f"WHERE project_id=? AND {CONVERSATION} {bound} "
                 "ORDER BY created_at DESC, message_id DESC LIMIT ?", (*params, limit + 1))]
             total = conn.execute("SELECT COUNT(*) FROM driver_inbox_messages "
@@ -405,6 +443,7 @@ class DriverInbox:
                 "sender_driver_id": row["sender_driver_id"],
                 "subject": row["subject"], "body": row["body"],
                 "refs": json.loads(row["refs_json"]),
+                "segments": json.loads(row["segments_json"]) if row["segments_json"] else [],
                 "reply_to_message_id": row["reply_to_message_id"],
                 "created_at": row["created_at"]})
         next_cursor = (encode_conversation_cursor(page[-1]["created_at"], page[-1]["message_id"])

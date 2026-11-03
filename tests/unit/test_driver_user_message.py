@@ -257,3 +257,49 @@ def test_an_existing_inbox_database_gains_the_column_and_keeps_its_messages(tmp_
     assert [m["message_id"] for m in execute(seed, "list_user_messages",
                                              {"project_id": "alpha"})["messages"]] == [
         sent["message_id"]]
+
+
+# ── Tagged segments ─────────────────────────────────────────────────────────
+# The owner asked to see at a glance which messages carry a question. A tag is
+# presentation only: a `question` block asks; it answers no checkpoint and is
+# not evidence, exactly like the message that carries it.
+
+def test_tagged_segments_reach_storage_and_the_conversation_read(world):
+    sent = send(world["ada"], request_key="tags", segments=[
+        {"kind": "info", "text": "restart is coordinated"},
+        {"kind": "question", "text": "may I restart the host now?"},
+        {"kind": "info", "text": "nothing else is in flight"}])
+    page = execute(world["reader"], "list_user_conversation",
+                   {"project_id": "alpha", "limit": 10})
+    row = next(m for m in page["messages"] if m["message_id"] == sent["message_id"])
+    assert [s["kind"] for s in row["segments"]] == ["info", "question", "info"]
+    assert "may I restart" in row["segments"][1]["text"]
+
+
+def test_several_questions_in_one_message_are_all_kept(world):
+    """The owner asked for this explicitly: one call, several of each kind."""
+    sent = send(world["ada"], request_key="many", segments=[
+        {"kind": "question", "text": "first?"},
+        {"kind": "info", "text": "context"},
+        {"kind": "question", "text": "second?"}])
+    page = execute(world["reader"], "list_user_conversation",
+                   {"project_id": "alpha", "limit": 10})
+    row = next(m for m in page["messages"] if m["message_id"] == sent["message_id"])
+    questions = [s["text"] for s in row["segments"] if s["kind"] == "question"]
+    assert questions == ["first?", "second?"]
+
+
+def test_an_unknown_tag_is_refused(world):
+    with pytest.raises(Exception):
+        send(world["ada"], request_key="bad", segments=[{"kind": "demand", "text": "do it"}])
+
+
+def test_an_untagged_message_keeps_its_old_payload_and_reads_as_no_segments(world):
+    """Messages written before tags existed must replay byte-identically."""
+    first = send(world["ada"], request_key="legacy")
+    again = send(world["ada"], request_key="legacy")
+    assert first["message_id"] == again["message_id"]
+    page = execute(world["reader"], "list_user_conversation",
+                   {"project_id": "alpha", "limit": 10})
+    row = next(m for m in page["messages"] if m["message_id"] == first["message_id"])
+    assert row["segments"] == []

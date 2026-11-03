@@ -42,6 +42,9 @@ services:
       nofile:
         soft: 65536
         hard: 65536
+      # No core dumps: apport writes them to the root fs, and a crash loop
+      # filled it with GBs of cores on 2026-10-15.
+      core: 0
     # Run as the host user → files written into ~/.AItelier keep host ownership.
     user: "${AITELIER_UID:-1000}:${AITELIER_GID:-1000}"
     depends_on:
@@ -199,7 +202,7 @@ services:
     # stanza: `up --build` (the CLI uses it when dependencies change) cannot swap
     # in a canonical-source build whose worker differs, and pull_policy never
     # makes a missing local image fail closed instead of pulling another one.
-    image: semantic-namespace-fbe0-8a431b32@sha256:0922fbfc3970b3274531e5e5e939a9b46f3a20c824e20356409f2028debb58a6
+    image: sha256:4efa1423eb59b0544d8d45828bf93e61189cbbadbe4fdb3ba32d3a2f19837874
     pull_policy: never
     container_name: aitelier-zg
     environment:
@@ -249,6 +252,9 @@ services:
     init: true
     # Same host user → can read the host-owned workspace files it checks.
     user: "${AITELIER_UID:-1000}:${AITELIER_GID:-1000}"
+    # No core dumps from crashing godot renders (same reason as aitelier).
+    ulimits:
+      core: 0
     environment:
       PORT: "8080"
       # Writable HOME for Godot's import cache when run as an arbitrary host uid

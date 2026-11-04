@@ -76,6 +76,16 @@ class TestIsPrivateHost:
 # ── WebSearchTool (mocked) ──
 
 class TestWebSearchTool:
+    @pytest.fixture(autouse=True)
+    def _configured_searxng(self):
+        # SEARXNG_URL is read once at import time, so setting the environment here
+        # would change nothing. Without it the tool now answers with a structured
+        # "unavailable" note (that behaviour has its own test); these tests are
+        # about querying and parsing, so they point the module at a base URL and
+        # keep the HTTP client mocked.
+        with patch("core.web_tools.SEARXNG_URL", "http://searxng.test"):
+            yield
+
     @patch("core.web_tools.httpx.get")
     def test_search_returns_results(self, mock_get):
         mock_resp = MagicMock()
@@ -139,6 +149,21 @@ class TestWebSearchTool:
 # ── WebFetchTool (mocked) ──
 
 class TestWebFetchTool:
+    @pytest.fixture(autouse=True)
+    def _resolve_without_dns(self, request):
+        # These tests are about text windowing, not about the SSRF guard. The
+        # guard resolves the hostname, and a network-isolated test container has
+        # no DNS - every fetch came back "Blocked: private/internal IP" instead of
+        # exercising the code under test.
+        #
+        # The one test that DOES assert blocking must keep the real guard, so the
+        # patch is withheld by name rather than applied blindly to the class.
+        if "private" in request.node.name:
+            yield
+            return
+        with patch("core.web_tools._is_private_host", return_value=False):
+            yield
+
     def test_fetch_invalid_url(self):
         tool = WebFetchTool()
         result = tool.fetch("")
@@ -226,6 +251,21 @@ class TestWebFetchTool:
 
 
 class TestWebFetchWindowing:
+    @pytest.fixture(autouse=True)
+    def _resolve_without_dns(self, request):
+        # These tests are about text windowing, not about the SSRF guard. The
+        # guard resolves the hostname, and a network-isolated test container has
+        # no DNS - every fetch came back "Blocked: private/internal IP" instead of
+        # exercising the code under test.
+        #
+        # The one test that DOES assert blocking must keep the real guard, so the
+        # patch is withheld by name rather than applied blindly to the class.
+        if "private" in request.node.name:
+            yield
+            return
+        with patch("core.web_tools._is_private_host", return_value=False):
+            yield
+
     """Long pages page through windows; #fragments position the first window.
 
     Regression for the vitest-docs incident: a 10k head-truncation with no

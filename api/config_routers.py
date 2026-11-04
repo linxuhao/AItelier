@@ -140,6 +140,9 @@ def pipeline_graph(config_name: str, registry=Depends(get_config_registry),
         from skillflow import graph_digest
         from api.dependencies import get_skillflow as initialized_skillflow
         try:
+            # Catalogue view of a registered config: the drift check IS a
+            # comparison against what is registered NOW, not what a run pinned.
+            # by-name-ok: catalogue listing — no run in scope
             current = initialized_skillflow()._graphs.get(config_name)
             if current is None or graph_digest(current.to_dict()) != view["graph_digest"]:
                 view.update(graph_version=None, graph_digest=None, registration_status="conflict")

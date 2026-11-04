@@ -509,27 +509,49 @@ PROSE_CONSTANT_EXEMPTIONS = {
     # rather than folded into a prompt as prose.
     ("core/director_messaging.py", "SCHEMA"):
         "SQL DDL for the director notes table",
+    ("core/director_messaging_quorum.py", "SCHEMA"):
+        "SQL DDL and its immutability triggers for the director "
+        "acknowledgement table",
+    ("core/driver_inbox.py", "SCHEMA"):
+        "SQL DDL for the driver inbox message and delivery tables",
+    ("core/drivers.py", "SCHEMA"):
+        "SQL DDL for the drivers table",
+    ("core/dsh_driver.py", "SCHEMA"):
+        "SQL DDL for the per-project DSH driver table",
     ("core/state_attempts.py", "SCHEMA"):
         "SQL DDL schema for the attempt tables",
     ("core/state_attempt_schema.py", "ATTEMPT_TABLE"):
         "SQL DDL for the attempts table",
     ("core/state_attempt_schema.py", "EXTRA_SCHEMA"):
         "JSON schema for structured state output validation",
+    ("core/state_attempt_schema.py", "OWNERS_TABLE"):
+        "table-name templated SQL DDL for the external attempt owners table",
+    ("core/state_changes.py", "current"):
+        "SQL predicate fragment spliced into an attempt query, never rendered "
+        "as prose",
     ("core/state_design.py", "SCHEMA"):
         "SQL DDL schema for the design tables",
     ("core/state_driver_index.py", "ENTRY_SCHEMA"):
         "JSON schema for state driver index entries",
+    ("core/state_driver_index.py", "_ENTRY_TEMPLATE"):
+        "table-name templated SQL DDL for the driver note entry tables",
     ("core/state_driver_notes.py", "SCHEMA"):
         "SQL DDL for the driver notes table",
     ("core/state_graph.py", "SCHEMA"):
         "SQL DDL schema for the state graph tables",
+    ("core/state_handoffs.py", "SCHEMA"):
+        "SQL DDL for the handoff table",
     ("core/state_issues.py", "SCHEMA"):
         "SQL DDL schema for the issue tables",
     ("core/state_metadata.py", "SCHEMA"):
         "SQL DDL schema for the state metadata table",
     ("core/state_run_summary.py", "USAGE_SQL"):
         "SQL query for token usage accounting",
+    ("core/state_subagents.py", "SCHEMA"):
+        "SQL DDL for the driver subagent table and its indexes",
     # Executable plumbing, never rendered into a prompt.
+    ("core/repository_executor.py", "PREP_SCRIPT"):
+        "shell script run out of process to prepare the bare snapshot repo",
     ("core/tool_guards.py", "probe"):
         "function-local out-of-process importability probe script",
 }

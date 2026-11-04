@@ -313,6 +313,10 @@ def _registered_graph_identity(sf, name: str, graph, definition: dict) -> dict:
         if not row or type(row.get("version")) is not int or row["version"] < 1:
             return result
         saved = sf.get_graph_version(name, row["version"])
+        # Registration identity, not execution: the last clause asks whether the
+        # object registered NOW is the one being described, so there is no run
+        # whose pin could answer it.
+        # by-name-ok: registration identity check — no run in scope
         if (isinstance(saved, dict) and type(saved.get("version")) is int
                 and saved["version"] == row["version"]
                 and saved.get("digest") == digest

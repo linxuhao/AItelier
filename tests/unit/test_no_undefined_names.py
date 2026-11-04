@@ -21,9 +21,14 @@ _ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_no_undefined_names_in_first_party_code():
+    # --no-cache: ruff's result cache is a speed artefact, not part of the
+    # guarantee, and writing it into the checkout makes an F821 gate fail on a
+    # read-only tree (`error: Failed to initialize cache at /w/.ruff_cache`)
+    # before it has looked at a single name. The rest of the repo already calls
+    # ruff this way (api/dependencies.py:135).
     r = subprocess.run(
         [sys.executable, "-m", "ruff", "check", "--select", "F821",
-         "--output-format", "concise", "api/", "core/", "aitelier/"],
+         "--output-format", "concise", "--no-cache", "api/", "core/", "aitelier/"],
         cwd=_ROOT, capture_output=True, text=True)
     assert r.returncode == 0, "undefined names:\n" + r.stdout + r.stderr
 

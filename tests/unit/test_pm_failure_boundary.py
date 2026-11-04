@@ -3,6 +3,7 @@
 Real base/addon graph transitions and SkillFlow state machine; upstream content
 assembly/validation is replaced only to enter the PM boundary without models.
 """
+import json
 from copy import deepcopy
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -114,6 +115,24 @@ def test_old_error_edge_reproduces_bypass(tmp_path):
     assert row(sf, run, "3_review")["status"] == "pending"
 
 
+_COVERAGE_LEDGER = {
+    # Step 3 declares three fixed outputs (`configs/dpe_default.yaml`:
+    # tasks_manifest, task_card, coverage_ledger) and skillflow's checkpoint
+    # path reads EVERY one of them out of the staging dir before it will
+    # complete the step. This fixture writes only the manifest, so the ledger
+    # completes the slot set and lets the step reach its checkpoint.
+    "document_type": "coverage_ledger",
+    "schema_version": 1,
+    "ledger_version": 1,
+    "inventory_sha256": "0" * 64,
+    "base_sha": "0" * 40,
+    "baseline": {"id": "baseline", "revision": 1},
+    "entries": [{"requirement_id": "reviewed", "disposition": "card",
+                 "card_id": "reviewed"}],
+    "ledger_sha256": "0" * 64,
+}
+
+
 @pytest.mark.parametrize("game", [False, True], ids=["base", "game"])
 def test_pm_success_still_requires_explicit_approval(tmp_path, game):
     sf, run = engine(tmp_path, game)
@@ -121,12 +140,21 @@ def test_pm_success_still_requires_explicit_approval(tmp_path, game):
     draft = Path(sf._workspace.get_step_tmp_dir("p", "pm_boundary", "3"))
     draft.mkdir(parents=True, exist_ok=True)
     (draft / "tasks_manifest.json").write_text('{"execution_order":[["reviewed"]]}')
+    (draft / "requirements_coverage.json").write_text(json.dumps(_COVERAGE_LEDGER))
     sf.confirm_step(claim.token, StepResult(outputs={}, flags={}))
     sf.advance_run(run)
     assert sf.get_run(run)["status"] == "paused"
     assert row(sf, run, "3_budget")["status"] == "pending"
     assert row(sf, run, "3_review")["status"] == "pending"
-    sf.approve_checkpoint(run)
+    # Approval is bound to the retained instance the human reviewed:
+    # skillflow's approve_checkpoint takes that identity plus a decision id and
+    # refuses a bare run_id, so a decision can never land on a later re-plan of
+    # the same step. Read the retained checkpoint the way the API does.
+    checkpoint = sf.get_checkpoint(run)
+    assert checkpoint["step_id"] == "3"
+    sf.approve_checkpoint(run,
+                          expected_checkpoint=checkpoint["expected_checkpoint"],
+                          decision_id="reviewed-task-breakdown")
     assert sf.get_run(run)["current_node"] == "3_budget"
     resolver = sf._get_resolver_for_run(run)
     assert resolver.next_node("3_budget", {"within_budget": True}, {}) == "3_review"

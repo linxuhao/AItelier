@@ -40,15 +40,21 @@ TEST_INTENTIONAL_REPEATS = [
     ("tests/integration/test_tool_operation_owner_recovery.py", 'sf.reconcile_active_operations(run_id, trigger="retryable_trace")', 1),
     ("tests/unit/test_ai_router.py", 'litellm.exceptions.RateLimitError("Limit reached", model="zai", llm_provider="zai"),', 1),
     ("tests/unit/test_claim_precondition_bounded.py", 'await scheduler._run_skillflow_tick("p1", None)', 1),
+    ("tests/unit/test_cli_client.py", 'client.approve_checkpoint("project", observed)', 1),
+    ("tests/unit/test_debugctl_await_auth_headers.py", '"http://localhost:4444/api/events/stream",', 2),
     ("tests/unit/test_godot_harness.py", 'gh._playtest_spec(tmp_path / "proj", _spec(["a"]), 60, 120)', 1),
     ("tests/unit/test_godot_harness.py", "gh.run_script(str(tmp_path), [], timeout=30)", 1),
     ("tests/unit/test_knowledge_sync.py", '_call(repo, ws, "proj1")', 1),
-    ("tests/unit/test_postcompact_driver_hook.py", '"state_graph_read", "state_graph_read", "state_graph_help", "state_graph_read",', 1),
+    ("tests/unit/test_native_empty_response.py", 'assert g.generate_native(MSGS).text == "visible answer"', 1),
+    ("tests/unit/test_postcompact_driver_hook.py", '"driver_whoami", "state_graph_read", "state_graph_read", "state_graph_help", "state_graph_read",', 1),
     ("tests/unit/test_public_read_hardening.py", '_read_cache.cached(("k2",), lambda: calls.append(1) or "v", ttl=-1)', 1),
     ("tests/unit/test_quota_hold.py", 'sched.tick_log("p", outcome)', 1),
     ("tests/unit/test_route_rotation.py", 'assert table.resolve("plain", rotate=True) == ["a/m1", "payg/m9"]', 1),
     ("tests/unit/test_route_rotation.py", 'assert table.resolve("solo", rotate=True) == ["a/m1", "payg/m9"]', 1),
     ("tests/unit/test_run_isolation_lifecycle.py", "await sc.poll_and_execute()", 2),
+    ("tests/unit/test_tick_log.py", 'await scheduler._run_skillflow_tick("p1", None)', 1),
+    ("tests/unit/test_waiting_tick_log_coalescing.py", 'await tick("p1")', 1),
+    ("tests/writing_bench/test_early_semantic_refusal.py", 'adapter.publish_review_materials(bench, "run1", "literary", out)', 1),
 ]
 
 
@@ -92,7 +98,7 @@ def test_named_test_repeats_are_pinned_and_current():
         f"only-in-tree={sorted(set(derived) - set(listed))} "
         f"only-in-list={sorted(set(listed) - set(derived))} "
         f"count-mismatch={[(k, derived[k], listed.get(k)) for k in derived if k in listed and derived[k] != listed[k]]}")
-    assert len(TEST_INTENTIONAL_REPEATS) == 13
+    assert len(TEST_INTENTIONAL_REPEATS) == 19
 
 
 

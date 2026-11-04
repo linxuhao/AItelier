@@ -59,8 +59,18 @@ def call_case(engine,tmp_path,monkeypatch,request):
         getattr(engine.factory,'get_native_agent' if mode=='native' else 'get_agent').return_value=agent
     _setup(tmp_path);ws=_WS(tmp_path)
     def run(schemas=TS):
+        # config_name: the engine infers its config from output_dir and, with no
+        # output_dir, falls back to dpe_default_v2 — a config that opts into
+        # x-aitelier.preamble_steps. That lookup reads api.dependencies' config
+        # registry singleton, so it returned [] while this file ran first (the
+        # singleton was built from this fixture's own tmp SkillFlow) and
+        # dpe_default_v2's steps once any other test had built it; the native turn
+        # loop then called assembler.build_shared_preamble on this fixture's stub
+        # and the step fell through to JSON. Name the graph this fixture actually
+        # registers, so the path does not depend on test order.
         return engine.run_step(1,'t_impl',ws,'default',agent_config_name='task_implementer',tool_schemas=schemas,
-            run_id=rid,step_instance_id=claim.token.step_instance_id,claim_epoch=claim.token.claim_epoch)
+            run_id=rid,step_instance_id=claim.token.step_instance_id,claim_epoch=claim.token.claim_epoch,
+            config_name='provider-failure')
     def evidence(name,caught):
         rows=sf.get_trace(rid)
         summary=trace_list(sf,rid,step='t_impl',errors_only=True)

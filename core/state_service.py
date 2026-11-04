@@ -458,6 +458,11 @@ class StateService:
         if manifest is not None:
             try:
                 from core.seed_publication import reads_own_seed
+                # Launch preflight, reached only from the fresh-launch branch:
+                # `_launch_or_recover` returns to reconcile_attempt above when the
+                # attempt already carries a run, so no run exists to pin here and
+                # the run this attempt creates is pinned to the graph NOW.
+                # by-name-ok: no run exists yet — creation-time preflight
                 own = reads_own_seed(self.sf._get_resolver(attempt["workflow"]).graph,
                                      attempt["workflow"], manifest.seed_file)
             except Exception as exc:  # unresolvable receiver graph: fail closed
@@ -792,6 +797,10 @@ class StateService:
                     raise StateConflict("an attempt may declare exactly one review input bundle")
                 if review_inputs:
                     from core.seed_publication import reads_own_seed
+                    # Same launch preflight as _preflight_review_inputs: this
+                    # attempt has not launched, so the run it will create is the
+                    # one pinned to the graph registered NOW.
+                    # by-name-ok: no run exists yet — creation-time preflight
                     if not reads_own_seed(self.sf._get_resolver(attempt["workflow"]).graph,
                                           attempt["workflow"], manifest.seed_file):
                         raise StateConflict("review input workflows must read their published seed")

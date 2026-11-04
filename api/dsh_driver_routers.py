@@ -259,7 +259,10 @@ async def completion(project_id: str, body: Completion, request: Request, runtim
         raise HTTPException(409, "driver is stopped")
     sessions = runtime.gateways.setdefault(project_id, {})
     if body.session_id not in sessions:
-        gateway = AIGateway(row["model"], enable_thinking=True, thinking_effort=body.reasoning_effort,
+        # Native children (including resumed old children) have their own session.
+        # Bind once per child: rotate across workers, keep tool turns sticky.
+        model = row["model"] if body.session_id == row["session_id"] else "worker"
+        gateway = AIGateway(model, enable_thinking=True, thinking_effort=body.reasoning_effort,
                             max_output_tokens=body.max_tokens)
         sessions[body.session_id] = (gateway, asyncio.Lock())
     gateway, lock = sessions[body.session_id]

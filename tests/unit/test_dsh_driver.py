@@ -266,7 +266,7 @@ async def test_host_completion_reuses_native_session_gateway_and_real_failover(r
         app = FastAPI(); app.include_router(router)
         app.dependency_overrides[manager] = lambda: runtime
         app.dependency_overrides[authz.require_writer] = lambda: None
-        payload = {'session_id': 'native-root', 'messages': [{'role': 'user', 'content': 'work'}],
+        payload = {'session_id': driver['session_id'], 'messages': [{'role': 'user', 'content': 'work'}],
                    'tools': [{'type': 'function', 'function': {'name': 'wait', 'parameters': {'type': 'object'}}}]}
         with TestClient(app) as client:
             result = client.post('/api/dsh-drivers/alpha/completion', json=payload)
@@ -288,6 +288,64 @@ async def test_host_completion_reuses_native_session_gateway_and_real_failover(r
             assert 'x-opencode-session' not in called[-1][1].get('extra_headers', {})
             identity.driver_id = 'other'
             assert client.post('/api/dsh-drivers/alpha/completion', json=payload).status_code == 403
+        await runtime.stop('alpha')
+        assert 'alpha' not in runtime.gateways
+    finally:
+        await runtime.close()
+
+
+async def test_native_workers_rotate_once_per_session_and_fail_over_without_changing_director(runtime, tmp_path, monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from api import authz
+    from api.dsh_driver_routers import router, manager
+    import core.ai_router as ai
+    import litellm
+
+    providers = tmp_path / 'providers.json'
+    routes = tmp_path / 'routes.json'
+    providers.write_text(json.dumps({p: {'base_url': 'https://example.invalid/v1', 'api_key_env': 'FIXTURE'}
+                                    for p in ('opencodego', 'ollamacloud', 'deepseek')}))
+    pool = ['opencodego/deepseek-v4.1-flash', 'ollamacloud/deepseek-v4.1-flash']
+    routes.write_text(json.dumps({'driver': ['deepseek/deepseek-flash'], 'worker': {'rotate': pool}}))
+    monkeypatch.setattr(ai, '_read_secret', lambda _: 'fixture-key')
+    monkeypatch.setattr(ai, '_ENDPOINT_COOLDOWN', {})
+    gateway_class = ai.AIGateway
+    monkeypatch.setattr(ai, 'AIGateway', lambda model, **kw: gateway_class(model, config_path=str(providers), routes_path=str(routes), **kw))
+    calls = []
+    fail_go = False
+    def call(gateway, kwargs, **unused):
+        calls.append(gateway.active_model)
+        if fail_go and gateway.provider == 'opencodego':
+            raise litellm.AuthenticationError('fixture unavailable', llm_provider='openai', model=gateway.active_model)
+        return litellm.ModelResponse(choices=[{'message': {'role': 'assistant', 'content': 'worker ok'},
+                                             'finish_reason': 'stop'}],
+                                    usage={'prompt_tokens': 10, 'completion_tokens': 2, 'total_tokens': 12})
+    monkeypatch.setattr(gateway_class, '_call_llm', call)
+    try:
+        driver = await runtime.start('alpha', actor='fixture')
+        monkeypatch.setattr(authz, 'request_identity', lambda _: SimpleNamespace(driver_id=driver['driver_id']))
+        app = FastAPI(); app.include_router(router)
+        app.dependency_overrides[manager] = lambda: runtime
+        app.dependency_overrides[authz.require_writer] = lambda: None
+        with TestClient(app) as client:
+            def complete(session):
+                response = client.post('/api/dsh-drivers/alpha/completion', json={
+                    'session_id': session, 'messages': [{'role': 'user', 'content': 'work'}]})
+                assert response.status_code == 200, response.text
+                return response.json()['served_by']
+            assert complete(driver['session_id']) == 'deepseek/deepseek-flash'
+            assert complete('native-child-a') == pool[0]
+            assert complete('native-child-a') == pool[0], 'tool turns must not rotate'
+            assert complete('native-child-b') == pool[1]
+            assert complete('native-child-c') == pool[0]
+            assert complete('native-child-b') == pool[1]
+            fail_go = True
+            assert complete('native-child-a') == pool[1], 'failure must try the other pool member'
+            assert calls[-2:] == pool
+            assert complete('native-child-a') == pool[1], 'successful failover remains sticky'
+            assert complete(driver['session_id']) == 'deepseek/deepseek-flash'
+            assert len(runtime.gateways['alpha']) == 4
         await runtime.stop('alpha')
         assert 'alpha' not in runtime.gateways
     finally:
@@ -426,6 +484,18 @@ def _patch_document(runtime, row):
     path = (runtime.root / row["driver_id"] / "home" / "profiles" / "driver"
             / "cordis.patch.yml")
     return yaml.load(path.read_text(), Loader=_Any)
+
+
+def test_native_spawn_and_fork_use_worker_without_changing_the_director(runtime):
+    row = runtime._provision("alpha", "aitelier", "driver", "fixture")
+    env = runtime._environment(row)
+    patch = {p.get("id"): p for p in _patch_document(runtime, row)}
+    for tool in ("tool-subagent", "tool-subagent-fork"):
+        assert patch[tool]["config"]["agentOptions"] == {"provider": "aitelier", "model": "worker"}
+    assert patch["tool-subagent"]["config"]["provider"] == "spawn"
+    assert patch["tool-subagent-fork"]["config"]["provider"] == "fork"
+    assert env["AITELIER_DSH_MODEL"] == "driver"
+    assert runtime.get("alpha")["model"] == "driver"
 
 
 def test_local_mcp_servers_are_registered_by_default(runtime):

@@ -224,6 +224,15 @@ unchanged. This profile mounts native Spawn/Fork only. Claude Code and Codex ext
 are not mounted by this MVP; naming a preferred model in the goal does not
 install a provider or change the host adapter's default model.
 
+Native Spawn and Fork subagents use the `worker` model route; the director keeps
+its configured model (normally `driver`). The completion bridge also identifies
+children by their native session id, so resumed children with an old inherited
+model selection still use `worker`. Each child binds one gateway: successive
+children round-robin over `worker.rotate`, while all tool turns in that child
+stay on the same provider unless an endpoint fails. The example pool contains
+OpenCodeGo and Ollama Cloud DeepSeek V4.1 Flash, using the existing `GO_API_KEY`
+and `OLLAMA_API_KEY` secret files. Both endpoints need configured credentials.
+
 The State subscription requests a 240-second wait, below Node fetch's default
 300-second response-header timeout. Ordinary timeouts stay inside the runtime
 without model turns. Transport failures retry there too, include the underlying

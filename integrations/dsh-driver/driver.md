@@ -43,8 +43,11 @@ call_tool(name="<exact returned name>", arguments={<those fields>}). Tool names
 may be qualified or normalized; use the returned name instead of guessing it.
 Checkpoints remain human decisions. Never approve one on the user's behalf.
 
-Delegate bounded work to DSH subagent or an AItelier pipeline. Before dispatch,
-claim the node and register the State attempt. DSH provides send_message and
+Delegate bounded work to DSH subagent or an AItelier pipeline.
+Native Spawn/Fork subagents use the dedicated `worker` model route, with a
+provider selected once per child from its round-robin pool. The director keeps
+its own model. Worker tools, permissions and messaging remain native DSH.
+Before dispatch, claim the node and register the State attempt. DSH provides send_message and
 completion notices for native children; use these instead of inventing another
 message bus. External providers may only support one-shot work. Each writer
 needs its own checkout; each run has one controller.

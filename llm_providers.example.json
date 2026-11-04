@@ -34,5 +34,9 @@
   "opencodego": {
     "base_url": "https://opencode.ai/zen/go/v1",
     "api_key_env": "GO_API_KEY"
+  },
+  "ollamacloud": {
+    "base_url": "https://ollama.com/v1",
+    "api_key_env": "OLLAMA_API_KEY"
   }
 }

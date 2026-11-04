@@ -53,6 +53,17 @@
     "qwen/deepseek-v4-flash-0731",
     "deepseek/deepseek-flash"
   ],
+  "_worker_note": "DSH native subagents use worker; each child rotates once, then keeps a sticky provider for its tool turns. Configure the deployment pool independently of the director's model.",
+  "worker": {
+    "rotate": [
+      "opencodego/deepseek-v4.1-flash",
+      "ollamacloud/deepseek-v4.1-flash"
+    ],
+    "effort": {
+      "opencodego/deepseek-v4.1-flash": "high",
+      "ollamacloud/deepseek-v4.1-flash": "high"
+    }
+  },
   "_flash_review_note": [
     "Reviewer roles (the *_reviewer roles that used to ride `flash`) name their own",
     "route so a deployment can staff review apart from implementation. Measured",

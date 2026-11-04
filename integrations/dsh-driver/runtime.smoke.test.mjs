@@ -96,6 +96,9 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
     await writeFile(join(profile, 'package.json'), JSON.stringify({ private: true, dsh: { profile: { bundles: ['@deepseek-ai/dsh-base'] } } }));
     await writeFile(join(profile, 'cordis.patch.yml'), JSON.stringify([
       { id: 'hmr', disabled: true }, { id: 'compaction-basic', config: { thresholdRatio: 0.8, retainTokens: 128, headroomTokens: 512 } },
+      ...[['tool-subagent', 'spawn', 'subagent'], ['tool-subagent-fork', 'fork', 'subagent_fork']]
+        .map(([id, provider, toolName]) => ({ id, config: { provider, toolName,
+          agentOptions: { provider: 'fixture', model: 'worker' } } })),
       { insert: [{ id: 'fixture', name: join(here, 'fixture-provider.mjs') }, { id: 'driver', name: join(here, 'runtime.mjs') },
         { id: 'mcp-aitelier', name: '@deepseek-ai/dsh-mcp-client', config: { serverName: 'aitelier', transport: 'streamable-http', url: base + '/mcp', failOnStartupError: true } }] },
     ]));
@@ -156,6 +159,11 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
       'goal or operating protocol disappeared after compact/overflow');
     assert.ok(!requests.filter(r=>r.child&&!r.summary).some(r=>JSON.stringify(r.options).includes('Native DSH driver goal (')),
       'native child inherited the director goal');
+    const workerRequests = requests.filter(r=>r.child&&!r.summary);
+    assert.ok(workerRequests.length > 1, 'worker tool loop was not exercised');
+    assert.ok(workerRequests.every(r=>r.options.provider==='fixture'&&r.options.model==='worker'),
+      'native child inherited the director model instead of worker');
+    assert.ok(rootRequests.every(r=>r.options.model==='fixture-model'), 'worker selection changed the director model');
     assert.deepEqual(workCalls.map(c => c.action), ['open', 'write', 'bash', 'deliver']);
     assert.ok(workCalls.every(c => c.session_id && c.session_id !== 'fixture-root'), 'child work used the root session identity');
     assert.equal(new Set(workCalls.map(c => c.session_id)).size, 1);

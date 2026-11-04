@@ -205,6 +205,10 @@ class DshDrivers:
         patches = [
             {"id": "hmr", "disabled": True},
             {"id": "compaction-basic", "config": {"thresholdRatio": ratio}},
+            *[{"id": tool, "config": {"provider": provider, "toolName": name,
+                "agentOptions": {"provider": "aitelier", "model": "worker"}}}
+              for tool, provider, name in (("tool-subagent", "spawn", "subagent"),
+                                           ("tool-subagent-fork", "fork", "subagent_fork"))],
             {"insert": [{"id": "aitelier-driver", "name": str(source)},
                 {"id": "mcp-aitelier", "name": "@deepseek-ai/dsh-mcp-client", "config": {
                     "serverName": "aitelier", "transport": "streamable-http",

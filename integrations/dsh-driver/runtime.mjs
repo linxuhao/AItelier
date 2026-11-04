@@ -413,9 +413,23 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
   const inbox = await projectInbox();
   // Native goal rounds start/continue the director; bootstrap is not a human
   // message and must not manufacture human authority for goal tools.
-  bindDriverGoal(ctx.goals, agent, driverGoal(project));
+  const pendingInbox = (inbox.result ?? inbox).items?.length;
+  let removeInboxHook = () => {};
+  const deliverInbox = () => {
+    removeInboxHook();
+    agent.steer(eventMessage('Pending project inbox:\n' + JSON.stringify(inbox)));
+  };
+  // Legacy project messages must not win the first-turn race and strand an
+  // armed goal inside a non-goal wait turn before its first round is admitted.
+  if (pendingInbox) removeInboxHook = ctx.on('session/event', (session, event) => {
+    if (session !== agent.session || event.type !== 'user/message' || event.data.source?.kind !== 'goal') return;
+    removeInboxHook();
+    // Session observers cannot append reentrantly to their own log.
+    queueMicrotask(() => { if (!disposed) ctx.agents.withoutInitiator(deliverInbox); });
+  });
+  const goal = bindDriverGoal(ctx.goals, agent, driverGoal(project));
   await ctx.sessionPersistence.flush();
-  if ((inbox.result ?? inbox).items?.length) agent.steer(eventMessage('Pending project inbox:\n' + JSON.stringify(inbox)));
+  if (pendingInbox && (goal?.phase !== 'active' || goal.activation !== 'armed')) deliverInbox();
   const pump = runtime.pump().catch(async error => {
     if (!runtime.controller.signal.aborted) {
       await report('failed', String(error).slice(0, 2000));

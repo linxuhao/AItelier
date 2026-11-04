@@ -59,7 +59,7 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
     }
     if (req.url === '/api/drivers/me') return send({ driver_id: 'dsh-fixture' });
     if (req.url === '/api/state/schema') return send({ operations: {} });
-    if (req.url === '/api/state/query/list_director_messages') return send({ result: { items: [] } });
+    if (req.url === '/api/state/query/list_director_messages') return send({ result: { items: [{subject:'BOOT_PROJECT_INBOX',status:'unread'}] } });
     if (req.url.endsWith('/context')) { contextReads++; return send({ project_id: 'alpha', driver_id: 'dsh-fixture', event_seq: 10,
       nodes: [{ name: 'n', status: changed ? 'VERIFIED' : 'PENDING' }], project_note: { index: ['project rule'] },
       private_note: { index: [overflowChanged ? 'overflow fresh private rule' : changed ? 'fresh private rule' : 'original private rule'] }, driver_skill: 'fixture driver skill', runtime_skill: 'Use wait.' }); }
@@ -147,6 +147,10 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
       'premature final did not continue through a native goal round');
     assert.ok(!events.some(e=>e.type==='user/message'&&e.data.source?.kind==='user'), 'bootstrap manufactured a human input');
     const rootRequests=requests.filter(r=>!r.child&&!r.summary&&r.options.tools?.length);
+    assert.match(JSON.stringify(rootRequests[0].options.messages), /<goal_round>/,
+      'a pending project inbox displaced the initial native goal round');
+    assert.ok(rootRequests.some(r=>JSON.stringify(r.options.messages).includes('BOOT_PROJECT_INBOX')),
+      'native goal bootstrap lost the pending project inbox\n'+output);
     assert.ok(rootRequests.every(r=>JSON.stringify(r.options).includes('Native DSH driver goal (') && JSON.stringify(r.options).includes('fixture driver skill')),
       'goal or operating protocol disappeared after compact/overflow');
     assert.ok(!requests.filter(r=>r.child&&!r.summary).some(r=>JSON.stringify(r.options).includes('Native DSH driver goal (')),

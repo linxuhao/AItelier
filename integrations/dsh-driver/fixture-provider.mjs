@@ -7,7 +7,7 @@ export const inject = ['llm'];
 export function apply(ctx) {
   let rootCalls = 0, pressure = false, triggered = false, childMessaged = false, childShell = false, childWork = 0, childDiscovery = 0;
   const host = process.env.AITELIER_DSH_EXECUTION === 'host';
-  let overflowed = false, earlyFinal = false;
+  let overflowed = false, earlyFinal = 0;
   class FixtureAdapter extends LlmAdapter {
     async resolveModel(provider, model) { return { provider, id: model, name: model, context: { contextWindow: 16000 }, defaultMaxTokens: 1024 }; }
     async *stream(options) {
@@ -50,9 +50,9 @@ export function apply(ctx) {
         block = { type: 'text', text: 'Native child completed.' };
       }
       else if (!options.tools?.length) block = { type: 'text', text: 'Fixture session' };
-      // End before any child exists: only the native goal driver can restart
-      // this work. Later finals legitimately wait for children or State input.
-      else if (!earlyFinal) { earlyFinal = true; block = {type:'text',text:'Premature director final.'}; }
+      // Finish twice before any child exists: bootstrap inbox can continue the
+      // first stop, but the next needs a native goal round, not a State wake.
+      else if (earlyFinal < 2) { earlyFinal++; block = {type:'text',text:'Premature director final.'}; }
       else {
         const rawCall = rootCalls++;
         const call = host ? rawCall - 1 : rawCall;

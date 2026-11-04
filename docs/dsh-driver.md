@@ -184,6 +184,8 @@ system section reads the actual persisted objective, making it visible after
 pressure/overflow compaction without duplicating it in State snapshots. Protocol
 and runtime tool instructions have their own system sections; native children
 keep their assigned task instead of inheriting the director's goal.
+Retained project-inbox messages are delivered after the first native goal round
+is admitted, so bootstrap messages cannot displace that round.
 
 Session resume preserves goal identity, objective, counters and the existing
 project snapshot. The enabled resident host explicitly re-arms an active goal

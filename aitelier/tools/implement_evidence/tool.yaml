@@ -1,0 +1,66 @@
+name: implement_evidence
+description: >
+  Observe the implement step instead of believing it. Reads that step's own
+  code-delivery receipt (`code_changes.json`: base_commit, delivered commit and
+  the files it recorded) and holds the ACTUAL worktree against it with the
+  shared predicate library from `core/todo_runtime.py` — one `file_changed`
+  predicate per declared file, comparing content against the BASE COMMIT's
+  version of that same path (never against "the file must be absent or wrong
+  first": for a write step the file already exists, and demanding redness would
+  make deleting it the only way to satisfy the check), plus the declared
+  `contains` marker when one is given, plus one cheap `command_exit` on the
+  delivered commit object. Returns verdict `confirmed` or `unconfirmed` with the
+  `basis` (each predicate and its detail) and `missing` (the file whose declared
+  change is absent, and the expected content when a marker was declared). The
+  verdict also lands as `implement_evidence.json` in this step's output dir, so
+  it is a STEP OUTPUT readable with get_step_output, not a log line.
+  NOT a gate. Nothing routes on this step: it observes, records and moves on. A
+  red verdict here cannot make a green run red and a green one cannot make a red
+  gate green — `run_tests` still decides.
+  Absence is `absent`, not failure: a missing/unreadable receipt, a missing git
+  binary, a timeout, or a base commit this worktree does not contain is recorded
+  as a bounded episode through `core/gate_deferral.py` (DeferralLedger) and
+  reported with `waiting_for` naming what it waits for. A missing binary is
+  never charged to the implementer.
+parameters:
+  out_dir:
+    type: string
+    description: "Absolute output directory ($STEP_DIR); its parent is the graph
+      dir, which is where the implement step published its receipt."
+  project_root:
+    type: string
+    description: "The run's code worktree (auto-injected by the engine as the
+      resolved code path for this run)."
+    required: false
+  declared_step:
+    type: string
+    description: "Which step's code_changes.json is the declared change (default
+      'implement'). Another config binds its own implementer here instead of
+      editing this tool."
+    required: false
+  declared:
+    type: string
+    description: >
+      Optional JSON list of extra declared changes, each {path, contains?} —
+      e.g. '[{"path": "feature.py", "contains": "def tag("}]'. They ADD to the
+      receipt's file list and turn a plain "it changed" into "it changed into
+      the declared content".
+    required: false
+  max_files:
+    type: integer
+    description: "Bound on how many declared files are observed (default 500). A
+      change set larger than this is reported unconfirmed, naming the files that
+      were not evaluated — a confirmation may not rest on files never looked at."
+    required: false
+  timeout_seconds:
+    type: number
+    description: "Per-git-command timeout (default 20s). A timeout is an absence,
+      not a failure."
+    required: false
+
+# Its result never carries `passed`, and no step routes on it: the observer is
+# deliberately not a gate, so `x-fallible` (which marks a tool whose failure
+# branch a generated graph MUST route) stays off. An `error` key it returns is a
+# binding problem reported as an absent measurement.
+output:
+  target: artifact

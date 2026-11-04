@@ -1,0 +1,9 @@
+{
+  "target": "code",
+  "run_id": "5cbe5dd5-8c33-4908-8764-a7cb03114412",
+  "step_instance_id": 2,
+  "base_commit": "ac90f58f15603aeb15a1368b44c82a125f6a7b0d",
+  "commit": "ac90f58f15603aeb15a1368b44c82a125f6a7b0d",
+  "files": [],
+  "note": "Source files live in the run worktree."
+}

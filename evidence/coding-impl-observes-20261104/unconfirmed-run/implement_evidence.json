@@ -1,0 +1,27 @@
+{
+  "basis": [],
+  "confirmed": false,
+  "declared": {
+    "base_commit": "ac90f58f15603aeb15a1368b44c82a125f6a7b0d",
+    "commit": "ac90f58f15603aeb15a1368b44c82a125f6a7b0d",
+    "evaluated": [],
+    "files": [],
+    "recorded_files": [],
+    "refused": [],
+    "run_id": "5cbe5dd5-8c33-4908-8764-a7cb03114412",
+    "step_instance_id": 2
+  },
+  "declared_step": "implement",
+  "missing": [
+    {
+      "missing": "change",
+      "path": "",
+      "reason": "the implement step's code_changes.json names no changed file and no change was declared, so nothing was observed to change while implement claimed completion"
+    }
+  ],
+  "receipt": "/tmp/pytest-of-unknown/pytest-0/test_an_unconfirmed_observatio0/with/ws/p/coding_impl/implement/code_changes.json",
+  "state": "measured",
+  "summary": "implement claimed completion and its receipt names no changed file: no code_changes.json 'files' entry.",
+  "verdict": "unconfirmed",
+  "workspace": "/tmp/pytest-of-unknown/pytest-0/test_an_unconfirmed_observatio0/with/home/worktrees/5cbe5dd5-8c33-4908-8764-a7cb03114412"
+}

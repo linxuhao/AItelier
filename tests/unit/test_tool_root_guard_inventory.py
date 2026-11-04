@@ -31,6 +31,7 @@ rather than a silent one. The behavioural spot-checks further down are the proof
 for a handful of them; the tables are the inventory.
 """
 import ast
+import json
 from pathlib import Path
 
 import pytest
@@ -70,6 +71,9 @@ GUARDED = {
     "scaffold_bible",           # raises unless the chosen root is absolute
     "task_budget_check",        # _graph_dir: every branch is `if <root> and …`
     "vision_human_pass",        # errors when workspace_root is not injected
+    "implement_evidence",       # an empty or RELATIVE project_root is reported as
+                                # an absence; it never becomes a path, so it can
+                                # never reach the process CWD
 }
 
 # UNGUARDED: with both roots empty the tool resolves the process CWD —
@@ -202,6 +206,29 @@ def test_run_tests_and_repo_delete_refuse_a_non_absolute_project_root(
 
 
 # ── Unguarded: no root injected → the process CWD ─────────────────────────
+
+def test_implement_evidence_refuses_an_empty_or_relative_root(tmp_path, monkeypatch):
+    """It takes `project_root`; a missing or relative one must not become the CWD."""
+    from aitelier.tools.implement_evidence.impl import implement_evidence
+    monkeypatch.chdir(tmp_path)
+
+    empty = implement_evidence(project_root="", out_dir=str(tmp_path / "out"))
+    assert empty["verdict"] == "absent" and "no code root" in empty["reason"]
+    # The absence is still a STEP OUTPUT, not a silent no-op.
+    assert json.loads((tmp_path / "out" / "implement_evidence.json")
+                      .read_text(encoding="utf-8"))["verdict"] == "absent"
+
+    # `Path(".")` IS the CWD: a relative root is refused rather than resolved.
+    relative = implement_evidence(project_root=".", out_dir=str(tmp_path / "out2"))
+    assert relative["verdict"] == "absent"
+    assert "not absolute" in relative["reason"]
+
+    # And a relative out_dir must not create a directory under the CWD either.
+    relative_out = implement_evidence(project_root=str(tmp_path), out_dir="reports")
+    assert relative_out["verdict"] == "absent" and "absolute" in relative_out["error"]
+    assert not (Path.cwd() / "reports").exists(), \
+        "implement_evidence created a directory under the process CWD"
+
 
 def test_state_probe_resolves_against_the_process_cwd(tmp_path, monkeypatch):
     """`base = project_root or workspace_root or "."`. With both empty the novel

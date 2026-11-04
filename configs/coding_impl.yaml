@@ -101,6 +101,41 @@ steps:
       mode: write
       target: code
     transitions:
+      - to: "implement_evidence"
+
+  # ── ADDITIVE OBSERVATION, NOT A GATE ───────────────────────────────────────
+  # Owner instruction: migrate `coding_impl` first, run it for days, fix what it
+  # reveals, and only then migrate the rest. So this step changes NOTHING about
+  # how the run is decided. It reads the implement step's own delivery receipt
+  # (`implement/code_changes.json`: base_commit, delivered commit, recorded
+  # files) and holds the ACTUAL worktree against it with the shared predicate
+  # library (`core/todo_runtime.py`): one `file_changed` per declared file,
+  # compared to the BASE COMMIT's content of that same path, plus one cheap
+  # `command_exit` on the delivered commit object.
+  #
+  # Its one edge goes to `test`, so `implement -> test -> test_outcome` runs
+  # exactly as before: no transition, no `max_loop`, no end condition and no
+  # `output_step` changed. A red observation cannot fail a passing run (there is
+  # no failure edge to take), and a green one cannot release a red gate
+  # (`test_outcome` still routes `all_passed: false` back to `implement`).
+  #
+  # Absence is recorded, not charged: no receipt / no git / a timeout becomes a
+  # bounded DeferralLedger episode naming what it waits for
+  # (`core/gate_deferral.py`), the same treatment an unmeasured gate gets one
+  # step later. The verdict is promoted as `implement_evidence.json` into this
+  # step's output dir, so it is readable with get_step_output.
+  - id: "implement_evidence"
+    step_type: "tool"
+    tool_name: "implement_evidence"
+    # Bounded: reading a receipt and a couple of blobs. A budget far below the
+    # 4200 s gate steps on purpose — this step must never hold the run.
+    timeout_seconds: 120
+    tool_params:
+      out_dir: "$STEP_DIR"
+      # The implementer above; named here so another config can bind this tool
+      # without editing it.
+      declared_step: "implement"
+    transitions:
       - to: "test"
 
   - id: "test"

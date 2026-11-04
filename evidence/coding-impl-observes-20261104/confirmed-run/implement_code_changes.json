@@ -1,0 +1,12 @@
+{
+  "target": "code",
+  "run_id": "68ef3433-7875-4470-b8ca-f17f9282d83d",
+  "step_instance_id": 2,
+  "base_commit": "4f25e03fb089fcc4e5e87f2f9c85f9b195799d68",
+  "commit": "e74066cab31dfbf4a7b38de9ae8bb185d3c844a5",
+  "files": [
+    "feature.py",
+    "impl.py"
+  ],
+  "note": "Source files live in the run worktree."
+}

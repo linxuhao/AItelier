@@ -84,8 +84,27 @@ class TestV2ConfigLoading:
         path = ROOT / "configs" / "coding_impl.yaml"
         graph = PipelineGraph.from_yaml(path)
         assert graph.name == "coding_impl"
-        assert graph.begin == "implement"
+        # The known-red baseline is the FIRST step (it measures the pre-change
+        # suite before the implementer can touch it), so the graph begins there,
+        # not at `implement`. This assertion used to say `implement` and had been
+        # red since the baseline step landed.
+        assert graph.begin == "baseline"
         assert graph.validate() == []
+        # The routing spine, in the graph's own order. `implement_evidence` is the
+        # additive observation step between the implementer and the gate; if a
+        # later change moves the gate, the implementer or the observer out of this
+        # order, the order assertion notices. It is a subsequence, not the whole
+        # step list, so adding an unrelated terminal does not make it brittle.
+        spine = {"baseline", "implement", "implement_evidence", "test", "test_outcome"}
+        assert [s.id for s in graph.steps if s.id in spine] == [
+            "baseline", "implement", "implement_evidence", "test", "test_outcome"]
+        # `baseline` hands straight to the implementer; the observer is NOT
+        # entered before anything has been implemented.
+        baseline = next(s for s in graph.steps if s.id == "baseline")
+        assert [(t.to, t.match) for t in baseline.transitions] == [("implement", None)]
+        observer = next(s for s in graph.steps if s.id == "implement_evidence")
+        assert observer.step_type == "tool"
+        assert [(t.to, t.match, t.max_loop) for t in observer.transitions] == [("test", None, None)]
 
     def test_coding_impl_test_step_gates_on_run_tests(self):
         """Only a written report enters validation; evidence and verdict are separate."""
@@ -115,6 +134,13 @@ class TestV2ConfigLoading:
             ("test_gate_report_unattributable",
              {"field": "repo_gate_unattributable", "value": True}),
             ("test_gate_absent", {"field": "repo_gate_absent", "value": True}),
+            # A retained FAILED candidate is terminal evidence, not a repair
+            # attempt: its edge sits after the absence edges (a measured red is
+            # stronger than a missing gate) and before the `written` edge, and it
+            # ends on its own validator (`failed_candidate_evidence`) rather than
+            # on `test_evidence_missing`.
+            ("failed_candidate_evidence",
+             {"field": "retained_red_candidate", "value": True}),
             ("test_evidence", {"written": "test_report.json"}),
             ("test_evidence_missing", None),
         ]
@@ -144,16 +170,26 @@ class TestV2ConfigLoading:
         ]
 
     def test_coding_impl_end_condition_is_outside_the_loop(self):
-        """Success and evidence failure have distinct loop-external terminals."""
+        """Success and the two evidence failures have distinct loop-external terminals."""
         graph = PipelineGraph.from_yaml(ROOT / "configs" / "coding_impl.yaml")
         conditions = graph.end_conditions.conditions
+        # `done` (green) and `done_candidate_tests_failed` (a MEASURED failure the
+        # run may not repair away) complete the run; the two evidence terminals
+        # fail it. `done_candidate_tests_failed` is listed here because it IS an
+        # end condition, and asserting the list is what notices an accidental
+        # fourth terminal — the list had been red since that one landed.
         assert [(c.type, c.node, c.result) for c in conditions] == [
             ("node_reached", "done", "completed"),
+            ("node_reached", "done_candidate_tests_failed", "completed"),
             ("node_reached", "test_evidence_missing", "failed"),
             ("node_reached", "test_gate_report_unattributable", "failed"),
         ]
+        # `implement` is NOT a terminal: the loop it sits in is bounded by
+        # `test_outcome -> implement max_loop: 3`, so reaching it never ends a run.
+        assert all(c.node != "implement" for c in conditions)
         for terminal in ("done", "test_evidence_missing",
-                         "test_gate_report_unattributable"):
+                         "test_gate_report_unattributable",
+                         "done_candidate_tests_failed"):
             node = next(s for s in graph.steps if s.id == terminal)
             assert node.step_type == "gate"
             assert [t.to for t in node.transitions] == [None]

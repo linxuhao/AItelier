@@ -123,17 +123,24 @@ test('call_tool retains image attachment handles and the target text projection'
 
 test('State writers are refused for any non-root session, through call_tool or directly, and kept for the root', () => fixture(async ({ctx, agent, call}) => {
   const root = agent('root'), child = agent('child'), executed = [];
-  for (const name of ['record_evidence', 'verify_node', 'report_external_attempt', 'start_external_attempt', 'claim_node', 'list_pipelines'])
-    ctx.tools.register(defineTool({name:'mcp__aitelier__' + name,description:name,parameters:{},output,
-      async execute(_args, exec){executed.push([name, exec.agent.session.id]);return 'ok';}}));
-  for (const name of ['record_evidence', 'verify_node', 'report_external_attempt', 'start_external_attempt', 'claim_node']) {
-    for (const result of [await call('call_tool',{name:'mcp__aitelier__' + name,arguments:{}},child), await call('mcp__aitelier__' + name,{},child)]) {
-      assert.equal(result.isError,true);
-      assert.match(JSON.stringify(result.content),/workers do not judge their own work; the director records State evidence/);
-    }
-    assert.equal((await call('call_tool',{name:'mcp__aitelier__' + name,arguments:{}},root)).isError,false);
+  // The real aitelier server's shape: one write tool, the operation in `action`.
+  ctx.tools.register(defineTool({name:'mcp__aitelier__state_graph_write',description:'state write',
+    parameters:{action:{type:'string'},arguments:{type:'object',additionalProperties:true}},output,
+    async execute(args, exec){executed.push([args.action, exec.agent.session.id]);return 'ok';}}));
+  ctx.tools.register(defineTool({name:'mcp__aitelier__record_evidence',description:'bare name',parameters:{},output,
+    async execute(_args, exec){executed.push(['bare', exec.agent.session.id]);return 'ok';}}));
+  const write = action => ({name:'mcp__aitelier__state_graph_write',arguments:{action,arguments:{}}});
+  const refusedFor = result => { assert.equal(result.isError,true);
+    assert.match(JSON.stringify(result.content),/workers do not judge their own work; the director records State evidence/); };
+  for (const action of ['record_evidence', 'verify_node', 'report_external_attempt', 'start_external_attempt', 'claim_node']) {
+    refusedFor(await call('call_tool',write(action),child));
+    refusedFor(await call('mcp__aitelier__state_graph_write',write(action).arguments,child));
+    assert.equal((await call('call_tool',write(action),root)).isError,false);
   }
-  assert.equal((await call('call_tool',{name:'mcp__aitelier__list_pipelines',arguments:{}},child)).isError,false);
-  assert.deepEqual(executed.filter(([, session]) => session === 'child').map(([name]) => name), ['list_pipelines']);
+  refusedFor(await call('call_tool',{name:'mcp__aitelier__state_graph_write',arguments:{arguments:{}}},child));
+  refusedFor(await call('call_tool',write(7),child));
+  refusedFor(await call('call_tool',{name:'mcp__aitelier__record_evidence',arguments:{}},child));
+  assert.equal((await call('call_tool',write('report_issue'),child)).isError,false, 'other writes stay open to workers');
+  assert.deepEqual(executed.filter(([, session]) => session === 'child').map(([action]) => action), ['report_issue']);
   assert.equal(executed.filter(([, session]) => session === 'root').length, 5);
 }));

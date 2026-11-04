@@ -1,9 +1,16 @@
 /** Keep MCP schemas in the registry, outside ordinary model requests. */
 const metaTools = new Set(['search_tools', 'call_tool', 'run_code']);
-/** State writers only the director (the root session) may call. */
-export const directorOnlyTools = new Set(['record_evidence', 'verify_node', 'report_external_attempt',
-  'start_external_attempt', 'claim_node'].map(name => 'mcp__aitelier__' + name));
+/** State writes only the director (the root session) may make. In the real
+ *  aitelier MCP server they are `action` values of ONE tool, state_graph_write;
+ *  the bare names are refused too in case a server ever exposes them. */
+export const directorOnlyActions = new Set(['record_evidence', 'verify_node', 'report_external_attempt',
+  'start_external_attempt', 'claim_node']);
+const directorOnlyTools = new Set([...directorOnlyActions].map(name => 'mcp__aitelier__' + name));
+const stateWriteTool = 'mcp__aitelier__state_graph_write';
 export const workerJudgeRule = 'workers do not judge their own work; the director records State evidence';
+/** Fails closed: a state_graph_write without a string action is refused too. */
+const directorOnly = exec => directorOnlyTools.has(exec.name) || (exec.name === stateWriteTool
+  && (typeof exec.arguments?.action !== 'string' || directorOnlyActions.has(exec.arguments.action)));
 
 export function searchTools(schemas, query, limit = 5) {
   const needle = query.trim().toLocaleLowerCase();
@@ -23,8 +30,8 @@ export function searchTools(schemas, query, limit = 5) {
 export function installToolDiscovery(ctx, { defineTool, HarnessError, rootSession }) {
   // Keyed on the caller's session, not on a prompt. A global guard covers both
   // call_tool targets and a direct call of the (merely unlisted) MCP name.
-  ctx.tools.guard(exec => directorOnlyTools.has(exec.name) && exec.agent?.session?.id !== rootSession
-    ? `${exec.name} is refused for a subagent: ${workerJudgeRule}` : undefined);
+  ctx.tools.guard(exec => directorOnly(exec) && exec.agent?.session?.id !== rootSession
+    ? `${exec.name}${exec.name === stateWriteTool ? `(${String(exec.arguments?.action)})` : ''} is refused for a subagent: ${workerJudgeRule}` : undefined);
   // Presentation only: restrictions would also deny execution, and root-local
   // registrations would miss fresh native children. Resolve each caller anew.
   ctx.on('system-prompt/assemble', async (_assembly, _context, next) => {
@@ -32,7 +39,7 @@ export function installToolDiscovery(ctx, { defineTool, HarnessError, rootSessio
     return { ...assembly, tools: assembly.tools.filter(t => !t.name.startsWith('mcp__')) };
   });
   ctx.systemPrompt.section({ name: 'aitelier:tool-discovery', order: 3090, interpolate: false,
-    text: 'MCP capabilities are available through search_tools(query) and call_tool(name, arguments). Search names/descriptions to retrieve only the relevant full parameter schemas; then use call_tool with the exact name and arguments. For AgentMCP image, OCR, PDF, audio or video work, for example search_tools({query:"agentmcp image",limit:3}), then call_tool({name:"<exact returned tool name>",arguments:{/* fields from its returned schema */}}). Search again after compaction if you need an earlier schema. Known names may be called without searching first. Native coding, coordination and wait tools remain directly callable. Discovery does not change your existing permissions.' });
+    text: 'MCP capabilities are available through search_tools(query) and call_tool(name, arguments). Search names/descriptions to retrieve only the relevant full parameter schemas; then use call_tool with the exact name and arguments. For AgentMCP image, OCR, PDF, audio or video work, for example search_tools({query:"agentmcp image",limit:3}), then call_tool({name:"<exact returned tool name>",arguments:{/* fields from its returned schema */}}). Search again after compaction if you need an earlier schema. Known names may be called without searching first. Native coding and coordination tools remain directly callable. Discovery does not change your existing permissions.' });
   ctx.tools.register(defineTool({ name: 'search_tools',
     description: 'Find available tools by name or description and return their parameter schemas (default 5, maximum 10). Includes deferred MCP capabilities: State writes, pipelines, provider management, AgentMCP images/OCR/PDF/audio/video, devmcp and zvec. Use call_tool to invoke a result. The catalog follows live MCP updates and your own agent scope.',
     parameters: { query: { type: 'string', required: true }, limit: { type: 'integer', description: '1–10; defaults to 5' } },

@@ -424,6 +424,19 @@ class _WaitSF:
         self.status = status
         self.reads = 0
 
+    def get_steps(self, run_id):
+        # No steps: this double exists to drive run-status transitions, and the
+        # router reads steps only to describe them.
+        return []
+
+    def approve_checkpoint(self, run_id, *args, **kwargs):
+        # The double's whole job is the status transition; record the call so a
+        # test can assert the router reached it, and report what the run moved to.
+        if not hasattr(self, "approved"):
+            self.approved = []
+        self.approved.append(run_id)
+        return "next_node"
+
     def get_run(self, run_id):
         self.reads += 1
         if run_id in ("missing", "p1"):
@@ -1130,7 +1143,7 @@ class _ApproveSpy(_WaitSF):
         super().__init__(status)
         self.approved = []
 
-    def approve_checkpoint(self, run_id):
+    def approve_checkpoint(self, run_id, *args, **kwargs):
         self.approved.append(run_id)
         return "next_node"
 
@@ -1458,7 +1471,10 @@ class _RaisingApproveSF(_WaitSF):
         self._readable = readable
         self._answered = False
 
-    def approve_checkpoint(self, run_id):
+    def approve_checkpoint(self, run_id, *args, **kwargs):
+        # `expected_checkpoint` is part of the live signature; this double models
+        # the raise that happens AFTER the state change, so it accepts and ignores
+        # the argument rather than pretending the call never matched the contract.
         self._answered = True
         raise RuntimeError("cannot commit - no transaction is active")
 

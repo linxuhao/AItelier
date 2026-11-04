@@ -6,6 +6,7 @@ suites. These are Source/adapter checks, not normal service or game measurements
 """
 from functools import wraps
 import importlib.metadata
+import re
 import json
 from pathlib import Path
 import sqlite3
@@ -29,9 +30,23 @@ ROOT = Path(__file__).resolve().parents[2]
 STAGES = ("5_test", "5_final_test")
 
 
+def _declared_skillflow_pin():
+    """The version this repository declares, so the guard cannot drift from it.
+
+    The guard's purpose is real - never run against a stale editable/local SDK -
+    but a hardcoded number stopped describing the repository the moment the pin
+    moved to 1.5.100, and 15 tests failed for a reason unrelated to what they
+    test. Read the pin instead of restating it.
+    """
+    text = (ROOT / "pyproject.toml").read_text()
+    match = re.search(r'"skillflow-py==([0-9][^"]*)"', text)
+    assert match, "pyproject.toml no longer pins skillflow-py"
+    return match.group(1)
+
+
 def _rig(tmp_path, monkeypatch, outcome="pass"):
     # This test must not silently exercise a stale editable/local SDK.
-    assert importlib.metadata.version("skillflow-py") == "1.5.99"
+    assert importlib.metadata.version("skillflow-py") == _declared_skillflow_pin()
     cfg = launcher_fixture(tmp_path)
     cfg["executor_entry"] = str(Path(entry.__file__).resolve())
     repo = tmp_path / "projects" / "repo"

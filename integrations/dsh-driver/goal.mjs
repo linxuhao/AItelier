@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { dirname, basename } from 'node:path';
+import { dirname, basename, join } from 'node:path';
+import { appendFile } from 'node:fs/promises';
 
 const git = promisify(execFile);
 
@@ -56,4 +57,22 @@ export function driverGoalSection(goals, agent) {
   const goal = goals.get(agent);
   if (!goal) return '';
   return `Native DSH driver goal (${goal.id}, ${goal.phase}):\n${goal.objective}`;
+}
+
+/**
+ * Append one re-seed record to the driver's goal-seed.jsonl trace.
+ *
+ * Returns { written: true } or { written: false, error } - it NEVER throws. The
+ * trace witnesses a change that goals.edit has already applied, so a failed write
+ * must not be able to reject boot(); boot()'s only call site turns a rejection into
+ * appExit(1) and systemd then restart-loops every resident driver on the host
+ * because one directory was momentarily unwritable.
+ */
+export async function appendGoalSeedRecord(stateDir, record) {
+  try {
+    await appendFile(join(stateDir, 'goal-seed.jsonl'), JSON.stringify(record) + '\n', { mode: 0o600 });
+    return { written: true };
+  } catch (error) {
+    return { written: false, error: String(error?.code ?? error).slice(0, 120) };
+  }
 }

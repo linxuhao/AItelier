@@ -237,3 +237,18 @@ test('real pinned DSH: restart re-seeds an active director goal from goal.md exa
     if (!process.env.DSH_TEST_KEEP) await rm(directory, { recursive: true, force: true });
   }
 });
+
+test('an unwritable trace target does not throw - the record is lost, the host is not', async () => {
+  const { appendGoalSeedRecord } = await import('./goal.mjs');
+  const directory = await mkdtemp(join(tmpdir(), 'dsh-seedblocked-'));
+  // Deterministic EISDIR without touching permissions: the trace path IS a directory.
+  await mkdir(join(directory, 'goal-seed.jsonl'));
+  const result = await appendGoalSeedRecord(directory, { at: 'x', goal_id: 'g' });
+  assert.equal(result.written, false);
+  assert.equal(result.error, 'EISDIR');
+  // and the happy path still writes
+  const clean = await mkdtemp(join(tmpdir(), 'dsh-seedok-'));
+  assert.deepEqual(await appendGoalSeedRecord(clean, { at: 'x', goal_id: 'g' }), { written: true });
+  const written = (await readFile(join(clean, 'goal-seed.jsonl'), 'utf8')).trim();
+  assert.deepEqual(JSON.parse(written), { at: 'x', goal_id: 'g' });
+});

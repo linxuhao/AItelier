@@ -2,7 +2,7 @@
 import { historyPage } from './history.mjs';
 import { installHostModel } from './model.mjs';
 import { installToolDiscovery } from './tool-discovery.mjs';
-import { bindDriverGoal, driverGoalSection, goalMdCommit } from './goal.mjs';
+import { appendGoalSeedRecord, bindDriverGoal, driverGoalSection, goalMdCommit } from './goal.mjs';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { readFile, writeFile, appendFile, rename, stat } from 'node:fs/promises';
@@ -659,13 +659,25 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
     // mandate leaves a durable, append-only trace (the headless host shows no
     // logger output). Digests are of the stored (trimmed) objectives, so one
     // record's new digest is the next record's old digest.
-    const sha = text => createHash('sha256').update(text).digest('hex');
+    //
+    // The trace is a RECORD, not the mandate: goals.edit above already applied the
+    // new objective, and this block only witnesses it. Treating a failed write as
+    // fatal would invert that - boot() rejects, the call site calls appExit(1), and
+    // systemd restart-loops the whole host (every resident driver, every live
+    // session) because a directory was momentarily unwritable. So a failure here is
+    // reported and swallowed; the absence of a record is then itself observable.
     const { after, before } = seeded;
-    const record = { at: new Date().toISOString(), goal_id: after.id, old_revision: before.revision, new_revision: after.revision,
-      old_objective_sha256: sha(before.objective), new_objective_sha256: sha(after.objective),
-      goal_md_sha256: sha(goalTemplate), goal_md_commit: await goalMdCommit(goalFile, { cwd: env.AITELIER_TODO_CWD }) };
-    ctx.logger.info(`director goal ${after.id} re-seeded from goal.md: ${JSON.stringify(record)}`);
-    await appendFile(join(env.AITELIER_DSH_STATE_DIR, 'goal-seed.jsonl'), JSON.stringify(record) + '\n', { mode: 0o600 });
+    try {
+      const sha = text => createHash('sha256').update(text).digest('hex');
+      const record = { at: new Date().toISOString(), goal_id: after.id, old_revision: before.revision, new_revision: after.revision,
+        old_objective_sha256: sha(before.objective), new_objective_sha256: sha(after.objective),
+        goal_md_sha256: sha(goalTemplate), goal_md_commit: await goalMdCommit(goalFile, { cwd: env.AITELIER_TODO_CWD }) };
+      ctx.logger.info(`director goal ${after.id} re-seeded from goal.md: ${JSON.stringify(record)}`);
+      const written = await appendGoalSeedRecord(env.AITELIER_DSH_STATE_DIR, record);
+      if (!written.written) ctx.logger.error(`director goal ${after.id} was re-seeded but its trace was NOT written (${written.error})`);
+    } catch (error) {
+      ctx.logger.error(`director goal ${after?.id} was re-seeded but its trace was NOT written: ${String(error).slice(0, 300)}`);
+    }
   }
   await ctx.sessionPersistence.flush();
   if (pendingInbox && (goal?.phase !== 'active' || goal.activation !== 'armed')) deliverInbox();

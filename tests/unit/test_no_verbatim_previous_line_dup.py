@@ -7,7 +7,14 @@ _ROOT = Path(__file__).resolve().parent.parent.parent
 
 def _python_sources():
     for path in sorted(_ROOT.glob("**/*.py")):
-        if set(path.parts) & {"evidence", ".git", "__pycache__", "node_modules"}:
+        # .cache and output hold DOWNLOADED third-party trees (a vendored CPython
+        # under .cache/apply-patch-dev) and old capture copies. They are not this
+        # repository's source, and walking them made this guard fail or pass
+        # depending on which working copy it ran in - it only looked stable
+        # because a fresh worktree has neither directory.
+        if set(path.parts) & {"evidence", ".git", "__pycache__", "node_modules",
+                              ".cache", "output", ".wt", ".venv", "site-packages",
+                              ".claude"}:
             continue
         yield path
 

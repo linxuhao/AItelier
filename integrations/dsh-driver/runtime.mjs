@@ -5,6 +5,7 @@ import { installToolDiscovery } from './tool-discovery.mjs';
 import { bindDriverGoal, driverGoalSection } from './goal.mjs';
 import { createRequire } from 'node:module';
 import { readFile, writeFile, rename, stat } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -648,7 +649,16 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
     // Session observers cannot append reentrantly to their own log.
     queueMicrotask(() => { if (!disposed) ctx.agents.withoutInitiator(deliverInbox); });
   });
-  const goal = bindDriverGoal(ctx.goals, agent, driverGoal(project));
+  const objective = driverGoal(project);
+  let seeded;
+  const goal = bindDriverGoal(ctx.goals, agent, objective, { onSeed: view => { seeded = view; } });
+  if (seeded) {
+    const sha256 = createHash('sha256').update(objective).digest('hex');
+    ctx.logger.info(`director goal ${seeded.id} re-seeded from goal.md (sha256 ${sha256.slice(0, 12)}, revision ${seeded.revision})`);
+    const file = join(env.AITELIER_DSH_STATE_DIR, 'goal-seed.json');
+    await writeFile(file + '.tmp', JSON.stringify({ sha256, goal_id: seeded.id, revision: seeded.revision, at: new Date().toISOString() }), { mode: 0o600 });
+    await rename(file + '.tmp', file);
+  }
   await ctx.sessionPersistence.flush();
   if (pendingInbox && (goal?.phase !== 'active' || goal.activation !== 'armed')) deliverInbox();
   const pump = runtime.pump().catch(async error => {

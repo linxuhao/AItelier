@@ -152,9 +152,10 @@ class TodoPlan:
                               f"v{library.version} {library.names()}; a plan binds predicates, it cannot define one") from exc
             except ValueError as exc:
                 raise Refusal("invalid_plan", f"item {item_id}: {exc}") from exc
-            for key in ("path", "pattern"):
+            for key in ("path", "pattern", "paths"):
                 if key in args:
-                    _relative(args[key], f"item {item_id}: {binding.predicate}.{key}")
+                    for value in (args[key] if isinstance(args[key], list) else [args[key]]):
+                        _relative(value, f"item {item_id}: {binding.predicate}.{key}")
             bindings.append(binding)
         return Item(item_id, title, tuple(bindings), tuple(needs))
 
@@ -230,10 +231,12 @@ class PlanStore:
         return sorted(p.stem for p in self.root.glob("*.json") if _ID.match(p.stem)) if self.root.is_dir() else []
 
 
-def new_document(plan: TodoPlan, library: PredicateLibrary, now: float) -> dict:
-    """The file's initial content: the frozen plan, and an empty observation record per item."""
+def new_document(plan: TodoPlan, library: PredicateLibrary, now: float,
+                 template: Mapping[str, Any] | None = None, params: Mapping[str, Any] | None = None) -> dict:
+    """The file's initial content: the frozen plan, where it came from, and an empty observation record per item."""
     return {
         "schema": 1, "library_version": library.version, "plan": plan.as_json(), "plan_hash": plan.plan_hash,
+        "template": dict(template) if template else None, "params": dict(params) if params is not None else None,
         "created_at": now, "child_session": None, "episodes": {},
         "items": {i.id: {"pre_state": None, "begun_at": None, "outcome": None, "unmeasurable": False,
                          "results": [], "observed_at": None, "notes": []} for i in plan.items},

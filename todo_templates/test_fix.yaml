@@ -1,0 +1,26 @@
+name: test_fix
+version: 1
+description: >-
+  Make a failing test command pass, touching only the declared scope, and deliver
+  the fix as a commit.
+params:
+  test_argv:
+    type: list[str]
+    required: true
+    description: The command (argv) that fails today and must exit 0 after the fix.
+  scope:
+    type: list[str]
+    required: true
+    description: Globs the whole change may touch; anything outside fails delivery.
+items:
+  - id: fix
+    title: "Fix the failure behind ${test_argv}"
+    predicates:
+      - predicate: changes_within
+        args: {scope: $scope}
+  - id: test
+    title: "Pass ${test_argv}"
+    needs: [fix]
+    predicates:
+      - predicate: command_exit
+        args: {argv: $test_argv, expect: 0}

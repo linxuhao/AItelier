@@ -45,7 +45,7 @@ Outcome = Literal["pass", "fail", "absent"]
 #: What each argument NAME must hold, checked when a plan is created so that a
 #: broken binding (`argv` given as a string) is refused instead of measuring as
 #: an absence weeks later. Argument names mean the same thing in every predicate.
-_STR_LISTS = {"argv", "scope", "require_keys"}
+_STR_LISTS = {"argv", "scope", "require_keys", "paths"}
 _STRINGS = {"path", "pattern", "contains", "base"}
 
 
@@ -172,7 +172,12 @@ def capture_pre_state(workspace: Path, bindings: Iterable[Binding]) -> dict[str,
     captured: dict[str, Any] = {}
     for binding in bindings:
         if binding.predicate == "file_changed":
-            rel = str(binding.args["path"])
+            rels = [str(binding.args["path"])]
+        elif binding.predicate == "files_changed":
+            rels = [str(p) for p in binding.args["paths"]]
+        else:
+            continue
+        for rel in rels:
             captured[rel] = _digest(Path(workspace) / rel)
     return captured
 
@@ -214,6 +219,8 @@ def _git(workspace: Path, *args: str) -> tuple[str, str]:
 
 
 def _scope_regex(pattern: str) -> "re.Pattern[str]":
+    if pattern in (".", "./"):
+        pattern = "**"                      # the whole workspace
     if pattern.endswith("/"):
         pattern += "**"
     out: list[str] = []
@@ -237,6 +244,20 @@ def _scope_regex(pattern: str) -> "re.Pattern[str]":
     return re.compile("".join(out) + r"\Z")
 
 
+def _file_delta(target: Path, rel: str, before: str | None, contains: str | None) -> str:
+    """Why `rel` is not changed as intended, or "" when it is. Never asks for a bad starting point."""
+    after = _digest(target)
+    if after is None:
+        return f"{rel} does not exist after the step"
+    if after == before:
+        return f"{rel} is byte-identical to the state captured at step start"
+    if contains is not None and contains not in target.read_text(errors="replace"):
+        # A change that is not the INTENDED change is still a failure: any
+        # spurious edit would otherwise satisfy a bare delta.
+        return f"{rel} changed but does not contain {contains!r}"
+    return ""
+
+
 def builtin_library() -> PredicateLibrary:
     library = PredicateLibrary(version="2")
 
@@ -254,18 +275,22 @@ def builtin_library() -> PredicateLibrary:
         rel = str(path)
         if rel not in pre_state:
             raise ValueError(f"file_changed({rel!r}) needs a pre-state; capture it when the item begins")
-        target = Path(workspace) / rel
-        after = _digest(target)
-        before = pre_state[rel]
-        if after is None:
-            return PredicateResult("file_changed", "fail", f"{rel} does not exist after the step")
-        if after == before:
-            return PredicateResult("file_changed", "fail", f"{rel} is byte-identical to the state captured at step start")
-        if contains is not None and contains not in target.read_text(errors="replace"):
-            # A change that is not the INTENDED change is still a failure: any
-            # spurious edit would otherwise satisfy a bare delta.
-            return PredicateResult("file_changed", "fail", f"{rel} changed but does not contain {contains!r}")
-        return PredicateResult("file_changed", "pass", f"{rel} changed as intended")
+        problem = _file_delta(Path(workspace) / rel, rel, pre_state[rel], contains)
+        return PredicateResult("file_changed", "fail", problem) if problem else \
+            PredicateResult("file_changed", "pass", f"{rel} changed as intended")
+
+    @library.define("files_changed")
+    def files_changed(*, workspace: Path, pre_state: Mapping[str, Any], paths: Sequence[str],
+                      contains: str | None = None) -> PredicateResult:
+        """file_changed for N files in one binding: EVERY path must differ from its state at the
+        start of the step (and carry `contains`, when given). Names the first path that does not."""
+        for rel in map(str, paths):
+            if rel not in pre_state:
+                raise ValueError(f"files_changed({rel!r}) needs a pre-state; capture it when the item begins")
+            problem = _file_delta(Path(workspace) / rel, rel, pre_state[rel], contains)
+            if problem:
+                return PredicateResult("files_changed", "fail", problem)
+        return PredicateResult("files_changed", "pass", f"all {len(paths)} file(s) changed as intended")
 
     @library.define("command_exit")
     def command_exit(*, workspace: Path, pre_state: Mapping[str, Any], argv: Sequence[str],

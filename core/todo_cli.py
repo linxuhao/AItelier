@@ -29,6 +29,7 @@ from typing import Any, Iterator
 
 from core.todo_plan import (MAX_NOTES, PlanStore, Refusal, TodoPlan, item_state, load_run,
                             new_document, save_observations)
+from core import todo_templates as templates
 from core.todo_runtime import builtin_library
 
 _BRIEF_CHARS = 600
@@ -112,13 +113,49 @@ def _plan(store: PlanStore, attempt_id: str, now: float, *, locked: bool) -> Ite
 
 # -- commands ---------------------------------------------------------------
 
-def cmd_create(args, store: PlanStore, now: float) -> dict:
-    try:
-        raw = json.loads(Path(args.plan_json).read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        raise Refusal("invalid_plan", f"cannot read plan JSON {args.plan_json}: {exc}") from exc
+_TEMPLATE_FLAGS = ("attempt", "node_key", "context_hash", "base_sha", "workspace", "goal")
+
+
+def cmd_templates(args, store: None, now: float) -> dict:
     library = builtin_library()
-    plan = TodoPlan.from_json(raw, library)
+    directory = templates.default_dir()
+    listed = []
+    for name in templates.available(directory):
+        try:
+            listed.append(templates.load_template(name, library, directory).as_json())
+        except Refusal as refusal:
+            listed.append({"name": name, "error": refusal.reason})
+    return {"directory": str(directory), "templates": listed}
+
+
+def _plan_from_args(args, library) -> tuple[TodoPlan, dict | None, dict | None]:
+    """The frozen plan, and (for a template) where it came from. Both routes validate identically."""
+    if bool(args.plan_json) == bool(args.template):
+        raise Refusal("usage", "give exactly one of --template NAME (with --params) or --plan-json FILE")
+    if args.plan_json:
+        try:
+            raw = json.loads(Path(args.plan_json).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise Refusal("invalid_plan", f"cannot read plan JSON {args.plan_json}: {exc}") from exc
+        return TodoPlan.from_json(raw, library), None, None
+    missing = [f"--{f.replace('_', '-')}" for f in _TEMPLATE_FLAGS if not getattr(args, f)]
+    if missing:
+        raise Refusal("usage", f"--template needs {', '.join(missing)}")
+    try:
+        supplied = json.loads(args.params or "{}")
+    except ValueError as exc:
+        raise Refusal("bad_param", f"--params is not JSON: {exc}") from exc
+    template = templates.load_template(args.template, library)
+    resolved = templates.resolve_params(template, supplied)
+    plan = TodoPlan.from_json(templates.plan_data(
+        template, resolved, attempt_id=args.attempt, node_key=args.node_key, context_hash=args.context_hash,
+        base_sha=args.base_sha, workspace=args.workspace, goal=args.goal), library)
+    return plan, {"name": template.name, "version": template.version, "sha256": template.sha256}, resolved
+
+
+def cmd_create(args, store: PlanStore, now: float) -> dict:
+    library = builtin_library()
+    plan, template, params = _plan_from_args(args, library)
     with store.lock(plan.attempt_id):
         existing = store.read(plan.attempt_id)
         if existing is not None:
@@ -127,11 +164,11 @@ def cmd_create(args, store: PlanStore, now: float) -> dict:
                               plan_hash=existing["plan_hash"], offered_plan_hash=plan.plan_hash)
             created = False
         else:
-            store.write(plan.attempt_id, new_document(plan, library, now))
+            store.write(plan.attempt_id, new_document(plan, library, now, template, params))
             created = True
     with _plan(store, plan.attempt_id, now, locked=False) as open_plan:
         return {"created": created, "attempt_id": plan.attempt_id, "plan_hash": plan.plan_hash,
-                "library_version": library.version, "items": [i.id for i in plan.items],
+                "template": template, "params": params, "library_version": library.version, "items": [i.id for i in plan.items],
                 "brief": open_plan.run.brief(max_chars=_BRIEF_CHARS)}
 
 
@@ -301,7 +338,7 @@ def cmd_finish(args, store: PlanStore, now: float) -> dict:
                 "brief": p.run.brief(max_chars=_BRIEF_CHARS)}
 
 
-COMMANDS = {"create": cmd_create, "status": cmd_status, "begin": cmd_begin, "done": cmd_done,
+COMMANDS = {"templates": cmd_templates, "create": cmd_create, "status": cmd_status, "begin": cmd_begin, "done": cmd_done,
             "report": cmd_report, "handback": cmd_handback, "finish": cmd_finish, "list": cmd_list}
 
 
@@ -321,7 +358,13 @@ def _parser() -> argparse.ArgumentParser:
 
     attempt = ("--attempt", {"required": True})
     item = ("--item", {"required": True})
-    command("create", ("--plan-json", {"required": True, "metavar": "FILE"}))
+    command("templates")
+    command("create",
+            ("--template", {"metavar": "NAME", "help": "expand a repository template (the way plans are made)"}),
+            ("--params", {"metavar": "JSON", "help": "the template's params, as a JSON object"}),
+            ("--attempt", {}), ("--node-key", {}), ("--context-hash", {}), ("--base-sha", {}),
+            ("--workspace", {}), ("--goal", {}),
+            ("--plan-json", {"metavar": "FILE", "help": "TESTS ONLY: a free-form plan; the director's tool does not use it"}))
     command("status", attempt)
     command("begin", attempt, item, ("--session", {"metavar": "SID"}))
     command("done", attempt, item)
@@ -339,9 +382,10 @@ def main(argv: list[str] | None = None) -> int:
             raise Refusal("clock_override_disabled", "--now is for tests; set AITELIER_TODO_CLOCK_OVERRIDE=1 to use it")
         root = args.store or (os.path.join(os.environ["AITELIER_DSH_STATE_DIR"], "todo")
                               if os.environ.get("AITELIER_DSH_STATE_DIR") else None)
-        if root is None:
+        if root is None and args.command != "templates":
             raise Refusal("usage", "no --store and AITELIER_DSH_STATE_DIR is not set")
-        out = COMMANDS[args.command](args, PlanStore(Path(root)), time.time() if args.now is None else args.now)
+        out = COMMANDS[args.command](args, None if args.command == "templates" else PlanStore(Path(root)),
+                                     time.time() if args.now is None else args.now)
         code = 0
     except Refusal as refusal:
         out, code = refusal.as_json(), 2

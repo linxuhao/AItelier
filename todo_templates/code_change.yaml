@@ -1,0 +1,41 @@
+name: code_change
+version: 1
+description: >-
+  Change code under a declared scope, prove it with the repository's own test
+  command, and deliver it as a commit.
+params:
+  paths:
+    type: list[str]
+    required: true
+    description: Files this change must modify (each must differ from its state at the start of the step).
+  scope:
+    type: list[str]
+    required: true
+    description: Globs the whole change may touch; anything outside fails delivery.
+  test_argv:
+    type: list[str]
+    required: true
+    description: The repository's own test command, as an argv list; it must exit 0.
+  marker:
+    type: str
+    required: false
+    description: Text every listed file must contain after the change.
+  test_timeout:
+    type: int
+    required: false
+    default: 1800
+    description: Seconds the test command may run before it counts as not measured.
+items:
+  - id: implement
+    title: "Implement the change in ${paths}"
+    predicates:
+      - predicate: files_changed
+        args: {paths: $paths, contains: $marker}
+      - predicate: changes_within
+        args: {scope: $scope}
+  - id: test
+    title: "Pass ${test_argv}"
+    needs: [implement]
+    predicates:
+      - predicate: command_exit
+        args: {argv: $test_argv, expect: 0, timeout: $test_timeout}

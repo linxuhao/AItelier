@@ -147,7 +147,7 @@ def _eval(repo: Path, predicate: str, plan_base: str | None = None, **args):
 def test_the_library_is_versioned_and_offers_the_contracted_predicates():
     library = builtin_library()
     assert library.version == "2"
-    assert {"files_present", "file_changed", "command_exit",
+    assert {"files_present", "file_changed", "files_changed", "command_exit",
             "changes_within", "git_delivered", "report_json"} <= set(library.names())
 
 
@@ -275,6 +275,33 @@ def test_report_json_wants_an_object_with_the_required_keys(repo):
     assert check(require_keys=["passed"]).outcome == "pass"
     missing = check(require_keys=["passed", "failed"])
     assert missing.outcome == "fail" and "failed" in missing.detail
+
+
+def test_files_changed_wants_every_path_changed_and_names_the_first_that_is_not(tmp_path):
+    for name in ("a.py", "b.py", "c.py"):
+        (tmp_path / name).write_text("v1\n")
+    item = Item(id="all", title="", predicates=(Binding("files_changed", {"paths": ["a.py", "b.py", "c.py"], "contains": "v2"}),))
+    run = _run(tmp_path, item)
+    run.begin("all")
+    assert run.pre_states["all"].keys() == {"a.py", "b.py", "c.py"}, "every listed path is captured at begin"
+    (tmp_path / "a.py").write_text("v2\n")
+    (tmp_path / "c.py").write_text("v2\n")
+    report = run.observe("all")
+    assert report.outcome == "fail" and "b.py" in report.results[0].detail and "a.py" not in report.results[0].detail
+    (tmp_path / "b.py").write_text("v1 edited\n")
+    assert "does not contain 'v2'" in run.observe("all").results[0].detail
+    (tmp_path / "b.py").write_text("v2\n")
+    assert run.observe("all").outcome == "pass"
+    (tmp_path / "c.py").unlink()
+    assert "c.py does not exist" in run.observe("all").results[0].detail
+
+
+def test_a_dot_scope_means_the_whole_workspace(repo):
+    base = _git(repo, "rev-parse", "HEAD")
+    (repo / "anywhere").mkdir()
+    (repo / "anywhere" / "x.txt").write_text("1")
+    assert _eval(repo, "changes_within", base, scope=["src/**"]).outcome == "fail"
+    assert _eval(repo, "changes_within", base, scope=["."]).outcome == "pass"
 
 
 def test_file_changed_is_a_delta_that_never_demands_a_bad_starting_point(tmp_path):

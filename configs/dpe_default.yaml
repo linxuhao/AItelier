@@ -111,8 +111,14 @@ steps:
       # nothing at all. Now that the token resolves the real tree, leaving the
       # policy implicit would turn a routing fix into a new fetch and pull of
       # somebody's repository. A run worktree refuses to sync whatever this
-      # says (it is pinned to its base commit); set "pull" to restore the
-      # syncing behaviour for a direct-mode checkout that wants it.
+      # says (it is pinned to its base commit).
+      #
+      # "pull" is NOT a way to restore the old behaviour any more. The pinned
+      # engine's closed-Git policy refuses in-engine fetch/pull outright
+      # ("unavailable in the engine … no raw equivalent here and no fallback"),
+      # so policy: "pull" fails this first step instead of syncing it. Measured
+      # 2026-11-04 when test_git_sync_pre's divergence path became unreachable.
+      # "skip" is the only policy that currently lets the graph proceed.
       policy: "skip"
     transitions:
       - to: "1"

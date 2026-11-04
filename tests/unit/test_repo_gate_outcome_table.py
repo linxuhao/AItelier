@@ -57,6 +57,8 @@ _PROTOCOL = _ROOT / "docs" / "repo-gate-unmeasured-protocol.md"
 #                 $GATE_REPORT_DIR
 #   foreign_same  a directory whose manifest names this repository with a red
 #   foreign_other a directory whose manifest names another repository with a red
+pytestmark = pytest.mark.docker  # needs docker + a frozen clean Source
+
 TABLE_GATE = r'''
 import json, os, sys, tempfile, urllib.error, urllib.request
 mode = os.environ["TABLE_GATE_MODE"]
@@ -64,7 +66,6 @@ pre = os.environ.get("TABLE_GATE_PRE", "")
 builder = os.environ.get("GODOT_BUILDER_URL", "http://godot-builder:8080")
 parent = os.environ.get("GATE_REPORT_DIR") or tempfile.gettempdir()
 os.makedirs(parent, exist_ok=True)
-pytestmark = pytest.mark.docker  # needs docker + a frozen clean Source
 
 def pre_writer(repo_claim):
     f = tempfile.mkdtemp(prefix="aaa-first-", dir=parent)

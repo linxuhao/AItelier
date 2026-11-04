@@ -80,6 +80,23 @@ def seed_callback(*, project_id='', run_id='', kind='', coding_project='', sessi
     return {'passed': True}
 
 
+# The bundle's tool source. `core.tool_guards.tool_source_error` imports an
+# impl.py IN A SUBPROCESS whose cwd is a throwaway directory, so this checkout is
+# not on that process's sys.path the way it is under pytest (rootdir insertion) —
+# a tool whose source imports `tests.*` was refused at import with "impl.py does
+# not import: No module named 'tests'" before any run started. The fixture hands
+# the root over explicitly; the probe runs no less strictly for that.
+_IMPL = (
+    'import os, sys\n'
+    "sys.path.insert(0, os.environ['NESTED_SEED_REPO'])\n"
+    'from tests.integration.test_nested_callback_seed import seed_callback\n'
+    '\n'
+    'def nested_seed_probe(*, project_id="", run_id="", kind="", coding_project="", session_id=""):\n'
+    '    return seed_callback(project_id=project_id, run_id=run_id, kind=kind, '
+    'coding_project=coding_project, session_id=session_id)\n'
+)
+
+
 def bundle(name, shape, coding_project, session_id):
     agent = {'id': 'investigate', 'step_type': 'agent', 'agent_config': 'receipt_reader',
              'context': [{'source': {'config': name, 'output': 'task.md'}}],
@@ -102,8 +119,8 @@ def bundle(name, shape, coding_project, session_id):
                        'fallback_to_json_mode': False, 'thinking': {'enable': False},
                        'max_tool_turns': 2, 'max_output_tokens': 256,
                        'system_prompt': 'Read the user task supplied through resolved context. Write findings.md with the requested JSON receipt and arithmetic sum. If no task is supplied write NO_INPUT. Do not invent input.'}},
-            'tools': {'nested_seed_probe': {'impl.py': 'from tests.integration.test_nested_callback_seed import seed_callback\n\ndef nested_seed_probe(*, project_id="", run_id="", kind="", coding_project="", session_id=""):\n    return seed_callback(project_id=project_id, run_id=run_id, kind=kind, coding_project=coding_project, session_id=session_id)\n',
-                                          'tool.yaml': yaml.safe_dump(tool), 'README.md': 'Offline owned fixture only.'}}}
+            'tools': {'nested_seed_probe': {'impl.py': _IMPL, 'tool.yaml': yaml.safe_dump(tool),
+                                            'README.md': 'Offline owned fixture only.'}}}
 
 
 @pytest.fixture
@@ -112,6 +129,7 @@ def runtime(tmp_path, monkeypatch):
     home.mkdir()
     monkeypatch.setenv('AITELIER_HOME', str(home))
     monkeypatch.setenv('AITELIER_ZVEC_LIFECYCLE', '0')
+    monkeypatch.setenv('NESTED_SEED_REPO', str(Path(__file__).resolve().parents[2]))
     monkeypatch.delenv('AITELIER_HOST_LAUNCHER_SOCKET', raising=False)
     monkeypatch.setattr(deps, 'DB_PATH', home / 'app.db')
     monkeypatch.setattr(deps, 'SKILLFLOW_DB_PATH', str(home / 'engine.db'))

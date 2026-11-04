@@ -37,7 +37,6 @@ import pytest
 import yaml
 from skillflow.core import SkillFlow
 from skillflow.graph import PipelineGraph
-from skillflow.tool_loader import ToolLoader
 
 from core import scheduler
 from core.run_launcher import start_config_run
@@ -400,11 +399,27 @@ def _manifest(name, seed_file, owned=True):
                            registers_generated_addon=False)
 
 
+def _host_loader():
+    """The loader the deployment actually installs (`api.dependencies.get_tool_loader`).
+
+    coding_impl's first step is a `run_tests` TOOL step, so `advance_run`
+    executes it inline; a bare SDK `ToolLoader()` only searches the SDK's own
+    tools dir, where `run_tests` no longer lives — it is a host tool
+    (`aitelier/tools/run_tests`).
+    """
+    import skillflow
+    from core.tool_routes import AItelierToolLoader
+
+    loader = AItelierToolLoader(Path(skillflow.__file__).parent / "tools")
+    loader.add_tools_dir(CONFIGS.parent / "aitelier" / "tools")
+    return loader
+
+
 @pytest.fixture
 def live(tmp_path, monkeypatch):
     """A REAL SkillFlow and a REAL workspace — the interleaving under test is
     between two real writers, and a mock cannot race."""
-    sf = SkillFlow(":memory:", tool_loader=ToolLoader(),
+    sf = SkillFlow(":memory:", tool_loader=_host_loader(),
                    workspace_base=str(tmp_path / "ws"),
                    projects_base=str(tmp_path / "projects"))
     sf.register_agent_config("offload_implementer", tools=["read_file"])
@@ -561,14 +576,49 @@ def test_a_tick_after_publication_but_before_start_still_yields_one_run(
 
 # ── the runtime backstop ─────────────────────────────────────────────
 
-def test_a_plan_less_run_cannot_claim_its_implement_step(live):
-    """`required: true` on coding_impl's plan. Reached only if something creates
-    a run with no seed anyway — and then it is a named terminal failure at the
-    first claim, not an implementer with no scope."""
+def test_a_plan_less_run_cannot_claim_its_implement_step(live, monkeypatch):
+    """No run without a published plan ever reaches an implementer.
+
+    TWO refusals now stand between the incident and an unscoped implementer,
+    and both are exercised here because they fire in different places:
+
+      * coding_impl's first step is the `baseline` `run_tests` TOOL step, which
+        `advance_run` executes inline. Inline tool nodes do not resolve
+        `required:` context in the pinned engine, so `run_tests` reuses the
+        published-seed guard itself and returns a named terminal error — this is
+        the route a real launch takes, and it fails BEFORE any claim.
+      * `required: true` on the implement step's `plan.md` is the runtime
+        backstop behind it: a run that somehow gets past `baseline` raises
+        RequiredContextMissing at the first claim instead of spawning an
+        implementer with no scope.
+
+    The backstop is exercised with `baseline` stubbed to a pass — the tool step
+    is not this test's subject, and leaving it unstubbed would only ever test
+    the outer guard.
+    """
     from skillflow.exceptions import RequiredContextMissing
+
     rid = live.sf.get_or_create_run("coding_impl", "p1", {"project_id": "p1"})
     live.sf.start_run(rid)
     live.sf.advance_run(rid)
+    run = live.sf.get_run(rid)
+    assert run["status"] == "failed", run
+    assert "plan.md" in (run["error_reason"] or ""), run
+    assert live.sf.claim_next_step(rid) is None
+
+    loader = live.sf._tool_loader
+    real_load_fn = loader.load_fn
+
+    def load_fn(name):
+        if name == "run_tests":
+            return lambda **kwargs: {"passed": True}
+        return real_load_fn(name)
+
+    monkeypatch.setattr(loader, "load_fn", load_fn)
+    rid = live.sf.get_or_create_run("coding_impl", "p2", {"project_id": "p2"})
+    live.sf.start_run(rid)
+    live.sf.advance_run(rid)
+    assert live.sf.get_run(rid)["status"] == "running"
     with pytest.raises(RequiredContextMissing):
         live.sf.claim_next_step(rid)
 

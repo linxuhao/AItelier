@@ -1,6 +1,35 @@
 """Actual installed SDK wheel -> host loader -> owned fixture launcher -> baked ESLint.
 
 LINT_REAL_ROOT is an explicitly mounted disposable test fixture, never production.
+
+This module is not runnable in the shipped image or in a plain disposable test
+container, and that is a property of its environment, not of its imports: every
+test needs all three of
+
+  * ``LINT_REAL_ROOT`` — a prepared disposable root whose ``fixture-ownership.sqlite``
+    ALREADY holds the ``run_isolation`` table this file inserts bindings into
+    (nothing in this repository creates that schema; the owning harness does),
+    plus a writable ``home/`` and ``projects/``;
+  * a live owned host launcher socket exported as
+    ``AITELIER_HOST_LAUNCHER_SOCKET`` — the eslint backend refuses to run without
+    it, by design (``aitelier/lint_backends.py``);
+  * the baked toolchain the fixed command names: ``/opt/aitelier-node/bin/node``
+    24.22.0 and ``/opt/aitelier-eslint`` (official ESLint 10.12.0). The image
+    carries a distro ``/usr/bin/eslint`` and node 24.22.2 instead, so the
+    executor refuses with "unavailable" — a refusal, not a lint measurement.
+
+Hence the module-level ``baked_toolchain`` marker (deselected by default, opt in
+with ``pytest -m baked_toolchain``), the same one the unit-level sibling
+``tests/unit/test_javascript_lint_owned_boundary.py`` carries. The invocation
+that WOULD run these tests is the owning host harness: a machine with
+``/opt/aitelier-node`` + ``/opt/aitelier-eslint`` baked, its owned launcher up,
+``AITELIER_HOST_LAUNCHER_SOCKET`` exported, and ``LINT_REAL_ROOT`` pointing at a
+fresh seated fixture root.
+
+Running them WITHOUT that environment is worse than skipping them: with no
+launcher the backend answers "JavaScript lint unavailable" for every context,
+which would turn the refusal tests green for the wrong reason and prove nothing
+about the guards they name.
 """
 import json
 import os
@@ -19,6 +48,14 @@ from skillflow.lint_backends import _backends
 from core.tool_routes import AItelierToolLoader
 from aitelier.lint_backends import register_all
 
+LINT_ROOT = os.environ.get('LINT_REAL_ROOT')
+pytestmark = [
+    pytest.mark.baked_toolchain,
+    pytest.mark.skipif(not LINT_ROOT, reason=(
+        "requires LINT_REAL_ROOT (a prepared disposable fixture root; see module "
+        "docstring) plus the owned launcher and baked /opt/aitelier-eslint")),
+]
+
 
 @pytest.fixture(autouse=True)
 def registry_snapshot():
@@ -30,7 +67,7 @@ def registry_snapshot():
 
 @pytest.fixture
 def owned_root(monkeypatch):
-    root=Path(os.environ['LINT_REAL_ROOT'])
+    root=Path(LINT_ROOT)
     monkeypatch.setenv('AITELIER_HOME',str(root/'home'))
     return root
 

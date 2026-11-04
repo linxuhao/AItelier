@@ -1,4 +1,28 @@
-"""Actual State owner, Coding Mode SDK workspace, delivery and normal push."""
+"""Actual State owner, Coding Mode SDK workspace, delivery and normal push.
+
+Everything here runs against the SHARED Coding Mode fixture
+(`tests.integration.test_coding_workspace_integration`), and that fixture has two
+environment preconditions this file inherits:
+
+  * the tree is mounted at ``/src`` — the fixture hashes ``/src/<module>`` into the
+    runtime identity it records as evidence, so a tree mounted anywhere else
+    (e.g. ``-v ...:/w``) raises FileNotFoundError in session setup, not in a test;
+  * ``CODING_WORKSPACE_FIXTURE`` names an owned, writable, disposable root.
+
+The invocation that runs them, one worker:
+
+    docker run --rm --network none --cpus 2 --memory 2g -u 1000:1000 \
+        --pids-limit 512 --init -v <tree>:/src:ro -w /src \
+        -e EXPECTED_SOURCE=/src -e CODING_WORKSPACE_FIXTURE=/tmp/cwf \
+        -e CODING_WORKSPACE_RAW=/tmp/raw <image> \
+        python3 -m pytest tests/integration/test_dsh_project_work.py -q
+
+``test_real_host_executor_runs_child_tests`` needs more than that and carries the
+``docker`` marker: an external stdlib controller serving a disposable owned
+launcher socket (``DSH_WORK_HOST_FIXTURE``) and a test image
+(``DSH_WORK_TEST_IMAGE``), because the child bash/test execution runs as a real
+container.
+"""
 import json
 import os
 from pathlib import Path
@@ -12,6 +36,13 @@ from core.dsh_work import project_work, pipeline_source
 from core.state_commands import execute
 from core.state_service import StateService
 from core.drivers import DriverRegistry
+
+_CAPSULE = Path("/src/core/coding_workspace.py").is_file()
+pytestmark = pytest.mark.skipif(
+    not (_CAPSULE and os.environ.get("CODING_WORKSPACE_FIXTURE")),
+    reason=("requires the Coding Mode fixture: the tree mounted at /src and "
+            "CODING_WORKSPACE_FIXTURE=<owned disposable root> (see module "
+            "docstring for the full invocation)"))
 
 
 @pytest.fixture
@@ -103,6 +134,7 @@ def test_delivered_commit_pushes_to_configured_local_origin(work, tmp_path):
     assert not work['service'].db.get_project(work['dag'])  # State id is not a run id.
 
 
+@pytest.mark.docker  # needs DSH_WORK_HOST_FIXTURE (an external disposable owned launcher) + DSH_WORK_TEST_IMAGE and a real docker binary for the child execution
 def test_real_host_executor_runs_child_tests(work, env):
     # The external stdlib controller starts only our disposable launcher. No
     # Docker socket, production data, secrets or host pytest enter this fixture.

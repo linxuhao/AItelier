@@ -4,8 +4,8 @@ The framework suite proves the routing; this proves the thing the routing was
 for, through the pieces that actually ship: the host's own code-path resolver
 (`api.dependencies._existing_repo_code_path`), the isolation records the host
 writes at launch, real `git worktree`s, the real `repo_apply` on both sides, and
-a barrier fired inside run A's `git add -A` — the only window in which the
-cross-staging defect exists.
+a barrier fired the moment run A starts publishing — the only window in which
+the cross-staging defect exists.
 
 `test_shared_root...` is the control. It is the same two runs with isolation
 removed, and it must keep passing: without it the positive test proves only that
@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 import skillflow as _skillflow_pkg
+from skillflow import closed_git
 from skillflow.core import SkillFlow, StepResult
 from skillflow.graph import PipelineGraph, StepNode, Transition
 from skillflow.tool_loader import ToolLoader
@@ -44,18 +45,42 @@ def _init_repo(path: Path) -> str:
     return _git(path, "rev-parse", "HEAD")
 
 
-class _AddBarrier:
-    """Run B delivers inside run A's `git add -A`, deterministically."""
+class _PublishBarrier:
+    """Run B delivers the moment run A starts publishing INTO ITS CODE ROOT.
 
-    def __init__(self, real_run, callback):
-        self._real, self._cb, self.fired = real_run, callback, False
+    The delivery seam is `skillflow.closed_git.ClosedRepo.publish`, not a
+    `git add -A` process: `repo_apply` stages raw bytes into a private index and
+    never shells out to native staging. Firing BEFORE the real `publish` runs
+    keeps the barrier in the window the defect lives in — A has already copied
+    its own files into its code root, has not yet taken the index lock and not
+    yet enumerated the working tree — while leaving that lock free for B's whole
+    delivery. (Firing inside `publish`, e.g. from its `before=` hook, would run
+    under A's index lock and turn the control into a lock collision instead of
+    the cross-staging it exists to reproduce.)
 
-    def __call__(self, args, **kwargs):
-        if (not self.fired and isinstance(args, list)
-                and args[:3] == ["git", "add", "-A"]):
+    `publish` is also used for the workspace's own step commit, which is why the
+    barrier watches only the run's delivery target.
+    """
+
+    def __init__(self, real_publish, code_root, callback):
+        self._real = real_publish
+        self._root = Path(code_root).resolve()
+        self._cb = callback
+        self.fired = False
+
+    # Installed as a class attribute, so it must bind like a method: without
+    # `__get__` an instance attribute is returned as-is and the call loses the
+    # repository argument.
+    def __get__(self, repo, owner=None):
+        if repo is None:
+            return self
+        return lambda select, message, **kw: self(repo, select, message, **kw)
+
+    def __call__(self, repo, select, message, **kwargs):
+        if not self.fired and Path(repo.top).resolve() == self._root:
             self.fired = True
             self._cb()
-        return self._real(args, **kwargs)
+        return self._real(repo, select, message, **kwargs)
 
 
 def _graph():
@@ -117,11 +142,10 @@ def test_two_isolated_runs_share_a_repository_and_nothing_else(stack, monkeypatc
     assert rec_b["branch"] == f"codex/run/{rid_b}"
     assert rec_a["base_sha"] == rec_b["base_sha"] == base
 
-    import skillflow.tools.repo_apply.impl as apply_impl
-    barrier = _AddBarrier(
-        subprocess.run,
+    barrier = _PublishBarrier(
+        closed_git.ClosedRepo.publish, rec_a["worktree_path"],
         lambda: sf.confirm_step(tok_b, StepResult(outputs={}, flags={})))
-    monkeypatch.setattr(apply_impl.subprocess, "run", barrier)
+    monkeypatch.setattr(closed_git.ClosedRepo, "publish", barrier)
     sf.confirm_step(tok_a, StepResult(outputs={}, flags={}))
 
     assert barrier.fired, "the two deliveries did not actually interleave"
@@ -148,11 +172,10 @@ def test_the_same_two_runs_cross_stage_without_isolation(stack, monkeypatch):
     rid_a, tok_a = _stage(sf, "pA", "a.txt", "A\n")
     rid_b, tok_b = _stage(sf, "pB", "b.txt", "B\n")
 
-    import skillflow.tools.repo_apply.impl as apply_impl
-    barrier = _AddBarrier(
-        subprocess.run,
+    barrier = _PublishBarrier(
+        closed_git.ClosedRepo.publish, src,
         lambda: sf.confirm_step(tok_b, StepResult(outputs={}, flags={})))
-    monkeypatch.setattr(apply_impl.subprocess, "run", barrier)
+    monkeypatch.setattr(closed_git.ClosedRepo, "publish", barrier)
     sf.confirm_step(tok_a, StepResult(outputs={}, flags={}))
 
     first = _git(src, "log", "--format=%H %s", "--reverse").splitlines()[1]

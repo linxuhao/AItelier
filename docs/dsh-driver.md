@@ -107,8 +107,11 @@ tries OpenCode Go DeepSeek V4.1 Flash → DeepSeek official. Go uses
 after direct calls and a client-compatible request probe both returned 429.
 The existing `flash` rotate pool is unchanged. Provider keys stay in the host
 gateway, outside DSH.
-The bridge preserves text, reasoning and tool-call history; attachments are
-represented as handles for native file tools, not sent as model vision input.
+The bridge preserves text, reasoning and tool-call history. Image blocks are
+forwarded as model vision input: each image attachment is read through DSH's
+durable attachment service and sent as an OpenAI-style `image_url` data URL
+(`integrations/dsh-driver/model.mjs`); an image that cannot be resolved fails the
+request instead of being silently dropped.
 An explicitly selected `deepseek-official` provider can still use the mounted
 `DEEPSEEK_API_KEY` in DSH's private credential store. The route chosen at
 creation is kept on subsequent starts.
@@ -201,14 +204,17 @@ after restart, while paused, blocked, completed and explicitly cleared goals rem
 Native round limits remain in force; restart does not reset them or bypass a
 blocker. No additional goal store or scheduler is introduced. The director
 maintains State/note/inboxes, checks issues and unfinished delivery beyond the
-frontier, prioritizes critical defects, and aims for four independent pipelines
-and four subagents when actionable work exists. The owner's push/publish scope,
+frontier, prioritizes critical defects, and aims for four independent native
+subagents when actionable work exists. The owner's push/publish scope,
 model preferences and cleanup policy are part of that mandate. At each scheduling
 round, new task or worker completion, the director checks ready work and free
 workers, dispatches bounded implementation/investigation/verification by default,
-and focuses on prioritization, acceptance and integration. Assignments carry the
-State attempt/fence, source base, owned checkout, write scope and delivery criteria;
-the director continues independent work and refills available slots after review.
+and focuses on prioritization, acceptance and integration. An assignment is a
+frozen todo plan expanded from a repository template (State attempt, source
+base, owned checkout, goal and the template's params) plus a native child; see
+“Todo plans”. `run_pipeline`
+stays available but is no longer the default. The director continues
+independent work and refills available slots after review.
 Small fixes, urgent mitigation and work requiring the director's current context
 can still be handled directly. Concurrency follows real independent work.
 
@@ -268,8 +274,8 @@ to use their original execution project id.
 
 ## Tool discovery
 
-The driver and native Spawn/Fork children keep native coding, coordination and
-wait tools directly available. MCP definitions stay in DSH's live registry but
+The driver and native Spawn/Fork children keep native coding and coordination
+tools directly available; there is no wait tool. MCP definitions stay in DSH's live registry but
 are omitted from ordinary model requests. Two runtime tools provide access:
 
 - `search_tools(query, limit=5)` searches tool names/descriptions and returns the
@@ -308,13 +314,198 @@ setting DSH's `deferLoading` flag or selecting PTC would not provide this: the
 current host adapter does not support incremental tool declarations, and PTC's
 generated SDK would still contain the complete visible tool catalog.
 
+## Todo plans
+
+Dispatch is a frozen todo plan plus a native child. A plan is never authored per
+dispatch: it is expanded from a reviewed repository template. The plan store,
+the templates and every predicate live in Python (`core/todo_cli.py`,
+`todo_templates/`); `runtime.mjs` only shells out to
+`$AITELIER_TODO_PYTHON -m core.todo_cli <command>` in `$AITELIER_TODO_CWD`, with
+`AITELIER_DSH_STATE_DIR` set, parses its stdout JSON and returns it. Values are
+passed as `--flag=value`, so a note or goal starting with `-` stays a value.
+Exit 2 is returned as a refusal (`refused`), not thrown; any other non-zero
+exit, or a call past its bound, is a tool error. `todo_done` and `todo_finish`
+are bounded by the plan's own budget from `status` (`timeout_budget_seconds`
+for the item, `finish_budget_seconds` for finish) plus 60 s; every other call,
+and a plan without the key, gets 60 s. The CLI runs as the leader of its own
+process group. On a timeout, or when the tool call is aborted, the group gets
+SIGTERM, so the CLI stops the predicates it runs in their own sessions; after 5 s
+it gets SIGKILL. No test run or docker client outlives the call. Every
+plan result carries `brief`: the CLI's own, or the plan's `status` brief when the
+command printed none (`null` only when the plan does not exist).
+
+| Variable | Set by | Meaning |
+|---|---|---|
+| `AITELIER_TODO_PYTHON` | `core/dsh_driver.py`: `sys.executable` | interpreter that runs the CLI |
+| `AITELIER_TODO_CWD` | `core/dsh_driver.py`: the repository root | checkout containing `core/todo_cli.py` and `todo_templates/` |
+| `AITELIER_DSH_STATE_DIR` | `core/dsh_driver.py`: the driver's private state directory | plan store `<state dir>/todo/<attempt_id>.json` |
+| `AITELIER_TODO_TEMPLATES` | unset (tests only) | read by the CLI: overrides the template directory `todo_templates/` |
+| `AITELIER_DSH_IDLE_REVIEW_MS` | unset (tests only) | overrides the 15-minute idle review interval |
+
+Templates. `todo_templates/<name>.yaml` declares `name`, `version`,
+`description`, `params` (each with `type` in `str`, `int`, `list[str]`,
+`required`, `default`) and `items`, whose predicate args reference a param by
+whole value (`$param`) and whose titles may use `${param}`. The CLI validates the
+params, expands the items, appends `deliver`, freezes the plan and records the
+template's name, version and file sha256 with the params. A template changes only
+through a reviewed code change, like the predicate library. When no template
+fits a task, add one that way; never improvise items.
+
+Director only, registered on the root agent's scope (children never see them):
+
+- `todo_templates()` → `templates`: the templates with name, version,
+  description and params.
+- `todo_plan(template, params, goal, attempt_id, node_key, context_hash,
+  base_sha, workspace)` → `create --template --params --attempt --node-key
+  --context-hash --base-sha --workspace --goal`, with `context_hash` from
+  `start_external_attempt`. Any other argument (for example `items`) is refused
+  as `unknown_arguments` before the CLI runs; a missing, unknown or wrongly typed
+  param is the CLI's refusal.
+- `todo_finish(attempt_id)` → `finish --out <state dir>/todo/finish/<attempt_id>`:
+  re-evaluates every item and, only if all pass, writes the git bundle, its
+  sha256 and the candidate report for `report_external_attempt`. An attempt_id
+  that is not a plain file name is refused before any path is built.
+
+Root and every native child, registered host-wide like `project_work`; the
+caller is the executing agent (`exec.agent.session.id`), never the root:
+
+- `todo_status(attempt_id)` → `status`: brief, goal, next, done, remaining.
+- `todo_begin(attempt_id, item_id)` → `begin --session <caller session>`: binds
+  the plan to the calling child and captures the item's pre-state. The CLI
+  refuses, under the plan lock, a plan bound to another session
+  (`bound_to_other_session`, naming `bound_session`). The runtime retries with
+  `--rebind` only when that session is verified dead (not the root, not a live
+  child of this process); otherwise the refusal is the result.
+- `todo_done(attempt_id, item_id)` → `done --session <caller session>`: the
+  harness evaluates the item's predicates now (`pass|fail|absent`); a fail keeps
+  the item open.
+- `todo_report(attempt_id, item_id, note)` → `report --session <caller session>
+  --note`: a free-text note.
+
+`done` and `report` never rebind. When the plan is bound to another session, the
+CLI refuses `bound_to_other_session`, and the tool returns that refusal (with
+the brief) as its result rather than an error.
+
+DSH's own `todo_write` (from `dsh-base`) stays visible to the root and children.
+It is a private checklist with no harness behind it; the plan's `todo_*` tools are
+the work contract and the only progress the director sees.
+
+Workers do not judge their own work. In the real `aitelier` MCP server every
+State write is an `action` value of one tool, `mcp__aitelier__state_graph_write`.
+For every session other than the root, a tool guard installed by tool discovery
+applies an allowlist. `state_graph_write` is allowed only with `action`
+`report_issue`. Every other action is refused, as is a missing or non-string
+`action`. Refused actions include:
+
+- `record_evidence`, `verify_node`, `report_external_attempt`, `start_external_attempt`, `claim_node`;
+- `take_over_claim`, `take_over_attempt`, `abandon_external_attempt`, `release_claim`, `heartbeat`;
+- `revise_node`, `add_nodes`, `link_issue`, `resolve_issue`;
+- any action added later.
+
+Two writes are separate MCP tools, not `state_graph_write` actions, and are
+refused for children by name:
+
+- `mcp__aitelier__declare_driver_presence`: marking the director offline would
+  let other drivers take over its claims.
+- `mcp__aitelier__answer_checkpoint`: a checkpoint is a human decision.
+
+The five judging writes are also refused as bare tool names
+(`mcp__aitelier__record_evidence`, `verify_node`, `report_external_attempt`,
+`start_external_attempt`, `claim_node`) in case a server ever exposes them. The
+aitelier server registers no separate `take_over_*`, `abandon_*` or `release_*`
+tool; those exist only as `state_graph_write` actions. The guard applies through
+`call_tool` and to direct calls. Its message is “workers do not judge their own
+work; the director records State evidence (a subagent may only state_graph_write
+report_issue)”. The root is unchanged and keeps everything.
+
+Deliberately left open to children:
+
+- the pipeline tools (`run_pipeline`, `stop_pipeline`, `generate_pipeline`, …);
+- the pipeline, role, template and tool edit tools (`edit_*`, `import_pipeline`, `archive_pipeline`);
+- the provider and model tools;
+- the read tools;
+- every other MCP server, the driver inbox tools among them, since they are not `state_graph_write`.
+
+This is a rule on the tool surface, not a security boundary. A child's bash
+inherits the driver token (`AITELIER_DRIVER_TOKEN`, `AITELIER_DRIVER_TOKEN_FILE`),
+so a direct HTTP call to the State API is not
+covered. Per-child tokens are a separate owner decision (design D9).
+
+Handback is produced by the runtime, not by the child's last message. When a
+native child ends (`subagent/end`) and a plan whose bound `child_session` is that
+exact child still has remaining items, the runtime asks the CLI (`handback`) and
+steers the root with an `aitelier-runtime-event` message
+`{reason: "todo_unfinished", attempt_id, done, next, remaining, last_observations}`.
+`last_observations` is the CLI's object keyed by every item that has not passed,
+each with its latest predicate results (`[]` for an item never observed). It is
+an object, not the array named in the node goal. If the CLI refuses or fails, the
+steer carries `todo_error` instead of empty fields. If the plans cannot be listed
+at all, it is `{reason: "todo_handback_failed", child_session, todo_error}`. The
+idle review payload adds `todo_unfinished` (plans with remaining items and no
+live child), or `todo_error` when the plans cannot be read.
+
+Compaction. The root's `aitelier-driver-state` snapshot (bootstrap and after each
+successful compaction) adds `todo: [{attempt_id, node_key, next, remaining_count,
+child_alive}]` for unfinished plans. When there are none, the key is absent, and
+finished plans drop out. A todo CLI failure never fails the snapshot: it renders
+`todo_error` instead.
+
+A host-scoped `agent/pre-step` hook does fire for native children:
+
+- The pinned `compaction-basic` compacts children through the same host-level hook.
+- `runtime.todo.test.mjs` observes a child's `compaction/end` followed by the brief in that child's next model request.
+
+After each successful compaction of a child bound to a plan, the runtime appends
+one user message `todo brief: …` (source kind `aitelier-todo-brief`, newlines
+folded) to that child's next step. If the brief cannot be read, the step proceeds
+without it. The brief in every todo result remains the primary recovery channel.
+
+Director flow:
+
+1. Claim the node, then `start_external_attempt`.
+2. Pick a template with `todo_templates` and bind its params.
+3. Call `todo_plan`.
+4. Spawn the child with its attempt_id and the `todo_*` tools.
+5. On completion or a `todo_unfinished` handback, re-dispatch or report failed.
+6. When the plan is complete, call `todo_finish`, then `report_external_attempt` with its report.
+7. Review the delivery and `record_evidence` a separate report.
+
+Deploying a changed `goal.md`. `bindDriverGoal` seeds the native goal only when
+a session has none and otherwise keeps the durable objective. A running driver
+therefore keeps its old dispatch instructions after a restart, while `driver.md`
+(reloaded every start) has the new ones. The restart must re-seed each live
+driver's goal without resetting its counters:
+
+1. Render `integrations/dsh-driver/goal.md` with `{{project_id}}` replaced.
+2. Run `/goal edit <that text>` on the driver's root session. This keeps the goal
+   id, phase and round counters.
+3. Confirm the persisted objective with `get_goal`.
+
+Do not use `/goal clear`: a cleared goal is deliberately not recreated on restart.
+
 ## Checks
 
 Run backend tests only in a throwaway container as required by AGENTS.md.
 `integrations/dsh-driver` has `npm test` after `npm ci`: it includes a real pinned
 DSH process, a local fake model/MCP/State server, native child execution,
 automatic compaction, fresh private-state injection, precompact history grep,
-and automatic idle/busy notifications, issue delivery and idle task reviews. Tool-discovery checks cover parent/child MCP lookup and
+and automatic idle/busy notifications, issue delivery and idle task reviews.
+`runtime.todo.test.mjs` drives two `code_change` template plans through native
+children against a fake `core.todo_cli` (set `AITELIER_TODO_TEST_PYTHON`/
+`AITELIER_TODO_TEST_CWD` to use a real checkout). It covers:
+
+- the template listing;
+- the refusal of free items and of a wrongly typed param;
+- a full walk and a runtime handback;
+- the `state_graph_write` action refusal;
+- the real idle review payload, using a short interval;
+- briefs across child and root compaction;
+- `todo_finish`;
+- a broken CLI degrading the snapshot;
+- a dead child's plan rebound by a re-dispatched child;
+- budget-derived bounds, and a hung predicate's grandchild stopped with the CLI's process group (SIGTERM, then SIGKILL).
+
+Tool-discovery checks cover parent/child MCP lookup and
 dispatch, live registry updates, caller restrictions, errors, cancellation and
 unchanged model tool prefixes. It makes no paid model calls and touches no live project.
 
@@ -336,11 +527,10 @@ The message box sends through the existing driver inbox. Authenticated browser
 owners send as owners, without borrowing a registered driver's identity; the
 inbox request audit retains that actor. “Sent to driver inbox” confirms delivery,
 while the driver's response appears in the live records. The runtime's existing
-combined State/inbox subscription wakes its native wait when a message arrives.
+combined State/inbox subscription steers each arriving message into the agent's
+native DSH inbox; there is no native wait tool to wake.
 
-The wait notification is an edge, not a queue of wake credits. The runtime
-checks the native DSH next-step inbox before and after sleeping. Messages that
-were already claimed during active work cannot wake a later idle wait; new
-messages arriving during a model call remain visible to the following wait.
-Native child completion uses DSH's own inbox delivery. Empty or resolved-only
-subscription replies advance cursors without starting a model turn.
+An idle agent starts a turn on that input; a busy one receives it at its next
+step, so a message arriving during a model call is not lost. Native child
+completion uses DSH's own inbox delivery. Empty or resolved-only subscription
+replies advance cursors without starting a model turn.

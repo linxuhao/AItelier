@@ -15,7 +15,7 @@ async function fixture(body) {
   const ctx = new Context();
   const prompt = ctx.plugin(SystemPrompt); await prompt.await();
   const tools = ctx.plugin(Tools); await tools.await();
-  installToolDiscovery(ctx, { defineTool, HarnessError });
+  installToolDiscovery(ctx, { defineTool, HarnessError, rootSession: 'root' });
   let scopeOwner;
   const dependencies = ctx.inject(['tools', 'systemPrompt'], owner => { scopeOwner = owner; }); await dependencies.await();
   const scopes = [];
@@ -119,4 +119,44 @@ test('call_tool retains image attachment handles and the target text projection'
     output:{schema:{type:'string'},render:()=>content},async execute(){return 'stored-image';}}));
   const result = await call('call_tool',{name:'mcp__fixture__image',arguments:{}},root);
   assert.equal(result.isError,false);assert.equal(result.value,'stored-image');assert.deepEqual(result.content,content);
+}));
+
+test('State writers are refused for any non-root session, through call_tool or directly, and kept for the root', () => fixture(async ({ctx, agent, call}) => {
+  const root = agent('root'), child = agent('child'), executed = [];
+  // The real aitelier server's shape: one write tool, the operation in `action`.
+  ctx.tools.register(defineTool({name:'mcp__aitelier__state_graph_write',description:'state write',
+    parameters:{action:{type:'string'},arguments:{type:'object',additionalProperties:true}},output,
+    async execute(args, exec){executed.push([args.action, exec.agent.session.id]);return 'ok';}}));
+  const separate = ['declare_driver_presence', 'answer_checkpoint', 'record_evidence', 'verify_node', 'report_external_attempt',
+    'start_external_attempt', 'claim_node'];
+  for (const name of [...separate, 'run_pipeline'])
+    ctx.tools.register(defineTool({name:'mcp__aitelier__' + name,description:'separate tool ' + name,parameters:{},output,
+      async execute(_args, exec){executed.push(['tool:' + name, exec.agent.session.id]);return 'ok';}}));
+  const write = action => ({name:'mcp__aitelier__state_graph_write',arguments:{action,arguments:{}}});
+  const refusedFor = result => { assert.equal(result.isError,true);
+    assert.match(JSON.stringify(result.content),/workers do not judge their own work; the director records State evidence/); };
+  for (const action of ['record_evidence', 'verify_node', 'report_external_attempt', 'start_external_attempt', 'claim_node']) {
+    refusedFor(await call('call_tool',write(action),child));
+    refusedFor(await call('mcp__aitelier__state_graph_write',write(action).arguments,child));
+    assert.equal((await call('call_tool',write(action),root)).isError,false);
+  }
+  refusedFor(await call('call_tool',{name:'mcp__aitelier__state_graph_write',arguments:{arguments:{}}},child));
+  refusedFor(await call('call_tool',write(7),child));
+  // Separate director-only tools: refused for a child through call_tool and directly, kept for the root.
+  for (const name of separate) {
+    refusedFor(await call('call_tool',{name:'mcp__aitelier__' + name,arguments:{}},child));
+    refusedFor(await call('mcp__aitelier__' + name,{},child));
+    assert.equal((await call('call_tool',{name:'mcp__aitelier__' + name,arguments:{}},root)).isError,false, name + ' for the root');
+  }
+  assert.equal((await call('call_tool',{name:'mcp__aitelier__run_pipeline',arguments:{}},child)).isError,false, 'pipeline tools stay open');
+  // An allowlist, not a denylist: any action not named is the director's.
+  for (const action of ['resolve_issue', 'take_over_claim', 'take_over_attempt', 'abandon_external_attempt', 'release_claim',
+    'heartbeat', 'revise_node', 'add_nodes', 'link_issue', 'declare_driver_presence', 'some_future_action']) {
+    const result = await call('call_tool',write(action),child);
+    refusedFor(result); assert.match(JSON.stringify(result.content),/may only state_graph_write report_issue\)/);
+    assert.equal((await call('call_tool',write(action),root)).isError,false);
+  }
+  assert.equal((await call('call_tool',write('report_issue'),child)).isError,false, 'report_issue is allowlisted for workers');
+  assert.deepEqual(executed.filter(([, session]) => session === 'child').map(([action]) => action), ['tool:run_pipeline', 'report_issue']);
+  assert.equal(executed.filter(([, session]) => session === 'root').length, 16 + separate.length);
 }));

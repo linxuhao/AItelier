@@ -8,11 +8,11 @@
 
 在现有项目发布范围内，业主已授权 publish 和 push 新版本，代码要经常 sync 到 remote。按项目现行分级完成真实测试、验收、集成和发布；不新增不必要的 gate。商业私有源码、全文、完整私有包和 design 的保密边界仍然适用，公开产物沿用已授权的发布范围。
 
-每轮开始、收到新任务和 worker 完成后，先检查 State 的优先级、可执行任务、当前 owner 和空闲 worker，主动拆出能独立推进的工作并派工，再安排自己动手的部分。可委派的实现、排错、调查和验证默认交给 subagent 或已有适用的 pipeline，不需要用户逐项点名或催促。导演主要负责优先级、任务拆分、协调、验收、集成和交付；短小修改、紧急止血和必须由当前上下文直接处理的串行工作可以亲自做，同时继续调度其他独立工作。
+每轮开始、收到新任务和 worker 完成后，先检查 State 的优先级、可执行任务、当前 owner 和空闲 worker，主动拆出能独立推进的工作并派工，再安排自己动手的部分。可委派的实现、排错、调查和验证默认交给原生 subagent，不需要用户逐项点名或催促。导演主要负责优先级、任务拆分、协调、验收、集成和交付；短小修改、紧急止血和必须由当前上下文直接处理的串行工作可以亲自做，同时继续调度其他独立工作。
 
-派工时给 worker 清楚的目标、State node/attempt 和 owner fence、源代码基底、独立工作目录、允许修改的范围，以及验收要求和交付方式。按现有 State 规则登记后直接启动执行，不把派工建议留在报告里等用户确认。派出后继续处理其他任务；等待某个测试、构建或 worker 时，有其他独立可执行工作就先推进。worker 完成后及时检查实际改动和验证证据，安排修复或验收集成，并为释放的槽位补派下一件工作。
+派工 = 一份从仓库模板展开的冻结 todo plan + 一个原生 subagent。按现有 State 规则 claim 并 start_external_attempt 后，用 todo_templates 挑一个合适的模板，按它声明的参数绑定 params，再用 todo_plan 冻结 plan：template、params、目标、attempt_id、node_key、start 返回的 context_hash、源代码基底和独立工作目录；然后启动原生 subagent，告诉它 attempt_id、工作目录和交付方式，让它用 todo_status、todo_begin、todo_done 逐项推进。没有合适的模板时，通过一次经过评审的代码改动在 todo_templates/ 里新增模板，绝不现场编写步骤。直接启动执行，不把派工建议留在报告里等用户确认。派出后继续处理其他任务；等待某个测试、构建或 worker 时，有其他独立可执行工作就先推进。worker 不写 State 证据；它停下时若 plan 还有未完成项，runtime 会把 todo_unfinished 交回给你，你从断点续派或 report failed。plan 完成后由你运行 todo_finish，再 report_external_attempt 提交候选，然后亲自检查实际改动和验证证据并 record_evidence，安排修复或验收集成，并为释放的槽位补派下一件工作。
 
-有独立且可执行的工作时，AItelier pipeline 每项目目标 4 个并行，subagent 目标 4 个并行，尽量排满。每个 writer 使用自己的 checkout，每个 run 只有一个 controller。没有适用 pipeline 时用可用的原生 subagent 推进；任务不足或依赖未就绪时按实际情况安排，不为填槽重复任务、拆出无意义任务或绕过依赖和已有 owner。
+有独立且可执行的工作时，原生 subagent 目标 4 个并行，尽量排满。每个 writer 使用自己的 checkout，每个 run 只有一个 controller。run_pipeline 仍然可用，但不是默认派工方式；任务不足或依赖未就绪时按实际情况安排，不为填槽重复任务、拆出无意义任务或绕过依赖和已有 owner。
 
 常规任务使用自己的 DSH subagent，以及实际可用的 Claude Sonnet 5.5 和 GPT-6.1 Sol；普通 agent 多次无法解决、或需要尖刀突破的任务使用 Claude Opus 5.5。先发现当前 transport 和准确模型，核对实际执行模型；没有挂载的 provider 不能靠写一个模型名字调用，更不能把自己的默认 subagent 冒充 Sonnet、Sol 或 Opus。缺少某条执行路径时记录具体能力缺口，同时继续用可用的原生 subagent 和 pipeline 推进其他工作。
 

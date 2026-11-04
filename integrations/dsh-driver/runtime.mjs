@@ -4,8 +4,9 @@ import { installHostModel } from './model.mjs';
 import { installToolDiscovery } from './tool-discovery.mjs';
 import { bindDriverGoal, driverGoalSection } from './goal.mjs';
 import { createRequire } from 'node:module';
-import { readFile, writeFile, rename } from 'node:fs/promises';
+import { readFile, writeFile, rename, stat } from 'node:fs/promises';
 import { join } from 'node:path';
+import { spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 
 export const name = 'aitelier-state-driver';
@@ -19,6 +20,8 @@ export const stateInjectionSource = 'aitelier-driver-state';
  *  tick is not the owner speaking, and labelling it `user` made a driver hunt for
  *  a message that was never sent. */
 export const runtimeEventSource = 'aitelier-runtime-event';
+/** Source kind for the one-line plan brief a bound child gets after compaction. */
+export const todoBriefSource = 'aitelier-todo-brief';
 
 /** Does an event tick carry anything worth waking the driver for?
  *
@@ -95,6 +98,85 @@ export class IdleReview {
   close() { this.closed = true; clearTimeout(this.timer); }
 }
 
+/** The host-side todo plan store, reached only through `python -m core.todo_cli`.
+ *  Predicates, freezing and evaluation live in Python; this only shells out. */
+export class TodoCli {
+  constructor({ python, cwd, stateDir }) {
+    Object.assign(this, { python, cwd, stateDir });
+    this.store = join(stateDir, 'todo');
+  }
+  /** Exit 0 is a result, exit 2 a refusal; anything else is a broken call.
+   *  Bounded: a hung predicate or interpreter must not hold a step forever. The
+   *  CLI leads its own process group. On timeout or abort the group gets SIGTERM
+   *  first, so the CLI can stop the predicates it runs in their own sessions (a
+   *  SIGKILLed CLI cannot), then SIGKILL after 5 s: a predicate's test run or
+   *  docker client must not outlive the call. */
+  run(args, signal, timeout = 60000) {
+    return new Promise((resolve, reject) => {
+      const child = spawn(this.python, ['-m', 'core.todo_cli', ...args], { cwd: this.cwd, detached: true,
+        stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, AITELIER_DSH_STATE_DIR: this.stateDir } });
+      let stdout = '', stderr = '', killed, escalate;
+      const signalGroup = name => { try { process.kill(-child.pid, name); } catch { /* ESRCH: the group is already gone */ } };
+      const killGroup = why => {
+        if (killed) return;
+        killed = why;
+        signalGroup('SIGTERM');
+        escalate = setTimeout(() => signalGroup('SIGKILL'), 5000);
+      };
+      const timer = setTimeout(() => killGroup(`timed out after ${timeout} ms`), timeout);
+      const onAbort = () => killGroup('aborted');
+      signal?.addEventListener('abort', onAbort, { once: true });
+      if (signal?.aborted) onAbort();
+      child.stdout.on('data', chunk => { stdout += chunk; });
+      child.stderr.on('data', chunk => { stderr += chunk; });
+      const settle = () => { clearTimeout(timer); clearTimeout(escalate); signal?.removeEventListener('abort', onAbort); };
+      child.on('error', error => { settle(); reject(new Error(`todo_cli ${args[0]}: ${error.message}`)); });
+      child.on('close', (code, killSignal) => {
+        settle();
+        if (killed) return reject(new Error(`todo_cli ${args[0]} ${killed}; its process group was stopped (${killSignal ?? 'exit ' + code})`));
+        if (code !== 0 && code !== 2) return reject(new Error(`todo_cli ${args[0]}: exit ${code ?? killSignal} ${stderr}`.slice(0, 2000)));
+        try { resolve({ code, result: JSON.parse(stdout) }); }
+        catch { reject(new Error(`todo_cli ${args[0]} printed no JSON (exit ${code}): ${stdout} ${stderr}`.slice(0, 2000))); }
+      });
+    });
+  }
+  /** The bound for a predicate-running call: the plan's own budget (seconds,
+   *  from `status`) plus a minute for the CLI itself; 60 s when none is given. */
+  async bound(attempt, budget, signal) {
+    const { code, result } = await this.run(['status', '--attempt=' + attempt], signal);
+    const seconds = code === 0 ? Number(budget(result)) : NaN;
+    return Number.isFinite(seconds) && seconds > 0 ? (seconds + 60) * 1000 : 60000;
+  }
+  /** A tool result: a refusal is returned, not thrown, and always carries the brief. */
+  async call(attempt, args, signal, timeout) {
+    const { code, result } = await this.run(args, signal, timeout);
+    const value = code === 2 ? { refused: true, ...result } : result;
+    if (typeof value.brief === 'string') return value;
+    const status = await this.run(['status', '--attempt=' + attempt], signal);
+    return { ...value, brief: status.code === 0 ? status.result.brief : null };
+  }
+  /** Every stored plan's summary (`list`). No store yet means no plan was ever
+   *  made, so the interpreter is not started for it. */
+  async plans(signal) {
+    try { await stat(this.store); } catch (error) { if (error.code === 'ENOENT') return []; throw error; }
+    const { code, result } = await this.run(['list'], signal);
+    if (code !== 0) throw new Error('todo_cli list refused: ' + JSON.stringify(result).slice(0, 1000));
+    return result.plans.filter(plan => !plan.error);
+  }
+}
+
+/** The post-compaction snapshot's view of unfinished plans: enough to resume, not the items. */
+export function todoSummary(plans, liveSessions) {
+  return plans.filter(p => p.remaining?.length).map(p => ({ attempt_id: p.attempt_id, node_key: p.node_key, next: p.next,
+    remaining_count: p.remaining?.length ?? 0, child_alive: liveSessions.has(p.child_session) }));
+}
+
+/** Plans the idle review must hand back: unfinished, and no live child on them. */
+export function unfinishedWithoutChild(plans, liveSessions) {
+  return plans.filter(p => p.remaining?.length && !liveSessions.has(p.child_session))
+    .map(p => ({ attempt_id: p.attempt_id, node_key: p.node_key, next: p.next, remaining: p.remaining }));
+}
+
 /** Grep the immutable raw log, including events shadowed by compaction. */
 export function grepHistory(events, pattern, { regex = false, ignore_case = false, after_seq = -1, limit = 20 } = {}) {
   if (!pattern) throw new Error('pattern must not be empty');
@@ -122,8 +204,8 @@ export function grepHistory(events, pattern, { regex = false, ignore_case = fals
 // Pure transport/state controller is separate so the actual wait/refresh logic
 // is exercised without making model calls.
 export class DriverRuntime {
-  constructor({ project, driver, directory, request, onEvent = () => {}, onConnectionError = () => {}, onConnectionRestored = () => {}, retryDelayMs = 1000 }) {
-    Object.assign(this, { project, driver, directory, request, onEvent, onConnectionError, onConnectionRestored, retryDelayMs });
+  constructor({ project, driver, directory, request, onEvent = () => {}, onConnectionError = () => {}, onConnectionRestored = () => {}, retryDelayMs = 1000, todoPlans = async () => [] }) {
+    Object.assign(this, { project, driver, directory, request, onEvent, onConnectionError, onConnectionRestored, retryDelayMs, todoPlans });
     this.after = 0;
     this.inboxAfter = 0;
     this.snapshot = null;
@@ -146,13 +228,18 @@ export class DriverRuntime {
   }
   async refresh() {
     this.snapshot = await this.request(`/api/dsh-drivers/${encodeURIComponent(this.project)}/context`);
+    // Plans are an addition to the snapshot; a broken todo CLI must not stop
+    // the director from reading State.
+    try { this.todo = await this.todoPlans(); this.todoError = undefined; }
+    catch (error) { this.todo = []; this.todoError = String(error.message ?? error).slice(0, 1000); }
     this.dirty = false;
     return this.snapshot;
   }
   render() {
     return JSON.stringify({ project_id: this.project, driver_id: this.driver,
       nodes: this.snapshot.nodes, project_note: this.snapshot.project_note,
-      private_note: this.snapshot.private_note });
+      private_note: this.snapshot.private_note, ...(this.todo?.length ? { todo: this.todo } : {}),
+      ...(this.todoError ? { todo_error: this.todoError } : {}) });
   }
   async pump() {
     while (!this.controller.signal.aborted) {
@@ -201,7 +288,7 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
   const { defineTool } = await import(require.resolve('@deepseek-ai/dsh-tools'));
   const llm = await import(require.resolve('@deepseek-ai/dsh-llm'));
   const { createUserMessage } = llm;
-  installToolDiscovery(ctx, { defineTool, HarnessError: llm.HarnessError });
+  installToolDiscovery(ctx, { defineTool, HarnessError: llm.HarnessError, rootSession: env.AITELIER_DSH_SESSION });
   const { installModelSelection } = await import(require.resolve('@deepseek-ai/dsh-agent'));
   const token = (await readFile(env.AITELIER_DRIVER_TOKEN_FILE, 'utf8')).trim();
   const request = suppliedRequest ?? (async (path, body, signal) => {
@@ -250,8 +337,47 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
     text: `Project ${project}: project_work is available to the driver and all native subagents. Parent assignments must include the registered State attempt_id and current owner fence. Each caller gets its own owned worktree: open, then read/write/edit/bash there, verify, then deliver (commit_message when needed). Only deliver writes back to Source. push(expected_head) uses the project's actual origin without force. bash runs in the existing isolated test container; do not run repository tests in the production backend. Use native local tools for orchestration/inbox/history, not as a fallback for denied project work. No new planning gate is required.` });
   if (hostExecution) ctx.systemPrompt.section({ name: 'aitelier:host-work', order: 5, interpolate: false,
     text: `Project ${project}: you and your native DSH subagents run on the Linux host with danger-full-access and approval never. Use native file and bash tools directly for coding, Git fetch/merge/commit/push, Docker and installed agent CLIs. project_work is not mounted in this runtime. Existing history or notes describing workspace-write, read-only Git or missing Docker describe the previous container runtime. Read the current State source binding for the repository; the backend binding /app maps to host ${env.AITELIER_DSH_BACKEND_SOURCE ?? 'the AItelier deployment checkout'}, all other absolute bindings retain their host path. Each writer needs its own checkout/worktree, each run one controller. Run AItelier pytest only in disposable containers: docker run --rm --network none --cpus 2 --memory 2g, one worker, at most four concurrent; never directly on the host or in the production container. Use your own driver token for AItelier calls. Full access does not change project rules or grant permission to publish private source publicly.` });
+  const todo = new TodoCli({ python: env.AITELIER_TODO_PYTHON, cwd: env.AITELIER_TODO_CWD, stateDir: env.AITELIER_DSH_STATE_DIR });
+  const liveChildren = new Set();
+  const jsonOutput = { schema: { type: 'json' }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] };
+  const planRef = { attempt_id: { type: 'string', required: true }, item_id: { type: 'string', required: true } };
+  // Worker-facing plan tools are host-scoped like project_work: the caller is
+  // exec.agent, so a child's todo_begin binds the CHILD session to the plan.
+  ctx.tools.register(defineTool({ name: 'todo_status',
+    description: 'Read the frozen todo plan of a State attempt: brief, goal, next item, done and remaining items. Call it first, and again whenever you lost track (for example after compaction).',
+    parameters: { attempt_id: { type: 'string', required: true } }, output: jsonOutput,
+    execute: (args, exec) => todo.call(args.attempt_id, ['status', '--attempt=' + args.attempt_id], exec.signal),
+  }));
+  ctx.tools.register(defineTool({ name: 'todo_begin',
+    description: 'Start one plan item before working on it. Refuses unmet needs, captures the state its predicates compare against, and binds the plan to your session.',
+    parameters: planRef, output: jsonOutput,
+    async execute(args, exec) {
+      // The CLI refuses, under the plan lock, to take a plan bound to another
+      // session. Rebind only when that session is verified dead: not the root
+      // and not a live child of this process.
+      const begin = ['begin', '--attempt=' + args.attempt_id, '--item=' + args.item_id, '--session=' + exec.agent.session.id];
+      const result = await todo.call(args.attempt_id, begin, exec.signal);
+      if (result.refused !== 'bound_to_other_session') return result;
+      const bound = result.bound_session;
+      if (!bound || bound === env.AITELIER_DSH_SESSION || liveChildren.has(bound)) return result;
+      return todo.call(args.attempt_id, [...begin, '--rebind'], exec.signal);
+    },
+  }));
+  ctx.tools.register(defineTool({ name: 'todo_done',
+    description: 'Say you finished one plan item. The harness evaluates its bound predicates now and returns outcome pass|fail|absent with each result; your own claim is not an input. A fail keeps the item open: fix it and call again.',
+    parameters: planRef, output: jsonOutput,
+    execute: async (args, exec) => todo.call(args.attempt_id, ['done', '--attempt=' + args.attempt_id, '--item=' + args.item_id,
+      '--session=' + exec.agent.session.id], exec.signal,
+      await todo.bound(args.attempt_id, status => status.timeout_budget_seconds?.[args.item_id], exec.signal)),
+  }));
+  ctx.tools.register(defineTool({ name: 'todo_report',
+    description: 'Attach one free-text note to a plan item. It changes no item state.',
+    parameters: { ...planRef, note: { type: 'string', required: true } }, output: jsonOutput,
+    execute: (args, exec) => todo.call(args.attempt_id, ['report', '--attempt=' + args.attempt_id, '--item=' + args.item_id,
+      '--session=' + exec.agent.session.id, '--note=' + args.note], exec.signal),
+  }));
   const runtime = new DriverRuntime({ project, driver: env.AITELIER_DRIVER_ID,
-    directory: env.AITELIER_DSH_STATE_DIR, request });
+    directory: env.AITELIER_DSH_STATE_DIR, request, todoPlans: async () => todoSummary(await todo.plans(), liveChildren) });
   await runtime.init();
   const schema = await request('/api/state/schema');
   const subagents = new Set();
@@ -353,6 +479,39 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
         return result;
       },
     }));
+    // Director-only plan tools: scope-registered, so native children never see them.
+    // A plan is expanded from a reviewed repository template, never authored per
+    // dispatch: there is deliberately no way to pass items through this tool.
+    scope.tools.register(defineTool({ name: 'todo_templates',
+      description: 'Director only. List the repository todo templates (name, version, description, params with type/required/default) a plan can be expanded from.',
+      parameters: {}, output: jsonOutput,
+      async execute(_args, exec) {
+        const { code, result } = await todo.run(['templates'], exec.signal);
+        return code === 2 ? { refused: true, ...result } : result;
+      },
+    }));
+    const planArgs = new Set(['template', 'params', 'goal', 'attempt_id', 'node_key', 'context_hash', 'base_sha', 'workspace']);
+    scope.tools.register(defineTool({ name: 'todo_plan',
+      description: 'Director only. Freeze the todo plan of a State attempt before dispatching its native child, by expanding a repository template (see todo_templates) with params bound to that template\'s declared params. context_hash is the one start_external_attempt returned. A wrongly typed, missing or unknown param refuses the plan. Items cannot be supplied: when no template fits, add one under todo_templates/ through a reviewed code change.',
+      parameters: { template: { type: 'string', required: true }, params: { type: 'object', additionalProperties: true, required: true },
+        goal: { type: 'string', required: true }, attempt_id: { type: 'string', required: true }, node_key: { type: 'string', required: true },
+        context_hash: { type: 'string', required: true }, base_sha: { type: 'string', required: true }, workspace: { type: 'string', required: true } },
+      output: jsonOutput,
+      execute: (args, exec) => Object.keys(args).some(key => !planArgs.has(key))
+        ? { refused: 'unknown_arguments', reason: `todo_plan takes only ${[...planArgs].join(', ')}; items come from the template`, brief: null }
+        : todo.call(args.attempt_id, ['create', '--template=' + args.template, '--params=' + JSON.stringify(args.params),
+        '--attempt=' + args.attempt_id, '--node-key=' + args.node_key, '--context-hash=' + args.context_hash,
+        '--base-sha=' + args.base_sha, '--workspace=' + args.workspace, '--goal=' + args.goal], exec.signal),
+    }));
+    scope.tools.register(defineTool({ name: 'todo_finish',
+      description: 'Director only. Re-evaluate every item of an attempt\'s plan; only when all pass, write the git bundle, its sha256 and the candidate report and return their paths for report_external_attempt. Otherwise it is refused with the failing items.',
+      parameters: { attempt_id: { type: 'string', required: true } }, output: jsonOutput,
+      execute: async (args, exec) => /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(args.attempt_id)
+        ? todo.call(args.attempt_id, ['finish', '--attempt=' + args.attempt_id,
+          '--out=' + join(todo.store, 'finish', args.attempt_id)], exec.signal,
+          await todo.bound(args.attempt_id, status => status.finish_budget_seconds, exec.signal))
+        : { refused: 'invalid_attempt_id', reason: 'attempt_id must be a plain file name', brief: null },
+    }));
     scope.tools.register(defineTool({ name: 'grep_chat_history',
       description: 'Search this driver’s complete chat log, including before compaction. Literal search by default; optional JavaScript regex. Results cite event seq and line. Page with after_seq.',
       parameters: { pattern: { type: 'string', required: true }, regex: { type: 'boolean' },
@@ -371,10 +530,17 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
     : await ctx.agents.create({ ...options, sessionId: env.AITELIER_DSH_SESSION, meta: { cwd: process.cwd() } });
   agent = handle.agent;
   const idleReview = new IdleReview({ agent, goals: ctx.goals,
-    notify: () => notify('AItelier director review due:\n' + JSON.stringify({
-      project_id: project, reason: 'idle_review_due',
-      instruction: 'Recheck live State frontier, open issues, worker capacity and prior blockers. Continue independent authorized work; a blocked task does not block the whole project. If no action is available, finish this round and remain subscribed.',
-    })),
+    ...(Number(env.AITELIER_DSH_IDLE_REVIEW_MS) > 0 ? { intervalMs: Number(env.AITELIER_DSH_IDLE_REVIEW_MS) } : {}),
+    notify: async () => {
+      let todoView;
+      try { todoView = { todo_unfinished: unfinishedWithoutChild(await todo.plans(), liveChildren) }; }
+      catch (error) { ctx.logger.warn(String(error)); todoView = { todo_error: String(error.message ?? error).slice(0, 1000) }; }
+      await notify('AItelier director review due:\n' + JSON.stringify({
+        project_id: project, reason: 'idle_review_due',
+        instruction: 'Recheck live State frontier, open issues, worker capacity and prior blockers. Continue independent authorized work; a blocked task does not block the whole project. If no action is available, finish this round and remain subscribed.',
+        ...todoView,
+      }));
+    },
     onError: error => { ctx.logger.warn(String(error)); },
   });
   ctx.on('agent/status', ({ agent: subject, status }) => {
@@ -394,10 +560,58 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
     const entry = historyPage([event], { limit: 1 }).entries[0];
     if (entry) void report(currentPhase(), undefined, entry);
   });
+  // A child that stops with plan items open is handed back by the runtime, not
+  // left to whatever its last message happened to say.
+  // Keyed to the plan's bound session only, so a child's own helpers ending
+  // does not hand its plan back.
+  const handback = async session => {
+    let plans;
+    try { plans = await todo.plans(); }
+    catch (error) {
+      // The director must still learn that a child ended while plans were unreadable.
+      return notify('AItelier todo handback:\n' + JSON.stringify({ reason: 'todo_handback_failed', child_session: session,
+        todo_error: String(error.message ?? error).slice(0, 1000) }));
+    }
+    for (const plan of plans) {
+      if (plan.child_session !== session || !plan.remaining?.length) continue;
+      let payload;
+      try {
+        const { code, result } = await todo.run(['handback', '--attempt=' + plan.attempt_id]);
+        payload = code === 0 ? { done: result.done, next: result.next, remaining: result.remaining, last_observations: result.last_observations }
+          : { todo_error: JSON.stringify(result).slice(0, 1000) };
+      } catch (error) { payload = { todo_error: String(error.message ?? error).slice(0, 1000) }; }
+      await notify('AItelier todo handback:\n' + JSON.stringify({ reason: 'todo_unfinished', attempt_id: plan.attempt_id, ...payload }));
+    }
+  };
   // Observe nested native children too: all activity belongs to this private
   // per-DAG process, so no cross-project worker can enter these counts.
-  ctx.on('subagent/start', info => { subagents.add(info.runId); void report(currentPhase()); });
-  ctx.on('subagent/end', info => { subagents.delete(info.runId); void report(currentPhase()); });
+  ctx.on('subagent/start', info => { subagents.add(info.runId); liveChildren.add(info.id); void report(currentPhase()); });
+  ctx.on('subagent/end', info => {
+    subagents.delete(info.runId); liveChildren.delete(info.id); void report(currentPhase());
+    void handback(info.id).catch(error => ctx.logger.warn(String(error)));
+  });
+  // After a child's successful compaction, its next step gets one line of its
+  // bound plan's brief. Host-scoped hooks see native children; the root has
+  // its own post-compaction State snapshot instead.
+  const compactedChildren = new Set();
+  ctx.on('session/event', (session, event) => {
+    if (event.type === 'compaction/end' && !event.data.error && session.id !== env.AITELIER_DSH_SESSION) compactedChildren.add(session.id);
+  });
+  ctx.on('agent/pre-step', async (payload, next) => {
+    const subject = payload.agent;
+    const decision = await next();
+    if (decision.kind !== 'enter' || !compactedChildren.delete(subject.session.id)) return decision;
+    let text;
+    try {
+      const plan = (await todo.plans(payload.signal)).find(p => p.child_session === subject.session.id);
+      if (!plan) return decision;
+      ({ brief: text } = await todo.call(plan.attempt_id, ['status', '--attempt=' + plan.attempt_id], payload.signal));
+    } catch (error) { ctx.logger.warn('todo brief skipped: ' + String(error)); return decision; }
+    if (typeof text !== 'string') return decision;
+    const brief = createUserMessage({ content: [{ type: 'text', text: 'todo brief: ' + String(text).replace(/\s*\n\s*/g, ' / ') }],
+      source: { kind: todoBriefSource } });
+    return { ...decision, messages: [...decision.messages, brief] };
+  });
   ctx.on('agent/error', ({ agent: subject, error }) => {
     if (subject !== agent) return;
     completionError = connectionErrorMessage(error, 'AItelier model completion');

@@ -1,0 +1,27 @@
+name: investigate
+version: 2
+description: >-
+  Investigate and leave a structured JSON report with the required keys in the
+  workspace. The report must be written during the step: one already present at the
+  base commit does not count.
+params:
+  report_path:
+    type: str
+    required: true
+    description: Workspace-relative path of the JSON report the investigation must produce.
+  require_keys:
+    type: list[str]
+    required: true
+    description: Keys the report must carry.
+  scope:
+    type: list[str]
+    required: true
+    description: Globs the delivery may touch (include the report's path).
+items:
+  - id: investigate
+    title: "Investigate and write ${report_path}"
+    predicates:
+      - predicate: files_changed
+        args: {paths: [$report_path]}
+      - predicate: report_json
+        args: {path: $report_path, require_keys: $require_keys}

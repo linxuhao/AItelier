@@ -629,7 +629,8 @@ def _get_or_create_skillflow_run(project_id: str) -> str | None:
 
     run = sf.get_run(run_id)
     if run and run["status"] == "pending":
-        sf.start_run(run_id)
+        from core.skillflow_host import start_with_ledger
+        start_with_ledger(sf, run_id, db)
     return run_id
 
 

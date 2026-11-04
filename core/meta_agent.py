@@ -3013,7 +3013,8 @@ class MetaAgent:
                     "message": f"Failed to create conversation run: {e}"}
         run = sf.get_run(run_id)
         if run and run["status"] == "pending":
-            sf.start_run(run_id)
+            from core.skillflow_host import start_with_ledger
+            start_with_ledger(sf, run_id, self.db)
         if self.session_id:
             self.db.link_run_to_session(self.session_id, run_id)
 
@@ -4602,7 +4603,8 @@ class MetaAgent:
 
         run = sf.get_run(run_id)
         if run and run["status"] == "pending":
-            sf.start_run(run_id)
+            from core.skillflow_host import start_with_ledger
+            start_with_ledger(sf, run_id, self.db)
         elif run and run["status"] in ("running", "paused"):
             return {
                 "status": "already_running",

@@ -821,7 +821,8 @@ class CodingRequest:
         intent = _write(cpath, {**intent, "state": "created", "run_id": rid})
         _index_put(rid, role="owner", project_id=self.project_id, session_id=self.session_id)
         with _trusted("create"):
-            sf.start_run(rid)
+            from core.skillflow_host import start_with_ledger
+            start_with_ledger(sf, rid, self.db)
             sf.advance_run(rid)
             claimed = sf.claim_next_step(rid)
         if claimed is None or claimed.step_id != WORK_STEP or not claimed.token.claim_epoch:

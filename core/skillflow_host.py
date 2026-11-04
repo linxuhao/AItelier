@@ -26,6 +26,26 @@ from skillflow.identity import owner_is_dead, worker_identity
 from core.tool_routes import EXECUTOR_TOOLS, graph_identity_violations, spoofed_slot_keys
 
 
+def start_with_ledger(sf, run_id: str, db) -> None:
+    """Start one run, handing the deployment host the ledger it was declared on.
+
+    `db` is the DBManager of the caller that just created this run and wrote its
+    isolation record — the launcher, the poller, the Meta controller, Coding
+    Mode. The host reads that record back before the run can execute, so it must
+    be asked the same ledger (`AItelierSkillFlow.start_run`).
+
+    A bare `SkillFlow` has no isolation ingress and its `start_run` takes only
+    the run id; the SDK is not ours to widen, and callers that hold "an engine"
+    rather than this deployment's host (embedders, evidence probes, tests that
+    drive the SDK directly) must keep working unchanged. Hence the dispatch
+    rather than a keyword every caller has to know about.
+    """
+    if isinstance(sf, AItelierSkillFlow):
+        sf.start_run(run_id, db=db)
+    else:
+        sf.start_run(run_id)
+
+
 class AItelierSkillFlow(SkillFlow):
     """SkillFlow with durable tool-operation recovery enforced at host ingress."""
 
@@ -36,9 +56,39 @@ class AItelierSkillFlow(SkillFlow):
     #: guard and the audit instead of replaying the ``project_id`` outage.
     HOST_INJECTED_KEYWORDS: tuple[str, ...] = ("project_id",)
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, db: Any = None, **kwargs):
         super().__init__(*args, **kwargs)
         self._operation_recovery_decisions: set[tuple[Any, ...]] = set()
+        # The ledger this host reads a run's isolation record through. `None`
+        # keeps today's behaviour exactly: the host is built by
+        # `api.dependencies.get_skillflow()`, which has exactly one DBManager
+        # for the deployment, so the process singleton IS this host's ledger.
+        self._ledger = db
+
+    def _ledger_db(self, db: Any = None):
+        """Answer with the DBManager whose isolation ledger this call reads.
+
+        The isolation record is written by whoever creates the run (the
+        launcher, the poller, the Meta controller, Coding Mode) through the DB
+        *that caller was handed*. Reading it back through a process-global
+        singleton instead only agrees with those writers while there is exactly
+        one DBManager in the process — a split (a test overriding the FastAPI
+        dependency, an embedder handing the host its own DBManager) makes the
+        write invisible to this read, and a run that already holds a tree is
+        then refused as "already exists and ... has no record naming it".
+
+        So the ledger is an explicit dependency with a default rather than a
+        lookup: a per-call `db` (the caller's own, when it has one — see
+        `start_run`), else the DBManager this host was constructed with, else
+        the singleton. Deployed, all three are the same object.
+        """
+        if db is not None:
+            return db
+        injected = getattr(self, "_ledger", None)
+        if injected is not None:
+            return injected
+        from api.dependencies import get_db_manager
+        return get_db_manager()
 
     def _execute_tool_impl(self, name: str, params: dict, *, run_id: str = "",
                            step_id: str = "", project_root: str = "") -> dict:
@@ -106,11 +156,10 @@ class AItelierSkillFlow(SkillFlow):
     # checkpoint (resume), reopen a dismissed one (reactivate/re_run) or move
     # the pinned graph under a sealed binding (repin).
     def _guard_state_recovery(self, run_id: str, *, continuation=False):
-        from api.dependencies import get_db_manager
         from core.state_attempts import guard_generic_recovery
         run = self.get_run(run_id) or {}
         guard_generic_recovery(
-            get_db_manager(), project_id=run.get("project_id"), run_id=run_id,
+            self._ledger_db(), project_id=run.get("project_id"), run_id=run_id,
             allow_active=continuation and run.get("status") in ("running", "paused"))
 
     def resume_run(self, run_id: str, *args, **kwargs):
@@ -626,7 +675,7 @@ class AItelierSkillFlow(SkillFlow):
             "run_status": self._run_status(row["run_id"]),
         }
 
-    def _admit_source_identity(self, run_id: str) -> None:
+    def _admit_source_identity(self, run_id: str, *, db: Any = None) -> None:
         """Propagate this run's typed source-identity refusal before a claim.
 
         ``run_isolation.resolve_for_resolver`` is the supported answer to "which
@@ -664,9 +713,8 @@ class AItelierSkillFlow(SkillFlow):
         # ingress; it keeps its legacy behaviour (nothing to ask the ledger).
         if getattr(self, "_workspace", None) is None:
             return
-        from api.dependencies import get_db_manager
         from core import run_isolation
-        db = get_db_manager()
+        db = self._ledger_db(db)
         # Ask the resolver itself, not a `has_record` proxy. `resolve_for_resolver`
         # hands back the run's recorded tree (or no opinion) and raises the typed
         # ``IsolationUnavailable`` on a bad decision; when the run has NO record it
@@ -692,7 +740,7 @@ class AItelierSkillFlow(SkillFlow):
         # Exact review context still requires its record even for another engine.
         run_isolation.resolve_for_resolver(db, run_id, sf=self)
 
-    def _declare_unowned_run(self, run_id: str) -> None:
+    def _declare_unowned_run(self, run_id: str, *, db: Any = None) -> None:
         """Give a run of this deployment its isolation record before it starts.
 
         Every host path that creates a run declares one itself, and does so
@@ -704,6 +752,16 @@ class AItelierSkillFlow(SkillFlow):
         hands back to the host, and nothing can claim, advance or resolve a
         pending run before it. A run that already holds a record (every other
         path) is left exactly as it is.
+
+        ``db`` is the ledger of the caller that created this run, when it has
+        one: the launcher, the poller, the Meta controller and Coding Mode all
+        hold the DBManager they wrote the run's isolation record through, and
+        handing it in here is what makes this check ask the same ledger. Without
+        it the host falls back to its own (``_ledger_db``) — one DBManager in a
+        deployment — and a caller whose ledger is a different instance would be
+        read as "no record", which is not a safe answer: the run would be
+        re-provisioned over the tree it already owns and refused as
+        "already exists and ... has no record naming it".
 
         Scope is the resolver's own, as in ``_admit_source_identity``: only a
         run THIS deployment's engine owns. A harness driving a SkillFlow of its
@@ -717,11 +775,11 @@ class AItelierSkillFlow(SkillFlow):
         """
         if getattr(self, "_workspace", None) is None:
             return
-        from api.dependencies import get_db_manager, get_skillflow
+        from api.dependencies import get_skillflow
         if get_skillflow() is not self:
             return
         from core import run_isolation
-        db = get_db_manager()
+        db = self._ledger_db(db)
         if run_isolation.record(db, run_id) is not None:
             return
         run = self.get_run(run_id)
@@ -748,8 +806,12 @@ class AItelierSkillFlow(SkillFlow):
                 reason += " (the run could not be settled and is left pending)"
             raise IsolationUnavailable(reason) from exc
 
-    def start_run(self, run_id: str) -> None:
-        self._declare_unowned_run(run_id)
+    def start_run(self, run_id: str, *, db: Any = None) -> None:
+        # `db` is the creating caller's own ledger (it has just written this
+        # run's isolation record through it). Keyword-only and optional, so the
+        # engine's public ``start_run(run_id)`` is unchanged and every caller
+        # that does not pass one keeps today's behaviour.
+        self._declare_unowned_run(run_id, db=db)
         super().start_run(run_id)
 
     def _operation_blocks_reentry(self, run_id: str, trigger: str) -> bool:

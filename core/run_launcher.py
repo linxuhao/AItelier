@@ -404,7 +404,8 @@ def start_config_run(db, ws, config_name: str, project_id: str, *,
         # CHECK-THEN-ACT is still safe: the poller also provisions isolation
         # before starting this same run. If it wins, running/paused is success.
         try:
-            sf.start_run(run_id)
+            from core.skillflow_host import start_with_ledger
+            start_with_ledger(sf, run_id, db)
         except SkillFlowError:
             if (sf.get_run(run_id) or {}).get("status") not in ("running", "paused"):
                 raise

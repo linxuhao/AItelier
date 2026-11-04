@@ -1,33 +1,5 @@
 # Phase 4: generic /api/runs surface + run-id-keyed checkpoint delegation.
 
-import pytest
-
-
-@pytest.fixture(name="run_client")
-def run_client_fixture(client, monkeypatch):
-    """The `client` fixture with the PROCESS-WIDE DB singleton pointed at the same DB.
-
-    Starting a run touches two layers that must agree on which database they are
-    talking to. `POST /api/runs` receives `db` through the FastAPI dependency
-    (which `client` overrides with its per-test DB), and then
-    `AItelierSkillFlow.start_run` -> `_declare_unowned_run` re-reads that run's
-    isolation record through `api.dependencies.get_db_manager()` — the process
-    singleton, because the engine has no injected DB (core/skillflow_host.py).
-    Deployed there is exactly one DBManager and both calls return it. Overriding
-    only the dependency splits them: the launcher wrote the record to the test DB,
-    the host looked in the singleton, found nothing, and refused to provision a
-    second tree for a run that already had one ("already exists and run ... has no
-    record naming it"). Pointing the singleton at the test DB restores the
-    one-DB invariant the assertions below were written against; the assertions
-    themselves are unchanged.
-    """
-    import api.dependencies as deps
-
-    db = client.app.dependency_overrides[deps.get_db_manager]()
-    monkeypatch.setattr(deps, "get_db_manager", lambda: db)
-    return client
-
-
 def test_list_all_runs_attaches_config_label(client):
     """GET /api/runs lists runs of any config with config label + has_task_loop."""
     client.post("/api/projects", json={"project_id": "run_list_proj", "name": "RunList"})
@@ -69,9 +41,9 @@ def test_start_run_unknown_config_404(client):
     assert resp.status_code == 404
 
 
-def test_run_detail_includes_cache_stats(run_client):
+def test_run_detail_includes_cache_stats(client):
     """GET /api/runs/{run_id} includes cache_stats at run and step level."""
-    run_client.post("/api/projects", json={"project_id": "cache_test_proj", "name": "CacheTest"})
+    client.post("/api/projects", json={"project_id": "cache_test_proj", "name": "CacheTest"})
     # dpe_default_v2 step "1" reads meta_conversation/finalize/step1_goals.json
     # as a REQUIRED cross-config input, so run_launcher refuses to start one for
     # a project that never had a meta conversation. Seed that artifact — the
@@ -85,12 +57,12 @@ def test_run_detail_includes_cache_stats(run_client):
     (finalize / "step1_goals.json").write_text(
         '{"goals": ["ship it"]}', encoding="utf-8")
 
-    start_resp = run_client.post("/api/runs", json={
+    start_resp = client.post("/api/runs", json={
         "config_name": "dpe_default_v2",
         "project_id": "cache_test_proj",
     })
     assert start_resp.status_code == 201, start_resp.text
-    resp = run_client.get("/api/runs/cache_test_proj")
+    resp = client.get("/api/runs/cache_test_proj")
     assert resp.status_code == 200
     data = resp.json()
     # Run-level cache_stats must be present
@@ -142,18 +114,18 @@ def _start_dpe(client, project_id):
     assert r.status_code == 201, r.text
 
 
-def test_run_detail_reports_loop_item_as_none_when_nothing_ran(run_client):
+def test_run_detail_reports_loop_item_as_none_when_nothing_ran(client):
     """A run whose loop never executed carries no items, and every step says so
     explicitly rather than omitting the key — a client that reads it must not
     have to distinguish "absent" from "not in a loop"."""
-    _start_dpe(run_client, "loopitem_fresh")
-    steps = run_client.get("/api/runs/loopitem_fresh").json()["steps"]
+    _start_dpe(client, "loopitem_fresh")
+    steps = client.get("/api/runs/loopitem_fresh").json()["steps"]
     assert steps, "expected seeded step rows"
     assert all("loop_item" in s for s in steps)
     assert all(s["loop_item"] is None for s in steps)
 
 
-def test_run_detail_survives_a_skillflow_without_the_column(run_client, monkeypatch):
+def test_run_detail_survives_a_skillflow_without_the_column(client, monkeypatch):
     """PURELY additive: the run page must still render against a skillflow that
     predates `loop_item`.
 
@@ -164,7 +136,7 @@ def test_run_detail_survives_a_skillflow_without_the_column(run_client, monkeypa
     whole run detail, taking every historical run's page down with it.
     """
     from api.dependencies import get_skillflow
-    _start_dpe(run_client, "loopitem_oldsf")
+    _start_dpe(client, "loopitem_oldsf")
     sf = get_skillflow()
     real = sf.get_steps
 
@@ -173,7 +145,7 @@ def test_run_detail_survives_a_skillflow_without_the_column(run_client, monkeypa
                 for s in real(run_id, **kw)]
 
     monkeypatch.setattr(sf, "get_steps", without_the_column)
-    resp = run_client.get("/api/runs/loopitem_oldsf")
+    resp = client.get("/api/runs/loopitem_oldsf")
     assert resp.status_code == 200, resp.text
     steps = resp.json()["steps"]
     assert steps and all(s["loop_item"] is None for s in steps)

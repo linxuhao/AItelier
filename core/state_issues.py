@@ -29,7 +29,7 @@ from core.state_graph import StateConflict, StateGraphError, StateNotFound, cano
 from core.state_privacy import UntrustedDatabase
 
 KINDS = ("defect", "gap", "handoff", "question")
-RESOLUTIONS = ("absorbed", "promoted", "duplicate", "fixed", "rejected")
+RESOLUTIONS = ("absorbed", "promoted", "duplicate", "fixed", "observed", "rejected")
 MAX_LINKS = 20
 
 SCHEMA = """
@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS state_issues (
     title TEXT NOT NULL,
     body TEXT NOT NULL,
     source TEXT,
-    status TEXT NOT NULL CHECK(status IN ('open','absorbed','promoted','duplicate','fixed','rejected')),
+    status TEXT NOT NULL CHECK(status IN ('open','absorbed','promoted','duplicate','fixed','observed','rejected')),
     version INTEGER NOT NULL CHECK(version > 0),
     resolution_json TEXT,
     reported_by_actor TEXT NOT NULL,
@@ -81,7 +81,10 @@ def _widen_status_check(conn) -> None:
     carries ``fixed`` and skips this.
     """
     row = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='state_issues'").fetchone()
-    if row and "'fixed'" not in (row["sql"] or ""):
+    # Keyed on the NEWEST value, not on the oldest missing one: a database that
+    # already carries `fixed` but predates `observed` still needs this rebuild, and
+    # checking for the older value would silently skip it.
+    if row and "'observed'" not in (row["sql"] or ""):
         from core.state_attempt_schema import _rebuild
         conn.execute("PRAGMA foreign_keys=OFF")
         try:
@@ -283,12 +286,24 @@ class StateIssues:
             raise StateGraphError(f"resolution must be one of {', '.join(RESOLUTIONS)}")
         reason = text(reason, "reason", 4000)
         director_identity = text(director_identity, "director_identity", 320)
-        # receipt_id/artifact are provenance fields of the fixed resolution only;
-        # a legacy resolution naming them must be refused before anything is read.
-        if resolution != "fixed" and (receipt_id is not None or artifact is not None):
-            raise StateGraphError("receipt_id and artifact are only accepted for the fixed resolution")
+        # receipt_id is the fixed resolution's provenance only. artifact is accepted
+        # by both terminal "it is really done" resolutions, because both name what
+        # was shipped; a legacy resolution naming either field is refused before
+        # anything is read.
+        if receipt_id is not None and resolution != "fixed":
+            raise StateGraphError("receipt_id is only accepted for the fixed resolution")
+        if artifact is not None and resolution not in ("fixed", "observed"):
+            raise StateGraphError(
+                "artifact is only accepted for the fixed and observed resolutions")
+        #  exists because a real fix often ships without a State node: the
+        # gate-imports permission fix, a comment that named the wrong mechanism, a
+        # reclaim guard. Those can be closed honestly against the shipped artifact,
+        # but they must NOT be labelled , which means "a node was accepted and
+        # here is its receipt" - conflating the two is how a receipt requirement
+        # turns into a list of issues that can never be closed.
         shape = {"absorbed": {"node_key", "node_revision"}, "promoted": {"node_key"},
-                 "fixed": {"receipt_id", "artifact"}, "rejected": set()}.get(resolution)
+                 "fixed": {"receipt_id", "artifact"}, "observed": {"artifact"},
+                 "rejected": set()}.get(resolution)
         given = {n for n, v in (("node_key", node_key), ("node_revision", node_revision),
                                 ("duplicate_of", duplicate_of), ("receipt_id", receipt_id),
                                 ("artifact", artifact)) if v is not None}
@@ -339,6 +354,10 @@ class StateIssues:
                 record["node_revision"] = receipt["node_revision"]
                 conn.execute("INSERT OR IGNORE INTO state_issue_nodes VALUES(?,?,?)",
                              (row["issue_id"], project_id, receipt["node_key"]))
+            if resolution == "observed":
+                # No node and no receipt: the artifact IS the whole claim, so it is
+                # recorded verbatim and the reason has to carry the rest.
+                record["artifact_ref"] = text(artifact, "artifact", 200)
             if duplicate_of is not None:
                 if duplicate_of == row["issue_id"]:
                     raise StateGraphError("an issue cannot duplicate itself")

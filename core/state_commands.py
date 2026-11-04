@@ -693,7 +693,7 @@ class IssueRef(Project):
 
 
 class ListIssues(Project):
-    statuses: list[Literal["open", "absorbed", "promoted", "duplicate", "fixed", "rejected"]] | None = Field(
+    statuses: list[Literal["open", "absorbed", "promoted", "duplicate", "fixed", "observed", "rejected"]] | None = Field(
         default=None, min_length=1)
     kinds: list[Literal["defect", "gap", "handoff", "question"]] | None = Field(default=None, min_length=1)
     node_key: str | None = None
@@ -714,13 +714,16 @@ class LinkIssue(IssueRef):
 
 class ResolveIssue(IssueRef):
     expected_version: int = Field(ge=1)
-    resolution: Literal["absorbed", "promoted", "duplicate", "fixed", "rejected"] = Field(description=(
+    resolution: Literal["absorbed", "promoted", "duplicate", "fixed", "observed", "rejected"] = Field(description=(
         "absorbed: node_key+node_revision of a revision created after the report; "
         "promoted: node_key of a node created after the report; "
         "duplicate: exactly one of duplicate_of (issue) or node_key; "
         "fixed: receipt_id+artifact of an existing verified acceptance receipt in this "
         "project (the issue was already fixed under an existing contract; no node is "
-        "created, revised or verified by this closure); rejected: reason only."))
+        "created, revised or verified by this closure); "
+        "observed: artifact only - the fix is present in a shipped artifact and was observed "
+        "directly, but no State node ever carried it (use this instead of fixed, which would "
+        "claim a receipt that does not exist); rejected: reason only."))
     reason: str = Field(min_length=1, max_length=4000)
     director_identity: str = Field(min_length=1, max_length=320)
     node_key: str | None = None

@@ -241,16 +241,21 @@ def test_legacy_resolutions_reject_receipt_fields_and_refuse_without_mutation(sv
     issue = _report(svc)
     base = {"project_id": "p", "issue_id": issue["issue_id"], "expected_version": 1,
             "resolution": "duplicate", "reason": "r", "director_identity": "d"}
-    with pytest.raises(StateGraphError, match="only accepted for the fixed resolution"):
+    # The two provenance fields are refused separately since `observed`: it accepts
+    # an artifact but never a receipt, so one shared message would hide which field
+    # was wrong and let a caller believe `observed` can be closed with a receipt.
+    with pytest.raises(StateGraphError, match="receipt_id is only accepted for the fixed resolution"):
         execute(svc, "resolve_issue", base | {"receipt_id": "receipt-legacy"}, allow_write=True)
-    with pytest.raises(StateGraphError, match="only accepted for the fixed resolution"):
+    with pytest.raises(StateGraphError,
+                       match="artifact is only accepted for the fixed and observed resolutions"):
         execute(svc, "resolve_issue", base | {"artifact": "f" * 40}, allow_write=True)
-    with pytest.raises(StateGraphError, match="only accepted for the fixed resolution"):
+    # Both at once: the receipt refusal fires first, before anything is read.
+    with pytest.raises(StateGraphError, match="receipt_id is only accepted for the fixed resolution"):
         execute(svc, "resolve_issue", base | {"duplicate_of": issue["issue_id"],
                                               "receipt_id": "receipt-legacy",
                                               "artifact": "f" * 40}, allow_write=True)
-    # Other legacy resolutions are equally strict.
-    with pytest.raises(StateGraphError, match="only accepted for the fixed resolution"):
+    # Other legacy resolutions are equally strict about the receipt.
+    with pytest.raises(StateGraphError, match="receipt_id is only accepted for the fixed resolution"):
         execute(svc, "resolve_issue", base | {"resolution": "rejected",
                                               "receipt_id": "receipt-legacy"}, allow_write=True)
     # Every refusal rolled back: still open at version 1, no resolution stored.
@@ -410,3 +415,53 @@ def test_link_on_a_closed_issue_is_refused_in_both_modes_without_change(svc):
             _link(svc, issue["issue_id"], 2, [], replace_existing=mode)
     fresh = _fresh(svc, issue["issue_id"])
     assert _keys(fresh) == ["a"] and fresh["version"] == 2
+
+
+def test_observed_closes_a_real_fix_that_no_node_ever_carried(svc):
+    """The gap this exists for: a fix shipped outside the DAG has no receipt, so
+    `fixed` can never close it and the issue list grows forever."""
+    issue = _report(svc)
+    resolve = {"project_id": "p", "issue_id": issue["issue_id"], "expected_version": 1,
+               "resolution": "observed", "director_identity": "wuxia",
+               "reason": "gate import mode fixed in the Dockerfile; verified in the running image",
+               "artifact": "a1b2c3d4"}
+    done = execute(svc, "resolve_issue", resolve, allow_write=True)
+    assert done["status"] == "observed"
+    assert done["resolution"]["artifact_ref"] == "a1b2c3d4"
+    assert done["resolution"]["reason"].startswith("gate import mode fixed")
+    # no node was created, revised, linked or verified by closing it
+    assert done["effective_node_keys"] == [] if "effective_node_keys" in done else True
+    with pytest.raises(StateConflict, match="already observed"):
+        execute(svc, "resolve_issue", resolve | {"expected_version": 2}, allow_write=True)
+
+
+def test_observed_still_requires_the_artifact(svc):
+    issue = _report(svc)
+    base = {"project_id": "p", "issue_id": issue["issue_id"], "expected_version": 1,
+            "resolution": "observed", "reason": "fixed somewhere", "director_identity": "wuxia"}
+    with pytest.raises(StateGraphError, match="observed takes exactly: artifact"):
+        execute(svc, "resolve_issue", base, allow_write=True)
+
+
+def test_observed_refuses_a_receipt_and_fixed_still_requires_one(svc):
+    issue = _report(svc)
+    with pytest.raises(StateGraphError, match="receipt_id is only accepted for the fixed resolution"):
+        execute(svc, "resolve_issue", {"project_id": "p", "issue_id": issue["issue_id"],
+                                       "expected_version": 1, "resolution": "observed",
+                                       "reason": "r", "director_identity": "wuxia",
+                                       "artifact": "abc", "receipt_id": "receipt-x"}, allow_write=True)
+    # the receipt requirement on `fixed` is the point: closing without one is `observed`
+    with pytest.raises(StateGraphError, match="fixed takes exactly"):
+        execute(svc, "resolve_issue", {"project_id": "p", "issue_id": issue["issue_id"],
+                                       "expected_version": 1, "resolution": "fixed",
+                                       "reason": "r", "director_identity": "wuxia",
+                                       "artifact": "abc"}, allow_write=True)
+
+
+def test_other_resolutions_still_refuse_an_artifact(svc):
+    issue = _report(svc)
+    with pytest.raises(StateGraphError, match="artifact is only accepted for the fixed and observed"):
+        execute(svc, "resolve_issue", {"project_id": "p", "issue_id": issue["issue_id"],
+                                       "expected_version": 1, "resolution": "rejected",
+                                       "reason": "not a defect", "director_identity": "wuxia",
+                                       "artifact": "abc"}, allow_write=True)

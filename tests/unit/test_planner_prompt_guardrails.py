@@ -96,6 +96,11 @@ _NAMED_BUT_NOT_CALLED = {
     ("task_plan_red.md", "apply_patch"),
     ("task_implementer.md", "write"),        # "你没有整文件覆写的 `write` 工具"
     ("step5_verifier.md", "repo_apply"),     # on_deliver hook, not an agent call
+    # 11deed3b08 added the "code task executable boundary" paragraph to the PM
+    # template. Both names in it are about OTHER actors, not the PM's own calls:
+    ("step3_pm.md", "pytest"),        # prose: pytest RUNS in `5_test`/`5_evidence`,
+                                      # and t_impl must not be asked for its output
+    ("step3_pm.md", "test_write"),    # "`test_write` 是私有 scratch" — t_impl's tool
 }
 
 

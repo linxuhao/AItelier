@@ -118,6 +118,7 @@ def test_state_only_bearer_wrapper_resolves_registered_driver(world):
         assert actual.get('/probe',headers={'X-AItelier-Driver-Token':token}).json()=={'actor':'driver:caller','driver_id':'caller'}
         assert actual.get('/probe',headers={'X-AItelier-Driver-Token':'synthetic-unknown'}).status_code==401
 
+@pytest.mark.baked_toolchain  # reads a node-evaluated cordis.patch.yml from /reports; needs /opt/aitelier-node + that mount, neither of which the shipped image or a disposable test container has
 def test_actual_node_evaluated_dsh_patch_headers_resolve_table_and_refuse_suspension(tmp_path,monkeypatch):
     from api import authz
     from api.mcp_router import build_mcp

@@ -81,10 +81,21 @@ def test_versioned_refusal_real_consumer_inverse(peers):
     consumer=Draft202012Validator({"$ref":"#/$defs/error","$defs":schema["$defs"]})
     consumer.validate(legacy)
     validate_envelope(current)
-    # The actual immutable v2 consumer rejects both proposed workarounds.
+    # The actual immutable v2 consumer rejects the v3 envelope outright.
     with pytest.raises(ValidationError): consumer.validate(current)
+    # `detail.message` is bounded PROSE since 9d0516cf10 ("Error `code` remains the
+    # closed machine-readable enum; `detail.message` ... may explain a declared
+    # field"; contracts/director_messaging/v2/README.md). A sentence there is now
+    # a legal v2 error, so it is no longer a workaround the consumer must refuse.
+    # What still refuses the workaround is the closed `code` enum and the closed,
+    # bounded `detail` object — the parts an explanation must never relax.
+    consumer.validate({**legacy,"detail":{"message":"Use the driver inbox"}})
     with pytest.raises(ValidationError):
-        consumer.validate({**legacy,"detail":{"message":"Use the driver inbox"}})
+        consumer.validate({**legacy,"code":"use_driver_inbox"})
+    with pytest.raises(ValidationError):
+        consumer.validate({**legacy,"detail":{"message":"x"*1001}})
+    with pytest.raises(ValidationError):
+        consumer.validate({**legacy,"detail":{"message":"ok","grant":"override"}})
 
 @pytest.mark.parametrize("version",[None,"v2","v3"])
 @pytest.mark.parametrize("route",["target","broadcast","reply"])

@@ -479,6 +479,10 @@ def test_final_report_is_resolved_for_review_and_replanning(dpe_game, tmp_path):
     assert final.tool_name == "run_tests"
     assert final.tool_params == {
         "out_dir": "$STEP_DIR", "repo_gate": False,
+        # 4c425a7336 ("Carry bounded explicit caller budgets through normal test
+        # requests") gave the post-design pass the same finite wall as 5_test;
+        # 5_final_test used to leave run_tests on its default.
+        "pytest_wall_seconds": 3600,
         "evidence_cycle_from": "5_test",
         "fail_fast_gates": (
             '[["5_test", "test_report.json"], '
@@ -607,9 +611,35 @@ def test_pm_claim_assembles_context_before_and_after_final_tests(
     assert ("FINAL_TREE_FAILURE" in context) == has_final_report
 
 
-def test_real_empty_godot_suite_cannot_pass_final_tree_gate(dpe_game, tmp_path):
+def test_real_empty_godot_suite_cannot_pass_final_tree_gate(dpe_game, tmp_path, monkeypatch):
     import json
+    import subprocess
     from aitelier.tools.run_tests.impl import run_tests
+    from core import repository_executor, repository_executor_entry
+
+    # Supply only the owned executor TRANSPORT: `repository_executor.execute`
+    # shells into a nested Docker capsule that this disposable test job does not
+    # have, so the tool refused ("Docker CPU execution facility is unavailable;
+    # local execution refused") instead of measuring anything. Handing it
+    # `repository_executor_entry.run` keeps every assertion below and still runs
+    # real pytest — in the isolation this test already lives in. Same transport
+    # substitution as test_dpe_final_execution.py and
+    # test_release_fail_fast.test_run_tests_never_emits_a_relative_pass_it_did_not_measure.
+    def capsule_entry(root, args, timeout, **kwargs):
+        payload = {"repo": str(root), "args": args, "timeout": timeout,
+                   **{k: kwargs[k] for k in ("pytest_timeout", "import_module",
+                                            "report_dir", "relay_socket") if k in kwargs}}
+        actual = repository_executor_entry.run(payload)
+        assert not actual.get("unavailable") and not actual.get("timed_out"), actual
+        done = subprocess.CompletedProcess(args, actual["returncode"],
+                                           actual["stdout"], actual["stderr"])
+        done.import_error = actual.get("import_error", "")
+        done.storage = actual.get("storage")
+        done.execution_identity = actual.get("execution_identity")
+        done.git = None
+        return done
+
+    monkeypatch.setattr(repository_executor, "execute", capsule_entry)
 
     repo = tmp_path / "repo"
     repo.mkdir()

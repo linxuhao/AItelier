@@ -3,6 +3,7 @@ import importlib.metadata
 import io
 import json
 import os
+import re
 from pathlib import Path
 import pytest
 from fastapi import FastAPI
@@ -12,9 +13,23 @@ from core.state_database import StateDatabase
 
 ROOT=Path(__file__).resolve().parents[2]
 
+def _declared_skillflow_pin():
+    """The SDK version pyproject declares — the value this test is about.
+
+    It used to be a literal (`1.5.88`), so every pin bump left a red test behind
+    that said nothing about the product: the installed SDK tracked the
+    declaration, the literal did not. Binding to the declaration checks what
+    actually matters — that the installed SDK IS the one pyproject pins — and
+    the image-vs-pin mismatch stays a failure instead of a stale constant.
+    """
+    declared = re.search(r'"skillflow-py==([0-9][^"]*)"',
+                         (ROOT/'pyproject.toml').read_text(encoding='utf-8'))
+    assert declared, "pyproject no longer pins skillflow-py"
+    return declared.group(1)
+
 def test_exact_source_and_sdk_binding():
     import core.drivers,api.authz,api.driver_routers,cli.client
-    assert importlib.metadata.version('skillflow-py') == '1.5.88'
+    assert importlib.metadata.version('skillflow-py') == _declared_skillflow_pin()
     for module in [core.drivers,api.authz,api.driver_routers,cli.client]:
         assert Path(module.__file__).resolve().is_relative_to(ROOT)
 

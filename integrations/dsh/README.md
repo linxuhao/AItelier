@@ -96,6 +96,7 @@ current State before acting; notes cannot grant permission or certify results.
 | `list_runs` | read | Recent runs, newest first — the entry point when you hold no id. |
 | `trace_list` / `trace_search` / `trace_read` | read | The durable trace: find where it broke, then read the actual prompt / response / tool result. |
 | `driver_whoami` | read | Resolve this credential to its driver/owner identity, memberships and capabilities. |
+| `declare_driver_presence` | write | Declare THIS credential offline or back online. There is no driver argument — the token decides. While you are offline (declared and not waiting, or unseen past the stale bound) another member of the project may take over your live claims; any `wait_for_*`, `claim_node`, `heartbeat` or external-attempt call ends the declaration. |
 | `observe_deployment_quiescence` | write | Record an actual deployment-quiescence observation; does not authorize a deployment. |
 | `state_graph_help` | read | The typed operation contracts of the persistent State DAG, plus `driver_guide`. Read it before any other `state_graph_*` call. |
 | `state_graph_read` | read | Persistent State projects, node context, dependency frontier, attempts, evidence — and `wait_for_state_change`. A PRIVATE read: needs the token. |

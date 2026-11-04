@@ -25,9 +25,19 @@ def test_55_actual_wire_omits_sampling_and_preserves_effort(wiring, monkeypatch,
     p=c.map_openai_params(params,{},model,False)
     body=c.transform_request(model,MSGS,p,{"drop_params":True},{})
     assert "temperature" not in body and "extra_body" not in body
-    if model == "claude-opus-5-5" and not enabled:
-        # Official Opus 5.5 always thinks; LiteLLM omits disabled accordingly.
-        assert "thinking" not in body
+    # Whether `thinking={'type': 'disabled'}` survives is not an AItelier claim:
+    # litellm omits it for models its cost map marks `thinking_always_on`,
+    # because those 400 on `disabled` and think adaptively regardless. WHICH
+    # models are in that set moves with the pinned litellm release — at 1.105.7
+    # it holds Opus 5.5 AND Sonnet 5.5 (Haiku 5.5 still honours `disabled`) — so
+    # ask the same catalog predicate litellm's own transform asks instead of
+    # hardcoding one model name that silently rots on the next upgrade.
+    from litellm.llms.anthropic.common_utils import AnthropicModelInfo
+    always_on = AnthropicModelInfo._is_always_on_thinking_model(model, "anthropic")
+    if always_on and not enabled:
+        assert "thinking" not in body, (
+            f"{model} is catalogued thinking_always_on, so litellm must omit "
+            f"`disabled` — sending it is a provider 400")
     else:
         assert body["thinking"]["type"] == ("adaptive" if enabled else "disabled")
     if effort:

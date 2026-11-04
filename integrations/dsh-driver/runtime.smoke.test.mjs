@@ -20,6 +20,8 @@ function assertInjectionCadence(events) {
       assert.equal(event.data.source.compaction_seq, epoch);
       assert.ok(!injected.has(epoch), `State was injected twice in compaction epoch ${epoch}`);
       injected.add(epoch);
+      const state = JSON.parse(event.data.content[0].text.split('\n').slice(1).join('\n'));
+      assert.deepEqual(Object.keys(state).sort(), ['driver_id','nodes','private_note','project_id','project_note']);
     }
     assert.ok(!event.data.source?.sections?.some(s => s.name === 'aitelier:state') || event.data.source.kind === stateInjectionSource,
       'State was repeated through dynamic native runtime context');
@@ -132,12 +134,23 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
     assert.match(await readFile(join(childDirectory, 'commit-proof.txt'), 'utf8'), /^[0-9a-f]{40}\n$/, 'native child could not commit using its own git metadata');
     await assert.rejects(readFile(join(outsideDirectory, 'outside-probe.txt')), {code:'ENOENT'});
     assert.ok(events.some(e => e.data?.message?.toolCallId === 'fixture-child-shell' && JSON.stringify(e.data).includes('OUTSIDE_WRITE_DENIED')), 'child cwd was incorrectly treated as a new write grant');
-    assert.ok(events.some(e => e.type === 'tool/result' && JSON.stringify(e.data).includes('next_after_seq') && JSON.stringify(e.data).includes('Resume the assigned State DAG')), 'precompact grep missing\n' + output);
+    assert.ok(events.some(e => e.type === 'tool/result' && JSON.stringify(e.data).includes('next_after_seq') && JSON.stringify(e.data).includes('goal_round')), 'precompact goal history grep missing\n' + output);
     assert.ok(activity.some(a => a.phase === 'waiting' && a.subagents.length > 0), 'parent never waited while the native child was active');
     assert.ok(activity.some(a => a.phase === 'waiting' && a.subagents.length === 0), output);
     assertInjectionCadence(events);
     assert.ok(events.filter(e => e.type === 'compaction/end' && !e.data.error).length >= 2, 'pressure and overflow recovery were not both exercised');
     assert.ok(events.some(e => e.type === 'user/message' && e.data.source?.kind === stateInjectionSource && JSON.stringify(e.data).includes('overflow fresh private rule')), 'overflow retry did not get fresh State');
+    const created = events.filter(e => e.type === 'goal/change' && e.data.operation === 'create');
+    assert.equal(created.length, 1, 'bootstrap must create exactly one native goal');
+    assert.match(created[0].data.goal.objective, /常驻导演/);
+    assert.ok(events.filter(e => e.type === 'user/message' && e.data.source?.kind === 'goal').length >= 2,
+      'premature final did not continue through a native goal round');
+    assert.ok(!events.some(e=>e.type==='user/message'&&e.data.source?.kind==='user'), 'bootstrap manufactured a human input');
+    const rootRequests=requests.filter(r=>!r.child&&!r.summary&&r.options.tools?.length);
+    assert.ok(rootRequests.every(r=>JSON.stringify(r.options).includes('Native DSH driver goal (') && JSON.stringify(r.options).includes('fixture driver skill')),
+      'goal or operating protocol disappeared after compact/overflow');
+    assert.ok(!requests.filter(r=>r.child&&!r.summary).some(r=>JSON.stringify(r.options).includes('Native DSH driver goal (')),
+      'native child inherited the director goal');
     assert.deepEqual(workCalls.map(c => c.action), ['open', 'write', 'bash', 'deliver']);
     assert.ok(workCalls.every(c => c.session_id && c.session_id !== 'fixture-root'), 'child work used the root session identity');
     assert.equal(new Set(workCalls.map(c => c.session_id)).size, 1);
@@ -174,16 +187,19 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
       await new Promise(resolve => setTimeout(resolve, 100));
     }
     assert.equal(proc.exitCode, null, output);
-    const resumed = requests.slice(before).find(r => r.options.tools?.some(t => t.name === 'wait'));
+    const resumed = requests.slice(before).find(r => r.host && r.options.tools?.some(t => t.name === 'wait'));
     assert.ok(resumed, 'persisted driver did not resume\n' + output);
     assert.match(JSON.stringify(resumed.options.messages), /earlier details can be searched/);
     assert.match(JSON.stringify(resumed.options), /你是 alpha 项目 State DAG 的常驻导演/);
+    assert.equal(events.filter(e=>e.type==='goal/change'&&e.data.operation==='create').length,1,'restart replaced the persisted goal');
+    const rearmed=events.find(e=>e.type==='goal/change'&&e.data.operation==='resume');
+    assert.equal(rearmed?.data.goal.id,created[0].data.goal.id,'active goal was not rearmed after restart');
     assert.ok(!resumed.options.tools.some(t => t.name === 'project_work'), 'host kept obsolete coding bridge');
     assert.equal(await readFile(join(outsideDirectory, 'root-host-proof.txt'), 'utf8'), 'ROOT_HOST_OK');
     assert.equal(await readFile(join(outsideDirectory, 'outside-probe.txt'), 'utf8'), 'allowed');
     assert.match(await readFile(join(outsideDirectory, 'host-git-proof.txt'), 'utf8'), /^[0-9a-f]{40}\n$/);
     if (process.env.AITELIER_TEST_DOCKER) assert.match(await readFile(join(outsideDirectory, 'docker-proof.txt'), 'utf8'), /^\d+\./);
-    const childRequest = requests.slice(before).find(r => r.child && r.options.tools?.some(t=>t.name==='bash'));
+    const childRequest = requests.slice(before).find(r => r.host && r.child && r.options.tools?.some(t=>t.name==='bash'));
     assert.match(JSON.stringify(childRequest.options), /danger-full-access/);
     assert.doesNotMatch(JSON.stringify(childRequest.options), /Current DSH file policy: workspace-write/);
   } finally {

@@ -4,13 +4,13 @@
 
 主动检查项目的 open issues、失败/暂停的 attempt、待复查候选和当前产品的实际问题。优先修复 critical issues，包括尚未进入 State DAG 的问题；先记录发现并纳入已有任务或合适的新节点，再推进修复。frontier 为空只说明没有 ready 节点，不说明导演没有工作。不要只因为上一件事完成就结束职责。
 
+现有授权任务内的截图、读日志、复现、排错、修复和复测直接推进，不为常规下一步反复请求确认。一个任务遇到阻塞时继续其他可执行工作；只有真实产品决策、超出现有授权或既有人工 checkpoint 才需要业主决定。这是常驻导演 goal，完成一项任务不等于完成整个 goal；继续履职时保持 active，没有可执行工作时用 wait() 等待，不空转。
+
 在现有项目发布范围内，业主已授权 publish 和 push 新版本，代码要经常 sync 到 remote。按项目现行分级完成真实测试、验收、集成和发布；不新增不必要的 gate。商业私有源码、全文、完整私有包和 design 的保密边界仍然适用，公开产物沿用已授权的发布范围。
 
 有独立且可执行的工作时，AItelier pipeline 每项目目标 4 个并行，subagent 目标 4 个并行，尽量排满。每个 writer 使用自己的 checkout，每个 run 只有一个 controller。不要为了填槽重复任务或绕过依赖和已有 owner。
 
 常规任务使用自己的 DSH subagent，以及实际可用的 Claude Sonnet 5.5 和 GPT-6.1 Sol；普通 agent 多次无法解决、或需要尖刀突破的任务使用 Claude Opus 5.5。先发现当前 transport 和准确模型，核对实际执行模型；没有挂载的 provider 不能靠写一个模型名字调用，更不能把自己的默认 subagent 冒充 Sonnet、Sol 或 Opus。缺少某条执行路径时记录具体能力缺口，同时继续用可用的原生 subagent 和 pipeline 推进其他工作。
-
-按当前注入的运行环境工作。宿主机 runtime 中，Driver 和原生 subagent 都有 full access，直接用原生文件和 bash 工具完成代码修改、Git fetch/merge/commit/push、Docker 调用和已安装的 agent CLI；保留历史中关于容器只读 Git、没有 Docker 和必须使用 project_work 的说明已经过时。派工时给 child 对应的 State attempt_id 和当前 owner fence，每个 writer 自己创建独立 checkout/worktree，不共享写入目录，也不覆盖他人或用户的改动。AItelier pytest 只在一次性容器中运行：network none、2 CPU/2 GiB、单 worker、最多四个并行，不在宿主机或生产后端容器直接跑。无需另开审批计划。
 
 做完一件事并完成交接后，清理不再使用的自有 worktree、重复 driver report 和中间文件；保留 State/发布引用、必要恢复信息和首次失败证据。不要清理他人的目录或在飞任务。
 

@@ -3,7 +3,37 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DriverRuntime, StateInjection, stateInjectionSource, runtimeEventSource, eventCarriesSomething, grepHistory, connectionErrorMessage } from './runtime.mjs';
+import { DriverRuntime, StateInjection, stateInjectionSource, runtimeEventSource, eventCarriesSomething, grepHistory, connectionErrorMessage, driverGoal } from './runtime.mjs';
+import { bindDriverGoal, driverGoalSection } from './goal.mjs';
+
+test('resident restart preserves stopped or already armed goals and edited objectives', () => {
+  for (const phase of ['paused', 'blocked', 'complete', 'active']) {
+    const current = {id:'kept',revision:7,objective:'owner-edited objective',phase,activation:'armed'};
+    const goals = {get: () => current};
+    assert.equal(bindDriverGoal(goals, {}, 'bootstrap template'), current);
+    assert.match(driverGoalSection(goals, {}), /owner-edited objective/);
+    assert.doesNotMatch(driverGoalSection(goals, {}), /bootstrap template/);
+  }
+});
+
+test('enabled resident re-arms the exact active native goal without resetting its budget', () => {
+  const agent = {}, current = {id:'kept',revision:7,objective:'owner-edited objective',phase:'active',activation:'disarmed',roundsStarted:12,maxGoalRounds:256};
+  const goals = {get: a => {assert.equal(a,agent);return current;}, resume: (a,ref) => {
+    assert.equal(a,agent);assert.deepEqual(ref,{id:'kept',revision:7});return {...current,revision:8,activation:'armed'};
+  }};
+  const resumed = bindDriverGoal(goals, agent, 'different bootstrap template');
+  assert.equal(resumed.roundsStarted,12);assert.equal(resumed.objective,current.objective);
+  assert.equal(resumed.activation,'armed');
+});
+
+test('native continuation budget exhaustion is retained as a blocker across restart', () => {
+  const current={id:'capped',revision:3,phase:'active',activation:'disarmed',roundsStarted:256,maxGoalRounds:256};
+  const goals={get:()=>current,block:(_agent,ref,reason)=>{
+    assert.deepEqual(ref,{id:'capped',revision:3});assert.equal(reason.code,'round-limit');
+    return {...current,phase:'blocked',blockedReason:reason};
+  }};
+  assert.equal(bindDriverGoal(goals,{},'template').phase,'blocked');
+});
 
 test('State injection survives resume and ignores ordinary events, steps and failed compaction', async () => {
   const events = [], session = { snapshotEvents: () => events };
@@ -73,12 +103,12 @@ test('fresh context replaces names/statuses and both note indexes after compact'
   assert.deepEqual(rendered.nodes, [{ name: 'n', status: 'VERIFIED' }]);
   assert.equal(rendered.private_note.index[0].index_line, 'new private rule');
   assert.equal(rendered.project_note.index[0].index_line, 'project rule');
-  assert.equal(rendered.driver_skill, 'driver skill');
-  assert.match(rendered.driver_goal, /你是 alpha 项目 State DAG 的常驻导演/);
-  assert.match(rendered.driver_goal, /critical issues/);
-  assert.match(rendered.driver_goal, /Claude Sonnet 5\.5 和 GPT-6\.1 Sol/);
-  assert.match(rendered.driver_goal, /Claude Opus 5\.5/);
-  assert.doesNotMatch(rendered.driver_goal, /\{\{project_id\}\}/);
+  assert.deepEqual(Object.keys(rendered).sort(), ['driver_id','nodes','private_note','project_id','project_note']);
+  assert.match(driverGoal('alpha'), /你是 alpha 项目 State DAG 的常驻导演/);
+  assert.match(driverGoal('alpha'), /critical issues/);
+  assert.match(driverGoal('alpha'), /Claude Sonnet 5\.5 和 GPT-6\.1 Sol/);
+  assert.match(driverGoal('alpha'), /Claude Opus 5\.5/);
+  assert.doesNotMatch(driverGoal('alpha'), /\{\{project_id\}\}/);
 }));
 test('wrong identity refuses bootstrap before private context is read', async () => fixture(async directory => {
   let reads = 0;

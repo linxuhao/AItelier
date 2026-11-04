@@ -7,7 +7,7 @@ export const inject = ['llm'];
 export function apply(ctx) {
   let rootCalls = 0, pressure = false, triggered = false, childMessaged = false, childShell = false, childWork = 0, childDiscovery = 0;
   const host = process.env.AITELIER_DSH_EXECUTION === 'host';
-  let overflowed = false;
+  let overflowed = false, earlyFinal = false;
   class FixtureAdapter extends LlmAdapter {
     async resolveModel(provider, model) { return { provider, id: model, name: model, context: { contextWindow: 16000 }, defaultMaxTokens: 1024 }; }
     async *stream(options) {
@@ -15,7 +15,7 @@ export function apply(ctx) {
       const last = JSON.stringify(options.messages.at(-1));
       const summary = /compaction engine|structured checkpoint|Condense the conversation/i.test(last);
       const child = options.messages.some(m => m.role === 'user' && JSON.stringify(m.content).includes('CHILD_TASK_MARKER'));
-      await fetch(process.env.AITELIER_URL + '/test/request', { method: 'POST', body: JSON.stringify({ options, summary, child }) });
+      await fetch(process.env.AITELIER_URL + '/test/request', { method: 'POST', body: JSON.stringify({ options, summary, child, host }) });
       if (!summary && !child && options.tools?.length && rootCalls >= (host ? 6 : 5) && !overflowed) {
         overflowed = true;
         await fetch(process.env.AITELIER_URL + '/test/overflow', { method: 'POST' });
@@ -50,6 +50,9 @@ export function apply(ctx) {
         block = { type: 'text', text: 'Native child completed.' };
       }
       else if (!options.tools?.length) block = { type: 'text', text: 'Fixture session' };
+      // End before any child exists: only the native goal driver can restart
+      // this work. Later finals legitimately wait for children or State input.
+      else if (!earlyFinal) { earlyFinal = true; block = {type:'text',text:'Premature director final.'}; }
       else {
         const rawCall = rootCalls++;
         const call = host ? rawCall - 1 : rawCall;
@@ -58,7 +61,7 @@ export function apply(ctx) {
         else if (call === 1) block = { type: 'tool-call', id: 'fixture-pipelines', name: 'call_tool', arguments: JSON.stringify({name:'mcp__aitelier__list_pipelines',arguments:{}}) };
         else if (call === 2) block = { type: 'tool-call', id: 'fixture-spawn', name: 'subagent', arguments: JSON.stringify({ description: 'smoke child', prompt: 'CHILD_TASK_MARKER', cwd: process.env.AITELIER_TEST_CHILD_CWD }) };
         else if (call === 3) { pressure = true; block = { type: 'text', text: 'HISTORY_BEFORE_COMPACT_ANCHOR ' + 'earlier context '.repeat(14000) }; }
-        else if (call === 4) block = { type: 'tool-call', id: 'fixture-grep', name: 'grep_chat_history', arguments: JSON.stringify({ pattern: 'Resume the assigned State DAG' }) };
+        else if (call === 4) block = { type: 'tool-call', id: 'fixture-grep', name: 'grep_chat_history', arguments: JSON.stringify({ pattern: 'goal_round' }) };
         else block = { type: 'tool-call', id: 'fixture-wait-' + call, name: 'wait', arguments: '{}' };
       }
       yield { type: 'block-start', index: 0, blockType: block.type };
@@ -82,7 +85,7 @@ export function apply(ctx) {
     }
   });
   ctx.on('session/event', (session, event) => {
-    if ((session.id === process.env.AITELIER_DSH_SESSION || event.data?.message?.toolCallId === 'fixture-child-shell') && ['compaction/end', 'surface/replace', 'tool/result', 'user/message'].includes(event.type)) {
+    if ((session.id === process.env.AITELIER_DSH_SESSION || event.data?.message?.toolCallId === 'fixture-child-shell') && ['compaction/end', 'surface/replace', 'tool/result', 'user/message', 'goal/change', 'system/message'].includes(event.type)) {
       void fetch(process.env.AITELIER_URL + '/test/event', { method: 'POST', body: JSON.stringify(event) });
     }
   });

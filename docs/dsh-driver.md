@@ -27,7 +27,10 @@ after each successful compaction, the runtime injects:
 
 - Node names and current statuses, without full acceptance/goal text.
 - The project's current driver-note index and the driver's own private index.
-- The State driver skill/index and the resident-driver instructions.
+
+The director mandate is a native persisted DSH goal. Goal visibility, the State
+protocol index and runtime operating instructions are separate system sections;
+they are not copied into these project snapshots.
 
 Each injection is a durable `aitelier-driver-state` message keyed to the last
 successful compaction event. Ordinary State changes, inbox messages and tool
@@ -174,9 +177,19 @@ version, not an older globally installed command.
 
 ## Standing director goal and connection recovery
 
-`integrations/dsh-driver/goal.md` supplies each project's standing director
-mandate as `driver_goal` in the initial and post-compaction State snapshots.
-Session resume retains the existing snapshot instead of repeating it. The director
+`integrations/dsh-driver/goal.md` seeds each project's standing director mandate
+as a native DSH goal when its session has no current goal. Native goal rounds
+continue an active director after a premature final reply. A stable root-only
+system section reads the actual persisted objective, making it visible after
+pressure/overflow compaction without duplicating it in State snapshots. Protocol
+and runtime tool instructions have their own system sections; native children
+keep their assigned task instead of inheriting the director's goal.
+
+Session resume preserves goal identity, objective, counters and the existing
+project snapshot. The enabled resident host explicitly re-arms an active goal
+after restart, while paused, blocked and completed goals remain unchanged.
+Native round limits remain in force; restart does not reset them or bypass a
+blocker. No additional goal store or scheduler is introduced. The director
 maintains State/note/inboxes, checks issues and unfinished delivery beyond the
 frontier, prioritizes critical defects, and aims for four independent pipelines
 and four subagents when actionable work exists. The owner's push/publish scope,

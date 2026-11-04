@@ -2,15 +2,17 @@
 import { historyPage } from './history.mjs';
 import { installHostModel } from './model.mjs';
 import { installToolDiscovery } from './tool-discovery.mjs';
+import { bindDriverGoal, driverGoalSection } from './goal.mjs';
 import { createRequire } from 'node:module';
 import { readFile, writeFile, rename } from 'node:fs/promises';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
 export const name = 'aitelier-state-driver';
-export const inject = ['agents', 'sessions', 'sessionPersistence', 'sessionQuery', 'systemPrompt', 'tools', 'compaction', 'credentials', 'llm'];
+export const inject = ['agents', 'sessions', 'sessionPersistence', 'sessionQuery', 'systemPrompt', 'tools', 'compaction', 'credentials', 'llm', 'goals'];
 
 const goalTemplate = await readFile(new URL('./goal.md', import.meta.url), 'utf8');
+const runtimeSkill = await readFile(new URL('./driver.md', import.meta.url), 'utf8');
 export const driverGoal = project => goalTemplate.replaceAll('{{project_id}}', project);
 export const stateInjectionSource = 'aitelier-driver-state';
 /** Source kind for a State runtime event. Deliberately NOT `user`: a routine
@@ -128,10 +130,8 @@ export class DriverRuntime {
   }
   render() {
     return JSON.stringify({ project_id: this.project, driver_id: this.driver,
-      driver_goal: driverGoal(this.project),
       nodes: this.snapshot.nodes, project_note: this.snapshot.project_note,
-      private_note: this.snapshot.private_note, driver_skill: this.snapshot.driver_skill,
-      runtime_skill: this.snapshot.runtime_skill });
+      private_note: this.snapshot.private_note });
   }
   wake() {
     // A notification is an edge, not durable work. DSH owns the pending input.
@@ -272,7 +272,6 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
   // from "the owner wrote to me", which is exactly how a routine tick gets
   // mistaken for an unanswered message. DSH's MessageSourceMap is merge-extensible
   // (each producer declares its own kind, consumers fall through unknown ones).
-  const message = text => createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } });
   const eventMessage = text => createUserMessage({ content: [{ type: 'text', text }], source: { kind: runtimeEventSource } });
   const projectInbox = () => request('/api/state/query/list_director_messages', {
     project_id: project, protocol_version: 'v3', statuses: ['unread', 'acknowledged'], limit: 20,
@@ -298,6 +297,12 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
   };
   const setup = async (scope, subject) => {
     agentCtx = scope;
+    scope.systemPrompt.section({ name: 'aitelier:driver-goal', order: 10, interpolate: false,
+      text: () => driverGoalSection(ctx.goals, subject) });
+    scope.systemPrompt.section({ name: 'aitelier:driver-protocol', order: 11, interpolate: false,
+      text: () => runtime.snapshot.driver_skill ?? '' });
+    scope.systemPrompt.section({ name: 'aitelier:driver-runtime', order: 12, interpolate: false,
+      text: runtimeSkill });
     installModelSelection(scope, { current: { provider: env.AITELIER_DSH_PROVIDER,
       model: env.AITELIER_DSH_MODEL }, assembled: undefined });
     const injection = new StateInjection(subject.session, runtime, createUserMessage);
@@ -382,7 +387,6 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
     // children inherit this explicit full-access selection, including forks.
     ctx.get('permissionPresets').set(agent.session, 'danger-full-access');
   }
-  await ctx.sessionPersistence.flush();
   ctx.on('session/event', (session, event) => {
     if (session !== agent.session) return;
     const entry = historyPage([event], { limit: 1 }).entries[0];
@@ -395,7 +399,11 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
   ctx.on('agent/error', ({ agent: subject, error }) => { if (subject === agent) void report('failed', String(error).slice(0, 2000)); });
   const close = async () => {
     if (disposed) return;
-    disposed = true; runtime.close();
+    disposed = true;
+    // A host shutdown ends process-local continuation, not the standing goal.
+    // Disarm before cancellation so DSH does not persist a user-style pause.
+    ctx.goals.disarm(agent);
+    runtime.close();
     await handle.dispose();
     await ctx.sessionPersistence.flush();
     await activity.catch(() => {});
@@ -403,7 +411,11 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
   ctx.on('dispose', close);
   await report('running');
   const inbox = await projectInbox();
-  agent.followup(message('Resume the assigned State DAG from the current injected state. Follow driver_goal as this project’s standing director mandate. Read relevant contracts, notes and both inboxes. Review issues and unfinished delivery as well as the frontier, dispatch actionable work, and wait() only after assessing remaining work and concrete blockers.\nPending project inbox:\n' + JSON.stringify(inbox)));
+  // Native goal rounds start/continue the director; bootstrap is not a human
+  // message and must not manufacture human authority for goal tools.
+  bindDriverGoal(ctx.goals, agent, driverGoal(project));
+  await ctx.sessionPersistence.flush();
+  if ((inbox.result ?? inbox).items?.length) agent.steer(eventMessage('Pending project inbox:\n' + JSON.stringify(inbox)));
   const pump = runtime.pump().catch(async error => {
     if (!runtime.controller.signal.aborted) {
       await report('failed', String(error).slice(0, 2000));

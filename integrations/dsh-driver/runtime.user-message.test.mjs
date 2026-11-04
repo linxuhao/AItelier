@@ -27,10 +27,12 @@ export function apply(ctx) {
     async resolveModel(provider, model) { return { provider, id: model, name: model, context: { contextWindow: 16000 }, defaultMaxTokens: 1024 }; }
     async *stream(options) {
       await fetch(process.env.AITELIER_URL + '/test/turn', { method: 'POST', body: JSON.stringify(options.messages) });
-      const block = calls++ === 0
+      const call = calls++;
+      const block = call === 0
         ? { type: 'tool-call', id: 'fixture-user-message', name: 'send_user_message',
             arguments: JSON.stringify({ request_key: 'smoke-user-message', subject: 'Smoke report', body: 'durable body', node_key: 'n' }) }
-        : { type: 'text', text: 'Reported to the user.' };
+        : call === 1 ? { type: 'text', text: 'Reported to the user.' }
+        : {type:'tool-call',id:'fixture-message-wait',name:'wait',arguments:'{}'};
       yield { type: 'block-start', index: 0, blockType: block.type };
       if (block.type === 'text') yield { type: 'text-delta', index: 0, text: block.text };
       else yield { type: 'tool-call-delta', index: 0, id: block.id, name: block.name, argumentsDelta: block.arguments };

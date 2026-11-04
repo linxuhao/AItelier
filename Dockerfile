@@ -55,7 +55,10 @@ COPY --from=dsh-runtime /opt/aitelier-dsh /opt/aitelier-dsh
 COPY . /app
 # Authored repository gates import only this image-owned client module. Keep
 # /app and backend packages off their PYTHONPATH; no new host mount is needed.
-COPY docker/godot/godot_harness.py /opt/aitelier-gate-imports/docker/godot/godot_harness.py
+# --chmod is not decoration: plain COPY preserves the BUILD HOST's mode, and a
+# working tree with umask 077 bakes this 0600 root:root while the backend runs as
+# uid 1000 - every authored gate then died on PermissionError before measuring.
+COPY --chmod=0644 docker/godot/godot_harness.py /opt/aitelier-gate-imports/docker/godot/godot_harness.py
 RUN touch /opt/aitelier-gate-imports/docker/__init__.py \
     /opt/aitelier-gate-imports/docker/godot/__init__.py
 # Copy the compiled SPA bundle from the frontend-build stage — OUTSIDE /app,

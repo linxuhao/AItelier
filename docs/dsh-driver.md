@@ -479,9 +479,21 @@ ACTIVE with a different objective, the runtime itself calls `goals.edit` with th
 rendered text. The goal id, phase and round counters are kept, the round cap is
 not touched, and the usual re-arm follows. Paused, blocked, completed and
 explicitly cleared goals are preserved (a cleared goal is deliberately not
-recreated); an objective that already matches is not edited again. The applied
-rendering is recorded in `goal-seed.json` (sha256, goal id, revision, time) in the
-driver state directory (`AITELIER_DSH_STATE_DIR`) and logged once.
+recreated); an objective that already matches is not edited again.
+
+`goal.md` is therefore a non-human authorization channel: whoever changes it
+rewrites every active director's mandate at the next restart. Every applied edit
+appends one line to the append-only `goal-seed.jsonl` in the driver state
+directory (`AITELIER_DSH_STATE_DIR`; the headless host shows no logger output, so
+this file is the log): `at`, `goal_id`, `old_revision`, `new_revision`,
+`old_objective_sha256`, `new_objective_sha256`, `goal_md_sha256` and
+`goal_md_commit` (the last commit touching `goal.md` in the repository the runtime
+loaded it from, else in `AITELIER_TODO_CWD`, else `unknown`). It answers "what was
+this director told at the time": hash the objective text and match it against
+`new_objective_sha256` of the latest record at or before that time (objectives are
+hashed as DSH stores them, trimmed); the previous record's new digest equals the
+next record's old digest. A restart that finds the objective already matching
+appends nothing.
 
 This has to be the runtime, not a message: the model-facing `update_goal` only
 accepts a direct human turn, and an owner message delivered through the driver

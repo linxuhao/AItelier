@@ -9,7 +9,8 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { bindDriverGoal } from './goal.mjs';
+import { execFileSync } from 'node:child_process';
+import { bindDriverGoal, goalMdCommit } from './goal.mjs';
 
 // A stateful stand-in for the native goals service: edit() bumps the revision
 // and keeps everything else, as the pinned dsh-goal does.
@@ -32,7 +33,7 @@ const active = (over = {}) => ({ id: 'g1', revision: 7, objective: 'OLD mandate'
 
 test('an active goal whose objective differs from goal.md is re-seeded in place', () => {
   const goals = fakeGoals(active()), seeded = [];
-  const view = bindDriverGoal(goals, {}, 'NEW mandate\n', { onSeed: v => seeded.push(v) });
+  const view = bindDriverGoal(goals, {}, 'NEW mandate\n', { onSeed: (after, before) => seeded.push({ after, before }) });
   // Exactly one edit carrying only the objective: the round cap is not touched.
   assert.deepEqual(goals.edits, [{ objective: 'NEW mandate\n' }]);
   assert.equal(view.id, 'g1');
@@ -45,8 +46,35 @@ test('an active goal whose objective differs from goal.md is re-seeded in place'
   assert.equal(view.activation, 'armed');
   assert.equal(view.revision, 9);
   assert.equal(seeded.length, 1);
-  assert.equal(seeded[0].id, 'g1');
-  assert.equal(seeded[0].revision, 8);
+  assert.equal(seeded[0].after.id, 'g1');
+  assert.equal(seeded[0].after.revision, 8);
+  assert.equal(seeded[0].before.revision, 7);
+  assert.equal(seeded[0].before.objective, 'OLD mandate');
+});
+
+test('goal_md_commit is the commit of goal.md, falls back to AITELIER_TODO_CWD, and is "unknown" without git', async () => {
+  const repo = await mkdtemp(join(tmpdir(), 'goalmd-repo-'));
+  const plain = await mkdtemp(join(tmpdir(), 'goalmd-plain-'));
+  try {
+    const run = (...args) => execFileSync('git', ['-C', repo, '-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { encoding: 'utf8' }).trim();
+    run('init', '-q');
+    await mkdir(join(repo, 'integrations/dsh-driver'), { recursive: true });
+    await writeFile(join(repo, 'integrations/dsh-driver/goal.md'), 'v1\n');
+    await writeFile(join(repo, 'other.txt'), 'x');
+    run('add', '.'); run('commit', '-q', '-m', 'goal');
+    const goalCommit = run('rev-parse', 'HEAD');
+    await writeFile(join(repo, 'other.txt'), 'y'); run('commit', '-q', '-am', 'unrelated');
+    const goalFile = join(repo, 'integrations/dsh-driver/goal.md');
+    assert.equal(await goalMdCommit(goalFile), goalCommit, 'must be the last commit touching goal.md, not HEAD');
+    // A copy outside any repository resolves through the configured checkout.
+    await writeFile(join(plain, 'goal.md'), 'v1\n');
+    assert.equal(await goalMdCommit(join(plain, 'goal.md')), 'unknown');
+    assert.equal(await goalMdCommit(join(plain, 'goal.md'), { cwd: repo }), goalCommit);
+    // git unavailable, a missing file, a missing directory: 'unknown', never a throw.
+    assert.equal(await goalMdCommit(goalFile, { env: { PATH: plain } }), 'unknown');
+    assert.equal(await goalMdCommit(join(repo, 'nope/goal.md')), 'unknown');
+    assert.equal(await goalMdCommit(join(plain, 'goal.md'), { cwd: join(plain, 'missing') }), 'unknown');
+  } finally { await rm(repo, { recursive: true, force: true }); await rm(plain, { recursive: true, force: true }); }
 });
 
 test('the same objective is not edited again (no revision churn)', () => {
@@ -138,8 +166,9 @@ test('real pinned DSH: restart re-seeds an active director goal from goal.md exa
     await writeFile(join(dir, 'package.json'), JSON.stringify({ private: true, dsh: { profile: { bundles: ['@deepseek-ai/dsh-base'] } } }));
     await writeFile(join(dir, 'cordis.patch.yml'), profile(variant)[1]);
   }
-  const seedFile = join(directory, 'goal-seed.json');
-  const readSeed = async () => { try { return JSON.parse(await readFile(seedFile, 'utf8')); } catch (error) { if (error.code === 'ENOENT') return undefined; throw error; } };
+  const seedFile = join(directory, 'goal-seed.jsonl');
+  const sha = text => createHash('sha256').update(text).digest('hex');
+  const readSeeds = async () => { try { return (await readFile(seedFile, 'utf8')).split('\n').filter(Boolean).map(line => JSON.parse(line)); } catch (error) { if (error.code === 'ENOENT') return []; throw error; } };
   const run = async (variant, until) => {
     activity.length = 0;
     proc = spawn(process.execPath, [entry, '--profile', 'driver-' + variant], { cwd: directory, env: { ...process.env,
@@ -164,11 +193,11 @@ test('real pinned DSH: restart re-seeds an active director goal from goal.md exa
     assert.equal(created.length, 1);
     assert.equal(created[0].data.goal.objective, 'OLD mandate for alpha');
     assert.equal(first.filter(e => e.data.operation === 'edit').length, 0);
-    assert.equal(await readSeed(), undefined, 'a plain create is not a re-seed');
+    assert.deepEqual(await readSeeds(), [], 'a plain create is not a re-seed');
     const goalId = created[0].data.goal.id;
 
     // goal.md edited + restart: the active goal follows it.
-    const secondAll = await run('new', async () => (await readSeed()) !== undefined), second = secondAll.filter(e => e.type === 'goal/change');
+    const secondAll = await run('new', async () => (await readSeeds()).length > 0), second = secondAll.filter(e => e.type === 'goal/change');
     const edits = second.filter(e => e.data.operation === 'edit');
     assert.equal(edits.length, 1, JSON.stringify(second.map(e => e.data.operation)));
     assert.equal(second.filter(e => e.data.operation === 'create').length, 1, 'goal was recreated');
@@ -181,18 +210,26 @@ test('real pinned DSH: restart re-seeds an active director goal from goal.md exa
     assert.ok(roundsBefore >= 1, 'first run should have started a goal round');
     assert.equal(edits[0].data.roundsStarted, roundsBefore);
     assert.ok(second.some(e => e.data.operation === 'resume' && e.seq > edits[0].seq), 'disarmed -> resume did not follow the edit');
-    const seed = await readSeed();
-    assert.deepEqual(Object.keys(seed).sort(), ['at', 'goal_id', 'revision', 'sha256']);
-    assert.equal(seed.sha256, createHash('sha256').update('NEW mandate for alpha\n').digest('hex'));
+    const seeds = await readSeeds();
+    assert.equal(seeds.length, 1);
+    const [seed] = seeds;
+    assert.deepEqual(Object.keys(seed).sort(), ['at', 'goal_id', 'goal_md_commit', 'goal_md_sha256', 'new_objective_sha256', 'new_revision', 'old_objective_sha256', 'old_revision']);
     assert.equal(seed.goal_id, goalId);
-    assert.equal(seed.revision, edits[0].data.goal.revision);
+    assert.equal(seed.old_objective_sha256, sha(created[0].data.goal.objective), 'old digest is the start-1 objective');
+    assert.equal(seed.old_objective_sha256, sha('OLD mandate for alpha'));
+    assert.equal(seed.new_objective_sha256, sha('NEW mandate for alpha'));
+    assert.equal(seed.new_objective_sha256, sha(edits[0].data.goal.objective));
+    assert.equal(seed.goal_md_sha256, sha('NEW mandate for {{project_id}}\n'), 'digest of the goal.md file as loaded');
+    assert.equal(seed.goal_md_commit, 'unknown', 'the copied driver is not in a git repository');
+    assert.equal(seed.new_revision, edits[0].data.goal.revision);
+    assert.ok(seed.old_revision < seed.new_revision);
     assert.ok(Number.isFinite(Date.parse(seed.at)));
     // The log line goes through ctx.logger.info, which the headless host does not echo; the record above is the observable evidence.
 
     // Restart again with the same goal.md: no further edit, the record stays.
     const third = (await run('new', idle)).filter(e => e.type === 'goal/change');
     assert.equal(third.filter(e => e.data.operation === 'edit').length, 1, 'same text was edited again');
-    assert.deepEqual(await readSeed(), seed);
+    assert.deepEqual(await readSeeds(), seeds, 'a start with unchanged goal.md must append nothing');
   } finally {
     if (proc && proc.exitCode === null) { proc.kill('SIGTERM'); await once(proc, 'exit'); }
     for (const response of parked) response.destroy();

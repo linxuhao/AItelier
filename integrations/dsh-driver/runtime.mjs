@@ -2,9 +2,10 @@
 import { historyPage } from './history.mjs';
 import { installHostModel } from './model.mjs';
 import { installToolDiscovery } from './tool-discovery.mjs';
-import { bindDriverGoal, driverGoalSection } from './goal.mjs';
+import { bindDriverGoal, driverGoalSection, goalMdCommit } from './goal.mjs';
 import { createRequire } from 'node:module';
-import { readFile, writeFile, rename, stat } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
+import { readFile, writeFile, appendFile, rename, stat } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -13,7 +14,8 @@ import { setTimeout as delay } from 'node:timers/promises';
 export const name = 'aitelier-state-driver';
 export const inject = ['agents', 'sessions', 'sessionPersistence', 'sessionQuery', 'systemPrompt', 'tools', 'compaction', 'credentials', 'llm', 'goals'];
 
-const goalTemplate = await readFile(new URL('./goal.md', import.meta.url), 'utf8');
+const goalFile = fileURLToPath(new URL('./goal.md', import.meta.url));
+const goalTemplate = await readFile(goalFile, 'utf8');
 const runtimeSkill = await readFile(new URL('./driver.md', import.meta.url), 'utf8');
 export const driverGoal = project => goalTemplate.replaceAll('{{project_id}}', project);
 export const stateInjectionSource = 'aitelier-driver-state';
@@ -651,13 +653,19 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
   });
   const objective = driverGoal(project);
   let seeded;
-  const goal = bindDriverGoal(ctx.goals, agent, objective, { onSeed: view => { seeded = view; } });
+  const goal = bindDriverGoal(ctx.goals, agent, objective, { onSeed: (after, before) => { seeded = { after, before }; } });
   if (seeded) {
-    const sha256 = createHash('sha256').update(objective).digest('hex');
-    ctx.logger.info(`director goal ${seeded.id} re-seeded from goal.md (sha256 ${sha256.slice(0, 12)}, revision ${seeded.revision})`);
-    const file = join(env.AITELIER_DSH_STATE_DIR, 'goal-seed.json');
-    await writeFile(file + '.tmp', JSON.stringify({ sha256, goal_id: seeded.id, revision: seeded.revision, at: new Date().toISOString() }), { mode: 0o600 });
-    await rename(file + '.tmp', file);
+    // goal.md is a non-human authorization channel: every applied rewrite of a
+    // mandate leaves a durable, append-only trace (the headless host shows no
+    // logger output). Digests are of the stored (trimmed) objectives, so one
+    // record's new digest is the next record's old digest.
+    const sha = text => createHash('sha256').update(text).digest('hex');
+    const { after, before } = seeded;
+    const record = { at: new Date().toISOString(), goal_id: after.id, old_revision: before.revision, new_revision: after.revision,
+      old_objective_sha256: sha(before.objective), new_objective_sha256: sha(after.objective),
+      goal_md_sha256: sha(goalTemplate), goal_md_commit: await goalMdCommit(goalFile, { cwd: env.AITELIER_TODO_CWD }) };
+    ctx.logger.info(`director goal ${after.id} re-seeded from goal.md: ${JSON.stringify(record)}`);
+    await appendFile(join(env.AITELIER_DSH_STATE_DIR, 'goal-seed.jsonl'), JSON.stringify(record) + '\n', { mode: 0o600 });
   }
   await ctx.sessionPersistence.flush();
   if (pendingInbox && (goal?.phase !== 'active' || goal.activation !== 'armed')) deliverInbox();

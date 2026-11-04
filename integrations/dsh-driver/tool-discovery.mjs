@@ -1,16 +1,18 @@
 /** Keep MCP schemas in the registry, outside ordinary model requests. */
 const metaTools = new Set(['search_tools', 'call_tool', 'run_code']);
-/** State writes only the director (the root session) may make. In the real
- *  aitelier MCP server they are `action` values of ONE tool, state_graph_write;
- *  the bare names are refused too in case a server ever exposes them. */
-export const directorOnlyActions = new Set(['record_evidence', 'verify_node', 'report_external_attempt',
-  'start_external_attempt', 'claim_node']);
-const directorOnlyTools = new Set([...directorOnlyActions].map(name => 'mcp__aitelier__' + name));
+/** State writes from a subagent: in the real aitelier MCP server every write is
+ *  an `action` of ONE tool, state_graph_write. A non-root session may use only
+ *  the allowlisted actions; everything else (and a missing/non-string action) is
+ *  the director's. The judging writes are also refused as bare tool names in
+ *  case a server ever exposes them. */
+export const childWriteActions = new Set(['report_issue', 'send_driver_message']);
+const directorOnlyTools = new Set(['record_evidence', 'verify_node', 'report_external_attempt',
+  'start_external_attempt', 'claim_node'].map(name => 'mcp__aitelier__' + name));
 const stateWriteTool = 'mcp__aitelier__state_graph_write';
-export const workerJudgeRule = 'workers do not judge their own work; the director records State evidence';
-/** Fails closed: a state_graph_write without a string action is refused too. */
-const directorOnly = exec => directorOnlyTools.has(exec.name) || (exec.name === stateWriteTool
-  && (typeof exec.arguments?.action !== 'string' || directorOnlyActions.has(exec.arguments.action)));
+export const workerJudgeRule = 'workers do not judge their own work; the director records State evidence'
+  + ` (a subagent may only state_graph_write ${[...childWriteActions].join(' or ')})`;
+const directorOnly = exec => directorOnlyTools.has(exec.name)
+  || (exec.name === stateWriteTool && !childWriteActions.has(exec.arguments?.action));
 
 export function searchTools(schemas, query, limit = 5) {
   const needle = query.trim().toLocaleLowerCase();

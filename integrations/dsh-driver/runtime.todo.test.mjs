@@ -193,6 +193,7 @@ const scripts = {
     ...['record_evidence', 'verify_node', 'report_external_attempt'].map(action =>
       tool('full-judge-' + action, 'call_tool', { name: 'mcp__aitelier__state_graph_write', arguments: { action, arguments: { attempt_id: plans.a.attempt_id } } })),
     tool('full-write-report_issue', 'call_tool', { name: 'mcp__aitelier__state_graph_write', arguments: { action: 'report_issue', arguments: { title: 'worker observation' } } }),
+    tool('full-write-resolve_issue', 'call_tool', { name: 'mcp__aitelier__state_graph_write', arguments: { action: 'resolve_issue', arguments: { issue_id: 'iss-1' } } }),
     tool('full-todo_status-start', 'todo_status', { attempt_id: plans.a.attempt_id }),
     ...work('full', plans.a, ['implement']),
     'COMPACT',
@@ -434,8 +435,8 @@ test('real pinned DSH: plans walked by native children, runtime handback, State-
     assert.deepEqual(handback.remaining, ['deliver']);
     assert.deepEqual(Object.keys(handback.last_observations), ['deliver']);
 
-    // 3. A child cannot judge its own work through state_graph_write; the root can,
-    // and other writes stay open to the child.
+    // 3. A child cannot judge its own work through state_graph_write; the root can.
+    // Workers get an allowlist: report_issue passes, resolve_issue does not.
     for (const action of ['record_evidence', 'verify_node', 'report_external_attempt']) {
       const refused = result('full-judge-' + action);
       assert.equal(refused.session, full); assert.equal(refused.event.data.message.isError, true);
@@ -444,6 +445,9 @@ test('real pinned DSH: plans walked by native children, runtime handback, State-
     const rootJudge = result('root-judge-record_evidence');
     assert.equal(rootJudge.event.data.message.isError, false); assert.match(toolText(rootJudge.event), /fixture_state_write_ok/);
     assert.equal(result('full-write-report_issue').event.data.message.isError, false);
+    const resolve = result('full-write-resolve_issue').event;
+    assert.equal(resolve.data.message.isError, true, 'a worker resolved an issue');
+    assert.match(toolText(resolve), /may only state_graph_write report_issue or send_driver_message/);
     assert.deepEqual(mcpCalls.sort(), ['state_graph_write:record_evidence', 'state_graph_write:report_issue'], 'a refused State write reached the server');
 
     // 3b. The real idle review (short interval) names the unfinished plan with no live child.

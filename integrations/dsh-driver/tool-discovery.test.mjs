@@ -140,7 +140,15 @@ test('State writers are refused for any non-root session, through call_tool or d
   refusedFor(await call('call_tool',{name:'mcp__aitelier__state_graph_write',arguments:{arguments:{}}},child));
   refusedFor(await call('call_tool',write(7),child));
   refusedFor(await call('call_tool',{name:'mcp__aitelier__record_evidence',arguments:{}},child));
-  assert.equal((await call('call_tool',write('report_issue'),child)).isError,false, 'other writes stay open to workers');
-  assert.deepEqual(executed.filter(([, session]) => session === 'child').map(([action]) => action), ['report_issue']);
-  assert.equal(executed.filter(([, session]) => session === 'root').length, 5);
+  // An allowlist, not a denylist: any action not named is the director's.
+  for (const action of ['resolve_issue', 'take_over_claim', 'take_over_attempt', 'abandon_external_attempt', 'release_claim',
+    'heartbeat', 'revise_node', 'add_nodes', 'link_issue', 'declare_driver_presence', 'some_future_action']) {
+    const result = await call('call_tool',write(action),child);
+    refusedFor(result); assert.match(JSON.stringify(result.content),/report_issue or send_driver_message/);
+    assert.equal((await call('call_tool',write(action),root)).isError,false);
+  }
+  for (const action of ['report_issue', 'send_driver_message'])
+    assert.equal((await call('call_tool',write(action),child)).isError,false, action + ' is allowlisted for workers');
+  assert.deepEqual(executed.filter(([, session]) => session === 'child').map(([action]) => action), ['report_issue', 'send_driver_message']);
+  assert.equal(executed.filter(([, session]) => session === 'root').length, 16);
 }));

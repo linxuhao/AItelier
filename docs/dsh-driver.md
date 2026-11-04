@@ -376,18 +376,27 @@ DSH's own `todo_write` (from `dsh-base`) stays visible to the root and children.
 It is a private checklist with no harness behind it; the plan's `todo_*` tools are
 the work contract and the only progress the director sees.
 
-Workers do not judge their own work. In the real `aitelier` MCP server the State
-writes are `action` values of one tool, `mcp__aitelier__state_graph_write`. For
-every session other than the root, a tool guard installed by tool discovery
-refuses `state_graph_write` whose `action` is `record_evidence`, `verify_node`,
-`report_external_attempt`, `start_external_attempt` or `claim_node`, and refuses
-it when `action` is missing or not a string. The same five names are also refused
-as bare tool names in case a server ever exposes them. The guard applies through
-`call_tool` and to direct calls, with the message “workers do not judge their own
-work; the director records State evidence”. Other actions stay open to workers,
-and the root keeps all of them. This is a rule on the tool surface, not a security
-boundary. A child's bash inherits the driver token (`AITELIER_DRIVER_TOKEN`,
-`AITELIER_DRIVER_TOKEN_FILE`), so a direct HTTP call to the State API is not
+Workers do not judge their own work. In the real `aitelier` MCP server every
+State write is an `action` value of one tool, `mcp__aitelier__state_graph_write`.
+For every session other than the root, a tool guard installed by tool discovery
+applies an allowlist. `state_graph_write` is allowed only with `action`
+`report_issue` or `send_driver_message`. Every other action is refused, as is a
+missing or non-string `action`. Refused actions include:
+
+- `record_evidence`, `verify_node`, `report_external_attempt`, `start_external_attempt`, `claim_node`;
+- `take_over_claim`, `take_over_attempt`, `abandon_external_attempt`, `release_claim`, `heartbeat`;
+- `revise_node`, `add_nodes`, `link_issue`, `resolve_issue`, `declare_driver_presence`;
+- any action added later.
+
+The five judging writes are also refused as bare tool names in case a server ever
+exposes them. The guard applies through `call_tool` and to direct calls. Its
+message is “workers do not judge their own work; the director records State
+evidence (a subagent may only state_graph_write report_issue or
+send_driver_message)”. The root is unchanged and keeps every action.
+
+This is a rule on the tool surface, not a security boundary. A child's bash
+inherits the driver token (`AITELIER_DRIVER_TOKEN`, `AITELIER_DRIVER_TOKEN_FILE`),
+so a direct HTTP call to the State API is not
 covered. Per-child tokens are a separate owner decision (design D9).
 
 Handback is produced by the runtime, not by the child's last message. When a

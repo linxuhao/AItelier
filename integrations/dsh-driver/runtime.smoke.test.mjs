@@ -223,7 +223,7 @@ test('real pinned DSH default host adapter calls the authenticated completion br
   const entry = await realpath(process.env.AITELIER_DSH_TEST_ENTRY ?? new URL('./node_modules/.bin/dsh', import.meta.url));
   const here = dirname(fileURLToPath(import.meta.url));
   const completions = [], activity = [];
-  let output = '', proc, inboxWait, replied = false, call = 0, heldCompletion, waitRequests = 0;
+  let output = '', proc, inboxWait, replied = false, call = 0, heldCompletion, waitRequests = 0, failNext = false;
   const server = createServer(async (req, res) => {
     const chunks = []; for await (const chunk of req) chunks.push(chunk);
     const body = chunks.length ? JSON.parse(Buffer.concat(chunks)) : {};
@@ -243,13 +243,15 @@ test('real pinned DSH default host adapter calls the authenticated completion br
     if (req.url.endsWith('/completion')) {
       assert.equal(req.headers['x-aitelier-driver-token'], 'fixture-only');
       completions.push(body);
+      if(failNext){failNext=false;res.statusCode=400;return send({detail:'fixture completion failure'});}
       const hasDriver = body.tools?.some(t => t.function.name === 'state_read');
       assert.ok(!body.tools?.some(t=>t.function.name==='wait'),'manual wait schema leaked');
       const human = hasDriver && JSON.stringify(body.messages).includes('HUMAN_MESSAGE_MARKER');
       const second = hasDriver && JSON.stringify(body.messages).includes('HUMAN_SECOND_MESSAGE');
       const issue = hasDriver && JSON.stringify(body.messages).includes('ISSUE_NOTIFICATION_MARKER');
+      const recovered = hasDriver && JSON.stringify(body.messages).includes('RECOVERY_NOTIFICATION_MARKER');
       if (human) replied = true;
-      const reply = { text: issue ? 'ISSUE_HANDLED_MARKER' : second ? 'HUMAN_SECOND_REPLY' : human ? 'HUMAN_REPLY_MARKER' : hasDriver ? 'Idle director.' : 'Fixture title', reasoning_content: 'ready', truncated: false,
+      const reply = { text: recovered ? 'RECOVERED_REPLY_MARKER' : issue ? 'ISSUE_HANDLED_MARKER' : second ? 'HUMAN_SECOND_REPLY' : human ? 'HUMAN_REPLY_MARKER' : hasDriver ? 'Idle director.' : 'Fixture title', reasoning_content: 'ready', truncated: false,
         tool_calls: [],
         usage: { prompt_tokens: 100, completion_tokens: 10 } };
       if (human && !second) { heldCompletion = () => send(reply); return; }
@@ -318,6 +320,29 @@ test('real pinned DSH default host adapter calls the authenticated completion br
     const stateEvents = activity.filter(a => a.event?.type === 'user/message' && JSON.parse(a.event.text).source?.kind === stateInjectionSource);
     assert.equal(stateEvents.length, 1, 'ordinary inbox messages duplicated the initial State snapshot');
     assert.ok(!activity.some(a => a.phase === 'failed'), JSON.stringify(activity));
+    // Model failures must stay visible across successful empty subscription
+    // replies, then recover when a later notification starts a successful turn.
+    failNext=true;
+    inboxWait.setHeader('content-type','application/json');
+    inboxWait.end(JSON.stringify({timed_out:false,next_after:3,next_inbox_after:2,
+      events:[{seq:3,event_type:'node_revised',payload:{reason:'trigger one failed completion'}}]}));
+    const failedBy=Date.now()+4000;
+    while(Date.now()<failedBy&&!activity.some(a=>a.phase==='failed'&&a.error?.includes('fixture completion failure')))await new Promise(resolve=>setTimeout(resolve,25));
+    assert.ok(activity.some(a=>a.phase==='failed'&&a.error?.includes('fixture completion failure')),'model failure was not reported');
+    await new Promise(resolve=>setTimeout(resolve,100));
+    assert.equal(activity.at(-1).phase,'failed','idle event hid a model failure');
+    const oldWait=inboxWait;
+    oldWait.setHeader('content-type','application/json');oldWait.end(JSON.stringify({timed_out:true,next_after:3,next_inbox_after:2}));
+    while(Date.now()<failedBy&&inboxWait===oldWait)await new Promise(resolve=>setTimeout(resolve,25));
+    assert.equal(activity.at(-1).phase,'failed','an empty subscription reply hid the model failure');
+    inboxWait.setHeader('content-type','application/json');
+    inboxWait.end(JSON.stringify({timed_out:false,next_after:4,next_inbox_after:2,
+      events:[{seq:4,event_type:'issue_reported',payload:{issue_id:'iss-recover',title:'RECOVERY_NOTIFICATION_MARKER'}}]}));
+    const recoveredBy=Date.now()+4000;
+    while(Date.now()<recoveredBy&&!activity.some(a=>a.event?.text.includes('RECOVERED_REPLY_MARKER')))await new Promise(resolve=>setTimeout(resolve,25));
+    assert.ok(activity.some(a=>a.event?.text.includes('RECOVERED_REPLY_MARKER')),'later notification did not recover the idle failed agent');
+    await new Promise(resolve=>setTimeout(resolve,100));
+    assert.equal(activity.at(-1).phase,'waiting');assert.equal(activity.at(-1).error,'');
   } finally {
     if (proc?.exitCode === null) { proc.kill('SIGTERM'); await once(proc, 'exit'); }
     server.closeAllConnections(); await new Promise(resolve => server.close(resolve));

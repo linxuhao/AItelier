@@ -68,9 +68,9 @@ export class StateInjection {
     this.session.append('user/message', message, { surfaceOp: 'append' });
   }
 }
-export function connectionErrorMessage(error) {
+export function connectionErrorMessage(error, source = 'AItelier event subscription') {
   const cause = error.cause;
-  return `AItelier event subscription: ${error.message}${cause ? ` (${[cause.code, cause.message].filter(Boolean).join(': ')})` : ''}`.slice(0, 2000);
+  return `${source}: ${error.message}${cause ? ` (${[cause.code, cause.message].filter(Boolean).join(': ')})` : ''}`.slice(0, 2000);
 }
 
 /** The resident runtime owns idle time; the model never holds a wait tool open. */
@@ -256,8 +256,10 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
   const schema = await request('/api/state/schema');
   const subagents = new Set();
   let agent, agentCtx, waiting = false, disposed = false;
+  let subscriptionError = '', completionError = '';
   let activity = Promise.resolve();
-  const report = (phase, error = '', event) => {
+  const currentPhase = () => completionError ? 'failed' : waiting ? 'waiting' : 'running';
+  const report = (phase, error = completionError || subscriptionError, event) => {
     const body = { phase, subagents: [...subagents], error, ...(event ? { event } : {}) };
     activity = activity.catch(() => {}).then(() => request(`/api/dsh-drivers/${encodeURIComponent(project)}/activity`,
       body));
@@ -279,11 +281,11 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
     project_id: project, protocol_version: 'v3', statuses: ['unread', 'acknowledged'], limit: 20,
   });
   runtime.onConnectionError = async error => {
-    const detail = connectionErrorMessage(error);
-    ctx.logger.warn(detail);
-    await report(waiting ? 'waiting' : 'running', detail).catch(() => {});
+    subscriptionError = connectionErrorMessage(error);
+    ctx.logger.warn(subscriptionError);
+    await report(currentPhase()).catch(() => {});
   };
-  runtime.onConnectionRestored = () => report(waiting ? 'waiting' : 'running');
+  runtime.onConnectionRestored = () => { subscriptionError = ''; return report(currentPhase()); };
   runtime.onEvent = async result => {
     // Steering starts an idle agent or queues input at the next active step.
     // Queue into the durable DSH inbox before committing the State cursor. An
@@ -379,7 +381,7 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
     if (subject !== agent || disposed) return;
     idleReview.statusChanged(status);
     waiting = status === 'idle';
-    void report(waiting ? 'waiting' : 'running');
+    void report(currentPhase());
   });
   if (hostExecution) {
     // Resume preserves old pinned policy. Change it through DSH's durable API;
@@ -388,14 +390,19 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
   }
   ctx.on('session/event', (session, event) => {
     if (session !== agent.session) return;
+    if (event.type === 'assistant/message') completionError = '';
     const entry = historyPage([event], { limit: 1 }).entries[0];
-    if (entry) void report(waiting ? 'waiting' : 'running', '', entry);
+    if (entry) void report(currentPhase(), undefined, entry);
   });
   // Observe nested native children too: all activity belongs to this private
   // per-DAG process, so no cross-project worker can enter these counts.
-  ctx.on('subagent/start', info => { subagents.add(info.runId); void report(waiting ? 'waiting' : 'running'); });
-  ctx.on('subagent/end', info => { subagents.delete(info.runId); void report(waiting ? 'waiting' : 'running'); });
-  ctx.on('agent/error', ({ agent: subject, error }) => { if (subject === agent) void report('failed', String(error).slice(0, 2000)); });
+  ctx.on('subagent/start', info => { subagents.add(info.runId); void report(currentPhase()); });
+  ctx.on('subagent/end', info => { subagents.delete(info.runId); void report(currentPhase()); });
+  ctx.on('agent/error', ({ agent: subject, error }) => {
+    if (subject !== agent) return;
+    completionError = connectionErrorMessage(error, 'AItelier model completion');
+    void report('failed');
+  });
   const close = async () => {
     if (disposed) return;
     disposed = true;

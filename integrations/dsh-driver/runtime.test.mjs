@@ -6,6 +6,11 @@ import { join } from 'node:path';
 import { DriverRuntime, StateInjection, stateInjectionSource, runtimeEventSource, eventCarriesSomething, grepHistory, connectionErrorMessage, driverGoal } from './runtime.mjs';
 import { bindDriverGoal, driverGoalSection } from './goal.mjs';
 
+test('an explicitly cleared native goal is not recreated on resident restart', () => {
+  const agent={session:{snapshotEvents:()=>[{type:'goal/change',data:{operation:'clear'}}]}};
+  assert.equal(bindDriverGoal({get:()=>undefined},agent,'bootstrap template'),undefined);
+});
+
 test('resident restart preserves stopped or already armed goals and edited objectives', () => {
   for (const phase of ['paused', 'blocked', 'complete', 'active']) {
     const current = {id:'kept',revision:7,objective:'owner-edited objective',phase,activation:'armed'};

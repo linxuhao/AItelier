@@ -187,7 +187,7 @@ keep their assigned task instead of inheriting the director's goal.
 
 Session resume preserves goal identity, objective, counters and the existing
 project snapshot. The enabled resident host explicitly re-arms an active goal
-after restart, while paused, blocked and completed goals remain unchanged.
+after restart, while paused, blocked, completed and explicitly cleared goals remain unchanged.
 Native round limits remain in force; restart does not reset them or bypass a
 blocker. No additional goal store or scheduler is introduced. The director
 maintains State/note/inboxes, checks issues and unfinished delivery beyond the

@@ -5,7 +5,7 @@ Your native DSH goal holds the project director mandate. The driver-goal system
 section reads that durable goal, so its objective remains visible after compact.
 Use get_goal to inspect it; do not replace it with each incoming task. An active
 goal continues through native goal rounds after a final reply. Explicitly paused,
-blocked or completed goals keep their state across restart.
+blocked, completed or cleared goals keep their state across restart.
 Follow the injected execution environment. In the host runtime, the driver and
 native subagents have danger-full-access with approval never: use native file
 and bash tools directly for coding, Git integration/push and Docker. Each writer

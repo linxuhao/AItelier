@@ -336,3 +336,31 @@ def test_the_rescan_answer_exposes_only_the_watermark_and_it_is_the_overviews_ev
     assert answer == "rescan" and json.dumps(answer) == '"rescan"'
     assert read == {("state_events", "seq"), ("state_events", "project_id")}, sorted(read)
     assert wait_disposition(service.store, "p", watermark, None, None, None) != "rescan"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("filters", [{}, {"node_keys": ["a"]}])
+async def test_new_project_issue_wakes_state_subscription_once(service, filters):
+    service.create_project("q", "Other project")
+    after = service.store.events("p")[-1]["seq"]
+    waiting = asyncio.create_task(service.wait_for_state_change(
+        "p", after=after, timeout_seconds=2, **filters))
+    await asyncio.sleep(.02)
+    args = {"request_key": "notification", "kind": "defect", "title": "New issue notification",
+            "body": "Measured failure", "director_identity": "test-director"}
+    execute(service, "report_issue", {**args, "project_id": "q"}, allow_write=True)
+    await asyncio.sleep(.02)
+    assert not waiting.done(), "another project's issue woke this DAG"
+    issue = execute(service, "report_issue", {**args, "project_id": "p"}, allow_write=True)
+    result = await asyncio.wait_for(waiting, 1)
+    assert not result["timed_out"]
+    assert len(result["events"]) == 1
+    event = result["events"][0]
+    assert event["event_type"] == "issue_reported"
+    assert event["payload"]["issue_id"] == issue["issue_id"]
+    assert event["payload"]["title"] == args["title"]
+    again = execute(service, "report_issue", {**args, "project_id": "p"}, allow_write=True)
+    assert again["created"] is False
+    empty = await service.wait_for_state_change(
+        "p", after=result["next_after"], timeout_seconds=0, **filters)
+    assert empty["timed_out"] and empty["events"] == []

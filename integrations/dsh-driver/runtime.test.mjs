@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DriverRuntime, StateInjection, stateInjectionSource, runtimeEventSource, eventCarriesSomething, grepHistory, connectionErrorMessage, driverGoal } from './runtime.mjs';
+import { DriverRuntime, IdleReview, StateInjection, stateInjectionSource, runtimeEventSource, eventCarriesSomething, grepHistory, connectionErrorMessage, driverGoal } from './runtime.mjs';
 import { bindDriverGoal, driverGoalSection } from './goal.mjs';
 
 test('an explicitly cleared native goal is not recreated on resident restart', () => {
@@ -144,19 +144,32 @@ test('timeouts stay inside runtime; a combined event advances both durable curso
     request: async path => path.endsWith('/me') ? { driver_id: 'driver-a' } : snapshot('PENDING') });
   await restored.init(); assert.equal(restored.after, 12); assert.equal(restored.inboxAfter, 7);
 }));
-test('wait wakes on native child messages and is cancellation safe', async () => fixture(async directory => {
-  let pending = [];
-  const r = new DriverRuntime({ directory, pendingInputs: () => pending });
-  const waiting = r.wait();
-  pending = [{ reason: 'native_input_pending', message_id: 'child-message' }]; r.wake();
-  assert.deepEqual(await waiting, pending);
-  pending = [];
-  const stop = new AbortController();
-  const cancelled = r.wait(stop.signal); stop.abort(new Error('cancelled'));
-  await assert.rejects(cancelled, /cancelled/);
-  assert.equal(r.waiters.size, 0);
-  const closing = r.wait(); r.close(); await assert.rejects(closing, /stopped/);
-}));
+test('runtime parks native continuation, reviews idle active goals, and cancels reviews during work or shutdown', async t => {
+  t.mock.timers.enable({apis:['setTimeout']});
+  const agent={status:'idle'},goal={id:'kept',phase:'active',activation:'armed',roundsStarted:4};
+  let reviews=0;
+  const review=new IdleReview({agent,goals:{get:()=>goal,disarm:()=>{goal.activation='disarmed';}},intervalMs:100,
+    notify:()=>{reviews++;agent.status='running';review.statusChanged('running');},onError:error=>{throw error;}});
+  review.statusChanged('idle');
+  assert.equal(goal.phase,'active');assert.equal(goal.activation,'disarmed');assert.equal(goal.roundsStarted,4);
+  t.mock.timers.tick(99);await Promise.resolve();assert.equal(reviews,0);
+  agent.status='running';review.statusChanged('running');
+  t.mock.timers.tick(500);await Promise.resolve();assert.equal(reviews,0);
+  agent.status='idle';review.statusChanged('idle');
+  t.mock.timers.tick(100);await Promise.resolve();assert.equal(reviews,1);
+  agent.status='idle';review.statusChanged('idle');review.close();
+  t.mock.timers.tick(500);await Promise.resolve();assert.equal(reviews,1);
+});
+test('idle review respects explicit stopped and cleared goal states', async t => {
+  t.mock.timers.enable({apis:['setTimeout']});
+  let reviews=0;
+  for(const phase of ['paused','blocked','complete',undefined]){
+    const review=new IdleReview({agent:{status:'idle'},goals:{get:()=>phase?{phase}:undefined,disarm:()=>{}},
+      intervalMs:10,notify:()=>{reviews++;},onError:error=>{throw error;}});
+    review.statusChanged('idle');t.mock.timers.tick(100);await Promise.resolve();review.close();
+  }
+  assert.equal(reviews,0);
+});
 test('subscription reconnects without a model turn and never retries a revoked token', async () => fixture(async directory => {
   let waits = 0, failures = 0, delivered = 0, restored = 0;
   const r = new DriverRuntime({ project:'alpha', driver:'driver-a', directory, retryDelayMs:1,
@@ -211,23 +224,20 @@ test('history grep includes precompact events, exact citations, regex and pagina
   assert.equal(long.matches[0].matches[0].truncated, true);
 });
 
-test('old notifications and consumed inputs never become future wait credits', async () => fixture(async directory => {
-  let pending = [];
-  const r = new DriverRuntime({ directory, pendingInputs: () => pending });
-  r.wake(); // Bootstrap input was already claimed before the model called wait.
-  pending = [{reason:'native_input_pending', message_id:'state-1'}]; r.wake();
-  pending = []; // Native pre-step claimed the State update during active work.
-  const abort = new AbortController();
-  let returned = false;
-  const waiting = r.wait(abort.signal).then(() => { returned = true; });
-  r.wake(); // An empty notification while blocked must recheck and stay blocked.
-  await new Promise(resolve => setTimeout(resolve, 15));
-  assert.equal(returned, false);
-  pending = [{reason:'native_input_pending', message_id:'real-new-input'}]; r.wake();
-  await waiting; assert.equal(returned, true);
-  pending = [];
-  const blocked = r.wait(abort.signal); abort.abort(new Error('end fixture'));
-  await assert.rejects(blocked, /end fixture/);
+test('project issue notification is delivered without a model wait and retains its durable cursor', async () => fixture(async directory => {
+  let reads=0;const delivered=[];
+  const issue={seq:12,project_id:'alpha',event_type:'issue_reported',payload:{issue_id:'iss-new',title:'A real defect',kind:'defect'}};
+  const runtime=new DriverRuntime({directory,project:'alpha',
+    request:async(path,args)=>{
+      if(path.endsWith('/heartbeat'))return {};
+      assert.equal(args.project_id,'alpha');
+      if(++reads===1)return {timed_out:true,events:[],next_after:11,next_inbox_after:0};
+      if(reads===2)return {timed_out:false,events:[issue],next_after:12,next_inbox_after:0};
+      runtime.close();throw new Error('done');
+    },onEvent:async value=>{delivered.push(value);}});
+  await assert.rejects(runtime.pump(),/done/);
+  assert.equal(delivered.length,1);assert.deepEqual(delivered[0].events,[issue]);
+  assert.equal(JSON.parse(await readFile(join(directory,'cursor.json'),'utf8')).after,12);
 }));
 
 test('empty/resolved inbox replies advance cursors without model turns', async () => fixture(async directory => {

@@ -25,7 +25,7 @@ export const runtimeEventSource = 'aitelier-runtime-event';
  *  A tick with no events, no driver inbox items and no project inbox is a
  *  heartbeat: steering it still creates a user message, so the harness reports
  *  pending input and the driver spends a turn on nothing. A driver woken with an
- *  empty payload either loops on wait() or learns to distrust wakes.
+ *  empty payload either spins or learns to distrust notifications.
  *  @param result - one `/wait` payload.
  *  @returns true when there is something to read.
  */
@@ -73,6 +73,28 @@ export function connectionErrorMessage(error) {
   return `AItelier event subscription: ${error.message}${cause ? ` (${[cause.code, cause.message].filter(Boolean).join(': ')})` : ''}`.slice(0, 2000);
 }
 
+/** The resident runtime owns idle time; the model never holds a wait tool open. */
+export class IdleReview {
+  constructor({ agent, goals, notify, onError, intervalMs = 15 * 60 * 1000 }) {
+    Object.assign(this, { agent, goals, notify, onError, intervalMs });
+    this.closed = false;
+  }
+  statusChanged(status) {
+    clearTimeout(this.timer);
+    if (this.closed || status !== 'idle') return;
+    // Keep the durable mandate active, while parking immediate native rounds.
+    // Incoming steering and native child messages still wake an idle agent.
+    this.goals.disarm(this.agent);
+    if (this.goals.get(this.agent)?.phase !== 'active') return;
+    this.timer = setTimeout(() => {
+      if (this.closed || this.agent.status !== 'idle' || this.goals.get(this.agent)?.phase !== 'active') return;
+      Promise.resolve().then(this.notify).catch(this.onError);
+    }, this.intervalMs);
+    this.timer.unref?.();
+  }
+  close() { this.closed = true; clearTimeout(this.timer); }
+}
+
 /** Grep the immutable raw log, including events shadowed by compaction. */
 export function grepHistory(events, pattern, { regex = false, ignore_case = false, after_seq = -1, limit = 20 } = {}) {
   if (!pattern) throw new Error('pattern must not be empty');
@@ -100,13 +122,12 @@ export function grepHistory(events, pattern, { regex = false, ignore_case = fals
 // Pure transport/state controller is separate so the actual wait/refresh logic
 // is exercised without making model calls.
 export class DriverRuntime {
-  constructor({ project, driver, directory, request, onEvent = () => {}, onConnectionError = () => {}, onConnectionRestored = () => {}, retryDelayMs = 1000, pendingInputs = () => [] }) {
-    Object.assign(this, { project, driver, directory, request, onEvent, onConnectionError, onConnectionRestored, retryDelayMs, pendingInputs });
+  constructor({ project, driver, directory, request, onEvent = () => {}, onConnectionError = () => {}, onConnectionRestored = () => {}, retryDelayMs = 1000 }) {
+    Object.assign(this, { project, driver, directory, request, onEvent, onConnectionError, onConnectionRestored, retryDelayMs });
     this.after = 0;
     this.inboxAfter = 0;
     this.snapshot = null;
     this.dirty = true;
-    this.waiters = new Set();
     this.controller = new AbortController();
     this.lastHeartbeat = 0;
     this.connectionLost = false;
@@ -132,30 +153,6 @@ export class DriverRuntime {
     return JSON.stringify({ project_id: this.project, driver_id: this.driver,
       nodes: this.snapshot.nodes, project_note: this.snapshot.project_note,
       private_note: this.snapshot.private_note });
-  }
-  wake() {
-    // A notification is an edge, not durable work. DSH owns the pending input.
-    for (const resolve of this.waiters) resolve();
-  }
-  async wait(signal) {
-    while (true) {
-      if (signal?.aborted) throw signal.reason;
-      if (this.controller.signal.aborted) throw this.controller.signal.reason;
-      const pending = this.pendingInputs();
-      if (pending.length) return pending;
-      await new Promise((resolve, reject) => {
-        const done = () => { cleanup(); resolve(); };
-        const abort = () => { cleanup(); reject(signal?.aborted ? signal.reason : this.controller.signal.reason); };
-        const cleanup = () => {
-          this.waiters.delete(done);
-          signal?.removeEventListener('abort', abort);
-          this.controller.signal.removeEventListener('abort', abort);
-        };
-        this.waiters.add(done);
-        signal?.addEventListener('abort', abort, { once: true });
-        this.controller.signal.addEventListener('abort', abort, { once: true });
-      });
-    }
   }
   async pump() {
     while (!this.controller.signal.aborted) {
@@ -273,6 +270,11 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
   // mistaken for an unanswered message. DSH's MessageSourceMap is merge-extensible
   // (each producer declares its own kind, consumers fall through unknown ones).
   const eventMessage = text => createUserMessage({ content: [{ type: 'text', text }], source: { kind: runtimeEventSource } });
+  const notify = async text => {
+    if (disposed) return;
+    ctx.agents.withoutInitiator(() => agent.steer(eventMessage(text)));
+    await ctx.sessionPersistence.flush();
+  };
   const projectInbox = () => request('/api/state/query/list_director_messages', {
     project_id: project, protocol_version: 'v3', statuses: ['unread', 'acknowledged'], limit: 20,
   });
@@ -283,17 +285,16 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
   };
   runtime.onConnectionRestored = () => report(waiting ? 'waiting' : 'running');
   runtime.onEvent = async result => {
-    // Steer at the next step: a resident turn can remain in wait() indefinitely.
+    // Steering starts an idle agent or queues input at the next active step.
     // Queue into the durable DSH inbox before committing the State cursor. An
     // interrupted delivery is replayed, never silently skipped.
     const inbox = result.events?.some(e => e.event_type === 'director_message_received') ? await projectInbox() : undefined;
     // A tick that carries nothing is not worth a turn. Steering it still wakes
     // the driver (the message exists, so the harness reports pending input), and
-    // a driver woken with an empty payload either loops on wait() or learns to
+    // a driver woken with an empty payload either spins or learns to
     // ignore wakes - both are worse than not being woken.
     if (!eventCarriesSomething({ ...result, project_inbox: inbox })) return;
-    agent.steer(eventMessage('AItelier runtime event:\n' + JSON.stringify({ ...result, project_inbox: inbox })));
-    await ctx.sessionPersistence.flush();
+    await notify('AItelier runtime event:\n' + JSON.stringify({ ...result, project_inbox: inbox }));
   };
   const setup = async (scope, subject) => {
     agentCtx = scope;
@@ -320,31 +321,16 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
       await injection.beforeRequest();
       return config;
     });
-    runtime.pendingInputs = () => subject.inbox.nextStep.map(input => ({
-      reason: 'native_input_pending', message_id: input.id, source_kind: input.source.kind,
-    }));
-    scope.on('agent/inbox/inserted', () => runtime.wake());
-    scope.tools.register(defineTool({ name: 'wait',
-      description: 'Wait for pending native input from State, driver inbox or subagents. Returns queued message IDs; the next step includes those messages. Runtime owns subscriptions and timeouts.',
-      parameters: {},
-      output: { schema: { type: 'json' }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
-      async execute(_args, exec) {
-        waiting = true; await report('waiting');
-        try { return await runtime.wait(exec.signal); }
-        finally { waiting = false; if (!disposed) await report('running'); }
-      },
-    }));
-    // The external-client waits stay on the server. The resident driver sees
-    // only wait(), including when it works through PTC mode.
+    // The runtime owns subscriptions; model-facing manual waits stay hidden.
     const hidden = ['state_graph_read', 'wait_for_run', 'wait_for_driver_inbox']
       .map(n => 'mcp__aitelier__' + n).filter(n => scope.tools.get(n));
     if (hidden.length) scope.tools.restrict({ deny: hidden });
     scope.tools.register(defineTool({ name: 'state_read',
-      description: 'Query State. Use state_graph_help for action schemas. Current project_id is supplied when omitted. Use wait() for event waits.',
+      description: 'Query State. Use state_graph_help for action schemas. Current project_id is supplied when omitted. Runtime delivers event notifications automatically.',
       parameters: { action: { type: 'string', required: true }, arguments: { type: 'object', additionalProperties: true } },
       output: { schema: { type: 'json' }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
       async execute(args, exec) {
-        if (['wait_for_state_change', 'wait_for_driver_inbox'].includes(args.action)) throw new Error('Use wait()');
+        if (['wait_for_state_change', 'wait_for_driver_inbox'].includes(args.action)) throw new Error('Runtime delivers notifications automatically; no manual wait is needed');
         const arguments_ = { ...args.arguments };
         if (!arguments_.project_id && !arguments_.driver_id && schema.operations[args.action]?.arguments?.properties?.project_id) arguments_.project_id = project;
         return request('/api/state/query/' + encodeURIComponent(args.action), arguments_, exec.signal);
@@ -382,6 +368,19 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
   const handle = resume ? await ctx.agents.resume({ ...options, resumeSessionId: env.AITELIER_DSH_SESSION })
     : await ctx.agents.create({ ...options, sessionId: env.AITELIER_DSH_SESSION, meta: { cwd: process.cwd() } });
   agent = handle.agent;
+  const idleReview = new IdleReview({ agent, goals: ctx.goals,
+    notify: () => notify('AItelier director review due:\n' + JSON.stringify({
+      project_id: project, reason: 'idle_review_due',
+      instruction: 'Recheck live State frontier, open issues, worker capacity and prior blockers. Continue independent authorized work; a blocked task does not block the whole project. If no action is available, finish this round and remain subscribed.',
+    })),
+    onError: error => { ctx.logger.warn(String(error)); },
+  });
+  ctx.on('agent/status', ({ agent: subject, status }) => {
+    if (subject !== agent || disposed) return;
+    idleReview.statusChanged(status);
+    waiting = status === 'idle';
+    void report(waiting ? 'waiting' : 'running');
+  });
   if (hostExecution) {
     // Resume preserves old pinned policy. Change it through DSH's durable API;
     // children inherit this explicit full-access selection, including forks.
@@ -400,6 +399,7 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
   const close = async () => {
     if (disposed) return;
     disposed = true;
+    idleReview.close();
     // A host shutdown ends process-local continuation, not the standing goal.
     // Disarm before cancellation so DSH does not persist a user-style pause.
     ctx.goals.disarm(agent);

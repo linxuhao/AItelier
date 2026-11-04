@@ -32,7 +32,7 @@ export function apply(ctx) {
         ? { type: 'tool-call', id: 'fixture-user-message', name: 'send_user_message',
             arguments: JSON.stringify({ request_key: 'smoke-user-message', subject: 'Smoke report', body: 'durable body', node_key: 'n' }) }
         : call === 1 ? { type: 'text', text: 'Reported to the user.' }
-        : {type:'tool-call',id:'fixture-message-wait',name:'wait',arguments:'{}'};
+        : {type:'text',text:'No further work.'};
       yield { type: 'block-start', index: 0, blockType: block.type };
       if (block.type === 'text') yield { type: 'text-delta', index: 0, text: block.text };
       else yield { type: 'tool-call-delta', index: 0, id: block.id, name: block.name, argumentsDelta: block.arguments };
@@ -63,7 +63,7 @@ test('native send_user_message tool calls the durable driver -> user action', { 
     if (req.url === '/api/state/query/list_director_messages') return send({ result: { items: [] } });
     if (req.url.endsWith('/context')) return send({ project_id: 'alpha', driver_id: 'dsh-fixture',
       event_seq: 1, nodes: [], project_note: { index: [] }, private_note: { index: [] },
-      driver_skill: 'fixture driver skill', runtime_skill: 'Use wait.' });
+      driver_skill: 'fixture driver skill', runtime_skill: 'Automatic notifications.' });
     if (req.url.endsWith('/activity')) { activity.push(body); return send({ ok: true }); }
     if (req.url.endsWith('/heartbeat')) return send({ ok: true });
     if (req.url === '/api/state/commands/send_user_message') { sent.push(body); return send(message); }

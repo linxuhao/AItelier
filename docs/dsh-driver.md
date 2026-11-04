@@ -15,8 +15,13 @@ Native local children support `send_message` and automatic completion notices;
 external providers retain their own one-shot or continuable behavior.
 
 The runtime subscribes to State changes and the private driver inbox together,
-persists both cursors, wakes the DSH inbox, and exposes a native **wait()**. Normal
-wait timeouts stay inside the runtime and spend no model turn. While this
+persists both cursors, and wakes the DSH inbox automatically. There is no driver
+`wait` tool: a final reply leaves the agent idle and subscribed. State changes,
+including newly reported project issues, inbox messages and native worker
+messages/completion wake it while idle or queue input at the next active step.
+Normal transport timeouts spend no model turn. An active director receives a
+task review after 15 idle minutes; running work, shutdown and explicitly stopped
+goal phases do not generate review ticks. While this
 resident process supervises its project it renews its own claims and attempts
 every 20–30 minutes. Stopping it stops that supervision and renewal. Pipeline
 runs remain governed by their existing State lifecycle; stopping the driver
@@ -178,8 +183,11 @@ version, not an older globally installed command.
 ## Standing director goal and connection recovery
 
 `integrations/dsh-driver/goal.md` seeds each project's standing director mandate
-as a native DSH goal when its session has no current goal. Native goal rounds
-continue an active director after a premature final reply. A stable root-only
+as a native DSH goal when its session has no current goal. The native goal starts
+the first director round. When that round ends, the runtime disarms immediate
+native continuation without changing the durable active phase, objective or
+round counters. Automatic notifications and idle reviews resume work instead of
+holding a wait tool open or generating an immediate loop. A stable root-only
 system section reads the actual persisted objective, making it visible after
 pressure/overflow compaction without duplicating it in State snapshots. Protocol
 and runtime tool instructions have their own system sections; native children
@@ -297,7 +305,7 @@ Run backend tests only in a throwaway container as required by AGENTS.md.
 `integrations/dsh-driver` has `npm test` after `npm ci`: it includes a real pinned
 DSH process, a local fake model/MCP/State server, native child execution,
 automatic compaction, fresh private-state injection, precompact history grep,
-and unified waiting. Tool-discovery checks cover parent/child MCP lookup and
+and automatic idle/busy notifications, issue delivery and idle task reviews. Tool-discovery checks cover parent/child MCP lookup and
 dispatch, live registry updates, caller restrictions, errors, cancellation and
 unchanged model tool prefixes. It makes no paid model calls and touches no live project.
 

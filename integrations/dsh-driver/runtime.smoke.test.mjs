@@ -30,7 +30,7 @@ function assertInjectionCadence(events) {
   assert.ok(injected.has(epoch), 'latest successful compaction was not followed by fresh State');
 }
 
-test('real pinned DSH: native child, auto compact, fresh injection, raw history grep and unified wait', { timeout: 45000 }, async () => {
+test('real pinned DSH: native child, auto compact, fresh injection, raw history grep and automatic notifications', { timeout: 45000 }, async () => {
   // Use non-temporary roots: /tmp is writable independently of workspace policy.
   const directory = await mkdtemp(join(homedir(), 'dsh-native-smoke-'));
   const outsideDirectory = await mkdtemp(join(homedir(), 'dsh-outside-workspace-'));
@@ -62,7 +62,7 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
     if (req.url === '/api/state/query/list_director_messages') return send({ result: { items: [{subject:'BOOT_PROJECT_INBOX',status:'unread'}] } });
     if (req.url.endsWith('/context')) { contextReads++; return send({ project_id: 'alpha', driver_id: 'dsh-fixture', event_seq: 10,
       nodes: [{ name: 'n', status: changed ? 'VERIFIED' : 'PENDING' }], project_note: { index: ['project rule'] },
-      private_note: { index: [overflowChanged ? 'overflow fresh private rule' : changed ? 'fresh private rule' : 'original private rule'] }, driver_skill: 'fixture driver skill', runtime_skill: 'Use wait.' }); }
+      private_note: { index: [overflowChanged ? 'overflow fresh private rule' : changed ? 'fresh private rule' : 'original private rule'] }, driver_skill: 'fixture driver skill', runtime_skill: 'Automatic notifications.' }); }
     if (req.url.endsWith('/activity')) {
       activity.push(body);
       if (body.phase === 'waiting') for (const target of childWaits) { target.setHeader('content-type','application/json'); target.end('{}'); childWaits.delete(target); }
@@ -118,7 +118,8 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
     while (Date.now() < deadline && proc.exitCode === null) {
       if (activity.some(a => a.phase === 'failed')) break;
       if (events.some(e => e.type === 'tool/result' && JSON.stringify(e.data).includes('next_after_seq'))
-          && events.some(e => e.data?.message?.toolCallId === 'fixture-child-shell') && activity.some(a => a.phase === 'waiting' && a.subagents.length === 0)) break;
+          && events.some(e => e.data?.message?.toolCallId === 'fixture-child-shell') && activity.some(a => a.phase === 'waiting' && a.subagents.length === 0)
+          && requests.some(r=>!r.child&&!r.summary&&JSON.stringify(r.options.messages).includes('Native child completed.'))) break;
       await new Promise(resolve => setTimeout(resolve, 100));
     }
     assert.equal(proc.exitCode, null, output);
@@ -143,8 +144,8 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
     const created = events.filter(e => e.type === 'goal/change' && e.data.operation === 'create');
     assert.equal(created.length, 1, 'bootstrap must create exactly one native goal');
     assert.match(created[0].data.goal.objective, /常驻导演/);
-    assert.ok(events.filter(e => e.type === 'user/message' && e.data.source?.kind === 'goal').length >= 2,
-      'premature final did not continue through a native goal round');
+    assert.equal(events.filter(e => e.type === 'user/message' && e.data.source?.kind === 'goal').length, 1,
+      'idle director immediately spun another native goal round');
     assert.ok(!events.some(e=>e.type==='user/message'&&e.data.source?.kind==='user'), 'bootstrap manufactured a human input');
     const rootRequests=requests.filter(r=>!r.child&&!r.summary&&r.options.tools?.length);
     assert.match(JSON.stringify(rootRequests[0].options.messages), /<goal_round>/,
@@ -159,9 +160,10 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
     assert.ok(workCalls.every(c => c.session_id && c.session_id !== 'fixture-root'), 'child work used the root session identity');
     assert.equal(new Set(workCalls.map(c => c.session_id)).size, 1);
     assert.ok(!activity.some(a => a.phase === 'failed'), JSON.stringify(activity) + output);
-    const tools = requests.find(r => r.options.tools?.some(t => t.name === 'wait')).options.tools.map(t => t.name);
+    const tools = requests.find(r => r.options.tools?.some(t => t.name === 'state_read')).options.tools.map(t => t.name);
     for (const hidden of ['state_graph_read', 'wait_for_run', 'wait_for_driver_inbox']) assert.ok(!tools.includes('mcp__aitelier__' + hidden));
     assert.ok(tools.includes('search_tools') && tools.includes('call_tool'));
+    assert.ok(!tools.includes('wait'), 'manual wait tool is still exposed');
     assert.ok(requests.filter(r=>!r.summary && r.options.tools?.length).every(r=>!r.options.tools.some(t=>t.name.startsWith('mcp__'))), 'root or child still receives full MCP schemas');
     for (const child of [false,true]) {
       const relevant = requests.filter(r=>r.child===child && !r.summary);
@@ -170,6 +172,7 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
       assert.ok(dispatches.some(d=>(d.session_id!=='fixture-root')===child && d.nested && !d.isError), 'MCP dispatch used the wrong caller');
     }
     assert.ok(requests.some(r => !r.child && JSON.stringify(r.options.messages).includes('CHILD_MESSAGE_MARKER')), 'native child messaging missing');
+    assert.ok(requests.some(r=>!r.child&&!r.summary&&JSON.stringify(r.options.messages).includes('Native child completed.')),'worker completion did not notify the idle parent');
     assert.ok(events.some(e => e.type === 'tool/result' && e.data.message.toolCallId === 'fixture-child-shell' && !e.data.message.isError && JSON.stringify(e.data.message.content).includes('WORKER_SHELL_OK')), 'native worker shell failed\n' + JSON.stringify(events.filter(e => e.data?.message?.toolCallId === 'fixture-child-shell')));
     assert.ok(events.some(e => e.type === 'tool/result' && JSON.stringify(e.data).includes('fixture_pipeline')), 'pipeline bridge missing');
     const before = requests.length;
@@ -191,7 +194,7 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
       await new Promise(resolve => setTimeout(resolve, 100));
     }
     assert.equal(proc.exitCode, null, output);
-    const resumed = requests.slice(before).find(r => r.host && r.options.tools?.some(t => t.name === 'wait'));
+    const resumed = requests.slice(before).find(r => r.host && r.options.tools?.some(t => t.name === 'state_read'));
     assert.ok(resumed, 'persisted driver did not resume\n' + output);
     assert.match(JSON.stringify(resumed.options.messages), /earlier details can be searched/);
     assert.match(JSON.stringify(resumed.options), /你是 alpha 项目 State DAG 的常驻导演/);
@@ -240,12 +243,14 @@ test('real pinned DSH default host adapter calls the authenticated completion br
     if (req.url.endsWith('/completion')) {
       assert.equal(req.headers['x-aitelier-driver-token'], 'fixture-only');
       completions.push(body);
-      const hasWait = body.tools?.some(t => t.function.name === 'wait');
-      const human = hasWait && JSON.stringify(body.messages).includes('HUMAN_MESSAGE_MARKER');
-      const second = hasWait && JSON.stringify(body.messages).includes('HUMAN_SECOND_MESSAGE');
+      const hasDriver = body.tools?.some(t => t.function.name === 'state_read');
+      assert.ok(!body.tools?.some(t=>t.function.name==='wait'),'manual wait schema leaked');
+      const human = hasDriver && JSON.stringify(body.messages).includes('HUMAN_MESSAGE_MARKER');
+      const second = hasDriver && JSON.stringify(body.messages).includes('HUMAN_SECOND_MESSAGE');
+      const issue = hasDriver && JSON.stringify(body.messages).includes('ISSUE_NOTIFICATION_MARKER');
       if (human) replied = true;
-      const reply = { text: second ? 'HUMAN_SECOND_REPLY' : human ? 'HUMAN_REPLY_MARKER' : hasWait ? '' : 'Fixture title', reasoning_content: 'ready', truncated: false,
-        tool_calls: hasWait ? [{ id: 'host-wait-' + call++, function: { name: 'wait', arguments: '{}' } }] : [],
+      const reply = { text: issue ? 'ISSUE_HANDLED_MARKER' : second ? 'HUMAN_SECOND_REPLY' : human ? 'HUMAN_REPLY_MARKER' : hasDriver ? 'Idle director.' : 'Fixture title', reasoning_content: 'ready', truncated: false,
+        tool_calls: [],
         usage: { prompt_tokens: 100, completion_tokens: 10 } };
       if (human && !second) { heldCompletion = () => send(reply); return; }
       return send(reply);
@@ -268,13 +273,13 @@ test('real pinned DSH default host adapter calls the authenticated completion br
     const deadline = Date.now() + 15000;
     while (Date.now() < deadline && proc.exitCode === null && !activity.some(a => a.phase === 'waiting')) await new Promise(resolve => setTimeout(resolve, 100));
     assert.ok(activity.some(a => a.phase === 'waiting'), output + JSON.stringify(activity));
-    assert.ok(completions.some(c => c.session_id === 'host-root' && c.tools.some(t => t.function.name === 'wait')), JSON.stringify(completions));
+    assert.ok(completions.some(c => c.session_id === 'host-root' && c.tools.some(t => t.function.name === 'state_read')), JSON.stringify(completions));
     while (Date.now() < deadline && !inboxWait) await new Promise(resolve => setTimeout(resolve, 50));
     const errorIndex = activity.findIndex(a => a.error?.includes('AItelier event subscription: fetch failed'));
     assert.ok(errorIndex >= 0, 'transport error was not diagnosed');
     assert.ok(activity.slice(errorIndex + 1).some(a => !a.error && a.phase === 'waiting'), 'successful empty response did not clear connection error');
     await new Promise(resolve => setTimeout(resolve, 400));
-    assert.equal(completions.filter(c => c.tools?.some(t => t.function.name === 'wait')).length, 1, 'consumed startup input must not wake the first idle wait');
+    assert.equal(completions.filter(c => c.tools?.some(t => t.function.name === 'state_read')).length, 1, 'idle active goal must not generate an immediate continuation');
     assert.ok(inboxWait, 'combined runtime wait missing');
     const firstWait = inboxWait;
     inboxWait.setHeader('content-type', 'application/json');
@@ -299,7 +304,17 @@ test('real pinned DSH default host adapter calls the authenticated completion br
     assert.ok(activity.some(a => a.event?.text.includes('HUMAN_REPLY_MARKER')), output + JSON.stringify(activity));
     assert.ok(activity.some(a => a.event?.text.includes('HUMAN_SECOND_REPLY')), 'busy-time input was not consumed on the next step');
     await new Promise(resolve => setTimeout(resolve, 400));
-    assert.equal(completions.filter(c => c.tools?.some(t => t.function.name === 'wait')).length, 3, 'empty waits caused extra model turns');
+    assert.equal(completions.filter(c => c.tools?.some(t => t.function.name === 'state_read')).length, 3, 'ordinary transport timeouts caused extra model turns');
+    // A new project issue wakes an agent that has ALREADY finished its turn.
+    const issueWait = inboxWait;
+    issueWait.setHeader('content-type', 'application/json');
+    issueWait.end(JSON.stringify({timed_out:false,next_after:2,next_inbox_after:2,
+      events:[{seq:2,project_id:'alpha',event_type:'issue_reported',payload:{issue_id:'iss-new',kind:'defect',title:'ISSUE_NOTIFICATION_MARKER'}}]}));
+    const issueDeadline=Date.now()+5000;
+    while(Date.now()<issueDeadline && !activity.some(a=>a.event?.text.includes('ISSUE_HANDLED_MARKER'))) await new Promise(resolve=>setTimeout(resolve,25));
+    assert.ok(activity.some(a=>a.event?.text.includes('ISSUE_HANDLED_MARKER')),'new issue did not wake an idle driver');
+    await new Promise(resolve=>setTimeout(resolve,100));
+    assert.equal(completions.filter(c=>c.tools?.some(t=>t.function.name==='state_read')).length,4,'issue notification caused an idle spin');
     const stateEvents = activity.filter(a => a.event?.type === 'user/message' && JSON.parse(a.event.text).source?.kind === stateInjectionSource);
     assert.equal(stateEvents.length, 1, 'ordinary inbox messages duplicated the initial State snapshot');
     assert.ok(!activity.some(a => a.phase === 'failed'), JSON.stringify(activity));

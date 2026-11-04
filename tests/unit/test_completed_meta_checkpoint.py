@@ -59,7 +59,23 @@ def test_http_retry_of_prior_checkpoint_does_not_approve_later_pause(live):
 
 
 @pytest.mark.asyncio
-async def test_actual_registered_mcp_refuses_stale_and_replays_while_completed(live):
+async def test_actual_registered_mcp_refuses_stale_and_replays_while_completed(live, monkeypatch):
+    """Checkpoint semantics (stale refusal, exact replay while completed), not the
+    auth boundary: this drives the registered tool in-process, which carries no
+    request and is therefore only legal where the Cloudflare Access gate is
+    INACTIVE. A deployment that sets AITELIER_CF_TEAM_DOMAIN/AUD enables the gate
+    and every state-changing tool refuses a request-less call with "carries no
+    verifiable identity" - correct behaviour, different subject.
+
+    The boundary itself is covered next door by
+    test_completed_human_meta_helper_refuses_missing_identity, which asserts that
+    same refusal. Leaving the gate state to the ambient environment made this test
+    pass or fail depending on whether the box happened to be accessed via
+    Cloudflare, which says nothing about checkpoints.
+    """
+    from core import cf_access
+    monkeypatch.setattr(cf_access, "_TEAM_DOMAIN", "")
+    monkeypatch.setattr(cf_access, "_AUD", "")
     sf, rid, client, _ = live
     observed=checkpoint_view(sf,rid)
     server=mcp_router.build_mcp()

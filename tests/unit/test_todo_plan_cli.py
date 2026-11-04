@@ -93,6 +93,7 @@ def cli(tmp_path, monkeypatch) -> Cli:
     monkeypatch.setenv("AITELIER_GATE_DEFERRAL_WAIT_SECONDS", str(WAIT))
     monkeypatch.setenv("AITELIER_GATE_DEFERRAL_EPISODE_MAX_SECONDS", str(CEILING))
     monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "1")
+    monkeypatch.setenv("AITELIER_TODO_CLOCK_OVERRIDE", "1")
     return Cli(tmp_path / "store", tmp_path)
 
 
@@ -309,25 +310,53 @@ def slow_gate_plan(repo, base) -> dict:
     return plan(repo, base, [gate, docs])
 
 
-def test_a_second_done_inside_the_wait_does_not_restart_the_episode(cli, repo, base):
-    """Same unchanged absence, seen again inside the wait: a new LOOK, not a new episode.
+def counting_gate_plan(repo, base, counter: Path) -> dict:
+    """A gate that leaves a line in `counter` each time it is really executed, then outlives its timeout."""
+    code = "import sys, time; open(sys.argv[1], 'a').write('ran\\n'); time.sleep(30)"
+    gate = item("gate", [{"predicate": "command_exit",
+                          "args": {"argv": [sys.executable, "-c", code, str(counter)], "timeout": 0.5}}])
+    return plan(repo, base, [gate])
+
+
+def executions(counter: Path) -> int:
+    return len(counter.read_text().splitlines()) if counter.exists() else 0
+
+
+def test_a_second_done_inside_the_wait_does_not_restart_the_episode(cli, repo, base, tmp_path):
+    """The wait is enforced: inside it the gate is not asked again, so nothing restarts and nothing is counted.
 
     Each call below is a separate process, so started_at surviving proves the
     ledger really is rehydrated from the plan file.
     """
-    cli.create(slow_gate_plan(repo, base))
-    first = begin_done(cli, "gate", now=T0)["episode"]
-    assert first["started_at"] == T0 and first["gate_runs"] == 1 and first["absences"] == 1
+    counter = tmp_path / "ran.txt"
+    cli.create(counting_gate_plan(repo, base, counter))
+    first = begin_done(cli, "gate", now=T0)
+    assert executions(counter) == 1
+    assert first["episode"]["started_at"] == T0 and first["episode"]["gate_runs"] == 1
 
     again = cli.ok("done", "--attempt", "att-1", "--item", "gate", now=T0 + 100)
-    assert again["outcome"] == "absent"
+    assert executions(counter) == 1, "inside the wait the stored absence is returned, the gate is not run again"
+    assert again["outcome"] == "absent" and again["results"] == first["results"]
     episode = again["episode"]
     assert episode["started_at"] == T0, "the episode start never moves"
-    assert episode["last_absence_at"] == T0, "the same measurement must not restart the wait"
-    assert episode["gate_runs"] == 1, "the same measurement is not another gate run"
+    assert episode["last_absence_at"] == T0, "looking at the same report again must not restart the wait"
+    assert episode["gate_runs"] == 1, "a re-read report is not another gate run"
     assert episode["absences"] == 2
     assert episode["hold_remaining"] == pytest.approx(WAIT - 100)
     assert cli.ok("status", "--attempt", "att-1", now=T0 + 100)["deferred"] == ["gate"]
+
+
+def test_after_the_wait_the_gate_is_asked_again_and_that_is_one_more_run_and_a_new_wait(cli, repo, base, tmp_path):
+    counter = tmp_path / "ran.txt"
+    cli.create(counting_gate_plan(repo, base, counter))
+    begin_done(cli, "gate", now=T0)
+    later = cli.ok("done", "--attempt", "att-1", "--item", "gate", now=T0 + WAIT + 1)
+    assert executions(counter) == 2, "past the wait the gate really runs again"
+    episode = later["episode"]
+    assert later["outcome"] == "absent" and later["unmeasurable"] is False
+    assert episode["started_at"] == T0, "the ceiling still measures from the first sighting"
+    assert episode["gate_runs"] == 2 and episode["last_absence_at"] == T0 + WAIT + 1
+    assert episode["hold_remaining"] == pytest.approx(WAIT)
 
 
 def test_past_the_ceiling_the_item_is_unmeasurable_skipped_and_named(cli, repo, base):
@@ -350,6 +379,80 @@ def test_past_the_ceiling_the_item_is_unmeasurable_skipped_and_named(cli, repo, 
     refusal = cli.refused("finish", "--attempt", "att-1", "--out", str(cli.tmp_path / "out"), now=T0 + CEILING + 2)
     assert refusal["refused"] == "unfinished"
     assert "gate" in {f["item"] for f in refusal["failing"]}
+
+
+def test_a_failing_predicate_beside_an_absent_one_fails_and_is_never_unmeasurable(cli, repo, base):
+    mixed = item("mixed", [{"predicate": "file_changed", "args": {"path": "app.py"}},
+                           {"predicate": "command_exit", "args": {"argv": SLOW, "timeout": 0.3}}])
+    cli.create(plan(repo, base, [mixed]))
+    cli.ok("begin", "--attempt", "att-1", "--item", "mixed", now=T0)
+    for moment in (T0, T0 + CEILING + 1):
+        out = cli.ok("done", "--attempt", "att-1", "--item", "mixed", now=moment)
+        assert out["outcome"] == "fail" and out["unmeasurable"] is False and "episode" not in out
+    status = cli.ok("status", "--attempt", "att-1", now=T0 + CEILING + 1)
+    assert status["unmeasurable"] == [] and status["next"] == "mixed" and status["episodes"] == {}
+
+
+# -- the harness refuses what it should not do -------------------------------------------
+
+def test_the_clock_override_is_refused_unless_the_test_environment_allows_it(cli, repo, base, monkeypatch):
+    cli.create(plan(repo, base))
+    monkeypatch.delenv("AITELIER_TODO_CLOCK_OVERRIDE")
+    assert cli.refused("status", "--attempt", "att-1", now=T0)["refused"] == "clock_override_disabled"
+    assert cli.ok("status", "--attempt", "att-1", now=None)["attempt_id"] == "att-1"
+    monkeypatch.setenv("AITELIER_TODO_CLOCK_OVERRIDE", "0")
+    assert cli.refused("status", "--attempt", "att-1", now=T0)["refused"] == "clock_override_disabled"
+
+
+def test_a_damaged_plan_file_is_a_refusal_not_a_traceback(cli, repo, base):
+    cli.create(plan(repo, base))
+    path = cli.store / "att-1.json"
+    original = path.read_text()
+    for damaged in ("{not json", "[]", "{}", json.dumps({**json.loads(original), "items": None})):
+        path.write_text(damaged)
+        for command in (["status"], ["handback"], ["done", "--item", "edit"]):
+            out = cli.refused(command[0], "--attempt", "att-1", *command[1:])
+            assert out["refused"] == "corrupt_plan", (damaged, out)
+    path.write_text(original)
+    assert cli.ok("status", "--attempt", "att-1")["attempt_id"] == "att-1"
+
+
+def test_anything_unforeseen_is_reported_as_an_internal_refusal(tmp_path, capsys, monkeypatch):
+    from core import todo_cli
+
+    def boom(args, store, now):
+        raise RuntimeError("kaboom")
+    monkeypatch.setitem(todo_cli.COMMANDS, "status", boom)
+    assert todo_cli.main(["status", "--attempt", "x", "--store", str(tmp_path)]) == 2
+    assert json.loads(capsys.readouterr().out) == {"refused": "internal", "reason": "RuntimeError: kaboom"}
+
+
+@pytest.mark.parametrize("predicate,args", [
+    ("command_exit", {"argv": "true"}),
+    ("command_exit", {"argv": []}),
+    ("command_exit", {"argv": ["true", 1]}),
+    ("report_json", {"path": "r.json", "require_keys": "passed"}),
+    ("files_present", {"pattern": 5}),
+])
+def test_create_refuses_wrongly_typed_predicate_arguments(cli, repo, base, predicate, args):
+    bad = item("edit", [{"predicate": predicate, "args": args}])
+    code, out = cli.create(plan(repo, base, [bad]))
+    assert code == 2 and out["refused"] == "invalid_plan", out
+    assert cli.create(plan(repo, base, scope="app.py"))[1]["refused"] == "invalid_plan"
+
+
+def test_finish_refuses_a_head_that_was_reset_behind_the_base(cli, repo, base, tmp_path):
+    (repo / "app.py").write_text("x = 1\ny = 2\n")
+    second = commit_all(repo, "second")
+    look = item("look", [{"predicate": "files_present", "args": {"pattern": "app.py"}}])
+    cli.create(plan(repo, second, [look]))
+    begin_done(cli, "look")
+    git(repo, "reset", "-q", "--hard", base)                              # clean tree, HEAD an ancestor of the base
+    got = deliver_results(cli)
+    assert got["_outcome"] == "fail" and "not a descendant" in got["git_delivered"]["detail"]
+    refusal = cli.refused("finish", "--attempt", "att-1", "--out", str(tmp_path / "out"))
+    assert refusal["refused"] == "unfinished" and "deliver" in {f["item"] for f in refusal["failing"]}
+    assert not (tmp_path / "out").exists() or not list((tmp_path / "out").iterdir())
 
 
 # -- status / handback / report / list ------------------------------------------------

@@ -200,10 +200,16 @@ class PlanStore:
             os.close(fd)  # closing releases the flock
 
     def read(self, attempt_id: str) -> dict | None:
+        path = self.path(attempt_id)
         try:
-            return json.loads(self.path(attempt_id).read_text(encoding="utf-8"))
+            document = json.loads(path.read_text(encoding="utf-8"))
         except FileNotFoundError:
             return None
+        except (OSError, ValueError) as exc:
+            raise Refusal("corrupt_plan", f"{path} cannot be read as a plan file: {str(exc)[:200]}") from exc
+        if not isinstance(document, dict):
+            raise Refusal("corrupt_plan", f"{path} is not a plan file")
+        return document
 
     def write(self, attempt_id: str, document: Mapping[str, Any]) -> None:
         path = self.path(attempt_id)

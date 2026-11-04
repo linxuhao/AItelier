@@ -12,7 +12,7 @@ import sys
 import pytest
 
 from core.gate_deferral import ABSENCE_TERMINAL, absent_terminal_names_no_failure
-from core.todo_runtime import (BASE_KEY, Binding, Item, Plan, TodoRun, builtin_library)
+from core.todo_runtime import (Binding, Item, Plan, TodoRun, builtin_library)
 
 
 def _plan(*items: Item) -> Plan:
@@ -140,8 +140,8 @@ def repo(tmp_path) -> Path:
 
 
 def _eval(repo: Path, predicate: str, plan_base: str | None = None, **args):
-    pre_state = {BASE_KEY: plan_base} if plan_base else {}
-    return builtin_library().evaluate(Binding(predicate, args), workspace=repo, pre_state=pre_state)
+    return builtin_library().evaluate(Binding(predicate, args), workspace=repo, pre_state={},
+                                      base_sha=plan_base or "")
 
 
 def test_the_library_is_versioned_and_offers_the_contracted_predicates():
@@ -154,6 +154,10 @@ def test_the_library_is_versioned_and_offers_the_contracted_predicates():
 def test_the_library_checks_a_binding_before_any_work_starts():
     library = builtin_library()
     library.check(Binding("file_changed", {"path": "a.py"}))
+    library.check(Binding("command_exit", {"argv": ["true"], "expect": 1, "timeout": 2.5}))
+    library.check(Binding("report_json", {"path": "r.json", "require_keys": []}))
+    with pytest.raises(ValueError):
+        library.check(Binding("changes_within", {"scope": ["**"], "base_sha": "f" * 40}))   # the plan's base, not a binding's
     with pytest.raises(KeyError):
         library.check(Binding("worker_says_done", {}))
     with pytest.raises(ValueError):
@@ -197,6 +201,34 @@ def test_changes_within_cannot_be_measured_without_a_readable_base(repo):
         _eval(repo, "changes_within", None, scope=["**"])
 
 
+@pytest.mark.parametrize("predicate,args", [
+    ("command_exit", {"argv": "true"}),                     # a string would be split into letters
+    ("command_exit", {"argv": []}),
+    ("command_exit", {"argv": ["true", 1]}),
+    ("command_exit", {"argv": ["true"], "timeout": True}),
+    ("command_exit", {"argv": ["true"], "expect": "0"}),
+    ("changes_within", {"scope": "src/**"}),
+    ("changes_within", {"scope": []}),
+    ("report_json", {"path": "r.json", "require_keys": "passed"}),
+    ("report_json", {"path": 5, "require_keys": []}),
+    ("files_present", {"pattern": ["*.py"]}),
+    ("git_delivered", {"base": 12}),
+])
+def test_a_binding_with_a_wrongly_typed_argument_is_refused_up_front(predicate, args):
+    with pytest.raises(ValueError):
+        builtin_library().check(Binding(predicate, args))
+
+
+def test_a_missing_workspace_is_named_as_such_not_as_a_missing_binary(tmp_path):
+    gone = tmp_path / "gone"
+    for name, args in (("command_exit", {"argv": [sys.executable, "-V"]}),
+                       ("git_delivered", {"base": "0" * 40}),
+                       ("changes_within", {"scope": ["**"]})):
+        result = builtin_library().evaluate(Binding(name, args), workspace=gone, pre_state={}, base_sha="0" * 40)
+        assert result.outcome == "absent" and str(gone) in result.detail, result
+        assert "not installed" not in result.detail
+
+
 def test_git_delivered_needs_head_past_base_and_a_clean_tree(repo):
     base = _git(repo, "rev-parse", "HEAD")
     assert _eval(repo, "git_delivered", base=base).outcome == "fail", "HEAD == base is not a delivery"
@@ -208,6 +240,26 @@ def test_git_delivered_needs_head_past_base_and_a_clean_tree(repo):
     (repo / "wip.txt").unlink()
     assert _eval(repo, "git_delivered", base=base).outcome == "pass"
     assert _eval(repo, "git_delivered", base="f" * 40).outcome == "absent", "an unreadable base is unmeasured, not failed"
+
+
+def test_git_delivered_refuses_a_head_that_is_not_a_descendant_of_the_base(repo):
+    first = _git(repo, "rev-parse", "HEAD")
+    (repo / "src" / "a.py").write_text("a = 2\n")
+    _git(repo, "commit", "-qam", "second")
+    base = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "reset", "-q", "--hard", first)                            # HEAD now BEHIND the base, tree clean
+    behind = _eval(repo, "git_delivered", base=base)
+    assert behind.outcome == "fail" and "not a descendant" in behind.detail
+
+    _git(repo, "switch", "-q", "-c", "side")                              # a sibling of the base
+    (repo / "side.txt").write_text("1")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "side")
+    diverged = _eval(repo, "git_delivered", base=base)
+    assert diverged.outcome == "fail" and "not a descendant" in diverged.detail
+
+    _git(repo, "merge", "-q", "--no-edit", base)                          # now it contains the base
+    assert _eval(repo, "git_delivered", base=base).outcome == "pass"
 
 
 def test_report_json_wants_an_object_with_the_required_keys(repo):
@@ -265,6 +317,26 @@ def test_an_expired_absence_is_a_terminal_state_that_next_item_skips_and_the_bri
     run.begin("docs")
     assert run.observe("docs").complete and run.next_item() is None
     assert not run.finished(), "an unmeasurable item is not a completed one"
+
+
+def test_a_measured_failure_beside_an_absence_is_a_failure_never_unmeasurable(tmp_path):
+    now = [0.0]
+    (tmp_path / "app.py").write_text("x = 1\n")
+    mixed = Item(id="mixed", title="", predicates=(
+        Binding("file_changed", {"path": "app.py"}),
+        Binding("command_exit", {"argv": SLOW, "timeout": 0.3})))
+    run = _run(tmp_path, mixed, clock=lambda: now[0])
+    run.begin("mixed")
+    for moment in (0.0, 10_000_000.0):
+        now[0] = moment
+        report = run.observe("mixed")
+        assert report.outcome == "fail" and report.unmeasurable is False
+        assert run.next_item().id == "mixed", "a failure goes back to the worker"
+        assert run.ledger.episodes == {}, "an absence beside a failure opens no episode"
+    assert run.report()["unmeasurable"] == []
+
+    (tmp_path / "app.py").write_text("x = 2\n")                          # the failing half is fixed ...
+    assert run.observe("mixed").outcome == "absent", "... and only then does the absence speak"
 
 
 def test_a_run_can_be_resumed_from_its_observations(tmp_path):

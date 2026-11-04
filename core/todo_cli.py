@@ -7,8 +7,11 @@ exits 0, because the verdict is the product.
 
 Every state-changing command takes the plan's flock, rehydrates a TodoRun from
 `<store>/<attempt_id>.json` (ledger episodes included, so `started_at` never
-moves), acts, and replaces the file atomically. `--now` fixes the clock; it
-exists so tests can walk the ledger's wait and ceiling deterministically.
+moves), acts, and replaces the file atomically. `--now` fixes the clock so tests can
+walk the ledger's wait and ceiling deterministically; it is refused unless the
+environment sets AITELIER_TODO_CLOCK_OVERRIDE=1, because whoever picks the clock picks
+when an absence expires. Anything that is not a refusal is reported as
+{"refused": "internal"}: the exit status is 0 or 2, never a traceback.
 """
 from __future__ import annotations
 
@@ -43,10 +46,13 @@ class _Open:
     def __init__(self, store: PlanStore, document: dict, now: float):
         self.store, self.document, self.now = store, document, now
         self.library = builtin_library()
-        self.plan = TodoPlan.from_stored(document["plan"], self.library)
-        if self.plan.plan_hash != document["plan_hash"]:
-            raise Refusal("corrupt_plan", "the stored plan does not match its plan_hash")
-        self.run = load_run(document, self.plan, self.library, lambda: now)
+        try:
+            self.plan = TodoPlan.from_stored(document["plan"], self.library)
+            if self.plan.plan_hash != document["plan_hash"]:
+                raise Refusal("corrupt_plan", "the stored plan does not match its plan_hash")
+            self.run = load_run(document, self.plan, self.library, lambda: now)
+        except (KeyError, TypeError, ValueError, AttributeError) as exc:
+            raise Refusal("corrupt_plan", f"the plan file is damaged: {type(exc).__name__}: {str(exc)[:200]}") from exc
 
     def item(self, item_id: str):
         try:
@@ -261,6 +267,14 @@ def cmd_finish(args, store: PlanStore, now: float) -> dict:
             with tempfile.TemporaryDirectory(prefix="todo-bundle-verify-") as empty:
                 _git(empty, "init", "--bare", "-q", ".")
                 _git(empty, "bundle", "verify", str(staged))
+            tips = {line.split()[0] for line in _git(workspace, "bundle", "list-heads", str(staged)).splitlines()
+                    if line.strip()}
+            if head not in tips:
+                raise Refusal("head_moved", f"HEAD was {head} when read but the bundle's tip is {sorted(tips)}; "
+                                            "something committed while finishing")
+            # `quiescent` is attested below, so look once more, right before writing it.
+            if _git(workspace, "status", "--porcelain") or _git(workspace, "rev-parse", "HEAD") != head:
+                raise Refusal("not_quiescent", "the working tree changed while the candidate was being produced")
             os.replace(staged, bundle)
         finally:
             staged.unlink(missing_ok=True)
@@ -294,7 +308,9 @@ COMMANDS = {"create": cmd_create, "status": cmd_status, "begin": cmd_begin, "don
 def _parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--store", help="plan directory (default: $AITELIER_DSH_STATE_DIR/todo)")
-    common.add_argument("--now", type=float, help="fix the clock (seconds since epoch); for tests")
+    common.add_argument("--now", type=float,
+                        help="fix the clock (seconds since epoch). TESTS ONLY: refused unless "
+                             "AITELIER_TODO_CLOCK_OVERRIDE=1, since the clock decides when an absence expires")
     parser = _Parser(prog="python -m core.todo_cli")
     sub = parser.add_subparsers(dest="command", required=True, parser_class=_Parser)
 
@@ -319,6 +335,8 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
+        if args.now is not None and os.environ.get("AITELIER_TODO_CLOCK_OVERRIDE") != "1":
+            raise Refusal("clock_override_disabled", "--now is for tests; set AITELIER_TODO_CLOCK_OVERRIDE=1 to use it")
         root = args.store or (os.path.join(os.environ["AITELIER_DSH_STATE_DIR"], "todo")
                               if os.environ.get("AITELIER_DSH_STATE_DIR") else None)
         if root is None:
@@ -327,6 +345,8 @@ def main(argv: list[str] | None = None) -> int:
         code = 0
     except Refusal as refusal:
         out, code = refusal.as_json(), 2
+    except Exception as exc:  # noqa: BLE001 - the contract is JSON and exit 0 or 2, whatever broke
+        out, code = Refusal("internal", f"{type(exc).__name__}: {str(exc)[:300]}").as_json(), 2
     print(json.dumps(out, sort_keys=True))
     return code
 

@@ -11,8 +11,8 @@ blocked, completed or cleared goals keep their state across restart.
 Follow the injected execution environment. In the host runtime, the driver and
 native subagents have danger-full-access with approval never: use native file
 and bash tools directly for coding, Git integration/push and Docker. Each writer
-uses its own checkout/worktree. Pass the assigned State attempt and current owner
-fence to children for reporting. The old container's workspace-write restrictions
+uses its own checkout/worktree. Pass the assigned State attempt_id to children for
+their todo tools; State reporting stays with you. The old container's workspace-write restrictions
 and project_work instructions in retained history are obsolete on the host.
 Run AItelier pytest only in disposable containers (network none, 2 CPU/2 GiB,
 one worker, at most four concurrent), never on the host or in production.
@@ -43,11 +43,24 @@ call_tool(name="<exact returned name>", arguments={<those fields>}). Tool names
 may be qualified or normalized; use the returned name instead of guessing it.
 Checkpoints remain human decisions. Never approve one on the user's behalf.
 
-Delegate bounded work to DSH subagent or an AItelier pipeline.
+Dispatch bounded work as a frozen todo plan plus a native DSH subagent. Before
+dispatch, claim the node and register the State attempt (start_external_attempt).
+Then call todo_plan with that attempt's context_hash, base_sha, workspace, scope,
+goal and items whose completion is bound to library predicates; the plan is
+frozen. Tell the child its attempt_id, workspace and delivery, and to work item by
+item with todo_status, todo_begin and todo_done. Every todo result carries the
+plan brief. Children cannot write State: record_evidence, verify_node,
+report_external_attempt, start_external_attempt and claim_node are refused for
+any session but yours. If a child stops with items open, the runtime hands it
+back to you (reason todo_unfinished, with done/next/remaining): re-dispatch from
+the next item or report the attempt failed. When the plan is complete, run
+todo_finish, then report_external_attempt with the report it wrote, then review
+the delivered change yourself and record_evidence. run_pipeline stays available
+for a task that genuinely needs an existing pipeline; it is not the default.
 Native Spawn/Fork subagents use the dedicated `worker` model route, with a
 provider selected once per child from its round-robin pool. The director keeps
 its own model. Worker tools, permissions and messaging remain native DSH.
-Before dispatch, claim the node and register the State attempt. DSH provides send_message and
+DSH provides send_message and
 completion notices for native children; use these instead of inventing another
 message bus. External providers may only support one-shot work. Each writer
 needs its own checkout; each run has one controller.

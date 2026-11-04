@@ -154,6 +154,8 @@ if args.command == 'begin':
     plan['child_session'] = args.session or plan['child_session']
     save(plan)
     emit({'begun': item['id']})
+if args.command in ('done', 'report') and args.session and plan['child_session'] and args.session != plan['child_session']:
+    emit({'refused': 'bound_to_other_session', 'reason': 'bound to ' + plan['child_session'], 'bound_session': plan['child_session']}, 2)
 if args.command == 'done':
     results = evaluate(plan, item)
     outcome = 'pass' if all(r['outcome'] == 'pass' for r in results) else 'fail'
@@ -218,7 +220,11 @@ const scripts = {
   ],
   // Re-dispatched after the handback: the partial child is dead, so its plan is rebound.
   resume: [
+    // Before rebinding, the plan still belongs to the dead partial child: done and report are refused.
+    tool('resume-todo_done-early', 'todo_done', { attempt_id: plans.b.attempt_id, item_id: 'deliver' }),
+    tool('resume-todo_report-early', 'todo_report', { attempt_id: plans.b.attempt_id, item_id: 'deliver', note: '-starts with a dash' }),
     tool('resume-todo_begin-deliver', 'todo_begin', { attempt_id: plans.b.attempt_id, item_id: 'deliver' }),
+    tool('resume-todo_report-bound', 'todo_report', { attempt_id: plans.b.attempt_id, item_id: 'deliver', note: '-starts with a dash' }),
     { type: 'text', text: 'RESUME_CHILD_STOPS' },
   ],
   partial: [
@@ -458,6 +464,13 @@ test('real pinned DSH: plans walked by native children, runtime handback, State-
     // The re-dispatched child took over the dead child's plan (CLI refusal, then --rebind)
     // and was handed back in turn; nothing else rebinds a plan.
     const resume = sessionOf('resume');
+    for (const id of ['resume-todo_done-early', 'resume-todo_report-early']) {
+      const early = result(id);
+      assert.equal(early.event.data.message.isError, false, id + ' threw instead of refusing');
+      assert.equal(toolJson(early.event).refused, 'bound_to_other_session', id + ': ' + toolText(early.event));
+      assert.match(toolJson(early.event).brief, /Write a\.txt and b\.txt/);
+    }
+    assert.equal(toolJson(result('resume-todo_report-bound').event).refused, undefined, toolText(result('resume-todo_report-bound').event));
     const resumed = toolJson(result('resume-todo_begin-deliver').event);
     assert.equal(resumed.refused, undefined, JSON.stringify(resumed));
     assert.equal(result('resume-todo_begin-deliver').session, resume);

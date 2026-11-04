@@ -376,9 +376,15 @@ caller is the executing agent (`exec.agent.session.id`), never the root:
   (`bound_to_other_session`, naming `bound_session`). The runtime retries with
   `--rebind` only when that session is verified dead (not the root, not a live
   child of this process); otherwise the refusal is the result.
-- `todo_done(attempt_id, item_id)` → `done`: the harness evaluates the item's
-  predicates now (`pass|fail|absent`); a fail keeps the item open.
-- `todo_report(attempt_id, item_id, note)` → `report --note`: a free-text note.
+- `todo_done(attempt_id, item_id)` → `done --session <caller session>`: the
+  harness evaluates the item's predicates now (`pass|fail|absent`); a fail keeps
+  the item open.
+- `todo_report(attempt_id, item_id, note)` → `report --session <caller session>
+  --note`: a free-text note.
+
+`done` and `report` never rebind. When the plan is bound to another session, the
+CLI refuses `bound_to_other_session`, and the tool returns that refusal (with
+the brief) as its result rather than an error.
 
 DSH's own `todo_write` (from `dsh-base`) stays visible to the root and children.
 It is a private checklist with no harness behind it; the plan's `todo_*` tools are

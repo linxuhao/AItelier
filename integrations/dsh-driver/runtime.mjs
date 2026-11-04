@@ -366,14 +366,15 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
   ctx.tools.register(defineTool({ name: 'todo_done',
     description: 'Say you finished one plan item. The harness evaluates its bound predicates now and returns outcome pass|fail|absent with each result; your own claim is not an input. A fail keeps the item open: fix it and call again.',
     parameters: planRef, output: jsonOutput,
-    execute: async (args, exec) => todo.call(args.attempt_id, ['done', '--attempt=' + args.attempt_id, '--item=' + args.item_id], exec.signal,
+    execute: async (args, exec) => todo.call(args.attempt_id, ['done', '--attempt=' + args.attempt_id, '--item=' + args.item_id,
+      '--session=' + exec.agent.session.id], exec.signal,
       await todo.bound(args.attempt_id, status => status.timeout_budget_seconds?.[args.item_id], exec.signal)),
   }));
   ctx.tools.register(defineTool({ name: 'todo_report',
     description: 'Attach one free-text note to a plan item. It changes no item state.',
     parameters: { ...planRef, note: { type: 'string', required: true } }, output: jsonOutput,
     execute: (args, exec) => todo.call(args.attempt_id, ['report', '--attempt=' + args.attempt_id, '--item=' + args.item_id,
-      '--note=' + args.note], exec.signal),
+      '--session=' + exec.agent.session.id, '--note=' + args.note], exec.signal),
   }));
   const runtime = new DriverRuntime({ project, driver: env.AITELIER_DRIVER_ID,
     directory: env.AITELIER_DSH_STATE_DIR, request, todoPlans: async () => todoSummary(await todo.plans(), liveChildren) });

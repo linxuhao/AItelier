@@ -186,7 +186,8 @@ version, not an older globally installed command.
 ## Standing director goal and connection recovery
 
 `integrations/dsh-driver/goal.md` seeds each project's standing director mandate
-as a native DSH goal when its session has no current goal. The native goal starts
+as a native DSH goal when its session has no current goal, and re-seeds an ACTIVE
+goal's objective from it on every start (see "Deploying a changed `goal.md`"). The native goal starts
 the first director round. When that round ends, the runtime disarms immediate
 native continuation without changing the durable active phase, objective or
 round counters. Automatic notifications and idle reviews resume work instead of
@@ -198,8 +199,8 @@ keep their assigned task instead of inheriting the director's goal.
 Retained project-inbox messages are delivered after the first native goal round
 is admitted, so bootstrap messages cannot displace that round.
 
-Session resume preserves goal identity, objective, counters and the existing
-project snapshot. The enabled resident host explicitly re-arms an active goal
+Session resume preserves goal identity, counters and the existing project
+snapshot; an active goal's objective follows `goal.md`. The enabled resident host explicitly re-arms an active goal
 after restart, while paused, blocked, completed and explicitly cleared goals remain unchanged.
 Native round limits remain in force; restart does not reset them or bypass a
 blocker. No additional goal store or scheduler is introduced. The director
@@ -470,18 +471,36 @@ Director flow:
 6. When the plan is complete, call `todo_finish`, then `report_external_attempt` with its report.
 7. Review the delivery and `record_evidence` a separate report.
 
-Deploying a changed `goal.md`. `bindDriverGoal` seeds the native goal only when
-a session has none and otherwise keeps the durable objective. A running driver
-therefore keeps its old dispatch instructions after a restart, while `driver.md`
-(reloaded every start) has the new ones. The restart must re-seed each live
-driver's goal without resetting its counters:
+Deploying a changed `goal.md`. The mandate's source of truth is
+`integrations/dsh-driver/goal.md` in the repository. Edit it and restart the host
+service (`aitelier-dsh-host.service`): on every start `bindDriverGoal` renders the
+file (`{{project_id}}` replaced) and, for each director whose native goal is
+ACTIVE with a different objective, the runtime itself calls `goals.edit` with the
+rendered text. The goal id, phase and round counters are kept, the round cap is
+not touched, and the usual re-arm follows. Paused, blocked, completed and
+explicitly cleared goals are preserved (a cleared goal is deliberately not
+recreated); an objective that already matches is not edited again.
 
-1. Render `integrations/dsh-driver/goal.md` with `{{project_id}}` replaced.
-2. Run `/goal edit <that text>` on the driver's root session. This keeps the goal
-   id, phase and round counters.
-3. Confirm the persisted objective with `get_goal`.
+`goal.md` is therefore a non-human authorization channel: whoever changes it
+rewrites every active director's mandate at the next restart. Every applied edit
+appends one line to the append-only `goal-seed.jsonl` in the driver state
+directory (`AITELIER_DSH_STATE_DIR`; the headless host shows no logger output, so
+this file is the log): `at`, `goal_id`, `old_revision`, `new_revision`,
+`old_objective_sha256`, `new_objective_sha256`, `goal_md_sha256` and
+`goal_md_commit` (the last commit touching `goal.md` in the repository the runtime
+loaded it from, else in `AITELIER_TODO_CWD`, else `unknown`). It answers "what was
+this director told at the time": hash the objective text and match it against
+`new_objective_sha256` of the latest record at or before that time (objectives are
+hashed as DSH stores them, trimmed); the previous record's new digest equals the
+next record's old digest. A restart that finds the objective already matching
+appends nothing.
 
-Do not use `/goal clear`: a cleared goal is deliberately not recreated on restart.
+This has to be the runtime, not a message: the model-facing `update_goal` only
+accepts a direct human turn, and an owner message delivered through the driver
+inbox does not count. The converse also holds: an objective changed by hand with
+`update_goal` or `/goal edit` on an active goal is overwritten at the next start if
+it differs from `goal.md`. To make a lasting change, edit `goal.md`; to keep a
+manual objective, pause the goal first.
 
 ## Checks
 

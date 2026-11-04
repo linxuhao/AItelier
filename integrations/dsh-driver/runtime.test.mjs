@@ -11,8 +11,9 @@ test('an explicitly cleared native goal is not recreated on resident restart', (
   assert.equal(bindDriverGoal({get:()=>undefined},agent,'bootstrap template'),undefined);
 });
 
-test('resident restart preserves stopped or already armed goals and edited objectives', () => {
-  for (const phase of ['paused', 'blocked', 'complete', 'active']) {
+// An ACTIVE goal no longer keeps a differing objective: it follows goal.md (runtime.goalseed.test.mjs).
+test('resident restart preserves stopped goals and their edited objectives', () => {
+  for (const phase of ['paused', 'blocked', 'complete']) {
     const current = {id:'kept',revision:7,objective:'owner-edited objective',phase,activation:'armed'};
     const goals = {get: () => current};
     assert.equal(bindDriverGoal(goals, {}, 'bootstrap template'), current);
@@ -26,13 +27,13 @@ test('enabled resident re-arms the exact active native goal without resetting it
   const goals = {get: a => {assert.equal(a,agent);return current;}, resume: (a,ref) => {
     assert.equal(a,agent);assert.deepEqual(ref,{id:'kept',revision:7});return {...current,revision:8,activation:'armed'};
   }};
-  const resumed = bindDriverGoal(goals, agent, 'different bootstrap template');
+  const resumed = bindDriverGoal(goals, agent, 'owner-edited objective');
   assert.equal(resumed.roundsStarted,12);assert.equal(resumed.objective,current.objective);
   assert.equal(resumed.activation,'armed');
 });
 
 test('native continuation budget exhaustion is retained as a blocker across restart', () => {
-  const current={id:'capped',revision:3,phase:'active',activation:'disarmed',roundsStarted:256,maxGoalRounds:256};
+  const current={id:'capped',revision:3,objective:'template',phase:'active',activation:'disarmed',roundsStarted:256,maxGoalRounds:256};
   const goals={get:()=>current,block:(_agent,ref,reason)=>{
     assert.deepEqual(ref,{id:'capped',revision:3});assert.equal(reason.code,'round-limit');
     return {...current,phase:'blocked',blockedReason:reason};

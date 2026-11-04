@@ -82,7 +82,7 @@ def test_templates_lists_the_four_repository_templates_with_their_params(cli):
     assert shape["test_fix"] == {"test_argv": ("list[str]", True, None), "scope": ("list[str]", True, None)}
     assert shape["docs_change"] == {"paths": ("list[str]", True, None), "scope": ("list[str]", True, None)}
     assert shape["investigate"] == {"report_path": ("str", True, None), "require_keys": ("list[str]", True, None),
-                                    "scope": ("list[str]", False, ["."])}
+                                    "scope": ("list[str]", True, None)}
     assert by_name["code_change"]["items"] == ["implement", "test"] and all(t["version"] == 1 for t in by_name.values())
 
 
@@ -114,6 +114,9 @@ def test_create_from_code_change_expands_freezes_and_records_where_it_came_from(
         "sha256": hashlib.sha256((TEMPLATES / "code_change.yaml").read_bytes()).hexdigest()}
     assert stored["params"] == {**CODE, "test_timeout": 1800}, "the resolved params, defaults included"
     assert out["template"] == stored["template"] and out["plan_hash"] == stored["plan_hash"]
+    status = cli.ok("status", "--attempt", "att-1")
+    assert status["timeout_budget_seconds"] == {"implement": 0, "test": 1800, "deliver": 0}
+    assert status["finish_budget_seconds"] == 1800, "the template's test_timeout default is what the runtime must wait for"
 
 
 def test_an_optional_param_nobody_set_leaves_its_arg_out(cli, repo, base):
@@ -144,18 +147,49 @@ def test_create_from_a_template_is_idempotent_and_refuses_a_different_result(cli
     assert code == 2 and out["refused"] == "plan_differs"
 
 
-def test_investigate_scope_defaults_to_the_whole_workspace(cli, repo, base):
-    params = {"report_path": "out/report.json", "require_keys": ["passed"]}
-    assert create_from(cli, repo, base, "investigate", params)[0] == 0
-    stored = document(cli)
-    assert stored["plan"]["scope"] == ["."] and stored["params"]["scope"] == ["."]
+INVESTIGATE = {"report_path": "out/report.json", "require_keys": ["passed"], "scope": ["out/"]}
+
+
+def test_investigate_needs_an_explicit_scope(cli, repo, base):
+    code, out = create_from(cli, repo, base, "investigate", {k: v for k, v in INVESTIGATE.items() if k != "scope"})
+    assert code == 2 and out["refused"] == "missing_param" and "scope" in out["reason"]
+
+
+def test_investigate_wants_a_report_written_during_the_step(cli, repo, base, tmp_path):
+    assert create_from(cli, repo, base, "investigate", INVESTIGATE)[0] == 0
     cli.ok("begin", "--attempt", "att-1", "--item", "investigate")
-    assert cli.ok("done", "--attempt", "att-1", "--item", "investigate")["outcome"] == "fail"
+    assert cli.ok("done", "--attempt", "att-1", "--item", "investigate")["outcome"] == "fail", "no report yet"
     (repo / "out").mkdir()
     (repo / "out" / "report.json").write_text(json.dumps({"passed": True}))
-    commit_all(repo)
     assert cli.ok("done", "--attempt", "att-1", "--item", "investigate")["outcome"] == "pass"
-    assert deliver_results(cli)["_outcome"] == "pass", "scope ['.'] allows the report anywhere"
+    commit_all(repo)
+    assert deliver_results(cli)["_outcome"] == "pass"
+    assert cli.ok("finish", "--attempt", "att-1", "--out", str(tmp_path / "out"))["candidate"] is True
+
+
+def test_a_report_that_already_existed_at_the_base_does_not_satisfy_investigate(cli, repo):
+    (repo / "out").mkdir()
+    (repo / "out" / "report.json").write_text(json.dumps({"passed": True}))
+    old_base = commit_all(repo, "a stale report")
+    assert create_from(cli, repo, old_base, "investigate", INVESTIGATE)[0] == 0
+    cli.ok("begin", "--attempt", "att-1", "--item", "investigate")
+    out = cli.ok("done", "--attempt", "att-1", "--item", "investigate")
+    by = {r["predicate"]: r for r in out["results"]}
+    assert out["outcome"] == "fail" and by["report_json"]["outcome"] == "pass"
+    assert by["files_changed"]["outcome"] == "fail" and "out/report.json" in by["files_changed"]["detail"]
+    (repo / "out" / "report.json").write_text(json.dumps({"passed": True, "rewritten": 1}))
+    assert cli.ok("done", "--attempt", "att-1", "--item", "investigate")["outcome"] == "pass"
+
+
+def test_a_delivery_with_the_base_trees_content_is_not_a_candidate(cli, repo, base, tmp_path):
+    params = {"test_argv": PASS, "scope": ["app.py"]}                 # the "fix" is already green
+    assert create_from(cli, repo, base, "test_fix", params)[0] == 0
+    assert begin_done(cli, "fix")["outcome"] == "pass" and begin_done(cli, "test")["outcome"] == "pass"
+    git(repo, "commit", "-q", "--allow-empty", "-m", "nothing")
+    got = deliver_results(cli)
+    assert got["_outcome"] == "fail" and "nothing was delivered" in got["git_delivered"]["detail"]
+    refusal = cli.refused("finish", "--attempt", "att-1", "--out", str(tmp_path / "out"))
+    assert refusal["refused"] == "unfinished" and {f["item"] for f in refusal["failing"]} == {"deliver"}
 
 
 # -- refusals -----------------------------------------------------------------------------
@@ -194,6 +228,11 @@ def test_create_needs_exactly_one_source_and_every_identity_flag(cli, repo, base
      "bad_template", "undeclared"),
     (GOOD.format(name="t", predicate="worker_says_done", args="{x: $target}"), "unknown_predicate", "worker_says_done"),
     (GOOD.format(name="t", predicate="files_present", args='{pattern: "pre-${target}"}'), "bad_template", "whole value"),
+    (GOOD.format(name="t", predicate="files_present", args='{pattern: "src/$target"}'), "bad_template", "whole value"),
+    (GOOD.format(name="t", predicate="command_exit", args='{argv: [ls, "-l/$target"]}'), "bad_template", "whole value"),
+    (GOOD.format(name="t", predicate="command_exit", args="{argv: [ls, $nope]}"), "bad_template", "undeclared"),
+    (GOOD.format(name="t", predicate="files_present", args="{pattern: $target}").replace(
+        "    required: true\n  target", "    required: false\n  target"), "bad_template", "scope"),
     (GOOD.format(name="t", predicate="files_present", args="{glob: $target}"), "bad_template", "unknown argument"),
     (GOOD.format(name="t", predicate="command_exit", args="{argv: $target}"), "bad_template", "wrong type"),
     (GOOD.format(name="other", predicate="files_present", args="{pattern: $target}"), "bad_template", "name"),
@@ -210,6 +249,23 @@ def test_a_defective_template_is_refused_when_it_is_loaded(cli, repo, base, cust
     assert code == 2 and out["refused"] == refused and needle in out["reason"], out
     listed = {t["name"]: t for t in cli.ok("templates", store=False)["templates"]}
     assert "error" in listed["t"], "`templates` shows the defect instead of hiding the template"
+
+
+def test_a_broken_template_does_not_hide_the_others_from_the_listing(cli, repo, base, custom):
+    write_template(custom, "broken", GOOD.format(name="broken", predicate="files_present", args="{pattern: $target}")
+                   .replace("    required: true\n  target", "    required: false\n  target"))
+    write_template(custom, "fine", GOOD.format(name="fine", predicate="files_present", args="{pattern: $target}"))
+    listed = {t["name"]: t for t in cli.ok("templates", store=False)["templates"]}
+    assert "error" in listed["broken"] and "scope" in listed["broken"]["error"]
+    assert "error" not in listed["fine"] and listed["fine"]["version"] == 1
+
+
+def test_a_list_argument_may_hold_whole_param_elements(cli, repo, base, custom):
+    write_template(custom, "t", GOOD.format(name="t", predicate="files_present", args="{pattern: $target}").replace(
+        "predicate: files_present\n        args: {pattern: $target}",
+        "predicate: command_exit\n        args: {argv: [ls, -l, $target]}"))
+    assert create_from(cli, repo, base, "t", {"scope": ["**"], "target": "app.py"})[0] == 0
+    assert document(cli)["plan"]["items"][0]["predicates"][0]["args"]["argv"] == ["ls", "-l", "app.py"]
 
 
 def test_a_well_formed_custom_template_is_usable_from_the_overridden_directory(cli, repo, base, custom):

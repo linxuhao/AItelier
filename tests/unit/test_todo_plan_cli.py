@@ -27,6 +27,7 @@ _GIT_ENV = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
             "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull}
 #: Absent without a missing binary: the process exists but outlives its timeout.
 SLOW = [sys.executable, "-c", "import time; time.sleep(30)"]
+PASS_ARGV = [sys.executable, "-c", "pass"]
 
 
 def git(repo: Path, *args: str) -> str:
@@ -198,11 +199,82 @@ def test_begin_records_the_session_and_keeps_the_first_pre_state(cli, repo, base
     first = cli.ok("begin", "--attempt", "att-1", "--item", "edit", "--session", "child-A")
     assert first["first_begin"] is True and first["child_session"] == "child-A"
     (repo / "app.py").write_text("x = 1\ny = 2\n")                     # work done by the first child
-    resumed = cli.ok("begin", "--attempt", "att-1", "--item", "edit", "--session", "child-B")
+    resumed = cli.ok("begin", "--attempt", "att-1", "--item", "edit", "--session", "child-B", "--rebind")
     assert resumed["first_begin"] is False and resumed["pre_state"] == first["pre_state"]
     assert cli.ok("status", "--attempt", "att-1")["child_session"] == "child-B"
     assert cli.ok("done", "--attempt", "att-1", "--item", "edit")["outcome"] == "pass", \
         "a resumed child is judged against the state at the ORIGINAL begin"
+
+
+def test_a_plan_bound_to_one_session_refuses_another_until_it_is_rebound(cli, repo, base):
+    cli.create(plan(repo, base))
+    cli.ok("begin", "--attempt", "att-1", "--item", "edit", "--session", "child-A")
+    out = cli.refused("begin", "--attempt", "att-1", "--item", "edit", "--session", "child-B")
+    assert out["refused"] == "bound_to_other_session" and out["bound_session"] == "child-A"
+    assert "child-A" in out["reason"]
+    status = cli.ok("status", "--attempt", "att-1")
+    assert status["child_session"] == "child-A" and status["rebound_from"] is None, "a refusal changes nothing"
+
+    same = cli.ok("begin", "--attempt", "att-1", "--item", "edit", "--session", "child-A")
+    assert same["child_session"] == "child-A" and same["rebound_from"] is None
+    assert cli.ok("begin", "--attempt", "att-1", "--item", "edit")["child_session"] == "child-A", "no --session: no change"
+
+    taken = cli.ok("begin", "--attempt", "att-1", "--item", "edit", "--session", "child-B", "--rebind")
+    assert taken["child_session"] == "child-B" and taken["rebound_from"] == "child-A"
+    document = json.loads((cli.store / "att-1.json").read_text())
+    assert document["child_session"] == "child-B" and document["rebound_from"] == "child-A"
+    assert cli.refused("begin", "--attempt", "att-1", "--item", "edit", "--session", "child-A")["bound_session"] == "child-B"
+    assert cli.refused("begin", "--attempt", "att-1", "--item", "edit", "--rebind")["refused"] == "usage"
+    for command in ("status", "handback"):
+        assert cli.ok(command, "--attempt", "att-1")["rebound_from"] == "child-A"
+
+
+def test_a_first_binding_needs_no_rebind(cli, repo, base):
+    cli.create(plan(repo, base))
+    out = cli.ok("begin", "--attempt", "att-1", "--item", "edit", "--session", "child-A", "--rebind")
+    assert out["child_session"] == "child-A" and out["rebound_from"] is None, "nothing was bound before"
+
+
+def test_status_and_handback_report_how_long_each_item_may_take_to_measure(cli, repo, base):
+    timed = item("timed", [{"predicate": "command_exit", "args": {"argv": PASS_ARGV, "timeout": 1800}},
+                           {"predicate": "command_exit", "args": {"argv": PASS_ARGV, "timeout": 7.5}},
+                           {"predicate": "files_present", "args": {"pattern": "*.py"}}])
+    untimed = item("untimed", [{"predicate": "command_exit", "args": {"argv": PASS_ARGV}}])
+    cli.create(plan(repo, base, [timed, untimed]))
+    for command in ("status", "handback"):
+        out = cli.ok(command, "--attempt", "att-1")
+        assert out["timeout_budget_seconds"] == {"timed": 1807.5, "untimed": 0, "deliver": 0}
+        assert out["finish_budget_seconds"] == 1807.5
+
+
+def test_a_terminated_cli_leaves_no_running_command_behind(cli, repo, base, tmp_path):
+    import signal
+    import time
+    pidfile = tmp_path / "child.pid"
+    code = ("import subprocess, sys, time; "
+            "p = subprocess.Popen(['sleep', '60']); open(sys.argv[1], 'w').write(str(p.pid)); time.sleep(60)")
+    gate = item("gate", [{"predicate": "command_exit", "args": {"argv": [sys.executable, "-c", code, str(pidfile)],
+                                                                 "timeout": 120}}])
+    cli.create(plan(repo, base, [gate]))
+    cli.ok("begin", "--attempt", "att-1", "--item", "gate")
+    cli_proc = subprocess.Popen([sys.executable, "-m", "core.todo_cli", "done", "--attempt", "att-1", "--item", "gate",
+                                 "--store", str(cli.store)], cwd=REPO_ROOT, stdout=subprocess.PIPE, text=True)
+    deadline = time.time() + 60
+    while not pidfile.exists() and time.time() < deadline:
+        time.sleep(0.05)
+    time.sleep(0.3)
+    grandchild = int(pidfile.read_text())
+    cli_proc.send_signal(signal.SIGTERM)
+    assert cli_proc.wait(timeout=30) == 143
+    for _ in range(100):
+        try:
+            os.kill(grandchild, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    else:
+        os.kill(grandchild, signal.SIGKILL)
+        pytest.fail("the command's own child survived the CLI being terminated")
 
 
 def test_done_before_begin_is_refused(cli, repo, base):

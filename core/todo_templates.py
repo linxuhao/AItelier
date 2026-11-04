@@ -38,6 +38,8 @@ _SAMPLE = {"str": "x", "int": 1, "list[str]": ["x"]}
 
 
 def default_dir() -> Path:
+    """AITELIER_TODO_TEMPLATES, like `create --plan-json`, is not gated: both rely on the DSH tool
+    that calls `create` being root-only (a child must never choose the template directory)."""
     return Path(os.environ.get("AITELIER_TODO_TEMPLATES") or Path(__file__).resolve().parents[1] / "todo_templates")
 
 
@@ -137,6 +139,8 @@ def _validate(name: str, doc: Any, sha256: str) -> Template:
         params[pname] = Param(spec["type"], required, spec.get("default"), str(spec.get("description", "")))
     if "scope" not in params or params["scope"].type != "list[str]":
         raise _bad(name, "must declare a list[str] param `scope`: it is the scope of the appended deliver item")
+    if not params["scope"].required and params["scope"].default is None:
+        raise _bad(name, "param `scope` must be required or have a default: deliver cannot run without one")
     items = doc["items"]
     if not isinstance(items, list) or not items or not all(isinstance(i, dict) for i in items):
         raise _bad(name, "items must be a non-empty list of mappings")
@@ -154,22 +158,26 @@ def _check_refs(name: str, item: dict, params: Mapping[str, Param]) -> None:
         if ref not in params:
             raise _bad(name, f"item {item.get('id')}: title references undeclared param ${{{ref}}}")
     for binding in item.get("predicates") or []:
-        for arg, value in (binding.get("args") or {}).items() if isinstance(binding, dict) else []:
-            m = _REF.match(value) if isinstance(value, str) else None
-            if m and m.group(1) not in params:
-                raise _bad(name, f"item {item.get('id')}: {binding.get('predicate')}.{arg} references undeclared param ${m.group(1)}")
-            if not m and _contains_ref(value):
-                raise _bad(name, f"item {item.get('id')}: {binding.get('predicate')}.{arg} embeds a reference; "
-                                 "a $param must be the whole value of an arg")
+        for arg, value in (binding.get("args") or {}).items():
+            where = f"item {item.get('id')}: {binding.get('predicate')}.{arg}"
+            # A reference is the whole arg value, or a whole element of a list value.
+            for element in (value if isinstance(value, list) else [value]):
+                m = _REF.match(element) if isinstance(element, str) else None
+                if m and m.group(1) not in params:
+                    raise _bad(name, f"{where} references undeclared param ${m.group(1)}")
+                if not m and _embeds_ref(element, params):
+                    raise _bad(name, f"{where} embeds a reference; a $param must be the whole value of an arg "
+                                     "(or a whole element of a list)")
 
 
-def _contains_ref(value: Any) -> bool:
+def _embeds_ref(value: Any, params: Mapping[str, Param]) -> bool:
+    """A `$name` / `${name}` for a declared param inside a longer string, or any `${...}` at all."""
     if isinstance(value, str):
-        return "${" in value or bool(_REF.match(value))
+        return "${" in value or any(re.search(rf"\${re.escape(n)}(?!\w)", value) for n in params)
     if isinstance(value, list):
-        return any(_contains_ref(v) for v in value)
+        return any(_embeds_ref(v, params) or (isinstance(v, str) and _REF.match(v)) for v in value)
     if isinstance(value, dict):
-        return any(_contains_ref(v) for v in value.values())
+        return any(_embeds_ref(v, params) or (isinstance(v, str) and _REF.match(v)) for v in value.values())
     return False
 
 
@@ -193,6 +201,17 @@ def resolve_params(template: Template, supplied: Any) -> dict:
     return resolved
 
 
+def _expand_list(value: list, resolved: Mapping[str, Any]) -> list:
+    out = []
+    for element in value:
+        m = _REF.match(element) if isinstance(element, str) else None
+        if not m:
+            out.append(element)
+        elif m.group(1) in resolved:          # an optional param nobody set drops its element
+            out.append(resolved[m.group(1)])
+    return out
+
+
 def plan_data(template: Template, resolved: Mapping[str, Any], *, attempt_id: str, node_key: str,
               context_hash: str, base_sha: str, workspace: str, goal: str) -> dict:
     """The free-form plan this template and these params stand for."""
@@ -208,6 +227,9 @@ def plan_data(template: Template, resolved: Mapping[str, Any], *, attempt_id: st
         for binding in raw.get("predicates") or []:
             args = {}
             for arg, value in (binding.get("args") or {}).items():
+                if isinstance(value, list):       # whole elements may be refs: [$report_path]
+                    args[arg] = _expand_list(value, resolved)
+                    continue
                 m = _REF.match(value) if isinstance(value, str) else None
                 if m and m.group(1) not in resolved:
                     continue                      # an optional param nobody set: the arg is left out

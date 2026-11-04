@@ -34,6 +34,7 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
 import subprocess
 import time
 from typing import Any, Callable, Iterable, Literal, Mapping, Sequence
@@ -190,6 +191,35 @@ def _safe_rev(rev: Any) -> str:
     return text
 
 
+def _run_in_own_group(argv: list[str], cwd: str, timeout: float | None) -> "subprocess.CompletedProcess[str]":
+    """subprocess.run, except the child leads its own process group and the WHOLE group dies with us.
+
+    A test command that is killed on timeout (or whose parent is terminated mid-run) must not leave
+    its own children - a docker client, a test runner's workers - running behind it.
+    """
+    proc = subprocess.Popen(argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                            start_new_session=True)
+    try:
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _kill_group(proc)
+            proc.communicate()
+            raise
+        return subprocess.CompletedProcess(argv, proc.returncode, stdout, stderr)
+    finally:
+        if proc.poll() is None:          # an exception (SystemExit from SIGTERM, ...) is leaving
+            _kill_group(proc)
+            proc.wait()
+
+
+def _kill_group(proc: "subprocess.Popen[str]") -> None:
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
 def _git_status(workspace: Path, *args: str) -> tuple[int, str, str]:
     """Run git in the workspace: (exit code, stdout, "") or (-1, "", why it could not run)."""
     if not Path(workspace).is_dir():
@@ -219,6 +249,8 @@ def _git(workspace: Path, *args: str) -> tuple[str, str]:
 
 
 def _scope_regex(pattern: str) -> "re.Pattern[str]":
+    while pattern.startswith("./") and pattern != "./":
+        pattern = pattern[2:]               # "./src/" means "src/"
     if pattern in (".", "./"):
         pattern = "**"                      # the whole workspace
     if pattern.endswith("/"):
@@ -298,8 +330,7 @@ def builtin_library() -> PredicateLibrary:
         if not Path(workspace).is_dir():
             return PredicateResult("command_exit", "absent", f"workspace {workspace} does not exist")
         try:
-            done = subprocess.run(list(argv), cwd=str(workspace), capture_output=True,
-                                  text=True, timeout=timeout)
+            done = _run_in_own_group(list(argv), str(workspace), timeout)
         except FileNotFoundError:
             return PredicateResult("command_exit", "absent", f"{argv[0]!r} is not installed here")
         except subprocess.TimeoutExpired:
@@ -343,9 +374,10 @@ def builtin_library() -> PredicateLibrary:
 
     @library.define("git_delivered")
     def git_delivered(*, workspace: Path, pre_state: Mapping[str, Any], base: str) -> PredicateResult:
-        """HEAD is a descendant of `base`, is not `base`, and the working tree is clean.
+        """HEAD is a descendant of `base`, its tree differs from the base's, and the working tree is clean.
 
-        A branch reset behind the base, or one that diverged from it, is not a delivery.
+        A branch reset behind the base, one that diverged from it, and an empty commit
+        on top of it are not deliveries.
         """
         base_commit, absence = _git(workspace, "rev-parse", "--verify", "--quiet", f"{_safe_rev(base)}^{{commit}}")
         if absence:
@@ -359,11 +391,16 @@ def builtin_library() -> PredicateLibrary:
         code, _, err = _git_status(workspace, "merge-base", "--is-ancestor", base_commit.strip(), "HEAD")
         if code not in (0, 1):
             return PredicateResult("git_delivered", "absent", f"git merge-base exited {code}: {err[:200]}")
+        same, _, err = _git_status(workspace, "diff", "--quiet", base_commit.strip(), "HEAD")
+        if same not in (0, 1):
+            return PredicateResult("git_delivered", "absent", f"git diff exited {same}: {err[:200]}")
         problems = []
         if head.strip() == base_commit.strip():
             problems.append(f"HEAD is still the base commit {base_commit.strip()[:12]}")
         elif code == 1:
             problems.append(f"HEAD {head.strip()[:12]} is not a descendant of the base commit {base_commit.strip()[:12]}")
+        elif same == 0:
+            problems.append(f"HEAD {head.strip()[:12]} has exactly the base commit's tree: nothing was delivered")
         if dirty.strip():
             problems.append(f"working tree is not clean: {len(dirty.splitlines())} uncommitted path(s)")
         if problems:

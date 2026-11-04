@@ -12,6 +12,10 @@ walk the ledger's wait and ceiling deterministically; it is refused unless the
 environment sets AITELIER_TODO_CLOCK_OVERRIDE=1, because whoever picks the clock picks
 when an absence expires. Anything that is not a refusal is reported as
 {"refused": "internal"}: the exit status is 0 or 2, never a traceback.
+
+Trust: `create --plan-json` and AITELIER_TODO_TEMPLATES are not gated here. They rely on
+the DSH tool that calls `create` being root-only: a child must never pick the plan source
+or the template directory.
 """
 from __future__ import annotations
 
@@ -21,6 +25,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import tempfile
@@ -77,6 +82,8 @@ class _Open:
     def view(self) -> dict:
         report = self.run.report()
         entries = self.document["items"]
+        # Longest this item can legitimately take to measure: the sum of its predicates' timeouts.
+        budget = {i.id: sum(b.args["timeout"] for b in i.predicates if b.args.get("timeout")) for i in self.plan.items}
         return {
             "attempt_id": self.plan.attempt_id, "node_key": self.plan.node_key,
             "plan_hash": self.plan.plan_hash, "goal": self.plan.goal,
@@ -85,6 +92,8 @@ class _Open:
             "remaining": [i.id for i in self.plan.items if i.id not in report["done"]],
             "deferred": report["deferred"], "unmeasurable": report["unmeasurable"],
             "child_session": self.document["child_session"],
+            "rebound_from": self.document.get("rebound_from"),
+            "timeout_budget_seconds": budget, "finish_budget_seconds": sum(budget.values()),
             "episodes": {i.id: self.episode(i.id) for i in self.plan.items if self.episode(i.id)},
             "items": [{"id": i.id, "title": i.title, "needs": list(i.needs),
                        "state": item_state(entries[i.id]), "begun": entries[i.id]["pre_state"] is not None,
@@ -125,6 +134,8 @@ def cmd_templates(args, store: None, now: float) -> dict:
             listed.append(templates.load_template(name, library, directory).as_json())
         except Refusal as refusal:
             listed.append({"name": name, "error": refusal.reason})
+        except Exception as exc:  # noqa: BLE001 - one broken file must not hide the other templates
+            listed.append({"name": name, "error": f"{type(exc).__name__}: {str(exc)[:200]}"})
     return {"directory": str(directory), "templates": listed}
 
 
@@ -193,13 +204,22 @@ def cmd_begin(args, store: PlanStore, now: float) -> dict:
         unmet = [n for n in item.needs if n not in done]
         if unmet:
             raise Refusal("unmet_needs", f"item {item.id} needs {unmet} to pass first", unmet=unmet)
+        bound = p.document["child_session"]
+        if args.rebind and not args.session:
+            raise Refusal("usage", "--rebind needs --session")
+        if args.session and bound and bound != args.session and not args.rebind:
+            raise Refusal("bound_to_other_session",
+                          f"plan {p.plan.attempt_id} is bound to session {bound}; pass --rebind only once that session is dead",
+                          bound_session=bound)
         first = p.document["items"][item.id]["pre_state"] is None
         p.run.begin(item.id)
         if args.session:
+            if bound and bound != args.session:
+                p.document["rebound_from"] = bound
             p.document["child_session"] = args.session
         p.save()
         return {"item": item.id, "begun": True, "first_begin": first,
-                "child_session": p.document["child_session"],
+                "child_session": p.document["child_session"], "rebound_from": p.document.get("rebound_from"),
                 "pre_state": p.document["items"][item.id]["pre_state"], **_tail(p)}
 
 
@@ -364,9 +384,12 @@ def _parser() -> argparse.ArgumentParser:
             ("--params", {"metavar": "JSON", "help": "the template's params, as a JSON object"}),
             ("--attempt", {}), ("--node-key", {}), ("--context-hash", {}), ("--base-sha", {}),
             ("--workspace", {}), ("--goal", {}),
-            ("--plan-json", {"metavar": "FILE", "help": "TESTS ONLY: a free-form plan; the director's tool does not use it"}))
+            ("--plan-json", {"metavar": "FILE", "help": "TESTS ONLY: a free-form plan, not gated here - it relies on the DSH create tool being "
+                                    "root-only (as does AITELIER_TODO_TEMPLATES)"}))
     command("status", attempt)
-    command("begin", attempt, item, ("--session", {"metavar": "SID"}))
+    command("begin", attempt, item, ("--session", {"metavar": "SID"}),
+            ("--rebind", {"action": "store_true",
+                          "help": "take over a plan bound to another session; only after that session is known dead"}))
     command("done", attempt, item)
     command("report", attempt, item, ("--note", {"required": True}))
     command("handback", attempt)
@@ -396,4 +419,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    # A terminated CLI must unwind (so a running predicate command's process group is killed),
+    # not vanish and leave a test or docker child behind.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
     sys.exit(main())

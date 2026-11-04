@@ -296,6 +296,27 @@ def test_files_changed_wants_every_path_changed_and_names_the_first_that_is_not(
     assert "c.py does not exist" in run.observe("all").results[0].detail
 
 
+def test_a_delivery_whose_tree_equals_the_base_is_not_a_delivery(repo):
+    base = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "commit", "-q", "--allow-empty", "-m", "empty")
+    empty = _eval(repo, "git_delivered", base=base)
+    assert empty.outcome == "fail" and "nothing was delivered" in empty.detail
+    (repo / "src" / "a.py").write_text("a = 2\n")
+    _git(repo, "commit", "-qam", "real")
+    assert _eval(repo, "git_delivered", base=base).outcome == "pass"
+    (repo / "src" / "a.py").write_text("a = 1\n")                        # changed and changed back
+    _git(repo, "commit", "-qam", "revert")
+    assert _eval(repo, "git_delivered", base=base).outcome == "fail", "net change is what counts"
+
+
+def test_scope_entries_are_normalised_before_matching(repo):
+    base = _git(repo, "rev-parse", "HEAD")
+    (repo / "src" / "a.py").write_text("a = 2\n")
+    for scope in (["./src/"], ["./src/**"], [".//src/a.py".replace(".//", "./")], ["././src/"]):
+        assert _eval(repo, "changes_within", base, scope=scope).outcome == "pass", scope
+    assert _eval(repo, "changes_within", base, scope=["./docs/"]).outcome == "fail"
+
+
 def test_a_dot_scope_means_the_whole_workspace(repo):
     base = _git(repo, "rev-parse", "HEAD")
     (repo / "anywhere").mkdir()
@@ -376,3 +397,24 @@ def test_a_run_can_be_resumed_from_its_observations(tmp_path):
     resumed = TodoRun(_plan(one, two), builtin_library(), tmp_path,
                       pre_state=first.pre_states, reports=first.reports)
     assert resumed.report()["done"] == ["one"] and resumed.next_item().id == "two"
+
+
+def test_a_command_that_times_out_takes_its_whole_process_group_with_it(tmp_path):
+    import signal
+    import time
+    pidfile = tmp_path / "child.pid"
+    code = ("import subprocess, sys, time; "
+            "p = subprocess.Popen(['sleep', '60']); open(sys.argv[1], 'w').write(str(p.pid)); time.sleep(60)")
+    result = builtin_library().evaluate(
+        Binding("command_exit", {"argv": [sys.executable, "-c", code, str(pidfile)], "timeout": 1.5}),
+        workspace=tmp_path, pre_state={})
+    assert result.outcome == "absent" and "timed out" in result.detail
+    grandchild = int(pidfile.read_text())
+    for _ in range(100):
+        try:
+            os.kill(grandchild, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.05)
+    os.kill(grandchild, signal.SIGKILL)
+    pytest.fail("the timed-out command's child is still running")

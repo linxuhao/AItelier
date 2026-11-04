@@ -370,7 +370,13 @@ async def _drive_to_completion(sf, db, ws, run_id, monkeypatch, max_ticks=160,
                     sf.reject_checkpoint(run_id, checkpoint_step, feedback)
                     checkpoint_rejected.add(checkpoint_step)
                 else:
-                    sf.approve_checkpoint(run_id)
+                    # CAS on the paused checkpoint's retained identity: the
+                    # host reads the published checkpoint and approves exactly
+                    # that one under a unique decision id.
+                    paused = sf.get_checkpoint(run_id)
+                    sf.approve_checkpoint(
+                        run_id, expected_checkpoint=paused["expected_checkpoint"],
+                        decision_id=f"real-runner-{run_id}-{checkpoints}")
                 continue
             if status == "running":
                 # advance_run reached an internal node (tool/gate/loop) and
@@ -697,4 +703,12 @@ class TestRealRunnerFullPipeline:
         artifact = sf._workspace.get_step_dir("p", sf._get_graph_name(run_id), "t_impl", item="t1")
         receipt = json.loads((artifact / "code_changes.json").read_text())
         from skillflow.output_targets import git
-        assert "# Reviewed implementation." in git(root, "diff", receipt["base_commit"], receipt["commit"], "--", "main.py")
+        # --no-ext-diff, exactly as closeout_gate and writing_bench already do:
+        # the closed profile pins `diff.external=` to mean "no external diff
+        # program", but Git reads an empty diff.external as a program NAME, so a
+        # content-rendering diff dies with "cannot run : No such file or
+        # directory" on git 2.47.3. --no-ext-diff asks for the built-in
+        # renderer, which is what this assertion is about.
+        assert "# Reviewed implementation." in git(root, "diff", "--no-ext-diff",
+                                                   receipt["base_commit"], receipt["commit"],
+                                                   "--", "main.py")

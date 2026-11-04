@@ -445,7 +445,13 @@ def _drive(sf, run_id, *, reject_at=None, stop_at="t_plan", max_ticks=40):
             run = sf.get_run(run_id)
             if run["status"] == "paused":
                 checkpoints += 1
-                sf.approve_checkpoint(run_id)
+                # Approving a checkpoint is a CAS on the retained identity the
+                # engine published for THIS pause, not a bare "go ahead": read
+                # the paused checkpoint and approve exactly that one.
+                checkpoint = sf.get_checkpoint(run_id)
+                sf.approve_checkpoint(
+                    run_id, expected_checkpoint=checkpoint["expected_checkpoint"],
+                    decision_id=f"mocked-planning-{run_id}-{checkpoints}")
                 continue
             break  # completed / failed
         claimed = sf.claim_next_step(run_id)

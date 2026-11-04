@@ -1,6 +1,8 @@
-"""New reviewer scenarios; production code comes only from exact /work."""
+"""New reviewer scenarios; production code comes only from the tested tree."""
 import copy
 import json
+import os
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,11 +15,18 @@ from tests.unit.test_json_delivery_failure import EXTRA_BRACE, action, engine, r
 from tests.unit.test_native_direct_code import run_fixture, host, response, execute
 from tests.unit.test_native_effect_recovery import HostCrash, batch, crash_after_fence, owned_tools
 from tests.unit.test_scheduler_launch_isolation_failure import launch_world, _reserve
-from tests.unit.test_state_relay_latest_payload import owned_world, fail_round, budget
+from tests.unit.test_state_relay_latest_payload import owned_world, fail_round, budget, pinned_sdk
 
-R=Path('/reports')
+# Scenario dumps are diagnostic evidence, never asserted on: they used to be
+# written to an absolute /reports that only the authoring review harness
+# mounted, so every scenario died in `record` before its assertions ran. The
+# destination is now derived from the environment (set AITELIER_R2_REPORT_DIR
+# to keep them beside a review record) and created on demand.
+R = Path(os.environ.get('AITELIER_R2_REPORT_DIR')
+         or Path(tempfile.gettempdir()) / 'aitelier-r2-reports')
 
 def record(name, data):
+    R.mkdir(parents=True, exist_ok=True)
     (R/(name+'.json')).write_text(json.dumps(data,indent=2,default=str)+'\n')
 
 def install_json(e, replies, prompts):
@@ -43,12 +52,23 @@ def test_actual_native_failure_before_effect_enters_bounded_json_loop(tmp_path,m
     e._emit=observed_emit
     e.factory.get_max_retries=lambda _:2
     if json_route=='actions':claim.inputs['_tool_schemas'].pop('write',None)
-    install_json(e,[EXTRA_BRACE,jr(action('create',file='independent.py',content='VALUE = 29\n'))],prompts)
+    replies=[EXTRA_BRACE,jr(action('create',file='independent.py',content='VALUE = 29\n'))]
+    if json_route=='actions':
+        # The `write` schema is what routes a step to _run_tool_content_step.
+        # Without it the JSON fallback runs _run_tool_step, which since the
+        # explicit-completion hardening requires finish_step/end_step before a
+        # native-sourced round may report done: the write alone keeps the loop
+        # open rather than completing it.
+        replies.append(jr(action('finish_step')))
+    install_json(e,replies,prompts)
     try:
         result=execute(e,ws,rid,claim)
         rows=sf.get_trace(rid)
         record('actual-native-json-fallback-'+json_route,{'outcome':result,'json_route':json_route,'native_calls':native,'json_prompts':prompts,'trace':rows,'events':events,'bytes':(root/'independent.py').read_text()})
-        assert result is True and len(prompts)==2
+        # The bounded loop consumed exactly the scripted turns: malformed reply
+        # + repaired reply, plus the explicit completion turn the actions route
+        # now requires before it may report done.
+        assert result is True and len(prompts)==(3 if json_route=='actions' else 2)
         if json_route=='actions':assert 'Failed to parse JSON' in prompts[1]
         else:
             assert 'previous response was not valid JSON' in prompts[1]
@@ -135,8 +155,8 @@ def test_recovered_identical_calls_at_distinct_batch_positions_execute(tmp_path,
         record('distinct-retained-invocations',{'executions':executions,'provider_calls':provider,'fences':fences,'trace':sf.get_trace(rid)})
     finally:sf._conn.close()
 
-def test_latest_failure_payload_survives_bounded_tail_and_frozen_handoff(tmp_path,monkeypatch):
-    service,runtime,source=owned_world(tmp_path,monkeypatch)
+def test_latest_failure_payload_survives_bounded_tail_and_frozen_handoff(tmp_path,monkeypatch,pinned_sdk):
+    service,runtime,source=owned_world(tmp_path,monkeypatch,pinned_sdk)
     old={'remaining_delivery':['first unfinished'],'read_accounting':{'bytes':120}}
     new={'remaining_delivery':['latest unfinished'],'read_accounting':{'bytes':17},'reviewer_marker':'latest'}
     first=fail_round(service,runtime,source,'independent-first',[budget(1,old)])

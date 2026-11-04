@@ -83,9 +83,14 @@ steps:
       # poller now refuses to create a run for this config until the seed is
       # published (core/seed_publication.py), so a healthy launch never reaches
       # this. It fires only if something creates a run with no plan anyway —
-      # and then ContextResolver raises RequiredContextMissing at the first
-      # claim, which the scheduler turns into a terminal run with a named
-      # reason, instead of spawning an implementer with no scope at all.
+      # and what actually stops it is EARLIER than the claim this comment used
+      # to name: since coding_impl gained its `baseline` tool step, that step
+      # refuses a plan-less run with a named terminal error ("coding_impl
+      # baseline requires published plan.md") before any claim exists. The
+      # `required` flag below is now the backstop behind that backstop:
+      # ContextResolver still raises RequiredContextMissing at the first claim
+      # if a future config reorders the steps, which the scheduler turns into a
+      # terminal run with a named reason.
       #
       # Without it the source resolved to EMPTY and the step claimed cleanly:
       # that is how a plan-less agent got 95 s and a `repo_apply` on

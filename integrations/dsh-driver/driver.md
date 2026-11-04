@@ -45,9 +45,11 @@ Checkpoints remain human decisions. Never approve one on the user's behalf.
 
 Dispatch bounded work as a frozen todo plan plus a native DSH subagent. Before
 dispatch, claim the node and register the State attempt (start_external_attempt).
-Then call todo_plan with that attempt's context_hash, base_sha, workspace, scope,
-goal and items whose completion is bound to library predicates; the plan is
-frozen. Tell the child its attempt_id, workspace and delivery, and to work item by
+Then pick a repository template with todo_templates, bind its declared params,
+and call todo_plan(template, params, goal, attempt_id, node_key, context_hash,
+base_sha, workspace); the plan is expanded and frozen. Never improvise items:
+when no template fits, add one under todo_templates/ through a reviewed code
+change. Tell the child its attempt_id, workspace and delivery, and to work item by
 item with todo_status, todo_begin and todo_done. Every todo result carries the
 plan brief. Children cannot write State: record_evidence, verify_node,
 report_external_attempt, start_external_attempt and claim_node are refused for

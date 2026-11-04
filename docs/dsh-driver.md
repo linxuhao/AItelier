@@ -210,8 +210,9 @@ model preferences and cleanup policy are part of that mandate. At each schedulin
 round, new task or worker completion, the director checks ready work and free
 workers, dispatches bounded implementation/investigation/verification by default,
 and focuses on prioritization, acceptance and integration. An assignment is a
-frozen todo plan (State attempt, source base, owned checkout, write scope, goal
-and predicate-bound items) plus a native child; see “Todo plans”. `run_pipeline`
+frozen todo plan expanded from a repository template (State attempt, source
+base, owned checkout, goal and the template's params) plus a native child; see
+“Todo plans”. `run_pipeline`
 stays available but is no longer the default. The director continues
 independent work and refills available slots after review.
 Small fixes, urgent mitigation and work requiring the director's current context
@@ -315,71 +316,131 @@ generated SDK would still contain the complete visible tool catalog.
 
 ## Todo plans
 
-Dispatch is a frozen todo plan plus a native child. The plan store and every
-predicate live in Python (`core/todo_cli.py`); `runtime.mjs` only shells out to
+Dispatch is a frozen todo plan plus a native child. A plan is never authored per
+dispatch: it is expanded from a reviewed repository template. The plan store,
+the templates and every predicate live in Python (`core/todo_cli.py`,
+`todo_templates/`); `runtime.mjs` only shells out to
 `$AITELIER_TODO_PYTHON -m core.todo_cli <command>` in `$AITELIER_TODO_CWD`, with
-`AITELIER_DSH_STATE_DIR` set, parses its stdout JSON and returns it. Exit 2 is
-returned as a refusal (`refused`), not thrown; any other non-zero exit is a tool
-error. Every result carries `brief`: the CLI's own, or the plan's `status` brief
-when the command printed none (`null` only when the plan does not exist).
+`AITELIER_DSH_STATE_DIR` set, parses its stdout JSON and returns it. Values are
+passed as `--flag=value`, so a note or goal starting with `-` stays a value.
+Exit 2 is returned as a refusal (`refused`), not thrown; any other non-zero
+exit, or a call past its timeout (60 s; `finish` 600 s), is a tool error. Every
+plan result carries `brief`: the CLI's own, or the plan's `status` brief when the
+command printed none (`null` only when the plan does not exist).
 
-| Variable | Set by `core/dsh_driver.py` to | Meaning |
+| Variable | Set by | Meaning |
 |---|---|---|
-| `AITELIER_TODO_PYTHON` | `sys.executable` | interpreter that runs the CLI |
-| `AITELIER_TODO_CWD` | the repository root | checkout containing `core/todo_cli.py` |
-| `AITELIER_DSH_STATE_DIR` | the driver's private state directory | plan store `<state dir>/todo/<attempt_id>.json` |
+| `AITELIER_TODO_PYTHON` | `core/dsh_driver.py`: `sys.executable` | interpreter that runs the CLI |
+| `AITELIER_TODO_CWD` | `core/dsh_driver.py`: the repository root | checkout containing `core/todo_cli.py` and `todo_templates/` |
+| `AITELIER_DSH_STATE_DIR` | `core/dsh_driver.py`: the driver's private state directory | plan store `<state dir>/todo/<attempt_id>.json` |
+| `AITELIER_TODO_TEMPLATES` | unset (tests only) | read by the CLI: overrides the template directory `todo_templates/` |
+| `AITELIER_DSH_IDLE_REVIEW_MS` | unset (tests only) | overrides the 15-minute idle review interval |
+
+Templates. `todo_templates/<name>.yaml` declares `name`, `version`,
+`description`, `params` (each with `type` in `str`, `int`, `list[str]`,
+`required`, `default`) and `items`, whose predicate args reference a param by
+whole value (`$param`) and whose titles may use `${param}`. The CLI validates the
+params, expands the items, appends `deliver`, freezes the plan and records the
+template's name, version and file sha256 with the params. A template changes only
+through a reviewed code change, like the predicate library. When no template
+fits a task, add one that way; never improvise items.
 
 Director only, registered on the root agent's scope (children never see them):
 
-- `todo_plan(plan)` → `create --plan-json`; `plan` is `{attempt_id, node_key,
-  context_hash, base_sha, workspace, scope[], goal, items[{id, title, needs[],
-  predicates[{predicate, args}]}]}`, with `context_hash` from
-  `start_external_attempt`. The CLI freezes it and appends a `deliver` item.
+- `todo_templates()` → `templates`: the templates with name, version,
+  description and params.
+- `todo_plan(template, params, goal, attempt_id, node_key, context_hash,
+  base_sha, workspace)` → `create --template --params --attempt --node-key
+  --context-hash --base-sha --workspace --goal`, with `context_hash` from
+  `start_external_attempt`. Any other argument (for example `items`) is refused
+  as `unknown_arguments` before the CLI runs; a missing, unknown or wrongly typed
+  param is the CLI's refusal.
 - `todo_finish(attempt_id)` → `finish --out <state dir>/todo/finish/<attempt_id>`:
   re-evaluates every item and, only if all pass, writes the git bundle, its
-  sha256 and the candidate report for `report_external_attempt`.
+  sha256 and the candidate report for `report_external_attempt`. An attempt_id
+  that is not a plain file name is refused before any path is built.
 
 Root and every native child, registered host-wide like `project_work`; the
 caller is the executing agent (`exec.agent.session.id`), never the root:
 
 - `todo_status(attempt_id)` → `status`: brief, goal, next, done, remaining.
 - `todo_begin(attempt_id, item_id)` → `begin --session <caller session>`: binds
-  the plan to the calling child and captures the item's pre-state.
+  the plan to the calling child and captures the item's pre-state. A plan bound to
+  another child that is still alive is refused (`bound_to_live_session`, naming
+  that session) instead of being silently rebound.
 - `todo_done(attempt_id, item_id)` → `done`: the harness evaluates the item's
   predicates now (`pass|fail|absent`); a fail keeps the item open.
 - `todo_report(attempt_id, item_id, note)` → `report --note`: a free-text note.
 
-Workers do not judge their own work. For every session other than the root,
-`mcp__aitelier__record_evidence`, `verify_node`, `report_external_attempt`,
-`start_external_attempt` and `claim_node` are refused by a tool guard that tool
-discovery installs, whether reached through `call_tool` or called directly, with
-the message “workers do not judge their own work; the director records State
-evidence”. The root keeps them.
+DSH's own `todo_write` (from `dsh-base`) stays visible to the root and children.
+It is a private checklist with no harness behind it; the plan's `todo_*` tools are
+the work contract and the only progress the director sees.
+
+Workers do not judge their own work. In the real `aitelier` MCP server the State
+writes are `action` values of one tool, `mcp__aitelier__state_graph_write`. For
+every session other than the root, a tool guard installed by tool discovery
+refuses `state_graph_write` whose `action` is `record_evidence`, `verify_node`,
+`report_external_attempt`, `start_external_attempt` or `claim_node`, and refuses
+it when `action` is missing or not a string. The same five names are also refused
+as bare tool names in case a server ever exposes them. The guard applies through
+`call_tool` and to direct calls, with the message “workers do not judge their own
+work; the director records State evidence”. Other actions stay open to workers,
+and the root keeps all of them. This is a rule on the tool surface, not a security
+boundary. A child's bash inherits the driver token (`AITELIER_DRIVER_TOKEN`,
+`AITELIER_DRIVER_TOKEN_FILE`), so a direct HTTP call to the State API is not
+covered. Per-child tokens are a separate owner decision (design D9).
 
 Handback is produced by the runtime, not by the child's last message. When a
-native child ends (`subagent/end`) and a plan whose `child_session` is that child
-still has remaining items, the runtime asks the CLI (`handback`) and steers the
-root with an `aitelier-runtime-event` message
-`{reason: "todo_unfinished", attempt_id, done, next, remaining, last_observations}`
-(`last_observations` are the last three `todo_done` verdicts this process saw for
-that plan). The idle review payload adds `todo_unfinished`: plans with remaining
-items and no live child.
+native child ends (`subagent/end`) and a plan whose bound `child_session` is that
+exact child still has remaining items, the runtime asks the CLI (`handback`) and
+steers the root with an `aitelier-runtime-event` message
+`{reason: "todo_unfinished", attempt_id, done, next, remaining, last_observations}`.
+`last_observations` is the CLI's object keyed by every item that has not passed,
+each with its latest predicate results (`[]` for an item never observed). It is
+an object, not the array named in the node goal. If the CLI refuses or fails, the
+steer carries `todo_error` instead of empty fields. If the plans cannot be listed
+at all, it is `{reason: "todo_handback_failed", child_session, todo_error}`. The
+idle review payload adds `todo_unfinished` (plans with remaining items and no
+live child), or `todo_error` when the plans cannot be read.
 
 Compaction. The root's `aitelier-driver-state` snapshot (bootstrap and after each
 successful compaction) adds `todo: [{attempt_id, node_key, next, remaining_count,
-child_alive}]` once any plan exists; with no plan the key is absent. For
-children, a host-scoped `agent/pre-step` hook does fire for native children: the
-pinned `compaction-basic` compacts children through the same host-level hook, and
-`runtime.todo.test.mjs` observes a child's `compaction/end` followed by the brief
-in that child's next model request. After each successful compaction of a child
-bound to a plan, the runtime appends one user message `todo brief: …` (source kind
-`aitelier-todo-brief`, newlines folded) to that child's next step. The brief in
-every todo result remains the primary recovery channel.
+child_alive}]` for unfinished plans. When there are none, the key is absent, and
+finished plans drop out. A todo CLI failure never fails the snapshot: it renders
+`todo_error` instead.
 
-Director flow: claim, `start_external_attempt`, `todo_plan`, spawn the child with
-its attempt_id; on completion or a `todo_unfinished` handback, re-dispatch or
-report failed; when complete, `todo_finish`, then `report_external_attempt` with
-its report, then review the delivery and `record_evidence` a separate report.
+A host-scoped `agent/pre-step` hook does fire for native children:
+
+- The pinned `compaction-basic` compacts children through the same host-level hook.
+- `runtime.todo.test.mjs` observes a child's `compaction/end` followed by the brief in that child's next model request.
+
+After each successful compaction of a child bound to a plan, the runtime appends
+one user message `todo brief: …` (source kind `aitelier-todo-brief`, newlines
+folded) to that child's next step. If the brief cannot be read, the step proceeds
+without it. The brief in every todo result remains the primary recovery channel.
+
+Director flow:
+
+1. Claim the node, then `start_external_attempt`.
+2. Pick a template with `todo_templates` and bind its params.
+3. Call `todo_plan`.
+4. Spawn the child with its attempt_id and the `todo_*` tools.
+5. On completion or a `todo_unfinished` handback, re-dispatch or report failed.
+6. When the plan is complete, call `todo_finish`, then `report_external_attempt` with its report.
+7. Review the delivery and `record_evidence` a separate report.
+
+Deploying a changed `goal.md`. `bindDriverGoal` seeds the native goal only when
+a session has none and otherwise keeps the durable objective. A running driver
+therefore keeps its old dispatch instructions after a restart, while `driver.md`
+(reloaded every start) has the new ones. The restart must re-seed each live
+driver's goal without resetting its counters:
+
+1. Render `integrations/dsh-driver/goal.md` with `{{project_id}}` replaced.
+2. Run `/goal edit <that text>` on the driver's root session. This keeps the goal
+   id, phase and round counters.
+3. Confirm the persisted objective with `get_goal`.
+
+Do not use `/goal clear`: a cleared goal is deliberately not recreated on restart.
 
 ## Checks
 
@@ -388,10 +449,18 @@ Run backend tests only in a throwaway container as required by AGENTS.md.
 DSH process, a local fake model/MCP/State server, native child execution,
 automatic compaction, fresh private-state injection, precompact history grep,
 and automatic idle/busy notifications, issue delivery and idle task reviews.
-`runtime.todo.test.mjs` drives two todo plans through native children against a
-fake `core.todo_cli` (set `AITELIER_TODO_TEST_PYTHON`/`AITELIER_TODO_TEST_CWD`
-to use a real checkout): a full walk, a runtime handback, the State-writer
-refusal, briefs across child and root compaction and `todo_finish`. Tool-discovery checks cover parent/child MCP lookup and
+`runtime.todo.test.mjs` drives two `code_change` template plans through native
+children against a fake `core.todo_cli` (set `AITELIER_TODO_TEST_PYTHON`/
+`AITELIER_TODO_TEST_CWD` to use a real checkout). It covers:
+
+- the template listing;
+- the refusal of free items and of a wrongly typed param;
+- a full walk and a runtime handback;
+- the `state_graph_write` action refusal;
+- the real idle review payload, using a short interval;
+- briefs across child and root compaction;
+- `todo_finish`;
+- a broken CLI degrading the snapshot. Tool-discovery checks cover parent/child MCP lookup and
 dispatch, live registry updates, caller restrictions, errors, cancellation and
 unchanged model tool prefixes. It makes no paid model calls and touches no live project.
 

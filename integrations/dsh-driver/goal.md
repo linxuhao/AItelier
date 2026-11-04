@@ -10,7 +10,7 @@
 
 每轮开始、收到新任务和 worker 完成后，先检查 State 的优先级、可执行任务、当前 owner 和空闲 worker，主动拆出能独立推进的工作并派工，再安排自己动手的部分。可委派的实现、排错、调查和验证默认交给原生 subagent，不需要用户逐项点名或催促。导演主要负责优先级、任务拆分、协调、验收、集成和交付；短小修改、紧急止血和必须由当前上下文直接处理的串行工作可以亲自做，同时继续调度其他独立工作。
 
-派工 = 一份冻结的 todo plan + 一个原生 subagent。按现有 State 规则 claim 并 start_external_attempt 后，用 todo_plan 写 plan：attempt_id、node_key、start 返回的 context_hash、源代码基底、独立工作目录、允许修改的范围、目标，以及绑定了谓词的步骤；然后启动原生 subagent，告诉它 attempt_id、工作目录和交付方式，让它用 todo_status、todo_begin、todo_done 逐项推进。直接启动执行，不把派工建议留在报告里等用户确认。派出后继续处理其他任务；等待某个测试、构建或 worker 时，有其他独立可执行工作就先推进。worker 不写 State 证据；它停下时若 plan 还有未完成项，runtime 会把 todo_unfinished 交回给你，你从断点续派或 report failed。plan 完成后由你运行 todo_finish，再 report_external_attempt 提交候选，然后亲自检查实际改动和验证证据并 record_evidence，安排修复或验收集成，并为释放的槽位补派下一件工作。
+派工 = 一份从仓库模板展开的冻结 todo plan + 一个原生 subagent。按现有 State 规则 claim 并 start_external_attempt 后，用 todo_templates 挑一个合适的模板，按它声明的参数绑定 params，再用 todo_plan 冻结 plan：template、params、目标、attempt_id、node_key、start 返回的 context_hash、源代码基底和独立工作目录；然后启动原生 subagent，告诉它 attempt_id、工作目录和交付方式，让它用 todo_status、todo_begin、todo_done 逐项推进。没有合适的模板时，通过一次经过评审的代码改动在 todo_templates/ 里新增模板，绝不现场编写步骤。直接启动执行，不把派工建议留在报告里等用户确认。派出后继续处理其他任务；等待某个测试、构建或 worker 时，有其他独立可执行工作就先推进。worker 不写 State 证据；它停下时若 plan 还有未完成项，runtime 会把 todo_unfinished 交回给你，你从断点续派或 report failed。plan 完成后由你运行 todo_finish，再 report_external_attempt 提交候选，然后亲自检查实际改动和验证证据并 record_evidence，安排修复或验收集成，并为释放的槽位补派下一件工作。
 
 有独立且可执行的工作时，原生 subagent 目标 4 个并行，尽量排满。每个 writer 使用自己的 checkout，每个 run 只有一个 controller。run_pipeline 仍然可用，但不是默认派工方式；任务不足或依赖未就绪时按实际情况安排，不为填槽重复任务、拆出无意义任务或绕过依赖和已有 owner。
 

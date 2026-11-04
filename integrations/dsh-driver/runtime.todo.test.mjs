@@ -1,6 +1,7 @@
 /**
  * Todo plans end to end: a real pinned DSH boots this driver with a fake model,
- * a fake MCP/State server and a todo CLI. The root freezes two plans and
+ * a fake MCP/State server and a todo CLI. The root lists the repository
+ * templates, freezes two plans expanded from template `code_change` and
  * dispatches two native children; one walks every item, one stops after the
  * second and must be handed back by the runtime, not by its last message.
  *
@@ -19,15 +20,16 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn, execFileSync } from 'node:child_process';
 import { once } from 'node:events';
-import { DriverRuntime, TodoCli, todoSummary, unfinishedWithoutChild, stateInjectionSource, runtimeEventSource, todoBriefSource } from './runtime.mjs';
+import { DriverRuntime, TodoCli, todoSummary, unfinishedWithoutChild, stateInjectionSource, runtimeEventSource, todoBriefSource, driverGoal } from './runtime.mjs';
 
 const FAKE_CLI = String.raw`"""Fake core.todo_cli for runtime.todo.test.mjs: the CLI contract, minimally."""
-import argparse, glob, hashlib, json, os, subprocess, sys
+import argparse, hashlib, json, os, subprocess, sys
 from pathlib import Path
 
 parser = argparse.ArgumentParser()
 parser.add_argument('command')
-for flag in ('--store', '--attempt', '--item', '--session', '--note', '--plan-json', '--out'):
+for flag in ('--store', '--attempt', '--item', '--session', '--note', '--out', '--template', '--params',
+             '--node-key', '--context-hash', '--base-sha', '--workspace', '--goal'):
     parser.add_argument(flag)
 args = parser.parse_args()
 store = Path(args.store or os.path.join(os.environ['AITELIER_DSH_STATE_DIR'], 'todo'))
@@ -40,12 +42,36 @@ def emit(value, code=0):
 def git(plan, *argv):
     return subprocess.run(['git', *argv], cwd=plan['workspace'], capture_output=True, text=True, check=True).stdout.strip()
 
+# One template, shaped like todo_templates/code_change.yaml: params are typed,
+# predicate args reference a param by whole value ('$name'), titles by '$' '{name}' (split so this JS template stays literal).
+TEMPLATES = {'code_change': {
+    'name': 'code_change', 'version': 1, 'description': 'Change files within a scope, then pass a test command.',
+    'params': {'paths': {'type': 'list[str]', 'required': True}, 'scope': {'type': 'list[str]', 'required': True},
+               'test_argv': {'type': 'list[str]', 'required': True}, 'marker': {'type': 'str', 'required': False, 'default': None},
+               'test_timeout': {'type': 'int', 'required': False, 'default': 1800}},
+    'items': [
+        {'id': 'implement', 'title': 'change $' '{paths}', 'needs': [], 'predicates': [
+            {'predicate': 'files_changed', 'args': {'paths': '$paths', 'contains': '$marker'}},
+            {'predicate': 'changes_within', 'args': {'scope': '$scope'}}]},
+        {'id': 'test', 'title': 'run $' '{test_argv}', 'needs': ['implement'], 'predicates': [
+            {'predicate': 'command_exit', 'args': {'argv': '$test_argv', 'expect': 0, 'timeout': '$test_timeout'}}]},
+    ]}}
+TYPES = {'str': lambda v: isinstance(v, str), 'int': lambda v: isinstance(v, int) and not isinstance(v, bool),
+         'list[str]': lambda v: isinstance(v, list) and all(isinstance(x, str) for x in v)}
+
+def bind(value, params):
+    return params[value[1:]] if isinstance(value, str) and value.startswith('$') else value
+
 def evaluate(plan, item):
     results = []
     for binding in item['predicates']:
         name, bound = binding['predicate'], binding.get('args', {})
-        if name == 'files_present':
-            ok = any(os.path.isfile(p) for p in glob.glob(os.path.join(plan['workspace'], bound['pattern'])))
+        if name == 'files_changed':
+            ok = all(os.path.isfile(os.path.join(plan['workspace'], p)) for p in bound['paths'])
+        elif name == 'changes_within':
+            ok = True
+        elif name == 'command_exit':
+            ok = subprocess.run(bound['argv'], cwd=plan['workspace']).returncode == bound['expect']
         else:
             ok = git(plan, 'rev-parse', 'HEAD') != bound['base'] and not git(plan, 'status', '--porcelain')
         results.append({'predicate': name, 'outcome': 'pass' if ok else 'fail', 'detail': name})
@@ -65,17 +91,37 @@ def save(plan):
     path.with_suffix('.tmp').write_text(json.dumps(plan))
     path.with_suffix('.tmp').replace(path)
 
+if args.command == 'templates':
+    emit({'templates': [{k: t[k] for k in ('name', 'version', 'description', 'params')} for t in TEMPLATES.values()]})
 if args.command == 'create':
-    plan = json.loads(Path(args.plan_json).read_text())
-    for item in plan['items']:
-        for binding in item['predicates']:
-            if binding['predicate'] != 'files_present':
-                emit({'refused': 'unknown_predicate', 'reason': binding['predicate']}, 2)
-    plan['items'].append({'id': 'deliver', 'title': 'deliver', 'needs': [i['id'] for i in plan['items']],
-                          'predicates': [{'predicate': 'git_delivered', 'args': {'base': plan['base_sha']}}]})
-    plan.update(done=[], child_session=None, notes=[], results={})
+    template = TEMPLATES.get(args.template)
+    if template is None:
+        emit({'refused': 'unknown_template', 'reason': str(args.template)}, 2)
+    given = json.loads(args.params)
+    unknown = sorted(set(given) - set(template['params']))
+    if unknown:
+        emit({'refused': 'invalid_params', 'reason': 'unknown params ' + ', '.join(unknown)}, 2)
+    params = {}
+    for key, spec in template['params'].items():
+        if key not in given:
+            if spec['required']:
+                emit({'refused': 'invalid_params', 'reason': 'missing ' + key}, 2)
+            params[key] = spec['default']
+        elif not TYPES[spec['type']](given[key]):
+            emit({'refused': 'invalid_params', 'reason': key + ' must be ' + spec['type']}, 2)
+        else:
+            params[key] = given[key]
+    items = [{'id': i['id'], 'title': i['title'].replace('$' '{paths}', ', '.join(params['paths'])).replace('$' '{test_argv}', ' '.join(params['test_argv'])),
+              'needs': i['needs'], 'predicates': [{'predicate': b['predicate'], 'args': {k: bind(v, params) for k, v in b['args'].items()}}
+                                                   for b in i['predicates']]} for i in template['items']]
+    items.append({'id': 'deliver', 'title': 'deliver', 'needs': [i['id'] for i in items],
+                  'predicates': [{'predicate': 'git_delivered', 'args': {'base': args.base_sha}}]})
+    plan = {'attempt_id': args.attempt, 'node_key': args.node_key, 'context_hash': args.context_hash, 'base_sha': args.base_sha,
+            'workspace': args.workspace, 'goal': args.goal, 'items': items, 'params': params,
+            'template': {'name': template['name'], 'version': template['version']},
+            'done': [], 'child_session': None, 'notes': [], 'results': {}}
     save(plan)
-    emit({'plan_hash': hashlib.sha256(json.dumps(plan['items']).encode()).hexdigest()})
+    emit({'plan_hash': hashlib.sha256(json.dumps(items).encode()).hexdigest()})
 if args.command == 'list':
     plans = [status(json.loads(p.read_text())) for p in sorted(store.glob('*.json'))]
     emit({'plans': [{k: v for k, v in p.items() if k in ('attempt_id', 'node_key', 'next', 'done', 'remaining', 'child_session')} for p in plans]})
@@ -134,21 +180,24 @@ const post = (path, body) => fetch(process.env.AITELIER_URL + path, { method: 'P
 const plans = JSON.parse(process.env.AITELIER_TEST_PLANS);
 const tool = (id, name, args) => ({ type: 'tool-call', id, name, arguments: JSON.stringify(args) });
 const shell = (id, command) => tool(id, 'bash', { description: 'fixture work', command, run_in_background: false });
+// implement writes the files; test only needs its command to pass.
 const work = (role, plan, ids) => ids.flatMap(item => [
   tool(role + '-todo_begin-' + item, 'todo_begin', { attempt_id: plan.attempt_id, item_id: item }),
-  shell(role + '-shell-' + item, "printf " + item + " > '" + plan.workspace + "/" + item + ".txt'"),
+  ...(item === 'implement' ? [shell(role + '-shell-' + item, "cd '" + plan.workspace + "' && printf a > a.txt && printf b > b.txt")] : []),
   tool(role + '-todo_done-' + item, 'todo_done', { attempt_id: plan.attempt_id, item_id: item }),
 ]);
 const commit = plan => shell('full-shell-commit', "cd '" + plan.workspace + "' && git add -A && git -c user.name=fixture -c user.email=fixture@example.invalid commit -q -m work");
 const scripts = {
   full: [
-    ...['record_evidence', 'verify_node', 'report_external_attempt'].map(name =>
-      tool('full-judge-' + name, 'call_tool', { name: 'mcp__aitelier__' + name, arguments: { attempt_id: plans.a.attempt_id } })),
+    // The real server's shape: one state_graph_write tool, the operation in action.
+    ...['record_evidence', 'verify_node', 'report_external_attempt'].map(action =>
+      tool('full-judge-' + action, 'call_tool', { name: 'mcp__aitelier__state_graph_write', arguments: { action, arguments: { attempt_id: plans.a.attempt_id } } })),
+    tool('full-write-report_issue', 'call_tool', { name: 'mcp__aitelier__state_graph_write', arguments: { action: 'report_issue', arguments: { title: 'worker observation' } } }),
     tool('full-todo_status-start', 'todo_status', { attempt_id: plans.a.attempt_id }),
-    ...work('full', plans.a, ['a', 'b']),
+    ...work('full', plans.a, ['implement']),
     'COMPACT',
     tool('full-todo_status-after-compact', 'todo_status', { attempt_id: plans.a.attempt_id }),
-    ...work('full', plans.a, ['c']),
+    ...work('full', plans.a, ['test']),
     commit(plans.a),
     tool('full-todo_begin-deliver', 'todo_begin', { attempt_id: plans.a.attempt_id, item_id: 'deliver' }),
     tool('full-todo_done-deliver', 'todo_done', { attempt_id: plans.a.attempt_id, item_id: 'deliver' }),
@@ -156,7 +205,7 @@ const scripts = {
   ],
   partial: [
     tool('partial-todo_status-start', 'todo_status', { attempt_id: plans.b.attempt_id }),
-    ...work('partial', plans.b, ['a', 'b']),
+    ...work('partial', plans.b, ['implement', 'test']),
     { type: 'text', text: 'PARTIAL_CHILD_STOPS' },
   ],
 };
@@ -172,7 +221,7 @@ export function apply(ctx) {
       if (!roles.has(options.sessionId)) roles.set(options.sessionId, options.sessionId === root ? 'root'
         : text.includes('TODO_CHILD_FULL') ? 'full' : text.includes('TODO_CHILD_PARTIAL') ? 'partial' : 'other');
       const role = roles.get(options.sessionId);
-      await post('/test/request', { session: options.sessionId, role, purpose: options.purpose ?? null, messages: options.messages, tools: options.tools?.map(t => t.name) });
+      await post('/test/request', { session: options.sessionId, role, purpose: options.purpose ?? null, messages: options.messages, tools: options.tools });
       let blocks, usage = 20;
       if (options.purpose === 'compaction') blocks = [{ type: 'text', text: 'Checkpoint: continue the plan; use todo_status for the current step.' }];
       else if (!options.tools?.length) blocks = [{ type: 'text', text: 'Fixture session' }];
@@ -186,12 +235,15 @@ export function apply(ctx) {
             tool('full-todo_status-before-compact', 'todo_status', { attempt_id: plans.a.attempt_id })];
         } else blocks = [next];
       } else if (role === 'root') {
-        const handed = text.includes('todo_unfinished'), completed = text.includes('FULL_CHILD_DONE');
-        const block = once('plan-a', tool('root-todo_plan-a', 'todo_plan', { plan: plans.a.input }))
-          ?? once('plan-b', tool('root-todo_plan-b', 'todo_plan', { plan: plans.b.input }))
+        const handed = text.includes('AItelier todo handback:'), completed = text.includes('FULL_CHILD_DONE');
+        const block = once('templates', tool('root-todo_templates', 'todo_templates', {}))
+          ?? once('plan-items', tool('root-todo_plan-items', 'todo_plan', { ...plans.bad.input, items: [{ id: 'improvised', title: 'x', needs: [], predicates: [] }] }))
+          ?? once('plan-typo', tool('root-todo_plan-typo', 'todo_plan', { ...plans.bad.input, params: { ...plans.bad.input.params, paths: 'a.txt' } }))
+          ?? once('plan-a', tool('root-todo_plan-a', 'todo_plan', plans.a.input))
+          ?? once('plan-b', tool('root-todo_plan-b', 'todo_plan', plans.b.input))
           ?? once('spawn-full', tool('root-spawn-full', 'subagent', { description: 'full todo child', prompt: 'TODO_CHILD_FULL attempt_id=' + plans.a.attempt_id + '; use todo_status, todo_begin and todo_done.' }))
           ?? once('spawn-partial', tool('root-spawn-partial', 'subagent', { description: 'partial todo child', prompt: 'TODO_CHILD_PARTIAL attempt_id=' + plans.b.attempt_id + '; use todo_status, todo_begin and todo_done.' }))
-          ?? once('judge', tool('root-judge-record_evidence', 'call_tool', { name: 'mcp__aitelier__record_evidence', arguments: { attempt_id: plans.a.attempt_id } }))
+          ?? once('judge', tool('root-judge-record_evidence', 'call_tool', { name: 'mcp__aitelier__state_graph_write', arguments: { action: 'record_evidence', arguments: { attempt_id: plans.a.attempt_id } } }))
           ?? (handed && completed ? once('finish', tool('root-todo_finish-a', 'todo_finish', { attempt_id: plans.a.attempt_id })) : undefined)
           ?? (done.has('finish') ? once('pressure', { type: 'text', text: 'ROOT_PADDING ' + 'director context '.repeat(14000) }) : undefined)
           ?? (woke ? once('status-b', tool('root-todo_status-after-compact', 'todo_status', { attempt_id: plans.b.attempt_id })) : undefined)
@@ -230,13 +282,12 @@ async function workspace(path) {
   git(path, '-c', 'user.name=fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-q', '-m', 'base');
   return git(path, 'rev-parse', 'HEAD');
 }
-const planInput = (attempt_id, node_key, base_sha, path) => ({ attempt_id, node_key, context_hash: 'c'.repeat(64), base_sha,
-  workspace: path, scope: ['*.txt'], goal: 'Write a.txt, b.txt and c.txt for ' + node_key,
-  items: [
-    { id: 'a', title: 'write a.txt', needs: [], predicates: [{ predicate: 'files_present', args: { pattern: 'a.txt' } }] },
-    { id: 'b', title: 'write b.txt', needs: ['a'], predicates: [{ predicate: 'files_present', args: { pattern: 'b.txt' } }] },
-    { id: 'c', title: 'write c.txt', needs: ['b'], predicates: [{ predicate: 'files_present', args: { pattern: 'c.txt' } }] },
-  ] });
+/** The exact todo_plan arguments: a template, its params, and the attempt binding. */
+const planInput = (attempt_id, node_key, base_sha, path) => ({ template: 'code_change',
+  params: { paths: ['a.txt', 'b.txt'], scope: ['*.txt'], test_argv: ['test', '-s', 'a.txt'], test_timeout: 60 },
+  goal: 'Write a.txt and b.txt for ' + node_key, attempt_id, node_key, context_hash: 'c'.repeat(64), base_sha, workspace: path });
+const createArgs = plan => ['create', '--template', plan.template, '--params', JSON.stringify(plan.params), '--attempt', plan.attempt_id,
+  '--node-key', plan.node_key, '--context-hash', plan.context_hash, '--base-sha', plan.base_sha, '--workspace', plan.workspace, '--goal', plan.goal];
 const toolText = event => event.data.message.content.map(block => block.text ?? '').join('');
 const toolJson = event => JSON.parse(toolText(event));
 
@@ -265,9 +316,9 @@ test('real pinned DSH: plans walked by native children, runtime handback, State-
       let result;
       if (body.method === 'initialize') result = { protocolVersion: body.params.protocolVersion,
         capabilities: { tools: {} }, serverInfo: { name: 'fixture-aitelier', version: '1' } };
-      else if (body.method === 'tools/list') result = { tools: ['record_evidence', 'verify_node', 'report_external_attempt'].map(name => ({ name, description: name,
-        inputSchema: { type: 'object', properties: {}, additionalProperties: true } })) };
-      else if (body.method === 'tools/call') { mcpCalls.push(body.params.name); result = { content: [{ type: 'text', text: 'fixture_state_write_ok' }] }; }
+      else if (body.method === 'tools/list') result = { tools: [{ name: 'state_graph_write', description: 'Manage State facts',
+        inputSchema: { type: 'object', properties: { action: { type: 'string' }, arguments: { type: 'object' } }, required: ['action', 'arguments'] } }] };
+      else if (body.method === 'tools/call') { mcpCalls.push(body.params.name + ':' + body.params.arguments?.action); result = { content: [{ type: 'text', text: 'fixture_state_write_ok' }] }; }
       else result = {};
       return send({ jsonrpc: '2.0', id: body.id, result });
     }
@@ -303,6 +354,7 @@ test('real pinned DSH: plans walked by native children, runtime handback, State-
       const input = planInput('attempt-todo-' + key, node, await workspace(path), path);
       plans[key] = { attempt_id: input.attempt_id, workspace: path, input };
     }
+    plans.bad = { input: { ...plans.a.input, attempt_id: 'attempt-todo-bad' } };
     const profile = join(directory, 'home/profiles/driver'); await mkdir(profile, { recursive: true });
     await writeFile(join(directory, 'fixture-todo-provider.mjs'), PROVIDER);
     await writeFile(join(profile, 'package.json'), JSON.stringify({ private: true, dsh: { profile: { bundles: ['@deepseek-ai/dsh-base'] } } }));
@@ -318,11 +370,15 @@ test('real pinned DSH: plans walked by native children, runtime handback, State-
       AITELIER_DRIVER_ID: 'dsh-fixture', AITELIER_DSH_PROJECT: 'alpha', AITELIER_DSH_SESSION: 'fixture-root',
       AITELIER_DSH_PROVIDER: 'fixture', AITELIER_DSH_MODEL: 'fixture-model', AITELIER_URL: base,
       AITELIER_DSH_STATE_DIR: directory, AITELIER_SECRETS_DIR: join(directory, 'no-secrets'),
-      AITELIER_DSH_EXECUTION: 'host', DSH_PERMISSION_MODE: 'danger-full-access',
+      AITELIER_DSH_EXECUTION: 'host', DSH_PERMISSION_MODE: 'danger-full-access', AITELIER_DSH_IDLE_REVIEW_MS: '3000',
       AITELIER_TODO_PYTHON: cli.python, AITELIER_TODO_CWD: cli.cwd, AITELIER_TEST_PLANS: JSON.stringify(plans) } });
     proc.stdout.on('data', chunk => output += chunk); proc.stderr.on('data', chunk => output += chunk);
+    const reviews = () => events.filter(e => e.session === 'fixture-root' && e.event.type === 'user/message'
+      && e.event.data.content?.[0]?.text?.startsWith('AItelier director review due:'))
+      .map(e => JSON.parse(e.event.data.content[0].text.split('\n').slice(1).join('\n')));
+    const reviewedB = () => reviews().some(r => r.todo_unfinished?.some(p => p.attempt_id === plans.b.attempt_id));
     const deadline = Date.now() + 75000;
-    while (Date.now() < deadline && proc.exitCode === null && !rootDone && !activity.some(a => a.phase === 'failed')) {
+    while (Date.now() < deadline && proc.exitCode === null && !(rootDone && reviewedB()) && !activity.some(a => a.phase === 'failed')) {
       await new Promise(resolve => setTimeout(resolve, 100));
     }
     const diagnostics = () => output + '\n' + JSON.stringify(requests.map(r => ({ role: r.role, purpose: r.purpose,
@@ -337,20 +393,36 @@ test('real pinned DSH: plans walked by native children, runtime handback, State-
     const full = sessionOf('full'), partial = sessionOf('partial');
     assert.ok(full && partial && full !== partial && ![full, partial].includes('fixture-root'));
 
-    // 1. The full child walked a, b, c and deliver; every todo result carried the brief.
-    for (const item of ['a', 'b', 'c', 'deliver']) assert.equal(toolJson(result('full-todo_done-' + item).event).outcome, 'pass', item);
+    // 0. Plans come from templates only: the listing is the CLI's, items cannot be
+    // passed, and a wrongly typed param is a refusal result, not a throw.
+    const templates = toolJson(result('root-todo_templates').event);
+    assert.ok(templates.templates.some(t => t.name === 'code_change' && t.params.paths), JSON.stringify(templates));
+    const planSchema = requests.find(r => r.role === 'root' && r.tools?.length).tools.find(t => t.name === 'todo_plan').parameters;
+    assert.deepEqual(Object.keys(planSchema.properties).sort(),
+      ['attempt_id', 'base_sha', 'context_hash', 'goal', 'node_key', 'params', 'template', 'workspace']);
+    assert.notEqual(planSchema.additionalProperties, true);
+    const improvised = result('root-todo_plan-items').event;
+    assert.equal(toolJson(improvised).refused, 'unknown_arguments', 'todo_plan accepted free items: ' + toolText(improvised));
+    const typo = result('root-todo_plan-typo').event;
+    assert.equal(typo.data.message.isError, false, toolText(typo));
+    assert.ok(toolJson(typo).refused, toolText(typo)); assert.match(toolText(typo), /paths/);
+    await assert.rejects(stat(join(directory, 'todo', 'attempt-todo-bad.json')), { code: 'ENOENT' });
+
+    // 1. The full child walked implement, test and deliver of the code_change plan;
+    // every todo result carried the brief.
+    for (const item of ['implement', 'test', 'deliver']) assert.equal(toolJson(result('full-todo_done-' + item).event).outcome, 'pass', item);
     const todoResults = results.filter(r => /^(full|partial)-todo_/.test(r.id));
-    assert.ok(todoResults.length >= 15);
+    assert.ok(todoResults.length >= 12);
     for (const r of todoResults) {
       assert.equal(r.event.data.message.isError, false, r.id + toolText(r.event));
-      assert.match(toolJson(r.event).brief, /Write a\.txt, b\.txt and c\.txt/, r.id + ' result lacks the brief');
+      assert.match(toolJson(r.event).brief, /Write a\.txt and b\.txt/, r.id + ' result lacks the brief');
     }
     assert.ok(todoResults.filter(r => r.id.startsWith('full-')).every(r => r.session === full));
     const finalA = JSON.parse(execFileSync(cli.python, ['-m', 'core.todo_cli', 'status', '--attempt', plans.a.attempt_id],
       { cwd: cli.cwd, env: { ...process.env, AITELIER_DSH_STATE_DIR: directory }, encoding: 'utf8' }));
     assert.deepEqual(finalA.remaining, []); assert.equal(finalA.child_session, full, 'todo_begin bound the root, not the calling child');
 
-    // 2. The partial child stopped after b: the runtime, not the model, handed it back.
+    // 2. The partial child stopped after item 2: the runtime, not the model, handed it back.
     // (The goal text itself names todo_unfinished, so match the runtime's message.)
     const handbacks = events.filter(e => e.session === 'fixture-root' && e.event.type === 'user/message'
       && e.event.data.content?.[0]?.text?.startsWith('AItelier todo handback:'));
@@ -358,19 +430,27 @@ test('real pinned DSH: plans walked by native children, runtime handback, State-
     assert.equal(handbacks[0].event.data.source.kind, runtimeEventSource);
     const handback = JSON.parse(handbacks[0].event.data.content[0].text.split('\n').slice(1).join('\n'));
     assert.equal(handback.reason, 'todo_unfinished'); assert.equal(handback.attempt_id, plans.b.attempt_id);
-    assert.equal(handback.next, 'c'); assert.deepEqual(handback.done, ['a', 'b']);
-    assert.deepEqual(handback.remaining, ['c', 'deliver']);
-    assert.deepEqual(Object.keys(handback.last_observations).sort(), ['c', 'deliver']);
+    assert.equal(handback.next, 'deliver'); assert.deepEqual(handback.done, ['implement', 'test']);
+    assert.deepEqual(handback.remaining, ['deliver']);
+    assert.deepEqual(Object.keys(handback.last_observations), ['deliver']);
 
-    // 3. A child cannot judge its own work; the root can.
-    for (const name of ['record_evidence', 'verify_node', 'report_external_attempt']) {
-      const refused = result('full-judge-' + name);
+    // 3. A child cannot judge its own work through state_graph_write; the root can,
+    // and other writes stay open to the child.
+    for (const action of ['record_evidence', 'verify_node', 'report_external_attempt']) {
+      const refused = result('full-judge-' + action);
       assert.equal(refused.session, full); assert.equal(refused.event.data.message.isError, true);
       assert.match(toolText(refused.event), /workers do not judge their own work; the director records State evidence/);
     }
     const rootJudge = result('root-judge-record_evidence');
     assert.equal(rootJudge.event.data.message.isError, false); assert.match(toolText(rootJudge.event), /fixture_state_write_ok/);
-    assert.deepEqual(mcpCalls, ['record_evidence'], 'a refused State write reached the server');
+    assert.equal(result('full-write-report_issue').event.data.message.isError, false);
+    assert.deepEqual(mcpCalls.sort(), ['state_graph_write:record_evidence', 'state_graph_write:report_issue'], 'a refused State write reached the server');
+
+    // 3b. The real idle review (short interval) names the unfinished plan with no live child.
+    assert.ok(reviewedB(), 'no idle review named the unfinished plan\n' + JSON.stringify(reviews()));
+    const review = reviews().filter(r => r.todo_unfinished?.length).at(-1);
+    assert.deepEqual(review.todo_unfinished, [
+      { attempt_id: plans.b.attempt_id, node_key: 'execution.todo-partial', next: 'deliver', remaining: ['deliver'] }]);
 
     // 4. Compaction: after each successful child compaction the child got one
     // brief line (a host-scoped agent/pre-step reaches native children) and its
@@ -383,11 +463,11 @@ test('real pinned DSH: plans walked by native children, runtime handback, State-
       'expected exactly one brief after child compaction ' + seq));
     assert.equal(briefs.length, compactions.length);
     for (const brief of briefs) {
-      assert.match(brief.event.data.content[0].text, /^todo brief: Write a\.txt, b\.txt and c\.txt for execution\.todo-full \/ Next: c/);
+      assert.match(brief.event.data.content[0].text, /^todo brief: Write a\.txt and b\.txt for execution\.todo-full \/ Next: test/);
       assert.doesNotMatch(brief.event.data.content[0].text, /\n/);
     }
     assert.ok(requests.some(r => r.session === full && !r.purpose && JSON.stringify(r.messages).includes('todo brief:')), 'brief never reached the child model');
-    assert.match(toolJson(result('full-todo_status-after-compact').event).brief, /Next: c/);
+    assert.match(toolJson(result('full-todo_status-after-compact').event).brief, /Next: test/);
     assert.ok(!events.some(e => e.session === partial && e.event.data.source?.kind === todoBriefSource), 'brief without a compaction');
     assert.ok(events.some(e => e.session === 'fixture-root' && e.event.type === 'compaction/end' && !e.event.data.error), 'root never compacted');
     const snapshots = events.filter(e => e.session === 'fixture-root' && e.event.type === 'user/message' && e.event.data.source?.kind === stateInjectionSource);
@@ -396,10 +476,9 @@ test('real pinned DSH: plans walked by native children, runtime handback, State-
     const after = snapshots.filter(s => s.event.data.source.compaction_seq > 0).at(-1);
     assert.ok(after, 'no post-compaction snapshot');
     assert.deepEqual(state(after).todo, [
-      { attempt_id: plans.a.attempt_id, node_key: 'execution.todo-full', next: null, remaining_count: 0, child_alive: false },
-      { attempt_id: plans.b.attempt_id, node_key: 'execution.todo-partial', next: 'c', remaining_count: 2, child_alive: false },
+      { attempt_id: plans.b.attempt_id, node_key: 'execution.todo-partial', next: 'deliver', remaining_count: 1, child_alive: false },
     ]);
-    assert.match(toolJson(result('root-todo_status-after-compact').event).brief, /Next: c/);
+    assert.match(toolJson(result('root-todo_status-after-compact').event).brief, /Next: deliver/);
 
     // 5. Finish on the all-pass plan returns the bundle and report paths.
     const finish = toolJson(result('root-todo_finish-a').event);
@@ -409,10 +488,10 @@ test('real pinned DSH: plans walked by native children, runtime handback, State-
     git(plans.a.workspace, 'bundle', 'verify', finish.git_bundle.path);
 
     // Root-only tools stay off the children's tool lists; worker tools are on both.
-    const toolsOf = role => requests.find(r => r.role === role && !r.purpose && r.tools?.length).tools;
+    const toolsOf = role => requests.find(r => r.role === role && !r.purpose && r.tools?.length).tools.map(t => t.name);
     for (const role of ['root', 'full', 'partial']) for (const name of ['todo_status', 'todo_begin', 'todo_done', 'todo_report'])
       assert.ok(toolsOf(role).includes(name), role + ' lacks ' + name);
-    for (const name of ['todo_plan', 'todo_finish']) {
+    for (const name of ['todo_templates', 'todo_plan', 'todo_finish']) {
       assert.ok(toolsOf('root').includes(name));
       assert.ok(!toolsOf('full').includes(name) && !toolsOf('partial').includes(name), 'children see ' + name);
     }
@@ -430,12 +509,13 @@ test('CLI results: a refusal is returned with the brief, a missing brief is fill
     const cli = await fakeCli(join(directory, 'cli'));
     const path = join(directory, 'work');
     const plan = planInput('attempt-unit', 'execution.unit', await workspace(path), path);
-    await writeFile(join(directory, 'plan.json'), JSON.stringify(plan));
     const todo = new TodoCli({ python: cli.python, cwd: cli.cwd, stateDir: directory });
-    const created = await todo.call(plan.attempt_id, ['create', '--plan-json', join(directory, 'plan.json')]);
-    assert.match(created.plan_hash, /^[0-9a-f]{64}$/); assert.match(created.brief, /Next: a/);
-    const refused = await todo.call(plan.attempt_id, ['begin', '--attempt', plan.attempt_id, '--item', 'b', '--session', 's1']);
-    assert.ok(refused.refused); assert.match(refused.brief, /Next: a/);
+    const typo = await todo.call(plan.attempt_id, createArgs({ ...plan, params: { ...plan.params, test_timeout: 'soon' } }));
+    assert.ok(typo.refused); assert.match(JSON.stringify(typo), /timeout/); assert.equal(typo.brief, null);
+    const created = await todo.call(plan.attempt_id, createArgs(plan));
+    assert.match(created.plan_hash, /^[0-9a-f]{64}$/); assert.match(created.brief, /Next: implement/);
+    const refused = await todo.call(plan.attempt_id, ['begin', '--attempt', plan.attempt_id, '--item', 'test', '--session', 's1']);
+    assert.ok(refused.refused); assert.match(refused.brief, /Next: implement/);
     const absent = await todo.call('attempt-missing', ['status', '--attempt', 'attempt-missing']);
     assert.ok(absent.refused); assert.equal(absent.brief, null);
     await assert.rejects(new TodoCli({ python: cli.python, cwd: directory, stateDir: directory }).run(['status', '--attempt', 'x']), /todo_cli status/);
@@ -451,14 +531,12 @@ test('idle review and snapshot views: unfinished plans without a live child, and
     for (const key of ['open', 'done']) {
       const path = join(directory, 'work-' + key);
       const plan = planInput('attempt-' + key, 'execution.' + key, await workspace(path), path);
-      plan.items = plan.items.slice(0, 1);
-      await writeFile(join(directory, key + '.json'), JSON.stringify(plan));
-      await todo.call(plan.attempt_id, ['create', '--plan-json', join(directory, key + '.json')]);
-      await todo.call(plan.attempt_id, ['begin', '--attempt', plan.attempt_id, '--item', 'a', '--session', 'child-' + key]);
+      await todo.call(plan.attempt_id, createArgs(plan));
+      await todo.call(plan.attempt_id, ['begin', '--attempt', plan.attempt_id, '--item', 'implement', '--session', 'child-' + key]);
       if (key === 'done') {
-        await writeFile(join(path, 'a.txt'), 'a');
-        git(path, 'add', 'a.txt'); git(path, '-c', 'user.name=f', '-c', 'user.email=f@example.invalid', 'commit', '-q', '-m', 'a');
-        for (const item of ['a', 'deliver']) {
+        await writeFile(join(path, 'a.txt'), 'a'); await writeFile(join(path, 'b.txt'), 'b');
+        git(path, 'add', 'a.txt', 'b.txt'); git(path, '-c', 'user.name=f', '-c', 'user.email=f@example.invalid', 'commit', '-q', '-m', 'ab');
+        for (const item of ['implement', 'test', 'deliver']) {
           await todo.call(plan.attempt_id, ['begin', '--attempt', plan.attempt_id, '--item', item, '--session', 'child-done']);
           assert.equal((await todo.call(plan.attempt_id, ['done', '--attempt', plan.attempt_id, '--item', item])).outcome, 'pass');
         }
@@ -467,11 +545,10 @@ test('idle review and snapshot views: unfinished plans without a live child, and
     const plans = await todo.plans();
     assert.deepEqual(plans.map(p => p.attempt_id), ['attempt-done', 'attempt-open']);
     assert.deepEqual(unfinishedWithoutChild(plans, new Set()), [
-      { attempt_id: 'attempt-open', node_key: 'execution.open', next: 'a', remaining: ['a', 'deliver'] }]);
+      { attempt_id: 'attempt-open', node_key: 'execution.open', next: 'implement', remaining: ['implement', 'test', 'deliver'] }]);
     assert.deepEqual(unfinishedWithoutChild(plans, new Set(['child-open'])), [], 'a plan with a live child is not handed back');
     assert.deepEqual(todoSummary(plans, new Set(['child-open'])), [
-      { attempt_id: 'attempt-done', node_key: 'execution.done', next: null, remaining_count: 0, child_alive: false },
-      { attempt_id: 'attempt-open', node_key: 'execution.open', next: 'a', remaining_count: 2, child_alive: true }]);
+      { attempt_id: 'attempt-open', node_key: 'execution.open', next: 'implement', remaining_count: 3, child_alive: true }]);
     let listed = [];
     const runtime = new DriverRuntime({ project: 'alpha', driver: 'driver-a', directory,
       request: async () => ({ nodes: [], project_note: {}, private_note: {} }), todoPlans: async () => listed });
@@ -480,5 +557,26 @@ test('idle review and snapshot views: unfinished plans without a live child, and
     listed = todoSummary(plans, new Set());
     await runtime.refresh();
     assert.deepEqual(JSON.parse(runtime.render()).todo, listed);
+    assert.equal(JSON.parse(runtime.render()).todo_error, undefined);
+    // A broken todo CLI degrades the snapshot; it never fails a State refresh.
+    const broken = new DriverRuntime({ project: 'alpha', driver: 'driver-a', directory,
+      request: async path => path.endsWith('/me') ? { driver_id: 'driver-a' } : { event_seq: 1, nodes: [], project_note: {}, private_note: {} },
+      todoPlans: () => new TodoCli({ python: cli.python, cwd: directory, stateDir: directory }).plans() });
+    await broken.init();
+    const degraded = JSON.parse(broken.render());
+    assert.equal(degraded.todo, undefined); assert.match(degraded.todo_error, /todo_cli list/);
+    await assert.rejects(todo.run(['list'], undefined, 1), /todo_cli list/, 'a CLI call past its timeout is an error, not a hang');
   } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('prompts: dispatch picks a template and binds params, adds templates by reviewed change, and no longer prefers pipelines', async () => {
+  const goal = driverGoal('alpha'), driver = await readFile(new URL('./driver.md', import.meta.url), 'utf8');
+  for (const text of [goal, driver]) {
+    assert.match(text, /todo_templates/); assert.match(text, /todo_plan/); assert.match(text, /params/);
+    assert.match(text, /todo_templates\//, 'adding a template under todo_templates/ is not named');
+    assert.match(text, /todo_status/); assert.match(text, /todo_finish/);
+  }
+  assert.match(goal, /经过评审的代码改动/); assert.match(driver, /reviewed code\s+change/);
+  assert.doesNotMatch(goal, /已有适用的 pipeline|没有适用 pipeline/);
+  assert.doesNotMatch(driver, /Delegate bounded work to DSH subagent or an AItelier pipeline/);
 });

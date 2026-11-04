@@ -195,7 +195,14 @@ blocker. No additional goal store or scheduler is introduced. The director
 maintains State/note/inboxes, checks issues and unfinished delivery beyond the
 frontier, prioritizes critical defects, and aims for four independent pipelines
 and four subagents when actionable work exists. The owner's push/publish scope,
-model preferences and cleanup policy are part of that mandate.
+model preferences and cleanup policy are part of that mandate. At each scheduling
+round, new task or worker completion, the director checks ready work and free
+workers, dispatches bounded implementation/investigation/verification by default,
+and focuses on prioritization, acceptance and integration. Assignments carry the
+State attempt/fence, source base, owned checkout, write scope and delivery criteria;
+the director continues independent work and refills available slots after review.
+Small fixes, urgent mitigation and work requiring the director's current context
+can still be handled directly. Concurrency follows real independent work.
 
 Host drivers use `danger-full-access` and `approval=never`. Startup explicitly
 updates resumed sessions through DSH's permission preset API, replacing the old

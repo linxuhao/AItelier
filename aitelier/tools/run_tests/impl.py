@@ -277,7 +277,12 @@ def _explain_missing_names(py: str, summary: str) -> str:
                  "import importlib,sys;m=importlib.import_module(sys.argv[1]);"
                  "print(', '.join(sorted(n for n in dir(m) "
                  "if not n.startswith('_'))))", module],
-                capture_output=True, text=True, timeout=30)
+                capture_output=True, text=True, timeout=30,
+                # The module name comes from a FAILING TEST's traceback, so this
+                # executes code we did not choose. It must not inherit the backend
+                # environment: that is where AITELIER_ADMIN_TOKEN and the provider
+                # keys live, and an import is arbitrary code.
+                env=env_scrub.scrubbed_env())
             names = (proc.stdout or "").strip()
         except Exception:
             names = ""
@@ -320,7 +325,10 @@ def _explain_missing_attrs(py: str, summary: str) -> list[str]:
                      "c=getattr(m,sys.argv[2],None);print('' if c is None else "
                      "', '.join(sorted(n for n in dir(c) if not n.startswith('_'))))",
                      mod, cls],
-                    capture_output=True, text=True, timeout=30)
+                    capture_output=True, text=True, timeout=30,
+                    # Same rule as the name probe: the module comes from the
+                    # failure text, so this is execution, not inspection.
+                    env=env_scrub.scrubbed_env())
                 names = (proc.stdout or "").strip()
             except Exception:
                 names = ""
@@ -406,7 +414,11 @@ def _import_smoke_error(py: str, repo: Path, env: dict) -> str:
         return ""
     try:
         proc = subprocess.run([py, "-c", f"import {mod}"], capture_output=True,
-                              text=True, cwd=str(repo), env=env, timeout=60)
+                              text=True, cwd=str(repo),
+                              # Scrubbed even when the caller passes an env: this
+                              # imports the repository's package, so whatever the
+                              # module does at import time runs here.
+                              env=env_scrub.scrubbed_env(env), timeout=60)
         if proc.returncode == 0:
             return ""
         lines = [ln.strip() for ln in (proc.stderr or "").splitlines() if ln.strip()]

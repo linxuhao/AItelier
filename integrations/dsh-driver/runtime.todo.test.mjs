@@ -23,7 +23,7 @@ import { once } from 'node:events';
 import { DriverRuntime, TodoCli, todoSummary, unfinishedWithoutChild, stateInjectionSource, runtimeEventSource, todoBriefSource, driverGoal } from './runtime.mjs';
 
 const FAKE_CLI = String.raw`"""Fake core.todo_cli for runtime.todo.test.mjs: the CLI contract, minimally."""
-import argparse, hashlib, json, os, subprocess, sys
+import argparse, hashlib, json, os, signal, subprocess, sys, time
 from pathlib import Path
 
 parser = argparse.ArgumentParser()
@@ -31,6 +31,7 @@ parser.add_argument('command')
 for flag in ('--store', '--attempt', '--item', '--session', '--note', '--out', '--template', '--params',
              '--node-key', '--context-hash', '--base-sha', '--workspace', '--goal'):
     parser.add_argument(flag)
+parser.add_argument('--rebind', action='store_true')
 args = parser.parse_args()
 store = Path(args.store or os.path.join(os.environ['AITELIER_DSH_STATE_DIR'], 'todo'))
 store.mkdir(parents=True, exist_ok=True)
@@ -84,7 +85,8 @@ def status(plan):
     brief = f"{plan['goal']}\nNext: {upcoming or '(none)'}\nRemaining {len(remaining)} item(s): {', '.join(remaining)}"
     return {'attempt_id': plan['attempt_id'], 'brief': brief, 'goal': plan['goal'], 'next': upcoming, 'done': done, 'remaining': remaining,
             'deferred': [], 'unmeasurable': [], 'child_session': plan['child_session'], 'items': plan['items'],
-            'node_key': plan['node_key']}
+            'node_key': plan['node_key'], 'timeout_budget_seconds': {i['id']: 5 for i in plan['items']},
+            'finish_budget_seconds': 15}
 
 def save(plan):
     path = store / (plan['attempt_id'] + '.json')
@@ -136,9 +138,19 @@ if args.command == 'status':
 if args.command == 'handback':
     emit({**status(plan), 'reason': 'todo_unfinished', 'last_observations': {
         i: plan['results'].get(i, []) for i in status(plan)['remaining']}})
+if args.command == 'done' and args.item in ('hang', 'stubborn'):
+    # A predicate that outlives its bound, with a grandchild of its own; the
+    # stubborn one (and its grandchild, by inheritance) ignores SIGTERM.
+    if args.item == 'stubborn':
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    sleeper = subprocess.Popen(['sleep', '30'])
+    (store / 'hang.pid').write_text(str(sleeper.pid))
+    time.sleep(30)
 if args.command == 'begin':
     if not all(n in plan['done'] for n in item['needs']):
         emit({'refused': 'unmet_needs', 'reason': ', '.join(item['needs'])}, 2)
+    if plan['child_session'] and args.session and args.session != plan['child_session'] and not args.rebind:
+        emit({'refused': 'bound_to_other_session', 'reason': 'bound to ' + plan['child_session'], 'bound_session': plan['child_session']}, 2)
     plan['child_session'] = args.session or plan['child_session']
     save(plan)
     emit({'begun': item['id']})
@@ -204,6 +216,11 @@ const scripts = {
     tool('full-todo_done-deliver', 'todo_done', { attempt_id: plans.a.attempt_id, item_id: 'deliver' }),
     { type: 'text', text: 'FULL_CHILD_DONE' },
   ],
+  // Re-dispatched after the handback: the partial child is dead, so its plan is rebound.
+  resume: [
+    tool('resume-todo_begin-deliver', 'todo_begin', { attempt_id: plans.b.attempt_id, item_id: 'deliver' }),
+    { type: 'text', text: 'RESUME_CHILD_STOPS' },
+  ],
   partial: [
     tool('partial-todo_status-start', 'todo_status', { attempt_id: plans.b.attempt_id }),
     ...work('partial', plans.b, ['implement', 'test']),
@@ -220,13 +237,14 @@ export function apply(ctx) {
     async *stream(options) {
       const text = JSON.stringify(options.messages);
       if (!roles.has(options.sessionId)) roles.set(options.sessionId, options.sessionId === root ? 'root'
-        : text.includes('TODO_CHILD_FULL') ? 'full' : text.includes('TODO_CHILD_PARTIAL') ? 'partial' : 'other');
+        : text.includes('TODO_CHILD_FULL') ? 'full' : text.includes('TODO_CHILD_PARTIAL') ? 'partial'
+        : text.includes('TODO_CHILD_RESUME') ? 'resume' : 'other');
       const role = roles.get(options.sessionId);
       await post('/test/request', { session: options.sessionId, role, purpose: options.purpose ?? null, messages: options.messages, tools: options.tools });
       let blocks, usage = 20;
       if (options.purpose === 'compaction') blocks = [{ type: 'text', text: 'Checkpoint: continue the plan; use todo_status for the current step.' }];
       else if (!options.tools?.length) blocks = [{ type: 'text', text: 'Fixture session' }];
-      else if (role === 'full' || role === 'partial') {
+      else if (role in scripts) {
         const step = steps.get(options.sessionId) ?? 0;
         steps.set(options.sessionId, step + 1);
         const next = scripts[role][step] ?? { type: 'text', text: role.toUpperCase() + '_CHILD_IDLE' };
@@ -245,6 +263,7 @@ export function apply(ctx) {
           ?? once('spawn-full', tool('root-spawn-full', 'subagent', { description: 'full todo child', prompt: 'TODO_CHILD_FULL attempt_id=' + plans.a.attempt_id + '; use todo_status, todo_begin and todo_done.' }))
           ?? once('spawn-partial', tool('root-spawn-partial', 'subagent', { description: 'partial todo child', prompt: 'TODO_CHILD_PARTIAL attempt_id=' + plans.b.attempt_id + '; use todo_status, todo_begin and todo_done.' }))
           ?? once('judge', tool('root-judge-record_evidence', 'call_tool', { name: 'mcp__aitelier__state_graph_write', arguments: { action: 'record_evidence', arguments: { attempt_id: plans.a.attempt_id } } }))
+          ?? (handed ? once('spawn-resume', tool('root-spawn-resume', 'subagent', { description: 'resume todo child', prompt: 'TODO_CHILD_RESUME attempt_id=' + plans.b.attempt_id + '; continue with todo_begin.' })) : undefined)
           ?? (handed && completed ? once('finish', tool('root-todo_finish-a', 'todo_finish', { attempt_id: plans.a.attempt_id })) : undefined)
           ?? (done.has('finish') ? once('pressure', { type: 'text', text: 'ROOT_PADDING ' + 'director context '.repeat(14000) }) : undefined)
           ?? (woke ? once('status-b', tool('root-todo_status-after-compact', 'todo_status', { attempt_id: plans.b.attempt_id })) : undefined)
@@ -379,7 +398,9 @@ test('real pinned DSH: plans walked by native children, runtime handback, State-
       .map(e => JSON.parse(e.event.data.content[0].text.split('\n').slice(1).join('\n')));
     const reviewedB = () => reviews().some(r => r.todo_unfinished?.some(p => p.attempt_id === plans.b.attempt_id));
     const deadline = Date.now() + 75000;
-    while (Date.now() < deadline && proc.exitCode === null && !(rootDone && reviewedB()) && !activity.some(a => a.phase === 'failed')) {
+    const handbackCount = () => events.filter(e => e.session === 'fixture-root' && e.event.type === 'user/message'
+      && e.event.data.content?.[0]?.text?.startsWith('AItelier todo handback:')).length;
+    while (Date.now() < deadline && proc.exitCode === null && !(rootDone && reviewedB() && handbackCount() >= 2) && !activity.some(a => a.phase === 'failed')) {
       await new Promise(resolve => setTimeout(resolve, 100));
     }
     const diagnostics = () => output + '\n' + JSON.stringify(requests.map(r => ({ role: r.role, purpose: r.purpose,
@@ -427,13 +448,21 @@ test('real pinned DSH: plans walked by native children, runtime handback, State-
     // (The goal text itself names todo_unfinished, so match the runtime's message.)
     const handbacks = events.filter(e => e.session === 'fixture-root' && e.event.type === 'user/message'
       && e.event.data.content?.[0]?.text?.startsWith('AItelier todo handback:'));
-    assert.equal(handbacks.length, 1, 'expected exactly one handback\n' + diagnostics());
+    assert.equal(handbacks.length, 2, 'expected the partial and the resume child to be handed back\n' + diagnostics());
     assert.equal(handbacks[0].event.data.source.kind, runtimeEventSource);
     const handback = JSON.parse(handbacks[0].event.data.content[0].text.split('\n').slice(1).join('\n'));
     assert.equal(handback.reason, 'todo_unfinished'); assert.equal(handback.attempt_id, plans.b.attempt_id);
     assert.equal(handback.next, 'deliver'); assert.deepEqual(handback.done, ['implement', 'test']);
     assert.deepEqual(handback.remaining, ['deliver']);
     assert.deepEqual(Object.keys(handback.last_observations), ['deliver']);
+    // The re-dispatched child took over the dead child's plan (CLI refusal, then --rebind)
+    // and was handed back in turn; nothing else rebinds a plan.
+    const resume = sessionOf('resume');
+    const resumed = toolJson(result('resume-todo_begin-deliver').event);
+    assert.equal(resumed.refused, undefined, JSON.stringify(resumed));
+    assert.equal(result('resume-todo_begin-deliver').session, resume);
+    const second = JSON.parse(handbacks[1].event.data.content[0].text.split('\n').slice(1).join('\n'));
+    assert.equal(second.attempt_id, plans.b.attempt_id); assert.equal(second.next, 'deliver');
 
     // 3. A child cannot judge its own work through state_graph_write; the root can.
     // Workers get an allowlist: report_issue passes, resolve_issue does not.
@@ -524,6 +553,48 @@ test('CLI results: a refusal is returned with the brief, a missing brief is fill
     assert.ok(absent.refused); assert.equal(absent.brief, null);
     await assert.rejects(new TodoCli({ python: cli.python, cwd: directory, stateDir: directory }).run(['status', '--attempt', 'x']), /todo_cli status/);
   } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('CLI bounds: done/finish get the plan budget plus a minute; a timeout or abort stops the process group (SIGTERM, then SIGKILL)', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'dsh-todo-bound-'));
+  const alive = pid => { try { process.kill(pid, 0); return true; } catch { return false; } };
+  let sleeper;
+  try {
+    const cli = await fakeCli(join(directory, 'cli'));
+    const path = join(directory, 'work');
+    const plan = planInput('attempt-bound', 'execution.bound', await workspace(path), path);
+    const todo = new TodoCli({ python: cli.python, cwd: cli.cwd, stateDir: directory });
+    await todo.call(plan.attempt_id, createArgs(plan));
+    // Bounds follow whatever budget the configured CLI (fake or real) reports.
+    const { result: status } = await todo.run(['status', '--attempt=' + plan.attempt_id]);
+    assert.ok(status.timeout_budget_seconds.test > 0 && status.finish_budget_seconds > 0, JSON.stringify(status));
+    assert.equal(await todo.bound(plan.attempt_id, s => s.timeout_budget_seconds?.test), (status.timeout_budget_seconds.test + 60) * 1000);
+    assert.equal(await todo.bound(plan.attempt_id, s => s.finish_budget_seconds), (status.finish_budget_seconds + 60) * 1000);
+    assert.equal(await todo.bound(plan.attempt_id, s => s.no_such_budget), 60000);
+    // Process handling is the runtime's, so it always runs against the fake's hanging items.
+    const fake = new TodoCli({ python: 'python3', cwd: join(directory, 'cli'), stateDir: join(directory, 'fake') });
+    await fake.call(plan.attempt_id, createArgs(plan));
+    for (const stop of ['timeout', 'abort', 'stubborn']) {
+      await rm(join(directory, 'fake', 'todo', 'hang.pid'), { force: true });
+      const controller = new AbortController();
+      const pending = fake.run(['done', '--attempt=' + plan.attempt_id, '--item=' + (stop === 'stubborn' ? 'stubborn' : 'hang')],
+        controller.signal, stop === 'abort' ? 60000 : 1500);
+      while (!(sleeper = Number(await readFile(join(directory, 'fake', 'todo', 'hang.pid'), 'utf8').catch(() => 0)))) await new Promise(r => setTimeout(r, 50));
+      assert.ok(alive(sleeper));
+      if (stop === 'abort') controller.abort();
+      const stopped = Date.now();
+      await assert.rejects(pending, stop === 'abort' ? /aborted; its process group was stopped \(SIGTERM\)/
+        : stop === 'timeout' ? /timed out after 1500 ms; its process group was stopped \(SIGTERM\)/
+        : /timed out after 1500 ms; its process group was stopped \(SIGKILL\)/);
+      // A surviving grandchild would hold the CLI's stdout open until its 30 s sleep ends.
+      assert.ok(Date.now() - stopped < 10000, `the call only settled after the grandchild exited on its own (${stop})`);
+      for (let i = 0; i < 40 && alive(sleeper); i++) await new Promise(r => setTimeout(r, 50));
+      assert.equal(alive(sleeper), false, `the predicate's grandchild survived the ${stop}`);
+    }
+  } finally {
+    if (sleeper) try { process.kill(sleeper, 'SIGKILL'); } catch {}
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test('idle review and snapshot views: unfinished plans without a live child, and render() only lists plans when there are any', async () => {

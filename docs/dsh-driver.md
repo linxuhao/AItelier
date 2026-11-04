@@ -324,7 +324,13 @@ the templates and every predicate live in Python (`core/todo_cli.py`,
 `AITELIER_DSH_STATE_DIR` set, parses its stdout JSON and returns it. Values are
 passed as `--flag=value`, so a note or goal starting with `-` stays a value.
 Exit 2 is returned as a refusal (`refused`), not thrown; any other non-zero
-exit, or a call past its timeout (60 s; `finish` 600 s), is a tool error. Every
+exit, or a call past its bound, is a tool error. `todo_done` and `todo_finish`
+are bounded by the plan's own budget from `status` (`timeout_budget_seconds`
+for the item, `finish_budget_seconds` for finish) plus 60 s; every other call,
+and a plan without the key, gets 60 s. The CLI runs as the leader of its own
+process group. On a timeout, or when the tool call is aborted, the group gets
+SIGTERM, so the CLI stops the predicates it runs in their own sessions; after 5 s
+it gets SIGKILL. No test run or docker client outlives the call. Every
 plan result carries `brief`: the CLI's own, or the plan's `status` brief when the
 command printed none (`null` only when the plan does not exist).
 
@@ -365,9 +371,11 @@ caller is the executing agent (`exec.agent.session.id`), never the root:
 
 - `todo_status(attempt_id)` → `status`: brief, goal, next, done, remaining.
 - `todo_begin(attempt_id, item_id)` → `begin --session <caller session>`: binds
-  the plan to the calling child and captures the item's pre-state. A plan bound to
-  another child that is still alive is refused (`bound_to_live_session`, naming
-  that session) instead of being silently rebound.
+  the plan to the calling child and captures the item's pre-state. The CLI
+  refuses, under the plan lock, a plan bound to another session
+  (`bound_to_other_session`, naming `bound_session`). The runtime retries with
+  `--rebind` only when that session is verified dead (not the root, not a live
+  child of this process); otherwise the refusal is the result.
 - `todo_done(attempt_id, item_id)` → `done`: the harness evaluates the item's
   predicates now (`pass|fail|absent`); a fail keeps the item open.
 - `todo_report(attempt_id, item_id, note)` → `report --note`: a free-text note.
@@ -385,15 +393,32 @@ applies an allowlist. `state_graph_write` is allowed only with `action`
 
 - `record_evidence`, `verify_node`, `report_external_attempt`, `start_external_attempt`, `claim_node`;
 - `take_over_claim`, `take_over_attempt`, `abandon_external_attempt`, `release_claim`, `heartbeat`;
-- `revise_node`, `add_nodes`, `link_issue`, `resolve_issue`, `declare_driver_presence`;
+- `revise_node`, `add_nodes`, `link_issue`, `resolve_issue`;
 - any action added later.
 
-The five judging writes are also refused as bare tool names in case a server ever
-exposes them. The guard applies through `call_tool` and to direct calls. Its
-message is “workers do not judge their own work; the director records State
-evidence (a subagent may only state_graph_write report_issue)”. The root is
-unchanged and keeps every action. Other MCP tools, for example the driver inbox
-tools, are not covered by this guard because they are not `state_graph_write`.
+Two writes are separate MCP tools, not `state_graph_write` actions, and are
+refused for children by name:
+
+- `mcp__aitelier__declare_driver_presence`: marking the director offline would
+  let other drivers take over its claims.
+- `mcp__aitelier__answer_checkpoint`: a checkpoint is a human decision.
+
+The five judging writes are also refused as bare tool names
+(`mcp__aitelier__record_evidence`, `verify_node`, `report_external_attempt`,
+`start_external_attempt`, `claim_node`) in case a server ever exposes them. The
+aitelier server registers no separate `take_over_*`, `abandon_*` or `release_*`
+tool; those exist only as `state_graph_write` actions. The guard applies through
+`call_tool` and to direct calls. Its message is “workers do not judge their own
+work; the director records State evidence (a subagent may only state_graph_write
+report_issue)”. The root is unchanged and keeps everything.
+
+Deliberately left open to children:
+
+- the pipeline tools (`run_pipeline`, `stop_pipeline`, `generate_pipeline`, …);
+- the pipeline, role, template and tool edit tools (`edit_*`, `import_pipeline`, `archive_pipeline`);
+- the provider and model tools;
+- the read tools;
+- every other MCP server, the driver inbox tools among them, since they are not `state_graph_write`.
 
 This is a rule on the tool surface, not a security boundary. A child's bash
 inherits the driver token (`AITELIER_DRIVER_TOKEN`, `AITELIER_DRIVER_TOKEN_FILE`),
@@ -470,7 +495,11 @@ children against a fake `core.todo_cli` (set `AITELIER_TODO_TEST_PYTHON`/
 - the real idle review payload, using a short interval;
 - briefs across child and root compaction;
 - `todo_finish`;
-- a broken CLI degrading the snapshot. Tool-discovery checks cover parent/child MCP lookup and
+- a broken CLI degrading the snapshot;
+- a dead child's plan rebound by a re-dispatched child;
+- budget-derived bounds, and a hung predicate's grandchild stopped with the CLI's process group (SIGTERM, then SIGKILL).
+
+Tool-discovery checks cover parent/child MCP lookup and
 dispatch, live registry updates, caller restrictions, errors, cancellation and
 unchanged model tool prefixes. It makes no paid model calls and touches no live project.
 

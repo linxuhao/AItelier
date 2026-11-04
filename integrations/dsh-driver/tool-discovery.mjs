@@ -1,13 +1,16 @@
 /** Keep MCP schemas in the registry, outside ordinary model requests. */
 const metaTools = new Set(['search_tools', 'call_tool', 'run_code']);
-/** State writes from a subagent: in the real aitelier MCP server every write is
- *  an `action` of ONE tool, state_graph_write. A non-root session may use only
- *  the allowlisted actions; everything else (and a missing/non-string action) is
- *  the director's. The judging writes are also refused as bare tool names in
- *  case a server ever exposes them. */
+/** State writes from a subagent: in the real aitelier MCP server almost every
+ *  write is an `action` of ONE tool, state_graph_write. A non-root session may use
+ *  only the allowlisted actions; everything else (and a missing/non-string
+ *  action) is the director's. Two writes are separate tools and are the
+ *  director's too: declare_driver_presence (marking the director offline lets
+ *  others take over its claims) and answer_checkpoint (a human decision). The
+ *  judging writes are also refused as bare tool names in case a server ever
+ *  exposes them. */
 export const childWriteActions = new Set(['report_issue']);
-const directorOnlyTools = new Set(['record_evidence', 'verify_node', 'report_external_attempt',
-  'start_external_attempt', 'claim_node'].map(name => 'mcp__aitelier__' + name));
+export const directorOnlyTools = new Set(['declare_driver_presence', 'answer_checkpoint', 'record_evidence', 'verify_node',
+  'report_external_attempt', 'start_external_attempt', 'claim_node'].map(name => 'mcp__aitelier__' + name));
 const stateWriteTool = 'mcp__aitelier__state_graph_write';
 export const workerJudgeRule = 'workers do not judge their own work; the director records State evidence'
   + ` (a subagent may only state_graph_write ${[...childWriteActions].join(' or ')})`;

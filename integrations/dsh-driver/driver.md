@@ -54,7 +54,8 @@ item with todo_status, todo_begin and todo_done. Every todo result carries the
 plan brief. Children cannot write State beyond an allowlist: any session but
 yours may call state_graph_write only with action report_issue; every other
 action (record_evidence, verify_node,
-report_external_attempt, claims, takeovers, node and issue edits) is yours. If a child stops with items open, the runtime hands it
+report_external_attempt, claims, takeovers, node and issue edits) is yours, as are
+declare_driver_presence and answer_checkpoint. If a child stops with items open, the runtime hands it
 back to you (reason todo_unfinished, with done/next/remaining): re-dispatch from
 the next item or report the attempt failed. When the plan is complete, run
 todo_finish, then report_external_attempt with the report it wrote, then review

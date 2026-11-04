@@ -127,8 +127,11 @@ test('State writers are refused for any non-root session, through call_tool or d
   ctx.tools.register(defineTool({name:'mcp__aitelier__state_graph_write',description:'state write',
     parameters:{action:{type:'string'},arguments:{type:'object',additionalProperties:true}},output,
     async execute(args, exec){executed.push([args.action, exec.agent.session.id]);return 'ok';}}));
-  ctx.tools.register(defineTool({name:'mcp__aitelier__record_evidence',description:'bare name',parameters:{},output,
-    async execute(_args, exec){executed.push(['bare', exec.agent.session.id]);return 'ok';}}));
+  const separate = ['declare_driver_presence', 'answer_checkpoint', 'record_evidence', 'verify_node', 'report_external_attempt',
+    'start_external_attempt', 'claim_node'];
+  for (const name of [...separate, 'run_pipeline'])
+    ctx.tools.register(defineTool({name:'mcp__aitelier__' + name,description:'separate tool ' + name,parameters:{},output,
+      async execute(_args, exec){executed.push(['tool:' + name, exec.agent.session.id]);return 'ok';}}));
   const write = action => ({name:'mcp__aitelier__state_graph_write',arguments:{action,arguments:{}}});
   const refusedFor = result => { assert.equal(result.isError,true);
     assert.match(JSON.stringify(result.content),/workers do not judge their own work; the director records State evidence/); };
@@ -139,7 +142,13 @@ test('State writers are refused for any non-root session, through call_tool or d
   }
   refusedFor(await call('call_tool',{name:'mcp__aitelier__state_graph_write',arguments:{arguments:{}}},child));
   refusedFor(await call('call_tool',write(7),child));
-  refusedFor(await call('call_tool',{name:'mcp__aitelier__record_evidence',arguments:{}},child));
+  // Separate director-only tools: refused for a child through call_tool and directly, kept for the root.
+  for (const name of separate) {
+    refusedFor(await call('call_tool',{name:'mcp__aitelier__' + name,arguments:{}},child));
+    refusedFor(await call('mcp__aitelier__' + name,{},child));
+    assert.equal((await call('call_tool',{name:'mcp__aitelier__' + name,arguments:{}},root)).isError,false, name + ' for the root');
+  }
+  assert.equal((await call('call_tool',{name:'mcp__aitelier__run_pipeline',arguments:{}},child)).isError,false, 'pipeline tools stay open');
   // An allowlist, not a denylist: any action not named is the director's.
   for (const action of ['resolve_issue', 'take_over_claim', 'take_over_attempt', 'abandon_external_attempt', 'release_claim',
     'heartbeat', 'revise_node', 'add_nodes', 'link_issue', 'declare_driver_presence', 'some_future_action']) {
@@ -148,6 +157,6 @@ test('State writers are refused for any non-root session, through call_tool or d
     assert.equal((await call('call_tool',write(action),root)).isError,false);
   }
   assert.equal((await call('call_tool',write('report_issue'),child)).isError,false, 'report_issue is allowlisted for workers');
-  assert.deepEqual(executed.filter(([, session]) => session === 'child').map(([action]) => action), ['report_issue']);
-  assert.equal(executed.filter(([, session]) => session === 'root').length, 16);
+  assert.deepEqual(executed.filter(([, session]) => session === 'child').map(([action]) => action), ['tool:run_pipeline', 'report_issue']);
+  assert.equal(executed.filter(([, session]) => session === 'root').length, 16 + separate.length);
 }));

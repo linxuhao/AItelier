@@ -6,7 +6,7 @@ import { bindDriverGoal, driverGoalSection } from './goal.mjs';
 import { createRequire } from 'node:module';
 import { readFile, writeFile, rename, stat } from 'node:fs/promises';
 import { join } from 'node:path';
-import { execFile } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 
 export const name = 'aitelier-state-driver';
@@ -106,18 +106,46 @@ export class TodoCli {
     this.store = join(stateDir, 'todo');
   }
   /** Exit 0 is a result, exit 2 a refusal; anything else is a broken call.
-   *  Bounded: a hung predicate or interpreter must not hold a step forever. */
+   *  Bounded: a hung predicate or interpreter must not hold a step forever. The
+   *  CLI leads its own process group. On timeout or abort the group gets SIGTERM
+   *  first, so the CLI can stop the predicates it runs in their own sessions (a
+   *  SIGKILLed CLI cannot), then SIGKILL after 5 s: a predicate's test run or
+   *  docker client must not outlive the call. */
   run(args, signal, timeout = 60000) {
     return new Promise((resolve, reject) => {
-      execFile(this.python, ['-m', 'core.todo_cli', ...args], { cwd: this.cwd, signal, timeout, killSignal: 'SIGKILL',
-        maxBuffer: 16 * 1024 * 1024, env: { ...process.env, AITELIER_DSH_STATE_DIR: this.stateDir } },
-        (error, stdout, stderr) => {
-          const code = error ? error.code : 0;
-          if (code !== 0 && code !== 2) return reject(new Error(`todo_cli ${args[0]}: ${error.message} ${stderr}`.slice(0, 2000)));
-          try { resolve({ code, result: JSON.parse(stdout) }); }
-          catch { reject(new Error(`todo_cli ${args[0]} printed no JSON (exit ${code}): ${stdout} ${stderr}`.slice(0, 2000))); }
-        });
+      const child = spawn(this.python, ['-m', 'core.todo_cli', ...args], { cwd: this.cwd, detached: true,
+        stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, AITELIER_DSH_STATE_DIR: this.stateDir } });
+      let stdout = '', stderr = '', killed, escalate;
+      const signalGroup = name => { try { process.kill(-child.pid, name); } catch { /* ESRCH: the group is already gone */ } };
+      const killGroup = why => {
+        if (killed) return;
+        killed = why;
+        signalGroup('SIGTERM');
+        escalate = setTimeout(() => signalGroup('SIGKILL'), 5000);
+      };
+      const timer = setTimeout(() => killGroup(`timed out after ${timeout} ms`), timeout);
+      const onAbort = () => killGroup('aborted');
+      signal?.addEventListener('abort', onAbort, { once: true });
+      if (signal?.aborted) onAbort();
+      child.stdout.on('data', chunk => { stdout += chunk; });
+      child.stderr.on('data', chunk => { stderr += chunk; });
+      const settle = () => { clearTimeout(timer); clearTimeout(escalate); signal?.removeEventListener('abort', onAbort); };
+      child.on('error', error => { settle(); reject(new Error(`todo_cli ${args[0]}: ${error.message}`)); });
+      child.on('close', (code, killSignal) => {
+        settle();
+        if (killed) return reject(new Error(`todo_cli ${args[0]} ${killed}; its process group was stopped (${killSignal ?? 'exit ' + code})`));
+        if (code !== 0 && code !== 2) return reject(new Error(`todo_cli ${args[0]}: exit ${code ?? killSignal} ${stderr}`.slice(0, 2000)));
+        try { resolve({ code, result: JSON.parse(stdout) }); }
+        catch { reject(new Error(`todo_cli ${args[0]} printed no JSON (exit ${code}): ${stdout} ${stderr}`.slice(0, 2000))); }
+      });
     });
+  }
+  /** The bound for a predicate-running call: the plan's own budget (seconds,
+   *  from `status`) plus a minute for the CLI itself; 60 s when none is given. */
+  async bound(attempt, budget, signal) {
+    const { code, result } = await this.run(['status', '--attempt=' + attempt], signal);
+    const seconds = code === 0 ? Number(budget(result)) : NaN;
+    return Number.isFinite(seconds) && seconds > 0 ? (seconds + 60) * 1000 : 60000;
   }
   /** A tool result: a refusal is returned, not thrown, and always carries the brief. */
   async call(attempt, args, signal, timeout) {
@@ -324,18 +352,22 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
     description: 'Start one plan item before working on it. Refuses unmet needs, captures the state its predicates compare against, and binds the plan to your session.',
     parameters: planRef, output: jsonOutput,
     async execute(args, exec) {
-      // Never silently take a plan away from another live child.
-      const caller = exec.agent.session.id;
-      const status = await todo.call(args.attempt_id, ['status', '--attempt=' + args.attempt_id], exec.signal);
-      if (status.child_session && status.child_session !== caller && liveChildren.has(status.child_session))
-        return { refused: 'bound_to_live_session', reason: `plan ${args.attempt_id} is bound to live session ${status.child_session}`, brief: status.brief };
-      return todo.call(args.attempt_id, ['begin', '--attempt=' + args.attempt_id, '--item=' + args.item_id, '--session=' + caller], exec.signal);
+      // The CLI refuses, under the plan lock, to take a plan bound to another
+      // session. Rebind only when that session is verified dead: not the root
+      // and not a live child of this process.
+      const begin = ['begin', '--attempt=' + args.attempt_id, '--item=' + args.item_id, '--session=' + exec.agent.session.id];
+      const result = await todo.call(args.attempt_id, begin, exec.signal);
+      if (result.refused !== 'bound_to_other_session') return result;
+      const bound = result.bound_session;
+      if (!bound || bound === env.AITELIER_DSH_SESSION || liveChildren.has(bound)) return result;
+      return todo.call(args.attempt_id, [...begin, '--rebind'], exec.signal);
     },
   }));
   ctx.tools.register(defineTool({ name: 'todo_done',
     description: 'Say you finished one plan item. The harness evaluates its bound predicates now and returns outcome pass|fail|absent with each result; your own claim is not an input. A fail keeps the item open: fix it and call again.',
     parameters: planRef, output: jsonOutput,
-    execute: (args, exec) => todo.call(args.attempt_id, ['done', '--attempt=' + args.attempt_id, '--item=' + args.item_id], exec.signal),
+    execute: async (args, exec) => todo.call(args.attempt_id, ['done', '--attempt=' + args.attempt_id, '--item=' + args.item_id], exec.signal,
+      await todo.bound(args.attempt_id, status => status.timeout_budget_seconds?.[args.item_id], exec.signal)),
   }));
   ctx.tools.register(defineTool({ name: 'todo_report',
     description: 'Attach one free-text note to a plan item. It changes no item state.',
@@ -473,9 +505,10 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
     scope.tools.register(defineTool({ name: 'todo_finish',
       description: 'Director only. Re-evaluate every item of an attempt\'s plan; only when all pass, write the git bundle, its sha256 and the candidate report and return their paths for report_external_attempt. Otherwise it is refused with the failing items.',
       parameters: { attempt_id: { type: 'string', required: true } }, output: jsonOutput,
-      execute: (args, exec) => /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(args.attempt_id)
+      execute: async (args, exec) => /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(args.attempt_id)
         ? todo.call(args.attempt_id, ['finish', '--attempt=' + args.attempt_id,
-          '--out=' + join(todo.store, 'finish', args.attempt_id)], exec.signal, 600000)
+          '--out=' + join(todo.store, 'finish', args.attempt_id)], exec.signal,
+          await todo.bound(args.attempt_id, status => status.finish_budget_seconds, exec.signal))
         : { refused: 'invalid_attempt_id', reason: 'attempt_id must be a plain file name', brief: null },
     }));
     scope.tools.register(defineTool({ name: 'grep_chat_history',

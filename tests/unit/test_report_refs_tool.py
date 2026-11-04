@@ -109,3 +109,22 @@ def test_the_guard_would_have_stopped_the_real_losses():
         "both reference shapes must stay detected; the 2026-11-04 losses came from the "
         "cited_by_report shape alone"
     )
+
+
+def test_a_relative_argument_does_not_match_by_substring(tmp_path, monkeypatch):
+    """A relative bundle name must not read as "cited" merely because some report
+    mentions the same directory name somewhere else on disk."""
+    import os
+    reports = tmp_path / "reports"
+    bundle = reports / "shared-name"
+    bundle.mkdir(parents=True)
+    other = tmp_path / "elsewhere" / "shared-name"
+    other.mkdir(parents=True)
+    stored = tmp_path / "state-report-evidence" / "aa" / "sha"
+    stored.parent.mkdir(parents=True)
+    # the report cites the OTHER directory, not the bundle we are asking about
+    stored.write_text("see %s/proof.json" % other)
+    db = _state_db(tmp_path, [("attempt-c", "obs-c", str(stored))])
+    monkeypatch.chdir(reports)
+    rc = _module().main(["shared-name", "--db", str(db)])
+    assert rc == 0, "the same directory NAME elsewhere must not make this bundle 'cited'"

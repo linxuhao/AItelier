@@ -66,7 +66,9 @@ def find_refs(bundle: pathlib.Path, db_path: str) -> list[dict]:
             text = ref.read_text(errors="ignore")
         except OSError:
             continue
-        marker = str(bundle)
+        # resolve(): a relative argument must not become a loose substring match
+        # against every report that happens to mention the same directory name.
+        marker = str(bundle.resolve()) + os.sep
         if marker in text:
             names = sorted({p for p in text.split() if marker in p})
             hits.append({"kind": "cited_by_report",

@@ -18,6 +18,7 @@ import sys
 import pytest
 
 from core.gate_deferral import ABSENCE_TERMINAL, absent_terminal_names_no_failure
+from tests.unit.test_todo_runtime import process_is_stopped
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WAIT, CEILING = 300, 1000          # ledger constants for these tests (seconds)
@@ -283,9 +284,7 @@ def test_a_terminated_cli_leaves_no_running_command_behind(cli, repo, base, tmp_
     cli_proc.send_signal(signal.SIGTERM)
     assert cli_proc.wait(timeout=30) == 143
     for _ in range(100):
-        try:
-            os.kill(grandchild, 0)
-        except ProcessLookupError:
+        if process_is_stopped(grandchild):
             break
         time.sleep(0.05)
     else:

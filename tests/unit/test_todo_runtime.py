@@ -15,6 +15,20 @@ from core.gate_deferral import ABSENCE_TERMINAL, absent_terminal_names_no_failur
 from core.todo_runtime import (Binding, Item, Plan, TodoRun, builtin_library)
 
 
+def process_is_stopped(pid: int) -> bool:
+    """True when the process is gone OR is a zombie (state Z: killed, not yet reaped).
+
+    Whether a killed grandchild is ever reaped depends on the container having an init;
+    "no longer running" is what the kill guarantees, so a zombie counts as stopped and a
+    live state (R/S/D/T) does not.
+    """
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except (FileNotFoundError, ProcessLookupError):
+        return True
+    return stat.rpartition(")")[2].split()[0] in ("Z", "X")
+
+
 def _plan(*items: Item) -> Plan:
     return Plan(key="fixture-plan", goal="prove the item is done by observation", items=tuple(items))
 
@@ -411,9 +425,7 @@ def test_a_command_that_times_out_takes_its_whole_process_group_with_it(tmp_path
     assert result.outcome == "absent" and "timed out" in result.detail
     grandchild = int(pidfile.read_text())
     for _ in range(100):
-        try:
-            os.kill(grandchild, 0)
-        except ProcessLookupError:
+        if process_is_stopped(grandchild):
             return
         time.sleep(0.05)
     os.kill(grandchild, signal.SIGKILL)

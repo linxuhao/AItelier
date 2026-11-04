@@ -1,5 +1,9 @@
 /** Keep MCP schemas in the registry, outside ordinary model requests. */
 const metaTools = new Set(['search_tools', 'call_tool', 'run_code']);
+/** State writers only the director (the root session) may call. */
+export const directorOnlyTools = new Set(['record_evidence', 'verify_node', 'report_external_attempt',
+  'start_external_attempt', 'claim_node'].map(name => 'mcp__aitelier__' + name));
+export const workerJudgeRule = 'workers do not judge their own work; the director records State evidence';
 
 export function searchTools(schemas, query, limit = 5) {
   const needle = query.trim().toLocaleLowerCase();
@@ -16,7 +20,11 @@ export function searchTools(schemas, query, limit = 5) {
     has_more: ranked.length > limit };
 }
 
-export function installToolDiscovery(ctx, { defineTool, HarnessError }) {
+export function installToolDiscovery(ctx, { defineTool, HarnessError, rootSession }) {
+  // Keyed on the caller's session, not on a prompt. A global guard covers both
+  // call_tool targets and a direct call of the (merely unlisted) MCP name.
+  ctx.tools.guard(exec => directorOnlyTools.has(exec.name) && exec.agent?.session?.id !== rootSession
+    ? `${exec.name} is refused for a subagent: ${workerJudgeRule}` : undefined);
   // Presentation only: restrictions would also deny execution, and root-local
   // registrations would miss fresh native children. Resolve each caller anew.
   ctx.on('system-prompt/assemble', async (_assembly, _context, next) => {

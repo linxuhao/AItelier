@@ -15,7 +15,7 @@ async function fixture(body) {
   const ctx = new Context();
   const prompt = ctx.plugin(SystemPrompt); await prompt.await();
   const tools = ctx.plugin(Tools); await tools.await();
-  installToolDiscovery(ctx, { defineTool, HarnessError });
+  installToolDiscovery(ctx, { defineTool, HarnessError, rootSession: 'root' });
   let scopeOwner;
   const dependencies = ctx.inject(['tools', 'systemPrompt'], owner => { scopeOwner = owner; }); await dependencies.await();
   const scopes = [];
@@ -119,4 +119,21 @@ test('call_tool retains image attachment handles and the target text projection'
     output:{schema:{type:'string'},render:()=>content},async execute(){return 'stored-image';}}));
   const result = await call('call_tool',{name:'mcp__fixture__image',arguments:{}},root);
   assert.equal(result.isError,false);assert.equal(result.value,'stored-image');assert.deepEqual(result.content,content);
+}));
+
+test('State writers are refused for any non-root session, through call_tool or directly, and kept for the root', () => fixture(async ({ctx, agent, call}) => {
+  const root = agent('root'), child = agent('child'), executed = [];
+  for (const name of ['record_evidence', 'verify_node', 'report_external_attempt', 'start_external_attempt', 'claim_node', 'list_pipelines'])
+    ctx.tools.register(defineTool({name:'mcp__aitelier__' + name,description:name,parameters:{},output,
+      async execute(_args, exec){executed.push([name, exec.agent.session.id]);return 'ok';}}));
+  for (const name of ['record_evidence', 'verify_node', 'report_external_attempt', 'start_external_attempt', 'claim_node']) {
+    for (const result of [await call('call_tool',{name:'mcp__aitelier__' + name,arguments:{}},child), await call('mcp__aitelier__' + name,{},child)]) {
+      assert.equal(result.isError,true);
+      assert.match(JSON.stringify(result.content),/workers do not judge their own work; the director records State evidence/);
+    }
+    assert.equal((await call('call_tool',{name:'mcp__aitelier__' + name,arguments:{}},root)).isError,false);
+  }
+  assert.equal((await call('call_tool',{name:'mcp__aitelier__list_pipelines',arguments:{}},child)).isError,false);
+  assert.deepEqual(executed.filter(([, session]) => session === 'child').map(([name]) => name), ['list_pipelines']);
+  assert.equal(executed.filter(([, session]) => session === 'root').length, 5);
 }));

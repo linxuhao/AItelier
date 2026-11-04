@@ -8,6 +8,7 @@ import shutil
 import sqlite3
 from pathlib import Path
 import signal
+import sys
 import time
 import uuid
 
@@ -229,7 +230,10 @@ class DshDrivers:
                    AITELIER_DSH_SESSION=row["session_id"], AITELIER_DSH_PROVIDER=row["provider"],
                    AITELIER_DSH_MODEL=row["model"], AITELIER_URL=self.base_url,
                    AITELIER_DSH_STATE_DIR=str(directory),
-                   AITELIER_DSH_ENTRY=str(Path(self.command[0]).resolve()))
+                   AITELIER_DSH_ENTRY=str(Path(self.command[0]).resolve()),
+                   # The runtime's todo_* tools run `python -m core.todo_cli` from this checkout.
+                   AITELIER_TODO_PYTHON=sys.executable,
+                   AITELIER_TODO_CWD=str(Path(__file__).resolve().parents[1]))
         if self.host_controller:
             env.update(DSH_PERMISSION_MODE="danger-full-access", AITELIER_DSH_EXECUTION="host",
                        AITELIER_DSH_BACKEND_SOURCE=str(Path(__file__).resolve().parents[1]))

@@ -256,38 +256,58 @@ def test_approve_refuses_feedback_instead_of_dropping_it(client: TestClient, mon
 
 def test_approve_without_feedback_still_approves(client: TestClient, monkeypatch):
     """The refusal is about the field, not the endpoint — the ordinary approval
-    must still reach skillflow untouched."""
+    must still reach skillflow untouched.
+
+    The route requires the OBSERVED exact run: api/meta_routers.approve_checkpoint
+    resolves `run_id` from the body and refuses (409) unless get_run() returns a
+    run of the SAME project, so that the engine can approve that identity
+    atomically instead of approving whatever checkpoint is current. The fixture
+    therefore names a real run of this project. What is asserted is unchanged:
+    no feedback in, approval out, with this exact run id handed to skillflow.
+    """
     import api.meta_routers as mr
 
     _ensure_project(client, "cp-nofb-proj")
     sf = MagicMock()
-    sf.get_run.return_value = {"status": "paused"}
+    sf.get_run.return_value = {"status": "paused", "project_id": "cp-nofb-proj",
+                               "graph_name": "dpe_default_v2", "id": "run-1"}
     monkeypatch.setattr(mr, "get_skillflow", lambda: sf)
     monkeypatch.setattr(mr, "_get_checkpoint_info",
                         lambda pid: ("gather", "Project conversation", "run-1", "meta_conversation", 7))
 
     resp = client.post("/api/meta/cp-nofb-proj/checkpoint/approve",
-                       json={"checkpoint": "gather", "feedback": ""})
+                       json={"checkpoint": "gather", "run_id": "run-1", "feedback": ""})
 
     assert resp.status_code == 200, resp.text
     assert resp.json()["status"] == "approved"
-    sf.approve_checkpoint.assert_called_once_with("run-1")
+    # Approving is a CAS against the checkpoint the reviewer read: the run id is
+    # positional and the observed identity/decision travel as keywords. Nothing
+    # about feedback is forwarded, which is the point of the endpoint.
+    sf.approve_checkpoint.assert_called_once_with(
+        "run-1", expected_checkpoint=None, decision_id="")
 
 
 def test_approve_refuses_whitespace_only_feedback_as_empty(client: TestClient, monkeypatch):
     """A textarea the user tabbed through holds whitespace, not an instruction —
-    that is an ordinary approval, not a request to deliver something."""
+    that is an ordinary approval, not a request to deliver something.
+
+    Same observed-run precondition as the test above: the approval names the run
+    it was read from, so the fixture supplies that run and its id.
+    """
     import api.meta_routers as mr
 
     _ensure_project(client, "cp-wsfb-proj")
     sf = MagicMock()
-    sf.get_run.return_value = {"status": "paused"}
+    sf.get_run.return_value = {"status": "paused", "project_id": "cp-wsfb-proj",
+                               "graph_name": "dpe_default_v2", "id": "run-1"}
     monkeypatch.setattr(mr, "get_skillflow", lambda: sf)
     monkeypatch.setattr(mr, "_get_checkpoint_info",
                         lambda pid: ("gather", "Project conversation", "run-1", "meta_conversation", 7))
 
     resp = client.post("/api/meta/cp-wsfb-proj/checkpoint/approve",
-                       json={"checkpoint": "gather", "feedback": "   \n  "})
+                       json={"checkpoint": "gather", "run_id": "run-1",
+                             "feedback": "   \n  "})
 
     assert resp.status_code == 200, resp.text
-    sf.approve_checkpoint.assert_called_once_with("run-1")
+    sf.approve_checkpoint.assert_called_once_with(
+        "run-1", expected_checkpoint=None, decision_id="")

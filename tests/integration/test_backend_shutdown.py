@@ -79,9 +79,21 @@ class Backend:
         (observer / "sitecustomize.py").write_text(_CLEANUP_OBSERVER)
         self.env["PYTHONPATH"] = f"{observer}:{ROOT}"
         # conftest's in-process test locks must not leak into the actual backend.
+        # The deployment's Cloudflare Access identity must not either: this
+        # fixture's backend is the test's own process, and it is driven by a
+        # plain HTTP client that carries no Access JWT. With the host's
+        # AITELIER_CF_TEAM_DOMAIN/_AUD exported (they are, on a host that fronts
+        # AItelier with Access), the write gate correctly answers
+        # "Not signed in" to those calls — correct for the deployed origin, but
+        # it would make THIS test about the write gate instead of about
+        # shutdown, claim recovery and stale-claim fencing. The gate stays
+        # configured nowhere in this fixture's backend, exactly like a dev box;
+        # the auth boundary is asserted in test_web_api_auth.py.
         for key in ("DPE_DB_PATH", "SKILLFLOW_DB_PATH", "DPE_WS_PATH",
                     "DPE_PROJECTS_PATH", "AITELIER_SCHEDULER_LOCK",
-                    "AITELIER_INSTANCE_LOCK", "UVICORN_TIMEOUT_GRACEFUL_SHUTDOWN"):
+                    "AITELIER_INSTANCE_LOCK", "UVICORN_TIMEOUT_GRACEFUL_SHUTDOWN",
+                    "AITELIER_CF_TEAM_DOMAIN", "AITELIER_CF_AUD",
+                    "AITELIER_WRITERS"):
             self.env.pop(key, None)
         self.observations = []
         self.process = None
@@ -299,11 +311,28 @@ GRAPH_CODE = '''
 from skillflow.core import StepResult, ClaimToken
 from skillflow.exceptions import StaleClaimFenced
 from skillflow.graph import PipelineGraph, StepNode, Transition
-from api.dependencies import get_skillflow
+from api.dependencies import get_db_manager, get_skillflow
+from core import run_isolation
 sf = get_skillflow()
 sf.register_graph(PipelineGraph(name="shutdown_fixture", begin="committed", steps=[
     StepNode(id="committed", transitions=[Transition(to="interrupted")]),
     StepNode(id="interrupted")]))
+
+def declared(run_id):
+    """Declare what this fixture run works in, exactly as a launch does.
+
+    `AItelierSkillFlow.start_run` refuses a record-less run of this deployment
+    (core/skillflow_host.py:_declare_unowned_run): with no declaration the run
+    would be claimed by a resolver that has no root to hand it, so the host
+    fails it instead. The launcher writes this record before it starts a run and
+    every other creation path does the same; a fixture that calls start_run
+    directly is the one caller that has to say it itself. This graph publishes
+    code nowhere (`repo_mode="none"`) and the project is registered with
+    `repo_type="none"`, which is the same declaration the launch would derive.
+    """
+    run_isolation.ensure_for_run(get_db_manager(), run_id=run_id,
+                                 project_id="shutdown-fixture",
+                                 config_name="shutdown_fixture", repo_mode="none")
 '''
 
 
@@ -328,6 +357,7 @@ async def test_real_backend_shutdown_restart_and_recovery(backend_factory, entry
         fixture = backend.fixture_api(GRAPH_CODE + f'''
 import json
 rid = sf.create_run("shutdown_fixture", project_id="shutdown-fixture", context={{"task_id": {task_id}}})
+declared(rid)
 sf.start_run(rid); sf.advance_run(rid)
 committed = sf.claim_next_step(rid)
 sf.confirm_step(committed.token, StepResult(outputs={{"report": "durable committed output"}}))

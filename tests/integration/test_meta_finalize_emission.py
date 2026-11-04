@@ -223,7 +223,17 @@ class TestMetaRunE2E:
         assert paused, "run never reached the gather checkpoint"
 
         # Approve → finalize tool emits artifacts → end-condition completes run.
-        meta_run.approve_meta(sf, run_id)
+        # The engine approves a checkpoint by CAS against the identity the
+        # reviewer observed (step_instance/version/completion_seq/
+        # outputs_sha256) plus a decision id unique in the engine DB — a bare
+        # approve(run_id) names no observed state and is refused. The dashboard
+        # route reads exactly this identity from `sf.get_checkpoint()` and
+        # forwards it, so the fixture does the same; the approval is still the
+        # one the butler makes for a reviewed brief.
+        observed = sf.get_checkpoint(run_id)
+        meta_run.approve_meta(sf, run_id,
+                              expected_checkpoint=observed["expected_checkpoint"],
+                              decision_id="meta-finalize-e2e:gather")
 
         assert sf.get_run(run_id)["status"] == "completed"
         assert (ws_root / "project" / "project_brief.md").read_text(encoding="utf-8")

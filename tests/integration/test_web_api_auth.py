@@ -141,8 +141,23 @@ def test_create_project_sets_owner(web_client: TestClient):
     assert resp.json()["owner_email"] == "projowner@test.com"
 
 
-def test_user_sees_only_own_tasks(web_client: TestClient):
-    """Users should only see their own tasks."""
+def test_user_sees_only_own_tasks(web_client: TestClient, monkeypatch):
+    """Users should only see their own tasks.
+
+    Isolation is asserted for two AUTHORIZED identities. On the host that runs
+    this suite Cloudflare Access is configured, and api.authz's boundary
+    (writer == reader of a private record) is keyed on a VERIFIED Access JWT —
+    which a `Cf-Access-User-Email` header is not. With the gate on, alice's own
+    task list is the public projection and carries no `owner_email` at all,
+    because the request carries no verifiable identity. That refusal is the
+    product's, and the routes that enforce it are covered by the write/read
+    denial tests; this test is about per-user isolation of the LISTS. Pin the
+    identity configuration off for this test only; isolation between the two
+    users is asserted exactly as before.
+    """
+    from core import cf_access
+    monkeypatch.setattr(cf_access, "_TEAM_DOMAIN", "")
+    monkeypatch.setattr(cf_access, "_AUD", "")
     alice = {"Cf-Access-User-Email": "alice@t.com"}
     bob = {"Cf-Access-User-Email": "bob@t.com"}
 

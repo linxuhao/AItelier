@@ -19,6 +19,21 @@ def web_client_fixture(tmp_path, monkeypatch):
     web_app.dependency_overrides[get_db_manager] = lambda: test_db
     web_app.dependency_overrides[get_workspace_manager] = lambda: test_ws
     web_app.dependency_overrides[get_optional_user] = get_current_user
+    # The host that runs this suite fronts AItelier with Cloudflare Access, so
+    # api.authz's read/write boundary is CONFIGURED here and it is keyed on a
+    # VERIFIED Access JWT — not on the `Cf-Access-User-Email` header these tests
+    # send (core/cf_access.email_from_request_headers reads the JWT claim only).
+    # With the gate on, every such request is an anonymous identity: private
+    # fields are projected out (a task's `prompt`, `owner_email`) and
+    # writer-only routes answer 403 before their own 404, because the request
+    # carries no verifiable identity. None of that is about the project routes under
+    # test here. Pin the identity configuration OFF for this file so the requests
+    # are attributed the way this suite's own auth override already assumes;
+    # the boundary itself keeps its own tests in test_web_api_auth.py and
+    # tests/unit/test_authz*.py, which run with the gate as configured.
+    from core import cf_access
+    monkeypatch.setattr(cf_access, "_TEAM_DOMAIN", "")
+    monkeypatch.setattr(cf_access, "_AUD", "")
     with TestClient(web_app) as c:
         yield c
     web_app.dependency_overrides.clear()

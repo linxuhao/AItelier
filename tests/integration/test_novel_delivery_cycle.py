@@ -212,6 +212,7 @@ async def _drive(sf, db, host_ws, run_id, monkeypatch, *, chapter=0,
     runner = AgentStepRunner(db, host_ws)
     rejected = False
     executed = []
+    approvals = []
     for _ in range(140):
         node = sf.advance_run(run_id)
         if node is None:
@@ -233,7 +234,24 @@ async def _drive(sf, db, host_ws, run_id, monkeypatch, *, chapter=0,
                     sf.reject_checkpoint(run_id, checkpoint, REVISION, redirect_to=redirect)
                     rejected = True
                 else:
-                    sf.approve_checkpoint(run_id)
+                    # The engine approves a checkpoint by CAS against the exact
+                    # identity the reviewer read (step_instance/version/
+                    # completion_seq/outputs_sha256) plus a decision id that is
+                    # unique in the engine DB. A bare approve_checkpoint(run_id)
+                    # is refused: it names no observed state, so it could approve
+                    # a checkpoint that advanced under the reviewer. Observe,
+                    # then approve that observation -- the same two calls the
+                    # dashboard's approve route makes.
+                    observed = sf.get_checkpoint(run_id)
+                    sf.approve_checkpoint(
+                        run_id,
+                        expected_checkpoint=observed["expected_checkpoint"],
+                        # A decision id is unique in the ENGINE DB, not per run:
+                        # name the run and count this run's decisions so a
+                        # re-visited gate (reject -> redo -> approve) is a
+                        # different decision rather than a collision.
+                        decision_id=f"novel-fixture:{run_id}:{len(approvals)}")
+                    approvals.append(checkpoint)
                 continue
             if row["status"] == "running":
                 continue
@@ -355,7 +373,12 @@ async def test_two_chapter_delivery_cycle_in_real_linked_worktrees(tmp_path, mon
             sf._workspace._code_path_resolver = (
                 lambda _pid, run_id=None: run_isolation.resolve_for_resolver(db, run_id)
             )
-            sf.approve_checkpoint(run_id)
+            # Rebuilt engine, same durable DB: observe the retained checkpoint
+            # on THIS engine and approve exactly that identity (see _drive).
+            observed = sf.get_checkpoint(run_id)
+            sf.approve_checkpoint(
+                run_id, expected_checkpoint=observed["expected_checkpoint"],
+                decision_id="novel-fixture:resume-final-gate")
             resumed, later, more_calls = await _drive(
                 sf, db, host_ws, run_id, monkeypatch, chapter=chapter,
                 observations=observations,

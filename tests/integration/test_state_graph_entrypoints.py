@@ -1215,11 +1215,24 @@ def test_end_to_end_rest_acceptance_and_requirement_revision(live):
 
 
 def test_offline_executable_demo_runs_real_red_then_green_tests(live):
+    import os
     import sys
     source = Path(__file__).resolve().parents[2]
     report = live.tmp / "demo-result.json"
+    # `examples/state_graph_demo.py` is a FILE script, so Python puts
+    # `examples/` — not the repo root — on sys.path[0]. `core` therefore resolves
+    # through the interpreter's environment: on this host that is the image's
+    # editable install under /app, which is root-owned and unreadable to the
+    # unprivileged uid the suite runs as, and on any box it is a DIFFERENT copy
+    # of the tree than the one under test. Name the checkout on PYTHONPATH so the
+    # demo exercises the source it ships with (the same reason
+    # tests/integration/test_backend_shutdown.py passes PYTHONPATH to its
+    # subprocesses).
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(source) + (
+        os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
     out = subprocess.run([sys.executable, "examples/state_graph_demo.py", "--report", str(report)],
-                         cwd=source, capture_output=True, text=True, timeout=30)
+                         cwd=source, capture_output=True, text=True, timeout=30, env=env)
     assert out.returncode == 0, out.stdout + out.stderr
     result = json.loads(report.read_text())
     assert result["result"] == "PASS"

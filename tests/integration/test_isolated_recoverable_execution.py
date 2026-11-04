@@ -317,8 +317,26 @@ async def test_bounded_failure_timeout_disconnect_and_unknown_retain_distinct_st
             "request-2")
 
 
+@pytest.fixture
+def short_control_home():
+    """A SHORT-ENOUGH AITELIER_HOME for the host relay's AF_UNIX socket.
+
+    The owner relay's socket is `<home>/r/<32 hex>.s`, and 107 bytes is the
+    kernel's limit for `sun_path`, so `home` must stay under ~71 bytes. Deployed
+    AITELIER_HOME is a short path (/home/<user>/.AItelier); a home derived from
+    pytest's tmp base is not. Removed after the test.
+    """
+    import shutil
+    import tempfile
+    home = Path(tempfile.mkdtemp(prefix="aitelier-relay-"))
+    try:
+        yield home
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
 def test_parallel_runs_progress_but_competing_controllers_admit_one_owner(
-        tmp_path, monkeypatch):
+        tmp_path, monkeypatch, short_control_home):
     """Admission is per run, while two hosts racing one run get one operation."""
     db_path, workspace, projects = (
         tmp_path / "sf.db", tmp_path / "ws", tmp_path / "projects")
@@ -360,8 +378,15 @@ def test_parallel_runs_progress_but_competing_controllers_admit_one_owner(
     from core import repository_executor_entry as entry
     from core import repository_host_launcher as launcher
 
-    home = tmp_path / "control"
-    home.mkdir()
+    # The host relay's AF_UNIX socket lives at <AITELIER_HOME>/r/<32-byte digest>.s,
+    # and Linux caps a unix socket path at 107 bytes. Deployed AITELIER_HOME is a
+    # short path (/home/<user>/.AItelier); pytest's tmp base is long enough that
+    # "tmp_path/control" pushes the socket over the cap, and the real gate then
+    # refuses with "owned relay path exceeds Linux AF_UNIX's 107-byte filesystem
+    # budget" — the budget check working, not this test's subject. Use a home of
+    # the deployed SHAPE so the socket fits; the host/executor plumbing under test
+    # is unchanged.
+    home = short_control_home
     monkeypatch.setattr(datadir, "aitelier_home", lambda: home)
     binding_db = home / "bindings.db"
     with sqlite3.connect(binding_db) as conn:

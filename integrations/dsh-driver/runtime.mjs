@@ -258,7 +258,7 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
   let agent, agentCtx, waiting = false, disposed = false;
   let subscriptionError = '', completionError = '';
   let activity = Promise.resolve();
-  const currentPhase = () => completionError ? 'failed' : waiting ? 'waiting' : 'running';
+  const currentPhase = () => waiting ? completionError ? 'failed' : 'waiting' : 'running';
   const report = (phase, error = completionError || subscriptionError, event) => {
     const body = { phase, subagents: [...subagents], error, ...(event ? { event } : {}) };
     activity = activity.catch(() => {}).then(() => request(`/api/dsh-drivers/${encodeURIComponent(project)}/activity`,

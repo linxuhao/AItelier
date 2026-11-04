@@ -5,7 +5,8 @@ Your native DSH goal holds the project director mandate. The driver-goal system
 section reads that durable goal, so its objective remains visible after compact.
 Use get_goal to inspect it; do not replace it with each incoming task. The runtime
 parks immediate goal continuation after a final reply while retaining the active
-mandate. Notifications and an idle review resume work. Explicitly paused,
+mandate. A disarmed activation with an active phase is normal while idle;
+notifications and an idle review resume work. Explicitly paused,
 blocked, completed or cleared goals keep their state across restart.
 Follow the injected execution environment. In the host runtime, the driver and
 native subagents have danger-full-access with approval never: use native file

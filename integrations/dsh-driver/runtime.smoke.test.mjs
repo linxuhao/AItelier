@@ -342,6 +342,7 @@ test('real pinned DSH default host adapter calls the authenticated completion br
     while(Date.now()<recoveredBy&&!activity.some(a=>a.event?.text.includes('RECOVERED_REPLY_MARKER')))await new Promise(resolve=>setTimeout(resolve,25));
     assert.ok(activity.some(a=>a.event?.text.includes('RECOVERED_REPLY_MARKER')),'later notification did not recover the idle failed agent');
     await new Promise(resolve=>setTimeout(resolve,100));
+    assert.ok(activity.some(a=>a.phase==='running'&&a.error?.includes('fixture completion failure')),'retry was not shown as running with its previous failure');
     assert.equal(activity.at(-1).phase,'waiting');assert.equal(activity.at(-1).error,'');
   } finally {
     if (proc?.exitCode === null) { proc.kill('SIGTERM'); await once(proc, 'exit'); }

@@ -430,8 +430,15 @@ class _WaitSF:
         return []
 
     def approve_checkpoint(self, run_id, *args, **kwargs):
-        # The double's whole job is the status transition; record the call so a
-        # test can assert the router reached it, and report what the run moved to.
+        # Reproduce the contract this stands in for, including its refusal.
+        # skillflow's own approve_checkpoint answers a non-paused run by raising
+        # "Run '<id>' is not paused" (core.py, _checkpoint_in_transaction). The MCP
+        # layer no longer repeats that status check for approvals - it delegates -
+        # so a double that approves anything would hide a real hole instead of
+        # finding one. The guarantee is what the test is about; the wording is the
+        # SDK's.
+        if self.status != "paused":
+            raise RuntimeError(f"Run '{run_id}' is not paused")
         if not hasattr(self, "approved"):
             self.approved = []
         self.approved.append(run_id)
@@ -1290,13 +1297,24 @@ def test_every_run_taking_tool_actually_resolves_a_project_id(monkeypatch):
         assert out.get("run_id") == "r1" or out.get("entries") is not None, (
             f"{name} must answer for the run it landed on: {out}")
 
-    # The two MUTATING ones resolve permissively too, but every guard they had
-    # still applies to the run they landed on, and the reply names it.
+    # The mutating ones are NOT symmetric, and that asymmetry is deliberate.
+    #
+    # A rejection still resolves a project id: refusing a checkpoint is the
+    # reversible direction, and the run it lands on is named in the reply.
     out = captured["answer_checkpoint"]("p1", "reject")
     assert "needs feedback" in out["error"], out
+
+    # An APPROVAL must not. It is the irreversible one, a project can own several
+    # runs, and resolving "the newest" is how an approval answers the wrong run.
+    # The tool therefore requires the exact observed run_id - so the honest
+    # assertion is that a project id is refused FOR THAT REASON, not that it
+    # resolves. (There is a matching refusal on the SDK side: an approval has to
+    # carry the checkpoint identity it was shown.)
     sf.status = "running"
     out = captured["answer_checkpoint"]("p1")
-    assert "not paused" in out["error"] and "r1" in out["error"]
+    assert "exact observed run_id" in out["error"], out
+    assert "approved" not in out and "decision" not in out, (
+        f"a project id must not produce an approval: {out}")
 
 
 class _NoWorkspace:
@@ -1487,17 +1505,28 @@ class _RaisingApproveSF(_WaitSF):
         return super().get_run(run_id)
 
 
-def test_an_approval_that_raised_but_landed_is_not_reported_as_failed(monkeypatch):
-    """Reporting a mutation that happened as a failure invites the operator to
-    answer again — a second answer to a checkpoint that is no longer there."""
+def test_an_approval_that_raised_says_it_is_unconfirmed_and_how_to_settle_it(monkeypatch):
+    """A raise after a mutation cannot be read off the run's global status.
+
+    The earlier contract here was to infer "it landed" whenever the run had left
+    paused - and the mirror test below shows why that is unsound: an unreadable run
+    is also "not paused". The layer now says "not confirmed" instead, which is the
+    only thing it actually knows.
+
+    What it must NOT do is stop there. "Not confirmed" reading as "failed" invites
+    a blind second answer to a checkpoint that may already be answered, so the
+    message has to name the cheap, definite way out: replay the same decision_id.
+    That is exact - the engine returns the recorded decision for the same id and
+    refuses a different answer to that checkpoint as stale.
+    """
     captured = _run_tools(_RaisingApproveSF(after_status="running"), monkeypatch)
 
     out = captured["answer_checkpoint"]("r1")
 
-    assert "error" not in out, out
-    assert out["status"] == "running"
-    assert "DID land" in out["warning"]
-    assert "cannot commit" in out["warning"], \
+    assert "not confirmed" in out["error"], out
+    assert "decision_id" in out["error"], "say how to settle it, not just that we do not know"
+    assert "same" in out["error"].lower()
+    assert "cannot commit" in out["error"], \
         "the underlying skillflow defect must stay visible, not be papered over"
 
 

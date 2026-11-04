@@ -1448,7 +1448,17 @@ def _register_run_tools(tool, mcp=None):
         except Exception as e:
             # Global run status cannot prove THIS decision landed. In particular
             # a stale/colliding retry against a running run is still refused.
-            return {**echo, "error": f"{decision} not confirmed: {e}"}
+            #
+            # So the message stops at "not confirmed" - but it must also say what
+            # to do next, because the honest answer ("we do not know") is otherwise
+            # indistinguishable from "it failed" and invites a blind second answer.
+            # The engine makes the safe retry definite: an exact replay of the same
+            # decision_id returns the recorded next node, and a different decision
+            # against the same checkpoint is refused as a stale identity.
+            return {**echo, "error": (
+                f"{decision} not confirmed: {e}. Re-send the SAME decision_id to "
+                f"settle it: an exact replay returns the recorded decision, and a "
+                f"different answer to that checkpoint is refused as stale.")}
         # Answering releases the run; whoever was driving it keeps going.
         after = sf.get_run(run_id) or {}
         return {**echo, "run_id": run_id, "decision": decision,

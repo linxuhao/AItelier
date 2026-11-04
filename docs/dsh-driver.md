@@ -380,8 +380,8 @@ Workers do not judge their own work. In the real `aitelier` MCP server every
 State write is an `action` value of one tool, `mcp__aitelier__state_graph_write`.
 For every session other than the root, a tool guard installed by tool discovery
 applies an allowlist. `state_graph_write` is allowed only with `action`
-`report_issue` or `send_driver_message`. Every other action is refused, as is a
-missing or non-string `action`. Refused actions include:
+`report_issue`. Every other action is refused, as is a missing or non-string
+`action`. Refused actions include:
 
 - `record_evidence`, `verify_node`, `report_external_attempt`, `start_external_attempt`, `claim_node`;
 - `take_over_claim`, `take_over_attempt`, `abandon_external_attempt`, `release_claim`, `heartbeat`;
@@ -391,8 +391,9 @@ missing or non-string `action`. Refused actions include:
 The five judging writes are also refused as bare tool names in case a server ever
 exposes them. The guard applies through `call_tool` and to direct calls. Its
 message is “workers do not judge their own work; the director records State
-evidence (a subagent may only state_graph_write report_issue or
-send_driver_message)”. The root is unchanged and keeps every action.
+evidence (a subagent may only state_graph_write report_issue)”. The root is
+unchanged and keeps every action. Other MCP tools, for example the driver inbox
+tools, are not covered by this guard because they are not `state_graph_write`.
 
 This is a rule on the tool surface, not a security boundary. A child's bash
 inherits the driver token (`AITELIER_DRIVER_TOKEN`, `AITELIER_DRIVER_TOKEN_FILE`),

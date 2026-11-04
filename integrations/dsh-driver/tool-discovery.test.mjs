@@ -144,11 +144,10 @@ test('State writers are refused for any non-root session, through call_tool or d
   for (const action of ['resolve_issue', 'take_over_claim', 'take_over_attempt', 'abandon_external_attempt', 'release_claim',
     'heartbeat', 'revise_node', 'add_nodes', 'link_issue', 'declare_driver_presence', 'some_future_action']) {
     const result = await call('call_tool',write(action),child);
-    refusedFor(result); assert.match(JSON.stringify(result.content),/report_issue or send_driver_message/);
+    refusedFor(result); assert.match(JSON.stringify(result.content),/may only state_graph_write report_issue\)/);
     assert.equal((await call('call_tool',write(action),root)).isError,false);
   }
-  for (const action of ['report_issue', 'send_driver_message'])
-    assert.equal((await call('call_tool',write(action),child)).isError,false, action + ' is allowlisted for workers');
-  assert.deepEqual(executed.filter(([, session]) => session === 'child').map(([action]) => action), ['report_issue', 'send_driver_message']);
+  assert.equal((await call('call_tool',write('report_issue'),child)).isError,false, 'report_issue is allowlisted for workers');
+  assert.deepEqual(executed.filter(([, session]) => session === 'child').map(([action]) => action), ['report_issue']);
   assert.equal(executed.filter(([, session]) => session === 'root').length, 16);
 }));

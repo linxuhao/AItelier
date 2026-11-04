@@ -5,7 +5,7 @@ const metaTools = new Set(['search_tools', 'call_tool', 'run_code']);
  *  the allowlisted actions; everything else (and a missing/non-string action) is
  *  the director's. The judging writes are also refused as bare tool names in
  *  case a server ever exposes them. */
-export const childWriteActions = new Set(['report_issue', 'send_driver_message']);
+export const childWriteActions = new Set(['report_issue']);
 const directorOnlyTools = new Set(['record_evidence', 'verify_node', 'report_external_attempt',
   'start_external_attempt', 'claim_node'].map(name => 'mcp__aitelier__' + name));
 const stateWriteTool = 'mcp__aitelier__state_graph_write';

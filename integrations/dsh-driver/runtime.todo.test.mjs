@@ -447,7 +447,7 @@ test('real pinned DSH: plans walked by native children, runtime handback, State-
     assert.equal(result('full-write-report_issue').event.data.message.isError, false);
     const resolve = result('full-write-resolve_issue').event;
     assert.equal(resolve.data.message.isError, true, 'a worker resolved an issue');
-    assert.match(toolText(resolve), /may only state_graph_write report_issue or send_driver_message/);
+    assert.match(toolText(resolve), /may only state_graph_write report_issue\)/);
     assert.deepEqual(mcpCalls.sort(), ['state_graph_write:record_evidence', 'state_graph_write:report_issue'], 'a refused State write reached the server');
 
     // 3b. The real idle review (short interval) names the unfinished plan with no live child.

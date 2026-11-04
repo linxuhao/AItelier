@@ -73,6 +73,7 @@ def entry():
     return module
 
 
+@pytest.mark.baked_toolchain  # executes /opt/aitelier-node + /opt/aitelier-eslint, which the shipped image does not bake
 @pytest.mark.parametrize("suffix,code,rc",[("js","await Promise.resolve(42);",0),
     ("mjs","export const café=42;",0),("cjs","module.exports = require('node:path');",0),
     ("cjs","import x from 'node:path';",1),("js","const broken = ;",1),("js","",0),

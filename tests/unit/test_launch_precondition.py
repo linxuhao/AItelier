@@ -26,6 +26,7 @@ import yaml
 from skillflow.compose import compose_graph
 from skillflow.graph import GraphResolver, PipelineGraph
 
+from core.db_manager import DBManager
 from core.run_launcher import start_config_run
 
 CONFIGS = Path(__file__).resolve().parents[2] / "configs"
@@ -59,8 +60,6 @@ def _launch(config_name: str, graph: PipelineGraph, workspace_root: Path,
             manifest=None):
     """Run the generic launch path over *graph*, with the project workspace
     rooted at *workspace_root*. Returns (result, skillflow stub, workspace stub)."""
-    db = MagicMock()
-    db.get_project.return_value = None
     # A code-producing launch is isolated into a worktree of the project's
     # repository, and a run with no repository is refused. The doubles here are
     # about the cross-config precondition, so give them the thing every real
@@ -72,8 +71,19 @@ def _launch(config_name: str, graph: PipelineGraph, workspace_root: Path,
                 ["git", "config", "user.name", "t"], ["git", "add", "-A"],
                 ["git", "commit", "-qm", "seed"]):
         subprocess.run(cmd, cwd=repo, check=True, capture_output=True)
-    db.get_repo_info.return_value = {"repo_type": "existing",
-                                     "repo_path": str(repo), "repo_url": None}
+    # A REAL database, not a MagicMock. The launch provisions run isolation
+    # (`run_isolation.ensure_for_run`) before it starts, and that reads
+    # `run_isolation` rows through `db.get_connection()`. A bare MagicMock
+    # answers EVERY such read with a truthy double, which the provisioner takes
+    # for a record it did not write (`KeyError: 'project_id'`), so the launch
+    # was refused for a reason that has nothing to do with the precondition
+    # under test. A real row set is also what makes the started cases prove the
+    # whole path: the project names a real git repository, and the worktree is
+    # actually provisioned.
+    db = DBManager(str(workspace_root / "aitelier.db"))
+    db.ensure_project("pid_x", name=config_name, owner_email="cli@local",
+                      repo_type="existing", repo_path=str(repo),
+                      repo_url=None, config_name=config_name)
     ws = MagicMock()
     registry = MagicMock()
     registry.get.return_value = manifest or _manifest(config_name)

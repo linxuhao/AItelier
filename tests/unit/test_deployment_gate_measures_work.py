@@ -38,6 +38,7 @@ def _stat(root, pid, ppid, comm="bash"):
 # 1. the measurer's own pid chain is not an owner
 # ===========================================================================
 
+@pytest.mark.docker  # fabricated ancestor chain needs a real init: under `docker run` pytest IS pid 1
 def test_the_gate_does_not_measure_its_own_shell(tmp_path, monkeypatch):
     root = tmp_path / "proc"
     me = os.getpid()

@@ -48,6 +48,7 @@ def _identities(report):
     return [rt._failure_key(f) for f in report["new_failures"]]
 
 
+@pytest.mark.docker  # run_tests only ever runs the gate in the bounded CPU container
 def test_a_long_red_output_still_names_every_failure(rig, tmp_path):
     result, report = _run(tmp_path, "repo")
     gate = report["repo_gate"]
@@ -66,6 +67,7 @@ def test_a_long_red_output_still_names_every_failure(rig, tmp_path):
         assert text in joined
 
 
+@pytest.mark.docker  # run_tests only ever runs the gate in the bounded CPU container
 def test_the_identities_do_not_depend_on_the_retained_tail(rig, tmp_path, monkeypatch):
     """The same failure, read with the 2000-character tail and with a tail
     larger than the whole output: the same entries, one for one."""

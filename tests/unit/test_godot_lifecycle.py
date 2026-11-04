@@ -38,21 +38,58 @@ def test_render_owner_is_durable_single_owner_and_explicitly_reconciled(tmp_path
                for row in harness.render_owner_snapshot())
 
 
-def test_reconciliation_refuses_while_real_render_lock_is_held(tmp_path, monkeypatch):
+def test_reconciliation_refuses_while_a_real_render_effect_is_unsettled(tmp_path, monkeypatch):
+    """The barrier is the DURABLE effect lock, not the process render lock.
+
+    Moved deliberately (198ded9bcd, "Expose the shared render lock and stop
+    reconcile waiting on it"): refusing while `_RENDER_LOCK` was held made
+    recovery wait on the very lock it exists to clear — measured 2026-09-14 as
+    ~13 minutes of 409s before the first success. A render that is genuinely
+    still in flight still blocks, through the effect lock it holds for its whole
+    duration (`_acquire_render_effect_lock` before the render, released in the
+    handler's `finally`), and that refusal names the blocker. Both poles are
+    asserted here: the process lock alone no longer blocks, a held effect lock
+    still does, and the owner row still refuses a second render.
+    """
     harness = _harness(tmp_path, monkeypatch)
-    owner = harness.acquire_render_owner("project-a", "run-a", "op-a")
-    harness.mark_render_owner_lost(owner["owner_id"], owner["generation"], "worker lost")
+
+    # Pole 1: the process render lock alone is NOT a barrier any more.
+    first = harness.acquire_render_owner("project-a", "run-a", "op-a")
+    harness.mark_render_owner_lost(first["owner_id"], first["generation"], "worker lost")
     harness._Handler._RENDER_LOCK.acquire()
     try:
-        with pytest.raises(RuntimeError, match="effect|lock|settled"):
-            harness.reconcile_render_owner(
-                owner["owner_id"], owner["generation"], "operator", "checked")
-        with pytest.raises(RuntimeError, match="render owner exists"):
-            harness.acquire_render_owner("project-b", "run-b", "op-b")
+        reconciled = harness.reconcile_render_owner(
+            first["owner_id"], first["generation"], "operator", "process lock is not the barrier")
     finally:
         harness._Handler._RENDER_LOCK.release()
+    assert reconciled["status"] == "reconciled"
+
+    # Pole 2: a real render's durable effect is unsettled, so recovery refuses.
+    second = harness.acquire_render_owner("project-b", "run-b", "op-b")
+    harness.mark_render_owner_lost(second["owner_id"], second["generation"], "worker lost")
+    # A live render holds the effect lock for its whole duration. Held from a
+    # CHILD process because flock belongs to the open file description, and this
+    # process would not block itself.
+    holder = subprocess.Popen(
+        [sys.executable, "-c",
+         "import fcntl,sys; f=open(sys.argv[1],'a+b'); "
+         "fcntl.flock(f.fileno(),fcntl.LOCK_EX); print('locked',flush=True); sys.stdin.read()",
+         harness.RENDER_EFFECT_LOCK], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    try:
+        assert holder.stdout.readline().strip() == "locked"
+        with pytest.raises(RuntimeError, match="effect|lock|settled"):
+            harness.reconcile_render_owner(
+                second["owner_id"], second["generation"], "operator", "checked")
+        with pytest.raises(RuntimeError, match="render owner exists"):
+            harness.acquire_render_owner("project-c", "run-c", "op-c")
+        assert [row["status"] for row in harness.render_owner_snapshot()
+                if row["owner_id"] == second["owner_id"]] == ["owner_lost"]
+    finally:
+        if holder.stdin:
+            holder.stdin.close()
+        holder.wait(timeout=5)
     reconciled = harness.reconcile_render_owner(
-        owner["owner_id"], owner["generation"], "operator", "lock released")
+        second["owner_id"], second["generation"], "operator", "effect lock released")
     assert reconciled["status"] == "reconciled"
 
 

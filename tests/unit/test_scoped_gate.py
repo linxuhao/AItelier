@@ -247,13 +247,17 @@ def test_attributed_manifest_carries_coverage_whole_and_missing_marker_is_unmeas
                                   "retained_findings": 1}) == rt.REPO_GATE_MEASURED_FAIL
 
 
+@pytest.mark.docker  # run_tests' pytest leg needs the bounded CPU executor (docker + a host-visible repo)
 def test_scope_survives_test_report_current_cycle_and_audit(graph, tmp_path, monkeypatch):
     repo, _, _, _ = graph
     scope = plan(graph)
     gate = {"script": "run_tests.sh", "returncode": 0, "passed": True,
             "output": "x" * 5000, "output_truncated": True,
             "measured": rt.REPO_GATE_MEASURED_PASS, "gate_coverage": scope}
-    monkeypatch.setattr(rt, "_acquire_repo_gate", lambda _: gate)
+    # `run_tests` hands the run id down to the gate (it is part of the gate
+    # run's ticket and of every measurement it retains), so the double has to
+    # accept it. The verdict below is synthetic and unchanged.
+    monkeypatch.setattr(rt, "_acquire_repo_gate", lambda *_, **__: gate)
     # No Python product tests and no gate process; the real report writer and
     # routing fold consume a structured synthetic gate verdict.
     result = rt.run_tests(project_root=str(repo), out_dir=str(tmp_path / "graph" / "test"),
@@ -284,7 +288,7 @@ def test_subset_does_not_erase_unmeasured_known_red_gate_cases(graph, tmp_path, 
     path = Path(baseline_dir) / rt.BASELINE_FILE
     known = "repo_gate:run_tests.sh#playtest/omitted/assertion"
     path.write_text(json.dumps({"failures": [known]}))
-    monkeypatch.setattr(rt, "_acquire_repo_gate", lambda _: {
+    monkeypatch.setattr(rt, "_acquire_repo_gate", lambda *_, **__: {
         "script": "run_tests.sh", "returncode": 0, "passed": True,
         "output": "subset green", "measured": rt.REPO_GATE_MEASURED_PASS,
         "gate_coverage": scope})

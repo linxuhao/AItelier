@@ -19,6 +19,8 @@ import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import pytest
+
 from aitelier import gate_admission
 from aitelier.tools.run_tests import impl as rt
 from tests.gate_fixture import HarnessRig, write_gate
@@ -49,6 +51,7 @@ def _queued_gate(tmp_path, monkeypatch, *, render, queue, client_timeout):
     return gate, elapsed, rig
 
 
+@pytest.mark.docker  # _run_repo_gate only ever runs the gate in the bounded CPU container
 def test_a_render_after_a_queue_longer_than_the_client_timeout_is_answered(
         tmp_path, monkeypatch):
     """Queue 4 s, render 1 s, client timeout 2 s."""
@@ -66,6 +69,7 @@ def test_a_render_after_a_queue_longer_than_the_client_timeout_is_answered(
     assert rig.rendered == ["op-holder", "repo"]
 
 
+@pytest.mark.docker  # _run_repo_gate only ever runs the gate in the bounded CPU container
 def test_the_client_timeout_still_bounds_the_render_itself(tmp_path, monkeypatch):
     """Queue 1.5 s, render 3 s, client timeout 2 s: once admitted, the gate's
     own timeout runs again, and a render longer than it is not waited out."""
@@ -103,6 +107,7 @@ class _NoLifecycle(BaseHTTPRequestHandler):
         pass
 
 
+@pytest.mark.docker  # _run_repo_gate only ever runs the gate in the bounded CPU container
 def test_no_keepalive_when_admission_cannot_be_seen(tmp_path, monkeypatch):
     server = ThreadingHTTPServer(("127.0.0.1", 0), _NoLifecycle)
     server.daemon_threads = True

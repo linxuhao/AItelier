@@ -18,6 +18,7 @@ import sys
 import pytest
 
 from core.gate_deferral import ABSENCE_TERMINAL, absent_terminal_names_no_failure
+from tests.unit.test_todo_runtime import process_is_stopped
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WAIT, CEILING = 300, 1000          # ledger constants for these tests (seconds)
@@ -281,11 +282,15 @@ def test_a_terminated_cli_leaves_no_running_command_behind(cli, repo, base, tmp_
     time.sleep(0.3)
     grandchild = int(pidfile.read_text())
     cli_proc.send_signal(signal.SIGTERM)
-    assert cli_proc.wait(timeout=30) == 143
+    try:
+        assert cli_proc.wait(timeout=30) == 143
+    except subprocess.TimeoutExpired:      # the CLI blocked on a command group that was never killed
+        cli_proc.kill()
+        if not process_is_stopped(grandchild):
+            os.kill(grandchild, signal.SIGKILL)
+        pytest.fail("the terminated CLI did not exit: it was still waiting on the command's child")
     for _ in range(100):
-        try:
-            os.kill(grandchild, 0)
-        except ProcessLookupError:
+        if process_is_stopped(grandchild):
             break
         time.sleep(0.05)
     else:

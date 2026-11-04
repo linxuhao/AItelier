@@ -15,6 +15,20 @@ from core.gate_deferral import ABSENCE_TERMINAL, absent_terminal_names_no_failur
 from core.todo_runtime import (Binding, Item, Plan, TodoRun, builtin_library)
 
 
+def process_is_stopped(pid: int) -> bool:
+    """True when the process is gone OR is a zombie (state Z: killed, not yet reaped).
+
+    Whether a killed grandchild is ever reaped depends on the container having an init;
+    "no longer running" is what the kill guarantees, so a zombie counts as stopped and a
+    live state (R/S/D/T) does not.
+    """
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except (FileNotFoundError, ProcessLookupError):
+        return True
+    return stat.rpartition(")")[2].split()[0] in ("Z", "X")
+
+
 def _plan(*items: Item) -> Plan:
     return Plan(key="fixture-plan", goal="prove the item is done by observation", items=tuple(items))
 
@@ -405,15 +419,21 @@ def test_a_command_that_times_out_takes_its_whole_process_group_with_it(tmp_path
     pidfile = tmp_path / "child.pid"
     code = ("import subprocess, sys, time; "
             "p = subprocess.Popen(['sleep', '60']); open(sys.argv[1], 'w').write(str(p.pid)); time.sleep(60)")
+    started = time.monotonic()
     result = builtin_library().evaluate(
         Binding("command_exit", {"argv": [sys.executable, "-c", code, str(pidfile)], "timeout": 1.5}),
         workspace=tmp_path, pre_state={})
-    assert result.outcome == "absent" and "timed out" in result.detail
+    elapsed = time.monotonic() - started
     grandchild = int(pidfile.read_text())
+    # A survivor holds the command's pipes open, so the call blocks until it exits on its own (~60 s)
+    # and would look stopped by the time it is checked: bound the call itself, not only the survivor.
+    if elapsed > 20:
+        if not process_is_stopped(grandchild):
+            os.kill(grandchild, signal.SIGKILL)
+        pytest.fail(f"a 1.5 s command timeout took {elapsed:.0f} s to return: its child outlived the kill")
+    assert result.outcome == "absent" and "timed out" in result.detail
     for _ in range(100):
-        try:
-            os.kill(grandchild, 0)
-        except ProcessLookupError:
+        if process_is_stopped(grandchild):
             return
         time.sleep(0.05)
     os.kill(grandchild, signal.SIGKILL)

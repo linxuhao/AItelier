@@ -229,6 +229,22 @@ def test_a_plan_bound_to_one_session_refuses_another_until_it_is_rebound(cli, re
         assert cli.ok(command, "--attempt", "att-1")["rebound_from"] == "child-A"
 
 
+def test_done_and_report_check_the_callers_session_but_never_rebind(cli, repo, base):
+    cli.create(plan(repo, base))
+    cli.ok("begin", "--attempt", "att-1", "--item", "edit", "--session", "child-A")
+    for command, extra in (("done", []), ("report", ["--note", "n"])):
+        base_args = [command, "--attempt", "att-1", "--item", "edit", *extra]
+        out = cli.refused(*base_args, "--session", "child-B")
+        assert out["refused"] == "bound_to_other_session" and out["bound_session"] == "child-A", out
+        assert cli.ok(*base_args, "--session", "child-A")["item"] == "edit"
+        assert cli.ok(*base_args)["item"] == "edit", "a plain call without --session stays as it was"
+    after = cli.ok("status", "--attempt", "att-1")
+    assert after["child_session"] == "child-A" and after["rebound_from"] is None
+    assert after["items"][0]["notes"] == 2, "the refused report recorded nothing"
+    assert after["items"][0]["state"] == "fail", "the refused done measured nothing; the allowed ones did"
+    assert cli.refused("done", "--attempt", "att-1", "--item", "edit", "--session", "child-B", "--rebind")["refused"] == "usage"
+
+
 def test_a_first_binding_needs_no_rebind(cli, repo, base):
     cli.create(plan(repo, base))
     out = cli.ok("begin", "--attempt", "att-1", "--item", "edit", "--session", "child-A", "--rebind")

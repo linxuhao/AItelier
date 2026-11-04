@@ -223,8 +223,17 @@ def cmd_begin(args, store: PlanStore, now: float) -> dict:
                 "pre_state": p.document["items"][item.id]["pre_state"], **_tail(p)}
 
 
+def _check_session(p: _Open, session: str | None) -> None:
+    """A caller that names its session must be the bound one (only `begin --rebind` can change it)."""
+    bound = p.document["child_session"]
+    if session and bound and session != bound:
+        raise Refusal("bound_to_other_session", f"plan {p.plan.attempt_id} is bound to session {bound}, not {session}",
+                      bound_session=bound)
+
+
 def cmd_done(args, store: PlanStore, now: float) -> dict:
     with _plan(store, args.attempt, now, locked=True) as p:
+        _check_session(p, args.session)
         item = p.item(args.item)
         if p.document["items"][item.id]["pre_state"] is None:
             raise Refusal("not_begun", f"item {item.id} was never begun: begin it first so there is a state to compare against")
@@ -244,6 +253,7 @@ def cmd_done(args, store: PlanStore, now: float) -> dict:
 def cmd_report(args, store: PlanStore, now: float) -> dict:
     """A free-text note. It is recorded and never read as a verdict."""
     with _plan(store, args.attempt, now, locked=True) as p:
+        _check_session(p, args.session)
         item = p.item(args.item)
         notes = p.document["items"][item.id]["notes"]
         notes.append({"at": now, "text": args.note[:2000]})
@@ -390,8 +400,9 @@ def _parser() -> argparse.ArgumentParser:
     command("begin", attempt, item, ("--session", {"metavar": "SID"}),
             ("--rebind", {"action": "store_true",
                           "help": "take over a plan bound to another session; only after that session is known dead"}))
-    command("done", attempt, item)
-    command("report", attempt, item, ("--note", {"required": True}))
+    session = ("--session", {"metavar": "SID", "help": "the caller's session; refused if the plan is bound to another"})
+    command("done", attempt, item, session)
+    command("report", attempt, item, ("--note", {"required": True}), session)
     command("handback", attempt)
     command("finish", attempt, ("--out", {"required": True, "metavar": "DIR"}))
     command("list")

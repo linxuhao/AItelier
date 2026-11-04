@@ -1,5 +1,5 @@
 name: investigate
-version: 1
+version: 2
 description: >-
   Investigate and leave a structured JSON report with the required keys in the
   workspace. The report must be written during the step: one already present at the

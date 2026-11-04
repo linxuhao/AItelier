@@ -12,6 +12,11 @@ params:
     type: list[str]
     required: true
     description: Globs the whole change may touch; anything outside fails delivery.
+  test_timeout:
+    type: int
+    required: false
+    default: 1800
+    description: Seconds the test command may run before it counts as not measured.
 items:
   - id: fix
     title: "Fix the failure behind ${test_argv}"
@@ -23,4 +28,4 @@ items:
     needs: [fix]
     predicates:
       - predicate: command_exit
-        args: {argv: $test_argv, expect: 0}
+        args: {argv: $test_argv, expect: 0, timeout: $test_timeout}

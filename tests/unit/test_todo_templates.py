@@ -19,6 +19,7 @@ from tests.unit.test_todo_plan_cli import (  # noqa: F401
 
 TEMPLATES = Path(__file__).resolve().parents[2] / "todo_templates"
 SHIPPED = {"code_change", "test_fix", "docs_change", "investigate"}
+VERSIONS = {"code_change": 1, "test_fix": 1, "docs_change": 1, "investigate": 2}   # investigate: scope required, freshness
 PASS = [sys.executable, "-c", "pass"]
 CODE = {"paths": ["app.py", "other.py"], "scope": ["app.py", "other.py"], "test_argv": PASS, "marker": "changed"}
 
@@ -79,17 +80,19 @@ def test_templates_lists_the_four_repository_templates_with_their_params(cli):
     assert shape["code_change"] == {
         "paths": ("list[str]", True, None), "scope": ("list[str]", True, None),
         "test_argv": ("list[str]", True, None), "marker": ("str", False, None), "test_timeout": ("int", False, 1800)}
-    assert shape["test_fix"] == {"test_argv": ("list[str]", True, None), "scope": ("list[str]", True, None)}
+    assert shape["test_fix"] == {"test_argv": ("list[str]", True, None), "scope": ("list[str]", True, None),
+                                 "test_timeout": ("int", False, 1800)}
     assert shape["docs_change"] == {"paths": ("list[str]", True, None), "scope": ("list[str]", True, None)}
     assert shape["investigate"] == {"report_path": ("str", True, None), "require_keys": ("list[str]", True, None),
                                     "scope": ("list[str]", True, None)}
-    assert by_name["code_change"]["items"] == ["implement", "test"] and all(t["version"] == 1 for t in by_name.values())
+    assert by_name["code_change"]["items"] == ["implement", "test"]
+    assert {n: t["version"] for n, t in by_name.items()} == VERSIONS
 
 
 @pytest.mark.parametrize("name", sorted(SHIPPED))
 def test_each_shipped_template_loads_and_validates_against_the_library(name):
     template = load_template(name, builtin_library(), TEMPLATES)
-    assert template.name == name and template.version == 1
+    assert template.name == name and template.version == VERSIONS[name]
     assert template.sha256 == hashlib.sha256((TEMPLATES / f"{name}.yaml").read_bytes()).hexdigest()
 
 
@@ -179,6 +182,20 @@ def test_a_report_that_already_existed_at_the_base_does_not_satisfy_investigate(
     assert by["files_changed"]["outcome"] == "fail" and "out/report.json" in by["files_changed"]["detail"]
     (repo / "out" / "report.json").write_text(json.dumps({"passed": True, "rewritten": 1}))
     assert cli.ok("done", "--attempt", "att-1", "--item", "investigate")["outcome"] == "pass"
+
+
+def test_test_fix_bounds_its_test_item_and_a_plan_records_the_template_version(cli, repo, base):
+    params = {"test_argv": PASS, "scope": ["app.py"]}
+    assert create_from(cli, repo, base, "test_fix", params)[0] == 0
+    items = {i["id"]: i for i in document(cli)["plan"]["items"]}
+    assert items["test"]["predicates"][0]["args"]["timeout"] == 1800
+    assert cli.ok("status", "--attempt", "att-1")["timeout_budget_seconds"] == {"fix": 0, "test": 1800, "deliver": 0}
+    assert create_from(cli, repo, base, "test_fix", {**params, "test_timeout": 90}, attempt="att-2")[0] == 0
+    assert cli.ok("status", "--attempt", "att-2")["finish_budget_seconds"] == 90
+    assert create_from(cli, repo, base, "test_fix", {**params, "test_timeout": "90"}, attempt="att-3")[1]["refused"] == "bad_param"
+    assert document(cli)["template"]["version"] == 1
+    assert create_from(cli, repo, base, "investigate", INVESTIGATE, attempt="att-4")[0] == 0
+    assert document(cli, "att-4")["template"]["version"] == 2, "the plan file says which meaning of investigate it was made with"
 
 
 def test_a_delivery_with_the_base_trees_content_is_not_a_candidate(cli, repo, base, tmp_path):

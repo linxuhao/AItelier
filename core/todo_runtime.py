@@ -204,13 +204,19 @@ def _run_in_own_group(argv: list[str], cwd: str, timeout: float | None) -> "subp
             stdout, stderr = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
             _kill_group(proc)
-            proc.communicate()
+            try:                         # bounded: a survivor holding the pipes must not stall the timeout
+                proc.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
             raise
         return subprocess.CompletedProcess(argv, proc.returncode, stdout, stderr)
     finally:
         if proc.poll() is None:          # an exception (SystemExit from SIGTERM, ...) is leaving
             _kill_group(proc)
-            proc.wait()
+            try:                         # bounded for the same reason: never wait on a leader that was not killed
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
 
 
 def _kill_group(proc: "subprocess.Popen[str]") -> None:

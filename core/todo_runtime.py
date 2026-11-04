@@ -29,8 +29,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from glob import glob as _glob
 import hashlib
+import inspect
+import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import time
 from typing import Any, Callable, Iterable, Literal, Mapping, Sequence
@@ -38,6 +41,11 @@ from typing import Any, Callable, Iterable, Literal, Mapping, Sequence
 from core.gate_deferral import DeferralLedger
 
 Outcome = Literal["pass", "fail", "absent"]
+
+#: Pre-state key under which a plan's base commit reaches the predicates. Not a
+#: path (no workspace file starts with "@"), so it cannot collide with
+#: `file_changed`'s per-path digests.
+BASE_KEY = "@base_sha"
 
 
 @dataclass(frozen=True)
@@ -76,6 +84,9 @@ class Plan:
     key: str
     goal: str
     items: tuple[Item, ...]
+    # The commit the work started from. Predicates that compare against it
+    # (`changes_within`) read it from the pre-state under BASE_KEY.
+    base_sha: str = ""
 
     def item(self, item_id: str) -> Item:
         for entry in self.items:
@@ -102,6 +113,22 @@ class PredicateLibrary:
 
     def names(self) -> tuple[str, ...]:
         return tuple(sorted(self._definitions))
+
+    def check(self, binding: Binding) -> None:
+        """Refuse a binding the library cannot evaluate, before any work starts.
+
+        An unknown name raises KeyError; an argument the predicate does not take
+        (or a required one that is missing) raises ValueError.
+        """
+        fn = self._definitions.get(binding.predicate)
+        if fn is None:
+            raise KeyError(f"unknown predicate {binding.predicate!r}; library has {self.names()}")
+        params = {name: p for name, p in inspect.signature(fn).parameters.items()
+                  if name not in ("workspace", "pre_state")}
+        unknown = sorted(set(binding.args) - set(params))
+        missing = sorted(n for n, p in params.items() if p.default is p.empty and n not in binding.args)
+        if unknown or missing:
+            raise ValueError(f"{binding.predicate}: unknown argument(s) {unknown}, missing argument(s) {missing}")
 
     def evaluate(self, binding: Binding, *, workspace: Path, pre_state: Mapping[str, Any]) -> PredicateResult:
         fn = self._definitions.get(binding.predicate)
@@ -133,8 +160,59 @@ def capture_pre_state(workspace: Path, bindings: Iterable[Binding]) -> dict[str,
     return captured
 
 
+def _safe_rev(rev: Any) -> str:
+    """A revision that cannot be read by git as an option."""
+    text = str(rev)
+    if not text or text.startswith("-"):
+        raise ValueError(f"not a usable revision: {text!r}")
+    return text
+
+
+def _git(workspace: Path, *args: str) -> tuple[str, str]:
+    """Run git in the workspace: (stdout, "") or ("", why it could not be measured).
+
+    Git being missing, slow, or unable to read the repository is an absence, not
+    a verdict on the work.
+    """
+    try:
+        done = subprocess.run(["git", "-C", str(workspace), *args], capture_output=True,
+                              text=True, timeout=60)
+    except FileNotFoundError:
+        return "", "'git' is not installed here"
+    except subprocess.TimeoutExpired:
+        return "", f"git {args[0]} timed out after 60s"
+    if done.returncode:
+        tail = (done.stderr or done.stdout or "").strip().splitlines()[-1:] or [""]
+        return "", f"git {args[0]} exited {done.returncode}: {tail[0][:200]}"
+    return done.stdout, ""
+
+
+def _scope_regex(pattern: str) -> "re.Pattern[str]":
+    if pattern.endswith("/"):
+        pattern += "**"
+    out: list[str] = []
+    i = 0
+    while i < len(pattern):
+        if pattern.startswith("**/", i):
+            out.append("(?:.*/)?")
+            i += 3
+        elif pattern.startswith("**", i):
+            out.append(".*")
+            i += 2
+        elif pattern[i] == "*":
+            out.append("[^/]*")
+            i += 1
+        elif pattern[i] == "?":
+            out.append("[^/]")
+            i += 1
+        else:
+            out.append(re.escape(pattern[i]))
+            i += 1
+    return re.compile("".join(out) + r"\Z")
+
+
 def builtin_library() -> PredicateLibrary:
-    library = PredicateLibrary(version="1")
+    library = PredicateLibrary(version="2")
 
     @library.define("files_present")
     def files_present(*, workspace: Path, pre_state: Mapping[str, Any], pattern: str) -> PredicateResult:
@@ -178,6 +256,73 @@ def builtin_library() -> PredicateLibrary:
         tail = (done.stderr or done.stdout or "").strip().splitlines()[-1:] or [""]
         return PredicateResult("command_exit", "fail", f"exit {done.returncode}, expected {expect}: {tail[0][:200]}")
 
+    @library.define("changes_within")
+    def changes_within(*, workspace: Path, pre_state: Mapping[str, Any], scope: Sequence[str]) -> PredicateResult:
+        """Every path changed since the plan's base commit matches a scope glob.
+
+        The base commit is the plan's `base_sha`, supplied through the pre-state
+        (BASE_KEY). "Changed" is the union of `git diff base..HEAD`, uncommitted
+        changes to tracked files, and untracked files. Globs: `*` stays inside one
+        path segment, `**` crosses segments, a trailing `/` means everything under.
+        """
+        base = pre_state.get(BASE_KEY)
+        if not base:
+            raise ValueError("changes_within needs the plan's base_sha in the pre-state")
+        changed: set[str] = set()
+        for args in (("diff", "--name-only", "--no-renames", "-z", f"{_safe_rev(base)}..HEAD"),
+                     ("diff", "--name-only", "--no-renames", "-z", "HEAD"),
+                     ("ls-files", "--others", "--exclude-standard", "-z")):
+            out, absence = _git(workspace, *args)
+            if absence:
+                return PredicateResult("changes_within", "absent", absence)
+            changed.update(p for p in out.split("\0") if p)
+        patterns = [_scope_regex(str(g)) for g in scope]
+        outside = sorted(p for p in changed if not any(rx.match(p) for rx in patterns))
+        if outside:
+            more = f" (+{len(outside) - 5} more)" if len(outside) > 5 else ""
+            return PredicateResult("changes_within", "fail",
+                                   f"{len(outside)} changed path(s) outside scope {list(scope)}: "
+                                   f"{', '.join(outside[:5])}{more}")
+        return PredicateResult("changes_within", "pass", f"{len(changed)} changed path(s), all inside scope")
+
+    @library.define("git_delivered")
+    def git_delivered(*, workspace: Path, pre_state: Mapping[str, Any], base: str) -> PredicateResult:
+        """HEAD has moved past `base` and the working tree is clean."""
+        base_commit, absence = _git(workspace, "rev-parse", "--verify", "--quiet", f"{_safe_rev(base)}^{{commit}}")
+        if absence:
+            return PredicateResult("git_delivered", "absent", absence)
+        head, absence = _git(workspace, "rev-parse", "HEAD")
+        if absence:
+            return PredicateResult("git_delivered", "absent", absence)
+        dirty, absence = _git(workspace, "status", "--porcelain")
+        if absence:
+            return PredicateResult("git_delivered", "absent", absence)
+        problems = []
+        if head.strip() == base_commit.strip():
+            problems.append(f"HEAD is still the base commit {base_commit.strip()[:12]}")
+        if dirty.strip():
+            problems.append(f"working tree is not clean: {len(dirty.splitlines())} uncommitted path(s)")
+        if problems:
+            return PredicateResult("git_delivered", "fail", "; ".join(problems))
+        return PredicateResult("git_delivered", "pass", f"HEAD {head.strip()[:12]} is past the base and the tree is clean")
+
+    @library.define("report_json")
+    def report_json(*, workspace: Path, pre_state: Mapping[str, Any], path: str,
+                    require_keys: Sequence[str]) -> PredicateResult:
+        target = Path(workspace) / str(path)
+        if not target.is_file():
+            return PredicateResult("report_json", "fail", f"{path} does not exist")
+        try:
+            data = json.loads(target.read_text(encoding="utf-8"))
+        except (ValueError, UnicodeDecodeError) as exc:
+            return PredicateResult("report_json", "fail", f"{path} is not valid JSON: {str(exc)[:120]}")
+        if not isinstance(data, dict):
+            return PredicateResult("report_json", "fail", f"{path} is not a JSON object")
+        missing = [k for k in require_keys if k not in data]
+        if missing:
+            return PredicateResult("report_json", "fail", f"{path} lacks key(s) {missing}")
+        return PredicateResult("report_json", "pass", f"{path} carries every required key")
+
     return library
 
 
@@ -186,6 +331,9 @@ class ItemReport:
     item_id: str
     outcome: Outcome
     results: tuple[PredicateResult, ...] = ()
+    # Terminal: the absence outlived the ledger's ceiling, so the item stays
+    # unmeasured and is handed back by name instead of being retried forever.
+    unmeasurable: bool = False
 
     @property
     def complete(self) -> bool:
@@ -196,14 +344,25 @@ class TodoRun:
     """Executes the plan's OBSERVATION half. The worker still does the work."""
 
     def __init__(self, plan: Plan, library: PredicateLibrary, workspace: Path, *,
-                 ledger: DeferralLedger | None = None, clock: Callable[[], float] | None = None):
+                 ledger: DeferralLedger | None = None, clock: Callable[[], float] | None = None,
+                 pre_state: Mapping[str, Mapping[str, Any]] | None = None,
+                 reports: Mapping[str, ItemReport] | None = None):
         self.plan = plan
         self.library = library
         self.workspace = Path(workspace)
         self.ledger = ledger if ledger is not None else DeferralLedger()
         self._clock = clock or time.time
-        self._pre_state: dict[str, dict[str, Any]] = {}
-        self._reports: dict[str, ItemReport] = {}
+        # `pre_state` and `reports` let a fresh process resume a run it did not start.
+        self._pre_state: dict[str, dict[str, Any]] = {k: dict(v) for k, v in (pre_state or {}).items()}
+        self._reports: dict[str, ItemReport] = dict(reports or {})
+
+    @property
+    def pre_states(self) -> dict[str, dict[str, Any]]:
+        return {k: dict(v) for k, v in self._pre_state.items()}
+
+    @property
+    def reports(self) -> dict[str, ItemReport]:
+        return dict(self._reports)
 
     # -- lifecycle -------------------------------------------------------
     def begin(self, item_id: str) -> Item:
@@ -218,22 +377,28 @@ class TodoRun:
         pre_state = self._pre_state.get(item_id)
         if pre_state is None:
             raise RuntimeError(f"observe({item_id!r}) before begin(): no pre-state to compare against")
+        if self.plan.base_sha:
+            pre_state = {**pre_state, BASE_KEY: self.plan.base_sha}
         results = tuple(
             self.library.evaluate(binding, workspace=self.workspace, pre_state=pre_state)
             for binding in item.predicates
         )
         outcomes = {r.outcome for r in results}
-        key = self._key(item_id)
+        key = self.episode_key(item_id)
         if "absent" in outcomes:
             # Not a failure: hand the episode to the ledger that already models
-            # absence as bounded, cheaply retried, and self-naming.
-            self.ledger.note_absence(key, now=self._clock(),
-                                     gate=next(r.predicate for r in results if r.outcome == "absent"))
-            if self.ledger.expired(key, now=self._clock()):
-                report = ItemReport(item_id, "absent", results)
-                self._reports[item_id] = report
-                return report
-            return ItemReport(item_id, "absent", results)
+            # absence as bounded, cheaply retried, and self-naming. The report key
+            # names WHAT was measured as absent, so looking at the same absence
+            # again neither restarts the wait nor counts as another gate run.
+            now = self._clock()
+            absent = [r for r in results if r.outcome == "absent"]
+            self.ledger.note_absence(
+                key, now=now, gate=absent[0].predicate,
+                report_key=tuple(part for r in absent
+                                 for part in (r.predicate, hashlib.sha256(r.detail.encode()).hexdigest()[:16])))
+            report = ItemReport(item_id, "absent", results, unmeasurable=self.ledger.expired(key, now=now))
+            self._reports[item_id] = report
+            return report
         self.ledger.clear(key)
         report = ItemReport(item_id, "fail" if "fail" in outcomes else "pass", results)
         self._reports[item_id] = report
@@ -241,38 +406,54 @@ class TodoRun:
 
     # -- resume ----------------------------------------------------------
     def next_item(self) -> Item | None:
-        """First item whose needs are met and which is not yet observed complete."""
+        """First item whose needs are met, which is not observed complete and not unmeasurable."""
         done = {iid for iid, r in self._reports.items() if r.complete}
         for item in self.plan.items:
-            if item.id in done:
+            if item.id in done or self._is_unmeasurable(item.id):
                 continue
             if all(need in done for need in item.needs):
                 return item
         return None
 
     def finished(self) -> bool:
-        return self.next_item() is None
+        return all(self._is_complete(i.id) for i in self.plan.items)
 
     def terminal_reason(self, item_id: str) -> str:
         """The sentence an expired absence ends with - the ledger owns the words."""
-        return self.ledger.terminal_reason(self._key(item_id))
+        return self.ledger.terminal_reason(self.episode_key(item_id))
 
     def report(self) -> dict:
         """Resume view: what is done, what is next, what is still unmeasured."""
+        nxt = self.next_item()
         return {
             "plan": self.plan.key,
-            "done": [i.id for i in self.plan.items if self._reports.get(i.id) and self._reports[i.id].complete],
-            "next": (self.next_item().id if self.next_item() else None),
-            "deferred": [i.id for i in self.plan.items if self._key(i.id) in self.ledger.episodes],
+            "done": [i.id for i in self.plan.items if self._is_complete(i.id)],
+            "next": nxt.id if nxt else None,
+            "deferred": [i.id for i in self.plan.items
+                         if self.episode_key(i.id) in self.ledger.episodes and not self._is_unmeasurable(i.id)],
+            "unmeasurable": [{"id": i.id, "reason": self.terminal_reason(i.id)}
+                             for i in self.plan.items if self._is_unmeasurable(i.id)],
         }
 
     def brief(self, *, max_chars: int = 600) -> str:
         """The compact-surviving summary: ids and one line each, never the catalogue."""
-        remaining = [i for i in self.plan.items if not (self._reports.get(i.id) and self._reports[i.id].complete)]
-        head = f"{self.plan.goal}\nNext: {self.next_item().id if self.next_item() else '(none)'}" 
-        lines = [head, f"Remaining {len(remaining)} item(s): " + ", ".join(i.id for i in remaining)]
+        remaining = [i for i in self.plan.items if not self._is_complete(i.id)]
+        nxt = self.next_item()
+        lines = [f"{self.plan.goal[:160]}\nNext: {nxt.id if nxt else '(none)'}"]
+        unmeasurable = self.report()["unmeasurable"]
+        if unmeasurable:
+            lines.append("Unmeasurable: " + "; ".join(f"{u['id']} ({u['reason']})" for u in unmeasurable))
+        lines.append(f"Remaining {len(remaining)} item(s): " + ", ".join(i.id for i in remaining))
         text = "\n".join(lines)
         return text[:max_chars]
 
-    def _key(self, item_id: str) -> str:
+    def episode_key(self, item_id: str) -> str:
         return f"{self.plan.key}/{item_id}"
+
+    def _is_complete(self, item_id: str) -> bool:
+        report = self._reports.get(item_id)
+        return bool(report and report.complete)
+
+    def _is_unmeasurable(self, item_id: str) -> bool:
+        report = self._reports.get(item_id)
+        return bool(report and report.unmeasurable)

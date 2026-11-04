@@ -3,12 +3,16 @@
 Each test below is a rule from the design, written so that breaking the rule
 makes it fail - not so that it describes the implementation back to itself.
 """
+import json
+import os
 from pathlib import Path
+import subprocess
 import sys
 
 import pytest
 
-from core.todo_runtime import (Binding, Item, Plan, TodoRun, builtin_library)
+from core.gate_deferral import ABSENCE_TERMINAL, absent_terminal_names_no_failure
+from core.todo_runtime import (BASE_KEY, Binding, Item, Plan, TodoRun, builtin_library)
 
 
 def _plan(*items: Item) -> Plan:
@@ -106,3 +110,170 @@ def test_resume_is_by_reference_and_bounded(tmp_path):
     assert len(brief) <= 200, "the brief must stay bounded; it is re-injected after every compact"
     assert "two" in brief and "one" in run.report()["done"]
     assert "definitely-not-a-real-binary-xyz" not in brief, "the brief carries ids, not the whole catalogue"
+
+
+# -- predicate library v2 ----------------------------------------------------------
+
+_GIT_ENV = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid",
+            "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull}
+
+
+def _git(repo: Path, *args: str) -> str:
+    done = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True,
+                          env={**os.environ, **_GIT_ENV})
+    assert done.returncode == 0, f"git {args}: {done.stderr}"
+    return done.stdout.strip()
+
+
+@pytest.fixture
+def repo(tmp_path) -> Path:
+    path = tmp_path / "repo"
+    path.mkdir()
+    _git(path, "init", "-q", "-b", "main")
+    (path / "src").mkdir()
+    (path / "src" / "a.py").write_text("a = 1\n")
+    (path / "README.md").write_text("hi\n")
+    _git(path, "add", "-A")
+    _git(path, "commit", "-q", "-m", "base")
+    return path
+
+
+def _eval(repo: Path, predicate: str, plan_base: str | None = None, **args):
+    pre_state = {BASE_KEY: plan_base} if plan_base else {}
+    return builtin_library().evaluate(Binding(predicate, args), workspace=repo, pre_state=pre_state)
+
+
+def test_the_library_is_versioned_and_offers_the_contracted_predicates():
+    library = builtin_library()
+    assert library.version == "2"
+    assert {"files_present", "file_changed", "command_exit",
+            "changes_within", "git_delivered", "report_json"} <= set(library.names())
+
+
+def test_the_library_checks_a_binding_before_any_work_starts():
+    library = builtin_library()
+    library.check(Binding("file_changed", {"path": "a.py"}))
+    with pytest.raises(KeyError):
+        library.check(Binding("worker_says_done", {}))
+    with pytest.raises(ValueError):
+        library.check(Binding("file_changed", {}))                       # path is required
+    with pytest.raises(ValueError):
+        library.check(Binding("file_changed", {"path": "a.py", "claimed": True}))
+
+
+def test_changes_within_judges_committed_uncommitted_and_untracked_paths(repo):
+    base = _git(repo, "rev-parse", "HEAD")
+    scope = ["src/**", "docs/"]
+    assert _eval(repo, "changes_within", base, scope=scope).outcome == "pass", "no change at all is inside any scope"
+
+    (repo / "src" / "deep" / "x").parent.mkdir()
+    (repo / "src" / "deep" / "x").write_text("1")
+    (repo / "docs").mkdir()
+    (repo / "docs" / "d.md").write_text("1")
+    assert _eval(repo, "changes_within", base, scope=scope).outcome == "pass", "** crosses segments, a trailing / takes the tree"
+
+    (repo / "README.md").write_text("changed\n")                         # tracked, uncommitted, outside
+    outcome = _eval(repo, "changes_within", base, scope=scope)
+    assert outcome.outcome == "fail" and "README.md" in outcome.detail
+    _git(repo, "checkout", "--", "README.md")
+
+    (repo / "stray.txt").write_text("1")                                  # untracked, outside
+    assert "stray.txt" in _eval(repo, "changes_within", base, scope=scope).detail
+    (repo / "stray.txt").unlink()
+
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "inside only")
+    assert _eval(repo, "changes_within", base, scope=scope).outcome == "pass"
+    (repo / "README.md").write_text("committed outside\n")
+    _git(repo, "commit", "-qam", "outside")
+    assert _eval(repo, "changes_within", base, scope=scope).outcome == "fail", "a committed change counts"
+    assert _eval(repo, "changes_within", base, scope=["src/*.py"]).outcome == "fail", "* stays inside one segment"
+
+
+def test_changes_within_cannot_be_measured_without_a_readable_base(repo):
+    assert _eval(repo, "changes_within", "0" * 40, scope=["**"]).outcome == "absent"
+    with pytest.raises(ValueError):
+        _eval(repo, "changes_within", None, scope=["**"])
+
+
+def test_git_delivered_needs_head_past_base_and_a_clean_tree(repo):
+    base = _git(repo, "rev-parse", "HEAD")
+    assert _eval(repo, "git_delivered", base=base).outcome == "fail", "HEAD == base is not a delivery"
+    (repo / "src" / "a.py").write_text("a = 2\n")
+    _git(repo, "commit", "-qam", "work")
+    (repo / "wip.txt").write_text("untracked")
+    dirty = _eval(repo, "git_delivered", base=base)
+    assert dirty.outcome == "fail" and "not clean" in dirty.detail
+    (repo / "wip.txt").unlink()
+    assert _eval(repo, "git_delivered", base=base).outcome == "pass"
+    assert _eval(repo, "git_delivered", base="f" * 40).outcome == "absent", "an unreadable base is unmeasured, not failed"
+
+
+def test_report_json_wants_an_object_with_the_required_keys(repo):
+    def check(**kw):
+        return _eval(repo, "report_json", path="out/report.json", **kw)
+    assert check(require_keys=["passed"]).outcome == "fail", "no file yet"
+    (repo / "out").mkdir()
+    (repo / "out" / "report.json").write_text("{not json")
+    assert check(require_keys=["passed"]).outcome == "fail"
+    (repo / "out" / "report.json").write_text("[1]")
+    assert check(require_keys=[]).outcome == "fail"
+    (repo / "out" / "report.json").write_text(json.dumps({"passed": 3}))
+    assert check(require_keys=["passed"]).outcome == "pass"
+    missing = check(require_keys=["passed", "failed"])
+    assert missing.outcome == "fail" and "failed" in missing.detail
+
+
+def test_file_changed_is_a_delta_that_never_demands_a_bad_starting_point(tmp_path):
+    target = tmp_path / "app.py"
+    target.write_text("y = 2\n")                    # already carries the marker before the step begins
+    item = Item(id="edit", title="", predicates=(Binding("file_changed", {"path": "app.py", "contains": "y = 2"}),))
+    run = _run(tmp_path, item)
+    run.begin("edit")
+    assert run.observe("edit").outcome == "fail", "no delta yet, whatever the file already says"
+    target.write_text("y = 2\nz = 3\n")
+    assert run.observe("edit").outcome == "pass"
+
+
+# -- TodoRun: the two ledger fixes ---------------------------------------------------------
+
+SLOW = [sys.executable, "-c", "import time; time.sleep(30)"]
+
+
+def test_an_expired_absence_is_a_terminal_state_that_next_item_skips_and_the_brief_names(tmp_path):
+    now = [0.0]
+    gate = Item(id="gate", title="", predicates=(Binding("command_exit", {"argv": SLOW, "timeout": 0.3}),))
+    docs = Item(id="docs", title="", predicates=(Binding("files_present", {"pattern": "*.md"}),))
+    run = _run(tmp_path, gate, docs, clock=lambda: now[0])
+    run.begin("gate")
+    assert run.observe("gate").unmeasurable is False
+    assert run.next_item().id == "gate", "still inside the ceiling: keep looking"
+
+    now[0] = 10_000_000.0
+    report = run.observe("gate")
+    assert report.outcome == "absent" and report.unmeasurable is True
+    assert run.next_item().id == "docs", "an unmeasurable item is skipped, not retried forever"
+    reason = run.terminal_reason("gate")
+    assert ABSENCE_TERMINAL in reason and absent_terminal_names_no_failure(reason)
+    assert run.report()["unmeasurable"] == [{"id": "gate", "reason": reason}]
+    assert "gate" not in run.report()["deferred"] and "gate" not in run.report()["done"]
+    assert "gate" in run.brief() and reason in run.brief() and len(run.brief()) <= 600
+    assert not run.finished()
+
+    (tmp_path / "x.md").write_text("")
+    run.begin("docs")
+    assert run.observe("docs").complete and run.next_item() is None
+    assert not run.finished(), "an unmeasurable item is not a completed one"
+
+
+def test_a_run_can_be_resumed_from_its_observations(tmp_path):
+    (tmp_path / "a.py").write_text("")
+    one = Item(id="one", title="", predicates=(Binding("files_present", {"pattern": "*.py"}),))
+    two = Item(id="two", title="", predicates=(Binding("files_present", {"pattern": "*.py"}),), needs=("one",))
+    first = _run(tmp_path, one, two)
+    first.begin("one")
+    first.observe("one")
+    resumed = TodoRun(_plan(one, two), builtin_library(), tmp_path,
+                      pre_state=first.pre_states, reports=first.reports)
+    assert resumed.report()["done"] == ["one"] and resumed.next_item().id == "two"

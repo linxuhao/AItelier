@@ -17,6 +17,11 @@ P3_PRIVATE={'state_handoffs'}
 P3_PUBLIC={'state_project_enforcement'}
 # The retained Git bundle store holds the same private bytes as state_git_artifacts.
 BUNDLE_STORE_PRIVATE={'state_git_bundle_store'}
+# Audited retirement of cross-project context run protection (3f817f6fe7): the
+# retirement rows name the project, reference and node a protection was lifted
+# from — the same private fields as the protections themselves — so the table is
+# PRIVATE and has its own denied-reader canary in tests/support/state_canaries.py.
+CONTEXT_PROTECTION_PRIVATE={'state_context_run_protection_retirements'}
 BASE='f367c46f2cd29d4d3306aa6ca540bf8c54ebbeb9'
 
 def old_sets():
@@ -26,13 +31,14 @@ def old_sets():
             if isinstance(n,ast.Assign) and isinstance(n.targets[0],ast.Name)
             and n.targets[0].id in {'PRIVATE_STATE_TABLES','PUBLIC_STATE_TABLES'}}
 
+@pytest.mark.docker  # needs a frozen Source WITH history: `git show BASE:core/state_privacy.py` is the pre-policy baseline, and a linked worktree mounted alone has no repository
 def test_policy_adds_only_two_private_ack_tables_and_preserves_public_set():
     old=old_sets()
-    assert set(PRIVATE_STATE_TABLES)-old['PRIVATE_STATE_TABLES']==TABLES|P3_PRIVATE|BUNDLE_STORE_PRIVATE
+    assert set(PRIVATE_STATE_TABLES)-old['PRIVATE_STATE_TABLES']==TABLES|P3_PRIVATE|BUNDLE_STORE_PRIVATE|CONTEXT_PROTECTION_PRIVATE
     assert not old['PRIVATE_STATE_TABLES']-set(PRIVATE_STATE_TABLES)
     assert set(PUBLIC_STATE_TABLES)-old['PUBLIC_STATE_TABLES']==P3_PUBLIC
     assert not old['PUBLIC_STATE_TABLES']-set(PUBLIC_STATE_TABLES)
-    assert not (TABLES|P3_PRIVATE|BUNDLE_STORE_PRIVATE) & set(PUBLIC_STATE_TABLES)
+    assert not (TABLES|P3_PRIVATE|BUNDLE_STORE_PRIVATE|CONTEXT_PROTECTION_PRIVATE) & set(PUBLIC_STATE_TABLES)
 
 def ack_ledger(db):
     with db.get_connection() as c:
@@ -71,6 +77,7 @@ def test_actual_quorum_history_trusted_positive_untrusted_and_foreign_acker_nega
         execute(anonymous,'list_director_messages',{'project_id':'beta','protocol_version':'v3'})
     assert ack_ledger(s['bob'].db)==before
 
+@pytest.mark.docker  # needs a frozen Source WITH history: `git show 100a1886:core/director_messaging.py` is the pre-ack mailbox, and a linked worktree mounted alone has no repository
 def test_actual_legacy_migration_retains_acknowledged_history_and_stays_private(tmp_path):
     root=Path(__file__).resolve().parents[2]
     original=tmp_path/'old_director_mailbox.py'

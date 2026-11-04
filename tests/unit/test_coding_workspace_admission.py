@@ -179,6 +179,7 @@ def test_process_exit_and_pending_marker_preserve_exact_row_until_explicit_retir
     assert ri.write_admissions(reopened) == []
 
 
+@pytest.mark.docker  # needs the deployment container layout: the source under test IS /src
 def test_owned_source_identity():
     assert Path(__file__).resolve().parents[2] == Path("/src")
     assert Path(ri.__file__).resolve() == Path("/src/core/run_isolation.py")

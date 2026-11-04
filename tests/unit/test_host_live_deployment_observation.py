@@ -147,6 +147,7 @@ def test_cli_guard_no_runtime_import_and_existing_fence_journal_path(live,monkey
     assert completed['event']['status']=='completed'
 
 
+@pytest.mark.docker  # needs the owned CPU capsule: the frozen Source at /src, EXPECTED_SOURCE, --pids-limit 512
 def test_source_import_identity_and_cgroup():
     root=Path(os.environ['EXPECTED_SOURCE'])
     for module in [dq,server,admin_routers]:assert Path(module.__file__).resolve().is_relative_to(root)
@@ -154,6 +155,7 @@ def test_source_import_identity_and_cgroup():
     assert Path('/sys/fs/cgroup/pids.max').read_text().strip()=='512'
 
 
+@pytest.mark.docker  # needs a frozen Source WITH history at EXPECTED_SOURCE: `git show caa3bf16:cli/server.py` is the accepted preimage, and a linked worktree mounted alone has no repository
 def test_original_accepted_cli_guard_calls_composition_getter(live,monkeypatch,tmp_path):
     # Execute exact accepted preimage guard body in the same owned fixture domain.
     raw=subprocess.check_output(['git','show','caa3bf161f064f1ed32cea99d2fec8e74a07dd67:cli/server.py'],cwd=Path(os.environ['EXPECTED_SOURCE'])).decode()

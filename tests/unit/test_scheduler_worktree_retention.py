@@ -122,6 +122,7 @@ def test_failed_reap_is_not_a_successful_absence_observation(sweep, caplog):
     assert sweep.observe([item]) == []
 
 
+@pytest.mark.docker  # needs the deployment container layout: the source under test IS /src
 def test_test_and_scheduler_import_the_owned_source():
     root = Path(__file__).resolve().parents[2]
     assert Path(sc.__file__).resolve() == root / "core/scheduler.py"

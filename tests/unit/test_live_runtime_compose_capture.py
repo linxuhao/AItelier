@@ -163,13 +163,34 @@ def test_untrusted_http_response_refuses_before_real_compose(operated_backend, m
     assert not operated_backend[1].exists()
 
 
+def _runtime_db_modules_pulled_by_import():
+    """Which of the runtime/DB modules a BARE interpreter loads for this path.
+
+    Measured in a fresh interpreter, because in-process `sys.modules` cannot
+    answer it: `tests/conftest.py` imports `api.main`/`api.dependencies`/
+    `core.db_manager` for every session, so the set is already populated before
+    any test body runs and an in-process check would only ever be red (or, if it
+    were relaxed to ignore the conftest imports, would measure nothing at all).
+    Run from the tree under test, so the import resolves against THIS source.
+    """
+    root = Path(__file__).resolve().parents[2]
+    code = ("import json, sys, cli.server, core.deployment_quiescence;"
+            "print(json.dumps(sorted({'api.dependencies', 'core.db_manager',"
+            " 'skillflow.core'} & set(sys.modules))))")
+    proc = subprocess.run([sys.executable, '-c', code], capture_output=True,
+                          text=True, cwd=str(root), timeout=120)
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
+
+
+@pytest.mark.docker  # needs the owned CPU capsule: the frozen Source at /src, EXPECTED_SOURCE, --pids-limit 512
 def test_source_imports_and_owned_container_caps():
     root = Path(os.environ['EXPECTED_SOURCE']).resolve()
     for module in (server, dq):
         assert Path(module.__file__).resolve().is_relative_to(root)
     assert Path('/sys/fs/cgroup/memory.max').read_text().strip() == '2147483648'
     assert Path('/sys/fs/cgroup/pids.max').read_text().strip() == '512'
-    assert not {'api.dependencies', 'core.db_manager', 'skillflow.core'} & set(sys.modules)
+    assert _runtime_db_modules_pulled_by_import() == []
 
 
 @pytest.mark.parametrize('mismatch', [False, True])
@@ -191,7 +212,10 @@ def test_explicit_canonical_compose_root_keeps_normal_identity_verification(
     assert commands[0] == ['compose', '--project-directory', str(canonical), '-f',
                            str(compose_file), 'ps', '-q', 'aitelier']
     assert commands[1] == ['inspect', '--format', '{{.State.Pid}}', 'a'*64]
-    assert not {'api.dependencies', 'core.db_manager', 'skillflow.core'} & set(sys.modules)
+    # The compose-capture CLI path is importable on its own: a bare interpreter
+    # that imports it loads none of the runtime DB stack (a fresh interpreter,
+    # since tests/conftest.py pre-imports them for the whole session).
+    assert _runtime_db_modules_pulled_by_import() == []
 
 
 @pytest.mark.parametrize('kind', ['relative', 'absent', 'no-compose'])

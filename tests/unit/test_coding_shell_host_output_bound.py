@@ -92,5 +92,6 @@ def test_existing_readonly_result_semantics_are_not_restricted(collect):
     assert state["quiet"]
 
 
+@pytest.mark.docker  # needs the deployment container layout: the source under test IS /src
 def test_actual_owned_source_identity():
     assert Path(host.__file__).resolve() == Path("/src/core/repository_host_launcher.py")

@@ -120,9 +120,14 @@ def _spec_run(monkeypatch, tmp_path, game_usec):
         nodes = {"N": {"v": "driven" if extra.get("AITELIER_PROBE_SPEC") and
                        "assert" in Path(extra["AITELIER_PROBE_SPEC"]).read_text()
                        else "idle"}}
+        # The native probe emits the frame extent it actually stepped
+        # (`{"frames": _frame, ...}`) beside `timing`; a report without it is an
+        # incomplete comparable observation, so the recorder must emit it too —
+        # and the counter must agree with the ledger row, as the native one does.
         return ({"asserts": [{"name": "a", "node": "N", "expr": "1 == 1",
                               "passed": True, "actual": True, "error": "",
                               "frame": 20}],
+                 "frames": frames,
                  "nodes": nodes, "captures": [],
                  "timing": probe_timing}, [], False)
 

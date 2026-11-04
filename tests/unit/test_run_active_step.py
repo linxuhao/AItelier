@@ -49,7 +49,10 @@ def test_active_run_uses_current_node_only_between_step_instances():
 
 
 def test_project_runs_endpoint_attaches_the_snapshot(monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
     from api import run_routers
+    from api.dependencies import get_db_manager
 
     run = _run("running", "stale_node")
     steps = [{"id": 4513, "step_id": "t_impl", "status": "claimed",
@@ -71,7 +74,17 @@ def test_project_runs_endpoint_attaches_the_snapshot(monkeypatch):
     monkeypatch.setattr(run_routers, "get_skillflow", lambda: FakeSF())
     monkeypatch.setattr(run_routers, "compute_cache_stats_batch", lambda ids: {})
 
-    response = run_routers.list_project_runs("project-1", db=FakeDB())
+    # Through the real route, not a direct call: the body now projects the row
+    # through `execution_progress(request, row)` for whoever asked, so the
+    # identity-bearing Request has to exist. With no Cloudflare Access gate
+    # configured (this process) the verdict is trusted, exactly as for any other
+    # read, and the row passes through unchanged.
+    app = FastAPI()
+    app.include_router(run_routers.router)
+    app.dependency_overrides[get_db_manager] = lambda: FakeDB()
+    response = TestClient(app).get("/api/projects/project-1/runs")
+    assert response.status_code == 200, response.text
+    response = response.json()
     assert response["runs"][0]["active_step"] == {
         "step_id": "t_impl",
         "status": "claimed",

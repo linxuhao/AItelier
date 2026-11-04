@@ -2,6 +2,7 @@
 import json
 from pathlib import Path
 
+import pytest
 import skillflow
 import yaml
 from skillflow.core import SkillFlow, StepResult
@@ -11,6 +12,7 @@ from skillflow.output_targets import git
 from tests.code_output_fixture import init_code_repo
 
 
+@pytest.mark.docker  # needs the docker CPU execution facility: run_tests reports `infrastructure_unavailable` without it, and this asserts a REAL pytest report became an artifact
 def test_run_tests_report_is_an_artifact_not_a_code_change(tmp_path):
     root = init_code_repo(tmp_path / "code")
     (root / "tests").mkdir()

@@ -122,6 +122,15 @@ def _sf_stub(status: str, reason: str = ""):
         {"step_id": "5", "status": "completed"},
         {"step_id": "5_review", "status": "completed"},
     ]
+    # A paused run is answered from the ENGINE's checkpoint record — the exact
+    # step instance a client must echo back — not from step history, so the stub
+    # has to answer like the deployed SDK does (`checkpoint_view` reads the same
+    # keys: step_id, label, expected_checkpoint.step_instance_id, outputs).
+    sf.get_checkpoint.return_value = {
+        "step_id": "3", "label": "Checkpoint",
+        "expected_checkpoint": {"step_instance_id": 41},
+        "outputs": {},
+    }
     return sf
 
 
@@ -156,8 +165,10 @@ def test_other_failures_keep_the_rescue_checkpoint(checkpoint_info):
 
 def test_paused_checkpoint_is_unaffected(checkpoint_info):
     """The normal path — a paused run has no error_reason at all."""
-    step_id, _label, run_id, _graph, _inst = checkpoint_info("paused")
+    step_id, _label, run_id, _graph, instance = checkpoint_info("paused")
     assert (step_id, run_id) == ("3", "run1")
+    # The paused answer carries the engine's own instance id through unchanged.
+    assert instance == 41
 
 
 # ── general guard: one instance re-executed forever is a resumed terminal ─────

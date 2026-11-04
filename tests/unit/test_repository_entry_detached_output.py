@@ -115,6 +115,7 @@ def test_detached_writer():
     return record, repo / "main.json"
 
 
+@pytest.mark.docker  # needs the owned capsule's init reaper: a container run WITHOUT --init leaves the killed escaped holder a zombie, so the fixture's own cleanup assertion cannot hold
 @pytest.mark.parametrize("blocked,ignore_sigchld", [(False, False), (False, True), (True, False)])
 def test_detached_output_cannot_erase_or_outlive_entry_deadline(tmp_path, blocked, ignore_sigchld):
     """Exited main, genuinely absent group, and still-blocked main are distinct."""

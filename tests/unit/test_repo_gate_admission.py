@@ -13,6 +13,7 @@ Criteria (State node `harness.a-gate-that-could-not-run-is-not-a-failing-test`):
     not-admitted outcome (pole 1); a gate that ran and went red is still a
     code red (pole 2).
 """
+
 from __future__ import annotations
 
 import json
@@ -25,6 +26,7 @@ from aitelier import gate_admission
 from aitelier.gate_evidence import release_disposition, report_state
 from aitelier.tools.run_tests import impl as rt
 from tests.gate_fixture import HOLDER, HarnessRig, red_report, write_gate
+
 
 
 @pytest.fixture
@@ -49,6 +51,7 @@ def _report(out):
 
 # ── coding-impl-stops-using-409-as-control-flow ────────────────────────────
 
+@pytest.mark.baked_toolchain  # needs the pinned node/npm the image does not bake
 def test_two_concurrent_repo_gates_are_each_admitted_by_the_queue(
         tmp_path, monkeypatch):
     """Gate A holds the render lock while gate B arrives. B queues behind A's
@@ -117,6 +120,7 @@ def test_a_gate_that_sends_its_own_wait_keeps_it(rig, tmp_path):
 
 # ── contention-is-a-distinct-outcome ───────────────────────────────────────
 
+@pytest.mark.baked_toolchain  # needs the pinned node/npm the image does not bake
 @pytest.mark.parametrize("holder", ["live_render", "owner_lost"])
 def test_pole_1_a_gate_the_engine_did_not_admit_is_not_run(
         rig, tmp_path, monkeypatch, holder):
@@ -159,6 +163,7 @@ def test_pole_1_a_gate_the_engine_did_not_admit_is_not_run(
     rig.let_go()
 
 
+@pytest.mark.baked_toolchain  # needs the pinned node/npm the image does not bake
 def test_pole_2_a_gate_that_ran_and_went_red_is_a_code_red(rig, tmp_path):
     """The engine admitted and answered; two GDScript suites failed; the gate
     exits 1. That is a measured red with both identities, the release reading
@@ -186,6 +191,7 @@ def test_pole_2_a_gate_that_ran_and_went_red_is_a_code_red(rig, tmp_path):
     assert repo.name in rig.rendered
 
 
+@pytest.mark.baked_toolchain  # needs the pinned node/npm the image does not bake
 def test_an_unreachable_engine_is_not_run(tmp_path, monkeypatch):
     """Nothing listens at the builder URL: the relay records `unreachable`,
     the gate exits 2, and the report says not run."""

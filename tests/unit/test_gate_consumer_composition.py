@@ -1,4 +1,5 @@
 """Accepted early-red, bounded diagnostics and report writer composed together."""
+
 import hashlib
 import json
 from pathlib import Path
@@ -9,6 +10,8 @@ from aitelier.tools.run_tests import impl as rt
 from tests.unit import test_repo_gate_early_contract_red as early
 
 
+
+@pytest.mark.baked_toolchain  # needs the pinned node/npm the image does not bake
 def test_early_contract_red_retains_full_raw_and_bounded_diagnostic(tmp_path, monkeypatch):
     diagnostic = "SCRIPT ERROR: generic authored schema contract failed"
     noisy = early.GATE.replace(
@@ -44,6 +47,7 @@ def test_early_contract_red_retains_full_raw_and_bounded_diagnostic(tmp_path, mo
     assert result["release_evidence"] != "passed"
 
 
+@pytest.mark.baked_toolchain  # needs the pinned node/npm the image does not bake
 @pytest.mark.parametrize("exit_code", [0, 1, 2])
 def test_raw_only_gate_cannot_claim_complete_coverage(tmp_path, monkeypatch, exit_code):
     from tests.unit.test_run_tests_unmeasured_declaration import _write_raw_gate

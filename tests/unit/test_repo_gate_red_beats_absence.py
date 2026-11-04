@@ -12,6 +12,7 @@ Two shapes did exactly that on the r2 candidate (review gnr2, 2026-09-25):
 Every test below serves the REAL harness admission code
 (`tests/gate_fixture.py:HarnessRig`) and runs the REAL `run_tests`.
 """
+
 from __future__ import annotations
 
 import json
@@ -31,6 +32,7 @@ from tests.gate_fixture import RUN_TESTS_SH, HarnessRig, write_gate
 # and no findings file). Its /script request then meets a busy render lock.
 RED_THEN_ASK_GATE = r'''
 import json, os, sys, tempfile, urllib.error, urllib.request
+
 mode = os.environ["RED_GATE_MODE"]
 builder = os.environ.get("GODOT_BUILDER_URL", "http://godot-builder:8080")
 parent = os.environ.get("GATE_REPORT_DIR") or tempfile.gettempdir()
@@ -104,6 +106,7 @@ def _run(repo, out):
 
 # ── pole 3: a red the gate retained beats the refusal that followed it ──────
 
+@pytest.mark.baked_toolchain  # needs the pinned node/npm the image does not bake
 @pytest.mark.parametrize("mode", ["python_red", "compile_red"])
 def test_pole_3_a_retained_red_then_a_refusal_is_a_measured_red(
         busy, tmp_path, monkeypatch, mode):
@@ -137,6 +140,7 @@ def test_pole_3_a_retained_red_then_a_refusal_is_a_measured_red(
     assert gate_deferral.read_absence(Path(tmp_path / "out" / "test_report.json")) is None
 
 
+@pytest.mark.baked_toolchain  # needs the pinned node/npm the image does not bake
 def test_the_same_refusal_with_no_retained_red_is_still_not_run(
         busy, tmp_path, monkeypatch):
     """The other pole of the same gate: nothing measured before the refusal."""
@@ -172,6 +176,7 @@ def test_a_retained_finding_outranks_every_source_of_unmeasured(source):
 
 # ── pole 4: a pytest red beside a refused gate goes back to implement ──────
 
+@pytest.mark.baked_toolchain  # needs the pinned node/npm the image does not bake
 def test_pole_4_a_pytest_red_beside_a_refused_gate_is_not_an_absence(
         busy, tmp_path, monkeypatch):
     repo = tmp_path / "repo"
@@ -198,6 +203,7 @@ def test_pole_4_a_pytest_red_beside_a_refused_gate_is_not_an_absence(
     assert gate_deferral.read_absence(tmp_path / "out" / "test_report.json") is None
 
 
+@pytest.mark.baked_toolchain  # needs the pinned node/npm the image does not bake
 def test_a_pytest_killed_at_its_wall_beside_a_refused_gate_is_an_absence(
         busy, tmp_path, monkeypatch):
     """A pytest killed at its wall measured nothing ("NOTHING was measured.
@@ -221,6 +227,7 @@ def test_a_pytest_killed_at_its_wall_beside_a_refused_gate_is_an_absence(
         "gate": "run_tests.sh"}
 
 
+@pytest.mark.baked_toolchain  # needs the pinned node/npm the image does not bake
 def test_a_green_pytest_beside_a_refused_gate_is_an_absence(
         busy, tmp_path, monkeypatch):
     repo = tmp_path / "repo"
